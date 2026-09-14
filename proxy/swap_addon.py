@@ -4,6 +4,8 @@ Replaces hsurr:<name> and hsurr:<name>:<entry> placeholders in request
 headers, URL query string, URL path, and text bodies with real secrets
 from /home/swapd/secrets/, but ONLY for hosts listed in
 /home/swapd/hosts.allow. Everything else passes through untouched.
+HTML form posts (application/x-www-form-urlencoded) percent-encode the
+colon, so hsurr%3A<name> is swapped there too, with values re-encoded.
 
 Secret files: one file per credential name. Either the whole file is the
 single value, or the file holds "entry=value" lines (one per line) for
@@ -26,6 +28,10 @@ LOG_FILE = Path("/home/swapd/swap.log")
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 ENTRY_LINE_RE = re.compile(r"^([A-Za-z0-9_-]+)=(.*)$", re.DOTALL)
 PLACEHOLDER_RE = re.compile(r"hsurr:([A-Za-z0-9_-]+)(?::([A-Za-z0-9_-]+))?")
+# Percent-encoded form, as sent in application/x-www-form-urlencoded bodies
+# (browsers encode ':' as %3A). Case-insensitive on the hex digits.
+ENCODED_PLACEHOLDER_RE = re.compile(
+    r"hsurr%3A([A-Za-z0-9_-]+)(?:%3A([A-Za-z0-9_-]+))?", re.IGNORECASE)
 
 log = logging.getLogger(__name__)
 
@@ -124,10 +130,26 @@ class SwapAddon:
             return v
         return PLACEHOLDER_RE.sub(repl, text)
 
+    def _swap_urlencoded(self, text, host):
+        """Swap percent-encoded placeholders (hsurr%3A<name>) found in
+        application/x-www-form-urlencoded bodies. Substituted values are
+        re-encoded so reserved characters can't corrupt the form."""
+        def repl(m):
+            name, entry = m.group(1), m.group(2) or "access_token"
+            v = self._resolve(name, entry)
+            if v is None:
+                return m.group(0)  # unknown name/entry: leave untouched
+            self._audit(host, "hsurr:%s%s"
+                        % (name, (":" + entry) if m.group(2) else ""))
+            return urllib.parse.quote(v, safe="")
+        return ENCODED_PLACEHOLDER_RE.sub(repl, text)
+
     # ------------------------------------------------------------------
     def _warn_if_placeholder(self, flow, host):
         hay = b"hsurr:"
-        in_body = hay in (flow.request.content or b"")
+        hay_enc = b"hsurr%3a"  # urlencoded forms percent-encode the colon
+        body = (flow.request.content or b"").lower()
+        in_body = hay in body or hay_enc in body
         in_headers = any(
             hay in v.encode("utf-8", "ignore")
             for k in flow.request.headers.keys()
@@ -177,6 +199,9 @@ class SwapAddon:
             except UnicodeDecodeError:
                 return  # binary body: headers/query/path already handled
             new_text = self._swap_text(text, host)
+            ctype = req.headers.get("content-type", "")
+            if "application/x-www-form-urlencoded" in ctype:
+                new_text = self._swap_urlencoded(new_text, host)
             if new_text != text:
                 req.content = new_text.encode("utf-8")
 
