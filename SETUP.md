@@ -115,3 +115,27 @@ holds SSH keys — fine for a private machine, not for shared infrastructure.
   (29.1.3) works and the daemon is verified.
 - No system python packages were installed with `--break-system-packages`;
   Playwright lives in its own venv.
+
+## Backups / pushing
+
+`~/spark-vm` on this box is a clone of the **private** repo
+[ntindle/spark-vm](https://github.com/ntindle/spark-vm) — it is the source
+of truth for the box's tooling going forward. After changing anything worth
+keeping:
+
+```bash
+~/spark-vm/scripts/push.sh "what changed"
+```
+
+First-time auth: create a fine-grained PAT with **contents: write** on
+`ntindle/spark-vm`, then store it (once). Never paste it into chat or a file:
+
+```bash
+echo '<token>' | cred set github
+```
+
+`push.sh` reads the token via `cred get github` at push time, refuses to
+commit anything secret-shaped, and pushes over HTTPS with the token in an
+HTTP header (never in the remote URL, never echoed). If the token isn't
+stored yet, it prints the exact `cred set` command and exits.
+The repo is private; nothing pushed here is public.
