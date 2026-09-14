@@ -5,7 +5,10 @@ Wants=network-online.target
 
 [Service]
 User=swapd
-ExecStart=/home/swapd/.venvs/mitm/bin/mitmdump -p 18080 --set listen_host=127.0.0.1 -s /home/swapd/swap_addon.py --set termlog_verbosity=warn
+# dumper_filter matches nothing: mitmdump's per-flow request/response lines
+# print full URLs, which may contain swapped secrets in query params.
+# The addon's own audit log (swap.log) is the intended observability.
+ExecStart=/home/swapd/.venvs/mitm/bin/mitmdump -p 18080 --set listen_host=127.0.0.1 -s /home/swapd/swap_addon.py --set termlog_verbosity=warn --set "dumper_filter=~d nomatch.invalid"
 Restart=always
 RestartSec=5
 
