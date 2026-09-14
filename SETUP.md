@@ -139,3 +139,70 @@ commit anything secret-shaped, and pushes over HTTPS with the token in an
 HTTP header (never in the remote URL, never echoed). If the token isn't
 stored yet, it prints the exact `cred set` command and exits.
 The repo is private; nothing pushed here is public.
+## Secrets (transparent swapping — the agent never sees real values)
+
+**Architecture.** All configs and code the agent writes carry placeholders —
+`hsurr:<name>` or `hsurr:<name>:<entry>` — never real secrets. A mitmproxy
+instance running as the dedicated `swapd` system user listens on
+127.0.0.1:18080. Any command run via `with-proxy` (or `cred run --`) has its
+HTTPS traffic routed through it; the proxy replaces placeholders in request
+headers, URL query string, URL path, and text/JSON bodies with the real
+value, but only for hosts listed in `/home/swapd/hosts.allow`. Non-listed
+hosts pass through byte-for-byte (a one-line warning is logged, no values).
+Every swap is audit-logged to `/home/swapd/swap.log` as
+`ts=<utc> host=<host> swapped=<placeholder>` — never values.
+
+Secret files live in `/home/swapd/secrets/` (0700, swapd-only): one file per
+credential name; either the whole file is the value, or `entry=value` lines
+for multi-entry credentials. Placement metadata (which header/query param a
+credential goes in) lives in `/home/swapd/credentials.json`, managed via
+`cred register`.
+
+**Installing a secret (human only, your own SSH session):**
+```
+cred set <name>                                            # paste at the prompt; never send it to the agent
+cred register <name> [--entry <e>] [--placement <spec>]    # optional: how it's placed
+```
+`<spec>`: `bearer_header` | `url_path_segment` | `custom_header:<Name>` |
+`query_param:<name>`. The agent's standing policy: never run `cred get`,
+never read `/home/swapd/secrets`, never attempt to bypass the proxy.
+
+**Managing allowed hosts:** edit `/home/swapd/hosts.allow` (one host per
+line, `#` comments; leading `.` matches subdomains, e.g. `.openai.com`).
+New hosts and secrets are picked up without a proxy restart
+(`sudo systemctl restart swap-proxy` only needed for addon changes).
+
+**Using it:** prefix any command that needs secrets:
+```
+with-proxy <cmd> [args...]
+```
+`cred run -- <cmd>` is the same thing. AutoGPT pattern: put
+`hsurr:openai` in its config, then run it under `with-proxy`. For Python,
+`/home/ntindle/credlib/dynamic_credentials.py` mirrors the hatch cell's
+helper (`from dynamic_credentials import add_surrogate_to_request, ...`)
+with the same names and `DynamicCredentialError`; `fill_secret.py` fills a
+Playwright field without the value touching logs (see its docstring for the
+honest limit).
+
+**Cell → spark-vm CLI mapping:**
+
+| cell | spark-vm |
+|---|---|
+| `credentials.request_login` / `request_api_access` | `cred set <name>` (your own SSH session) |
+| `credentials.list` (metadata only) | `cred list` |
+| `hsurr:` surrogates | identical `hsurr:<name>` / `hsurr:<name>:<entry>` format |
+| `credential_fill` | `~/credlib/fill_secret.py` → `fill_secret(page, selector, name)` |
+| `dynamic_credentials` import | `from dynamic_credentials import ...` (same function names) |
+
+**Verifying:** `sudo ausearch -k swapd-secrets` shows every read/write of the
+secret store and registry. `sudo journalctl -u swap-proxy` shows the proxy
+log. `sudo -u swapd cat /home/swapd/swap.log` shows every swap (names only).
+
+**Honest limits.** With root on this box, this is verifiable hygiene, not a
+hard boundary: root can read swapd's files and the proxy's memory. What it
+guarantees is that secrets never enter the agent's context — transcripts,
+logs, memory, or tool calls — so they can't leak through the agent. The
+hatch cell achieves the stronger version through physical separation
+(secrets never enter the cell at all).
+(If `ausearch` hangs on this box, the equivalent is
+`sudo grep 'key="swapd-secrets"' /var/log/audit/audit.log`.)

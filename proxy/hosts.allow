@@ -1,0 +1,6 @@
+# Hosts the swapping proxy may inject secrets for.
+# One per line. Exact match, or a leading dot matches subdomains
+# (e.g. .openai.com matches api.openai.com).
+# Everything else passes through byte-for-byte unchanged.
+github.com
+api.github.com

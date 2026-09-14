@@ -1,0 +1,22 @@
+#!/bin/bash
+# cred-store-set — narrow writer for the swapd secret store.
+# Invoked as: sudo -u swapd /usr/local/bin/cred-store-set <name>
+# Reads the secret value from stdin, writes it atomically to
+# /home/swapd/secrets/<name> (0600, swapd-owned).
+# Root-owned 0755; ntindle cannot modify this script, only execute it
+# via the sudoers entry.
+set -euo pipefail
+
+name="${1:-}"
+if ! [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "cred-store-set: invalid name '$name' (use only [A-Za-z0-9_-])" >&2
+    exit 2
+fi
+
+dir=/home/swapd/secrets
+tmp="$(mktemp "$dir/.tmp.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+cat > "$tmp"
+chmod 600 "$tmp"
+mv -f "$tmp" "$dir/$name"
+trap - EXIT

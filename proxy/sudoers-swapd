@@ -1,0 +1,8 @@
+# spark-vm credential store: ntindle may touch swapd's secrets ONLY through
+# these narrow, name-validated paths. No shell access, no broad wildcards.
+ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-set
+ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-registry-set
+ntindle ALL=(swapd) NOPASSWD: /usr/bin/cat /home/swapd/secrets/*
+ntindle ALL=(swapd) NOPASSWD: /usr/bin/cat /home/swapd/credentials.json
+ntindle ALL=(swapd) NOPASSWD: /usr/bin/ls /home/swapd/secrets
+ntindle ALL=(swapd) NOPASSWD: /usr/bin/rm /home/swapd/secrets/*

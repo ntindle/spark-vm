@@ -1,0 +1,85 @@
+#!/bin/bash
+# cred-registry-set — narrow writer for the swapd credential registry.
+# Invoked as swapd via sudo:
+#   cred-registry-set set <name> <entry> <placement-json>
+#   cred-registry-set remove <name> [entry]
+# Merges into /home/swapd/credentials.json atomically (0600, swapd-owned).
+# Root-owned 0755; ntindle can only execute it via the sudoers entry.
+set -euo pipefail
+
+exec python3 - "$@" <<'PYEOF'
+import json, os, re, sys
+
+def fail(msg):
+    sys.stderr.write("cred-registry-set: %s\n" % msg)
+    sys.exit(1)
+
+args = sys.argv[1:]
+if not args or args[0] not in ("set", "remove"):
+    fail("usage: set <name> <entry> <placement-json> | remove <name> [entry]")
+action = args[0]
+
+def check(s, what):
+    if not re.match(r"^[A-Za-z0-9_-]+$", s or ""):
+        fail("invalid %s %r" % (what, s))
+
+reg_path = "/home/swapd/credentials.json"
+reg = {}
+if os.path.exists(reg_path):
+    with open(reg_path, encoding="utf-8") as f:
+        reg = json.load(f)
+    if not isinstance(reg, dict):
+        fail("registry is not a JSON object")
+
+def save():
+    tmp = reg_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(reg, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, reg_path)
+
+if action == "set":
+    if len(args) != 4:
+        fail("usage: cred-registry-set set <name> <entry> <placement-json>")
+    _, name, entry, pjson = args
+    check(name, "name")
+    check(entry, "entry")
+    try:
+        placement = json.loads(pjson)
+    except ValueError:
+        fail("placement is not valid JSON")
+    ok = (
+        placement in ("bearer_header", "url_path_segment")
+        or (
+            isinstance(placement, dict)
+            and len(placement) == 1
+            and list(placement)[0] in ("custom_header", "query_param", "url_path_segment")
+            and isinstance(list(placement.values())[0], str)
+            and re.match(r"^[A-Za-z0-9_.-]+$", list(placement.values())[0])
+        )
+    )
+    if not ok:
+        fail("invalid placement %r" % (placement,))
+    reg.setdefault(name, {})[entry] = {"placement": placement}
+    save()
+    print("registered '%s' entry '%s'" % (name, entry))
+else:
+    if len(args) not in (2, 3):
+        fail("usage: cred-registry-set remove <name> [entry]")
+    name = args[1]
+    check(name, "name")
+    if name not in reg:
+        fail("credential '%s' not registered" % (name,))
+    if len(args) == 3:
+        entry = args[2]
+        check(entry, "entry")
+        reg[name].pop(entry, None)
+        if not reg[name]:
+            del reg[name]
+        print("unregistered '%s' entry '%s'" % (name, entry))
+    else:
+        del reg[name]
+        print("unregistered '%s'" % (name,))
+    save()
+PYEOF

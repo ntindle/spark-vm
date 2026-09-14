@@ -1,38 +1,47 @@
 #!/usr/bin/env python3
-"""cred — tiny credential store for the spark-vm workhorse box.
+"""cred — secret management front-end for the spark-vm swapping proxy.
 
-Backends:
-  file       (default) secrets in ~/.config/spark-credentials/<name>,
-             directory 0700, files 0600. Same trust model as ~/.ssh.
-  bitwarden  (planned) will shell out to the `bw` CLI. Not implemented yet;
-             selecting it raises a clear error.
+Secrets live in /home/swapd/secrets/, owned by the swapd system user.
+This CLI reaches that store ONLY through narrow sudo helpers:
 
-Usage:
-  cred set <name>        read secret from stdin (piped) or a no-echo prompt
-  cred get <name>        print secret to stdout (no trailing newline)
-  cred list              print stored names, one per line (never values)
-  cred delete <name>     remove a stored credential
+  cred set <name>     store a secret (stdin pipe or no-echo prompt)
+                      -> sudo -u swapd /usr/local/bin/cred-store-set <name>
+  cred get <name>     print a secret to stdout (no trailing newline).
+                      For the HUMAN and for local scripts. The agent's
+                      standing policy is to never invoke this.
+  cred list           list stored credential names (never values)
+  cred delete <name>  delete a stored credential
+  cred register <name> [--entry <entry>] [--placement <spec>]
+                      record a credential's request placement in the registry
+  cred unregister <name> [--entry <entry>]
+                      remove a credential's registry entry
   cred run -- <cmd> [args...]
-                         export every credential as SPARK_CRED_<NAME>
-                         (uppercased, '-' -> '_') and exec the command.
-                         This is the automatic injection path for scripts.
+                      exec <cmd> with traffic routed through the
+                      credential-swapping proxy (127.0.0.1:18080).
+                      Configs may carry hsurr:<name> placeholders; the
+                      proxy swaps them for real values, allowlisted
+                      hosts only. The agent never sees secret values.
 
-Missing credential: commands exit 3 with an actionable message telling the
-human exactly what to run once; everything downstream then works automatically.
+Secrets are installed ONLY by the human in their own SSH session:
+  cred set <name>     (paste at the prompt; never send it to the agent)
+
+Missing credential: exit 3 with the exact command to fix it.
 """
 
 import getpass
+import json
 import os
 import re
+import subprocess
 import sys
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 BACKEND_ENV = "SPARK_CRED_BACKEND"
-DEFAULT_ROOT = os.path.expanduser("~/.config/spark-credentials")
+STORE = "/home/swapd/secrets"
+SUDO = ["sudo", "-n", "-u", "swapd"]
+STORE_SET = "/usr/local/bin/cred-store-set"
 MISSING_MSG = "credential '{name}' not set \u2014 add with: cred set {name}"
 
-
-# ---------------------------------------------------------------- backends
 
 class CredentialError(Exception):
     """Fatal, user-actionable error. Message is printed to stderr."""
@@ -44,118 +53,32 @@ class CredentialNotFound(CredentialError):
         self.name = name
 
 
-class Backend:
-    """Interface every credential backend must implement."""
-
-    def set(self, name, secret):
-        raise NotImplementedError
-
-    def get(self, name):
-        raise NotImplementedError
-
-    def list(self):
-        raise NotImplementedError
-
-    def delete(self, name):
-        raise NotImplementedError
-
-    def all(self):
-        """Return {name: secret} for every stored credential."""
-        raise NotImplementedError
-
-
-class FileBackend(Backend):
-    """Secrets as 0600 files under a 0700 directory."""
-
-    def __init__(self, root=DEFAULT_ROOT):
-        self.root = root
-
-    # -- internals -------------------------------------------------
-    def _ensure_root(self):
-        os.makedirs(self.root, mode=0o700, exist_ok=True)
-        os.chmod(self.root, 0o700)
-
-    def _check_name(self, name):
-        if not NAME_RE.match(name or ""):
-            raise CredentialError(
-                "invalid credential name %r \u2014 use only [A-Za-z0-9_-]" % (name,)
-            )
-        return name
-
-    def _path(self, name):
-        self._check_name(name)
-        # join + abspath guard so a name can never escape the root
-        p = os.path.abspath(os.path.join(self.root, name))
-        if os.path.dirname(p) != os.path.abspath(self.root):
-            raise CredentialError("invalid credential name %r" % (name,))
-        return p
-
-    # -- interface -------------------------------------------------
-    def set(self, name, secret):
-        self._ensure_root()
-        p = self._path(name)
-        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(secret)
-        os.chmod(p, 0o600)
-
-    def get(self, name):
-        p = self._path(name)
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                return f.read()
-        except FileNotFoundError:
-            raise CredentialNotFound(name)
-
-    def list(self):
-        self._ensure_root()
-        try:
-            entries = os.listdir(self.root)
-        except FileNotFoundError:
-            return []
-        return sorted(
-            e for e in entries
-            if NAME_RE.match(e) and os.path.isfile(os.path.join(self.root, e))
-        )
-
-    def delete(self, name):
-        p = self._path(name)
-        try:
-            os.unlink(p)
-        except FileNotFoundError:
-            raise CredentialNotFound(name)
-
-    def all(self):
-        return {name: self.get(name) for name in self.list()}
-
-
-class BitwardenBackend(Backend):
-    """Planned backend: secrets via the `bw` CLI. Not implemented yet."""
-
-    def __init__(self):
+def check_name(name):
+    if not NAME_RE.match(name or ""):
         raise CredentialError(
-            "SPARK_CRED_BACKEND=bitwarden is not implemented yet \u2014 "
-            "unset it (or set it to 'file') to use the file backend."
+            "invalid credential name %r \u2014 use only [A-Za-z0-9_-]" % (name,)
         )
+    return name
 
 
-def get_backend():
-    """Backend factory. Honours SPARK_CRED_BACKEND (default: file)."""
+def get_backend_kind():
     kind = os.environ.get(BACKEND_ENV, "file")
-    if kind == "file":
-        return FileBackend()
-    if kind == "bitwarden":
-        return BitwardenBackend()
-    raise CredentialError(
-        "unknown %s %r \u2014 expected 'file' or 'bitwarden'" % (BACKEND_ENV, kind)
-    )
+    if kind != "file":
+        raise CredentialError(
+            "only %s=file is supported (the swapd secret store) \u2014 got %r"
+            % (BACKEND_ENV, kind)
+        )
+    return kind
 
 
-# ---------------------------------------------------------------- helpers
-
-def env_name(name):
-    """SPARK_CRED_<NAME>: uppercased, '-' becomes '_'."""
-    return "SPARK_CRED_" + name.upper().replace("-", "_")
+def run_as_swapd(argv, input_bytes=None):
+    """Run argv as swapd via the sudoers allowlist. Returns CompletedProcess."""
+    try:
+        return subprocess.run(
+            SUDO + argv, input=input_bytes, capture_output=True, check=False
+        )
+    except FileNotFoundError:
+        raise CredentialError("sudo not available on this box")
 
 
 def read_secret_stdin():
@@ -181,60 +104,155 @@ def read_secret_prompt(name):
 USAGE = """usage: cred <command> [args]
 
   cred set <name>              store a secret (stdin pipe or no-echo prompt)
-  cred get <name>              print a secret to stdout
+  cred get <name>              print a secret (human/scripts only; the agent
+                               never invokes this)
   cred list                    list stored credential names (never values)
   cred delete <name>           delete a stored credential
-  cred run -- <cmd> [args...]  exec cmd with all credentials exported as
-                               SPARK_CRED_<NAME> in its environment
+  cred register <name> [--entry <entry>] [--placement <spec>]
+                               record how a credential is placed into requests
+                               (registry; default entry access_token, placement
+                               bearer_header). <spec>: bearer_header |
+                               custom_header:<Name> | query_param:<name> |
+                               url_path_segment
+  cred unregister <name> [--entry <entry>]
+                               remove a credential's registry entry
+  cred run -- <cmd> [args...]  exec cmd with traffic routed through the
+                               credential-swapping proxy (placeholders
+                               hsurr:<name> are swapped at the proxy)
 
-backend: SPARK_CRED_BACKEND=file (default) | bitwarden (planned)
+Secrets live in the swapd-owned store; install them only in your own
+SSH session. Missing credential exits 3 with the fix command.
 """
 
 
-# ---------------------------------------------------------------- commands
+def _strip_dashdash(args):
+    """Allow `cred <cmd> -- <name>` so odd names can't be mistaken for flags."""
+    if args and args[0] == "--":
+        return args[1:]
+    return args
 
-def cmd_set(backend, args):
+
+def cmd_set(args):
+    args = _strip_dashdash(args)
     if len(args) != 1:
         raise CredentialError("usage: cred set <name>")
-    name = args[0]
+    name = check_name(args[0])
     if sys.stdin.isatty():
         secret = read_secret_prompt(name)
     else:
         secret = read_secret_stdin()
-    backend.set(name, secret)
-    print("stored '%s'" % name)
+        if not secret:
+            raise CredentialError("empty secret \u2014 try again")
+    p = run_as_swapd([STORE_SET, name], input_bytes=secret.encode("utf-8"))
+    if p.returncode != 0:
+        err = p.stderr.decode("utf-8", "replace").strip()
+        raise CredentialError(err or "cred-store-set failed")
+    print("stored '%s' (swapd store)" % name)
 
 
-def cmd_get(backend, args):
+def cmd_get(args):
+    args = _strip_dashdash(args)
     if len(args) != 1:
         raise CredentialError("usage: cred get <name>")
-    sys.stdout.write(backend.get(args[0]))
+    name = check_name(args[0])
+    p = run_as_swapd(["/usr/bin/cat", "%s/%s" % (STORE, name)])
+    if p.returncode != 0:
+        raise CredentialNotFound(name)
+    sys.stdout.buffer.write(p.stdout)
 
 
-def cmd_list(backend, args):
+def cmd_list(args):
     if args:
         raise CredentialError("usage: cred list")
-    for name in backend.list():
-        print(name)
+    p = run_as_swapd(["/usr/bin/ls", STORE])
+    if p.returncode != 0:
+        return  # missing/empty store: no output, not an error
+    sys.stdout.write(p.stdout.decode("utf-8", "replace"))
 
 
-def cmd_delete(backend, args):
+def cmd_delete(args):
+    args = _strip_dashdash(args)
     if len(args) != 1:
         raise CredentialError("usage: cred delete <name>")
-    backend.delete(args[0])
-    print("deleted '%s'" % args[0])
+    name = check_name(args[0])
+    p = run_as_swapd(["/usr/bin/rm", "%s/%s" % (STORE, name)])
+    if p.returncode != 0:
+        raise CredentialNotFound(name)
+    print("deleted '%s'" % name)
 
 
-def cmd_run(backend, args):
-    if not args or args[0] != "--":
+PLACEMENT_USAGE = ("--placement <spec>: bearer_header | url_path_segment | "
+                   "custom_header:<Name> | query_param:<name>")
+
+
+def parse_placement(spec):
+    if spec in ("bearer_header", "url_path_segment"):
+        return spec
+    if ":" in spec:
+        kind, _, value = spec.partition(":")
+        if kind in ("custom_header", "query_param") and re.match(
+                r"^[A-Za-z0-9_.-]+$", value or ""):
+            return {kind: value}
+    raise CredentialError("invalid placement %r \u2014 " + PLACEMENT_USAGE % (spec,))
+
+
+def cmd_register(args):
+    args = _strip_dashdash(args)
+    if not args:
+        raise CredentialError(
+            "usage: cred register <name> [--entry <entry>] [%s]" % PLACEMENT_USAGE)
+    name = check_name(args[0])
+    entry = "access_token"
+    placement = "bearer_header"
+    rest = args[1:]
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--entry" and i + 1 < len(rest):
+            entry = check_name(rest[i + 1])
+            i += 2
+        elif rest[i] == "--placement" and i + 1 < len(rest):
+            placement = parse_placement(rest[i + 1])
+            i += 2
+        else:
+            raise CredentialError(
+                "usage: cred register <name> [--entry <entry>] [%s]" % PLACEMENT_USAGE)
+    p = run_as_swapd(["/usr/local/bin/cred-registry-set", "set",
+                      name, entry, json.dumps(placement)])
+    if p.returncode != 0:
+        err = p.stderr.decode("utf-8", "replace").strip()
+        raise CredentialError(err or "cred-registry-set failed")
+    sys.stdout.write(p.stdout.decode("utf-8", "replace"))
+
+
+def cmd_unregister(args):
+    args = _strip_dashdash(args)
+    if not args:
+        raise CredentialError("usage: cred unregister <name> [--entry <entry>]")
+    name = check_name(args[0])
+    rest = args[1:]
+    entry = None
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--entry" and i + 1 < len(rest):
+            entry = check_name(rest[i + 1])
+            i += 2
+        else:
+            raise CredentialError("usage: cred unregister <name> [--entry <entry>]")
+    cmd = ["/usr/local/bin/cred-registry-set", "remove", name]
+    if entry:
+        cmd.append(entry)
+    p = run_as_swapd(cmd)
+    if p.returncode != 0:
+        err = p.stderr.decode("utf-8", "replace").strip()
+        raise CredentialError(err or "cred-registry-set failed")
+    sys.stdout.write(p.stdout.decode("utf-8", "replace"))
+
+
+def cmd_run(args):
+    if not args or args[0] != "--" or len(args) < 2:
         raise CredentialError("usage: cred run -- <cmd> [args...]")
     argv = args[1:]
-    if not argv:
-        raise CredentialError("usage: cred run -- <cmd> [args...]")
-    env = dict(os.environ)
-    for name, secret in backend.all().items():
-        env[env_name(name)] = secret
-    os.execvpe(argv[0], argv, env)
+    os.execvp("/usr/local/bin/with-proxy", ["with-proxy"] + argv)
 
 
 COMMANDS = {
@@ -242,6 +260,8 @@ COMMANDS = {
     "get": cmd_get,
     "list": cmd_list,
     "delete": cmd_delete,
+    "register": cmd_register,
+    "unregister": cmd_unregister,
     "run": cmd_run,
 }
 
@@ -255,8 +275,8 @@ def main(argv):
         sys.stderr.write(USAGE)
         return 2
     try:
-        backend = get_backend()
-        cmd(backend, argv[1:])
+        get_backend_kind()
+        cmd(argv[1:])
     except CredentialNotFound as e:
         sys.stderr.write(str(e) + "\n")
         return 3

@@ -1,0 +1,13 @@
+[Unit]
+Description=Transparent credential-swapping egress proxy (mitmdump, as swapd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=swapd
+ExecStart=/home/swapd/.venvs/mitm/bin/mitmdump -p 18080 --set listen_host=127.0.0.1 -s /home/swapd/swap_addon.py --set termlog_verbosity=warn
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

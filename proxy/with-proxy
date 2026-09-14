@@ -1,0 +1,23 @@
+#!/bin/bash
+# with-proxy — run a command with traffic routed through the local
+# credential-swapping proxy (127.0.0.1:18080).
+#
+# Configs passed to the command may contain hsurr:<name> placeholders;
+# the proxy swaps them for real secrets, for allowlisted hosts only.
+# Opt-in per command: nothing here changes the global environment.
+set -u
+CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+export http_proxy=http://127.0.0.1:18080
+export https_proxy=http://127.0.0.1:18080
+export HTTP_PROXY=http://127.0.0.1:18080
+export HTTPS_PROXY=http://127.0.0.1:18080
+export REQUESTS_CA="$CA_BUNDLE"
+export REQUESTS_CA_BUNDLE="$CA_BUNDLE"
+export CURL_CA_BUNDLE="$CA_BUNDLE"
+export SSL_CERT_FILE="$CA_BUNDLE"
+export NODE_EXTRA_CA_CERTS="$CA_BUNDLE"
+if [ "$#" -eq 0 ]; then
+    echo "usage: with-proxy <cmd> [args...]" >&2
+    exit 2
+fi
+exec "$@"

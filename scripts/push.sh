@@ -1,22 +1,14 @@
 #!/bin/bash
 # Push box-side changes in ~/spark-vm back to the ntindle/spark-vm repo.
 # Usage: ~/spark-vm/scripts/push.sh [commit message]
-# Auth: GH_TOKEN from `cred get github` (see setup below).
+# Auth: the placeholder hsurr:github in the Authorization header is swapped
+# for the real token by the credential-swapping proxy (with-proxy), for
+# allowlisted hosts only. The token itself never appears in this script,
+# in the environment, or in any log.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
-
-# --- auth: github token from the credential store ---
-if ! GH_TOKEN="$(cred get github 2>/tmp/push-cred-err)"; then
-    if [ -s /tmp/push-cred-err ]; then
-        cat /tmp/push-cred-err >&2
-    fi
-    echo "GitHub token not set. Create a fine-grained PAT with contents:write on ntindle/spark-vm, then run:" >&2
-    echo "  echo '<token>' | cred set github" >&2
-    exit 1
-fi
-rm -f /tmp/push-cred-err
 
 # --- never commit secrets: scan staged changes for secret-shaped values ---
 git add -A
@@ -38,6 +30,11 @@ else
     git commit -m "$MSG"
 fi
 
-# --- push with the token in an HTTP header (never in the remote URL, never echoed) ---
-git -c http.extraHeader="Authorization: Bearer ${GH_TOKEN}" push origin HEAD
+# --- push through the swapping proxy; hsurr:github becomes the real token ---
+if ! with-proxy git -c http.extraHeader="Authorization: Bearer hsurr:github" -c http.proxy=http://127.0.0.1:18080 push origin HEAD; then
+    echo "Push failed. If this is an auth (401/403) error, install a GitHub token:" >&2
+    echo "  Create a fine-grained PAT with contents:write on ntindle/spark-vm, then run:" >&2
+    echo "  cred set github   # paste the token at the prompt (your own SSH session)" >&2
+    exit 1
+fi
 echo "Pushed."
