@@ -132,6 +132,11 @@ HOSTS_FILE = _env_path("SWAP_HOSTS_FILE", "/home/swapd/hosts.allow")
 REGISTRY_FILE = _env_path("SWAP_REGISTRY_FILE", "/home/swapd/credentials.json")
 LOG_FILE = _env_path("SWAP_LOG_FILE", "/home/swapd/swap.log")
 SSRF_ALLOW_FILE = _env_path("SWAP_SSRF_FILE", "/home/swapd/ssrf.allow")
+# Finding 47: hard-deny list. Entries here refuse egress even if
+# ssrf.allow names the host — it covers the host's own tailnet
+# addresses and the confirmation page's name, so the jail can never
+# reach the page through the proxy and be seen as the owner.
+SSRF_DENY_FILE = _env_path("SWAP_SSRF_DENY_FILE", "/home/swapd/ssrf.deny")
 # Inference mode (finding 31): swap headers only, never bodies, query,
 # paths, or websocket messages — page content in obox's prompts must
 # never traverse credential insertion.
@@ -420,14 +425,26 @@ class SwapAddon:
         except OSError as e:
             log.warning("swap: cannot read ssrf.allow: %s (default deny)",
                         e)
+        # Finding 47: the deny list beats the allow list. Same format
+        # as ssrf.allow; reloaded with it.
+        deny_hosts, deny_nets = [], []
+        try:
+            if SSRF_DENY_FILE.is_file():
+                deny_hosts, deny_nets = _parse_ssrf_allow(
+                    SSRF_DENY_FILE.read_text(encoding="utf-8"))
+        except OSError as e:
+            log.warning("swap: cannot read ssrf.deny: %s", e)
         self.secrets = secrets
         self.hosts = hosts
         self.ssrf_hosts = ssrf_hosts
         self.ssrf_nets = ssrf_nets
+        self.deny_hosts = deny_hosts
+        self.deny_nets = deny_nets
         self._store_mtime = self._mtime(SECRETS_DIR)
         self._hosts_mtime = self._mtime(HOSTS_FILE)
         self._registry_mtime = self._mtime(REGISTRY_FILE)
         self._ssrf_mtime = self._mtime(SSRF_ALLOW_FILE)
+        self._deny_mtime = self._mtime(SSRF_DENY_FILE)
 
     @staticmethod
     def _mtime(p):
@@ -442,7 +459,8 @@ class SwapAddon:
         if (self._mtime(SECRETS_DIR) != self._store_mtime
                 or self._mtime(HOSTS_FILE) != self._hosts_mtime
                 or self._mtime(REGISTRY_FILE) != self._registry_mtime
-                or self._mtime(SSRF_ALLOW_FILE) != self._ssrf_mtime):
+                or self._mtime(SSRF_ALLOW_FILE) != self._ssrf_mtime
+                or self._mtime(SSRF_DENY_FILE) != self._deny_mtime):
             self._load()
 
     # ------------------------------------------------------------------
@@ -742,6 +760,17 @@ class SwapAddon:
         if not addr:
             return
         host = addr[0]
+        # Finding 47: the hard-deny list beats the allow list. The
+        # confirmation page's name and the host's own tailnet addresses
+        # are refused here, before any allow check, so the jail can
+        # never reach the page through the proxy and be seen as the
+        # owner.
+        if _host_in_list(host, self.deny_hosts):
+            log.warning("swap: refusing egress to %s: deny-list (name)",
+                        host)
+            self._audit_ssrf_refused(host, "-", "deny-list")
+            server.error = "swap-proxy: egress refused (deny-list)"
+            return
         ips = await self._resolve_ips(host)
         if ips is None:
             return  # DNS failure fails open; the connect fails on its own
@@ -750,6 +779,12 @@ class SwapAddon:
             parsed = _normalize_ip(ip)
             if parsed is None:
                 continue
+            if any(parsed in net for net in self.deny_nets):
+                log.warning("swap: refusing egress to %s: deny-list (ip=%s)",
+                            host, parsed)
+                self._audit_ssrf_refused(host, str(parsed), "deny-list")
+                server.error = "swap-proxy: egress refused (deny-list)"
+                return
             if self._ip_refused(host, parsed):
                 if refused_ip is None:
                     refused_ip = str(parsed)

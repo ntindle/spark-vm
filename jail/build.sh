@@ -114,19 +114,17 @@ $SUDO tee /etc/systemd/system/systemd-nspawn@$MACHINE.service.d/veth-ip.conf >/d
 [Service]
 ExecStartPost=-/usr/sbin/ip addr add $HOST_VETH_IP/$CIDR dev ve-$MACHINE
 ExecStartPost=-/usr/sbin/ip link set ve-$MACHINE up
+# Finding 51: route_localnet is needed only on ve-jail (the proxy
+# DNATs jail traffic to 127.0.0.1). Setting it on `all` would let any
+# same-L2 peer address loopback services; leave all/default at 0.
+ExecStartPost=-/usr/sbin/sysctl -w net.ipv4.conf.ve-$MACHINE.route_localnet=1
 EOF
 $SUDO systemctl daemon-reload
 
 # ---------------------------------------------------------------- firewall
 say "jail firewall"
-# route_localnet: the proxy DNATs jail traffic to 127.0.0.1, and the
-# kernel drops 127/8-destined packets arriving on a non-loopback
-# interface unless this is set. (Standard knob for DNAT-to-localhost.)
-$SUDO tee /etc/sysctl.d/99-jail.conf >/dev/null <<'EOF'
-net.ipv4.conf.all.route_localnet=1
-net.ipv4.conf.default.route_localnet=1
-EOF
-$SUDO sysctl --system >/dev/null 2>&1 || true
+# (route_localnet is set per-interface on ve-jail from the veth
+# drop-in above, not globally.)
 $SUDO tee /etc/nftables-jail.conf >/dev/null <<'EOF'
 # Proxy-only egress for the jail's veth (ve-jail). Evaluated before the
 # base filter chains (priority -10 < filter 0), so nothing later can
