@@ -1072,3 +1072,73 @@ opens the fixed page URL. Sending goes from the host to Apple's push
 endpoint directly, not through the swap proxy. The Muse-app card, when
 it exists, links to the same fixed URL and never carries an approval
 id.
+
+## What is left, and how the browser gets used (round 6 planning)
+
+**Built and verified:** the swap proxy with every correctness finding
+closed, per-credential host binding, static method and path limits,
+the inference proxy, the private-range guard with a deny list (repo
+copy pending, 61), response scrubbing, TOTP, the jail for the agent
+login, and the confirmation page with structured approvals. The
+GitHub token and the model key are installed and bound.
+
+**In progress:** the grant channel (55 to 66), which must land with
+tests and be deployed by the owner before any approval is consumed.
+
+**Not built:** everything in the spec's build plan from `bdrive`
+onward.
+
+- `bdrive`, the driver: Playwright plus Chromium as its own user with
+  the persistent profile, AX snapshots with `ref_scope`, the action
+  protocol with receipts, screenshots, downloads, per-action timeouts,
+  the proxy health gate, the socket with SO_PEERCRED (33), and the
+  nftables uid rule that forces its egress through the proxy (10).
+- `obox`, the brain: brief, steer, status and report; the
+  observe-decide-act loop; `need_info` parking; the untrusted-data
+  envelope and `hsurr:` neutralization (26, 30); the read
+  restrictions (32); model calls through the inference proxy with
+  `stream: false`, `store: false` and an explicit reasoning effort.
+- The card pathway helper (decision 6), Web Push (round 6 decision),
+  `deploy.sh` (19, 66), `.gitignore` additions (20), `flow_detail=0`
+  (21), and the v2 items: noVNC watch and a classifier pass.
+
+**A spec gap the jail exposed.** The spec's IPC is a unix socket on
+the host with group permissions. The jail has no bind mounts and no
+route to host services except the two proxy ports, so neither the
+orchestrator in the jail nor a future `bdrive` client there can reach
+`/run/bdrive/bdrive.sock` or obox's socket as specified. Two shapes:
+bind-mount the sockets into the jail (`[Files] Bind=`), with the
+daemons accepting the jail's mapped uid range via SO_PEERCRED; or
+expose them as ports on the veth gateway with DNAT and nftables
+rules, like the proxy ports. Recommendation: the bind-mounted sockets,
+which keep the "no network to host services" rule and match 33.
+Owner to confirm.
+
+**A residual to state plainly.** There is no egress policy beyond
+the private-range guard: the jail, and any browser inside it, can
+reach every public host through the proxy. The reference governs
+every request through Sentinel with taint tracking and a
+personal-data egress classifier; spark-vm has neither. What bounds it
+today is per-credential binding, so secrets cannot travel anywhere
+but their own hosts. What does not bound it is anything the agent
+already holds, such as session cookies in a browser profile it owns.
+
+**Two ways to get the browser in use.**
+
+1. *Now, inside the jail.* The agent installs Chromium in the jail,
+   trusts the swapd CA in Chromium's NSS database (the recipe step),
+   launches Playwright with `proxy={"server":
+   "http://10.99.0.1:18080"}`, and drives sites with placeholders.
+   The proxy, the allowlist, the binding and the SSRF guard all
+   apply. What is missing versus the spec: the agent owns the browser
+   profile, so a compromised agent holds the session cookies and can
+   send them to any public host; there is no AX-only observation and
+   no fixed action set. This is the mode the spec set out to replace,
+   made much safer by the jail and the proxy, but not the design.
+   Acceptable for low-value sites only: nothing where a stolen
+   session matters.
+2. *The design.* Build `bdrive` on the host first, with the IPC
+   decision above, then `obox`. The profile lives with `bdrive`, the
+   agent sees AX snapshots, and cookies never reach the jail. Several
+   days of work, after the grant channel, since first-use
+   confirmations depend on it.
