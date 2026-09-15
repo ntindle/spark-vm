@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """cred-grant-revoke — revoke grants for a job (owner decision, round 5).
 
+Finding 60: delegates to grant-writer, the single writer for grants.json.
+
 bdrive calls this at job end over the peer-checked socket (future);
 for now it's a CLI that swapd (or root) runs.
 
 Usage: cred-grant-revoke --job <job-id>
 """
 import argparse
-import json
 import os
+import subprocess
 import sys
 
-REGISTRY = os.environ.get("SWAP_REGISTRY_FILE", "/home/swapd/credentials.json")
+GRANT_WRITER = os.environ.get("GRANT_WRITER", "/home/swapd/grant-writer")
 
 
 def main():
@@ -19,29 +21,20 @@ def main():
     ap.add_argument("--job", required=True, help="job id whose grants to revoke")
     args = ap.parse_args()
 
+    # Finding 60: single writer. No direct file modification.
     try:
-        with open(REGISTRY) as f:
-            reg = json.load(f)
-    except (OSError, ValueError) as e:
-        print("cannot read registry: %s" % e, file=sys.stderr)
+        out = subprocess.run(
+            [GRANT_WRITER, "revoke", "--job", args.job],
+            capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        print("cred-grant-revoke: cannot run grant-writer: %s" % e,
+              file=sys.stderr)
         return 1
-
-    grants = reg.get("grants")
-    if not isinstance(grants, list):
-        print("no grants")
-        return 0
-
-    kept = [g for g in grants
-            if not isinstance(g, dict) or g.get("job") != args.job]
-    revoked = len(grants) - len(kept)
-    if revoked:
-        reg["grants"] = kept
-        tmp = REGISTRY + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(reg, f, indent=2)
-        os.replace(tmp, REGISTRY)
-    print("revoked %d grant(s) for job %s" % (revoked, args.job))
-    return 0
+    if out.stdout:
+        print(out.stdout.strip())
+    if out.stderr:
+        print(out.stderr.strip(), file=sys.stderr)
+    return out.returncode
 
 
 if __name__ == "__main__":

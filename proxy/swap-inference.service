@@ -16,6 +16,9 @@ Environment=SWAP_REGISTRY_FILE=/home/swapd/inference-registry.json
 Environment=SWAP_LOG_FILE=/home/swapd/inference-swap.log
 Environment=SWAP_SSRF_FILE=/home/swapd/ssrf.allow
 Environment=SWAP_INFERENCE_MODE=1
+# Finding 60: the inference proxy has no approvals directory. It reads
+# grants.json but never files approvals or consumes answers.
+Environment=SWAP_ENABLE_APPROVALS=0
 ExecStart=/home/swapd/.venvs/mitm/bin/mitmdump -p 18081 --set listen_host=127.0.0.1 -s /home/swapd/swap_addon.py --set termlog_verbosity=warn --set "dumper_filter=~d nomatch.invalid"
 Restart=always
 RestartSec=5

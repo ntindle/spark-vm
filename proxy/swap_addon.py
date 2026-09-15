@@ -136,6 +136,12 @@ LOG_FILE = _env_path("SWAP_LOG_FILE", "/home/swapd/swap.log")
 # refuses a swap for lack of a grant. The pending dir is setgid so
 # the file owner (the requester) is recorded from the filesystem.
 APPROVALS_DIR = _env_path("SWAP_APPROVALS_DIR", "/home/swapd/approvals")
+# Finding 60: grants live in their own file. The single writer is
+# proxy/grant-writer; proxies only read.
+GRANTS_FILE = _env_path("SWAP_GRANTS_FILE", "/home/swapd/grants.json")
+# Finding 60: the inference proxy gets no approvals directory at all.
+# It reads grants but never files or consumes approvals.
+APPROVALS_ENABLED = os.environ.get("SWAP_ENABLE_APPROVALS", "1") == "1"
 SSRF_ALLOW_FILE = _env_path("SWAP_SSRF_FILE", "/home/swapd/ssrf.allow")
 # Finding 47: hard-deny list. Entries here refuse egress even if
 # ssrf.allow names the host — it covers the host's own tailnet
@@ -435,11 +441,17 @@ class SwapAddon:
                         e)
         # Finding 47: the deny list beats the allow list. Same format
         # as ssrf.allow; reloaded with it.
+        # Finding 61: warn loudly if the file is missing - a rebuild
+        # from the repo without it silently loses the self-peer guard.
         deny_hosts, deny_nets = [], []
         try:
             if SSRF_DENY_FILE.is_file():
                 deny_hosts, deny_nets = _parse_ssrf_allow(
                     SSRF_DENY_FILE.read_text(encoding="utf-8"))
+            else:
+                log.warning(
+                    "swap: ssrf.deny MISSING at %s - the jail can "
+                    "impersonate the owner (finding 47/61)", SSRF_DENY_FILE)
         except OSError as e:
             log.warning("swap: cannot read ssrf.deny: %s", e)
         self.secrets = secrets
@@ -457,16 +469,17 @@ class SwapAddon:
     @staticmethod
     def _mtime(p):
         try:
-            return p.stat().st_mtime_ns
+            import pathlib
+            pp = p if isinstance(p, pathlib.Path) else pathlib.Path(p)
+            return pp.stat().st_mtime_ns
         except OSError:
             return None
 
     def _maybe_reload(self):
         # Pick up newly installed secrets / host / registry / ssrf changes
-        # without a restart. Also consumes answered approvals into
-        # grants and reaps expired grants (owner decision, round 5).
-        self._consume_answers()
-        self._reap_grants()
+        # without a restart. Finding 60: grants are read from grants.json
+        # (single writer is proxy/grant-writer); the proxy never writes.
+        # Finding 59's mtime gate lives in _grants().
         if (self._mtime(SECRETS_DIR) != self._store_mtime
                 or self._mtime(HOSTS_FILE) != self._hosts_mtime
                 or self._mtime(REGISTRY_FILE) != self._registry_mtime
@@ -479,154 +492,95 @@ class SwapAddon:
         return _host_in_list(host, self.hosts)
 
     def _grants(self):
-        """Return the list of grant dicts from the registry. Expired
-        grants are reaped on reload (owner decision, round 5)."""
-        reg = getattr(self, "registry", None) or {}
-        grants = reg.get("grants")
-        return grants if isinstance(grants, list) else []
-
-    def _save_registry(self):
-        """Persist the registry (grants added/reaped). Atomic write."""
+        """Finding 60: return grants from grants.json. Proxies only
+        read; the single writer is proxy/grant-writer. Expired grants
+        are ignored by callers (and reaped by the writer on write)."""
         try:
-            tmp = str(REGISTRY_FILE) + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.registry, f, indent=2)
-            os.replace(tmp, str(REGISTRY_FILE))
-            self._registry_mtime = self._mtime(REGISTRY_FILE)
-        except OSError as e:
-            log.warning("swap: cannot save registry: %s", e)
-
-    def _consume_answers(self):
-        """Owner decision (round 5): an approved answer becomes a grant
-        {credential, host, method, path_prefix, scope, expires,
-        approval_id, job}. Checked here on every reload so answers are
-        consumed without a restart. Expires is capped at 24 hours."""
-        try:
-            answered = os.path.join(str(APPROVALS_DIR), "answered")
-            if not os.path.isdir(answered):
-                return
-            reg = getattr(self, "registry", None)
-            if not isinstance(reg, dict):
-                return
-            grants = reg.get("grants")
-            if not isinstance(grants, list):
-                grants = []
-                reg["grants"] = grants
-            seen_ids = {g.get("approval_id") for g in grants
-                        if isinstance(g, dict)}
-            changed = False
-            for fn in sorted(os.listdir(answered)):
-                if not fn.endswith(".json"):
-                    continue
-                p = os.path.join(answered, fn)
+            # Cache with mtime gate (finding 59 pattern).
+            mt = self._mtime(GRANTS_FILE)
+            if mt != getattr(self, "_grants_mtime", None):
+                self._grants_mtime = mt
                 try:
-                    with open(p) as f:
-                        it = json.load(f)
+                    data = json.loads(GRANTS_FILE.read_text(
+                        encoding="utf-8"))
+                    g = data.get("grants") if isinstance(data, dict) else None
+                    self._grants_cache = g if isinstance(g, list) else []
                 except (OSError, ValueError):
-                    continue
-                if it.get("decision") != "approve":
-                    continue
-                aid = it.get("id")
-                if not aid or aid in seen_ids:
-                    continue
-                # 24-hour hard cap (owner decision).
-                expires = datetime.now(timezone.utc) + timedelta(hours=24)
-                grant = {
-                    "credential": it.get("credential"),
-                    "host": it.get("host"),
-                    "method": (it.get("method") or "").upper(),
-                    "path_prefix": it.get("path_prefix") or "/",
-                    "scope": it.get("scope") or "",
-                    "expires": expires.isoformat(),
-                    "approval_id": aid,
-                    "job": it.get("job") or "",
-                }
-                grants.append(grant)
-                seen_ids.add(aid)
-                changed = True
-                ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                try:
-                    with LOG_FILE.open("a", encoding="utf-8") as f:
-                        f.write("ts=%s grant=created approval_id=%s "
-                                "credential=%s host=%s method=%s "
-                                "path_prefix=%s job=%s\n"
-                                % (ts, aid, grant["credential"],
-                                   grant["host"], grant["method"],
-                                   grant["path_prefix"], grant["job"]))
-                except OSError:
-                    pass
-            if changed:
-                self._save_registry()
-        except OSError as e:
-            log.warning("swap: cannot consume answers: %s", e)
-
-    def _reap_grants(self):
-        """Remove expired grants (owner decision, round 5)."""
-        try:
-            reg = getattr(self, "registry", None)
-            if not isinstance(reg, dict):
-                return
-            grants = reg.get("grants")
-            if not isinstance(grants, list):
-                return
-            now = datetime.now(timezone.utc)
-            kept = []
-            reaped = 0
-            for g in grants:
-                if not isinstance(g, dict):
-                    continue
-                try:
-                    exp = datetime.fromisoformat(g.get("expires"))
-                    if exp.tzinfo is None:
-                        exp = exp.replace(tzinfo=timezone.utc)
-                except (ValueError, TypeError):
-                    continue
-                if now >= exp:
-                    reaped += 1
-                    continue
-                kept.append(g)
-            if reaped:
-                reg["grants"] = kept
-                self._save_registry()
-                log.info("swap: reaped %d expired grants", reaped)
-        except OSError as e:
-            log.warning("swap: cannot reap grants: %s", e)
+                    self._grants_cache = []
+            return getattr(self, "_grants_cache", [])
+        except Exception:
+            return []
 
     def _file_approval(self, name, host, method, path, reason):
+        # Finding 60: the inference proxy has no approvals directory.
+        if not APPROVALS_ENABLED:
+            return
         """Finding 49: when a swap is refused for lack of a grant, swapd
         files a structured approval itself. The tuple comes from the
-        real request — no model-authored text. Deduplicated: one pending
-        item per (credential, host, method, path_prefix)."""
+        real request - no model-authored text.
+        Finding 58 (anti-flooding): coalesced by (credential, host,
+        method) rather than full path, capped at 5 pending per
+        credential, and rate-limited to one filing per credential per
+        60 seconds."""
         try:
             pending = os.path.join(APPROVALS_DIR, "pending")
             os.makedirs(pending, exist_ok=True)
-            # Deduplicate on the structured tuple.
-            norm_path = _normalize_path(path or "/")
+            method_up = (method or "").upper()
+            now = datetime.now(timezone.utc)
+            # Coalesce by (credential, host, method); count per
+            # credential for the cap; track newest filing for rate limit.
+            per_cred = 0
+            newest = None
             for fn in os.listdir(pending):
                 if not fn.endswith(".json"):
                     continue
                 try:
                     with open(os.path.join(pending, fn)) as f:
                         it = json.load(f)
-                    if (it.get("credential") == name
-                            and it.get("host") == host
+                    # Reap expired while scanning (finding 58).
+                    try:
+                        exp = datetime.fromisoformat(it.get("expires"))
+                        if exp.tzinfo is None:
+                            exp = exp.replace(tzinfo=timezone.utc)
+                        if now >= exp:
+                            os.remove(os.path.join(pending, fn))
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+                    if it.get("credential") != name:
+                        continue
+                    per_cred += 1
+                    try:
+                        created = datetime.fromisoformat(it.get("created"))
+                        if created.tzinfo is None:
+                            created = created.replace(tzinfo=timezone.utc)
+                        if newest is None or created > newest:
+                            newest = created
+                    except (ValueError, TypeError):
+                        pass
+                    # Coalesced: same credential, host, method.
+                    if (it.get("host") == host
                             and (it.get("method") or "").upper()
-                            == (method or "").upper()
-                            and _normalize_path(it.get("path_prefix")
-                                                or "/") == norm_path):
+                            == method_up):
                         return  # already pending
                 except (OSError, ValueError):
                     continue
+            # Finding 58: cap and rate limit.
+            if per_cred >= 5:
+                log.warning("swap: approval flood cap hit for %r", name)
+                return
+            if newest is not None and (now - newest).total_seconds() < 60:
+                return  # rate-limited
+            norm_path = _normalize_path(path or "/")
             aid = uuid.uuid4().hex[:16]
             item = {
                 "id": aid,
-                "created": datetime.now(timezone.utc).isoformat(),
-                "expires": (datetime.now(timezone.utc)
-                            + timedelta(hours=1)).isoformat(),
+                "created": now.isoformat(),
+                "expires": (now + timedelta(hours=1)).isoformat(),
                 "kind": "grant-request",
                 "credential": name,
                 "host": host,
-                "method": (method or "").upper(),
+                "method": method_up,
                 "path_prefix": norm_path,
                 "scope": "",
                 "amount": "",
@@ -647,16 +601,19 @@ class SwapAddon:
 
     def _credential_allows_request(self, name, host, method, path):
         """Registry binding check for one request (grant scoping, approved
-        half). Grants are checked before the static lists (owner decision,
-        round 5): a valid grant for (credential, host, method, path)
-        allows the swap. Host binding is fail closed. allowed_methods and
-        allowed_paths are static limits: absent means unrestricted (for
-        migration), but an explicit empty list fails closed (finding
-        41) — removing the last method must not silently unlimit the
-        credential. Returns (ok, reason)."""
-        # Grants first: {credential, host, method, path_prefix, scope,
-        # expires, approval_id, job}. Expired grants are ignored and
-        # reaped on reload.
+        half). Finding 55: host binding is checked first and no grant can
+        override it. Grants only widen methods and paths within already-
+        bound hosts. allowed_methods and allowed_paths are static limits:
+        absent means unrestricted (for migration), but an explicit empty
+        list fails closed (finding 41). Returns (ok, reason)."""
+        reg = getattr(self, "registry", None) or {}
+        spec = reg.get(name)
+        if not isinstance(spec, dict):
+            return False, "unbound-host"
+        # Host binding first: never overridable by a grant (finding 55).
+        if not _host_in_list(host, spec.get("allowed_hosts")):
+            return False, "unbound-host"
+        # Grants widen methods/paths within the bound host.
         now = datetime.now(timezone.utc)
         for g in self._grants():
             if not isinstance(g, dict):
@@ -681,12 +638,6 @@ class SwapAddon:
             if not _path_allowed(norm, [prefix]):
                 continue
             return True, ""
-        reg = getattr(self, "registry", None) or {}
-        spec = reg.get(name)
-        if not isinstance(spec, dict):
-            return False, "unbound-host"
-        if not _host_in_list(host, spec.get("allowed_hosts")):
-            return False, "unbound-host"
         methods = spec.get("allowed_methods")
         if methods is not None:
             allowed = {str(m).upper() for m in methods}
@@ -740,9 +691,12 @@ class SwapAddon:
             log.warning("swap: refusing swap of %r for %s %s: %s", name,
                         method or "?", host, reason)
             self._audit_refused(host, name, reason)
-            # Finding 49: file a structured approval for the human.
-            # The tuple comes from the real request.
-            self._file_approval(name, host, method, path, reason)
+            # Finding 55: file a structured approval only when the host
+            # is bound and the refusal is about method or path. A grant
+            # can never widen a credential beyond its bound hosts, so an
+            # unbound-host refusal must not produce an approval item.
+            if reason in ("method-not-allowed", "path-not-allowed"):
+                self._file_approval(name, host, method, path, reason)
             return None
         if isinstance(val, dict):
             e = entry or "access_token"

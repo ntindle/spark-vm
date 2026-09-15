@@ -1073,6 +1073,81 @@ endpoint directly, not through the swap proxy. The Muse-app card, when
 it exists, links to the same fixed URL and never carries an approval
 id.
 
+### Round 6 resolution: findings 55-66
+
+All fixes are implemented in the repo with tests. The owner reviews
+and deploys the grant path himself (per the round-6 process note).
+
+**55. Host binding first.** `_credential_allows_request` checks
+`allowed_hosts` before grants; no grant can override it. Grants only
+widen methods/paths within bound hosts. `_file_approval` fires only
+for `method-not-allowed` and `path-not-allowed`, never `unbound-host`.
+
+**56. One-way consumption.** confirmd calls `grant-writer add` on
+approve, then moves the answered file to `consumed/`. Denials go to
+`consumed/` without a grant. Nothing re-derives grants from answered/.
+
+**57. Origin exact-match.** `PAGE_ORIGINS` is the exact set
+(`https://<BIND>:<port>` and `https://<ts.net name>:<port>`), port
+included. The `100.65.241.200` prefix attack is rejected.
+
+**58. Anti-flooding.** Coalesced by (credential, host, method); cap of
+5 pending per credential; 60s rate limit per credential; expired
+items reaped when the list renders and when filing.
+
+**59. mtime gate.** `_grants()` caches grants.json with an mtime
+check; the proxy no longer scans answered/ on every request.
+
+**60. Single writer.** Grants live in `/home/swapd/grants.json`.
+`proxy/grant-writer` is the only writer (fcntl-locked); confirmd and
+`cred-grant-revoke` call it. Proxies only read. The inference proxy
+gets `SWAP_ENABLE_APPROVALS=0` — no approvals directory at all.
+
+**61. ssrf.deny in repo.** `proxy/ssrf.deny` has the ts.net name;
+`deploy.sh` appends the host's tailscale IPs. The addon warns loudly
+if the file is missing at load.
+
+**62. Tests.** 63 tests total (43 original + 20 new): proxy grant
+channel, grant-writer (add/revoke/reap/null-reject), confirmd Origin
+(ts.net and IP, prefix attacks), nonce, self-peer, requester.
+
+**63. Nits.** (a) confirmd validates the tuple before calling
+grant-writer; (b) `_host_addrs` tries sudo first and warns on failure,
+with sudoers rules for `tailscale ip`; (c) README lists key
+fingerprints; (d) Sec-Fetch-Site documented as defense-in-depth.
+
+**64. Tuple validation.** `grant-writer add` refuses unless credential,
+host, and method are present; confirmd validates before calling.
+Refusals are audited.
+
+**65. The null grant: what wrote it.** The grant
+`{credential: null, host: null, method: ""}` was minted from a
+round-4 free-text test answer that Muse marked `approve` while testing
+the confirmd page mechanics from the box (via curl, before finding
+47's self-peer refusal existed). The round-4 "tested: owner
+views/answers" meant the page mechanics worked when driven from the
+box as the owner identity; the round-5 "impossible without his device"
+meant a true remote-owner flow was never exercised. Both true, of
+different things — but the file was a test artifact, not a human
+approval. Round-5's `_consume_answers` then minted the null grant
+because it validated nothing (finding 64). It was harmless only
+because null matches nothing. The owner moved `answered/` aside per
+the round-6 hold instructions; that was the only grant in
+`credentials.json`. With 64, such items are refused and audited, and
+with 56/60 the proxy never mints from files at all. To verify nothing
+else of that origin remains on the box:
+```
+sudo ls /home/swapd/approvals/answered/ /home/swapd/approvals/pending/ /home/swapd/approvals/consumed/
+sudo cat /home/swapd/grants.json
+```
+Only the owner's real approvals should appear; no null tuples.
+
+**66. daemon-reload.** `proxy/deploy.sh` runs `systemctl
+daemon-reload` before restarting. The owner runs it once now.
+
+**19. Rebuild docs.** `proxy/deploy.sh` is the single deploy path.
+The repo is the only source.
+
 ## What is left, and how the browser gets used (round 6 planning)
 
 **Built and verified:** the swap proxy with every correctness finding
@@ -1277,3 +1352,9 @@ merges the branch into main, keeping both sides of REVIEW.md. The
 owner runs `proxy/deploy.sh`, deletes the `answered.hold` directory,
 and performs one real approve and one real deny from his phone. Only
 then is the grant channel done.
+
+**Round 7 merge.** 67 and 68 verified at `32d53af` (sudo-first name
+lookup with origins printed at startup; dedicated lock file), 68 tests
+passing across four files. Branch merged into main. Next: the owner
+runs `proxy/deploy.sh`, deletes `answered.hold`, and performs one real
+approve and one real deny from his phone.

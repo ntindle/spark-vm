@@ -12,3 +12,9 @@ ntindle ALL=(swapd) NOPASSWD: /usr/bin/rm /home/swapd/secrets/*
 # inference proxy (finding 31): append-only hosts file, listable secrets dir
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/tee -a /home/swapd/inference-hosts.allow
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/ls /home/swapd/inference-secrets
+# confirmd (finding 47, 63b): narrow tailscale rules for the self-peer
+# check. whois takes a peer IP; ip takes no args.
+swapd ALL=(root) NOPASSWD: /usr/bin/tailscale whois --json *
+swapd ALL=(root) NOPASSWD: /usr/bin/tailscale ip
+swapd ALL=(root) NOPASSWD: /usr/bin/tailscale ip -4
+swapd ALL=(root) NOPASSWD: /usr/bin/tailscale status --json

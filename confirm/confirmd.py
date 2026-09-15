@@ -56,6 +56,44 @@ def _tailnet_ip4():
 
 BIND = os.environ.get("CONFIRM_BIND") or _tailnet_ip4() or "100.65.241.20"
 
+# Finding 57: the page's own origins, exact-matched with port.
+# Served at the tailnet IP (BIND) and the ts.net DNS name.
+def _tailnet_dnsname():
+    """Finding 67: sudo-first, like _host_addrs. A narrow sudoers rule
+    for `tailscale status --json` exists; use it. If unprivileged
+    status fails as swapd, PAGE_ORIGINS would hold only the IP origin
+    and every real browser POST would 403 (finding 57 again)."""
+    for cmd in (["sudo", "-n", "tailscale", "status", "--json"],
+                ["tailscale", "status", "--json"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=10)
+            if out.returncode == 0:
+                import json as _json
+                data = _json.loads(out.stdout)
+                name = data.get("Self", {}).get("DNSName", "")
+                # "spark-vm.axolotl-sirius.ts.net." -> strip trailing dot
+                name = name.rstrip(".")
+                if name:
+                    return name
+        except Exception:
+            continue
+    return None
+
+def _page_origins():
+    """Exact set of origins the page is served at (finding 57)."""
+    # Explicit override wins (deploy.sh sets both IP and ts.net name).
+    env = os.environ.get("CONFIRM_ORIGINS", "")
+    if env.strip():
+        return {o.strip() for o in env.split(",") if o.strip()}
+    origins = {"https://%s:%d" % (BIND, PORT)}
+    dns = _tailnet_dnsname()
+    if dns:
+        origins.add("https://%s:%d" % (dns, PORT))
+    return origins
+
+PAGE_ORIGINS = _page_origins()
+
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 
@@ -63,17 +101,28 @@ NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 # of these is the host itself (e.g. the swap proxy connecting out) —
 # never the human on a remote node.
 def _host_addrs():
+    """Finding 63(b): try sudo first (same narrow rule as whois). If
+    tailscaled is unreachable, warn - the set collapses to BIND only."""
     addrs = set()
-    try:
-        out = subprocess.run(["tailscale", "ip"],
-                             capture_output=True, text=True, timeout=10)
-        if out.returncode == 0:
-            for line in out.stdout.splitlines():
-                ip = line.strip()
-                if ip:
-                    addrs.add(ip)
-    except Exception:
-        pass
+    ok = False
+    for cmd in (["sudo", "-n", "tailscale", "ip"], ["tailscale", "ip"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=10)
+            if out.returncode == 0:
+                for line in out.stdout.splitlines():
+                    ip = line.strip()
+                    if ip:
+                        addrs.add(ip)
+                ok = True
+                break
+        except Exception:
+            continue
+    if not ok:
+        # Finding 63(b): do not silently collapse. This is a security
+        # boundary (finding 47); log it loudly.
+        print("confirmd WARNING: cannot get tailscale IPs; self-peer "
+              "set is BIND only", flush=True)
     # Belt and braces: the bind address is always self.
     addrs.add(BIND)
     return addrs
@@ -144,19 +193,38 @@ def pending_dir():
 
 def answered_dir():
     d = os.path.join(APPROVALS, "answered")
+    return d
+
+
+def consumed_dir():
+    # Finding 56: one-way consumption. Answered files move here after
+    # the grant is minted (or denied).
+    d = os.path.join(APPROVALS, "consumed")
     os.makedirs(d, exist_ok=True)
     return d
 
 
+# Finding 60: the single writer for grants.json.
+GRANT_WRITER = os.environ.get("GRANT_WRITER", "/home/swapd/grant-writer")
+
+
 def load_pending():
+    """Finding 58: reap expired items when the list is rendered."""
     items = []
     d = pending_dir()
+    now = datetime.now(timezone.utc)
     for fn in sorted(os.listdir(d)):
         if not fn.endswith(".json"):
             continue
+        p = os.path.join(d, fn)
         try:
-            with open(os.path.join(d, fn)) as f:
-                items.append(json.load(f))
+            with open(p) as f:
+                it = json.load(f)
+            exp = _parse_expiry(it.get("expires"))
+            if exp is not None and now >= exp:
+                os.remove(p)
+                continue
+            items.append(it)
         except Exception:
             continue
     return items
@@ -276,7 +344,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(body)
         elif self.path == "/answered":
             items = []
-            d = answered_dir()
+            d = consumed_dir()
             for fn in sorted(os.listdir(d), reverse=True):
                 if not fn.endswith(".json"):
                     continue
@@ -345,14 +413,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         # Finding 48: reject non-same-origin POSTs.
+        # Finding 63(d): Sec-Fetch-Site is enforced only when present.
+        # The per-item CSRF nonce (minted on GET, required on POST) is
+        # the real protection; Sec-Fetch-Site is defense in depth for
+        # browsers that send it. Non-browser clients (curl) omit it.
         fetch_site = self.headers.get("Sec-Fetch-Site", "")
         origin = self.headers.get("Origin", "")
         if fetch_site and fetch_site != "same-origin":
             self._deny(self.client_address[0], login,
                        "csrf: Sec-Fetch-Site=%s" % fetch_site)
             return
-        if origin and not origin.startswith("https://%s" % BIND):
-            # Allow the tailnet DNS name too (same cert, same host).
+        # Finding 57: exact-match Origin against the page's own
+        # origins, port included. The old startswith accepted only the
+        # IP literal (breaking real approvals) and also matched
+        # 100.65.241.200 (prefix without port).
+        if origin and origin not in PAGE_ORIGINS:
             self._deny(self.client_address[0], login,
                        "csrf: Origin=%s" % origin)
             return
@@ -405,12 +480,52 @@ class Handler(BaseHTTPRequestHandler):
         it["answered_at"] = datetime.now(timezone.utc).isoformat()
         it["answered_by"] = login
         it["requester"] = requester
+        # Finding 60: on approve, mint the grant via the single writer
+        # BEFORE moving to consumed/. Finding 64: validate the tuple.
+        if decision == "approve":
+            name = it.get("credential")
+            host = it.get("host")
+            method = (it.get("method") or "").upper()
+            if not name or not host or not method:
+                audit_log("grant-refused", self.client_address[0], login,
+                          "id=%s reason=missing credential/host/method" % aid)
+                self._send_html("<p>Cannot mint grant: missing fields.</p>",
+                                400)
+                return
+            # Call the single writer (finding 60).
+            try:
+                out = subprocess.run(
+                    [GRANT_WRITER, "add",
+                     "--credential", name,
+                     "--host", host,
+                     "--method", method,
+                     "--path-prefix", it.get("path_prefix") or "/",
+                     "--approval-id", aid,
+                     "--scope", it.get("scope") or "",
+                     "--job", it.get("job") or ""],
+                    capture_output=True, text=True, timeout=15)
+                if out.returncode != 0:
+                    audit_log("grant-failed", self.client_address[0], login,
+                              "id=%s err=%s" % (aid, out.stderr.strip()))
+                    self._send_html("<p>Grant minting failed.</p>", 500)
+                    return
+            except Exception as e:
+                audit_log("grant-failed", self.client_address[0], login,
+                          "id=%s err=%s" % (aid, e))
+                self._send_html("<p>Grant minting failed.</p>", 500)
+                return
+        # Finding 56: one-way. Write to answered/, then move to consumed/.
+        # The proxy never re-derives grants from these files.
         dst = os.path.join(answered_dir(), aid + ".json")
         tmp = dst + ".tmp"
         with open(tmp, "w") as f:
             json.dump(it, f, indent=2)
         os.replace(tmp, dst)
         os.remove(src)
+        try:
+            os.replace(dst, os.path.join(consumed_dir(), aid + ".json"))
+        except OSError:
+            pass
         audit_log("answer", self.client_address[0], login,
                   "id=%s decision=%s requester=%s"
                   % (aid, decision, requester))
@@ -423,7 +538,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    for d in (pending_dir(), answered_dir()):
+    # Finding 67: print the resolved origins at startup so the journal
+    # shows them; a missing ts.net name must be visible, not silent.
+    print("confirmd PAGE_ORIGINS=%s" % sorted(PAGE_ORIGINS), flush=True)
+    for d in (pending_dir(), answered_dir(), consumed_dir()):
         os.makedirs(d, exist_ok=True)
     import ssl
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

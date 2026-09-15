@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""grant-writer — the single writer for /home/swapd/grants.json.
+
+Finding 60: three writers (proxies' _save_registry, cred-registry-set,
+cred-grant-revoke) raced on credentials.json with no lock. Grants now
+live in their own file, and this script is the ONLY writer. It holds an
+exclusive fcntl lock on a dedicated lock file (grants.json.lock, never
+replaced) while reading, modifying, and atomically writing (finding 68).
+
+Called by:
+- confirmd on approve (mints a grant)
+- cred-grant-revoke (revokes grants for a job)
+
+Proxies (main and inference) only READ grants.json.
+
+Usage:
+  grant-writer add --credential NAME --host HOST --method METHOD
+                  --path-prefix PREFIX --approval-id ID [--scope S]
+                  [--job J] [--ttl-hours H]
+  grant-writer revoke --job JOB
+  grant-writer list
+"""
+import argparse
+import fcntl
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+GRANTS_FILE = os.environ.get("SWAP_GRANTS_FILE", "/home/swapd/grants.json")
+GRANTS_LOCK = os.environ.get("SWAP_GRANTS_LOCK", GRANTS_FILE + ".lock")
+AUDIT_LOG = os.environ.get("SWAP_LOG_FILE", "/home/swapd/swap.log")
+
+
+def _audit(msg):
+    try:
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with open(AUDIT_LOG, "a", encoding="utf-8") as f:
+            f.write("ts=%s %s\n" % (ts, msg))
+    except OSError:
+        pass
+
+
+def _load_grants():
+    """Read grants from the data file. The caller holds the lock file."""
+    try:
+        with open(GRANTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                grants = data.get("grants")
+                if isinstance(grants, list):
+                    return grants
+    except (ValueError, OSError):
+        pass
+    return []
+
+
+def _save_grants(grants):
+    """Atomically write grants via temp-and-rename so readers never see
+    a partial file. The caller holds the lock file."""
+    tmp = GRANTS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as t:
+        json.dump({"grants": grants}, t, indent=2)
+    os.replace(tmp, GRANTS_FILE)
+
+
+def _reap_expired(grants):
+    """Remove expired grants. Called on every write."""
+    now = datetime.now(timezone.utc)
+    kept = []
+    for g in grants:
+        if not isinstance(g, dict):
+            continue
+        try:
+            exp = datetime.fromisoformat(g.get("expires"))
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if now >= exp:
+                continue
+        except (ValueError, TypeError):
+            continue
+        kept.append(g)
+    return kept
+
+
+def _with_lock(fn):
+    """Run fn(grants) -> (new_grants, audit_msg) under exclusive lock.
+
+    Finding 68: the lock lives on a DEDICATED lock file that is never
+    replaced. The old code flocked the open grants.json and then renamed
+    a temp file over it: a second writer that opened before the rename
+    held the old inode's lock, read stale content after the first
+    unlocked, and its rename discarded the first writer's grant. The
+    data file still uses temp-and-rename so readers never see partial
+    content, but locking always lands on the same inode now.
+    """
+    fd = os.open(GRANTS_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        with os.fdopen(fd, "r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                grants = _reap_expired(_load_grants())
+                new_grants, audit_msg = fn(grants)
+                _save_grants(new_grants)
+                if audit_msg:
+                    _audit(audit_msg)
+                return new_grants
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except OSError as e:
+        print("grant-writer: %s" % e, file=sys.stderr)
+        return None
+
+
+def cmd_add(args):
+    # Finding 64: validate the tuple before minting.
+    if not args.credential or not args.host or not args.method:
+        print("grant-writer: credential, host, and method are required",
+              file=sys.stderr)
+        return 1
+    expires = datetime.now(timezone.utc) + timedelta(hours=args.ttl_hours)
+    grant = {
+        "credential": args.credential,
+        "host": args.host,
+        "method": args.method.upper(),
+        "path_prefix": args.path_prefix or "/",
+        "scope": args.scope or "",
+        "expires": expires.isoformat(),
+        "approval_id": args.approval_id,
+        "job": args.job or "",
+    }
+
+    def add_fn(grants):
+        # Deduplicate on approval_id (defense in depth; confirmd moves
+        # the answered file to consumed/ so this should not trigger).
+        if any(isinstance(g, dict)
+               and g.get("approval_id") == args.approval_id
+               for g in grants):
+            return grants, None
+        grants.append(grant)
+        msg = ("grant=created approval_id=%s credential=%s host=%s "
+               "method=%s path_prefix=%s job=%s"
+               % (args.approval_id, grant["credential"], grant["host"],
+                  grant["method"], grant["path_prefix"], grant["job"]))
+        return grants, msg
+
+    result = _with_lock(add_fn)
+    if result is None:
+        return 1
+    print("grant added: %s" % args.approval_id)
+    return 0
+
+
+def cmd_revoke(args):
+    def revoke_fn(grants):
+        kept = [g for g in grants
+                if not isinstance(g, dict) or g.get("job") != args.job]
+        revoked = len(grants) - len(kept)
+        msg = "grant=revoked job=%s count=%d" % (args.job, revoked) if revoked else None
+        return kept, msg
+
+    result = _with_lock(revoke_fn)
+    if result is None:
+        return 1
+    print("revoked grants for job %s" % args.job)
+    return 0
+
+
+def cmd_list(args):
+    try:
+        with open(GRANTS_FILE) as f:
+            data = json.load(f)
+        grants = data.get("grants", []) if isinstance(data, dict) else []
+        now = datetime.now(timezone.utc)
+        for g in grants:
+            if not isinstance(g, dict):
+                continue
+            try:
+                exp = datetime.fromisoformat(g.get("expires"))
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                status = "expired" if now >= exp else "active"
+            except (ValueError, TypeError):
+                status = "bad-expiry"
+            print("%s %s %s %s %s %s (%s)" % (
+                g.get("approval_id"), g.get("credential"), g.get("host"),
+                g.get("method"), g.get("path_prefix"), g.get("job"),
+                status))
+    except (OSError, ValueError) as e:
+        print("grant-writer: cannot list: %s" % e, file=sys.stderr)
+        return 1
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Single writer for grants.json")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_add = sub.add_parser("add", help="mint a grant")
+    p_add.add_argument("--credential", required=True)
+    p_add.add_argument("--host", required=True)
+    p_add.add_argument("--method", required=True)
+    p_add.add_argument("--path-prefix", default="/")
+    p_add.add_argument("--approval-id", required=True)
+    p_add.add_argument("--scope", default="")
+    p_add.add_argument("--job", default="")
+    p_add.add_argument("--ttl-hours", type=int, default=24)
+    p_add.set_defaults(fn=cmd_add)
+
+    p_rev = sub.add_parser("revoke", help="revoke grants for a job")
+    p_rev.add_argument("--job", required=True)
+    p_rev.set_defaults(fn=cmd_revoke)
+
+    p_list = sub.add_parser("list", help="list grants")
+    p_list.set_defaults(fn=cmd_list)
+
+    args = ap.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
