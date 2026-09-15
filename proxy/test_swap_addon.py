@@ -81,9 +81,10 @@ class Query:
 
 
 class Request:
-    def __init__(self, host, path="/", headers=(), content=b""):
+    def __init__(self, host, path="/", headers=(), content=b"", method="GET"):
         self.pretty_host = host
         self.path = path
+        self.method = method
         self.headers = Headers(headers)
         self.content = content
 
@@ -97,6 +98,19 @@ class Flow:
         self.request = request
         self.response = None
         self.websocket = None
+
+
+class FakeServerConn:
+    """Minimal mitmproxy Server for the server_connect hook."""
+    def __init__(self, host, port=443):
+        self.address = (host, port)
+        self.error = None
+
+
+class FakeServerConnectData:
+    def __init__(self, host, port=443):
+        self.server = FakeServerConn(host, port)
+        self.client = None
 
 
 class FakeResponse:
@@ -131,20 +145,6 @@ class _FakeMPResponse:
         self.status_code = status
         self.content = content
         self.headers = headers
-
-
-class _FakeMPHTTP:
-    class Response:
-        @staticmethod
-        def make(status, content, headers):
-            return _FakeMPResponse(status, content, headers)
-
-
-def fake_mp_module():
-    """Stand in for mitmproxy.http so _refuse takes its prod path."""
-    real = sa._mp_http
-    sa._mp_http = _FakeMPHTTP()
-    return real
 
 
 SECRETS = {
@@ -187,6 +187,9 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY):
     a.refused = []
     a._audit_refused = lambda host, name, reason: a.refused.append(
         (host, name, reason))
+    a.ssrf_refused = []
+    a._audit_ssrf_refused = lambda host, ip, reason: a.ssrf_refused.append(
+        (host, ip, reason))
     return a
 
 
@@ -439,67 +442,122 @@ class SwapAddonTests(unittest.TestCase):
         self.assertEqual(b.refused, [("github.com", "openai", "unbound-host")])
 
     def test_bug_single_value_kv_secret_not_split(self):
-        """REVIEW item 25: single-vs-multi comes from the registry or the
-        #hsurr:multi marker, never from sniffing the content — a
-        single-value secret that looks like 'k=v' stays a single value."""
+        """REVIEW items 25, 35: the #hsurr:multi marker is the SOLE source
+        of file layout. Registry entries describe placements, never file
+        format — a single-value secret that looks like 'k=v' stays a
+        single value, and a registry entry never flips it to multi."""
         a = make_addon()
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "x"
             p.write_text("token=abc=def\n")
-            self.assertEqual(a._load_secret_file(p, []), "token=abc=def")
-            self.assertEqual(a._load_secret_file(p, ["token"]),
-                             {"token": "abc=def"})
+            self.assertEqual(a._load_secret_file(p), "token=abc=def")
             p.write_text("#hsurr:multi\nuser=jdoe\npassword=x\n")
-            self.assertEqual(a._load_secret_file(p, []),
+            self.assertEqual(a._load_secret_file(p),
                              {"user": "jdoe", "password": "x"})
-            # registry declaration is enough without the marker
+            # no marker, no entries: single value even with '=' inside
             p.write_text("user=jdoe\npassword=x\n")
-            self.assertEqual(a._load_secret_file(p, ["user", "password"]),
-                             {"user": "jdoe", "password": "x"})
+            self.assertEqual(a._load_secret_file(p), "user=jdoe\npassword=x")
+
+    def test_bug_register_does_not_break_single_value_secret(self):
+        """REVIEW item 35 (regression): `cred register <name> --host <h>`
+        writes a default access_token entry. A bare-value file plus such
+        a registry must still load as the single value and swap — for the
+        bare placeholder and for the lone declared entry."""
+        a = make_addon(
+            secrets={"acme": "bare-TOKEN-value"},
+            hosts=["acme.example.com"],
+            registry={"acme": {"allowed_hosts": ["acme.example.com"],
+                               "access_token": {"placement": "bearer_header"}}})
+        self.assertEqual(a._resolve("acme", None, "acme.example.com",
+                                    "GET", "/"), "bare-TOKEN-value")
+        self.assertEqual(a._resolve("acme", "access_token",
+                                    "acme.example.com", "GET", "/"),
+                         "bare-TOKEN-value")
+        out = a._swap_text("Authorization: Bearer hsurr:acme",
+                           "acme.example.com", "GET", "/")
+        self.assertEqual(out, "Authorization: Bearer bare-TOKEN-value")
+        # a genuinely different entry still does not match
+        self.assertIsNone(a._resolve("acme", "password", "acme.example.com",
+                                     "GET", "/"))
+        self.assertEqual(a._swap_text("hsurr:acme:password",
+                                      "acme.example.com"),
+                         "hsurr:acme:password")
 
     def test_bug_private_range_refused(self):
-        """REVIEW item 29: private-range egress is refused by default,
-        allowed only via the ssrf allow file; DNS failure fails open."""
-        real = fake_mp_module()
-        self.addCleanup(setattr, sa, "_mp_http", real)
+        """REVIEW items 29, 37, 38: the server_connect hook refuses
+        private-range egress BEFORE the upstream TCP connect (no SYN ever
+        leaves), and pins the server address to the resolved IP on
+        allow, so the check and the connect use the same answer. DNS
+        failure fails open."""
         now = time.time()
 
-        def box(private=True, **kw):
+        def box(ip, **kw):
             a = make_addon(hosts=["box.local"],
                            registry={"box": {"allowed_hosts": ["box.local"]}},
                            secrets={"box": "box-SECRET"})
-            ip = "192.168.1.1" if private else "93.184.216.34"
             a._dns_cache["box.local"] = (now + 3600, [ip])
             for k, v in kw.items():
                 setattr(a, k, v)
             return a
 
-        # refused by default
-        a = box()
-        flow = Flow(Request("box.local", "/"))
-        a.request(flow)
-        self.assertEqual(flow.response.status_code, 403)
-        # hostname allowlist admits it
-        a = box(ssrf_hosts=["box.local"])
-        flow = Flow(Request("box.local", "/"))
-        a.request(flow)
-        self.assertIsNone(flow.response)
+        def connect(a, host="box.local"):
+            data = FakeServerConnectData(host)
+            a.server_connect(data)
+            return data
+
+        # refused by default: connection killed, audited, never connected
+        a = box("192.168.1.1")
+        data = connect(a)
+        self.assertEqual(data.server.error,
+                         "swap-proxy: egress refused (private-range)")
+        self.assertEqual(data.server.address, ("box.local", 443))  # unpinned
+        self.assertEqual(a.ssrf_refused,
+                         [("box.local", "192.168.1.1", "private-range")])
+        # hostname allowlist admits it and pins the resolved IP
+        a = box("192.168.1.1", ssrf_hosts=["box.local"])
+        data = connect(a)
+        self.assertIsNone(data.server.error)
+        self.assertEqual(data.server.address, ("192.168.1.1", 443))
         # CIDR allowlist admits it
-        a = box(ssrf_nets=[ipaddress.ip_network("192.168.0.0/16")])
-        flow = Flow(Request("box.local", "/"))
-        a.request(flow)
-        self.assertIsNone(flow.response)
+        a = box("192.168.1.1",
+                ssrf_nets=[ipaddress.ip_network("192.168.0.0/16")])
+        data = connect(a)
+        self.assertIsNone(data.server.error)
+        self.assertEqual(data.server.address, ("192.168.1.1", 443))
         # public IPs are unaffected
-        a = box(private=False)
-        flow = Flow(Request("box.local", "/"))
-        a.request(flow)
-        self.assertIsNone(flow.response)
-        # DNS failure fails open (the request can't complete upstream anyway)
-        a = box()
+        a = box("93.184.216.34")
+        data = connect(a)
+        self.assertIsNone(data.server.error)
+        self.assertEqual(data.server.address, ("93.184.216.34", 443))
+        # DNS failure fails open (the connect fails on its own upstream)
+        a = box("192.168.1.1")
         a._dns_cache["box.local"] = (now + 3600, None)
-        flow = Flow(Request("box.local", "/"))
-        a.request(flow)
-        self.assertIsNone(flow.response)
+        data = connect(a)
+        self.assertIsNone(data.server.error)
+
+    def test_bug_private_range_literals(self):
+        """REVIEW item 37: 0.0.0.0, IPv4-mapped IPv6 localhost, and the
+        newly refused ranges are all judged before connecting."""
+        now = time.time()
+        for literal in ("0.0.0.0", "::ffff:127.0.0.1", "127.0.0.1",
+                        "10.9.9.9", "192.0.0.7", "198.18.0.1",
+                        "240.0.0.1", "::1"):
+            a = make_addon(hosts=["h.example"],
+                           registry={"h": {"allowed_hosts": ["h.example"]}},
+                           secrets={"h": "h-SECRET"})
+            a._dns_cache["h.example"] = (now + 3600, [literal])
+            data = FakeServerConnectData("h.example")
+            a.server_connect(data)
+            self.assertIsNotNone(data.server.error, literal)
+        # a public literal still passes
+        a = make_addon(hosts=["h.example"],
+                       registry={"h": {"allowed_hosts": ["h.example"]}},
+                       secrets={"h": "h-SECRET"})
+        a._dns_cache["h.example"] = (now + 3600, ["93.184.216.34"])
+        data = FakeServerConnectData("h.example")
+        a.server_connect(data)
+        self.assertIsNone(data.server.error)
+        self.assertEqual(data.server.address, ("93.184.216.34", 443))
 
     def test_bug_inference_mode_header_only(self):
         """REVIEW item 31: the inference proxy swaps headers only — a page
@@ -535,6 +593,204 @@ class SwapAddonTests(unittest.TestCase):
         flow.websocket = FakeWebSocket([FakeWSMessage(b"key=hsurr:llm")])
         b.websocket_message(flow)
         self.assertEqual(flow.websocket.messages[0].content, b"key=sk-LLM")
+
+    # --- review round 3 (findings 35-40) --------------------------------
+
+    def test_bug_scrub_minimum_length(self):
+        """REVIEW item 36: values under 8 chars are never scrubbed — a
+        one-character password must not rewrite 'Next' into
+        'Nehsurr:acme:passwordt'."""
+        a = make_addon(
+            secrets={"acme": {"password": "e",
+                              "username": "averylongusername1"}},
+            hosts=["acme.example.com"],
+            registry={"acme": {"allowed_hosts": ["acme.example.com"]}})
+        resp = FakeResponse(b"<p>Next, averylongusername1</p>", "text/html")
+        flow = Flow(Request("acme.example.com", "/"))
+        flow.response = resp
+        a.response(flow)
+        self.assertIn(b"Next,", resp.content)
+        self.assertNotIn(b"averylongusername1", resp.content)
+        self.assertIn(b"hsurr:acme:username", resp.content)
+
+    def test_bug_scrub_short_value_warns_at_load(self):
+        """REVIEW item 36: loading a secret with a sub-8-char value warns,
+        naming the credential but never the value."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "acme").write_text("x")
+            with mock.patch.object(sa, "SECRETS_DIR", Path(d)), \
+                 mock.patch.object(sa, "HOSTS_FILE", Path(d) / "h"), \
+                 mock.patch.object(sa, "REGISTRY_FILE", Path(d) / "r"), \
+                 mock.patch.object(sa, "SSRF_ALLOW_FILE", Path(d) / "s"), \
+                 mock.patch.object(sa, "LOG_FILE", Path(d) / "l"):
+                with self.assertLogs(sa.log, level="WARNING") as cm:
+                    sa.SwapAddon()
+        msgs = "\n".join(cm.output)
+        self.assertIn("acme", msgs)
+        self.assertIn("shorter than 8 chars", msgs)
+        self.assertNotIn("secret value 'x'", msgs)
+
+    def test_bug_scrub_opt_out_and_totp_whole_token(self):
+        """REVIEW item 36: an entry with scrub:false (usernames, emails)
+        is never scrubbed; TOTP codes match as whole tokens only, so a
+        six-digit code collides with neither prices nor IDs."""
+        reg = {"acme": {"allowed_hosts": ["acme.example.com"],
+                        "username": {"scrub": False}}}
+        a = make_addon(
+            secrets={"acme": {"username": "averylongusername1",
+                              "totp": "JBSWY3DPEHPK3PXP"}},
+            hosts=["acme.example.com"], registry=reg)
+        code = sa._totp_code("JBSWY3DPEHPK3PXP").encode()
+        body = (b"welcome averylongusername1, price 1" + code + b"2, "
+                b"code " + code + b" ok")
+        resp = FakeResponse(body, "text/html")
+        flow = Flow(Request("acme.example.com", "/"))
+        flow.response = resp
+        a.response(flow)
+        self.assertIn(b"averylongusername1", resp.content)   # opted out
+        self.assertIn(b"1" + code + b"2", resp.content)      # not a token
+        self.assertNotIn(b"code " + code + b" ok", resp.content)
+        self.assertIn(b"hsurr:acme:totp", resp.content)
+
+    def test_bug_inference_install_steps_swap(self):
+        """REVIEW item 39: after the documented install steps — store the
+        key, write the registry through cred-registry-set-inference,
+        bind the host — the inference instance swaps headers only."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        wrapper = os.path.join(here, "cred-registry-set-inference")
+        tool = os.path.join(here, "cred-registry-set")
+        with tempfile.TemporaryDirectory() as d:
+            reg = os.path.join(d, "inference-registry.json")
+            env = dict(os.environ, CRED_REGISTRY_FILE=reg,
+                       CRED_REGISTRY_SET=tool)
+            (Path(d) / "llm-api").write_text("sk-LLM-KEY")
+            for argv in (["set", "llm-api", "access_token",
+                          '"bearer_header"'],
+                         ["add-host", "llm-api", "api.llm.example"]):
+                r = subprocess.run([wrapper] + argv, capture_output=True,
+                                   env=env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+            (Path(d) / "hosts.allow").write_text("api.llm.example\n")
+            (Path(d) / "ssrf.allow").write_text("")
+            with mock.patch.object(sa, "SECRETS_DIR", Path(d)), \
+                 mock.patch.object(sa, "HOSTS_FILE",
+                                   Path(d) / "hosts.allow"), \
+                 mock.patch.object(sa, "REGISTRY_FILE", Path(reg)), \
+                 mock.patch.object(sa, "SSRF_ALLOW_FILE",
+                                   Path(d) / "ssrf.allow"), \
+                 mock.patch.object(sa, "LOG_FILE", Path(d) / "swap.log"):
+                a = sa.SwapAddon()
+                a.inference_mode = True
+                a._dns_cache["api.llm.example"] = (time.time() + 3600,
+                                                   ["93.184.216.34"])
+                req = Request("api.llm.example", "/v1/chat",
+                              [("Authorization", "Bearer hsurr:llm-api")],
+                              b'{"key":"hsurr:llm-api"}')
+                a.request(Flow(req))
+            self.assertEqual(req.headers.get("Authorization"),
+                             "Bearer sk-LLM-KEY")
+            self.assertIn(b"hsurr:llm-api", req.content)  # body untouched
+
+    def test_nit_nonallowlisted_placeholder_audits_refused(self):
+        """REVIEW item 40a: a placeholder seen for a non-allowlisted host
+        is a refused= audit line, not just a journal warning."""
+        a = make_addon()
+        b64 = base64.b64encode(b"x-access-token:hsurr:github").decode()
+        req = Request("evil.example", "/",
+                      [("Authorization", "Basic " + b64)])
+        a.request(Flow(req))
+        self.assertIn(("evil.example", "github", "host-not-allowlisted"),
+                      a.refused)
+
+    def test_nit_multi_entry_bad_line_warns(self):
+        """REVIEW item 40b: a non-k=v line in a multi file is dropped with
+        a warning naming the line number, never the content."""
+        a = make_addon()
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x"
+            p.write_text("#hsurr:multi\nuser=jdoe\nnot a pair\npw=x\n")
+            with self.assertLogs(sa.log, level="WARNING") as cm:
+                vals = a._load_secret_file(p)
+        self.assertEqual(vals, {"user": "jdoe", "pw": "x"})
+        msgs = "\n".join(cm.output)
+        self.assertIn("line 3", msgs)
+        self.assertNotIn("not a pair", msgs)
+
+    def test_nit_oversized_body_skipped_before_decode(self):
+        """REVIEW item 40c: the scrub size cap is checked on the raw bytes
+        before decoding — an undecodable oversized body must not even be
+        attempted."""
+        class ExplodingResponse(FakeResponse):
+            @property
+            def text(self):
+                raise AssertionError("decoded an oversized body")
+
+        a = make_addon()
+        big = b"\xff" * (sa.SwapAddon._MAX_SCRUB_BYTES + 1)
+        resp = ExplodingResponse(big, "text/plain")
+        flow = Flow(Request("github.com", "/big"))
+        flow.response = resp
+        a.response(flow)  # must not raise
+        self.assertEqual(resp.content, big)
+
+    # --- grant scoping (approved half) --------------------------------
+
+    def _grant_addon(self, **over):
+        reg = {"api": {"allowed_hosts": ["api.example.com"],
+                       "allowed_methods": ["post"],
+                       "allowed_paths": ["/repos/"]}}
+        kw = dict(hosts=["api.example.com"], secrets={"api": "API-TOKEN"},
+                  registry=reg)
+        kw.update(over)
+        return make_addon(**kw)
+
+    def _grant_req(self, path, method="POST"):
+        return Request("api.example.com", path, method=method,
+                       headers=[("Authorization", "Bearer hsurr:api")])
+
+    def test_grant_method_limit(self):
+        """allowed_methods is checked before swapping; the stored method
+        is uppercased and the request method compared case-insensitively.
+        Absent limits mean unrestricted (migration)."""
+        a = self._grant_addon()
+        req = self._grant_req("/repos/x", method="GET")
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"), "Bearer hsurr:api")
+        self.assertIn(("api.example.com", "api", "method-not-allowed"),
+                      a.refused)
+        # no limits at all: swaps freely
+        b = make_addon()
+        req = Request("github.com", "/anything", method="DELETE",
+                      headers=[("Authorization", "Bearer hsurr:github")])
+        b.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"), "Bearer ghp_TOKEN")
+
+    def test_grant_path_prefix(self):
+        """allowed_paths: segment-aligned prefix match on the
+        percent-decoded, dot-segment-normalized path; the query string
+        is ignored."""
+        a = self._grant_addon()
+        req = self._grant_req("/repos/x?page=2")
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"), "Bearer API-TOKEN")
+
+        for bad in ("/admin", "/repository", "/repos/../admin",
+                    "/repos/%2e%2e/admin"):
+            b = self._grant_addon()
+            req = self._grant_req(bad)
+            b.request(Flow(req))
+            self.assertEqual(req.headers.get("Authorization"),
+                             "Bearer hsurr:api", bad)
+            self.assertIn(("api.example.com", "api", "path-not-allowed"),
+                          b.refused)
+
+    def test_grant_normalize_path(self):
+        self.assertEqual(sa._normalize_path("/repos/%2e%2e/admin"), "/admin")
+        self.assertEqual(sa._normalize_path("/repos//x"), "/repos/x")
+        self.assertEqual(sa._normalize_path("/repos/x?y=1"), "/repos/x")
+        self.assertTrue(sa._path_allowed("/repos/x", ["/repos/"]))
+        self.assertTrue(sa._path_allowed("/repos", ["/repos/"]))
+        self.assertFalse(sa._path_allowed("/repository", ["/repos/"]))
 
     def test_nit_path_unchanged_segments_byte_identical(self):
         """REVIEW nit 34a: re-quoting must not mangle : ~ or escapes in

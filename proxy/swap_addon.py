@@ -33,42 +33,66 @@ a substituted value can't break out of its segment.
 An entry named "totp" is treated as a base32 seed: the swap inserts the
 current RFC 6238 six-digit code (30s step, SHA-1), never the seed.
 
-Secret files: one file per credential name. Either the whole file is the
-single value, or the file holds "entry=value" lines (one per line) for
-multi-entry credentials. Single-vs-multi is decided by the registry's
-entry list for that credential, or by a "#hsurr:multi" marker as the
-file's first line — never by sniffing the content, so a single-value
-secret whose value looks like "k=v" is never misread. For a
-single-value secret an entry suffix only matches when it is absent or
-"access_token"; anything else (e.g. hsurr:github:8080) is left alone.
+Secret files: one file per credential name. The "#hsurr:multi" marker
+as the file's first non-blank line is the SOLE source of file layout
+(finding 35): registry entries describe placements, never file format,
+so running `cred register` on a bare-value file can never silently
+break its swaps. A marked file holds "entry=value" lines (one per
+line); lines that do not match k=v are dropped with a warning. For a
+single-value secret an entry suffix matches when absent, when it is
+"access_token", or when it is the one entry the registry declares for
+that credential; anything else (e.g. hsurr:github:8080) is left alone.
 
 Response scrubbing: for responses from allowlisted hosts, known secret
 values in text bodies are replaced with their placeholders, so a
 "review your details" page or a key-echoing API can't hand the value
-back through the driver's text/screenshot reads. Residual, stated not
-solved: images and binary bodies.
+back through the driver's text/screenshot reads. Values under 8
+characters are never scrubbed (finding 36: a one-character password
+turns "Next" into "Nehsurr:acme:passwordt"); a load-time warning names
+the credential, never the value. Registry entries may set
+"scrub": false for usernames and emails. TOTP codes are matched as
+whole tokens only, so a six-digit code collides with neither prices
+nor IDs. Residual, stated not solved: images and binary bodies.
 
-Egress guard: the request host is resolved and requests to private
-ranges (RFC 1918, loopback, link-local, CGNAT/tailnet space) are
-refused with 403 unless the host is explicitly allowlisted in the SSRF
-allow file (hostnames or CIDR literals). Fresh installs default to
-deny. DNS failure fails open (the request can't complete upstream
-anyway); DNS-rebind races between the check and the upstream connect
-are a stated residual.
+Egress guard: the `server_connect` hook resolves the request host
+BEFORE the upstream TCP connect (finding 38), so a refused host never
+gets even a SYN — the old `request`-hook check ran after mitmproxy had
+already connected. Refused ranges (RFC 1918, loopback, link-local,
+CGNAT/tailnet space, 0.0.0.0/8, IETF/benchmark/reserved space,
+ULA/link-local/multicast v6; finding 37 adds IPv4-mapped unwrapping)
+are killed via data.server.error unless the host is explicitly
+allowlisted in the SSRF allow file (hostnames or CIDR literals).
+Fresh installs default to deny. On allow, the server address is pinned
+to the resolved IP, so the check and the connect use the same answer:
+no DNS-rebind race. DNS failure fails open (the connect fails on its
+own anyway).
 
 Inference mode (SWAP_INFERENCE_MODE=1): a second mitmdump instance for
 obox's LLM calls, with its own secrets dir holding only the provider
-key, its own hosts file holding only the provider, header-only
+key, its own hosts file holding only the provider, its own registry
+(populated through cred-registry-set-inference), header-only
 placement, and a separate audit log. The provider is never in the main
 proxy's hosts file.
+
+Grant scoping (approved half): registry `allowed_methods` and
+`allowed_paths` are checked before swapping (absent = unrestricted,
+for migration). Paths are percent-decoded and dot-segment-normalized
+before a segment-aligned prefix match, so /repos/../admin cannot pass
+an /repos/ prefix and /repository does not match /repos/. Methods are
+uppercased. A path/method-bound credential never swaps where the
+method or path can't be verified (CONNECT tunnels, websocket
+messages).
 
 Audit: every swap is appended to the log file as
     ts=<utc> host=<host> swapped=<matched placeholder>
 Refused swaps are logged too:
     ts=<utc> host=<host> refused=hsurr:<name> reason=<why>
+Refused egress is logged as:
+    ts=<utc> host=<host> refused=egress reason=private-range ip=<ip>
 Values are NEVER logged. A placeholder seen for a non-allowlisted host
-(including inside base64'd Basic-auth headers) is logged as a warning:
-it is the only signal that a placeholder went somewhere it should not.
+(including inside base64'd Basic-auth headers) is logged as a warning
+AND as a refused= audit line: it is the only signal that a
+placeholder went somewhere it should not.
 """
 
 import base64
@@ -79,6 +103,7 @@ import ipaddress
 import json
 import logging
 import os
+import posixpath
 import re
 import socket
 import struct
@@ -86,11 +111,6 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
-
-try:
-    from mitmproxy import http as _mp_http
-except Exception:  # unit tests run without mitmproxy installed
-    _mp_http = None
 
 
 def _env_path(name, default):
@@ -155,16 +175,67 @@ def _host_in_list(host, entries):
     return False
 
 
+def _normalize_path(raw):
+    """Percent-decode then dot-segment-normalize a request path (grant
+    scoping): /repos/../admin must not pass an /repos/ prefix, and
+    %2e%2e encodings must not smuggle dot segments past the check."""
+    try:
+        p = urllib.parse.urlsplit(raw).path
+    except Exception:
+        p = raw or ""
+    p = urllib.parse.unquote(p)
+    if not p.startswith("/"):
+        p = "/" + p
+    return posixpath.normpath(p) or "/"
+
+
+def _path_allowed(norm_path, prefixes):
+    """Segment-aligned prefix match: /repos/ matches /repos and
+    /repos/x but not /repository."""
+    for pre in prefixes or []:
+        pp = _normalize_path(str(pre))
+        if norm_path == pp or norm_path.startswith(pp.rstrip("/") + "/"):
+            return True
+    return False
+
+
 # ------------------------------------------------------------------ SSRF
 
-# Ranges refused by default (finding 29): RFC 1918 private, loopback,
-# link-local, CGNAT and other carrier space, and ULA/link-local v6.
+# Ranges refused by default (findings 29, 37): RFC 1918 private,
+# loopback, link-local, CGNAT and other carrier space, 0.0.0.0/8,
+# IETF protocol assignments, benchmarking space, reserved space, and
+# ULA/link-local/multicast v6.
 _PRIVATE_NETS = tuple(ipaddress.ip_network(c) for c in (
-    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
-    "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4",
+    "0.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+    "192.0.0.0/24", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
     "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
 ))
 _DNS_TTL = 60
+# Response scrubbing floor (finding 36): values under this length are
+# never scrubbed, because short secrets mangle pages.
+_MIN_SCRUB_LEN = 8
+
+
+def _normalize_ip(ip):
+    """Parse an IP literal, unwrapping IPv4-mapped IPv6 (finding 37):
+    ::ffff:127.0.0.1 reaches localhost on Linux and must be judged as
+    127.0.0.1, not as a global unicast v6 address. Returns None for
+    garbage."""
+    try:
+        addr = ipaddress.ip_address(ip.split("%")[0])
+    except ValueError:
+        return None
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped if mapped is not None else addr
+
+
+def _is_private_ip(ip):
+    addr = _normalize_ip(ip)
+    if addr is None:
+        return False
+    return bool(addr.is_unspecified
+                or any(addr in net for net in _PRIVATE_NETS))
 
 
 def _parse_ssrf_allow(text):
@@ -193,14 +264,6 @@ def _parse_ssrf_allow(text):
             pass
         hosts.append(line.lower())
     return hosts, nets
-
-
-def _is_private_ip(ip):
-    try:
-        addr = ipaddress.ip_address(ip.split("%")[0])
-    except ValueError:
-        return False
-    return any(addr in net for net in _PRIVATE_NETS)
 
 
 class SwapAddon:
@@ -232,7 +295,7 @@ class SwapAddon:
         except (binascii.Error, ValueError, UnicodeDecodeError):
             return None
 
-    def _swap_basic_auth(self, value, host):
+    def _swap_basic_auth(self, value, host, method=None, path=None):
         """Swap placeholders inside an HTTP Basic Authorization header.
 
         Clients (git, curl -u) base64 the whole "user:password" pair, so a
@@ -243,7 +306,7 @@ class SwapAddon:
         decoded = self._basic_decoded(value)
         if decoded is None:
             return value
-        new_decoded = self._swap_text(decoded, host)
+        new_decoded = self._swap_text(decoded, host, method, path)
         if new_decoded == decoded:
             return value
         return "Basic " + base64.b64encode(
@@ -260,14 +323,17 @@ class SwapAddon:
             return []
         return [k for k in spec if k not in RESERVED_KEYS]
 
-    def _load_secret_file(self, path, entries):
-        """Read one secret file (finding 25).
+    def _load_secret_file(self, path):
+        """Read one secret file (finding 35).
 
-        Single value unless the registry declares entries for this
-        credential or the file's first non-blank line is the
-        #hsurr:multi marker. Content is never sniffed for "k=v": a
-        single-value secret whose value happens to contain "=" stays a
-        single value.
+        The #hsurr:multi marker as the file's first non-blank line is
+        the SOLE source of file layout. Registry entries describe
+        placements, never file format: a bare-value file stays a single
+        value even when the registry declares entries (e.g. the default
+        access_token entry `cred register` writes), so registering a
+        host binding can never silently break a credential's swaps.
+        Lines that do not match k=v are dropped with a warning
+        (finding 40b), naming the line number but never the content.
         """
         try:
             text = path.read_text(encoding="utf-8")
@@ -275,13 +341,17 @@ class SwapAddon:
             log.warning("swap: cannot read secret %s: %s", path.name, e)
             return None
         lines = [l for l in text.splitlines() if l.strip()]
-        multi = bool(entries) or (lines and lines[0].strip() == MULTI_MARKER)
-        if multi:
-            if lines and lines[0].strip() == MULTI_MARKER:
-                lines = lines[1:]
-            return {m.group(1): m.group(2)
-                    for m in (ENTRY_LINE_RE.match(l) for l in lines) if m}
-        return text.strip()
+        if not lines or lines[0].strip() != MULTI_MARKER:
+            return text.strip()
+        values = {}
+        for lineno, line in enumerate(lines[1:], start=2):
+            m = ENTRY_LINE_RE.match(line)
+            if m:
+                values[m.group(1)] = m.group(2)
+            else:
+                log.warning("swap: secret %s line %d is not k=v; dropped",
+                            path.name, lineno)
+        return values
 
     def _load(self):
         registry = {}
@@ -300,12 +370,22 @@ class SwapAddon:
             if SECRETS_DIR.is_dir():
                 for p in SECRETS_DIR.iterdir():
                     if p.is_file() and NAME_RE.match(p.name):
-                        v = self._load_secret_file(p,
-                                                   self._declared_entries(p.name))
+                        v = self._load_secret_file(p)
                         if v is not None:
                             secrets[p.name] = v
         except OSError as e:
             log.warning("swap: cannot list secrets dir: %s", e)
+        # Finding 36: values under _MIN_SCRUB_LEN are never scrubbed
+        # from responses. Warn here (naming the credential, never the
+        # value) so a short secret is a visible configuration problem,
+        # not a silent gap.
+        for name, val in secrets.items():
+            vals = val.values() if isinstance(val, dict) else (val,)
+            if any(v and len(v) < _MIN_SCRUB_LEN for v in vals):
+                log.warning(
+                    "swap: secret %r has a value shorter than %d chars; "
+                    "response scrubbing is disabled for it", name,
+                    _MIN_SCRUB_LEN)
         hosts = []
         try:
             if HOSTS_FILE.is_file():
@@ -352,14 +432,31 @@ class SwapAddon:
     def _host_allowed(self, host):
         return _host_in_list(host, self.hosts)
 
-    def _credential_allows_host(self, name, host):
-        """Per-credential host binding from the registry. Fail closed: a
-        credential with no allowed_hosts entry never swaps."""
+    def _credential_allows_request(self, name, host, method, path):
+        """Registry binding check for one request (grant scoping, approved
+        half). Host binding is fail closed; allowed_methods and
+        allowed_paths are static limits, absent meaning unrestricted
+        (for migration). Returns (ok, reason)."""
         reg = getattr(self, "registry", None) or {}
         spec = reg.get(name)
         if not isinstance(spec, dict):
-            return False
-        return _host_in_list(host, spec.get("allowed_hosts"))
+            return False, "unbound-host"
+        if not _host_in_list(host, spec.get("allowed_hosts")):
+            return False, "unbound-host"
+        methods = spec.get("allowed_methods")
+        if methods:
+            allowed = {str(m).upper() for m in methods}
+            if (method or "").upper() not in allowed:
+                return False, "method-not-allowed"
+        prefixes = spec.get("allowed_paths")
+        if prefixes:
+            if (method or "").upper() == "CONNECT":
+                # the proxy cannot see inside the tunnel, so a
+                # path-bound credential never swaps on a CONNECT
+                return False, "path-not-verifiable"
+            if not _path_allowed(_normalize_path(path or "/"), prefixes):
+                return False, "path-not-allowed"
+        return True, ""
 
     def _cookie_swap_names(self):
         """Credential names whose registry placement explicitly targets the
@@ -381,16 +478,18 @@ class SwapAddon:
                     break
         return names
 
-    def _resolve(self, name, entry, host):
-        """Return the secret value for name/entry on this host, or None to
-        leave the placeholder untouched."""
+    def _resolve(self, name, entry, host, method=None, path=None):
+        """Return the secret value for name/entry on this request, or None
+        to leave the placeholder untouched."""
         val = self.secrets.get(name)
         if val is None:
             return None
-        if not self._credential_allows_host(name, host):
-            log.warning("swap: credential %r is not bound to host %r; "
-                        "leaving placeholder", name, host)
-            self._audit_refused(host, name, "unbound-host")
+        ok, reason = self._credential_allows_request(name, host, method,
+                                                     path)
+        if not ok:
+            log.warning("swap: refusing swap of %r for %s %s: %s", name,
+                        method or "?", host, reason)
+            self._audit_refused(host, name, reason)
             return None
         if isinstance(val, dict):
             e = entry or "access_token"
@@ -404,11 +503,17 @@ class SwapAddon:
                     log.warning("swap: bad totp seed for %r: %s", name, ex)
                     return None
             return val.get(e)
-        # single-value secret: an entry suffix only matches when absent
-        # or "access_token" (hsurr:github:8080 must keep its :8080)
-        if entry and entry != "access_token":
-            return None
-        return val
+        # single-value secret (finding 35): the whole file is the value.
+        # An entry suffix matches when absent, when "access_token"
+        # (hsurr:github:8080 must keep its :8080), or when it is the one
+        # entry the registry declares for this credential.
+        if entry is None or entry == "access_token":
+            return val
+        declared = self._declared_entries(name)
+        if len(declared) == 1 and declared[0] == entry:
+            return val
+        self._audit_refused(host, name, "unknown-entry")
+        return None
 
     def _audit(self, host, matched):
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -429,9 +534,12 @@ class SwapAddon:
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
-    def _swap_text(self, text, host, encode=None, allow=None):
+    def _swap_text(self, text, host, method=None, path=None, encode=None,
+                   allow=None):
         """Substitute placeholders in text.
 
+        method/path: the request's method and path, for the registry's
+            allowed_methods / allowed_paths checks (grant scoping).
         encode: optional transform applied to each substituted value only
             (e.g. JSON-escaping), never to the surrounding text.
         allow: optional set of credential names permitted to swap; other
@@ -441,20 +549,20 @@ class SwapAddon:
             name, entry = m.group(1), m.group(2) or "access_token"
             if allow is not None and name not in allow:
                 return m.group(0)
-            v = self._resolve(name, entry, host)
+            v = self._resolve(name, entry, host, method, path)
             if v is None:
-                return m.group(0)  # unknown name/entry or unbound host
+                return m.group(0)  # unknown name/entry or refused request
             self._audit(host, m.group(0))
             return encode(v) if encode else v
         return PLACEHOLDER_RE.sub(repl, text)
 
-    def _swap_json_text(self, text, host):
+    def _swap_json_text(self, text, host, method=None, path=None):
         """Substitute placeholders in a JSON body, JSON-escaping each value
         so quotes/backslashes in a secret can't break the document."""
         return self._swap_text(
-            text, host, encode=lambda v: json.dumps(v)[1:-1])
+            text, host, method, path, encode=lambda v: json.dumps(v)[1:-1])
 
-    def _swap_urlencoded(self, text, host):
+    def _swap_urlencoded(self, text, host, method=None, path=None):
         """Swap percent-encoded placeholders (hsurr%3A<name>) found in
         application/x-www-form-urlencoded bodies. Substituted values are
         re-encoded so reserved characters can't corrupt the form. Used as
@@ -462,7 +570,7 @@ class SwapAddon:
         is _swap_form_body."""
         def repl(m):
             name, entry = m.group(1), m.group(2) or "access_token"
-            v = self._resolve(name, entry, host)
+            v = self._resolve(name, entry, host, method, path)
             if v is None:
                 return m.group(0)  # unknown name/entry: leave untouched
             self._audit(host, "hsurr:%s%s"
@@ -470,7 +578,7 @@ class SwapAddon:
             return urllib.parse.quote(v, safe="")
         return ENCODED_PLACEHOLDER_RE.sub(repl, text)
 
-    def _swap_form_body(self, text, host):
+    def _swap_form_body(self, text, host, method=None, path=None):
         """Swap placeholders in an application/x-www-form-urlencoded body.
 
         The body is parsed as a form, placeholder values are swapped, and
@@ -480,21 +588,25 @@ class SwapAddon:
         (curl/requests style) work too. Bodies with no swappable fields
         fall back to the encoded-placeholder regex."""
         pairs = urllib.parse.parse_qsl(text, keep_blank_values=True)
-        new_pairs = [(k, self._swap_text(v, host)) for k, v in pairs]
+        new_pairs = [(k, self._swap_text(v, host, method, path))
+                     for k, v in pairs]
         if new_pairs != pairs:
             return urllib.parse.urlencode(new_pairs)
-        return self._swap_urlencoded(text, host)
+        return self._swap_urlencoded(text, host, method, path)
 
     # ------------------------------------------------------------------
     def _warn_if_placeholder(self, flow, host):
-        """Warn when a placeholder is seen for a host that may not swap it
-        (finding 22).
+        """Warn (and audit) when a placeholder is seen for a host that may
+        not swap it (findings 22, 40a).
 
         The old version only matched the literal bytes b"hsurr:" in the
         body, so a placeholder inside a base64'd Basic-auth header — the
         exact case git uses — never triggered it. This version also
         inspects decoded Basic auth (the same helper the swap path
         uses), the percent-encoded form in the body, and the URL path.
+        Every distinct placeholder name becomes a refused= audit line:
+        a journal warning alone is too easy to miss, and this is the
+        only signal that a placeholder went somewhere it should not.
         """
         hay = b"hsurr:"
         hay_enc = b"hsurr%3a"  # urlencoded forms percent-encode the colon
@@ -508,10 +620,19 @@ class SwapAddon:
                         chunks.append(decoded.encode("utf-8", "ignore"))
         chunks.append(flow.request.path.encode("utf-8", "ignore"))
         blob = b"\n".join(chunks).lower()
-        if hay in blob or hay_enc in blob:
-            log.warning(
-                "swap: placeholder seen for non-allowlisted host %s; "
-                "passing through unchanged", host)
+        if hay not in blob and hay_enc not in blob:
+            return
+        log.warning(
+            "swap: placeholder seen for non-allowlisted host %s; "
+            "passing through unchanged", host)
+        seen = set()
+        text = blob.decode("utf-8", "ignore")
+        for rx in (PLACEHOLDER_RE, ENCODED_PLACEHOLDER_RE):
+            for m in rx.finditer(text):
+                if m.group(1) not in seen:
+                    seen.add(m.group(1))
+                    self._audit_refused(host, m.group(1),
+                                        "host-not-allowlisted")
 
     # ------------------------------------------------------------------ SSRF
 
@@ -543,43 +664,76 @@ class SwapAddon:
             self._dns_cache.clear()
         return ips
 
-    def _ssrf_refusal(self, host):
-        """Return a reason string if the request must be refused (finding
-        29), else None.
+    def _ip_refused(self, host, parsed):
+        """True if this resolved IP must not be connected to (findings 29,
+        37): refused ranges by default, unless the ssrf allow file names
+        the host or a CIDR covering the IP."""
+        if not (parsed.is_unspecified
+                or any(parsed in net for net in _PRIVATE_NETS)):
+            return False
+        if _host_in_list(host, self.ssrf_hosts):
+            return False
+        return not any(parsed in net for net in self.ssrf_nets)
 
-        Private ranges (RFC 1918, loopback, link-local, CGNAT/tailnet
-        space) are refused by default; a host explicitly allowlisted in
-        the ssrf file — by hostname or by CIDR covering a resolved IP —
-        may proceed. DNS failure fails open. Residual: DNS-rebind races
-        between this check and the upstream connect.
+    def _audit_ssrf_refused(self, host, ip, reason):
+        """Record refused egress (finding 38): like a refused swap, the
+        verdict leaves a trail even though nothing was sent."""
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            with LOG_FILE.open("a", encoding="utf-8") as f:
+                f.write("ts=%s host=%s refused=egress reason=%s ip=%s\n"
+                        % (ts, host, reason, ip))
+        except OSError as e:
+            log.warning("swap: cannot write audit log: %s", e)
+
+    def server_connect(self, data):
+        """Egress guard (findings 29, 37, 38).
+
+        Runs BEFORE the upstream TCP connect — the old `request`-hook
+        check ran after mitmproxy had already connected, which was
+        enough to port-scan the tailnet. The host is resolved here;
+        refused IPs kill the connection via data.server.error, and on
+        allow the server address is pinned to the resolved IP so the
+        check and the connect use the same answer (no DNS-rebind race).
+        SNI is unaffected: tlsconfig sets it from the client's hello,
+        not from the pinned address.
+
+        Hook signature verified against the mitmproxy in the deploy
+        venv (12.2.3): server_connect(data: ServerConnectionHookData).
         """
+        self._maybe_reload()
+        server = getattr(data, "server", None)
+        addr = getattr(server, "address", None)
+        if not addr:
+            return
+        host = addr[0]
         ips = self._resolve_ips(host)
         if ips is None:
-            return None
-        if not any(_is_private_ip(ip) for ip in ips):
-            return None
-        if _host_in_list(host, self.ssrf_hosts):
-            return None
+            return  # DNS failure fails open; the connect fails on its own
+        allowed_ip, refused_ip = None, None
         for ip in ips:
-            try:
-                addr = ipaddress.ip_address(ip.split("%")[0])
-            except ValueError:
+            parsed = _normalize_ip(ip)
+            if parsed is None:
                 continue
-            if _is_private_ip(ip) and any(addr in net
-                                         for net in self.ssrf_nets):
-                return None
-        return "private-range"
+            if self._ip_refused(host, parsed):
+                if refused_ip is None:
+                    refused_ip = str(parsed)
+                continue
+            allowed_ip = str(parsed)
+            break
+        if allowed_ip is None:
+            log.warning("swap: refusing egress to %s: private-range (ip=%s)",
+                        host, refused_ip)
+            self._audit_ssrf_refused(host, refused_ip, "private-range")
+            server.error = "swap-proxy: egress refused (private-range)"
+            return
+        try:
+            server.address = (allowed_ip, addr[1])
+        except Exception as e:
+            log.warning("swap: could not pin server address for %s: %s",
+                        host, e)
 
-    def _refuse(self, flow, reason):
-        """Short-circuit a flow with a 403 (finding 29)."""
-        if _mp_http is not None:
-            flow.response = _mp_http.Response.make(
-                403, b"swap-proxy: egress refused (%s)\n" % reason.encode(),
-                {"Content-Type": "text/plain"})
-        elif hasattr(flow, "kill"):
-            flow.kill()
-
-    def _swap_headers(self, req, host):
+    def _swap_headers(self, req, host, method=None, path=None):
         # headers: never swap Referer/Origin; Cookie only when a registry
         # placement explicitly names the Cookie header
         for key in list(req.headers.keys()):
@@ -588,21 +742,24 @@ class SwapAddon:
                 continue
             vals = req.headers.get_all(key)
             if kl == "authorization":
-                new_vals = [self._swap_basic_auth(v, host) for v in vals]
+                new_vals = [self._swap_basic_auth(v, host, method, path)
+                            for v in vals]
                 # fall back to plain-text swap (e.g. Bearer <placeholder>)
-                new_vals = [self._swap_text(v, host)
+                new_vals = [self._swap_text(v, host, method, path)
                             if nv == v else nv
                             for v, nv in zip(vals, new_vals)]
             elif kl == "cookie":
                 allowed = self._cookie_swap_names()
-                new_vals = [self._swap_text(v, host, allow=allowed)
+                new_vals = [self._swap_text(v, host, method, path,
+                                            allow=allowed)
                             for v in vals]
             else:
-                new_vals = [self._swap_text(v, host) for v in vals]
+                new_vals = [self._swap_text(v, host, method, path)
+                            for v in vals]
             if new_vals != vals:
                 req.headers.set_all(key, new_vals)
 
-    def _request_inference(self, req, host):
+    def _request_inference(self, req, host, method=None, path=None):
         """Inference proxy request path (finding 31): headers only.
 
         obox's prompts can contain whole pages; they must never traverse
@@ -610,28 +767,28 @@ class SwapAddon:
         websocket messages. The inference registry's placement is
         header-only anyway — this makes the guarantee structural.
         """
-        self._swap_headers(req, host)
+        self._swap_headers(req, host, method, path)
 
     def request(self, flow):
         self._maybe_reload()
         req = flow.request
         host = req.pretty_host
-        refusal = self._ssrf_refusal(host)
-        if refusal:
-            log.warning("swap: refusing egress to %s: %s", host, refusal)
-            self._refuse(flow, refusal)
-            return
+        # Egress is guarded in server_connect (before the TCP connect);
+        # here we only gate swapping on the hosts file.
         if not self._host_allowed(host):
             self._warn_if_placeholder(flow, host)
             return
+        method = getattr(req, "method", None)
+        path = getattr(req, "path", "/")
         if self.inference_mode:
-            self._request_inference(req, host)
+            self._request_inference(req, host, method, path)
             return
-        self._swap_headers(req, host)
+        self._swap_headers(req, host, method, path)
         # query string (percent-decoded values; re-encoded on assignment)
         q_items = list(req.query.items(multi=True))
         if q_items:
-            new_q = [(k, self._swap_text(v, host)) for k, v in q_items]
+            new_q = [(k, self._swap_text(v, host, method, path))
+                     for k, v in q_items]
             query_changed = new_q != q_items
         else:
             new_q, query_changed = q_items, False
@@ -645,7 +802,7 @@ class SwapAddon:
         path_changed = False
         for seg in segments:
             dec = urllib.parse.unquote(seg)
-            new_dec = self._swap_text(dec, host)
+            new_dec = self._swap_text(dec, host, method, path)
             if new_dec != dec:
                 path_changed = True
                 new_segments.append(urllib.parse.quote(new_dec, safe=""))
@@ -665,11 +822,11 @@ class SwapAddon:
                 return  # binary body: headers/query/path already handled
             ctype = req.headers.get("content-type", "")
             if "application/json" in ctype:
-                new_text = self._swap_json_text(text, host)
+                new_text = self._swap_json_text(text, host, method, path)
             elif "application/x-www-form-urlencoded" in ctype:
-                new_text = self._swap_form_body(text, host)
+                new_text = self._swap_form_body(text, host, method, path)
             else:
-                new_text = self._swap_text(text, host)
+                new_text = self._swap_text(text, host, method, path)
             if new_text != text:
                 req.content = new_text.encode("utf-8")
 
@@ -709,13 +866,31 @@ class SwapAddon:
             return True
         return c.endswith(("+json", "+xml"))
 
+    def _scrubbable_entry(self, name, entry, value):
+        """Whether one entry's value may be scrubbed from responses
+        (finding 36): values under _MIN_SCRUB_LEN are never scrubbed,
+        and the registry may set "scrub": false for usernames/emails."""
+        if not value or len(value) < _MIN_SCRUB_LEN:
+            return False
+        spec = (getattr(self, "registry", None) or {}).get(name)
+        if isinstance(spec, dict):
+            entry_spec = spec.get(entry)
+            if (isinstance(entry_spec, dict)
+                    and entry_spec.get("scrub") is False):
+                return False
+        return True
+
     def _secret_replacements(self):
-        """(value, placeholder) pairs for response scrubbing (finding 4),
-        longest value first so overlapping secrets replace correctly.
+        """(value, placeholder, whole_token) triples for response
+        scrubbing (findings 4, 36), longest value first so overlapping
+        secrets replace correctly.
+
         totp seeds are never returned; the current code is included
         because the agent typed that placeholder into the page and a
-        "review your details" screen may echo it back."""
-        pairs = []
+        "review your details" screen may echo it back. Codes are
+        whole_token: a six-digit code collides with prices and IDs, so
+        it is only replaced as a standalone token."""
+        triples = []
         for name, val in (self.secrets or {}).items():
             if isinstance(val, dict):
                 for entry, v in val.items():
@@ -724,19 +899,23 @@ class SwapAddon:
                             code = _totp_code(v)
                         except (ValueError, binascii.Error):
                             continue
-                        pairs.append((code, "hsurr:%s:totp" % name))
+                        triples.append((code, "hsurr:%s:totp" % name, True))
                         continue
-                    if v:
-                        pairs.append((v, "hsurr:%s:%s" % (name, entry)))
-            elif val:
-                pairs.append((val, "hsurr:%s" % name))
-        pairs.sort(key=lambda p: len(p[0]), reverse=True)
-        return pairs
+                    if self._scrubbable_entry(name, entry, v):
+                        triples.append((v, "hsurr:%s:%s" % (name, entry),
+                                        False))
+            elif self._scrubbable_entry(name, None, val):
+                triples.append((val, "hsurr:%s" % name, False))
+        triples.sort(key=lambda t: len(t[0]), reverse=True)
+        return triples
 
     def response(self, flow):
         """Scrub known secret values out of text responses from allowlisted
         hosts (finding 4), replacing each with its placeholder. Images and
-        binary bodies are a stated residual risk, not a solved one."""
+        binary bodies are a stated residual risk, not a solved one.
+
+        The hook buffers the whole body (finding 40d): obox must not
+        depend on streamed provider responses through this proxy."""
         self._maybe_reload()
         req = flow.request
         host = req.pretty_host if req else ""
@@ -748,15 +927,19 @@ class SwapAddon:
         if not self._is_scrubbable_content_type(
                 resp.headers.get("content-type", "")):
             return
+        # finding 40c: check the byte size BEFORE decoding the body
+        if len(resp.content or b"") > self._MAX_SCRUB_BYTES:
+            return
         try:
             text = resp.text
         except Exception:
             return  # undecodable: skip
-        if len(resp.content or b"") > self._MAX_SCRUB_BYTES:
-            return
         new_text = text
-        for value, placeholder in self._secret_replacements():
-            if value in new_text:
+        for value, placeholder, whole_token in self._secret_replacements():
+            if whole_token:
+                new_text = re.sub(r"(?<!\d)" + re.escape(value) + r"(?!\d)",
+                                  placeholder, new_text)
+            elif value in new_text:
                 new_text = new_text.replace(value, placeholder)
         if new_text != text:
             resp.text = new_text

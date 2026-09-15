@@ -226,13 +226,14 @@ Mapping of the managed fill protocol onto placeholders:
   SHA-1, stdlib only) and substitutes the code — never the seed.
   (Review finding 23; implemented.)
 - Secret files: one file per credential name in `/home/swapd/secrets/`.
-  Either the whole file is the single value, or the file holds
-  `entry=value` lines (one per line) for multi-entry credentials.
-  Whether a file is multi-entry is decided by the registry's entry
-  list for that credential, or by an explicit `#hsurr:multi` marker as
-  the file's first line — never by sniffing the content (review
-  finding 25), so a single-value secret whose value looks like `k=v`
-  is never misread.
+  The `#hsurr:multi` marker as the file's first non-blank line is the
+  SOLE source of file layout (review finding 35): registry entries
+  describe placements, never file format, so running `cred register`
+  on a bare-value file can never silently break its swaps. A marked
+  file holds `entry=value` lines (one per line); non-`k=v` lines are
+  dropped with a warning. For a single-value secret an entry suffix
+  matches when absent, when `access_token`, or when it is the one
+  entry the registry declares for that credential.
 - SMS/email one-time codes cannot be auto-read on spark-vm (no
   connected inbox). The agent returns `need_info:"otp"` (§9); the user
   reads the code and the orchestrator passes it back as a one-shot
@@ -266,8 +267,15 @@ review findings 5–9, each reproduced against the addon before fixing):
 - Responses: on allowlisted hosts, replace known secret values in
   response text bodies with their placeholders, so a "review your
   details" page or a key-echoing API cannot hand the value back
-  through `text`/`look`. Residual risk, stated not solved: images and
-  binary bodies (review finding 4; implemented).
+  through `text`/`look`. Values shorter than 8 characters are never
+  scrubbed (a one-character password must not rewrite "Next"), any
+  entry can opt out per-name with `"scrub": false` in the registry
+  (usernames, emails), and TOTP codes match as whole digit tokens so
+  they collide with neither prices nor IDs. Residual risk, stated not
+  solved: images and binary bodies (review finding 4; implemented).
+  The hook buffers bodies, so obox cannot depend on streamed provider
+  responses — a provider's streaming endpoint arrives at obox only
+  after the whole body is in (review finding 40).
 
 **Surrogate note.** The reference architecture mints opaque,
 per-use surrogates in authd, so an attacker page cannot contain a
@@ -281,18 +289,63 @@ same format. Open question: whether the cell's surrogates are
 per-session — worth confirming before choosing between static
 placeholders and minted aliases.
 
-### Proposal: grant scoping (review finding 28) — NOT YET IMPLEMENTED
+### Grant scoping (review finding 28) — owner decision recorded, static half implemented
 
 The reference authorizes each concrete request (method, path, decoded
 body) before inserting the credential, and every approval is a scoped
 grant (one-time, session, task, time-bounded, perpetual). spark-vm's
-allowlist entry is a perpetual, host-wide grant: a bound GitHub token
-can be used for any request to `api.github.com`, including deleting
-repositories. This section proposes the registry schema and the grant
-lifetimes; **do not implement until the owner reviews it.**
+allowlist entry was a perpetual, host-wide grant: a bound GitHub token
+could be used for any request to `api.github.com`, including deleting
+repositories.
 
-Registry additions per credential (all optional; absent = current
-behavior, so existing bindings keep working):
+**Owner decision (review round 2):** approve the static method and
+path limits now; defer session- and task-scoped grants. The proxy
+cannot attribute a request to a bdrive session or an obox job —
+sessions are tabs in one shared browser context (§3), and the proxy
+sees one Chromium connection pool — so a session-scoped grant would
+be a time-bounded grant with a misleading name. For v1 keep `one-time`
+and `time-bounded` only, with bdrive (trusted, on the host) telling
+swapd when a job ends so swapd revokes.
+
+**Implemented:** registry `allowed_methods` / `allowed_paths`, checked
+in `_resolve` before swapping (absent = unrestricted, for migration).
+Managed with `cred-registry-set add-method|add-path` (stored
+uppercased for methods). Semantics, per the owner's requirements:
+
+- Paths are compared after percent-decoding AND dot-segment
+  normalization, so `/repos/../admin` (or `/repos/%2e%2e/admin`)
+  cannot pass an `/repos/` prefix.
+- Prefixes are segment-aligned: `/repos/` matches `/repos` and
+  `/repos/x` but not `/repository`.
+- Methods are uppercased on both sides.
+- A path/method-bound credential never swaps where the method or path
+  cannot be verified: CONNECT tunnels and websocket messages fail
+  closed (refused + audited).
+- The owner binds methods for every write-capable token at install
+  time, even though the field is optional.
+
+**Deferred:** `grants` with `session` and `task` scopes, and the
+`one-time` / `time-bounded` grant machinery. When they land:
+`one-time` means one request flow, not one regex match, with a short
+grace window because browsers retry and follow redirects.
+
+**Open questions, answered by the owner:**
+
+- Card pathway (§7): stays as job-scoped placeholder entries, not
+  one-time grants — checkout forms re-submit and a one-time grant
+  fails on the retry.
+- Audit: grants log to the same audit file as `grant=` lines; no
+  second log.
+- Default expiry: job end via bdrive's revoke, with a hard 24-hour cap
+  for anything left unrevoked.
+
+**Open gap (noted in review, still unanswered):** the `cred-grant`
+writer is specified as "callable only from the confirmation page's
+backend", but the page is served by bdrive and bdrive is not swapd —
+the socket between them and the peer check still need specifying
+before the deferred half is built.
+
+Registry shape (static half live; `grants` still a proposal):
 
 ```jsonc
 "github": {
@@ -305,38 +358,6 @@ behavior, so existing bindings keep working):
   ]
 }
 ```
-
-- `allowed_methods`: HTTP methods the credential may be swapped into.
-  Checked in `_resolve` before swapping; anything else passes through
-  untouched (fail closed, like an unbound host).
-- `allowed_paths`: path prefixes the credential may be swapped into.
-  Compared against the decoded request path. A credential bound to
-  `/repos/` cannot be used for `/user/repos` deletion endpoints.
-- `grants`: scoped, expiring grants minted outside the static
-  registry. Scopes: `one-time` (consumed by the first swap, then
-  deleted), `session` (valid for one bdrive session id),
-  `task`/`job` (valid for one obox job id), `time-bounded` (valid
-  until `expires`), `perpetual` (equivalent to the static lists).
-  A later call must match the grant's scope exactly — host, method,
-  path, and session/job id — or no swap happens.
-- **First-use confirmation** becomes a session-scoped grant that swapd
-  records itself: the first time a job submits a given placeholder to
-  a host, the agent pauses with `need_info:"confirm_first_use"`; the
-  user answers on the tailnet confirmation page (§8); swapd mints the
-  grant. This replaces the spec's old "v2: first-use confirmation"
-  gap item with a concrete mechanism.
-- Writer: a narrow `cred-grant` helper (swapd-side, like
-  `cred-registry-set`), callable only from the confirmation page's
-  backend — never from the orchestrator or obox. Grant minting is the
-  one privileged write; reading/checking stays in the addon.
-- Migration: `allowed_methods`/`allowed_paths` are reserved registry
-  keys today (`cred-registry-set` already rejects them as entry names)
-  so the schema can land without a rename.
-
-Open questions for review: should `one-time` grants cover the card
-pathway (§7) instead of the job-scoped placeholder? Should grants be
-audited to a separate log? What is the default `expires` for a
-session grant (session end, or session end + a grace window)?
 
 ## 7. Payments — the wallet stays orchestrator-side
 
@@ -582,12 +603,20 @@ with the orchestrator as backstop:
   payment-card details (at most masked identifiers), the agent's private
   reasoning beyond what it reports, or any box files not explicitly
   staged for the job.
-- **Egress guard (review finding 29).** The swap proxy resolves each
-  request host and refuses private ranges (RFC 1918, loopback,
-  link-local, CGNAT/tailnet space) unless the host is on an explicit
-  allow list (`/home/swapd/ssrf.allow`). Default-deny on a fresh
-  install; the tailnet is on the list for now. Redirects are separate
-  requests and get the same check.
+- **Egress guard (review findings 29, 37, 38).** The swap proxy's
+  `server_connect` hook resolves each upstream host BEFORE the TCP
+  connect — a refused host never gets even a SYN — and kills the
+  connection via the hook's error channel. Refused ranges: RFC 1918,
+  loopback, link-local, CGNAT/tailnet space, `0.0.0.0/8`, IETF
+  assignments, benchmarking and reserved space, and the v6
+  equivalents; IPv4-mapped IPv6 (`::ffff:127.0.0.1`) is unwrapped
+  before judging. Refused egress is audited. A host on the explicit
+  allow list (`/home/swapd/ssrf.allow`, hostnames or CIDRs) may
+  proceed; default-deny on a fresh install; the tailnet is on the list
+  for now. On allow, the server address is pinned to the resolved IP,
+  so the check and the connect use the same answer (no DNS-rebind
+  race). DNS failure fails open — the connect fails on its own
+  anyway. Redirects are separate connections and get the same check.
 - **CA trust (owner decision 5).** The swapd CA goes system-wide inside
   the jail's own rootfs only — everything in the jail is meant to go
   through the proxy. `with-proxy` keeps setting `NODE_EXTRA_CA_CERTS`,
@@ -615,7 +644,7 @@ previously observable contract):
 | Fresh approval before credential use | Yes — per-fill approval | Standing approval via per-credential host binding + user-owned allowlist + audit log; first-use confirmation as session-scoped grants (§6 proposal); approvals answered on the tailnet page, never via the orchestrator | ⚠️ different mechanism, same intent — grants proposed, not built |
 | Swap correctness (encoding, headers, paths) | n/a — runtime-owned | Behaviors in §6 implemented and conformance-tested; refused swaps audited (finding 22) | ✅ implemented |
 | Egress actually forced through the proxy | n/a — runtime-owned | Chromium flag today; nftables uid rule required (finding 10); jail veth has no other route (§2) | ⚠️ pending |
-| Private-range / SSRF guard | Yes — resolved-IP validation | Default-deny with explicit allow list; tailnet allowed for now (finding 29) | ✅ implemented |
+| Private-range / SSRF guard | Yes — resolved-IP validation | Pre-connect `server_connect` guard, pinned IP, completed ranges (37–38); allow list (`/home/swapd/ssrf.allow`), tailnet allowed for now (finding 29) | ✅ implemented |
 | Inference transport separated from credential insertion | Yes — separate inference proxy | Separate mitmdump instance, header-only, own secrets dir (finding 31) | ✅ implemented |
 | Untrusted-content labeling | Yes — harness labels + classifier ensemble | Untrusted-data envelope + `hsurr:` neutralization required v1 (findings 26, 30); classifier pass v2 | ⚠️ v1 mechanism specified, not built |
 | Observation model | AX tree + ref_scope + screenshots | Same — AX tree + ref_scope + `look` | ✅ aligned |
@@ -656,13 +685,18 @@ previously observable contract):
    swap-correctness fixes 5–9, TOTP-as-code (23), response scrubbing
    (4), refused-swap warning + audit (22), registry/marker multi-entry
    (25), private-range guard (29), inference proxy (31), path-byte
-   preservation and registry-set hardening (34) — one conformance test
-   per finding. Owner decisions 2026-09-15 settled the jail (§2,
+   preservation and registry-set hardening (34), marker-only file
+   layout (35), scrub minimum length + opt-outs (36), guard range
+   completions (37), pre-connect `server_connect` guard + DNS pinning
+   (38), inference registry writer (39), audit/warn/size-cap nits
+   (40), and the approved half of grant scoping — static
+   `allowed_methods`/`allowed_paths` (28). One conformance test per
+   finding. Owner decisions 2026-09-15 settled the jail (§2,
    finding 2), the tailnet confirmation page (§8, finding 3), the audit
    log staying on the box (12), CA in the jail only (13), the card
    pathway + one-time-code exception (27), and the default-deny guard
-   (29). Grant scoping (28) is a proposal in §6, awaiting review.
-   Repo hygiene still open: `.gitignore` (20), `proxy/install.sh`
+   (29). Session/task grant scopes stay deferred. Repo hygiene still
+   open: `.gitignore` (20), `proxy/install.sh`
    rebuild instructions (19), `flow_detail=0` + error-line URL check
    (21).
 1. `bdrive` service: Playwright driver, AX snapshots + ref_scope,

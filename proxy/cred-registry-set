@@ -5,6 +5,11 @@
 #   cred-registry-set remove <name> [entry]
 #   cred-registry-set add-host <name> <host>
 #   cred-registry-set remove-host <name> <host>
+#   cred-registry-set add-method <name> <METHOD>     (grant scoping)
+#   cred-registry-set remove-method <name> <METHOD>
+#   cred-registry-set add-path <name> <prefix>       (grant scoping)
+#   cred-registry-set remove-path <name> <prefix>
+#   cred-registry-set set-scrub <name> <entry> <true|false>  (finding 36)
 # Merges into /home/swapd/credentials.json atomically (0600, swapd-owned).
 # Root-owned 0755; ntindle can only execute it via the sudoers entry.
 set -euo pipefail
@@ -17,9 +22,15 @@ def fail(msg):
     sys.exit(1)
 
 args = sys.argv[1:]
-if not args or args[0] not in ("set", "remove", "add-host", "remove-host"):
+ACTIONS = ("set", "remove", "add-host", "remove-host",
+           "add-method", "remove-method", "add-path", "remove-path",
+           "set-scrub")
+if not args or args[0] not in ACTIONS:
     fail("usage: set <name> <entry> <placement-json> | remove <name> [entry] "
-         "| add-host <name> <host> | remove-host <name> <host>")
+         "| add-host <name> <host> | remove-host <name> <host> "
+         "| add-method <name> <METHOD> | remove-method <name> <METHOD> "
+         "| add-path <name> <prefix> | remove-path <name> <prefix> "
+         "| set-scrub <name> <entry> <true|false>")
 action = args[0]
 
 def check(s, what):
@@ -123,4 +134,69 @@ elif action in ("add-host", "remove-host"):
             hosts.remove(host)
         print("unbound '%s' from host '%s'" % (name, host))
     save()
+elif action in ("add-method", "remove-method"):
+    # Grant scoping, approved half: static per-credential method limits.
+    # Stored uppercased; the addon uppercases the request method too.
+    if len(args) != 3:
+        fail("usage: cred-registry-set %s <name> <METHOD>" % action)
+    name, method = args[1], args[2]
+    check(name, "name")
+    if not re.match(r"^[A-Za-z]+$", method or ""):
+        fail("invalid method %r" % (method,))
+    method = method.upper()
+    entry = reg.setdefault(name, {})
+    if not isinstance(entry, dict):
+        fail("registry entry for '%s' is not an object" % (name,))
+    methods = entry.setdefault("allowed_methods", [])
+    if not isinstance(methods, list):
+        fail("allowed_methods for '%s' is not a list" % (name,))
+    if action == "add-method":
+        if method not in methods:
+            methods.append(method)
+        print("limited '%s' to method '%s'" % (name, method))
+    else:
+        if method in methods:
+            methods.remove(method)
+        print("unlimited '%s' method '%s'" % (name, method))
+    save()
+elif action in ("add-path", "remove-path"):
+    # Grant scoping, approved half: static per-credential path prefixes.
+    # The addon percent-decodes, dot-segment-normalizes, and
+    # segment-aligns these before matching.
+    if len(args) != 3:
+        fail("usage: cred-registry-set %s <name> <prefix>" % action)
+    name, prefix = args[1], args[2]
+    check(name, "name")
+    if not prefix.startswith("/") or re.search(r"\s", prefix):
+        fail("invalid path prefix %r (must start with /, no whitespace)"
+             % (prefix,))
+    entry = reg.setdefault(name, {})
+    if not isinstance(entry, dict):
+        fail("registry entry for '%s' is not an object" % (name,))
+    prefixes = entry.setdefault("allowed_paths", [])
+    if not isinstance(prefixes, list):
+        fail("allowed_paths for '%s' is not a list" % (name,))
+    if action == "add-path":
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+        print("limited '%s' to path prefix '%s'" % (name, prefix))
+    else:
+        if prefix in prefixes:
+            prefixes.remove(prefix)
+        print("unlimited '%s' path prefix '%s'" % (name, prefix))
+    save()
+elif action == "set-scrub":
+    # Finding 36: opt an entry (usernames, emails) out of response
+    # scrubbing entirely.
+    if len(args) != 4 or args[3] not in ("true", "false"):
+        fail("usage: cred-registry-set set-scrub <name> <entry> <true|false>")
+    _, name, entry, flag = args
+    check(name, "name")
+    check_entry(entry)
+    entry_spec = reg.setdefault(name, {}).setdefault(entry, {})
+    if not isinstance(entry_spec, dict):
+        fail("entry '%s' for '%s' is not an object" % (entry, name))
+    entry_spec["scrub"] = (flag == "true")
+    save()
+    print("set scrub=%s for '%s' entry '%s'" % (flag, name, entry))
 PYEOF

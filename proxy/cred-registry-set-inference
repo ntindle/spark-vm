@@ -1,0 +1,18 @@
+#!/bin/bash
+# cred-registry-set-inference — registry writer for the inference proxy
+# (finding 39). The inference mitmdump reads
+# /home/swapd/inference-registry.json, but cred-registry-set writes only
+# /home/swapd/credentials.json unless CRED_REGISTRY_FILE is set, which
+# sudo's env_reset strips. This fixed-path wrapper sets the variable
+# AFTER sudo (inside the script, running as swapd), so the documented
+# install steps work through the narrow path:
+#   sudo -u swapd cred-registry-set-inference set llm-api access_token '"bearer_header"'
+#   sudo -u swapd cred-registry-set-inference add-host llm-api <provider host>
+set -euo pipefail
+
+# A pre-set CRED_REGISTRY_FILE (tests) wins; sudo's env_reset guarantees
+# it is unset in production, so the fixed path always applies there.
+export CRED_REGISTRY_FILE="${CRED_REGISTRY_FILE:-/home/swapd/inference-registry.json}"
+# Same for the registry tool itself: fixed in production, overridable in
+# tests so the install steps can be exercised without /usr/local/bin.
+exec "${CRED_REGISTRY_SET:-/usr/local/bin/cred-registry-set}" "$@"

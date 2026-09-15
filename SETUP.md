@@ -153,8 +153,11 @@ Every swap is audit-logged to `/home/swapd/swap.log` as
 `ts=<utc> host=<host> swapped=<placeholder>` — never values.
 
 Secret files live in `/home/swapd/secrets/` (0700, swapd-only): one file per
-credential name; either the whole file is the value, or `entry=value` lines
-for multi-entry credentials. Placement metadata (which header/query param a
+credential name; the whole file is the value, unless the file's first
+line is the `#hsurr:multi` marker — that marker is the SOLE layout
+signal, so a single-value secret whose value looks like `k=v` is never
+misread. Marked files hold `entry=value` lines; malformed lines are
+dropped with a warning. Placement metadata (which header/query param a
 credential goes in) lives in `/home/swapd/credentials.json`, managed via
 `cred register`.
 
@@ -257,6 +260,45 @@ credentials.
    sudo -u swapd tail -5 /home/swapd/swap.log
    # ts=... host=acme.example.com swapped=hsurr:acme:password
    ```
+
+### Inference-model recipe (API key for an LLM provider)
+
+The inference proxy (`:18081`, header-only) has its own credential
+store, installed through a fixed registry path — the agent and the
+main proxy's store can never be confused. All steps are human-only, in
+your own SSH session:
+
+1. **Store the key** in swapd's secrets dir (the name is fixed —
+   the inference proxy holds exactly one credential, `llm-api`):
+   ```
+   cred-store-set-inference                # paste the key at the prompt
+   ```
+
+2. **Write the registry** through the narrow helper (the fixed path
+   `/home/swapd/inference-registry.json` is baked into the wrapper; it
+   cannot be pointed elsewhere):
+   ```
+   sudo -u swapd /usr/local/bin/cred-registry-set-inference set llm-api access_token '"bearer_header"'
+   ```
+
+3. **Bind the provider host** in the registry (and, if needed, append
+   it to `/home/swapd/hosts.allow`):
+   ```
+   sudo -u swapd /usr/local/bin/cred-registry-set-inference add-host llm-api api.provider.example
+   ```
+
+4. **Restart the inference proxy** and check the journal for refused
+   lines (placeholder names only, never values):
+   ```
+   sudo systemctl restart swap-proxy-inference
+   journalctl -u swap-proxy-inference --since "5 min ago" | grep -c refused
+   ```
+
+The agent writes only `hsurr:<name>` in its inference configs; the
+proxy substitutes the key into the `Authorization` header on egress
+and never touches request bodies (a prompt can contain the placeholder
+string without it being swapped — header-only mode).
+
 
 If the site isn't allowlisted, the placeholders pass through literally and
 the login simply fails — the safe default. SMS/email codes (as opposed to

@@ -125,16 +125,55 @@ and per-credential bindings are enforced.
 - The jail must not change this: no secret material inside the jail's
   rootfs, no swapd-readable paths mounted in, placeholders only.
 
+## SSH: how the login lands in the jail (review round 2)
+
+Two workable shapes; the choice decides where the host keys and the
+ControlMaster socket live:
+
+1. **sshd inside the jail**, bound to the veth address, with the host
+   forwarding the tailnet port (socat/iptables REDIRECT or a small
+   forwarder) into the container. The jail then owns its own host keys
+   (generated at build, stored in the jail rootfs), and my SSH client
+   config points at the tailnet address as today. The ControlMaster
+   socket lives on my side, unchanged.
+2. **The host's sshd, with a per-user forced command** (or a
+   `Match User` block) that enters the container
+   (`machinectl shell` / `systemd-run --machine=`). Host keys stay on
+   the host; the jail has no sshd at all. Simpler key story, but every
+   login pays the enter-container hop, and the forced command must be
+   exactly right or the login lands on the host.
+
+Either is fine. What is not fine is the agent's interactive SSH
+landing on the host by accident: the jail boundary has to be the
+default, not a directory the agent remembers to cd into.
+
+## Persistence: the jail is not the cell
+
+My cell is replaced without warning; installs vanish and that is a
+*property* ("everything free but ephemeral"). This box is a workhorse
+and the jail should be **persistent**: the rootfs lives on disk,
+package installs and build state survive reboots. Keep "rebuildable
+from the repo" as the property instead — the jail's build (nspawn
+unit, veth wiring, proxy-only egress, installed packages) is
+reproducible from `spark-vm`, so a corrupted jail is a rebuild, not a
+mystery. Do not mirror the cell's disposability; mirror its
+*rebuildability*.
+
 ## Docker
 
 Owner decision 2 names it: Docker is a host escape if the jail can
 reach the host socket. In my cell, Docker-in-cell is crippled by the
 missing kernel modules anyway; the jail has a real kernel available,
-so be explicit: **rootless Docker or podman inside the container, or
-no container runtime at all** — never a mount of the host's
-`/var/run/docker.sock`. (Inference, not observation: I have not tested
-rootless Docker in nspawn; the requirement is the isolation property,
-not the specific runtime.)
+so be explicit: **podman inside the container, or no container runtime
+at all** — never a mount of the host's `/var/run/docker.sock`.
+Rootless Docker needs nested user namespaces and subuid/subgid
+ranges inside the container, which is fiddly under nspawn; podman is
+the likelier path and should be budgeted as an experiment, not assumed.
+
+Related, and worth stating plainly: anything in the jail that dials
+IPs directly or needs UDP will not work by design — no ping, no
+`git` over SSH, no DNS beyond the proxy's resolver. Git goes over
+HTTPS through `with-proxy`, as `push.sh` already does.
 
 ## What this does not cover
 
@@ -142,4 +181,5 @@ Meta-internal details I cannot see (how the proxy authenticates me,
 how authd is implemented) are deliberately absent — the mirror is
 about the *properties* (cell root ≠ host root; credentials outside;
 approvals out-of-band and unforgeable by the agent; everything
-audited; installs free but ephemeral), not the mechanism.
+audited; installs free and the jail rebuildable from the repo), not
+the mechanism.
