@@ -31,13 +31,25 @@ def check_host(h):
         fail("invalid host %r" % (h,))
     return h.lower()
 
-reg_path = "/home/swapd/credentials.json"
+reg_path = os.environ.get("CRED_REGISTRY_FILE",
+                           "/home/swapd/credentials.json")
 reg = {}
 if os.path.exists(reg_path):
     with open(reg_path, encoding="utf-8") as f:
         reg = json.load(f)
     if not isinstance(reg, dict):
         fail("registry is not a JSON object")
+
+# Structural keys must never become credential entries: an entry named
+# "allowed_hosts" would clobber the host binding with a placement object
+# (finding 34b). allowed_methods/allowed_paths are reserved for the
+# grant-scoping proposal.
+RESERVED_ENTRIES = ("allowed_hosts", "allowed_methods", "allowed_paths")
+
+def check_entry(s):
+    check(s, "entry")
+    if s in RESERVED_ENTRIES:
+        fail("entry name %r is reserved" % (s,))
 
 def save():
     tmp = reg_path + ".tmp"
@@ -52,7 +64,7 @@ if action == "set":
         fail("usage: cred-registry-set set <name> <entry> <placement-json>")
     _, name, entry, pjson = args
     check(name, "name")
-    check(entry, "entry")
+    check_entry(entry)
     try:
         placement = json.loads(pjson)
     except ValueError:
@@ -81,7 +93,7 @@ elif action == "remove":
         fail("credential '%s' not registered" % (name,))
     if len(args) == 3:
         entry = args[2]
-        check(entry, "entry")
+        check_entry(entry)
         reg[name].pop(entry, None)
         if not reg[name]:
             del reg[name]

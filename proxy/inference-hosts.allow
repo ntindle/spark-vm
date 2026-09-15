@@ -1,0 +1,6 @@
+# hosts.allow for the inference proxy (finding 31).
+#
+# ONLY the LLM provider's exact hostname goes here — never anything
+# else, and the provider must never appear in the main proxy's
+# hosts.allow. Add the provider when installing the llm-api credential:
+#   echo "api.example.com" | sudo -u swapd tee -a /home/swapd/inference-hosts.allow

@@ -191,26 +191,29 @@ credentials.
 
 1. **Store the credential (human only, your own SSH session).** One
    credential, one entry per line. The interactive prompt takes a single
-   line, so pipe multi-entry values:
+   line, so pipe multi-entry values. The first line MUST be the
+   `#hsurr:multi` marker — it declares the file multi-entry explicitly
+   (the proxy never guesses from the content):
    ```
-   printf 'username=jdoe\npassword=correct horse battery staple\ntotp=JBSWY3DPEHPK3PXP\n' | cred set acme
+   printf '#hsurr:multi\nusername=jdoe\npassword=correct horse battery staple\ntotp=JBSWY3DPEHPK3PXP\n' | cred set acme
    ```
    Omit the `totp` line if the site doesn't use one. The `totp` value
    is the base32 **seed** — at swap time the proxy computes the current
-   RFC 6238 six-digit code and substitutes the code, never the seed
-   (pending addon change, review finding 23; until it lands,
-   TOTP-via-placeholder does not work). Never send these values to the
-   agent — only the credential *name* (`acme`).
+   RFC 6238 six-digit code and substitutes the code, never the seed.
+   Never send these values to the agent — only the credential *name*
+   (`acme`).
 
-2. **Allowlist the site.** A credential may only ever travel to hosts you
-   approve — the allowlist is the standing approval:
+2. **Allowlist the site AND bind the credential to it.** A credential
+   may only ever travel to hosts you approve — the allowlist is the
+   standing approval, and the per-credential binding is fail-closed
+   (an unbound credential never swaps):
    ```
    # append to /home/swapd/hosts.allow (one host per line)
    acme.example.com
+   # bind the credential to that host (narrow sudo helper, no shell)
+   sudo -u swapd /usr/local/bin/cred-registry-set add-host acme acme.example.com
    ```
-   New hosts are picked up without a proxy restart. (Per-credential
-   host binding is pending, review finding 1 — until then, any stored
-   secret swaps into any allowlisted host.)
+   New hosts and new bindings are picked up without a proxy restart.
 
 3. **Launch Chromium through the proxy and trust its CA.** Plain
    Playwright ignores `with-proxy`'s environment variables, and

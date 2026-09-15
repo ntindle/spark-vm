@@ -17,13 +17,19 @@ allowed_hosts) directly.
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
+import socket
 import struct
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import urllib.parse
+from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import swap_addon as sa  # noqa: E402
@@ -58,6 +64,12 @@ class Headers:
         vals = self.get_all(key)
         return vals[0] if vals else default
 
+    def __contains__(self, key):
+        return any(k.lower() == key.lower() for k, _ in self._items)
+
+    def __setitem__(self, key, value):
+        self.set_all(key, [value])
+
 
 class Query:
     def __init__(self, path):
@@ -83,6 +95,56 @@ class Request:
 class Flow:
     def __init__(self, request):
         self.request = request
+        self.response = None
+        self.websocket = None
+
+
+class FakeResponse:
+    """Minimal mitmproxy response: text property, content, headers."""
+    def __init__(self, content, content_type):
+        self.content = content
+        self.headers = Headers([("content-type", content_type),
+                                ("content-length", str(len(content)))])
+
+    @property
+    def text(self):
+        return self.content.decode("utf-8")
+
+    @text.setter
+    def text(self, value):
+        self.content = value.encode("utf-8")
+
+
+class FakeWSMessage:
+    def __init__(self, content, is_binary=False):
+        self.content = content
+        self.is_binary = is_binary
+
+
+class FakeWebSocket:
+    def __init__(self, messages):
+        self.messages = messages
+
+
+class _FakeMPResponse:
+    def __init__(self, status, content, headers):
+        self.status_code = status
+        self.content = content
+        self.headers = headers
+
+
+class _FakeMPHTTP:
+    class Response:
+        @staticmethod
+        def make(status, content, headers):
+            return _FakeMPResponse(status, content, headers)
+
+
+def fake_mp_module():
+    """Stand in for mitmproxy.http so _refuse takes its prod path."""
+    real = sa._mp_http
+    sa._mp_http = _FakeMPHTTP()
+    return real
 
 
 SECRETS = {
@@ -112,9 +174,19 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY):
     a.hosts = list(hosts)
     a.registry = {k: (dict(v) if isinstance(v, dict) else v)
                   for k, v in registry.items()}
+    a.inference_mode = False
+    a.ssrf_hosts = []
+    a.ssrf_nets = []
+    # Hermetic DNS: test hosts fail open without a real lookup. Tests that
+    # exercise the SSRF guard seed _dns_cache themselves.
+    a._dns_cache = {h: (time.time() + 3600, None)
+                    for h in list(hosts) + ["evil.example"]}
     a._store_mtime = a._hosts_mtime = None
     a._maybe_reload = lambda: None      # never touch /home/swapd here
     a._audit = lambda host, matched: None
+    a.refused = []
+    a._audit_refused = lambda host, name, reason: a.refused.append(
+        (host, name, reason))
     return a
 
 
@@ -300,6 +372,209 @@ class SwapAddonTests(unittest.TestCase):
             a._swap_text("k=hsurr:openai", "api.example.com"), "k=sk-OPENAI")
         self.assertEqual(
             a._swap_text("k=hsurr:openai", "other.com"), "k=hsurr:openai")
+
+    # --- review round 2 -------------------------------------------------
+
+    def test_bug_response_scrubs_secret_values(self):
+        """REVIEW item 4: a 'review your details' response must not hand
+        secret values back through the driver's text reads."""
+        a = make_addon()
+        code = sa._totp_code("JBSWY3DPEHPK3PXP")
+        body = ('{"token":"ghp_TOKEN","pw":"correct horse",'
+                '"otp":"%s"}' % code).encode()
+        resp = FakeResponse(body, "application/json")
+        flow = Flow(Request("github.com", "/"))
+        flow.response = resp
+        a.response(flow)
+        self.assertNotIn(b"ghp_TOKEN", resp.content)
+        self.assertNotIn(b"correct horse", resp.content)
+        self.assertNotIn(code.encode(), resp.content)
+        self.assertIn(b"hsurr:github", resp.content)
+        self.assertIn(b"hsurr:acme:password", resp.content)
+        self.assertIn(b"hsurr:acme:totp", resp.content)
+        # content-length stays honest
+        self.assertEqual(resp.headers.get("content-length"),
+                         str(len(resp.content)))
+        # binary bodies are a stated residual: untouched
+        img = FakeResponse(b"\x89PNGghp_TOKEN", "image/png")
+        flow = Flow(Request("github.com", "/logo.png"))
+        flow.response = img
+        a.response(flow)
+        self.assertIn(b"ghp_TOKEN", img.content)
+        # non-allowlisted hosts: no scrub
+        other = FakeResponse(b"ghp_TOKEN", "text/plain")
+        flow = Flow(Request("evil.example", "/"))
+        flow.response = other
+        a.response(flow)
+        self.assertIn(b"ghp_TOKEN", other.content)
+
+    def test_bug_refused_swap_warns_and_audits(self):
+        """REVIEW item 22: the placeholder warning must fire for
+        placeholders hidden inside base64'd Basic auth, and refused
+        swaps must reach the audit trail."""
+        a = make_addon()
+        records = []
+
+        class H(logging.Handler):
+            def emit(self, r):
+                records.append(r.getMessage())
+
+        h = H()
+        sa.log.addHandler(h)
+        self.addCleanup(sa.log.removeHandler, h)
+        b64 = base64.b64encode(b"x-access-token:hsurr:github").decode()
+        req = Request("evil.example", "/",
+                      [("Authorization", "Basic " + b64)])
+        a.request(Flow(req))
+        self.assertTrue(
+            any("placeholder" in r and "evil.example" in r for r in records),
+            records)
+        self.assertEqual(req.headers.get("Authorization"), "Basic " + b64)
+        # refused swap (credential not bound to the request host) is
+        # recorded even though nothing leaks
+        b = make_addon()
+        req = Request("github.com", "/x", [("X-T", "hsurr:openai")])
+        b.request(Flow(req))
+        self.assertEqual(req.headers.get("X-T"), "hsurr:openai")
+        self.assertEqual(b.refused, [("github.com", "openai", "unbound-host")])
+
+    def test_bug_single_value_kv_secret_not_split(self):
+        """REVIEW item 25: single-vs-multi comes from the registry or the
+        #hsurr:multi marker, never from sniffing the content — a
+        single-value secret that looks like 'k=v' stays a single value."""
+        a = make_addon()
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x"
+            p.write_text("token=abc=def\n")
+            self.assertEqual(a._load_secret_file(p, []), "token=abc=def")
+            self.assertEqual(a._load_secret_file(p, ["token"]),
+                             {"token": "abc=def"})
+            p.write_text("#hsurr:multi\nuser=jdoe\npassword=x\n")
+            self.assertEqual(a._load_secret_file(p, []),
+                             {"user": "jdoe", "password": "x"})
+            # registry declaration is enough without the marker
+            p.write_text("user=jdoe\npassword=x\n")
+            self.assertEqual(a._load_secret_file(p, ["user", "password"]),
+                             {"user": "jdoe", "password": "x"})
+
+    def test_bug_private_range_refused(self):
+        """REVIEW item 29: private-range egress is refused by default,
+        allowed only via the ssrf allow file; DNS failure fails open."""
+        real = fake_mp_module()
+        self.addCleanup(setattr, sa, "_mp_http", real)
+        now = time.time()
+
+        def box(private=True, **kw):
+            a = make_addon(hosts=["box.local"],
+                           registry={"box": {"allowed_hosts": ["box.local"]}},
+                           secrets={"box": "box-SECRET"})
+            ip = "192.168.1.1" if private else "93.184.216.34"
+            a._dns_cache["box.local"] = (now + 3600, [ip])
+            for k, v in kw.items():
+                setattr(a, k, v)
+            return a
+
+        # refused by default
+        a = box()
+        flow = Flow(Request("box.local", "/"))
+        a.request(flow)
+        self.assertEqual(flow.response.status_code, 403)
+        # hostname allowlist admits it
+        a = box(ssrf_hosts=["box.local"])
+        flow = Flow(Request("box.local", "/"))
+        a.request(flow)
+        self.assertIsNone(flow.response)
+        # CIDR allowlist admits it
+        a = box(ssrf_nets=[ipaddress.ip_network("192.168.0.0/16")])
+        flow = Flow(Request("box.local", "/"))
+        a.request(flow)
+        self.assertIsNone(flow.response)
+        # public IPs are unaffected
+        a = box(private=False)
+        flow = Flow(Request("box.local", "/"))
+        a.request(flow)
+        self.assertIsNone(flow.response)
+        # DNS failure fails open (the request can't complete upstream anyway)
+        a = box()
+        a._dns_cache["box.local"] = (now + 3600, None)
+        flow = Flow(Request("box.local", "/"))
+        a.request(flow)
+        self.assertIsNone(flow.response)
+
+    def test_bug_inference_mode_header_only(self):
+        """REVIEW item 31: the inference proxy swaps headers only — a page
+        blob in obox's prompt must never traverse credential insertion."""
+        def llm(inference):
+            a = make_addon(hosts=["api.llm.example"],
+                           registry={"llm": {"allowed_hosts": ["api.llm.example"]}},
+                           secrets={"llm": "sk-LLM"})
+            a.inference_mode = inference
+            return a
+
+        def req():
+            return Request("api.llm.example", "/v1/chat?k=hsurr:llm",
+                           [("Authorization", "Bearer hsurr:llm")],
+                           b'{"model":"x","key":"hsurr:llm"}')
+
+        a = llm(True)
+        r = req()
+        a.request(Flow(r))
+        self.assertEqual(r.headers.get("Authorization"), "Bearer sk-LLM")
+        self.assertIn(b"hsurr:llm", r.content)          # body untouched
+        self.assertIn("hsurr:llm", r.path)              # path/query untouched
+        flow = Flow(req())
+        flow.websocket = FakeWebSocket([FakeWSMessage(b"key=hsurr:llm")])
+        a.websocket_message(flow)
+        self.assertEqual(flow.websocket.messages[0].content, b"key=hsurr:llm")
+
+        b = llm(False)
+        r = req()
+        b.request(Flow(r))
+        self.assertNotIn(b"hsurr:llm", r.content)       # normal mode swaps
+        flow = Flow(req())
+        flow.websocket = FakeWebSocket([FakeWSMessage(b"key=hsurr:llm")])
+        b.websocket_message(flow)
+        self.assertEqual(flow.websocket.messages[0].content, b"key=sk-LLM")
+
+    def test_nit_path_unchanged_segments_byte_identical(self):
+        """REVIEW nit 34a: re-quoting must not mangle : ~ or escapes in
+        segments that had no placeholder."""
+        a = make_addon()
+        req = Request("github.com", "/repos/a~b/c:d/hsurr:github/e%2Ff")
+        a.request(Flow(req))
+        self.assertEqual(req.path, "/repos/a~b/c:d/ghp_TOKEN/e%2Ff")
+
+    def test_nit_registry_set_rejects_reserved_entry_names(self):
+        """REVIEW nit 34b: an entry named 'allowed_hosts' would clobber
+        the host binding with a placement object — reject it (and the
+        grant-scoping reservations)."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-registry-set")
+        with tempfile.TemporaryDirectory() as d:
+            reg = os.path.join(d, "credentials.json")
+            env = dict(os.environ, CRED_REGISTRY_FILE=reg)
+            # a normal entry works and lands in the registry file
+            r = subprocess.run(
+                [script, "set", "acme", "username", '"bearer_header"'],
+                capture_output=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            saved = json.loads(Path(reg).read_text())
+            self.assertEqual(saved["acme"]["username"]["placement"],
+                             "bearer_header")
+            self.assertNotIn("allowed_hosts", saved["acme"])
+            # reserved names are rejected on both set and remove
+            for entry in ("allowed_hosts", "allowed_methods", "allowed_paths"):
+                r = subprocess.run(
+                    [script, "set", "acme", entry, '"bearer_header"'],
+                    capture_output=True, env=env)
+                self.assertNotEqual(r.returncode, 0, entry)
+                self.assertIn(b"reserved", r.stderr)
+            r = subprocess.run([script, "remove", "acme", "allowed_hosts"],
+                               capture_output=True, env=env)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn(b"reserved", r.stderr)
+            saved = json.loads(Path(reg).read_text())
+            self.assertNotIn("allowed_hosts", saved["acme"])
 
 
 if __name__ == "__main__":
