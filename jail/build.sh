@@ -283,14 +283,21 @@ say "agent user $JAIL_USER"
 # path on the host before running (override with PUBKEY_FILE=...).
 PUBKEY_FILE="${PUBKEY_FILE:-/home/ntindle/agent-jail.pub}"
 PUBKEY="$(cat "$PUBKEY_FILE")"
-run_guest /bin/bash -c 'id -u '"$JAIL_USER"' >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo '"$JAIL_USER"
-echo "'"$JAIL_USER"' ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/'"$JAIL_USER"'
-chmod 440 /etc/sudoers.d/'"$JAIL_USER"'
-mkdir -p /home/'"$JAIL_USER"'/.ssh
-echo "'"$PUBKEY"'" > /home/'"$JAIL_USER"'/.ssh/authorized_keys
-chmod 700 /home/'"$JAIL_USER"'/.ssh
-chmod 600 /home/'"$JAIL_USER"'/.ssh/authorized_keys
-chown -R '"$JAIL_USER:$JAIL_USER"' /home/'"$JAIL_USER"'/.ssh'
+# All guest-side setup runs inside run_guest (heredoc via stdin, quoted
+# so nothing expands on the host; $1/$2 are passed as arguments).
+run_guest /bin/bash -s "$JAIL_USER" "$PUBKEY" <<'GUEST_EOF'
+set -e
+U="$1"
+KEY="$2"
+id -u "$U" >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo "$U"
+echo "$U ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$U"
+chmod 440 "/etc/sudoers.d/$U"
+mkdir -p "/home/$U/.ssh"
+echo "$KEY" > "/home/$U/.ssh/authorized_keys"
+chmod 700 "/home/$U/.ssh"
+chmod 600 "/home/$U/.ssh/authorized_keys"
+chown -R "$U:$U" "/home/$U/.ssh"
+GUEST_EOF
 # Guest sshd host keys (generated once, live in the jail rootfs).
 run_guest /usr/bin/ssh-keygen -A
 
