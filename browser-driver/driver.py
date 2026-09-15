@@ -29,6 +29,7 @@ import json
 import os
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 
 V1_ACTIONS = {
     "open", "goto", "snapshot", "click", "fill", "type", "press",
@@ -171,7 +172,8 @@ class Session:
         self.last_used = time.time()
         self.ref_scope = None
         self.refs = {}          # ref -> dict(frame, xpath, role, name, tag, type)
-        self.sensitive_refs = set()  # refs filled with relayed values (OTP/codes)
+        self.sensitive_refs = set()  # refs bdrive typed this job:
+                                       # unreadable (finding 75)
 
 
 def _proxy_healthy(proxy_url, timeout=5):
@@ -201,12 +203,16 @@ class Driver:
         self.shots_dir = os.environ.get("BDRIVE_SHOTS_DIR",
                                         "/home/bdrive/shots")
         self.session_ttl = int(os.environ.get("BDRIVE_SESSION_TTL", "1800"))
-        # First-use confirmation (spec section 16): the human confirms
-        # once via the grant channel; confirmd writes this marker on
-        # approve. bdrive never writes it itself.
-        self.first_use_file = os.environ.get(
-            "BDRIVE_FIRST_USE_FILE",
-            "/home/swapd/approvals/first-use-confirmed")
+        # Driver enablement (review finding 74): the human acknowledges
+        # once, on the confirmation page, that the persistent profile
+        # is in use. confirmd writes this marker on approve. bdrive
+        # never writes it itself. (This is NOT the grant channel's
+        # first-use confirmation — that already covers first use of
+        # credentials via refused swaps; this gate is about the
+        # browser profile.)
+        self.enablement_file = os.environ.get(
+            "BDRIVE_ENABLEMENT_FILE",
+            "/home/swapd/approvals/driver-enablement-confirmed")
         self._pw = None
         self._ctx = None
         self.sessions = {}
@@ -244,7 +250,7 @@ class Driver:
             self.start()
         if self.proxy and not _proxy_healthy(self.proxy):
             raise DriverError("proxy unhealthy: %s" % self.proxy)
-        self._check_first_use(job)
+        self._check_enablement(job)
         self._reap_expired()
         sid = "s-" + uuid.uuid4().hex[:12]
         page = self._ctx.new_page()
@@ -363,12 +369,26 @@ class Driver:
                 raise _NotStarted("timeout", "reload: %s" % _short(e))
             return {"action": name, "status": "completed", "url": page.url}
         if name == "open":
+            # Finding 78 nit: close the previous page — a new tab must
+            # not leak the old one.
+            old_page = sess.page
             new_page = self._ctx.new_page()
-            url = spec.get("url")
-            if url:
-                self._goto(new_page, url, timeout)
+            try:
+                url = spec.get("url")
+                if url:
+                    self._goto(new_page, url, timeout)
+            except Exception:
+                try:
+                    new_page.close()
+                except Exception:
+                    pass
+                raise
             sess.page = new_page
             sess.last_used = time.time()
+            try:
+                old_page.close()
+            except Exception:
+                pass
             return {"action": name, "status": "completed",
                     "url": new_page.url}
         if name == "snapshot":
@@ -443,8 +463,10 @@ class Driver:
                 loc.fill(text, timeout=timeout)
             except Exception as e:
                 raise _NotStarted(*_pw_reason(e, "fill"))
-            if spec.get("sensitive"):
-                sess.sensitive_refs.add(ref)
+            # Finding 75: EVERY value bdrive types is unreadable for
+            # the rest of the job — no caller-supplied flag. The agent
+            # already knows what it typed; read-back is refused.
+            sess.sensitive_refs.add(ref)
             return {"action": name, "status": "completed", "ref": ref}
         if name == "type":
             text = spec.get("text")
@@ -455,8 +477,8 @@ class Driver:
                 loc.press_sequentially(text, timeout=timeout)
             except Exception as e:
                 raise _NotStarted(*_pw_reason(e, "type"))
-            if spec.get("sensitive"):
-                sess.sensitive_refs.add(ref)
+            # Finding 75: as above — all typed values are unreadable.
+            sess.sensitive_refs.add(ref)
             return {"action": name, "status": "completed", "ref": ref}
         if name == "press":
             key = spec.get("key")
@@ -552,14 +574,15 @@ class Driver:
         return frames[tgt["frame"]].locator("xpath=" + tgt["xpath"])
 
     def _check_readable(self, sess, tgt, ref):
-        """Spec section 11: no read-back of password inputs or fields
-        filled with a relayed value (OTP, card number) in this job."""
+        """Spec section 11: no read-back of password inputs, nor of any
+        field bdrive typed in this job (finding 75 — every typed value
+        is unreadable, no caller flag)."""
         if tgt["tag"] == "INPUT" and tgt.get("type") == "password":
             raise _NotStarted("read_restricted",
                               "ref %s is a password input" % ref)
         if ref in sess.sensitive_refs:
             raise _NotStarted("read_restricted",
-                              "ref %s held a relayed value" % ref)
+                              "ref %s was typed by bdrive this job" % ref)
 
     def _title(self, page):
         try:
@@ -630,6 +653,15 @@ class Driver:
         return lines or ["(no actionable elements)"]
 
     # -- purchase approvals (spec section 7, findings 49/50) ------------
+    @staticmethod
+    def _approval_times(ttl_hours):
+        """Finding 77: approval timestamps are ISO strings, matching
+        what confirmd's _parse_expiry and the proxy reaper expect.
+        Epoch floats never expire on the page — do not use them."""
+        now = datetime.now(timezone.utc)
+        return (now.isoformat(),
+                (now + timedelta(hours=ttl_hours)).isoformat())
+
     def _write_approval(self, item, prefix):
         """Write a structured approval item to the pending dir, 0640."""
         os.makedirs(self.approvals_dir, exist_ok=True)
@@ -648,53 +680,55 @@ class Driver:
             raise
         return item["id"]
 
-    def _pending_first_use_id(self):
-        """Id of an already-filed first-use request, if one is pending."""
+    def _pending_enablement_id(self):
+        """Id of an already-filed driver-enablement request, if one is
+        pending."""
         try:
             names = os.listdir(self.approvals_dir)
         except OSError:
             return None
         for name in sorted(names):
-            if not name.startswith("fu-") or not name.endswith(".json"):
+            if not name.startswith("en-") or not name.endswith(".json"):
                 continue
             try:
                 with open(os.path.join(self.approvals_dir, name)) as f:
                     it = json.load(f)
             except (OSError, ValueError):
                 continue
-            if it.get("kind") == "first_use":
+            if it.get("kind") == "driver_enablement":
                 return it.get("id")
         return None
 
-    def _check_first_use(self, job):
-        """First-use confirmation via the grant channel (spec section 16).
-
-        The persistent profile may hold the user's logged-in sessions,
-        so the very first session needs a human confirmation. bdrive
-        files a structured first-use request and refuses until the
-        human approves it on the grant channel page, which writes the
-        marker file. bdrive never writes the marker itself.
+    def _check_enablement(self, job):
+        """Driver enablement (review finding 74): the persistent profile
+        may hold the user's logged-in sessions, so the very first
+        session needs a one-time human acknowledgement on the
+        confirmation page. bdrive files a structured enablement request
+        and refuses until the human approves it, which writes the
+        marker file. bdrive never writes the marker itself. This is
+        not the grant channel's first-use confirmation — that already
+        covers first use of credentials via refused swaps.
         """
-        if os.path.exists(self.first_use_file):
+        if os.path.exists(self.enablement_file):
             return
-        aid = self._pending_first_use_id()
+        aid = self._pending_enablement_id()
         if aid is None:
-            aid = self.file_first_use_approval(job)
+            aid = self.file_enablement_approval(job)
         raise DriverError(
-            "first_use_confirmation_required approval=%s "
+            "driver_enablement_required approval=%s "
             "(confirm on the grant channel page)" % aid)
 
-    def file_first_use_approval(self, job):
-        now = time.time()
+    def file_enablement_approval(self, job):
+        created, expires = self._approval_times(24)
         item = {
-            "kind": "first_use",
-            "id": "fu-" + uuid.uuid4().hex[:12],
+            "kind": "driver_enablement",
+            "id": "en-" + uuid.uuid4().hex[:12],
             "job": job or "",
-            "summary": "First browser-driver use (job %s)" % (job or "?"),
-            "created": now,
-            "expires": now + 86400,
+            "summary": "Driver enablement (job %s)" % (job or "?"),
+            "created": created,
+            "expires": expires,
         }
-        return self._write_approval(item, "fu-")
+        return self._write_approval(item, "en-")
 
     def file_purchase_approval(self, approval):
         """Validate and file a structured purchase approval.
@@ -703,6 +737,10 @@ class Driver:
         text as the binding. Finding 50: the requester is derived by
         confirmd from the FILE OWNER — this process must run as the
         bdrive user, so the owner is bdrive. obox cannot file.
+        Finding 76: the caller names a live session; bdrive stamps the
+        session's current URL and title into the item itself, so the
+        confirmation page can show both the agent-claimed host and
+        where the browser actually is.
         """
         if not isinstance(approval, dict):
             raise DriverError("approval must be an object")
@@ -711,6 +749,7 @@ class Driver:
         currency = approval.get("currency")
         job = approval.get("job")
         purpose = approval.get("purpose", "")
+        session = approval.get("session")
         if not isinstance(host, str) or not host.strip():
             raise DriverError("approval.host must be a non-empty string")
         if not isinstance(amount, (int, float)) or amount <= 0:
@@ -721,8 +760,13 @@ class Driver:
             raise DriverError("approval.job must be a non-empty string")
         if not isinstance(purpose, str):
             raise DriverError("approval.purpose must be a string")
+        if not isinstance(session, str) or not session:
+            raise DriverError("approval.session must be a live session id")
+        sess = self._get_session(session)  # raises if unknown/expired
+        page_url = sess.page.url
+        page_title = self._title(sess.page)
         aid = uuid.uuid4().hex
-        now = time.time()
+        created, expires = self._approval_times(1)
         item = {
             "kind": "purchase",
             "id": aid,
@@ -733,8 +777,15 @@ class Driver:
             # Agent-supplied text, shown labeled as untrusted (finding 49).
             "purpose": purpose,
             "purpose_untrusted": True,
-            "created": now,
-            "expires": now + 3600,
+            # bdrive-stamped, not agent-claimed (finding 76).
+            "session": session,
+            "page_url": page_url,
+            "page_title": page_title,
+            "summary": "Purchase %.2f %s at %s (job %s)" % (
+                amount, currency.strip().upper(), host.strip(),
+                job.strip()),
+            "created": created,
+            "expires": expires,
         }
         return self._write_approval(item, "")
 

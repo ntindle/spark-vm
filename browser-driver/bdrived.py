@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """bdrived — the bdrive daemon.
 
-Listens on a unix socket (/run/bdrive/bdrive.sock, mode 0770, owned by
-bdrive, group bdrive-clients). The bdrive CLI (and, from the jail, the
+Listens on a unix socket (/run/bdrive/bdrive.sock, mode 0777 — the
+mode is not the gate). The bdrive CLI (and, from the jail, the
 orchestrator) speaks newline-delimited JSON. Every connection is peer-
-checked with SO_PEERCRED (review finding 33): only the jail's mapped
-agent uid and, later, the obox uid are accepted — group membership
-alone is not the check.
+checked with SO_PEERCRED (review finding 33): only uids in
+BDRIVE_PEER_UIDS are accepted, before a single byte is read.
 
 Config (environment):
     BDRIVE_SOCKET     socket path (default /run/bdrive/bdrive.sock)
     BDRIVE_PEER_UIDS  comma-separated accepted peer uids
-                      (default "2000000", the jail's mapped agent uid;
-                      the obox uid is appended in round 9)
+                      (default EMPTY — accept nobody until deploy.sh
+                      writes the jail agent's real mapped uid into a
+                      drop-in; the obox uid is appended in round 9)
     ... plus driver.py's BDRIVE_* variables.
 
 Protocol (one JSON object per line):
@@ -24,7 +24,8 @@ Protocol (one JSON object per line):
         {"ok": true, "receipts": [...], "observation": {...}}
     {"op": "close", "session": "s-..."} -> {"ok": true}
     {"op": "file_purchase_approval", "approval": {...}} ->
-        {"ok": true, "id": "..."}
+        {"ok": true, "id": "..."}   (approval must carry "session": a
+        live session id; bdrive stamps its current URL/title in)
 
 Errors: {"ok": false, "error": "..."}. A rejected peer gets its
 connection closed with no response.
@@ -46,7 +47,7 @@ MAX_REQUEST_BYTES = 1024 * 1024
 # jail agent at host uid 2000000+guest_uid) can never carry a host
 # group, so DAC cannot be the gate. SO_PEERCRED in _handle is the
 # gate (finding 33): non-peer uids are dropped before a single byte
-# is read. The 0711 parent dir keeps the socket unlistable by others.
+# is read. The 2711 parent dir keeps the socket unlistable by others.
 SOCK_MODE = 0o777
 
 
@@ -59,7 +60,13 @@ def peer_uid(conn):
 
 
 def allowed_uids():
-    raw = os.environ.get("BDRIVE_PEER_UIDS", "2000000")
+    # Finding 73: the default is EMPTY — accept nobody until
+    # configured. A missing drop-in must fail closed, never admit a
+    # guessed jail uid. deploy.sh writes the real mapped agent uid.
+    # Note the gate distinguishes the jail from the host, not
+    # identities within the jail: anything in the jail can become any
+    # jail uid.
+    raw = os.environ.get("BDRIVE_PEER_UIDS", "")
     uids = set()
     for part in raw.split(","):
         part = part.strip()
@@ -117,7 +124,7 @@ class Daemon:
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(self.socket_path)
         os.chmod(self.socket_path, SOCK_MODE)
-        # The parent dir is 0711 (set by the unit's RuntimeDirectoryMode):
+        # The parent dir is 2711 (set by the unit's RuntimeDirectoryMode):
         # anyone can traverse to the socket, nobody but the daemon can
         # list the dir. The mode is NOT the gate; SO_PEERCRED below is.
         self._sock.listen(16)
@@ -147,8 +154,14 @@ class Daemon:
             return
         try:
             with conn:
-                f = conn.makefile("r", encoding="utf-8")
-                line = f.readline(MAX_REQUEST_BYTES + 2)
+                # makefile() duplicates the socket fd: it MUST be closed
+                # explicitly. The handler frame can stay alive past return
+                # inside an exception traceback's reference cycle
+                # (re-raised driver errors), which would otherwise keep
+                # the dup'd fd open, delay the client's EOF, and hang
+                # read-until-EOF clients on every refused request.
+                with conn.makefile("r", encoding="utf-8") as f:
+                    line = f.readline(MAX_REQUEST_BYTES + 2)
                 if not line:
                     return
                 try:
@@ -196,8 +209,12 @@ class Daemon:
                     lambda: self.driver.close_session(req.get("session")))
                 return {"ok": True}
             if op == "file_purchase_approval":
-                aid = self.driver.file_purchase_approval(
-                    req.get("approval"))
+                # Finding 76: the driver looks up the session, which is
+                # Playwright-adjacent state — marshal to the driver
+                # thread like the other ops.
+                aid = self._on_driver_thread(
+                    lambda: self.driver.file_purchase_approval(
+                        req.get("approval")))
                 return {"ok": True, "id": aid}
             return {"ok": False, "error": "unknown op: %r" % op}
         except driver.DriverError as e:

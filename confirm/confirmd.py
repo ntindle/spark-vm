@@ -248,6 +248,27 @@ def is_expired(item):
     return exp is not None and datetime.now(timezone.utc) > exp
 
 
+def approve_action(it):
+    """Finding 79: what an approval does on approve, by kind.
+
+    Returns ("enablement",) for the driver-enablement gate,
+    ("purchase",) for a purchase approval (recorded for round 10 to
+    consume; mints NOTHING), ("grant",) for a credential tuple, or
+    ("refuse", reason) when a grant tuple is incomplete.
+    """
+    kind = it.get("kind")
+    if kind == "driver_enablement":
+        return ("enablement",)
+    if kind == "purchase":
+        return ("purchase",)
+    name = it.get("credential")
+    host = it.get("host")
+    method = (it.get("method") or "").upper()
+    if not name or not host or not method:
+        return ("refuse", "missing credential/host/method")
+    return ("grant",)
+
+
 def file_owner_name(path):
     """Finding 50: the requester is the file's owner, never an argument."""
     try:
@@ -304,10 +325,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _render_item(self, it):
         """Finding 49: structured fields render as a table; any
-        free-text purpose is labeled untrusted."""
+        free-text purpose is labeled untrusted. Finding 76: purchase
+        items carry bdrive-stamped session/page_url/page_title next to
+        the agent-claimed host, so the human sees both."""
         rows = []
         for key in ("credential", "host", "method", "path_prefix",
-                    "scope", "amount", "job"):
+                    "scope", "amount", "currency", "job",
+                    "session", "page_url", "page_title"):
             val = it.get(key)
             if val is not None:
                 rows.append("<tr><th>%s</th><td>%s</td></tr>" % (
@@ -482,51 +506,67 @@ class Handler(BaseHTTPRequestHandler):
         it["requester"] = requester
         # Finding 60: on approve, mint the grant via the single writer
         # BEFORE moving to consumed/. Finding 64: validate the tuple.
-        # Round 8: a first_use approval carries no credential tuple --
-        # approving it records the human's confirmation where bdrived
-        # checks it, instead of minting a grant.
-        if decision == "approve" and it.get("kind") == "first_use":
-            marker = os.path.join(APPROVALS, "first-use-confirmed")
-            tmp = marker + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump({"approval_id": aid,
-                           "answered_by": login,
-                           "answered_at": it["answered_at"]}, f,
-                          indent=2)
-            os.replace(tmp, marker)
-            audit_log("first-use-confirmed", self.client_address[0], login,
-                      "id=%s requester=%s" % (aid, requester))
-        if decision == "approve" and it.get("kind") != "first_use":
-            name = it.get("credential")
-            host = it.get("host")
-            method = (it.get("method") or "").upper()
-            if not name or not host or not method:
-                audit_log("grant-refused", self.client_address[0], login,
-                          "id=%s reason=missing credential/host/method" % aid)
-                self._send_html("<p>Cannot mint grant: missing fields.</p>",
-                                400)
-                return
-            # Call the single writer (finding 60).
-            try:
-                out = subprocess.run(
-                    [GRANT_WRITER, "add",
-                     "--credential", name,
-                     "--host", host,
-                     "--method", method,
-                     "--path-prefix", it.get("path_prefix") or "/",
-                     "--approval-id", aid,
-                     "--scope", it.get("scope") or "",
-                     "--job", it.get("job") or ""],
-                    capture_output=True, text=True, timeout=15)
-                if out.returncode != 0:
-                    audit_log("grant-failed", self.client_address[0], login,
-                              "id=%s err=%s" % (aid, out.stderr.strip()))
+        # Driver enablement (finding 74; was kind "first_use"): carries
+        # no credential tuple — approving it records the human's
+        # acknowledgement where bdrived checks it, instead of minting
+        # a grant. Finding 79: a purchase approval is the human's own
+        # authorization for round 10 to consume — it mints nothing.
+        if decision == "approve":
+            action = approve_action(it)
+            if action[0] == "enablement":
+                marker = os.path.join(APPROVALS,
+                                      "driver-enablement-confirmed")
+                tmp = marker + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump({"approval_id": aid,
+                               "answered_by": login,
+                               "answered_at": it["answered_at"]}, f,
+                              indent=2)
+                os.replace(tmp, marker)
+                audit_log("driver-enablement-confirmed",
+                          self.client_address[0], login,
+                          "id=%s requester=%s" % (aid, requester))
+            elif action[0] == "purchase":
+                audit_log("purchase-approved", self.client_address[0],
+                          login,
+                          "id=%s requester=%s host=%s amount=%s %s "
+                          "page_url=%s (no grant minted)" % (
+                              aid, requester, it.get("host"),
+                              it.get("amount"), it.get("currency"),
+                              it.get("page_url")))
+            elif action[0] == "grant":
+                name = it.get("credential")
+                host = it.get("host")
+                method = (it.get("method") or "").upper()
+                # Call the single writer (finding 60).
+                try:
+                    out = subprocess.run(
+                        [GRANT_WRITER, "add",
+                         "--credential", name,
+                         "--host", host,
+                         "--method", method,
+                         "--path-prefix", it.get("path_prefix") or "/",
+                         "--approval-id", aid,
+                         "--scope", it.get("scope") or "",
+                         "--job", it.get("job") or ""],
+                        capture_output=True, text=True, timeout=15)
+                    if out.returncode != 0:
+                        audit_log("grant-failed", self.client_address[0],
+                                  login,
+                                  "id=%s err=%s" % (aid, out.stderr.strip()))
+                        self._send_html("<p>Grant minting failed.</p>",
+                                        500)
+                        return
+                except Exception as e:
+                    audit_log("grant-failed", self.client_address[0],
+                              login, "id=%s err=%s" % (aid, e))
                     self._send_html("<p>Grant minting failed.</p>", 500)
                     return
-            except Exception as e:
-                audit_log("grant-failed", self.client_address[0], login,
-                          "id=%s err=%s" % (aid, e))
-                self._send_html("<p>Grant minting failed.</p>", 500)
+            else:
+                audit_log("grant-refused", self.client_address[0], login,
+                          "id=%s reason=%s" % (aid, action[1]))
+                self._send_html("<p>Cannot mint grant: missing fields.</p>",
+                                400)
                 return
         # Finding 56: one-way. Write to answered/, then move to consumed/.
         # The proxy never re-derives grants from these files.

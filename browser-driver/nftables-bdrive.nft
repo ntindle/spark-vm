@@ -2,11 +2,14 @@
 # a Chromium flag. The bdrive uid may open exactly one thing: TCP to the
 # swap proxy on loopback (127.0.0.1:18080). Everything else it tries to
 # open — any other address, port, protocol, or address family — drops.
-# __BDRIVE_UID__ is substituted by browser-driver/deploy.sh.
+# __BDRIVE_UID__ is substituted by browser-driver/deploy.sh into
+# /etc/nftables-bdrive.conf. Applied by bdrive-firewall.service at every
+# boot (finding 71): the service destroys this table before reloading,
+# so re-running deploy never duplicates rules.
 table inet bdrive_egress {
     chain output {
         type filter hook output priority 0; policy accept;
-        skuid __BDRIVE_UID__ tcp daddr 127.0.0.1 tcp dport 18080 accept
+        skuid __BDRIVE_UID__ tcp dport 18080 ip daddr 127.0.0.1 accept
         skuid __BDRIVE_UID__ drop
     }
 }

@@ -277,6 +277,10 @@ review findings 5–9, each reproduced against the addon before fixing):
   (usernames, emails), and TOTP codes match as whole digit tokens so
   they collide with neither prices nor IDs. Residual risk, stated not
   solved: images and binary bodies (review finding 4; implemented).
+  Screenshots (`look`) can visually contain sensitive field values
+  even though AX text observations mask them — masking is not
+  screenshot redaction (review nit 78; stated not solved for v1; the
+  shots dir is 0750, bdrive-only).
   The hook buffers bodies, so obox cannot depend on streamed provider
   responses — a provider's streaming endpoint arrives at obox only
   after the whole body is in (review finding 40).
@@ -399,6 +403,10 @@ Flow. obox drives, bdrive fills, the confirmation page approves:
 2. **File the approval.** `bdrive` files a structured approval with
    `kind: purchase`, `host` (the merchant), `amount` (total and
    currency), `job`, and the review fields as the labeled purpose.
+   The filing names a live `session`; `bdrive` stamps that session's
+   current URL and title into the item (finding 76), so the
+   confirmation page shows the agent-claimed host next to where the
+   browser actually is. Timestamps are ISO strings (finding 77).
    The requester is bdrive by file owner (finding 50). obox cannot
    file it.
 3. **The owner approves on the confirmation page (§8).** Never via
@@ -599,11 +607,15 @@ with the orchestrator as backstop:
   minted surrogates — which is why this is required here.) v2: a
   classifier pass over page text and downloaded files, run outside
   obox.
-- **Read restrictions (review finding 32).** `get_html`, `get_value`,
-  and `get_attr` are refused on password-type inputs and on any field
-  filled with a relayed value (one-time code, card number) in the
-  current job — they are a read-back path for the one real value that
-  may transiently sit in the DOM.
+- **Read restrictions (review finding 32; finding 75 removes the
+  caller flag).** `get_html`, `get_value`, and `get_attr` are refused
+  on password-type inputs and on any field `bdrive` typed in the
+  current job — the `sensitive` flag used to be caller-supplied, so a
+  prompt-injected agent could omit it and read a relayed value back
+  through `get_text` or the snapshot. `bdrive` now treats every value
+  it typed as unreadable for the rest of the job; the agent already
+  knows what it typed. They are a read-back path for the one real
+  value that may transiently sit in the DOM.
 - Sign-in attempt discipline: at most one automatic corrected
   resubmission when the site clearly rejects an identifier's *format*
   (corrected value, never the unchanged value); stop immediately on
@@ -754,8 +766,11 @@ previously observable contract):
    bind-mounted into the jail, SO_PEERCRED accepting the jail's
    mapped agent uid and `obox`; proxy health gate; nftables uid rule
    confining `bdrive`'s egress to the proxy (finding 10); password
-   read restrictions (32); first-use confirmation through the page
-   and the grant channel. Driven by the orchestrator from the jail
+   read restrictions (32); driver enablement through the confirmation
+   page (finding 74 — a one-time human acknowledgement that the
+   persistent profile is in use, not the grant channel's first-use
+   confirmation, which already covers first use of credentials via
+   refused swaps). Driven by the orchestrator from the jail
    until obox exists. v1.1: `gesture`, `upload`, `download`, `pdf`,
    `hover`, `scroll`, `fill_card`.
 2. **`obox` (round 9).** The stable orchestrator-facing interface:

@@ -27,6 +27,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import driver as driver_mod
 import bdrived as daemon_mod
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO_ROOT, "confirm"))
+import confirmd as confirmd_mod
+
 # Dummy credentials: placeholders only. The swap proxy would replace
 # these on egress; the dummy site is local so they must arrive
 # literally — that is exactly what test_placeholder_stays_placeholder
@@ -97,7 +101,8 @@ class _Handler(BaseHTTPRequestHandler):
                        "document.getElementById('s').textContent='Ready!';"
                        "}, 1200);</script>")
         elif path == "/a":
-            self._send("<h1>Page A</h1><a href='/b'>go to B</a>")
+            self._send("<head><title>Page A</title></head>"
+                       "<h1>Page A</h1><a href='/b'>go to B</a>")
         elif path == "/b":
             self._send("<h1>Page B</h1><a href='/a'>go to A</a>")
         else:
@@ -147,15 +152,15 @@ class DriverTest(unittest.TestCase):
     def setUpClass(cls):
         cls._old = dict(os.environ)
         tmpbase = cls._tmp("base")
-        # First-use is confirmed for the class-scoped driver; dedicated
-        # tests below cover the gate itself.
-        marker = os.path.join(tmpbase, "first-use-confirmed")
+        # Driver enablement is granted for the class-scoped driver;
+        # dedicated tests below cover the gate itself.
+        marker = os.path.join(tmpbase, "driver-enablement-confirmed")
         os.makedirs(tmpbase, exist_ok=True)
         with open(marker, "w") as f:
             f.write("test")
         os.environ.update(_env(BDRIVE_PROFILE_DIR=cls._tmp("profile"),
                                BDRIVE_SHOTS_DIR=cls._tmp("shots"),
-                               BDRIVE_FIRST_USE_FILE=marker))
+                               BDRIVE_ENABLEMENT_FILE=marker))
         cls.site = DummySite()
         cls.site.start()
         cls.drv = driver_mod.Driver()
@@ -269,17 +274,28 @@ class DriverTest(unittest.TestCase):
             sid, [{"action": "fill", "ref": ref, "text": "hello"}],
             ref_scope=obs["ref_scope"])
         self.assertEqual(receipts[0]["status"], "completed")
-        # fill REPLACES: the preset value is gone
+        # fill REPLACES: the preset value is gone from the DOM...
+        sess = self.drv._get_session(sid)
+        val = sess.page.locator(
+            "xpath=" + sess.refs[ref]["xpath"]).input_value()
+        self.assertEqual(val, "hello")
+        # ...and finding 75 masks every typed value from the snapshot.
         self.assertNotIn('value="preset"', obs2["ax"])
-        self.assertIn('value="hello"', obs2["ax"])
+        self.assertNotIn('value="hello"', obs2["ax"])
 
     def test_type_appends(self):
         sid, obs = self._open(self.base + "/form")
         ref = self._ref(obs, "textbox", "Query")
         self._act(sid, [{"action": "type", "ref": ref, "text": "+more"}],
                   ref_scope=obs["ref_scope"])
+        # The append happened in the DOM...
+        sess = self.drv._get_session(sid)
+        val = sess.page.locator(
+            "xpath=" + sess.refs[ref]["xpath"]).input_value()
+        self.assertEqual(val, "preset+more")
+        # ...but finding 75 masks it from the snapshot.
         _, obs2 = self._act(sid, [{"action": "snapshot"}])
-        self.assertIn('value="preset+more"', obs2["ax"])
+        self.assertNotIn("preset+more", obs2["ax"])
 
     def test_press_enter_submits(self):
         sid, obs = self._open(self.base + "/login")
@@ -347,14 +363,14 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(receipts[0]["actionability_reason"],
                          "read_restricted")
 
-    def test_sensitive_fill_masks(self):
-        # A field filled with a relayed value (OTP): the snapshot hides
-        # its value and ref-scoped get_text is refused.
+    def test_fill_masks_without_flag(self):
+        # Finding 75: EVERY value bdrive types is unreadable for the
+        # rest of the job — no caller-supplied sensitive flag. The
+        # snapshot hides the value and ref-scoped get_text is refused.
         sid, obs = self._open(self.base + "/form")
         ref = self._ref(obs, "textbox", "Code")
         receipts, obs2 = self._act(
-            sid, [{"action": "fill", "ref": ref, "text": "123456",
-                   "sensitive": True}],
+            sid, [{"action": "fill", "ref": ref, "text": "123456"}],
             ref_scope=obs["ref_scope"])
         self.assertEqual(receipts[0]["status"], "completed")
         self.assertNotIn("123456", obs2["ax"])
@@ -364,6 +380,17 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(receipts2[0]["status"], "not_started")
         self.assertEqual(receipts2[0]["actionability_reason"],
                          "read_restricted")
+
+    def test_type_masks_without_flag(self):
+        # Finding 75 applies to `type` as well as `fill`.
+        sid, obs = self._open(self.base + "/form")
+        ref = self._ref(obs, "textbox", "Query")
+        receipts, obs2 = self._act(
+            sid, [{"action": "type", "ref": ref, "text": "+secret"}],
+            ref_scope=obs["ref_scope"])
+        self.assertEqual(receipts[0]["status"], "completed")
+        self.assertNotIn("+secret", obs2["ax"])
+        self.assertNotIn('value="preset+secret"', obs2["ax"])
 
     def test_wait_text_appears(self):
         sid, obs = self._open(self.base + "/slow")
@@ -403,6 +430,31 @@ class DriverTest(unittest.TestCase):
                                    ref_scope=obs["ref_scope"])
         self.assertEqual(receipts[0]["status"], "completed")
         self.assertTrue(obs2["url"].endswith("/b"))
+
+    def test_open_closes_previous_page(self):
+        # Nit 78: a new tab must not leak the old page.
+        sid, obs = self._open(self.base + "/a")
+        old_page = self.drv._get_session(sid).page
+        receipts, obs2 = self._act(sid, [{"action": "open",
+                                          "url": self.base + "/b"}],
+                                   ref_scope=obs["ref_scope"])
+        self.assertEqual(receipts[0]["status"], "completed")
+        self.assertTrue(old_page.is_closed())
+        self.assertTrue(obs2["url"].endswith("/b"))
+
+    def test_file_purchase_approval_requires_session(self):
+        # Finding 76: no session, no approval.
+        with self.assertRaises(driver_mod.DriverError) as cm:
+            self.drv.file_purchase_approval(
+                {"host": "example.com", "amount": 9.99,
+                 "currency": "USD", "job": "job-9"})
+        self.assertIn("session", str(cm.exception))
+        # Unknown session ids are refused too.
+        with self.assertRaises(driver_mod.DriverError):
+            self.drv.file_purchase_approval(
+                {"host": "example.com", "amount": 9.99,
+                 "currency": "USD", "job": "job-9",
+                 "session": "s-nope"})
 
     # -- receipts and guards --------------------------------------------
     def test_unknown_action_rejected(self):
@@ -500,7 +552,7 @@ class DriverTest(unittest.TestCase):
                 f.write("test")
             os.environ.update(_env(BDRIVE_SESSION_TTL="0",
                                    BDRIVE_PROFILE_DIR=self._tmp("p3"),
-                                   BDRIVE_FIRST_USE_FILE=marker))
+                                   BDRIVE_ENABLEMENT_FILE=marker))
             try:
                 d2 = driver_mod.Driver()
                 d2.start()
@@ -521,33 +573,33 @@ class DriverTest(unittest.TestCase):
         result = self._run_in_thread(run)
         self.assertIn("unknown or expired", result, result)
 
-    # -- first-use confirmation (spec section 16) -----------------------
-    def _first_use_driver(self, marker_path, approvals_dir):
-        """Build a driver whose first use is NOT confirmed."""
+    # -- driver enablement (spec section 16, finding 74) ----------------
+    def _enablement_driver(self, marker_path, approvals_dir):
+        """Build a driver whose use is NOT yet enabled."""
         os.makedirs(approvals_dir, exist_ok=True)
         if os.path.exists(marker_path):
             os.unlink(marker_path)
         old = dict(os.environ)
         os.environ.update(_env(
-            BDRIVE_PROFILE_DIR=self._tmp("p-fu"),
-            BDRIVE_FIRST_USE_FILE=marker_path,
+            BDRIVE_PROFILE_DIR=self._tmp("p-en"),
+            BDRIVE_ENABLEMENT_FILE=marker_path,
             BDRIVE_APPROVALS_DIR=approvals_dir))
         return old
 
-    def test_first_use_blocks_open_and_files_request(self):
+    def test_enablement_blocks_open_and_files_request(self):
         import tempfile
-        tmp = tempfile.mkdtemp(prefix="bdrive-fu-")
-        marker = os.path.join(tmp, "first-use-confirmed")
+        tmp = tempfile.mkdtemp(prefix="bdrive-en-")
+        marker = os.path.join(tmp, "driver-enablement-confirmed")
         pending = os.path.join(tmp, "pending")
 
         def run():
-            old = self._first_use_driver(marker, pending)
+            old = self._enablement_driver(marker, pending)
             try:
                 d2 = driver_mod.Driver()
                 d2.start()
                 try:
                     try:
-                        d2.open_session(job="job-fu")
+                        d2.open_session(job="job-en")
                         return "no-error"
                     except driver_mod.DriverError as e:
                         return "blocked: %s" % e
@@ -558,27 +610,32 @@ class DriverTest(unittest.TestCase):
                 os.environ.update(old)
 
         result = self._run_in_thread(run)
-        self.assertIn("first_use_confirmation_required", result, result)
-        # A structured first-use request is now pending for the human.
+        self.assertIn("driver_enablement_required", result, result)
+        # A structured enablement request is now pending for the human.
         names = os.listdir(pending)
         self.assertEqual(len(names), 1, names)
         with open(os.path.join(pending, names[0])) as f:
             item = json.load(f)
-        self.assertEqual(item["kind"], "first_use")
-        self.assertEqual(item["job"], "job-fu")
+        self.assertEqual(item["kind"], "driver_enablement")
+        self.assertEqual(item["job"], "job-en")
         self.assertIn(item["id"], result)
         mode = stat.S_IMODE(os.stat(os.path.join(pending,
                                                  names[0])).st_mode)
         self.assertEqual(mode, 0o640)
+        # Finding 77: ISO timestamps, parseable by confirmd.
+        from datetime import datetime
+        created = datetime.fromisoformat(item["created"])
+        expires = datetime.fromisoformat(item["expires"])
+        self.assertGreater(expires, created)
 
-    def test_first_use_files_only_once(self):
+    def test_enablement_files_only_once(self):
         import tempfile
-        tmp = tempfile.mkdtemp(prefix="bdrive-fu2-")
-        marker = os.path.join(tmp, "first-use-confirmed")
+        tmp = tempfile.mkdtemp(prefix="bdrive-en2-")
+        marker = os.path.join(tmp, "driver-enablement-confirmed")
         pending = os.path.join(tmp, "pending")
 
         def run():
-            old = self._first_use_driver(marker, pending)
+            old = self._enablement_driver(marker, pending)
             try:
                 d2 = driver_mod.Driver()
                 d2.start()
@@ -598,29 +655,29 @@ class DriverTest(unittest.TestCase):
         names = self._run_in_thread(run)
         self.assertEqual(len(names), 1, names)
 
-    def test_first_use_marker_allows_open(self):
+    def test_enablement_marker_allows_open(self):
         import tempfile
-        tmp = tempfile.mkdtemp(prefix="bdrive-fu3-")
-        marker = os.path.join(tmp, "first-use-confirmed")
+        tmp = tempfile.mkdtemp(prefix="bdrive-en3-")
+        marker = os.path.join(tmp, "driver-enablement-confirmed")
         pending = os.path.join(tmp, "pending")
-        # The human approved on the grant channel page: the marker exists.
+        # The human approved on the confirmation page: the marker exists.
         os.makedirs(tmp, exist_ok=True)
         with open(marker, "w") as f:
-            json.dump({"approval_id": "fu-test", "answered_by": "human"},
+            json.dump({"approval_id": "en-test", "answered_by": "human"},
                       f)
 
         def run():
             old = dict(os.environ)
             os.environ.update(_env(
-                BDRIVE_PROFILE_DIR=self._tmp("p-fu3"),
-                BDRIVE_FIRST_USE_FILE=marker,
+                BDRIVE_PROFILE_DIR=self._tmp("p-en3"),
+                BDRIVE_ENABLEMENT_FILE=marker,
                 BDRIVE_APPROVALS_DIR=pending))
             try:
                 d2 = driver_mod.Driver()
                 d2.start()
                 try:
                     sid, _ = d2.open_session(
-                        job="job-fu", url=self.site.base + "/")
+                        job="job-en", url=self.site.base + "/")
                     d2.close_session(sid)
                     return "opened"
                 finally:
@@ -630,7 +687,7 @@ class DriverTest(unittest.TestCase):
                 os.environ.update(old)
 
         self.assertEqual(self._run_in_thread(run), "opened")
-        # Confirmed first use files nothing.
+        # Granted enablement files nothing.
         self.assertFalse(os.path.exists(pending) and
                          os.listdir(pending))
 
@@ -641,7 +698,7 @@ class DaemonTest(unittest.TestCase):
         cls._old = dict(os.environ)
         import tempfile
         cls.tmp = tempfile.mkdtemp(prefix="bdrived-test-")
-        marker = os.path.join(cls.tmp, "first-use-confirmed")
+        marker = os.path.join(cls.tmp, "driver-enablement-confirmed")
         with open(marker, "w") as f:
             f.write("test")
         os.environ.update(_env(
@@ -650,7 +707,7 @@ class DaemonTest(unittest.TestCase):
             BDRIVE_PROFILE_DIR=os.path.join(cls.tmp, "profile"),
             BDRIVE_SHOTS_DIR=os.path.join(cls.tmp, "shots"),
             BDRIVE_APPROVALS_DIR=os.path.join(cls.tmp, "pending"),
-            BDRIVE_FIRST_USE_FILE=marker))
+            BDRIVE_ENABLEMENT_FILE=marker))
         cls.site = DummySite()
         cls.site.start()
         cls.daemon = daemon_mod.Daemon()
@@ -682,6 +739,60 @@ class DaemonTest(unittest.TestCase):
         resp = self._call({"op": "ping"})
         self.assertTrue(resp["ok"])
         self.assertEqual(resp["service"], "bdrive")
+
+    def test_peer_uid_default_empty(self):
+        # Finding 73: with no BDRIVE_PEER_UIDS configured, nobody is
+        # accepted — a missing drop-in fails closed.
+        old = os.environ.pop("BDRIVE_PEER_UIDS", None)
+        try:
+            self.assertEqual(daemon_mod.allowed_uids(), set())
+        finally:
+            if old is not None:
+                os.environ["BDRIVE_PEER_UIDS"] = old
+
+    def test_daemon_reserve_keeps_socket_dir(self):
+        # Finding 72: the daemon recreates only the socket file on
+        # (re)start; the parent dir's inode is untouched, so a jail
+        # bind mount of the dir keeps working across restarts. (The
+        # unit's RuntimeDirectoryPreserve=yes covers systemd's side;
+        # this covers the daemon's.)
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="bdrived-restart-")
+        sock = os.path.join(tmp, "bdrive.sock")
+        d1 = daemon_mod.Daemon(socket_path=sock)
+        t1 = threading.Thread(target=d1.serve, daemon=True)
+        t1.start()
+        time.sleep(0.5)
+        ino_before = os.stat(tmp).st_ino
+
+        def ping(path):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(path)
+            with s:
+                s.sendall(b'{"op":"ping"}\n')
+                return json.loads(s.recv(65536).decode())
+
+        try:
+            self.assertTrue(ping(sock)["ok"])
+            # Simulate the restart: stop the old listener, serve again.
+            d1._sock.close()
+            t1.join(timeout=10)
+            d2 = daemon_mod.Daemon(socket_path=sock)
+            t2 = threading.Thread(target=d2.serve, daemon=True)
+            t2.start()
+            time.sleep(0.5)
+            try:
+                self.assertTrue(ping(sock)["ok"])
+            finally:
+                d2._sock.close()
+                t2.join(timeout=10)
+            self.assertEqual(os.stat(tmp).st_ino, ino_before)
+            self.assertTrue(os.path.exists(sock))
+        finally:
+            try:
+                d1._sock.close()
+            except Exception:
+                pass
 
     def test_daemon_rejects_bad_peer(self):
         # Finding 33: SO_PEERCRED, not group membership, is the check.
@@ -727,9 +838,16 @@ class DaemonTest(unittest.TestCase):
     def test_file_purchase_approval_structured(self):
         # Findings 49/50: structured fields; the requester comes from
         # the file owner (this process), never an argument.
+        # Finding 76: a live session is required; bdrive stamps its
+        # current URL and title into the item.
+        r = self._call({"op": "open", "job": "j1",
+                        "url": self.site.base + "/a"})
+        self.assertTrue(r["ok"], r)
+        sid = r["session"]
+        self.addCleanup(self._call, {"op": "close", "session": sid})
         approval = {"host": "example.com", "amount": 42.50,
                     "currency": "usd", "job": "job-9",
-                    "purpose": "test widget x1"}
+                    "purpose": "test widget x1", "session": sid}
         resp = self._call({"op": "file_purchase_approval",
                            "approval": approval})
         self.assertTrue(resp["ok"], resp)
@@ -746,6 +864,19 @@ class DaemonTest(unittest.TestCase):
         self.assertEqual(item["currency"], "USD")
         self.assertEqual(item["job"], "job-9")
         self.assertTrue(item["purpose_untrusted"])
+        # Finding 76: bdrive-stamped, not agent-claimed.
+        self.assertEqual(item["session"], sid)
+        self.assertTrue(item["page_url"].endswith("/a"), item["page_url"])
+        self.assertEqual(item["page_title"], "Page A")
+        self.assertIn("42.50", item["summary"])
+        # Finding 77: ISO timestamps, and confirmd can parse the expiry
+        # (an epoch float would be silently skipped by its reaper).
+        from datetime import datetime
+        created = datetime.fromisoformat(item["created"])
+        expires = datetime.fromisoformat(item["expires"])
+        self.assertGreater(expires, created)
+        self.assertIsNotNone(
+            confirmd_mod._parse_expiry(item["expires"]))
         # Finding 50: the owner is the filer — confirmd maps owner to
         # requester and accepts only bdrive/swapd.
         self.assertEqual(os.stat(path).st_uid, os.getuid())
@@ -761,6 +892,22 @@ class DaemonTest(unittest.TestCase):
         resp2 = self._call({"op": "file_purchase_approval",
                             "approval": bad2})
         self.assertFalse(resp2["ok"])
+        # Finding 76: session is required, and must be live.
+        r = self._call({"op": "open", "job": "j1",
+                        "url": self.site.base + "/"})
+        sid = r["session"]
+        self.addCleanup(self._call, {"op": "close", "session": sid})
+        no_session = {"host": "example.com", "amount": 5,
+                      "currency": "USD", "job": "j"}
+        resp3 = self._call({"op": "file_purchase_approval",
+                            "approval": no_session})
+        self.assertFalse(resp3["ok"])
+        self.assertIn("session", resp3["error"])
+        stale = {"host": "example.com", "amount": 5,
+                 "currency": "USD", "job": "j", "session": "s-nope"}
+        resp4 = self._call({"op": "file_purchase_approval",
+                            "approval": stale})
+        self.assertFalse(resp4["ok"])
 
     def test_cli_ping(self):
         import subprocess
@@ -772,6 +919,199 @@ class DaemonTest(unittest.TestCase):
             capture_output=True, text=True, env=env, timeout=30)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn('"ok": true', p.stdout)
+
+
+class ConfirmdTest(unittest.TestCase):
+    """confirmd's approval branches (finding 79) and expiry parsing
+    (finding 77) — without the TLS/tailnet stack."""
+
+    def test_approve_action_purchase_mints_nothing(self):
+        # Finding 79: purchase has its own branch — record, mint nothing.
+        action = confirmd_mod.approve_action({
+            "kind": "purchase", "host": "example.com",
+            "amount": 42.50, "currency": "USD", "job": "job-9"})
+        self.assertEqual(action, ("purchase",))
+
+    def test_approve_action_enablement(self):
+        action = confirmd_mod.approve_action({"kind": "driver_enablement"})
+        self.assertEqual(action, ("enablement",))
+
+    def test_approve_action_grant_tuple(self):
+        action = confirmd_mod.approve_action(
+            {"credential": "c", "host": "h", "method": "get"})
+        self.assertEqual(action, ("grant",))
+
+    def test_approve_action_grant_missing_fields_refused(self):
+        # The old code path that 400'd purchase approvals: a non-first_use
+        # item with no credential tuple is still refused, not granted.
+        action = confirmd_mod.approve_action({"kind": "weird"})
+        self.assertEqual(action[0], "refuse")
+        self.assertIn("missing", action[1])
+
+    def test_parse_expiry_accepts_iso_rejects_float(self):
+        # Finding 77: confirmd (and the proxy reaper) parse ISO strings;
+        # the epoch floats bdrive used to write never expired.
+        created, expires = driver_mod.Driver._approval_times(1)
+        self.assertIsNotNone(confirmd_mod._parse_expiry(expires))
+        self.assertIsNone(confirmd_mod._parse_expiry(time.time()))
+        self.assertIsNone(confirmd_mod._parse_expiry(None))
+
+    def test_render_item_shows_stamped_fields(self):
+        # Finding 76: the page shows the bdrive-stamped location next
+        # to the agent-claimed host.
+        item = {"kind": "purchase", "host": "example.com",
+                "amount": 42.50, "currency": "USD", "job": "job-9",
+                "session": "s-abc", "page_url": "https://example.com/x",
+                "page_title": "Checkout", "purpose": "agent words",
+                "purpose_untrusted": True,
+                "summary": "buy agent words for 42.50 USD"}
+        body = confirmd_mod.Handler._render_item(None, item)
+        self.assertIn("page_url", body)
+        self.assertIn("https://example.com/x", body)
+        self.assertIn("Checkout", body)
+        self.assertIn("s-abc", body)
+        self.assertIn("untrusted", body)
+
+
+def _repo_file(name):
+    with open(os.path.join(REPO_ROOT, name)) as f:
+        return f.read()
+
+
+class DeployTest(unittest.TestCase):
+    """Static deploy checks (findings 70-73, nit 78) plus the certutil
+    recipe run live against a throwaway NSS database."""
+
+    def test_service_preserves_runtime_dir(self):
+        # Finding 72: systemd must not remove /run/bdrive on stop.
+        unit = _repo_file("browser-driver/bdrive.service")
+        self.assertIn("RuntimeDirectoryPreserve=yes", unit)
+
+    def test_service_peer_default_empty(self):
+        # Finding 73: no configured peer uids -> accept nobody.
+        unit = _repo_file("browser-driver/bdrive.service")
+        line = next(l for l in unit.splitlines()
+                    if l.startswith("Environment=BDRIVE_PEER_UIDS"))
+        self.assertEqual(line, "Environment=BDRIVE_PEER_UIDS=")
+
+    def test_service_after_firewall(self):
+        unit = _repo_file("browser-driver/bdrive.service")
+        self.assertIn("bdrive-firewall.service", unit)
+
+    def test_firewall_unit_shape(self):
+        # Finding 71: boot-persistent oneshot, destroy-before-reload.
+        unit = _repo_file("browser-driver/bdrive-firewall.service")
+        self.assertIn("Type=oneshot", unit)
+        self.assertIn("Before=bdrive.service", unit)
+        destroy = unit.index("destroy table inet bdrive_egress")
+        reload = unit.index("nft -f /etc/nftables-bdrive.conf")
+        self.assertLess(destroy, reload)
+
+    def test_firewall_rules_shape(self):
+        rules = _repo_file("browser-driver/nftables-bdrive.nft")
+        self.assertIn("table inet bdrive_egress", rules)
+        self.assertIn("tcp dport 18080 ip daddr 127.0.0.1 accept", rules)
+        self.assertIn("drop", rules)
+
+    def test_nft_rules_parse(self):
+        # The substituted rules file must parse (needs nft; the uid is
+        # a dummy — syntax only, check mode).
+        import shutil
+        import subprocess
+        import tempfile
+        if shutil.which("nft") is None:
+            self.skipTest("nft not installed")
+        rules = _repo_file("browser-driver/nftables-bdrive.nft")
+        rules = rules.replace("__BDRIVE_UID__", "65534")
+        with tempfile.NamedTemporaryFile("w", suffix=".nft",
+                                         delete=False) as f:
+            f.write(rules)
+            path = f.name
+        try:
+            p = subprocess.run(["nft", "-c", "-f", path],
+                               capture_output=True, text=True, timeout=30)
+        finally:
+            os.unlink(path)
+        if p.returncode != 0 and "Operation not permitted" in p.stderr:
+            self.skipTest("nft check needs privileges: %s" % p.stderr.strip())
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_deploy_installs_ca(self):
+        # Finding 70: the swapd CA goes into bdrive's NSS database
+        # (Chromium ignores the system store), with a deploy-time check.
+        deploy = _repo_file("browser-driver/deploy.sh")
+        self.assertIn("libnss3-tools", deploy)
+        self.assertIn("certutil", deploy)
+        self.assertIn("-A -t C -n swapd-ca", deploy)
+        self.assertIn("certutil", deploy)
+        check = [l for l in deploy.splitlines()
+                 if "certutil" in l and "-L" in l]
+        self.assertTrue(check, "no deploy-time certutil -L check")
+        # The db dir must exist before certutil -N touches it.
+        self.assertIn(".pki/nssdb", deploy)
+
+    def test_deploy_firewall_persistent(self):
+        # Finding 71: deploy installs the oneshot and enables it; it no
+        # longer applies nft rules inline (that regressed on reboot).
+        deploy = _repo_file("browser-driver/deploy.sh")
+        self.assertIn("bdrive-firewall.service", deploy)
+        self.assertIn("enable --now bdrive-firewall.service", deploy)
+        self.assertNotIn("nft -f", deploy)
+
+    def test_deploy_reads_nspawn_offset(self):
+        # Nit 78: the PrivateUsers map base comes from the .nspawn file,
+        # not a hardcoded 2000000.
+        deploy = _repo_file("browser-driver/deploy.sh")
+        self.assertIn("jail.nspawn", deploy)
+        self.assertIn("PrivateUsers", deploy)
+        self.assertNotIn("2000000 + GUEST_UID", deploy)
+        self.assertNotIn("=2000000", deploy)
+
+    def test_no_bdrive_clients_group(self):
+        # Nit 78: bdrive-clients is vestigial — the socket is 0777 and
+        # the gate is SO_PEERCRED, so no group is created or used.
+        # (deploy.sh may mention it in a comment explaining its absence.)
+        deploy = _repo_file("browser-driver/deploy.sh")
+        self.assertNotIn("groupadd bdrive-clients", deploy)
+        self.assertNotIn("-G bdrive-clients", deploy)
+        self.assertNotIn("bdrive-clients", _repo_file(
+            "browser-driver/bdrive.service"))
+        self.assertNotIn("bdrive-clients", _repo_file(
+            "browser-driver/bdrived.py"))
+
+    def test_certutil_ca_recipe(self):
+        # Finding 70, live: the exact certutil recipe shape deploy.sh
+        # uses (new db, add CA as trusted, list to verify) works. The CA
+        # itself is a throwaway self-signed cert from openssl — the
+        # recipe, not the key material, is what's under test.
+        import shutil
+        import subprocess
+        import tempfile
+        if shutil.which("certutil") is None:
+            self.skipTest("certutil not installed")
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl not installed")
+        tmp = tempfile.mkdtemp(prefix="nssdb-test-")
+        db = "sql:" + tmp
+        run = lambda *a: subprocess.run(
+            ["certutil", "-d", db] + list(a),
+            capture_output=True, text=True, timeout=30)
+        p = run("-N", "--empty-password")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        key = os.path.join(tmp, "ca.key")
+        pem = os.path.join(tmp, "ca.pem")
+        p = subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048",
+             "-keyout", key, "-out", pem, "-days", "2",
+             "-nodes", "-subj", "/CN=test-ca"],
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        # The deploy.sh recipe, verbatim in shape.
+        p = run("-A", "-t", "C", "-n", "swapd-ca", "-i", pem)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        p = run("-L")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("swapd-ca", p.stdout)
 
 
 if __name__ == "__main__":

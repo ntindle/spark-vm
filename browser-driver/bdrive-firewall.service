@@ -1,0 +1,17 @@
+[Unit]
+Description=bdrive egress firewall (proxy-only uid)
+# Finding 71: the nftables table must exist before the daemon starts
+# and survive reboots. deploy.sh installs the rules file; this oneshot
+# (re)applies them at every boot, destroying the old table first so a
+# re-run never duplicates rules. Mirrors jail-firewall.service.
+Before=bdrive.service
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/sbin/nft destroy table inet bdrive_egress
+ExecStart=/usr/sbin/nft -f /etc/nftables-bdrive.conf
+
+[Install]
+WantedBy=multi-user.target

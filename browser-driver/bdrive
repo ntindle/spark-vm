@@ -10,7 +10,9 @@ Usage:
     bdrive act SESSION [--ref-scope RS] '[{"action":"goto","url":"..."}]'
     bdrive close SESSION
     bdrive file-purchase-approval '{"host":"...","amount":12.34,
-        "currency":"USD","job":"...","purpose":"..."}'
+        "currency":"USD","job":"...","session":"s-...",
+        "purpose":"..."}'
+        (bdrive stamps the session's current URL/title into the item)
 
 BDRIVE_SOCKET overrides the socket path (default /run/bdrive/bdrive.sock).
 """
