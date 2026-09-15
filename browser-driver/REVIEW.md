@@ -355,7 +355,7 @@ sniffing). Items 19 to 22 are listed in the build plan and not done.
 spark-vm ever holds a real value" one paragraph before conceding swapd
 does, and still states unconditionally that the DOM, screenshots and
 logs contain only placeholders while listing response scrubbing as
-pending. Build plan item 0 says 24 findings; this file now has 63.
+pending. Build plan item 0 says 24 findings; this file now has 66.
 
 ### New findings from v2's on-box agent
 
@@ -1029,3 +1029,46 @@ session: move `/home/swapd/approvals/answered` aside, remove any
 `~/.ssh/authorized_keys`. Do not approve anything on the page; the
 button does not work yet (57), and when it does, an approval could
 widen a credential beyond its bound hosts (55) and never expire (56).
+
+### Round 6 addendum: what the hold found on the box
+
+The owner moved `answered/` aside and found one grant in
+`credentials.json`: `credential: null, host: null, method: ""`,
+`path_prefix: "/"`, expiring 24 hours after consumption. It could
+never match a request, so it was harmless by luck. It was minted from
+a free-text test answer left over from round 4, marked `approve`,
+which no human made. The inference registry held none. Restarting the
+services produced systemd's "unit file changed on disk, run
+daemon-reload" warning for both proxies.
+
+64. **Consumption does not validate the tuple.** CONFIRMED on the box.
+    `_consume_answers` mints a grant from any `approve` file, even one
+    with no credential, host or method. Fix: refuse to mint unless
+    `credential`, `host` and `method` are present and the credential
+    exists in the registry, and audit the refusal. Part of 62's tests.
+
+65. **An approve answer existed that the owner never gave.** The
+    round-4 report said the page was "tested: owner views/answers";
+    the round-5 report said an end-to-end approval was impossible
+    without the owner's device. Both cannot be true of the same file.
+    Muse should say which test wrote it and how it was marked
+    approved, and confirm no other answered or pending items of that
+    origin remain.
+
+66. **Deploys skipped `daemon-reload`.** Unit files were replaced on
+    disk without reloading systemd, so the running proxies may carry
+    old unit definitions, including environment lines. `deploy.sh`
+    must run `systemctl daemon-reload` before restarting anything, and
+    the owner should run it once now.
+
+**Owner decision (round 6): Web Push for the confirmation page.** The
+owner has added the page to the iOS home screen. After 55 to 64 land,
+confirmd gains Web Push: a manifest with `display: standalone`, a
+service worker at root scope, a subscribe endpoint reachable only by
+the owner's identity, a VAPID keypair stored under swapd at 0600,
+subscriptions stored the same way, and a push sent when an approval
+is filed. The payload says only that an approval is pending; tapping
+opens the fixed page URL. Sending goes from the host to Apple's push
+endpoint directly, not through the swap proxy. The Muse-app card, when
+it exists, links to the same fixed URL and never carries an approval
+id.
