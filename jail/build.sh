@@ -56,9 +56,15 @@ say ".nspawn config"
 $SUDO mkdir -p /etc/systemd/nspawn
 $SUDO tee /etc/systemd/nspawn/$MACHINE.nspawn >/dev/null <<EOF
 [Exec]
-# Guest root is not host root: user namespacing on, tree chowned to the
-# mapped range on first boot.
-PrivateUsers=yes
+# User namespacing: guest root is NOT host root. The range is EXPLICIT
+# (not "yes"/"pick"): container uid 0 maps to host uid 2000000.
+# NOTE: PrivateUsers=yes would read the range from the root dir's owner;
+# on a fresh debootstrap that is host uid 0, which yields an IDENTITY map
+# (no isolation). An explicit range cannot silently degrade like that.
+# Verify with: cat /proc/$(machinectl show jail -p Leader --value)/uid_map
+PrivateUsers=2000000:65536
+# Shift the (host-0-owned) debootstrap tree into the range above on
+# first boot; reuse idmapped mounts where the fs supports it.
 PrivateUsersOwnership=auto
 # No DNS in the jail: the host proxy resolves. (Build script also
 # empties /etc/resolv.conf inside the guest; this stops nspawn from
@@ -85,6 +91,14 @@ $SUDO systemctl daemon-reload
 
 # ---------------------------------------------------------------- firewall
 say "jail firewall"
+# route_localnet: the proxy DNATs jail traffic to 127.0.0.1, and the
+# kernel drops 127/8-destined packets arriving on a non-loopback
+# interface unless this is set. (Standard knob for DNAT-to-localhost.)
+$SUDO tee /etc/sysctl.d/99-jail.conf >/dev/null <<'EOF'
+net.ipv4.conf.all.route_localnet=1
+net.ipv4.conf.default.route_localnet=1
+EOF
+$SUDO sysctl --system >/dev/null 2>&1 || true
 $SUDO tee /etc/nftables-jail.conf >/dev/null <<'EOF'
 # Proxy-only egress for the jail's veth (ve-jail). Evaluated before the
 # base filter chains (priority -10 < filter 0), so nothing later can
@@ -162,14 +176,19 @@ run_guest() { $SUDO systemd-run --machine=$MACHINE --wait --pipe "$@" ; }
 say "guest base config"
 run_guest /bin/bash -c 'echo jail > /etc/hostname'
 # Static veth address; no DNS (the host proxy resolves).
-run_guest /bin/bash -c 'cat > /etc/systemd/network/host0.network <<EOF
+# Written as 80-container-host0.network so it SHADOWS systemd's default
+# /usr/lib/.../80-container-host0.network by name: same-name files in
+# /etc win; a differently-named file would LOSE to it (lexicographic
+# order beats directory priority for different names).
+run_guest /bin/bash -c 'cat > /etc/systemd/network/80-container-host0.network <<EOF
 [Match]
 Name=host0
 [Network]
 Address='"$GUEST_IP/$CIDR"'
 Gateway='"$HOST_VETH_IP"'
+LinkLocalAddressing=no
 EOF
-systemctl enable systemd-networkd'
+systemctl enable --now systemd-networkd'
 # No DNS by design: empty resolv.conf fails fast instead of hanging.
 run_guest /bin/bash -c 'rm -f /etc/resolv.conf; : > /etc/resolv.conf; grep -q 127.0.0.1 /etc/hosts || echo "127.0.0.1 localhost" >> /etc/hosts'
 
