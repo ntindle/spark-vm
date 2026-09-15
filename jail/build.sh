@@ -63,10 +63,12 @@ $SUDO tee "$ROOTFS/etc/systemd/network/80-container-host0.network" >/dev/null <<
 [Match]
 Name=host0
 [Network]
-# No Gateway: the guest has no default route (fail closed). The proxy
-# at $HOST_VETH_IP is on-link via the /$CIDR, so proxying works;
-# direct-IP attempts fail inside the guest with "network unreachable".
+# Default route via the host veth address: REQUIRED so the guest can
+# reply to DNAT'd tailnet SSH (return traffic). Egress is enforced by
+# nftables (forward chain drops all iifname ve-jail except established
+# and the proxy DNAT), not by the route table.
 Address=$GUEST_IP/$CIDR
+Gateway=$HOST_VETH_IP
 LinkLocalAddressing=no
 EOF
 $SUDO chmod 644 "$ROOTFS/etc/systemd/network/80-container-host0.network"
@@ -212,10 +214,10 @@ run_guest /bin/bash -c 'cat > /etc/systemd/network/80-container-host0.network <<
 [Match]
 Name=host0
 [Network]
-# No Gateway: the guest has no default route (fail closed). The proxy
-# at 10.99.0.1 is on-link via the /30, so proxying works; direct-IP
-# attempts fail inside the guest with "network unreachable".
+# Default route via the host veth: REQUIRED for SSH return traffic
+# (DNAT from tailnet); egress is enforced by nftables, not the route table.
 Address='"$GUEST_IP/$CIDR"'
+Gateway='"$HOST_VETH_IP"'
 LinkLocalAddressing=no
 EOF
 systemctl enable --now systemd-networkd
