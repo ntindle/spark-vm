@@ -139,7 +139,8 @@ EOF
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable --now jail-firewall.service
 say "firewall active:"
-$SUDO nft list table inet jail | head -8
+# (|| true: head closes the pipe early; pipefail would SIGPIPE the script.)
+$SUDO nft list table inet jail | head -8 || true
 
 # ---------------------------------------------------------------- start the machine
 say "enable + start $MACHINE"
