@@ -27,6 +27,35 @@ change them. Where a fix touches credential metadata it extends the
 existing registry (`credentials.json`, managed by `cred register`)
 rather than inventing a parallel format.
 
+## For the implementer
+
+Read this section first; the numbered findings follow.
+
+**Runnable target.** `python3 -m unittest proxy/test_swap_addon.py`
+from the repo root. No mitmproxy needed. At `a006f6e` it reports 5
+passing, 6 failing, 1 skipped; the failing tests are items 5, 6, 7, 8,
+9 and 23, each named for its finding. The skipped test is item 1 and
+should be enabled once the registry carries `allowed_hosts`. Done means
+all of them pass and the `test_holds_*` tests still pass.
+
+**Order.** Land items 1, 5, 6, 7, 8, 9 and 23 together as one proxy
+change with the tests green. Then settle items 3 and 4 with the user
+before writing `bdrive`, because the driver's `need_info` and `shot`
+semantics depend on them. Items 10 to 13 are box hardening and can go
+in parallel. The rest is spec and docs text.
+
+**Needs the user, not just Muse.** Item 2 is the user's decision
+(option a creates a new login and changes sudo; only they can do that
+from their own SSH session). Item 3 needs the user to agree on the
+confirmation channel. Items 12 and 13 are policy calls. Everything
+else Muse can do alone.
+
+**Do not.** Do not change the `hsurr:` format, the entry default, or
+the placement set (see Schema constraint). Do not weaken pass-through
+for non-allowlisted hosts. Do not resolve item 2 by editing the spec
+text alone unless the user picks option (b). Do not mark a finding
+done without its test.
+
 ## Blocking (fix before building bdrive)
 
 1. **The allowlist is global, not per credential.** CONFIRMED (probe B).
@@ -204,6 +233,15 @@ rather than inventing a parallel format.
     placeholder sent to a non-allowlisted host is the only signal that
     a placeholder went somewhere it should not, and the only evidence
     that the §5 "safe default" is exercised. Fix before relying on it.
+
+25. **Single-value secrets that look like `k=v` are misread as
+    multi-entry.** CONFIRMED. `_load_secret_file` sniffs: if every
+    non-blank line matches `name=value`, the file becomes a dict. A
+    one-line secret whose value is `key=abc` (some DSNs and API keys
+    look like this) loads as `{"key": "abc"}`, so `hsurr:<name>`
+    resolves `access_token`, finds nothing, and passes through
+    untouched. Fix: decide multi-entry from the registry's entry list
+    or an explicit marker, not by sniffing the content.
 
 ## What holds up
 
