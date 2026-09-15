@@ -37,12 +37,23 @@ permission.
 
 | Principal | Can do | Cannot do |
 |---|---|---|
-| Orchestrator (assistant, off-box) | Submit task briefs; steer jobs; read terminal reports | Run code in the driver or agent; see credential values; bypass the proxy; see the session's step-by-step detail |
+| Orchestrator (assistant, off-box) | Submit task briefs; steer jobs; read terminal reports | Run code in the driver or agent (fixed protocols only) |
 | On-box agent | Run the observe→act loop via `bdrive`; type placeholders | See real values (only `hsurr:` strings); reach the network except via the swap proxy; keep working past a `need_info` without an answer |
 | Driver service (`bdrive`) | Drive Chromium per the action protocol (§5) | See real values; run anything but the fixed action set |
 | Swap proxy (swapd) | Substitute values for allowlisted hosts; audit | Be reconfigured by the orchestrator or agent (hosts.allow is user-managed) |
 | LLM provider (agent's brain) | Receive prompts with page content + placeholders | Receive real credential values (they never exist in prompts) |
 | User | Watch sessions; edit allowlist; install secrets via `cred set`; approve purchases, CAPTCHAs, takeovers | — |
+
+**Enforcement status (review finding 2).** The "cannot see values /
+cannot bypass the proxy" properties are policy on this box, not
+mechanism: the orchestrator logs in as `ntindle`, which has
+passwordless sudo, so `cred get` and the swapd store are one command
+away. Until that changes, read every orchestrator "cannot" above as
+"must not". Two paths, owner's choice: (a) a dedicated agent login
+(e.g. `muse`) with no general sudo and only narrow rules, keeping
+`ntindle` for the human — this is what makes the table true; (b)
+leave the box as-is and treat the boundary as verifiable hygiene.
+The spec's verdicts assume (a); the box today is (b).
 
 `bdrive` and the agent each run as their own system user (`bdrive`,
 `obox`), not as `ntindle`, so a compromised orchestrator SSH session
@@ -65,6 +76,19 @@ privileges plus the audit trail (§13).
   Model choice is deployment config, not spec.
 - Transport: local CLI over SSH for v1 (`bdrive …`, `obox …`); path to
   MCP-over-SSH-tunnel later. The protocols are transport-agnostic JSON.
+- **IPC (review finding 15).** The driver daemon listens on a unix
+  socket (`/run/bdrive/bdrive.sock`, owned by `bdrive`, group
+  `bdrive-clients`, mode 0770); the orchestrator's login is a member
+  of `bdrive-clients`. The `bdrive` CLI speaks JSON over the socket —
+  no sudo on the driver path.
+- **Session model (review finding 14).** One browser process with one
+  persistent context; a "session" is a page (tab) inside it.
+  Concurrent sessions are tabs sharing the profile's cookies — never
+  two browser launches on the same profile dir (Playwright locks it).
+- **Egress enforcement (review finding 10).** "All traffic via the
+  proxy" must be a network rule, not a Chromium flag: an nftables rule
+  confines the `bdrive`/`obox` uids to `127.0.0.1:18080` outbound. The
+  proxy health-check gate is belt and braces.
 - Sessions: `bdrive open` returns a session id; actions target a session;
   idle sessions expire after 30 minutes. Agent jobs: `obox submit
   <brief.json>` returns a job id; `obox steer <job> <message>` continues
@@ -142,6 +166,14 @@ shell, no CDP, no file access outside the profile:
 
 Anything outside this set is rejected, not interpreted.
 
+- Refs may address elements inside iframes (SSO and payment forms live
+  there); the snapshot's AX tree includes frame boundaries and every
+  ref is frame-scoped. Every action takes an optional `timeout_ms`.
+  `look` screenshots are size-capped (bounded viewport; full-page on
+  explicit request). The job's download dir is group-readable by the
+  orchestrator's login so artifacts can be fetched over SSH. (Review
+  finding 17.)
+
 ## 6. Credentials — placeholder-only (stronger than credential_fill)
 
 The managed agent's `credential_fill` delivers real values into the
@@ -170,8 +202,10 @@ Mapping of the managed fill protocol onto placeholders:
   username + password placeholders.
 - If the host is not allowlisted, the placeholder passes through
   literally and the server receives a useless string. Safe default.
-- TOTP codes are credential entries (`hsurr:github:totp`): typed as a
-  placeholder, swapped on egress like anything else.
+- TOTP: the stored `totp` entry is the base32 **seed**; at swap time
+  the proxy computes the current RFC 6238 six-digit code (30s step,
+  SHA-1, stdlib only) and substitutes the code — never the seed.
+  (Review finding 23; pending in the addon.)
 - SMS/email one-time codes cannot be auto-read on spark-vm (no
   connected inbox). The agent returns `need_info:"otp"` (§9); the user
   reads the code and the orchestrator passes it back as a one-shot
@@ -179,6 +213,33 @@ Mapping of the managed fill protocol onto placeholders:
   path, used once and never repeated in any report.
 - There is intentionally no `credential_fill` RPC: there is nothing to
   fill — the value never exists on this box outside swapd's store.
+  `credlib/fill_secret.py` stays as the schema-compatible mirror of
+  the cell's `credential_fill` for human-run scripts — it is the
+  weaker path on this box (values enter the `ntindle` process) and is
+  never used by the driver or the on-box agent. (Review finding 16.)
+
+**Swap-correctness requirements** (the proxy must satisfy all of these;
+review findings 5–9, each reproduced against the addon):
+
+- JSON bodies: substitute the `json.dumps`-escaped value, never the raw
+  string — a `"` or `\` in a password must not break the document.
+- `application/x-www-form-urlencoded`: parse with `parse_qsl`, swap
+  values, re-encode with `urlencode` — no regex on the raw body, so a
+  literal `:` plus `&`/`=` in a value cannot split fields.
+- Entry suffixes: for single-value secrets, `hsurr:name:entry` swaps
+  only when `entry` is absent or `access_token`; anything else passes
+  through rather than swallowing the suffix.
+- Headers: never substitute into `Referer` or `Origin` — a placeholder
+  placed in a `goto` URL would otherwise return as the real value in
+  later requests and land in server logs. Substitute into `Cookie`
+  only when a placement says so.
+- Paths: swap per path segment with `safe=""`; leave the path alone
+  when no segment changed, so re-quoting cannot corrupt `%25`/`%2F`.
+- Responses: on allowlisted hosts, replace known secret values in
+  response text bodies with their placeholders, so a "review your
+  details" page or a key-echoing API cannot hand the value back
+  through `text`/`look`. Residual risk, stated not solved: images and
+  binary bodies.
 
 ## 7. Payments — the wallet stays orchestrator-side
 
@@ -215,14 +276,34 @@ delivered to the browser. spark-vm's equivalent is the proxy allowlist:
 - A credential can only ever reach a host the user allowlisted in
   `/home/swapd/hosts.allow`. The allowlist is managed by the user (the
   orchestrator may propose entries, never write them silently).
+- **Per-credential host binding (review finding 1 — blocking).** The
+  global allowlist is not enough: any stored secret currently swaps
+  into any allowlisted host, so a prompt-injected page could get the
+  agent to fill `hsurr:openai` into a gist form on github.com and the
+  key would go public. The registry (`credentials.json`, via
+  `cred register <name> --host <h>`) gains an `allowed_hosts` list per
+  credential; `_resolve` refuses hosts not on the credential's list.
+  `hosts.allow` remains the outer gate. Until this lands, the old
+  "no exfiltration channel" claim is withdrawn.
 - Every substitution is audit-logged (`/home/swapd/swap.log`: timestamp,
   host, placeholder name — never the value). The user can verify after
-  the fact what went where.
+  the fact what went where. The log is a debugging aid, not a control:
+  it lives on the box within the orchestrator's reach — either ship it
+  off-box or accept it as after-the-fact verification. (Review
+  finding 12.)
 - Honest difference: there is no per-fill approval prompt. A compromised
   orchestrator could direct the agent to submit placeholders to an
-  *already-allowlisted* host without a fresh prompt. The mitigations are
-  the user-owned allowlist, the audit log, and the narrow action set
-  (no exfiltration channel beyond what the page itself shows).
+  allowlisted host without a fresh prompt. The mitigations are the
+  per-credential binding above, the audit log, and the narrow action
+  set.
+- **Confirmations that route through the orchestrator do not contain
+  it (review finding 3).** `need_info` pauses resume on the
+  orchestrator's relay — in the compromised-orchestrator scenario the
+  orchestrator answers itself. A confirmation only counts if the user
+  signals the driver/swapd directly (a file only the human's SSH
+  session can create, or a tailnet-authenticated page). Until that
+  channel exists, the "fresh approval" and "destructive actions gated"
+  verdicts in §15 are ⚠️, not ✅.
 - Destructive/outbound actions the managed agent would gate (purchases,
   money movement, messages sent as the user, account creation,
   password resets, deletions) remain gated the same way: explicit user
@@ -323,6 +404,13 @@ with the orchestrator as backstop:
   never implies purchase approval); wallet sign-ins (Shop Pay, PayPal —
   via user takeover of the live session); entering a saved card's
   security code (takeover).
+- Destructive-gate triggers (heuristic, review finding 18): a click or
+  submit whose target's AX role/name matches buy, purchase, pay,
+  submit-order, send, post, publish, delete, cancel, or
+  account-security patterns pauses with `need_info` naming the action
+  and its terms — even mid-task. The confirmation *channel* itself is
+  the open design question in §8 (finding 3): until the user can
+  signal the driver/swapd directly, these pauses are advisory.
 - Sign-in attempt discipline: at most one automatic corrected
   resubmission when the site clearly rejects an identifier's *format*
   (corrected value, never the unchanged value); stop immediately on
@@ -385,9 +473,11 @@ previously observable contract):
 | Driver is a separate trust domain | Yes — dedicated browser-task agent | Yes — fixed `bdrive` service, own user | ✅ aligned |
 | Agent is a separate trust domain from orchestrator | Yes — browser agent ≠ main agent | Yes — on-box `obox` agent ≠ orchestrator | ✅ aligned |
 | Orchestrator cannot run code in the driver | Yes — task briefs only | Yes — fixed action set, no eval/shell/CDP | ✅ aligned |
-| Credential values hidden from orchestrator | Yes — opaque `[credential:<uuid>]` refs | Yes — orchestrator only writes `hsurr:` strings | ✅ aligned |
-| Values hidden from the agent/driver itself | No — `credential_fill` delivers real values to the browser agent | Yes — placeholders only; swap happens at egress | ✅ stronger |
-| Fresh approval before credential use | Yes — per-fill approval | Standing approval via user-owned allowlist + audit log | ⚠️ different mechanism, same intent |
+| Credential values hidden from orchestrator | Yes — opaque `[credential:<uuid>]` refs | Yes — orchestrator only writes `hsurr:` strings — but policy, not mechanism, while the orchestrator logs in as `ntindle` with passwordless sudo (finding 2) | ⚠️ true only under §2 option (a) |
+| Values hidden from the agent/driver itself | No — `credential_fill` delivers real values to the browser agent | Yes — placeholders only; swap happens at egress (response-echo scrubbing pending, finding 4) | ✅ stronger, with a pending gap |
+| Fresh approval before credential use | Yes — per-fill approval | Per-credential host binding (pending, finding 1) + user-owned allowlist + audit log; confirmations routed via the orchestrator don't contain it (finding 3) | ⚠️ different mechanism, same intent — binding pending |
+| Swap correctness (encoding, headers, paths) | n/a — runtime-owned | Required behaviors listed in §6; findings 5–9 reproduced against the addon, fixes pending | ⚠️ pending |
+| Egress actually forced through the proxy | n/a — runtime-owned | Chromium flag today; nftables uid rule required (finding 10) | ⚠️ pending |
 | Observation model | AX tree + ref_scope + screenshots | Same — AX tree + ref_scope + `look` | ✅ aligned |
 | Action vocabulary | `muse.automation` batching, receipts, actionability reasons | Ordered arrays, same receipt semantics | ✅ aligned |
 | Freeform gestures (CAPTCHA/canvas) | `visual_automation` | `gesture`, permission-gated for challenges | ✅ aligned |
@@ -397,7 +487,7 @@ previously observable contract):
 | User can watch / take over | Yes — live session | v1: screenshots + action log; v2: noVNC | ⚠️ gap, planned |
 | Ask-back when blocked | `ask_for_information` + resume-from-current-page | `need_info` + same resumption rules | ✅ aligned |
 | Purchase flow | In-agent Stripe Link spend requests | Agent to final review → orchestrator wallet flow → transient card relay | ⚠️ split at the trust boundary by necessity |
-| Destructive actions gated | Yes — purchase/message approvals | Yes — same rule, orchestrator + agent both enforce | ✅ aligned |
+| Destructive actions gated | Yes — purchase/message approvals | Same rule, but confirmations routed via the orchestrator don't contain a compromised orchestrator (finding 3) | ⚠️ pending a direct user-to-driver/swapd channel |
 | Sign-in attempt discipline | One format-correction retry; stop on lockout signals | Same | ✅ aligned |
 | IP/network block recovery | `refresh_environment` (one fresh route) | None — fixed egress; block is terminal, reported | ⚠️ honest difference |
 | Secrets never in logs | Yes | Yes — placeholder names only; field contents never logged; proxy flow-dump logging disabled | ✅ aligned |
@@ -417,6 +507,18 @@ previously observable contract):
 
 ## 16. Build plan
 
+0. **Review findings first** (`browser-driver/REVIEW.md`, 24 items).
+   Blocking before `bdrive`: per-credential `allowed_hosts` in the
+   registry + `_resolve` enforcement (1); swap-correctness fixes 5–9,
+   one conformance test per probe; TOTP-as-code in the addon (23);
+   non-allowlisted-host warning reaching the journal (22). Owner
+   decisions before code: dedicated agent login vs. hygiene-as-is
+   (§2, finding 2); the confirmation channel (finding 3); response
+   scrubbing scope (finding 4). Spec decisions already made: session
+   = page in one persistent context (§3, finding 14), unix-socket IPC
+   (§3, finding 15). Repo hygiene: `.gitignore` for `*.log`,
+   `profile/`, `sessions/`, `*.pem` (20); `proxy/install.sh` rebuild
+   instructions (19); `flow_detail=0` + error-line URL check (21).
 1. `bdrive` service: Playwright driver, AX snapshots + ref_scope,
    action protocol (§5), ordered-array execution with receipts, session
    management, proxy health-check gate, runs as `bdrive` user.

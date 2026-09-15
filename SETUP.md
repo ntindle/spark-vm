@@ -195,8 +195,12 @@ credentials.
    ```
    printf 'username=jdoe\npassword=correct horse battery staple\ntotp=JBSWY3DPEHPK3PXP\n' | cred set acme
    ```
-   Omit the `totp` line if the site doesn't use one. Never send these
-   values to the agent — only the credential *name* (`acme`).
+   Omit the `totp` line if the site doesn't use one. The `totp` value
+   is the base32 **seed** — at swap time the proxy computes the current
+   RFC 6238 six-digit code and substitutes the code, never the seed
+   (pending addon change, review finding 23; until it lands,
+   TOTP-via-placeholder does not work). Never send these values to the
+   agent — only the credential *name* (`acme`).
 
 2. **Allowlist the site.** A credential may only ever travel to hosts you
    approve — the allowlist is the standing approval:
@@ -204,10 +208,32 @@ credentials.
    # append to /home/swapd/hosts.allow (one host per line)
    acme.example.com
    ```
-   New hosts are picked up without a proxy restart.
+   New hosts are picked up without a proxy restart. (Per-credential
+   host binding is pending, review finding 1 — until then, any stored
+   secret swaps into any allowlisted host.)
 
-3. **Drive the login with placeholders.** In a Playwright script (or the
-   future `bdrive` browser driver), fill the form with placeholder text —
+3. **Launch Chromium through the proxy and trust its CA.** Plain
+   Playwright ignores `with-proxy`'s environment variables, and
+   Chromium keeps its own certificate store (`~/.pki/nssdb`) — without
+   both steps the placeholders go to the site unswapped and the login
+   fails silently:
+   ```python
+   from playwright.sync_api import sync_playwright
+   with sync_playwright() as p:
+       browser = p.chromium.launch(headless=True,
+           proxy={"server": "http://127.0.0.1:18080"})
+       page = browser.new_page()
+       # ... fills below ...
+   ```
+   ```bash
+   # one-time: trust swapd's CA in Chromium's NSS store
+   # (the CA *certificate* is distributed for this purpose by the
+   # install script; the private key never leaves swapd)
+   certutil -d sql:$HOME/.pki/nssdb -A -t C -n swapd-ca \
+       -i <path-to-swapd-ca-cert.pem>
+   ```
+
+4. **Drive the login with placeholders.** Fill the form with placeholder text —
    the browser DOM, screenshots, and logs then contain only placeholders:
    ```python
    page.fill("#username", "hsurr:acme:username")
@@ -217,13 +243,13 @@ credentials.
    page.fill("#totp", "hsurr:acme:totp")
    ```
 
-4. **The proxy swaps on submit.** When the browser POSTs the login form,
+5. **The proxy swaps on submit.** When the browser POSTs the login form,
    the proxy replaces each placeholder with the real value (form bodies
    included — browsers percent-encode the `:` as `%3A` and the proxy
    handles that). The site receives the real credentials; everything on
    the agent's side stays placeholders.
 
-5. **Verify in the audit log** (placeholder names only, never values):
+6. **Verify in the audit log** (placeholder names only, never values):
    ```
    sudo -u swapd tail -5 /home/swapd/swap.log
    # ts=... host=acme.example.com swapped=hsurr:acme:password
