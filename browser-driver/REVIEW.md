@@ -42,9 +42,9 @@ Keep it that way: every new proxy finding gets a test before its fix.
 
 **Order (updated at `53a8a9a`).** Proxy: items 25, 29, 31 and the nits
 in 34 are the remaining code changes, plus 22 so refused swaps are
-visible. Design decisions with the user before `bdrive`: 3 (now
-backed by the reference, see below), 4, 28, 30. Box hardening: 2, 10,
-11, 12, 13. Docs: 19, 20, 21, 34(c)(d), and the one-file spec.
+visible. Design decisions: see "Owner decisions" at the end; most are
+now settled. Box hardening: 2, 10, 11, 12, 13. Docs: 19, 20, 21,
+34(c)(d), and the one-file spec.
 
 **Needs the user, not just Muse.** Item 2 is the user's decision
 (option a creates a new login and changes sudo; only they can do that
@@ -541,3 +541,60 @@ reference's own raw-code path.
     obox daemons that accepts only the obox uid and the orchestrator
     login. Small, and it removes the dependence on group membership
     being right forever.
+
+## Owner decisions (2026-09-15)
+
+Recorded from the owner's answers to the seven decisions the reviewer
+put to them. Muse: treat these as settled unless marked pending.
+
+1. **The browser brain runs on spark-vm.** `obox` stays. Consequence:
+   items 26, 30 and 31 are required v1 work, not options. Build the
+   separate inference proxy (31) before obox makes its first model
+   call: its own mitmdump instance, its own secrets directory holding
+   only `llm-api`, header-only placement, the provider as its only
+   host, and the provider never in the main proxy's `hosts.allow`.
+   Wrap every page or tool block in an untrusted-data envelope and
+   neutralize `hsurr:` strings inside it (30, 26). Keep 32's read
+   restrictions.
+
+2. **The agent login becomes a jail, not just a user.** Direction:
+   mirror the cell on spark-vm. Muse's SSH login lands in a
+   systemd-nspawn container: rootful inside (guest root is not host
+   root), its own rootfs, package installs free inside, a veth whose
+   only egress is the swap proxy on the host, and no host secrets,
+   swapd state, bdrive state or audit log inside. swapd, bdrive, the
+   audit log and the confirmation page live on the host. Two asks for
+   Muse before design: describe how your own cell treats package
+   installs and egress approvals (the allowlist and approval model),
+   the same interview method used for Spec v2, so the jail can mirror
+   it; and account for Docker, which is a host escape if the jail can
+   reach the host socket (rootless Docker or podman inside the
+   container, or none). This resolves item 2 by option (a) in its
+   stronger form. Until it lands, ENVIRONMENT.md's rule stands: the
+   implementer can become root.
+
+3. **Confirmation channel: a tailnet page.** swapd or bdrive serves a
+   small page reachable only over the tailnet, authenticated by
+   Tailscale identity, where pending approvals and first-use
+   confirmations are answered. Nothing routes through obox or the
+   orchestrator. Item 3 is decided; the page is part of bdrive v1.
+
+4. **Grant scoping (item 28): Muse proposes.** The owner wants a
+   written proposal for per-credential method and path limits and for
+   grant lifetimes, submitted for review before any implementation.
+   Put it in the spec as a proposal section with the registry schema
+   it would need.
+
+5. **Audit log placement and CA trust (items 12, 13): pending.** The
+   owner is deciding. Do not change either yet.
+
+6. **Transient credentials (item 27): accept the one-time-code
+   exception; build the card pathway.** Cards get a job-scoped,
+   expiring, merchant-bound placeholder entry installed through a
+   narrow helper, filled as `hsurr:card-<job>:number` and friends,
+   and deleted at job end. Design the helper as part of §7. The
+   one-time-code relay stays as a stated exception.
+
+7. **Private-range guard (item 29): approved, default-deny.** Implement
+   the guard with an explicit allow list. The tailnet is on that list
+   for now; the default for a fresh install is deny.
