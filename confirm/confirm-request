@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""confirm-request — file a pending approval for the confirmd page.
+
+Called by bdrive (later) for first-use confirmations and destructive
+actions; in v1 it is the CLI used to test the page end to end.
+
+Usage:
+  confirm-request --kind first-use --summary "..." --detail "..." \
+      --requester bdrive --ttl 3600
+"""
+import argparse
+import json
+import os
+import sys
+import uuid
+from datetime import datetime, timedelta, timezone
+
+APPROVALS = os.environ.get("CONFIRM_DIR", "/home/swapd/approvals")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--kind", required=True)
+    ap.add_argument("--summary", required=True)
+    ap.add_argument("--detail", default="")
+    ap.add_argument("--requester", default="bdrive")
+    ap.add_argument("--ttl", type=int, default=3600,
+                    help="seconds until the request expires")
+    args = ap.parse_args()
+
+    aid = uuid.uuid4().hex[:16]
+    item = {
+        "id": aid,
+        "created": datetime.now(timezone.utc).isoformat(),
+        "expires": (datetime.now(timezone.utc)
+                    + timedelta(seconds=args.ttl)).isoformat(),
+        "kind": args.kind,
+        "summary": args.summary,
+        "detail": args.detail,
+        "requester": args.requester,
+    }
+    d = os.path.join(APPROVALS, "pending")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, aid + ".json"), "w") as f:
+        json.dump(item, f, indent=2)
+    print(aid)
+
+
+if __name__ == "__main__":
+    main()
