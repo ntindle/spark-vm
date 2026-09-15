@@ -142,3 +142,22 @@ through the proxy, and Chromium uses its NSS database.
   the jail mirrors.
 - `confirm-page.md` — confirmation page design; the answer→grant
   channel is specified but not implemented (owner review required).
+
+## Verify list
+
+After (re)building, confirm the isolation properties hold:
+
+- `sudo systemd-run --machine=jail --wait --pipe cat /proc/self/uid_map`
+  shows `0 2000000 65536` (explicit userns range).
+- From the jail: `with-proxy curl https://example.com` returns 200;
+  plain `curl` (no proxy) fails; `getent hosts` fails (no DNS).
+- From the jail: `with-proxy curl -k https://spark-vm.<tailnet>.ts.net:8443/`
+  is denied (finding 47: the proxy hard-denies the page).
+- `sysctl net.ipv4.conf.ve-jail.route_localnet` is 1;
+  `net.ipv4.conf.all.route_localnet` and `default` are 0 (finding 51).
+- Finding 52: the agent's key is NOT in `/home/ntindle/.ssh/authorized_keys`
+  (only the owner's Termius key remains); no ControlMaster socket to the
+  host exists for the agent. The jail is the only door.
+  ```bash
+  sudo grep -c "hatch" /home/ntindle/.ssh/authorized_keys  # must be 0
+  ```
