@@ -355,7 +355,7 @@ sniffing). Items 19 to 22 are listed in the build plan and not done.
 spark-vm ever holds a real value" one paragraph before conceding swapd
 does, and still states unconditionally that the DOM, screenshots and
 logs contain only placeholders while listing response scrubbing as
-pending. Build plan item 0 says 24 findings; this file now has 66.
+pending. Build plan item 0 says 24 findings; this file now has 69.
 
 ### New findings from v2's on-box agent
 
@@ -1218,3 +1218,62 @@ and the helper cancels the card. 3-D Secure challenges go to
 
 **Unchanged:** the placeholder path stays the mechanism for
 everything that is not a card. The one-time-code exception stands.
+
+## Round 7 verification: branch `round6-grant-channel` (`2966637`)
+
+Reviewed against main. All four test files pass: 43, 8, 5 and 7. The
+branch does what it says for 55, 56, 58, 59, 60, 61, 64 and 66, and
+the tests for 55, 58, 60 and 64 exercise the real code. Host binding
+is now checked first and no grant can override it; approvals are
+filed only for method and path refusals; grants live in
+`grants.json` behind a single writer and the proxies only read;
+consumption is one-way through `consumed/`; the inference instance
+files nothing; `ssrf.deny` is in the repo; `deploy.sh` reloads
+systemd before restarting. The explanation for 65 is accepted: the
+approve answer was Muse's own round-4 curl test from the box, which
+passed as the owner because finding 47 did not yet exist. That is a
+live demonstration that 47 was exploitable, and it is now closed.
+Two things must land on the branch before merge and deploy.
+
+67. **The ts.net origin may still be missing at runtime.**
+    `_tailnet_dnsname()` runs `tailscale status --json` without
+    `sudo -n`, while the sibling calls for whois and `tailscale ip`
+    were changed to sudo-first in this same round and a sudoers rule
+    for `status --json` was added but is never used. If unprivileged
+    `status` fails as swapd, `PAGE_ORIGINS` holds only the IP origin
+    and every real browser POST still gets 403 "csrf: Origin", which
+    is exactly finding 57 again. The test cannot see this because it
+    mocks `subprocess.run` for both spellings. Fix: sudo-first like
+    `_host_addrs`, print the resolved `PAGE_ORIGINS` at startup so the
+    journal shows them, and add a test where the unprivileged call
+    fails. Acceptance: the owner's first approve from the phone.
+
+68. **The grants lock is on the inode that gets replaced.**
+    `_with_lock` flocks the open `grants.json`, then `_save_locked`
+    writes a temp file and renames it over the path. A second writer
+    that opened before the rename holds a lock on the old inode, reads
+    stale content after the first unlocks, and its rename discards the
+    first writer's grant. Two approvals seconds apart can lose one
+    silently, and the loss shows up later as an unexplained refusal.
+    Fix: lock a dedicated `grants.json.lock` that is never replaced,
+    and keep temp-and-rename so readers never see a partial file.
+    Test: two writers with the lock held artificially.
+
+69. **Tests that do not touch the code they name, and deploy gaps.**
+    (a) `test_55_file_approval_not_for_unbound_host` reimplements the
+    gating condition inside the test instead of calling `_resolve`
+    with `_file_approval` stubbed. (b) The confirmd tests never drive
+    `do_POST`, so the nonce and Origin checks are tested only as data;
+    a handler-level test with a fake socket, or the checks factored
+    into pure functions, would cover them. (c) `deploy.sh` runs
+    `tailscale ip` without sudo and swallows two install failures with
+    `|| true`. (d) `deploy.sh` does not install `with-proxy` or the
+    `cred*` store setters, and does not create the approvals
+    directories with the setgid group that finding 50 depends on;
+    bdrive will need that in round 8.
+
+**Merge plan.** Muse pushes 67 and 68 to the branch. The reviewer
+merges the branch into main, keeping both sides of REVIEW.md. The
+owner runs `proxy/deploy.sh`, deletes the `answered.hold` directory,
+and performs one real approve and one real deny from his phone. Only
+then is the grant channel done.
