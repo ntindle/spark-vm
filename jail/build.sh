@@ -50,6 +50,9 @@ if ! $SUDO test -x "$ROOTFS/bin/bash"; then
 else
     say "rootfs present, skipping debootstrap"
 fi
+# Fresh machine-id: debootstrap stamps one; never boot two machines
+# with the same id. First boot regenerates it.
+$SUDO rm -f "$ROOTFS/etc/machine-id"
 
 # ---------------------------------------------------------------- .nspawn config
 say ".nspawn config"
@@ -63,9 +66,6 @@ $SUDO tee /etc/systemd/nspawn/$MACHINE.nspawn >/dev/null <<EOF
 # (no isolation). An explicit range cannot silently degrade like that.
 # Verify with: cat /proc/$(machinectl show jail -p Leader --value)/uid_map
 PrivateUsers=2000000:65536
-# Shift the (host-0-owned) debootstrap tree into the range above on
-# first boot; reuse idmapped mounts where the fs supports it.
-PrivateUsersOwnership=auto
 # No DNS in the jail: the host proxy resolves. (Build script also
 # empties /etc/resolv.conf inside the guest; this stops nspawn from
 # copying the host's in.)
@@ -76,7 +76,14 @@ Boot=yes
 VirtualEthernet=yes
 
 [Files]
-# Deliberately empty: no host bind mounts. The jail sees no host files.
+# Shift the (host-0-owned) debootstrap tree into the range above on
+# first boot; reuse idmapped mounts where the fs supports it.
+# NOTE: this key lives in [Files], not [Exec] — nspawn ignores it in
+# [Exec] ("Unknown key name"), silently skipping the ownership shift
+# and leaving the tree host-root-owned (container root could then
+# write host-0-owned files).
+PrivateUsersOwnership=auto
+# Deliberately no bind mounts: no host files inside the jail.
 EOF
 
 # Host-side veth address, assigned each time the container starts.
@@ -128,10 +135,14 @@ table inet jail {
         # Tailnet -> jail sshd, after DNAT.
         iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state new,established accept
         iifname "ve-jail" ct state established,related accept
+        oifname "ve-jail" ct state established,related accept
         # No other egress for the jail: no direct internet, no tailnet,
         # no lan. (Runs before ts-forward, so the tailnet accept there
         # cannot re-allow jail traffic.)
         iifname "ve-jail" log prefix "jail-fwd-drop: " drop
+        # Nothing may route INTO the jail either, except the sshd DNAT
+        # above (and its return traffic).
+        oifname "ve-jail" log prefix "jail-fwd-indrop: " drop
     }
 }
 EOF
@@ -144,7 +155,7 @@ After=network.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=-/usr/sbin/nft delete table inet jail
+ExecStart=-/usr/sbin/nft destroy table inet jail
 ExecStart=/usr/sbin/nft -f /etc/nftables-jail.conf
 
 [Install]
@@ -184,8 +195,10 @@ run_guest /bin/bash -c 'cat > /etc/systemd/network/80-container-host0.network <<
 [Match]
 Name=host0
 [Network]
+# No Gateway: the guest has no default route (fail closed). The proxy
+# at 10.99.0.1 is on-link via the /30, so proxying works; direct-IP
+# attempts fail inside the guest with "network unreachable".
 Address='"$GUEST_IP/$CIDR"'
-Gateway='"$HOST_VETH_IP"'
 LinkLocalAddressing=no
 EOF
 systemctl enable --now systemd-networkd'
@@ -216,6 +229,15 @@ run_guest /usr/bin/env http_proxy=http://$HOST_VETH_IP:18080 https_proxy=http://
     DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y -q \
     openssh-server sudo ca-certificates curl git python3 iproute2 >/dev/null
 run_guest /bin/systemctl enable ssh
+# sshd hardening: key-only, no root login, only the agent user.
+run_guest /bin/bash -c 'cat > /etc/ssh/sshd_config.d/90-jail.conf <<EOF
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+X11Forwarding no
+AllowUsers '"$JAIL_USER"'
+EOF
+passwd -l root'
 
 # ---------------------------------------------------------------- swapd CA inside the jail only
 say "swapd CA -> jail trust store"
