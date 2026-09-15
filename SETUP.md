@@ -184,6 +184,55 @@ with the same names and `DynamicCredentialError`; `fill_secret.py` fills a
 Playwright field without the value touching logs (see its docstring for the
 honest limit).
 
+### Website login recipe (username + password + TOTP)
+
+End-to-end: logging the agent into a website without it ever seeing the
+credentials.
+
+1. **Store the credential (human only, your own SSH session).** One
+   credential, one entry per line. The interactive prompt takes a single
+   line, so pipe multi-entry values:
+   ```
+   printf 'username=jdoe\npassword=correct horse battery staple\ntotp=JBSWY3DPEHPK3PXP\n' | cred set acme
+   ```
+   Omit the `totp` line if the site doesn't use one. Never send these
+   values to the agent — only the credential *name* (`acme`).
+
+2. **Allowlist the site.** A credential may only ever travel to hosts you
+   approve — the allowlist is the standing approval:
+   ```
+   # append to /home/swapd/hosts.allow (one host per line)
+   acme.example.com
+   ```
+   New hosts are picked up without a proxy restart.
+
+3. **Drive the login with placeholders.** In a Playwright script (or the
+   future `bdrive` browser driver), fill the form with placeholder text —
+   the browser DOM, screenshots, and logs then contain only placeholders:
+   ```python
+   page.fill("#username", "hsurr:acme:username")
+   page.fill("#password", "hsurr:acme:password")
+   page.click("button[type=submit]")
+   # if the site then asks for a code:
+   page.fill("#totp", "hsurr:acme:totp")
+   ```
+
+4. **The proxy swaps on submit.** When the browser POSTs the login form,
+   the proxy replaces each placeholder with the real value (form bodies
+   included — browsers percent-encode the `:` as `%3A` and the proxy
+   handles that). The site receives the real credentials; everything on
+   the agent's side stays placeholders.
+
+5. **Verify in the audit log** (placeholder names only, never values):
+   ```
+   sudo -u swapd tail -5 /home/swapd/swap.log
+   # ts=... host=acme.example.com swapped=hsurr:acme:password
+   ```
+
+If the site isn't allowlisted, the placeholders pass through literally and
+the login simply fails — the safe default. SMS/email codes (as opposed to
+TOTP) can't be auto-filled: the agent asks you for the code instead.
+
 **Cell → spark-vm CLI mapping:**
 
 | cell | spark-vm |
