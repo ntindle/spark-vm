@@ -15,6 +15,7 @@ export REQUESTS_CA="$CA_BUNDLE"
 export REQUESTS_CA_BUNDLE="$CA_BUNDLE"
 export CURL_CA_BUNDLE="$CA_BUNDLE"
 export SSL_CERT_FILE="$CA_BUNDLE"
+export GIT_SSL_CAINFO="$CA_BUNDLE"
 export NODE_EXTRA_CA_CERTS="$CA_BUNDLE"
 if [ "$#" -eq 0 ]; then
     echo "usage: with-proxy <cmd> [args...]" >&2
