@@ -143,7 +143,9 @@ On spark-vm (live, not in repo): `/home/swapd/secrets/` (0700),
   paths (e.g. `~/workspace/newvm/repo`) are meaningless to it. Prefer
   repo-relative paths in findings.
 - GitHub `main` is authoritative. If the local clone and `main` disagree,
-  `main` wins.
+  `main` wins. The box clone (`~/spark-vm` on spark-vm) only ever
+  pulls — never merge from it into a staging branch; a merge from the
+  box re-imports its commits under new hashes (nit, review round 4).
 
 ## Current work (2026-09-15)
 

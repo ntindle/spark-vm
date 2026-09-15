@@ -75,13 +75,18 @@ placement, and a separate audit log. The provider is never in the main
 proxy's hosts file.
 
 Grant scoping (approved half): registry `allowed_methods` and
-`allowed_paths` are checked before swapping (absent = unrestricted,
-for migration). Paths are percent-decoded and dot-segment-normalized
+`allowed_paths` are checked before swapping. Absent means unrestricted
+(for migration); an explicit empty list fails closed (finding 41).
+Paths are percent-decoded to a fixpoint and dot-segment-normalized
 before a segment-aligned prefix match, so /repos/../admin cannot pass
-an /repos/ prefix and /repository does not match /repos/. Methods are
-uppercased. A path/method-bound credential never swaps where the
-method or path can't be verified (CONNECT tunnels, websocket
-messages).
+an /repos/ prefix and /repository does not match /repos/. A path that
+still contains %, ; or \ after fixpoint decoding is refused outright
+(finding 42): those only reach a path-bound credential as smuggling
+tricks for lenient servers (double decoding, path parameters,
+backslash separators). This is defense in depth — the server's own
+parser has the last word on what a path means. Methods are uppercased.
+A path/method-bound credential never swaps where the method or path
+can't be verified (CONNECT tunnels, websocket messages).
 
 Audit: every swap is appended to the log file as
     ts=<utc> host=<host> swapped=<matched placeholder>
@@ -95,6 +100,7 @@ AND as a refused= audit line: it is the only signal that a
 placeholder went somewhere it should not.
 """
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -131,8 +137,10 @@ SSRF_ALLOW_FILE = _env_path("SWAP_SSRF_FILE", "/home/swapd/ssrf.allow")
 # never traverse credential insertion.
 INFERENCE_MODE = os.environ.get("SWAP_INFERENCE_MODE") == "1"
 # Registry keys with structural meaning; never entry names (finding 34b,
-# and the grant-scoping proposal reserves allowed_methods/allowed_paths).
-RESERVED_KEYS = frozenset({"allowed_hosts", "allowed_methods", "allowed_paths"})
+# and the grant-scoping proposal reserves allowed_methods/allowed_paths;
+# finding 44 reserves grants before the deferred grant machinery lands).
+RESERVED_KEYS = frozenset({"allowed_hosts", "allowed_methods",
+                           "allowed_paths", "grants"})
 # Explicit marker: a secret file whose first non-blank line is this is
 # multi-entry, even when the registry declares no entries (finding 25).
 MULTI_MARKER = "#hsurr:multi"
@@ -176,14 +184,18 @@ def _host_in_list(host, entries):
 
 
 def _normalize_path(raw):
-    """Percent-decode then dot-segment-normalize a request path (grant
-    scoping): /repos/../admin must not pass an /repos/ prefix, and
-    %2e%2e encodings must not smuggle dot segments past the check."""
+    """Percent-decode to a fixpoint, then dot-segment-normalize a
+    request path (grant scoping, finding 42): /repos/../admin must not
+    pass an /repos/ prefix, %2e%2e encodings must not smuggle dot
+    segments past the check, and %252e%252e (double-encoded) must not
+    survive as %2e%2e for a server that decodes twice."""
     try:
         p = urllib.parse.urlsplit(raw).path
     except Exception:
         p = raw or ""
-    p = urllib.parse.unquote(p)
+    prev = None
+    while p != prev:
+        prev, p = p, urllib.parse.unquote(p)
     if not p.startswith("/"):
         p = "/" + p
     return posixpath.normpath(p) or "/"
@@ -378,10 +390,15 @@ class SwapAddon:
         # Finding 36: values under _MIN_SCRUB_LEN are never scrubbed
         # from responses. Warn here (naming the credential, never the
         # value) so a short secret is a visible configuration problem,
-        # not a silent gap.
+        # not a silent gap. Entries opted out with "scrub": false are
+        # skipped — the warning is about scrubbing, which is already
+        # off for them (nit, round 4).
         for name, val in secrets.items():
-            vals = val.values() if isinstance(val, dict) else (val,)
-            if any(v and len(v) < _MIN_SCRUB_LEN for v in vals):
+            entries = (val.items() if isinstance(val, dict)
+                       else ((None, val),))
+            if any(v and len(v) < _MIN_SCRUB_LEN
+                   and not self._scrub_opted_out(name, e)
+                   for e, v in entries):
                 log.warning(
                     "swap: secret %r has a value shorter than %d chars; "
                     "response scrubbing is disabled for it", name,
@@ -434,9 +451,11 @@ class SwapAddon:
 
     def _credential_allows_request(self, name, host, method, path):
         """Registry binding check for one request (grant scoping, approved
-        half). Host binding is fail closed; allowed_methods and
-        allowed_paths are static limits, absent meaning unrestricted
-        (for migration). Returns (ok, reason)."""
+        half). Host binding is fail closed. allowed_methods and
+        allowed_paths are static limits: absent means unrestricted (for
+        migration), but an explicit empty list fails closed (finding
+        41) — removing the last method must not silently unlimit the
+        credential. Returns (ok, reason)."""
         reg = getattr(self, "registry", None) or {}
         spec = reg.get(name)
         if not isinstance(spec, dict):
@@ -444,17 +463,23 @@ class SwapAddon:
         if not _host_in_list(host, spec.get("allowed_hosts")):
             return False, "unbound-host"
         methods = spec.get("allowed_methods")
-        if methods:
+        if methods is not None:
             allowed = {str(m).upper() for m in methods}
             if (method or "").upper() not in allowed:
                 return False, "method-not-allowed"
         prefixes = spec.get("allowed_paths")
-        if prefixes:
+        if prefixes is not None:
             if (method or "").upper() == "CONNECT":
                 # the proxy cannot see inside the tunnel, so a
                 # path-bound credential never swaps on a CONNECT
                 return False, "path-not-verifiable"
-            if not _path_allowed(_normalize_path(path or "/"), prefixes):
+            norm = _normalize_path(path or "/")
+            if "%" in norm or ";" in norm or "\\" in norm:
+                # Finding 42: after fixpoint decoding these can only be
+                # smuggling tricks for lenient servers (double-decode
+                # residue, path parameters, backslash separators).
+                return False, "path-not-allowed"
+            if not _path_allowed(norm, prefixes):
                 return False, "path-not-allowed"
         return True, ""
 
@@ -636,8 +661,13 @@ class SwapAddon:
 
     # ------------------------------------------------------------------ SSRF
 
-    def _resolve_ips(self, host):
+    async def _resolve_ips(self, host):
         """Resolve host to IPs with a small TTL cache (finding 29).
+
+        Finding 45: the lookup runs through the event loop's resolver
+        instead of blocking getaddrinfo — server_connect runs on
+        mitmproxy's asyncio loop, and a slow resolver must not stall
+        every connection through both proxies.
 
         Returns None on DNS failure: fail open, since the request cannot
         complete upstream anyway.
@@ -647,7 +677,9 @@ class SwapAddon:
         if cached and cached[0] > now:
             return cached[1]
         try:
-            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            loop = asyncio.get_running_loop()
+            infos = await loop.getaddrinfo(host, None,
+                                           type=socket.SOCK_STREAM)
         except socket.gaierror:
             ips = None
         except Exception:
@@ -686,7 +718,7 @@ class SwapAddon:
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
-    def server_connect(self, data):
+    async def server_connect(self, data):
         """Egress guard (findings 29, 37, 38).
 
         Runs BEFORE the upstream TCP connect — the old `request`-hook
@@ -698,6 +730,9 @@ class SwapAddon:
         SNI is unaffected: tlsconfig sets it from the client's hello,
         not from the pinned address.
 
+        A coroutine hook (finding 45): mitmproxy awaits it, so the DNS
+        lookup below never blocks the event loop.
+
         Hook signature verified against the mitmproxy in the deploy
         venv (12.2.3): server_connect(data: ServerConnectionHookData).
         """
@@ -707,7 +742,7 @@ class SwapAddon:
         if not addr:
             return
         host = addr[0]
-        ips = self._resolve_ips(host)
+        ips = await self._resolve_ips(host)
         if ips is None:
             return  # DNS failure fails open; the connect fails on its own
         allowed_ip, refused_ip = None, None
@@ -866,19 +901,25 @@ class SwapAddon:
             return True
         return c.endswith(("+json", "+xml"))
 
+    def _scrub_opted_out(self, name, entry):
+        """True when the registry sets "scrub": false for this entry
+        (finding 36). Single-value secrets carry the opt-out on the
+        "access_token" entry spec — there is no entry None (finding
+        43)."""
+        spec = (getattr(self, "registry", None) or {}).get(name)
+        if not isinstance(spec, dict):
+            return False
+        entry_spec = spec.get(entry if entry is not None else "access_token")
+        return (isinstance(entry_spec, dict)
+                and entry_spec.get("scrub") is False)
+
     def _scrubbable_entry(self, name, entry, value):
         """Whether one entry's value may be scrubbed from responses
         (finding 36): values under _MIN_SCRUB_LEN are never scrubbed,
         and the registry may set "scrub": false for usernames/emails."""
         if not value or len(value) < _MIN_SCRUB_LEN:
             return False
-        spec = (getattr(self, "registry", None) or {}).get(name)
-        if isinstance(spec, dict):
-            entry_spec = spec.get(entry)
-            if (isinstance(entry_spec, dict)
-                    and entry_spec.get("scrub") is False):
-                return False
-        return True
+        return not self._scrub_opted_out(name, entry)
 
     def _secret_replacements(self):
         """(value, placeholder, whole_token) triples for response

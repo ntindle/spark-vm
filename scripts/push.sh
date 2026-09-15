@@ -14,7 +14,7 @@ cd "$REPO_DIR"
 git add -A
 STAGED="$(git diff --cached --name-only)"
 if [ -n "$STAGED" ]; then
-    LEAK="$(echo "$STAGED" | xargs grep -nEi '(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|xox[bap]-)' 2>/dev/null || true)"
+    LEAK="$(echo "$STAGED" | xargs grep -nEi '(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|LLM_[0-9]+|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|xox[bap]-)' 2>/dev/null || true)"
     if [ -n "$LEAK" ]; then
         echo "Refusing to push: secret-shaped values found in staged changes:" >&2
         echo "$LEAK" | sed 's/=.*/=<redacted>/' >&2

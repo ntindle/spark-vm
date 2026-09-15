@@ -15,6 +15,7 @@ allowed_hosts) directly.
 """
 
 import base64
+import asyncio
 import hashlib
 import hmac
 import ipaddress
@@ -502,7 +503,7 @@ class SwapAddonTests(unittest.TestCase):
 
         def connect(a, host="box.local"):
             data = FakeServerConnectData(host)
-            a.server_connect(data)
+            asyncio.run(a.server_connect(data))
             return data
 
         # refused by default: connection killed, audited, never connected
@@ -547,7 +548,7 @@ class SwapAddonTests(unittest.TestCase):
                            secrets={"h": "h-SECRET"})
             a._dns_cache["h.example"] = (now + 3600, [literal])
             data = FakeServerConnectData("h.example")
-            a.server_connect(data)
+            asyncio.run(a.server_connect(data))
             self.assertIsNotNone(data.server.error, literal)
         # a public literal still passes
         a = make_addon(hosts=["h.example"],
@@ -555,7 +556,7 @@ class SwapAddonTests(unittest.TestCase):
                        secrets={"h": "h-SECRET"})
         a._dns_cache["h.example"] = (now + 3600, ["93.184.216.34"])
         data = FakeServerConnectData("h.example")
-        a.server_connect(data)
+        asyncio.run(a.server_connect(data))
         self.assertIsNone(data.server.error)
         self.assertEqual(data.server.address, ("93.184.216.34", 443))
 
@@ -819,7 +820,8 @@ class SwapAddonTests(unittest.TestCase):
                              "bearer_header")
             self.assertNotIn("allowed_hosts", saved["acme"])
             # reserved names are rejected on both set and remove
-            for entry in ("allowed_hosts", "allowed_methods", "allowed_paths"):
+            for entry in ("allowed_hosts", "allowed_methods", "allowed_paths",
+                          "grants"):
                 r = subprocess.run(
                     [script, "set", "acme", entry, '"bearer_header"'],
                     capture_output=True, env=env)
@@ -831,6 +833,209 @@ class SwapAddonTests(unittest.TestCase):
             self.assertIn(b"reserved", r.stderr)
             saved = json.loads(Path(reg).read_text())
             self.assertNotIn("allowed_hosts", saved["acme"])
+
+    # --- review round 4 (findings 41-46) --------------------------------
+
+    def test_grant_empty_lists_fail_closed(self):
+        """REVIEW item 41: an explicit empty allowed_methods or
+        allowed_paths fails closed — removing the last method must not
+        silently unlimit the credential."""
+        for key, reason in (("allowed_methods", "method-not-allowed"),
+                            ("allowed_paths", "path-not-allowed")):
+            reg = {"api": {"allowed_hosts": ["api.example.com"], key: []}}
+            a = make_addon(hosts=["api.example.com"],
+                           secrets={"api": "API-TOKEN"}, registry=reg)
+            req = Request("api.example.com", "/repos/x", method="POST",
+                          headers=[("Authorization", "Bearer hsurr:api")])
+            a.request(Flow(req))
+            self.assertEqual(req.headers.get("Authorization"),
+                             "Bearer hsurr:api", key)
+            self.assertIn(("api.example.com", "api", reason), a.refused)
+
+    def test_nit_registry_set_emptied_list_now_unrestricted(self):
+        """REVIEW item 41: remove-method/remove-path of the last entry
+        deletes the key and prints 'now unrestricted' instead of leaving
+        [] behind."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-registry-set")
+
+        def run(env, *argv):
+            r = subprocess.run([script] + list(argv), capture_output=True,
+                               env=env, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r
+
+        with tempfile.TemporaryDirectory() as d:
+            reg = os.path.join(d, "credentials.json")
+            env = dict(os.environ, CRED_REGISTRY_FILE=reg)
+            run(env, "add-method", "api", "POST")
+            r = run(env, "remove-method", "api", "POST")
+            self.assertIn("now unrestricted", r.stdout)
+            saved = json.loads(Path(reg).read_text())
+            self.assertNotIn("allowed_methods", saved["api"])
+            run(env, "add-path", "api", "/repos/")
+            r = run(env, "remove-path", "api", "/repos/")
+            self.assertIn("now unrestricted", r.stdout)
+            saved = json.loads(Path(reg).read_text())
+            self.assertNotIn("allowed_paths", saved["api"])
+            # partial removal keeps the key and the remaining entries
+            run(env, "add-method", "api", "GET")
+            run(env, "add-method", "api", "POST")
+            r = run(env, "remove-method", "api", "POST")
+            self.assertNotIn("now unrestricted", r.stdout)
+            saved = json.loads(Path(reg).read_text())
+            self.assertEqual(saved["api"]["allowed_methods"], ["GET"])
+
+    def test_grant_path_smuggling_shapes_refused(self):
+        """REVIEW item 42: double-encoding, path parameters, and
+        backslashes must not slip a path-bound credential past its
+        prefix — unquote to a fixpoint, then refuse %, ; and \\."""
+        for bad in ("/repos/%252e%252e/admin", "/repos/..;/admin",
+                    "/repos/..\\admin"):
+            a = self._grant_addon()
+            req = self._grant_req(bad)
+            a.request(Flow(req))
+            self.assertEqual(req.headers.get("Authorization"),
+                             "Bearer hsurr:api", bad)
+            self.assertIn(("api.example.com", "api", "path-not-allowed"),
+                          a.refused)
+        self.assertEqual(sa._normalize_path("/repos/%252e%252e/admin"),
+                         "/admin")
+        self.assertEqual(sa._normalize_path("/repos/%2e%2e/admin"), "/admin")
+        # a clean path still swaps
+        b = self._grant_addon()
+        req = self._grant_req("/repos/x")
+        b.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"), "Bearer API-TOKEN")
+
+    def test_bug_scrub_opt_out_single_value_secret(self):
+        """REVIEW item 43: set-scrub consults the access_token entry spec
+        for single-value secrets — there is no entry None."""
+        reg = {"web": {"allowed_hosts": ["web.example.com"],
+                       "access_token": {"scrub": False}}}
+        a = make_addon(secrets={"web": "averylongsinglevaluetoken"},
+                       hosts=["web.example.com"], registry=reg)
+        resp = FakeResponse(b"welcome averylongsinglevaluetoken bye",
+                            "text/html")
+        flow = Flow(Request("web.example.com", "/"))
+        flow.response = resp
+        a.response(flow)
+        self.assertIn(b"averylongsinglevaluetoken", resp.content)
+        # and the helper writes exactly that shape
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-registry-set")
+        with tempfile.TemporaryDirectory() as d:
+            regfile = os.path.join(d, "credentials.json")
+            env = dict(os.environ, CRED_REGISTRY_FILE=regfile)
+            r = subprocess.run(
+                [script, "set-scrub", "web", "access_token", "false"],
+                capture_output=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            saved = json.loads(Path(regfile).read_text())
+            self.assertIs(saved["web"]["access_token"]["scrub"], False)
+
+    def test_bug_grants_key_reserved(self):
+        """REVIEW item 44: 'grants' is structural — hsurr:api:grants must
+        not resolve to the token, and the helper rejects it as an entry
+        name."""
+        reg = {"api": {"allowed_hosts": ["api.example.com"],
+                       "grants": [{"scope": "session"}]}}
+        a = make_addon(hosts=["api.example.com"],
+                       secrets={"api": "API-TOKEN"}, registry=reg)
+        self.assertIsNone(a._resolve("api", "grants", "api.example.com",
+                                     "GET", "/"))
+        out = a._swap_text("Bearer hsurr:api:grants", "api.example.com",
+                           "GET", "/")
+        self.assertIn("hsurr:api:grants", out)
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-registry-set")
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ,
+                       CRED_REGISTRY_FILE=os.path.join(d, "credentials.json"))
+            r = subprocess.run([script, "set", "api", "grants",
+                                '"bearer_header"'],
+                               capture_output=True, env=env)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn(b"reserved", r.stderr)
+
+    def test_bug_server_connect_is_async(self):
+        """REVIEW item 45: server_connect is a coroutine hook — DNS goes
+        through the loop's resolver instead of blocking getaddrinfo on
+        mitmproxy's event loop. A failing resolver still fails open."""
+        self.assertTrue(
+            asyncio.iscoroutinefunction(sa.SwapAddon.server_connect))
+        self.assertTrue(
+            asyncio.iscoroutinefunction(sa.SwapAddon._resolve_ips))
+        a = make_addon(hosts=["nope.invalid"],
+                       registry={"n": {"allowed_hosts": ["nope.invalid"]}},
+                       secrets={"n": "n-SECRET"})
+        a._dns_cache.pop("nope.invalid", None)  # force a real lookup
+
+        async def drive():
+            loop = asyncio.get_running_loop()
+
+            async def boom(*args, **kwargs):
+                raise socket.gaierror("mocked resolver failure")
+
+            with mock.patch.object(loop, "getaddrinfo", boom):
+                data = FakeServerConnectData("nope.invalid")
+                await a.server_connect(data)
+                return data
+
+        data = asyncio.run(drive())
+        self.assertIsNone(data.server.error)
+
+    def test_bug_inference_store_piped_stdin(self):
+        """REVIEW item 46: cred-store-set-inference takes the key on stdin
+        (piped, never an echoing prompt), into the fixed name, 0600."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-store-set-inference")
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, INFERENCE_SECRETS_DIR=d)
+            r = subprocess.run([script], input=b"LLM-test-key-bytes",
+                               capture_output=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            p = Path(d) / "llm-api"
+            self.assertEqual(p.read_bytes(), b"LLM-test-key-bytes")
+            self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+
+    def test_nit_inference_recipe_names_right_files(self):
+        """REVIEW item 46: the install recipe must bind the provider in
+        inference-hosts.allow (never the main hosts.allow) and run the
+        store step as swapd with piped, non-echoing input."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        setup = Path(here, "..", "SETUP.md").resolve().read_text()
+        recipe = setup.split("### Inference-model recipe")[1]
+        recipe = recipe.split("\n### ")[0]
+        self.assertIn("inference-hosts.allow", recipe)
+        self.assertIn("sudo -u swapd", recipe)
+        self.assertIn("read -rsp", recipe)  # no-echo prompt, piped in
+        self.assertNotIn("/home/swapd/hosts.allow", recipe)
+
+    def test_nit_scrub_false_skips_short_value_warning(self):
+        """Round-4 nit: the sub-8-char load warning skips entries opted
+        out with scrub:false — the warning is about scrubbing, which is
+        already off for them."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "acme").write_text("x")
+            (Path(d) / "r").write_text(
+                json.dumps({"acme": {"access_token": {"scrub": False}}}))
+            records = []
+            handler = logging.Handler()
+            handler.emit = records.append
+            sa.log.addHandler(handler)
+            try:
+                with mock.patch.object(sa, "SECRETS_DIR", Path(d)), \
+                     mock.patch.object(sa, "HOSTS_FILE", Path(d) / "h"), \
+                     mock.patch.object(sa, "REGISTRY_FILE", Path(d) / "r"), \
+                     mock.patch.object(sa, "SSRF_ALLOW_FILE",
+                                        Path(d) / "s"), \
+                     mock.patch.object(sa, "LOG_FILE", Path(d) / "l"):
+                    sa.SwapAddon()
+            finally:
+                sa.log.removeHandler(handler)
+        self.assertNotIn("shorter than 8 chars",
+                         "\n".join(r.getMessage() for r in records))
 
 
 if __name__ == "__main__":

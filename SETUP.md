@@ -269,9 +269,15 @@ main proxy's store can never be confused. All steps are human-only, in
 your own SSH session:
 
 1. **Store the key** in swapd's secrets dir (the name is fixed —
-   the inference proxy holds exactly one credential, `llm-api`):
+   the inference proxy holds exactly one credential, `llm-api`).
+   The script reads the key from stdin with no prompt — use a
+   non-echoing read and pipe it in, running as `swapd`. Without
+   `sudo -u swapd` the write fails on permissions; typing the key at
+   a visible prompt would echo it to the terminal:
    ```
-   cred-store-set-inference                # paste the key at the prompt
+   read -rsp "Provider API key: " KEY; echo
+   printf '%s' "$KEY" | sudo -u swapd /usr/local/bin/cred-store-set-inference
+   unset KEY
    ```
 
 2. **Write the registry** through the narrow helper (the fixed path
@@ -281,8 +287,12 @@ your own SSH session:
    sudo -u swapd /usr/local/bin/cred-registry-set-inference set llm-api access_token '"bearer_header"'
    ```
 
-3. **Bind the provider host** in the registry (and, if needed, append
-   it to `/home/swapd/hosts.allow`):
+3. **Bind the provider host** in the registry, and append it to
+   `/home/swapd/inference-hosts.allow` — the inference proxy's own
+   hosts file. Never the main proxy's `hosts.allow`: the inference
+   service unit forbids the provider there, and mixing the two stores
+   defeats the finding-31 separation between page content in prompts
+   and credential insertion:
    ```
    sudo -u swapd /usr/local/bin/cred-registry-set-inference add-host llm-api api.provider.example
    ```

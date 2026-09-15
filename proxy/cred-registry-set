@@ -54,8 +54,10 @@ if os.path.exists(reg_path):
 # Structural keys must never become credential entries: an entry named
 # "allowed_hosts" would clobber the host binding with a placement object
 # (finding 34b). allowed_methods/allowed_paths are reserved for the
-# grant-scoping proposal.
-RESERVED_ENTRIES = ("allowed_hosts", "allowed_methods", "allowed_paths")
+# grant-scoping proposal, and grants is reserved before the deferred
+# grant machinery lands (finding 44).
+RESERVED_ENTRIES = ("allowed_hosts", "allowed_methods", "allowed_paths",
+                    "grants")
 
 def check_entry(s):
     check(s, "entry")
@@ -157,7 +159,15 @@ elif action in ("add-method", "remove-method"):
     else:
         if method in methods:
             methods.remove(method)
-        print("unlimited '%s' method '%s'" % (name, method))
+        if not methods:
+            # Finding 41: an emptied list must not linger as [] — the
+            # addon would read it as unrestricted. Delete the key so
+            # the state is explicit.
+            del entry["allowed_methods"]
+            print("removed method '%s' from '%s'; now unrestricted"
+                  % (method, name))
+        else:
+            print("removed method '%s' from '%s'" % (method, name))
     save()
 elif action in ("add-path", "remove-path"):
     # Grant scoping, approved half: static per-credential path prefixes.
@@ -183,7 +193,13 @@ elif action in ("add-path", "remove-path"):
     else:
         if prefix in prefixes:
             prefixes.remove(prefix)
-        print("unlimited '%s' path prefix '%s'" % (name, prefix))
+        if not prefixes:
+            # Finding 41: see remove-method above.
+            del entry["allowed_paths"]
+            print("removed path prefix '%s' from '%s'; now unrestricted"
+                  % (prefix, name))
+        else:
+            print("removed path prefix '%s' from '%s'" % (prefix, name))
     save()
 elif action == "set-scrub":
     # Finding 36: opt an entry (usernames, emails) out of response

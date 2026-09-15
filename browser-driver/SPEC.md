@@ -308,13 +308,23 @@ and `time-bounded` only, with bdrive (trusted, on the host) telling
 swapd when a job ends so swapd revokes.
 
 **Implemented:** registry `allowed_methods` / `allowed_paths`, checked
-in `_resolve` before swapping (absent = unrestricted, for migration).
+in `_resolve` before swapping. Absent means unrestricted (for
+migration); an explicit empty list fails closed (review round 4) —
+`cred-registry-set remove-method`/`remove-path` delete the key when a
+list empties and print "now unrestricted" so the state is visible.
 Managed with `cred-registry-set add-method|add-path` (stored
 uppercased for methods). Semantics, per the owner's requirements:
 
-- Paths are compared after percent-decoding AND dot-segment
-  normalization, so `/repos/../admin` (or `/repos/%2e%2e/admin`)
-  cannot pass an `/repos/` prefix.
+- Paths are compared after percent-decoding to a fixpoint AND
+  dot-segment normalization, so `/repos/../admin`,
+  `/repos/%2e%2e/admin`, and `/repos/%252e%252e/admin` (double-encoded)
+  cannot pass an `/repos/` prefix. A path that still contains `%`,
+  `;`, or `\` after fixpoint decoding is refused outright — those
+  only reach a path-bound credential as smuggling tricks for lenient
+  servers (double decoding, path parameters, backslash separators).
+- `allowed_paths` is defense in depth (review round 4): the proxy does
+  its best with the path it sees, but the server's own parser has the
+  last word on what a path means.
 - Prefixes are segment-aligned: `/repos/` matches `/repos` and
   `/repos/x` but not `/repository`.
 - Methods are uppercased on both sides.
@@ -345,7 +355,8 @@ backend", but the page is served by bdrive and bdrive is not swapd —
 the socket between them and the peer check still need specifying
 before the deferred half is built.
 
-Registry shape (static half live; `grants` still a proposal):
+Registry shape (static half live; `grants` reserved as a structural
+key since review round 4, still a proposal for the deferred half):
 
 ```jsonc
 "github": {
