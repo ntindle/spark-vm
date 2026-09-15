@@ -39,9 +39,14 @@ confirmation page live on the host.
 
 ## Guarantees
 
-- **Guest root is not host root.** `PrivateUsers=yes`: the container
-  runs in a user namespace; uid 0 inside maps to an unprivileged host
-  range.
+- **Guest root is not host root.** Explicit `PrivateUsers=2000000:65536`:
+  container uid 0 maps to host uid 2000000 (verify: the leader's
+  `/proc/<pid>/uid_map` must not be an identity map). `PrivateUsers=yes`
+  is deliberately NOT used: on a fresh debootstrap (host-0-owned tree)
+  it silently yields an identity map. `PrivateUsersOwnership=auto`
+  shifts the tree into the range on first boot — and it lives in the
+  `[Files]` section of the .nspawn, not `[Exec]` (nspawn ignores it in
+  `[Exec]` with "Unknown key name", leaving the tree host-root-owned).
 - **Proxy-only egress.** nftables `table inet jail` (priority -10, so
   it runs before Docker/Tailscale chains):
   - jail -> 10.99.0.1:18080/18081 is DNATed to the host proxy;
@@ -50,8 +55,11 @@ confirmation page live on the host.
     (the jail cannot SSH to the host);
   - tailnet :2222 is DNATed to the jail's sshd. Nothing else is
     forwarded in.
-- **No host secrets/state/logs inside.** No bind mounts at all
-  (`[Files]` is empty). Placeholders only.
+  - The guest HAS a default route via 10.99.0.1 (required so it can
+    reply to DNAT'd tailnet SSH); the firewall, not the route table,
+    is the egress enforcement.
+- **No host secrets/state/logs inside.** No bind mounts
+  (`[Files]` carries only `PrivateUsersOwnership`). Placeholders only.
 - **No DNS.** `/etc/resolv.conf` is empty in the guest; name
   resolution happens in the host proxy (mitmproxy CONNECTs by
   hostname, where finding 29's SSRF guard runs). Anything dialing IPs
@@ -64,8 +72,8 @@ confirmation page live on the host.
 - **Persistent, rebuildable.** The rootfs lives at
   `/var/lib/machines/jail`; `machinectl enable jail` starts it at
   boot. Everything about it is produced by `jail/build.sh` in this
-  repo — a corrupted jail is a rebuild (`build.sh --rebuild-rootfs`),
-  not a mystery.
+  repo — a corrupted jail is a rebuild, not a mystery. Rebuilds get a
+  fresh `/etc/machine-id`; guest sshd host keys live in the rootfs.
 
 ## Build
 
