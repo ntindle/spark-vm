@@ -290,8 +290,8 @@ your own SSH session:
 4. **Restart the inference proxy** and check the journal for refused
    lines (placeholder names only, never values):
    ```
-   sudo systemctl restart swap-proxy-inference
-   journalctl -u swap-proxy-inference --since "5 min ago" | grep -c refused
+   sudo systemctl restart swap-inference
+   journalctl -u swap-inference --since "5 min ago" | grep -c refused
    ```
 
 The agent writes only `hsurr:<name>` in its inference configs; the
