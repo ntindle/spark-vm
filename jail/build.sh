@@ -275,7 +275,7 @@ $SUDO cp /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem /tmp/swapd-mitmproxy.crt
 $SUDO chmod 644 /tmp/swapd-mitmproxy.crt
 $SUDO cp /tmp/swapd-mitmproxy.crt "$ROOTFS/usr/local/share/ca-certificates/swapd-mitmproxy.crt"
 run_guest /usr/sbin/update-ca-certificates >/dev/null
-rm -f /tmp/swapd-mitmproxy.crt
+$SUDO rm -f /tmp/swapd-mitmproxy.crt
 
 # ---------------------------------------------------------------- agent user
 say "agent user $JAIL_USER"
