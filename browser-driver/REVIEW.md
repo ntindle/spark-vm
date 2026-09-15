@@ -40,10 +40,11 @@ status section at the end for what v2 did and did not resolve.
 from the repo root. No mitmproxy needed. At `53a8a9a` all 15 pass.
 Keep it that way: every new proxy finding gets a test before its fix.
 
-**Order (updated at `da26910`).** Proxy: items 41 to 46 from the
-round-3 verification; 41 and 46 first, since one silently lifts a
-limit and the other tells the owner to break the inference separation.
-Box hardening: 2, 10, 11. Docs: 19, 20, 21.
+**Order (updated at `ef0f30e`).** Confirmation page: 47 and 48 before
+any answer is consumed as a grant, then 49 and 50, which shape the
+grant channel itself. Jail: 51 and 52. Then the grant channel as
+decided in the round-5 section. Box hardening still open: 10, 11.
+Docs: 19, 20, 21.
 
 **Needs the user, not just Muse.** Item 2 is the user's decision
 (option a creates a new login and changes sudo; only they can do that
@@ -355,7 +356,7 @@ sniffing). Items 19 to 22 are listed in the build plan and not done.
 spark-vm ever holds a real value" one paragraph before conceding swapd
 does, and still states unconditionally that the DOM, screenshots and
 logs contain only placeholders while listing response scrubbing as
-pending. Build plan item 0 says 24 findings; this file now has 46.
+pending. Build plan item 0 says 24 findings; this file now has 54.
 
 ### New findings from v2's on-box agent
 
@@ -814,3 +815,112 @@ worked so far, and whether to keep it that way is the owner's call.
 (`459fcb3`) re-imported a dozen commits under new hashes.
 ENVIRONMENT.md says GitHub main is authoritative, so the box clone
 should only ever pull, never be merged from.
+
+## Round 5: round-4 fixes, the jail, and the confirmation page (`3d4547e` to `ef0f30e`)
+
+Round 4 verified: 41 to 46 are done as described, the suite passes,
+and the tests for 41, 42 and 45 exercise the real behavior. The jail
+build script is careful where it matters: an explicit user-namespace
+range with the `[Files]` placement caught, proxy-only nftables ahead of
+the Docker and Tailscale chains, no bind mounts, no DNS, key-only sshd
+limited to one user, and the CA moved out of the host store. The
+confirmation page is the right shape and the right owner, and it has
+three problems that must land before an answer ever becomes a grant.
+
+47. **The jail can reach the confirmation page through the proxy, and
+    the page would see the host's own identity.** By reading; verify
+    on the box. confirmd authenticates by peer address. The proxy
+    connects from the host's own tailnet address, and `tailscale
+    whois` resolves that address to the owner's login. The jail has no
+    DNS, but the proxy resolves names for it, so from the jail
+    `with-proxy curl https://spark-vm.<tailnet>.ts.net:8443/` goes:
+    proxy, SSRF guard (the tailnet is on the allow list), TLS verified
+    against the ts.net name, confirmd, whois on the host's address,
+    owner login, 200. The IP-literal test that returned 502 failed on
+    the certificate name, not on any block. If this reproduces, the
+    jail can list and answer its own approvals. Fix, all three parts:
+    confirmd refuses any peer address that belongs to the host itself
+    (the `tailscale ip` list) or is not a remote tailnet node; the swap
+    proxy hard-denies the host's own addresses and the page's name and
+    port regardless of `ssrf.allow`, a deny list that beats the allow
+    list; and confirmd writes every 403 with peer and login to the
+    audit log. Test from the jail with the hostname, not the IP.
+
+48. **No CSRF protection on `/answer`.** By reading. Authentication is
+    by source address, the forms carry no token, and the POST handler
+    checks neither `Origin` nor `Sec-Fetch-Site`. Any page open in a
+    browser on one of the owner's tailnet devices can submit
+    `id=…&decision=approve`, and the agent knows the ids because it
+    files the requests. That is the agent-content-on-your-device
+    problem, now concrete. Fix: mint a random nonce per pending item
+    when `/approval/<id>` is served, store it in the pending file,
+    require it on POST; and reject any POST whose `Sec-Fetch-Site` is
+    not `same-origin` or whose `Origin` is not the page's own. Test:
+    a POST with a valid id and no nonce is refused.
+
+49. **Approvals are free text, not bound to a request.** By reading.
+    A pending item is `{kind, summary, detail, requester}`. Nothing
+    structured says which credential, host, method, path prefix or
+    amount is being approved, so the deferred grant record would have
+    to be built from prose the requester wrote. Fix: the item carries
+    structured fields (`credential`, `host`, `method`, `path_prefix`,
+    `scope`, `amount`, `job`), the page renders those, and any
+    agent-supplied purpose text is shown labeled as untrusted. Better:
+    swapd files the item itself when it refuses a swap for lack of a
+    grant, so the tuple comes from the actual request and no
+    model-authored text is in the approval at all. That is how the
+    reference's Sentinel produces the "user-visible purpose".
+
+50. **The requester is self-declared.** By reading. `confirm-request
+    --requester bdrive` writes a field, and the writers are whoever can
+    write the pending directory. Fix: record the requester from the
+    peer, SO_PEERCRED over a socket or the file owner via a setgid
+    directory, never from an argument, and accept only bdrive and
+    swapd. obox must never file approvals directly.
+
+51. **`route_localnet=1` is set on every interface.** By reading. The
+    DNAT to 127.0.0.1 needs it only on `ve-jail`. On `all`, the kernel
+    accepts packets addressed to 127/8 arriving on any interface, which
+    turns every loopback-bound service into something a same-L2 peer
+    can address. Set `net.ipv4.conf.ve-jail.route_localnet=1` from the
+    veth drop-in's `ExecStartPost` and leave `all` and `default` at 0.
+
+52. **Verify the agent's key is gone from `ntindle`.** The jail only
+    works if the agent can no longer log in as `ntindle`. Its old key
+    must be out of `/home/ntindle/.ssh/authorized_keys` and the
+    ControlMaster socket that reused it must be closed; otherwise the
+    jail is a second door beside an open one. Confirm, and add the
+    check to the README's verify list.
+
+53. **Nits in confirmd.** (a) Expired items stay listed, and approving
+    one silently records a deny and redirects with no message; show
+    "expired", refuse, and reap. (b) Expiry compares ISO strings; parse
+    to datetimes. (c) `HTTPServer` is single-threaded and whois can
+    take ten seconds; use `ThreadingHTTPServer`. (d) `Content-Length`
+    is unbounded; cap it. (e) Refused requests are not logged anywhere.
+    (f) The bind address is hardcoded; read it from `tailscale ip -4`.
+    (g) If swapd runs `tailscale whois` through `tailscale set
+    --operator=swapd`, that grants swapd full control of tailscaled
+    including `tailscale serve`; prefer the narrow sudoers rule the
+    design already mentions.
+
+54. **The scanner pattern `LLM_[0-9]+` matches any `LLM_` plus a digit,
+    documentation included.** Harmless, but
+    `LLM_[0-9]{3,}_[A-Za-z0-9-]{16,}` would avoid false refusals.
+
+### Grant channel: owner decisions (round 5)
+
+- **The page stays as swapd.** The split is not worth specifying now;
+  the trust boundary is the owner's Tailscale identity on the request,
+  with 47 and 48 fixed.
+- **Who files an approval.** swapd itself, when it refuses a swap for
+  lack of a grant (49), or bdrive over a peer-checked socket (50).
+  Never obox, never a self-declared requester.
+- **What a grant is.** `{credential, host, method, path_prefix, scope,
+  expires, approval_id, job}`, checked in `_resolve` before the static
+  lists, audited as a `grant=` line in the swap log, reaped on expiry,
+  revoked by bdrive at job end through the same peer-checked socket,
+  hard-capped at 24 hours. One-time means one request flow with a
+  short grace window for retries and redirects.
+- **Order.** 47 and 48 land and are verified from the jail before any
+  answer is consumed as a grant.
