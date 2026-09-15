@@ -40,10 +40,9 @@ status section at the end for what v2 did and did not resolve.
 from the repo root. No mitmproxy needed. At `53a8a9a` all 15 pass.
 Keep it that way: every new proxy finding gets a test before its fix.
 
-**Order (updated at `d22ceab`).** Proxy: items 35 to 40 from the
-round-2 verification are the next code changes; 35 first, it is a
-regression. Grant scoping: build only what the owner approved in the
-round-2 section (static methods and paths); scoped grants are deferred.
+**Order (updated at `da26910`).** Proxy: items 41 to 46 from the
+round-3 verification; 41 and 46 first, since one silently lifts a
+limit and the other tells the owner to break the inference separation.
 Box hardening: 2, 10, 11. Docs: 19, 20, 21.
 
 **Needs the user, not just Muse.** Item 2 is the user's decision
@@ -356,7 +355,7 @@ sniffing). Items 19 to 22 are listed in the build plan and not done.
 spark-vm ever holds a real value" one paragraph before conceding swapd
 does, and still states unconditionally that the DOM, screenshots and
 logs contain only placeholders while listing response scrubbing as
-pending. Build plan item 0 says 24 findings; this file now has 40.
+pending. Build plan item 0 says 24 findings; this file now has 46.
 
 ### New findings from v2's on-box agent
 
@@ -743,3 +742,75 @@ it proposes is the right one. Three things to add before building:
   anything in the jail that dials IPs directly or needs UDP, including
   ping and git over SSH, will not work by design. Git goes over HTTPS
   through `with-proxy`, as `push.sh` already does.
+
+## Round 3 verification (`6af2738`, `da26910`)
+
+Verified by reading the diff and running the suite: 34 of 34 pass.
+Findings 35 to 40 and the approved half of grant scoping are done as
+described. What holds up: `server_connect` is the right hook, and the
+live GitHub push returning 200 after deploy is evidence that pinning
+the resolved IP survives upstream TLS verification; the IPv4-mapped
+unwrap plus `is_unspecified` cover both localhost spellings; the
+marker-only file layout has a regression test for the exact
+`cred register` case; the scrub floor and whole-token TOTP match are
+right; the inference install test drives the real helper scripts; path
+normalization is correct for every shape the proxy itself can judge.
+Round 3 was deployed before review, as round 2 was. Fix-forward has
+worked so far, and whether to keep it that way is the owner's call.
+
+41. **Empty method and path lists mean unrestricted.** CONFIRMED.
+    `remove-method` of the last method leaves `[]`, and the addon
+    treats an empty list as absent. An owner who removes POST intending
+    to add PUT next leaves the token unrestricted in between, with the
+    helper printing "unlimited". Fix: an explicit empty list fails
+    closed; the helper deletes the key when the list empties and prints
+    "now unrestricted" so the state is visible. Test both.
+
+42. **Path prefixes are bypassable on servers with lenient path
+    parsing.** CONFIRMED for three shapes. Double encoding:
+    `/repos/%252e%252e/admin` normalizes to `/repos/%2e%2e/admin` and
+    passes, and a server that decodes twice sees `/admin`. Path
+    parameters: `/repos/..;/admin` passes, and Tomcat-family servers
+    collapse it to `/admin`. Backslashes: `/repos/..\admin` passes,
+    and IIS-style servers treat it as `/admin`. Fix: for a path-bound
+    credential, unquote to a fixpoint before normalizing, then refuse
+    any path that still contains `%`, `;` or `\`. Describe the control
+    as defense in depth in the spec, because the server's parser has
+    the last word. Test each shape.
+
+43. **`set-scrub` cannot opt out a single-value secret.** CONFIRMED.
+    The scrub check looks up entry `None` for single-value secrets, so
+    `set-scrub user access_token false` has no effect on a username
+    stored as its own credential. Fix: consult the `access_token` entry
+    spec for single-value secrets. Test.
+
+44. **`grants` is not a reserved key.** CONFIRMED. `RESERVED_KEYS` has
+    only the three static keys, so a future `grants` list is treated
+    as an entry name: `hsurr:api:grants` resolves to the token today,
+    and the deferred grant machinery will collide when it lands. Add
+    `grants` now, in the addon and in `cred-registry-set`.
+
+45. **Blocking DNS inside the event loop.** By reading. `_resolve_ips`
+    calls `socket.getaddrinfo` synchronously from `server_connect`,
+    which runs on mitmproxy's asyncio loop. A slow resolver stalls
+    every connection through both proxies for the duration. mitmproxy
+    accepts coroutine hooks: make `server_connect` async and await the
+    loop's `getaddrinfo`.
+
+46. **The inference recipe in SETUP.md has two errors, one a
+    separation violation.** By reading. Step 3 tells the owner to
+    append the provider "if needed" to `/home/swapd/hosts.allow`, the
+    main proxy's file, which the spec and the service unit both forbid;
+    it belongs in `inference-hosts.allow` only. Step 1 runs
+    `cred-store-set-inference` without `sudo -u swapd` and calls it a
+    prompt, but the script reads raw stdin: run as written it fails on
+    permissions and echoes the key to the terminal. Fix: `sudo -u
+    swapd`, piped input or a no-echo prompt behind a `cred` subcommand,
+    and the correct hosts file. Nobody should follow the recipe until
+    this lands.
+
+**Nits.** (a) The short-value load warning fires for entries marked
+`scrub: false` too; skip those. (b) The merge from the box clone
+(`459fcb3`) re-imported a dozen commits under new hashes.
+ENVIRONMENT.md says GitHub main is authoritative, so the box clone
+should only ever pull, never be merged from.
