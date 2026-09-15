@@ -1,6 +1,6 @@
 # Review of browser-driver/SPEC.md v1
 
-Reviewed at commit `a006f6e`; the first addendum covers `7934e0e`, and the status section at the end covers Spec v2 (`9cc21c0`, `6f6600a`), both of which landed under this review. Scope: `SPEC.md`, `proxy/swap_addon.py`,
+Reviewed at commit `a006f6e`. Later sections cover `7934e0e` (login recipe), Spec v2 (`9cc21c0`, `6f6600a`), the proxy fix `53a8a9a`, and a comparison against the reference architecture described in the Muse safety post. Scope: `SPEC.md`, `proxy/swap_addon.py`,
 `proxy/sudoers-swapd`, `proxy/hosts.allow`, `proxy/swap-proxy.service`,
 `cred`, `credlib/`, `scripts/push.sh`, `SETUP.md`. Items marked
 CONFIRMED were reproduced against the addon's pure functions with the
@@ -37,17 +37,14 @@ Move the revised one over the old path so there is one spec. See the
 status section at the end for what v2 did and did not resolve.
 
 **Runnable target.** `python3 -m unittest proxy/test_swap_addon.py`
-from the repo root. No mitmproxy needed. At `a006f6e` it reports 5
-passing, 6 failing, 1 skipped; the failing tests are items 5, 6, 7, 8,
-9 and 23, each named for its finding. The skipped test is item 1 and
-should be enabled once the registry carries `allowed_hosts`. Done means
-all of them pass and the `test_holds_*` tests still pass.
+from the repo root. No mitmproxy needed. At `53a8a9a` all 15 pass.
+Keep it that way: every new proxy finding gets a test before its fix.
 
-**Order.** Land items 1, 5, 6, 7, 8, 9 and 23 together as one proxy
-change with the tests green. Then settle items 3 and 4 with the user
-before writing `bdrive`, because the driver's `need_info` and `shot`
-semantics depend on them. Items 10 to 13 are box hardening and can go
-in parallel. The rest is spec and docs text.
+**Order (updated at `d22ceab`).** Proxy: items 35 to 40 from the
+round-2 verification are the next code changes; 35 first, it is a
+regression. Grant scoping: build only what the owner approved in the
+round-2 section (static methods and paths); scoped grants are deferred.
+Box hardening: 2, 10, 11. Docs: 19, 20, 21.
 
 **Needs the user, not just Muse.** Item 2 is the user's decision
 (option a creates a new login and changes sudo; only they can do that
@@ -359,7 +356,7 @@ sniffing). Items 19 to 22 are listed in the build plan and not done.
 spark-vm ever holds a real value" one paragraph before conceding swapd
 does, and still states unconditionally that the DOM, screenshots and
 logs contain only placeholders while listing response scrubbing as
-pending. Build plan item 0 says 24 findings; this file now has 27.
+pending. Build plan item 0 says 24 findings; this file now has 40.
 
 ### New findings from v2's on-box agent
 
@@ -399,3 +396,350 @@ pending. Build plan item 0 says 24 findings; this file now has 27.
     friends, and swapd deletes the entry when the job ends. Then the
     §15 verdict "values hidden from the agent/driver" holds for
     transient values too; today it holds only for stored ones.
+
+## Status after the proxy fix (`53a8a9a`)
+
+Verified by reading the diff and running the suite: 15 of 15 pass. The
+fix does what it says for items 1, 5, 6, 7, 8, 9 and 23, fails closed
+when a credential has no host binding, keeps `hosts.allow` as the
+outer gate, computes TOTP correctly (RFC 6238, SHA-1, 30 s, six
+digits), never touches Referer or Origin, and swaps Cookie only for a
+credential whose placement names the Cookie header. The tests Muse
+added are stricter than mine, not looser. `ENVIRONMENT.md` is a useful
+addition and is accurate about who can do what.
+
+Still open in code: 4, 22 (more important now, since a refused swap is
+only a warning), 25. Still open on the box: 2, 10, 11, 12, 13. Still
+open in docs: 19, 20, 21, the one-file spec.
+
+34. **Nits in `53a8a9a`.** (a) When one path segment changes, every
+    other segment is re-quoted with `safe=""`, so a `:`, `@` or `~` in
+    an unchanged segment becomes a percent-escape; keep the original
+    bytes for segments whose decoded form did not change. (b)
+    `allowed_hosts` is now a reserved key inside each credential's
+    registry object, next to entry names; `cred-registry-set set`
+    should reject it as an entry name or the list gets clobbered. (c)
+    `README.md` and `ENVIRONMENT.md` still describe the pre-proxy
+    `cred` with a `~/.config/spark-credentials` file backend and a
+    planned Bitwarden backend; both are stale. (d) `ENVIRONMENT.md`
+    shows a `:placement` suffix on the placeholder that the addon does
+    not parse.
+
+## Against the reference architecture
+
+The Muse safety post and architecture diagram describe the system the
+spec ports: the runtime cell, `hatch-authd`, Sentinel, `privsep`, the
+browser broker, and the client-side approval and credential-capture
+UIs. Checking the spec's comparison table against that source rather
+than the inferred contract changes several verdicts.
+
+| Reference control | spark-vm today | Status |
+|---|---|---|
+| Two isolated security domains on one box; cell root is not host root; no host secrets, no Sentinel state in the cell | Agent login is `ntindle` with passwordless sudo | Item 2. The box is the thing the post says it is not: "an LLM powered agent with root" |
+| Sentinel authorizes every concrete request at L4 and L7 (host, resolved IP, port, method, path, decoded body) before inserting the credential | Host allowlist, now per credential | Item 28 |
+| Grants are scoped capabilities: one-time, session, task, time-bounded, perpetual; later calls must match the scope exactly | Allowlist entry = perpetual grant | Item 28 |
+| Approvals go directly to the client UI, "not via their conversation with Muse", and the answer routes directly back to Sentinel | `need_info` relayed through the orchestrator | Item 3, now a regression from the reference rather than a difference |
+| SSRF validation on resolved and final IPs | None | Item 29 |
+| Inference proxy is a separate constrained path; credential insertion is on the Sentinel path only | obox's LLM calls go through the swap proxy | Item 31, root cause of 26 |
+| `hatch-safety` classifier ensemble outside the cell; harness labels external content untrusted; browser classifiers for DOM, image and file injection and high-risk forms | Model instructions only | Item 30 |
+| Browser sub-agent sees the AX tree, not the DOM, so it cannot read filled credentials; paused during fill and takeover | AX tree plus `get_html`, `get_value`, `get_attr` | Item 32 |
+| Surrogates minted by authd, opaque `[credential:<uuid>]` | Static, documented `hsurr:<name>` | Item 30 and 31 carry more weight here; see note below |
+| Unix sockets with SO_PEERCRED and peer ACLs | Socket group permissions | Item 33 |
+| Credential capture UI on the client routes straight to authd | `cred set` from the human's SSH session | Aligned |
+| Value injected into the browser window by the store while the agent is paused | Placeholder typed, swapped at egress | Aligned; see the corrected table row below |
+| Wallet issues single-use cards bound to merchant, amount and time | Orchestrator's wallet flow, relayed as a raw value | Item 27, severity lowered for cards |
+| Email connector strips OTPs, reset links and magic links | No inbox on spark-vm | Not applicable until a mail connector exists; then required |
+| Watch and take over live | noVNC planned for v2 | Already ⚠️ in the spec |
+| Malicious-site blocklist inside the VM | None | Optional; a public domain blocklist is cheap |
+
+**Corrected comparison row.** The spec's §15 says the managed agent
+delivers real values to the browser agent ("Managed: No") and scores
+spark-vm "stronger". The post says otherwise: the store injects the
+value into the browser window while the sub-agent is paused, and the
+sub-agent sees only the AX tree, so it cannot read the value before,
+during or after. Both designs hide the value from the agent. spark-vm
+additionally keeps it out of the browser process, and pays for that
+with the entire encoding and protocol surface (items 5 to 9, plus
+WebSocket, multipart and HTTP/2 coverage). The row should read
+"aligned; marginal gain; large correctness surface".
+
+**Surrogate note.** The reference's surrogates are minted by authd and
+opaque, so an attacker page cannot contain a valid one. spark-vm's
+placeholders are static and documented, so any page can contain a
+valid one. That is why items 26, 30 and 31 matter more here than in
+the reference. The schema fixes the format, but a per-job alias
+(`cred register <alias> --alias-of <name> --host …`, revoked at job
+end) would give unguessable placeholders inside the same format. Ask
+whether the cell's surrogates are per-session before deciding.
+
+**Adjusted findings.** Item 2: use the post's own framing; the goal is
+two security domains, and today there is one. Item 3: the reference
+treats direct-to-client approval as a core property, so the spec's
+"⚠️ different mechanism, same intent" understates it; the spark-vm
+analog is a pending approval that swapd or bdrive posts to a channel
+only the human can answer. Item 26: the cross-credential half is
+closed by `53a8a9a`; the rest is 30 and 31. Item 27: the reference's
+card is single-use and bound to merchant, amount and time, so a leaked
+card is of little use; keep the placeholder path as should-fix, and
+treat the one-time code relay as a stated exception, which matches the
+reference's own raw-code path.
+
+28. **No L7 policy and no grant scoping on the swap.** The reference
+    authorizes each concrete request (method, path, decoded body)
+    before inserting the credential, and every approval is a scoped
+    grant. spark-vm's allowlist entry is a perpetual, host-wide grant:
+    a bound GitHub token can be used for any request to
+    `api.github.com`, including deleting repositories. Fix: the
+    registry gains optional `allowed_methods` and `allowed_paths`
+    (prefix) per credential, checked in `_resolve` before swapping.
+    When item 3's channel exists, first-use confirmation becomes a
+    session-scoped grant that swapd records itself.
+
+29. **No SSRF or private-range guard at egress.** Through the proxy,
+    the browser and obox can reach tailnet peers (`100.64.0.0/10`),
+    RFC 1918 ranges, loopback and link-local. The reference validates
+    the resolved and final destination IP. Fix: the proxy resolves the
+    host and refuses those ranges unless the host is explicitly
+    allowlisted for them; redirects are separate requests and get the
+    same check.
+
+30. **No independent prompt-injection layer and no untrusted-content
+    labeling.** The reference stacks model training, harness labeling
+    of every external block, a classifier ensemble outside the cell,
+    and browser classifiers for DOM, image and file injection and for
+    high-risk forms. Spec v2 §11 relies on instructions to the model.
+    Fix for v1: obox wraps every page or tool block in an explicit
+    untrusted-data envelope and neutralizes `hsurr:` strings inside it
+    (item 26). v2: a classifier pass over page text and downloaded
+    files, run outside obox.
+
+31. **Inference transport shares the credential-swapping path.** The
+    reference keeps the inference proxy separate from Sentinel, so
+    page content in prompts never traverses credential insertion.
+    Spec v2 routes obox's LLM calls through swapd to inject the API
+    key, which puts the provider host in `hosts.allow` and sends every
+    prompt body through the swap. Item 1 now stops other credentials
+    from swapping there; `hsurr:llm-api` still swaps anywhere in the
+    body. Fix: a second mitmdump instance as the inference proxy, with
+    its own secrets directory holding only `llm-api`, header-only
+    placement, and the provider as its only host. obox uses it; the
+    main proxy never allowlists the provider.
+
+32. **`get_html`, `get_value` and `get_attr` deviate from AX-only
+    observation.** The reference's sub-agent cannot read the DOM, and
+    the post names that as the reason it cannot read filled
+    credentials. With placeholders in the DOM the reads are mostly
+    harmless. With a relayed one-time code or card number typed raw
+    (item 27) they are a read-back path. Fix: refuse these reads on
+    password-type inputs and on any field filled with a relayed value
+    in the current job, or resolve item 27 so nothing real is in the
+    DOM.
+
+33. **IPC should verify the peer, not just the socket mode.** The
+    reference uses SO_PEERCRED and peer ACLs. Spec v2 relies on a
+    group-owned socket. Add a SO_PEERCRED uid check in the bdrive and
+    obox daemons that accepts only the obox uid and the orchestrator
+    login. Small, and it removes the dependence on group membership
+    being right forever.
+
+## Owner decisions (2026-09-15)
+
+Recorded from the owner's answers to the seven decisions the reviewer
+put to them. Muse: treat these as settled unless marked pending.
+
+1. **The browser brain runs on spark-vm.** `obox` stays. Consequence:
+   items 26, 30 and 31 are required v1 work, not options. Build the
+   separate inference proxy (31) before obox makes its first model
+   call: its own mitmdump instance, its own secrets directory holding
+   only `llm-api`, header-only placement, the provider as its only
+   host, and the provider never in the main proxy's `hosts.allow`.
+   Wrap every page or tool block in an untrusted-data envelope and
+   neutralize `hsurr:` strings inside it (30, 26). Keep 32's read
+   restrictions.
+
+2. **The agent login becomes a jail, not just a user.** Direction:
+   mirror the cell on spark-vm. Muse's SSH login lands in a
+   systemd-nspawn container: rootful inside (guest root is not host
+   root), its own rootfs, package installs free inside, a veth whose
+   only egress is the swap proxy on the host, and no host secrets,
+   swapd state, bdrive state or audit log inside. swapd, bdrive, the
+   audit log and the confirmation page live on the host. Two asks for
+   Muse before design: describe how your own cell treats package
+   installs and egress approvals (the allowlist and approval model),
+   the same interview method used for Spec v2, so the jail can mirror
+   it; and account for Docker, which is a host escape if the jail can
+   reach the host socket (rootless Docker or podman inside the
+   container, or none). This resolves item 2 by option (a) in its
+   stronger form. Until it lands, ENVIRONMENT.md's rule stands: the
+   implementer can become root.
+
+3. **Confirmation channel: a tailnet page.** swapd or bdrive serves a
+   small page reachable only over the tailnet, authenticated by
+   Tailscale identity, where pending approvals and first-use
+   confirmations are answered. Nothing routes through obox or the
+   orchestrator. Item 3 is decided; the page is part of bdrive v1.
+
+4. **Grant scoping (item 28): Muse proposes.** The owner wants a
+   written proposal for per-credential method and path limits and for
+   grant lifetimes, submitted for review before any implementation.
+   Put it in the spec as a proposal section with the registry schema
+   it would need.
+
+5. **Audit log placement (item 12): decided, leave it on the box.**
+   No forwarding, no append-only flag. It is a verification aid, and
+   the long-term direction the spec already names in §17, moving the
+   whole swapd side off the box, makes it a control later without any
+   interim work.
+
+   **CA trust (item 13): decided, system-wide inside the jail.** The
+   swapd CA goes into the jail's own rootfs trust store, because
+   everything in the jail is meant to go through the proxy. When the
+   jail lands, remove the CA from the host's store; nothing on the
+   host needs it (swapd, sshd, tailscaled and host apt must never go
+   through the proxy, and Chromium reads its NSS database, not the
+   system store, so the `certutil` step in the login recipe stays).
+   Until the jail exists, leave the host as it is. `with-proxy` keeps
+   setting `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE`
+   regardless: Node, Python `requests` and Java ignore the system
+   store.
+
+6. **Transient credentials (item 27): accept the one-time-code
+   exception; build the card pathway.** Cards get a job-scoped,
+   expiring, merchant-bound placeholder entry installed through a
+   narrow helper, filled as `hsurr:card-<job>:number` and friends,
+   and deleted at job end. Design the helper as part of §7. The
+   one-time-code relay stays as a stated exception.
+
+7. **Private-range guard (item 29): approved, default-deny.** Implement
+   the guard with an explicit allow list. The tailnet is on that list
+   for now; the default for a fresh install is deny.
+
+## Round 2 verification (`f8d825c`, `d22ceab`)
+
+Muse's handoff message said the round-2 proxy work was implemented and
+deployed on the box but not pushed. It is pushed: `f8d825c` carries the
+addon, tests, service unit, helpers and allow files. The suite passes,
+22 of 22, and the tests Muse added are hermetic and strict. Findings
+4, 22, 25, 29, 31 and the 34 nits are addressed as described. The
+verification below found one regression, two guard bypasses, one
+deployment gap, and one correctness hazard, all reproduced against the
+addon.
+
+**Recommendation to the owner: fix forward, no rollback.** Item 35
+does not affect the GitHub credential as it is bound on the box today,
+36 only bites on short secrets, and 37 and 38 weaken a guard that did
+not exist before rather than anything that was protected. Until 35 is
+fixed, nobody should run `cred register` on a single-value credential.
+
+35. **Regression: `cred register` on a single-value secret makes it
+    never swap.** CONFIRMED. `_load_secret_file` treats a file as
+    multi-entry whenever the registry declares any entry, and `cred
+    register <name> --host <h>` always writes the default
+    `access_token` entry before adding the host. A bare-token file then
+    parses to an empty dict, and every swap of that credential returns
+    nothing. It works on the box today only because the GitHub binding
+    was added with `add-host` directly, skipping `set`; anyone
+    following the CLI's own usage line breaks their credential
+    silently. Fix: make the `#hsurr:multi` marker the sole source of
+    file layout. Registry entries describe placements, not file
+    format. Test: a bare file plus a registry with `access_token` must
+    load as the single value and swap.
+
+36. **Response scrubbing has no minimum length and scrubs non-secret
+    entries.** CONFIRMED. A one-character password turns "Next" into
+    "Nehsurr:acme:passwordt" on every page from that host, and a
+    `username` entry rewrites "Welcome jdoe". Fix: skip values under
+    eight characters and warn at load that such a secret cannot be
+    scrubbed; let the registry mark an entry `scrub: false` for
+    usernames and emails; match TOTP codes only as whole tokens, since
+    a six-digit code collides with prices and IDs.
+
+37. **The private-range guard misses `0.0.0.0/8` and IPv4-mapped
+    IPv6.** CONFIRMED. `0.0.0.0` and `::ffff:127.0.0.1` both pass, and
+    both reach localhost on Linux. Fix: unwrap `addr.ipv4_mapped`
+    before checking, and add `0.0.0.0/8`, `192.0.0.0/24`,
+    `198.18.0.0/15` and `240.0.0.0/4`. Test each literal.
+
+38. **The guard runs after the upstream TCP connect.** By reading.
+    mitmproxy's default connection strategy is eager: it connects to
+    the upstream host when the client connects, to read the server
+    certificate, so by the time the `request` hook refuses, a TCP
+    connection to the private address has already been made. That is
+    enough to port-scan the tailnet. The right hook is
+    `server_connect`, which runs before the connect. It also gives the
+    DNS-pinning fix Muse listed as later work: resolve there, refuse by
+    setting the connection's error, or set the server address to the
+    resolved IP so the check and the connect use the same answer.
+    Verify the hook's signature against the mitmproxy version in the
+    venv.
+
+39. **The inference proxy has no narrow path to populate its
+    registry.** By reading. `_resolve` fails closed without an
+    `allowed_hosts` binding, the inference instance reads
+    `inference-registry.json`, and `cred-registry-set` writes only
+    `credentials.json` unless `CRED_REGISTRY_FILE` is set, which sudo's
+    `env_reset` strips. There is a store setter and a hosts appender
+    for inference, but no registry writer. Either the file was
+    hand-edited on the box or the inference proxy cannot swap. Fix: a
+    fixed-path `cred-registry-set-inference`, or an `--inference` flag
+    handled inside the root-owned script, plus a sudoers line, plus a
+    test that the instance swaps after the documented install steps.
+
+40. **Nits.** (a) A placeholder seen for a non-allowlisted host is a
+    journal warning only, not a `refused=` audit line; parse the name
+    with the placeholder regex and audit it. (b) Multi-entry parsing
+    silently drops lines that do not match `k=v`; warn. (c) The
+    scrub size cap is checked after decoding the whole body; check
+    `len(resp.content)` first. (d) The response hook buffers whole
+    bodies, so obox must not depend on streamed provider responses.
+
+### Grant-scoping proposal (spec §6): owner review
+
+**Approve now:** `allowed_methods` and `allowed_paths` as static
+registry fields, checked in `_resolve` before swapping, absent means
+unrestricted for migration. Requirements: compare paths after
+percent-decoding and dot-segment normalization so `/repos/../admin`
+cannot pass a `/repos/` prefix; make prefixes segment-aligned so
+`/repos/` matches `/repos/x` and not `/repository`; uppercase methods.
+The owner should bind methods for every write-capable token at install
+time even though the field is optional.
+
+**Defer:** `grants` with `session` and `task` scopes. The proxy cannot
+attribute a request to a bdrive session or an obox job: sessions are
+tabs in one shared browser context (spec §3), and the proxy sees one
+Chromium connection pool. Without attribution, a session-scoped grant
+is a time-bounded grant with a misleading name. For v1 keep `one-time`
+and `time-bounded` only, with bdrive, which is trusted and on the host,
+telling swapd when a job ends so swapd revokes. `one-time` must mean
+one request flow, not one regex match, and needs a short grace window
+because browsers retry and follow redirects.
+
+**Open questions answered.** The card pathway stays as job-scoped
+placeholder entries, not one-time grants, because checkout forms
+re-submit and a one-time grant fails on the retry. Grants go to the
+same audit log as `grant=` lines; no second log. A grant's default
+expiry is job end via bdrive's revoke, with a hard cap of 24 hours for
+anything left unrevoked. One gap in the proposal: the `cred-grant`
+writer is "callable only from the confirmation page's backend", but
+the page is served by bdrive and bdrive is not swapd; specify the
+socket and the peer check between them.
+
+### Jail document (`jail/cell-mirror.md`)
+
+Accurate about what is observed and what is inferred, and the mirror
+it proposes is the right one. Three things to add before building:
+
+- **How the SSH login lands in the jail.** Either sshd inside the jail
+  bound to the veth address with the host forwarding the tailnet port,
+  or the host's sshd with a per-user forced command into the container.
+  The choice decides where the host keys and the ControlMaster socket
+  live.
+- **The jail is persistent, not disposable.** The cell is replaced
+  without warning; this box is a workhorse. Keep "rebuildable from the
+  repo" as the property and drop the assumption that installs vanish.
+- **Container runtime inside nspawn.** Rootless Docker needs nested
+  user namespaces and subuid ranges inside the container; podman is
+  more likely to work. Budget time for it, and say in the document that
+  anything in the jail that dials IPs directly or needs UDP, including
+  ping and git over SSH, will not work by design. Git goes over HTTPS
+  through `with-proxy`, as `push.sh` already does.
