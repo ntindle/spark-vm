@@ -40,7 +40,10 @@ if [ "$REBUILD_ROOTFS" = 1 ]; then
     say "removing existing rootfs (--rebuild-rootfs)"
     $SUDO rm -rf "$ROOTFS"
 fi
-if [ ! -x "$ROOTFS/bin/bash" ]; then
+# NOTE: the test must run under sudo — the rootfs is root-owned and not
+# traversable by the invoking user, so an unprivileged -x test always
+# fails and would re-bootstrap over a good tree.
+if ! $SUDO test -x "$ROOTFS/bin/bash"; then
     say "debootstrap noble -> $ROOTFS (a few minutes)"
     $SUDO mkdir -p /var/lib/machines
     $SUDO debootstrap noble "$ROOTFS" http://archive.ubuntu.com/ubuntu/
