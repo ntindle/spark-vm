@@ -585,8 +585,20 @@ put to them. Muse: treat these as settled unless marked pending.
    Put it in the spec as a proposal section with the registry schema
    it would need.
 
-5. **Audit log placement and CA trust (items 12, 13): pending.** The
-   owner is deciding. Do not change either yet.
+5. **Audit log placement (item 12): pending.** The owner is deciding.
+   Do not change it yet.
+
+   **CA trust (item 13): decided, system-wide inside the jail.** The
+   swapd CA goes into the jail's own rootfs trust store, because
+   everything in the jail is meant to go through the proxy. When the
+   jail lands, remove the CA from the host's store; nothing on the
+   host needs it (swapd, sshd, tailscaled and host apt must never go
+   through the proxy, and Chromium reads its NSS database, not the
+   system store, so the `certutil` step in the login recipe stays).
+   Until the jail exists, leave the host as it is. `with-proxy` keeps
+   setting `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE`
+   regardless: Node, Python `requests` and Java ignore the system
+   store.
 
 6. **Transient credentials (item 27): accept the one-time-code
    exception; build the card pathway.** Cards get a job-scoped,
