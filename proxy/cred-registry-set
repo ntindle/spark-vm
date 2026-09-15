@@ -3,6 +3,8 @@
 # Invoked as swapd via sudo:
 #   cred-registry-set set <name> <entry> <placement-json>
 #   cred-registry-set remove <name> [entry]
+#   cred-registry-set add-host <name> <host>
+#   cred-registry-set remove-host <name> <host>
 # Merges into /home/swapd/credentials.json atomically (0600, swapd-owned).
 # Root-owned 0755; ntindle can only execute it via the sudoers entry.
 set -euo pipefail
@@ -15,13 +17,19 @@ def fail(msg):
     sys.exit(1)
 
 args = sys.argv[1:]
-if not args or args[0] not in ("set", "remove"):
-    fail("usage: set <name> <entry> <placement-json> | remove <name> [entry]")
+if not args or args[0] not in ("set", "remove", "add-host", "remove-host"):
+    fail("usage: set <name> <entry> <placement-json> | remove <name> [entry] "
+         "| add-host <name> <host> | remove-host <name> <host>")
 action = args[0]
 
 def check(s, what):
     if not re.match(r"^[A-Za-z0-9_-]+$", s or ""):
         fail("invalid %s %r" % (what, s))
+
+def check_host(h):
+    if not re.match(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$", h or ""):
+        fail("invalid host %r" % (h,))
+    return h.lower()
 
 reg_path = "/home/swapd/credentials.json"
 reg = {}
@@ -64,7 +72,7 @@ if action == "set":
     reg.setdefault(name, {})[entry] = {"placement": placement}
     save()
     print("registered '%s' entry '%s'" % (name, entry))
-else:
+elif action == "remove":
     if len(args) not in (2, 3):
         fail("usage: cred-registry-set remove <name> [entry]")
     name = args[1]
@@ -81,5 +89,26 @@ else:
     else:
         del reg[name]
         print("unregistered '%s'" % (name,))
+    save()
+elif action in ("add-host", "remove-host"):
+    if len(args) != 3:
+        fail("usage: cred-registry-set %s <name> <host>" % action)
+    name = args[1]
+    check(name, "name")
+    host = check_host(args[2])
+    entry = reg.setdefault(name, {})
+    if not isinstance(entry, dict):
+        fail("registry entry for '%s' is not an object" % (name,))
+    hosts = entry.setdefault("allowed_hosts", [])
+    if not isinstance(hosts, list):
+        fail("allowed_hosts for '%s' is not a list" % (name,))
+    if action == "add-host":
+        if host not in hosts:
+            hosts.append(host)
+        print("bound '%s' to host '%s'" % (name, host))
+    else:
+        if host in hosts:
+            hosts.remove(host)
+        print("unbound '%s' from host '%s'" % (name, host))
     save()
 PYEOF

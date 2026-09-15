@@ -8,9 +8,10 @@ minimal fake flow exposing only the attributes request() reads. If
 mitmproxy is installed, mitmproxy.test.tflow can replace the fake.
 
 Tests named test_bug_* encode the expected behaviour from
-browser-driver/REVIEW.md and FAIL at a006f6e on purpose. Tests named
-test_holds_* pass today and guard against regressions. Nothing here
-touches /home/swapd: reload and audit are stubbed out.
+browser-driver/REVIEW.md. Tests named test_holds_* pass today and guard
+against regressions. Nothing here touches /home/swapd: reload and audit
+are stubbed out, and make_addon injects the registry (per-credential
+allowed_hosts) directly.
 """
 
 import base64
@@ -88,16 +89,29 @@ SECRETS = {
     "github": "ghp_TOKEN",
     "openai": "sk-OPENAI",
     "pw": 'p&ss=w"o\\rd%7d',
+    "sess": "sess-SECRET",
     "acme": {"username": "jdoe", "password": "correct horse",
              "totp": "JBSWY3DPEHPK3PXP"},
 }
 HOSTS = ["github.com", "api.github.com", "acme.example.com"]
+# Per-credential host bindings (REVIEW item 1). hosts.allow stays the outer
+# gate; a credential swaps only where BOTH allow it.
+REGISTRY = {
+    "github": {"allowed_hosts": ["github.com", "api.github.com"]},
+    "openai": {"allowed_hosts": ["api.openai.com"]},
+    "pw": {"allowed_hosts": ["github.com", "api.github.com"]},
+    "sess": {"allowed_hosts": ["github.com"],
+             "access_token": {"placement": {"custom_header": "Cookie"}}},
+    "acme": {"allowed_hosts": ["acme.example.com"]},
+}
 
 
-def make_addon(secrets=SECRETS, hosts=HOSTS):
+def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY):
     a = sa.SwapAddon.__new__(sa.SwapAddon)
     a.secrets = dict(secrets)
     a.hosts = list(hosts)
+    a.registry = {k: (dict(v) if isinstance(v, dict) else v)
+                  for k, v in registry.items()}
     a._store_mtime = a._hosts_mtime = None
     a._maybe_reload = lambda: None      # never touch /home/swapd here
     a._audit = lambda host, matched: None
@@ -224,14 +238,68 @@ class SwapAddonTests(unittest.TestCase):
         self.assertIn(code, {totp("JBSWY3DPEHPK3PXP", now),
                              totp("JBSWY3DPEHPK3PXP", now - 30)})
 
-    @unittest.skip("REVIEW items 1 and 26 need a per-credential "
-                   "allowed_hosts list in the registry first; then assert "
-                   "that hsurr:openai is NOT swapped for github.com even "
-                   "though github.com is in hosts.allow, and that "
-                   "hsurr:github is NOT swapped into a JSON prompt body "
-                   "sent to the allowlisted LLM provider host.")
     def test_bug_credential_bound_to_its_own_hosts(self):
-        pass
+        """REVIEW item 1: a credential swaps only on its bound hosts, even
+        when the request host is in hosts.allow."""
+        a = make_addon()
+        # openai is bound to api.openai.com only: github.com is allowlisted
+        # but the swap must be refused there.
+        self.assertEqual(a._swap_text("body=hsurr:openai", "github.com"),
+                         "body=hsurr:openai")
+        req = Request("github.com", "/v1/chat",
+                      [("Authorization", "Bearer hsurr:openai")],
+                      b'{"model":"x"}')
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer hsurr:openai")
+        self.assertEqual(req.content, b'{"model":"x"}')
+        # ... while the bound host swaps fine (outer gate also allows it).
+        b = make_addon(hosts=HOSTS + ["api.openai.com"])
+        req = Request("api.openai.com", "/v1/chat",
+                      [("Authorization", "Bearer hsurr:openai")])
+        b.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer sk-OPENAI")
+        # Fail closed: a credential with no registry entry never swaps,
+        # even on an allowlisted host.
+        c = make_addon(registry={})
+        self.assertEqual(c._swap_text("body=hsurr:github", "github.com"),
+                         "body=hsurr:github")
+
+    def test_bug_origin_is_not_swapped(self):
+        """REVIEW item 8: Origin, like Referer, must never be swapped."""
+        a = make_addon()
+        req = Request("github.com", "/x",
+                      [("Origin", "https://github.com/hsurr:github")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Origin"),
+                         "https://github.com/hsurr:github")
+
+    def test_bug_cookie_swapped_only_with_cookie_placement(self):
+        """REVIEW item 8: Cookie swaps only for credentials whose registry
+        placement explicitly names the Cookie header."""
+        a = make_addon()
+        # 'sess' has {"custom_header": "Cookie"}: swapped.
+        req = Request("github.com", "/x", [("Cookie", "sess=hsurr:sess")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Cookie"), "sess=sess-SECRET")
+        # 'github' has no Cookie placement: untouched, even mixed with one
+        # that does.
+        req = Request("github.com", "/x",
+                      [("Cookie", "t=hsurr:github; sess=hsurr:sess")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Cookie"),
+                         "t=hsurr:github; sess=sess-SECRET")
+
+    def test_bug_subdomain_binding_matches(self):
+        """Item 1: a leading-dot allowed_hosts entry matches subdomains,
+        the same shape ensure_allowed_url takes."""
+        reg = {"openai": {"allowed_hosts": [".example.com"]}}
+        a = make_addon(hosts=["api.example.com"], registry=reg)
+        self.assertEqual(
+            a._swap_text("k=hsurr:openai", "api.example.com"), "k=sk-OPENAI")
+        self.assertEqual(
+            a._swap_text("k=hsurr:openai", "other.com"), "k=hsurr:openai")
 
 
 if __name__ == "__main__":

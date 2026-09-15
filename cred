@@ -12,7 +12,12 @@ This CLI reaches that store ONLY through narrow sudo helpers:
   cred list           list stored credential names (never values)
   cred delete <name>  delete a stored credential
   cred register <name> [--entry <entry>] [--placement <spec>]
-                      record a credential's request placement in the registry
+                      [--host <h>]...
+                      record a credential's request placement in the registry,
+                      and bind it to the hosts it may be swapped for
+                      (repeatable; a credential with no host binding never
+                      swaps). The swapping proxy additionally requires the
+                      host in hosts.allow.
   cred unregister <name> [--entry <entry>]
                       remove a credential's registry entry
   cred run -- <cmd> [args...]
@@ -59,6 +64,18 @@ def check_name(name):
             "invalid credential name %r \u2014 use only [A-Za-z0-9_-]" % (name,)
         )
     return name
+
+
+HOST_RE = re.compile(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$")
+
+
+def check_host(host):
+    """Validate an allowed-host binding: exact hostname or a leading-dot
+    subdomain entry (".example.com"), the same shape hosts.allow takes."""
+    h = (host or "").lower()
+    if not HOST_RE.match(h):
+        raise CredentialError("invalid host %r" % (host,))
+    return h
 
 
 def get_backend_kind():
@@ -109,11 +126,14 @@ USAGE = """usage: cred <command> [args]
   cred list                    list stored credential names (never values)
   cred delete <name>           delete a stored credential
   cred register <name> [--entry <entry>] [--placement <spec>]
+                      [--host <h>]...
                                record how a credential is placed into requests
                                (registry; default entry access_token, placement
                                bearer_header). <spec>: bearer_header |
                                custom_header:<Name> | query_param:<name> |
-                               url_path_segment
+                               url_path_segment. --host binds the credential
+                               to a host it may be swapped for (repeatable;
+                               a credential with no host binding never swaps).
   cred unregister <name> [--entry <entry>]
                                remove a credential's registry entry
   cred run -- <cmd> [args...]  exec cmd with traffic routed through the
@@ -200,10 +220,12 @@ def cmd_register(args):
     args = _strip_dashdash(args)
     if not args:
         raise CredentialError(
-            "usage: cred register <name> [--entry <entry>] [%s]" % PLACEMENT_USAGE)
+            "usage: cred register <name> [--entry <entry>] [%s] [--host <h>]..."
+            % PLACEMENT_USAGE)
     name = check_name(args[0])
     entry = "access_token"
     placement = "bearer_header"
+    hosts = []
     rest = args[1:]
     i = 0
     while i < len(rest):
@@ -213,15 +235,26 @@ def cmd_register(args):
         elif rest[i] == "--placement" and i + 1 < len(rest):
             placement = parse_placement(rest[i + 1])
             i += 2
+        elif rest[i] == "--host" and i + 1 < len(rest):
+            hosts.append(check_host(rest[i + 1]))
+            i += 2
         else:
             raise CredentialError(
-                "usage: cred register <name> [--entry <entry>] [%s]" % PLACEMENT_USAGE)
+                "usage: cred register <name> [--entry <entry>] [%s] "
+                "[--host <h>]..." % PLACEMENT_USAGE)
     p = run_as_swapd(["/usr/local/bin/cred-registry-set", "set",
                       name, entry, json.dumps(placement)])
     if p.returncode != 0:
         err = p.stderr.decode("utf-8", "replace").strip()
         raise CredentialError(err or "cred-registry-set failed")
     sys.stdout.write(p.stdout.decode("utf-8", "replace"))
+    for h in hosts:
+        p = run_as_swapd(["/usr/local/bin/cred-registry-set", "add-host",
+                          name, h])
+        if p.returncode != 0:
+            err = p.stderr.decode("utf-8", "replace").strip()
+            raise CredentialError(err or "cred-registry-set failed")
+        sys.stdout.write(p.stdout.decode("utf-8", "replace"))
 
 
 def cmd_unregister(args):
