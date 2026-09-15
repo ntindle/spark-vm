@@ -98,7 +98,8 @@ table inet jail {
         # config never changes and is never exposed on a real interface.
         iifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat to 127.0.0.1
         # Tailnet -> jail sshd (the agent login). Tailnet interface only.
-        iifname "tailscale0" tcp dport 2222 dnat to 10.99.0.2:22
+        # (dnat ip: inet-family tables need the address family explicit.)
+        iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22
     }
     chain input {
         type filter hook input priority -10; policy accept;
