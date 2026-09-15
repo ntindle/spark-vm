@@ -159,5 +159,7 @@ After (re)building, confirm the isolation properties hold:
   (only the owner's Termius key remains); no ControlMaster socket to the
   host exists for the agent. The jail is the only door.
   ```bash
-  sudo grep -c "hatch" /home/ntindle/.ssh/authorized_keys  # must be 0
+  # Finding 63(c): list key fingerprints, do not grep for a name.
+  # Only the owner's Termius key should be present.
+  sudo ssh-keygen -l -f /home/ntindle/.ssh/authorized_keys
   ```

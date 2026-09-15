@@ -1,0 +1,9 @@
+# ssrf.deny — hosts the swap proxy must never egress to, even if listed
+# in ssrf.allow. Finding 47: the jail must not impersonate the owner by
+# reaching the host's own tailnet addresses.
+#
+# The tailnet DNS name is not secret and is committed here. The host's
+# numeric tailnet IPs are filled in by proxy/deploy.sh from
+# `tailscale ip` at deploy time (they are box-specific).
+spark-vm.axolotl-sirius.ts.net
+# --- deploy.sh appends the host's tailscale IPs below ---
