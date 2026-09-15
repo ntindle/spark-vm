@@ -270,6 +270,9 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 X11Forwarding no
 AllowUsers '"$JAIL_USER"'
+# Let ~/.ssh/environment set session env (proxy vars for non-interactive
+# ssh commands, which do not source /etc/profile.d).
+PermitUserEnvironment yes
 EOF
 passwd -l root'
 
@@ -301,6 +304,17 @@ echo "$KEY" > "/home/$U/.ssh/authorized_keys"
 chmod 700 "/home/$U/.ssh"
 chmod 600 "/home/$U/.ssh/authorized_keys"
 chown -R "$U:$U" "/home/$U/.ssh"
+# ~/.ssh/environment: proxy vars for every SSH session, including
+# non-interactive commands (which skip /etc/profile.d). Requires
+# PermitUserEnvironment yes in sshd_config (set above).
+cat > "/home/$U/.ssh/environment" <<EOF
+https_proxy=http://10.99.0.1:18080
+http_proxy=http://10.99.0.1:18080
+HTTPS_PROXY=http://10.99.0.1:18080
+HTTP_PROXY=http://10.99.0.1:18080
+EOF
+chmod 600 "/home/$U/.ssh/environment"
+chown "$U:$U" "/home/$U/.ssh/environment"
 GUEST_EOF
 # Guest sshd host keys (generated once, live in the jail rootfs).
 run_guest /usr/bin/ssh-keygen -A
