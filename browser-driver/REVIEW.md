@@ -1358,3 +1358,20 @@ lookup with origins printed at startup; dedicated lock file), 68 tests
 passing across four files. Branch merged into main. Next: the owner
 runs `proxy/deploy.sh`, deletes `answered.hold`, and performs one real
 approve and one real deny from his phone.
+
+**Grant channel: accepted (2026-09-15 07:46 UTC).** The owner deployed
+`bba306a` with `proxy/deploy.sh`, created two test approvals, and
+answered them from his phone. Audit log: two `answer` events from a
+remote tailnet peer with the owner's login, one approve and one deny.
+`grant-writer list` showed exactly one active grant, for the approved
+tuple; `cred-grant-revoke --job` removed it. That exercises identity
+(47), the nonce and Origin checks with the real ts.net origin (48, 57,
+67), structured items (49), file-owner requester (50), one-way
+consumption (56), the single writer (60, 68) and revocation. The grant
+channel is done. Round 8, `bdrive` v1, is released.
+
+69(e). **`deploy.sh` warns "ssrf.deny missing" falsely.** The final
+check runs `[ -f ]` without sudo against swapd's 0700 home, so it
+always fails. Use `sudo test -f`. The owner should confirm once with
+`sudo cat /home/swapd/ssrf.deny` that the ts.net name and both tailnet
+IPs are present; the proxy also warns at load if the file is absent.
