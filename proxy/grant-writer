@@ -4,7 +4,8 @@
 Finding 60: three writers (proxies' _save_registry, cred-registry-set,
 cred-grant-revoke) raced on credentials.json with no lock. Grants now
 live in their own file, and this script is the ONLY writer. It holds an
-exclusive fcntl lock while reading, modifying, and atomically writing.
+exclusive fcntl lock on a dedicated lock file (grants.json.lock, never
+replaced) while reading, modifying, and atomically writing (finding 68).
 
 Called by:
 - confirmd on approve (mints a grant)
@@ -27,6 +28,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 GRANTS_FILE = os.environ.get("SWAP_GRANTS_FILE", "/home/swapd/grants.json")
+GRANTS_LOCK = os.environ.get("SWAP_GRANTS_LOCK", GRANTS_FILE + ".lock")
 AUDIT_LOG = os.environ.get("SWAP_LOG_FILE", "/home/swapd/swap.log")
 
 
@@ -39,22 +41,23 @@ def _audit(msg):
         pass
 
 
-def _load_locked(f):
-    """Read grants from an already-locked file object."""
+def _load_grants():
+    """Read grants from the data file. The caller holds the lock file."""
     try:
-        f.seek(0)
-        data = json.load(f)
-        if isinstance(data, dict):
-            grants = data.get("grants")
-            if isinstance(grants, list):
-                return grants
+        with open(GRANTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                grants = data.get("grants")
+                if isinstance(grants, list):
+                    return grants
     except (ValueError, OSError):
         pass
     return []
 
 
-def _save_locked(f, grants):
-    """Atomically write grants to an already-locked file object."""
+def _save_grants(grants):
+    """Atomically write grants via temp-and-rename so readers never see
+    a partial file. The caller holds the lock file."""
     tmp = GRANTS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as t:
         json.dump({"grants": grants}, t, indent=2)
@@ -81,16 +84,24 @@ def _reap_expired(grants):
 
 
 def _with_lock(fn):
-    """Run fn(grants) -> (new_grants, audit_msg) under exclusive lock."""
-    # Open for read/write, create if missing.
-    fd = os.open(GRANTS_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    """Run fn(grants) -> (new_grants, audit_msg) under exclusive lock.
+
+    Finding 68: the lock lives on a DEDICATED lock file that is never
+    replaced. The old code flocked the open grants.json and then renamed
+    a temp file over it: a second writer that opened before the rename
+    held the old inode's lock, read stale content after the first
+    unlocked, and its rename discarded the first writer's grant. The
+    data file still uses temp-and-rename so readers never see partial
+    content, but locking always lands on the same inode now.
+    """
+    fd = os.open(GRANTS_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         with os.fdopen(fd, "r+") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             try:
-                grants = _reap_expired(_load_locked(f))
+                grants = _reap_expired(_load_grants())
                 new_grants, audit_msg = fn(grants)
-                _save_locked(f, new_grants)
+                _save_grants(new_grants)
                 if audit_msg:
                     _audit(audit_msg)
                 return new_grants

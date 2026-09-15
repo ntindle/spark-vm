@@ -3,11 +3,13 @@
 The single writer for grants.json. Run with:
     python3 -m unittest proxy.test_grant_writer -v
 """
+import fcntl
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -120,6 +122,64 @@ class GrantWriterTests(unittest.TestCase):
                 "--method", "POST", "--approval-id", "dup1")
         grants = self.read_grants()
         self.assertEqual(len(grants), 1)
+
+    # --- 68: dedicated lock file ---------------------------------------
+
+    def _lock_path(self):
+        return self.grants_file + ".lock"
+
+    def _add_args(self, aid):
+        return ("add", "--credential", "github", "--host", "github.com",
+                "--method", "POST", "--approval-id", aid)
+
+    def test_68_lock_blocks_second_writer(self):
+        """Finding 68: the lock is a dedicated file that is never
+        replaced. Hold it artificially in this process; a second writer
+        must block until it is released. With the old inode-replaced
+        lock the second writer would proceed (it locked a different
+        inode) and this test would fail."""
+        fd = os.open(self._lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        results = []
+        try:
+            t = threading.Thread(
+                target=lambda: results.append(
+                    self.run_writer(*self._add_args("locked1"))))
+            t.start()
+            t.join(timeout=5)
+            self.assertTrue(t.is_alive(),
+                            "second writer did not block on the lock file")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        t.join(timeout=15)
+        self.assertFalse(t.is_alive(), "second writer never finished")
+        self.assertEqual(results[0].returncode, 0, results[0].stderr)
+        grants = self.read_grants()
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(grants[0]["approval_id"], "locked1")
+
+    def test_68_two_writers_no_loss(self):
+        """Finding 68: two writers racing adds — both grants survive.
+        This is the lost-grant scenario from the finding: one writer's
+        rename discarding the other's grant."""
+        start = threading.Barrier(2)
+        codes = [None, None]
+
+        def writer(i, aid):
+            start.wait()
+            r = self.run_writer(*self._add_args(aid))
+            codes[i] = r.returncode
+
+        threads = [threading.Thread(target=writer, args=(i, aid))
+                   for i, aid in enumerate(("race1", "race2"))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        self.assertEqual(codes, [0, 0])
+        ids = sorted(g["approval_id"] for g in self.read_grants())
+        self.assertEqual(ids, ["race1", "race2"])
 
 
 if __name__ == "__main__":

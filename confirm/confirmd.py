@@ -59,19 +59,25 @@ BIND = os.environ.get("CONFIRM_BIND") or _tailnet_ip4() or "100.65.241.20"
 # Finding 57: the page's own origins, exact-matched with port.
 # Served at the tailnet IP (BIND) and the ts.net DNS name.
 def _tailnet_dnsname():
-    try:
-        out = subprocess.run(["tailscale", "status", "--json"],
-                             capture_output=True, text=True, timeout=10)
-        if out.returncode == 0:
-            import json as _json
-            data = _json.loads(out.stdout)
-            name = data.get("Self", {}).get("DNSName", "")
-            # "spark-vm.axolotl-sirius.ts.net." -> strip trailing dot
-            name = name.rstrip(".")
-            if name:
-                return name
-    except Exception:
-        pass
+    """Finding 67: sudo-first, like _host_addrs. A narrow sudoers rule
+    for `tailscale status --json` exists; use it. If unprivileged
+    status fails as swapd, PAGE_ORIGINS would hold only the IP origin
+    and every real browser POST would 403 (finding 57 again)."""
+    for cmd in (["sudo", "-n", "tailscale", "status", "--json"],
+                ["tailscale", "status", "--json"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True,
+                                 timeout=10)
+            if out.returncode == 0:
+                import json as _json
+                data = _json.loads(out.stdout)
+                name = data.get("Self", {}).get("DNSName", "")
+                # "spark-vm.axolotl-sirius.ts.net." -> strip trailing dot
+                name = name.rstrip(".")
+                if name:
+                    return name
+        except Exception:
+            continue
     return None
 
 def _page_origins():
@@ -532,6 +538,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    # Finding 67: print the resolved origins at startup so the journal
+    # shows them; a missing ts.net name must be visible, not silent.
+    print("confirmd PAGE_ORIGINS=%s" % sorted(PAGE_ORIGINS), flush=True)
     for d in (pending_dir(), answered_dir(), consumed_dir()):
         os.makedirs(d, exist_ok=True)
     import ssl

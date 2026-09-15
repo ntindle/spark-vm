@@ -59,6 +59,61 @@ class ConfirmdTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    # --- 67: sudo-first dnsname; unprivileged failure must not drop ---
+    # --- the ts.net origin ----------------------------------------------
+
+    def test_67_unprivileged_status_fails(self):
+        """The unprivileged call fails as swapd; sudo still works."""
+        def fake(cmd, **kwargs):
+            class R:
+                returncode = 0
+                stdout = json.dumps({
+                    "Self": {"DNSName": "spark-vm.axolotl-sirius.ts.net."}
+                })
+                stderr = ""
+            if cmd[0] == "sudo":
+                return R()
+            class F:
+                returncode = 1
+                stdout = ""
+                stderr = "permission denied"
+            return F()
+        with mock.patch("subprocess.run", side_effect=fake):
+            self.assertEqual(
+                cd._tailnet_dnsname(),
+                "spark-vm.axolotl-sirius.ts.net")
+
+    def test_67_sudo_fallback_used(self):
+        """sudo-first: the unprivileged spelling is never tried first."""
+        seen = []
+        def fake(cmd, **kwargs):
+            seen.append(cmd[0])
+            class R:
+                returncode = 0
+                stdout = json.dumps({
+                    "Self": {"DNSName": "spark-vm.axolotl-sirius.ts.net."}
+                })
+                stderr = ""
+            return R()
+        with mock.patch("subprocess.run", side_effect=fake):
+            self.assertEqual(
+                cd._tailnet_dnsname(),
+                "spark-vm.axolotl-sirius.ts.net")
+        self.assertEqual(seen[0], "sudo")
+
+    def test_67_both_fail_returns_none(self):
+        """Both spellings fail: None, so _page_origins keeps the IP
+        origin only. The startup print of PAGE_ORIGINS makes this
+        visible in the journal."""
+        def fake(cmd, **kwargs):
+            class F:
+                returncode = 1
+                stdout = ""
+                stderr = "no tailscaled"
+            return F()
+        with mock.patch("subprocess.run", side_effect=fake):
+            self.assertIsNone(cd._tailnet_dnsname())
+
     # --- 57: Origin exact-match -----------------------------------------
 
     def test_57_origin_ts_net_accepted(self):
