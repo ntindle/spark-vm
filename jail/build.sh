@@ -54,6 +54,23 @@ fi
 # with the same id. First boot regenerates it.
 $SUDO rm -f "$ROOTFS/etc/machine-id"
 
+# Guest network file, written from the host BEFORE first boot so
+# networkd has it when the guest starts. (nspawn's ownership shift
+# fixes the host-0 ownership on first boot.) Written again via
+# run_guest in the guest-config phase for idempotent re-runs.
+$SUDO mkdir -p "$ROOTFS/etc/systemd/network"
+$SUDO tee "$ROOTFS/etc/systemd/network/80-container-host0.network" >/dev/null <<EOF
+[Match]
+Name=host0
+[Network]
+# No Gateway: the guest has no default route (fail closed). The proxy
+# at $HOST_VETH_IP is on-link via the /$CIDR, so proxying works;
+# direct-IP attempts fail inside the guest with "network unreachable".
+Address=$GUEST_IP/$CIDR
+LinkLocalAddressing=no
+EOF
+$SUDO chmod 644 "$ROOTFS/etc/systemd/network/80-container-host0.network"
+
 # ---------------------------------------------------------------- .nspawn config
 say ".nspawn config"
 $SUDO mkdir -p /etc/systemd/nspawn
@@ -201,7 +218,20 @@ Name=host0
 Address='"$GUEST_IP/$CIDR"'
 LinkLocalAddressing=no
 EOF
-systemctl enable --now systemd-networkd'
+systemctl enable --now systemd-networkd
+# networkd may already be running with an older config; restart so the
+# file above is actually applied, then wait for the address.
+systemctl restart systemd-networkd'
+say "waiting for guest address $GUEST_IP"
+for i in $(seq 1 30); do
+    if run_guest /bin/bash -c 'ip -4 addr show host0 | grep -q '"$GUEST_IP"'' 2>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+run_guest /bin/bash -c 'ip -4 addr show host0 | grep -q '"$GUEST_IP"'' || {
+    echo "guest did not get $GUEST_IP" >&2; exit 1
+}
 # No DNS by design: empty resolv.conf fails fast instead of hanging.
 run_guest /bin/bash -c 'rm -f /etc/resolv.conf; : > /etc/resolv.conf; grep -q 127.0.0.1 /etc/hosts || echo "127.0.0.1 localhost" >> /etc/hosts'
 
