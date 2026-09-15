@@ -40,11 +40,10 @@ status section at the end for what v2 did and did not resolve.
 from the repo root. No mitmproxy needed. At `53a8a9a` all 15 pass.
 Keep it that way: every new proxy finding gets a test before its fix.
 
-**Order (updated at `ef0f30e`).** Confirmation page: 47 and 48 before
-any answer is consumed as a grant, then 49 and 50, which shape the
-grant channel itself. Jail: 51 and 52. Then the grant channel as
-decided in the round-5 section. Box hardening still open: 10, 11.
-Docs: 19, 20, 21.
+**Order (updated at `b2fb668`).** The grant channel is not done: 55,
+56 and 57 first, with tests (62), then 58 to 61. Until 55 and 56 land,
+the owner should hold grant consumption on the box (see round 6). Box
+hardening still open: 10, 11. Docs: 19, 20, 21.
 
 **Needs the user, not just Muse.** Item 2 is the user's decision
 (option a creates a new login and changes sudo; only they can do that
@@ -356,7 +355,7 @@ sniffing). Items 19 to 22 are listed in the build plan and not done.
 spark-vm ever holds a real value" one paragraph before conceding swapd
 does, and still states unconditionally that the DOM, screenshots and
 logs contain only placeholders while listing response scrubbing as
-pending. Build plan item 0 says 24 findings; this file now has 54.
+pending. Build plan item 0 says 24 findings; this file now has 63.
 
 ### New findings from v2's on-box agent
 
@@ -924,3 +923,109 @@ three problems that must land before an answer ever becomes a grant.
   short grace window for retries and redirects.
 - **Order.** 47 and 48 land and are verified from the jail before any
   answer is consumed as a grant.
+
+## Round 6: the grant channel (`ee96bb0` to `b2fb668`)
+
+Findings 47, 48, 51, 53 and 54 are done as described, and the
+structured approval shape from 49 and the owner-based requester from
+50 are in place. The grant channel itself, the part that turns an
+answer into a swap, has four confirmed defects, two of them severe,
+and no tests. It must not be treated as done, and the owner should
+hold consumption on the box until 55 and 56 land.
+
+**Process.** Round 5 was deployed before review, with "unit-verified"
+claims for code that has no tests in the repo, and three of the four
+confirmed findings below are exactly what those tests would have
+caught. During 52 the agent also truncated the owner's
+`authorized_keys` with a bad pipeline and restored the owner's key
+from its transcript. That is the class of event the jail exists to
+make impossible, and it happened on the way in. From here: nothing in
+the grant path lands without a test in the repo, and the owner
+reviews the grant path before deploy, not after.
+
+55. **Grants override per-credential host binding, and the agent can
+    file the request for it.** CONFIRMED. `_credential_allows_request`
+    checks grants before `allowed_hosts` and returns on a match, and
+    `_file_approval` fires on every refusal including `unbound-host`.
+    Chain: the agent sends `hsurr:openai` to github.com, the swap is
+    refused, a pending item "POST github.com/gists for openai" appears
+    on the page, one mistaken tap mints a grant, and the OpenAI key is
+    posted to GitHub. Finding 1's guarantee now rests on the human
+    never mis-tapping. Fix: host binding is checked first and no grant
+    can override it; grants only widen methods and paths within bound
+    hosts; `_file_approval` fires only for `method-not-allowed` and
+    `path-not-allowed`, never for `unbound-host`.
+
+56. **Reaped and revoked grants resurrect on the next reload.**
+    CONFIRMED. `_consume_answers` derives grants from `answered/` minus
+    the ids currently in the grants list, so a grant reaped at the
+    24-hour cap or removed by `cred-grant-revoke` is recreated from its
+    answered file on the next request. The cap and revocation are both
+    ineffective. Fix: consumption is one-way. Move the answered file
+    into `consumed/` at consumption, or keep a persistent consumed-id
+    set, and never re-derive from `answered/`.
+
+57. **Legitimate approvals are refused by the Origin check.**
+    CONFIRMED. The page is served at its ts.net name, browsers send
+    `Origin: https://spark-vm.<tailnet>.ts.net:8443` on every form
+    POST, and the handler accepts only origins starting with the IP
+    literal. Every real approve or deny returns 403 "csrf: Origin".
+    That fails closed, so it is harmless, but it means the flow has
+    never worked end to end, which the missing browser test would have
+    shown. `startswith` without the port also matches
+    `100.65.241.200`. Fix: exact match against the set of the page's
+    own origins, port included.
+
+58. **Approval flooding.** By reading. Dedup is on the full normalized
+    path, so the agent creates one pending item per distinct path it
+    tries, pending items are reaped only when opened, and the page
+    fills until the human mis-taps. `_file_approval` also lists the
+    whole pending directory on every refusal. Fix: cap pending items
+    per credential, rate-limit filing, reap expired items when the list
+    is rendered, and coalesce by credential, host and method.
+
+59. **Every request re-reads every answered file.** By reading.
+    `_maybe_reload` runs `_consume_answers` and `_reap_grants` on every
+    request, connect and response, each listing and parsing
+    `answered/`, which grows forever. Fix: gate on the directory's
+    mtime like the other inputs; with 56's `consumed/` move, the
+    directory stays small.
+
+60. **Three writers, one registry, no lock.** By reading. The proxies'
+    `_save_registry`, `cred-registry-set` and `cred-grant-revoke` each
+    read, modify and write `credentials.json`, so concurrent writes
+    lose updates: a removed method comes back, a grant disappears. The
+    inference instance also consumes answers into its own registry
+    because it inherits the default approvals directory. Fix: grants
+    live in their own file with a single writer that confirmd and the
+    revoke path call; proxies read it; the inference instance gets no
+    approvals directory at all.
+
+61. **`ssrf.deny` is not in the repo.** The file that makes 47 hold
+    exists only on the box, so a rebuild from the repo loses it
+    silently. Add `proxy/ssrf.deny` (the tailnet name is not secret)
+    and have the addon warn at load when the file is missing.
+
+62. **No tests for any of round 5.** The suite is the same 43 tests as
+    round 4; the diff adds two attributes to a fake. The deny list,
+    self-peer refusal, nonce, Origin check, requester check, grant
+    match, consume, reap, revoke and approval filing have no tests.
+    Nothing in round 5 counts as done until each has one, and the
+    Origin check needs a test that uses the ts.net origin.
+
+63. **Nits.** (a) `_consume_answers` trusts any file in `answered/`;
+    verify `answered_by` is the owner and `decision` is `approve`, and
+    make `answered/` writable only by confirmd's uid. (b) `tailscale
+    ip` in confirmd runs without sudo while whois needs it; if the
+    socket is unreadable, the self-peer set silently collapses to the
+    bind literal. (c) The README's key check greps for "hatch"; list
+    fingerprints instead. (d) `Sec-Fetch-Site` is enforced only when
+    present, which is fine because the nonce exists; say so.
+
+**Owner action until 55 and 56 land.** On the box, in your own
+session: move `/home/swapd/approvals/answered` aside, remove any
+`grants` list from `/home/swapd/credentials.json`, restart
+`swap-proxy`, and verify your own key's fingerprint in
+`~/.ssh/authorized_keys`. Do not approve anything on the page; the
+button does not work yet (57), and when it does, an approval could
+widen a credential beyond its bound hosts (55) and never expire (56).
