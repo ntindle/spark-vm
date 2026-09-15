@@ -85,6 +85,8 @@ $SUDO tee /etc/systemd/nspawn/$MACHINE.nspawn >/dev/null <<EOF
 # (no isolation). An explicit range cannot silently degrade like that.
 # Verify with: cat /proc/$(machinectl show jail -p Leader --value)/uid_map
 PrivateUsers=2000000:65536
+# The guest's hostname (nspawn would otherwise copy the host's).
+Hostname=jail
 # No DNS in the jail: the host proxy resolves. (Build script also
 # empties /etc/resolv.conf inside the guest; this stops nspawn from
 # copying the host's in.)
