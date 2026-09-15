@@ -482,7 +482,21 @@ class Handler(BaseHTTPRequestHandler):
         it["requester"] = requester
         # Finding 60: on approve, mint the grant via the single writer
         # BEFORE moving to consumed/. Finding 64: validate the tuple.
-        if decision == "approve":
+        # Round 8: a first_use approval carries no credential tuple --
+        # approving it records the human's confirmation where bdrived
+        # checks it, instead of minting a grant.
+        if decision == "approve" and it.get("kind") == "first_use":
+            marker = os.path.join(APPROVALS, "first-use-confirmed")
+            tmp = marker + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"approval_id": aid,
+                           "answered_by": login,
+                           "answered_at": it["answered_at"]}, f,
+                          indent=2)
+            os.replace(tmp, marker)
+            audit_log("first-use-confirmed", self.client_address[0], login,
+                      "id=%s requester=%s" % (aid, requester))
+        if decision == "approve" and it.get("kind") != "first_use":
             name = it.get("credential")
             host = it.get("host")
             method = (it.get("method") or "").upper()

@@ -104,7 +104,14 @@ VirtualEthernet=yes
 # and leaving the tree host-root-owned (container root could then
 # write host-0-owned files).
 PrivateUsersOwnership=auto
-# Deliberately no bind mounts: no host files inside the jail.
+# Bind mounts: exactly one — the bdrive socket dir (round 8). The
+# orchestrator drives bdrive from the jail over /run/bdrive/bdrive.sock;
+# the daemon peer-checks with SO_PEERCRED (finding 33), so the mount
+# grants no authority by itself. bdrive.service must be up first (the
+# systemd-nspawn@jail drop-in orders it); /run is tmpfs, so a missing
+# dir here fails the jail start — that is intentional (fail closed).
+[Files]
+Bind=/run/bdrive
 EOF
 
 # Host-side veth address, assigned each time the container starts.
@@ -339,6 +346,13 @@ if [ "\$#" -eq 0 ]; then echo "usage: with-proxy <cmd> [args...]" >&2; exit 2; f
 exec "\$@"
 EOF
 chmod 755 /usr/local/bin/with-proxy'
+# ---------------------------------------------------------------- bdrive CLI (round 8)
+# The orchestrator drives bdrived from the jail over the bind-mounted
+# /run/bdrive/bdrive.sock; the CLI is stdlib-only.
+say "bdrive CLI inside the jail"
+BDRIVE_CLI="$(cd "$(dirname "$0")/../browser-driver" && pwd)/bdrive"
+$SUDO machinectl copy-to "$MACHINE" "$BDRIVE_CLI" /usr/local/bin/bdrive
+run_guest /bin/chmod 755 /usr/local/bin/bdrive
 
 say "done. Verify with:  ssh -p 2222 $JAIL_USER@<tailnet-ip>"
 say "Then remove the swapd CA from the HOST trust store (see jail/README)."

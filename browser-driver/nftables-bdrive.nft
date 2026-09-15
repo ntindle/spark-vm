@@ -1,0 +1,12 @@
+# Finding 10: "all browser traffic via the proxy" as a network rule, not
+# a Chromium flag. The bdrive uid may open exactly one thing: TCP to the
+# swap proxy on loopback (127.0.0.1:18080). Everything else it tries to
+# open — any other address, port, protocol, or address family — drops.
+# __BDRIVE_UID__ is substituted by browser-driver/deploy.sh.
+table inet bdrive_egress {
+    chain output {
+        type filter hook output priority 0; policy accept;
+        skuid __BDRIVE_UID__ tcp daddr 127.0.0.1 tcp dport 18080 accept
+        skuid __BDRIVE_UID__ drop
+    }
+}

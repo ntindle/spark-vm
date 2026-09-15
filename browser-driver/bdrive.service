@@ -1,0 +1,36 @@
+[Unit]
+Description=bdrive — Playwright browser driver daemon
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=bdrive
+# Primary group bdrive-clients, and /run/bdrive is setgid to it, so the
+# socket is born bdrive:bdrive-clients 0770 however it is created.
+Group=bdrive-clients
+# /run/bdrive is created here each boot (tmpfs); the nspawn jail
+# bind-mounts it, so bdrive.service must be up before the jail starts
+# (see the After=bdrive.service drop-in on systemd-nspawn@jail).
+# Mode 2711: the daemon (owner) has full access; the jail agent (a
+# userns-mapped uid that can never carry a host group) traverses via
+# o+x; nobody lists the dir. DAC is not the peer gate (see bdrived).
+RuntimeDirectory=bdrive
+RuntimeDirectoryMode=2711
+Environment=BDRIVE_SOCKET=/run/bdrive/bdrive.sock
+# Peer uids accepted by SO_PEERCRED. The default below is a placeholder:
+# deploy.sh computes the jail agent's real host uid
+# (2000000 + the agent's guest uid from the jail rootfs) and overrides
+# this via a drop-in. The obox uid is appended in round 9.
+Environment=BDRIVE_PEER_UIDS=2000000
+# Browsers live in the bdrive user's cache (installed by deploy.sh).
+Environment=PLAYWRIGHT_BROWSERS_PATH=/home/bdrive/.cache/ms-playwright
+ExecStart=/home/bdrive/venv/bin/python /usr/local/bin/bdrived
+Restart=on-failure
+RestartSec=5
+# The browser needs no more than this.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

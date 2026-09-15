@@ -86,8 +86,10 @@ for svc in swap-proxy swap-inference confirmd; do
     fi
 done
 
-# Warn if ssrf.deny is missing (finding 61).
-if [ ! -f /home/swapd/ssrf.deny ]; then
+# Warn if ssrf.deny is missing (finding 61). swapd's home is 0700, so
+# the check needs sudo; without it the test always fails and the warning
+# is noise.
+if ! sudo test -f /home/swapd/ssrf.deny; then
     echo "WARNING: /home/swapd/ssrf.deny missing (finding 61)"
 fi
 

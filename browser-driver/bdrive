@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""bdrive — CLI client for the bdrive daemon.
+
+Speaks newline-delimited JSON over the unix socket (bind-mounted into
+the jail at the same path). No sudo on the driver path.
+
+Usage:
+    bdrive ping
+    bdrive open [--job JOB] [--url URL]
+    bdrive act SESSION [--ref-scope RS] '[{"action":"goto","url":"..."}]'
+    bdrive close SESSION
+    bdrive file-purchase-approval '{"host":"...","amount":12.34,
+        "currency":"USD","job":"...","purpose":"..."}'
+
+BDRIVE_SOCKET overrides the socket path (default /run/bdrive/bdrive.sock).
+"""
+import json
+import os
+import socket
+import sys
+
+SOCKET_PATH = os.environ.get("BDRIVE_SOCKET", "/run/bdrive/bdrive.sock")
+
+
+def call(req):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(SOCKET_PATH)
+    except OSError as e:
+        print("bdrive: cannot connect to %s: %s" % (SOCKET_PATH, e),
+              file=sys.stderr)
+        sys.exit(1)
+    with s:
+        s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+        chunks = []
+        while True:
+            data = s.recv(65536)
+            if not data:
+                break
+            chunks.append(data)
+    raw = b"".join(chunks).decode("utf-8", "replace")
+    if not raw.strip():
+        print("bdrive: empty reply (peer rejected?)", file=sys.stderr)
+        sys.exit(1)
+    resp = json.loads(raw)
+    print(json.dumps(resp, indent=2))
+    sys.exit(0 if resp.get("ok") else 1)
+
+
+def usage():
+    print(__doc__.strip())
+    sys.exit(2)
+
+
+def main(argv):
+    if len(argv) < 2:
+        usage()
+    cmd = argv[1]
+    if cmd == "ping":
+        call({"op": "ping"})
+    elif cmd == "open":
+        req = {"op": "open"}
+        i = 2
+        while i < len(argv):
+            if argv[i] == "--job" and i + 1 < len(argv):
+                req["job"] = argv[i + 1]
+                i += 2
+            elif argv[i] == "--url" and i + 1 < len(argv):
+                req["url"] = argv[i + 1]
+                i += 2
+            else:
+                usage()
+        call(req)
+    elif cmd == "act":
+        if len(argv) < 4:
+            usage()
+        req = {"op": "act", "session": argv[2],
+               "actions": json.loads(argv[3])}
+        if len(argv) > 4:
+            if argv[4] == "--ref-scope" and len(argv) > 5:
+                req["ref_scope"] = argv[5]
+            else:
+                usage()
+        call(req)
+    elif cmd == "close":
+        if len(argv) != 3:
+            usage()
+        call({"op": "close", "session": argv[2]})
+    elif cmd == "file-purchase-approval":
+        if len(argv) != 3:
+            usage()
+        call({"op": "file_purchase_approval",
+              "approval": json.loads(argv[2])})
+    else:
+        usage()
+
+
+if __name__ == "__main__":
+    main(sys.argv)
