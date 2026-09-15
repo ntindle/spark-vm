@@ -1,0 +1,18 @@
+#!/bin/bash
+# cred-store-set-inference — narrow writer for the inference proxy's secret
+# store. Invoked as: sudo -u swapd /usr/local/bin/cred-store-set-inference
+# Reads the provider API key from stdin, writes it atomically to
+# /home/swapd/inference-secrets/llm-api (0600, swapd-owned). The name is
+# fixed: the inference proxy (finding 31) holds exactly one credential.
+# Root-owned 0755; ntindle cannot modify this script, only execute it
+# via the sudoers entry.
+set -euo pipefail
+
+dir=/home/swapd/inference-secrets
+tmp="$(mktemp "$dir/.tmp.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+cat > "$tmp"
+chmod 600 "$tmp"
+mv -f "$tmp" "$dir/llm-api"
+trap - EXIT
+echo "stored inference credential 'llm-api'"
