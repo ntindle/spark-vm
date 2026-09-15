@@ -40,11 +40,11 @@ status section at the end for what v2 did and did not resolve.
 from the repo root. No mitmproxy needed. At `53a8a9a` all 15 pass.
 Keep it that way: every new proxy finding gets a test before its fix.
 
-**Order (updated at `53a8a9a`).** Proxy: items 25, 29, 31 and the nits
-in 34 are the remaining code changes, plus 22 so refused swaps are
-visible. Design decisions: see "Owner decisions" at the end; most are
-now settled. Box hardening: 2, 10, 11, 12, 13. Docs: 19, 20, 21,
-34(c)(d), and the one-file spec.
+**Order (updated at `d22ceab`).** Proxy: items 35 to 40 from the
+round-2 verification are the next code changes; 35 first, it is a
+regression. Grant scoping: build only what the owner approved in the
+round-2 section (static methods and paths); scoped grants are deferred.
+Box hardening: 2, 10, 11. Docs: 19, 20, 21.
 
 **Needs the user, not just Muse.** Item 2 is the user's decision
 (option a creates a new login and changes sudo; only they can do that
@@ -356,7 +356,7 @@ sniffing). Items 19 to 22 are listed in the build plan and not done.
 spark-vm ever holds a real value" one paragraph before conceding swapd
 does, and still states unconditionally that the DOM, screenshots and
 logs contain only placeholders while listing response scrubbing as
-pending. Build plan item 0 says 24 findings; this file now has 34.
+pending. Build plan item 0 says 24 findings; this file now has 40.
 
 ### New findings from v2's on-box agent
 
@@ -613,3 +613,133 @@ put to them. Muse: treat these as settled unless marked pending.
 7. **Private-range guard (item 29): approved, default-deny.** Implement
    the guard with an explicit allow list. The tailnet is on that list
    for now; the default for a fresh install is deny.
+
+## Round 2 verification (`f8d825c`, `d22ceab`)
+
+Muse's handoff message said the round-2 proxy work was implemented and
+deployed on the box but not pushed. It is pushed: `f8d825c` carries the
+addon, tests, service unit, helpers and allow files. The suite passes,
+22 of 22, and the tests Muse added are hermetic and strict. Findings
+4, 22, 25, 29, 31 and the 34 nits are addressed as described. The
+verification below found one regression, two guard bypasses, one
+deployment gap, and one correctness hazard, all reproduced against the
+addon.
+
+**Recommendation to the owner: fix forward, no rollback.** Item 35
+does not affect the GitHub credential as it is bound on the box today,
+36 only bites on short secrets, and 37 and 38 weaken a guard that did
+not exist before rather than anything that was protected. Until 35 is
+fixed, nobody should run `cred register` on a single-value credential.
+
+35. **Regression: `cred register` on a single-value secret makes it
+    never swap.** CONFIRMED. `_load_secret_file` treats a file as
+    multi-entry whenever the registry declares any entry, and `cred
+    register <name> --host <h>` always writes the default
+    `access_token` entry before adding the host. A bare-token file then
+    parses to an empty dict, and every swap of that credential returns
+    nothing. It works on the box today only because the GitHub binding
+    was added with `add-host` directly, skipping `set`; anyone
+    following the CLI's own usage line breaks their credential
+    silently. Fix: make the `#hsurr:multi` marker the sole source of
+    file layout. Registry entries describe placements, not file
+    format. Test: a bare file plus a registry with `access_token` must
+    load as the single value and swap.
+
+36. **Response scrubbing has no minimum length and scrubs non-secret
+    entries.** CONFIRMED. A one-character password turns "Next" into
+    "Nehsurr:acme:passwordt" on every page from that host, and a
+    `username` entry rewrites "Welcome jdoe". Fix: skip values under
+    eight characters and warn at load that such a secret cannot be
+    scrubbed; let the registry mark an entry `scrub: false` for
+    usernames and emails; match TOTP codes only as whole tokens, since
+    a six-digit code collides with prices and IDs.
+
+37. **The private-range guard misses `0.0.0.0/8` and IPv4-mapped
+    IPv6.** CONFIRMED. `0.0.0.0` and `::ffff:127.0.0.1` both pass, and
+    both reach localhost on Linux. Fix: unwrap `addr.ipv4_mapped`
+    before checking, and add `0.0.0.0/8`, `192.0.0.0/24`,
+    `198.18.0.0/15` and `240.0.0.0/4`. Test each literal.
+
+38. **The guard runs after the upstream TCP connect.** By reading.
+    mitmproxy's default connection strategy is eager: it connects to
+    the upstream host when the client connects, to read the server
+    certificate, so by the time the `request` hook refuses, a TCP
+    connection to the private address has already been made. That is
+    enough to port-scan the tailnet. The right hook is
+    `server_connect`, which runs before the connect. It also gives the
+    DNS-pinning fix Muse listed as later work: resolve there, refuse by
+    setting the connection's error, or set the server address to the
+    resolved IP so the check and the connect use the same answer.
+    Verify the hook's signature against the mitmproxy version in the
+    venv.
+
+39. **The inference proxy has no narrow path to populate its
+    registry.** By reading. `_resolve` fails closed without an
+    `allowed_hosts` binding, the inference instance reads
+    `inference-registry.json`, and `cred-registry-set` writes only
+    `credentials.json` unless `CRED_REGISTRY_FILE` is set, which sudo's
+    `env_reset` strips. There is a store setter and a hosts appender
+    for inference, but no registry writer. Either the file was
+    hand-edited on the box or the inference proxy cannot swap. Fix: a
+    fixed-path `cred-registry-set-inference`, or an `--inference` flag
+    handled inside the root-owned script, plus a sudoers line, plus a
+    test that the instance swaps after the documented install steps.
+
+40. **Nits.** (a) A placeholder seen for a non-allowlisted host is a
+    journal warning only, not a `refused=` audit line; parse the name
+    with the placeholder regex and audit it. (b) Multi-entry parsing
+    silently drops lines that do not match `k=v`; warn. (c) The
+    scrub size cap is checked after decoding the whole body; check
+    `len(resp.content)` first. (d) The response hook buffers whole
+    bodies, so obox must not depend on streamed provider responses.
+
+### Grant-scoping proposal (spec §6): owner review
+
+**Approve now:** `allowed_methods` and `allowed_paths` as static
+registry fields, checked in `_resolve` before swapping, absent means
+unrestricted for migration. Requirements: compare paths after
+percent-decoding and dot-segment normalization so `/repos/../admin`
+cannot pass a `/repos/` prefix; make prefixes segment-aligned so
+`/repos/` matches `/repos/x` and not `/repository`; uppercase methods.
+The owner should bind methods for every write-capable token at install
+time even though the field is optional.
+
+**Defer:** `grants` with `session` and `task` scopes. The proxy cannot
+attribute a request to a bdrive session or an obox job: sessions are
+tabs in one shared browser context (spec §3), and the proxy sees one
+Chromium connection pool. Without attribution, a session-scoped grant
+is a time-bounded grant with a misleading name. For v1 keep `one-time`
+and `time-bounded` only, with bdrive, which is trusted and on the host,
+telling swapd when a job ends so swapd revokes. `one-time` must mean
+one request flow, not one regex match, and needs a short grace window
+because browsers retry and follow redirects.
+
+**Open questions answered.** The card pathway stays as job-scoped
+placeholder entries, not one-time grants, because checkout forms
+re-submit and a one-time grant fails on the retry. Grants go to the
+same audit log as `grant=` lines; no second log. A grant's default
+expiry is job end via bdrive's revoke, with a hard cap of 24 hours for
+anything left unrevoked. One gap in the proposal: the `cred-grant`
+writer is "callable only from the confirmation page's backend", but
+the page is served by bdrive and bdrive is not swapd; specify the
+socket and the peer check between them.
+
+### Jail document (`jail/cell-mirror.md`)
+
+Accurate about what is observed and what is inferred, and the mirror
+it proposes is the right one. Three things to add before building:
+
+- **How the SSH login lands in the jail.** Either sshd inside the jail
+  bound to the veth address with the host forwarding the tailnet port,
+  or the host's sshd with a per-user forced command into the container.
+  The choice decides where the host keys and the ControlMaster socket
+  live.
+- **The jail is persistent, not disposable.** The cell is replaced
+  without warning; this box is a workhorse. Keep "rebuildable from the
+  repo" as the property and drop the assumption that installs vanish.
+- **Container runtime inside nspawn.** Rootless Docker needs nested
+  user namespaces and subuid ranges inside the container; podman is
+  more likely to work. Budget time for it, and say in the document that
+  anything in the jail that dials IPs directly or needs UDP, including
+  ping and git over SSH, will not work by design. Git goes over HTTPS
+  through `with-proxy`, as `push.sh` already does.
