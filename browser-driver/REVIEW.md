@@ -1162,10 +1162,10 @@ Made by the reviewer at the owner's request and recorded as decisions.
    gateway.
 
 3. **Round 8 is `bdrive` v1, driven by the agent from the jail.** The
-   brain for v1 is the agent itself, over the socket. `obox` is
-   deferred, not cancelled: it needs its own untrusted-content
-   handling (26, 30) that the agent's own cell already provides, so
-   building it first delays a safe browser for no gain. `bdrive` does
+   brain for v1 is the agent itself, over the socket, until obox
+   exists. `obox` is round 9, not deferred: the owner keeps it as the
+   stable orchestrator-facing interface so the orchestrator can be
+   swapped without touching `bdrive`, swapd or the page. `bdrive` does
    not change when `obox` arrives. v1 scope: `open`, `goto`,
    `snapshot`, `click`, `fill`, `type`, `press`, `select`, `check`,
    `look`, `get_text`, `wait`, `back`, `reload`, `state`,
@@ -1180,8 +1180,8 @@ Made by the reviewer at the owner's request and recorded as decisions.
 4. **No interim browser in the jail.** The time goes to `bdrive`. The
    agent's own lookups go through the proxy with curl.
 
-5. **Round 9:** Web Push for the page, the card pathway helper, and
-   then the `obox` question again with `bdrive` in hand.
+5. **Round 9 is `obox`. Round 10 is the card pathway (now spec §7,
+   trusted fill plus an issued single-use card) and Web Push.**
 
 ## Card pathway: design note for round 9 (decision 6, revised)
 

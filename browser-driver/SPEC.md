@@ -78,7 +78,11 @@ other privileges plus the audit trail (§13).
   traffic forced through the swap proxy (`http://127.0.0.1:18080`); the
   driver refuses to start a session if the proxy health check fails.
 - **obox**: the on-box agent (own user, `obox`) implementing the agent
-  loop. It thinks with an LLM whose API key the user installs via
+  loop. Its `submit` / `steer` / `status` / `report` interface is the
+  orchestrator-facing contract (owner decision, round 7): the
+  orchestrator is replaceable without changing `bdrive`, swapd or the
+  confirmation page. Muse drives it today; anything that can submit a
+  brief and read a report can drive it tomorrow. It thinks with an LLM whose API key the user installs via
   `cred set llm-api`. The key is used through a **separate inference
   proxy** (review finding 31) — a second mitmdump instance on
   `127.0.0.1:18081` with its own secrets directory holding only
@@ -370,43 +374,75 @@ key since review round 4, still a proposal for the deferred half):
 }
 ```
 
-## 7. Payments — the wallet stays orchestrator-side
+## 7. Payments — trusted fill and a single-use issued card
 
 The managed agent performs Stripe Link spend requests itself. On
-spark-vm the wallet (Stripe Link, cards) is a Meta-runtime capability
-the on-box agent cannot reach, so the purchase flow splits at the
-trust boundary:
+spark-vm the wallet is not reachable from the box, and two facts rule
+out the placeholder mechanism for cards. Card, expiry and CVC fields
+are digit-masked and Luhn-checked in the browser, and processors such
+as Stripe Elements refuse to tokenize a non-numeric value, so a typed
+placeholder never reaches the network. And card data is posted to the
+processor's shared hosts, not the merchant's, so a per-merchant host
+binding at the proxy cannot exist for cards. The card pathway
+therefore mirrors the reference: a **trusted fill by `bdrive`**, and a
+card whose own controls carry the merchant and amount binding.
 
-1. The on-box agent drives checkout up to final review, then returns
-   `need_info:"purchase_review"` with merchant, items/variants/
-   quantities, delivery address, contact info, shipping option,
-   delivery estimate, total incl. taxes/fees, add-ons, cancellation
-   terms, and remaining setup (login, security-code takeover).
-2. The user approves the exact terms on the **tailnet confirmation
-   page** (§8) — never via the orchestrator's relay. The orchestrator
-   then runs the normal purchase flow (wallet approval, virtual card
-   funding).
-3. Card details reach the agent as a **job-scoped placeholder
-   pathway** (owner decision 6): a narrow helper installs a
-   job-scoped, expiring, merchant-bound entry filled as
-   `hsurr:card-<job>:number` (and `:expiry`, `:cvc` friends); the
-   agent types it with ordinary `fill` into the merchant's card form
-   for that checkout only; the entry is deleted at job end. Never
-   written to logs, reports, memory, or files, never repeated in any
-   handoff. This is the analog of the managed agent's transient
-   credential path, with the reference's single-use,
-   merchant/amount/time-bound card semantics.
-4. The agent submits, verifies the confirmation page, and reports the
-   order/confirmation identifiers from page output — never from
-   intended values.
+Flow. obox drives, bdrive fills, the confirmation page approves:
 
-The **one-time-code relay stays a stated exception** (owner decision
-6): a code the user reads out may be relayed once for the current
-challenge, matching the reference's own raw-code path.
+1. **Drive to final review.** obox drives checkout up to the review
+   step and parks with `need_info:"purchase_review"`: merchant (host
+   and display name), items, variants and quantities, delivery
+   address, contact, shipping option, delivery estimate, total
+   including taxes and fees, add-ons, cancellation terms, and any
+   remaining setup (login, security-code takeover). Nothing is
+   submitted.
+2. **File the approval.** `bdrive` files a structured approval with
+   `kind: purchase`, `host` (the merchant), `amount` (total and
+   currency), `job`, and the review fields as the labeled purpose.
+   The requester is bdrive by file owner (finding 50). obox cannot
+   file it.
+3. **The owner approves on the confirmation page (§8).** Never via
+   the orchestrator. The approval expires in one hour. Approval of an
+   exact total does not authorize a higher one; a changed total is a
+   new approval.
+4. **A card is issued for that approval.** A swapd-side helper, run
+   by confirmd on approve, calls the issuer's API (Stripe Issuing in
+   v1) using an issuer secret stored in swapd's store with no host
+   binding, so it never swaps and only the helper can use it. The
+   card is single-use, capped at the approved amount as a
+   per-authorization limit, and expires at job end plus a short
+   grace. Its number, expiry and CVC are written as a job-scoped
+   multi-entry secret `card-<job>` (`#hsurr:multi`), readable only
+   over bdrive's peer-checked socket for that job.
+5. **Trusted fill by `bdrive`.** obox issues one action,
+   `fill_card {job}`, carrying no values. bdrive fetches the card
+   entries from swapd (SO_PEERCRED, the bdrive uid only), locates the
+   processor's fields including inside the processor's cross-origin
+   iframe, types the real values itself, and pauses obox for the
+   duration: no `snapshot`, `look` or `get_*` is served until the fill
+   completes. Afterwards obox sees only the accessibility tree, and
+   processor fields are treated as password-class for the read
+   restrictions in §11.
+6. **Submit and verify.** obox submits. A 3-D Secure or bank
+   challenge parks as `need_info:"takeover"`; until live takeover
+   exists (§13 v2), the job reports and stops. obox verifies the
+   confirmation page and reports order and confirmation identifiers
+   from page output, never from intended values.
+7. **Job end.** `cred-grant-revoke --job` deletes `card-<job>` and
+   the helper cancels the card at the issuer. A denied, failed or
+   unknown-outcome payment is never retried; obox reports and waits.
+   One job handles one order.
 
-A denied, failed, or unknown-outcome payment is never retried by the
-agent; it reports and waits. One job handles at most one distinct
-order — a second order is a fresh job.
+Where the secrets are: the issuer secret and every `card-<job>` value
+belong to swapd; obox and the orchestrator never hold them; bdrive
+holds them in memory only for the fill. The audit log records
+`card=issued job=… amount=… last4=…` and `card=cancelled`, never the
+number, expiry or CVC. Response scrubbing (§6) also scrubs the number
+and CVC of active job cards from processor and merchant responses.
+
+The **one-time-code relay stays a stated exception**: a code the user
+reads out may be relayed once for the current challenge, matching the
+reference's own raw-code path.
 
 ## 8. Approvals — the allowlist is the standing approval
 
@@ -710,27 +746,35 @@ previously observable contract):
    open: `.gitignore` (20), `proxy/install.sh`
    rebuild instructions (19), `flow_detail=0` + error-line URL check
    (21).
-1. `bdrive` service: Playwright driver, AX snapshots + ref_scope,
-   action protocol (§5), ordered-array execution with receipts, session
-   management, proxy health-check gate, tailnet confirmation page,
-   runs as `bdrive` user. Peer check via `SO_PEERCRED` (finding 33).
-2. `obox` agent service: brief/steer/status/report CLI, the
-   observe→decide→act loop against `bdrive`, `need_info` parking with
-   the untrusted-data envelope + `hsurr:` neutralization (findings 26,
-   30), read restrictions on password/relayed-value fields (finding
-   32), LLM calls via the inference proxy, runs as `obox` user.
-   Conformance tests with dummy credentials only: placeholder login
-   flow end-to-end, `need_info` pause/resume, allowlist-denied
-   pass-through, stale-ref rejection, receipt semantics, secret-free
-   logs.
-3. The jail (§2): nspawn container for the agent login per
-   `jail/cell-mirror.md`; swapd, bdrive, audit log, and confirmation
-   page stay on the host.
-4. Repo: `browser-driver/` with SPEC.md, driver + agent source,
-   systemd units, tests. Nothing merged without the conformance suite
-   green.
-5. v2: noVNC watch; classifier pass over page text/downloads outside
-   obox (finding 30).
+1. **`bdrive` v1 (round 8).** Playwright driver as the `bdrive`
+   user with the persistent profile; AX snapshots with `ref_scope`;
+   the v1 action set (`open`, `goto`, `snapshot`, `click`, `fill`,
+   `type`, `press`, `select`, `check`, `look`, `get_text`, `wait`,
+   `back`, `reload`, `state`, `cookies_clear`) with receipts; socket
+   bind-mounted into the jail, SO_PEERCRED accepting the jail's
+   mapped agent uid and `obox`; proxy health gate; nftables uid rule
+   confining `bdrive`'s egress to the proxy (finding 10); password
+   read restrictions (32); first-use confirmation through the page
+   and the grant channel. Driven by the orchestrator from the jail
+   until obox exists. v1.1: `gesture`, `upload`, `download`, `pdf`,
+   `hover`, `scroll`, `fill_card`.
+2. **`obox` (round 9).** The stable orchestrator-facing interface:
+   `submit` / `steer` / `status` / `report`; the observe-decide-act
+   loop against `bdrive`; `need_info` parking; the untrusted-data
+   envelope and `hsurr:` neutralization (26, 30); model calls
+   through the inference proxy with `stream: false`, `store: false`
+   and an explicit reasoning effort; runs as `obox`. Conformance
+   tests with dummy credentials: placeholder login end to end,
+   pause and resume, allowlist-denied pass-through, stale-ref
+   rejection, receipt semantics, secret-free logs.
+3. **Round 10.** The card pathway (§7): issuer helper, `card-<job>`
+   entries, `fill_card`, cancellation at job end. Web Push for the
+   confirmation page (manifest, service worker, VAPID, owner-only
+   subscribe, minimal payload).
+4. **Done:** the jail (§2), the confirmation page (§8), the proxy
+   work in item 0.
+5. **v2:** noVNC watch and takeover; classifier pass over page text
+   and downloads outside obox (finding 30).
 
 ## 17. What this does not change
 
