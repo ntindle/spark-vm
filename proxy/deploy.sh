@@ -86,6 +86,12 @@ sudo systemctl restart confirmd.service
 
 echo ""
 echo "=== verifying ==="
+# mitmdump takes a few seconds to listen after restart; a pull.sh run
+# straight after deploy would otherwise fail with "Couldn't connect".
+for i in $(seq 1 20); do
+    if (exec 3<>/dev/tcp/127.0.0.1/18080) 2>/dev/null; then break; fi
+    sleep 0.5
+done
 for svc in swap-proxy swap-inference confirmd; do
     if sudo systemctl is-active --quiet "$svc.service"; then
         echo "  $svc: active"
