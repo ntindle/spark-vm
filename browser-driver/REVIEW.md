@@ -1182,3 +1182,39 @@ Made by the reviewer at the owner's request and recorded as decisions.
 
 5. **Round 9:** Web Push for the page, the card pathway helper, and
    then the `obox` question again with `bdrive` in hand.
+
+## Card pathway: design note for round 9 (decision 6, revised)
+
+Two things the placeholder mechanism cannot do for payment cards,
+found while planning:
+
+- **Client-side validation rejects placeholders.** Card, expiry and
+  CVC fields are digit-masked and Luhn-checked in the browser before
+  anything is submitted, and Stripe Elements and its peers refuse to
+  tokenize a non-numeric value. A typed `hsurr:card-<job>:number`
+  never reaches the network.
+- **The destination is the processor, not the merchant.** Card data
+  is posted from the browser to the payment processor's hosts
+  (`api.stripe.com` and the like), which every merchant shares, so a
+  per-merchant host binding at the proxy cannot exist for cards.
+
+**Revised design, mirroring the reference.** For cards, `bdrive` does
+a trusted fill: it fetches the job's card values from swapd over its
+peer-checked socket, fills the processor's fields itself (including
+inside the processor's cross-origin iframe), and pauses the agent for
+the duration. The agent sees only the accessibility tree, so it never
+reads the value, and response scrubbing still applies. The merchant
+and amount binding moves from the network path to the card itself:
+a single-use virtual card issued for the approved amount, cancelled at
+job end. With Stripe Issuing that is one API call from a swapd-side
+helper using a Stripe secret that is stored in swapd's store with no
+host binding, so it never swaps and is usable only by the helper. The
+flow: the agent drives to final review and pauses with
+`purchase_review`; the page shows merchant, items and total; approval
+mints a job-scoped card with a spending limit equal to the approved
+total; `bdrive` fills it; `cred-grant-revoke --job` deletes the entry
+and the helper cancels the card. 3-D Secure challenges go to
+`need_info` or user takeover.
+
+**Unchanged:** the placeholder path stays the mechanism for
+everything that is not a card. The one-time-code exception stands.
