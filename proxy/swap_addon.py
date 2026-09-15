@@ -6,6 +6,9 @@ from /home/swapd/secrets/, but ONLY for hosts listed in
 /home/swapd/hosts.allow. Everything else passes through untouched.
 HTML form posts (application/x-www-form-urlencoded) percent-encode the
 colon, so hsurr%3A<name> is swapped there too, with values re-encoded.
+HTTP Basic auth headers are base64-decoded first: a placeholder used as
+the password (e.g. x-access-token:hsurr:github, the form GitHub's git
+HTTPS endpoint requires) is swapped and the header re-encoded.
 
 Secret files: one file per credential name. Either the whole file is the
 single value, or the file holds "entry=value" lines (one per line) for
@@ -16,6 +19,8 @@ Audit: every swap is appended to /home/swapd/swap.log as
 Values are NEVER logged.
 """
 
+import base64
+import binascii
 import logging
 import re
 import urllib.parse
@@ -43,6 +48,27 @@ class SwapAddon:
         self._store_mtime = None
         self._hosts_mtime = None
         self._load()
+
+    def _swap_basic_auth(self, value, host):
+        """Swap placeholders inside an HTTP Basic Authorization header.
+
+        Clients (git, curl -u) base64 the whole "user:password" pair, so a
+        placeholder used as the password is invisible to plain text
+        matching. Decode, swap, re-encode. Returns the original value if
+        there is nothing to do or the value isn't valid Basic auth.
+        """
+        scheme, _, b64 = value.partition(" ")
+        if scheme.lower() != "basic" or not b64.strip():
+            return value
+        try:
+            decoded = base64.b64decode(b64.strip(), validate=True).decode("utf-8")
+        except (binascii.Error, ValueError, UnicodeDecodeError):
+            return value
+        new_decoded = self._swap_text(decoded, host)
+        if new_decoded == decoded:
+            return value
+        return "Basic " + base64.b64encode(
+            new_decoded.encode("utf-8")).decode("ascii")
 
     # ------------------------------------------------------------------
     def _load_secret_file(self, path):
@@ -171,7 +197,14 @@ class SwapAddon:
         # headers
         for key in list(req.headers.keys()):
             vals = req.headers.get_all(key)
-            new_vals = [self._swap_text(v, host) for v in vals]
+            if key.lower() == "authorization":
+                new_vals = [self._swap_basic_auth(v, host) for v in vals]
+                # fall back to plain-text swap (e.g. Bearer <placeholder>)
+                new_vals = [self._swap_text(v, host)
+                            if nv == v else nv
+                            for v, nv in zip(vals, new_vals)]
+            else:
+                new_vals = [self._swap_text(v, host) for v in vals]
             if new_vals != vals:
                 req.headers.set_all(key, new_vals)
         # query string (percent-decoded values; re-encoded on assignment)
