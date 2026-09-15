@@ -1,6 +1,6 @@
 # Review of browser-driver/SPEC.md v1
 
-Reviewed at commit `a006f6e`. Scope: `SPEC.md`, `proxy/swap_addon.py`,
+Reviewed at commit `a006f6e`; the addendum at the end covers `7934e0e`, which landed under this review. Scope: `SPEC.md`, `proxy/swap_addon.py`,
 `proxy/sudoers-swapd`, `proxy/hosts.allow`, `proxy/swap-proxy.service`,
 `cred`, `credlib/`, `scripts/push.sh`, `SETUP.md`. Items marked
 CONFIRMED were reproduced against the addon's pure functions with the
@@ -247,3 +247,27 @@ E {'user': ['x'], 'password': ['p&ss=w"o\\rd%7d']}
 F /v1/100%/ghp_TOKEN/x
 G https://github.com/cb?token=ghp_TOKEN
 ```
+
+## Addendum: commit `7934e0e` (website login recipe in SETUP.md)
+
+23. **A TOTP placeholder swaps in the seed, not a code.** CONFIRMED by
+    reading. The recipe stores `totp=JBSWY3DPEHPK3PXP`, the base32
+    seed, and fills `hsurr:acme:totp`. The addon's `_resolve` returns
+    the stored entry verbatim, and nothing in the repo imports `hmac`
+    or computes HOTP or TOTP. The site receives the seed string in the
+    code field and the login fails. Spec §5 makes the same claim. Fix:
+    in the addon, treat an entry named `totp` (or a `totp` placement)
+    as a seed and swap in the current six-digit code, computed with
+    stdlib `hmac`, `hashlib`, `struct` and `time` (RFC 6238, 30-second
+    step, SHA-1). Item 4's response scrubbing should cover the seed
+    too.
+
+24. **The recipe never routes the browser through the proxy.** Step 3
+    is a plain Playwright script. For the swap to happen, Chromium
+    must be launched with `proxy={"server": "http://127.0.0.1:18080"}`
+    and must trust swapd's CA. Chromium uses its own NSS store under
+    `~/.pki/nssdb`, not `/etc/ssl/certs`, so the `with-proxy`
+    environment variables do nothing for it. Whatever was done to
+    verify the login flow live is not in the recipe. Add the launch
+    arguments and the CA step; without them the recipe fails silently
+    and the placeholders go straight to the site.
