@@ -1142,3 +1142,43 @@ already holds, such as session cookies in a browser profile it owns.
    agent sees AX snapshots, and cookies never reach the jail. Several
    days of work, after the grant channel, since first-use
    confirmations depend on it.
+
+## Owner decisions (round 7): the order from here
+
+Made by the reviewer at the owner's request and recorded as decisions.
+
+1. **Round 7 is the grant channel plus the deploy path.** Findings 55
+   to 66 with a test per behavior, `ssrf.deny` in the repo, and
+   `proxy/deploy.sh` that the owner runs as himself: every file, unit,
+   sudoers line, `daemon-reload`, restarts, and a hash check of the
+   live files against the repo. Nothing else lands in this round. The
+   owner deploys it and performs the first real approve and deny from
+   his phone, which is the end-to-end test the page has never had.
+
+2. **Jail IPC: bind-mounted sockets.** `bdrive`'s socket is bind-mounted
+   into the jail. The daemon checks SO_PEERCRED and accepts exactly two
+   uids: the jail's `muse` user as seen from the host (its mapped uid
+   in the `2000000` range) and, later, `obox`. No new ports on the veth
+   gateway.
+
+3. **Round 8 is `bdrive` v1, driven by the agent from the jail.** The
+   brain for v1 is the agent itself, over the socket. `obox` is
+   deferred, not cancelled: it needs its own untrusted-content
+   handling (26, 30) that the agent's own cell already provides, so
+   building it first delays a safe browser for no gain. `bdrive` does
+   not change when `obox` arrives. v1 scope: `open`, `goto`,
+   `snapshot`, `click`, `fill`, `type`, `press`, `select`, `check`,
+   `look`, `get_text`, `wait`, `back`, `reload`, `state`,
+   `cookies_clear`; receipts and `ref_scope`; persistent profile as
+   the `bdrive` user; proxy health gate; the nftables uid rule that
+   confines `bdrive`'s egress to the proxy (10); the read restrictions
+   on password fields (32); first-use confirmation through the page
+   and the grant channel. Deferred to v1.1: `gesture`, `upload`,
+   `download`, `pdf`, `hover`, `scroll`. Conformance tests against a
+   local dummy site, dummy credentials only.
+
+4. **No interim browser in the jail.** The time goes to `bdrive`. The
+   agent's own lookups go through the proxy with curl.
+
+5. **Round 9:** Web Push for the page, the card pathway helper, and
+   then the `obox` question again with `bdrive` in hand.
