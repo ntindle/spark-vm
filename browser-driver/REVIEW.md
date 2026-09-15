@@ -16,6 +16,17 @@ an exfiltration channel, and the swap has several encoding bugs. None of
 that says "don't build the driver". It says fix the allowlist model and
 the trust table first, because the driver inherits both.
 
+## Schema constraint
+
+The spec ports an existing schema: the `hsurr:<name>:<entry>` surrogate
+format, the `access_token` default entry, the placement set
+(`bearer_header`, `custom_header`, `query_param`, `url_path_segment`),
+and the `dynamic_credentials` and `credential_fill` interfaces all come
+from the cell and are treated here as fixed. No finding below asks to
+change them. Where a fix touches credential metadata it extends the
+existing registry (`credentials.json`, managed by `cred register`)
+rather than inventing a parallel format.
+
 ## Blocking (fix before building bdrive)
 
 1. **The allowlist is global, not per credential.** CONFIRMED (probe B).
@@ -24,10 +35,14 @@ the trust table first, because the driver inherits both.
    tells the driver to fill `hsurr:openai` into a gist, issue, or
    comment form on github.com; the proxy swaps; the OpenAI key is now
    public. §6's "no exfiltration channel beyond what the page itself
-   shows" is wrong. Fix: make `hosts.allow` map credential to hosts
-   (`github github.com api.github.com`) and have `_resolve(name, entry,
-   host)` refuse otherwise. About twenty lines. Do it in v1; it also
-   makes the v2 first-use confirmation far less load-bearing.
+   shows" is wrong. Fix: put the host binding in the existing registry
+   as an `allowed_hosts` list per credential, the same shape
+   `dynamic_credentials.ensure_allowed_url` already takes, expose it
+   as `cred register <name> --host <h>`, and have `_resolve(name,
+   entry, host)` refuse when the host is not in that list.
+   `hosts.allow` can stay as the outer gate. About twenty lines in the
+   addon plus one flag in `cred`. Do it in v1; it also makes the v2
+   first-use confirmation far less load-bearing.
 
 2. **The trust table claims things the box does not enforce.** §2 says
    the orchestrator "cannot see credential values" or "bypass the
@@ -90,9 +105,11 @@ the trust table first, because the driver inherits both.
 8. **Referer and every other header are swapped.** CONFIRMED (probe G).
    §4 allows placeholders in `goto` URLs. The browser then sends that
    URL as `Referer` on later requests to the same host, the proxy swaps
-   the real token into it, and the server logs it. Fix: never swap in
-   `Referer` and `Origin` (and `Cookie` unless a placement says so), or
-   disallow placeholders in navigation URLs.
+   the real token into it, and the server logs it. Placeholders in URLs
+   are legitimate (`query_param` and `url_path_segment` are schema
+   placements), so the fix is on the header side only: never swap in
+   `Referer` and `Origin`, and in `Cookie` only when a placement says
+   so.
 
 9. **Path re-quoting corrupts percent signs.** CONFIRMED (probe F).
    `quote(..., safe="/%:@")` after `unquote` turns an encoded `%25`
@@ -147,9 +164,11 @@ the trust table first, because the driver inherits both.
 16. **`credential_fill` contradiction.** §5 says there is intentionally
     no equivalent. SETUP.md maps `credential_fill` to
     `credlib/fill_secret.py`, which loads real values into `ntindle`'s
-    process. Either delete `fill_secret.py`, or state in the spec that
-    it exists for human-run scripts only and the driver must not use
-    it (it cannot as `bdrive`, which has no sudo).
+    process. The mirror should stay, since code written against the
+    cell's `credential_fill` is meant to port unchanged. Fix the spec
+    text instead: say `fill_secret` is the schema-compatible path for
+    human-run scripts, is the weaker path on this box, and is not used
+    by the driver (it cannot be, as `bdrive` has no sudo).
 
 17. **Action set gaps.** Iframes (SSO and payment forms live in them,
     and CSS selectors do not cross frame boundaries), per-action
@@ -259,8 +278,10 @@ G https://github.com/cb?token=ghp_TOKEN
     in the addon, treat an entry named `totp` (or a `totp` placement)
     as a seed and swap in the current six-digit code, computed with
     stdlib `hmac`, `hashlib`, `struct` and `time` (RFC 6238, 30-second
-    step, SHA-1). Item 4's response scrubbing should cover the seed
-    too.
+    step, SHA-1). If the cell's schema already defines a `totp` entry,
+    match its semantics exactly; if it does not, §5 should name this
+    as a spark-vm extension. Item 4's response scrubbing should cover
+    the seed too.
 
 24. **The recipe never routes the browser through the proxy.** Step 3
     is a plain Playwright script. For the swap to happen, Chromium
