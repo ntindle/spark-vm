@@ -80,7 +80,7 @@ Grant scoping (approved half): registry `allowed_methods` and
 Paths are percent-decoded to a fixpoint and dot-segment-normalized
 before a segment-aligned prefix match, so /repos/../admin cannot pass
 an /repos/ prefix and /repository does not match /repos/. A path that
-still contains %, ; or \ after fixpoint decoding is refused outright
+still contains %, ; or \\ after fixpoint decoding is refused outright
 (finding 42): those only reach a path-bound credential as smuggling
 tricks for lenient servers (double decoding, path parameters,
 backslash separators). This is defense in depth — the server's own
