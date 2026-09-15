@@ -178,6 +178,8 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY):
     a.inference_mode = False
     a.ssrf_hosts = []
     a.ssrf_nets = []
+    a.deny_hosts = []
+    a.deny_nets = []
     # Hermetic DNS: test hosts fail open without a real lookup. Tests that
     # exercise the SSRF guard seed _dns_cache themselves.
     a._dns_cache = {h: (time.time() + 3600, None)
