@@ -203,7 +203,10 @@ rm -f /tmp/swapd-mitmproxy.crt
 
 # ---------------------------------------------------------------- agent user
 say "agent user $JAIL_USER"
-PUBKEY="$(cat "$HOME/.ssh/id_ed25519.pub")"
+# The agent's SSH public key. Copy the agent's id_ed25519.pub to this
+# path on the host before running (override with PUBKEY_FILE=...).
+PUBKEY_FILE="${PUBKEY_FILE:-/home/ntindle/agent-jail.pub}"
+PUBKEY="$(cat "$PUBKEY_FILE")"
 run_guest /bin/bash -c 'id -u '"$JAIL_USER"' >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo '"$JAIL_USER"
 echo "'"$JAIL_USER"' ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/'"$JAIL_USER"'
 chmod 440 /etc/sudoers.d/'"$JAIL_USER"'
