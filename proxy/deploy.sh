@@ -57,6 +57,15 @@ fi
 sudo chown swapd:swapd /home/swapd/grants.json
 sudo chmod 0600 /home/swapd/grants.json
 
+# --- 4b. with-proxy + its CA bundle (owner decision 13) ------------------
+echo "[4b/7] Building the with-proxy CA bundle and installing with-proxy..."
+# The swapd CA is not in the host store; with-proxy uses system CAs plus
+# the swapd CA cert. Rebuilt on every deploy so a rotated CA is picked up.
+sudo mkdir -p /usr/local/share/with-proxy-ca
+sudo sh -c 'cat /etc/ssl/certs/ca-certificates.crt /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem > /usr/local/share/with-proxy-ca/ca-bundle.crt'
+sudo chmod 0644 /usr/local/share/with-proxy-ca/ca-bundle.crt
+sudo install -o root -g root -m 0755 proxy/with-proxy /usr/local/bin/with-proxy
+
 # --- 5. systemd units (finding 66) -----------------------------------------
 echo "[5/7] Installing systemd units..."
 sudo install -o root -g root -m 0644 proxy/swap-proxy.service /etc/systemd/system/swap-proxy.service
@@ -87,7 +96,7 @@ for svc in swap-proxy swap-inference confirmd; do
 done
 
 # Warn if ssrf.deny is missing (finding 61).
-if [ ! -f /home/swapd/ssrf.deny ]; then
+if ! sudo test -f /home/swapd/ssrf.deny; then  # 69(e): swapd home is 0700, test under sudo
     echo "WARNING: /home/swapd/ssrf.deny missing (finding 61)"
 fi
 

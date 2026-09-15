@@ -6,7 +6,11 @@
 # the proxy swaps them for real secrets, for allowlisted hosts only.
 # Opt-in per command: nothing here changes the global environment.
 set -u
-CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+# Host edition. The swapd CA is NOT in the host's system store (owner
+# decision 13: system-wide trust inside the jail only), so this points at
+# a dedicated bundle = system CAs + swapd CA cert, built by deploy.sh.
+# Git reads GIT_SSL_CAINFO, not SSL_CERT_FILE, hence the extra export.
+CA_BUNDLE=/usr/local/share/with-proxy-ca/ca-bundle.crt
 export http_proxy=http://127.0.0.1:18080
 export https_proxy=http://127.0.0.1:18080
 export HTTP_PROXY=http://127.0.0.1:18080
