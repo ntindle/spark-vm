@@ -31,7 +31,12 @@ else
 fi
 
 # --- push through the swapping proxy; hsurr:github becomes the real token ---
-if ! with-proxy git -c http.extraHeader="Authorization: Bearer hsurr:github" -c http.proxy=http://127.0.0.1:18080 push origin HEAD; then
+# GitHub's git HTTPS endpoint accepts Basic auth only (not Bearer) for
+# PATs. The base64 below is computed over the *placeholder*
+# (x-access-token:hsurr:github) — not a secret; the proxy base64-decodes,
+# swaps in the real token, and re-encodes at egress for allowlisted hosts.
+GIT_AUTH="Basic $(printf '%s' 'x-access-token:hsurr:github' | base64)"
+if ! with-proxy git -c http.extraHeader="Authorization: $GIT_AUTH" -c http.proxy=http://127.0.0.1:18080 push origin HEAD; then
     echo "Push failed. If this is an auth (401/403) error, install a GitHub token:" >&2
     echo "  Create a fine-grained PAT with contents:write on ntindle/spark-vm, then run:" >&2
     echo "  cred set github   # paste the token at the prompt (your own SSH session)" >&2
