@@ -224,10 +224,12 @@ class SwapAddonTests(unittest.TestCase):
         self.assertIn(code, {totp("JBSWY3DPEHPK3PXP", now),
                              totp("JBSWY3DPEHPK3PXP", now - 30)})
 
-    @unittest.skip("REVIEW item 1 needs a per-credential allowed_hosts "
-                   "list in the registry first; then assert that "
-                   "hsurr:openai is NOT swapped for github.com even though "
-                   "github.com is in hosts.allow.")
+    @unittest.skip("REVIEW items 1 and 26 need a per-credential "
+                   "allowed_hosts list in the registry first; then assert "
+                   "that hsurr:openai is NOT swapped for github.com even "
+                   "though github.com is in hosts.allow, and that "
+                   "hsurr:github is NOT swapped into a JSON prompt body "
+                   "sent to the allowlisted LLM provider host.")
     def test_bug_credential_bound_to_its_own_hosts(self):
         pass
 

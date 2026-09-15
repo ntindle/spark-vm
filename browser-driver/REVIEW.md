@@ -1,6 +1,6 @@
 # Review of browser-driver/SPEC.md v1
 
-Reviewed at commit `a006f6e`; the addendum at the end covers `7934e0e`, which landed under this review. Scope: `SPEC.md`, `proxy/swap_addon.py`,
+Reviewed at commit `a006f6e`; the first addendum covers `7934e0e`, and the status section at the end covers Spec v2 (`9cc21c0`, `6f6600a`), both of which landed under this review. Scope: `SPEC.md`, `proxy/swap_addon.py`,
 `proxy/sudoers-swapd`, `proxy/hosts.allow`, `proxy/swap-proxy.service`,
 `cred`, `credlib/`, `scripts/push.sh`, `SETUP.md`. Items marked
 CONFIRMED were reproduced against the addon's pure functions with the
@@ -30,6 +30,11 @@ rather than inventing a parallel format.
 ## For the implementer
 
 Read this section first; the numbered findings follow.
+
+**Before anything else:** the repo has two spec files. `SPEC.md` at the
+root is the revised v2; `browser-driver/SPEC.md` is the unrevised v2.
+Move the revised one over the old path so there is one spec. See the
+status section at the end for what v2 did and did not resolve.
 
 **Runnable target.** `python3 -m unittest proxy/test_swap_addon.py`
 from the repo root. No mitmproxy needed. At `a006f6e` it reports 5
@@ -330,3 +335,67 @@ G https://github.com/cb?token=ghp_TOKEN
     verify the login flow live is not in the recipe. Add the launch
     arguments and the CA step; without them the recipe fails silently
     and the placeholders go straight to the site.
+
+## Status after Spec v2 (`9cc21c0`, `6f6600a`)
+
+**Wrong path.** `6f6600a` wrote the revised spec to `/SPEC.md` at the
+repo root and left `browser-driver/SPEC.md` at the unrevised v2. Every
+reference in this review and in the build plan points at
+`browser-driver/SPEC.md`. Move the revised file over it and delete the
+root copy.
+
+**Addressed in spec text, not yet in code.** Items 1, 2, 3, 4, 5 to 9,
+10, 12, 14, 15, 16, 17, 18 and 23 now appear in the spec as
+requirements or withdrawn claims, and the login recipe fixes 24. The
+addon is unchanged: `python3 -m unittest proxy/test_swap_addon.py`
+still reports 6 failures and 1 skip. The spec's build plan item 0
+lists the right code work; none of it has started.
+
+**Not addressed anywhere yet.** Item 11 (sudoers globs escape the
+directory), 13 (mitm CA in the system trust store), and 25 (`k=v`
+sniffing). Items 19 to 22 are listed in the build plan and not done.
+
+**Consistency nits in v2.** §6 still opens with "no component on
+spark-vm ever holds a real value" one paragraph before conceding swapd
+does, and still states unconditionally that the DOM, screenshots and
+logs contain only placeholders while listing response scrubbing as
+pending. Build plan item 0 says 24 findings; this file now has 27.
+
+### New findings from v2's on-box agent
+
+26. **Page content reaches the LLM through the swap proxy, so any
+    page that contains a placeholder string can exfiltrate the real
+    value.** Blocking. v2 adds `obox`, which sends prompts containing
+    page text to an LLM provider, authenticated with `hsurr:llm-api`
+    through the proxy. That makes the provider's host allowlisted. A
+    page the agent visits only has to contain the literal text
+    `hsurr:github` (an attacker page, or any page that echoes what the
+    agent typed) for that string to land in a prompt body, where the
+    proxy swaps in the real GitHub token before sending it to the
+    provider. The token is then in the provider's logs and may be
+    echoed back into the agent's context and its report. Item 1
+    (per-credential host binding) closes the swap-in half, which makes
+    it more urgent than before. Two more controls are needed in
+    `obox`: neutralise `hsurr:` strings in page content before they go
+    into a prompt (replace with a marker that the regex cannot match),
+    and apply item 4's response scrubbing to the provider's responses.
+    State in §2 that the LLM host is allowlisted for exactly one
+    credential.
+
+27. **Transient credentials break the placeholder invariant.** §7 has
+    the orchestrator relay single-use virtual card details to the
+    agent, which types them with ordinary `fill`. §9 does the same for
+    SMS and email codes. Those are real values: they exist in the
+    steer message, in the agent's context, in every LLM prompt that
+    includes the steer message, in the DOM, and in the action
+    screenshot. That contradicts §1 ("never handle a real credential
+    value anywhere in the stack") and the §2 row saying the LLM
+    provider never receives real values. A one-time code is spent
+    after use, so it is a tolerable and stated exception. Card details
+    are not. Fix: give transient credentials the same path as stored
+    ones. The orchestrator gets a narrow, job-scoped install
+    (`cred set-transient <job> card` with an expiry and a host binding
+    to the merchant), the agent fills `hsurr:card-<job>:number` and
+    friends, and swapd deletes the entry when the job ends. Then the
+    §15 verdict "values hidden from the agent/driver" holds for
+    transient values too; today it holds only for stored ones.
