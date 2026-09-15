@@ -12,7 +12,7 @@ infrastructure.
 
 | Path | What it is |
 |---|---|
-| `cred` | Credential CLI (single-file Python, stdlib only). Deployed to `~/bin/cred` on the box. File backend at `~/.config/spark-credentials`, `SPARK_CRED_BACKEND` reserved for a future Bitwarden backend. |
+| `cred` | Credential CLI (single-file Python, stdlib only). Deployed to `~/bin/cred` on the box. Secrets live in the swapd-owned store (`/home/swapd/secrets`), reached only through narrow sudo helpers (`cred-store-set`, `cred-registry-set`); `cred set` takes stdin pipe or no-echo prompt, `cred register` records placement + per-credential host bindings. |
 | `SETUP.md` | Full box documentation: install inventory, cred usage + the missing-credential flow, browser automation, security notes. |
 | `scripts/pw-test.py` | Playwright smoke test — headless Chromium loads example.com, prints title, saves screenshot. Run with `/home/ntindle/.venvs/pw/bin/python`. |
 | `scripts/png-check.py` | Validates the smoke-test screenshot is a real PNG. |

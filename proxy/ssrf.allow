@@ -1,0 +1,13 @@
+# ssrf.allow — explicit egress exceptions for the private-range guard
+# (finding 29).
+#
+# The swap proxy resolves every request host and refuses private ranges
+# (RFC 1918, loopback, link-local, CGNAT/tailnet space) by DEFAULT.
+# A fresh install ships this file empty: default deny.
+#
+# Lines are hostnames (exact, or leading-dot for subdomains) or CIDR
+# literals. Blank lines and #-comments are ignored.
+#
+# This box allows the tailnet (the agent's own infrastructure), added at
+# deploy time:
+#   100.64.0.0/10

@@ -42,7 +42,7 @@ The spark-vm design mirrors this with local parts:
 | Cell (Hatch VM)              | spark-vm equivalent                                          |
 |------------------------------|--------------------------------------------------------------|
 | Secure Vault                 | `swapd`'s store: `/home/swapd/secrets` (0700, user `swapd`) + `credentials.json` registry |
-| Opaque `[credential:…]` ref  | `hsurr:<name>[:entry][:placement]` placeholder               |
+| Opaque `[credential:…]` ref  | `hsurr:<name>[:entry]` placeholder                                      |
 | Runtime direct-to-page delivery | mitmproxy addon (`proxy/swap_addon.py`) swapping placeholders at egress |
 | —                            | Audit log `/home/swapd/swap.log` (names only, never values)  |
 
@@ -62,8 +62,10 @@ The spark-vm design mirrors this with local parts:
   listen_host=127.0.0.1 -s /home/swapd/swap_addon.py`). Secrets are
   installed only by the user via `cred set` in his own sessions.
 - `cred` CLI: deployed to `~/bin/cred` on spark-vm (also on PATH via
-  `/usr/local/bin/cred`). File backend at `~/.config/spark-credentials`;
-  `SPARK_CRED_BACKEND` reserved for a future Bitwarden backend.
+  `/usr/local/bin/cred`). Secrets live in the swapd-owned store
+  (`/home/swapd/secrets`), installed only via `cred set` in the user's
+  own sessions; placement and per-credential host bindings go through
+  `cred register` into `/home/swapd/credentials.json`.
 
 ## Workflow: repo is the source of truth
 

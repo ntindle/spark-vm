@@ -1,0 +1,24 @@
+[Unit]
+Description=Inference-only credential-swapping proxy (mitmdump, as swapd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=swapd
+# Finding 31: obox's LLM calls go through this separate mitmdump
+# instance, not the main swap proxy. It has its own secrets dir holding
+# ONLY the provider API key, its own hosts file holding ONLY the
+# provider, its own registry, and its own audit log. The provider must
+# never appear in the main proxy's hosts.allow.
+Environment=SWAP_SECRETS_DIR=/home/swapd/inference-secrets
+Environment=SWAP_HOSTS_FILE=/home/swapd/inference-hosts.allow
+Environment=SWAP_REGISTRY_FILE=/home/swapd/inference-registry.json
+Environment=SWAP_LOG_FILE=/home/swapd/inference-swap.log
+Environment=SWAP_SSRF_FILE=/home/swapd/ssrf.allow
+Environment=SWAP_INFERENCE_MODE=1
+ExecStart=/home/swapd/.venvs/mitm/bin/mitmdump -p 18081 --set listen_host=127.0.0.1 -s /home/swapd/swap_addon.py --set termlog_verbosity=warn --set "dumper_filter=~d nomatch.invalid"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
