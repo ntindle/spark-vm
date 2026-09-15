@@ -1,0 +1,25 @@
+[Unit]
+Description=Tailnet-only confirmation page (Tailscale-identity auth)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=swapd
+Group=swapd
+# Runs as swapd (owner decision 3: "swapd or bdrive serves the page").
+# Binds the tailnet address only; every request is authenticated by
+# Tailscale identity against CONFIRM_OWNER.
+Environment=CONFIRM_BIND=100.65.241.20
+Environment=CONFIRM_PORT=8443
+Environment=CONFIRM_CERT=/home/swapd/confirmd/cert.crt
+Environment=CONFIRM_KEY=/home/swapd/confirmd/key.pem
+Environment=CONFIRM_OWNER=ntindle@github
+Environment=CONFIRM_DIR=/home/swapd/approvals
+ExecStart=/usr/bin/python3 /home/swapd/confirmd.py
+Restart=on-failure
+# No host secrets are read by the page; it only writes approvals/.
+# The jail cannot route here (jail firewall drops ve-jail).
+
+[Install]
+WantedBy=multi-user.target
