@@ -585,8 +585,11 @@ put to them. Muse: treat these as settled unless marked pending.
    Put it in the spec as a proposal section with the registry schema
    it would need.
 
-5. **Audit log placement (item 12): pending.** The owner is deciding.
-   Do not change it yet.
+5. **Audit log placement (item 12): decided, leave it on the box.**
+   No forwarding, no append-only flag. It is a verification aid, and
+   the long-term direction the spec already names in §17, moving the
+   whole swapd side off the box, makes it a control later without any
+   interim work.
 
    **CA trust (item 13): decided, system-wide inside the jail.** The
    swapd CA goes into the jail's own rootfs trust store, because
