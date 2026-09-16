@@ -355,7 +355,7 @@ sniffing). Items 19 to 22 are listed in the build plan and not done.
 spark-vm ever holds a real value" one paragraph before conceding swapd
 does, and still states unconditionally that the DOM, screenshots and
 logs contain only placeholders while listing response scrubbing as
-pending. Build plan item 0 says 24 findings; this file now has 69.
+pending. Build plan item 0 says 24 findings; this file now has 79.
 
 ### New findings from v2's on-box agent
 
@@ -1375,3 +1375,101 @@ check runs `[ -f ]` without sudo against swapd's 0700 home, so it
 always fails. Use `sudo test -f`. The owner should confirm once with
 `sudo cat /home/swapd/ssrf.deny` that the ts.net name and both tailnet
 IPs are present; the proxy also warns at load if the file is absent.
+
+## Round 8 verification: branch `round8-bdrive-v1` (`67eb3a9`)
+
+Reviewed against main and run here: all 39 tests pass with Playwright
+1.62.0 and a real headless Chromium, including the daemon round trip
+and the bad-peer rejection. The two properties the reviewer said it
+would check hold: the socket accepts exactly the configured peer uid
+via SO_PEERCRED before reading a byte, and the profile is 0700 under
+the `bdrive` user with no path from the jail to it. The action set is
+the v1 list and nothing else; receipts, `ref_scope`, frame-scoped refs,
+the post-navigation rule, the proxy health gate, session expiry, the
+password read restriction and the placeholder-stays-placeholder test
+are all real and tested. The uid correction (guest `muse` is 1000, so
+the host sees 2001000) and the "DAC cannot gate a userns peer" point
+are both right. Five findings block deploy; they are all small.
+
+70. **Chromium cannot verify HTTPS through the proxy.** By reading;
+    the suite runs with the proxy disabled so it cannot see this.
+    `deploy.sh` never installs the swapd CA into the `bdrive` user's
+    NSS database, and Chromium ignores the system store, so every
+    HTTPS `goto` through the proxy fails certificate verification.
+    SETUP.md's own login recipe has the `certutil` step for exactly
+    this. Fix: `libnss3-tools` plus `certutil -d sql:/home/bdrive/.pki/nssdb
+    -A -t C -n swapd-ca -i /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem`
+    as `bdrive` in `deploy.sh`, and a deploy-time check that
+    `certutil -L` lists it.
+
+71. **The nftables egress table is not persisted.** `deploy.sh` runs
+    `nft -f` once; after a reboot `bdrive` has unrestricted egress
+    until someone re-runs deploy, so finding 10 regresses on every
+    boot. Re-running deploy also appends duplicate rules. Fix: a
+    `bdrive-firewall.service` oneshot like `jail-firewall.service`,
+    `destroy table` first, ordered `Before=bdrive.service`.
+
+72. **Restarting `bdrive.service` breaks the jail's socket.**
+    `RuntimeDirectory=bdrive` is removed on stop and recreated on
+    start, while the jail holds a bind mount of the old directory
+    inode. The new socket is created in a directory the jail cannot
+    see, so `bdrive ping` from the jail fails until the jail itself
+    restarts. Fix: `RuntimeDirectoryPreserve=yes`; recreate only the
+    socket file. Test: restart the service, ping from the jail.
+
+77. **bdrive's approval items use epoch floats where confirmd and the
+    proxy expect ISO strings.** `_parse_expiry` fails on a float and
+    returns None, so `first_use` and `purchase` items never expire on
+    the page and the proxy's reaper skips them. Use ISO timestamps
+    like `_file_approval` does.
+
+79. **A purchase approval cannot be approved on the page.** By
+    reading. confirmd's approve path treats every non-`first_use` item
+    as a grant tuple, and a `purchase` item has no credential or
+    method, so approving it returns 400 "Cannot mint grant: missing
+    fields". Give `kind: purchase` its own branch that records the
+    approval for round 10 to consume and mints nothing. Test it.
+
+Should fix in this round:
+
+73. **The peer-uid default accepts guest root.** `BDRIVE_PEER_UIDS`
+    defaults to 2000000 in the unit and in the code, so a missing
+    drop-in still admits a jail uid. Anything in the jail can become
+    any jail uid, so this widens nothing today, but the default should
+    be empty: accept nobody until configured. Say plainly in ROUND8.md
+    that the gate distinguishes the jail from the host, not identities
+    within the jail.
+
+74. **"First-use confirmation" here is a one-time global gate.** It
+    fires once for bdrive's first session ever, never again, and the
+    marker never expires. That is not what §16 or the reference mean
+    by first use, which the grant channel already covers via refused
+    swaps. Decision: keep it, renamed to driver enablement, a one-time
+    human acknowledgement that the persistent profile is in use, and
+    stop calling it first-use confirmation in the spec and ROUND8.md.
+
+75. **Read masking depends on an agent-supplied flag.** `sensitive:
+    true` on `fill` and `type` is set by the caller, so a
+    prompt-injected agent omits it and reads a relayed value back
+    through `get_text` or the snapshot. bdrive should treat every value
+    it typed as unreadable for the rest of the job; the agent already
+    knows what it typed.
+
+76. **Purchase approvals carry agent-claimed host and amount.** bdrive
+    validates types, not that the host matches the page. The issued
+    card's amount cap bounds the damage in round 10, but the human
+    sees what the agent says. Require a session id and stamp the
+    session's current URL and title into the item so the page can show
+    both.
+
+78. **Nits.** The `open` action leaks the previous page. `deploy.sh`
+    hardcodes the 2000000 offset instead of reading it from the
+    `.nspawn` file. `bdrive-clients` is now vestigial. The "screenshots
+    can show sensitive values" limit belongs in the spec's residual
+    list, not only in ROUND8.md.
+
+**Merge plan.** Muse pushes 70, 71, 72, 77 and 79 with tests to the
+branch, and 73 to 76 if they fit; the reviewer re-runs the suite,
+merges, and the owner deploys with `browser-driver/deploy.sh` after
+`jail/build.sh`, then runs `bdrive ping` and one HTTPS `goto` from the
+jail.

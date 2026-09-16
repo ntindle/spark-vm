@@ -14,7 +14,7 @@ cd "$REPO_DIR"
 # (x-access-token:hsurr:github) — not a secret; the proxy base64-decodes,
 # swaps in the real token, and re-encodes at egress for allowlisted hosts.
 GIT_AUTH="Basic $(printf '%s' 'x-access-token:hsurr:github' | base64 -w0)"
-if ! with-proxy git -c http.extraHeader="Authorization: $GIT_AUTH" -c http.proxy=http://127.0.0.1:18080 pull --ff-only; then
+if ! with-proxy git -c http.extraHeader="Authorization: $GIT_AUTH" -c http.proxy=http://127.0.0.1:18080 pull --ff-only origin "$(git rev-parse --abbrev-ref HEAD)"; then
     echo "Pull failed. If this is an auth (401/403) error, install a GitHub token:" >&2
     echo "  Create a fine-grained PAT with contents:read on ntindle/spark-vm, then run:" >&2
     echo "  cred set github   # paste the token at the prompt (your own SSH session)" >&2
