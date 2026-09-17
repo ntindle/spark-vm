@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Credentials</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 16px;
+         background: #111; color: #eee; max-width: 720px; margin-inline: auto; }
+  h1 { font-size: 1.3rem; margin: 0 0 4px; }
+  .sub { color: #999; font-size: .85rem; margin-bottom: 16px; }
+  .card { background: #1c1c1c; border: 1px solid #333; border-radius: 10px;
+          padding: 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 1rem; margin: 0 0 10px; }
+  label { display: block; font-size: .8rem; color: #aaa; margin: 8px 0 4px; }
+  input, select, textarea { width: 100%; box-sizing: border-box; padding: 10px;
+      border-radius: 8px; border: 1px solid #444; background: #222; color: #eee;
+      font-size: 1rem; }
+  textarea { min-height: 56px; font-family: monospace; }
+  button { padding: 10px 16px; border-radius: 8px; border: none; font-size: 1rem;
+           cursor: pointer; }
+  .primary { background: #2f7cf6; color: #fff; width: 100%; margin-top: 12px; }
+  .danger { background: #5a2020; color: #f88; padding: 6px 10px; font-size: .85rem; }
+  .small { background: #333; color: #ddd; padding: 6px 10px; font-size: .85rem; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #2a2a2a;
+           vertical-align: top; }
+  th { color: #999; font-weight: 600; font-size: .78rem; text-transform: uppercase; }
+  .mono { font-family: monospace; font-size: .85rem; }
+  .ok { color: #6d6; } .warn { color: #fc6; } .bad { color: #f66; }
+  .host { display: inline-block; background: #2a2a2a; border-radius: 6px;
+          padding: 2px 8px; margin: 2px 4px 2px 0; font-size: .82rem; }
+  .host button { background: none; color: #f88; padding: 0 0 0 6px; font-size: .9rem; }
+  .row { display: flex; gap: 8px; margin-top: 6px; }
+  .row input { flex: 1; padding: 6px 8px; font-size: .85rem; }
+  #status { min-height: 1.2em; font-size: .85rem; margin-top: 10px; }
+  #refresh-note { font-size: .78rem; color: #777; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>Credentials</h1>
+<div class="sub">swapd store on spark-vm &middot; values are never displayed
+  &middot; <span id="refresh-note">auto-refreshing…</span></div>
+
+<div class="card">
+  <h2>Add / update credential</h2>
+  <label for="f-name">Name</label>
+  <input id="f-name" autocomplete="off" placeholder="github" pattern="[A-Za-z0-9_-]+">
+  <label for="f-value">Secret value</label>
+  <input id="f-value" type="password" autocomplete="new-password" placeholder="paste token">
+  <label for="f-entry">Entry</label>
+  <input id="f-entry" value="access_token" autocomplete="off">
+  <label for="f-placement">Placement</label>
+  <select id="f-placement">
+    <option value="bearer_header">Authorization: Bearer header</option>
+    <option value="custom_header">Custom header</option>
+    <option value="query_param">Query parameter</option>
+    <option value="url_path_segment">URL path segment</option>
+  </select>
+  <div id="arg-wrap" class="hidden">
+    <label for="f-arg" id="f-arg-label">Header name</label>
+    <input id="f-arg" autocomplete="off" placeholder="X-Api-Key">
+  </div>
+  <label for="f-hosts">Allowed hosts (one per line)</label>
+  <textarea id="f-hosts" placeholder="api.github.com"></textarea>
+  <button class="primary" id="btn-save">Save credential</button>
+  <div id="status"></div>
+</div>
+
+<div class="card">
+  <h2>Stored credentials</h2>
+  <div id="list"><p class="sub">loading…</p></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const placementSel = $('f-placement'), argWrap = $('arg-wrap');
+
+function syncArg() {
+  const v = placementSel.value;
+  argWrap.classList.toggle('hidden', v === 'bearer_header' || v === 'url_path_segment');
+  $('f-arg-label').textContent = v === 'custom_header' ? 'Header name' : 'Parameter name';
+  $('f-arg').placeholder = v === 'custom_header' ? 'X-Api-Key' : 'api_key';
+}
+placementSel.addEventListener('change', syncArg); syncArg();
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+let lastOk = 0;
+async function refresh() {
+  try {
+    const r = await fetch('/api/creds', {cache: 'no-store'});
+    const data = await r.json();
+    render(data.creds || []);
+    lastOk = Date.now();
+    $('refresh-note').textContent = 'updated just now';
+  } catch (e) {
+    $('refresh-note').textContent = 'refresh failed — retrying…';
+  }
+}
+
+function render(creds) {
+  if (!creds.length) { $('list').innerHTML = '<p class="sub">none stored</p>'; return; }
+  let h = '<table><tr><th>Name</th><th>State</th><th>Hosts</th><th></th></tr>';
+  for (const c of creds) {
+    const entries = Object.entries(c.entries).map(([e, p]) =>
+      '<div class="mono">' + esc(e) + ' → ' + esc(typeof p === 'string' ? p : JSON.stringify(p)) + '</div>').join('');
+    const state = (c.has_value ? '<span class="ok">● value stored</span>' : '<span class="bad">● no value</span>') +
+      (c.registered ? '' : ' <span class="warn">(not registered — never swaps)</span>') +
+      (entries ? '<div style="margin-top:4px">' + entries + '</div>' : '');
+    const hosts = c.allowed_hosts.map(x =>
+      '<span class="host">' + esc(x) +
+      '<button data-del-host="' + esc(c.name) + '|' + esc(x) + '" title="remove">×</button></span>').join('');
+    h += '<tr><td class="mono"><b>' + esc(c.name) + '</b></td><td>' + state + '</td>' +
+         '<td>' + hosts +
+         '<div class="row"><input placeholder="add host" data-add-host="' + esc(c.name) + '">' +
+         '<button class="small" data-add-btn="' + esc(c.name) + '">+</button></div></td>' +
+         '<td><button class="danger" data-del="' + esc(c.name) + '">delete</button></td></tr>';
+  }
+  $('list').innerHTML = h + '</table>';
+}
+
+$('list').addEventListener('click', async ev => {
+  const t = ev.target;
+  const setStatus = m => { $('status').textContent = m; };
+  if (t.dataset.del) {
+    if (!confirm('Delete credential "' + t.dataset.del + '" (value + registration)?')) return;
+    const r = await fetch('/api/delete', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: t.dataset.del})});
+    const d = await r.json();
+    setStatus(d.ok ? 'deleted ' + t.dataset.del : 'error: ' + (d.error || r.status));
+    refresh();
+  } else if (t.dataset.delHost) {
+    const [name, host] = t.dataset.delHost.split('|');
+    await fetch('/api/host/remove', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, host})});
+    refresh();
+  } else if (t.dataset.addBtn) {
+    const name = t.dataset.addBtn;
+    const input = document.querySelector('input[data-add-host="' + CSS.escape(name) + '"]');
+    const host = (input.value || '').trim();
+    if (!host) return;
+    const r = await fetch('/api/host/add', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, host})});
+    const d = await r.json();
+    if (!d.ok) setStatus('error: ' + (d.error || r.status));
+    refresh();
+  }
+});
+
+$('btn-save').addEventListener('click', async () => {
+  const hosts = $('f-hosts').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const body = {
+    name: $('f-name').value.trim(),
+    value: $('f-value').value,
+    entry: $('f-entry').value.trim() || 'access_token',
+    placement: placementSel.value,
+    placement_arg: $('f-arg').value.trim(),
+    hosts
+  };
+  $('status').textContent = 'saving…';
+  try {
+    const r = await fetch('/api/set', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (d.ok) {
+      $('status').textContent = 'saved ' + d.name;
+      $('f-value').value = '';
+      refresh();
+    } else {
+      $('status').textContent = 'error: ' + (d.error || r.status);
+    }
+  } catch (e) {
+    $('status').textContent = 'error: ' + e;
+  }
+});
+
+setInterval(() => {
+  if (lastOk) {
+    const s = Math.round((Date.now() - lastOk) / 1000);
+    $('refresh-note').textContent = s < 5 ? 'updated just now' : 'updated ' + s + 's ago';
+  }
+}, 1000);
+setInterval(refresh, 3000);
+refresh();
+</script>
+</body>
+</html>

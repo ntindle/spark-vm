@@ -1,0 +1,14 @@
+[Unit]
+Description=cred-ui credential management web UI (localhost only)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/ntindle/spark-vm/cred-ui/cred-ui.py
+Restart=on-failure
+RestartSec=5
+# No secret values ever pass through here; the UI only writes via the
+# narrow sudo writers and never returns stored values.
+
+[Install]
+WantedBy=default.target
