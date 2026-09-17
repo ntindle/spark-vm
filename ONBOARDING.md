@@ -107,6 +107,26 @@ systemctl --user enable --now cred-ui
 ./cua/cua-desktop.sh start
 ```
 
+That starts the full desktop stack (details in `cua/README.md`):
+
+- **Xvfb `:98`** — a virtual display, 1280x800, separate from the VM's own
+  GNOME/Wayland session (the X11 driver cannot drive Wayland, so the
+  desktop lives on its own display).
+- **XFCE** — `xfwm4` + `xfce4-panel` + `xfdesktop` launched as individual
+  components (the full `xfce4-session` crashes here), giving a normal
+  desktop with a taskbar and app menu.
+- **cua-driver 0.28.2** (official `trycua/cua` release) as a daemon driving
+  the whole desktop — keyboard, mouse, screenshots — not just a browser.
+- **cua-bridge.py** — localhost-only HTTP bridge on `127.0.0.1:18731`.
+  The agent reaches it over an SSH tunnel (`-L 18732:127.0.0.1:18731`);
+  nothing is exposed publicly.
+- **Blender** — BlenderMCP runs headless on a *separate* Xvfb `:99`
+  (socket `127.0.0.1:9876`, untouched); the bridge can launch the Blender
+  GUI on `:98` to view and drive it.
+
+Verify: `./cua/cua-desktop.sh status` — every component should report ok,
+and `curl 127.0.0.1:18731/api/status` should answer.
+
 After `git pull`, re-run `./proxy/deploy.sh` (it reinstalls unit files and
 helpers from the repo — the repo is the only source) and restart
 `cred-ui` if it changed.
