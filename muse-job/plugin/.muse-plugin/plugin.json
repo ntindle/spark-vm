@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "name": "muse-job",
+  "displayName": "muse-job lifecycle hooks",
+  "version": "0.3.1",
+  "description": "Writes machine-readable turn and session state for the muse-job manager CLI.",
+  "compat": {
+    "source": "native",
+    "manifestDir": ".muse-plugin"
+  },
+  "capabilities": {
+    "skills": [],
+    "commands": [],
+    "hooks": [
+      {
+        "id": "stop",
+        "event": "Stop",
+        "command": [
+          "python3",
+          "hooks/stop.py"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "muse-job: recording turn state"
+      },
+      {
+        "id": "session-end",
+        "event": "SessionEnd",
+        "command": [
+          "python3",
+          "hooks/session-end.py"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "muse-job: recording session end"
+      },
+      {
+        "id": "session-start",
+        "event": "PreLLMCall",
+        "command": [
+          "python3",
+          "hooks/session-start.py"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "muse-job: registering session"
+      }
+    ],
+    "mcpServers": [],
+    "reminders": []
+  }
+}

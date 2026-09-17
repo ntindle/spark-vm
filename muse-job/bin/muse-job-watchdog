@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""muse-job watchdog: scan active jobs and report anything needing attention.
+
+Findings (one JSON object per line on stdout):
+  blocked   - last turn ended BLOCKED: with the question in `detail`
+  question  - last turn ended with a question (agent didn't use BLOCKED:)
+  stuck     - tmux alive but no turn-end event and no transcript growth in 45m
+  over-budget - elapsed wall time exceeded the job's budget_hours
+Prints nothing when all jobs are healthy (caller treats empty as OK).
+"""
+import json
+import os
+import subprocess
+import time
+
+HOME = os.path.expanduser("~")
+JOBS = os.path.join(HOME, "muse-jobs")
+EVENTS = os.path.join(HOME, ".local", "share", "muse-job", "events")
+STUCK_AFTER_S = 45 * 60
+
+
+def sh(*args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+
+
+def tmux_alive(slug):
+    r = sh("tmux", "has-session", "-t", f"mjob-{slug}")
+    return r is not None and r.returncode == 0
+
+
+def last_event(session_uuid):
+    if not session_uuid:
+        return None
+    p = os.path.join(EVENTS, session_uuid + ".jsonl")
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p) as f:
+            lines = [l for l in f if l.strip()]
+        return json.loads(lines[-1]) if lines else None
+    except Exception:
+        return None
+
+
+def head_bytes(session_uuid):
+    if not session_uuid:
+        return 0
+    p = os.path.join(HOME, ".local", "share", "muse", "projects",
+                     session_uuid, "HEAD.json")
+    try:
+        return os.path.getsize(p)
+    except Exception:
+        return 0
+
+
+def main():
+    now = time.time()
+    if not os.path.isdir(JOBS):
+        return
+    for slug in sorted(os.listdir(JOBS)):
+        jd = os.path.join(JOBS, slug)
+        jf = os.path.join(jd, "job.json")
+        if not os.path.isfile(jf):
+            continue
+        try:
+            with open(jf) as f:
+                job = json.load(f)
+        except Exception:
+            continue
+        if job.get("state") == "closed":
+            continue
+        sid = job.get("session_uuid")
+        started = job.get("started_at", now)
+        budget = job.get("budget_hours")
+        elapsed_h = (now - started) / 3600.0
+        alive = tmux_alive(slug)
+        ev = last_event(sid)
+
+        if ev and ev.get("state") in ("blocked", "question"):
+            print(json.dumps({"slug": slug, "finding": ev["state"],
+                              "detail": ev.get("detail", ""),
+                              "event_ts": ev.get("ts")}))
+            continue
+        if budget and elapsed_h > budget:
+            print(json.dumps({"slug": slug, "finding": "over-budget",
+                              "elapsed_h": round(elapsed_h, 1),
+                              "budget_h": budget}))
+        if alive and ev:
+            idle_s = now - ev.get("ts", now)
+            if idle_s > STUCK_AFTER_S and ev.get("state") == "idle":
+                # idle turn-end 45m ago with no new turn: likely waiting on
+                # nothing / stuck between turns. Report bytes to judge.
+                print(json.dumps({"slug": slug, "finding": "stuck",
+                                  "idle_min": round(idle_s / 60),
+                                  "bytes": head_bytes(sid)}))
+        elif alive and not ev:
+            if now - started > STUCK_AFTER_S:
+                print(json.dumps({"slug": slug, "finding": "stuck",
+                                  "idle_min": round((now - started) / 60),
+                                  "note": "no turn events yet",
+                                  "bytes": head_bytes(sid)}))
+
+
+if __name__ == "__main__":
+    main()

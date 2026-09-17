@@ -1,0 +1,623 @@
+#!/usr/bin/env python3
+"""muse-job: manage persistent Muse Code job sessions.
+
+Same vocabulary as the other agents this operator manages:
+  spawn  - start a job (like subagent.spawn / browser.spawn_task)
+  steer  - send a message into a running job (like browser.steer_task)
+  status - inspect one job (like subagent.list, single)
+  list   - all jobs
+  log    - recent terminal output
+  kill   - kill the tmux session (recoverable via resume)
+  resume - recover a dead tmux session via `muse resume`
+  close  - terminal: archive the job, remove its worktree
+  watch  - watchdog pass over active jobs (cron: JSON lines)
+
+Turn/state detection comes from the `muse-job` Muse plugin's Stop/SessionEnd
+hooks, which append machine-readable events to
+~/.local/share/muse-job/events/<session-uuid>.jsonl. This CLI never scrapes
+the TUI for state; the pane is only read to verify steer delivery.
+"""
+import argparse
+import fcntl
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+JOBS_DIR = os.path.join(HOME, "muse-jobs")
+REPOS_DIR = os.path.join(HOME, "repos")
+EVENTS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "events")
+SESSIONS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
+SESSION_INDEX = os.path.join(HOME, ".local", "share", "muse", "session-index.db")
+VIEW_DIR = os.path.join(HOME, ".local", "share", "muse", "sessions", ".msp-view-v1")
+MUSE = os.path.join(HOME, ".local", "bin", "muse")
+
+PREAMBLE = """You are running as a delegate inside a tmux-managed session. A human
+operator reads your terminal and can send you messages at any time; messages
+sent while you work are queued and delivered at your next turn boundary.
+
+Do not stop to ask questions you can resolve with a reasonable default: state
+your assumption and keep going. Stop only when genuinely blocked.
+
+Job dir: {jobdir}
+Every ~30 minutes of work, append a timestamped line to PROGRESS.md in the job
+dir (what you did, what's next). If you are genuinely blocked, do BOTH:
+(1) append the question and the options you considered to QUESTIONS.md in the
+job dir, (2) end your turn with a line starting `BLOCKED:`.
+When the work is finished, write SUMMARY.md in the job dir and end your turn
+with a line starting `DONE:`.
+
+---
+"""
+
+
+def run(*argv, check=True, capture=True, timeout=120):
+    p = subprocess.run(
+        list(argv),
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+        timeout=timeout,
+    )
+    if check and p.returncode != 0:
+        err = (p.stderr or b"").decode(errors="replace")[:500]
+        raise RuntimeError(f"{' '.join(argv[:3])} failed: {err}")
+    return p
+
+
+def slug_ok(slug):
+    return re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,79}", slug) is not None
+
+
+def job_dir(slug):
+    return os.path.join(JOBS_DIR, slug)
+
+
+def job_json_path(slug):
+    return os.path.join(job_dir(slug), "job.json")
+
+
+def load_job(slug):
+    p = job_json_path(slug)
+    if not os.path.exists(p):
+        raise RuntimeError(f"unknown job: {slug}")
+    with open(p) as f:
+        return json.load(f)
+
+
+def save_job(job):
+    p = job_json_path(job["slug"])
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(job, f, indent=2)
+    os.replace(tmp, p)
+
+
+def tmux_alive(slug):
+    p = subprocess.run(
+        ["tmux", "has-session", "-t", f"mjob-{slug}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return p.returncode == 0
+
+
+def with_lock(slug, fn):
+    os.makedirs(JOBS_DIR, exist_ok=True)
+    lockp = os.path.join(JOBS_DIR, f".{slug}.lock")
+    with open(lockp, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            return fn()
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def repo_name_from_url(url):
+    name = url.rstrip("/").split("/")[-1]
+    if name.endswith(".git"):
+        name = name[:-4]
+    return name or "repo"
+
+
+def cmd_spawn(args):
+    slug = args.slug
+    if not slug_ok(slug):
+        raise RuntimeError(f"bad slug: {slug}")
+    jd = job_dir(slug)
+    if os.path.exists(jd):
+        raise RuntimeError(f"job dir exists: {jd}")
+    prompt_file = args.prompt_file
+    if not os.path.exists(prompt_file):
+        raise RuntimeError(f"prompt file missing: {prompt_file}")
+
+    os.makedirs(REPOS_DIR, exist_ok=True)
+    rname = repo_name_from_url(args.repo)
+    pristine = os.path.join(REPOS_DIR, rname)
+    if not os.path.isdir(os.path.join(pristine, ".git")):
+        print(f"cloning {args.repo} -> {pristine}", flush=True)
+        run("git", "clone", args.repo, pristine, timeout=600)
+    else:
+        run("git", "-C", pristine, "fetch", "origin", timeout=600)
+    base = args.base or "origin/HEAD"
+    # resolve base to a sha for the record
+    sha = run("git", "-C", pristine, "rev-parse", base).stdout.decode().strip()
+
+    work = os.path.join(jd, "work")
+    os.makedirs(os.path.join(jd, "tmp"), exist_ok=True)
+    run("git", "-C", pristine, "worktree", "add", work, "-b", f"job/{slug}", sha)
+
+    with open(prompt_file) as f:
+        prompt = f.read()
+    full_prompt = PREAMBLE.format(jobdir=jd) + prompt
+    with open(os.path.join(jd, "prompt.md"), "w") as f:
+        f.write(full_prompt)
+    for name in ("SUMMARY.md", "QUESTIONS.md", "PROGRESS.md"):
+        open(os.path.join(jd, name), "a").close()
+
+    job = {
+        "slug": slug,
+        "repo": args.repo,
+        "pristine": pristine,
+        "worktree": work,
+        "branch": f"job/{slug}",
+        "base": base,
+        "base_sha": sha,
+        "tmux": f"mjob-{slug}",
+        "session_uuid": None,
+        "state": "active",
+        "budget_hours": args.budget_hours,
+        "started_at": time.time(),
+        "last_bytes": 0,
+        "last_diffstat": "",
+        "diffstat_strikes": 0,
+        "pr_url": None,
+    }
+    save_job(job)
+
+    if tmux_alive(slug):
+        run("tmux", "kill-session", "-t", f"mjob-{slug}", check=False)
+    run("tmux", "new-session", "-d", "-s", f"mjob-{slug}", "-x", "220", "-y", "60",
+        "-c", work)
+    prompt_md = os.path.join(jd, "prompt.md")
+    # Launch with the prompt as argv via shell $(cat): no TUI input racing,
+    # no quoting hazards (command substitution results are not re-scanned).
+    launch = (
+        f"cd {shquote(work)} && TMPDIR={shquote(os.path.join(jd, 'tmp'))} "
+    )
+    if shutil.which("sccache"):
+        launch += "RUSTC_WRAPPER=sccache SCCACHE_CACHE_SIZE=20G "
+    launch += f"muse --yolo \"$(cat {shquote(prompt_md)})\""
+    run("tmux", "send-keys", "-t", f"mjob-{slug}", launch, "Enter")
+    # Discover the session uuid via the session index.
+    uuid = None
+    deadline = time.time() + 90
+    while time.time() < deadline and uuid is None:
+        uuid = find_session(work, job["started_at"])
+        if uuid is None:
+            time.sleep(5)
+    if uuid is None:
+        print("WARNING: session uuid not discovered; steering still works via tmux")
+    else:
+        job["session_uuid"] = uuid
+        save_job(job)
+    print(json.dumps({"slug": slug, "session_uuid": uuid, "worktree": work}))
+    return 0
+
+
+def shquote(s):
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _is_main_session(rec):
+    """Exclude internal children (e.g. reminder observers share the cwd but
+    carry exactly one tool: submit_reminder_decision)."""
+    try:
+        tools = rec.get("payload", {}).get("tools") or []
+        names = [t.get("name") for t in tools]
+        return names != ["submit_reminder_decision"]
+    except Exception:
+        return True
+
+
+def find_session(workdir, since_ts):
+    """Discover the session uuid via the muse-job hook registry.
+
+    The plugin's PreLLMCall hook records {session_id, cwd, first_seen} for
+    every session at its first model call -- far earlier and more reliably
+    than the sqlite session index.
+    """
+    try:
+        cands = []
+        if not os.path.isdir(SESSIONS_DIR):
+            return None
+        for fn in os.listdir(SESSIONS_DIR):
+            if not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(SESSIONS_DIR, fn)) as f:
+                    rec = json.load(f)
+            except Exception:
+                continue
+            if rec.get("cwd") == workdir and rec.get("first_seen", 0) >= since_ts - 10:
+                cands.append((rec["first_seen"], rec["session_id"], rec))
+        cands.sort()
+        main = [c for c in cands if _is_main_session(c[2])]
+        pool = main or cands
+        return pool[0][1] if pool else None
+    except Exception:
+        return None
+
+
+def _input_box_has_text(pane, needle):
+    """True if the TUI input box (last ❯ line) still holds our text."""
+    last_box = None
+    for line in pane.splitlines():
+        s = line.strip()
+        if s.startswith("❯"):
+            last_box = s
+    if last_box is None:
+        return False
+    return bool(needle) and needle in last_box
+
+
+def _steer(slug, message, verify=True):
+    """The one place the tmux input quirk lives.
+
+    Text and Enter are sent as SEPARATE send-keys calls with a pause between.
+    Never combine them: `send-keys "<text>" Enter` in one call silently
+    no-ops against the TUI input box. paste-buffer is not used: the TUI can
+    render a bulk paste without committing it, so a following Enter hits an
+    empty box while the text sits there looking delivered.
+    """
+    target = f"mjob-{slug}"
+    if not tmux_alive(slug):
+        raise RuntimeError(f"tmux session {target} not alive")
+    run("tmux", "send-keys", "-t", target, "--", message)
+    time.sleep(2)
+    run("tmux", "send-keys", "-t", target, "Enter")
+    if not verify:
+        return True
+    needle = message.strip().splitlines()[0][:60] if message.strip() else ""
+    time.sleep(4)
+    for _ in range(3):
+        pane = run("tmux", "capture-pane", "-p", "-t", target).stdout.decode(
+            errors="replace")
+        # Submitted (or queued mid-turn): the input box is clear of our text.
+        if not _input_box_has_text(pane, needle):
+            return True
+        # Still sitting in the box: try Enter once more.
+        run("tmux", "send-keys", "-t", target, "Enter")
+        time.sleep(5)
+    return False
+
+
+def cmd_steer(args):
+    def go():
+        ok = _steer(args.slug, args.message)
+        print(json.dumps({"slug": args.slug, "delivered": ok}))
+        if not ok:
+            raise RuntimeError("input not delivered after 3 tries")
+    with_lock(args.slug, go)
+    return 0
+
+
+def head_info(uuid):
+    p = os.path.join(VIEW_DIR, uuid, "HEAD.json")
+    try:
+        with open(p) as f:
+            d = json.load(f)
+        return d.get("status"), d.get("source_total_bytes", 0)
+    except Exception:
+        return None, 0
+
+
+def last_event(uuid):
+    p = os.path.join(EVENTS_DIR, uuid + ".jsonl")
+    try:
+        with open(p) as f:
+            lines = f.readlines()
+        if not lines:
+            return None
+        return json.loads(lines[-1])
+    except Exception:
+        return None
+
+
+def dir_size(path):
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for fn in files:
+            try:
+                total += os.path.getsize(os.path.join(root, fn))
+            except OSError:
+                pass
+    return total
+
+
+def job_status(job):
+    slug = job["slug"]
+    alive = tmux_alive(slug)
+    uuid = job.get("session_uuid")
+    hstatus, nbytes = head_info(uuid) if uuid else (None, 0)
+    delta = nbytes - job.get("last_bytes", 0)
+    if delta:
+        job["last_bytes"] = nbytes
+        save_job(job)
+    ev = last_event(uuid) if uuid else None
+    try:
+        pm = os.path.getmtime(os.path.join(job_dir(slug), "PROGRESS.md"))
+        progress_age = time.time() - pm
+    except OSError:
+        progress_age = None
+    return {
+        "slug": slug,
+        "job_state": job.get("state"),
+        "tmux_alive": alive,
+        "session_uuid": uuid,
+        "session_status": hstatus,
+        "bytes_total": nbytes,
+        "bytes_delta": delta,
+        "last_hook_event": ev,
+        "progress_age_s": progress_age,
+        "dir_bytes": dir_size(job_dir(slug)),
+        "elapsed_h": (time.time() - job.get("started_at", time.time())) / 3600,
+        "budget_hours": job.get("budget_hours"),
+    }
+
+
+def cmd_status(args):
+    job = load_job(args.slug)
+    st = job_status(job)
+    if args.json:
+        print(json.dumps(st, indent=2, default=str))
+    else:
+        ev = st["last_hook_event"] or {}
+        print(f"job {st['slug']}: state={st['job_state']} tmux={'up' if st['tmux_alive'] else 'down'} "
+              f"session={st['session_status']} bytes={st['bytes_total']} (+{st['bytes_delta']})")
+        if ev:
+            print(f"  last turn: {ev.get('event')}/{ev.get('state')} "
+                  f"{time.strftime('%H:%M', time.localtime(ev.get('ts', 0)))} {ev.get('detail','')[:100]}")
+        if st["progress_age_s"] is not None:
+            print(f"  PROGRESS.md age: {st['progress_age_s']/60:.0f}m  elapsed: {st['elapsed_h']:.1f}h / budget {st['budget_hours']}h")
+    return 0
+
+
+def cmd_list(args):
+    out = []
+    if os.path.isdir(JOBS_DIR):
+        for slug in sorted(os.listdir(JOBS_DIR)):
+            p = job_json_path(slug)
+            if os.path.isfile(p):
+                try:
+                    job = load_job(slug)
+                    out.append({
+                        "slug": slug,
+                        "state": job.get("state"),
+                        "tmux_alive": tmux_alive(slug),
+                        "session_uuid": job.get("session_uuid"),
+                        "elapsed_h": round((time.time() - job.get("started_at", time.time())) / 3600, 1),
+                    })
+                except Exception:
+                    pass
+    if args.json or not out:
+        print(json.dumps(out, indent=2))
+    else:
+        for j in out:
+            print(f"{j['slug']}: {j['state']} tmux={'up' if j['tmux_alive'] else 'down'} {j['elapsed_h']}h")
+    return 0
+
+
+def cmd_log(args):
+    if not tmux_alive(args.slug):
+        raise RuntimeError("tmux session not alive")
+    pane = run("tmux", "capture-pane", "-p", "-t", f"mjob-{args.slug}").stdout.decode(
+        errors="replace")
+    lines = pane.splitlines()
+    print("\n".join(lines[-args.n:]))
+    return 0
+
+
+def cmd_kill(args):
+    run("tmux", "kill-session", "-t", f"mjob-{args.slug}", check=False)
+    print(json.dumps({"slug": args.slug, "tmux": "killed"}))
+    return 0
+
+
+def cmd_resume(args):
+    job = load_job(args.slug)
+    if tmux_alive(args.slug):
+        raise RuntimeError("tmux session already alive")
+    uuid = job.get("session_uuid")
+    if not uuid:
+        raise RuntimeError("no session uuid recorded; cannot resume")
+    work = job["worktree"]
+    run("tmux", "new-session", "-d", "-s", f"mjob-{args.slug}", "-x", "220", "-y", "60",
+        "-c", work)
+    run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
+        f"cd {shquote(work)} && muse resume {shquote(uuid)}", "Enter")
+    time.sleep(15)
+    pane = run("tmux", "capture-pane", "-p", "-t", f"mjob-{args.slug}").stdout.decode(
+        errors="replace")
+    if re.search(r"not found|no session|error", pane, re.I):
+        # Fallback: fresh TUI, continue from git state.
+        run("tmux", "send-keys", "-t", f"mjob-{args.slug}", "q")
+        time.sleep(2)
+        run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
+            f"cd {shquote(work)} && muse --yolo", "Enter")
+        time.sleep(8)
+        _steer(args.slug, "Continue the job described in ../prompt.md. "
+               "Review git state (git log, git status, git diff) and PROGRESS.md, "
+               "then carry on.", verify=False)
+        print(json.dumps({"slug": args.slug, "resumed": "fallback-fresh"}))
+    else:
+        print(json.dumps({"slug": args.slug, "resumed": uuid}))
+    return 0
+
+
+def cmd_close(args):
+    job = load_job(args.slug)
+    run("tmux", "kill-session", "-t", f"mjob-{args.slug}", check=False)
+    work = job["worktree"]
+    pristine = job["pristine"]
+    if os.path.isdir(work):
+        run("git", "-C", pristine, "worktree", "remove", "--force", work, check=False)
+    run("git", "-C", pristine, "worktree", "prune", check=False)
+    jd = job_dir(args.slug)
+    tmpd = os.path.join(jd, "tmp")
+    shutil.rmtree(tmpd, ignore_errors=True)
+    for fn in os.listdir(jd):
+        if fn.endswith(".log") and not fn.endswith(".gz"):
+            p = os.path.join(jd, fn)
+            run("gzip", "-f", p, check=False)
+    job["state"] = "closed"
+    job["closed_at"] = time.time()
+    save_job(job)
+    print(json.dumps({"slug": args.slug, "state": "closed"}))
+    return 0
+
+
+def git_diffstat(work):
+    try:
+        p = run("git", "-C", work, "diff", "--shortstat", timeout=30)
+        return p.stdout.decode().strip()
+    except Exception:
+        return ""
+
+
+def cmd_watch(args):
+    """One watchdog pass over active jobs. Emits JSON lines; never fails."""
+    events = []
+    if not os.path.isdir(JOBS_DIR):
+        return 0
+    for slug in sorted(os.listdir(JOBS_DIR)):
+        p = job_json_path(slug)
+        if not os.path.isfile(p):
+            continue
+        try:
+            job = load_job(slug)
+        except Exception:
+            continue
+        if job.get("state") not in ("active", "blocked"):
+            continue
+        st = job_status(job)
+        now = time.time()
+
+        if not st["tmux_alive"]:
+            # One recovery attempt.
+            try:
+                cmd_resume(argparse.Namespace(slug=slug))
+                events.append({"job": slug, "signal": "recovered",
+                               "detail": "tmux was dead; resumed session"})
+            except Exception as e:
+                events.append({"job": slug, "signal": "needs-attention",
+                               "detail": f"tmux dead and resume failed: {e}"})
+            continue
+
+        ev = st["last_hook_event"] or {}
+        estate = ev.get("state")
+        if estate == "blocked" and job.get("state") != "blocked":
+            job["state"] = "blocked"
+            save_job(job)
+            events.append({"job": slug, "signal": "blocked",
+                           "detail": ev.get("detail", "")})
+        elif estate == "done" and job.get("state") != "done":
+            job["state"] = "done"
+            save_job(job)
+            events.append({"job": slug, "signal": "done",
+                           "detail": ev.get("detail", "")})
+        elif estate == "question":
+            events.append({"job": slug, "signal": "question",
+                           "detail": ev.get("detail", "")})
+
+        if st["elapsed_h"] > (job.get("budget_hours") or 8):
+            events.append({"job": slug, "signal": "budget-exceeded",
+                           "detail": f"{st['elapsed_h']:.1f}h > {job.get('budget_hours')}h budget (notify only)"})
+
+        # Thrash heuristic: bytes growing, no progress heartbeat, no diff change.
+        diffstat = git_diffstat(job["worktree"])
+        if diffstat == job.get("last_diffstat") and diffstat:
+            job["diffstat_strikes"] = job.get("diffstat_strikes", 0) + 1
+        else:
+            job["diffstat_strikes"] = 0
+            job["last_diffstat"] = diffstat
+        save_job(job)
+        pa = st["progress_age_s"]
+        if (st["bytes_delta"] > 0 and pa is not None and pa > 90 * 60
+                and job["diffstat_strikes"] >= 3):
+            events.append({"job": slug, "signal": "possible-thrash",
+                           "detail": "bytes growing, PROGRESS.md stale >90m, diff unchanged 3 passes"})
+        if st["bytes_delta"] == 0 and pa is not None and pa > 45 * 60 \
+                and estate not in ("blocked", "done"):
+            # idle but session healthy: only flag if tmux pane also looks idle
+            events.append({"job": slug, "signal": "idle-unexplained",
+                           "detail": "no byte growth for 45m+ with no blocked/done marker"})
+        if st["dir_bytes"] > 20 * 1024**3:
+            events.append({"job": slug, "signal": "heavy",
+                           "detail": f"job dir {st['dir_bytes']/1024**3:.1f}GB"})
+
+    for e in events:
+        print(json.dumps(e), flush=True)
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="muse-job")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("spawn", help="start a job")
+    s.add_argument("slug")
+    s.add_argument("--repo", required=True)
+    s.add_argument("--prompt-file", required=True)
+    s.add_argument("--base", default=None)
+    s.add_argument("--budget-hours", type=float, default=8)
+    s.set_defaults(fn=cmd_spawn)
+
+    s = sub.add_parser("steer", help="send a message into a running job")
+    s.add_argument("slug")
+    s.add_argument("message")
+    s.set_defaults(fn=cmd_steer)
+
+    s = sub.add_parser("status", help="inspect one job")
+    s.add_argument("slug")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("list", help="all jobs")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_list)
+
+    s = sub.add_parser("log", help="recent terminal output")
+    s.add_argument("slug")
+    s.add_argument("-n", type=int, default=60)
+    s.set_defaults(fn=cmd_log)
+
+    s = sub.add_parser("kill", help="kill the tmux session (recoverable)")
+    s.add_argument("slug")
+    s.set_defaults(fn=cmd_kill)
+
+    s = sub.add_parser("resume", help="recover a dead tmux session")
+    s.add_argument("slug")
+    s.set_defaults(fn=cmd_resume)
+
+    s = sub.add_parser("close", help="archive the job, remove its worktree")
+    s.add_argument("slug")
+    s.set_defaults(fn=cmd_close)
+
+    s = sub.add_parser("watch", help="watchdog pass over active jobs")
+    s.set_defaults(fn=cmd_watch)
+
+    args = ap.parse_args()
+    try:
+        return args.fn(args)
+    except RuntimeError as e:
+        print(f"muse-job: error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

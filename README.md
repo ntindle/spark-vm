@@ -16,6 +16,7 @@ infrastructure.
 | `SETUP.md` | Full box documentation: install inventory, cred usage + the missing-credential flow, browser automation, security notes. |
 | `scripts/pw-test.py` | Playwright smoke test — headless Chromium loads example.com, prints title, saves screenshot. Run with `/home/ntindle/.venvs/pw/bin/python`. |
 | `scripts/png-check.py` | Validates the smoke-test screenshot is a real PNG. |
+| `muse-job/` | Muse Code job wrapper: CLI (`spawn/steer/status/log/kill/resume/close/watch`), plugin hooks (turn classification, session registry), watchdog + disk-sweeper scripts, Python client with the subagent-like API, and the tool-interface spec. Deployed to `~/bin/muse-job*` + user-scope plugin. |
 | `scripts/push.sh` | Push box-side changes back to this repo (runs on spark-vm; see "Backups / pushing"). |
 
 ## Deployed state (2026-09-14)

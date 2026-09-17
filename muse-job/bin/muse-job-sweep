@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""muse-job disk sweeper: keep spark-vm's disk healthy.
+
+Watermarks (on /home/ntindle):
+  >= 85%  prune closed job dirs older than 7 days, hook events and session
+          records older than 30 days
+  >= 93%  additionally kill the LARGEST active job (muse-job kill) to avoid
+          bricking the VM -- user-approved emergency breaker (2026-09-17)
+
+Prints a JSON summary of what it did. Exits 0 always (never break the cron).
+"""
+import json
+import os
+import shutil
+import subprocess
+import time
+
+HOME = os.path.expanduser("~")
+JOBS = os.path.join(HOME, "muse-jobs")
+EVENTS = os.path.join(HOME, ".local", "share", "muse-job", "events")
+SESSIONS = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
+WARN_PCT = 85
+KILL_PCT = 93
+PRUNE_CLOSED_AFTER_DAYS = 7
+PRUNE_EVENTS_AFTER_DAYS = 30
+
+summary = {"disk_pct": None, "pruned": [], "killed": None, "freed_hint": None}
+
+
+def sh(*args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=60)
+    except Exception:
+        return None
+
+
+def disk_pct(path):
+    try:
+        u = shutil.disk_usage(path)
+        return round(u.used / u.total * 100, 1)
+    except Exception:
+        return None
+
+
+def dir_size(p):
+    total = 0
+    for dp, _, fns in os.walk(p):
+        for fn in fns:
+            try:
+                total += os.path.getsize(os.path.join(dp, fn))
+            except OSError:
+                pass
+    return total
+
+
+def prune_old(path, older_than_s):
+    now = time.time()
+    for name in os.listdir(path):
+        p = os.path.join(path, name)
+        try:
+            if now - os.path.getmtime(p) > older_than_s:
+                if os.path.isdir(p) and not os.path.islink(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    os.remove(p)
+                summary["pruned"].append(p)
+        except OSError:
+            pass
+
+
+def main():
+    before = disk_pct(HOME)
+    summary["disk_pct"] = before
+    if before is None:
+        print(json.dumps(summary))
+        return
+    if before >= WARN_PCT:
+        # prune closed jobs
+        if os.path.isdir(JOBS):
+            for slug in os.listdir(JOBS):
+                jd = os.path.join(JOBS, slug)
+                jf = os.path.join(jd, "job.json")
+                try:
+                    with open(jf) as f:
+                        state = json.load(f).get("state")
+                except Exception:
+                    continue
+                if state == "closed" and (
+                        time.time() - os.path.getmtime(jd)
+                        > PRUNE_CLOSED_AFTER_DAYS * 86400):
+                    shutil.rmtree(jd, ignore_errors=True)
+                    summary["pruned"].append(jd)
+        for d in (EVENTS, SESSIONS):
+            if os.path.isdir(d):
+                prune_old(d, PRUNE_EVENTS_AFTER_DAYS * 86400)
+    after_prune = disk_pct(HOME)
+    if after_prune is not None and after_prune >= KILL_PCT:
+        # emergency breaker: kill the largest ACTIVE job
+        biggest, biggest_size = None, 0
+        if os.path.isdir(JOBS):
+            for slug in os.listdir(JOBS):
+                jd = os.path.join(JOBS, slug)
+                jf = os.path.join(jd, "job.json")
+                try:
+                    with open(jf) as f:
+                        if json.load(f).get("state") == "closed":
+                            continue
+                except Exception:
+                    continue
+                s = dir_size(jd)
+                if s > biggest_size:
+                    biggest, biggest_size = slug, s
+        if biggest:
+            r = sh(os.path.join(HOME, "bin", "muse-job"), "kill", biggest)
+            summary["killed"] = {"slug": biggest,
+                                 "bytes": biggest_size,
+                                 "rc": r.returncode if r else -1}
+    summary["disk_pct_after"] = disk_pct(HOME)
+    print(json.dumps(summary))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        summary["error"] = str(e)[:200]
+        print(json.dumps(summary))
