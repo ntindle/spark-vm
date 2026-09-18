@@ -374,11 +374,6 @@ def _capture_pane_state(target):
     return pane, cmd
 
 
-def _capture_pane(target):
-    """Pane text only; see `_capture_pane_state`."""
-    return _capture_pane_state(target)[0]
-
-
 def _dead_tui_msg(target, pane):
     """Refusal error for a pane that does not show a live TUI (issue #4)."""
     tail = "\n".join(pane.splitlines()[-8:]) if pane else "<no pane captured>"
