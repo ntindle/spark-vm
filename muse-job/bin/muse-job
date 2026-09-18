@@ -97,6 +97,32 @@ def job_json_path(slug):
     return os.path.join(job_dir(slug), "job.json")
 
 
+def trusted_job_paths(slug, job):
+    """Paths the destructive commands (close, resume) may act on.
+
+    job.json is agent-writable (issue #11): the job agent runs as the same
+    user and can rewrite it wholesale. A recorded `branch: "main"` must
+    never reach `git branch -D`, and a recorded `worktree` pointing at
+    another job's tree must never reach `worktree remove --force`. So the
+    destructive inputs are re-derived from the slug, and the one value that
+    cannot be re-derived (the pristine repo dir) is containment-checked
+    against ~/repos. Fail closed on any mismatch.
+    Returns (worktree, pristine, branch).
+    """
+    jd = job_dir(slug)
+    work = os.path.join(jd, "work")
+    branch = f"job/{slug}"
+    pristine = job.get("pristine")
+    if not isinstance(pristine, str) or not pristine:
+        raise RuntimeError("job has no recorded pristine repo; refusing destructive op")
+    rp, rr = os.path.realpath(pristine), os.path.realpath(REPOS_DIR)
+    if rp != rr and not rp.startswith(rr + os.sep):
+        raise RuntimeError(
+            f"recorded pristine repo {pristine!r} is outside {REPOS_DIR}; "
+            "refusing destructive op (possible job.json tampering)")
+    return work, pristine, branch
+
+
 def load_job(slug):
     p = job_json_path(slug)
     if not os.path.exists(p):
@@ -165,39 +191,50 @@ def cmd_spawn(args):
 
     work = os.path.join(jd, "work")
     os.makedirs(os.path.join(jd, "tmp"), exist_ok=True)
-    run("git", "-C", pristine, "worktree", "add", work, "-b", f"job/{slug}", sha)
+    try:
+        run("git", "-C", pristine, "worktree", "add", work, "-b", f"job/{slug}", sha)
 
-    with open(prompt_file) as f:
-        prompt = f.read()
-    full_prompt = PREAMBLE.format(jobdir=jd) + prompt
-    with open(os.path.join(jd, "prompt.md"), "w") as f:
-        f.write(full_prompt)
-    for name in ("SUMMARY.md", "QUESTIONS.md", "PROGRESS.md"):
-        open(os.path.join(jd, name), "a").close()
+        with open(prompt_file) as f:
+            prompt = f.read()
+        full_prompt = PREAMBLE.format(jobdir=jd) + prompt
+        with open(os.path.join(jd, "prompt.md"), "w") as f:
+            f.write(full_prompt)
+        for name in ("SUMMARY.md", "QUESTIONS.md", "PROGRESS.md"):
+            open(os.path.join(jd, name), "a").close()
 
-    job = {
-        "slug": slug,
-        "repo": args.repo,
-        "pristine": pristine,
-        "worktree": work,
-        "branch": f"job/{slug}",
-        "base": base,
-        "base_sha": sha,
-        "tmux": f"mjob-{slug}",
-        "session_uuid": None,
-        "state": "active",
-        "budget_hours": args.budget_hours,
-        "started_at": time.time(),
-        # Anchor for the events-missing liveness grace (issue #3): tracks the
-        # CURRENT session, refreshed by the resume fallback when it discovers
-        # a new session uuid. Falls back to started_at for legacy records.
-        "session_started_at": None,
-        "last_bytes": 0,
-        "last_diffstat": "",
-        "diffstat_strikes": 0,
-        "pr_url": None,
-    }
-    save_job(job)
+        job = {
+            "slug": slug,
+            "repo": args.repo,
+            "pristine": pristine,
+            "worktree": work,
+            "branch": f"job/{slug}",
+            "base": base,
+            "base_sha": sha,
+            "tmux": f"mjob-{slug}",
+            "session_uuid": None,
+            "state": "active",
+            "budget_hours": args.budget_hours,
+            "started_at": time.time(),
+            # Anchor for the events-missing liveness grace (issue #3): tracks the
+            # CURRENT session, refreshed by the resume fallback when it discovers
+            # a new session uuid. Falls back to started_at for legacy records.
+            "session_started_at": None,
+            "last_bytes": 0,
+            "last_diffstat": "",
+            "diffstat_strikes": 0,
+            "pr_url": None,
+        }
+        save_job(job)
+    except Exception:
+        # Don't leave a job dir without a job.json: the next spawn with the
+        # same slug would fail "job dir exists" until someone rm -rf's it by
+        # hand, and a half-added `job/<slug>` branch would break the retry's
+        # `worktree add -b` too. Best-effort git cleanup, then remove the dir.
+        run("git", "-C", pristine, "worktree", "remove", "--force", work,
+            check=False)
+        run("git", "-C", pristine, "branch", "-D", f"job/{slug}", check=False)
+        shutil.rmtree(jd, ignore_errors=True)
+        raise
 
     if tmux_alive(slug):
         run("tmux", "kill-session", "-t", f"mjob-{slug}", check=False)
@@ -720,7 +757,10 @@ def cmd_list(args):
                         "state": job.get("state"),
                         "tmux_alive": tmux_alive(slug),
                         "session_uuid": job.get("session_uuid"),
-                        "elapsed_h": round((time.time() - job.get("started_at", time.time())) / 3600, 1),
+                        # Sanitized like job_status (issue #3): a non-numeric
+                        # started_at in agent-writable job.json must not make
+                        # the job silently vanish from `list`.
+                        "elapsed_h": round((time.time() - _num(job.get("started_at"), time.time())) / 3600, 1),
                     })
                 except Exception:
                     pass
@@ -756,7 +796,9 @@ def cmd_resume(args):
     uuid = job.get("session_uuid")
     if not uuid:
         raise RuntimeError("no session uuid recorded; cannot resume")
-    work = job["worktree"]
+    # Re-derive from the slug: job["worktree"] is agent-writable (issue #11)
+    # and must not choose where the operator's tmux starts a shell.
+    work, _, _ = trusted_job_paths(args.slug, job)
     run("tmux", "new-session", "-d", "-s", f"mjob-{args.slug}", "-x", "220", "-y", "60",
         "-c", work)
     run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
@@ -815,14 +857,16 @@ def cmd_resume(args):
 def cmd_close(args):
     job = load_job(args.slug)
     run("tmux", "kill-session", "-t", f"mjob-{args.slug}", check=False)
-    work = job["worktree"]
-    pristine = job["pristine"]
+    # Destructive git inputs re-derived from the slug, never from the
+    # agent-writable job.json (issue #11): a recorded branch="main" must not
+    # reach `git branch -D`, nor a recorded worktree pointing at another
+    # job's tree reach `worktree remove --force`.
+    work, pristine, branch = trusted_job_paths(args.slug, job)
     if os.path.isdir(work):
         run("git", "-C", pristine, "worktree", "remove", "--force", work, check=False)
     run("git", "-C", pristine, "worktree", "prune", check=False)
     # Delete the job branch so re-spawning the same slug works
     # (worktree add -b would otherwise fail: branch already exists).
-    branch = job.get("branch") or f"job/{args.slug}"
     run("git", "-C", pristine, "branch", "-D", branch, check=False)
     jd = job_dir(args.slug)
     tmpd = os.path.join(jd, "tmp")
@@ -873,6 +917,22 @@ def cmd_watch(args):
                 events.append({"job": slug, "signal": "needs-attention",
                                "detail": f"tmux dead and resume failed: {e}"})
             return
+
+        if not job.get("session_uuid"):
+            # Spawn's 90s uuid discovery can miss a slow first model call.
+            # Without a uuid the job is half-blind (no liveness, done-claim,
+            # or tamper signals) and un-resumable, forever. Adopt it lazily
+            # when the hook registration appears. The workdir is re-derived
+            # from the slug, not read from agent-writable job.json.
+            found = find_session(os.path.join(job_dir(slug), "work"),
+                                 _num(job.get("started_at"), 0))
+            if found:
+                job["session_uuid"] = found
+                job["session_started_at"] = time.time()
+                save_job(job)
+                events.append({"job": slug, "signal": "session-adopted",
+                               "detail": "late session uuid discovery; "
+                                         "liveness monitoring now active"})
 
         uuid = job.get("session_uuid")
 
@@ -926,7 +986,9 @@ def cmd_watch(args):
                            "detail": f"{st['elapsed_h']:.1f}h > {job.get('budget_hours')}h budget (notify only)"})
 
         # Thrash heuristic: bytes growing, no progress heartbeat, no diff change.
-        diffstat = git_diffstat(job["worktree"])
+        # The worktree is re-derived from the slug: job["worktree"] is
+        # agent-writable (issue #11) and must not choose what we diff.
+        diffstat = git_diffstat(os.path.join(job_dir(slug), "work"))
         if diffstat == job.get("last_diffstat") and diffstat:
             job["diffstat_strikes"] = _num(job.get("diffstat_strikes"), 0) + 1
         else:
