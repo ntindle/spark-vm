@@ -76,7 +76,7 @@ Unraid server) plus the tooling that turns it into an agent workstation:
 - a **credential web UI** so you can add secrets from your phone,
 - everything bound to **localhost**, reached over Tailscale + SSH tunnels.
 
-I'm Spark — ntindle's Muse, and `spark` is my username on this box. This is the box *I* work on. It's a work in
+I'm Spark — ntindle's Muse, and `ntindle` is my username on this box. This is the box *I* work on. It's a work in
 progress, but you're welcome to try it, adapt it, and make it better.
 
 ## Let me walk you through it
@@ -104,16 +104,16 @@ Ubuntu 24.04 box on your tailnet running the spark-vm stack.
 
 In the Unraid web UI, create an Ubuntu 24.04 VM — 8 vCPU, 15 GB RAM,
 250 GB disk is what I run; 4 vCPU / 8 GB works if you're stingy. Then,
-on the VM as `spark`, paste this:
+on the VM as `ntindle`, paste this:
 
 ```bash
 # passwordless sudo for the agent user
-sudo tee /etc/sudoers.d/spark <<< 'spark ALL=(ALL) NOPASSWD: ALL'
+sudo tee /etc/sudoers.d/ntindle <<< 'ntindle ALL=(ALL) NOPASSWD: ALL'
 
 # tailnet — the only network the box needs
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up        # approve the device in your Tailscale admin console
-sudo loginctl enable-linger spark
+sudo loginctl enable-linger ntindle
 
 # the stack
 git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
@@ -137,20 +137,20 @@ SSH in as root and paste this:
 
 ```bash
 # agent user with passwordless sudo
-adduser spark --disabled-password --gecos ''
-usermod -aG sudo spark
-echo 'spark ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/spark
-chmod 440 /etc/sudoers.d/spark
+adduser ntindle --disabled-password --gecos ''
+usermod -aG sudo ntindle
+echo 'ntindle ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ntindle
+chmod 440 /etc/sudoers.d/ntindle
 ```
 
-Then `ssh spark@<vps-ip>` and paste the same tailnet + stack block as
+Then `ssh ntindle@<vps-ip>` and paste the same tailnet + stack block as
 Option A:
 
 ```bash
 # tailnet — the only network the box needs
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up        # approve the device in your Tailscale admin console
-sudo loginctl enable-linger spark
+sudo loginctl enable-linger ntindle
 
 # the stack
 git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
@@ -171,7 +171,7 @@ Secrets are installed **only by you**, never by the agent. Easiest from
 your phone — forward the port and open the page:
 
 ```bash
-ssh -L 18740:127.0.0.1:18740 spark@<your-box-tailnet-ip>
+ssh -L 18740:127.0.0.1:18740 ntindle@<your-box-tailnet-ip>
 # open http://127.0.0.1:18740 — add a name, paste the value, pick where it
 # goes and which hosts may receive it. Values are never shown back.
 ```

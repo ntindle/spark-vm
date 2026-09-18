@@ -7,12 +7,12 @@ a reviewer reasoning from wrong environment facts will produce wrong findings.
 
 ## The cast
 
-- **The user (spark).** Human. Owns both machines, installs secrets
+- **The user (ntindle).** Human. Owns both machines, installs secrets
   (`cred set`) from his own SSH sessions, manages the allowlist, and
   deploys proxy changes. The only party who ever handles real secret values.
 - **The implementer (Spark).** An AI agent running on a Hatch VM (Meta's
   runtime) — *not* on spark-vm. Reaches spark-vm only over SSH as user
-  `spark`, via a Tailscale TCP proxy with a persistent ControlMaster
+  `ntindle`, via a Tailscale TCP proxy with a persistent ControlMaster
   multiplexor. Writes code in a staging clone of this repo on its own box,
   then pushes; deployment to spark-vm happens afterwards (see Workflow).
 - **The reviewing agent.** Also off-box, works from this repo. Scope is
@@ -48,10 +48,10 @@ The spark-vm design mirrors this with local parts:
 
 ## spark-vm access and privilege (as of 2026-09-15)
 
-- Implementer SSH: as `spark` over the tailnet via a TCP CONNECT proxy,
+- Implementer SSH: as `ntindle` over the tailnet via a TCP CONNECT proxy,
   reusing a persistent ControlMaster socket. New direct connections may
   trigger a user approval; reuse the mux.
-- `spark` has **passwordless sudo** (`/etc/sudoers.d/spark`). The
+- `ntindle` has **passwordless sudo** (`/etc/sudoers.d/ntindle`). The
   implementer is therefore effectively root on demand. This is exactly the
   trust-boundary overclaim in REVIEW.md finding 2: today "the agent cannot
   read secrets" is policy, not enforcement. The user is setting up a
@@ -70,13 +70,13 @@ The spark-vm design mirrors this with local parts:
 ## Workflow: repo is the source of truth
 
 1. Implementer edits the **staging clone** on its own box.
-2. Commit, push to `github.com/ntindle/spark-vm` (**private** repo; GitHub
+2. Commit, push to `github.com/ntindle/spark-vm` (**public** repo; GitHub
    `main` is authoritative — the staging clone may lag it).
 3. On spark-vm, `~/spark-vm` is a clone of the same repo; pull there.
 4. Deploy: copy changed files into place (e.g. `proxy/swap_addon.py` →
    `/home/swapd/swap_addon.py`), `sudo systemctl restart swap-proxy` for
    addon changes (new hosts/secrets are picked up without a restart),
-   sync `SETUP.md` → `/home/spark/SETUP.md`.
+   sync `SETUP.md` → `/home/ntindle/SETUP.md`.
 5. Verify the live state matches the repo (hash-compare the addon).
 
 Rules: never edit the live proxy in place; never commit real secrets
@@ -96,7 +96,7 @@ real credentials — dummies only.
 | `cred`, `credlib/` | Credential CLI + library |
 | `browser-driver/SPEC.md` | Spec for `bdrive` (narrow action driver) + `obox` (on-box agent) |
 | `browser-driver/REVIEW.md` | The reviewer's findings — the authoritative issue list |
-| `SETUP.md` | Operator runbook (website-login recipe, troubleshooting); deployed copy at `/home/spark/SETUP.md` |
+| `SETUP.md` | Operator runbook (website-login recipe, troubleshooting); deployed copy at `/home/ntindle/SETUP.md` |
 | `scripts/push.sh` | Box-side commit+push helper (runs on spark-vm; sends `Basic base64(x-access-token:hsurr:github)`, which the proxy swaps for the real PAT on allowlisted github.com) |
 
 On spark-vm (live, not in repo): `/home/swapd/secrets/` (0700),

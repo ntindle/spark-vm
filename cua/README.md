@@ -8,13 +8,13 @@ listens publicly: no VNC, no RDP, no unauthenticated control port.
 ## Layout (live on the box)
 
 ```
-/home/spark/cua/bin/
+/home/ntindle/cua/bin/
   cua-driver           official trycua/cua driver binary, v0.28.2 (NOT in git — 49 MB;
                        fetch from the trycua/cua releases page, telemetry disabled)
   cua-desktop.sh       supervisor: start/stop/status of Xvfb :98 + D-Bus + XFCE + driver daemon
   start-xfce.sh        launches xfwm4 + xfce4-panel + xfdesktop as components (see gotchas)
   cua-bridge.py        localhost-only HTTP bridge on 127.0.0.1:18731
-  cua-keepalive.sh     run from spark's crontab every 5 min; restarts anything down
+  cua-keepalive.sh     run from ntindle's crontab every 5 min; restarts anything down
   launch-blender-gui.sh  wrapper for the `blender` allowlist entry (Wayland-safe env)
 ```
 
@@ -44,7 +44,7 @@ hatch box; the spark-vm side is kept alive by `cua-keepalive.sh` (5 min cron).
 own `launch_application` is permission-denied in standard mode, so the bridge
 spawns a fixed argv directly on :98. No arbitrary commands — unknown names or
 a missing binary → 400. `chromium` is the Playwright-bundled build (no system
-chromium installed); `blender` opens `/home/spark/cua/demo.blend` via the
+chromium installed); `blender` opens `/home/ntindle/cua/demo.blend` via the
 wrapper script.
 
 ## Display choice
@@ -56,10 +56,10 @@ Orphaned `:100`/`:101` instances from earlier testing were also left alone.
 
 ## Blender / BlenderMCP
 
-Blender 5.2.2 LTS at `/home/spark/apps/blender` (`~/bin/blender` symlink).
+Blender 5.2.2 LTS at `/home/ntindle/apps/blender` (`~/bin/blender` symlink).
 BlenderMCP addon + `blender-mcp` MCP server (via uvx) runs headless on `:99`
 as the `blender-mcp` systemd user service, socket `127.0.0.1:9876` — used to
-author 3D content (e.g. `/home/spark/cua/demo.blend`, a low-poly rocket built
+author 3D content (e.g. `/home/ntindle/cua/demo.blend`, a low-poly rocket built
 2026-09-16 entirely through `execute_blender_code`). The panel can open the
 Blender GUI on `:98` to view/drive it.
 
