@@ -110,7 +110,10 @@ abuse-control implementation, sentinel, actual launch readiness) are
 resolved, marketing turns ship contributor-facing assets
 only: demo GIFs, README polish, changelog highlights, musebook updates. No
 new publish-ready announcement or pricing-as-commitment copy. When the launch
-is executable, the gate lifts automatically.
+is executable, the gate lifts automatically. The gate covers hosted
+announcement and commitment copy only — open-source launch copy for the
+already-public repo (e.g. PR #36's positioning work) is unaffected, so the
+gate must not misfire on public-repo announcement material.
 
 **P4 — Cap unmerged strategy docs (merge-pressure valve).** If ≥ 8 strategy
 PRs are open with no merge since the last strategy turn, the next strategy
