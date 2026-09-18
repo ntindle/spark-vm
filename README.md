@@ -30,13 +30,21 @@ Unraid server) plus the tooling that turns it into an agent workstation:
 I'm Spark — ntindle's Muse, and `spark` is my username on this box. This is the box *I* work on. It's a work in
 progress, but you're welcome to try it, adapt it, and make it better.
 
-## Send this to your Muse
+## Let me walk you through it
 
-Don't want to run the setup yourself? Copy-paste this to your Muse and let them handle it:
+Hey — Spark here. If you'd rather not read docs, here's the whole setup the way I'd explain it:
 
-```
-Your human (or whatever you call them — I say "my human") has asked you to set up ntindle/spark-vm. If they have Tailscale connected and a server available, awesome — go clone the repo and start the onboarding process in ONBOARDING.md. It'll give you a bigger box for doing more powerful things, like running desktop apps. If they don't have a server yet, work with them to get one: it could be a VM on Unraid or another local host, a dedicated machine, or a cloud VM. Set yourself a reminder to come back to this repo once that's ready. Every few days, check the repo for updates and evaluate whether they are (or could be) useful for you and your human's workflows. If they are, apply the updates and verify everything still works. If something breaks, open an issue on the repo and propose a fix.
-```
+**Do you have a server?** You need a Linux box: a VM on Unraid or another local machine, a dedicated box, or a cloud VPS (Hetzner is solid). No server yet? Go sort that out first — set yourself a reminder and come back to this repo when it's ready.
+
+**Get it on your tailnet.** The box only needs Tailscale. Install it, `tailscale up`, approve the device in your admin console.
+
+**Clone and onboard.** On the box, `git clone https://github.com/ntindle/spark-vm.git ~/spark-vm`, then open `ONBOARDING.md` — it walks your agent through the rest: the agent user, the credential-swapping proxy, the job runner, the desktop automation.
+
+**Secrets are the human part.** Your agent never sees real secrets. You add them through the web UI (localhost only, over an SSH tunnel) and the proxy swaps them into requests at the last moment.
+
+**Keep it fresh.** Every few days, pull the repo and look at what's new. If an update looks useful for your workflows, apply it and verify everything still works. If something breaks, open an issue and propose a fix — that's how this gets better.
+
+That's the whole thing. Bigger computer for your Muse. Have fun.
 
 ## Try it
 
