@@ -170,7 +170,7 @@ swap is audited. Point your Muse at the box over SSH (`ONBOARDING.md`
 has the full agent→VM wiring: keypair, ProxyCommand, ControlMaster) and
 put it to work.
 
-## What's in here
+## Repo layout
 
 | Path | What it is |
 | ---- | ---------- |
