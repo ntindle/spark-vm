@@ -42,6 +42,10 @@ Consequences for packaging:
   alerts / kill switch is what lets an org buy the thing without a procurement
   fight. Swapd's per-decision audit lines (§10) are the raw material; the
   pricing page promises the *controls*, not the mechanism.
+- **Compliance is out of pricing scope for now.** C8 lists a SOC 2 path as a
+  gate-evidence item for orgs — that's a trust roadmap (enterprise tier, later),
+  not a tier in this thinking. The tiers here are priced for the Muse-user /
+  human-buyer pair, not for procurement departments.
 
 ## 2. Cost floor (C2)
 
@@ -64,7 +68,9 @@ earn its premium with *zero* setup, not with raw compute.
 GPU is priced separately everywhere (Daytona H100 $2.27/hr; Modal GPU inside
 sandbox at 3x rate). We have no GPU story today (C6) — the tiers below are
 CPU-only; GPU, if ever, is a metered add-on, never bundled into the flat
-tier (it would blow up the free tier).
+tier (it would blow up the free tier). Metered GPU does not violate the
+no-surprises principle below: it's opt-in per run with an explicit price
+shown before the run starts, not ambient metering on the box.
 
 ## 3. Tier design thinking
 
@@ -89,9 +95,11 @@ constraints:
      fire while suspended; wake-on-schedule is a session clock by another
      name and belongs on paid.
 3. **Abuse (§11 Q7):** signup rate limits + identity-verification level for
-   the free tier, decided before launch. Email-only signup invites spam VMs.
-   The agentmail-owned-inbox signup (identity linking) raises the bar
-   relative to email, but the rate limit is the real control.
+   the free tier, decided before launch. The signup design's baseline is
+   email + magic link for the human account — and its §11 Q7 warns that
+   email-only invites spam VMs. The bar-raiser to decide at launch is the
+   identity-verification level plus rate limits — still open (see NEEDS_USER.md
+   Abuse item).
 
 Proposed shape (thinking, not committed): one small box (2 vCPU / 4 GB —
 TermSquad-parity at the entry), suspend after N idle days, wake on SSH dial,
@@ -153,6 +161,11 @@ in order:
   anti-claims.
 - Disclose CPU-only: the page says plainly that there is no GPU tier today
   (and GPUs, if they ever come, are a metered add-on).
+- Never print the positioning one-liner "No session clock to beat" adjacent
+  to the free-tier row. That line is scoped to the self-hosted reality; the
+  hosted free tier *has* a session clock by another name (suspend), and
+  printing the line next to it would say the opposite of the honest suspend
+  copy the row above just gave.
 - No promises today: the page stays a thinking item until Billing + Abuse +
   Neo provider are decided (NEEDS_USER.md).
 
@@ -162,9 +175,10 @@ in order:
   hosted signups need payments, and which provider" — the free-tier suspend
   definition and the paid "no session clock" property need to land in that
   decision.
-- **Abuse item (refine):** identity-verification level for the free tier now
-  has a concrete design to check against (agentmail-owned inbox + enrollment
-  tokens + fingerprint approval); rate limits still undecided.
+- **Abuse item (refine):** identity-verification level for the free tier has
+  no decided design yet (signup doc §11 Q7: email + magic link baseline,
+  verification level + rate limits undecided). The free-tier shape proposed
+  in §3 (idle definition, suspend, wake path) is the input to that decision.
 - **Neo provider (feeds cost floor):** the tier anchors above assume a
   provider cost basis near TermSquad's visible floor. The H4 driver choice
   should carry a GPU-price criterion (C6) so a future GPU add-on is
