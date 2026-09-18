@@ -2,9 +2,7 @@
 
 Publish-ready launch copy for the open-source release of
 [ntindle/spark-vm](https://github.com/ntindle/spark-vm), written to the
-`docs/POSITIONING.md` copy bank and its anti-claims. (The posting
-checklist, demo-assets plan, and review notes for this copy ship with the
-PR, not here — this file is the copy itself.)
+`docs/POSITIONING.md` copy bank and its anti-claims.
 
 ## The post (copy-paste ready)
 
