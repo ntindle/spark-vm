@@ -174,8 +174,13 @@ def load_job(slug):
     return d
 
 
-def save_job(job):
-    p = job_json_path(job["slug"])
+def save_job(job, slug):
+    # The write path comes from the MANAGER-side slug (argv / lock slug /
+    # listdir entry), never job["slug"]: job.json is agent-writable
+    # (issue #11), so a recorded "slug": "victim" / "../../x" must not
+    # redirect the write. Callers pass their trusted slug; load_job also
+    # pins the record's slug as defense in depth.
+    p = job_json_path(slug)
     tmp = p + ".tmp"
     with open(tmp, "w") as f:
         json.dump(job, f, indent=2)
@@ -282,7 +287,7 @@ def _spawn(slug, args):
             "diffstat_strikes": 0,
             "pr_url": None,
         }
-        save_job(job)
+        save_job(job, slug)
     except BaseException:
         # Don't leave a job dir without a job.json: the next spawn with the
         # same slug would fail "job dir exists" until someone rm -rf's it by
@@ -331,7 +336,7 @@ def _spawn(slug, args):
     else:
         job["session_uuid"] = uuid
         job["session_started_at"] = time.time()
-        save_job(job)
+        save_job(job, slug)
     print(json.dumps({"slug": slug, "session_uuid": uuid, "worktree": work}))
     return 0
 
@@ -820,15 +825,14 @@ def dir_size(path):
     return total
 
 
-def job_status(job):
-    slug = job["slug"]
+def job_status(job, slug):
     alive = tmux_alive(slug)
     uuid = job.get("session_uuid")
     hstatus, nbytes = head_info(uuid) if uuid else (None, 0)
     delta = nbytes - _num(job.get("last_bytes"), 0)
     if delta:
         job["last_bytes"] = nbytes
-        save_job(job)
+        save_job(job, slug)
     ev = last_event(uuid) if uuid else None
     try:
         pm = os.path.getmtime(os.path.join(job_dir(slug), "PROGRESS.md"))
@@ -853,7 +857,7 @@ def job_status(job):
 
 def cmd_status(args):
     job = load_job(args.slug)
-    st = job_status(job)
+    st = job_status(job, args.slug)
     if args.json:
         print(json.dumps(st, indent=2, default=str))
     else:
@@ -987,7 +991,7 @@ def cmd_resume(args):
             # done_page_count/window intentionally kept: the re-page backoff
             # is per job, not per session (rate-limits pager fatigue across
             # resumes too).
-            save_job(job)
+            save_job(job, args.slug)
         else:
             print("WARNING: new session uuid not discovered; watch keeps "
                   "reading the old session's events", file=sys.stderr)
@@ -1031,7 +1035,7 @@ def _close(slug):
             run("gzip", "-f", p, check=False)
     job["state"] = "closed"
     job["closed_at"] = time.time()
-    save_job(job)
+    save_job(job, slug)
     print(json.dumps({"slug": slug, "state": "closed"}))
     return 0
 
@@ -1058,7 +1062,7 @@ def cmd_watch(args):
             return
         if job.get("state") not in ("active", "blocked"):
             return
-        st = job_status(job)
+        st = job_status(job, slug)
         now = time.time()
 
         if not st["tmux_alive"]:
@@ -1082,7 +1086,7 @@ def cmd_watch(args):
             if found:
                 job["session_uuid"] = found
                 job["session_started_at"] = time.time()
-                save_job(job)
+                save_job(job, slug)
                 events.append({"job": slug, "signal": "session-adopted",
                                "detail": "late session uuid discovery; "
                                          "liveness monitoring now active"})
@@ -1118,7 +1122,7 @@ def cmd_watch(args):
         estate = ev.get("state")
         if estate == "blocked" and job.get("state") != "blocked":
             job["state"] = "blocked"
-            save_job(job)
+            save_job(job, slug)
             events.append({"job": slug, "signal": "blocked",
                            "detail": _clean_text(ev.get("detail", ""))})
         elif estate == "question":
@@ -1138,7 +1142,7 @@ def cmd_watch(args):
                 if sig is not None:
                     sig["job"] = slug
                     events.append(sig)
-                    save_job(job)
+                    save_job(job, slug)
 
         if st["elapsed_h"] > (_num(job.get("budget_hours"), 8) or 8):
             events.append({"job": slug, "signal": "budget-exceeded",
@@ -1153,7 +1157,7 @@ def cmd_watch(args):
         else:
             job["diffstat_strikes"] = 0
             job["last_diffstat"] = diffstat
-        save_job(job)
+        save_job(job, slug)
         pa = st["progress_age_s"]
         if (st["bytes_delta"] > 0 and pa is not None and pa > 90 * 60
                 and job["diffstat_strikes"] >= 3):

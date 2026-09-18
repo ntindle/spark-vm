@@ -677,7 +677,7 @@ def test_job_status_survives_forged_numerics(cli, tmp_path):
     job["started_at"] = "x"
     job["last_bytes"] = {"evil": 1}
     job["budget_hours"] = "never"
-    st = cli.job_status(job)  # must not raise
+    st = cli.job_status(job, job["slug"])  # must not raise
     assert isinstance(st["elapsed_h"], float)
     assert st["bytes_delta"] >= 0
     # budget comparison path used by cmd_watch must not raise either.

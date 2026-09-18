@@ -314,11 +314,25 @@ def test_load_job_pins_slug(cli):
     loaded = cli.load_job("demo")
     assert loaded["slug"] == "demo"
     loaded["state"] = "closed"
-    cli.save_job(loaded)
+    cli.save_job(loaded, "demo")
     assert os.path.exists(os.path.join(jd, "job.json"))
     assert not os.path.exists(os.path.join(cli.JOBS_DIR, "victim"))
     with open(os.path.join(jd, "job.json")) as f:
         assert json.load(f)["slug"] == "demo"
+
+
+def test_save_job_write_path_uses_manager_slug(cli):
+    """save_job(job, slug) writes to the MANAGER slug's path even when the
+    record carries a forged slug -- the write path never comes from the
+    agent-writable dict (round-2 security blocker, write-path steering)."""
+    jd, job = make_job_dir(cli)
+    job["slug"] = "victim"
+    cli.save_job(job, "demo")
+    assert os.path.exists(os.path.join(jd, "job.json"))
+    assert not os.path.exists(os.path.join(cli.JOBS_DIR, "victim", "job.json"))
+    job["slug"] = "../../x"
+    cli.save_job(job, "demo")
+    assert not os.path.exists(os.path.join(cli.HOME, "x", "job.json"))
 
 
 def test_load_job_pins_traversal_slug(cli):
@@ -327,7 +341,7 @@ def test_load_job_pins_traversal_slug(cli):
     with open(os.path.join(jd, "job.json"), "w") as f:
         json.dump(job, f)
     loaded = cli.load_job("demo")
-    cli.save_job(loaded)
+    cli.save_job(loaded, "demo")
     assert os.path.exists(os.path.join(jd, "job.json"))
     assert not os.path.exists(os.path.join(cli.HOME, "x", "job.json"))
 
