@@ -196,6 +196,9 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY):
     a.refused = []
     a._audit_refused = lambda host, name, reason: a.refused.append(
         (host, name, reason))
+    a.audit_notes = []
+    a._audit_note = lambda host, refused, reason: a.audit_notes.append(
+        (host, refused, reason))
     a.ssrf_refused = []
     a._audit_ssrf_refused = lambda host, ip, reason: a.ssrf_refused.append(
         (host, ip, reason))
@@ -1227,6 +1230,139 @@ class AuthorityAndPlacementTests(unittest.TestCase):
                          "Bearer hsurr:nosuch")
         self.assertIn(("api.github.com", "nosuch", "unknown-credential"),
                       a.refused)
+
+
+class ProxyHardeningRoundTests(unittest.TestCase):
+    """Findings 70-72: response-header scrubbing, the request-side swap
+    cap, and the TOTP scrub window. (Finding 73's TTL clamp is tested in
+    test_grant_writer.py.)"""
+
+    def test_70_response_headers_scrubbed(self):
+        """Finding 70: a REAL secret value echoed in a response header —
+        a /headers-style echo, an X-Subject-Token-style header, a
+        Set-Cookie carrying the credential — is replaced with its
+        placeholder, exactly like the body. (Seeding placeholders here
+        would make the test vacuous: scrubbing is already-a-placeholder
+        → placeholder.)"""
+        a = make_addon()
+        code = sa._totp_code("JBSWY3DPEHPK3PXP")
+        resp = FakeResponse(b'{"ok": true}', "application/json")
+        resp.headers["X-Echo-Auth"] = "Bearer ghp_TOKEN"
+        resp.headers["Set-Cookie"] = "session=correct horse; Path=/"
+        # second Set-Cookie value: exercises the get_all/set_all
+        # round-trip with multiple values for one header
+        resp.headers._items.append(("Set-Cookie", "prefs=dark"))
+        resp.headers["X-OTP"] = "otp " + code
+        flow = Flow(Request("github.com", "/headers"))
+        flow.response = resp
+        a.response(flow)
+        self.assertEqual(resp.headers.get("X-Echo-Auth"),
+                         "Bearer hsurr:github")
+        cookies = resp.headers.get_all("Set-Cookie")
+        self.assertIn("session=hsurr:acme:password; Path=/", cookies)
+        self.assertIn("prefs=dark", cookies)
+        self.assertEqual(resp.headers.get("X-OTP"), "otp hsurr:acme:totp")
+        # content-length still describes the (unscrubbed) body
+        self.assertEqual(resp.headers.get("content-length"),
+                         str(len(resp.content)))
+        # a header with no secret in it is byte-identical
+        self.assertEqual(resp.headers.get("content-type"), "application/json")
+        # framing headers are never scrubbed (finding 70b), even if a
+        # value collides with a whole-token TOTP code
+        resp2 = FakeResponse(b"x", "application/json")
+        resp2.headers["Content-Length"] = code
+        flow = Flow(Request("github.com", "/"))
+        flow.response = resp2
+        a.response(flow)
+        self.assertEqual(resp2.headers.get("Content-Length"), code)
+        # non-allowlisted host: headers untouched
+        other = FakeResponse(b"ghp_TOKEN", "text/plain")
+        other.headers["X-Echo"] = "ghp_TOKEN"
+        flow = Flow(Request("evil.example", "/"))
+        flow.response = other
+        a.response(flow)
+        self.assertEqual(other.headers.get("X-Echo"), "ghp_TOKEN")
+
+    def test_71_oversize_request_body_passes_through_unswapped(self):
+        """Finding 71: a request body over the swap cap passes through
+        unswapped (headers/query/path were already handled); the skip is
+        loud in the log and leaves a durable audit note."""
+        a = make_addon()
+        big = (b'{"k": "hsurr:github", "pad": "'
+               + b"x" * (sa._MAX_SWAP_BODY_BYTES + 1) + b'"}')
+        req = Request("api.github.com", "/x?token=hsurr:github",
+                      [("Authorization", "Bearer hsurr:github"),
+                       ("Content-Type", "application/json")],
+                      big)
+        records = []
+
+        class H(logging.Handler):
+            def emit(self, r):
+                records.append(r.getMessage())
+
+        h = H()
+        sa.log.addHandler(h)
+        self.addCleanup(sa.log.removeHandler, h)
+        a.request(Flow(req))
+        # header and query swaps happened before the body gate...
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer ghp_TOKEN")
+        self.assertNotIn(b"hsurr:github", req.path.encode())
+        self.assertIn(b"ghp_TOKEN", req.path.encode())
+        # ...but the oversize body passed through untouched
+        self.assertIn(b"hsurr:github", req.content)
+        self.assertTrue(any("over swap cap" in r for r in records), records)
+        # ...and the skip left a durable audit note (not just a log)
+        self.assertIn(("api.github.com", "request-body", "over-swap-cap"),
+                      a.audit_notes)
+
+    def test_71_body_exactly_at_cap_is_still_swapped(self):
+        """Finding 71: the gate is `>`, not `>=` — a body of exactly
+        _MAX_SWAP_BODY_BYTES is still swapped. Pins the boundary."""
+        a = make_addon()
+        pad_len = sa._MAX_SWAP_BODY_BYTES - len(b'{"k": "hsurr:github"}')
+        body = b'{"k": "hsurr:github"}' + b"x" * pad_len
+        self.assertEqual(len(body), sa._MAX_SWAP_BODY_BYTES)
+        req = Request("api.github.com", "/x",
+                      [("Content-Type", "application/json")], body)
+        a.request(Flow(req))
+        self.assertNotIn(b"hsurr:github", req.content)
+        self.assertIn(b"ghp_TOKEN", req.content)
+        self.assertEqual(a.audit_notes, [])
+
+    def test_71_oversize_websocket_message_passes_through(self):
+        """Finding 71: the same cap applies to websocket text frames,
+        with the same durable audit note."""
+        a = make_addon()
+        big = b"hsurr:github" + b"x" * (sa._MAX_SWAP_BODY_BYTES + 1)
+        flow = Flow(Request("api.github.com", "/ws"))
+        flow.websocket = FakeWebSocket([FakeWSMessage(big)])
+        a.websocket_message(flow)
+        self.assertIn(b"hsurr:github",
+                      flow.websocket.messages[-1].content)
+        self.assertIn(("api.github.com", "websocket-message",
+                       "over-swap-cap"), a.audit_notes)
+
+    def test_72_totp_scrub_window_covers_adjacent_steps(self):
+        """Finding 72: TOTP codes from the previous and next 30s steps
+        are scrubbed too — a page echoing a code the agent submitted
+        ~40 seconds ago is still covered. Time is frozen so a step
+        boundary can never fall between the test's clock and the
+        addon's clock."""
+        a = make_addon()
+        fixed = 1750000000.0
+        with mock.patch.object(sa.time, "time", return_value=fixed):
+            prev_code = totp("JBSWY3DPEHPK3PXP", fixed - 30)
+            next_code = totp("JBSWY3DPEHPK3PXP", fixed + 30)
+            body = ('{"prev": "%s", "next": "%s"}'
+                    % (prev_code, next_code)).encode()
+            resp = FakeResponse(body, "application/json")
+            flow = Flow(Request("acme.example.com", "/"))
+            flow.response = resp
+            a.response(flow)
+        self.assertNotIn(prev_code.encode(), resp.content)
+        self.assertNotIn(next_code.encode(), resp.content)
+        self.assertEqual(resp.content.count(b"hsurr:acme:totp"), 2)
 
 
 if __name__ == "__main__":

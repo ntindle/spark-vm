@@ -162,8 +162,14 @@ HOSTS_FILE = _env_path("SWAP_HOSTS_FILE", "/home/swapd/hosts.allow")
 REGISTRY_FILE = _env_path("SWAP_REGISTRY_FILE", "/home/swapd/credentials.json")
 LOG_FILE = _env_path("SWAP_LOG_FILE", "/home/swapd/swap.log")
 # Finding 49/50: swapd files structured approvals here when it
-# refuses a swap for lack of a grant. The pending dir is setgid so
-# the file owner (the requester) is recorded from the filesystem.
+# refuses a swap for lack of a grant.
+# Finding 75: the pending dir is setgid so that confirm-request filings
+# record the filing user as the file owner — but filings made HERE are
+# written by the proxy process itself, so their owner is always swapd,
+# not the original requester. An HTTP request carries no unforgeable
+# user identity, so a proxy-filed approval's "requester" is the
+# (credential, host, method, path) tuple in the item, never the file
+# owner. Do not read requester identity out of these files' ownership.
 APPROVALS_DIR = _env_path("SWAP_APPROVALS_DIR", "/home/swapd/approvals")
 # Finding 60: grants live in their own file. The single writer is
 # proxy/grant-writer; proxies only read.
@@ -295,6 +301,12 @@ _DNS_TTL = 60
 # Response scrubbing floor (finding 36): values under this length are
 # never scrubbed, because short secrets mangle pages.
 _MIN_SCRUB_LEN = 8
+# Request-side swap cap (finding 71): response scrubbing refuses bodies
+# over 5MB, but request bodies were parsed whole (parse_qsl/urlencode,
+# full-text regex). A giant body through this shared proxy is a
+# CPU/memory DoS on the addon — skip swapping past the same 5MB line
+# and say so loudly, instead of parsing attacker-sized input.
+_MAX_SWAP_BODY_BYTES = 5 * 1024 * 1024
 
 
 def _normalize_ip(ip):
@@ -861,6 +873,21 @@ class SwapAddon:
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
+    def _audit_note(self, host, refused, reason):
+        """Durable audit line for a refusal that names no credential
+        (finding 71): the refused= token is written verbatim instead of
+        prefixed with hsurr:. A method (not an inline LOG_FILE write) so
+        it shares the audit-write discipline with the other audit paths
+        and tests can stub it like them."""
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            with LOG_FILE.open("a", encoding="utf-8") as f:
+                f.write("ts=%s host=%s refused=%s reason=%s ip=%s\n"
+                        % (ts, host, refused, reason,
+                           getattr(self, "_current_egress_ip", None) or "-"))
+        except OSError as e:
+            log.warning("swap: cannot write audit log: %s", e)
+
     def _audit_authority_mismatch(self, host, authority, egress_ip):
         """Record a refused swap batch: the authorized host (from the
         client-controlled Host header) was not the host the request
@@ -1265,8 +1292,16 @@ class SwapAddon:
                 req.path = new_path + "?" + urllib.parse.urlencode(new_q)
             else:
                 req.path = new_path
-        # body (text only), handled per content type
+        # body (text only), handled per content type. Finding 71:
+        # bodies over the cap are passed through unswapped — parsing
+        # attacker-sized input in this shared process is a DoS vector.
         if req.content:
+            if len(req.content) > _MAX_SWAP_BODY_BYTES:
+                log.warning("swap: request body %d bytes over swap cap "
+                            "for %s; passing through unswapped",
+                            len(req.content), host)
+                self._audit_note(host, "request-body", "over-swap-cap")
+                return
             try:
                 text = req.content.decode("utf-8")
             except UnicodeDecodeError:
@@ -1298,6 +1333,17 @@ class SwapAddon:
         msg = msgs[-1]
         if msg.is_binary:
             return
+        # Finding 71: same swap cap as request bodies — a huge text
+        # frame must not become a parsing DoS on the shared proxy.
+        # The skip is audited like the request-body one (finding 71b):
+        # a >5MB frame passing through unswapped leaves a durable
+        # record, not just a journal warning.
+        if len(msg.content or b"") > _MAX_SWAP_BODY_BYTES:
+            log.warning("swap: websocket message %d bytes over swap cap "
+                        "for %s; passing through unswapped",
+                        len(msg.content), host)
+            self._audit_note(host, "websocket-message", "over-swap-cap")
+            return
         try:
             text = msg.content.decode("utf-8")
         except UnicodeDecodeError:
@@ -1312,6 +1358,10 @@ class SwapAddon:
                          "application/javascript", "application/xml",
                          "application/x-www-form-urlencoded")
     _MAX_SCRUB_BYTES = 5 * 1024 * 1024
+    # Finding 70b: framing headers are never scrubbed — a whole-token
+    # TOTP triple must not rewrite Content-Length into a placeholder.
+    _NEVER_SCRUB_RESPONSE_HEADERS = frozenset({"content-length",
+                                               "transfer-encoding"})
 
     def _is_scrubbable_content_type(self, ctype):
         c = (ctype or "").split(";")[0].strip().lower()
@@ -1350,17 +1400,26 @@ class SwapAddon:
         because the agent typed that placeholder into the page and a
         "review your details" screen may echo it back. Codes are
         whole_token: a six-digit code collides with prices and IDs, so
-        it is only replaced as a standalone token."""
+        it is only replaced as a standalone token. Finding 72: the
+        window covers the previous, current, and next 30s step — a page
+        echoing a code the agent submitted ~40 seconds ago must still be
+        scrubbed. Residual, accepted: the window triples the codes that
+        can collide with an innocent 6-digit standalone token (an order
+        number that happens to equal an adjacent step's code is scrubbed);
+        whole-token matching bounds the damage."""
         triples = []
+        now = time.time()
         for name, val in (self.secrets or {}).items():
             if isinstance(val, dict):
                 for entry, v in val.items():
                     if entry == "totp":
-                        try:
-                            code = _totp_code(v)
-                        except (ValueError, binascii.Error):
-                            continue
-                        triples.append((code, "hsurr:%s:totp" % name, True))
+                        for delta in (-30, 0, 30):
+                            try:
+                                code = _totp_code(v, at=now + delta)
+                            except (ValueError, binascii.Error):
+                                continue
+                            triples.append((code, "hsurr:%s:totp" % name,
+                                            True))
                         continue
                     if self._scrubbable_entry(name, entry, v):
                         triples.append((v, "hsurr:%s:%s" % (name, entry),
@@ -1370,10 +1429,39 @@ class SwapAddon:
         triples.sort(key=lambda t: len(t[0]), reverse=True)
         return triples
 
+    def _scrub_text_value(self, text, triples=None):
+        """Apply the secret replacements to one string (finding 70):
+        shared by body scrubbing and response-header scrubbing so the
+        two surfaces cannot drift apart. Pass precomputed triples to
+        avoid rebuilding them (TOTP HMACs + sort) per header value."""
+        if triples is None:
+            triples = self._secret_replacements()
+        new_text = text
+        for value, placeholder, whole_token in triples:
+            if whole_token:
+                new_text = re.sub(r"(?<!\d)" + re.escape(value) + r"(?!\d)",
+                                  placeholder, new_text)
+            elif value in new_text:
+                new_text = new_text.replace(value, placeholder)
+        return new_text
+
     def response(self, flow):
         """Scrub known secret values out of text responses from allowlisted
         hosts (finding 4), replacing each with its placeholder. Images and
         binary bodies are a stated residual risk, not a solved one.
+
+        Finding 70: response HEADERS are scrubbed too. An allowlisted
+        host that echoes request headers (a /headers-style endpoint) or
+        returns the credential in a header (X-Subject-Token, Set-Cookie)
+        would otherwise hand the real value back through the driver's
+        header reads while the body is scrubbed.
+
+        Finding 70b: framing headers (content-length, transfer-encoding)
+        are NEVER scrubbed. A whole-token TOTP triple could otherwise
+        rewrite a 6-digit Content-Length into a placeholder string on a
+        response that returns before the content-length repair below
+        (non-text or over-size bodies) — broken framing on shared proxy
+        infra is a desync risk, not a cosmetic one.
 
         The hook buffers the whole body (finding 40d): obox must not
         depend on streamed provider responses through this proxy."""
@@ -1385,6 +1473,17 @@ class SwapAddon:
         resp = flow.response
         if resp is None:
             return
+        # Header scrubbing first: header values are short, so there is
+        # no size cap to check here. Triples are computed once, not per
+        # header value.
+        triples = self._secret_replacements()
+        for key in list(resp.headers.keys()):
+            if key.lower() in self._NEVER_SCRUB_RESPONSE_HEADERS:
+                continue
+            vals = resp.headers.get_all(key)
+            new_vals = [self._scrub_text_value(v, triples) for v in vals]
+            if new_vals != vals:
+                resp.headers.set_all(key, new_vals)
         if not self._is_scrubbable_content_type(
                 resp.headers.get("content-type", "")):
             return
@@ -1395,13 +1494,7 @@ class SwapAddon:
             text = resp.text
         except Exception:
             return  # undecodable: skip
-        new_text = text
-        for value, placeholder, whole_token in self._secret_replacements():
-            if whole_token:
-                new_text = re.sub(r"(?<!\d)" + re.escape(value) + r"(?!\d)",
-                                  placeholder, new_text)
-            elif value in new_text:
-                new_text = new_text.replace(value, placeholder)
+        new_text = self._scrub_text_value(text, triples)
         if new_text != text:
             resp.text = new_text
             try:

@@ -195,5 +195,53 @@ class GrantWriterTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.grants_file))
 
 
+    def test_73_ttl_clamped(self):
+        """Finding 73: --ttl-hours is clamped to [1h, 168h] — a typo'd
+        huge TTL must not mint an effectively permanent grant."""
+        from datetime import datetime, timezone
+
+        def hours_left(approval_id):
+            grants = {g["approval_id"]: g for g in self.read_grants()}
+            exp = datetime.fromisoformat(grants[approval_id]["expires"])
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            return (exp - datetime.now(timezone.utc)).total_seconds() / 3600
+
+        def add(approval_id, ttl):
+            return self.run_writer(
+                "add", "--credential", "github", "--host", "github.com",
+                "--method", "POST", "--approval-id", approval_id,
+                "--ttl-hours", str(ttl))
+
+        # huge TTL clamps to 168h with a warning
+        r = add("ttl-big", 100000)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("clamping", r.stderr)
+        self.assertLessEqual(hours_left("ttl-big"), 168)
+        self.assertGreater(hours_left("ttl-big"), 160)
+        # zero TTL clamps up to 1h, also with a warning
+        r = add("ttl-zero", 0)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("clamping", r.stderr)
+        self.assertGreater(hours_left("ttl-zero"), 0.9)
+        self.assertLessEqual(hours_left("ttl-zero"), 1.1)
+        # negative TTL: same floor
+        r = add("ttl-neg", -5)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("clamping", r.stderr)
+        self.assertGreater(hours_left("ttl-neg"), 0.9)
+        # exactly 168h passes through unclamped, no warning
+        r = add("ttl-max", 168)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("clamping", r.stderr)
+        self.assertLessEqual(hours_left("ttl-max"), 168)
+        self.assertGreater(hours_left("ttl-max"), 160)
+        # 169h is over the line: clamped with a warning
+        r = add("ttl-over", 169)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("clamping", r.stderr)
+        self.assertLessEqual(hours_left("ttl-over"), 168)
+
+
 if __name__ == "__main__":
     unittest.main()

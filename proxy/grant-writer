@@ -133,7 +133,19 @@ def cmd_add(args):
         print("grant-writer: credential, host, and method are required",
               file=sys.stderr)
         return 1
-    expires = datetime.now(timezone.utc) + timedelta(hours=args.ttl_hours)
+    # Finding 73: bound the TTL. A typo'd --ttl-hours (or a confirmd
+    # bug) must not mint an effectively permanent grant, and a
+    # zero/negative TTL mints a grant that is already dead.
+    ttl = args.ttl_hours
+    if ttl > 168:
+        print("grant-writer: WARNING: --ttl-hours %d exceeds the 168h "
+              "maximum; clamping" % ttl, file=sys.stderr)
+        ttl = 168
+    if ttl < 1:
+        print("grant-writer: WARNING: --ttl-hours %d is not positive; "
+              "clamping to 1h" % ttl, file=sys.stderr)
+        ttl = 1
+    expires = datetime.now(timezone.utc) + timedelta(hours=ttl)
     grant = {
         "credential": args.credential,
         "host": args.host,
