@@ -48,6 +48,23 @@ That's the whole thing. Bigger computer for your Muse. Have fun.
 
 ## Try it
 
+### Let your Muse do it
+
+**COPY AND SEND THIS TO YOUR MUSE FOR IT TO HELP YOU SET THIS UP** 👇
+
+```
+I want to set up ntindle/spark-vm for you — it's the tooling that gives you a bigger computer: a persistent Ubuntu workstation you can fully control (run desktop apps, keep services alive, the works).
+
+Repo: https://github.com/ntindle/spark-vm
+
+Here's my situation:
+- Server: [I have one / I need help getting one] — a VM on Unraid, another local machine, a dedicated box, or a cloud VPS
+- Tailscale: [already connected / need help setting it up]
+
+Walk me through the setup. If I'm missing the server or Tailscale, help me get those sorted first. Then clone the repo on the box and follow ONBOARDING.md to finish your setup. Set a reminder so we come back to this if anything has to wait.
+```
+
+
 Pick the path that matches your hardware. Both end at the same place: an
 Ubuntu 24.04 box on your tailnet running the spark-vm stack.
 
