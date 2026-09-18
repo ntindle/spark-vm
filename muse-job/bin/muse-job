@@ -163,7 +163,15 @@ def load_job(slug):
     if not os.path.exists(p):
         raise RuntimeError(f"unknown job: {slug}")
     with open(p) as f:
-        return json.load(f)
+        d = json.load(f)
+    # Pin the slug to the manager-side value: job.json is agent-writable
+    # (issue #11) and every read-modify-write path (save_job, job_status,
+    # verify_done_event's SUMMARY.md check) builds filesystem paths from the
+    # slug. A recorded "slug": "victim" would overwrite another job's record;
+    # "slug": "../../x" would write outside ~/muse-jobs. Every caller already
+    # passes the trusted slug (argv / lock slug / listdir entry).
+    d["slug"] = slug
+    return d
 
 
 def save_job(job):
@@ -205,6 +213,21 @@ def cmd_spawn(args):
     slug = args.slug
     if not slug_ok(slug):
         raise RuntimeError(f"bad slug: {slug}")
+
+    def go():
+        # Serialized on the per-slug lock (like cmd_steer): the exists
+        # pre-check races without it -- a concurrent same-slug spawn during
+        # the minutes-long clone would also pass the check, then fail
+        # `worktree add -b` (branch already exists), and the except-cleanup
+        # would destroy the WINNER's worktree, branch, and job dir.
+        # Inside the lock the loser fails fast at the exists check.
+        _spawn(slug, args)
+
+    with_lock(slug, go)
+    return 0
+
+
+def _spawn(slug, args):
     jd = job_dir(slug)
     if os.path.exists(jd):
         raise RuntimeError(f"job dir exists: {jd}")
@@ -260,14 +283,22 @@ def cmd_spawn(args):
             "pr_url": None,
         }
         save_job(job)
-    except Exception:
+    except BaseException:
         # Don't leave a job dir without a job.json: the next spawn with the
         # same slug would fail "job dir exists" until someone rm -rf's it by
         # hand, and a half-added `job/<slug>` branch would break the retry's
-        # `worktree add -b` too. Best-effort git cleanup, then remove the dir.
-        run("git", "-C", pristine, "worktree", "remove", "--force", work,
-            check=False)
-        run("git", "-C", pristine, "branch", "-D", f"job/{slug}", check=False)
+        # `worktree add -b` too. BaseException (not Exception) so SIGTERM /
+        # KeyboardInterrupt mid-spawn -- the clone can run minutes -- also
+        # cleans up. Best-effort git cleanup, then remove the dir.
+        try:
+            run("git", "-C", pristine, "worktree", "remove", "--force", work,
+                check=False)
+            run("git", "-C", pristine, "branch", "-D", f"job/{slug}",
+                check=False)
+        except Exception:
+            # Cleanup must not mask the original failure (e.g. git missing
+            # -> FileNotFoundError, or a hung git -> timeout).
+            pass
         shutil.rmtree(jd, ignore_errors=True)
         raise
 
@@ -338,6 +369,7 @@ def find_session(workdir, since_ts, exclude=None):
         cands = []
         if not os.path.isdir(SESSIONS_DIR):
             return None
+        rwork = os.path.realpath(workdir)
         for fn in os.listdir(SESSIONS_DIR):
             if not fn.endswith(".json"):
                 continue
@@ -348,14 +380,53 @@ def find_session(workdir, since_ts, exclude=None):
                 continue
             if exclude is not None and rec.get("session_id") == exclude:
                 continue
-            if rec.get("cwd") == workdir and rec.get("first_seen", 0) >= since_ts - 10:
+            rcwd = os.path.realpath(rec.get("cwd") or "")
+            if rcwd == rwork and rec.get("first_seen", 0) >= since_ts - 10:
                 cands.append((rec["first_seen"], rec["session_id"], rec))
         cands.sort()
         main = [c for c in cands if _is_main_session(c[2])]
         pool = main or cands
-        return pool[0][1] if pool else None
+        # Newest first: the just-launched / just-resumed session is the one
+        # we want. Oldest-first could adopt a stale dead registration --
+        # notably on close+respawn of the same slug within the 10s slack,
+        # where the old registration still matches.
+        return pool[-1][1] if pool else None
     except Exception:
         return None
+
+
+def session_bound_to_workdir(uuid, workdir):
+    """True iff the hook registry binds this session uuid to this workdir.
+
+    `job["session_uuid"]` is agent-writable (issue #11), and `muse resume
+    <uuid>` attaches the operator's tmux to whatever session the uuid names
+    -- a forged uuid steers resume across the job boundary. Re-validate the
+    binding at resume time and fail closed: the registry record's cwd must
+    realpath-match the slug-derived workdir. This closes the direct job.json
+    forgery (no matching record -> no resume). Residual, stated plainly: the
+    registry itself is same-user-writable, so this is consistency
+    enforcement -- planting a matching record takes a second, noisier write
+    outside the job dir -- not authentication. (The done-claim triage in
+    verify_done_event carries the same cooperative-telemetry caveat.)
+    """
+    try:
+        rwork = os.path.realpath(workdir)
+        if not os.path.isdir(SESSIONS_DIR):
+            return False
+        for fn in os.listdir(SESSIONS_DIR):
+            if not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(SESSIONS_DIR, fn)) as f:
+                    rec = json.load(f)
+            except Exception:
+                continue
+            if (rec.get("session_id") == uuid
+                    and os.path.realpath(rec.get("cwd") or "") == rwork):
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _input_box_has_text(pane, needle):
@@ -426,6 +497,24 @@ def cmd_steer(args):
             raise RuntimeError("input not delivered after 3 tries")
     with_lock(args.slug, go)
     return 0
+
+
+def maybe_adopt_session(job, slug):
+    """Late session-uuid adoption for jobs whose spawn-time discovery missed.
+
+    Returns (uuid_or_None, attention_detail_or_None). Fails closed: `started_at`
+    is agent-writable (issue #11), and a garbage value would make find_session
+    search from epoch zero -- adopting the oldest-ever registration, possibly
+    a dead session, and blinding liveness/done-claim/tamper monitoring to the
+    real session permanently (adoption is one-shot). Refuse loudly instead.
+    """
+    work = os.path.join(job_dir(slug), "work")
+    ts = _num(job.get("started_at"), 0)
+    if ts <= 0:
+        return None, ("job started_at is invalid; refusing late session uuid "
+                      "adoption (possible job.json tampering)")
+    found = find_session(work, ts)
+    return (found, None) if found else (None, None)
 
 
 def head_info(uuid):
@@ -844,6 +933,15 @@ def cmd_resume(args):
     # Re-derive from the slug: job["worktree"] is agent-writable (issue #11)
     # and must not choose where the operator's tmux starts a shell.
     work, _, _ = trusted_job_paths(args.slug, job)
+    # Re-validate the uuid->workdir binding: job["session_uuid"] is
+    # agent-writable, and `muse resume <uuid>` would otherwise attach the
+    # operator's tmux to whatever session a forged uuid names (cross-job
+    # steering). Fail closed with an explicit message.
+    if not uuid or not session_bound_to_workdir(uuid, work):
+        raise RuntimeError(
+            f"recorded session uuid {uuid!r} is not bound to this job's "
+            f"workdir {work!r} in the hook registry -- possible job.json "
+            "tampering; refusing resume")
     run("tmux", "new-session", "-d", "-s", f"mjob-{args.slug}", "-x", "220", "-y", "60",
         "-c", work)
     run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
@@ -900,20 +998,31 @@ def cmd_resume(args):
 
 
 def cmd_close(args):
-    job = load_job(args.slug)
-    run("tmux", "kill-session", "-t", f"mjob-{args.slug}", check=False)
+    def go():
+        # Serialized on the per-slug lock: without it a close racing a
+        # spawn could delete the job dir / branch out from under the
+        # in-flight spawn (same hazard class as the spawn-spawn race).
+        _close(args.slug)
+
+    with_lock(args.slug, go)
+    return 0
+
+
+def _close(slug):
+    job = load_job(slug)
+    run("tmux", "kill-session", "-t", f"mjob-{slug}", check=False)
     # Destructive git inputs re-derived from the slug, never from the
     # agent-writable job.json (issue #11): a recorded branch="main" must not
     # reach `git branch -D`, nor a recorded worktree pointing at another
     # job's tree reach `worktree remove --force`.
-    work, pristine, branch = trusted_job_paths(args.slug, job)
+    work, pristine, branch = trusted_job_paths(slug, job)
     if os.path.isdir(work):
         run("git", "-C", pristine, "worktree", "remove", "--force", work, check=False)
     run("git", "-C", pristine, "worktree", "prune", check=False)
     # Delete the job branch so re-spawning the same slug works
     # (worktree add -b would otherwise fail: branch already exists).
     run("git", "-C", pristine, "branch", "-D", branch, check=False)
-    jd = job_dir(args.slug)
+    jd = job_dir(slug)
     tmpd = os.path.join(jd, "tmp")
     shutil.rmtree(tmpd, ignore_errors=True)
     for fn in os.listdir(jd):
@@ -923,7 +1032,7 @@ def cmd_close(args):
     job["state"] = "closed"
     job["closed_at"] = time.time()
     save_job(job)
-    print(json.dumps({"slug": args.slug, "state": "closed"}))
+    print(json.dumps({"slug": slug, "state": "closed"}))
     return 0
 
 
@@ -969,8 +1078,7 @@ def cmd_watch(args):
             # or tamper signals) and un-resumable, forever. Adopt it lazily
             # when the hook registration appears. The workdir is re-derived
             # from the slug, not read from agent-writable job.json.
-            found = find_session(os.path.join(job_dir(slug), "work"),
-                                 _num(job.get("started_at"), 0))
+            found, attention = maybe_adopt_session(job, slug)
             if found:
                 job["session_uuid"] = found
                 job["session_started_at"] = time.time()
@@ -978,6 +1086,12 @@ def cmd_watch(args):
                 events.append({"job": slug, "signal": "session-adopted",
                                "detail": "late session uuid discovery; "
                                          "liveness monitoring now active"})
+            elif attention:
+                # Fail loud on every pass while the condition holds (same
+                # policy as events-tampered): a plantable latch in job.json
+                # would let the agent silence this permanently.
+                events.append({"job": slug, "signal": "needs-attention",
+                               "detail": attention})
 
         uuid = job.get("session_uuid")
 

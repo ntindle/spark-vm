@@ -370,8 +370,9 @@ def test_events_missing_silent_without_session_uuid(cli):
 
 def test_find_session_excludes_old_uuid(cli, tmp_path):
     # Issue #3 round-2 review: the resume fallback must not re-adopt the dead
-    # session's registration. Within the 10s since_ts slack the old record
-    # still qualifies and sorts first -- only an explicit exclude is robust.
+    # session's registration -- an explicit exclude is robust even within the
+    # 10s since_ts slack. Newest-first otherwise: the just-launched session
+    # is the one discovery wants.
     import time as _time
     sessdir = os.path.join(str(tmp_path), ".local", "share", "muse-job", "sessions")
     os.makedirs(sessdir, exist_ok=True)
@@ -380,8 +381,8 @@ def test_find_session_excludes_old_uuid(cli, tmp_path):
         with open(os.path.join(sessdir, sid + ".json"), "w") as f:
             json.dump({"session_id": sid, "cwd": "/w", "first_seen": seen,
                        "tools": [{"name": "bash"}]}, f)
-    assert cli.find_session("/w", now) == "old-uuid"  # the trap, documented
-    assert cli.find_session("/w", now, exclude="old-uuid") == "new-uuid"
+    assert cli.find_session("/w", now) == "new-uuid"
+    assert cli.find_session("/w", now, exclude="new-uuid") == "old-uuid"
 
 
 def test_classify_markers(stop_hook):

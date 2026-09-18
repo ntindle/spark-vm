@@ -22,6 +22,19 @@ consequences:
      next spawn with the same slug doesn't fail "job dir exists".
   5. The Stop/SessionEnd hooks skip events with no session id instead of
      appending them to a write-only events/unknown.jsonl.
+  6. `load_job` pins the slug to the manager-side value -- a recorded
+     "slug": "victim" / "../../x" cannot steer save_job / job_status /
+     verify_done_event paths (review round 2, security blocker 1).
+  7. `cmd_resume` re-validates the uuid->workdir binding against the hook
+     registry and fails closed when the recorded uuid is not bound to the
+     slug-derived workdir (review round 2, security blocker 2).
+  8. Watch's late uuid adoption fails closed on a garbage `started_at`
+     (no epoch-zero search adopting the oldest-ever registration) and
+     prefers the newest registration (review round 2, engineering B2/N2).
+  9. `cmd_spawn` / `cmd_close` run under the per-slug lock, so a
+     concurrent same-slug spawn cannot pass the exists check mid-clone and
+     have its cleanup destroy the winner's state (review round 2,
+     engineering B1).
 """
 import argparse
 import importlib.machinery
@@ -286,3 +299,160 @@ def test_session_end_hook_skips_missing_session_id(tmp_path):
     _run_hook("session-end.py", {"reason": "exit", "cwd": "/tmp/x"}, home)
     events = home / ".local" / "share" / "muse-job" / "events"
     assert not events.exists() or list(events.iterdir()) == []
+
+
+# --- review round 2: slug pinning (security blocker 1) -----------------------
+
+def test_load_job_pins_slug(cli):
+    """A forged "slug" in job.json is pinned to the manager-side slug on
+    load, so save_job / job_status / verify_done_event can never write to
+    or report on another job's paths."""
+    jd, job = make_job_dir(cli)
+    job["slug"] = "victim"
+    with open(os.path.join(jd, "job.json"), "w") as f:
+        json.dump(job, f)
+    loaded = cli.load_job("demo")
+    assert loaded["slug"] == "demo"
+    loaded["state"] = "closed"
+    cli.save_job(loaded)
+    assert os.path.exists(os.path.join(jd, "job.json"))
+    assert not os.path.exists(os.path.join(cli.JOBS_DIR, "victim"))
+    with open(os.path.join(jd, "job.json")) as f:
+        assert json.load(f)["slug"] == "demo"
+
+
+def test_load_job_pins_traversal_slug(cli):
+    jd, job = make_job_dir(cli)
+    job["slug"] = "../../x"
+    with open(os.path.join(jd, "job.json"), "w") as f:
+        json.dump(job, f)
+    loaded = cli.load_job("demo")
+    cli.save_job(loaded)
+    assert os.path.exists(os.path.join(jd, "job.json"))
+    assert not os.path.exists(os.path.join(cli.HOME, "x", "job.json"))
+
+
+# --- review round 2: resume uuid binding (security blocker 2) -----------------
+
+def _write_session_record(cli, sid, cwd, first_seen=None):
+    os.makedirs(cli.SESSIONS_DIR, exist_ok=True)
+    with open(os.path.join(cli.SESSIONS_DIR, sid + ".json"), "w") as f:
+        json.dump({"session_id": sid, "cwd": cwd,
+                   "first_seen": first_seen if first_seen is not None else time.time(),
+                   "tools": [{"name": "bash"}]}, f)
+
+
+def test_session_bound_to_workdir(cli):
+    jd, _job = make_job_dir(cli)
+    work = os.path.join(jd, "work")
+    os.makedirs(work, exist_ok=True)
+    _write_session_record(cli, "sid-a", work)
+    _write_session_record(cli, "sid-b", "/other/work")
+    assert cli.session_bound_to_workdir("sid-a", work) is True
+    assert cli.session_bound_to_workdir("sid-b", work) is False  # bound elsewhere
+    assert cli.session_bound_to_workdir("nope", work) is False   # unknown
+
+
+def _resume_harness(cli, monkeypatch, uuid):
+    """Fake tmux/git for cmd_resume; returns the recorded run() calls."""
+    jd, job = make_job_dir(cli, session_uuid=uuid)
+    work = os.path.join(jd, "work")
+    os.makedirs(work, exist_ok=True)
+    calls = []
+
+    def fake_run(*argv, **kw):
+        calls.append(list(argv))
+
+        class P:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        if "worktree" in argv and "list" in argv:
+            P.stdout = (f"worktree {work}\n\n"
+                        f"branch refs/heads/job/demo\n").encode()
+        if "capture-pane" in argv:
+            P.stdout = b"Muse TUI running -- some output"
+        return P()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "tmux_alive", lambda slug: False)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    return calls
+
+
+def test_resume_refuses_unbound_uuid(cli, monkeypatch, capsys):
+    """A forged session_uuid with no hook-registry binding to this job's
+    workdir fails closed BEFORE any tmux session is created."""
+    calls = _resume_harness(cli, monkeypatch, "forged-sid")
+    with pytest.raises(RuntimeError, match="not bound"):
+        cli.cmd_resume(argparse.Namespace(slug="demo"))
+    assert not [c for c in calls if "new-session" in c]
+
+
+def test_resume_accepts_bound_uuid(cli, monkeypatch, capsys):
+    """The legit path still works: bound uuid -> tmux resumes it."""
+    calls = _resume_harness(cli, monkeypatch, "real-sid")
+    jd = os.path.join(cli.JOBS_DIR, "demo")
+    work = os.path.join(jd, "work")
+    _write_session_record(cli, "real-sid", work)
+    assert cli.cmd_resume(argparse.Namespace(slug="demo")) == 0
+    steer = [c for c in calls if "send-keys" in c]
+    assert steer and "muse resume 'real-sid'" in " ".join(steer[0])
+    out = capsys.readouterr().out
+    assert json.loads(out.strip())["resumed"] == "real-sid"
+
+
+# --- review round 2: adoption fail-closed + newest-first (engineering B2/N2) --
+
+def test_adoption_refuses_garbage_started_at(cli):
+    """A garbage started_at must not trigger an epoch-zero search adopting
+    the oldest-ever registration -- fail closed with an attention detail."""
+    _jd, job = make_job_dir(cli, started_at="not-a-number")
+    found, attention = cli.maybe_adopt_session(job, "demo")
+    assert found is None
+    assert attention and "started_at" in attention
+
+
+def test_adoption_prefers_newest_registration(cli):
+    jd, job = make_job_dir(cli, started_at=time.time() - 60)
+    work = os.path.join(jd, "work")
+    os.makedirs(work, exist_ok=True)
+    now = time.time()
+    _write_session_record(cli, "old-sid", work, first_seen=now - 50)
+    _write_session_record(cli, "new-sid", work, first_seen=now - 5)
+    found, attention = cli.maybe_adopt_session(job, "demo")
+    assert (found, attention) == ("new-sid", None)
+
+
+def test_spawn_holds_per_slug_lock(cli, monkeypatch, tmp_path):
+    """cmd_spawn serializes on the per-slug lock: the exists check and the
+    whole setup run inside with_lock, so a concurrent same-slug spawn fails
+    fast instead of racing the clone."""
+    held = []
+
+    def fake_lock(slug, fn):
+        held.append(slug)
+        return fn()
+
+    monkeypatch.setattr(cli, "with_lock", fake_lock)
+
+    def boom(*argv, **kw):
+        if "worktree" in argv and "add" in argv:
+            raise RuntimeError("worktree add failed")
+
+        class P:
+            returncode = 0
+            stdout = b"deadbeef"
+            stderr = b""
+
+        return P()
+
+    monkeypatch.setattr(cli, "run", boom)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("do the thing")
+    with pytest.raises(RuntimeError, match="worktree add failed"):
+        cli.cmd_spawn(argparse.Namespace(
+            slug="demo", repo="https://example.com/demo.git",
+            prompt_file=str(prompt), base=None, budget_hours=8))
+    assert held == ["demo"]

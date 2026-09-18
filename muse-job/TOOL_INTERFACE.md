@@ -172,3 +172,34 @@ value that cannot be derived (the pristine repo dir) is containment-checked
 under `~/repos` **and** bound to the job by requiring the derived worktree
 to be a registered worktree of that repo. Future layout migrations must
 update the derivation, not the record.
+
+### Slug pinning, session binding, lock discipline
+
+- **Slug pinning.** `load_job` overwrites the record's `slug` with the
+  manager-side slug (argv / lock slug / directory listing) before
+  returning. Every read-modify-write path (`save_job`, `job_status`,
+  the done-claim `SUMMARY.md` check) therefore uses the trusted slug: a
+  recorded `"slug": "victim"` cannot overwrite another job's record and
+  `"slug": "../../x"` cannot write outside `~/muse-jobs`.
+- **Resume re-validates the session binding.** `job["session_uuid"]` is
+  agent-writable, and `muse resume <uuid>` attaches the operator's tmux to
+  whatever session the uuid names. `cmd_resume` fails closed unless the
+  hook registry binds that uuid to the slug-derived workdir. Residual,
+  stated plainly: the registry is same-user-writable, so this is
+  consistency enforcement (a forged binding needs a second, noisier write
+  outside the job dir), not authentication -- the same
+  cooperative-telemetry caveat as the done-claim triage.
+- **Late uuid adoption fails closed.** Watch adopts a missing uuid from
+  the hook registry, newest registration first, but refuses when the
+  record's `started_at` is invalid (no epoch-zero search that would adopt
+  the oldest-ever, possibly dead, registration and blind monitoring to the
+  real session). Refusal pages `needs-attention` on every pass while the
+  condition holds.
+- **Per-slug lock.** `spawn`, `steer`, `close`, and the watch pass
+  serialize on `~/muse-jobs/.<slug>.lock`. In particular `spawn` holds it
+  across the minutes-long clone: a concurrent same-slug spawn fails fast
+  at the exists check instead of racing, and its failure cleanup can no
+  longer destroy the winner's worktree/branch/job dir. `resume` does not
+  take the lock itself -- the watch pass calls it while holding the lock,
+  and `flock` is not re-entrant.
+
