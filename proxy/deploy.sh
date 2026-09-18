@@ -31,6 +31,22 @@ for arg in "$@"; do
     esac
 done
 
+# --- single-flight with the auto-deploy timer ---------------------------------
+# A manual deploy.sh racing the 10-minute unattended updater would interleave
+# installs and restarts (and the updater's rollback snapshot could capture a
+# half-installed manual state). Take the same lock the updater holds; the
+# updater sets AUTO_DEPLOY_HOLDS_LOCK when it invokes this script itself.
+# Run this script as the box owner (ntindle), not root, so the lock path matches.
+UPDATER_STATE_DIR="${UPDATER_STATE_DIR:-/home/ntindle/.sparkvm-deploy}"
+if [ "${AUTO_DEPLOY_HOLDS_LOCK:-0}" != "1" ]; then
+    mkdir -p "$UPDATER_STATE_DIR"
+    exec 9>"$UPDATER_STATE_DIR/auto-deploy.lock"
+    if ! flock -n 9; then
+        echo "ERROR: auto-deploy holds the lock (unattended deploy in progress) — try again in a minute" >&2
+        exit 1
+    fi
+fi
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
