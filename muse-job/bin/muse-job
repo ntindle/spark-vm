@@ -37,6 +37,22 @@ SESSION_INDEX = os.path.join(HOME, ".local", "share", "muse", "session-index.db"
 VIEW_DIR = os.path.join(HOME, ".local", "share", "muse", "sessions", ".msp-view-v1")
 MUSE = os.path.join(HOME, ".local", "bin", "muse")
 
+# ANSI/OSC escapes + C0 controls. Event `detail` fields are agent-influenced
+# text stored in the event log and echoed into operator-visible output
+# (status, watch pages); a forged line could otherwise erase or spoof the
+# security labels on those lines (issue #3 review). Mirrors the sanitizer in
+# plugin/hooks/stop.py, which cleans hook-written fields at the source --
+# this one covers forged event lines that bypass the hooks entirely.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+)
+
+
+def _clean_text(s):
+    return _ANSI_RE.sub("", s if isinstance(s, str) else "")
+
 PREAMBLE = """You are running as a delegate inside a tmux-managed session. A human
 operator reads your terminal and can send you messages at any time; messages
 sent while you work are queued and delivered at your next turn boundary.
@@ -172,6 +188,10 @@ def cmd_spawn(args):
         "state": "active",
         "budget_hours": args.budget_hours,
         "started_at": time.time(),
+        # Anchor for the events-missing liveness grace (issue #3): tracks the
+        # CURRENT session, refreshed by the resume fallback when it discovers
+        # a new session uuid. Falls back to started_at for legacy records.
+        "session_started_at": None,
         "last_bytes": 0,
         "last_diffstat": "",
         "diffstat_strikes": 0,
@@ -207,6 +227,7 @@ def cmd_spawn(args):
               file=sys.stderr)
     else:
         job["session_uuid"] = uuid
+        job["session_started_at"] = time.time()
         save_job(job)
     print(json.dumps({"slug": slug, "session_uuid": uuid, "worktree": work}))
     return 0
@@ -230,12 +251,16 @@ def _is_main_session(rec):
         return True
 
 
-def find_session(workdir, since_ts):
+def find_session(workdir, since_ts, exclude=None):
     """Discover the session uuid via the muse-job hook registry.
 
     The plugin's PreLLMCall hook records {session_id, cwd, first_seen} for
     every session at its first model call -- far earlier and more reliably
     than the sqlite session index.
+
+    `exclude` skips a known-stale session id (issue #3 review): the resume
+    fallback must not re-adopt the dead session's registration, which a pure
+    since_ts filter cannot reliably exclude within its 10s slack.
     """
     try:
         cands = []
@@ -248,6 +273,8 @@ def find_session(workdir, since_ts):
                 with open(os.path.join(SESSIONS_DIR, fn)) as f:
                     rec = json.load(f)
             except Exception:
+                continue
+            if exclude is not None and rec.get("session_id") == exclude:
                 continue
             if rec.get("cwd") == workdir and rec.get("first_seen", 0) >= since_ts - 10:
                 cands.append((rec["first_seen"], rec["session_id"], rec))
@@ -339,24 +366,276 @@ def head_info(uuid):
         return None, 0
 
 
-def last_event(uuid):
+def _iter_events(uuid):
+    """Yield parseable event dicts from the session's event file, oldest first.
+
+    Refuses symlinked event files (issue #3): the same-user agent can plant
+    a symlink so hook appends corrupt another job's state -- reading through
+    it would follow the link. The caller pages `events-tampered` for that.
+    """
     p = os.path.join(EVENTS_DIR, uuid + ".jsonl")
     try:
+        if os.path.islink(p):
+            return
         with open(p) as f:
             lines = f.readlines()
-        # A single corrupt trailing line must not hide all earlier good
-        # events: walk back and return the first parseable one.
-        for line in reversed(lines):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+
+def event_file_symlinked(uuid):
+    """True when the session's event file is a symlink (tampering, issue #3)."""
+    try:
+        return os.path.islink(os.path.join(EVENTS_DIR, uuid + ".jsonl"))
+    except OSError:
+        return False
+
+
+def last_event(uuid):
+    ev = None
+    for e in _iter_events(uuid):
+        ev = e
+    return ev
+
+
+def latest_done_event(uuid, now):
+    """Newest `done`-state event by normalized ts, or (None, 0).
+
+    Scans the WHOLE file (issue #3 review): the tail-line reader can be
+    defeated by a forged trailing `idle` line that buries a genuine `done`
+    claim, so the done page would never fire.
+    """
+    best, best_ts = None, 0
+    for e in _iter_events(uuid):
+        if isinstance(e, dict) and e.get("state") == "done":
+            ts = _claim_ts(e, now)
+            if best is None or ts > best_ts:
+                best, best_ts = e, ts
+    return best, best_ts
+
+
+def verify_done_event(job, ev):
+    """Triage a hook `done` event: protocol compliance, NOT authenticity.
+
+    Hook events are cooperative telemetry, not ground truth: the job agent
+    runs as the same user with a full shell, so a sophisticated agent can
+    read this tooling and satisfy every check below (write a SUMMARY.md,
+    append a matching event line with the right session_id and cwd). This
+    verifies that the agent *followed the done protocol*, not that the work
+    happened or that the event is genuine.
+
+    A `done` event passes triage only when all of:
+      1. the event names this job's recorded session uuid,
+      2. the event carries a cwd at or under the job worktree,
+      3. the job dir holds a non-empty SUMMARY.md regular file.
+    Returns (True, "") or (False, reason). Fail closed. Callers must NEVER
+    transition job state on the result alone -- see handle_done_claim.
+    """
+    ev = ev or {}
+    uuid = job.get("session_uuid")
+    if not uuid:
+        return False, "job has no recorded session uuid"
+    if ev.get("session_id") != uuid:
+        return False, "event session_id does not match the job's session"
+    cwd = ev.get("cwd")
+    if not cwd:
+        return False, "event carries no cwd"
+    work = job.get("worktree") or ""
+    if not work:
+        # Fail closed: os.path.realpath("") is the CLI process's own cwd,
+        # an attacker-influenced comparison with no security meaning.
+        return False, "job has no recorded worktree"
+    rcwd, rwork = os.path.realpath(cwd), os.path.realpath(work)
+    if rcwd != rwork and not rcwd.startswith(rwork + os.sep):
+        return False, f"event cwd {cwd!r} is outside the job worktree"
+    sp = os.path.join(job_dir(job["slug"]), "SUMMARY.md")
+    try:
+        # Must be a real non-empty file: getsize() succeeds on directories,
+        # so `mkdir SUMMARY.md` would otherwise satisfy this check.
+        summary_ok = os.path.isfile(sp) and os.path.getsize(sp) > 0
+    except OSError:
+        summary_ok = False
+    if not summary_ok:
+        return False, "SUMMARY.md missing, empty, or not a file"
+    return True, ""
+
+
+def _claim_ts(ev, now):
+    """Normalize a claim's event ts for dedup.
+
+    Non-numeric/bool/NaN -> 0; future ts clamped to now. Without the clamp,
+    a forged far-future ts would be recorded as done_claim_ts and suppress
+    every later genuine claim forever; a NaN ts would never dedup and page
+    every pass (issue #3 round-2 review).
+    """
+    ts = (ev or {}).get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts != ts:
+        return 0
+    return min(ts, now)
+
+
+def _stored_claim_ts(job, now):
+    """Sanitize the persisted done-claim dedup cursor on READ (issue #3).
+
+    job.json is agent-writable (issue #11): the agent can plant a far-future
+    done_claim_ts to suppress all future done pages, or garbage to break the
+    comparison. Non-numeric / bool / NaN / future values are treated as
+    absent (no cursor), never trusted. The write-side clamp in _claim_ts is
+    not enough -- this is the read side.
+    """
+    v = job.get("done_claim_ts")
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
         return None
-    except Exception:
+    if v > now:
         return None
+    return v
+
+
+def _sanitize_count(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+
+def _sanitize_window_start(v, now):
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+        return None
+    if v > now:
+        return None
+    return v
+
+
+def handle_done_claim(job, ev, now=None):
+    """Triage a hook `done` event into an operator page.
+
+    Never transitions job state (issue #3): the event is forgeable by the
+    same-user job agent, so a `done` line is only ever a *claim* the operator
+    must confirm (inspect SUMMARY.md, then `muse-job close`).
+
+    Returns a signal dict, or None if this exact claim was already paged.
+    `done-claimed` = the agent followed the done protocol;
+    `done-unverified` = it failed protocol triage (lazy forgery or a broken
+    hook payload). Neither authenticates the event.
+
+    Dedup is on the normalized claim ts (_claim_ts) against the SANITIZED
+    stored cursor (_stored_claim_ts): an already-paged claim never re-pages,
+    a newer `done` does. Re-page backoff: after 3 pages inside a 24h window
+    the claim stream coalesces into a single `done-repeated` page per window,
+    so an agent minting a fresh `done` every pass cannot page the operator
+    into ignoring the signal. The caller persists the job record after a
+    non-None return.
+    """
+    if now is None:
+        now = time.time()
+    ev = ev or {}
+    claim_ts = _claim_ts(ev, now)
+    prev = _stored_claim_ts(job, now)
+    if prev is not None and claim_ts <= prev:
+        return None
+    win = _sanitize_window_start(job.get("done_page_window_start"), now)
+    if win is None or now - win > 24 * 3600:
+        win = now
+        job["done_page_count"] = 0
+        job.pop("done_repeated_paged", None)
+    count = _sanitize_count(job.get("done_page_count"))
+    ok, reason = verify_done_event(job, ev)
+    detail = _clean_text(ev.get("detail", ""))
+    if ok:
+        label = "done-claimed"
+        text = (f"agent claims done (protocol checks passed; "
+                f"confirm SUMMARY.md, then close): {detail}")
+    else:
+        label = "done-unverified"
+        text = (f"agent claims done but failed protocol cross-check: "
+                f"{reason}; possible forgery: {detail}")
+    job["done_claim_ts"] = claim_ts
+    if count >= 3:
+        if job.get("done_repeated_paged"):
+            return None
+        job["done_repeated_paged"] = True
+        return {"signal": "done-repeated",
+                "detail": f"{count + 1} done claims in 24h; coalesced: {text}"}
+    job["done_page_window_start"] = win
+    job["done_page_count"] = count + 1
+    # A planted done_repeated_paged=True with count<3 is always stale or
+    # forged; pop it to maintain the invariant flag <=> count>=3 in-window.
+    job.pop("done_repeated_paged", None)
+    return {"signal": label, "detail": text}
+
+
+def _num(v, default):
+    """Sanitize a numeric read from agent-writable job.json (issue #3).
+
+    Rejects bool, non-numeric types, and NaN -- garbage fails to the default.
+    Without this, a single `"started_at": "x"` write makes job_status raise
+    TypeError, which watch_one swallows, silencing every signal for that job
+    (sec review round 2).
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+        return default
+    return v
+
+
+def _session_anchor(job, now):
+    """Sanitized liveness anchor: the current session's start time.
+
+    job.json is agent-writable (issue #11), so garbage is normalized here --
+    but an agent rewriting the anchor to ~now on every pass is the same class
+    of cooperative forgery as faked heartbeat lines: documented as a residual
+    in check_events_liveness, not defeated.
+    """
+    v = job.get("session_started_at", job.get("started_at", now))
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+        return now
+    return min(v, now)
+
+
+def check_events_liveness(job, st, now):
+    """Watchdog liveness (issue #3): detect event-file blinding.
+
+    Recency-based: page when the newest parseable hook event is older than
+    30 minutes (or there are none at all) while tmux is alive and a session
+    uuid is recorded. The 30m grace is anchored to `session_started_at` --
+    set at spawn and refreshed when the resume fallback re-discovers a new
+    session uuid -- not to spawn time, so a resumed job gets a fresh grace
+    window instead of paging on every pass.
+
+    Honest residuals (documented, not defeated): the anchor and the event
+    stream both live where the same-user agent can reach them -- an agent
+    rewriting `session_started_at` to ~now on every pass, or appending
+    periodic junk heartbeat lines, defeats recency detection. This catches
+    deletion and total silence, not an agent actively gaming job.json or the
+    event file.
+
+    Fail-loud: pages on every watch pass while the condition holds. An
+    earlier design deduped via a latch in job.json; that latch was plantable
+    by the same-user agent (one write = permanent watch blindness), so it was
+    removed (sec review round 2). Repeated paging during active blinding is
+    the correct behavior.
+    Returns a signal dict or None.
+    """
+    uuid = job.get("session_uuid")
+    if not (st["tmux_alive"] and uuid):
+        return None
+    if event_file_symlinked(uuid):
+        return None  # handled by the dedicated events-tampered signal
+    le = st["last_hook_event"]
+    le_ts = _claim_ts(le, now) if isinstance(le, dict) else 0
+    sess_start = _session_anchor(job, now)
+    if le_ts >= sess_start:
+        return None
+    if now - sess_start <= 30 * 60:
+        return None
+    return {"signal": "events-missing",
+            "detail": "tmux alive and session uuid recorded, but the newest "
+                      "hook event is older than 30m (or none exists) -- event "
+                      "file deleted or hooks blinded?"}
 
 
 def dir_size(path):
@@ -375,7 +654,7 @@ def job_status(job):
     alive = tmux_alive(slug)
     uuid = job.get("session_uuid")
     hstatus, nbytes = head_info(uuid) if uuid else (None, 0)
-    delta = nbytes - job.get("last_bytes", 0)
+    delta = nbytes - _num(job.get("last_bytes"), 0)
     if delta:
         job["last_bytes"] = nbytes
         save_job(job)
@@ -396,7 +675,7 @@ def job_status(job):
         "last_hook_event": ev,
         "progress_age_s": progress_age,
         "dir_bytes": dir_size(job_dir(slug)),
-        "elapsed_h": (time.time() - job.get("started_at", time.time())) / 3600,
+        "elapsed_h": (time.time() - _num(job.get("started_at"), time.time())) / 3600,
         "budget_hours": job.get("budget_hours"),
     }
 
@@ -411,8 +690,18 @@ def cmd_status(args):
         print(f"job {st['slug']}: state={st['job_state']} tmux={'up' if st['tmux_alive'] else 'down'} "
               f"session={st['session_status']} bytes={st['bytes_total']} (+{st['bytes_delta']})")
         if ev:
-            print(f"  last turn: {ev.get('event')}/{ev.get('state')} "
-                  f"{time.strftime('%H:%M', time.localtime(ev.get('ts', 0)))} {ev.get('detail','')[:100]}")
+            flag = ""
+            if ev.get("state") == "done":
+                # Issue #3: a `done` line is a claim, never proof -- the
+                # same-user agent can forge every check. Label what the
+                # triage actually established, nothing more.
+                ok, reason = verify_done_event(job, ev)
+                flag = (" (claims done; protocol checks passed)"
+                        if ok else
+                        f" (claims done; protocol check failed: {reason})")
+            print(f"  last turn: {ev.get('event')}/{ev.get('state')}{flag} "
+                  f"{time.strftime('%H:%M', time.localtime(ev.get('ts', 0)))} "
+                  f"{_clean_text(ev.get('detail',''))[:100]}")
         if st["progress_age_s"] is not None:
             print(f"  PROGRESS.md age: {st['progress_age_s']/60:.0f}m  elapsed: {st['elapsed_h']:.1f}h / budget {st['budget_hours']}h")
     return 0
@@ -483,12 +772,40 @@ def cmd_resume(args):
         # Fallback: fresh TUI, continue from git state.
         run("tmux", "send-keys", "-t", f"mjob-{args.slug}", "q")
         time.sleep(2)
+        t0 = time.time()
         run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
             f"cd {shquote(work)} && muse --yolo", "Enter")
         time.sleep(8)
         _steer(args.slug, "Continue the job described in ../prompt.md. "
                "Review git state (git log, git status, git diff) and PROGRESS.md, "
                "then carry on.", verify=False)
+        # The fallback is a brand-new session with a new uuid. The recorded
+        # uuid still points at the dead session -- watch would then read the
+        # dead session's event file forever and never see the new session's
+        # turn events (issue #3 review). Re-discover it like cmd_spawn does,
+        # explicitly excluding the dead uuid: a pure since_ts filter cannot
+        # reliably exclude the old registration within its 10s slack.
+        old_uuid = job.get("session_uuid")
+        uuid = None
+        deadline = time.time() + 90
+        while time.time() < deadline and uuid is None:
+            uuid = find_session(work, t0, exclude=old_uuid)
+            if uuid is None:
+                time.sleep(5)
+        if uuid:
+            job["session_uuid"] = uuid
+            # Fresh session, fresh liveness grace (issue #3): the new session
+            # writes to a new event file, so the 30m events-missing window
+            # must restart here, not at the original spawn.
+            job["session_started_at"] = t0
+            job.pop("done_claim_ts", None)
+            # done_page_count/window intentionally kept: the re-page backoff
+            # is per job, not per session (rate-limits pager fatigue across
+            # resumes too).
+            save_job(job)
+        else:
+            print("WARNING: new session uuid not discovered; watch keeps "
+                  "reading the old session's events", file=sys.stderr)
         print(json.dumps({"slug": args.slug, "resumed": "fallback-fresh"}))
     else:
         print(json.dumps({"slug": args.slug, "resumed": uuid}))
@@ -557,30 +874,61 @@ def cmd_watch(args):
                                "detail": f"tmux dead and resume failed: {e}"})
             return
 
+        uuid = job.get("session_uuid")
+
+        # Issue #3: a symlinked event file is tampering, not silence. Page it
+        # on every pass while the condition holds (fail loud). An earlier
+        # design deduped via a latch in job.json; the latch was plantable by
+        # the same-user agent (one write = permanent watch blindness), so it
+        # was removed (sec review round 2).
+        liv = None
+        if uuid and event_file_symlinked(uuid):
+            liv = {"signal": "events-tampered",
+                   "detail": "hook event file is a symlink; refusing to "
+                             "read it (possible cross-job tampering)"}
+        else:
+            # Issue #3 liveness: an agent that deletes its event file blinds
+            # the watchdog with no signal at all -- page it, every pass while
+            # blind (same plantable-latch reasoning as above).
+            liv = check_events_liveness(job, st, now)
+        if liv is not None:
+            liv["job"] = slug
+            events.append(liv)
+
         ev = st["last_hook_event"] or {}
         estate = ev.get("state")
         if estate == "blocked" and job.get("state") != "blocked":
             job["state"] = "blocked"
             save_job(job)
             events.append({"job": slug, "signal": "blocked",
-                           "detail": ev.get("detail", "")})
-        elif estate == "done" and job.get("state") != "done":
-            job["state"] = "done"
-            save_job(job)
-            events.append({"job": slug, "signal": "done",
-                           "detail": ev.get("detail", "")})
+                           "detail": _clean_text(ev.get("detail", ""))})
         elif estate == "question":
             events.append({"job": slug, "signal": "question",
-                           "detail": ev.get("detail", "")})
+                           "detail": _clean_text(ev.get("detail", ""))})
 
-        if st["elapsed_h"] > (job.get("budget_hours") or 8):
+        # Issue #3: a hook `done` is only ever a claim -- the same-user agent
+        # can forge every check -- so it never transitions job state. Scan
+        # the WHOLE event file for the newest done line (a forged trailing
+        # `idle` line must not bury a genuine claim) and triage it into an
+        # operator page. handle_done_claim owns the dedup cursor and the
+        # re-page backoff; the caller just persists the record.
+        if uuid:
+            done_ev, _done_ts = latest_done_event(uuid, now)
+            if done_ev is not None:
+                sig = handle_done_claim(job, done_ev, now)
+                if sig is not None:
+                    sig["job"] = slug
+                    events.append(sig)
+                    save_job(job)
+
+        if st["elapsed_h"] > (_num(job.get("budget_hours"), 8) or 8):
             events.append({"job": slug, "signal": "budget-exceeded",
                            "detail": f"{st['elapsed_h']:.1f}h > {job.get('budget_hours')}h budget (notify only)"})
 
         # Thrash heuristic: bytes growing, no progress heartbeat, no diff change.
         diffstat = git_diffstat(job["worktree"])
         if diffstat == job.get("last_diffstat") and diffstat:
-            job["diffstat_strikes"] = job.get("diffstat_strikes", 0) + 1
+            job["diffstat_strikes"] = _num(job.get("diffstat_strikes"), 0) + 1
         else:
             job["diffstat_strikes"] = 0
             job["last_diffstat"] = diffstat

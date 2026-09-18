@@ -129,4 +129,27 @@ if q:
 ```
 
 The 15-minute watchdog cron runs `muse-job watch` and reports
-blocked/question/done signals; that is the always-on version of this loop.
+blocked/question signals plus the completion/liveness set below; that is the
+always-on version of this loop.
+
+### Watch signal vocabulary (issue #3)
+
+Hook turn-state events are **cooperative telemetry, not ground truth** -- the
+job agent runs as the same user and can forge its own event lines. `watch`
+never transitions a job to `done` on a hook event; a `done` line is only ever
+a claim the operator must confirm (inspect SUMMARY.md, then `muse-job close`):
+
+| signal | meaning |
+|---|---|
+| `done-claimed` | agent's `done` passed protocol triage (session uuid + worktree cwd + non-empty SUMMARY.md regular file). Verify, then close. |
+| `done-unverified` | agent's `done` failed protocol triage. Possible forgery or broken hook payload. |
+| `done-repeated` | 3+ done claims inside 24h; coalesced into one page per window (re-page backoff against pager fatigue). |
+| `events-missing` | tmux alive, session uuid recorded, but the newest hook event is older than 30m (or none exists) -- event file deleted or hooks blinded. Pages on every watch pass while the condition holds (fail loud; no dedup latch, since a latch in agent-writable job.json would be plantable). |
+| `events-tampered` | the session's event file is a symlink; the manager refuses to read through it (possible cross-job tampering). Pages on every watch pass while the condition holds (fail loud; no dedup latch, since a latch in agent-writable job.json would be plantable). |
+
+Each claim pages once (deduped on the event ts against a read-sanitized
+cursor in job.json); a newer `done` event pages again, up to 3 pages per 24h
+window before coalescing. A sophisticated agent can satisfy every triage check
+-- including faking periodic heartbeat lines to defeat the recency-based
+`events-missing` -- so these verify protocol compliance, not that the work
+happened.
