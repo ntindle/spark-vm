@@ -133,4 +133,6 @@ secrets ever live in the repo.
   semantics instead of the in-`_file_approval` call.
 - Per-tenant subscription scoping (needs H10/H11).
 - iOS Safari note: Web Push on iOS requires the page added to the home
-  screen; the subscribe button reports "push not supported" otherwise.
+  screen; the status line says so explicitly (the button stays hidden).
+- Custom notification icon/badge in the service worker (currently
+  text-only; browser renders its own default).
