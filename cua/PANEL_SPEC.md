@@ -72,6 +72,57 @@ an absolute argv, never a shell string.
 - Window list from `/api/windows`.
 - Big touch targets and a dark theme if it's primarily a phone UI.
 
+## Example: driving Blender over the panel API
+
+This is a real session pattern (curl against the tunnel endpoint). Blender is
+allowlisted as `blender`; the launcher wrapper forces X11 so it appears on the
+box's Xvfb desktop.
+
+```bash
+BASE=http://127.0.0.1:18732
+H="X-CUA: 1"
+J="Content-Type: application/json"
+
+# 1. Launch Blender (cold start takes ~10-20 s)
+curl -s -H "$H" -H "$J" -X POST $BASE/api/launch -d '{"app":"blender"}'
+
+# 2. Wait until its window shows up
+for i in $(seq 1 20); do
+  curl -s $BASE/api/windows | grep -qi blender && break
+  sleep 2
+done
+curl -s $BASE/api/windows | python3 -c \
+  "import json,sys; [print(w['title'], w['bounds']) for w in json.load(sys.stdin)]"
+
+# 3. Look at the desktop, dismiss the splash screen
+curl -s $BASE/api/screenshot -o shot1.png
+curl -s -H "$H" -H "$J" -X POST $BASE/api/key -d '{"key":"Escape"}'
+
+# 4. Delete the default cube: select all, delete, confirm
+curl -s -H "$H" -H "$J" -X POST $BASE/api/key -d '{"key":"a"}'
+curl -s -H "$H" -H "$J" -X POST $BASE/api/key -d '{"key":"x"}'
+curl -s -H "$H" -H "$J" -X POST $BASE/api/key -d '{"key":"Return"}'
+
+# 5. Add Suzanne: Shift+A opens the Add menu, typing filters it
+curl -s -H "$H" -H "$J" -X POST $BASE/api/key \
+  -d '{"key":"a","modifiers":["shift"]}'
+curl -s -H "$H" -H "$J" -X POST $BASE/api/type -d '{"text":"Monkey"}'
+curl -s -H "$H" -H "$J" -X POST $BASE/api/key -d '{"key":"Return"}'
+
+# 6. Verify on screen
+curl -s $BASE/api/screenshot -o shot2.png
+```
+
+Tips for scripted Blender sessions:
+
+- Prefer `/api/key` and `/api/type` over `/api/click` — Blender's UI is
+  dense and resolution-dependent, while its keyboard shortcuts are stable.
+- After any action, grab a fresh screenshot; that is your ground truth.
+- The driver types into the focused top window (`/api/type` focuses it
+  first), so make sure the Blender window is on top before typing.
+- Rendering (`F12`) works fine headless; the render appears in a new
+  Blender window — screenshot it, or save via `F3`.
+
 ## Gotchas
 
 - The desktop is Xvfb + XFCE on display :98 (see `cua-desktop.sh`); if the
