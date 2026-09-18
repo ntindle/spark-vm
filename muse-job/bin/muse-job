@@ -333,16 +333,32 @@ def _wait_live_tui(slug, timeout=30):
     deadline = time.time() + timeout
     pane = ""
     while True:
-        try:
-            pane = run("tmux", "capture-pane", "-p", "-t", target).stdout.decode(
-                errors="replace")
-        except Exception:
-            pane = ""
+        pane = _capture_pane(target)
         if _pane_shows_live_tui(pane):
             return pane
         if time.time() >= deadline:
             return pane
         time.sleep(3)
+
+
+def _capture_pane(target):
+    """One `capture-pane`; empty string on any failure.
+
+    Fail closed: an empty pane never passes `_pane_shows_live_tui`, so a
+    capture failure reads as a dead TUI rather than a live one.
+    """
+    try:
+        return run("tmux", "capture-pane", "-p", "-t", target).stdout.decode(
+            errors="replace")
+    except Exception:
+        return ""
+
+
+def _dead_tui_msg(target, pane):
+    """Refusal error for a pane that does not show a live TUI (issue #4)."""
+    tail = "\n".join(pane.splitlines()[-8:]) if pane else "<no pane captured>"
+    return (f"pane of {target} does not show a live TUI input box -- refusing "
+            f"to steer (issue #4; pane tail:\n{tail})")
 
 
 def _steer(slug, message, verify=True):
@@ -364,10 +380,13 @@ def _steer(slug, message, verify=True):
     # execution. Refuse to send at all -- never steer into a dead pane.
     pane = _wait_live_tui(slug, timeout=30)
     if not _pane_shows_live_tui(pane):
-        tail = "\n".join(pane.splitlines()[-8:]) if pane else "<no pane captured>"
-        raise RuntimeError(
-            f"pane of {target} does not show a live TUI input box -- refusing "
-            f"to steer (issue #4; pane tail:\n{tail})")
+        raise RuntimeError(_dead_tui_msg(target, pane))
+    # TOCTOU: re-check on a FRESH capture immediately before pasting -- the
+    # poll above leaves a window where the TUI can die before the text lands.
+    # (The check lives before tmp-file creation so the refusal path leaves
+    # no steer text on disk either.)
+    if not _pane_shows_live_tui(_capture_pane(target)):
+        raise RuntimeError(_dead_tui_msg(target, pane))
     tmpd = os.path.join(job_dir(slug), "tmp")
     os.makedirs(tmpd, exist_ok=True)
     tmpf = os.path.join(tmpd, f"steer-{int(time.time() * 1000)}.txt")
@@ -384,6 +403,12 @@ def _steer(slug, message, verify=True):
         except OSError:
             pass
     time.sleep(2)
+    # TOCTOU: the TUI may have died between the paste and this Enter -- a
+    # dead pane would execute the pasted text (multi-line text can even
+    # execute at paste time, newline by newline). Do NOT send Enter into a
+    # dead pane: pasted-but-unsubmitted text is inert. Report failure.
+    if not _pane_shows_live_tui(_capture_pane(target)):
+        return False
     run("tmux", "send-keys", "-t", target, "Enter")
     if not verify:
         return True
