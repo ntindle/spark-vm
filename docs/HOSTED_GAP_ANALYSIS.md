@@ -74,7 +74,7 @@ even if those stay unmerged. **Verdict: no gap.**
 | A persistent computer per Muse | Real: proxy + swapd, muse-job, confirmd approvals, cred-ui, CUA desktop, jail spec |
 | Two Muses on one control plane without cross-tenant reads | **Missing everywhere** (see multi-tenancy below) |
 
-**Gaps** — these are the cross-cutting ones; they live in §9 and new
+**Gaps** — these are the cross-cutting ones; they live in §8 and new
 items H10/H11.
 
 ### 5. Sentinel — design only
@@ -84,9 +84,12 @@ items H10/H11.
 | A watcher the product reports to; per-tenant isolation story | H5 (design) unwritten. Building blocks exist: confirmd audit lines, proxy audit log, muse-job hooks/events, auto-deploy JSONL audit (PR #29). No sentinel API, no shipper |
 
 **Gaps:**
-- `[DESIGN]` H5 — sentinel design (what it watches, product↔sentinel API,
-  per-tenant isolation). Prerequisite: the multi-tenancy audit (H11) so the
-  design knows what it's isolating.
+- `[BLOCKER]` H5 — sentinel design not started (what it watches,
+  product↔sentinel API, per-tenant isolation). Nothing exists for the
+  sentinel stage; building blocks without a consumer are not a design.
+  Prerequisite: the multi-tenancy audit (H11) so the design knows what
+  it's isolating. Building blocks exist (confirmd audit lines, proxy audit
+  log, muse-job hooks, auto-deploy JSONL) but nothing consumes them.
 
 ### 6. Push — page exists, push does not
 
@@ -189,12 +192,18 @@ TermSquad ships Squad (coordinated parallel agents); we have muse-job
   verification, re-link with rate limits (implements the H3 design doc
   once the operator decides tailnet shape + abuse controls).
 - **H10 — confirmd multi-tenant approvals**: per-tenant pending queues,
-  tenant attribution on every approval/audit line (depends on #14), roles
-  beyond single CONFIRM_OWNER.
+  tenant attribution on every approval/audit line, roles
+  beyond single CONFIRM_OWNER. Attribution format must stay consistent
+  with the #14/#16 work folded into H11/H5 (see §11) — schema alignment,
+  not a sequencing dependency.
 - **H11 — Multi-tenancy audit**: inventory every localhost-only / no-auth /
   single-owner assumption; rank by blast radius; recommend the isolation
   story explicitly (per-tenant box vs per-tenant processes vs per-tenant
-  tailnets). Feeds H5 (sentinel design).
+  tailnets). Must explicitly answer: the swap proxy's trust boundary
+  relative to tenant workloads (swapd holds secrets on the same box that
+  runs tenant agent code — what is the assumed boundary?), fail-open vs
+  fail-closed semantics for tailnet-gated auth, and who holds root on a
+  provisioned tenant box. Feeds H5 (sentinel design).
 - **H12 — Usage metering hooks**: per-tenant resource + approval + suspend
   telemetry; the data source pricing/billing decisions need.
 - **H13 — Free-tier suspend/wake**: suspend-to-disk + wake-on-SSH-dial,
