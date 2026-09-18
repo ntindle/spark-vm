@@ -664,6 +664,19 @@ class SwapAddon:
                 json.dump(item, f, indent=2)
             os.replace(tmp, os.path.join(pending, aid + ".json"))
             self._audit(None, "approval-filed:%s" % aid)
+            # H2 (GitHub #2): VAPID push to the owner's devices.
+            # Fail-open: a push failure must never lose the filed approval.
+            try:
+                import importlib.util as _ilu
+                _here = os.path.dirname(os.path.abspath(__file__))
+                _spec = _ilu.spec_from_file_location(
+                    "sparkvm_push", os.path.join(_here, "push.py"))
+                _mod = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                _mod.PushSender.default().notify_approval(item)
+            except Exception:
+                log.exception("swap: VAPID push failed for approval %s",
+                              aid)
         except OSError as e:
             log.warning("swap: cannot file approval: %s", e)
 
