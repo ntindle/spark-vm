@@ -298,6 +298,53 @@ def _input_box_has_text(pane, needle):
     return bool(needle) and needle in last_box
 
 
+def _pane_shows_live_tui(pane):
+    """Fail-closed check: is the Muse TUI actually up in this pane?
+
+    `_steer` used to check only `tmux_alive()` -- never what is in the pane.
+    If the TUI has exited or crashed, the pane drops to a bash prompt and a
+    pasted steer message is parsed by the shell: `$(...)`, backticks, `;`,
+    `|` all execute (issue #4). The TUI input box (`❯`) is the last
+    non-empty viewport line whenever the TUI is alive and in its normal
+    state, so pasting is refused unless that marker is present.
+
+    A dead pane that once showed TUI output can leave a stale `❯` line in
+    scrollback -- requiring the marker on the *last* non-empty line (not
+    anywhere in the viewport) defeats that: after a crash, the last line is
+    a shell prompt, never the input box.
+    """
+    last = None
+    for line in pane.splitlines():
+        s = line.strip()
+        if s:
+            last = s
+    return bool(last) and last.startswith("❯")
+
+
+def _wait_live_tui(slug, timeout=30):
+    """Poll until the pane shows a live TUI or the timeout expires.
+
+    Returns the last captured pane (truthy-check it with
+    `_pane_shows_live_tui`); an empty string means capture itself failed.
+    The poll absorbs the normal TUI boot window after spawn/resume so the
+    fail-closed refusal only fires when the TUI genuinely is not coming up.
+    """
+    target = f"mjob-{slug}"
+    deadline = time.time() + timeout
+    pane = ""
+    while True:
+        try:
+            pane = run("tmux", "capture-pane", "-p", "-t", target).stdout.decode(
+                errors="replace")
+        except Exception:
+            pane = ""
+        if _pane_shows_live_tui(pane):
+            return pane
+        if time.time() >= deadline:
+            return pane
+        time.sleep(3)
+
+
 def _steer(slug, message, verify=True):
     """The one place the tmux input quirk lives.
 
@@ -312,6 +359,15 @@ def _steer(slug, message, verify=True):
     target = f"mjob-{slug}"
     if not tmux_alive(slug):
         raise RuntimeError(f"tmux session {target} not alive")
+    # Issue #4: a live tmux session is not a live TUI. If the TUI exited or
+    # crashed, the pane is a shell prompt and the paste below becomes shell
+    # execution. Refuse to send at all -- never steer into a dead pane.
+    pane = _wait_live_tui(slug, timeout=30)
+    if not _pane_shows_live_tui(pane):
+        tail = "\n".join(pane.splitlines()[-8:]) if pane else "<no pane captured>"
+        raise RuntimeError(
+            f"pane of {target} does not show a live TUI input box -- refusing "
+            f"to steer (issue #4; pane tail:\n{tail})")
     tmpd = os.path.join(job_dir(slug), "tmp")
     os.makedirs(tmpd, exist_ok=True)
     tmpf = os.path.join(tmpd, f"steer-{int(time.time() * 1000)}.txt")
@@ -336,6 +392,13 @@ def _steer(slug, message, verify=True):
     for _ in range(3):
         pane = run("tmux", "capture-pane", "-p", "-t", target).stdout.decode(
             errors="replace")
+        # Issue #4, TOCTOU half: the TUI may have died between the pre-send
+        # check and the Enter. A dead pane swallows the pasted text into a
+        # shell -- the old "box is clear" test would then wrongly report
+        # success (the text is gone because it executed). The TUI must still
+        # be up for the steer to count as delivered.
+        if not _pane_shows_live_tui(pane):
+            return False
         # Submitted (or queued mid-turn): the input box is clear of our text.
         if not _input_box_has_text(pane, needle):
             return True
