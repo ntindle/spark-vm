@@ -32,7 +32,10 @@ and self-hosters.
 4. **SSH** — real SSH into the box (agent workloads need a shell).
 5. **Persistence** — stop/suspend with disk persisted, resume; snapshot story.
 6. **Interface fit** — can `provision`/`status`/`dial`/`ssh_info`/`destroy`
-   map cleanly?
+   map cleanly? Includes the H3 **`public_ingress: false`** network clause:
+   drivers must not expose any public inbound path, and the control plane
+   verifies this post-provision — a driver that defaults to a public IP +
+   open SSH satisfies nothing.
 
 ## Headline numbers (surveyed 2026-09-18)
 
@@ -73,9 +76,24 @@ balances (~$5) are commonly cited but unverified.
 - **Persistence:** network volumes ($0.07–0.10/GB-month) persist across
   pod deletion and re-attach to new pods. **Billing nuance the interface
   layer must encode:** stopping a pod does NOT stop GPU billing
-  entirely — stopped pods bill a reduced disk rate (~$0.10–0.20/hr);
-  only **terminate** ends billing, and terminate keeps only the network
+  entirely — stopped pods are reported to keep billing a reduced disk
+  rate (~$0.10–0.20/hr; third-party surveys of runpod.io/pricing,
+  unverified against vendor docs — confirm during driver build); only
+  **terminate** ends billing, and terminate keeps only the network
   volume. A naive "stop = free" model would bleed money.
+- **Availability caveat:** on-demand H100/A100 availability on Secure
+  Cloud is unverified — GPU capacity is the #1 product risk for a GPU
+  tier and must be load-tested before any default-provider claim sticks.
+- **public_ingress clause:** RunPod pods are reached via public
+  IP:port SSH through RunPod's proxy — there is no private-pod mode.
+  Satisfying the H3 `public_ingress: false` clause therefore needs a
+  driver-level design (e.g. bind the pod's exposed port to the control
+  plane's own SSH proxy / WireGuard overlay so the pod never listens
+  on the open internet), and the control plane's post-provision
+  verification must test the RunPod path explicitly. If the clause
+  proves unsatisfiable on RunPod, Northflank leads on architecture even
+  at higher cost — the recommendation below is contingent on this
+  check.
 
 ### Northflank — best managed-platform alternative
 
@@ -92,6 +110,13 @@ balances (~$5) are commonly cited but unverified.
   maps tenant → stateful service + volume, which is workable but less
   1:1. One blog post frames GPU access as "request GPU access" — gating
   for small accounts needs verification during onboarding.
+- **public_ingress clause:** private services + Northflank's own SSH
+  proxy make compliance with the H3 clause plausible; verify during
+  the driver build.
+- **Suspend billing:** whether pausing a Northflank GPU workload stops
+  GPU billing is unverified — the idle-tier economics need the
+  *billing* half of the suspend check, not just the persistence half
+  (open verification, below).
 
 ### Lambda Labs — training/batch overflow
 
@@ -147,26 +172,64 @@ balances (~$5) are commonly cited but unverified.
 
 1. **RunPod (Secure Cloud)** as the default GPU driver target: real SSH,
    VM-like pods, persistent network volumes, full create/stop/destroy/
-   ssh-info API + CLI, widest reputable GPU menu, no commitments,
-   cheapest credible on-demand rates. Encode the stop-vs-terminate
-   billing nuance in the interface layer.
+   ssh-info API + CLI, the widest reputable GPU menu, no commitments —
+   chosen for **interface fit**, not price: Northflank is cheaper on
+   A100/H100 cards, but RunPod maps 1:1 onto the provisioning interface
+   while Northflank needs a tenant→service mapping plus a small-account
+   GPU-access verification. **Contingent on two checks:** (a) the H3
+   `public_ingress: false` clause must be satisfiable on RunPod's
+   public-IP pods (see above); (b) Secure Cloud on-demand availability
+   must be load-tested. If (a) fails, Northflank leads.
 2. **Northflank** as the managed-platform alternative: documented SSH,
    REST/CLI, stateful volumes, per-second all-inclusive billing; verify
    GPU-access gating for small accounts during onboarding.
 3. **Vast.ai** as a budget overflow tier; **Lambda Labs** for
-   batch/training overflow. **Daytona and Modal fail the persistence
-   requirement; Akash fails operational overhead.**
+   batch/training overflow — Lambda's 3–15 min launches make it
+   structurally unsuitable for interactive wake-on-dial, which
+   strengthens rather than weakens its batch-only scoping.
+   **Daytona and Modal fail the persistence requirement; Akash fails
+   operational overhead.**
 
 ## Interface design note (for H4)
 
 The provider-agnostic interface from the H3 design keeps working across
 CPU/GPU shapes if the `provision` request gains a shape descriptor
-(suggested: `gpu: true|false`,
-`gpu_class: "L4"|"A100-40"|"A100-80"|"H100"`, plus `preemptible: bool`
-for providers like Modal that price tiers differently). GPU drivers are
-*second* drivers, not a second interface — the tenant lifecycle
-(create → suspend → wake → destroy) is identical; only the shape
-selection and cost accounting differ.
+(suggested: `gpu: true|false`, `gpu_class` as an **open
+provider-namespaced shape string** the driver resolves — not a closed
+enum: the four-value `"L4"|"A100-40"|"A100-80"|"H100"` enum excluded
+the RTX 4090, the cheapest credible RunPod shape in this survey — or,
+better, a capability request `{class_hint, count, min_vram_gb}`).
+Spot/preemptible tiers are deliberately excluded from the v1 shape:
+RunPod Secure and Northflank are not preemptible, Vast.ai spot is
+overflow-tier only, and the only provider with a preemptible tier
+(Modal) fails the SSH + persistence axes — mid-session reclamation
+would need its own availability contract, which v1 does not define.
+
+Two harder interface consequences the research surfaced:
+
+1. **Suspend is not one thing.** Distinguish `suspend` (full-state
+   suspend-to-disk, H13's meaning) from `park` (terminate the compute,
+   keep the data volume, reprovision + reattach + re-run bootstrap on
+   wake). RunPod "suspend" is actually park: new pod id, new SSH
+   endpoint, full boot latency. Northflank pause/resume is closer to
+   suspend but the billing half is unverified. The H4 driver contract
+   must state which each driver offers — and **tenant bootstrap must
+   be idempotent/re-runnable** for park-style providers, since wake
+   re-runs it.
+2. **`status` needs new states.** H3's enum
+   (`creating | ready | degraded | dead`) cannot express the suspend
+   lifecycle the idle economics depend on: on RunPod, a "suspended"
+   tenant has no pod at all, so `dead` would no longer mean gone, and
+   wake-on-dial must distinguish dead-suspended from dead-destroyed via
+   driver-side metadata. Proposed: add `suspended` and `waking`
+   states, and define `dial()` wake semantics: async — `dial()` on a
+   `suspended` tenant triggers wake and the caller polls `status`
+   until `ready` (bounded blocking with an explicit timeout), rather
+   than blocking indefinitely through a multi-minute launch.
+
+Also: `destroy` on a RunPod driver must delete the tenant's network
+volume — otherwise $0.07–0.10/GB-mo bleeds forever per destroyed
+tenant.
 
 ## v1 GPU tier shape (proposal, not commitment)
 
@@ -175,11 +238,11 @@ selection and cost accounting differ.
   runs CPU.
 - **Shape:** A100-40 or L4 as the entry GPU tier (cheap enough to keep
   idle-suspend economics sane); H100/H200 for explicit paid demand.
-- **Billing:** billed only while running; the suspend-on-idle story
-  applies to GPU boxes exactly as to CPU boxes — a suspended GPU box
-  must cost storage-only, or the tier is a billing trap. Northflank's
-  all-inclusive rate makes this math simple; RunPod needs the
-  stop-vs-terminate distinction encoded.
+- **Billing:** billed only while running; when the CPU suspend-on-idle
+  tier (R4/C5, still unbuilt) ships, GPU boxes must follow the same
+  rule — a suspended GPU box must cost storage-only, or the tier is a
+  billing trap. Northflank's all-inclusive rate makes this math simple;
+  RunPod needs the stop-vs-terminate distinction encoded.
 - **Honesty rule** (from PRICING_THINKING.md + POSITIONING.md
   anti-claims): no GPU tier is announced, priced, or marketed until a
   driver exists against a real provider. This doc is research, not a
@@ -189,8 +252,14 @@ selection and cost accounting differ.
 
 - RunPod / Vast.ai minimum deposit amounts (commonly cited ~$5, unverified).
 - Northflank GPU-access gating for new/small accounts.
-- Whether Northflank GPU workloads support true suspend-to-disk + wake
-  (determines whether the idle tier R4/C5 extends to GPU).
+- Whether Northflank GPU workloads support true suspend-to-disk + wake —
+  and whether pausing stops GPU billing (the *billing* half of the
+  suspend check, which the idle-tier economics need).
+- RunPod: (a) does any private-pod option exist, or is the
+  `public_ingress: false` clause satisfiable only via the control
+  plane's own SSH proxy / WireGuard overlay; (b) on-demand Secure Cloud
+  H100/A100 availability load test; (c) API + pricing stability over
+  time (the doc's own premise is Fly rug-pulling GPUs).
 - Daytona on-demand (non-preemptible) GPU rates; Lambda persistent-FS
   $/GB-mo; Akash current market H100 rates.
 
@@ -200,15 +269,21 @@ Surveyed 2026-09-18 (links inline). Primary: modal.com/pricing (via
 three independent third-party rate tables, 2026-06/07);
 northflank.com blog + pricing page; daytona.io/pricing + docs (read
 2026-09-18); runpod.io/pricing + docs (via 2026-07-17 third-party
-factsheet); superfly/docs#2449 (Fly GPU deprecation); community.fly.io
-GPU deprecation thread (Feb 2026). Working notes:
+factsheet); E2B's no-public-GPU-tier status from Beam's and
+Northflank's 2026 sandbox comparisons (both list GPU as absent/BYOC);
+superfly/docs#2449 (Fly GPU deprecation); community.fly.io GPU
+deprecation thread (Feb 2026). Working notes:
 `agent_notes/gpu-provider-findings-2026-09-18.md`.
 
 ## Follow-ups
 
-- **H4** (provisioning automation): add `gpu` + `gpu_class` (+
-  `preemptible`) to the shape descriptor when the driver layer lands;
-  encode RunPod's stop-vs-terminate billing distinction.
+- **H4** (provisioning automation): add `gpu` + `gpu_class` (open shape
+  string or capability request, not a closed enum) to the shape
+  descriptor when the driver layer lands; encode RunPod's
+  stop-vs-terminate billing distinction; `destroy` must delete the
+  tenant's RunPod network volume; extend `status` with
+  `suspended`/`waking` and define `dial()` wake semantics; keep tenant
+  bootstrap idempotent for park-style providers.
 - **C6** (competitor pass): this doc is the deliverable — close C6 with
   a link to it.
 - **PRICING_THINKING.md** (PR #30): GPU boxes are a separate cost basis
