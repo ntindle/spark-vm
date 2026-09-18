@@ -66,6 +66,14 @@ report_leak() {
 
 MSG="${1:-update from spark-vm $(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 
+# --- push through the swapping proxy; hsurr:github becomes the real token ---
+# GitHub's git HTTPS endpoint accepts Basic auth only (not Bearer) for
+# PATs. The base64 below is computed over the *placeholder*
+# (x-access-token:hsurr:github) — not a secret; the proxy base64-decodes,
+# swaps in the real token, and re-encodes at egress for allowlisted hosts.
+GIT_AUTH="Basic $(printf '%s' 'x-access-token:hsurr:github' | base64 -w0)"
+PROXY_GIT=(with-proxy git -c http.extraHeader="Authorization: $GIT_AUTH" -c http.proxy=http://127.0.0.1:18080)
+
 # --- dry run: stage into a throwaway index, report, change nothing ---
 if (( DRY_RUN )); then
     # Race-free temp index: mktemp -d is atomic; the index file lives inside.
@@ -91,10 +99,12 @@ if (( DRY_RUN )); then
         fi
         echo "dry-run: secret scan clean."
     fi
-    if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1; then
+    # Read-only probes go through the proxy too: on the box, GitHub is
+    # reachable only via the swapping proxy.
+    if "${PROXY_GIT[@]}" ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1; then
         # Fetch so the ahead-count reads a fresh, local ref — a stale or
         # never-fetched origin/$BRANCH would miscount or die under set -e.
-        git fetch -q origin "$BRANCH" 2>/dev/null || true
+        "${PROXY_GIT[@]}" fetch -q origin "$BRANCH" 2>/dev/null || true
         AHEAD="$(git rev-list --count "origin/$BRANCH..HEAD" 2>/dev/null || echo "?")"
         echo "dry-run: would push $AHEAD local commit(s) to origin $BRANCH."
     else
@@ -123,13 +133,8 @@ else
     git commit -m "$MSG"
 fi
 
-# --- push through the swapping proxy; hsurr:github becomes the real token ---
-# GitHub's git HTTPS endpoint accepts Basic auth only (not Bearer) for
-# PATs. The base64 below is computed over the *placeholder*
-# (x-access-token:hsurr:github) — not a secret; the proxy base64-decodes,
-# swaps in the real token, and re-encodes at egress for allowlisted hosts.
-GIT_AUTH="Basic $(printf '%s' 'x-access-token:hsurr:github' | base64 -w0)"
-if ! with-proxy git -c http.extraHeader="Authorization: $GIT_AUTH" -c http.proxy=http://127.0.0.1:18080 push origin HEAD; then
+# --- push through the proxy ---
+if ! "${PROXY_GIT[@]}" push origin HEAD; then
     echo "Push failed. If this is an auth (401/403) error, install a GitHub token:" >&2
     echo "  Create a fine-grained PAT with contents:write on ntindle/spark-vm, then run:" >&2
     echo "  cred set github   # paste the token at the prompt (your own SSH session)" >&2
