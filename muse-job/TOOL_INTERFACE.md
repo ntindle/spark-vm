@@ -153,3 +153,22 @@ window before coalescing. A sophisticated agent can satisfy every triage check
 -- including faking periodic heartbeat lines to defeat the recency-based
 `events-missing` -- so these verify protocol compliance, not that the work
 happened.
+
+### Derived layout is the canonical contract
+
+`~/muse-jobs/<slug>/` holds `job.json`, `prompt.md`, `SUMMARY.md`,
+`QUESTIONS.md`, `PROGRESS.md`, `work/` (the git worktree), and `tmp/`.
+Pristine clones live directly under `~/repos/`; job branches are always
+`job/<slug>`.
+
+The manager **derives** the worktree (`<jobdir>/work`) and branch
+(`job/<slug>`) from the slug for every destructive or security-relevant
+operation (`close`, `resume`, the done-claim cwd check, the watch thrash
+heuristic) instead of reading them from `job.json`, which the job agent
+can rewrite (issue #11). A recorded value that diverges from the derived
+layout fails closed with an explicit error -- divergence is treated as
+tampering or an unsupported migration, never silently overridden. The one
+value that cannot be derived (the pristine repo dir) is containment-checked
+under `~/repos` **and** bound to the job by requiring the derived worktree
+to be a registered worktree of that repo. Future layout migrations must
+update the derivation, not the record.

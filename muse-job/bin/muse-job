@@ -101,13 +101,21 @@ def trusted_job_paths(slug, job):
     """Paths the destructive commands (close, resume) may act on.
 
     job.json is agent-writable (issue #11): the job agent runs as the same
-    user and can rewrite it wholesale. A recorded `branch: "main"` must
-    never reach `git branch -D`, and a recorded `worktree` pointing at
-    another job's tree must never reach `worktree remove --force`. So the
-    destructive inputs are re-derived from the slug, and the one value that
-    cannot be re-derived (the pristine repo dir) is containment-checked
-    against ~/repos. Fail closed on any mismatch.
-    Returns (worktree, pristine, branch).
+    user and can rewrite it wholesale. So:
+
+    - `worktree` and `branch` are RE-DERIVED from the slug -- the derived
+      layout (`~/muse-jobs/<slug>/work`, branch `job/<slug>`) is the
+      canonical contract (see TOOL_INTERFACE.md). A recorded value that
+      diverges from it fails closed with an explicit message: silent
+      override would turn tampering (or an unsupported migration) into
+      confident destruction of the wrong thing.
+    - `pristine` cannot be re-derived, so it is containment-checked against
+      `~/repos` AND bound to this job: the derived worktree must be a
+      registered worktree of that repo (`git worktree list`). Containment
+      alone would let a forged pristine point at any repo dir under
+      `~/repos` and run `branch -D job/<slug>` there.
+
+    Fail closed on any mismatch. Returns (worktree, pristine, branch).
     """
     jd = job_dir(slug)
     work = os.path.join(jd, "work")
@@ -120,6 +128,33 @@ def trusted_job_paths(slug, job):
         raise RuntimeError(
             f"recorded pristine repo {pristine!r} is outside {REPOS_DIR}; "
             "refusing destructive op (possible job.json tampering)")
+    rec_work = job.get("worktree")
+    if rec_work and os.path.realpath(rec_work) != os.path.realpath(work):
+        raise RuntimeError(
+            f"recorded worktree {rec_work!r} diverged from the derived "
+            f"layout {work!r} -- possible job.json tampering or an "
+            "unsupported migration; refusing destructive op")
+    rec_branch = job.get("branch")
+    if rec_branch and rec_branch != branch:
+        raise RuntimeError(
+            f"recorded branch {rec_branch!r} diverged from the derived "
+            f"layout {branch!r} -- possible job.json tampering or an "
+            "unsupported migration; refusing destructive op")
+    try:
+        out = run("git", "-C", pristine, "worktree", "list", "--porcelain",
+                  timeout=30).stdout.decode()
+    except Exception:
+        raise RuntimeError(
+            f"cannot list worktrees of pristine repo {pristine!r}; "
+            "refusing destructive op")
+    registered = {os.path.realpath(line.split(None, 1)[1])
+                  for line in out.splitlines()
+                  if line.startswith("worktree ") and len(line.split(None, 1)) == 2}
+    if os.path.realpath(work) not in registered:
+        raise RuntimeError(
+            f"derived worktree {work!r} is not a registered worktree of "
+            f"{pristine!r} -- possible job.json tampering (forged pristine); "
+            "refusing destructive op")
     return work, pristine, branch
 
 
@@ -459,7 +494,7 @@ def latest_done_event(uuid, now):
     return best, best_ts
 
 
-def verify_done_event(job, ev):
+def verify_done_event(job, ev, slug):
     """Triage a hook `done` event: protocol compliance, NOT authenticity.
 
     Hook events are cooperative telemetry, not ground truth: the job agent
@@ -469,9 +504,15 @@ def verify_done_event(job, ev):
     verifies that the agent *followed the done protocol*, not that the work
     happened or that the event is genuine.
 
+    `slug` is the manager-side job slug (argv / directory listing), never
+    job["slug"]: the worktree under test is DERIVED from it, because
+    job.json is agent-writable (issue #11) and the recorded `worktree`
+    field must not steer a security check -- a forged worktree would make
+    a forged event's cwd pass containment.
+
     A `done` event passes triage only when all of:
       1. the event names this job's recorded session uuid,
-      2. the event carries a cwd at or under the job worktree,
+      2. the event carries a cwd at or under the derived job worktree,
       3. the job dir holds a non-empty SUMMARY.md regular file.
     Returns (True, "") or (False, reason). Fail closed. Callers must NEVER
     transition job state on the result alone -- see handle_done_claim.
@@ -485,15 +526,16 @@ def verify_done_event(job, ev):
     cwd = ev.get("cwd")
     if not cwd:
         return False, "event carries no cwd"
-    work = job.get("worktree") or ""
-    if not work:
-        # Fail closed: os.path.realpath("") is the CLI process's own cwd,
-        # an attacker-influenced comparison with no security meaning.
-        return False, "job has no recorded worktree"
+    if not slug_ok(slug or ""):
+        # The slug feeds a path join below. Production callers pass the
+        # argv/listdir slug; a forged job["slug"] (or a missing one) must
+        # fail closed here, never widen the containment check silently.
+        return False, "no valid job slug to derive the worktree from"
+    work = os.path.join(job_dir(slug), "work")
     rcwd, rwork = os.path.realpath(cwd), os.path.realpath(work)
     if rcwd != rwork and not rcwd.startswith(rwork + os.sep):
         return False, f"event cwd {cwd!r} is outside the job worktree"
-    sp = os.path.join(job_dir(job["slug"]), "SUMMARY.md")
+    sp = os.path.join(job_dir(slug), "SUMMARY.md")
     try:
         # Must be a real non-empty file: getsize() succeeds on directories,
         # so `mkdir SUMMARY.md` would otherwise satisfy this check.
@@ -548,12 +590,15 @@ def _sanitize_window_start(v, now):
     return v
 
 
-def handle_done_claim(job, ev, now=None):
+def handle_done_claim(job, ev, slug, now=None):
     """Triage a hook `done` event into an operator page.
 
     Never transitions job state (issue #3): the event is forgeable by the
     same-user job agent, so a `done` line is only ever a *claim* the operator
     must confirm (inspect SUMMARY.md, then `muse-job close`).
+
+    `slug` is threaded through to verify_done_event (manager-side slug, so
+    the worktree check is derived, not read from agent-writable job.json).
 
     Returns a signal dict, or None if this exact claim was already paged.
     `done-claimed` = the agent followed the done protocol;
@@ -581,7 +626,7 @@ def handle_done_claim(job, ev, now=None):
         job["done_page_count"] = 0
         job.pop("done_repeated_paged", None)
     count = _sanitize_count(job.get("done_page_count"))
-    ok, reason = verify_done_event(job, ev)
+    ok, reason = verify_done_event(job, ev, slug)
     detail = _clean_text(ev.get("detail", ""))
     if ok:
         label = "done-claimed"
@@ -732,7 +777,7 @@ def cmd_status(args):
                 # Issue #3: a `done` line is a claim, never proof -- the
                 # same-user agent can forge every check. Label what the
                 # triage actually established, nothing more.
-                ok, reason = verify_done_event(job, ev)
+                ok, reason = verify_done_event(job, ev, args.slug)
                 flag = (" (claims done; protocol checks passed)"
                         if ok else
                         f" (claims done; protocol check failed: {reason})")
@@ -975,7 +1020,7 @@ def cmd_watch(args):
         if uuid:
             done_ev, _done_ts = latest_done_event(uuid, now)
             if done_ev is not None:
-                sig = handle_done_claim(job, done_ev, now)
+                sig = handle_done_claim(job, done_ev, slug, now)
                 if sig is not None:
                     sig["job"] = slug
                     events.append(sig)

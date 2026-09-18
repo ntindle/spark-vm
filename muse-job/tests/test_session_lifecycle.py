@@ -5,10 +5,13 @@ every field in it is attacker-influenced. These tests pin the manager-side
 consequences:
 
   1. `trusted_job_paths` re-derives destructive inputs from the slug and
-     containment-checks the pristine repo -- a forged `branch: "main"` or a
-     `worktree` pointing at another job's tree must never reach
-     `git branch -D` / `worktree remove --force` (close), nor choose where
-     the operator's tmux starts a shell (resume).
+     containment-checks the pristine repo -- a recorded `branch: "main"`,
+     a `worktree` pointing at another job's tree, or a pristine repo that
+     does not have this job's worktree registered, fails closed with an
+     explicit message instead of reaching `git branch -D` /
+     `worktree remove --force` (close) or choosing the resume tmux's
+     working directory. The derived layout is the canonical contract;
+     divergence is tampering-or-migration, never silently overridden.
   2. `cmd_list` must not silently drop a job whose `started_at` is garbage
      (residual of the issue #3 `_num` fix: job_status/watch were sanitized,
      cmd_list was missed).
@@ -74,16 +77,14 @@ def make_job_dir(cli, slug="demo", **overrides):
 
 # --- trusted_job_paths -------------------------------------------------------
 
-def test_trusted_paths_force_branch_and_worktree(cli):
-    """A forged branch/worktree in job.json must not survive into the
-    destructive commands: the branch is forced to job/<slug> and the
-    worktree to <jobdir>/work."""
-    _jd, job = make_job_dir(
-        cli, branch="main",
-        worktree="/home/ntindle/muse-jobs/victim/work")
-    work, pristine, branch = cli.trusted_job_paths("demo", job)
-    assert branch == "job/demo"
-    assert work == os.path.join(cli.JOBS_DIR, "demo", "work")
+def test_trusted_paths_derive_from_slug(cli, monkeypatch):
+    """A legit record yields the slug-derived worktree/branch; the
+    registration check binds the recorded pristine repo to this job."""
+    jd, job = make_job_dir(cli)
+    work = os.path.join(jd, "work")
+    _git_fake_with_worktree(monkeypatch, cli, work)
+    got_work, pristine, branch = cli.trusted_job_paths("demo", job)
+    assert (got_work, branch) == (work, "job/demo")
     assert pristine == job["pristine"]
 
 
@@ -124,9 +125,21 @@ def test_close_never_runs_forged_destructive_git(cli, monkeypatch):
     assert git_calls == [], f"no git may run on a tampered record: {git_calls}"
 
 
-def test_close_uses_derived_branch_on_legit_record(cli, monkeypatch):
-    """On a legit record the forced branch is job/<slug> even if job.json
-    names something else."""
+def test_trusted_paths_reject_diverged_branch(cli):
+    _jd, job = make_job_dir(cli, branch="main")
+    with pytest.raises(RuntimeError, match="diverged"):
+        cli.trusted_job_paths("demo", job)
+
+
+def test_trusted_paths_reject_diverged_worktree(cli):
+    _jd, job = make_job_dir(cli, worktree="/home/ntindle/muse-jobs/victim/work")
+    with pytest.raises(RuntimeError, match="diverged"):
+        cli.trusted_job_paths("demo", job)
+
+
+def _git_fake_with_worktree(monkeypatch, cli, work):
+    """Fake cli.run: answers `git worktree list --porcelain` with the given
+    work path registered, everything else succeeds silently."""
     calls = []
 
     def fake_run(*argv, **kw):
@@ -135,16 +148,52 @@ def test_close_uses_derived_branch_on_legit_record(cli, monkeypatch):
             returncode = 0
             stdout = b""
             stderr = b""
+        if "worktree" in argv and "list" in argv:
+            P.stdout = f"worktree {work}\n\nbranch refs/heads/job/demo\n".encode()
         return P()
 
     monkeypatch.setattr(cli, "run", fake_run)
-    _jd, job = make_job_dir(cli, branch="main")
+    return calls
+
+
+def test_close_uses_derived_branch_on_legit_record(cli, monkeypatch):
+    """On a legit record the destructive branch is job/<slug> even when the
+    record carries no branch field at all (derivation, not record)."""
+    jd, job = make_job_dir(cli)
+    del job["branch"]
+    with open(os.path.join(jd, "job.json"), "w") as f:
+        json.dump(job, f)
+    work = os.path.join(jd, "work")
+    calls = _git_fake_with_worktree(monkeypatch, cli, work)
     cli.cmd_close(argparse.Namespace(slug="demo"))
-    branch_deletes = [c for c in calls
-                      if c[:3] == ["git", "-C", job["pristine"]]
-                      and "branch" in c]
+    branch_deletes = [c for c in calls if "branch" in c and "-D" in c]
     assert branch_deletes, "expected a branch -D call"
     assert branch_deletes[0][-1] == "job/demo"
+
+
+def test_close_refuses_unregistered_worktree(cli, monkeypatch):
+    """A pristine repo that does not have the derived worktree registered
+    (forged pristine pointing at another repo under ~/repos) fails closed
+    before any destructive git runs."""
+    jd, job = make_job_dir(cli)
+    work = os.path.join(jd, "work")
+    calls = []
+
+    def fake_run(*argv, **kw):
+        calls.append(list(argv))
+        class P:
+            returncode = 0
+            stdout = b"worktree /somewhere/else/work\n"
+            stderr = b""
+        return P()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    with pytest.raises(RuntimeError, match="not a registered worktree"):
+        cli.cmd_close(argparse.Namespace(slug="demo"))
+    destructive = [c for c in calls
+                   if "branch" in c and "-D" in c
+                   or ("worktree" in c and "remove" in c)]
+    assert destructive == []
 
 
 # --- cmd_list started_at -----------------------------------------------------
