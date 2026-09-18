@@ -169,5 +169,281 @@ class ConfirmdTests(unittest.TestCase):
         self.assertEqual(cd.file_owner_name(str(p)), expected)
 
 
+    # --- #1: JSON API allowlisting -------------------------------------
+
+    def _evil_item(self):
+        return {
+            "id": "abc123",
+            "summary": "GET api.github.com/repos/ for github",
+            "kind": "first-use",
+            "created": "2026-09-18T10:00:00+00:00",
+            "expires": "2026-09-18T11:00:00+00:00",
+            "credential": "github",
+            "host": "api.github.com",
+            "method": "GET",
+            "path_prefix": "/repos/",
+            "scope": "read",
+            "amount": "",
+            "job": "test-job",
+            "detail": "please <script>alert(1)</script>",
+            "_csrf": "f" * 32,
+        }
+
+    def test_1_pending_api_allowlists_fields(self):
+        """The pending JSON exposes only the fields the list page
+        already shows: id/summary/kind/created/expires.
+        Structured fields (credential/host/...) and the CSRF nonce
+        must not leak into the poller feed."""
+        out = cd._pending_api_item(self._evil_item())
+        self.assertEqual(set(out),
+                         {"id", "summary", "kind", "created", "expires"})
+        self.assertEqual(out["summary"], "GET api.github.com/repos/ for github")
+
+    def test_1_answered_api_allowlists_fields(self):
+        """Answered JSON exposes only id/summary/kind/decision/
+        answered_by/answered_at."""
+        it = dict(self._evil_item())
+        it.update({"decision": "approve", "answered_by": "ntindle@github",
+                   "answered_at": "2026-09-18T10:05:00+00:00"})
+        out = cd._answered_api_item(it)
+        self.assertEqual(set(out),
+                         {"id", "summary", "kind", "decision",
+                          "answered_by", "answered_at"})
+        self.assertEqual(out["decision"], "approve")
+
+    def test_1_pending_sorted_oldest_first(self):
+        """Longest-waiting request renders first; items with
+        missing/unparseable `created` sort last, never first."""
+        mk = lambda c: {"id": c, "created": c}
+        items = cd._sort_pending([mk("2026-09-18T11:00:00+00:00"),
+                                  mk("2026-09-18T09:00:00+00:00"),
+                                  mk("2026-09-18T10:00:00+00:00"),
+                                  {"id": "no-created"},
+                                  {"id": "garbage", "created": "not-a-date"}])
+        self.assertEqual([it["id"] for it in items],
+                         ["2026-09-18T09:00:00+00:00",
+                          "2026-09-18T10:00:00+00:00",
+                          "2026-09-18T11:00:00+00:00",
+                          "no-created", "garbage"])
+
+    def test_1_answered_newest_first(self):
+        """Answered history is newest-first BY answered_at, not by
+        random-hex filename order (engineering blocker 1)."""
+        import uuid
+        for i, ts in enumerate(["2026-09-18T09:00:00+00:00",
+                                "2026-09-18T11:00:00+00:00",
+                                "2026-09-18T10:00:00+00:00"]):
+            fn = uuid.uuid4().hex[:16] + ".json"
+            (self.approvals / "consumed" / fn).write_text(json.dumps({
+                "id": "id%d" % i, "answered_at": ts, "decision": "approve"}))
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            got = cd._load_answered()
+        self.assertEqual([it["id"] for it in got], ["id1", "id2", "id0"])
+
+    # --- #1: rendering ---------------------------------------------------
+
+    def test_1_render_pending_escapes(self):
+        """Requester-supplied strings are HTML-escaped in cards."""
+        it = dict(self._evil_item())
+        it["summary"] = 'x"><script>alert(1)</script>'
+        body = cd._render_pending_list([it])
+        self.assertIn("&lt;script&gt;", body)
+        self.assertNotIn("<script>alert", body)
+
+    def test_1_render_pending_drops_hostile_id(self):
+        """An id that fails ID_RE is silently skipped (it can never be
+        answered anyway — the /approval route 400s it), so it cannot
+        reach the href attribute context."""
+        it = dict(self._evil_item())
+        it["id"] = 'x"onmouseover=alert(1)'
+        body = cd._render_pending_list([it])
+        self.assertNotIn("onmouseover", body)
+        self.assertIn("No pending approvals", body)
+
+    def test_1_render_answered_unknown_decision_no_badge(self):
+        """An unknown/missing decision is not styled as a deny."""
+        it = dict(self._evil_item())
+        it.update({"decision": "???", "answered_by": "ntindle@github",
+                   "answered_at": "2026-09-18T10:05:00+00:00"})
+        body = cd._render_answered_list([it])
+        self.assertNotIn("badge-deny", body)
+        self.assertNotIn("badge-approve", body)
+
+    def test_1_render_answered_escapes(self):
+        it = dict(self._evil_item())
+        it.update({"decision": "deny", "answered_by": "ntindle@github",
+                   "answered_at": "2026-09-18T10:05:00+00:00",
+                   "summary": "<img src=x onerror=alert(1)>"})
+        body = cd._render_answered_list([it])
+        self.assertIn("&lt;img", body)
+        self.assertNotIn("<img src=x", body)
+        self.assertIn("badge-deny", body)
+
+    def test_1_page_has_viewport_and_poll(self):
+        """Phone-friendly: viewport meta; live lists carry the poller."""
+        page = cd._page("t", "<p>x</p>",
+                        cd.POLL_JS + '<script>startPoll("/api/pending",'
+                        'renderPending);</script>')
+        self.assertIn('name="viewport"', page)
+        self.assertIn("startPoll", page)
+        self.assertIn("textContent", page)
+
+    # --- #1: API routes sit behind _auth ---------------------------------
+
+    def _get(self, path, login):
+        h = cd.Handler.__new__(cd.Handler)
+        h.path = path
+        sent = {}
+
+        def fake_json(obj, code=200):
+            sent["obj"] = obj
+            sent["code"] = code
+
+        with mock.patch.object(cd.Handler, "_auth", return_value=login), \
+             mock.patch.object(cd.Handler, "_send_json",
+                               side_effect=fake_json):
+            h.do_GET()
+        return sent
+
+    def test_1_api_pending_behind_auth(self):
+        """GET /api/pending with auth returns the allowlisted feed."""
+        item = self._evil_item()
+        with mock.patch.object(cd, "load_pending", return_value=[item]):
+            sent = self._get("/api/pending", "ntindle@github")
+        self.assertEqual(sent["code"], 200)
+        self.assertEqual(len(sent["obj"]), 1)
+        # Route-level allowlist: the full field set, not just one key.
+        self.assertEqual(set(sent["obj"][0]),
+                         {"id", "summary", "kind", "created", "expires"})
+
+    def test_1_api_answered_behind_auth(self):
+        item = dict(self._evil_item())
+        item.update({"decision": "approve", "answered_by": "ntindle@github",
+                     "answered_at": "2026-09-18T10:05:00+00:00"})
+        with mock.patch.object(cd, "_load_answered", return_value=[item]):
+            sent = self._get("/api/answered", "ntindle@github")
+        self.assertEqual(sent["code"], 200)
+        self.assertEqual(sent["obj"][0]["decision"], "approve")
+
+    def test_1_api_answered_capped(self):
+        """The 5s-polled answered feed is capped at 100 (product)."""
+        items = [{"id": "x%d" % i,
+                  "answered_at": "2026-09-18T10:00:00+00:00",
+                  "decision": "approve"} for i in range(150)]
+        with mock.patch.object(cd, "_load_answered", return_value=items):
+            sent = self._get("/api/answered", "ntindle@github")
+        self.assertEqual(len(sent["obj"]), 100)
+
+    def test_1_send_json_no_store(self):
+        """The JSON feed is Cache-Control: no-store (approval state is
+        live; a cached feed would show stale approvals)."""
+        import io
+        h = cd.Handler.__new__(cd.Handler)
+        headers = {}
+        h.send_response = lambda code: headers.setdefault("code", code)
+        h.send_header = lambda k, v: headers.__setitem__(k, v)
+        h.end_headers = lambda: None
+        h.wfile = io.BytesIO()
+        h._send_json([{"id": "a"}])
+        self.assertEqual(headers["code"], 200)
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(json.loads(h.wfile.getvalue()), [{"id": "a"}])
+
+    def test_1_routes_carry_poller(self):
+        """/ and /answered wire the live poller (engineering #3)."""
+        for path, fn in (("/", "renderPending"), ("/answered", "renderAnswered")):
+            h = cd.Handler.__new__(cd.Handler)
+            h.path = path
+            got = {}
+
+            def fake_html(body, code=200, title="", script=""):
+                got.update(body=body, script=script)
+
+            with mock.patch.object(cd.Handler, "_auth",
+                                   return_value="ntindle@github"), \
+                 mock.patch.object(cd.Handler, "_send_html",
+                                   side_effect=fake_html), \
+                 mock.patch.object(cd, "load_pending", return_value=[]), \
+                 mock.patch.object(cd, "_load_answered", return_value=[]):
+                h.do_GET()
+            self.assertIn("startPoll", got["script"], path)
+            self.assertIn(fn, got["script"], path)
+            self.assertIn('id="items"', got["body"], path)
+            if path == "/answered":
+                # Product nit: the cap note must survive poller ticks,
+                # so the stamp is a nested span, not the whole <p>.
+                self.assertIn("showing the 100 most recent",
+                              got["body"], path)
+                self.assertIn('<span id="updated">', got["body"], path)
+
+    def test_1_api_denied_without_auth(self):
+        """No auth, no feed: _send_json is never reached."""
+        with mock.patch.object(cd, "load_pending",
+                               side_effect=AssertionError("must not run")):
+            sent = self._get("/api/pending", None)
+        self.assertEqual(sent, {})
+
+    # --- Design review fixes ---------------------------------------------
+
+    def test_1_err_has_back_nav(self):
+        """Error pages are never navigation dead-ends (design #5)."""
+        h = cd.Handler.__new__(cd.Handler)
+        got = {}
+
+        def fake_html(body, code=200, title="", script=""):
+            got.update(body=body, code=code)
+
+        with mock.patch.object(cd.Handler, "_send_html",
+                               side_effect=fake_html):
+            h._err("boom", 400)
+        self.assertEqual(got["code"], 400)
+        self.assertIn('href="/"', got["body"])
+        self.assertIn("boom", got["body"])
+
+    def test_1_detail_page_two_step_approve(self):
+        """Approving is a two-tap confirm, not a single tap that mints
+        a grant (design #4)."""
+        aid = "abc123"
+        p = self.approvals / "pending" / (aid + ".json")
+        p.write_text(json.dumps({
+            "id": aid, "summary": "GET api.github.com/ for github",
+            "kind": "first-use",
+            "created": "2026-09-18T10:00:00+00:00",
+            "expires": "2999-01-01T00:00:00+00:00"}))
+        h = cd.Handler.__new__(cd.Handler)
+        h.path = "/approval/" + aid
+        got = {}
+
+        def fake_html(body, code=200, title="", script=""):
+            got.update(body=body, code=code)
+
+        with mock.patch.object(cd.Handler, "_auth",
+                               return_value="ntindle@github"), \
+             mock.patch.object(cd.Handler, "_send_html",
+                               side_effect=fake_html), \
+             mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            h.do_GET()
+        self.assertEqual(got["code"], 200)
+        self.assertIn('id="approveBtn"', got["body"])
+        self.assertIn("Tap again to confirm approval", got["body"])
+        self.assertIn('classList.add("armed")', got["body"])
+
+    def test_1_style_stale_and_focus(self):
+        """Stale poll-failure styling + focus-visible exist (design #1/#2)."""
+        self.assertIn(".sub.stale", cd.STYLE)
+        self.assertIn("focus-visible", cd.STYLE)
+        # Dark-mode deny button meets contrast (design #1).
+        self.assertIn(".btn-deny{color:#f2a9a2", cd.STYLE.replace(" ", "")
+                      .replace("\n", ""))
+
+    def test_1_poll_js_keyed_update(self):
+        """The poller reconciles by id and skips unchanged payloads
+        instead of wiping the list every 5 s (design #3)."""
+        self.assertIn("keyedUpdate", cd.POLL_JS)
+        self.assertIn("lastJson", cd.POLL_JS)
+        self.assertIn("document.hidden", cd.POLL_JS)
+
+
 if __name__ == "__main__":
     unittest.main()
