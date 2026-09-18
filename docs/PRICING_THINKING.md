@@ -9,11 +9,18 @@ a free tier before the idle/suspend economics are decided. The pricing *page*
 lands after the operator decides the NEEDS_USER.md items (Billing, Abuse
 controls, Neo provider); this doc is what informs those decisions.
 
-Strategy input feeding: R4 (free-tier "works immediately" shape),
-C2 (competitor pricing inputs), C5 (idle economics for the free tier),
-C8 (buyer-vs-user packaging), signup design §11 open questions.
-Sources for every number: `docs/COMPETITOR_ANALYSIS.md` (surveyed 2026-09-18;
-AgentComputer and DIY figures are third-party claims, flagged where used).
+Strategy input feeding: R1 (first-10-minutes spec, backlog item),
+R4 (free-tier "works immediately" shape), C2 (competitor pricing inputs),
+C5 (idle economics for the free tier), C8 (buyer-vs-user packaging),
+signup design §11 open questions. Sources for every number:
+`docs/COMPETITOR_ANALYSIS.md` (surveyed 2026-09-18; AgentComputer and DIY
+figures are third-party claims, flagged where used).
+
+**Merge-order note:** the cited strategy docs are open PRs, not on `main` —
+`docs/COMPETITOR_ANALYSIS.md` (PR #26), `docs/RESEARCH_AGENT_SANDBOX_ADOPTION.md`
+(PR #25), `docs/POSITIONING.md` (PR #28), `docs/HOSTED_SIGNUP_ONBOARDING.md`
+(PR #24). Cross-references in this doc point at their PR versions until those
+merge; this PR should merge after (or alongside) them.
 
 ## 1. Who actually pays (C8: buyer ≠ user)
 
@@ -30,12 +37,14 @@ Consequences for packaging:
 - **Per-box, not per-seat.** The human buyer's mental model is "a computer for
   my agent" — per-box pricing maps 1:1 to the thing they get. Per-seat makes
   sense only if one human pays for many Muses, and then the right unit is still
-  "box N," not "seat." Multiple Muses sharing one box is an identity/approvals
-  question (§4 of the signup doc), not a pricing dimension.
+  "box N," not "seat." (Multiple Muses sharing one box is this doc's own
+  extension — the signup doc binds tenant↔Muse 1:1 in §4 and never discusses
+  sharing; treat the sharing question as identity/approvals, not pricing.)
 - **The conversion trigger is buyer-facing evidence, not user-facing features.**
-  The Muse converts when the first-10-minutes aha lands (research Finding 1);
-  the human converts when they can *see* what the agent did and *bound* what
-  it can spend. The pricing page must carry both halves: the agent's story
+  The Muse converts when the first-10-minutes aha lands (research Finding 6's
+  aha-in-minute-ten framing, signup doc §8); the human converts when they can
+  *see* what the agent did and *bound* what it can spend. The pricing page must
+  carry both halves: the agent's story
   ("a real computer that stays yours") and the buyer's story ("you see every
   approval, you cap the spend, you can kill it").
 - **Cost controls are a feature the paid tier sells.** A per-box monthly cap /
@@ -56,7 +65,7 @@ What the market charges for persistent computers (Sep 2026):
 | TermSquad | $9–$49/mo (2–8 vCPU, 4–24 GB, 40–200 GB NVMe) | Always-on, includes Squad orchestration + backups |
 | AgentComputer | $20/mo (third-party claim, unconfirmed) | Persistent Ubuntu VM, 25 GB disk |
 | E2B Pro | $150/mo floor + usage | Task-scoped; one continuous 2vCPU box ≈ $78/mo usage — a task-scoped unit price for an always-on box |
-| DIY floor | $5.70/mo droplet + human labor | The "human does everything" alternative |
+| DIY floor (third-party guide) | $5.70/mo droplet + human labor | The "human does everything" alternative |
 | Fly Sprites | $0.07/CPU-hr active | Hibernates when idle — closest to our free-tier shape |
 
 Reading the floor: a hosted persistent box cannot price below its wall-clock
@@ -66,7 +75,9 @@ is the anchor the OSS self-host story already wins against — hosted has to
 earn its premium with *zero* setup, not with raw compute.
 
 GPU is priced separately everywhere (Daytona H100 $2.27/hr; Modal GPU inside
-sandbox at 3x rate). We have no GPU story today (C6) — the tiers below are
+sandbox at 3x rate). We have no GPU story today (C6 = the competitor-pass item
+asking for an explicit GPU criterion in the Neo provider choice) — the tiers
+below are
 CPU-only; GPU, if ever, is a metered add-on, never bundled into the flat
 tier (it would blow up the free tier). Metered GPU does not violate the
 no-surprises principle below: it's opt-in per run with an explicit price
@@ -81,7 +92,10 @@ constraints:
 
 1. **"Works immediately" (R4):** zero human-credential steps after the key
    approval — the signup design's fingerprint-approval is the last human
-   touchpoint; everything after is agent-driven.
+   touchpoint *before the box provisions*. The human still installs the
+   first secret in the first session (signup doc §8, step 3 — the designed
+   manual step, a separate trust-depth metric because it needs a human
+   SSH-tunnel step). Closing that gap is R4's work, not a solved problem.
 2. **Idle economics (C5):** always-on bills wall-clock. "No session clock" is
    a *paid-tier* property; the free tier trades it for suspend. (A *session
    clock* is any limit on how long the box stays awake running workloads —
@@ -94,9 +108,9 @@ constraints:
    - **Wake path:** suspend-to-disk + wake-on-SSH-dial. Cron jobs do not
      fire while suspended; wake-on-schedule is a session clock by another
      name and belongs on paid.
-3. **Abuse (§11 Q7):** signup rate limits + identity-verification level for
+3. **Abuse (§11.7):** signup rate limits + identity-verification level for
    the free tier, decided before launch. The signup design's baseline is
-   email + magic link for the human account — and its §11 Q7 warns that
+   email + magic link for the human account — and its §11.7 warns that
    email-only invites spam VMs. The bar-raiser to decide at launch is the
    identity-verification level plus rate limits — still open (see NEEDS_USER.md
    Abuse item).
@@ -105,7 +119,9 @@ Proposed shape (thinking, not committed): one small box (2 vCPU / 4 GB —
 TermSquad-parity at the entry), suspend after N idle days, wake on SSH dial,
 disk persists across suspend (persistence is the headline — losing the box
 would contradict the entire positioning). Suspend loses *uptime*, never
-*files*. What converts off the free tier: the session-clock difference
+*files*. Registered scheduled workloads are the paid line — on the free
+tier nothing is registered, so the second idle clause never keeps a free
+box awake (otherwise a registered no-op cron would be free always-on). What converts off the free tier: the session-clock difference
 ("your cron jobs only run while you're awake" → paid "no session clock"),
 and disk/compute upgrades — never the persistence itself.
 
@@ -120,7 +136,9 @@ and disk/compute upgrades — never the persistence itself.
 - **Every paid tier must ship the buyer story to sell it:** per-box spend cap,
   audit-log access (approval decisions + swapd lines), kill switch, cost
   alerts. These are not add-ons; they are why a human approves the purchase.
-  (Future-state until built — see §5's honesty rule.)
+  (Future-state until built — see §5's honesty rule. Note: on flat monthly
+  tiers there is no variable spend to cap — the spend cap only bites on the
+  metered GPU add-on and any future usage add-ons, so don't oversell it.)
 - **What we do NOT do:** per-second metering (that's the task-scoped
   segment's game; our headline is the opposite), GPU bundling, per-seat
   pricing, or usage credits that surprise the buyer.
@@ -132,9 +150,11 @@ The pricing page's job is to get the Muse to that aha (the approval loop:
 "approve this once, watch it work") inside 10 minutes. Conversion levers,
 in order:
 
-1. Free tier with zero human-credential friction after key approval (R4).
-2. The approval-loop aha in the first session — engineered by the
-   first-10-minutes spec (R1), not by copy.
+1. Free tier with zero human-credential friction after key approval
+   (R4's "works immediately" shape — the first-secret install is still a
+   human step today, signup doc §8).
+2. The approval-loop aha in the first session — will be engineered by the
+   first-10-minutes spec (R1, still a backlog item), not by copy.
 3. The human sees the trust evidence (audit trail, spend cap — page must tag
    unbuilt controls honestly per §5) and approves Tier 1.
 4. Upgrades sell compute, never persistence.
@@ -176,18 +196,20 @@ in order:
   definition and the paid "no session clock" property need to land in that
   decision.
 - **Abuse item (refine):** identity-verification level for the free tier has
-  no decided design yet (signup doc §11 Q7: email + magic link baseline,
+  no decided design yet (signup doc §11.7: email + magic link baseline,
   verification level + rate limits undecided). The free-tier shape proposed
   in §3 (idle definition, suspend, wake path) is the input to that decision.
 - **Neo provider (feeds cost floor):** the tier anchors above assume a
   provider cost basis near TermSquad's visible floor. The H4 driver choice
+  (H4 = provisioning automation against the provider-agnostic interface)
   should carry a GPU-price criterion (C6) so a future GPU add-on is
   provider-agnostic.
 
 ## Limitations
 
 - All competitor prices are September-2026 survey snapshots; the watch
-  (R3/C1) re-confirms periodically. TermSquad is three days old — its pricing
+  (R3/C1: the TermSquad competitive watch from the competitor pass)
+  re-confirms periodically. TermSquad is three days old — its pricing
   is the least battle-tested anchor here.
 - AgentComputer's $20 is a third-party directory claim, unconfirmed against
   the vendor.
