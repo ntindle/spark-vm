@@ -2,8 +2,8 @@
 
 Doc-first; honesty rules apply (`docs/POSITIONING.md`): everything below is
 **current state and work to do**, not promises. Statuses are pinned to the
-repo as of this commit; open strategy PRs (#24–#30) are cited where the
-vision they describe is already written down.
+repo as of this commit; open strategy PRs (#24–#26, #28–#30) are cited where
+the vision they describe is already written down.
 
 ## The hosted vision in one paragraph
 
@@ -142,7 +142,9 @@ a multi-tenancy audit — inventory every localhost-only/no-auth assumption,
 rank by blast radius, propose the isolation story (per-tenant processes?
 per-tenant tailnets? one box per tenant, à la signup doc §tailnet?). The
 cheapest correct answer may be "one box per tenant" — the audit must say
-so explicitly rather than leaving the question open.
+so explicitly rather than leaving the question open. H11 gates H5 (the
+sentinel's isolation story), H12 (per-tenant metering), and H13
+(per-tenant idle detection).
 
 ### 9. Metering — pricing thinking has no data source
 
@@ -205,10 +207,11 @@ TermSquad ships Squad (coordinated parallel agents); we have muse-job
   fail-closed semantics for tailnet-gated auth, and who holds root on a
   provisioned tenant box. Feeds H5 (sentinel design).
 - **H12 — Usage metering hooks**: per-tenant resource + approval + suspend
-  telemetry; the data source pricing/billing decisions need.
+  telemetry; the data source pricing/billing decisions need. Depends on
+  H11 — per-tenant metering needs the tenant dimension defined first.
 - **H13 — Free-tier suspend/wake**: suspend-to-disk + wake-on-SSH-dial,
   idle detector, registered-workload registry (feeds the abuse-controls
-  operator decision).
+  operator decision). Depends on H11 — idle detection is per-tenant.
 - **H14 — Push service implementation**: confirmd push hook
   (approval-created → enqueue) + push service; starts after the H2 VAPID
   operator decision.
