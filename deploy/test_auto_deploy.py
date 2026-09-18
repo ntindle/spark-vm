@@ -109,6 +109,29 @@ def test_component_name_mapping():
     assert "cred-ui/" in r.stdout
 
 
+def test_proxy_install_paths_cover_deploy_sh_writes():
+    """Every file proxy/deploy.sh installs must be rollback-restorable.
+    Security-review regression: /etc/sudoers.d/swapd, the CA bundle, and
+    grants.json were missing from proxy_install_paths, so a rollback after a
+    failed deploy would have left the NEW sudoers live while everything else
+    reverted — the exact half-state rollback exists to prevent."""
+    r = source_and('get_arr proxy install_paths')
+    assert r.returncode == 0, r.stderr
+    listed = {line.strip() for line in r.stdout.splitlines() if line.strip()}
+    required = {
+        "/home/swapd/grants.json",
+        "/etc/sudoers.d/swapd",
+        "/usr/local/share/with-proxy-ca/ca-bundle.crt",
+    }
+    missing = required - listed
+    assert not missing, "missing from proxy_install_paths: %s" % sorted(missing)
+    # Non-vacuous: deploy.sh really does write those targets.
+    with open(os.path.join(REPO, "proxy", "deploy.sh")) as f:
+        body = f.read()
+    for t in required:
+        assert t in body, "deploy.sh no longer writes %s (test is stale)" % t
+
+
 # --- change mapping ----------------------------------------------------------
 
 def test_map_changed_files(tmp_path):
@@ -127,6 +150,85 @@ def test_map_pull_only_change(tmp_path):
                  env_extra={"UPDATER_REPO": repo})
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == ""
+
+
+# --- pending_range contract ----------------------------------------------------
+
+def _make_pinned_fixture(tmp_path):
+    """Bare origin + cloned updater repo with PINNED_UPSTREAM env matching."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "init", "-q", "--bare"], cwd=origin, check=True)
+    repo, base, mid, docs_only = make_fixture_repo(tmp_path)
+    run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)
+    run("git", "remote", "add", "origin", str(origin))
+    run("git", "push", "-q", "origin", "HEAD:main")
+    subprocess.run(["git", "--git-dir", str(origin), "symbolic-ref",
+                    "HEAD", "refs/heads/main"], check=True)
+    updater = tmp_path / "updater"
+    subprocess.run(["git", "clone", "-q", str(origin), str(updater)], check=True)
+    state = tmp_path / "state"
+    state.mkdir()
+    env = {
+        "AUTO_DEPLOY_NO_MAIN": "1",
+        "UPDATER_REPO": str(updater),
+        "UPDATER_STATE_DIR": str(state),
+        "PINNED_UPSTREAM": str(origin),
+        "SKIP_SYSTEMCTL": "1",
+        "SKIP_SUDO": "1",
+    }
+    return updater, state, env, base, mid, docs_only
+
+
+def test_pending_range_return_contract(tmp_path):
+    """pending_range: 0 = range on stdout; 1 = nothing to do; 2 = error.
+    Regression: the `range="$(pending_range)"; rc=$?` form was dead code
+    under set -e — the shell exited inside the assignment, so the rc=1/2
+    branches (quiet blocked head, precheck alert+audit) were unreachable and
+    the common up-to-date tick reported a FAILED oneshot."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    head = subprocess.run(["git", "rev-parse", "origin/main"], cwd=updater,
+                          check=True, capture_output=True, text=True).stdout.strip()
+    assert docs_only == head  # main carries all three fixture commits
+
+    def sourced(code):
+        return run_bash("export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+                        + code, env_extra=env, cwd=REPO)
+
+    # behind: rc=0, prints "old new" (base -> docs_only covers a deployable change)
+    (state / "deployed-commit").write_text(base + "\n")
+    r = sourced('if range="$(pending_range)"; then rc=0; else rc=$?; fi; '
+                'echo "RC=$rc RANGE=$range"')
+    assert "RC=0 RANGE=%s %s" % (base, docs_only) in r.stdout, r.stdout + r.stderr
+
+    # up-to-date: rc=1 — and the real cmd_check must exit 0, not die in the assignment
+    (state / "deployed-commit").write_text(docs_only + "\n")
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; cmd_check; echo CHECK_OK",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "CHECK_OK" in r.stdout
+
+    # blocked head: rc=1, stays quiet
+    (state / "blocked-commit").write_text(docs_only + "\n")
+    (state / "deployed-commit").write_text(base + "\n")
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; cmd_check; echo CHECK_OK",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "CHECK_OK" in r.stdout
+    (state / "blocked-commit").unlink()
+
+    # garbage watermark: rc=2 — the precheck branch must alert AND audit
+    (state / "deployed-commit").write_text("not-a-sha\n")
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; "
+                 "if cmd_deploy; then rc=0; else rc=$?; fi; echo DEPLOY_RC=$rc",
+                 env_extra=env, cwd=REPO)
+    assert "DEPLOY_RC=1" in r.stdout, r.stdout + r.stderr
+    assert (state / "last-failure").exists(), "precheck-fail never alerted"
+    audit = (state / "audit.log").read_text()
+    assert '"result":"precheck-fail"' in audit, audit
 
 
 # --- upstream pinning ----------------------------------------------------------
