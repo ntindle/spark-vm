@@ -1,0 +1,19 @@
+[Unit]
+Description=spark-vm auto-deploy: deploy merged main commits to live services
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as the box owner (same identity that runs proxy/deploy.sh manually).
+# The updater installs files via that user's existing sudo rights; the timer
+# grants no new privilege.
+User=ntindle
+WorkingDirectory=/home/ntindle/spark-vm
+ExecStart=/home/ntindle/spark-vm/deploy/auto-deploy.sh deploy
+# A failed deploy must be loud in the journal and in the state dir.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -6,10 +6,30 @@
 # file changes take effect. Finding 19: this script is the rebuild
 # documentation — the repo is the only source.
 #
-# Usage: ./proxy/deploy.sh
+# Usage: ./proxy/deploy.sh [--no-restart] [--help]
 # Must be run from the repo root.
+#
+#   --no-restart  install everything but do not restart services (used by
+#                 deploy/auto-deploy.sh, which restarts only the services
+#                 belonging to changed components).
 
 set -euo pipefail
+
+NO_RESTART=0
+for arg in "$@"; do
+    case "$arg" in
+        --no-restart) NO_RESTART=1 ;;
+        --help|-h)
+            echo "Usage: ./proxy/deploy.sh [--no-restart]"
+            echo "Deploys swap proxy, inference proxy, and confirmd from the repo."
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown argument: $arg (try --help)" >&2
+            exit 1
+            ;;
+    esac
+done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
@@ -130,6 +150,12 @@ fi
 sudo mv -f "$tmp_sudoers" /etc/sudoers.d/swapd
 
 # --- 7. daemon-reload and restart (finding 66) -------------------------------
+if [ "$NO_RESTART" = "1" ]; then
+    echo "[7/7] Skipping service restarts (--no-restart; caller restarts affected services)"
+    echo ""
+    echo "Deploy complete (no restart). The repo is the only source (finding 19)."
+    exit 0
+fi
 echo "[7/7] Reloading systemd and restarting services..."
 sudo systemctl daemon-reload
 sudo systemctl enable swap-proxy.service swap-inference.service confirmd.service
