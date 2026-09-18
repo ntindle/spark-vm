@@ -350,10 +350,6 @@ class GenKeysCLITests(unittest.TestCase):
             self.assertEqual(Path(path).read_text(), "{}")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # --------------------------------------------------------------------------
 # confirmd push-endpoint integration (handler level, sockets stubbed)
 # --------------------------------------------------------------------------
@@ -453,8 +449,11 @@ class ConfirmdPushEndpointTests(unittest.TestCase):
 
     def test_config_disabled_without_keys(self):
         cd._PUSH, cd.PUSH_ENABLED = None, False
+        cd.PUSH_DISABLED_REASON = "no-keys: /none (No such file)"
         c = _StubHandler(self, "/api/push/config").do_get()
-        self.assertEqual(c["json"], {"enabled": False, "public_key": None})
+        self.assertFalse(c["json"]["enabled"])
+        self.assertIsNone(c["json"]["public_key"])
+        self.assertIn("no-keys", c["json"]["disabled_reason"])
 
     def test_sw_js_served(self):
         stub = _StubHandler(self, "/sw.js")
@@ -534,3 +533,159 @@ class ConfirmdPushEndpointTests(unittest.TestCase):
         self.assertIn('id="pushBtn"', page)
         self.assertIn('id="pushStatus"', page)
         self.assertIn("/api/push/subscribe", page)
+
+
+class NotifyFailureSemanticsTests(unittest.TestCase):
+    """QA B2 / Engineering B1: the idempotency mark must not fire on
+    total transient failure — otherwise an outage silently drops the
+    notification with no retry path."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.keys = str(Path(self.tmp.name) / "vapid.json")
+        self.subs = str(Path(self.tmp.name) / "subs.json")
+        priv, pub = push.gen_keypair()
+        Path(self.keys).write_text(json.dumps({"private": priv,
+                                               "public": pub}))
+        self.sender = push.PushSender(self.keys, self.subs, "mailto:t")
+        sub = _make_sub()
+        self.sender.subs.add(sub["endpoint"], sub["keys"]["p256dh"],
+                             sub["keys"]["auth"])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_all_sends_fail_not_marked(self):
+        def boom(req, timeout=None):
+            raise OSError("push service down")
+
+        with mock.patch("urllib.request.urlopen", boom):
+            self.assertEqual(
+                self.sender.notify_approval({"id": "aid1"}), 0)
+        # Not marked: a later attempt still delivers.
+        self.assertFalse(self.sender.notified.seen("aid1"))
+
+    def test_retry_after_failure_delivers(self):
+        def boom(req, timeout=None):
+            raise OSError("push service down")
+
+        with mock.patch("urllib.request.urlopen", boom):
+            self.sender.notify_approval({"id": "aid1"})
+        calls = []
+
+        def ok(req, timeout=None):
+            calls.append(req)
+            return FakeHTTPResponse(201)
+
+        with mock.patch("urllib.request.urlopen", ok):
+            self.assertEqual(
+                self.sender.notify_approval({"id": "aid1"}), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(self.sender.notified.seen("aid1"))
+
+    def test_partial_failure_not_marked(self):
+        sub2 = _make_sub(endpoint="https://push.example.com/p/other")
+        self.sender.subs.add(sub2["endpoint"], sub2["keys"]["p256dh"],
+                             sub2["keys"]["auth"])
+
+        def flaky(req, timeout=None):
+            if "other" in req.full_url:
+                raise OSError("one endpoint down")
+            return FakeHTTPResponse(201)
+
+        with mock.patch("urllib.request.urlopen", flaky):
+            self.assertEqual(
+                self.sender.notify_approval({"id": "aid2"}), 1)
+        # One sub failed transiently: not marked, so the failed one can
+        # still be retried later.
+        self.assertFalse(self.sender.notified.seen("aid2"))
+
+    def test_disabled_reason_no_keys(self):
+        s = push.PushSender(str(Path(self.tmp.name) / "missing.json"),
+                            self.subs, "mailto:x")
+        self.assertFalse(s.enabled)
+        self.assertIn("no-keys", s.disabled_reason)
+
+    def test_test_push_cli(self):
+        calls = []
+
+        def ok(req, timeout=None):
+            calls.append(req)
+            return FakeHTTPResponse(201)
+
+        with mock.patch.dict("os.environ",
+                             {"CONFIRM_VAPID_KEYS": self.keys,
+                              "CONFIRM_PUSH_SUBS": self.subs}):
+            with mock.patch("urllib.request.urlopen", ok):
+                rc = push.main(["--test-push"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)
+
+    def test_test_push_cli_disabled(self):
+        with mock.patch.dict("os.environ",
+                             {"CONFIRM_VAPID_KEYS": "/nonexistent.json",
+                              "CONFIRM_PUSH_SUBS": self.subs}):
+            rc = push.main(["--test-push"])
+        self.assertEqual(rc, 1)
+
+
+class PushServerPipelineTests(unittest.TestCase):
+    """QA B5, closest available to E2E without a real device: a real
+    browser-style keypair subscribes through the real confirmd handler,
+    then the server's own sender emits the approval push — the captured
+    wire POST decrypts with the browser key, and the served /sw.js maps
+    the notification tag to the approval deep link. The one unverifiable
+    mile is the browser rendering the notification; that needs a real
+    device and is an operator step via `push.py --test-push`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.keys = str(Path(self.tmp.name) / "vapid.json")
+        self.subs = str(Path(self.tmp.name) / "subs.json")
+        priv, pub = push.gen_keypair()
+        Path(self.keys).write_text(json.dumps({"private": priv,
+                                               "public": pub}))
+        self.sender = push.PushSender(self.keys, self.subs, "mailto:t")
+        self._orig = (cd._PUSH, cd.PUSH_ENABLED)
+        cd._PUSH = self.sender
+        cd.PUSH_ENABLED = True
+
+    def tearDown(self):
+        cd._PUSH, cd.PUSH_ENABLED = self._orig
+        self.tmp.cleanup()
+
+    def test_subscribe_then_notify_then_decrypt_pipeline(self):
+        sub = _make_sub()
+        body = json.dumps({"endpoint": sub["endpoint"],
+                           "keys": sub["keys"]}).encode()
+        c = _StubHandler(self, "/api/push/subscribe", body=body).do_post()
+        self.assertEqual(c["code"], 200)
+
+        captured = []
+
+        def fake_urlopen(req, timeout=None):
+            captured.append(req)
+            return FakeHTTPResponse(201)
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            sent = cd._PUSH.notify_approval({"id": "e2e9",
+                                             "summary": "pipeline test"})
+        self.assertEqual(sent, 1)
+        self.assertEqual(len(captured), 1)
+        pt = _decrypt_aes128gcm(sub["_priv"], sub["keys"]["auth"],
+                                captured[0].data)
+        doc = json.loads(pt)
+        self.assertEqual(doc["approval_id"], "e2e9")
+        self.assertEqual(doc["title"], "Approval needed")
+
+        # /sw.js deep-link contract: notification tag "approval-<id>"
+        # taps through to "/approval/<id>".
+        stub = _StubHandler(self, "/sw.js")
+        stub.do_get()
+        sw = stub.wfile_bytes.getvalue().decode()
+        self.assertIn('"approval-" + aid', sw)
+        self.assertIn('"/approval/" + aid', sw)
+
+
+if __name__ == "__main__":
+    unittest.main()

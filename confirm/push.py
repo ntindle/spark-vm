@@ -40,11 +40,14 @@ Config (env):
 
 import base64
 import binascii
+import contextlib
+import fcntl
 import json
 import logging
 import os
 import re
 import struct
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -52,12 +55,10 @@ import urllib.request
 log = logging.getLogger("sparkvm.push")
 
 try:
-    from cryptography.exceptions import InvalidSignature  # noqa: F401
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives.asymmetric.utils import (
         decode_dss_signature,
-        encode_dss_signature,
     )
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -118,6 +119,8 @@ def vapid_jwt(audience: str, private_b64u: str, subject: str,
               ttl_seconds: int = 12 * 3600) -> str:
     """Build a VAPID JWT (RFC 8292 §2): ES256-signed, exp ≤ 24h."""
     _need_crypto()
+    # RFC 8292 §2: exp MUST NOT exceed 24h from now.
+    ttl_seconds = max(60, min(ttl_seconds, 24 * 3600))
     priv_raw = b64url_decode(private_b64u)
     if len(priv_raw) != 32:
         raise ValueError("VAPID private key must decode to 32 bytes")
@@ -173,8 +176,9 @@ def encrypt_message(receiver_pub_b64u: str, auth_secret_b64u: str,
                info=b"Content-Encoding: aes128gcm\x00").derive(prk)
     nonce = HKDF(algorithm=hashes.SHA256(), length=12, salt=salt,
                 info=b"Content-Encoding: nonce\x00").derive(prk)
-    # Single record: plaintext || 0x02 (last-record delimiter). JSON
-    # payloads never end in 0x00, so the delimiter is unambiguous.
+    # Single record: plaintext || 0x02 (last-record delimiter, RFC 8291
+    # §3). In single-record mode the delimiter is simply the final octet,
+    # so stripping is unambiguous.
     ct = AESGCM(cek).encrypt(nonce, plaintext + b"\x02", b"")
     rs = 4096
     return (salt + struct.pack(">L", rs) + bytes([len(eph_pub_raw)])
@@ -190,16 +194,42 @@ _NOTIFIED_CAP = 1000
 
 
 def _atomic_write_json(path: str, obj) -> None:
+    # Engineering review: create the tmp file 0600 from the start — the
+    # old write-then-chmod left a world-readable window for endpoint
+    # URLs (capability-ish tokens).
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, path)
+
+
+@contextlib.contextmanager
+def _locked(path: str):
+    """Exclusive cross-process lock for load-modify-save on `path`.
+
+    QA review: SubscriptionStore and NotifiedLog are written from two
+    different processes (confirmd's ThreadingHTTPServer and mitmproxy's
+    swap_addon) plus concurrent threads inside each. Atomic os.replace
+    alone does not prevent a stale read-modify-write from silently
+    dropping a subscription. The lock is a `<path>.lock` sidecar.
+    """
+    lock_path = path + ".lock"
+    with open(lock_path, "a+b") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
 
 class SubscriptionStore:
@@ -240,20 +270,22 @@ class SubscriptionStore:
 
     def add(self, endpoint: str, p256dh: str, auth: str) -> None:
         self.validate(endpoint, p256dh, auth)
-        subs = [s for s in self._load() if s.get("endpoint") != endpoint]
-        subs.append({"endpoint": endpoint,
-                     "keys": {"p256dh": p256dh, "auth": auth},
-                     "created": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                              time.gmtime())})
-        self._save(subs)
+        with _locked(self.path):
+            subs = [s for s in self._load() if s.get("endpoint") != endpoint]
+            subs.append({"endpoint": endpoint,
+                         "keys": {"p256dh": p256dh, "auth": auth},
+                         "created": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                  time.gmtime())})
+            self._save(subs)
 
     def remove(self, endpoint: str) -> bool:
-        subs = self._load()
-        kept = [s for s in subs if s.get("endpoint") != endpoint]
-        if len(kept) != len(subs):
-            self._save(kept)
-            return True
-        return False
+        with _locked(self.path):
+            subs = self._load()
+            kept = [s for s in subs if s.get("endpoint") != endpoint]
+            if len(kept) != len(subs):
+                self._save(kept)
+                return True
+            return False
 
     def all(self):
         return self._load()
@@ -282,13 +314,14 @@ class NotifiedLog:
         return aid in self._load()
 
     def mark(self, aid: str) -> None:
-        noted = self._load()
-        noted[aid] = int(time.time())
-        if len(noted) > _NOTIFIED_CAP:
-            # Drop the oldest entries.
-            for old in sorted(noted, key=noted.get)[:len(noted) - _NOTIFIED_CAP]:
-                del noted[old]
-        _atomic_write_json(self.path, {"notified": noted})
+        with _locked(self.path):
+            noted = self._load()
+            noted[aid] = int(time.time())
+            if len(noted) > _NOTIFIED_CAP:
+                # Drop the oldest entries.
+                for old in sorted(noted, key=noted.get)[:len(noted) - _NOTIFIED_CAP]:
+                    del noted[old]
+            _atomic_write_json(self.path, {"notified": noted})
 
 
 # --------------------------------------------------------------------------
@@ -319,6 +352,9 @@ class PushSender:
         self.subject = subject
         self._private = None
         self._public = None
+        # Product review: surface WHY push is disabled, not just that it
+        # is. None when enabled.
+        self.disabled_reason = None
         self._load_keys()
 
     @classmethod
@@ -328,6 +364,11 @@ class PushSender:
                                   "mailto:confirmd@localhost"))
 
     def _load_keys(self):
+        if not _CRYPTO_OK:
+            self.disabled_reason = ("no-cryptography: pip/apt install the "
+                                    "`cryptography` package")
+            log.warning("push: disabled (%s)", self.disabled_reason)
+            return
         try:
             with open(self.keys_path, encoding="utf-8") as f:
                 doc = json.load(f)
@@ -337,9 +378,12 @@ class PushSender:
                 raise ValueError("bad key lengths")
             self._private = doc["private"]
             self._public = doc["public"]
-        except (OSError, ValueError, KeyError) as e:
-            log.warning("push: VAPID keys unavailable at %s: %s "
-                        "(push disabled)", self.keys_path, e)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            # Engineering review: TypeError covers a keys file holding
+            # valid JSON that isn't a dict (e.g. `[]`).
+            self.disabled_reason = ("no-keys: %s unreadable or invalid "
+                                    "(%s)" % (self.keys_path, e))
+            log.warning("push: disabled (%s)", self.disabled_reason)
 
     @property
     def enabled(self) -> bool:
@@ -362,6 +406,9 @@ class PushSender:
             headers={
                 "Content-Type": "application/octet-stream",
                 "Content-Encoding": "aes128gcm",
+                # TTL 3600 matches the approval lifetime: confirmd reaps
+                # pending approvals after 1h, so a later delivery would
+                # tap through to an expired page anyway.
                 "TTL": "3600",
                 "Authorization": "vapid t=%s, k=%s" % (jwt, self._public),
             })
@@ -383,6 +430,14 @@ class PushSender:
         """Push one approval to every stored subscription.
 
         Fail-open: never raises. Returns the number of successful sends.
+
+        QA/Engineering review: the idempotency mark is written ONLY when
+        the attempt had no transient failure (every subscription resolved
+        ok or was pruned, or there were no subscriptions). If every send
+        raised or returned "retry", the approval is left unmarked — a
+        transient outage must not become a silently dropped notification.
+        There is still no retry path until H14; the loud log line is the
+        signal.
         """
         if not self.enabled:
             return 0
@@ -408,17 +463,26 @@ class PushSender:
                      "approval_id": aid},
                     separators=(",", ":")).encode()
             sent = 0
+            pending = False
             for sub in self.subs.all():
                 try:
                     res = self._send_one(sub, payload)
                 except Exception:
                     log.exception("push: send failed")
+                    pending = True
                     continue
                 if res == "ok":
                     sent += 1
                 elif res == "prune":
                     self.subs.remove(sub.get("endpoint", ""))
-            self.notified.mark(aid)
+                else:  # "retry": transient — do not mark as notified
+                    pending = True
+            if pending:
+                log.error("push: transient failure notifying approval %s "
+                          "(%d/%d sent) — NOT marked notified, no retry "
+                          "until H14", aid, sent, len(self.subs.all()))
+            else:
+                self.notified.mark(aid)
             return sent
         except Exception:
             log.exception("push: notify_approval failed")
@@ -435,6 +499,9 @@ def main(argv):
         description="VAPID Web Push sender for confirmd approvals")
     ap.add_argument("--gen-keys", metavar="PATH",
                     help="generate a VAPID keypair JSON at PATH (mode 0600)")
+    ap.add_argument("--test-push", action="store_true",
+                    help="send a test notification to every stored "
+                         "subscription (operator verify step)")
     args = ap.parse_args(argv)
     if args.gen_keys:
         _need_crypto()
@@ -457,9 +524,24 @@ def main(argv):
         print("wrote %s (mode 0600)" % path)
         print("public key (for /api/push/config): %s" % pub)
         return 0
+    if args.test_push:
+        # Product review: the operator verify step. Sends a real push
+        # through the configured keys to every stored subscription.
+        sender = PushSender.default()
+        if not sender.enabled:
+            print("push disabled: %s" % sender.disabled_reason)
+            return 1
+        aid = "test-%d" % int(time.time())
+        sent = sender.notify_approval(
+            {"id": aid,
+             "summary": "Test notification from confirmd push "
+                        "(safe to ignore)."})
+        print("test push %s: %d subscription(s) accepted it"
+              % (aid, sent))
+        return 0
     ap.print_help()
     return 2
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(__import__("sys").argv[1:]))
+    raise SystemExit(main(sys.argv[1:]))

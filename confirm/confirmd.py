@@ -58,11 +58,14 @@ try:
     import push as _push_mod  # noqa: F401 (sibling file, installed next to this one)
     _PUSH = _push_mod.PushSender.default()
     PUSH_ENABLED = _PUSH.enabled
+    # Product review: surface WHY push is disabled, not just that it is.
+    PUSH_DISABLED_REASON = _PUSH.disabled_reason
     if not PUSH_ENABLED:
         _PUSH = None
-except Exception:
+except Exception as _push_import_err:
     _PUSH = None
     PUSH_ENABLED = False
+    PUSH_DISABLED_REASON = "import-failed: %s" % _push_import_err
 
 # Finding 53(f): bind address comes from tailscale, not a literal.
 def _tailnet_ip4():
@@ -481,11 +484,11 @@ self.addEventListener("push", function(event) {
   var title = data.title || "Approval needed";
   var aid = data.approval_id || "";
   // Per-approval tag: multiple pending approvals stack as separate
-  // notifications; renotify re-alerts on replace.
+  // notifications. (No renotify: each tag is pushed exactly once — the
+  // notified log makes re-alerts impossible, so claiming it would lie.)
   var options = {
     body: data.body || "Open confirmd to review.",
     tag: aid ? ("approval-" + aid) : "approval",
-    renotify: true,
     data: { url: aid ? ("/approval/" + aid) : "/" }
   };
   event.waitUntil(self.registration.showNotification(title, options));
@@ -516,13 +519,28 @@ _PUSH_JS = """<script>
     return a;
   }
   if(!("serviceWorker" in navigator) || !("PushManager" in window)){
-    say("push not supported in this browser"); return;
+    // Design review: on iOS, Web Push exists but requires the page to be
+    // added to the home screen first — PushManager is absent otherwise.
+    // Say that instead of the misleading "not supported".
+    var ua = navigator.userAgent || "";
+    if(/iPhone|iPad|iPod/.test(ua)){
+      say("on iPhone/iPad: add this page to your home screen, then open " +
+          "it from there to enable notifications");
+    } else {
+      say("push not supported in this browser");
+    }
+    return;
   }
   fetch("/api/push/config",{credentials:"same-origin"})
     .then(function(r){ return r.json(); })
     .then(function(cfg){
       if(!cfg.enabled || !cfg.public_key){
-        say("push not configured on this box"); return;
+        // Product review: name the reason and the doc so the
+        // human-who-is-also-the-operator can fix it.
+        say("push not configured on this box" +
+            (cfg.disabled_reason ? (": " + cfg.disabled_reason) : "") +
+            " — see docs/PUSH_NOTIFICATIONS.md");
+        return;
       }
       btn.hidden=false;
       return navigator.serviceWorker.register("/sw.js").then(function(reg){
@@ -554,12 +572,24 @@ _PUSH_JS = """<script>
                 if(!r.ok) throw new Error("server refused ("+r.status+")");
                 say("notifications on"); location.reload();
               })
-              .catch(function(e){ say("could not enable: "+e.message); });
+              .catch(function(e){
+                // Design review: the permission-denied path needs a
+                // recovery hint, not just the raw DOMException.
+                var msg = String((e && e.message) || e);
+                if(e && e.name === "NotAllowedError"){
+                  msg += " \u2014 allow notifications for this site in " +
+                         "the browser\u2019s site settings, then retry";
+                }
+                say("could not enable: " + msg);
+              });
           };
         });
       });
     })
-    .catch(function(){ say("push unavailable"); });
+    .catch(function(){
+      say("push unavailable \u2014 the page itself may be unreachable, " +
+          "try reloading");
+    });
 })();
 </script>"""
 
@@ -789,7 +819,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/push/config":
             self._send_json({"enabled": PUSH_ENABLED,
                              "public_key": (_PUSH.public_key_b64u
-                                            if _PUSH else None)})
+                                            if _PUSH else None),
+                             "disabled_reason": PUSH_DISABLED_REASON})
             return
         if self.path == "/sw.js":
             # The service worker is fetched by the owner's browser from
@@ -884,10 +915,41 @@ class Handler(BaseHTTPRequestHandler):
                     'b.classList.add("armed");'
                     'b.textContent="Tap again to confirm approval";'
                     '}});'
-                    "</script>") % (
+                    "</script>"
+                    # Design B1: dismiss this approval's notification when
+                    # the owner answers — otherwise a dead notification
+                    # lingers and taps through to a 404 ("already
+                    # answered"). Best-effort: the POST still answers even
+                    # if the service worker is unreachable.
+                    "<script>"
+                    '"use strict";'
+                    '(function(){'
+                    'var f=document.querySelector(\'form[action="/answer"]\');'
+                    'var i=document.querySelector(\'input[name="id"]\');'
+                    'if(!f||!i||!("serviceWorker" in navigator))return;'
+                    'var aid=i.value;'
+                    'f.addEventListener("submit",function(){'
+                    'try{'
+                    'navigator.serviceWorker.ready.then(function(r){'
+                    'return r.getNotifications({tag:"approval-"+aid});'
+                    '}).then(function(ns){'
+                    'ns.forEach(function(n){n.close();});'
+                    '}).catch(function(){});'
+                    '}catch(e){}'
+                    '});'
+                    '})();'
+                    "</script>"
+                    # Product nit: the deep-link target is where
+                    # notification taps land, so the push controls live
+                    # here too — not only on the pending page.
+                    '<p class="pushrow"><button class="btn" id="pushBtn" '
+                    'type="button" hidden>Enable notifications</button> '
+                    '<span id="pushStatus" class="sub" '
+                    'role="status"></span></p>') % (
                         html.escape(aid), self._render_item(it),
                         html.escape(aid), html.escape(nonce))
-            self._send_html(body, title="Approval %s" % aid)
+            self._send_html(body, title="Approval %s" % aid,
+                            script=_PUSH_JS)
         else:
             self.send_response(404)
             self.end_headers()
@@ -1075,8 +1137,13 @@ def main():
     # Finding 67: print the resolved origins at startup so the journal
     # shows them; a missing ts.net name must be visible, not silent.
     print("confirmd PAGE_ORIGINS=%s" % sorted(PAGE_ORIGINS), flush=True)
-    # H2: push state must be visible, not silent.
+    # H2: push state must be visible, not silent — including the reason
+    # when disabled (Product review: "push not configured" alone is
+    # undiagnosable).
     print("confirmd PUSH_ENABLED=%s" % PUSH_ENABLED, flush=True)
+    if not PUSH_ENABLED:
+        print("confirmd PUSH_DISABLED_REASON=%s" % PUSH_DISABLED_REASON,
+              flush=True)
     for d in (pending_dir(), answered_dir(), consumed_dir()):
         os.makedirs(d, exist_ok=True)
     import ssl
