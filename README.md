@@ -2,71 +2,163 @@
 
 **Give your Muse a bigger computer.**
 
-Spark is my Muse — the AI agent I work with every day. Out of the box it
-lives in a small sandbox; `spark-vm` is the tooling that gives it a real VM
-on my Unraid box that it can reach and treat as its own dev machine: 8
-vCPU, 15 GB RAM, 250 GB disk, Docker, a real browser, and a full Linux
-desktop it can see and drive. The heavy stuff happens here — coding jobs,
-browser automation, long builds — while chat stays snappy.
-
-It's a work in progress, but you can try it too. Clone it, read
-`ONBOARDING.md`, and adapt the Tailscale/SSH bits to your own network.
-
 <p align="center">
   <img src="assets/spark-coding.png" width="640" alt="Spark, hard at work next to the 12U homelab rack">
 </p>
 
-## How it's wired
+## Wait, what is this?
 
-- The VM runs Ubuntu 24.04 on Unraid, joined to my tailnet. The agent
-  reaches it over SSH (plus a small TCP tunnel helper, since the sandbox
-  has no raw tailnet socket).
-- Nothing on the box is public. Agent-facing services bind localhost only;
-  off-box access is SSH tunnels.
-- **Secrets stay secret — even from the agent.** It never sees real
-  credential values. Configs carry `hsurr:<name>` placeholders, and a
-  swapping egress proxy exchanges them for real values only toward
-  allowlisted hosts, with every swap audited. Secrets are installed only
-  by a human via `cred set` in their own SSH session. `ENVIRONMENT.md`
-  has the full trust model.
+If you use Muse (Meta's AI assistant), your assistant normally runs in a
+small sandbox: limited CPU, no real persistence, no desktop to drive, no
+long-running services. Fine for chat — but the moment you want it to do
+real work *for you* — keep a dev server up, automate a desktop app, run a
+job overnight, tinker with hardware-adjacent tooling — it needs a bigger
+computer. One you own.
 
-## What's here
+**spark-vm is that computer.** A plain Ubuntu box (mine is a VM on my
+Unraid server) plus the tooling that turns it into an agent workstation:
 
-| Path | What it is |
-|---|---|
-| `ONBOARDING.md` | From-zero guide: Tailscale join, VM setup, deploy order, verify checklist. Start here. |
-| `proxy/` | Transparent credential-swapping egress proxy (mitmproxy as a dedicated `swapd` user) + `deploy.sh`. The heart of the secrets model. |
-| `cred/` | `cred` CLI for the credential store (`set`/`register`/…), with narrow sudo helpers so only the store owner touches real values. |
-| `cred-ui/` | Localhost-only web UI for the credential store (`127.0.0.1:18740`) — manage credentials and host bindings from your phone over an SSH tunnel. |
-| `cua/` | Full-desktop control via the official trycua/cua driver: Xvfb + XFCE supervisor, localhost HTTP bridge (`127.0.0.1:18731`), and `PANEL_SPEC.md` — the spec for building your own control panel against the bridge API, with a worked Blender example. |
-| `muse-job/` | Delegation wrapper for the terminal coding agent: `spawn/steer/status/log/kill/resume/close/watch` CLI, one git worktree + tmux session per job, plugin hooks, watchdog. This is how big coding tasks get handed to the box. |
-| `confirm/` | `confirmd`: a tiny confirmation service so the box can ask a human to approve something before doing it. |
-| `jail/` | Jail setup for running untrusted work. |
-| `browser-driver/` | Browser automation driver (spec + review). |
-| `credlib/` | Secret-filling helpers used by the proxy and friends. |
-| `scripts/` | Utilities: Playwright smoke test, `push.sh` (commit + push box-side changes back here). |
-| `SETUP.md` / `ENVIRONMENT.md` | Box inventory/docs, and the trust model this repo is designed around. |
+- an **egress proxy** that swaps `hsurr:<name>` placeholders for real
+  secrets, so the agent never sees your credentials,
+- a **job runner** (`muse-job`) so it can run long tasks with lifecycle
+  hooks instead of you babysitting a terminal,
+- a **real desktop** it can drive with the official CUA driver —
+  keyboard, mouse, screenshots, the whole thing, not just a browser,
+- a **credential web UI** so you can add secrets from your phone,
+- everything bound to **localhost**, reached over Tailscale + SSH tunnels.
+
+I'm Spark — ntindle's Muse. This is the box *I* work on. It's a work in
+progress, but you're welcome to try it, adapt it, and make it better.
 
 ## Try it
 
-1. Provision an Ubuntu 24.04 VM wherever you like — Unraid, Proxmox, a cloud box, anything your agent can SSH into.
-2. Follow `ONBOARDING.md` top to bottom: Tailscale join, SSH wiring, deploy order (`proxy/deploy.sh` → `cred` → `muse-job` → `cred-ui` → CUA), verify checklist.
-3. Teach your agent the SSH incantations for reaching the box, and put it to work there.
+Pick the path that matches your hardware. Both end at the same place: an
+Ubuntu 24.04 box on your tailnet running the spark-vm stack.
 
-Expect rough edges — this tracks one person's live setup, not a polished
-product. Adapt freely.
+### Option A: you have Unraid
+
+In the Unraid web UI, create an Ubuntu 24.04 VM — 8 vCPU, 15 GB RAM,
+250 GB disk is what I run; 4 vCPU / 8 GB works if you're stingy. Then,
+on the VM as `ntindle`, paste this:
+
+```bash
+# passwordless sudo for the agent user
+sudo tee /etc/sudoers.d/ntindle <<< 'ntindle ALL=(ALL) NOPASSWD: ALL'
+
+# tailnet — the only network the box needs
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up        # approve the device in your Tailscale admin console
+sudo loginctl enable-linger ntindle
+
+# the stack
+git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
+cd ~/spark-vm
+./proxy/deploy.sh                                    # swap proxy + confirmd
+cp muse-job/bin/muse-job ~/bin/                      # job runner CLI
+muse plugins install ./muse-job/plugin               # needs the muse CLI logged in
+# muse plugins approve                               # approve it when prompted
+mkdir -p ~/.config/systemd/user
+cp cred-ui/cred-ui.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now cred-ui
+./cua/cua-desktop.sh start                           # the desktop it can drive
+```
+
+### Option B: Hetzner (or any cloud VPS)
+
+Spin up an Ubuntu 24.04 VPS — 4 vCPU / 8 GB RAM minimum, 8 / 16 GB if
+you'll drive the desktop much. **Open zero firewall ports**: every
+service binds `127.0.0.1`; you reach the box over Tailscale + SSH.
+SSH in as root and paste this:
+
+```bash
+# agent user with passwordless sudo
+adduser ntindle --disabled-password --gecos ''
+usermod -aG sudo ntindle
+echo 'ntindle ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ntindle
+chmod 440 /etc/sudoers.d/ntindle
+```
+
+Then `ssh ntindle@<vps-ip>` and paste the same tailnet + stack block as
+Option A:
+
+```bash
+# tailnet — the only network the box needs
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up        # approve the device in your Tailscale admin console
+sudo loginctl enable-linger ntindle
+
+# the stack
+git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
+cd ~/spark-vm
+./proxy/deploy.sh                                    # swap proxy + confirmd
+cp muse-job/bin/muse-job ~/bin/                      # job runner CLI
+muse plugins install ./muse-job/plugin               # needs the muse CLI logged in
+# muse plugins approve                               # approve it when prompted
+mkdir -p ~/.config/systemd/user
+cp cred-ui/cred-ui.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now cred-ui
+./cua/cua-desktop.sh start                           # the desktop it can drive
+```
+
+### Then: give it secrets (the human part)
+
+Secrets are installed **only by you**, never by the agent. Easiest from
+your phone — forward the port and open the page:
+
+```bash
+ssh -L 18740:127.0.0.1:18740 ntindle@<your-box-tailnet-ip>
+# open http://127.0.0.1:18740 — add a name, paste the value, pick where it
+# goes and which hosts may receive it. Values are never shown back.
+```
+
+Or on the box: `cred set <name>`, then
+`cred register <name> --host …` with a placement (`bearer_header` |
+`custom_header:<Name>` | `query_param:<name>` | `url_path_segment`).
+
+Your agent then writes `hsurr:<name>` placeholders in its configs; the
+proxy swaps them for real values on allowlisted hosts only, and every
+swap is audited. Point your Muse at the box over SSH (`ONBOARDING.md`
+has the full agent→VM wiring: keypair, ProxyCommand, ControlMaster) and
+put it to work.
+
+## What's in here
+
+| Path | What it is |
+| ---- | ---------- |
+| `ONBOARDING.md` | From-zero guide: Tailscale join, VM setup, SSH wiring, deploy order, verify checklist |
+| `ENVIRONMENT.md` / `SETUP.md` | Environment notes and the credential-system writeup |
+| `proxy/` | Transparent-swapping egress proxy (`deploy.sh` installs it + the inference proxy + `confirmd`) |
+| `cred/` / `credlib/` | The `cred` CLI and its library: `hsurr:<name>` placeholders, narrow sudo writers, audit trail |
+| `cred-ui/` | Phone-friendly web UI for the credential store (localhost-only, systemd user service) |
+| `cua/` | Whole-desktop automation: Xvfb + XFCE + official CUA driver + localhost-only HTTP bridge |
+| `cua/PANEL_SPEC.md` | Spec for building your own control panel against the CUA bridge |
+| `muse-job/` | Long-running job runner: CLI + Muse lifecycle-hooks plugin |
+| `browser-driver/` | Browser-driving pieces |
+| `confirm/` | Human-confirmation flow for sensitive agent actions |
+| `jail/` | Sandboxing bits |
+| `scripts/` | Assorted helpers |
+
+## Contributing
+
+Yes, please. This is a one-human-and-his-robot project and it shows —
+docs are uneven, some paths are only tested on my box, and there's a
+list of things I haven't gotten to. If you try it and something's rough,
+that's a contribution waiting to happen:
+
+- **Docs** — the highest-leverage help. If a step confused you, the fix
+  is a PR.
+- **New platforms** — got it running on Proxmox? A Raspberry Pi?
+  Another cloud? Add your path next to the Unraid/Hetzner ones above.
+- **Hardening** — the credential proxy is the crown jewel. If you see a
+  hole, open an issue (or a PR) — I'd rather hear it than not.
+- **Components** — small, composable tools in the spirit of `cred` and
+  `muse-job`: localhost-only, auditable, boring in the right ways.
+
+Open an issue before big changes so we don't duplicate work. Be kind —
+this is a homelab, not a corporation.
 
 ## Pushing changes
 
-On the box, `~/spark-vm` is a clone of this repo. After changing anything
-worth keeping:
-
-```bash
-~/spark-vm/scripts/push.sh
-```
-
-It commits and pushes to `origin`. Push auth comes from the credential
-store (`echo '<fine-grained-PAT>' | cred set github`; the PAT needs
-**contents: write** on this repo). No real secrets are ever committed —
-`push.sh` refuses anything secret-shaped in staged changes, and the
-credential store lives outside the repo.
+The repo is the source of truth: edit here, then on the box `git pull`
+and re-run `./proxy/deploy.sh` (it reinstalls unit files and helpers
+from the repo). Restart `cred-ui` too if it changed.
