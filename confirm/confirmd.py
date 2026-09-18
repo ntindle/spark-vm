@@ -257,13 +257,317 @@ def file_owner_name(path):
         return None
 
 
-PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Approvals</title></head><body>
-<h1>Pending approvals</h1>
-{body}
-<p><a href="/answered">answered history</a></p>
-</body></html>"""
+STYLE = """<style>
+:root{color-scheme:light dark}
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+margin:0;padding:16px;line-height:1.45;color:#1a1a1a;background:#f6f7f9}
+@media(prefers-color-scheme:dark){body{color:#e8e8e8;background:#111214}}
+main{max-width:720px;margin:0 auto}
+h1{font-size:1.4rem;margin:0 0 4px}
+.sub{color:#666;font-size:.85rem;margin:0 0 16px}
+@media(prefers-color-scheme:dark){.sub{color:#999}}
+.card{background:#fff;border:1px solid #dcdfe3;border-radius:10px;
+padding:14px;margin:0 0 12px}
+@media(prefers-color-scheme:dark){.card{background:#1c1e21;border-color:#333}}
+a.card{display:block;color:inherit;text-decoration:none}
+a.card:active{background:#f0f2f5}
+@media(prefers-color-scheme:dark){a.card:active{background:#24272b}}
+.card h2{font-size:1.05rem;margin:0 0 6px;word-break:break-all}
+.summary{font-size:.95rem;margin:4px 0}
+.meta{font-size:.8rem;color:#666;margin:4px 0 0}
+@media(prefers-color-scheme:dark){.meta{color:#999}}
+.badge{display:inline-block;font-size:.75rem;font-weight:700;
+padding:2px 10px;border-radius:999px;margin-left:6px;vertical-align:middle}
+.badge-approve{background:#dff3e4;color:#1a7f37}
+.badge-deny{background:#fde8e8;color:#b3261e}
+@media(prefers-color-scheme:dark){
+.badge-deny{background:#3a1f1f;color:#f2a9a2}
+.badge-approve{background:#173a24;color:#9fe0b4}}
+table.detail{width:100%;border-collapse:collapse;margin:12px 0;font-size:.95rem}
+table.detail th{text-align:left;padding:8px 10px;background:#f0f2f5;
+width:34%;border-radius:6px 0 0 6px}
+table.detail td{padding:8px 10px;word-break:break-word}
+@media(prefers-color-scheme:dark){table.detail th{background:#24272b}}
+.untrusted{font-size:.9rem;background:#fff8e1;border:1px solid #f0e0a0;
+border-radius:8px;padding:10px 12px;margin:12px 0}
+@media(prefers-color-scheme:dark){.untrusted{background:#2b2517;border-color:#4d4426}}
+.btnrow{display:flex;gap:12px;margin:16px 0;flex-wrap:wrap}
+.btn{display:inline-block;min-height:52px;min-width:140px;flex:1;
+padding:14px 20px;font-size:1.05rem;font-weight:700;border-radius:12px;
+border:2px solid transparent;cursor:pointer;text-align:center;
+font-family:inherit}
+.btn-approve{background:#1a7f37;color:#fff}
+.btn-approve:active{background:#146c2e}
+.btn-deny{background:transparent;color:#c0392b;border-color:#c0392b}
+.btn-deny:active{background:#fde8e8}
+@media(prefers-color-scheme:dark){
+.btn-deny{color:#f2a9a2;border-color:#f2a9a2}
+.btn-deny:active{background:#3a1f1f}}
+/* Design review #4: armed confirm state for the approve button. */
+.btn-approve.armed{background:#8a5200}
+/* Design review: visible keyboard focus; language-appropriate link. */
+a.card:focus-visible,.btn:focus-visible{outline:3px solid #1a73e8;outline-offset:2px}
+@media(prefers-color-scheme:dark){
+a.card:focus-visible,.btn:focus-visible{outline-color:#8ab4f8}}
+/* Design review #2: poll-failure is visually distinct from live. */
+.sub.stale{color:#b3261e;font-weight:700}
+@media(prefers-color-scheme:dark){.sub.stale{color:#f2a9a2}}
+.nav{margin:20px 0 8px;font-size:.9rem}
+.nav a{color:#1a73e8}
+@media(prefers-color-scheme:dark){.nav a{color:#8ab4f8}}
+.empty{color:#666;font-size:1rem;padding:24px 0;text-align:center}
+@media(prefers-color-scheme:dark){.empty{color:#999}}
+</style>"""
+
+# Issue #1: live-update the list pages. The JS polls the JSON API every
+# 5 s and rebuilds the list with textContent only (never innerHTML from
+# data), so requester-supplied strings cannot inject markup. No-JS
+# clients still get the server-rendered static list.
+POLL_JS = """<script>
+"use strict";
+function fmtTime(iso){
+  if(!iso) return "";
+  var d=new Date(iso);
+  return isNaN(d) ? String(iso) : d.toLocaleString();
+}
+function startPoll(api,render){
+  var list=document.getElementById("items");
+  var stamp=document.getElementById("updated");
+  var lastJson="";
+  async function tick(){
+    // Design review: don't drain a phone battery on a hidden tab.
+    if(document.hidden) return;
+    try{
+      var r=await fetch(api,{credentials:"same-origin",cache:"no-store"});
+      if(!r.ok) throw new Error("http "+r.status);
+      var text=await r.text();
+      // Design review #3: skip re-render when the payload is
+      // byte-identical, so a 5s tick never destroys :active press
+      // feedback or shifts cards under a tapping finger.
+      if(text!==lastJson){
+        lastJson=text;
+        render(list,JSON.parse(text));
+      }
+      stamp.textContent="updated "+new Date().toLocaleString();
+      stamp.classList.remove("stale");
+    }catch(e){
+      // Design review #2: failure is visually distinct from live.
+      stamp.textContent="update failed \\u2014 showing last known state";
+      stamp.classList.add("stale");
+    }
+  }
+  setInterval(tick,5000);tick();
+}
+// Design review #3: keyed reconciliation. Cards are matched by id and
+// only touched when their payload actually changed, so answering one
+// request elsewhere doesn't shift or rebuild the others.
+function keyedUpdate(list,items,makeNode,keyOf,emptyText){
+  if(!items.length){
+    list.textContent="";
+    var p=document.createElement("p");p.className="empty";
+    p.textContent=emptyText;list.appendChild(p);return;
+  }
+  var seen={},order=[];
+  items.forEach(function(it){
+    var key=keyOf(it),sig=JSON.stringify(it),node=null;
+    seen[key]=1;
+    for(var i=0;i<list.children.length;i++){
+      if(list.children[i].getAttribute("data-k")===key){
+        node=list.children[i];break;
+      }
+    }
+    if(node&&node.getAttribute("data-s")===sig){
+      order.push(node);return;
+    }
+    var fresh=makeNode(it);
+    if(!fresh) return;
+    fresh.setAttribute("data-k",key);
+    fresh.setAttribute("data-s",sig);
+    if(node) list.replaceChild(fresh,node);
+    order.push(fresh);
+  });
+  for(var j=list.children.length-1;j>=0;j--){
+    if(!seen[list.children[j].getAttribute("data-k")])
+      list.removeChild(list.children[j]);
+  }
+  order.forEach(function(n){list.appendChild(n);});
+}
+function validId(id){return /^[A-Za-z0-9_-]{1,64}$/.test(id);}
+function card(id){
+  var a=document.createElement("a");
+  a.className="card";a.href="/approval/"+encodeURIComponent(id);
+  var h=document.createElement("h2");h.textContent=id;a.appendChild(h);
+  return a;
+}
+function metaLine(el,parts){
+  var m=document.createElement("div");m.className="meta";
+  m.textContent=parts.filter(Boolean).join(" \\u00b7 ");el.appendChild(m);
+}
+function pendingCard(it){
+  var id=String(it.id||"");
+  if(!validId(id)) return null;
+  var a=card(id);
+  var s=document.createElement("div");s.className="summary";
+  s.textContent=String(it.summary||"");a.appendChild(s);
+  metaLine(a,[String(it.kind||""),
+    it.created?("filed "+fmtTime(it.created)):"",
+    it.expires?("expires "+fmtTime(it.expires)):""]);
+  return a;
+}
+function renderPending(list,items){
+  keyedUpdate(list,items,pendingCard,function(it){return String(it.id||"");},
+    "No pending approvals.");
+}
+function answeredCard(it){
+  var id=String(it.id||"?");
+  if(!validId(id)&&id!=="?") return null;
+  var c=document.createElement("div");c.className="card";
+  var h=document.createElement("h2");
+  h.textContent=id;c.appendChild(h);
+  var d=document.createElement("span");
+  var dec=String(it.decision||"?");
+  if(dec==="approve"||dec==="deny"){
+    d.className="badge "+(dec==="approve"?"badge-approve":"badge-deny");
+    d.textContent=dec;h.appendChild(d);
+  }
+  var s=document.createElement("div");s.className="summary";
+  s.textContent=String(it.summary||"");c.appendChild(s);
+  metaLine(c,[it.answered_by?("by "+String(it.answered_by)):"",
+    it.answered_at?fmtTime(it.answered_at):"",
+    String(it.kind||"")]);
+  return c;
+}
+function renderAnswered(list,items){
+  keyedUpdate(list,items,answeredCard,function(it){return String(it.id||"?");},
+    "No answered approvals yet.");
+}
+</script>"""
+
+
+def _page(title, body, script=""):
+    return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>%s</title>%s</head><body><main>%s</main>%s"
+            "</body></html>") % (html.escape(title), STYLE, body, script)
+
+
+def _sort_pending(items):
+    """Oldest filed first: the longest-waiting request is most urgent.
+    Engineering review: items with missing/unparseable `created` sort
+    LAST, never first ("" < any ISO string was a lie about urgency)."""
+    return sorted(items,
+                  key=lambda it: _parse_expiry(it.get("created")) or _MAX_DT)
+
+
+def _pending_api_item(it):
+    """Issue #1: the JSON surface for the poller. Allowlisted fields
+    only — the same data the list page already shows, never secrets."""
+    return {
+        "id": str(it.get("id", "")),
+        "summary": str(it.get("summary", "")),
+        "kind": str(it.get("kind", "")),
+        "created": str(it.get("created", "")),
+        "expires": str(it.get("expires", "")),
+    }
+
+
+# Engineering review (blocker 2): load_pending() reaps expired files
+# BEFORE the list is built, so an "expired" badge can never render in
+# production — the badge was dead code with a misleading test. It is
+# removed rather than kept as false belt-and-braces.
+_MAX_DT = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _load_answered():
+    """Newest answered first (issue #1), by answered_at — filenames are
+    random hex, so filename order is NOT chronological (engineering)."""
+    items = []
+    d = consumed_dir()
+    for fn in os.listdir(d):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, fn)) as f:
+                items.append(json.load(f))
+        except Exception:
+            continue
+    items.sort(key=lambda it: _parse_expiry(it.get("answered_at")) or
+               datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return items
+
+
+# Product review (blocker 2): the answered feed is re-polled every 5 s,
+# so it is capped — history on disk stays complete.
+_ANSWERED_FEED_LIMIT = 100
+
+
+def _answered_api_item(it):
+    """Issue #1: JSON surface for the answered-history poller.
+    Allowlisted fields only."""
+    return {
+        "id": str(it.get("id", "")),
+        "summary": str(it.get("summary", "")),
+        "kind": str(it.get("kind", "")),
+        "decision": str(it.get("decision", "")),
+        "answered_by": str(it.get("answered_by", "")),
+        "answered_at": str(it.get("answered_at", "")),
+    }
+
+
+def _meta_line(parts):
+    """Engineering review: one named helper for the "kind · filed ·
+    expires" line, so the escape ordering is reviewable in one place."""
+    parts = [p for p in parts if p]
+    if not parts:
+        return ""
+    return '<div class="meta">%s</div>' % " · ".join(
+        html.escape(str(p)) for p in parts)
+
+
+def _render_pending_list(items):
+    """Server-rendered static list (no-JS fallback); the poller
+    replaces #items with the same cards built from JSON."""
+    if not items:
+        return '<p class="empty">No pending approvals.</p>'
+    cards = []
+    for it in _sort_pending(items):
+        aid = str(it.get("id", "?"))
+        if not ID_RE.match(aid):
+            continue
+        meta = _meta_line([
+            it.get("kind") or "",
+            ("filed %s" % it["created"]) if it.get("created") else "",
+            ("expires %s" % it["expires"]) if it.get("expires") else ""])
+        cards.append(
+            '<a class="card" href="/approval/%s"><h2>%s</h2>'
+            '<div class="summary">%s</div>%s</a>' % (
+                html.escape(aid), html.escape(aid),
+                html.escape(str(it.get("summary", ""))), meta))
+    return "".join(cards) or '<p class="empty">No pending approvals.</p>'
+
+
+def _render_answered_list(items):
+    if not items:
+        return '<p class="empty">No answered approvals yet.</p>'
+    cards = []
+    for it in items:
+        dec = str(it.get("decision", "?"))
+        badge = ""
+        if dec in ("approve", "deny"):
+            badge = ('<span class="badge %s">%s</span>' % (
+                "badge-approve" if dec == "approve" else "badge-deny",
+                html.escape(dec)))
+        meta = _meta_line([
+            ("by %s" % it.get("answered_by")) if it.get("answered_by") else "",
+            it.get("answered_at") or "",
+            it.get("kind") or ""])
+        cards.append(
+            '<div class="card"><h2>%s%s</h2>'
+            '<div class="summary">%s</div>%s</div>' % (
+                html.escape(str(it.get("id", "?"))), badge,
+                html.escape(str(it.get("summary", ""))), meta))
+    return "".join(cards)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -294,10 +598,27 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return login
 
-    def _send_html(self, body, code=200):
-        data = PAGE.format(body=body).encode()
+    def _send_html(self, body, code=200, title="Approvals", script=""):
+        data = _page(title, body, script).encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _err(self, msg, code):
+        self._send_html('<div class="card"><p>%s</p></div>'
+                        '<p class="nav"><a href="/">back to pending</a></p>'
+                        % html.escape(msg), code, title="Approvals")
+
+    def _send_json(self, obj, code=200):
+        """Issue #1: JSON surface for the list pollers. Authenticated
+        exactly like the pages (the caller runs _auth first); no
+        caching — approval state is live."""
+        data = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -312,63 +633,65 @@ class Handler(BaseHTTPRequestHandler):
             if val is not None:
                 rows.append("<tr><th>%s</th><td>%s</td></tr>" % (
                     html.escape(key), html.escape(str(val))))
-        table = "<table>%s</table>" % "".join(rows) if rows else ""
+        table = ('<table class="detail">%s</table>' % "".join(rows)
+                 if rows else "")
         purpose = it.get("detail") or it.get("summary") or ""
         untrusted = ""
         if purpose:
-            untrusted = ("<p><b>Requester-supplied purpose "
-                         "(untrusted):</b> %s</p>" % html.escape(str(purpose)))
-        return table + untrusted
+            untrusted = ('<div class="untrusted"><b>Requester-supplied purpose '
+                         '(untrusted):</b><br>%s</div>'
+                         % html.escape(str(purpose)))
+        filed = []
+        if it.get("created"):
+            filed.append("filed %s" % it["created"])
+        if it.get("expires"):
+            filed.append("expires %s" % it["expires"])
+        return _meta_line(filed) + table + untrusted
 
     def do_GET(self):
         login = self._auth()
         if login is None:
             return
+        # Issue #1: JSON feeds for the live list pollers. Same auth
+        # gate as the pages; allowlisted fields only (see the helpers).
+        if self.path == "/api/pending":
+            items = _sort_pending(load_pending())
+            self._send_json([_pending_api_item(it) for it in items])
+            return
+        if self.path == "/api/answered":
+            # Product review: cap the 5s-polled feed; on-disk history
+            # stays complete.
+            self._send_json([_answered_api_item(it) for it in
+                             _load_answered()[:_ANSWERED_FEED_LIMIT]])
+            return
         if self.path == "/":
-            items = load_pending()
-            if not items:
-                body = "<p>No pending approvals.</p>"
-            else:
-                rows = []
-                for it in items:
-                    aid = html.escape(str(it.get("id", "?")))
-                    # Finding 53(a): expired items show as expired.
-                    expired = " <b>(expired)</b>" if is_expired(it) else ""
-                    rows.append(
-                        '<li><a href="/approval/%s">%s</a> — %s '
-                        '<small>(%s)</small>%s</li>' % (
-                            aid, aid,
-                            html.escape(str(it.get("summary", ""))),
-                            html.escape(str(it.get("kind", ""))), expired))
-                body = "<ul>%s</ul>" % "".join(rows)
-            self._send_html(body)
+            body = ('<h1>Pending approvals</h1>'
+                    '<p class="sub" id="updated" role="status">live — checking every 5 s</p>'
+                    '<div id="items">%s</div>'
+                    '<p class="nav"><a href="/answered">answered history</a></p>'
+                    % _render_pending_list(load_pending()))
+            self._send_html(body, title="Pending approvals",
+                            script=POLL_JS + '<script>startPoll("/api/pending",'
+                            'renderPending);</script>')
         elif self.path == "/answered":
-            items = []
-            d = consumed_dir()
-            for fn in sorted(os.listdir(d), reverse=True):
-                if not fn.endswith(".json"):
-                    continue
-                try:
-                    with open(os.path.join(d, fn)) as f:
-                        items.append(json.load(f))
-                except Exception:
-                    continue
-            rows = []
-            for it in items:
-                rows.append("<li>%s — <b>%s</b> by %s <small>%s</small></li>" % (
-                    html.escape(str(it.get("id", "?"))),
-                    html.escape(str(it.get("decision", "?"))),
-                    html.escape(str(it.get("answered_by", "?"))),
-                    html.escape(str(it.get("answered_at", "")))))
-            self._send_html("<ul>%s</ul>" % "".join(rows) or "<p>None.</p>")
+            body = ('<h1>Answered approvals</h1>'
+                    '<p class="sub" role="status">showing the 100 most recent'
+                    ' · <span id="updated">live — checking every 5 s</span></p>'
+                    '<div id="items">%s</div>'
+                    '<p class="nav"><a href="/">back to pending</a></p>'
+                    % _render_answered_list(
+                        _load_answered()[:_ANSWERED_FEED_LIMIT]))
+            self._send_html(body, title="Answered approvals",
+                            script=POLL_JS + '<script>startPoll("/api/answered",'
+                            'renderAnswered);</script>')
         elif self.path.startswith("/approval/"):
             aid = self.path[len("/approval/"):]
             if not ID_RE.match(aid):
-                self._send_html("<p>bad id</p>", 400)
+                self._err("bad id", 400)
                 return
             p = os.path.join(pending_dir(), aid + ".json")
             if not os.path.exists(p):
-                self._send_html("<p>not found or already answered</p>", 404)
+                self._err("not found or already answered", 404)
                 return
             with open(p) as f:
                 it = json.load(f)
@@ -380,8 +703,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 audit_log("expired-reaped", self.client_address[0], login,
                           "id=%s" % aid)
-                self._send_html("<p>This approval expired and was "
-                                "removed.</p>", 410)
+                self._err("This approval expired and was removed.", 410)
                 return
             # Finding 48: mint a CSRF nonce, store it in the pending file.
             nonce = secrets.token_urlsafe(24)
@@ -390,16 +712,35 @@ class Handler(BaseHTTPRequestHandler):
             with open(tmp, "w") as f:
                 json.dump(it, f, indent=2)
             os.replace(tmp, p)
-            body = ("<h2>%s</h2>%s"
+            body = ("<h1>Approval %s</h1>%s"
+                    '<p class="sub">Approving mints a credential grant for '
+                    'this request. Denying discards it.</p>'
                     '<form method="post" action="/answer">'
                     '<input type="hidden" name="id" value="%s">'
                     '<input type="hidden" name="csrf" value="%s">'
-                    '<button name="decision" value="approve">Approve</button> '
-                    '<button name="decision" value="deny">Deny</button>'
-                    "</form>") % (
+                    '<div class="btnrow">'
+                    '<button class="btn btn-approve" id="approveBtn" '
+                    'name="decision" value="approve">Approve</button>'
+                    '<button class="btn btn-deny" name="decision" '
+                    'value="deny">Deny</button>'
+                    "</div></form>"
+                    '<p class="nav"><a href="/">back to pending</a></p>'
+                    # Design review #4: a single large tap must not mint a
+                    # credential grant. First tap arms, second confirms.
+                    '<script>'
+                    '"use strict";'
+                    'var b=document.getElementById("approveBtn");'
+                    'b.addEventListener("click",function(e){'
+                    'if(!b.dataset.armed){'
+                    'e.preventDefault();'
+                    'b.dataset.armed="1";'
+                    'b.classList.add("armed");'
+                    'b.textContent="Tap again to confirm approval";'
+                    '}});'
+                    "</script>") % (
                         html.escape(aid), self._render_item(it),
                         html.escape(aid), html.escape(nonce))
-            self._send_html(body)
+            self._send_html(body, title="Approval %s" % aid)
         else:
             self.send_response(404)
             self.end_headers()
@@ -437,7 +778,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length <= 0 or length > 4096:
-            self._send_html("<p>bad request</p>", 400)
+            self._err("bad request", 400)
             return
         form = urllib.parse.parse_qs(
             self.rfile.read(length).decode(errors="replace"))
@@ -445,11 +786,11 @@ class Handler(BaseHTTPRequestHandler):
         csrf = form.get("csrf", [""])[0]
         decision = form.get("decision", [""])[0]
         if not ID_RE.match(aid) or decision not in ("approve", "deny"):
-            self._send_html("<p>bad request</p>", 400)
+            self._err("bad request", 400)
             return
         src = os.path.join(pending_dir(), aid + ".json")
         if not os.path.exists(src):
-            self._send_html("<p>not found or already answered</p>", 404)
+            self._err("not found or already answered", 404)
             return
         with open(src) as f:
             it = json.load(f)
@@ -465,8 +806,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             audit_log("expired-reaped", self.client_address[0], login,
                       "id=%s" % aid)
-            self._send_html("<p>This approval expired and was removed.</p>",
-                            410)
+            self._err("This approval expired and was removed.", 410)
             return
         # Finding 50: the requester is the file owner, and only
         # bdrive/swapd may file.
@@ -489,8 +829,7 @@ class Handler(BaseHTTPRequestHandler):
             if not name or not host or not method:
                 audit_log("grant-refused", self.client_address[0], login,
                           "id=%s reason=missing credential/host/method" % aid)
-                self._send_html("<p>Cannot mint grant: missing fields.</p>",
-                                400)
+                self._err("Cannot mint grant: missing fields.", 400)
                 return
             # Call the single writer (finding 60).
             try:
@@ -507,12 +846,12 @@ class Handler(BaseHTTPRequestHandler):
                 if out.returncode != 0:
                     audit_log("grant-failed", self.client_address[0], login,
                               "id=%s err=%s" % (aid, out.stderr.strip()))
-                    self._send_html("<p>Grant minting failed.</p>", 500)
+                    self._err("Grant minting failed.", 500)
                     return
             except Exception as e:
                 audit_log("grant-failed", self.client_address[0], login,
                           "id=%s err=%s" % (aid, e))
-                self._send_html("<p>Grant minting failed.</p>", 500)
+                self._err("Grant minting failed.", 500)
                 return
         # Finding 56: one-way. Write to answered/, then move to consumed/.
         # The proxy never re-derives grants from these files.
