@@ -14,8 +14,11 @@ TermSquad watch pass (backlog R3).
 
 **Scope note:** the market splits into two segments and spark-vm only plays in
 one of them. **Task-scoped sandboxes** (E2B, Daytona, Modal, Vercel, Cloudflare,
-Runloop) rent *executions* — fast cold starts, per-second billing, sessions
-measured in hours. **Persistent computers** (TermSquad, AgentComputer,
+Runloop) rent *executions* — fast cold starts, the billing unit is compute
+time, state is an opt-in snapshot, and the environment has no standing
+address/identity between runs. (Blaxel's "perpetual sandboxes" and Baseten's
+"persistent sandboxes" are blurring the lifetime edge of this split — see
+the pm watch update.) **Persistent computers** (TermSquad, AgentComputer,
 Fly Sprites, Northflank, DIY VPS, spark-vm) rent *a machine that stays yours*.
 Comparisons across the split are category errors for pricing and cold start —
 but they are fair game on the two load-bearing axes (egress controls,
@@ -95,9 +98,13 @@ GitHub Copilot, Factory Droid); (2) the launch release confirms TermSquad
 uses Herdr for session management — and an open upstream bug
 ([herdrdev/herdr#3415](https://github.com/herdrdev/herdr/issues/3415)) shows a
 reboot race that SIGHUPs panes during server shutdown, triggers
-`persist.clear`, and **loses the whole session on next boot**; TermSquad's own
-FAQ only promises persistence "through *normal* disconnects and reconnects",
-so their persistence claims inherit an unresolved upstream failure mode;
+`persist.clear`, and **loses the whole session on next boot** (the issue title
+supports the phrasing; the race is millisecond-level). TermSquad's own FAQ
+only promises persistence "through *normal* disconnects and reconnects", so
+their session persistence rides on Herdr's persist path — including the
+unresolved upstream reboot race above; whether TermSquad is exposed depends
+on their Herdr version/config (unconfirmed), and host-reboot survival is
+unpromised and undocumented;
 (3) host-failure restart policy is still undocumented; (4) still no
 isolation/security whitepaper, and egress controls are still undocumented on
 any public page.
@@ -179,8 +186,9 @@ is still a design doc, not code. Until it ships, our isolation story is
 1. **A real computer that stays yours.** Full OS, unattended background jobs,
    cron loops, your own stack — no session clock at all. Matches TermSquad;
    beats every task-scoped sandbox on the no-session-clock axis by design
-   (their sessions are measured in hours and their idle billing punishes
-   exactly the workloads a persistent box exists for).
+   (their billing unit is executions and state is opt-in snapshot/resume, not
+   a standing box — the idle economics still punish exactly the workloads a
+   persistent box exists for).
 2. **Per-action human approvals.** confirmd (mobile-friendly, auto-refreshing,
    two-tap approve, push on the roadmap) — no per-action approval loop found
    in any surveyed **sandbox or computer offering's** docs or product surface
@@ -292,8 +300,10 @@ Items from the pm watch pass, flagged against the morning survey:
   policy is worth a full pass next time.
 - **Runloop re-framing** — docs now call Devboxes "isolated, ephemeral
   virtual machines" (hypervisor still unnamed) and promise "Network Policies"
-  for egress. Watch for doc upgrades; the isolation boundary is unverifiable
-  pending a named hypervisor.
+  for egress. Watch for doc upgrades; Runloop is unscored in scorecard 2
+  until the hypervisor is named — its "ephemeral virtual machines" claim would
+  place it alongside Vercel's "MicroVM per sandbox, ephemeral" row, not the
+  per-customer-computer row.
 - **Factory $200M at $5B** (Blackstone, Khosla, Sequoia, NEA) — coding-agent
   infra, adjacent demand signal, not a sandbox move. (Factory Droid is on
   TermSquad's agent roster.)
