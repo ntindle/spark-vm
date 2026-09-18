@@ -5,13 +5,17 @@ the TUI had exited or crashed, the pane dropped to a bash prompt and the
 pasted steer message was parsed by the shell: `$(...)`, backticks, `;`, `|`
 all executed.
 
-The fix fails closed around a TUI marker check:
-  1. `_pane_shows_live_tui(pane)` -- the last non-empty viewport line must
-     start with the TUI input-box marker `❯`. (Last-line, not
-     anywhere-in-viewport: a dead pane can leave a stale `❯` line in
-     scrollback.)
-  2. `_steer` polls for the marker before pasting (`_wait_live_tui`, absorbs
-     the normal boot window) and refuses to send at all when it never appears.
+The fix fails closed around two independent TUI-liveness signals:
+  1. `_pane_shows_live_tui(pane, pane_cmd)` -- content: the last non-empty
+     viewport line must start with the TUI input-box marker `❯` (last-line,
+     not anywhere-in-viewport: a dead pane can leave a stale `❯` line in
+     scrollback); process: the pane's foreground process
+     (`pane_current_command`) must be the TUI itself (`muse`/`node`) --
+     content alone is spoofable (Starship's default prompt char is `❯`).
+  2. `_steer` polls for both signals before pasting (`_wait_live_tui`,
+     absorbs the normal boot window), re-checks on a fresh capture
+     immediately before the paste and again immediately before the Enter,
+     and refuses to send at all when they never appear.
   3. The post-send verify loop no longer reports success when the pane stops
      showing a live TUI after the paste -- a dead pane swallows the text into
      a shell, and the old "box is clear" test would have called that
