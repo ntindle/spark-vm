@@ -59,6 +59,8 @@ approval loop create friction?*
   beta Muse (clarification, pointing at docs, fixing environment). Counted
   and timestamped; the *sequence* of help requests is the friction map the
   pilot is really after.
+- **Completed unprompted**: a session that ends in a working approval with
+  zero `help_request` events.
 - **Session abandonment**: the operator closes a session after 30 minutes
   with no Muse action *and* no pending approval, or when the Muse explicitly
   gives up. The rule, not the operator's mood, closes the session.
@@ -145,10 +147,12 @@ the pilot box's default posture (see §5.1).
 The pilot's core precondition is gated, not asserted. The operator runs the
 canonical task once per pilot box and confirms: (a) a file appears in
 `APPROVALS/pending/`; (b) the human can answer it; (c) the grant mints. If
-the task doesn't file under the pinned policy, substitute a task that does
-— **do not run the cohort until the gate passes.** Record a `policy_verified`
-harness event (confirmd in the loop with the pilot policy + a pre-flight
-approval round-trip succeeded) before the first `pilot_start`.
+the task doesn't file under the pinned policy, substitute a task that does —
+the substitute must be identical across all pilot boxes, or the cohort is
+not comparable. **Do not run the cohort until the gate passes.** Record a
+`policy_verified` harness event (confirmd in the loop with the pilot policy +
+a pre-flight approval round-trip succeeded) before the first task-half start
+(`task_given`).
 
 ## 6. Instrumentation spec
 
@@ -162,7 +166,10 @@ event per line:
 ```
 
 - **`policy_verified`** (harness): pilot policy hash, confirmd version,
-  pre-flight round-trip result. Precedes the first `pilot_start`.
+  pre-flight round-trip result. Precedes the first task-half start
+  (`task_given` below) — in Phase B the funnel re-anchors `pilot_start` at
+  funnel entry, before any box or policy exists, so the event is scoped to
+  the task half, not to `pilot_start`.
 - **`pilot_start`** (harness): cohort id, task id, box fingerprint =
   `sha256(pilot policy file bytes || confirmd version string)`. The clock
   starts here, on the harness clock.
@@ -178,13 +185,14 @@ event per line:
   posture and the O7/#17 log-injection finding). Pending files carry
   `id, kind, created, expires, …`; log only `id` + `kind`.
 - **`approval_answered`** (harness, derived): request id, outcome
-  (approved/denied/expired). Outcomes approved/denied come from the
-  `answer` audit line (`id=… decision=…`). **Expired is not in the audit
+  (approved/denied/expired), emitted once per request id. Outcomes
+  approved/denied come from the `answer` audit line (`id=… decision=…`). **Expired is not in the audit
   log** — `load_pending()` reaps silently; only the item-page path audits
   `expired-reaped`. So the harness caches `(id → created, expires, kind)`
-  at first sighting of each pending file, and marks outcome=expired when
-  the file disappears with `expires < now` and no answered/consumed
-  transition. Fallback, if the inference proves flaky: add
+  at first sighting of each pending file — the cache is persisted to disk
+  so a mid-session harness restart doesn't lose expiry derivability for
+  files reaped during downtime — and marks outcome=expired when the file
+  disappears with `expires < now` and no answered/consumed transition. Fallback, if the inference proves flaky: add
   `audit_log("expired-reaped", …)` in `load_pending()` — an explicit
   confirmd change, which the spec currently avoids.
 - **`grant_consumed`** (harness, derived): request id. Emitted **only**
@@ -215,7 +223,9 @@ as an explicit, optional confirmd change.
 
 **Attribution rule:** exactly one active pilot session per confirmd instance
 at a time; the harness attributes every filing observed between
-`pilot_start` and `pilot_end` to the session. There is no pilot-session
+`pilot_start` and `pilot_end` to the session. The harness enforces this
+with a session lock (refuses `pilot_start` while one is open), not just the
+§4 operator checklist. There is no pilot-session
 marker on the request files — overlapping sessions on one box would need
 the filer (proxy) to write a pilot marker into the request file; flag that
 as a filer contract change if ever needed.
@@ -229,8 +239,9 @@ run.
 
 ### Metric definitions
 
-- **TTFWA (supporting):** define human latency canonically as
-  `answered_at − created` (file fields, confirmd's clock). Then
+- **TTFWA (supporting):** define human latency canonically as the **sum**
+  of `answered_at − created` (file fields, confirmd's clock) over all
+  approval rounds up to and including the first working approval. Then
   `grant_consumed.ts − pilot_start.ts − human latency` reduces exactly to
   **`created(first working approval) − pilot_start`**. Single-clock
   assumption: harness and confirmd on the same box; if not, the harness
@@ -253,8 +264,9 @@ Phase B is additive, not a rewrite. Reserve the funnel-event namespace now:
 `funnel_signup`, `funnel_identity_linked`, `funnel_box_provisioned` (harness
 events, emitted as the hosted funnel exists). Phase B re-anchors
 `pilot_start` at funnel entry; the Phase-A event set defined above becomes
-the named **"task half"** sub-span within it. TTFWA's task-half definition
-is unchanged.
+the named **"task half"** sub-span within it, anchored at `task_given`
+(the task-half start). Task-half TTFWA is defined against the task-half
+anchor, so it is unchanged by the re-anchoring.
 
 ## 7. Analysis plan and decision gates
 
@@ -270,26 +282,31 @@ After the cohort runs, the writeup answers:
    onboarding gap — the product must surface the loop proactively, not wait
    to be asked.
 
-**Pre-registered gates (falsifiable, evaluated on the non-contaminated
-completions):**
+**Pre-registered gates (falsifiable, evaluated on the non-contaminated,
+non-replaced completions; first match wins, so the procedure is total and
+deterministic):**
 
-- **Transfer holds:** median Muse-side TTFWA (human latency subtracted) ≤ 30
-  min AND ≥ 50% of sessions completed with ≤ 1 help request. Unlocks only
-  the R1 **task-design** half: "engineer the fastest path to one working
-  approval" becomes the R1 task foundation. The R1 spec as a whole still
-  waits for Phase B.
-- **Transfer fails:** median ≥ 60 min OR any abandonment. Finding 1 gets a
-  Muse-specific rewrite — the adoption gate is not "one tiny task" for
-  Muses, it is something else (likely: pre-seeded state + a narrated first
-  approval, i.e. R2-first, R1-second). The R1 task design waits for the
-  rewrite.
-- **Mixed:** ≥ 50% complete unprompted AND (≥ 1 abandonment OR ≥ 1 session
-  needing ≥ 2 help requests). The split is documented per snag class; snag
-  classes that reproduce across ≥ 2 sessions become R2 fixes; the R1
-  task-design decision is deferred to a second cohort rather than defaulting
-  to "holds."
-- Gates do not fire below 3 non-contaminated completions (small-n
-  qualitative study instead — §4).
+1. **Fails:** any abandonment among non-contaminated, non-replaced
+   sessions, OR median Muse-side TTFWA (human latency subtracted) ≥ 60 min.
+   Finding 1 gets a Muse-specific rewrite — the adoption gate is not "one
+   tiny task" for Muses, it is something else (likely: pre-seeded state + a
+   narrated first approval, i.e. R2-first, R1-second). The R1 task design
+   waits for the rewrite.
+2. **Holds:** median ≤ 30 min AND ≥ 50% of completions with ≤ 1 help
+   request. Unlocks only the R1 **task-design** half: "engineer the
+   fastest path to one working approval" becomes the R1 task foundation.
+   The R1 spec as a whole still waits for Phase B.
+3. **Mixed:** ≥ 50% of completions unprompted AND ≥ 1 session needing ≥ 2
+   help requests (abandonment is owned by gate 1 and does not fire here).
+   The split is documented per snag class; snag classes that reproduce
+   across ≥ 2 sessions become R2 fixes; the R1 task-design decision is
+   deferred to a second cohort rather than defaulting to "holds."
+4. **Otherwise** (median in 30–60 min, conditions split): treat as mixed —
+   document per snag class, defer the R1 task-design decision to a second
+   cohort.
+
+Gates do not fire below 3 non-contaminated completions (small-n qualitative
+study instead — §4).
 
 Either way, the outcome is published as an R7 findings addendum to this doc
 (or a linked findings file), and R1/R2 backlog items are updated from it.
@@ -299,7 +316,9 @@ Either way, the outcome is published as an R7 findings addendum to this doc
 - **This is not a benchmark.** Never publish per-Muse scores, leaderboards,
   or "Muse X was faster than Muse Y" comparisons. Report cohort-level
   friction shapes only — and TTFWA only as bands, because a published
-  "median TTFWA" is a benchmark-shaped number in a public repo.
+  "median TTFWA" is a benchmark-shaped number in a public repo. When
+  publishing the R7 findings addendum, report only the TTFWA band and which
+  §7 gate fired — never the numeric median.
 - Do not generalize beyond the cohort: "3 of 4 beta Muses discovered the
   approval loop unprompted" is a finding; "Muses discover the approval loop"
   is not.
