@@ -41,6 +41,32 @@ Redeploy: copy the files over, then reinstall the plugin with `--force`
 
 ## Gotchas
 
+- Turn-state events are **cooperative telemetry, not ground truth** (issue #3): the
+  job agent runs as the same user with a full shell, so it can append fabricated
+  `done` lines to its own event file. The hooks hardcode the event/sessions dirs
+  (no env override -- an agent could otherwise blind the watchdog mid-session),
+  whitelist the session id used in event/registration filenames, and never write
+  through symlinks (a planted `events/<sid>.jsonl` symlink could otherwise make
+  every hook append corrupt another job's state); hook-written text fields are
+  ANSI/control-character sanitized. `muse-job watch` **never transitions a job
+  to done on a hook event**: a `done` line is only ever a claim. `watch` scans
+  the whole event file for the newest `done` (a forged trailing `idle` line
+  cannot bury a claim), triages it against protocol checks (event names the
+  job's recorded session uuid, cwd is at/under the job worktree, non-empty
+  SUMMARY.md regular file present) and pages once per claim: `done-claimed`
+  (checks passed) or `done-unverified` (checks failed; possible forgery). The
+  dedup cursor lives in agent-writable job.json and is sanitized on read;
+  after 3 done pages in 24h, claims coalesce into a single `done-repeated`
+  page per window. `watch` also emits `events-missing` when the newest hook
+  event is older than 30m (or none exists) while tmux is alive and a session
+  uuid is recorded (event file deleted or hooks blinded) -- pages on EVERY watch pass while blind (fail loud; no dedup latch, since a latch in agent-writable job.json would be plantable)
+  uuid -- and `events-tampered` when the event file is a symlink. A
+  sophisticated agent can read this tooling and satisfy every check (including
+  faking periodic heartbeat lines to defeat recency detection), so this verifies
+  protocol compliance, not that the work happened -- genuine anchored trust needs
+  agent-immutable sections (#13) or broker-held state, which this does not
+  foreclose. The operator confirms SUMMARY.md, then `muse-job close`. `blocked`
+  / `question` signals remain advisory.
 - Never combine text+Enter in one `tmux send-keys` (silently no-ops vs the TUI); use separate text / sleep / Enter and verify the input box cleared.
 - Spawn prompts via argv: `muse --yolo "$(cat prompt.md)"`.
 - Muse's sqlite session index lags for TUI sessions; use the hook registry (`~/.local/share/muse-job/sessions/`).

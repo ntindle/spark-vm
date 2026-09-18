@@ -59,9 +59,31 @@ def dir_size(p):
     return total
 
 
-def prune_old(path, older_than_s):
+def active_session_uuids():
+    """Session uuids of non-closed jobs -- their hook event files and
+    session registrations must never be pruned (issue #3 review: a job
+    alive >30 days would otherwise lose its events and false-positive
+    the `events-missing` liveness signal)."""
+    uuids = set()
+    if not os.path.isdir(JOBS):
+        return uuids
+    for slug in os.listdir(JOBS):
+        jf = os.path.join(JOBS, slug, "job.json")
+        try:
+            with open(jf) as f:
+                d = json.load(f)
+            if d.get("state") in ("active", "blocked") and d.get("session_uuid"):
+                uuids.add(d["session_uuid"])
+        except Exception:
+            continue
+    return uuids
+
+
+def prune_old(path, older_than_s, skip_names=()):
     now = time.time()
     for name in os.listdir(path):
+        if name in skip_names:
+            continue
         p = os.path.join(path, name)
         try:
             if now - os.path.getmtime(p) > older_than_s:
@@ -98,7 +120,11 @@ def main():
                     summary["pruned"].append(jd)
         for d in (EVENTS, SESSIONS):
             if os.path.isdir(d):
-                prune_old(d, PRUNE_EVENTS_AFTER_DAYS * 86400)
+                # Never prune a live job's event file or session
+                # registration, whatever their mtime (issue #3 review).
+                skip = {u + ext for u in active_session_uuids()
+                        for ext in (".jsonl", ".json")}
+                prune_old(d, PRUNE_EVENTS_AFTER_DAYS * 86400, skip)
     # Emergency breaker: close (not kill -- kill only ends the tmux session
     # and frees ~0 bytes) the largest active job(s) until disk is back under
     # KILL_PCT, no active jobs remain, or the per-run cap is hit.
