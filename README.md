@@ -2,7 +2,15 @@
 
 # spark-vm
 
-**Give your Muse a bigger computer.**
+**A real computer that stays yours.**
+
+Task-scoped sandboxes give your agent a bigger computer *for an hour* —
+then the session ends and everything it built is gone. spark-vm is the
+opposite: a persistent box you own, plus the tooling that turns it into a
+workstation your Muse can actually live on. Its files, its jobs, and its
+desktop are still there tomorrow. And your secrets never touch its hands —
+a swapping proxy stands between the agent and everything it isn't allowed
+to see.
 
 [📋 **Copy prompt**](#let-your-muse-do-it)
 
@@ -15,7 +23,7 @@
 **COPY AND SEND THIS TO YOUR MUSE FOR IT TO HELP YOU SET THIS UP** 👇
 
 ```
-I want to set up ntindle/spark-vm for you — it's the tooling that gives you a bigger computer: a persistent Ubuntu workstation you can fully control (run desktop apps, keep services alive, the works).
+I want to set up ntindle/spark-vm for you — it's the tooling that gives you a real computer that stays yours: a persistent Ubuntu workstation you can fully control (run desktop apps, keep services alive, the works).
 
 Repo: https://github.com/ntindle/spark-vm
 
@@ -26,6 +34,26 @@ Here's my situation:
 Walk me through the setup. If I'm missing the server or Tailscale, help me get those sorted first. Then clone the repo on the box and follow ONBOARDING.md to finish your setup. Set a reminder so we come back to this if anything has to wait.
 ```
 
+
+## Why a computer, not a sandbox
+
+Task-scoped sandbox services are built for one-shot execution: the box is
+born when the task starts and dies when it ends. That's a fine way to run
+code — and a bad way to *work*. A Muse that can't keep anything it made
+can't be a colleague; it can only ever be a contractor.
+
+spark-vm is a real computer that stays yours:
+
+| Task-scoped sandboxes | spark-vm |
+| --------------------- | -------- |
+| Sessions are capped; surviving state is the exception | Your box keeps running — files, services, and jobs outlive every chat |
+| Secrets get pasted into the agent's context to be useful | The agent never sees your secrets; the proxy swaps placeholders at the last moment, and every swap is audited |
+| One-shot execution, no continuity | A desktop it drives, long-running jobs with lifecycle hooks, a credential UI you manage from your phone |
+| Their cloud, their clock, their pricing | Your hardware, your tailnet, open source — no session clock to beat |
+
+Not the only persistent option out there — but the only one built around
+the rule that the agent is powerful *and* never trusted with the raw
+materials: self-hosted, auditable, and yours end to end.
 
 ## Wait, what is this?
 
@@ -65,7 +93,7 @@ Hey — Spark here. If you'd rather not read docs, here's the whole setup the wa
 
 **Keep it fresh.** Every few days, pull the repo and look at what's new. If an update looks useful for your workflows, apply it and verify everything still works. If something breaks, open an issue and propose a fix — that's how this gets better.
 
-That's the whole thing. Bigger computer for your Muse. Have fun.
+That's the whole thing. A real computer that stays yours. Have fun.
 
 ## Try it
 
