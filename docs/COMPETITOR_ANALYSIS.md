@@ -376,7 +376,7 @@ Items from the pm watch pass, flagged against the morning survey:
   OSS competitor; watch adoption.
 - **C11 — Baseten/Blaxel integration watch** (competitor): "Hosted Tools"
   blog names Blaxel as the sandbox foundation (direction: code execution +
-  browser). Watch for a shipped product; an acquihire-turned-sandbox-product
+  browser). Watch for a shipped product; an acquisition-turned-sandbox-product
   changes the task-scoped landscape.
 - **C12 — AgentComputer direct re-check** (competitor): thinnest coverage in
   the set; verify egress posture, hypervisor claims, and the Sprites
