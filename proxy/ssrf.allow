@@ -8,6 +8,8 @@
 # Lines are hostnames (exact, or leading-dot for subdomains) or CIDR
 # literals. Blank lines and #-comments are ignored.
 #
-# This box allows the tailnet (the agent's own infrastructure), added at
-# deploy time:
+# Finding 74: the tailnet exception below is box-specific and is
+# provisioned MANUALLY on the box — proxy/deploy.sh never writes
+# ssrf.allow (it only manages ssrf.deny), so a redeploy will not
+# recreate this line. Do not expect it on a fresh install.
 #   100.64.0.0/10
