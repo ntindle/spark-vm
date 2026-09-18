@@ -34,7 +34,8 @@ PORT = 18731
 # header is not this bridge's own address, and (b) require a custom header
 # on all state-changing requests: browsers must preflight those, and we
 # never answer with permissive CORS.
-ALLOWED_HOSTS = {"127.0.0.1:18731", "localhost:18731"}
+# 18732 is the local end of the operator SSH tunnel (127.0.0.1:18732 -> 127.0.0.1:18731); loopback-only too.
+ALLOWED_HOSTS = {"127.0.0.1:18731", "localhost:18731", "127.0.0.1:18732", "localhost:18732"}
 CSRF_HEADER = "X-CUA"
 CSRF_VALUE = "1"
 
