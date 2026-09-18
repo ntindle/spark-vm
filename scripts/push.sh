@@ -9,12 +9,13 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: push.sh [--dry-run] [commit message]
+Usage: push.sh [--dry-run] [--] [commit message]
 
 Stages all changes, scans them for secret-shaped values, commits, and pushes
 origin HEAD through the credential-swapping proxy.
 
   --dry-run   show what would be committed and pushed, change nothing
+  --          end of flags (use if the commit message starts with -)
   -h, --help  show this help
 EOF
 }
@@ -31,6 +32,7 @@ while [[ $# -gt 0 ]]; do
         *) break ;;
     esac
 done
+(( $# <= 1 )) || die "too many arguments (see --help; use -- if the message starts with -)"
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
@@ -43,11 +45,17 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [[ "$BRANCH" != "HEAD" ]] || die "detached HEAD — check out a branch first"
 
 # --- never commit secrets: scan staged contents for secret-shaped values ---
-# git grep --cached scans the *staged* blobs (not the working tree), handles
-# filenames with spaces, and --diff-filter=ACM skips deleted files.
+# Scoped to files changed vs HEAD (like the old scan): a committed false
+# positive must not block future pushes. git grep --cached reads the *staged*
+# blobs (not the working tree), handles filenames with spaces, and
+# --diff-filter=ACM skips deleted files.
 SECRET_RE='(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{36}|ghu_[A-Za-z0-9]{36}|ghs_[A-Za-z0-9]{36}|ghr_[A-Za-z0-9]{36}|glpat-[A-Za-z0-9_-]{20,}|hf_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|LLM_[0-9]{3,}_[A-Za-z0-9-]{16,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|xox[bap]-)'
 scan_secrets() {
-    git grep -nEi -e "$SECRET_RE" --cached -- . 2>/dev/null || true
+    local -a paths=()
+    while IFS= read -r -d '' p; do paths+=("$p"); done \
+        < <(git diff --cached --name-only -z --diff-filter=ACM)
+    ((${#paths[@]})) || return 0
+    git grep -nEi -e "$SECRET_RE" --cached -- "${paths[@]}" 2>/dev/null || true
 }
 
 # Print file:line only — never the matched content (echoing even a
@@ -84,7 +92,10 @@ if (( DRY_RUN )); then
         echo "dry-run: secret scan clean."
     fi
     if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null 2>&1; then
-        AHEAD="$(git rev-list --count "origin/$BRANCH..HEAD")"
+        # Fetch so the ahead-count reads a fresh, local ref — a stale or
+        # never-fetched origin/$BRANCH would miscount or die under set -e.
+        git fetch -q origin "$BRANCH" 2>/dev/null || true
+        AHEAD="$(git rev-list --count "origin/$BRANCH..HEAD" 2>/dev/null || echo "?")"
         echo "dry-run: would push $AHEAD local commit(s) to origin $BRANCH."
     else
         echo "dry-run: would push and create remote branch $BRANCH."
