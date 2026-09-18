@@ -35,7 +35,7 @@ isolation), because those are where the trust story lives.
 | **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
 | **Cloudflare Sandbox** | Task-scoped sandbox | Containers on Workers, sleeps at 10 min idle, disk resets on sleep | Active-CPU billing ($0.072/vCPU-hr); $5/mo Workers Paid floor |
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
-| **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation (direction: code execution + browser use) | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
+| **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation ("fast, isolated, persistent sandboxes and storage where developers can run their own agentic workflows and tool execution") | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
 | **Microsandbox** | Task-scoped sandbox (OSS) | libkrun microVM, network-layer secret injection | Free, self-hosted (YC F26) |
 | **DIY floor** | Persistent computer | $4/mo droplet + the human does everything | $4/mo + labor |
 | **spark-vm (this project)** | Persistent computer (OSS + hosted-in-design) | Real VM, per-action human approvals (confirmd), credential proxy (swapd), tailnet-first networking | OSS: provider cost + operator time; hosted: TBD (pricing thinking is an open backlog item) |
@@ -190,7 +190,8 @@ is still a design doc, not code. Until it ships, our isolation story is
    product from the Vercel Sandbox SKU — ships a genuine per-action human
    approval loop ([eve.dev/docs/human-in-the-loop](https://eve.dev/docs/human-in-the-loop);
    per-tool `approval` property, `always()/once()/never()/auto()` policies,
-   native approve/cancel across 7 channels). So the differentiator holds
+   native approve/cancel across channels (Slack, Discord, Teams, Telegram,
+   Twilio, GitHub, Linear per the launch announcement)). So the differentiator holds
    scoped to sandbox/computer *offerings* but is **broken scoped to the
    vendor Vercel** — scope the claim that way in all outward copy (a surveyed
    negative — confirm periodically; see C1).
@@ -277,10 +278,11 @@ Items from the pm watch pass, flagged against the morning survey:
   direct OSS competitor.
 - **Baseten "Hosted Tools"** — no integration blog/changelog/docs since the
   Sep 10 acquisition, but Baseten's newest blog post explicitly names Blaxel
-  as the sandbox foundation (*"Our acquisition of Blaxel accelerates the
-  complementary foundation: fast, isolated, persistent sandboxes"*),
-  direction-of-travel toward code execution + browser use. Watch for a shipped
-  product.
+  as the sandbox foundation: *"Our acquisition of Blaxel accelerates the
+  complementary foundation: fast, isolated, persistent sandboxes and storage
+  where developers can run their own agentic workflows and tool execution."*
+  Direction-of-travel (in Hosted Tools generally, not Blaxel specifically):
+  code execution + browser use. Watch for a shipped product.
 - **Microsandbox v0.7.1** — guest filesystem flush policies for snapshots,
   npm provenance, CLI/SDK version separation; weekly changelog cadence
   continues. Egress policy docs now detailed (see scorecard 1).
@@ -290,7 +292,7 @@ Items from the pm watch pass, flagged against the morning survey:
   policy is worth a full pass next time.
 - **Runloop re-framing** — docs now call Devboxes "isolated, ephemeral
   virtual machines" (hypervisor still unnamed) and promise "Network Policies"
-  for egress. Watch for doc upgrades; the isolation tier is holding at 2
+  for egress. Watch for doc upgrades; the isolation boundary is unverifiable
   pending a named hypervisor.
 - **Factory $200M at $5B** (Blackstone, Khosla, Sequoia, NEA) — coding-agent
   infra, adjacent demand signal, not a sandbox move. (Factory Droid is on
@@ -348,6 +350,13 @@ Items from the pm watch pass, flagged against the morning survey:
   the persistence headline in-market; the "real computer that stays yours" +
   credential-proxy differentiator needs to land publicly before the window
   narrows further.
+- **C8 — Buyer-vs-user packaging analysis** (sales/product): the hosted
+  product's *user* is the Muse but the *buyer* is a human/org. Map both
+  journeys: what trust evidence each gate requires (audit trail,
+  compliance/SOC 2 path, cost controls), per-box vs per-seat pricing, and how
+  it shapes the pricing-page item, R4, and the free-tier abuse constraints.
+  The research doc's Limitations section flagged this; it drives pricing
+  packaging and the compliance roadmap, so it gets its own item.
 - **C9 — OpenAI Agents API partnership watch** (competitor): Sep 10 public
   beta names Blaxel/Cloudflare/Daytona/DigitalOcean/E2B/Modal/Oracle/Runloop/
   Vercel as sandbox partners. Track what the default sandbox surface
@@ -362,13 +371,6 @@ Items from the pm watch pass, flagged against the morning survey:
 - **C12 — AgentComputer direct re-check** (competitor): thinnest coverage in
   the set; verify egress posture, hypervisor claims, and the Sprites
   relationship directly against vendor sources.
-- **C8 — Buyer-vs-user packaging analysis** (sales/product): the hosted
-  product's *user* is the Muse but the *buyer* is a human/org. Map both
-  journeys: what trust evidence each gate requires (audit trail,
-  compliance/SOC 2 path, cost controls), per-box vs per-seat pricing, and how
-  it shapes the pricing-page item, R4, and the free-tier abuse constraints.
-  The research doc's Limitations section flagged this; it drives pricing
-  packaging and the compliance roadmap, so it gets its own item.
 
 ## Sources
 
