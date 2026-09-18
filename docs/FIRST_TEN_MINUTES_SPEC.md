@@ -58,7 +58,7 @@ contract. It is the R1 item from the 2026-09-18 adoption research
 
 | Min | Step | Muse does | Pass criterion |
 |---|---|---|---|
-| 0:00 | Box-live | Status poll flips; Muse opens the connection bundle (relay hostname + SSH cert from signup) | `ssh` connects, cert accepted. If the relay/cert path fails while the poll says live → `connection-unhealthy` (control-plane/relay defect, §8), not a Muse failure |
+| 0:00 | Box-live | Status poll flips; Muse opens the connection bundle (relay hostname + SSH cert from signup) | `ssh` connects, cert accepted. If the relay/cert path fails while the poll says live → `connection-unreachable` (control-plane/relay defect, §8), not a Muse failure |
 | 0–1 | Trust verify | Confirm the box is the provisioned tenant box: cert fingerprint matches the tenant record (the signup doc §4's term); `systemctl is-active swap-proxy confirmd` | Both active; fingerprint matches |
 | 1–3 | Smoke checks | §3, in order | All four green |
 | 3–4 | Harness probe | §5: non-interactive auth probe | Exit 0, no prompt, stdin closed |
