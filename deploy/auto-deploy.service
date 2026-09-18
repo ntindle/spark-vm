@@ -1,0 +1,22 @@
+[Unit]
+Description=spark-vm auto-deploy: deploy merged main commits to live services
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as the box owner (same identity that runs proxy/deploy.sh manually).
+# CRITICAL: ExecStart points at the INSTALLED copy in
+# /home/ntindle/.sparkvm-deploy/bin/ — never at the repo checkout. A writer
+# with checkout access must not be able to rewire the updater's own code or
+# config; refreshing the installed copy is the privileged `init` step
+# (see deploy/README.md). The timer grants no new privilege beyond ntindle's
+# existing sudo rights.
+User=ntindle
+ExecStart=/home/ntindle/.sparkvm-deploy/bin/auto-deploy.sh deploy
+# A failed deploy must be loud in the journal and in the state dir.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

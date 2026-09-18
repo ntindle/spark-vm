@@ -1,0 +1,15 @@
+[Unit]
+Description=Run spark-vm auto-deploy every 10 minutes
+
+[Timer]
+# 10 minutes: fast enough that a merged fix reaches the box the same coffee
+# break, slow enough that a bad merge has a human-noticeable window.
+OnBootSec=5min
+OnUnitActiveSec=10min
+# Don't pile up missed runs after downtime; the next tick deploys everything
+# pending anyway (the watermark, not the schedule, is the source of truth).
+Persistent=false
+RandomizedDelaySec=90
+
+[Install]
+WantedBy=timers.target
