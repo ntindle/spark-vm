@@ -2,7 +2,8 @@
 
 **Status: design thinking, not a commitment.** This is the internal pricing
 analysis the sales/funnel backlog item ("pricing page thinking") asked for.
-It is **not** published pricing and must never be quoted as a promise:
+It is **not** published pricing, not a price list, and must never be quoted
+as a promise:
 `docs/POSITIONING.md`'s anti-claims forbid promising hosted tiers, prices, or
 a free tier before the idle/suspend economics are decided. The pricing *page*
 lands after the operator decides the NEEDS_USER.md items (Billing, Abuse
@@ -76,7 +77,9 @@ constraints:
    approval — the signup design's fingerprint-approval is the last human
    touchpoint; everything after is agent-driven.
 2. **Idle economics (C5):** always-on bills wall-clock. "No session clock" is
-   a *paid-tier* property; the free tier trades it for suspend. Define before
+   a *paid-tier* property; the free tier trades it for suspend. (A *session
+   clock* is any limit on how long the box stays awake running workloads —
+   the free tier's suspend is one; paid has none.) Define before
    the shape hardens:
    - **Idle = no human-originated session *and* no *registered* scheduled
      workload activity for N days.** Background cron loops (the improvement
@@ -106,14 +109,15 @@ and disk/compute upgrades — never the persistence itself.
 - **Tier 2 — the workhorse:** more vCPU/RAM/disk for heavier agents
   (browser driving, builds, Blender renders). Price anchor: $29–$49 band,
   matching TermSquad's Power/Ultra spread.
-- **Every paid tier includes the buyer story:** per-box spend cap, audit-log
-  access (approval decisions + swapd lines), kill switch, cost alerts. These
-  are not add-ons; they are why a human approves the purchase.
+- **Every paid tier must ship the buyer story to sell it:** per-box spend cap,
+  audit-log access (approval decisions + swapd lines), kill switch, cost
+  alerts. These are not add-ons; they are why a human approves the purchase.
+  (Future-state until built — see §5's honesty rule.)
 - **What we do NOT do:** per-second metering (that's the task-scoped
   segment's game; our headline is the opposite), GPU bundling, per-seat
   pricing, or usage credits that surprise the buyer.
 
-### What converts (funnel reading)
+## 4. What converts (funnel reading)
 
 Research Finding 1: adoption gates on the *first tiny task* succeeding.
 The pricing page's job is to get the Muse to that aha (the approval loop:
@@ -123,25 +127,36 @@ in order:
 1. Free tier with zero human-credential friction after key approval (R4).
 2. The approval-loop aha in the first session — engineered by the
    first-10-minutes spec (R1), not by copy.
-3. The human sees the audit trail + spend cap on the pricing page and
-   approves Tier 1.
+3. The human sees the trust evidence (audit trail, spend cap — page must tag
+   unbuilt controls honestly per §5) and approves Tier 1.
 4. Upgrades sell compute, never persistence.
 
-## 4. What the pricing page will say (copy thinking, not copy)
+## 5. What the pricing page will say (copy thinking, not copy)
 
 - Lead with the agent's headline ("A real computer that stays yours."), then
   the buyer's reassurance in the same viewport: "You approve what it does.
   You cap what it spends. You can turn it off."
 - Tiers named by the job, not the spec: e.g. a starter/always-on/workhorse
   ladder — never "Basic/Pro/Enterprise" and never raw vCPU numbers as the
-  headline (the buyer is not sizing VMs; the Muse doesn't care).
-- Free tier row must state the suspend honestly: "Sleeps when idle, wakes on
-  SSH — your files are always there." Hiding the suspend creates the exact
-  trust wound the positioning doc is built to avoid.
+  headline. "Never as the headline" means headline, not absent: buyers do
+  compare specs, so a spec compare table (vCPU/RAM/disk, sleep behavior, cron
+  guarantees) sits under the job-name headlines.
+- Free tier row must state the suspend honestly and concretely: "Sleeps after
+  N idle days, wakes on SSH — your files are always there." (N is TBD in the
+  Billing/Abuse decisions.) Hiding the suspend creates the exact trust wound
+  the positioning doc is built to avoid. Include a wake-time expectation,
+  not just "wakes on SSH."
+- Do not promise controls that don't exist yet. Per-box spend caps, cost
+  alerts, the kill switch, and audit-log access are future-state — the page
+  must tag them "coming with paid" or omit them until Billing is decided
+  (NEEDS_USER.md). The sentinel stays unnamed per the POSITIONING.md
+  anti-claims.
+- Disclose CPU-only: the page says plainly that there is no GPU tier today
+  (and GPUs, if they ever come, are a metered add-on).
 - No promises today: the page stays a thinking item until Billing + Abuse +
   Neo provider are decided (NEEDS_USER.md).
 
-## 5. Open decisions (feeds NEEDS_USER.md; nothing new asked here)
+## 6. Open decisions (feeds NEEDS_USER.md; nothing new asked here)
 
 - **Billing item (refine):** this doc's open shape is the input to "whether
   hosted signups need payments, and which provider" — the free-tier suspend
