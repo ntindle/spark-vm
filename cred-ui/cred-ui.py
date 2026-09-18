@@ -8,6 +8,7 @@ touching a terminal. Writes go through the same narrow sudo writers the
 
     sudo -u swapd /usr/local/bin/cred-store-set <name>      (value on stdin)
     sudo -u swapd /usr/local/bin/cred-registry-set ...
+    sudo -u swapd /usr/local/bin/cred-store-delete <name>
 
 Reads go through:
 
@@ -24,6 +25,8 @@ Security properties (keep them if you touch this file):
   - Name/host/entry values are validated against strict regexes before
     they reach subprocess argv. No shell is used anywhere.
   - Every response carries Cache-Control: no-store.
+  - CSRF: the Host header must be this UI's own address, and POSTs must
+    carry the X-Cred-UI: 1 header (index.html sends it on every POST).
 
 Stdlib only.
 """
@@ -37,6 +40,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 BIND = "127.0.0.1"
 PORT = 18740
 
+# CSRF hardening (same class as cua-bridge): the UI binds localhost only,
+# but a browser on the user's own machine can reach it through their SSH
+# tunnel. Require our own Host header on every request and a custom header
+# on all POSTs, so a malicious web page can't drive the API (browsers must
+# preflight custom headers; we never answer with permissive CORS).
+ALLOWED_HOSTS = {"127.0.0.1:18740", "localhost:18740"}
+CSRF_HEADER = "X-Cred-UI"
+CSRF_VALUE = "1"
+
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 ENTRY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 HOST_RE = re.compile(r"^[A-Za-z0-9_.-]{1,253}(:[0-9]{1,5})?$")
@@ -47,7 +59,7 @@ STORE_SET = ["sudo", "-u", "swapd", "/usr/local/bin/cred-store-set"]
 REGISTRY_SET = ["sudo", "-u", "swapd", "/usr/local/bin/cred-registry-set"]
 REGISTRY_CAT = ["sudo", "-u", "swapd", "cat", "/home/swapd/credentials.json"]
 SECRETS_LS = ["sudo", "-u", "swapd", "ls", "/home/swapd/secrets"]
-SECRET_RM = ["sudo", "-u", "swapd", "rm"]
+SECRET_DELETE = ["sudo", "-u", "swapd", "/usr/local/bin/cred-store-delete"]
 
 
 def run(argv, inp=None):
@@ -137,7 +149,23 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return None
 
+    def _csrf_ok(self):
+        host = (self.headers.get("Host") or "").split(",")[0].strip().lower()
+        if host not in ALLOWED_HOSTS:
+            return False
+        if self.command in ("POST", "PUT", "DELETE"):
+            return self.headers.get(CSRF_HEADER) == CSRF_VALUE
+        return True
+
+    def _check_csrf(self):
+        if not self._csrf_ok():
+            self._send(403, {"error": "forbidden"})
+            return False
+        return True
+
     def do_GET(self):
+        if not self._check_csrf():
+            return
         path = urllib.parse.urlparse(self.path).path
         if path == "/":
             try:
@@ -154,6 +182,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._check_csrf():
+            return
         path = urllib.parse.urlparse(self.path).path
         data = self._read_json()
         if data is None:
@@ -194,9 +224,14 @@ def api_set(data):
         raise ValueError("bad host (use hostname or hostname:port)")
     pjson = placement_json(kind, arg)
 
-    # Secret values are stripped of a trailing newline only -- pastes from
-    # password managers and textareas commonly include one.
-    secret = value.rstrip("\r\n").encode("utf-8")
+    # Strip at most one trailing newline -- pastes from password managers
+    # and textareas commonly include one. (rstrip would silently alter a
+    # secret that legitimately ends in several newlines.)
+    if value.endswith("\r\n"):
+        value = value[:-2]
+    elif value.endswith("\n"):
+        value = value[:-1]
+    secret = value.encode("utf-8")
 
     rc, _, err = run(STORE_SET + [name], inp=secret)
     if rc != 0:
@@ -215,8 +250,9 @@ def api_delete(data):
     name = data.get("name", "")
     if not NAME_RE.match(name):
         raise ValueError("bad credential name")
-    # Remove the stored value (ignore "no such file" -- registry may exist alone).
-    run(SECRET_RM + ["/home/swapd/secrets/" + name])
+    # Remove the stored value (the wrapper ignores "no such file" -- the
+    # registry may exist alone).
+    run(SECRET_DELETE + [name])
     rc, _, err = run(REGISTRY_SET + ["remove", name])
     if rc != 0 and "not registered" not in err:
         raise RuntimeError("unregister failed: %s" % err.strip()[-200:])

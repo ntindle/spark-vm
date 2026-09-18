@@ -7,15 +7,20 @@
 #   cred-registry-set remove-host <name> <host>
 #   cred-registry-set add-method <name> <METHOD>     (grant scoping)
 #   cred-registry-set remove-method <name> <METHOD>
+#   cred-registry-set clear-method-limit <name>   (back to unrestricted)
 #   cred-registry-set add-path <name> <prefix>       (grant scoping)
 #   cred-registry-set remove-path <name> <prefix>
+#   cred-registry-set clear-path-limit <name>        (back to unrestricted)
 #   cred-registry-set set-scrub <name> <entry> <true|false>  (finding 36)
-# Merges into /home/swapd/credentials.json atomically (0600, swapd-owned).
+# Merges into /home/swapd/credentials.json atomically (0600, swapd-owned)
+# under an exclusive flock on a dedicated lock file, so concurrent
+# invocations cannot lose each other's updates.
 # Root-owned 0755; ntindle can only execute it via the sudoers entry.
 set -euo pipefail
 
 exec python3 - "$@" <<'PYEOF'
-import json, os, re, sys
+import fcntl, json, os, re, sys, tempfile
+import atexit
 
 def fail(msg):
     sys.stderr.write("cred-registry-set: %s\n" % msg)
@@ -23,13 +28,16 @@ def fail(msg):
 
 args = sys.argv[1:]
 ACTIONS = ("set", "remove", "add-host", "remove-host",
-           "add-method", "remove-method", "add-path", "remove-path",
+           "add-method", "remove-method", "clear-method-limit",
+           "add-path", "remove-path", "clear-path-limit",
            "set-scrub")
 if not args or args[0] not in ACTIONS:
     fail("usage: set <name> <entry> <placement-json> | remove <name> [entry] "
          "| add-host <name> <host> | remove-host <name> <host> "
          "| add-method <name> <METHOD> | remove-method <name> <METHOD> "
+         "| clear-method-limit <name> "
          "| add-path <name> <prefix> | remove-path <name> <prefix> "
+         "| clear-path-limit <name> "
          "| set-scrub <name> <entry> <true|false>")
 action = args[0]
 
@@ -44,6 +52,22 @@ def check_host(h):
 
 reg_path = os.environ.get("CRED_REGISTRY_FILE",
                            "/home/swapd/credentials.json")
+reg_dir = os.path.dirname(reg_path) or "."
+
+# All read-modify-write cycles run under an exclusive flock on a
+# dedicated lock file (never replaced), so two concurrent invocations
+# cannot interleave into lost updates. Released via atexit so fail()
+# (sys.exit) still unlocks.
+reg_lock_path = os.environ.get("CRED_REGISTRY_LOCK", reg_path + ".lock")
+_lock_fd = os.open(reg_lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(_lock_fd, fcntl.LOCK_EX)
+def _unlock():
+    try:
+        fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(_lock_fd)
+atexit.register(_unlock)
+
 reg = {}
 if os.path.exists(reg_path):
     with open(reg_path, encoding="utf-8") as f:
@@ -65,12 +89,28 @@ def check_entry(s):
         fail("entry name %r is reserved" % (s,))
 
 def save():
-    tmp = reg_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(reg, f, indent=2, sort_keys=True)
-        f.write("\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, reg_path)
+    # Crash-durable: mkstemp in the same directory (0600), fsync the
+    # file, rename atomically, fsync the directory.
+    fd, tmp = tempfile.mkstemp(dir=reg_dir, prefix=".tmp.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(reg, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, reg_path)
+        dfd = os.open(reg_dir, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 if action == "set":
     if len(args) != 4:
@@ -160,14 +200,25 @@ elif action in ("add-method", "remove-method"):
         if method in methods:
             methods.remove(method)
         if not methods:
-            # Finding 41: an emptied list must not linger as [] — the
-            # addon would read it as unrestricted. Delete the key so
-            # the state is explicit.
-            del entry["allowed_methods"]
-            print("removed method '%s' from '%s'; now unrestricted"
+            # An emptied list is deny-all (the addon refuses every swap
+            # when allowed_methods is present but empty), NOT
+            # unrestricted. Use clear-method-limit to deliberately
+            # return to unrestricted.
+            print("removed method '%s' from '%s'; now deny-all (no methods allowed)"
                   % (method, name))
         else:
             print("removed method '%s' from '%s'" % (method, name))
+    save()
+elif action == "clear-method-limit":
+    if len(args) != 2:
+        fail("usage: cred-registry-set clear-method-limit <name>")
+    name = args[1]
+    check(name, "name")
+    entry = reg.get(name)
+    if not isinstance(entry, dict):
+        fail("no such credential '%s'" % (name,))
+    entry.pop("allowed_methods", None)
+    print("cleared method limit for '%s'; now unrestricted" % (name,))
     save()
 elif action in ("add-path", "remove-path"):
     # Grant scoping, approved half: static per-credential path prefixes.
@@ -194,12 +245,25 @@ elif action in ("add-path", "remove-path"):
         if prefix in prefixes:
             prefixes.remove(prefix)
         if not prefixes:
-            # Finding 41: see remove-method above.
-            del entry["allowed_paths"]
-            print("removed path prefix '%s' from '%s'; now unrestricted"
+            # An emptied list is deny-all (the addon refuses every swap
+            # when allowed_paths is present but empty), NOT
+            # unrestricted. Use clear-path-limit to deliberately return
+            # to unrestricted.
+            print("removed path prefix '%s' from '%s'; now deny-all (no paths allowed)"
                   % (prefix, name))
         else:
             print("removed path prefix '%s' from '%s'" % (prefix, name))
+    save()
+elif action == "clear-path-limit":
+    if len(args) != 2:
+        fail("usage: cred-registry-set clear-path-limit <name>")
+    name = args[1]
+    check(name, "name")
+    entry = reg.get(name)
+    if not isinstance(entry, dict):
+        fail("no such credential '%s'" % (name,))
+    entry.pop("allowed_paths", None)
+    print("cleared path limit for '%s'; now unrestricted" % (name,))
     save()
 elif action == "set-scrub":
     # Finding 36: opt an entry (usernames, emails) out of response

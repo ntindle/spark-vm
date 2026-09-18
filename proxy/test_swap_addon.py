@@ -84,6 +84,7 @@ class Query:
 class Request:
     def __init__(self, host, path="/", headers=(), content=b"", method="GET"):
         self.pretty_host = host
+        self.host = host  # URI authority; the proxy routes on this
         self.path = path
         self.method = method
         self.headers = Headers(headers)
@@ -99,6 +100,7 @@ class Flow:
         self.request = request
         self.response = None
         self.websocket = None
+        self.server_conn = None  # set by mitmproxy once connected
 
 
 class FakeServerConn:
@@ -180,13 +182,17 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY):
     a.ssrf_nets = []
     a.deny_hosts = []
     a.deny_nets = []
-    # Hermetic DNS: test hosts fail open without a real lookup. Tests that
-    # exercise the SSRF guard seed _dns_cache themselves.
+    # Hermetic DNS: test hosts resolve to None without a real lookup.
+    # server_connect now fails closed on None (dns-resolution-failed);
+    # tests that exercise the SSRF guard seed _dns_cache themselves.
     a._dns_cache = {h: (time.time() + 3600, None)
                     for h in list(hosts) + ["evil.example"]}
     a._store_mtime = a._hosts_mtime = None
     a._maybe_reload = lambda: None      # never touch /home/swapd here
-    a._audit = lambda host, matched: None
+    # audit writes are durably recorded; the addon fails closed when
+    # they are not (tested separately)
+    a._audit = lambda host, matched: True
+    a._current_egress_ip = None
     a.refused = []
     a._audit_refused = lambda host, name, reason: a.refused.append(
         (host, name, reason))
@@ -491,7 +497,8 @@ class SwapAddonTests(unittest.TestCase):
         private-range egress BEFORE the upstream TCP connect (no SYN ever
         leaves), and pins the server address to the resolved IP on
         allow, so the check and the connect use the same answer. DNS
-        failure fails open."""
+        failure fails closed: the connection is killed rather than left
+        to re-resolve unpinned."""
         now = time.time()
 
         def box(ip, **kw):
@@ -532,11 +539,17 @@ class SwapAddonTests(unittest.TestCase):
         data = connect(a)
         self.assertIsNone(data.server.error)
         self.assertEqual(data.server.address, ("93.184.216.34", 443))
-        # DNS failure fails open (the connect fails on its own upstream)
+        # DNS failure fails closed: the connection is killed rather
+        # than left to re-resolve unpinned, and the refusal is audited
         a = box("192.168.1.1")
         a._dns_cache["box.local"] = (now + 3600, None)
         data = connect(a)
-        self.assertIsNone(data.server.error)
+        self.assertEqual(data.server.error,
+                         "swap-proxy: egress refused "
+                         "(dns-resolution-failed)")
+        self.assertEqual(data.server.address, ("box.local", 443))
+        self.assertIn(("box.local", "-", "dns-resolution-failed"),
+                      a.ssrf_refused)
 
     def test_bug_private_range_literals(self):
         """REVIEW item 37: 0.0.0.0, IPv4-mapped IPv6 localhost, and the
@@ -854,10 +867,9 @@ class SwapAddonTests(unittest.TestCase):
                              "Bearer hsurr:api", key)
             self.assertIn(("api.example.com", "api", reason), a.refused)
 
-    def test_nit_registry_set_emptied_list_now_unrestricted(self):
-        """REVIEW item 41: remove-method/remove-path of the last entry
-        deletes the key and prints 'now unrestricted' instead of leaving
-        [] behind."""
+    def test_registry_set_remove_last_is_deny_all(self):
+        """remove-method/remove-path of the last entry keeps [] (deny-all);
+        use clear-method-limit/clear-path-limit to go back to unrestricted."""
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "cred-registry-set")
 
@@ -872,19 +884,27 @@ class SwapAddonTests(unittest.TestCase):
             env = dict(os.environ, CRED_REGISTRY_FILE=reg)
             run(env, "add-method", "api", "POST")
             r = run(env, "remove-method", "api", "POST")
-            self.assertIn("now unrestricted", r.stdout)
+            self.assertIn("deny-all", r.stdout)
+            saved = json.loads(Path(reg).read_text())
+            self.assertEqual(saved["api"]["allowed_methods"], [])
+            r = run(env, "clear-method-limit", "api")
+            self.assertIn("unrestricted", r.stdout)
             saved = json.loads(Path(reg).read_text())
             self.assertNotIn("allowed_methods", saved["api"])
             run(env, "add-path", "api", "/repos/")
             r = run(env, "remove-path", "api", "/repos/")
-            self.assertIn("now unrestricted", r.stdout)
+            self.assertIn("deny-all", r.stdout)
+            saved = json.loads(Path(reg).read_text())
+            self.assertEqual(saved["api"]["allowed_paths"], [])
+            r = run(env, "clear-path-limit", "api")
+            self.assertIn("unrestricted", r.stdout)
             saved = json.loads(Path(reg).read_text())
             self.assertNotIn("allowed_paths", saved["api"])
             # partial removal keeps the key and the remaining entries
             run(env, "add-method", "api", "GET")
             run(env, "add-method", "api", "POST")
             r = run(env, "remove-method", "api", "POST")
-            self.assertNotIn("now unrestricted", r.stdout)
+            self.assertNotIn("deny-all", r.stdout)
             saved = json.loads(Path(reg).read_text())
             self.assertEqual(saved["api"]["allowed_methods"], ["GET"])
 
@@ -963,7 +983,7 @@ class SwapAddonTests(unittest.TestCase):
     def test_bug_server_connect_is_async(self):
         """REVIEW item 45: server_connect is a coroutine hook — DNS goes
         through the loop's resolver instead of blocking getaddrinfo on
-        mitmproxy's event loop. A failing resolver still fails open."""
+        mitmproxy's event loop. A failing resolver fails closed."""
         self.assertTrue(
             asyncio.iscoroutinefunction(sa.SwapAddon.server_connect))
         self.assertTrue(
@@ -985,7 +1005,9 @@ class SwapAddonTests(unittest.TestCase):
                 return data
 
         data = asyncio.run(drive())
-        self.assertIsNone(data.server.error)
+        self.assertEqual(data.server.error,
+                         "swap-proxy: egress refused "
+                         "(dns-resolution-failed)")
 
     def test_bug_inference_store_piped_stdin(self):
         """REVIEW item 46: cred-store-set-inference takes the key on stdin
@@ -1038,6 +1060,173 @@ class SwapAddonTests(unittest.TestCase):
                 sa.log.removeHandler(handler)
         self.assertNotIn("shorter than 8 chars",
                          "\n".join(r.getMessage() for r in records))
+
+
+class AuthorityAndPlacementTests(unittest.TestCase):
+    """2026-09-17 review round: CONNECT authority mismatch, registry
+    placement enforcement, audit-as-authorization."""
+
+    def _connect_flow(self, authority_host, pretty_host, headers,
+                      secrets={"github": "ghp_TOKEN"},
+                      registry={"github": {"allowed_hosts": [
+                          "evil.example", "api.github.com"]}}):
+        """A CONNECT-tunnel flow: the egress connection was pinned to
+        authority_host, the inner request claims pretty_host."""
+        a = make_addon(secrets=secrets,
+                       hosts=["evil.example", "api.github.com"],
+                       registry=registry)
+        conn = FakeServerConn(authority_host)
+        conn.swap_authority_host = sa._norm_authority(authority_host)
+        conn.swap_egress_ip = "6.6.6.6"
+        req = Request(pretty_host, "/", headers)
+        req.host = authority_host  # the proxy routes on the URI authority
+        flow = Flow(req)
+        flow.server_conn = conn
+        a.mismatch = []
+        a._audit_authority_mismatch = \
+            lambda h, auth, ip: a.mismatch.append((h, auth, ip))
+        return a, flow
+
+    def test_authority_mismatch_refuses_swaps(self):
+        """CONNECT to evil.example with an inner Host: api.github.com:
+        the Host header is spoofed, so NO swap may happen — and the
+        attempt is audited with the pinned egress IP."""
+        a, flow = self._connect_flow(
+            "evil.example", "api.github.com",
+            [("Authorization", "Bearer hsurr:github")])
+        a.request(flow)
+        self.assertEqual(flow.request.headers.get("Authorization"),
+                         "Bearer hsurr:github")
+        self.assertEqual(a.mismatch,
+                         [("api.github.com", "evil.example", "6.6.6.6")])
+
+    def test_authority_match_allows_swaps(self):
+        """The pinned egress authority matches the claimed host: swaps
+        proceed and the egress IP is recorded for the audit."""
+        a, flow = self._connect_flow(
+            "api.github.com", "api.github.com",
+            [("Authorization", "Bearer hsurr:github")])
+        a.request(flow)
+        self.assertEqual(flow.request.headers.get("Authorization"),
+                         "Bearer ghp_TOKEN")
+        self.assertEqual(a._current_egress_ip, "6.6.6.6")
+        self.assertEqual(a.mismatch, [])
+
+    def test_authority_fallback_uses_request_host(self):
+        """No server connection yet (fresh direct flow): the request's
+        own URI authority is the egress authority."""
+        a = make_addon()
+        req = Request("api.github.com", "/",
+                      [("Authorization", "Bearer hsurr:github")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer ghp_TOKEN")
+
+    def test_placement_bearer_header_rejects_query(self):
+        """A bearer_header placement must not swap in the query string."""
+        registry = {"github": {"allowed_hosts": ["api.github.com"],
+                           "access_token": {"placement": "bearer_header"}}}
+        a = make_addon(registry=registry)
+        req = Request("api.github.com", "/?token=hsurr:github")
+        a.request(Flow(req))
+        self.assertEqual(req.path, "/?token=hsurr:github")
+        self.assertIn(("api.github.com", "github", "placement-mismatch"),
+                      a.refused)
+
+    def test_placement_bearer_header_allows_bearer(self):
+        registry = {"github": {"allowed_hosts": ["api.github.com"],
+                           "access_token": {"placement": "bearer_header"}}}
+        a = make_addon(registry=registry)
+        req = Request("api.github.com", "/",
+                      [("Authorization", "Bearer hsurr:github")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer ghp_TOKEN")
+
+    def test_placement_bearer_header_rejects_basic(self):
+        """Bearer placement must not swap inside a Basic auth value."""
+        registry = {"github": {"allowed_hosts": ["api.github.com"],
+                           "access_token": {"placement": "bearer_header"}}}
+        a = make_addon(registry=registry)
+        basic = "Basic " + base64.b64encode(b"user:hsurr:github").decode()
+        req = Request("api.github.com", "/",
+                      [("Authorization", basic)])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"), basic)
+        self.assertIn(("api.github.com", "github", "placement-mismatch"),
+                      a.refused)
+
+    def test_placement_query_param_rejects_header(self):
+        """A query_param placement must not swap in a header."""
+        registry = {"github": {"allowed_hosts": ["api.github.com"],
+                           "access_token":
+                               {"placement": {"query_param": "token"}}}}
+        a = make_addon(registry=registry)
+        req = Request("api.github.com", "/",
+                      [("X-Token", "hsurr:github")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("X-Token"), "hsurr:github")
+        self.assertIn(("api.github.com", "github", "placement-mismatch"),
+                      a.refused)
+
+    def test_placement_query_param_allows_query(self):
+        registry = {"github": {"allowed_hosts": ["api.github.com"],
+                           "access_token":
+                               {"placement": {"query_param": "token"}}}}
+        a = make_addon(registry=registry)
+        req = Request("api.github.com", "/?token=hsurr:github")
+        a.request(Flow(req))
+        self.assertEqual(req.path, "/?token=ghp_TOKEN")
+
+    def test_pinning_failure_fails_closed(self):
+        """If the pin cannot be applied to the server connection, the
+        connection is killed rather than left unpinned."""
+        class NoPin:
+            def __init__(self):
+                self.error = None
+
+            @property
+            def address(self):
+                return ("box.local", 443)
+
+            @address.setter
+            def address(self, value):
+                raise RuntimeError("mitmproxy refused reassignment")
+
+        a = make_addon(hosts=["box.local"],
+                       registry={"box": {"allowed_hosts": ["box.local"]}},
+                       secrets={"box": "box-SECRET"})
+        a._dns_cache["box.local"] = (time.time() + 3600, ["93.184.216.34"])
+        data = FakeServerConnectData("box.local")
+        data.server = NoPin()
+        asyncio.run(a.server_connect(data))
+        self.assertEqual(data.server.error,
+                         "swap-proxy: egress refused (pinning-failed)")
+        self.assertIn(("box.local", "93.184.216.34", "pinning-failed"),
+                      a.ssrf_refused)
+
+    def test_audit_failure_refuses_swap(self):
+        """The audit write is part of authorization: when it fails, the
+        placeholder is left intact — no secret without a trail."""
+        a = make_addon()
+        a._audit = lambda host, matched: False
+        req = Request("api.github.com", "/",
+                      [("Authorization", "Bearer hsurr:github")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer hsurr:github")
+
+    def test_unknown_credential_audits_refused(self):
+        """A placeholder with no matching secret leaves the text
+        untouched and records an unknown-credential refusal."""
+        a = make_addon()
+        req = Request("api.github.com", "/",
+                      [("Authorization", "Bearer hsurr:nosuch")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer hsurr:nosuch")
+        self.assertIn(("api.github.com", "nosuch", "unknown-credential"),
+                      a.refused)
 
 
 if __name__ == "__main__":

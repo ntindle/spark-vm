@@ -1,0 +1,16 @@
+#!/bin/bash
+# cred-store-get — narrow reader for the swapd secret store.
+# Invoked as: sudo -u swapd /usr/local/bin/cred-store-get <name>
+# Prints the stored value for exactly /home/swapd/secrets/<name> to
+# stdout. The name is validated before use: no path traversal, no
+# wildcards, no shell — cat is exec'd directly on the fixed path.
+# Root-owned 0755; ntindle can only execute it via the sudoers entry.
+set -euo pipefail
+
+name="${1:-}"
+if ! [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "cred-store-get: invalid name '$name' (use only [A-Za-z0-9_-])" >&2
+    exit 2
+fi
+
+exec cat -- "/home/swapd/secrets/$name"

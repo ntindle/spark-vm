@@ -103,6 +103,9 @@ async function refresh() {
 }
 
 function render(creds) {
+  // Skip the re-render while the user is typing in an add-host input --
+  // rebuilding the table via innerHTML would destroy it and lose the text.
+  if (document.activeElement && $('list').contains(document.activeElement)) return;
   if (!creds.length) { $('list').innerHTML = '<p class="sub">none stored</p>'; return; }
   let h = '<table><tr><th>Name</th><th>State</th><th>Hosts</th><th></th></tr>';
   for (const c of creds) {
@@ -129,7 +132,7 @@ $('list').addEventListener('click', async ev => {
   if (t.dataset.del) {
     if (!confirm('Delete credential "' + t.dataset.del + '" (value + registration)?')) return;
     const r = await fetch('/api/delete', {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'X-Cred-UI': '1'},
       body: JSON.stringify({name: t.dataset.del})});
     const d = await r.json();
     setStatus(d.ok ? 'deleted ' + t.dataset.del : 'error: ' + (d.error || r.status));
@@ -137,7 +140,7 @@ $('list').addEventListener('click', async ev => {
   } else if (t.dataset.delHost) {
     const [name, host] = t.dataset.delHost.split('|');
     await fetch('/api/host/remove', {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'X-Cred-UI': '1'},
       body: JSON.stringify({name, host})});
     refresh();
   } else if (t.dataset.addBtn) {
@@ -146,7 +149,7 @@ $('list').addEventListener('click', async ev => {
     const host = (input.value || '').trim();
     if (!host) return;
     const r = await fetch('/api/host/add', {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'X-Cred-UI': '1'},
       body: JSON.stringify({name, host})});
     const d = await r.json();
     if (!d.ok) setStatus('error: ' + (d.error || r.status));
@@ -167,7 +170,7 @@ $('btn-save').addEventListener('click', async () => {
   $('status').textContent = 'saving…';
   try {
     const r = await fetch('/api/set', {method: 'POST',
-      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      headers: {'Content-Type': 'application/json', 'X-Cred-UI': '1'}, body: JSON.stringify(body)});
     const d = await r.json();
     if (d.ok) {
       $('status').textContent = 'saved ' + d.name;

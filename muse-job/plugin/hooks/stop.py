@@ -20,8 +20,10 @@ def classify(message):
         if line.startswith("DONE:"):
             return "done", line[len("DONE:"):].strip()[:500]
     tail = lines[-3:]
-    if any(t.endswith("?") for t in tail):
-        return "question", tail[-1][:500]
+    # Return the actual question line, not just the last tail line.
+    for t in reversed(tail):
+        if t.endswith("?"):
+            return "question", t[:500]
     return state, detail
 
 

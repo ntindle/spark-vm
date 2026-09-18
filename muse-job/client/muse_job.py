@@ -12,6 +12,8 @@ All box I/O goes through ~/workspace/bin/box.sh (SSH as ntindle).
 """
 import json
 import os
+import re
+import shlex
 import subprocess
 import time
 
@@ -22,6 +24,24 @@ REMOTE_TMUX = "tmux"
 
 class MuseJobError(RuntimeError):
     pass
+
+
+def slug_ok(slug):
+    """Same charset rule as the CLI (bin/muse-job). Anything else never
+    reaches the box command line."""
+    return isinstance(slug, str) and re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,79}", slug) is not None
+
+
+def check_slug(slug):
+    if not slug_ok(slug):
+        raise MuseJobError(f"bad slug: {slug!r}")
+    return slug
+
+
+def check_uuid(uuid):
+    if not isinstance(uuid, str) or re.fullmatch(r"[a-f0-9-]+", uuid) is None:
+        raise MuseJobError(f"bad session uuid: {uuid!r}")
+    return uuid
 
 
 def _box(cmd, timeout=120):
@@ -35,8 +55,13 @@ def _box(cmd, timeout=120):
 
 
 def _job(*args, timeout=180):
-    """Run muse-job on the box; parse its JSON stdout."""
-    out = _box(f"{REMOTE_JOB} " + " ".join(args), timeout=timeout)
+    """Run muse-job on the box; parse its JSON stdout.
+
+    Every arg is shlex-quoted: the command runs through ssh's remote shell,
+    so an unquoted arg with spaces or metacharacters would break or inject.
+    """
+    out = _box(f"{REMOTE_JOB} " + " ".join(shlex.quote(str(a)) for a in args),
+               timeout=timeout)
     try:
         return json.loads(out)
     except json.JSONDecodeError:
@@ -46,7 +71,11 @@ def _job(*args, timeout=180):
 # --- dispatch / steer --------------------------------------------------------
 
 def spawn(slug, repo, prompt_file, budget_hours=8, branch=None, base=None):
-    """Start a job. Returns {"slug","session_uuid","worktree"}."""
+    """Start a job. Returns {"slug","session_uuid","worktree"}.
+
+    Note: prompt_file must be a path ON THE BOX (the CLI reads it there).
+    """
+    check_slug(slug)
     args = ["spawn", slug, "--repo", repo, "--prompt-file", prompt_file,
             "--budget-hours", str(budget_hours)]
     if branch:
@@ -58,13 +87,14 @@ def spawn(slug, repo, prompt_file, budget_hours=8, branch=None, base=None):
 
 def steer(slug, message):
     """Send a message into the job (queues if mid-turn). Returns delivered."""
-    import shlex
-    return _job("steer", slug, shlex.quote(message), timeout=120)
+    check_slug(slug)
+    return _job("steer", slug, message, timeout=120)
 
 
 def interrupt(slug):
     """Ctrl-C the agent's terminal (like subagent.send interrupt=True)."""
-    _box(f"{REMOTE_TMUX} send-keys -t mjob-{slug} C-c")
+    check_slug(slug)
+    _box(f"{REMOTE_TMUX} send-keys -t {shlex.quote('mjob-' + slug)} C-c")
     return {"slug": slug, "interrupted": True}
 
 
@@ -72,6 +102,7 @@ def interrupt(slug):
 
 def status(slug):
     """Full status dict for one job (like subagent.list, scoped)."""
+    check_slug(slug)
     return _job("status", slug, "--json")
 
 
@@ -86,11 +117,14 @@ def _events_path(session_uuid):
 
 def log(slug, n=50):
     """Last n turn-end hook events for the job's session."""
+    check_slug(slug)
     st = status(slug)
     uuid = st.get("session_uuid")
     if not uuid:
         return []
-    out = _box(f"tail -n {int(n)} {_events_path(uuid)} 2>/dev/null || true")
+    check_uuid(uuid)
+    n = max(1, int(n))
+    out = _box(f"tail -n {n} {shlex.quote(_events_path(uuid))} 2>/dev/null || true")
     events = []
     for line in out.splitlines():
         line = line.strip()
@@ -110,10 +144,12 @@ def wait_for_turn(slug, since_ts=None, timeout=3600, poll=15):
     Emulates the runtime's pushed handoff in a synchronous context.
     Returns the event dict. Raises TimeoutError on timeout.
     """
+    check_slug(slug)
     st = status(slug)
     uuid = st.get("session_uuid")
     if not uuid:
         raise MuseJobError(f"job {slug} has no session uuid yet")
+    check_uuid(uuid)
     if since_ts is None:
         evs = log(slug, n=1)
         since_ts = evs[-1]["ts"] if evs else 0
@@ -135,6 +171,7 @@ def pending_question(slug):
     Returns None, or {"kind": "blocked"|"question", "detail": str}.
     Answer via steer(slug, ...) like browser.steer_task answers.
     """
+    check_slug(slug)
     evs = log(slug, n=1)
     if not evs:
         return None
@@ -149,16 +186,19 @@ def pending_question(slug):
 
 def kill(slug):
     """Stop the agent's process tree (like subagent.close)."""
+    check_slug(slug)
     return _job("kill", slug)
 
 
 def resume(slug):
     """Resume the recorded session in place (like subagent.resume)."""
+    check_slug(slug)
     return _job("resume", slug, timeout=180)
 
 
 def close(slug):
     """Kill, remove worktree, delete branch, archive (terminal)."""
+    check_slug(slug)
     return _job("close", slug, timeout=120)
 
 

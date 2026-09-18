@@ -4,8 +4,11 @@
 Watermarks (on /home/ntindle):
   >= 85%  prune closed job dirs older than 7 days, hook events and session
           records older than 30 days
-  >= 93%  additionally kill the LARGEST active job (muse-job kill) to avoid
-          bricking the VM -- user-approved emergency breaker (2026-09-17)
+  >= 93%  additionally CLOSE the largest active job(s) (muse-job close:
+          removes the worktree, which is where the bytes are) until disk is
+          back under 93% or no active jobs remain -- user-approved emergency
+          breaker (2026-09-17). `kill` is NOT used here: it only ends the
+          tmux session and frees ~0 bytes.
 
 Prints a JSON summary of what it did. Exits 0 always (never break the cron).
 """
@@ -23,8 +26,11 @@ WARN_PCT = 85
 KILL_PCT = 93
 PRUNE_CLOSED_AFTER_DAYS = 7
 PRUNE_EVENTS_AFTER_DAYS = 30
+# Emergency breaker: close at most this many jobs per run even if disk stays
+# high, so one run can't nuke everything (cron re-runs and continues).
+MAX_EMERGENCY_CLOSES = 3
 
-summary = {"disk_pct": None, "pruned": [], "killed": None, "freed_hint": None}
+summary = {"disk_pct": None, "pruned": [], "closed": [], "freed_hint": None}
 
 
 def sh(*args):
@@ -93,9 +99,15 @@ def main():
         for d in (EVENTS, SESSIONS):
             if os.path.isdir(d):
                 prune_old(d, PRUNE_EVENTS_AFTER_DAYS * 86400)
-    after_prune = disk_pct(HOME)
-    if after_prune is not None and after_prune >= KILL_PCT:
-        # emergency breaker: kill the largest ACTIVE job
+    # Emergency breaker: close (not kill -- kill only ends the tmux session
+    # and frees ~0 bytes) the largest active job(s) until disk is back under
+    # KILL_PCT, no active jobs remain, or the per-run cap is hit.
+    while True:
+        pct = disk_pct(HOME)
+        if pct is None or pct < KILL_PCT:
+            break
+        if len(summary["closed"]) >= MAX_EMERGENCY_CLOSES:
+            break
         biggest, biggest_size = None, 0
         if os.path.isdir(JOBS):
             for slug in os.listdir(JOBS):
@@ -110,11 +122,12 @@ def main():
                 s = dir_size(jd)
                 if s > biggest_size:
                     biggest, biggest_size = slug, s
-        if biggest:
-            r = sh(os.path.join(HOME, "bin", "muse-job"), "kill", biggest)
-            summary["killed"] = {"slug": biggest,
-                                 "bytes": biggest_size,
-                                 "rc": r.returncode if r else -1}
+        if not biggest:
+            break
+        r = sh(os.path.join(HOME, "bin", "muse-job"), "close", biggest)
+        summary["closed"].append({"slug": biggest,
+                                  "bytes": biggest_size,
+                                  "rc": r.returncode if r else -1})
     summary["disk_pct_after"] = disk_pct(HOME)
     print(json.dumps(summary))
 

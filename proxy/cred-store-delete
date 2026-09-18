@@ -1,0 +1,17 @@
+#!/bin/bash
+# cred-store-delete — narrow deleter for the swapd secret store.
+# Invoked as: sudo -u swapd /usr/local/bin/cred-store-delete <name>
+# Removes exactly /home/swapd/secrets/<name>. A missing file is not an
+# error (the registry may exist alone). The name is validated before
+# use: no path traversal, no wildcards, no shell — rm is exec'd
+# directly on the fixed path.
+# Root-owned 0755; ntindle can only execute it via the sudoers entry.
+set -euo pipefail
+
+name="${1:-}"
+if ! [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "cred-store-delete: invalid name '$name' (use only [A-Za-z0-9_-])" >&2
+    exit 2
+fi
+
+exec rm -f -- "/home/swapd/secrets/$name"

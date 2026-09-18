@@ -181,6 +181,19 @@ class GrantWriterTests(unittest.TestCase):
         ids = sorted(g["approval_id"] for g in self.read_grants())
         self.assertEqual(ids, ["race1", "race2"])
 
+    def test_audit_failure_refuses_grant(self):
+        """The audit write is part of authorization: when the audit log
+        is unwritable, add fails closed and no grant is saved."""
+        # Point the audit log at a directory: open-for-append raises
+        # OSError, so _audit returns False.
+        self.env["SWAP_LOG_FILE"] = self.tmp.name
+        r = self.run_writer(
+            "add", "--credential", "github", "--host", "github.com",
+            "--method", "POST", "--path-prefix", "/gists",
+            "--approval-id", "test123", "--job", "job1")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertFalse(os.path.exists(self.grants_file))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,11 @@ Usage:
                   [--job J] [--ttl-hours H]
   grant-writer revoke --job JOB
   grant-writer list
+
+--job is recorded on the grant for revoke-by-job and audit. It is NOT
+enforced per-request by the proxy: grants are host-wide, because an
+HTTP request carries no unforgeable job identity. Do not rely on grants
+for per-job isolation.
 """
 import argparse
 import fcntl
@@ -33,12 +38,17 @@ AUDIT_LOG = os.environ.get("SWAP_LOG_FILE", "/home/swapd/swap.log")
 
 
 def _audit(msg):
+    """Append to the audit log. Returns True when durably written.
+
+    The audit write is part of authorization: grant-writer refuses to
+    save a grant/revocation when the audit line cannot be recorded."""
     try:
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with open(AUDIT_LOG, "a", encoding="utf-8") as f:
             f.write("ts=%s %s\n" % (ts, msg))
     except OSError:
-        pass
+        return False
+    return True
 
 
 def _load_grants():
@@ -101,9 +111,14 @@ def _with_lock(fn):
             try:
                 grants = _reap_expired(_load_grants())
                 new_grants, audit_msg = fn(grants)
+                if audit_msg and not _audit(audit_msg):
+                    # Fail closed: a grant/revocation is never saved
+                    # without a durable audit trail (disk-full and
+                    # read-only-FS are exactly when the trail matters).
+                    print("grant-writer: audit log unwritable; refusing "
+                          "to save", file=sys.stderr)
+                    return None
                 _save_grants(new_grants)
-                if audit_msg:
-                    _audit(audit_msg)
                 return new_grants
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)

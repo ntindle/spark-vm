@@ -1,14 +1,18 @@
 # spark-vm credential store: ntindle may touch swapd's secrets ONLY through
-# these narrow, name-validated paths. No shell access, no broad wildcards.
+# these narrow, name-validated wrapper scripts. No shell access, no
+# wildcards — a sudoers `*` matches `/`, so literal paths are used
+# everywhere below. Secrets are read/written/deleted only through
+# cred-store-{get,set,delete}, which validate the name against
+# ^[A-Za-z0-9_-]+$ and touch exactly one file under the store.
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-set
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-set-inference
+ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-get
+ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-delete
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-registry-set
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-registry-set-inference
-ntindle ALL=(swapd) NOPASSWD: /usr/bin/cat /home/swapd/secrets/*
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/cat /home/swapd/credentials.json
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/cat /home/swapd/inference-registry.json
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/ls /home/swapd/secrets
-ntindle ALL=(swapd) NOPASSWD: /usr/bin/rm /home/swapd/secrets/*
 # inference proxy (finding 31): append-only hosts file, listable secrets dir
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/tee -a /home/swapd/inference-hosts.allow
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/ls /home/swapd/inference-secrets

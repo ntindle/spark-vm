@@ -6,6 +6,7 @@
 # Root-owned 0755; ntindle cannot modify this script, only execute it
 # via the sudoers entry.
 set -euo pipefail
+umask 077
 
 name="${1:-}"
 if ! [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -14,9 +15,41 @@ if ! [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
 fi
 
 dir=/home/swapd/secrets
+max_bytes=65536
+
 tmp="$(mktemp "$dir/.tmp.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
-cat > "$tmp"
 chmod 600 "$tmp"
+
+# Read stdin capped at max_bytes+1 so an oversized value is detectable.
+# head exits 0 even when the input is shorter.
+head -c $((max_bytes + 1)) > "$tmp"
+size="$(wc -c < "$tmp")"
+if [ "$size" -eq 0 ]; then
+    echo "cred-store-set: refusing to store an empty secret" >&2
+    exit 2
+fi
+if [ "$size" -gt "$max_bytes" ]; then
+    echo "cred-store-set: secret exceeds 64 KiB" >&2
+    exit 2
+fi
+
+# Crash-durable: fsync the file, rename atomically, fsync the directory.
+python3 - "$tmp" <<'PYEOF'
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PYEOF
 mv -f "$tmp" "$dir/$name"
+python3 - "$dir" <<'PYEOF'
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PYEOF
 trap - EXIT

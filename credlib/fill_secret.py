@@ -26,6 +26,9 @@ from dynamic_credentials import (
 SUDO = ["sudo", "-n", "-u", "swapd"]
 STORE = "/home/swapd/secrets"
 ENTRY_LINE_RE = re.compile(r"^([A-Za-z0-9_-]+)=(.*)$", re.DOTALL)
+# Explicit marker: a secret file whose first non-blank line is this is
+# multi-entry. Mirrors proxy/swap_addon.py (MULTI_MARKER there).
+MULTI_MARKER = "#hsurr:multi"
 
 
 def _read_value(credential_name, entry_name):
@@ -39,21 +42,23 @@ def _read_value(credential_name, entry_name):
             "credential '%s' not set \u2014 add with: cred set %s"
             % (credential_name, credential_name))
     text = p.stdout.decode("utf-8")
-    lines = text.splitlines()
-    # Multi-entry file? ("entry=value" per line) — mirrors the proxy addon.
+    lines = [l for l in text.splitlines() if l.strip()]
+    # Multi-entry file? Only when the first non-blank line is the explicit
+    # "#hsurr:multi" marker — mirrors the proxy addon. Unmarked files are a
+    # single whole secret, even when they look like k=v lines (e.g. a base64
+    # token ending in "==").
+    if not lines or lines[0].strip() != MULTI_MARKER:
+        return text.strip()
     parsed = {}
-    multi = bool(lines) and all(ENTRY_LINE_RE.match(l) for l in lines if l.strip())
-    if multi:
-        for line in lines:
-            if not line.strip():
-                continue
-            m = ENTRY_LINE_RE.match(line)
+    for line in lines[1:]:
+        m = ENTRY_LINE_RE.match(line)
+        if m:
             parsed[m.group(1)] = m.group(2)
-        if entry_name in parsed:
-            return parsed[entry_name]
-        raise DynamicCredentialError(
-            "credential '%s' has no entry '%s'" % (credential_name, entry_name))
-    return text.strip()
+        # Lines that don't match k=v are dropped (the proxy does the same).
+    if entry_name in parsed:
+        return parsed[entry_name]
+    raise DynamicCredentialError(
+        "credential '%s' has no entry '%s'" % (credential_name, entry_name))
 
 
 def fill_secret(page, selector, credential_name, entry_name="access_token"):

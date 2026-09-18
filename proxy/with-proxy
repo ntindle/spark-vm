@@ -10,7 +10,15 @@ set -u
 # decision 13: system-wide trust inside the jail only), so this points at
 # a dedicated bundle = system CAs + swapd CA cert, built by deploy.sh.
 # Git reads GIT_SSL_CAINFO, not SSL_CERT_FILE, hence the extra export.
+# A caller-inherited NO_PROXY/no_proxy would silently bypass this proxy:
+# placeholders would go out unswapped and unaudited. Clear both so the
+# wrapper's behavior is always what it advertises.
+unset NO_PROXY no_proxy
 CA_BUNDLE=/usr/local/share/with-proxy-ca/ca-bundle.crt
+if [ ! -f "$CA_BUNDLE" ]; then
+    echo "with-proxy: CA bundle missing: $CA_BUNDLE (deploy.sh builds it; run it first)" >&2
+    exit 1
+fi
 export http_proxy=http://127.0.0.1:18080
 export https_proxy=http://127.0.0.1:18080
 export HTTP_PROXY=http://127.0.0.1:18080

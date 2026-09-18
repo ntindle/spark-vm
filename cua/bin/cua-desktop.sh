@@ -25,7 +25,16 @@ do_start() {
     rm -f /tmp/.X${DISPLAY_NUM}-lock
     setsid Xvfb :$DISPLAY_NUM -screen 0 1280x800x24 >"$RUNDIR/xvfb.log" 2>&1 < /dev/null &
     echo $! > "$RUNDIR/xvfb.pid"
-    sleep 2
+    # Verify Xvfb actually bound the display; otherwise everything below
+    # would start against a dead display.
+    for _i in 1 2 3 4 5; do
+      [ -S /tmp/.X11-unix/X$DISPLAY_NUM ] && break
+      sleep 1
+    done
+    if [ ! -S /tmp/.X11-unix/X$DISPLAY_NUM ]; then
+      echo "cua-desktop: Xvfb failed to bind :$DISPLAY_NUM (see $RUNDIR/xvfb.log)" >&2
+      return 1
+    fi
   fi
   # 2. D-Bus session
   if ! running "$RUNDIR/dbus.pid"; then

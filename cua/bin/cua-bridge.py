@@ -28,6 +28,16 @@ DRIVER = "/home/ntindle/cua/bin/cua-driver"
 ENV_FILE = "/tmp/cua-desktop/env"
 PORT = 18731
 
+# CSRF hardening: the bridge binds localhost only, but a browser on the
+# user's own machine can reach it through their SSH tunnel — exactly what
+# a malicious web page would abuse. So (a) reject any request whose Host
+# header is not this bridge's own address, and (b) require a custom header
+# on all state-changing requests: browsers must preflight those, and we
+# never answer with permissive CORS.
+ALLOWED_HOSTS = {"127.0.0.1:18731", "localhost:18731"}
+CSRF_HEADER = "X-CUA"
+CSRF_VALUE = "1"
+
 BASE_ENV = dict(os.environ)
 if os.path.exists(ENV_FILE):
     for line in open(ENV_FILE):
@@ -132,14 +142,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
+        if n > 1_000_000:
+            return None  # body too large; caller answers 413
         raw = self.rfile.read(n) if n else b"{}"
         try:
             return json.loads(raw.decode() or "{}")
         except Exception:
             return {}
 
+    def _csrf_ok(self):
+        host = (self.headers.get("Host") or "").split(",")[0].strip().lower()
+        if host not in ALLOWED_HOSTS:
+            return False
+        if self.command in ("POST", "PUT", "DELETE"):
+            return self.headers.get(CSRF_HEADER) == CSRF_VALUE
+        return True
+
+    def _check_csrf(self):
+        if not self._csrf_ok():
+            self._json({"error": "forbidden"}, 403)
+            return False
+        return True
+
     def do_GET(self):
         try:
+            if not self._check_csrf():
+                return
             if self.path == "/api/status":
                 st = subprocess.run([DRIVER, "status"], capture_output=True,
                                     timeout=10, env=BASE_ENV, text=True)
@@ -165,7 +193,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            if not self._check_csrf():
+                return
             data = self._body()
+            if data is None:
+                return self._json({"error": "body too large"}, 413)
             if self.path == "/api/click":
                 x, y = int(data["x"]), int(data["y"])
                 button = data.get("button", "left")

@@ -139,7 +139,7 @@ def cmd_spawn(args):
     rname = repo_name_from_url(args.repo)
     pristine = os.path.join(REPOS_DIR, rname)
     if not os.path.isdir(os.path.join(pristine, ".git")):
-        print(f"cloning {args.repo} -> {pristine}", flush=True)
+        print(f"cloning {args.repo} -> {pristine}", flush=True, file=sys.stderr)
         run("git", "clone", args.repo, pristine, timeout=600)
     else:
         run("git", "-C", pristine, "fetch", "origin", timeout=600)
@@ -201,7 +201,10 @@ def cmd_spawn(args):
         if uuid is None:
             time.sleep(5)
     if uuid is None:
-        print("WARNING: session uuid not discovered; steering still works via tmux")
+        # stdout must stay a single JSON document (the client json.loads it);
+        # progress/warnings go to stderr.
+        print("WARNING: session uuid not discovered; steering still works via tmux",
+              file=sys.stderr)
     else:
         job["session_uuid"] = uuid
         save_job(job)
@@ -217,7 +220,10 @@ def _is_main_session(rec):
     """Exclude internal children (e.g. reminder observers share the cwd but
     carry exactly one tool: submit_reminder_decision)."""
     try:
-        tools = rec.get("payload", {}).get("tools") or []
+        tools = rec.get("tools")
+        if tools is None:
+            # records written before the payload trim (2026-09-17)
+            tools = rec.get("payload", {}).get("tools") or []
         names = [t.get("name") for t in tools]
         return names != ["submit_reminder_decision"]
     except Exception:
@@ -268,16 +274,32 @@ def _input_box_has_text(pane, needle):
 def _steer(slug, message, verify=True):
     """The one place the tmux input quirk lives.
 
-    Text and Enter are sent as SEPARATE send-keys calls with a pause between.
-    Never combine them: `send-keys "<text>" Enter` in one call silently
-    no-ops against the TUI input box. paste-buffer is not used: the TUI can
-    render a bulk paste without committing it, so a following Enter hits an
-    empty box while the text sits there looking delivered.
+    The message is written to a temp file, loaded into a tmux buffer, and
+    pasted -- never sent via send-keys text. tmux send-keys translates
+    embedded newlines into Enter, so a multi-line message sent as text would
+    be submitted as several separate messages (the first line submits
+    immediately). Enter is always a SEPARATE send-keys call after a pause:
+    never combine text+Enter in one call, which silently no-ops against the
+    TUI input box.
     """
     target = f"mjob-{slug}"
     if not tmux_alive(slug):
         raise RuntimeError(f"tmux session {target} not alive")
-    run("tmux", "send-keys", "-t", target, "--", message)
+    tmpd = os.path.join(job_dir(slug), "tmp")
+    os.makedirs(tmpd, exist_ok=True)
+    tmpf = os.path.join(tmpd, f"steer-{int(time.time() * 1000)}.txt")
+    with open(tmpf, "w") as f:
+        f.write(message)
+    buf = f"mjob-steer-{slug}"
+    try:
+        run("tmux", "load-buffer", "-b", buf, tmpf)
+        run("tmux", "paste-buffer", "-b", buf, "-t", target)
+    finally:
+        run("tmux", "delete-buffer", "-b", buf, check=False)
+        try:
+            os.remove(tmpf)
+        except OSError:
+            pass
     time.sleep(2)
     run("tmux", "send-keys", "-t", target, "Enter")
     if not verify:
@@ -290,7 +312,8 @@ def _steer(slug, message, verify=True):
         # Submitted (or queued mid-turn): the input box is clear of our text.
         if not _input_box_has_text(pane, needle):
             return True
-        # Still sitting in the box: try Enter once more.
+        # Still sitting in the box (e.g. the paste rendered without
+        # committing): try Enter once more.
         run("tmux", "send-keys", "-t", target, "Enter")
         time.sleep(5)
     return False
@@ -321,9 +344,17 @@ def last_event(uuid):
     try:
         with open(p) as f:
             lines = f.readlines()
-        if not lines:
-            return None
-        return json.loads(lines[-1])
+        # A single corrupt trailing line must not hide all earlier good
+        # events: walk back and return the first parseable one.
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+        return None
     except Exception:
         return None
 
@@ -415,10 +446,11 @@ def cmd_list(args):
 def cmd_log(args):
     if not tmux_alive(args.slug):
         raise RuntimeError("tmux session not alive")
+    n = max(1, args.n)
     pane = run("tmux", "capture-pane", "-p", "-t", f"mjob-{args.slug}").stdout.decode(
         errors="replace")
     lines = pane.splitlines()
-    print("\n".join(lines[-args.n:]))
+    print("\n".join(lines[-n:]))
     return 0
 
 
@@ -443,7 +475,11 @@ def cmd_resume(args):
     time.sleep(15)
     pane = run("tmux", "capture-pane", "-p", "-t", f"mjob-{args.slug}").stdout.decode(
         errors="replace")
-    if re.search(r"not found|no session|error", pane, re.I):
+    # Only fall back on a genuine "session not found" style message. The old
+    # pattern included a bare "error", which normal TUI output (e.g.
+    # "0 errors", a filename) could trigger -- abandoning a good session.
+    if re.search(r"session not found|no session found|could not find session|"
+                 r"unknown session|no such session", pane, re.I):
         # Fallback: fresh TUI, continue from git state.
         run("tmux", "send-keys", "-t", f"mjob-{args.slug}", "q")
         time.sleep(2)
@@ -467,6 +503,10 @@ def cmd_close(args):
     if os.path.isdir(work):
         run("git", "-C", pristine, "worktree", "remove", "--force", work, check=False)
     run("git", "-C", pristine, "worktree", "prune", check=False)
+    # Delete the job branch so re-spawning the same slug works
+    # (worktree add -b would otherwise fail: branch already exists).
+    branch = job.get("branch") or f"job/{args.slug}"
+    run("git", "-C", pristine, "branch", "-D", branch, check=False)
     jd = job_dir(args.slug)
     tmpd = os.path.join(jd, "tmp")
     shutil.rmtree(tmpd, ignore_errors=True)
@@ -492,18 +532,17 @@ def git_diffstat(work):
 def cmd_watch(args):
     """One watchdog pass over active jobs. Emits JSON lines; never fails."""
     events = []
-    if not os.path.isdir(JOBS_DIR):
-        return 0
-    for slug in sorted(os.listdir(JOBS_DIR)):
+
+    def watch_one(slug):
         p = job_json_path(slug)
         if not os.path.isfile(p):
-            continue
+            return
         try:
             job = load_job(slug)
         except Exception:
-            continue
+            return
         if job.get("state") not in ("active", "blocked"):
-            continue
+            return
         st = job_status(job)
         now = time.time()
 
@@ -516,7 +555,7 @@ def cmd_watch(args):
             except Exception as e:
                 events.append({"job": slug, "signal": "needs-attention",
                                "detail": f"tmux dead and resume failed: {e}"})
-            continue
+            return
 
         ev = st["last_hook_event"] or {}
         estate = ev.get("state")
@@ -559,6 +598,17 @@ def cmd_watch(args):
         if st["dir_bytes"] > 20 * 1024**3:
             events.append({"job": slug, "signal": "heavy",
                            "detail": f"job dir {st['dir_bytes']/1024**3:.1f}GB"})
+
+    if not os.path.isdir(JOBS_DIR):
+        return 0
+    for slug in sorted(os.listdir(JOBS_DIR)):
+        # The per-job body is read-modify-write on job.json (state
+        # transitions, byte counters, diffstat strikes) and a pass can take
+        # 15s+; serialize overlapping runs with the job lock, like steer.
+        try:
+            with_lock(slug, lambda: watch_one(slug))
+        except Exception:
+            pass
 
     for e in events:
         print(json.dumps(e), flush=True)

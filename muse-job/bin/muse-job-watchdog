@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """muse-job watchdog: scan active jobs and report anything needing attention.
 
+NOTE: this script is deprecated. `muse-job watch` is the canonical
+implementation and what the cron runs; this standalone script is kept only
+for ad-hoc manual runs and may drift from it.
+
 Findings (one JSON object per line on stdout):
   blocked   - last turn ended BLOCKED: with the question in `detail`
   question  - last turn ended with a question (agent didn't use BLOCKED:)
@@ -39,19 +43,32 @@ def last_event(session_uuid):
         return None
     try:
         with open(p) as f:
-            lines = [l for l in f if l.strip()]
-        return json.loads(lines[-1]) if lines else None
+            lines = f.readlines()
+        # A single corrupt trailing line must not hide all earlier good
+        # events: walk back and return the first parseable one.
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+        return None
     except Exception:
         return None
 
 
 def head_bytes(session_uuid):
+    """Transcript byte count, same source as `muse-job`'s head_info():
+    the .msp-view-v1 HEAD.json for the session."""
     if not session_uuid:
         return 0
-    p = os.path.join(HOME, ".local", "share", "muse", "projects",
-                     session_uuid, "HEAD.json")
+    p = os.path.join(HOME, ".local", "share", "muse", "sessions",
+                     ".msp-view-v1", session_uuid, "HEAD.json")
     try:
-        return os.path.getsize(p)
+        with open(p) as f:
+            return json.load(f).get("source_total_bytes", 0)
     except Exception:
         return 0
 

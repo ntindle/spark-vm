@@ -25,6 +25,15 @@ server's access log on later requests), and Cookie, which is only
 swapped for credentials whose registry placement explicitly names the
 Cookie header ({"custom_header": "Cookie"}).
 
+A registry `placement` on an entry restricts where that entry's value
+may be inserted: "bearer_header" swaps only in an Authorization: Bearer
+header; {"custom_header": name} swaps only in that header;
+{"query_param": name} swaps only in the query string;
+{"url_path_segment": name} swaps only in the URL path. A declared
+placement that does not match the placeholder's location fails closed
+(no swap). An entry with no declared placement swaps anywhere
+(migration).
+
 URL path: swapped per path segment. Segments whose decoded form did not
 change are left byte-identical, so existing percent-escapes (%25, %2F)
 and characters like :/@/~ in unchanged segments survive untouched, and
@@ -64,8 +73,17 @@ are killed via data.server.error unless the host is explicitly
 allowlisted in the SSRF allow file (hostnames or CIDR literals).
 Fresh installs default to deny. On allow, the server address is pinned
 to the resolved IP, so the check and the connect use the same answer:
-no DNS-rebind race. DNS failure fails open (the connect fails on its
-own anyway).
+no DNS-rebind race. DNS failure fails closed: the connection is killed
+and the refusal is audited — a transient resolver failure must never
+become a rebind window. The pre-pinning authority host and the pinned
+IP are stashed on the server connection; the request hook requires the
+authorized host (pretty_host, which comes from the client-controlled
+Host header — mitmproxy itself warns it "may not reflect the actual
+destination as the Host header could be spoofed") to equal that
+authority before ANY swap. A mismatch (CONNECT to evil.example.com
+with an inner Host: api.github.com) refuses all swaps and is audited
+as authority-mismatch with the pinned egress IP, so an exfiltration
+attempt is visible in the log.
 
 Inference mode (SWAP_INFERENCE_MODE=1): a second mitmdump instance for
 obox's LLM calls, with its own secrets dir holding only the provider
@@ -88,12 +106,23 @@ parser has the last word on what a path means. Methods are uppercased.
 A path/method-bound credential never swaps where the method or path
 can't be verified (CONNECT tunnels, websocket messages).
 
+Grants are host-wide, not job-scoped: a grant's `job` field is recorded
+for revoke-by-job and audit, but the swap path deliberately does not
+enforce it — an HTTP request carries no unforgeable job identity, so
+any local process using the proxy can spend any active grant. Do not
+rely on grants for per-job isolation.
+
 Audit: every swap is appended to the log file as
-    ts=<utc> host=<host> swapped=<matched placeholder>
+    ts=<utc> host=<host> swapped=<matched placeholder> ip=<pinned egress ip>
+The audit write is part of authorization: if the audit line cannot be
+durably recorded, the swap is refused — a secret is never released
+without a trail.
 Refused swaps are logged too:
-    ts=<utc> host=<host> refused=hsurr:<name> reason=<why>
+    ts=<utc> host=<host> refused=hsurr:<name> reason=<why> ip=<ip>
 Refused egress is logged as:
     ts=<utc> host=<host> refused=egress reason=private-range ip=<ip>
+An authority mismatch (authorized host != egress authority) is logged as:
+    ts=<utc> host=<host> refused=authority-mismatch authority=<a> ip=<ip>
 Values are NEVER logged. A placeholder seen for a non-allowlisted host
 (including inside base64'd Basic-auth headers) is logged as a warning
 AND as a refused= audit line: it is the only signal that a
@@ -227,6 +256,29 @@ def _path_allowed(norm_path, prefixes):
     return False
 
 
+def _norm_authority(host):
+    """Normalize a hostname for authority comparison: lowercase, strip
+    IPv6 brackets and one trailing dot. Used to compare the authorized
+    host (pretty_host, from the client-controlled Host header) against
+    the actual egress authority."""
+    h = (host or "").lower().strip()
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    return h.rstrip(".")
+
+
+def _auth_location(value):
+    """Swap location for an Authorization header value: Bearer-scheme
+    values are ("header", "authorization:bearer") so a "bearer_header"
+    placement matches only them; anything else is ("header",
+    "authorization"). (Basic-scheme values are decoded and swapped
+    separately in _swap_basic_auth with the :basic location.)"""
+    parts = (value or "").split(None, 1)
+    if parts and parts[0].lower() == "bearer":
+        return ("header", "authorization:bearer")
+    return ("header", "authorization")
+
+
 # ------------------------------------------------------------------ SSRF
 
 # Ranges refused by default (findings 29, 37): RFC 1918 private,
@@ -310,6 +362,8 @@ class SwapAddon:
         self._ssrf_mtime = None
         self._deny_mtime = None
         self._dns_cache = {}
+        self._current_egress_ip = None  # pinned egress IP of the request
+        # currently being swapped (for audit lines); reset per request.
         self._load()
 
     @staticmethod
@@ -337,7 +391,9 @@ class SwapAddon:
         decoded = self._basic_decoded(value)
         if decoded is None:
             return value
-        new_decoded = self._swap_text(decoded, host, method, path)
+        new_decoded = self._swap_text(decoded, host, method, path,
+                                      location=("header",
+                                                "authorization:basic"))
         if new_decoded == decoded:
             return value
         return "Basic " + base64.b64encode(
@@ -605,7 +661,13 @@ class SwapAddon:
         override it. Grants only widen methods and paths within already-
         bound hosts. allowed_methods and allowed_paths are static limits:
         absent means unrestricted (for migration), but an explicit empty
-        list fails closed (finding 41). Returns (ok, reason)."""
+        list fails closed (finding 41). Returns (ok, reason).
+
+        Grants are host-wide, not job-scoped: a grant's `job` field is
+        deliberately NOT checked here. An HTTP request carries no
+        unforgeable job identity, so any local process using the proxy
+        can spend any active grant; `job` exists for revoke-by-job and
+        audit only."""
         reg = getattr(self, "registry", None) or {}
         spec = reg.get(name)
         if not isinstance(spec, dict):
@@ -679,11 +741,54 @@ class SwapAddon:
                     break
         return names
 
-    def _resolve(self, name, entry, host, method=None, path=None):
+    def _placement_allows(self, name, entry, location):
+        """Enforce the registry `placement` for one swap location.
+
+        location is (area, detail): ("header", "<lowercased name>" with
+        ":bearer"/":basic" appended for Authorization), ("query", None),
+        ("path", None), ("body", None). A credential with no declared
+        placement swaps anywhere (migration). A declared placement
+        restricts the swap to its location; anything else fails closed.
+        Unknown placement shapes fail open — never invent a restriction
+        the registry did not declare.
+        """
+        if location is None:
+            return True
+        spec = (getattr(self, "registry", None) or {}).get(name)
+        if not isinstance(spec, dict):
+            return True
+        entry_spec = spec.get(entry if entry is not None else "access_token")
+        if not isinstance(entry_spec, dict):
+            return True
+        placement = entry_spec.get("placement")
+        area, detail = location
+        if isinstance(placement, str):
+            if placement == "bearer_header":
+                return area == "header" and detail == "authorization:bearer"
+            if placement == "url_path_segment":
+                return area == "path"
+            return True
+        if not isinstance(placement, dict) or len(placement) != 1:
+            return True
+        kind, target = next(iter(placement.items()))
+        target = str(target).lower()
+        if kind == "custom_header":
+            # detail may carry a ":bearer"/":basic" suffix for
+            # Authorization; the placement names the header itself.
+            return area == "header" and detail.split(":")[0] == target
+        if kind == "query_param":
+            return area == "query"
+        if kind == "url_path_segment":
+            return area == "path"
+        return True
+
+    def _resolve(self, name, entry, host, method=None, path=None,
+                 location=None):
         """Return the secret value for name/entry on this request, or None
         to leave the placeholder untouched."""
         val = self.secrets.get(name)
         if val is None:
+            self._audit_refused(host, name, "unknown-credential")
             return None
         ok, reason = self._credential_allows_request(name, host, method,
                                                      path)
@@ -697,6 +802,12 @@ class SwapAddon:
             # unbound-host refusal must not produce an approval item.
             if reason in ("method-not-allowed", "path-not-allowed"):
                 self._file_approval(name, host, method, path, reason)
+            return None
+        if not self._placement_allows(name, entry, location):
+            log.warning("swap: refusing swap of %r for %s %s: "
+                        "placement-mismatch (location %r)", name,
+                        method or "?", host, location)
+            self._audit_refused(host, name, "placement-mismatch")
             return None
         if isinstance(val, dict):
             e = entry or "access_token"
@@ -723,12 +834,20 @@ class SwapAddon:
         return None
 
     def _audit(self, host, matched):
+        """Append a swap line to the audit log. Returns True when the
+        line was durably written, False otherwise — the audit write is
+        part of authorization, so callers must treat False as a swap
+        refusal: a secret is never released without a trail."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with LOG_FILE.open("a", encoding="utf-8") as f:
-                f.write("ts=%s host=%s swapped=%s\n" % (ts, host, matched))
+                f.write("ts=%s host=%s swapped=%s ip=%s\n"
+                        % (ts, host, matched,
+                           getattr(self, "_current_egress_ip", None) or "-"))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
+            return False
+        return True
 
     def _audit_refused(self, host, name, reason):
         """Record a placeholder that was deliberately NOT swapped (finding
@@ -736,13 +855,62 @@ class SwapAddon:
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
             with LOG_FILE.open("a", encoding="utf-8") as f:
-                f.write("ts=%s host=%s refused=hsurr:%s reason=%s\n"
-                        % (ts, host, name, reason))
+                f.write("ts=%s host=%s refused=hsurr:%s reason=%s ip=%s\n"
+                        % (ts, host, name, reason,
+                           getattr(self, "_current_egress_ip", None) or "-"))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
+    def _audit_authority_mismatch(self, host, authority, egress_ip):
+        """Record a refused swap batch: the authorized host (from the
+        client-controlled Host header) was not the host the request
+        would actually egress to. The pinned egress IP is recorded so
+        an exfiltration attempt is visible in the log."""
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            with LOG_FILE.open("a", encoding="utf-8") as f:
+                f.write("ts=%s host=%s refused=authority-mismatch "
+                        "authority=%s ip=%s\n"
+                        % (ts, host, authority or "-",
+                           egress_ip or "-"))
+        except OSError as e:
+            log.warning("swap: cannot write audit log: %s", e)
+
+    def _swap_authority(self, flow, req):
+        """The host this request will actually egress to, plus the pinned
+        egress IP (or None).
+
+        Preferred: the pre-pinning authority stashed by server_connect
+        on the server connection — this covers CONNECT tunnels, where
+        request.host comes from the attacker-controlled inner Host
+        header. Fallback: the request's own URI authority, which is
+        what the proxy routes on for a fresh direct connection
+        (server_connect has not fired yet at request time).
+        """
+        server = getattr(flow, "server_conn", None)
+        stashed = getattr(server, "swap_authority_host", None)
+        if stashed:
+            return stashed, getattr(server, "swap_egress_ip", None)
+        return _norm_authority(getattr(req, "host", "")), None
+
+    def _check_authority(self, flow, req, host):
+        """Require the authorized host (pretty_host, from the
+        client-controlled Host header) to equal the host the request
+        will actually egress to, before ANY swap. On mismatch, refuse
+        all swaps and audit the attempt (fail closed). Returns True
+        when swaps may proceed. Also records the pinned egress IP for
+        the audit lines of this request."""
+        authority, egress_ip = self._swap_authority(flow, req)
+        self._current_egress_ip = egress_ip
+        if not authority or _norm_authority(host) != authority:
+            log.warning("swap: refusing swaps for %s: egress authority "
+                        "is %r", host, authority or "-")
+            self._audit_authority_mismatch(host, authority, egress_ip)
+            return False
+        return True
+
     def _swap_text(self, text, host, method=None, path=None, encode=None,
-                   allow=None):
+                   allow=None, location=None):
         """Substitute placeholders in text.
 
         method/path: the request's method and path, for the registry's
@@ -751,25 +919,36 @@ class SwapAddon:
             (e.g. JSON-escaping), never to the surrounding text.
         allow: optional set of credential names permitted to swap; other
             names' placeholders are left untouched (the Cookie policy).
+        location: (area, detail) where the placeholder was found, for
+            registry placement enforcement — ("header", name),
+            ("query", None), ("path", None), ("body", None).
         """
         def repl(m):
             name, entry = m.group(1), m.group(2) or "access_token"
             if allow is not None and name not in allow:
                 return m.group(0)
-            v = self._resolve(name, entry, host, method, path)
+            v = self._resolve(name, entry, host, method, path, location)
             if v is None:
                 return m.group(0)  # unknown name/entry or refused request
-            self._audit(host, m.group(0))
+            if not self._audit(host, m.group(0)):
+                # The audit write is part of authorization: never release
+                # a secret without a durable trail.
+                log.warning("swap: audit failed; refusing swap of %r "
+                            "for %s", name, host)
+                return m.group(0)
             return encode(v) if encode else v
         return PLACEHOLDER_RE.sub(repl, text)
 
-    def _swap_json_text(self, text, host, method=None, path=None):
+    def _swap_json_text(self, text, host, method=None, path=None,
+                        location=("body", None)):
         """Substitute placeholders in a JSON body, JSON-escaping each value
         so quotes/backslashes in a secret can't break the document."""
         return self._swap_text(
-            text, host, method, path, encode=lambda v: json.dumps(v)[1:-1])
+            text, host, method, path, encode=lambda v: json.dumps(v)[1:-1],
+            location=location)
 
-    def _swap_urlencoded(self, text, host, method=None, path=None):
+    def _swap_urlencoded(self, text, host, method=None, path=None,
+                         location=("body", None)):
         """Swap percent-encoded placeholders (hsurr%3A<name>) found in
         application/x-www-form-urlencoded bodies. Substituted values are
         re-encoded so reserved characters can't corrupt the form. Used as
@@ -777,15 +956,19 @@ class SwapAddon:
         is _swap_form_body."""
         def repl(m):
             name, entry = m.group(1), m.group(2) or "access_token"
-            v = self._resolve(name, entry, host, method, path)
+            v = self._resolve(name, entry, host, method, path, location)
             if v is None:
                 return m.group(0)  # unknown name/entry: leave untouched
-            self._audit(host, "hsurr:%s%s"
-                        % (name, (":" + entry) if m.group(2) else ""))
+            if not self._audit(host, "hsurr:%s%s"
+                               % (name, (":" + entry) if m.group(2) else "")):
+                log.warning("swap: audit failed; refusing swap of %r "
+                            "for %s", name, host)
+                return m.group(0)
             return urllib.parse.quote(v, safe="")
         return ENCODED_PLACEHOLDER_RE.sub(repl, text)
 
-    def _swap_form_body(self, text, host, method=None, path=None):
+    def _swap_form_body(self, text, host, method=None, path=None,
+                        location=("body", None)):
         """Swap placeholders in an application/x-www-form-urlencoded body.
 
         The body is parsed as a form, placeholder values are swapped, and
@@ -795,11 +978,13 @@ class SwapAddon:
         (curl/requests style) work too. Bodies with no swappable fields
         fall back to the encoded-placeholder regex."""
         pairs = urllib.parse.parse_qsl(text, keep_blank_values=True)
-        new_pairs = [(k, self._swap_text(v, host, method, path))
+        new_pairs = [(k, self._swap_text(v, host, method, path,
+                                         location=location))
                      for k, v in pairs]
         if new_pairs != pairs:
             return urllib.parse.urlencode(new_pairs)
-        return self._swap_urlencoded(text, host, method, path)
+        return self._swap_urlencoded(text, host, method, path,
+                                     location=location)
 
     # ------------------------------------------------------------------
     def _warn_if_placeholder(self, flow, host):
@@ -851,8 +1036,9 @@ class SwapAddon:
         mitmproxy's asyncio loop, and a slow resolver must not stall
         every connection through both proxies.
 
-        Returns None on DNS failure: fail open, since the request cannot
-        complete upstream anyway.
+        Returns None on DNS failure; the caller (server_connect) fails
+        closed on None — a transient resolver failure must never become
+        a rebind window.
         """
         now = time.time()
         cached = self._dns_cache.get(host)
@@ -937,7 +1123,15 @@ class SwapAddon:
             return
         ips = await self._resolve_ips(host)
         if ips is None:
-            return  # DNS failure fails open; the connect fails on its own
+            # DNS failure fails closed: without a resolved answer there
+            # is nothing to pin, and a later re-resolution inside
+            # mitmproxy would reintroduce the rebind race the pinning
+            # was built to kill.
+            log.warning("swap: refusing egress to %s: dns-resolution-failed",
+                        host)
+            self._audit_ssrf_refused(host, "-", "dns-resolution-failed")
+            server.error = "swap-proxy: egress refused (dns-resolution-failed)"
+            return
         allowed_ip, refused_ip = None, None
         for ip in ips:
             parsed = _normalize_ip(ip)
@@ -964,12 +1158,25 @@ class SwapAddon:
         try:
             server.address = (allowed_ip, addr[1])
         except Exception as e:
+            # Pinning failure fails closed: without the pin, mitmproxy
+            # re-resolves the hostname itself — unchecked, unpinned,
+            # rebindable.
             log.warning("swap: could not pin server address for %s: %s",
                         host, e)
+            self._audit_ssrf_refused(host, allowed_ip, "pinning-failed")
+            server.error = "swap-proxy: egress refused (pinning-failed)"
+            return
+        # Stash the pre-pinning authority and the pinned IP for the
+        # request hook's authority check: pretty_host comes from the
+        # client-controlled Host header and must equal the host the
+        # request actually egresses to before any swap happens.
+        server.swap_authority_host = _norm_authority(host)
+        server.swap_egress_ip = allowed_ip
 
     def _swap_headers(self, req, host, method=None, path=None):
         # headers: never swap Referer/Origin; Cookie only when a registry
-        # placement explicitly names the Cookie header
+        # placement explicitly names the Cookie header. Each header
+        # carries its swap location for placement enforcement.
         for key in list(req.headers.keys()):
             kl = key.lower()
             if kl in NEVER_SWAP_HEADERS:
@@ -979,16 +1186,19 @@ class SwapAddon:
                 new_vals = [self._swap_basic_auth(v, host, method, path)
                             for v in vals]
                 # fall back to plain-text swap (e.g. Bearer <placeholder>)
-                new_vals = [self._swap_text(v, host, method, path)
+                new_vals = [self._swap_text(v, host, method, path,
+                                            location=_auth_location(v))
                             if nv == v else nv
                             for v, nv in zip(vals, new_vals)]
             elif kl == "cookie":
                 allowed = self._cookie_swap_names()
                 new_vals = [self._swap_text(v, host, method, path,
-                                            allow=allowed)
+                                            allow=allowed,
+                                            location=("header", "cookie"))
                             for v in vals]
             else:
-                new_vals = [self._swap_text(v, host, method, path)
+                new_vals = [self._swap_text(v, host, method, path,
+                                            location=("header", kl))
                             for v in vals]
             if new_vals != vals:
                 req.headers.set_all(key, new_vals)
@@ -1005,12 +1215,17 @@ class SwapAddon:
 
     def request(self, flow):
         self._maybe_reload()
+        self._current_egress_ip = None
         req = flow.request
         host = req.pretty_host
         # Egress is guarded in server_connect (before the TCP connect);
         # here we only gate swapping on the hosts file.
         if not self._host_allowed(host):
             self._warn_if_placeholder(flow, host)
+            return
+        # The Host header is client-controlled: refuse all swaps unless
+        # it names the host the request will actually egress to.
+        if not self._check_authority(flow, req, host):
             return
         method = getattr(req, "method", None)
         path = getattr(req, "path", "/")
@@ -1021,7 +1236,8 @@ class SwapAddon:
         # query string (percent-decoded values; re-encoded on assignment)
         q_items = list(req.query.items(multi=True))
         if q_items:
-            new_q = [(k, self._swap_text(v, host, method, path))
+            new_q = [(k, self._swap_text(v, host, method, path,
+                                         location=("query", None)))
                      for k, v in q_items]
             query_changed = new_q != q_items
         else:
@@ -1036,7 +1252,8 @@ class SwapAddon:
         path_changed = False
         for seg in segments:
             dec = urllib.parse.unquote(seg)
-            new_dec = self._swap_text(dec, host, method, path)
+            new_dec = self._swap_text(dec, host, method, path,
+                                      location=("path", None))
             if new_dec != dec:
                 path_changed = True
                 new_segments.append(urllib.parse.quote(new_dec, safe=""))
@@ -1060,14 +1277,18 @@ class SwapAddon:
             elif "application/x-www-form-urlencoded" in ctype:
                 new_text = self._swap_form_body(text, host, method, path)
             else:
-                new_text = self._swap_text(text, host, method, path)
+                new_text = self._swap_text(text, host, method, path,
+                                           location=("body", None))
             if new_text != text:
                 req.content = new_text.encode("utf-8")
 
     def websocket_message(self, flow):
         self._maybe_reload()
+        self._current_egress_ip = None
         host = flow.request.pretty_host if flow.request else ""
         if not self._host_allowed(host):
+            return
+        if not self._check_authority(flow, flow.request, host):
             return
         if self.inference_mode:
             return  # never: page content must not traverse insertion
@@ -1081,7 +1302,7 @@ class SwapAddon:
             text = msg.content.decode("utf-8")
         except UnicodeDecodeError:
             return
-        new_text = self._swap_text(text, host)
+        new_text = self._swap_text(text, host, location=("body", None))
         if new_text != text:
             msg.content = new_text.encode("utf-8")
 

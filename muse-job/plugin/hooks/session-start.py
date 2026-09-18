@@ -26,12 +26,17 @@ def main():
         path = os.path.join(regdir, sid + ".json")
         if os.path.exists(path):
             return
+        # Store only what the manager reads: session id, cwd, model, and tool
+        # names (for main-session detection). The full PreLLMCall payload
+        # can contain message text previews and must not be persisted.
+        tools = d.get("tools") or []
         rec = {
             "session_id": sid,
             "cwd": d.get("cwd"),
             "model": d.get("model"),
             "first_seen": time.time(),
-            "payload": d,
+            "tools": [{"name": t.get("name")} for t in tools
+                      if isinstance(t, dict)],
         }
         tmp = path + ".tmp"
         with open(tmp, "w") as f:

@@ -87,7 +87,7 @@ class GrantChannelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(sa, "APPROVALS_DIR", Path(tmp)):
                 a = make_addon()
-                a._audit = lambda host, matched: None
+                a._audit = lambda host, matched: True
                 filed = []
                 a._file_approval = lambda n, h, m, p, r: filed.append(r)
                 # Simulate the _resolve refusal path for unbound-host.
@@ -113,7 +113,7 @@ class GrantChannelTests(unittest.TestCase):
             with mock.patch.object(sa, "APPROVALS_DIR", Path(tmp)):
                 with mock.patch.object(sa, "APPROVALS_ENABLED", True):
                     a = make_addon()
-                    a._audit = lambda host, matched: None
+                    a._audit = lambda host, matched: True
                     a._file_approval("github", "github.com",
                                      "POST", "/gists", "method-not-allowed")
                     a._file_approval("github", "github.com",
@@ -128,7 +128,7 @@ class GrantChannelTests(unittest.TestCase):
             with mock.patch.object(sa, "APPROVALS_DIR", Path(tmp)):
                 with mock.patch.object(sa, "APPROVALS_ENABLED", True):
                     a = make_addon()
-                    a._audit = lambda host, matched: None
+                    a._audit = lambda host, matched: True
                     pending_dir = Path(tmp) / "pending"
                     pending_dir.mkdir(exist_ok=True)
                     # Pre-seed 5 items with old timestamps (bypasses the
@@ -185,7 +185,7 @@ class GrantChannelTests(unittest.TestCase):
             with mock.patch.object(sa, "APPROVALS_DIR", Path(tmp)):
                 with mock.patch.object(sa, "APPROVALS_ENABLED", False):
                     a = make_addon()
-                    a._audit = lambda host, matched: None
+                    a._audit = lambda host, matched: True
                     a._file_approval("github", "github.com",
                                      "POST", "/", "method-not-allowed")
                     pending_dir = Path(tmp) / "pending"

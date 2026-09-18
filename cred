@@ -9,8 +9,10 @@ This CLI reaches that store ONLY through narrow sudo helpers:
   cred get <name>     print a secret to stdout (no trailing newline).
                       For the HUMAN and for local scripts. The agent's
                       standing policy is to never invoke this.
+                      -> sudo -u swapd /usr/local/bin/cred-store-get <name>
   cred list           list stored credential names (never values)
   cred delete <name>  delete a stored credential
+                      -> sudo -u swapd /usr/local/bin/cred-store-delete <name>
   cred register <name> [--entry <entry>] [--placement <spec>]
                       [--host <h>]...
                       record a credential's request placement in the registry,
@@ -175,7 +177,7 @@ def cmd_get(args):
     if len(args) != 1:
         raise CredentialError("usage: cred get <name>")
     name = check_name(args[0])
-    p = run_as_swapd(["/usr/bin/cat", "%s/%s" % (STORE, name)])
+    p = run_as_swapd(["/usr/local/bin/cred-store-get", name])
     if p.returncode != 0:
         raise CredentialNotFound(name)
     sys.stdout.buffer.write(p.stdout)
@@ -195,9 +197,9 @@ def cmd_delete(args):
     if len(args) != 1:
         raise CredentialError("usage: cred delete <name>")
     name = check_name(args[0])
-    p = run_as_swapd(["/usr/bin/rm", "%s/%s" % (STORE, name)])
+    p = run_as_swapd(["/usr/local/bin/cred-store-delete", name])
     if p.returncode != 0:
-        raise CredentialNotFound(name)
+        raise CredentialError("delete failed: %s" % p.stderr.decode().strip()[-200:])
     print("deleted '%s'" % name)
 
 

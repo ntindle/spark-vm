@@ -16,13 +16,46 @@ cd "$REPO"
 
 echo "=== spark-vm deploy from $REPO ==="
 
+# --- 0. preflight: validate everything BEFORE touching the box --------
+echo "[0/7] Preflight (no mutations yet)..."
+for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
+         proxy/cred-registry-set proxy/cred-registry-set-inference \
+         proxy/cred-store-set proxy/cred-store-set-inference \
+         proxy/cred-store-get proxy/cred-store-delete \
+         proxy/with-proxy proxy/ssrf.deny proxy/sudoers-swapd \
+         proxy/swap-proxy.service proxy/swap-inference.service \
+         confirm/confirmd.py confirm/confirm-request confirm/confirmd.service; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR: required repo file missing: $f — aborting before any mutation"
+        exit 1
+    fi
+done
+python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py \
+    || { echo "ERROR: python syntax check failed — aborting"; exit 1; }
+
 # --- 1. Python addons and scripts ---------------------------------------
 echo "[1/7] Installing proxy files to /home/swapd..."
 sudo install -o swapd -g swapd -m 0644 proxy/swap_addon.py /home/swapd/swap_addon.py
 sudo install -o swapd -g swapd -m 0755 proxy/grant-writer /home/swapd/grant-writer
 sudo install -o root -g root -m 0755 proxy/cred-grant-revoke /usr/local/bin/cred-grant-revoke
-sudo install -o root -g root -m 0755 proxy/cred-registry-set /usr/local/bin/cred-registry-set 2>/dev/null || true
-sudo install -o root -g root -m 0755 proxy/cred-registry-set-inference /usr/local/bin/cred-registry-set-inference 2>/dev/null || true
+sudo install -o root -g root -m 0755 proxy/cred-registry-set /usr/local/bin/cred-registry-set
+sudo install -o root -g root -m 0755 proxy/cred-registry-set-inference /usr/local/bin/cred-registry-set-inference
+sudo install -o root -g root -m 0755 proxy/cred-store-set /usr/local/bin/cred-store-set
+sudo install -o root -g root -m 0755 proxy/cred-store-set-inference /usr/local/bin/cred-store-set-inference
+sudo install -o root -g root -m 0755 proxy/cred-store-get /usr/local/bin/cred-store-get
+sudo install -o root -g root -m 0755 proxy/cred-store-delete /usr/local/bin/cred-store-delete
+# Verify the security-critical writers landed root-owned 0755. Any
+# install failure above aborts via set -e; this guards against silent
+# drift (a stale or tampered /usr/local/bin).
+for f in cred-registry-set cred-registry-set-inference cred-store-set \
+         cred-store-set-inference cred-store-get cred-store-delete \
+         cred-grant-revoke; do
+    got="$(stat -c '%U:%a' "/usr/local/bin/$f")"
+    if [ "$got" != "root:755" ]; then
+        echo "ERROR: /usr/local/bin/$f has owner:mode $got, expected root:755 — aborting before any service restart"
+        exit 1
+    fi
+done
 
 # --- 2. confirmd ---------------------------------------------------------
 echo "[2/7] Installing confirmd..."
@@ -62,8 +95,18 @@ echo "[4b/7] Building the with-proxy CA bundle and installing with-proxy..."
 # The swapd CA is not in the host store; with-proxy uses system CAs plus
 # the swapd CA cert. Rebuilt on every deploy so a rotated CA is picked up.
 sudo mkdir -p /usr/local/share/with-proxy-ca
-sudo sh -c 'cat /etc/ssl/certs/ca-certificates.crt /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem > /usr/local/share/with-proxy-ca/ca-bundle.crt'
-sudo chmod 0644 /usr/local/share/with-proxy-ca/ca-bundle.crt
+if sudo test -f /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem; then
+    sudo sh -c 'cat /etc/ssl/certs/ca-certificates.crt /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem > /usr/local/share/with-proxy-ca/ca-bundle.crt'
+    sudo chmod 0644 /usr/local/share/with-proxy-ca/ca-bundle.crt
+else
+    # First-time deploy: the proxy has never run, so it has not generated
+    # its CA yet. Skip the bundle LOUDLY rather than aborting mid-deploy;
+    # the restart below starts the proxy, which generates the CA, and the
+    # next deploy (or a manual re-run of this step) builds the bundle.
+    # Until then with-proxy refuses to run (it checks for the bundle).
+    echo "WARNING: /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem missing (first deploy?)"
+    echo "WARNING: skipping CA bundle; re-run deploy.sh after the proxy has started once"
+fi
 sudo install -o root -g root -m 0755 proxy/with-proxy /usr/local/bin/with-proxy
 
 # --- 5. systemd units (finding 66) -----------------------------------------
@@ -74,12 +117,22 @@ sudo install -o root -g root -m 0644 confirm/confirmd.service /etc/systemd/syste
 
 # --- 6. sudoers -------------------------------------------------------------
 echo "[6/7] Installing sudoers..."
-sudo install -o root -g root -m 0440 proxy/sudoers-swapd /etc/sudoers.d/swapd
-sudo visudo -c -f /etc/sudoers.d/swapd
+# Validate BEFORE installing: a bad sudoers file must never go live.
+# Write to a temp root-owned file, visudo-check it, then move it over
+# the real path atomically.
+tmp_sudoers="$(sudo mktemp /etc/sudoers.d/.swapd.XXXXXX)"
+sudo install -o root -g root -m 0440 proxy/sudoers-swapd "$tmp_sudoers"
+if ! sudo visudo -c -f "$tmp_sudoers"; then
+    echo "ERROR: sudoers validation failed — not installing"
+    sudo rm -f "$tmp_sudoers"
+    exit 1
+fi
+sudo mv -f "$tmp_sudoers" /etc/sudoers.d/swapd
 
 # --- 7. daemon-reload and restart (finding 66) -------------------------------
 echo "[7/7] Reloading systemd and restarting services..."
 sudo systemctl daemon-reload
+sudo systemctl enable swap-proxy.service swap-inference.service confirmd.service
 sudo systemctl restart swap-proxy.service
 sudo systemctl restart swap-inference.service
 sudo systemctl restart confirmd.service
