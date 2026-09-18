@@ -45,17 +45,25 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 # --- never commit secrets: scan staged contents for secret-shaped values ---
 # git grep --cached scans the *staged* blobs (not the working tree), handles
 # filenames with spaces, and --diff-filter=ACM skips deleted files.
-SECRET_RE='(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|LLM_[0-9]{3,}_[A-Za-z0-9-]{16,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|xox[bap]-)'
+SECRET_RE='(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{36}|ghu_[A-Za-z0-9]{36}|ghs_[A-Za-z0-9]{36}|ghr_[A-Za-z0-9]{36}|glpat-[A-Za-z0-9_-]{20,}|hf_[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|LLM_[0-9]{3,}_[A-Za-z0-9-]{16,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|xox[bap]-)'
 scan_secrets() {
     git grep -nEi -e "$SECRET_RE" --cached -- . 2>/dev/null || true
+}
+
+# Print file:line only — never the matched content (echoing even a
+# "redacted" secret is still an exposure; git grep -n emits path:lineno:content).
+report_leak() {
+    echo "$1" | cut -d: -f1,2 | sed 's/^/  /'
 }
 
 MSG="${1:-update from spark-vm $(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 
 # --- dry run: stage into a throwaway index, report, change nothing ---
 if (( DRY_RUN )); then
-    TMPIDX="$(mktemp -u)"
-    trap 'rm -f "$TMPIDX"' EXIT
+    # Race-free temp index: mktemp -d is atomic; the index file lives inside.
+    TMPDIR_IDX="$(mktemp -d)"
+    TMPIDX="$TMPDIR_IDX/index"
+    trap 'rm -rf "$TMPDIR_IDX"' EXIT
     GIT_INDEX_FILE="$TMPIDX" git add -A
     STAGED="$(GIT_INDEX_FILE="$TMPIDX" git diff --cached --name-only --diff-filter=ACM)"
     if [ -z "$STAGED" ]; then
@@ -70,7 +78,7 @@ if (( DRY_RUN )); then
         LEAK="$(GIT_INDEX_FILE="$TMPIDX" scan_secrets)"
         if [ -n "$LEAK" ]; then
             echo "dry-run: REFUSED — secret-shaped values found (same as a real run):" >&2
-            echo "$LEAK" | sed 's/=.*/=<redacted>/;s/^/  /' >&2
+            report_leak "$LEAK" >&2
             exit 1
         fi
         echo "dry-run: secret scan clean."
@@ -92,7 +100,7 @@ if [ -n "$STAGED" ]; then
     LEAK="$(scan_secrets)"
     if [ -n "$LEAK" ]; then
         echo "Refusing to push: secret-shaped values found in staged changes:" >&2
-        echo "$LEAK" | sed 's/=.*/=<redacted>/' >&2
+        report_leak "$LEAK" >&2
         exit 1
     fi
 fi
