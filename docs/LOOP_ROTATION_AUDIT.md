@@ -59,9 +59,11 @@ adjacent files — conflict risk grows every unmerged hour.
 
 **F3 — Marketing is outrunning the product's maturity.** The marketing
 archetype has shipped a publish-ready launch post (#36) and positioning copy
-(#28) for a hosted product whose launch decision is still in NEEDS_USER.md
-(hosting + domain, billing, abuse controls all unresolved). Announcement copy
-written before the announcement decision is speculative inventory.
+(#28) for a hosted product whose launch decisions are taken but execution is
+incomplete (sparkvm.dev purchased 2026-09-18, billing decided as
+no-free-tier-at-launch — yet provider choice, abuse-control implementation,
+and actual launch readiness all remain open in NEEDS_USER.md). Announcement
+copy written before the launch is executable is speculative inventory.
 
 **F4 — Strategy docs are piling onto an unmerged base.** Eight strategy PRs
 in ~8h, seven still open. Several cite each other (#36 cites POSITIONING.md
@@ -103,11 +105,12 @@ main with a concrete "rebase needed" note in RUNLOG. Merge decisions stay
 the operator's; hygiene becomes someone's job.
 
 **P3 — Gate the marketing archetype on launch-readiness.** Until the
-hosted-launch decision items in NEEDS_USER.md (hosting + domain, billing,
-abuse controls) are resolved, marketing turns ship contributor-facing assets
+hosted-launch execution items in NEEDS_USER.md (provider choice,
+abuse-control implementation, sentinel, actual launch readiness) are
+resolved, marketing turns ship contributor-facing assets
 only: demo GIFs, README polish, changelog highlights, musebook updates. No
 new publish-ready announcement or pricing-as-commitment copy. When the launch
-decision lands, the gate lifts automatically.
+is executable, the gate lifts automatically.
 
 **P4 — Cap unmerged strategy docs (merge-pressure valve).** If ≥ 8 strategy
 PRs are open with no merge since the last strategy turn, the next strategy
