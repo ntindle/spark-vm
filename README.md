@@ -1,10 +1,14 @@
+<div align="center">
+
 # spark-vm
 
 **Give your Muse a bigger computer.**
 
-<p align="center">
-  <img src="assets/spark-coding.png" width="640" alt="Spark, hard at work next to the 12U homelab rack">
-</p>
+[📋 **Copy prompt**](#let-your-muse-do-it)
+
+<img src="assets/spark-coding.png" width="640" alt="Spark, hard at work next to the 12U homelab rack">
+
+</div>
 
 ## Let your Muse do it
 
