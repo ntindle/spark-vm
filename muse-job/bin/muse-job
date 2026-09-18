@@ -32,6 +32,17 @@ HOME = os.path.expanduser("~")
 JOBS_DIR = os.path.join(HOME, "muse-jobs")
 REPOS_DIR = os.path.join(HOME, "repos")
 EVENTS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "events")
+
+# Mirrors the hooks' _SID_RE (plugin/hooks/stop.py and session-start.py):
+# session uuids are agent-writable (issue #11), so every manager-side use
+# that builds a filesystem path from job["session_uuid"] must refuse
+# values outside this whitelist. Without it a forged uuid ("../../x",
+# "a/b") steers event/view reads outside EVENTS_DIR / VIEW_DIR,
+# corrupting the liveness and done-claim signals this tool exists to
+# harden (arch review round 3). The three sinks below fail closed on a
+# non-matching uuid; watch_one also pages needs-attention, since a
+# plantable latch in job.json would let the agent silence it permanently.
+_UUID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 SESSIONS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
 SESSION_INDEX = os.path.join(HOME, ".local", "share", "muse", "session-index.db")
 VIEW_DIR = os.path.join(HOME, ".local", "share", "muse", "sessions", ".msp-view-v1")
@@ -523,6 +534,8 @@ def maybe_adopt_session(job, slug):
 
 
 def head_info(uuid):
+    if not _UUID_RE.match(uuid or ""):
+        return None, 0  # forged uuid: refuse to read outside VIEW_DIR
     p = os.path.join(VIEW_DIR, uuid, "HEAD.json")
     try:
         with open(p) as f:
@@ -539,6 +552,8 @@ def _iter_events(uuid):
     a symlink so hook appends corrupt another job's state -- reading through
     it would follow the link. The caller pages `events-tampered` for that.
     """
+    if not _UUID_RE.match(uuid or ""):
+        return  # forged uuid: refuse to read outside EVENTS_DIR
     p = os.path.join(EVENTS_DIR, uuid + ".jsonl")
     try:
         if os.path.islink(p):
@@ -559,6 +574,8 @@ def _iter_events(uuid):
 
 def event_file_symlinked(uuid):
     """True when the session's event file is a symlink (tampering, issue #3)."""
+    if not _UUID_RE.match(uuid or ""):
+        return False  # malformed uuid gets its own needs-attention signal
     try:
         return os.path.islink(os.path.join(EVENTS_DIR, uuid + ".jsonl"))
     except OSError:
@@ -1098,6 +1115,16 @@ def cmd_watch(args):
                                "detail": attention})
 
         uuid = job.get("session_uuid")
+        if uuid and not _UUID_RE.match(uuid):
+            # Agent-writable field (issue #11): a forged uuid must not steer
+            # event/view reads outside their dirs (arch review round 3). The
+            # sinks above fail closed on it; say so loudly, every pass while
+            # it holds -- the same plantable-latch reasoning as events-tampered.
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": "recorded session uuid is malformed; "
+                           "refusing to read event paths (possible job.json "
+                           "tampering)"})
+            uuid = None
 
         # Issue #3: a symlinked event file is tampering, not silence. Page it
         # on every pass while the condition holds (fail loud). An earlier

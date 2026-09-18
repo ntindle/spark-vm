@@ -303,6 +303,50 @@ def test_session_end_hook_skips_missing_session_id(tmp_path):
 
 # --- review round 2: slug pinning (security blocker 1) -----------------------
 
+# --- arch review round 3: session_uuid whitelist (path-steering) ----------------
+
+def test_event_paths_refuse_malformed_uuid(cli, tmp_path):
+    """A forged job['session_uuid'] must never steer manager-side event/view
+    reads outside EVENTS_DIR / VIEW_DIR (arch round-3 blocker)."""
+    jd, job = make_job_dir(cli)
+    # A decoy "event file" outside the events dir a traversal could reach.
+    outside = tmp_path / "evil.jsonl"
+    outside.write_text(json.dumps({"event": "stop", "state": "done"}) + "\n")
+    job["session_uuid"] = "../evil"
+    assert cli.head_info(job["session_uuid"]) == (None, 0)
+    assert list(cli._iter_events(job["session_uuid"])) == []
+    assert cli.event_file_symlinked(job["session_uuid"]) is False
+    assert cli.last_event(job["session_uuid"]) is None
+    job["session_uuid"] = "a/b"
+    assert list(cli._iter_events(job["session_uuid"])) == []
+    assert cli.head_info(job["session_uuid"]) == (None, 0)
+    # Legit uuids still read normally.
+    good = "abcDEF_-0123"
+    evf = os.path.join(cli.EVENTS_DIR, good + ".jsonl")
+    os.makedirs(cli.EVENTS_DIR, exist_ok=True)
+    with open(evf, "w") as f:
+        f.write(json.dumps({"event": "stop", "state": "idle"}) + "\n")
+    assert cli.last_event(good)["state"] == "idle"
+
+
+def test_watch_flags_malformed_uuid(cli, monkeypatch, capsys):
+    """watch_one pages needs-attention (every pass) on a malformed recorded
+    uuid instead of feeding it to event-path reads (arch round-3 blocker)."""
+    jd, job = make_job_dir(cli)
+    job["session_uuid"] = "../../x"
+    job["state"] = "active"
+    job["session_started_at"] = time.time() - 7200
+    cli.save_job(job, "demo")
+    monkeypatch.setattr(cli, "tmux_alive", lambda slug: True)
+    cli.cmd_watch(argparse.Namespace())
+    lines = [json.loads(l) for l in capsys.readouterr().out.splitlines()
+             if l.strip()]
+    malformed = [e for e in lines
+                 if e.get("signal") == "needs-attention"
+                 and "malformed" in e.get("detail", "")]
+    assert malformed and malformed[0]["job"] == "demo", lines
+
+
 def test_load_job_pins_slug(cli):
     """A forged "slug" in job.json is pinned to the manager-side slug on
     load, so save_job / job_status / verify_done_event can never write to
