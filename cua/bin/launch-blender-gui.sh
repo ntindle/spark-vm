@@ -5,4 +5,4 @@
 # unset both so Blender uses pure X11 on :98.
 unset XDG_RUNTIME_DIR WAYLAND_DISPLAY
 export GDK_BACKEND=x11 XDG_SESSION_TYPE=x11
-exec /home/ntindle/bin/blender /home/ntindle/cua/demo.blend
+exec $HOME/bin/blender $HOME/cua/demo.blend

@@ -6,12 +6,12 @@
 # NOTE: spark-vm's GNOME session runs on Wayland (not drivable by the X11
 # driver) and BlenderMCP owns Xvfb :99 — this stack uses a separate :98.
 set -u
-export PATH="/home/ntindle/cua/bin:/usr/local/bin:/usr/bin:/bin"
+export PATH="$HOME/cua/bin:/usr/local/bin:/usr/bin:/bin"
 
 RUNDIR=/tmp/cua-desktop
 DISPLAY_NUM=98
-SOCK="/home/ntindle/.cache/cua-driver/cua-driver.sock"
-DRIVER_BIN="/home/ntindle/cua/bin/cua-driver"
+SOCK="$HOME/.cache/cua-driver/cua-driver.sock"
+DRIVER_BIN="$HOME/cua/bin/cua-driver"
 
 mkdir -p "$RUNDIR"
 
@@ -51,7 +51,7 @@ do_start() {
   # Wayland-probing environment and crash), and every GTK app needs
   # GDK_BACKEND=x11 (see start-xfce.sh) or xfce4-panel segfaults in libwnck.
   # Openbox remains as a manual fallback only.
-  "/home/ntindle/cua/bin/start-xfce.sh" >/dev/null 2>&1
+  "$HOME/cua/bin/start-xfce.sh" >/dev/null 2>&1
   # 4. cua-driver daemon
   if ! "$DRIVER_BIN" status >/dev/null 2>&1; then
     setsid "$DRIVER_BIN" serve --socket "$SOCK" >"$RUNDIR/driver.log" 2>&1 < /dev/null &

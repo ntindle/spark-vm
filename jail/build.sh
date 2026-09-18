@@ -13,7 +13,7 @@
 #   - no DNS in the jail (name resolution happens in the host proxy);
 #     direct-IP/UDP/ping/git-over-SSH do not work by design
 #
-# Run on the host as ntindle (passwordless sudo). Re-running is safe:
+# Run on the host as the agent user (passwordless sudo). Re-running is safe:
 # the rootfs step is skipped when present (pass --rebuild-rootfs to
 # force), everything else is re-applied idempotently.
 set -euo pipefail
@@ -286,7 +286,7 @@ $SUDO rm -f /tmp/swapd-mitmproxy.crt
 say "agent user $JAIL_USER"
 # The agent's SSH public key. Copy the agent's id_ed25519.pub to this
 # path on the host before running (override with PUBKEY_FILE=...).
-PUBKEY_FILE="${PUBKEY_FILE:-/home/ntindle/agent-jail.pub}"
+PUBKEY_FILE="${PUBKEY_FILE:-$HOME/agent-jail.pub}"
 PUBKEY="$(cat "$PUBKEY_FILE")"
 # All guest-side setup runs inside run_guest (heredoc via stdin, quoted
 # so nothing expands on the host; $1/$2 are passed as arguments).

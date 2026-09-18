@@ -24,7 +24,8 @@ import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-DRIVER = "/home/ntindle/cua/bin/cua-driver"
+_HOME = os.path.expanduser("~")
+DRIVER = os.path.join(_HOME, "cua/bin/cua-driver")
 ENV_FILE = "/tmp/cua-desktop/env"
 PORT = 18731
 
@@ -46,7 +47,7 @@ if os.path.exists(ENV_FILE):
         if line.startswith("export "):
             k, _, v = line[len("export "):].partition("=")
             BASE_ENV[k] = v
-BASE_ENV["PATH"] = "/home/ntindle/cua/bin:" + BASE_ENV.get("PATH", "")
+BASE_ENV["PATH"] = os.path.join(_HOME, "cua/bin") + ":" + BASE_ENV.get("PATH", "")
 # Force the X11 backend: without this, GTK apps on :98 probe the Wayland
 # socket in XDG_RUNTIME_DIR (the GNOME session's) and misbehave/crash.
 BASE_ENV["GDK_BACKEND"] = "x11"
@@ -60,10 +61,10 @@ BASE_ENV.pop("WAYLAND_DISPLAY", None)
 LAUNCH_ALLOWLIST = {
     "xterm": ["xterm", "-geometry", "100x30+40+40"],
     "terminal": ["xfce4-terminal", "--geometry=100x30+40+40"],
-    "chromium": ["/home/ntindle/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome",
+    "chromium": [os.path.join(_HOME, ".cache/ms-playwright/chromium-1234/chrome-linux64/chrome"),
                  "--no-sandbox", "--disable-dev-shm-usage",
                  "--window-size=1260,740", "--window-position=10,30"],
-    "blender": ["/home/ntindle/cua/bin/launch-blender-gui.sh"],
+    "blender": [os.path.join(_HOME, "cua/bin/launch-blender-gui.sh")],
 }
 
 

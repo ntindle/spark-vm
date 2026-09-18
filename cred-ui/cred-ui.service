@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/ntindle/spark-vm/cred-ui/cred-ui.py
+ExecStart=/usr/bin/python3 %h/spark-vm/cred-ui/cred-ui.py
 Restart=on-failure
 RestartSec=5
 # No secret values ever pass through here; the UI only writes via the

@@ -8,7 +8,7 @@ Maps the subagent/browser interaction pattern (async dispatch, steer
 channel, question channel, introspection, lifecycle) onto today's reality:
 tmux TUI sessions + the muse-job plugin's hook events on spark-vm.
 
-All box I/O goes through ~/workspace/bin/box.sh (SSH as ntindle).
+All box I/O goes through ~/workspace/bin/box.sh (SSH as the agent user).
 """
 import json
 import os
@@ -18,7 +18,7 @@ import subprocess
 import time
 
 BOX = os.path.expanduser("~/workspace/bin/box.sh")
-REMOTE_JOB = "/home/ntindle/bin/muse-job"
+REMOTE_JOB = "$HOME/bin/muse-job"
 REMOTE_TMUX = "tmux"
 
 

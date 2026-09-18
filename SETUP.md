@@ -1,10 +1,10 @@
 # spark-vm — dev workhorse setup
 
 Hostname `spark-vm`, Ubuntu 24.04.5 LTS (kernel 7.0.0-31-generic), 8 vCPU,
-15 GB RAM, 250 GB disk. Tailnet IP `100.65.241.20`, user `ntindle`
+15 GB RAM, 250 GB disk. Tailnet IP `100.65.241.20`, user `spark`
 (passwordless sudo). Set up 2026-09-14.
 
-Agent access: SSH as `ntindle` over the Tailscale TCP proxy; a persistent
+Agent access: SSH as `spark` over the Tailscale TCP proxy; a persistent
 multiplexed master keeps connections approval-free. Network, SSH, and
 Tailscale configuration were deliberately left untouched.
 
@@ -20,18 +20,18 @@ Tailscale configuration were deliberately left untouched.
 | pip | 24.0 | |
 | node | v22.23.2 | |
 | npm | 10.9.8 | |
-| docker | 29.1.3 (Ubuntu repo build `29.1.3-0ubuntu3~24.04.2`) | daemon verified via `docker run --rm hello-world`; `ntindle` is in the `docker` group, no sudo needed |
-| playwright | 1.62.0 | in `/home/ntindle/.venvs/pw` (python venv) |
+| docker | 29.1.3 (Ubuntu repo build `29.1.3-0ubuntu3~24.04.2`) | daemon verified via `docker run --rm hello-world`; `spark` is in the `docker` group, no sudo needed |
+| playwright | 1.62.0 | in `/home/spark/.venvs/pw` (python venv) |
 | chromium | (playwright-managed, `~/.cache/ms-playwright`) | headless-tested: loaded https://example.com, correct title, valid PNG screenshot |
-| cred | 1.0 (local) | `/home/ntindle/bin/cred`, on PATH via `~/.profile` |
+| cred | 1.0 (local) | `/home/spark/bin/cred`, on PATH via `~/.profile` |
 
 Playwright system deps were installed with `playwright install-deps chromium`
 (fonts, xvfb, codec libs). Use the venv python for browser scripts:
-`/home/ntindle/.venvs/pw/bin/python`.
+`/home/spark/.venvs/pw/bin/python`.
 
 ## cred — the credential system
 
-Single-file Python CLI (stdlib only) at `/home/ntindle/bin/cred`.
+Single-file Python CLI (stdlib only) at `/home/spark/bin/cred`.
 Default backend is plain files: `~/.config/spark-credentials/<name>`,
 directory `0700`, files `0600`. Backend is selected by `SPARK_CRED_BACKEND`
 (`file` default; `bitwarden` reserved for a future `bw`-CLI backend — the
@@ -77,7 +77,7 @@ and let exit 3 surface the exact fix. Never invent a fallback secret.
 ## Browser automation example
 
 ```python
-# run with: /home/ntindle/.venvs/pw/bin/python script.py
+# run with: /home/spark/.venvs/pw/bin/python script.py
 from playwright.sync_api import sync_playwright
 
 with sync_playwright() as p:
@@ -94,7 +94,7 @@ middle. Combined with `cred run`, a script can drive a logged-in session
 end to end:
 
 ```bash
-cred run -- /home/ntindle/.venvs/pw/bin/python my-automation.py
+cred run -- /home/spark/.venvs/pw/bin/python my-automation.py
 # inside: os.environ["SPARK_CRED_MY_SERVICE_PASSWORD"]
 ```
 
@@ -181,7 +181,7 @@ with-proxy <cmd> [args...]
 ```
 `cred run -- <cmd>` is the same thing. AutoGPT pattern: put
 `hsurr:openai` in its config, then run it under `with-proxy`. For Python,
-`/home/ntindle/credlib/dynamic_credentials.py` mirrors the hatch cell's
+`/home/spark/credlib/dynamic_credentials.py` mirrors the hatch cell's
 helper (`from dynamic_credentials import add_surrogate_to_request, ...`)
 with the same names and `DynamicCredentialError`; `fill_secret.py` fills a
 Playwright field without the value touching logs (see its docstring for the

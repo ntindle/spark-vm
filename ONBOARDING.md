@@ -11,7 +11,7 @@ this file is the order of operations.
 ```
 agent machine (Hatch VM) ──Tailscale──▶ spark-vm (Ubuntu 24.04, 8 vCPU, 15 GB RAM)
       │                                        │
-      │ SSH as ntindle                          │ swapd proxy swaps hsurr:<name>
+      │ SSH as spark                          │ swapd proxy swaps hsurr:<name>
       │ (keypair + ProxyCommand)                │ placeholders for allowlisted
       ▼                                        │ hosts only; secrets never
    this repo ──push──▶ ~/spark-vm ──deploy──▶   │ leave the swapd store
@@ -51,18 +51,18 @@ Notes that bite:
 A plain Ubuntu 24.04 box. Reference specs: 8 vCPU, 15 GB RAM, 250 GB disk.
 On it:
 
-- Create user `ntindle` with passwordless sudo (`/etc/sudoers.d/ntindle`).
+- Create user `spark` with passwordless sudo (`/etc/sudoers.d/spark`).
 - Install Tailscale, `tailscale up`, approve it — note its tailnet IP
   (ours is `100.65.241.20`).
 - Enable linger so user services survive logout:
-  `sudo loginctl enable-linger ntindle`.
+  `sudo loginctl enable-linger spark`.
 
 ## 3. SSH — agent → VM
 
 On the agent machine:
 
 - Keypair at `~/.ssh/id_ed25519`; add the public key to the VM's
-  `/home/ntindle/.ssh/authorized_keys`.
+  `/home/spark/.ssh/authorized_keys`.
 - The tailnet is reached via a TCP proxy, so SSH needs a ProxyCommand.
   Ours is `~/workspace/bin/ts-ssh-proxy.py %h %p`, which does an HTTP
   CONNECT through the port-3130 proxy with Proxy-Authorization from
@@ -74,14 +74,14 @@ On the agent machine:
 ```bash
 ssh -M -S ~/.ssh/cm-newvm.sock -o ControlPersist=2h \
     -o ProxyCommand="~/workspace/bin/ts-ssh-proxy.py %h %p" \
-    -i ~/.ssh/id_ed25519 ntindle@100.65.241.20
+    -i ~/.ssh/id_ed25519 spark@100.65.241.20
 ```
 
-Then `ssh -S ~/.ssh/cm-newvm.sock ntindle@100.65.241.20 <cmd>` for everything.
+Then `ssh -S ~/.ssh/cm-newvm.sock spark@100.65.241.20 <cmd>` for everything.
 
 ## 4. Deploy the stack
 
-On the VM, as `ntindle`:
+On the VM, as `spark`:
 
 ```bash
 git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
@@ -138,7 +138,7 @@ Secrets are installed **only** by the human, in their own session. Two ways:
 **Web UI (easiest, phone-friendly).** Forward the port and open the page:
 
 ```bash
-ssh -L 18740:127.0.0.1:18740 ntindle@spark-vm
+ssh -L 18740:127.0.0.1:18740 spark@spark-vm
 # open http://127.0.0.1:18740 — add name, paste value, pick placement,
 # list allowed hosts. The list auto-refreshes every 3 s.
 ```
@@ -154,7 +154,7 @@ and hosts only.
 ## 6. Verify
 
 - [ ] `tailscale status` on both machines shows the other.
-- [ ] `ssh -S ~/.ssh/cm-newvm.sock ntindle@<tailnet-ip> true` works.
+- [ ] `ssh -S ~/.ssh/cm-newvm.sock spark@<tailnet-ip> true` works.
 - [ ] `./proxy/deploy.sh` completes; proxy unit is active.
 - [ ] `muse plugins list` shows `muse-job` installed and approved.
 - [ ] `systemctl --user is-active cred-ui` → `active`.

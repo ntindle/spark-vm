@@ -18,7 +18,7 @@ It listens on **127.0.0.1:18740** only. Reach it over an SSH tunnel:
 
 ```bash
 # from your laptop / phone (Termius: add a local port forward instead)
-ssh -L 18740:127.0.0.1:18740 ntindle@spark-vm
+ssh -L 18740:127.0.0.1:18740 spark@spark-vm
 ```
 
 Then open http://127.0.0.1:18740 in a browser.
