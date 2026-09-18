@@ -10,44 +10,58 @@ time-to-first-working-approval with a handful of beta Muses before Finding
 all evidence is human-developer DX; that a Muse adopts the same way is a
 hypothesis. This doc is the test design for that hypothesis.
 
+**Primary output:** the friction map (the help-request sequence across the
+cohort). Time-to-first-working-approval is a supporting context metric, not
+the primary one — a faster TTFWA that required more operator help is a worse
+outcome, not a better one.
+
 ## 1. The transfer being tested
 
 Finding 1 (PR #25): in the SDK-first segment, the products that convert make
 the first run a single bounded action, not a tour of capabilities
 (`npm i` → env key → quickstart snippet; `sandbox = daytona.create()`).
 
-The transfer hypothesis: **a Muse adopting spark-vm converts on the same
-shape — one tiny task, one verifiable result — and the atomic unit of that
-result is a working human approval** (the per-action consent loop is our
-Finding-2 differentiator; it is also the highest-friction surface a new Muse
-touches). If the hypothesis holds, the hosted first-run spec (R1) should be
-designed around engineering one working approval as fast as possible. If it
-fails, Finding 1 needs a Muse-specific rewrite before it hardens into spec.
+The transfer hypothesis, stated as a testable claim: **the task half of
+Finding 1 transfers — a Muse's first interaction with a spark-vm box is best
+shaped as one tiny task ending in a working approval.** The full "conversion"
+claim (signup → continued use) cannot be tested without the hosted product
+and is explicitly NOT tested here — §3's two-phase scoping holds: Phase A
+constrains the task half only; Finding 1's shape must not harden into the R1
+spec until Phase B data exists.
 
 This pilot does **not** test onboarding docs, signup UX copy, or pricing. It
 tests exactly one question: *does the one-tiny-task adoption gate transfer
-from human developers to Muses, and what is the fastest measurable path to
-a working approval?*
+from human developers to Muses at the task level, and where does the
+approval loop create friction?*
 
 ## 2. Definitions
 
-- **Working approval**: a beta Muse files an approval request through
-  `confirmd`, the human answers it on the approvals page, the grant is
-  minted (the request moves to `consumed/`), and the Muse's task verifies
-  end-to-end using the granted capability. A filed-but-expired request, a
-  denied request, or a request the Muse never sees answered does not count.
-- **Time-to-first-working-approval (TTFWA)**: wall-clock minutes from
-  `pilot_start` (the moment the pilot harness hands the beta Muse its one
-  task) to the first working approval's grant being consumed. This is the
-  primary metric. It is a friction metric, not a score — see §8.
+- **Working approval**: a beta Muse's action triggers an approval request
+  filed through `confirmd`, the human answers it on the approvals page, the
+  grant is minted, and the Muse's task verifies end-to-end using the granted
+  capability. Notes on the mechanics (verified against `confirm/confirmd.py`):
+  the request file moves pending → answered → `consumed/` on *both* approve
+  and deny (the consumed file carries `decision`); the grant is minted via
+  the grant writer *before* the move, on approve only. So `grant_consumed` in
+  this doc means "a consumed file with `decision == "approve"`" — `consumed/`
+  is a proxy for grant-minted, not the minting event itself. A filed-but-
+  expired request, a denied request, or a request the Muse never sees answered
+  does not count.
+- **Time-to-first-working-approval (TTFWA)**: `created(first working
+  approval) − pilot_start` (see §6 for why this reduction is exact), reported
+  as order-of-magnitude bands (minutes / tens of minutes / hour+), never as
+  a precise median. This is a friction metric, not a score — see §8.
 - **Aha moment**: the first point at which the Muse *anticipates* the
-  approval loop (files a correctly-scoped request without prompting, or
-  narrates that an action will need approval before acting). Recorded as a
+  approval loop (its unprompted action triggers a correctly-scoped filing, or
+  it narrates that an action will need approval before acting). Recorded as a
   timestamped qualitative event, not scored.
 - **Help request**: any intervention by the pilot operator to unstick the
   beta Muse (clarification, pointing at docs, fixing environment). Counted
   and timestamped; the *sequence* of help requests is the friction map the
   pilot is really after.
+- **Session abandonment**: the operator closes a session after 30 minutes
+  with no Muse action *and* no pending approval, or when the Muse explicitly
+  gives up. The rule, not the operator's mood, closes the session.
 
 ## 3. Two phases (honest scoping)
 
@@ -56,8 +70,8 @@ pilot. The pilot therefore runs in two phases, and only Phase A can run now.
 
 - **Phase A — self-hosted first run (runnable now):** beta Muses work from a
   spark-vm checkout on a provisioned box, completing the canonical tiny task
-  below. Tests the transfer hypothesis on the approval loop and the
-  first-task shape. Does not test signup, billing, or provisioning.
+  below. Tests the task-half transfer hypothesis on the approval loop and
+  the first-task shape. Does not test signup, billing, or provisioning.
 - **Phase B — hosted funnel (runs when the hosted signup exists):** the
   actual hosted funnel — discovery → signup → identity linking → provisioned
   box → first task — instrumented end to end. Feeds the R1 first-10-minutes
@@ -69,18 +83,33 @@ Running Phase A first is not scope creep: if the one-tiny-task gate fails to
 transfer even on the self-hosted box, the hosted first-run design needs a
 different foundation than the research assumed.
 
-## 4. Participants and recruitment
+## 4. Participants, recruitment, and box standardization
 
-- **Cohort:** 3–5 beta Muses. Small on purpose — this is a friction-mapping
-  study, not a survey; the output is the *sequence* of snags, which
-  saturates fast.
-- **Recruitment is the operator's call** (blocked: see §9). Candidates: peer
-  Muses of the operator with their own hosted Muse setups (musebook
-  community, operator's own fleet). They must NOT be spark-vm contributors —
-  contributor familiarity poisons the first-run data.
+- **Cohort:** recruit 5–6 to land 3–5 completions. Small on purpose — this
+  is a friction-mapping study, not a survey; the output is the *sequence*
+  of snags, which saturates fast. **If sessions 4–5 surface new snag
+  classes, extend the cohort** rather than asserting saturation.
+  Replacement rule: sessions closed as contaminated (human latency > 2 min,
+  §5) or abandoned (§2) are replaced up to the 6-recruit cap; beyond that,
+  the writeup reports a small-n qualitative study and the gates in §7 do not
+  fire.
+- **Exclusion criteria (cohort integrity):** anyone who has read this
+  protocol or the PR #25 adoption research is out; screen for prior
+  spark-vm exposure (repo reads, discussion threads); the operator's own
+  fleet is capped at 1 of the cohort (shared tooling/prompting lineage makes
+  its observations non-independent). Beta Muses must not be spark-vm
+  contributors — contributor familiarity poisons first-run data.
 - **Selection bias, stated up front:** peer Muses are technical users, not
   the eventual less-technical audience. The pilot measures best-case
   transfer; friction found here is a floor, not a ceiling.
+- **Box-standardization checklist** (all sessions run on identically
+  prepared boxes):
+  1. confirmd pinned to the same release + the **pilot policy file** (§5)
+     under which the canonical task always files an approval request.
+  2. The pilot harness installed with a generated `session_id`.
+  3. The §5.1 readiness gate passed on that box.
+  4. No other pilot session active on the box's confirmd instance at the
+     same time (attribution rule, §6).
 
 ## 5. The canonical tiny task (Phase A)
 
@@ -90,10 +119,11 @@ exercises the approval loop, not the VM's generality:
 > "Check whether your box can reach the internet: run `curl -sI
 > https://example.com` and report the result."
 
-- Reaching the internet requires an egress decision — on a spark-vm box this
-  passes through the credential proxy's allowlist posture and, where the
-  policy requires it, a **human approval via confirmd**. The task is one
-  command, one verifiable result, and it ends in a working approval.
+The task is chosen so that, **under the pinned pilot policy, the egress
+decision always files an approval request** — the metric the pilot hangs on
+is box-policy-dependent, so the policy is part of the protocol, not left to
+the pilot box's default posture (see §5.1).
+
 - The task text must NOT mention approvals, confirmd, or the proxy. The
   pilot measures whether the Muse discovers the loop on its own or needs a
   help request — the task brief is part of the measurement.
@@ -102,86 +132,164 @@ exercises the approval loop, not the VM's generality:
   Your task: check whether this box can reach the internet.
   Run: curl -sI https://example.com
   Report back the result (reachable / not reachable, plus the status line).
-  Do not change any system configuration. Nothing else is asked of you.
+  Don't change configuration unrelated to the task. Nothing else is asked of you.
   ```
-- The human answers the approval promptly (target: within 5 minutes) — the
-  pilot measures the Muse's loop, not human latency. Record human response
-  latency separately so it can be subtracted from TTFWA if it dominates.
+- **Human on standby, target response < 60 s.** A 5-minute human latency is
+  an eternity for a Muse session (context stall, giving up) and contaminates
+  the behavioral data, not just the clock: any session with human latency
+  > 2 min is flagged **contaminated** — excluded from the median, kept in
+  the friction notes, and replaced under the §4 replacement rule.
+
+### 5.1 Readiness gate (before the cohort, on every pilot box)
+
+The pilot's core precondition is gated, not asserted. The operator runs the
+canonical task once per pilot box and confirms: (a) a file appears in
+`APPROVALS/pending/`; (b) the human can answer it; (c) the grant mints. If
+the task doesn't file under the pinned policy, substitute a task that does
+— **do not run the cohort until the gate passes.** Record a `policy_verified`
+harness event (confirmd in the loop with the pilot policy + a pre-flight
+approval round-trip succeeded) before the first `pilot_start`.
 
 ## 6. Instrumentation spec
 
 Implementation is a future build-loop `feature` run; this section is the spec
 it builds from. All events go to one JSONL file per pilot session
-(`pilot_<session_id>.jsonl`), one event per line:
+(`pilot_<session_id>.jsonl`, `session_id` a harness-generated uuid4), one
+event per line:
 
 ```
-{"ts": "...", "event": "...", "actor": "harness|muse|human", "session_id": "...", "detail": "..."}
+{"ts": "...", "event": "...", "actor": "harness|muse|human|operator", "session_id": "...", "detail": "..."}
 ```
 
-- **`pilot_start`** (harness): cohort id, task id, box fingerprint (hash, not
-  hostname), confirmd version. The clock starts here.
+- **`policy_verified`** (harness): pilot policy hash, confirmd version,
+  pre-flight round-trip result. Precedes the first `pilot_start`.
+- **`pilot_start`** (harness): cohort id, task id, box fingerprint =
+  `sha256(pilot policy file bytes || confirmd version string)`. The clock
+  starts here, on the harness clock.
 - **`task_given`** (harness): the verbatim task brief handed to the Muse.
-- **`first_muse_action`** (harness): first shell command or tool call the Muse
-  issues. Measures orientation latency.
-- **`approval_filed`** (harness, derived from confirmd): request id, action
-  class (not the payload). **Never log the approval payload or any
-  client-influenced free text** — payloads can carry secrets and prompt
-  content; log ids, classes, and outcomes only (consistent with the proxy's
-  placeholder posture and the O7/#17 log-injection finding).
+- **`first_muse_action`** (harness): first shell command or tool call the
+  Muse issues. Measures orientation latency. If the Muse never acts, this
+  event is absent and orientation latency is undefined (the session resolves
+  via the abandonment rule).
+- **`approval_filed`** (harness, derived from confirmd): request id,
+  action class. **Never log the approval payload or any client-influenced
+  free text** — payloads can carry secrets and prompt content; log ids,
+  classes, and outcomes only (consistent with the proxy's placeholder
+  posture and the O7/#17 log-injection finding). Pending files carry
+  `id, kind, created, expires, …`; log only `id` + `kind`.
 - **`approval_answered`** (harness, derived): request id, outcome
-  (approved/denied/expired), human latency.
-- **`grant_consumed`** (harness, derived): request id. A working approval
-  completes here.
+  (approved/denied/expired). Outcomes approved/denied come from the
+  `answer` audit line (`id=… decision=…`). **Expired is not in the audit
+  log** — `load_pending()` reaps silently; only the item-page path audits
+  `expired-reaped`. So the harness caches `(id → created, expires, kind)`
+  at first sighting of each pending file, and marks outcome=expired when
+  the file disappears with `expires < now` and no answered/consumed
+  transition. Fallback, if the inference proves flaky: add
+  `audit_log("expired-reaped", …)` in `load_pending()` — an explicit
+  confirmd change, which the spec currently avoids.
+- **`grant_consumed`** (harness, derived): request id. Emitted **only**
+  when the consumed file's `decision == "approve"` (the harness reads the
+  file — denials land in `consumed/` identically, per §2). The grant is
+  minted by the grant writer before the move; `consumed/` is the observable
+  proxy.
+- **`result_reported`** (operator): the Muse's final report recorded +
+  boolean `verified` = the curl ran under the granted egress and produced a
+  status line. A working approval completes here — this is the terminal
+  event the §2 definition requires and the event stream must contain.
 - **`aha_moment`** (operator, qualitative): timestamp + one-line note of
   what the Muse did or said.
 - **`help_request`** (operator): timestamp + which snag triggered it.
-- **`pilot_end`** (harness): outcome (working-approval / abandoned), TTFWA if
-  completed, count of help requests, count of approval rounds.
+- **`pilot_end`** (harness): outcome (working-approval / abandoned /
+  contaminated), TTFWA band if completed, count of help requests, count of
+  approval rounds. `working-approval` requires the `result_reported`
+  verification step — a minted grant the Muse never uses is not a working
+  approval.
 
-Existing substrate: `confirmd` already writes audit lines
-(`ts=... event=... peer=... login=...`) and the pending → answered →
-consumed lifecycle is file-backed (`APPROVALS/pending/`, `answered/`,
-`consumed/`), so `approval_filed` / `approval_answered` / `grant_consumed`
-can be derived from the existing audit log + directory transitions without
-touching confirmd's hot path. The harness only adds session framing and the
-Muse-side events.
+**Existing substrate** (verified against `confirm/confirmd.py`): audit lines
+are `ts=… event=… peer=… login=…`; the pending → answered → consumed
+lifecycle is file-backed; the answer path writes `decision` and
+`answered_at` onto the file. So `approval_answered` (approved/denied) and
+`grant_consumed` are derivable without touching confirmd's hot path — the
+only deliberate gap is expiry inference (above), with the audit-line fallback
+as an explicit, optional confirmd change.
+
+**Attribution rule:** exactly one active pilot session per confirmd instance
+at a time; the harness attributes every filing observed between
+`pilot_start` and `pilot_end` to the session. There is no pilot-session
+marker on the request files — overlapping sessions on one box would need
+the filer (proxy) to write a pilot marker into the request file; flag that
+as a filer contract change if ever needed.
+
+**Implementation notes for the harness builder:** tolerate partially-written
+pending files (the filer isn't contractually atomic — parse-retry with a
+small backoff); never log payload free text; the task-delivery channel
+(how the harness hands the task to the beta Muse) must be identical across
+sessions — its exact mechanism is an open spec item for the implementation
+run.
 
 ### Metric definitions
 
-- **TTFWA (primary):** `grant_consumed[0].ts − pilot_start.ts`, minus human
-  response latency. Report median + range across the cohort, never a single
-  number.
-- **Orientation latency:** `first_muse_action.ts − task_given.ts`.
-- **Approval discovery:** did the Muse reach `approval_filed` without a help
-  request? (binary per session)
-- **Approval rounds:** number of filed requests before the first working
-  approval (denials/expiries count — they are friction data).
+- **TTFWA (supporting):** define human latency canonically as
+  `answered_at − created` (file fields, confirmd's clock). Then
+  `grant_consumed.ts − pilot_start.ts − human latency` reduces exactly to
+  **`created(first working approval) − pilot_start`**. Single-clock
+  assumption: harness and confirmd on the same box; if not, the harness
+  must record and apply the clock offset. Report as bands (minutes / tens
+  of minutes / hour+), never precise medians.
+- **Orientation latency:** `first_muse_action.ts − task_given.ts` (undefined
+  if the Muse never acts).
+- **Approval discovery (binary per session):** did the Muse's unprompted
+  action trigger the first filing — i.e. the first `approval_filed` with no
+  preceding `help_request`?
+- **Approval rounds:** filings up to and including the first working
+  approval; first-try success = 1. Denials/expiries count as filings; the
+  writeup must distinguish exploratory filings (the Muse correctly probing
+  scope — good behavior) from failed attempts.
 - **Aha latency:** `aha_moment.ts − pilot_start.ts` if observed.
+
+### Phase-B schema compatibility
+
+Phase B is additive, not a rewrite. Reserve the funnel-event namespace now:
+`funnel_signup`, `funnel_identity_linked`, `funnel_box_provisioned` (harness
+events, emitted as the hosted funnel exists). Phase B re-anchors
+`pilot_start` at funnel entry; the Phase-A event set defined above becomes
+the named **"task half"** sub-span within it. TTFWA's task-half definition
+is unchanged.
 
 ## 7. Analysis plan and decision gates
 
 After the cohort runs, the writeup answers:
 
-1. Did the one-tiny-task gate transfer? (Did Muses complete the task in one
-   session with ≤1 help request?) 
+1. Did the task half of Finding 1 transfer? (Did Muses complete the task in
+   one session with ≤1 help request?)
 2. What was the snag sequence? The help-request transcripts become the
-   ranked friction list that feeds R2 (pre-seeded state) and the R1 spec.
+   ranked friction list that feeds R2 (pre-seeded state) and the R1 task
+   design.
 3. Was the approval loop discovered or taught? If every Muse needed a help
    request to find confirmd, Finding 2's "per-action consent" story has an
    onboarding gap — the product must surface the loop proactively, not wait
    to be asked.
 
-**Decision gates (what changes depending on outcome):**
+**Pre-registered gates (falsifiable, evaluated on the non-contaminated
+completions):**
 
-- Transfer holds (median TTFWA small, discovery unprompted): Finding 1's
-  shape proceeds into the R1 first-10-minutes spec; the R1 task is "engineer
-  the fastest path to one working approval."
-- Transfer fails (abandons, or ≥2 help requests per session): Finding 1 gets
-  a Muse-specific rewrite — the adoption gate is not "one tiny task" for
+- **Transfer holds:** median Muse-side TTFWA (human latency subtracted) ≤ 30
+  min AND ≥ 50% of sessions completed with ≤ 1 help request. Unlocks only
+  the R1 **task-design** half: "engineer the fastest path to one working
+  approval" becomes the R1 task foundation. The R1 spec as a whole still
+  waits for Phase B.
+- **Transfer fails:** median ≥ 60 min OR any abandonment. Finding 1 gets a
+  Muse-specific rewrite — the adoption gate is not "one tiny task" for
   Muses, it is something else (likely: pre-seeded state + a narrated first
-  approval, i.e. R2-first, R1-second). The R1 spec waits for the rewrite.
-- Mixed: the snag sequence decides which half transfers; document the split
-  explicitly.
+  approval, i.e. R2-first, R1-second). The R1 task design waits for the
+  rewrite.
+- **Mixed:** ≥ 50% complete unprompted AND (≥ 1 abandonment OR ≥ 1 session
+  needing ≥ 2 help requests). The split is documented per snag class; snag
+  classes that reproduce across ≥ 2 sessions become R2 fixes; the R1
+  task-design decision is deferred to a second cohort rather than defaulting
+  to "holds."
+- Gates do not fire below 3 non-contaminated completions (small-n
+  qualitative study instead — §4).
 
 Either way, the outcome is published as an R7 findings addendum to this doc
 (or a linked findings file), and R1/R2 backlog items are updated from it.
@@ -190,7 +298,8 @@ Either way, the outcome is published as an R7 findings addendum to this doc
 
 - **This is not a benchmark.** Never publish per-Muse scores, leaderboards,
   or "Muse X was faster than Muse Y" comparisons. Report cohort-level
-  friction shapes only.
+  friction shapes only — and TTFWA only as bands, because a published
+  "median TTFWA" is a benchmark-shaped number in a public repo.
 - Do not generalize beyond the cohort: "3 of 4 beta Muses discovered the
   approval loop unprompted" is a finding; "Muses discover the approval loop"
   is not.
@@ -205,17 +314,18 @@ Either way, the outcome is published as an R7 findings addendum to this doc
 - Protocol defined (this doc). Instrumentation unbuilt (spec'd in §6, for a
   build-loop `feature` run once recruitment is confirmed).
 - **Blocked on the user:** beta-Muse recruitment — the operator supplies or
-  approves 3–5 peer Muses and their boxes, and confirms the human will be
-  available to answer approvals promptly during pilot sessions. Logged in
-  `NEEDS_USER.md` as "Beta-Muse pilot cohort".
+  approves 5–6 peer Muses meeting the §4 exclusion criteria and their boxes,
+  and confirms a human on standby (< 60 s target) during pilot sessions.
+  Logged in `NEEDS_USER.md` as "Beta-Muse pilot cohort".
 - Phase B is blocked on the hosted signup existing (H9/H15); the protocol
   stands ready for it.
 
 ## 10. What the pilot unblocks
 
 - R1 (first-10-minutes spec): takes the validated-or-rewritten Finding 1
-  shape as its foundation.
+  task-half shape as its foundation (Phase B completes the spec).
 - R2 (pre-seeded harness state): takes the ranked snag sequence as its
   fix list.
-- H10 (confirmd multi-tenant approvals): pilot friction on tenant
-  attribution and queue confusion, if observed, feeds the design.
+- H10 (confirmd multi-tenant approvals): Phase B only — Phase A is
+  single-tenant self-hosted and cannot produce friction on tenant
+  attribution or queue confusion. Do not claim otherwise.
