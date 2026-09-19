@@ -61,7 +61,14 @@ def test_version_flag_subprocess():
 
 def test_broken_reader_never_breaks_startup(tmp_path):
     """A syntax-broken sparkvm_version.py must not break the CLI import —
-    the bootstrap's except Exception is the best-effort contract."""
+    the bootstrap's except Exception is the best-effort contract.
+
+    The CLI bootstrap inserts its repo's scripts dir at sys.path[0] at
+    import time; this test restores sys.path and the module cache on exit
+    so the tmp copy can't poison later test modules (regression: the full
+    `python3 -m pytest` run once failed scripts/test_sparkvm_version.py
+    with a SyntaxError imported from this test's leftover tmp dir).
+    """
     import importlib.util
 
     repo = tmp_path / "repo"
@@ -74,14 +81,29 @@ def test_broken_reader_never_breaks_startup(tmp_path):
     cli_copy = bin_dir / "muse-job"
     cli_copy.write_bytes(open(CLI_PATH, "rb").read())
 
+    _SENTINEL = object()
+    saved_path = list(sys.path)
+    saved_reader = sys.modules.get("sparkvm_version", _SENTINEL)
     name = "muse_job_cli_broken_reader"
     sys.modules.pop(name, None)
     # Evict any cached reader: the snippet must re-import the broken file,
     # not reuse a good copy cached by an earlier test module.
     sys.modules.pop("sparkvm_version", None)
-    loader = importlib.machinery.SourceFileLoader(name, str(cli_copy))
-    spec = importlib.util.spec_from_loader(name, loader)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    loader.exec_module(mod)  # must not raise
-    assert mod.SPARKVM_VERSION == "0.0.0-unknown"
+    try:
+        loader = importlib.machinery.SourceFileLoader(name, str(cli_copy))
+        spec = importlib.util.spec_from_loader(name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        loader.exec_module(mod)  # must not raise
+        assert mod.SPARKVM_VERSION == "0.0.0-unknown"
+    finally:
+        sys.path[:] = saved_path
+        sys.modules.pop(name, None)
+        if saved_reader is _SENTINEL:
+            sys.modules.pop("sparkvm_version", None)
+        else:
+            sys.modules["sparkvm_version"] = saved_reader
+    # The cleanup above is the regression contract: assert it held.
+    assert sys.path == saved_path
+    assert sys.modules.get("sparkvm_version", _SENTINEL) is saved_reader
+    assert str(scripts) not in sys.path
