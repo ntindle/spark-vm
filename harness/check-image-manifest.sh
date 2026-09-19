@@ -48,9 +48,14 @@ if missing:
     print(f"check-image-manifest: missing keys: {', '.join(missing)}", file=sys.stderr)
     sys.exit(1)
 
+if not isinstance(m["image_version"], str) or not m["image_version"]:
+    print("check-image-manifest: image_version must be a non-empty string",
+          file=sys.stderr)
+    sys.exit(1)
+
 if m["image_version"] != expect:
     print(f"check-image-manifest: DRIFT — manifest image_version "
-          f"{m['image_version'][:12]} != expected {expect[:12]}; failing closed",
+          f"{str(m['image_version'])[:12]} != expected {expect[:12]}; failing closed",
           file=sys.stderr)
     sys.exit(1)
 

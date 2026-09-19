@@ -10,7 +10,7 @@ Implements the executable half of the R2 pre-seeded-harness contract
 - **`harness-auth-probe`** — the non-interactive harness auth check. Run as
   `</dev/null timeout 10 <harness-auth-probe>`; exit 0, zero prompts.
   Verifies (a) the tenant runtime's model calls route through the inference
-  proxy with the credential swapped in, then (b) confirmd answers.
+  proxy with the credential swapped in, then (b) confirmd liveness.
   Two modes: `gate` (image-build gate, against the public echo fixture —
   asserts the exact `Authorization: Bearer` wire shape and that the
   `hsurr:` placeholder never reaches the origin) and `provision`

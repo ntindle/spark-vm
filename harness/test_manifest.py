@@ -4,8 +4,6 @@ import json
 import os
 import subprocess
 
-import pytest
-
 HARNESS = os.path.dirname(os.path.abspath(__file__))
 GEN = os.path.join(HARNESS, "generate-image-manifest.sh")
 CHECK = os.path.join(HARNESS, "check-image-manifest.sh")
@@ -108,3 +106,42 @@ def test_check_fails_on_missing_file(tmp_path):
     p = subprocess.run([CHECK, str(tmp_path / "nope.json")], capture_output=True,
                        text=True, timeout=30)
     assert p.returncode == 1
+
+
+def _fresh_manifest(tmp_path):
+    out = tmp_path / "manifest.json"
+    subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
+                   capture_output=True)
+    return out
+
+
+def test_check_fails_on_nested_missing_subkeys(tmp_path):
+    out = _fresh_manifest(tmp_path)
+    m = json.loads(out.read_text())
+    del m["registry_paths"]["inference_hosts"]
+    del m["injector_expect"]["probe_path"]
+    out.write_text(json.dumps(m))
+    p = subprocess.run([CHECK, str(out)], capture_output=True, text=True,
+                       timeout=30)
+    assert p.returncode == 1
+    assert "missing keys" in p.stderr
+
+
+def test_check_fails_cleanly_on_non_string_version(tmp_path):
+    out = _fresh_manifest(tmp_path)
+    m = json.loads(out.read_text())
+    m["image_version"] = 12345
+    out.write_text(json.dumps(m))
+    p = subprocess.run([CHECK, str(out)], capture_output=True, text=True,
+                       timeout=30)
+    assert p.returncode == 1
+    assert "Traceback" not in p.stderr
+    assert "non-empty string" in p.stderr
+
+
+def test_check_usage_errors(tmp_path):
+    for argv in ([], ["a", "b", "c"]):
+        p = subprocess.run([CHECK, *argv], capture_output=True, text=True,
+                           timeout=30)
+        assert p.returncode == 2, argv
+        assert "usage" in p.stderr

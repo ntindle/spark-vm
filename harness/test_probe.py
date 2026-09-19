@@ -15,12 +15,14 @@ muse CLI:
 """
 
 import http.client
+import importlib.util
 import json
 import os
+import shutil
 import socket
+import ssl
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +42,8 @@ mode = os.environ.get("FAKE_MUSE_MODE", "ok")
 if mode == "sleep":
     time.sleep(30)
     sys.exit(0)
+if mode == "hang-after-request":
+    pass  # falls through to send requests, then sleeps below
 if mode == "cli-fails":
     sys.exit(3)
 # env contract the probe promises its child
@@ -51,14 +55,24 @@ argv = sys.argv
 base = argv[argv.index("--base-url") + 1]
 scheme = "Token " if mode == "bad-scheme" else "Bearer "
 headers = {"Authorization": scheme + key}
+paths = ["/muse-code/models", "/responses"]
+if mode == "duplicate":
+    paths = [p for p in paths for _ in (0, 1)]  # each request twice, like CLI retries
 if mode != "no-request":
-    for path in ("/muse-code/models", "/responses"):
+    for path in paths:
         req = urllib.request.Request(base.rstrip("/") + path, headers=headers,
                                      data=b"{}" if path == "/responses" else None)
         try:
             urllib.request.urlopen(req, timeout=5).read()
         except Exception:
             pass  # the echo fixture's body is not a completion; header delivery is what counts
+if mode in ("hang-after-request",):
+    time.sleep(30)  # delivered valid requests, then hung: the gate must fail this
+if mode == "corrupt-log":
+    # Valid requests delivered, then the echo log gains a corrupt line inside
+    # this run's window: the probe must fail closed, not misparse.
+    with open(os.environ["PROBE_ECHO_LOG"], "a") as f:
+        f.write("this is not json\n")
 sys.exit(0)
 '''
 
@@ -177,7 +191,14 @@ def fixtures(tmp_path):
         srv.shutdown()
 
 
-def run_probe(fixtures, tmp_path, mode="gate", extra_env=None, argv_extra=()):
+_NEUTRALIZED = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy",
+                "NO_PROXY", "no_proxy")
+
+
+def run_probe(fixtures, tmp_path, mode="gate", extra_env=None, argv_extra=(),
+              stdin=None):
+    """stdin=None -> subprocess.DEVNULL; otherwise the given fd is passed
+    through (used by the never-reads-stdin test with an unwritten pipe)."""
     env = {
         "PATH": os.path.dirname(fixtures["muse"]) + os.pathsep + os.environ.get("PATH", ""),
         "PROBE_MUSE_BIN": "muse",
@@ -190,24 +211,30 @@ def run_probe(fixtures, tmp_path, mode="gate", extra_env=None, argv_extra=()):
         "FAKE_MUSE_MODE": "ok",
     }
     # Keep the test hermetic even where the ambient env has proxies set.
-    for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy",
-                "NO_PROXY", "no_proxy"):
-        os.environ.pop(var, None)
-    if extra_env:
-        env.update(extra_env)
-    if mode == "provision":
-        env.pop("PROBE_ECHO_LOG", None)
-        env.pop("PROBE_EXPECTED_SWAPPED", None)
-        env["PROBE_KEY_NAME"] = "llm-api"
-    t0 = time.monotonic()
-    proc = subprocess.run(
-        [sys.executable, PROBE, "--mode", mode, *argv_extra],
-        env={**os.environ, **env},
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=60, text=True,
-    )
-    return proc, time.monotonic() - t0
+    # Snapshot/restore: never permanently mutate the test process env.
+    saved = {}
+    for var in _NEUTRALIZED:
+        if var in os.environ:
+            saved[var] = os.environ.pop(var)
+    try:
+        if extra_env:
+            env.update(extra_env)
+        if mode == "provision":
+            env.pop("PROBE_ECHO_LOG", None)
+            env.pop("PROBE_EXPECTED_SWAPPED", None)
+            env["PROBE_KEY_NAME"] = "llm-api"
+        stdin = subprocess.DEVNULL if stdin is None else stdin
+        t0 = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, PROBE, "--mode", mode, *argv_extra],
+            env={**os.environ, **env},
+            stdin=stdin,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=60, text=True,
+        )
+        return proc, time.monotonic() - t0
+    finally:
+        os.environ.update(saved)
 
 
 def echo_auths(path):
@@ -284,14 +311,11 @@ def test_missing_muse_fails_closed(fixtures, tmp_path):
 
 
 def test_bad_mode_usage_error(fixtures, tmp_path):
-    proc, _ = run_probe(fixtures, tmp_path, argv_extra=[])
-    # argparse path: pass the bad mode directly
     env = {"PATH": os.environ.get("PATH", "")}
     p = subprocess.run([sys.executable, PROBE, "--mode", "bogus"],
                        stdin=subprocess.DEVNULL, capture_output=True,
                        text=True, timeout=30, env={**os.environ, **env})
     assert p.returncode == 2
-    assert proc.returncode == 0  # sanity: the fixture run itself was fine
 
 
 def test_gate_missing_fixture_config_usage_error(fixtures, tmp_path):
@@ -323,8 +347,122 @@ def test_provision_missing_base_url_usage_error(fixtures, tmp_path):
     assert "PROBE_BASE_URL" in p.stderr
 
 
-def test_probe_never_blocks_on_stdin(fixtures, tmp_path):
-    # stdin closed AND stdin=DEVNULL both complete: the probe never prompts.
+def test_probe_never_reads_stdin(fixtures, tmp_path):
+    # An open-but-never-written pipe as stdin: any read by the probe or its
+    # child would block forever and trip the subprocess timeout (60s). The
+    # probe completing proves nothing ever read stdin — the R1 §5 contract.
+    r, w = os.pipe()
+    try:
+        proc, _ = run_probe(fixtures, tmp_path, stdin=r)
+    finally:
+        os.close(r)
+        os.close(w)
+    assert proc.returncode == 0, proc.stderr
+
+
+def _load_probe_module():
+    from importlib.machinery import SourceFileLoader
+    loader = SourceFileLoader("harness_auth_probe", PROBE)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_internal_timeouts_fit_the_10s_contract():
+    # Deterministic pin: the worst-case internal budget must stay under the
+    # external `timeout 10` from the R1 §5 contract.
+    mod = _load_probe_module()
+    assert mod.CLI_TIMEOUT_S + mod.CONFIRMD_TIMEOUT_S < 10
+
+
+def test_gate_cli_hang_after_request_fails(fixtures, tmp_path):
+    # Regression test for the gate-mode hang hole: a CLI vehicle that
+    # delivers valid requests and then hangs must FAIL the gate (R1 §5:
+    # hang = fail), not ride the delivered records to exit 0.
+    proc, dt = run_probe(fixtures, tmp_path,
+                         extra_env={"FAKE_MUSE_MODE": "hang-after-request"})
+    assert proc.returncode == 1
+    assert "timed out" in proc.stderr
+    assert dt < 15
+
+
+def test_gate_ignores_stale_records(fixtures, tmp_path):
+    # Records from a previous run already in the echo log must not affect
+    # this run's verdict (the since_size logic).
+    with open(fixtures["echo_log"], "a") as f:
+        f.write(json.dumps({"authorization": "Bearer STALE-GARBAGE"}) + "\n")
+        f.write("not json at all\n")  # stale corruption must also be ignored
     proc, _ = run_probe(fixtures, tmp_path)
-    assert proc.returncode == 0
-    assert "OK (gate mode" in proc.stderr
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_gate_unreachable_base_url_fails_closed(fixtures, tmp_path):
+    proc, _ = run_probe(
+        fixtures, tmp_path,
+        extra_env={"PROBE_BASE_URL": f"http://127.0.0.1:{free_port()}"})
+    assert proc.returncode == 1
+    assert "no requests reached the echo fixture" in proc.stderr
+
+
+def test_provision_cli_timeout_fails(fixtures, tmp_path):
+    proc, dt = run_probe(fixtures, tmp_path, mode="provision",
+                         extra_env={"FAKE_MUSE_MODE": "sleep"})
+    assert proc.returncode == 1
+    assert "timed out" in proc.stderr
+    assert dt < 15
+
+
+def test_gate_duplicate_records_pass(fixtures, tmp_path):
+    # CLI retries produce duplicate in-window records; all carry the swapped
+    # value, so the gate must still pass.
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"FAKE_MUSE_MODE": "duplicate"})
+    assert proc.returncode == 0, proc.stderr
+    assert len(echo_auths(fixtures["echo_log"])) >= 4
+
+
+def test_gate_unreadable_echo_log_fails_closed(fixtures, tmp_path):
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"PROBE_ECHO_LOG": str(tmp_path)})
+    assert proc.returncode == 3
+    assert "cannot read echo log" in proc.stderr
+
+
+def test_gate_corrupt_echo_log_fails_closed(fixtures, tmp_path):
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"FAKE_MUSE_MODE": "corrupt-log"})
+    assert proc.returncode == 3
+    assert "non-JSON" in proc.stderr
+
+
+def _tls_confirmd_server(tmp_path):
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl not available for the self-signed test cert")
+    key, cert = str(tmp_path / "c.key"), str(tmp_path / "c.crt")
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048",
+                    "-keyout", key, "-out", cert, "-days", "1", "-nodes",
+                    "-subj", "/CN=127.0.0.1"],
+                   check=True, capture_output=True, timeout=60)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), OkHandler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert, key)
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_confirmd_https_self_signed_passes(fixtures, tmp_path):
+    # The production confirmd path: HTTPS with a self-signed cert. This is
+    # the only test exercising the probe's HTTPSHandler(context) + CERT_NONE
+    # wiring — without it, "hardening" the context would break production
+    # while the suite stays green.
+    srv = _tls_confirmd_server(tmp_path)
+    try:
+        url = f"https://127.0.0.1:{srv.server_port}"
+        proc, _ = run_probe(fixtures, tmp_path,
+                            extra_env={"PROBE_CONFIRMD_URL": url})
+    finally:
+        srv.shutdown()
+    assert proc.returncode == 0, proc.stderr
+    assert "confirmd] answers" in proc.stderr

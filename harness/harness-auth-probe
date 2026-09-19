@@ -27,9 +27,17 @@ Modes:
               at the provider through the inference proxy with the tenant's
               injected placeholder (hsurr:llm-api). There is no echo log on
               the real provider, so the assertion is the CLI call succeeding:
-              the provider accepted the swapped real key. A gate failure
-              means the image is broken; a provision failure means the
-              injected credential is wrong — distinguishable by design.
+              the provider accepted the swapped real key.
+              Failure classes are distinguishable by design: exit 3 is an
+              environment/fixture-install problem (CLI missing, fixture
+              absent, echo log unreadable); a gate-mode exit 1 is an
+              image-path problem (CLI ignoring the proxy env, placeholder
+              reaching the origin unswapped, a hung CLI vehicle, or the
+              fixture itself misinstalled); a provision-mode exit 1 is a
+              credential-acceptance problem (provider rejected the swapped
+              key — a down proxy on the tenant box is not excluded, so treat
+              repeated provision failures as image/infra, not just wrong
+              credential).
 
 The probe never handles a real secret: every credential it names is an
 hsurr:<name> placeholder. The real value is swapped in by the proxy at
@@ -140,6 +148,8 @@ def read_new_records(echo_log, since_size):
 
 def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped):
     try:
+        # If the log is truncated between getsize and read, the seek below
+        # lands past EOF and yields an empty read — fail-closed "no requests".
         since_size = os.path.getsize(echo_log)
     except OSError as e:
         return die(EXIT_ENV, f"gate fixture echo log not readable: {echo_log}: {e}")
@@ -147,6 +157,15 @@ def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped):
     rc, out, err, timed_out = run_cli(muse_bin, base_url, proxy, key_name)
     print(f"[gate] cli vehicle rc={rc} timed_out={timed_out} "
           f"stdout_tail={out[-300:]!r} stderr_tail={err[-300:]!r}", file=sys.stderr)
+    if timed_out:
+        # A hang is not explained by the fixture's non-model response body
+        # (which justifies ignoring a nonzero exit): a CLI that cannot finish
+        # a model call against a localhost fixture in CLI_TIMEOUT_S is a
+        # broken image. R1 §5: hang = fail.
+        return die(EXIT_CHECK_FAILED,
+                   f"cli vehicle timed out after {CLI_TIMEOUT_S}s against the "
+                   f"gate fixture via {proxy}: the image's CLI cannot complete "
+                   "a model call — failing the gate.")
 
     records, err = read_new_records(echo_log, since_size)
     if err:
@@ -160,15 +179,13 @@ def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped):
                    "muse CLI ignored the proxy env — investigate before trusting "
                    "this image.")
     placeholder = f"hsurr:{key_name}"
-    bad = [a for a in auths
-           if not a.startswith("Bearer ")
-           or placeholder in a
-           or expected_swapped not in a]
+    want = f"Bearer {expected_swapped}"
+    bad = [a for a in auths if a != want or placeholder in a]
     if bad:
         return die(EXIT_CHECK_FAILED,
                    f"{len(bad)}/{len(auths)} origin-received Authorization "
                    "headers failed the wire-shape assertion (want exactly "
-                   f"'Bearer <{expected_swapped}>', placeholder {placeholder!r} "
+                   f"{want!r}; placeholder {placeholder!r} "
                    "must never reach the origin).")
     print(f"[gate] auth path ok: {len(auths)} request(s), swapped credential "
           "reached the origin with the Bearer wire shape.", file=sys.stderr)
@@ -176,6 +193,11 @@ def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped):
 
 
 def check_provision(muse_bin, base_url, proxy, key_name):
+    # Known limitation: provision mode has no echo log (the real provider),
+    # so it trusts the CLI's exit code. A CLI that exited 0 without sending
+    # anything would pass here; gate mode is protected against that class by
+    # the echo-log assertion. The failure message below keeps the ambiguity
+    # explicit rather than claiming more than the signal supports.
     rc, out, err, timed_out = run_cli(muse_bin, base_url, proxy, key_name)
     if timed_out:
         return die(EXIT_CHECK_FAILED,
