@@ -98,8 +98,15 @@ cd ~/spark-vm
 # credential CLI -> ~/bin/cred (single-file, stdlib only; see SETUP.md)
 
 # muse-job: CLI + lifecycle-hooks plugin
+mkdir -p ~/bin   # fresh users have no ~/bin (~/.profile picks it up next login)
 cp muse-job/bin/muse-job ~/bin/
-muse plugins install ./muse-job/plugin   # then: muse plugins approve
+muse plugins install ./muse-job/plugin   # needs the muse CLI logged in
+```
+
+Now run `muse plugins approve` on its own and answer the prompt — it's
+interactive, so don't paste past it. Then continue with the rest:
+
+```bash
 muse plugins validate muse-job
 
 # credential web UI (localhost-only; see cred-ui/README.md)
