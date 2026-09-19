@@ -124,7 +124,7 @@ Section order and copy are `LANDING_PAGE_COPY.md` §§2–3 as merged — this
 doc specifies only the build-side additions:
 
 - `<head>`: exactly the tag set from `FUNNEL_MEASUREMENT.md` §5 (PR #99) —
-  the plain `<meta name="description">`, `og:url`, `og:type`, `og:title`,
+  the `<meta name="description">` (non-OG), `og:url`, `og:type`, `og:title`,
   `og:description` (scoped to *this
   page*, no product-wide trackers claim), `og:image` (the persistence pair
   from the demo-assets plan — `assets/README.md` asset 3, currently a
@@ -149,8 +149,9 @@ doc specifies only the build-side additions:
 - The form itself (§4.2) is the only interactive element on the page.
 - **`/waitlist` is a dedicated minimal page** (every CTA links there; it is
   not an anchor on the landing page). It carries the same `<head>` tag set
-  as the landing page (`og:url` points at the marketing page — the share
-  target is the product, not the form), `<title>` "Join the waitlist —
+  as the landing page (`og:url` points at the marketing page — this spec's
+  choice, since the share target is the product, not the form;
+  `FUNNEL_MEASUREMENT.md` §5 defines the tag set for the landing page), `<title>` "Join the waitlist —
   spark-vm", a heading plus one line of the `LANDING_PAGE_COPY.md` §3 hero
   microcopy for context, the §4.2 form, the path-A inbox line (the Muse
   reader's entry point, no separate discovery), and a back-to-`/` link.
@@ -252,14 +253,22 @@ Screens, in order:
 3. **Link identity** — name the box; the enrollment token (shown once,
    "copy for your Muse" — H3 §5); the pending-key approval UI: the key
    fingerprint rendered **prominently** with the H3 re-link email UX
-   requirement (prominent new fingerprint + rate limits — the funnel's
-   §4 pattern, `WAITLIST_OPERATIONS.md` §4, PR #68). If the waitlisted
+   requirement (prominent new fingerprint + rate limits — recorded in the
+   loop's BACKLOG H3 follow-up; `WAITLIST_OPERATIONS.md` §4, PR #68,
+   defers it there). If the waitlisted
    `muse_pubkey` matches the presented key, the UI shows the continuity
    hint ("matches the key your agent submitted" — convenience, not trust —
    `WAITLIST_OPERATIONS.md` §8, PR #68). The waitlist→identity-linked
    bridge metric (`FUNNEL_MEASUREMENT.md` §7, PR #99 —
    waitlist→identity-linked, kept visible, never folded into the page
-   metric) starts emitting here.
+   metric) starts emitting here: the signup backend emits an
+   `identity_linked` event into `funnel_events` with `ref` = the waitlist
+   row id and no attrs, on **entering** the link-identity step (the §7
+   numerator is "signups *reaching* H3 identity linking" — reaching, not
+   approval completion). This is PR 2's one extension to the
+   `FUNNEL_MEASUREMENT.md` §3.4 event table, per §9's "emit into
+   `funnel_events` from day one" — the "no other instrumentation" line
+   scopes §9's waitlist-era metrics, not the signup era.
 4. **Bring your tailnet** — BYO Tailscale link step (decided, NEEDS_USER.md
    Tailnet). H3 §11.2's open tailnet-shape question is closed; the signup
    UI renders the decided shape, not the question.
@@ -269,6 +278,10 @@ Screens, in order:
    `<meta http-equiv="refresh">` plus a manual "Check status" plain-form
    POST. The first-10-minutes clock starts at box-ready, not at signup
    (H3 §5) — the signup page says so plainly, so nobody stares at a spinner.
+   The no-JS rule is status-screen-only: screen 2's card screen needs the
+   payment processor's third-party script, which `FUNNEL_MEASUREMENT.md` §5
+   already anticipates in its no-trackers caveat — the signup flow never
+   claims the no-trackers property past the marketing page.
 6. **Connection bundle** — the Muse's relay hostname + short-lived cert;
    the human's one-command cred-ui tunnel script (H3 §5). The human's
    first-credential install via cred-ui stays the one designed-manual step.
@@ -294,15 +307,25 @@ never render a panel whose substrate doesn't exist.
   fingerprint history (incl. re-link events), tailnet link state,
   card-on-file state. Never full PAN — the processor owns the card; the
   dashboard shows the decided billing surface's last-four/expiry only.
-- **Boxes** — the tenant's boxes: name, status (`provisioning` /
-  `live` / `suspended` / `waking` per the H4 PR #40 contract extensions),
-  connection-bundle re-issue, destroy. Destroy is two-step: an explicit
+- **Boxes** — the tenant's boxes: name, status, connection-bundle
+  re-issue, destroy. The status shown maps onto the H3 §6 provider
+  contract (`status(vm_id) -> creating | ready | degraded | dead`):
+  `creating` renders as `provisioning`, `ready` as `live`, and
+  `degraded` / `dead` render as-is with their remediation guidance
+  (H3 §6) — the panel never hides a human-facing failure state. Status
+  states beyond `live` (`suspended` / `waking`) require the H4 driver —
+  itself gated on the operator's spend-cap packet (NEEDS_USER.md) — to
+  ship the planned extensions to that contract; until then the panel
+  shows `provisioning`/`live` only and says nothing about suspend.
+  (Earlier notes cited "PR #40" for these extensions — that number is
+  the GPU-research deliverable; the extensions are unshipped H4 work.)
+  Connection-bundle re-issue is **gated on H3 §4's re-link/rotation path
+  and H9's cert issuance** — the re-issue flow renders the new key
+  fingerprint for human approval before it activates, exactly like the
+  signup link step (§5 screen 3). Destroy is two-step: an explicit
   "Destroy this box" confirmation screen (typed box name or a second
   rendering's confirm button) — a consequential action gets a
-  consequential interaction. Status states beyond `live`
-  require the H4 driver to ship the PR #40 extensions
-  (`suspended`/`waking` + async `dial()`); until then the panel shows
-  `provisioning`/`live` only and says nothing about suspend.
+  consequential interaction.
 - **Approvals** — the per-tenant pending/answered feed: the confirmd
   approvals UX the owner's phone already answers (two-tap, from
   `docs/FIRST_TEN_MINUTES_SPEC.md`). **Gated on H10/H11:** per-tenant
@@ -317,10 +340,14 @@ never render a panel whose substrate doesn't exist.
   ships), cross-tenant views (H11 audit pending), push-subscription
   management (H14 per-tenant scoping gated on H10/H11).
 
-## 7. Endpoint surface (control plane, pre-signup public set)
+## 7. Endpoint surface (control plane, public set)
 
-The waitlist-era control plane exposes exactly these public endpoints
-(the confirm page included); everything else is operator-side:
+The control plane exposes exactly these public endpoints; everything else
+is operator-side. The waitlist era needs only the first table; the signup
+era (PR 2) adds the second. The GET-never-changes-state rule (§4.3)
+applies to every signed-link endpoint in both tables.
+
+### Waitlist era (PR 1)
 
 | endpoint | method | notes |
 |---|---|---|
@@ -331,7 +358,9 @@ The waitlist-era control plane exposes exactly these public endpoints
 
 **`/waitlist/forget` GET/POST split** (the §4.3 pattern, with the same
 mail-scanner threat model — a scanner fetching the forget link must not
-delete data): GET renders a forget-confirmation page with the masked owner
+delete data): this **supersedes** `WAITLIST_OPERATIONS.md` §5's
+"one-click forget link" wording — the link renders a forget-confirmation
+page on GET and deletes on POST. GET renders the page with the masked owner
 line (same first-3-chars rule as §4.3), a plain "this deletes your waitlist
 entry" line, and a confirm button; POST performs the deletion and renders
 "forgotten"; a re-click after deletion renders the already-forgotten
@@ -342,6 +371,14 @@ rendering verbatim. No state change on GET.
 inside signed emails. The store is never writable from the public
 internet.
 
+### Signup era (PR 2)
+
+| endpoint | method | notes |
+|---|---|---|
+| `/signup/claim` | GET / POST | signed invite link. GET renders the claim screen (pre-filled owner email from the waitlist entry, plan/card summary) — never changes state, so a scanner fetching the link cannot claim anything. POST performs the claim: token as form field, idempotent, emits the `claimed` event (`FUNNEL_MEASUREMENT.md` §3.4, PR #99) with `ref` = the waitlist row id, creates the tenant shell, proceeds to §5 screen 1. |
+| `/signup/magic` | GET / POST | magic-link callback (screen 1). GET renders a "Continue as `<owner>`" button page — never changes state (the mail-scanner threat: a scanner must not consume the single-use token). POST consumes the token, opens the magic-link session, proceeds to screen 2. |
+| `/tenant/status` | GET | H3 §5: the Muse polls with its linked (approved) ed25519 key, signing requests per H3 §4; the signup page polls the same endpoint. Auth: human side = the magic-link session cookie (the status page meta-refreshes inside it); Muse side = its linked key (m2m). Renders the §6 status mapping (`provisioning` / `live`, later `suspended` / `waking`), never the raw H3 enum without the mapping. |
+
 ## 8. Phased build plan
 
 1. **PR 1 — the waitlist page build** (surface 1, §4): static page on
@@ -349,8 +386,9 @@ internet.
    `FUNNEL_MEASUREMENT.md` §5 — PR #99), the form endpoint + path-A
    parser + confirm sender/token signer + reminder/drop jobs + invite
    sender + forget-me handler (all per `WAITLIST_OPERATIONS.md` §§2/4–7 —
-   PR #68), the §4.3 confirm page on the control plane, the §7 endpoint
-   surface, `scripts/funnel_metrics.py` + the §7 query pack
+   PR #68), the §4.3 confirm page on the control plane, the §7 waitlist-era
+   endpoint surface (the §7 signup-era table lands with PR 2),
+   `scripts/funnel_metrics.py` + the §7 query pack
    (`FUNNEL_MEASUREMENT.md` §7 — PR #99). Closes the
    `WAITLIST_OPERATIONS.md` §10 checklist (PR #68) and the
    `FUNNEL_MEASUREMENT.md` §9 follow-up (PR #99). The page ships only
