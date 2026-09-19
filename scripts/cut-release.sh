@@ -115,8 +115,8 @@ TAG="v$VERSION"
 echo "cut-release.sh: VERSION=$VERSION tag=$TAG"
 
 # --- preflight: in sync with the remote ---
-git fetch --quiet "$REMOTE" "refs/heads/main:refs/remotes/$REMOTE/main" \
-    "+refs/tags/*:refs/tags/*" \
+git fetch --quiet -- "$REMOTE" "refs/heads/main:refs/remotes/$REMOTE/main" \
+    "refs/tags/*:refs/tags/*" \
     || die "could not fetch $REMOTE (network? remote name? --remote to override)"
 HEAD_SHA="$(git rev-parse HEAD)"
 REMOTE_SHA="$(git rev-parse "$REMOTE/main")"
@@ -131,6 +131,15 @@ REMOTE_TAGS="$(git ls-remote --tags "$REMOTE" "$TAG")" \
 [[ -z "$REMOTE_TAGS" ]] \
     || die "tag $TAG already exists on $REMOTE; releases are immutable, bump VERSION first"
 
+# --- preflight: VERSION must be newer than every existing release tag ---
+# (merging to main is the release authorization, so a downgrade typo must
+# not silently publish a confusing release).
+MAX_TAG="$(git tag --list 'v*' | sort -V | tail -n 1 || true)"
+if [[ -n "$MAX_TAG" ]]; then
+    printf '%s\n%s\n' "$MAX_TAG" "$TAG" | sort -V -C \
+        || die "VERSION $VERSION is not newer than latest release $MAX_TAG"
+fi
+
 # --- release-notes assembly ---
 PREV_TAG="$(git tag --list 'v*' --sort=-v:refname | head -n 1 || true)"
 NOTES_DIR="$(mktemp -d)"
@@ -144,7 +153,9 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
     if [[ -f CHANGELOG.md ]]; then
         # Extract the Keep-a-Changelog section for this version: "## [x.y.z]"
         # (or "## [vx.y.z]"); any other level-2 header ends the section.
-        VER_ESC="${VERSION//./\\.}"
+        # Escape every regex metacharacter so prerelease/build suffixes
+        # (e.g. the + in 1.2.3+build) match literally.
+        VER_ESC="$(printf '%s' "$VERSION" | sed -e 's/[][\.*^$()+?{}|\\]/\\&/g')"
         SECTION="$(awk -v ver="$VER_ESC" '
             /^## / { insec = ($0 ~ "^## \\[v?" ver "\\]"); next }
             insec { print }
@@ -166,8 +177,10 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
         echo "## Merged (first release)"
     fi
     echo
-    # Squash-merge subjects look like "subject (#123)"; plain subjects pass through.
-    git log --first-parent --format='%s' "$RANGE" | while IFS= read -r subject; do
+    # Squash-merge subjects look like "subject (#123)"; plain subjects pass
+    # through. Carriage returns are stripped: a crafted subject must not be
+    # able to smuggle terminal control sequences into the published notes.
+    git log --first-parent --format='%s' "$RANGE" | tr -d '\r' | while IFS= read -r subject; do
         if [[ "$subject" =~ \(#([0-9]+)\) ]]; then
             num="${BASH_REMATCH[1]}"
             title="${subject% \(#$num\)}"
@@ -207,7 +220,9 @@ fi
 TAG_MSG="spark-vm $TAG"
 git tag -a "$TAG" -m "$TAG_MSG" || die "git tag failed"
 echo "cut-release.sh: created tag $TAG on $HEAD_SHA"
-git push "$REMOTE" "$TAG" || die "git push of $TAG failed"
+git push "$REMOTE" "$TAG" \
+    || { git tag -d "$TAG" >/dev/null 2>&1 || true
+         die "git push of $TAG failed (local tag removed; fix and re-run)"; }
 echo "cut-release.sh: pushed $TAG to $REMOTE"
 
 # --- execute: publish the release ---
@@ -220,8 +235,13 @@ if [[ -z "${CUT_RELEASE_NO_GH:-}" ]] && command -v gh >/dev/null 2>&1; then
     gh "${GH_ARGS[@]}" || die "gh release create failed"
 elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
     # API fallback for operators without `gh`. The token comes from the
-    # environment only and is never printed or logged.
+    # environment only and is never printed, logged, or placed on a command
+    # line: it travels in a 0600 curl config file under the trap-cleaned
+    # temp dir, so it never appears in ps output.
     PAYLOAD="$NOTES_DIR/payload.json"
+    CURL_CFG="$NOTES_DIR/curl.cfg"
+    printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" > "$CURL_CFG"
+    chmod 600 "$CURL_CFG"
     TAG="$TAG" REPO="$REPO" VERSION="$VERSION" NOTES_PATH="$NOTES" \
         python3 - > "$PAYLOAD" <<'PYEOF' || die "release payload build failed"
 import json, os
@@ -236,9 +256,8 @@ print(json.dumps({
     "prerelease": "-" in os.environ["VERSION"],
 }))
 PYEOF
-    curl -sS -X POST \
+    curl -sS -X POST -K "$CURL_CFG" \
         -H "Accept: application/vnd.github+json" \
-        -H "Authorization: Bearer $GITHUB_TOKEN" \
         "https://api.github.com/repos/$REPO/releases" \
         -d @"$PAYLOAD" -o "$NOTES_DIR/release.json" \
         || die "release API call failed"

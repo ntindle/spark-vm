@@ -216,6 +216,67 @@ def test_refuses_when_behind_remote(workrepo, tmp_path):
     assert "not" in r.stderr and "origin/main" in r.stderr
 
 
+def test_refuses_version_not_newer_than_latest_tag(workrepo):
+    git("tag", "v0.5.0", cwd=workrepo)
+    git("push", "origin", "v0.5.0", cwd=workrepo)
+    git("tag", "-d", "v0.5.0", cwd=workrepo)
+    r = run_script(workrepo, "--dry-run")
+    assert r.returncode != 0
+    assert "not newer than latest release v0.5.0" in r.stderr
+
+
+def test_execute_removes_local_tag_when_push_fails(workrepo, fake_gh):
+    hook = workrepo.parent / "origin.git" / "hooks" / "update"
+    hook.write_text("#!/bin/sh\necho 'tag push blocked' >&2\nexit 1\n")
+    hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    r, recorded = run_with_gh(workrepo, fake_gh, "--execute", "--yes")
+    assert r.returncode != 0
+    assert "local tag removed" in r.stderr
+    local_tags = subprocess.run(
+        ["git", "tag", "--list"], cwd=str(workrepo),
+        capture_output=True, text=True, timeout=60).stdout.strip()
+    assert local_tags == ""
+    assert recorded == ""  # publish was never attempted
+
+
+FAKE_CURL = """#!/bin/sh
+{
+echo "CURL_ARGV: $*"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-K" ]; then
+    echo "CONFIG: $a"
+    grep -q 'Authorization' "$a" && echo "CONFIG_HAS_AUTH_HEADER"
+  fi
+  if [ "$prev" = "-o" ]; then
+    printf '{"html_url":"https://example.invalid/r/v0.2.0"}' > "$a"
+  fi
+  prev="$a"
+done
+} >> "$CURL_LOG"
+exit 0
+"""
+
+
+def test_api_fallback_keeps_token_off_argv(workrepo, tmp_path):
+    bindir = tmp_path / "curlbin"
+    bindir.mkdir()
+    curl = bindir / "curl"
+    curl.write_text(FAKE_CURL)
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    curl_log = tmp_path / "curl.log"
+    r = run_script(workrepo, "--execute", "--yes",
+                   env={"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+                        "CUT_RELEASE_NO_GH": "1",
+                        "GITHUB_TOKEN": "sekrit-token-123",
+                        "CURL_LOG": str(curl_log)})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "release URL: https://example.invalid/r/v0.2.0" in r.stdout
+    log = curl_log.read_text()
+    assert "CONFIG_HAS_AUTH_HEADER" in log  # header went via the config file
+    assert "sekrit-token-123" not in log  # ...and never on the command line
+
+
 # --- execute ---
 
 def test_execute_requires_yes(workrepo, fake_gh):

@@ -84,10 +84,14 @@ than its own checkout. `muse-job --version` reads the repo file.
    fires on any push that touches `VERSION` and cuts the release
    automatically: it runs `scripts/cut-release.sh --ci`, which preflights
    (on main, clean tree, strict semver, HEAD == origin/main, tag `vX.Y.Z`
-   absent everywhere), assembles the release notes from the changelog
-   section plus the merged-PR list since the previous tag, creates the
-   annotated tag (tags are never moved or re-cut), and publishes the GitHub
-   release. Semver prereleases (`-rc.1`) are marked prerelease on GitHub.
+   absent everywhere, and VERSION newer than every existing release tag),
+   assembles the release notes from the changelog section plus the
+   merged-PR list since the previous tag, creates the annotated tag (tags
+   are never moved or re-cut), and publishes the GitHub release. Semver
+   prereleases (`-rc.1`) are marked prerelease on GitHub. Merging to main
+   is the release authorization — treat VERSION bumps like releases in
+   review, and consider a GitHub tag-protection ruleset for `v*` so only
+   the workflow can create release tags.
 3. Manual path: `scripts/cut-release.sh` (dry-run by default — prints the
    plan and the notes draft, changes nothing); `cut-release.sh --execute
    --yes` cuts it by hand. It publishes via `gh`, or the GitHub API with
