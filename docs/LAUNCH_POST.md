@@ -25,6 +25,8 @@ Publish-ready launch copy for the open-source release of
 >   powerful — and never trusted with the raw materials.
 > - **Per-action approvals.** Sensitive actions pause for a tap on your
 >   phone before they run. Consent, not blanket lockdown.
+>
+>   ![Two taps on your phone: pending → detail → armed confirm → cleared.](../assets/demo-approval-loop.gif)
 > - **A job runner, a desktop driver, a browser driver.** Long-lived work
 >   with lifecycle hooks, a desktop it can actually click through, and a
 >   headless browser for the rest.
