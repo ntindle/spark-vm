@@ -117,7 +117,10 @@ trade-offs, stated explicitly:
 Non-blocking for this turn: the R2 `<harness-auth-probe>` (§5) should
 assert the `Authorization: Bearer` wire shape explicitly, so a future CLI
 update that changes the auth scheme fails loudly at the probe instead of
-silently passing the placeholder through unswapped.
+silently passing the placeholder through unswapped. **DONE 2026-09-19
+(R2 slice 1): `harness/harness-auth-probe` gate mode asserts every
+origin-received header starts with `Bearer `, contains the expected swapped
+fixture value, and never contains the `hsurr:` placeholder.**
 
 ## What this did NOT prove (kept open, non-blocking)
 
