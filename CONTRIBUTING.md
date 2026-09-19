@@ -22,6 +22,13 @@ work we sometimes forget.
   maintainer's automation loops — don't use them for manual PRs.
 - One improvement per PR. If the change grew teeth, split it.
 - PR body: what changed, why, and how you tested it. Link the issue.
+- **Add a `CHANGELOG.md` entry**: every PR that changes anything
+  user- or operator-visible adds one or two bullets under
+  `## [Unreleased]` in the right section — write it for the person
+  running spark-vm, not the person who wrote the diff, and link the PR
+  number. The ritual (sections, what skips an entry, release-time rollover)
+  is documented at the top of `CHANGELOG.md`. Reviewers will ask for the
+  entry if it's missing.
 - Every PR gets reviewed adversarially — expect hard questions from
   engineering, security, and product perspectives. That's the norm here, not
   a sign something is wrong with your PR.
