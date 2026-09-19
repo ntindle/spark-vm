@@ -475,6 +475,89 @@ def _input_box_has_text(pane, needle):
     return bool(needle) and needle in last_box
 
 
+def _pane_shows_live_tui(pane, pane_cmd):
+    """Fail-closed check: is the Muse TUI actually up in this pane?
+
+    `_steer` used to check only `tmux_alive()` -- never what is in the pane.
+    If the TUI has exited or crashed, the pane drops to a bash prompt and a
+    pasted steer message is parsed by the shell: `$(...)`, backticks, `;`,
+    `|` all execute (issue #4). Two independent signals are required:
+
+    1. Content: the TUI input box (`❯`) is the last non-empty viewport line
+       whenever the TUI is alive and in its normal state. Last-line, not
+       substring: a dead pane can leave a stale `❯` line in scrollback.
+    2. Process: the pane's foreground process must be the TUI itself
+       (`pane_current_command` in `_TUI_COMMANDS`). Content alone is
+       spoofable -- Starship's default prompt character is `❯`, so a dead
+       pane with such a prompt passes signal 1 deterministically. Process
+       identity is not spoofable by pane output.
+
+    Both must hold; anything else (dead TUI, shell prompt, capture failure)
+    refuses.
+    """
+    last = None
+    for line in pane.splitlines():
+        s = line.strip()
+        if s:
+            last = s
+    return bool(last) and last.startswith("❯") and pane_cmd in _TUI_COMMANDS
+
+
+def _wait_live_tui(slug, timeout=30):
+    """Poll until the pane shows a live TUI or the timeout expires.
+
+    Returns the last captured (pane, pane_cmd); check it with
+    `_pane_shows_live_tui`. ("", "") means capture itself failed.
+    The poll absorbs the normal TUI boot window after spawn/resume so the
+    fail-closed refusal only fires when the TUI genuinely is not coming up.
+    """
+    target = f"mjob-{slug}"
+    deadline = time.time() + timeout
+    state = ("", "")
+    while True:
+        state = _capture_pane_state(target)
+        if _pane_shows_live_tui(*state):
+            return state
+        if time.time() >= deadline:
+            return state
+        time.sleep(3)
+
+
+# Foreground process names that count as the live Muse TUI in tmux
+# `pane_current_command`. Anything else (bash/sh/zsh/...) means the pane is
+# a shell -- even if its last line starts with `❯` (issue #4: Starship's
+# default prompt character IS `❯`, and any PS1 can start with it, so the
+# content heuristic alone is spoofable by a dead pane's own prompt).
+_TUI_COMMANDS = frozenset({"muse", "node"})
+
+
+def _capture_pane_state(target):
+    """(pane text, foreground process name) for the target's active pane.
+
+    Fail closed: any capture failure yields ("", ""), which never passes
+    `_pane_shows_live_tui`.
+    """
+    try:
+        pane = run("tmux", "capture-pane", "-p", "-t", target).stdout.decode(
+            errors="replace")
+    except Exception:
+        pane = ""
+    try:
+        cmd = run("tmux", "display-message", "-p", "-t", target,
+                  "#{pane_current_command}").stdout.decode(
+            errors="replace").strip()
+    except Exception:
+        cmd = ""
+    return pane, cmd
+
+
+def _dead_tui_msg(target, pane):
+    """Refusal error for a pane that does not show a live TUI (issue #4)."""
+    tail = "\n".join(pane.splitlines()[-8:]) if pane else "<no pane captured>"
+    return (f"pane of {target} does not show a live TUI input box -- refusing "
+            f"to steer (issue #4; pane tail:\n{tail})")
+
+
 def _steer(slug, message, verify=True):
     """The one place the tmux input quirk lives.
 
@@ -489,6 +572,18 @@ def _steer(slug, message, verify=True):
     target = f"mjob-{slug}"
     if not tmux_alive(slug):
         raise RuntimeError(f"tmux session {target} not alive")
+    # Issue #4: a live tmux session is not a live TUI. If the TUI exited or
+    # crashed, the pane is a shell prompt and the paste below becomes shell
+    # execution. Refuse to send at all -- never steer into a dead pane.
+    pane, pane_cmd = _wait_live_tui(slug, timeout=30)
+    if not _pane_shows_live_tui(pane, pane_cmd):
+        raise RuntimeError(_dead_tui_msg(target, pane))
+    # TOCTOU: re-check on a FRESH capture immediately before pasting -- the
+    # poll above leaves a window where the TUI can die before the text lands.
+    # (The check lives before tmp-file creation so the refusal path leaves
+    # no steer text on disk either.)
+    if not _pane_shows_live_tui(*_capture_pane_state(target)):
+        raise RuntimeError(_dead_tui_msg(target, pane))
     tmpd = os.path.join(job_dir(slug), "tmp")
     os.makedirs(tmpd, exist_ok=True)
     tmpf = os.path.join(tmpd, f"steer-{int(time.time() * 1000)}.txt")
@@ -505,14 +600,26 @@ def _steer(slug, message, verify=True):
         except OSError:
             pass
     time.sleep(2)
+    # TOCTOU: the TUI may have died between the paste and this Enter -- a
+    # dead pane would execute the pasted text (multi-line text can even
+    # execute at paste time, newline by newline). Do NOT send Enter into a
+    # dead pane: pasted-but-unsubmitted text is inert. Report failure.
+    if not _pane_shows_live_tui(*_capture_pane_state(target)):
+        return False
     run("tmux", "send-keys", "-t", target, "Enter")
     if not verify:
         return True
     needle = message.strip().splitlines()[0][:60] if message.strip() else ""
     time.sleep(4)
     for _ in range(3):
-        pane = run("tmux", "capture-pane", "-p", "-t", target).stdout.decode(
-            errors="replace")
+        pane, pane_cmd = _capture_pane_state(target)
+        # Issue #4, TOCTOU half: the TUI may have died between the pre-send
+        # check and the Enter. A dead pane swallows the pasted text into a
+        # shell -- the old "box is clear" test would then wrongly report
+        # success (the text is gone because it executed). The TUI must still
+        # be up for the steer to count as delivered.
+        if not _pane_shows_live_tui(pane, pane_cmd):
+            return False
         # Submitted (or queued mid-turn): the input box is clear of our text.
         if not _input_box_has_text(pane, needle):
             return True
