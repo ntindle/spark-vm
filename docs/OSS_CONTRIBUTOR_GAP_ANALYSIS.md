@@ -74,12 +74,16 @@ public in the open PRs); CI exists as PR #39.
 - **G6 [medium] — README told contributors to open a public issue for
   security holes.** For a credential-proxy project, public-first disclosure
   is the wrong default posture. → **fixed in this PR** by `SECURITY.md`
-  (responsible disclosure; private GitHub Security Advisory first).
-- **G7 [low] — README's "Pushing changes" section conflates contributor and
-  operator flows.** It reads like PR instructions, then tells you to SSH to
+  (responsible disclosure; private GitHub Security Advisory first) and by
+  rewriting README's "Hardening" bullet to point at it — the line a
+  newcomer actually reads no longer directs public-first disclosure.
+- **G7 [low] — README's "Pushing changes" section conflated contributor and
+  operator flows.** It read like PR instructions, then told you to SSH to
   the box and run `proxy/deploy.sh`. → **fixed in this PR**:
-  CONTRIBUTING.md now carries the contributor flow; README's section points
-  to it.
+  CONTRIBUTING.md now carries the contributor flow; README's Contributing
+  section links CONTRIBUTING.md, the "Hardening" bullet points at
+  SECURITY.md's private-disclosure flow, and "Pushing changes" is relabeled
+  operator-only with a pointer back.
 - **G8 [low] — No CHANGELOG.md / release-note ritual.** Existing
   `repo`-rotation seed; not duplicated here.
 - Not filed: review SLA is unknown (open PRs are all hours-old loop

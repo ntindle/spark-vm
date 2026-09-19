@@ -25,7 +25,10 @@ work we sometimes forget.
 - Every PR gets reviewed adversarially — expect hard questions from
   engineering, security, and product perspectives. That's the norm here, not
   a sign something is wrong with your PR.
-- Don't merge your own PR.
+- Don't merge your own PR. (The `hourly/` and `strategy/` automation loops
+  are the one exception: they merge their own PRs after unanimous
+  adversarial sign-off — that's the maintainer's settled process, not a
+  shortcut available to manual contributors.)
 
 ## Running the tests
 
