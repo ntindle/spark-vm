@@ -76,11 +76,13 @@ HOST_RE = re.compile(r"^[A-Za-z0-9_.-]{1,253}(:[0-9]{1,5})?$")
 HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 PARAM_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
-STORE_SET = ["sudo", "-u", "swapd", "/usr/local/bin/cred-store-set"]
-REGISTRY_SET = ["sudo", "-u", "swapd", "/usr/local/bin/cred-registry-set"]
-REGISTRY_CAT = ["sudo", "-u", "swapd", "cat", "/home/swapd/credentials.json"]
-SECRETS_LS = ["sudo", "-u", "swapd", "ls", "/home/swapd/secrets"]
-SECRET_DELETE = ["sudo", "-u", "swapd", "/usr/local/bin/cred-store-delete"]
+# -n everywhere: the sudoers entries are NOPASSWD, and a request thread
+# must never block on a password prompt (matches the cred CLI).
+STORE_SET = ["sudo", "-n", "-u", "swapd", "/usr/local/bin/cred-store-set"]
+REGISTRY_SET = ["sudo", "-n", "-u", "swapd", "/usr/local/bin/cred-registry-set"]
+REGISTRY_CAT = ["sudo", "-n", "-u", "swapd", "cat", "/home/swapd/credentials.json"]
+SECRETS_LS = ["sudo", "-n", "-u", "swapd", "ls", "/home/swapd/secrets"]
+SECRET_DELETE = ["sudo", "-n", "-u", "swapd", "/usr/local/bin/cred-store-delete"]
 
 
 def run(argv, inp=None):

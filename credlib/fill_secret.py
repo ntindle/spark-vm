@@ -20,6 +20,7 @@ import subprocess
 
 from dynamic_credentials import (
     DynamicCredentialError,
+    _validate_name,
     dynamic_credential_entry,
 )
 
@@ -32,7 +33,14 @@ MULTI_MARKER = "#hsurr:multi"
 
 
 def _read_value(credential_name, entry_name):
-    """Read the raw secret value for one entry. Never logs or prints it."""
+    """Read the raw secret value for one entry. Never logs or prints it.
+
+    The name and entry are validated before touching the filesystem:
+    the path below is /home/swapd/secrets/<name>, and an unvalidated
+    name ("../../etc/passwd") would be a path traversal read as swapd.
+    """
+    _validate_name(credential_name, "credential")
+    _validate_name(entry_name, "entry")
     p = subprocess.run(
         SUDO + ["/usr/bin/cat", "%s/%s" % (STORE, credential_name)],
         capture_output=True, check=False, timeout=10,
