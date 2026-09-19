@@ -150,6 +150,88 @@ class ConfirmdTests(unittest.TestCase):
         self.assertFalse(cd.NONCE_RE.match("short"))
         self.assertFalse(cd.NONCE_RE.match("x" * 33))
 
+    # --- #75: CSRF nonce ring -------------------------------------------
+
+    def test_75_nonce_ring_accepts_recent(self):
+        """The last 3 minted nonces all verify; the 4th mint evicts the
+        oldest (a second tab's form stays valid across GETs)."""
+        it = {}
+        n1 = cd._mint_csrf_nonce(it)
+        n2 = cd._mint_csrf_nonce(it)
+        n3 = cd._mint_csrf_nonce(it)
+        self.assertTrue(cd._csrf_nonce_ok(it, n1))
+        self.assertTrue(cd._csrf_nonce_ok(it, n2))
+        self.assertTrue(cd._csrf_nonce_ok(it, n3))
+        n4 = cd._mint_csrf_nonce(it)
+        self.assertTrue(cd._csrf_nonce_ok(it, n4))
+        self.assertTrue(cd._csrf_nonce_ok(it, n2))
+        self.assertTrue(cd._csrf_nonce_ok(it, n3))
+        self.assertFalse(cd._csrf_nonce_ok(it, n1))
+        self.assertEqual(len(it["_csrf_nonces"]), 3)
+
+    def test_75_nonce_ring_migrates_legacy(self):
+        """A legacy single `_csrf` slot is absorbed into the ring on the
+        next mint, so pre-upgrade items keep working."""
+        it = {"_csrf": "f" * 32}
+        n = cd._mint_csrf_nonce(it)
+        self.assertNotIn("_csrf", it)
+        self.assertTrue(cd._csrf_nonce_ok(it, "f" * 32))
+        self.assertTrue(cd._csrf_nonce_ok(it, n))
+
+    def test_75_nonce_rejects_malformed_and_unknown(self):
+        """Malformed and well-formed-but-unknown nonces are rejected;
+        an empty item accepts nothing."""
+        it = {}
+        n = cd._mint_csrf_nonce(it)
+        self.assertTrue(cd._csrf_nonce_ok(it, n))
+        self.assertFalse(cd._csrf_nonce_ok(it, "short"))
+        self.assertFalse(cd._csrf_nonce_ok(it, ""))
+        self.assertFalse(cd._csrf_nonce_ok(it, None))
+        self.assertFalse(cd._csrf_nonce_ok(it, "g" * 32))
+        self.assertFalse(cd._csrf_nonce_ok({}, n))
+
+    def test_75_nonce_ring_drops_expired(self):
+        """Ring entries older than _CSRF_RING_TTL are pruned on mint."""
+        it = {}
+        n1 = cd._mint_csrf_nonce(it)
+        it["_csrf_nonces"][0]["ts"] -= (cd._CSRF_RING_TTL + 1)
+        n2 = cd._mint_csrf_nonce(it)
+        self.assertFalse(cd._csrf_nonce_ok(it, n1))
+        self.assertTrue(cd._csrf_nonce_ok(it, n2))
+        self.assertEqual(len(it["_csrf_nonces"]), 1)
+
+    def test_75_nonce_not_leaked_to_answered(self):
+        """The ring is stripped before the item reaches answered/."""
+        it = {"_csrf_nonces": [{"nonce": "f" * 32, "ts": 0}]}
+        it.pop("_csrf", None)
+        it.pop("_csrf_nonces", None)
+        self.assertNotIn("_csrf_nonces", it)
+
+    # --- #77: low-risk hardening leftovers -------------------------------
+
+    def test_77_answered_dir_recreates(self):
+        """answered_dir() re-creates the dir if deleted at runtime (L5)."""
+        import shutil
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            shutil.rmtree(self.approvals / "answered")
+            d = cd.answered_dir()
+            self.assertTrue(os.path.isdir(d))
+
+    def test_77_whois_cache_capped(self):
+        """The whois cache does not grow without bound (L10)."""
+        cd._whois_cache.clear()
+        try:
+            for i in range(4097):
+                cd._whois_cache["10.0.0.%d" % i] = ("x", 0.0)
+            # Mocked whois returns the owner login; the cache write is
+            # what we exercise.
+            with mock.patch("subprocess.run", side_effect=_fake_run):
+                self.assertEqual(cd.tailnet_login("10.9.9.9"),
+                                 "ntindle@github")
+            self.assertLessEqual(len(cd._whois_cache), 4096)
+        finally:
+            cd._whois_cache.clear()
+
     # --- 47: self-peer refusal -------------------------------------------
 
     def test_47_host_addrs_include_tailscale_ips(self):

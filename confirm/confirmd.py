@@ -144,6 +144,45 @@ PAGE_ORIGINS = _page_origins()
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 
+# Issue #75: a small ring of valid CSRF nonces per approval. The old code
+# kept a single `_csrf` slot and rewrote it on every GET, so a second tab
+# (or back-button + resubmit) 403'd the first tab's form AND audit-logged
+# it as a CSRF violation — false positives that desensitized review of
+# real violations. Ring entries are {nonce, ts}; only the newest few are
+# accepted, and only genuinely malformed/missing nonces are audited as
+# violations (see the POST path).
+_CSRF_RING_SIZE = 3
+_CSRF_RING_TTL = 15 * 60  # seconds; entries older than this are dropped
+
+
+def _mint_csrf_nonce(it):
+    """Mint a fresh CSRF nonce for an approval item, keeping a small ring
+    of recent nonces. Migrates the legacy single `_csrf` slot into the
+    ring on first use."""
+    now = time.time()
+    ring = [e for e in (it.get("_csrf_nonces") or [])
+            if isinstance(e, dict) and isinstance(e.get("ts"), (int, float))
+            and now - e["ts"] <= _CSRF_RING_TTL]
+    legacy = it.pop("_csrf", None)
+    if legacy and legacy not in {e.get("nonce") for e in ring}:
+        ring.append({"nonce": legacy, "ts": now})
+    nonce = secrets.token_urlsafe(24)
+    ring.append({"nonce": nonce, "ts": now})
+    it["_csrf_nonces"] = ring[-_CSRF_RING_SIZE:]
+    return nonce
+
+
+def _csrf_nonce_ok(it, csrf):
+    """True if `csrf` is a well-formed nonce in the item's ring (or its
+    legacy single slot)."""
+    if not NONCE_RE.match(csrf or ""):
+        return False
+    ring = it.get("_csrf_nonces") or []
+    candidates = {e.get("nonce") for e in ring if isinstance(e, dict)}
+    if it.get("_csrf"):
+        candidates.add(it["_csrf"])
+    return csrf in candidates
+
 # Finding 47: the host's own tailnet addresses. A peer presenting one
 # of these is the host itself (e.g. the swap proxy connecting out) —
 # never the human on a remote node.
@@ -202,6 +241,11 @@ def tailnet_login(peer_ip):
     except Exception:
         pass
     _whois_cache[peer_ip] = (login, now)
+    # Issue #77 (L10): hygiene cap on the otherwise-unbounded whois cache.
+    # Keyed by peer IP so it is tailnet-bounded, but a leak is a leak —
+    # evict oldest-inserted past the cap.
+    while len(_whois_cache) > 4096:
+        _whois_cache.pop(next(iter(_whois_cache)))
     return login
 
 
@@ -240,6 +284,9 @@ def pending_dir():
 
 def answered_dir():
     d = os.path.join(APPROVALS, "answered")
+    # Issue #77 (L5): create at the use site too, so a runtime-deleted
+    # answered/ cannot raise uncaught FileNotFoundError in /answer.
+    os.makedirs(d, exist_ok=True)
     return d
 
 
@@ -895,8 +942,14 @@ class Handler(BaseHTTPRequestHandler):
             if not os.path.exists(p):
                 self._err("not found or already answered", 404)
                 return
-            with open(p) as f:
-                it = json.load(f)
+            try:
+                with open(p) as f:
+                    it = json.load(f)
+            except (OSError, ValueError):
+                # Issue #77 (L5): a corrupt/torn pending file must not
+                # raise an uncaught exception into the page.
+                self._err("not found or already answered", 404)
+                return
             if is_expired(it):
                 # Finding 53(a): refuse with a message, and reap.
                 try:
@@ -907,9 +960,10 @@ class Handler(BaseHTTPRequestHandler):
                           "id=%s" % aid)
                 self._err("This approval expired and was removed.", 410)
                 return
-            # Finding 48: mint a CSRF nonce, store it in the pending file.
-            nonce = secrets.token_urlsafe(24)
-            it["_csrf"] = nonce
+            # Finding 48 + issue #75: mint a CSRF nonce, keeping a small
+            # ring of recent nonces in the pending file (a fresh GET in a
+            # second tab must not invalidate the first tab's form).
+            nonce = _mint_csrf_nonce(it)
             tmp = p + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(it, f, indent=2)
@@ -1030,11 +1084,25 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.exists(src):
             self._err("not found or already answered", 404)
             return
-        with open(src) as f:
-            it = json.load(f)
-        # Finding 48: the nonce must match the one minted on GET.
-        if not NONCE_RE.match(csrf) or it.get("_csrf") != csrf:
+        try:
+            with open(src) as f:
+                it = json.load(f)
+        except (OSError, ValueError):
+            # Issue #77 (L5): a corrupt/torn pending file must not raise
+            # an uncaught exception into the POST path either.
+            self._err("not found or already answered", 404)
+            return
+        # Finding 48 + issue #75: the nonce must be well-formed and belong
+        # to the item's nonce ring. Malformed/missing nonces are audited as
+        # CSRF violations; a well-formed but stale nonce (second tab,
+        # back-button resubmit) is just rejected — logging those as
+        # violations desensitized review of real ones.
+        if not csrf or not NONCE_RE.match(csrf):
             self._deny(self.client_address[0], login, "csrf: bad nonce")
+            return
+        if not _csrf_nonce_ok(it, csrf):
+            self._err("This form is stale — reload the page and try "
+                      "again.", 403)
             return
         # Finding 53(a): expired items are refused, not silently denied.
         if is_expired(it):
@@ -1054,6 +1122,7 @@ class Handler(BaseHTTPRequestHandler):
                        "bad requester: %s" % requester)
             return
         it.pop("_csrf", None)
+        it.pop("_csrf_nonces", None)
         it["decision"] = decision
         it["answered_at"] = datetime.now(timezone.utc).isoformat()
         it["answered_by"] = login
@@ -1093,6 +1162,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
         # Finding 56: one-way. Write to answered/, then move to consumed/.
         # The proxy never re-derives grants from these files.
+        # (answered_dir() re-creates the dir if it was deleted at
+        # runtime — issue #77 (L5).)
         dst = os.path.join(answered_dir(), aid + ".json")
         tmp = dst + ".tmp"
         with open(tmp, "w") as f:
@@ -1101,8 +1172,13 @@ class Handler(BaseHTTPRequestHandler):
         os.remove(src)
         try:
             os.replace(dst, os.path.join(consumed_dir(), aid + ".json"))
-        except OSError:
-            pass
+        except OSError as e:
+            # Issue #77 (L4): the old code swallowed a failed
+            # answered->consumed move silently, losing history. Journal
+            # it loudly instead (audit_log's own fail-silent path is
+            # issue #72).
+            print("confirmd WARNING: answered->consumed move failed for "
+                  "%s: %s" % (aid, e), flush=True)
         audit_log("answer", self.client_address[0], login,
                   "id=%s decision=%s requester=%s"
                   % (aid, decision, requester))
