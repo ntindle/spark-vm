@@ -168,11 +168,16 @@ trust doc, but pre-window and possibly already tracked by an earlier pass.
 
 ## 8. Watch items for the next pass
 
+Naming: watch passes land as `docs/COMPETITOR_WATCH_YYYY-MM-DD.md`, with
+`_EVENING`/`_NIGHT`/`_MORNING` suffixes when a second pass lands the same
+day; each doc is delta-only against the named previous doc.
+
 - The five items above are still **unconsolidated**: PR #64's night-pass
   doc folded nothing into `docs/COMPETITOR_ANALYSIS.md`; PR #54 (rebased
   onto main this run, head 31d5144) carries the evening-pass
-  consolidation. Next consolidation pass should fold both #54 and this
-  morning pass into the baseline doc.
+  consolidation. Next consolidation pass should fold #54 + #64 + this
+  morning pass into the baseline `docs/COMPETITOR_ANALYSIS.md`, in that
+  order.
 - WSO2 webinar Sep 29 (C10) — first real reception signal.
 - TermSquad's unadvertised Herdr version (herdr#3415 exposure hinges on it).
 - TermSquad's x.com/trytermsquad update channel is login-gated (watch-
