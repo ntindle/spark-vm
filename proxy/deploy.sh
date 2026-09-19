@@ -140,6 +140,15 @@ fi
 sudo chown swapd:swapd /home/swapd/grants.json
 sudo chmod 0600 /home/swapd/grants.json
 
+# --- 4a. audit log (swap.log) ---------------------------------------------
+echo "[4a/7] Tightening any pre-existing audit log..."
+# The writers create swap.log 0600, but a log left 0644 by the old code
+# stays that way (creation-only mode). Tighten it here every deploy.
+if sudo test -f /home/swapd/swap.log; then
+    sudo chown swapd:swapd /home/swapd/swap.log
+    sudo chmod 0600 /home/swapd/swap.log
+fi
+
 # --- 4b. with-proxy + its CA bundle (owner decision 13) ------------------
 echo "[4b/7] Building the with-proxy CA bundle and installing with-proxy..."
 # The swapd CA is not in the host store; with-proxy uses system CAs plus
@@ -197,10 +206,14 @@ echo ""
 echo "=== verifying ==="
 # mitmdump takes a few seconds to listen after restart; a pull.sh run
 # straight after deploy would otherwise fail with "Couldn't connect".
-for i in $(seq 1 20); do
-    if (exec 3<>/dev/tcp/127.0.0.1/18080) 2>/dev/null; then break; fi
+proxy_ready=0
+for attempt in $(seq 1 20); do
+    if (exec 3<>/dev/tcp/127.0.0.1/18080) 2>/dev/null; then proxy_ready=1; break; fi
     sleep 0.5
 done
+if [ "$proxy_ready" != "1" ]; then
+    echo "  WARNING: proxy port 18080 not listening after $attempt tries"
+fi
 for svc in swap-proxy swap-inference confirmd; do
     if sudo systemctl is-active --quiet "$svc.service"; then
         echo "  $svc: active"
