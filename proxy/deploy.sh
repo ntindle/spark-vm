@@ -197,10 +197,14 @@ echo ""
 echo "=== verifying ==="
 # mitmdump takes a few seconds to listen after restart; a pull.sh run
 # straight after deploy would otherwise fail with "Couldn't connect".
-for i in $(seq 1 20); do
-    if (exec 3<>/dev/tcp/127.0.0.1/18080) 2>/dev/null; then break; fi
+proxy_ready=0
+for attempt in $(seq 1 20); do
+    if (exec 3<>/dev/tcp/127.0.0.1/18080) 2>/dev/null; then proxy_ready=1; break; fi
     sleep 0.5
 done
+if [ "$proxy_ready" != "1" ]; then
+    echo "  WARNING: proxy port 18080 not listening after $attempt tries"
+fi
 for svc in swap-proxy swap-inference confirmd; do
     if sudo systemctl is-active --quiet "$svc.service"; then
         echo "  $svc: active"

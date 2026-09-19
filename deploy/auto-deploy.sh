@@ -384,8 +384,13 @@ restore_snapshot() {
             CHECKOUT-ABSENT\ *)
                 local rest="${line#CHECKOUT-ABSENT }"
                 local sub2="${rest#* }"
+                if [ -z "$sub2" ]; then
+                    log "  corrupt MANIFEST CHECKOUT-ABSENT line (empty subtree): $line"
+                    rc=1
+                    continue
+                fi
                 log "  removing $WORKING_CHECKOUT/$sub2 (was absent at snapshot)"
-                rm -rf "$WORKING_CHECKOUT/$sub2" || rc=1
+                rm -rf "${WORKING_CHECKOUT:?}/${sub2:?}" || rc=1
                 ;;
             *)
                 log "  restoring $line"
@@ -416,7 +421,7 @@ install_component() {
     local sub; sub="$(get_str "$c" checkout_sync)"
     if [ -n "$sub" ]; then
         log "  $c: syncing subtree $sub from mirror@$new into $WORKING_CHECKOUT"
-        rm -rf "$WORKING_CHECKOUT/$sub" || return 1
+        rm -rf "${WORKING_CHECKOUT:?}/${sub:?}" || return 1
         if ! git -C "$UPDATER_REPO" archive "$new" "$sub" | tar -x -C "$WORKING_CHECKOUT"; then
             log "  $c: subtree sync FAILED"
             return 1
@@ -498,13 +503,13 @@ health_check() {
         [ -n "$h" ] || continue
         host="${h#tcp:}"; host="${host%:*}"; port="${h##*:}"
         log "  health: tcp $host:$port ..."
-        local i ok=0
-        for i in $(seq 1 20); do
+        local attempt ok=0
+        for attempt in $(seq 1 20); do
             if tcp_ok "$host" "$port"; then ok=1; break; fi
             sleep 0.5
         done
         if [ "$ok" != "1" ]; then
-            log "  health: tcp $host:$port FAILED"
+            log "  health: tcp $host:$port FAILED after $attempt tries"
             return 1
         fi
     done < <(get_arr "$c" health)

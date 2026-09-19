@@ -364,11 +364,13 @@ def test_scripts_syntax():
     for f in ("deploy/auto-deploy.sh", "proxy/deploy.sh"):
         r = run_bash("bash -n " + f)
         assert r.returncode == 0, "%s: %s" % (f, r.stderr)
-    r = run_bash("command -v shellcheck >/dev/null && "
-                 "shellcheck -S warning deploy/auto-deploy.sh proxy/deploy.sh "
-                 "|| echo NO_SHELLCHECK")
-    if "NO_SHELLCHECK" not in r.stdout:
-        assert r.returncode == 0, r.stdout + r.stderr
+    # Gate on shellcheck warnings, not just syntax. Explicit skip (not a
+    # silent pass) when shellcheck is absent — CI installs it, so a skip
+    # there means the workflow's install step broke and should be noticed.
+    if run_bash("command -v shellcheck").returncode != 0:
+        pytest.skip("shellcheck not installed; syntax-only gate applied")
+    r = run_bash("shellcheck -S warning deploy/auto-deploy.sh proxy/deploy.sh")
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 # --- version stamping (docs/VERSIONING.md) ------------------------------------
@@ -571,3 +573,11 @@ def test_pull_only_deploy_records_version(tmp_path):
     assert '"result":"pull-only"' in audit, audit
     assert '"to_version":"unknown"' in audit, audit
     assert '"from_version":"unknown"' in audit, audit
+=======
+    # Gate on shellcheck warnings, not just syntax. Explicit skip (not a
+    # silent pass) when shellcheck is absent — CI installs it, so a skip
+    # there means the workflow's install step broke and should be noticed.
+    if run_bash("command -v shellcheck").returncode != 0:
+        pytest.skip("shellcheck not installed; syntax-only gate applied")
+    r = run_bash("shellcheck -S warning deploy/auto-deploy.sh proxy/deploy.sh")
+    assert r.returncode == 0, r.stdout + r.stderr
