@@ -92,11 +92,12 @@ security/medium issues (#5–#13), proxy arch issues (#14–#17), and #56 (now
 answered by PR #60, awaiting merge) all sit. The P1 surge rule would have
 fired (queue ≥ 15 at every turn start) — it was never adopted (F10).
 
-**F13 — F2/F4 are closed by events, not by design.** The PR queue drained
-(24 → 11) and the strategy pileup is gone because the operator merged the
-batch — the repo archetype never exercised the proposed queue duties, and
-P4's stall rule never triggered. The underlying risks (unowned queue,
-stacking without convention) are dormant, not fixed: #66's correct
+**F13 — F2 is closed by events, not by design.** The PR queue drained
+(24 → 11) because the operator merged the batch — the repo archetype never
+exercised the proposed queue duties, so the unowned-queue risk is dormant,
+not fixed. F4 (strategy pileup) deserves the same treatment: the re-pile
+conditions are already forming (11 open PRs, merge authority inert per
+F8/F14, strategy loop shipping 3 more PRs this window). #66's correct
 stack-on-branch + merge-order note shows the convention *can* work when a
 run bothers to write it down.
 
@@ -108,14 +109,25 @@ real, the first loop-executed merge needs to happen; if the operator
 prefers to keep merging, the playbook should say so instead of leaving
 runs in a wait-for-green-CI limbo.
 
+Terminology note: "the operator" in this doc means the human user/owner who
+provisions the hosted infrastructure and holds the GitHub token — distinct
+from the loop runs themselves.
+
 ## Proposals (for the loops to adopt — not applied by this audit)
 
-**P8 — One-time CI bootstrap merge.** Merge PR #39 on Engineering judgment,
-not CI-green: re-run the workflow's four jobs' underlying commands against
-the branch head locally (pytest, shellcheck, lychee, PNG check), record the
-results in RUNLOG, squash-merge, and note the exception on the PR. After
-#39 lands, the CI-green clause is live for everything else. This is a
-bootstrap, not a precedent.
+**P8 — One-time CI bootstrap merge.** Merge PR #39 on Engineering
+judgment, not CI-green: re-run the workflow's four jobs' underlying
+commands against the branch head locally —
+`python3 -m pytest` (root one-liner per CONTRIBUTING.md),
+`shellcheck` on the scripts the workflow scans,
+`lychee` on the markdown the workflow checks (fall back to `scripts/png-check.py`
+plus a manual link spot-check if lychee is unavailable locally),
+and the PNG/doc checks — record each result in RUNLOG. The bootstrap merge
+itself still needs unanimous SHIP IT from its routed roles on the final
+code: a one-time exception to the CI-green clause, not to the
+never-ship-without-approval rule. Squash-merge, note the exception on the
+PR. After #39 lands, the CI-green clause is live for everything else. This
+is a bootstrap, not a precedent.
 
 **P9 — Dirty-PR rebase ownership.** The archetype that owns a dirty PR
 rebases it before any merge decision: next `fix` turn rebases #50 (it's the
@@ -126,6 +138,9 @@ stacking topology + "rebase needed" flags as P2 proposed.
 checklist to the **top of BACKLOG.md** (the file every run reads), not just
 the audit doc; the `repo` archetype drains the checklist (propose text,
 run it past the user where the audit says "needs user approval").
+Placement: a dedicated `## Loop-rotation proposals (unadopted)` section
+above the existing archetype markers — it absorbs and supersedes the
+2026-09-18 audit's orphaned P1–P7 list rather than competing with it.
 
 **P11 — Hosted unblock pass.** Next `gap` turn: audit every hosted item's
 stated blocker against NEEDS_USER.md; convert stale blockers into work
@@ -133,16 +148,21 @@ stated blocker against NEEDS_USER.md; convert stale blockers into work
 start) and re-file the genuinely-blocked remainder with a one-line operator
 decision packet each.
 
-**P12 — Renew P1, P5, P6, P7; update P2; retire P3, P4 as moot.**
-P1 (fix surge) still fires on the numbers; P5 (defer trail) and P6
-(NEEDS_USER freshness) are unadopted and still needed — F8/F11 are both
-freshness failures. P7 (`ops` archetype) still needs the user call. P2's
-"merge decisions stay the operator's" is superseded by the standing
-loop-merges rule — rewrite it as merge *execution* duties (dependency
-order, update-branch endpoint, squash). P3 (marketing gate) never
-triggered and the launch copy it gated is now merged — retire. P4 (stall
-rule) never triggered; the pileup drained by merge — retire, keep the
-working-note pattern as convention.
+**P12 — Renew P1, P3, P4, P5, P6, P7; update P2.** P1 (fix surge) still
+fires on the numbers; P5 (defer trail) and P6 (NEEDS_USER freshness) are
+unadopted and still needed — F8/F11 are both freshness failures. P7
+(`ops` archetype) still needs the user call. P2's "merge decisions stay
+the operator's" is superseded by the standing loop-merges rule — rewrite
+it as merge *execution* duties (dependency order, update-branch endpoint,
+squash). P3 (marketing gate) was never *adopted*, so "never triggered"
+is evidence of non-adoption, not mootness — re-authorize it, and add the
+corrective the merge batch skipped: merged #36 (launch post) and #28
+(positioning) should be recalibrated or parked (marked vision/not-live)
+until the hosted launch is executable, since F3's speculative-inventory
+risk was realized, not retired. P4 (stall rule) likewise never adopted;
+keep it with an explicit re-arm condition: strategy turns flip to
+working-notes when ≥8 strategy PRs are open with no merge since the last
+strategy turn — the re-pile conditions are already forming (F13).
 
 ## Adoption checklist (for the next loops, in order)
 
@@ -152,8 +172,9 @@ working-note pattern as convention.
 - [ ] P10: this audit's checklist appended to BACKLOG.md top section;
       `repo` archetype owns draining it.
 - [ ] P11: next `gap` turn runs the hosted unblock pass.
-- [ ] P12: adopt P1/P5/P6/P7 text into PLAYBOOK.md; rewrite P2's merge
-      duties; strike P3/P4 as moot.
+- [ ] P12: adopt P1/P3/P4/P5/P6/P7 text into PLAYBOOK.md (P3 re-authorized
+      with the #36/#28 park corrective; P4 with the ≥8-open-PRs re-arm
+      condition); rewrite P2's merge duties.
 - [ ] F14: decide whether loop-executed merges are real — first
       loop-executed merge, or playbook text saying the operator merges.
 - [ ] Record each adoption in BACKLOG.md; this audit's proposals stay filed
