@@ -56,11 +56,16 @@ Operator merge batch (2026-09-18 ~20:26–20:46 CDT / 01:26–01:46 UTC 9/19):
 #38, #40, #43, #44, #45, #46, #48, #49, #51, #52, #58. The strategy-doc
 pileup (F4) is gone by merge, not by loop action.
 
-PR queue now: 11 open. #39 (CI) mergeable `unstable`, **0 check runs on its
-head commit**; #50 and #54 `dirty` — main moved under them in the merge
-batch; #59–#65 `clean`; #66 `clean`, stacked on #59's branch. Main has
-**no branch protection** (verified via API) — every merge gate is the
-loop's own convention, not GitHub enforcement.
+PR queue now: 11 open. #39 (CI) mergeable `unstable`; its head
+(`cc08a04c`) has **4 completed check runs — 2 green, 2 red** (shellcheck ✓,
+PNG smoke test ✓, markdown link check ✗ at step "Check links in all
+markdown docs", python tests ✗ at step "auto-deploy tests"; run
+2026-09-19T05:01Z). No other open PR's head has any check runs (the
+workflow file exists only in #39's branch, so only #39's own PR exercises
+it). #50 and #54 are `dirty` — main moved under them in the merge batch;
+#59–#65 `clean`; #66 `clean`, stacked on #59's branch. Main has **no
+branch protection** (verified via API) — every merge gate is the loop's
+own convention, not GitHub enforcement.
 
 Issue queue: 18 → 22. Closed: #2 (merged #48), #55 (LICENSE). Filed: #41,
 #42 (muse-job watch arch), #47 (live machine control), #53 (automate
@@ -69,17 +74,22 @@ releases from VERSION), #56 (single-command tests, already answered by PR
 
 ## Findings
 
-**F8 — The merge convention is in a chicken-and-egg deadlock.** The
-standing rule ("merging is the loop's job": merge when CI green +
-mergeable-clean + unanimous SHIP IT) cannot fire: there is no CI on main,
-so no PR can ever be "CI green" — and #39 *is* the CI PR. Three consecutive
-runs (00:27, 00:54, 01:05) left clean, unanimously-signed PRs open citing
-"no CI on main". The cited sub-blocker is stale: NEEDS_USER.md records the
-`workflow` token scope as RESOLVED 2026-09-18 and PR #39 opened the same
-day — the loop's RUNLOG entries kept quoting the old blocker after the
-fact. The real gate is a bootstrap judgment call nobody is authorized to
-make under the current rule text. Until #39 merges, the loop's merge
-authority is inert.
+**F8 — The merge gate is a red signal nobody diagnosed, not a missing
+one.** The standing rule ("merging is the loop's job": merge when CI green
++ mergeable-clean + unanimous SHIP IT) is blocked, but not for the reason
+the last three runs cited. "No CI on main" is true — yet CI *does* run on
+PR #39's own head (the workflow file lives in its branch), and it is
+**red**: shellcheck ✓, PNG ✓, markdown link check ✗ ("Check links in all
+markdown docs"), python tests ✗ ("auto-deploy tests"). The gate isn't "no
+signal exists"; it's a failing signal nobody has looked at. The stale-
+blocker half stands: NEEDS_USER.md records the `workflow` token scope as
+RESOLVED 2026-09-18 and PR #39 opened the same day, while RUNLOG entries
+kept quoting the old blocker afterward. No other open PR has any check
+runs, so the loop's merge authority stays inert until #39's own CI is
+green — but that is now a fixable engineering task, not a judgment-call
+paradox. The "bootstrap exception" the previous draft proposed is
+withdrawn: no escape hatch is needed, and the playbook's no-escape-hatch
+culture is preserved.
 
 **F9 — The merge batch left the two riskiest PRs conflict-blocked.**
 #50 (B1–B6 hardening — the fix turn's highest-priority *security* item,
@@ -143,20 +153,15 @@ runs in a wait-for-green-CI limbo.
 
 ## Proposals (for the loops to adopt — not applied by this audit)
 
-**P8 — One-time CI bootstrap merge.** Merge PR #39 on Engineering judgment,
-not CI-green: re-run the workflow's four jobs' underlying commands against
-the branch head locally — `python3 -m pytest` (root one-liner per
-CONTRIBUTING.md), `shellcheck` on the scripts the workflow scans, `lychee`
-on the markdown the workflow checks (fall back to `scripts/png-check.py`
-plus a manual link spot-check if lychee is unavailable locally), and the
-PNG/doc checks — record each result in RUNLOG. The bootstrap merge itself
-still needs unanimous SHIP IT from its routed roles on the final code.
-This is a one-time *recorded exception to the loop's own CI-green
-convention*, authorized under the user's standing "merging is the loop's
-job" grant — it resolves the "nobody is authorized" paradox without
-creating a general escape hatch (the playbook's no-escape-hatch culture
-for review approval stands). Squash-merge, note the exception on the PR.
-After #39 lands, the CI-green clause is live for everything else.
+**P8 — Fix #39's red CI, then merge it on genuinely green CI.** No
+bootstrap exception: the next `dx` (or `repo`) turn diagnoses the two
+failing jobs on #39's head — markdown link check (step "Check links in
+all markdown docs") and python tests (step "auto-deploy tests") — fixes
+them on the branch, and merges #39 only when its own CI is green. After
+#39 lands, the workflow file exists on main, CI starts reporting on every
+PR, and the CI-green clause is live for everything else. The playbook's
+no-escape-hatch culture stays intact: the loop merges on green CI, never
+on judgment over a red signal it refused to name.
 
 **P9 — Dirty-PR rebase ownership.** The archetype that owns a dirty PR
 rebases it before any merge decision: next `fix` turn rebases #50 (it's the
@@ -202,8 +207,9 @@ reporting); both stay.
 
 ## Adoption checklist (for the next loops, in order)
 
-- [ ] P8: next `repo` or `dx` turn executes the #39 bootstrap merge
-      (local verification + recorded exception).
+- [ ] P8: next `dx` (or `repo`) turn diagnoses #39's two red CI jobs
+      (link check, auto-deploy tests), fixes them on the branch, and
+      merges #39 only when its own CI is green — no bootstrap exception.
 - [ ] P9: next `fix` turn rebases #50; next strategy turn rebases #54.
 - [ ] P10: this audit's checklist appended to BACKLOG.md top section
       (absorbing the orphaned P1–P7 list); `repo` archetype owns draining
