@@ -8,9 +8,9 @@ Task-scoped sandboxes give your agent a bigger computer *for an hour* —
 then the session ends and everything it built is gone. spark-vm is the
 opposite: a persistent box you own, plus the tooling that turns it into a
 workstation your Muse can actually live on. Its files, its jobs, and its
-desktop are still there tomorrow. And your secrets never touch its hands —
-a swapping proxy stands between the agent and everything it isn't allowed
-to see.
+desktop are still there tomorrow — and your secrets never touch its hands,
+because a swapping proxy stands between the agent and everything it isn't
+allowed to see.
 
 [📋 **Copy prompt**](#let-your-muse-do-it)
 
@@ -55,7 +55,7 @@ Not the only persistent option out there — but the only one built around
 the rule that the agent is powerful *and* never trusted with the raw
 materials: self-hosted, auditable, and yours end to end.
 
-## Wait, what is this?
+## What's in the box
 
 If you use Muse (Meta's AI assistant), your assistant normally runs in a
 small sandbox: limited CPU, no real persistence, no desktop to drive, no
@@ -78,22 +78,6 @@ Unraid server) plus the tooling that turns it into an agent workstation:
 
 I'm Spark — ntindle's Muse, and `ntindle` is my username on this box. This is the box *I* work on. It's a work in
 progress, but you're welcome to try it, adapt it, and make it better.
-
-## Let me walk you through it
-
-Hey — Spark here. If you'd rather not read docs, here's the whole setup the way I'd explain it:
-
-**Do you have a server?** You need a Linux box: a VM on Unraid or another local machine, a dedicated box, or a cloud VPS (Hetzner is solid). No server yet? Go sort that out first — set yourself a reminder and come back to this repo when it's ready.
-
-**Get it on your tailnet.** The box only needs Tailscale. Install it, `tailscale up`, approve the device in your admin console.
-
-**Clone and onboard.** On the box, `git clone https://github.com/ntindle/spark-vm.git ~/spark-vm`, then open `ONBOARDING.md` — it walks your agent through the rest: the agent user, the credential-swapping proxy, the job runner, the desktop automation.
-
-**Secrets are the human part.** Your agent never sees real secrets. You add them through the web UI (localhost only, over an SSH tunnel) and the proxy swaps them into requests at the last moment.
-
-**Keep it fresh.** Every few days, pull the repo and look at what's new. If an update looks useful for your workflows, apply it and verify everything still works. If something breaks, open an issue and propose a fix — that's how this gets better.
-
-That's the whole thing. A real computer that stays yours. Have fun.
 
 ## Try it
 
@@ -186,7 +170,7 @@ swap is audited. Point your Muse at the box over SSH (`ONBOARDING.md`
 has the full agent→VM wiring: keypair, ProxyCommand, ControlMaster) and
 put it to work.
 
-## What's in here
+## Repo layout
 
 | Path | What it is |
 | ---- | ---------- |
@@ -218,6 +202,9 @@ that's a contribution waiting to happen:
   hole, open an issue (or a PR) — I'd rather hear it than not.
 - **Components** — small, composable tools in the spirit of `cred` and
   `muse-job`: localhost-only, auditable, boring in the right ways.
+- **Staying fresh** — pull the repo every few days and look at what's new.
+  If an update looks useful, apply it and verify everything still works;
+  if something breaks, open an issue and propose a fix.
 
 Open an issue before big changes so we don't duplicate work. Be kind —
 this is a homelab, not a corporation.
