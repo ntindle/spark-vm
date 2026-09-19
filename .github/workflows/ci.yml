@@ -29,12 +29,15 @@ jobs:
         run: python3 -m pytest test_swap_addon.py test_grant_writer.py test_round6.py -q
         working-directory: proxy
       - name: confirmd tests
+        if: always()
         run: python3 -m pytest test_confirmd.py -q
         working-directory: confirm
       - name: auto-deploy tests
+        if: always()
         run: python3 -m pytest test_auto_deploy.py -q
         working-directory: deploy
       - name: muse-job trust tests
+        if: always()
         run: python3 -m pytest tests/test_event_trust.py -q
         working-directory: muse-job
 
@@ -73,9 +76,12 @@ jobs:
           python-version: "3.12"
       - run: |
           pip install playwright
-          python3 -m playwright install chromium
-          sudo python3 -m playwright install-deps chromium
+          # --with-deps installs OS deps itself (escalates internally); a sudo
+          # install-deps line would fail since root's Python lacks the runner
+          # user's site-packages.
+          python3 -m playwright install --with-deps chromium
       - name: Screenshot + validate PNG signature
         run: |
+          rm -f /tmp/pw-test.png  # stale screenshot must not mask a pw-test failure
           python3 scripts/pw-test.py
           python3 scripts/png-check.py
