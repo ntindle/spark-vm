@@ -406,6 +406,47 @@ def test_version_state_defaults_unknown(tmp_path):
     assert "VER_UNKNOWN" in r.stdout
 
 
+def test_clean_version_sanitizes_hostile_input():
+    """clean_version: strict semver passes through, everything else —
+    quotes, backslashes, newlines — becomes "unknown". VERSION is
+    attacker-influenced (merged PRs, swapd-writable deployed copy) and is
+    interpolated into audit JSON, so this is the injection boundary."""
+    r = source_and(r'''
+set -e
+[ "$(clean_version '1.2.3')" = 1.2.3 ]
+[ "$(clean_version '1.2.3-rc.1+b1')" = '1.2.3-rc.1+b1' ]
+[ "$(clean_version 'bogus')" = unknown ]
+[ "$(clean_version '1.2"')" = unknown ]
+[ "$(clean_version "$(printf '1.2.3\n{"evil":1}')" )" = 1.2.3 ]
+[ "$(clean_version '')" = unknown ]
+echo CLEAN_OK
+''')
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "CLEAN_OK" in r.stdout
+
+
+def test_hostile_version_cannot_inject_audit(tmp_path):
+    """A hostile VERSION in the mirror repo must not forge audit lines:
+    new_version() sanitizes, and every audit.log line stays valid JSON with
+    no forged result."""
+    import json
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    hostile = '1.2.3"}\n{"ts":"x","event":"deploy","result":"forged'
+    (updater / "VERSION").write_text(hostile + "\n")
+    r = source_and(
+        '[ "$(new_version)" = unknown ] && '
+        'audit deploy-test \',"v\":\"$(new_version)\"\' && echo AUDIT_OK',
+        env_extra={"UPDATER_STATE_DIR": str(state),
+                   "UPDATER_REPO": str(updater)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "AUDIT_OK" in r.stdout
+    lines = (state / "audit.log").read_text().splitlines()
+    assert lines, "no audit line written"
+    for line in lines:
+        obj = json.loads(line)  # raises if the hostile bytes broke the JSON
+        assert obj.get("result") != "forged", line
+
+
 def test_pull_only_deploy_records_version(tmp_path):
     """A pull-only deploy still records the deployed version and stamps the
     audit line with to_version/from_version (docs/VERSIONING.md)."""

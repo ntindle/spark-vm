@@ -159,15 +159,27 @@ write_version() {
     printf '%s\n' "$1" >"$VERSION_STATE.tmp" && mv -f "$VERSION_STATE.tmp" "$VERSION_STATE"
 }
 
+# Strict semver (mirrors scripts/sparkvm_version.py). VERSION is
+# attacker-influenced — merged PRs feed new_version(), the deployed
+# standalone copy at $SWAPD_HOME/VERSION is swapd-writable and feeds the
+# rollback paths — and the result is interpolated raw into audit JSON.
+# Never let unvalidated bytes near an audit line.
+_semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+clean_version() {
+    # clean_version <candidate>: print it iff strict semver, else "unknown".
+    local v="${1%%$'\n'*}"
+    if [[ "$v" =~ $_semver_re ]]; then printf '%s' "$v"; else printf 'unknown'; fi
+}
+
 deployed_version() {
     # The VERSION the updater last deployed ("unknown" when nothing has
-    # recorded one yet).
-    cat "$VERSION_STATE" 2>/dev/null || echo "unknown"
+    # recorded one yet, or the recorded bytes are not valid semver).
+    clean_version "$(cat "$VERSION_STATE" 2>/dev/null || echo unknown)"
 }
 
 new_version() {
     # The VERSION stamped in the mirror at the commit being deployed.
-    cat "$UPDATER_REPO/VERSION" 2>/dev/null || echo "unknown"
+    clean_version "$(cat "$UPDATER_REPO/VERSION" 2>/dev/null || echo unknown)"
 }
 
 newest_snapshot() {
@@ -501,7 +513,7 @@ do_rollback() {
     printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
     # The restored snapshot reverted the deployed standalone files, so the
     # deployed version is whatever the restored VERSION file says.
-    local rbv; rbv="$(cat "$SWAPD_HOME/VERSION" 2>/dev/null || echo unknown)"
+    local rbv; rbv="$(clean_version "$(cat "$SWAPD_HOME/VERSION" 2>/dev/null || echo unknown)")"
     write_version "$rbv"
     audit 'deploy' ',"result":"rolled-back","from":"'"$old"'","to":"'"$new"'","to_version":"'"$rbv"'"'
     return 1
@@ -754,7 +766,7 @@ cmd_rollback() {
         return 1
     fi
     write_watermark "$from"
-    local rbv; rbv="$(cat "$SWAPD_HOME/VERSION" 2>/dev/null || echo unknown)"
+    local rbv; rbv="$(clean_version "$(cat "$SWAPD_HOME/VERSION" 2>/dev/null || echo unknown)")"
     write_version "$rbv"
     if [ "$unhealthy" -eq 1 ]; then
         alert "manual rollback to $from completed but a component is unhealthy"

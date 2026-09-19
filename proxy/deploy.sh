@@ -70,6 +70,10 @@ done
 python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py \
     scripts/sparkvm_version.py \
     || { echo "ERROR: python syntax check failed — aborting"; exit 1; }
+# VERSION feeds audit JSON via the updater: a non-semver VERSION must fail
+# the deploy here, loudly, rather than become "unknown" downstream.
+python3 scripts/sparkvm_version.py --check >/dev/null \
+    || { echo "ERROR: VERSION is not valid semver — aborting"; exit 1; }
 
 # --- 1. Python addons and scripts ---------------------------------------
 echo "[1/7] Installing proxy files to /home/swapd..."
