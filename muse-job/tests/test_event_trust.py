@@ -15,6 +15,14 @@ Covers the fix in two rounds:
      backoff (done-repeated coalescing), recency-based events-missing
      anchored to session_started_at with per-session dedup, and an
      events-tampered signal for symlinked event files.
+  3. Final adversarial review (security, engineering, architecture):
+     the persistent done-claim dedup cursor and suppression latch in
+     agent-writable job.json were both demonstrably plantable, so they
+     are GONE -- every visible done pages every pass (fail loud) until
+     the operator closes the job. Non-regular event files (symlink, FIFO,
+     device, dir) are refused without opening; a malformed session_uuid
+     pages events-tampered instead of silently blinding triage; the 2 MB
+     scan truncation is a loud per-pass signal; C1 controls are stripped.
 """
 import importlib.machinery
 import importlib.util
@@ -269,51 +277,52 @@ def test_lazy_forgery_pages_done_unverified(cli):
     assert job["state"] == "active"
 
 
-def test_done_claim_dedupes_on_event_ts(cli):
-    # One claim pages once; without dedup every 15-minute watch pass would
-    # re-page the same stale done line forever (engineering review).
+def test_done_claim_pages_every_pass_fail_loud(cli):
+    # Final review: there is no dedup cursor anywhere in agent-writable
+    # state -- the same claim pages on every pass until the operator closes
+    # the job. Silent suppression was the vulnerability; repeated paging is
+    # the fix.
     job = make_job(cli)
     ev = done_event(cli, ts=100.0)
     first = cli.handle_done_claim(job, ev, job["slug"])
     assert first is not None and first["signal"] == "done-unverified"
-    job["done_claim_ts"] = 100.0  # what watch_one records after emitting
-    assert cli.handle_done_claim(job, ev, job["slug"]) is None
-    # A NEWER done event (agent genuinely finished later) pages again.
-    assert cli.handle_done_claim(job, done_event(cli, ts=200.0), job["slug"]) is not None
+    second = cli.handle_done_claim(job, ev, job["slug"])
+    assert second is not None and second["signal"] == "done-unverified"
+    # A planted done_claim_ts remnant is migrated out, never honored.
+    job["done_claim_ts"] = 100.0
+    third = cli.handle_done_claim(job, ev, job["slug"])
+    assert third is not None and third["signal"] == "done-unverified"
+    assert "done_claim_ts" not in job
 
 
-def test_done_claim_future_ts_cannot_suppress_later_claim(cli):
-    # Round-2 security review: a forged done with a far-future ts must not
-    # poison dedup and permanently blind the operator to genuine completions.
+def test_done_claim_future_ts_pages_normally(cli):
+    # A forged far-future ts no longer interacts with any dedup state: it
+    # pages like any other claim (clamped for ordering only).
     import time as _time
     job = make_job(cli)
     now = _time.time()
     forged = done_event(cli, ts=now + 10 * 365 * 24 * 3600)  # +10 years
     assert cli.handle_done_claim(job, forged, job["slug"], now) is not None
-    job["done_claim_ts"] = cli._claim_ts(forged, now)
-    assert job["done_claim_ts"] <= now  # clamped, not 10y out
-    genuine = done_event(cli, ts=now + 60)
-    assert cli.handle_done_claim(job, genuine, job["slug"], now + 60) is not None
+    assert cli._claim_ts(forged, now) <= now
+    assert cli.handle_done_claim(job, done_event(cli, ts=now + 60), job["slug"], now + 60) is not None
 
 
-def test_done_claim_nan_ts_dedupes(cli):
-    # NaN never compares <= , so without normalization it would page forever.
+def test_done_claim_nan_ts_pages(cli):
+    # NaN normalizes to 0 for ordering; with no dedup state it pages.
     import time as _time
     job = make_job(cli)
     now = _time.time()
     ev = done_event(cli, ts=float("nan"))
     assert cli.handle_done_claim(job, ev, job["slug"], now) is not None
-    job["done_claim_ts"] = cli._claim_ts(ev, now)
-    assert cli.handle_done_claim(job, ev, job["slug"], now) is None
+    assert cli.handle_done_claim(job, ev, job["slug"], now) is not None
 
 
-def test_done_claim_missing_ts_dedupes(cli):
+def test_done_claim_missing_ts_pages(cli):
     job = make_job(cli)
     ev = done_event(cli)
     del ev["ts"]
     assert cli.handle_done_claim(job, ev, job["slug"]) is not None
-    job["done_claim_ts"] = 0  # watch_one records 0 for ts-less events
-    assert cli.handle_done_claim(job, ev, job["slug"]) is None
+    assert cli.handle_done_claim(job, ev, job["slug"]) is not None
 
 
 # --- check_events_liveness ---------------------------------------------------
@@ -463,13 +472,34 @@ def test_session_end_hook_sanitizes_reason(tmp_path):
 
 # --- review round: manager refuses symlinked event files ---------------------
 
-def test_last_event_refuses_symlink(cli, tmp_path):
+def test_event_file_tampered_refuses_symlink_and_fifo(cli, tmp_path):
+    # Final review (sec + arch): non-regular event files are refused WITHOUT
+    # opening them. A blocking open(2) on a planted FIFO hung the whole
+    # watch pass; now lstat refuses before any open, so completing at all
+    # (far under the old hang) is the regression check.
+    import time as _time
     os.makedirs(cli.EVENTS_DIR, exist_ok=True)
     target = tmp_path / "t.jsonl"
     target.write_text(json.dumps(done_event(cli)) + "\n")
-    os.symlink(str(target), os.path.join(cli.EVENTS_DIR, "uuid-abc.jsonl"))
-    assert cli.last_event("uuid-abc") is None
-    assert cli.event_file_symlinked("uuid-abc") is True
+    link = os.path.join(cli.EVENTS_DIR, "uuid-abc.jsonl")
+    os.symlink(str(target), link)
+    assert cli.event_file_tampered("uuid-abc") is True
+    assert list(cli._iter_events("uuid-abc")) == []
+    os.unlink(link)
+    os.mkfifo(link)
+    t0 = _time.time()
+    try:
+        assert cli.event_file_tampered("uuid-abc") is True
+        assert list(cli._iter_events("uuid-abc")) == []
+    finally:
+        os.unlink(link)
+    assert _time.time() - t0 < 5, "FIFO read must not block"
+
+
+def test_event_file_missing_is_not_tampered(cli):
+    # A missing file is events-missing (liveness), not events-tampered.
+    assert cli.event_file_tampered("uuid-abc") is False
+    assert list(cli._iter_events("uuid-abc")) == []
 
 
 def test_handle_done_claim_sanitizes_forged_detail(cli):
@@ -508,79 +538,80 @@ def test_buried_done_claim_still_pages(cli):
     # The tail-line reader sees only the forged idle line...
     assert cli.last_event("uuid-abc")["state"] == "idle"
     # ...but the claim scan still finds the done line.
-    done_ev, _ts = cli.latest_done_event("uuid-abc", now)
-    assert done_ev is not None and done_ev["state"] == "done"
-    sig = cli.handle_done_claim(job, done_ev, job["slug"], now)
+    done_evs = cli.done_events("uuid-abc", now)
+    assert len(done_evs) == 1 and done_evs[0][0]["state"] == "done"
+    sig = cli.handle_done_claim(job, done_evs[0][0], job["slug"], now)
     assert sig is not None and sig["signal"] == "done-claimed"
 
 
-def test_latest_done_event_picks_newest(cli):
+def test_done_events_yield_oldest_first(cli):
+    # Issue #23 B3: triage order is oldest-first so a newer forgery can never
+    # displace a genuine claim in the same window.
     import time as _time
     now = _time.time()
     write_events(cli, "uuid-abc", [
-        done_event(cli, ts=now - 300, detail="first"),
         done_event(cli, ts=now - 100, detail="second"),
+        done_event(cli, ts=now - 300, detail="first"),
     ])
-    done_ev, ts = cli.latest_done_event("uuid-abc", now)
-    assert done_ev["detail"] == "second"
-    assert ts == now - 100
+    evs = cli.done_events("uuid-abc", now)
+    assert [e["detail"] for e, _ in evs] == ["first", "second"]
 
 
 # --- review round: agent-writable dedup cursor -------------------------------
 
-def test_stored_done_claim_ts_future_forgery_ignored(cli):
-    # Security review B2 / arch B3: the agent plants a far-future
-    # done_claim_ts in job.json to suppress all future done pages.
+def test_b1_same_ts_forged_done_plus_planted_cursor_cannot_suppress(cli):
+    # Final security review (demonstrated exploit): the agent appends a
+    # forged done at ts F and plants done_claim_ts = F in job.json. The old
+    # design suppressed BOTH the genuine and the forged claim before
+    # verification ever ran -- zero signals, total silence. With no
+    # persistent suppression state, every visible done pages.
     import time as _time
     now = _time.time()
     job = make_job(cli)
-    job["done_claim_ts"] = now + 10 * 365 * 24 * 3600
-    sig = cli.handle_done_claim(job, done_event(cli, ts=now - 10), job["slug"], now)
-    assert sig is not None, "forged future cursor must not suppress paging"
+    with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
+        f.write("summary")
+    F = now - 300
+    write_events(cli, "uuid-abc", [
+        done_event(cli, ts=F - 60, detail="genuine"),
+        done_event(cli, ts=F, detail="forged", session_id="bogus", cwd="/nope"),
+    ])
+    job["done_claim_ts"] = F  # the plant: must be inert
+    events = []
+    cli.triage_done_events(job, "uuid-abc", now, events)
+    sigs = [e["signal"] for e in events]
+    assert sigs == ["done-claimed", "done-unverified"], sigs
+    assert "done_claim_ts" not in job  # plant migrated out
 
 
-def test_stored_done_claim_ts_garbage_ignored(cli):
-    import time as _time
-    now = _time.time()
-    job = make_job(cli)
-    job["done_claim_ts"] = "soon"
-    assert cli.handle_done_claim(job, done_event(cli, ts=now - 10), job["slug"], now) is not None
-
-
-def test_done_claims_coalesce_after_three_pages(cli):
-    # Issue #23 B2: unbounded re-paging trains the operator to ignore the
-    # signal; after 3 done claims in 24h, coalesce into done-repeated. The
-    # backoff count is derived from the event file (done_ts_list), NEVER
-    # from agent-writable job.json fields. Invariant: a strictly newer
-    # claim always produces at least a done-repeated page.
+def test_done_claims_coalesce_after_three_in_24h(cli):
+    # Issue #23 B2: the burst label is derived from the event file, never
+    # from job.json. With >3 dones in the last 24h visible, claims are
+    # labeled done-repeated; every claim still produces exactly one signal.
     import time as _time
     now = _time.time()
     job = make_job(cli)
     sigs = []
     for i in range(5):
-        # Each pass triages against the file with all events appended so far.
-        ts_list = [now - 300 + j for j in range(i + 1)]
         sig = cli.handle_done_claim(job, done_event(cli, ts=now - 300 + i),
-                                    job["slug"], now, done_ts_list=ts_list)
-        sigs.append(sig["signal"] if sig else None)
+                                    job["slug"], now,
+                                    recent_count=i + 1)
+        sigs.append(sig["signal"])
     assert sigs[:3] == ["done-unverified"] * 3
-    assert sigs[3] == "done-repeated"
-    # The boolean-latch days are over: a strictly newer claim always pages
-    # at least done-repeated, so a plant can never re-suppress the stream.
-    assert sigs[4] == "done-repeated"
+    assert sigs[3:] == ["done-repeated"] * 2
 
 
-def test_done_claim_window_resets_after_24h(cli):
-    # Only dones within the last 24h count toward the backoff budget.
+def test_done_claim_burst_window_ignores_old_claims(cli):
+    # Only dones within the last 24h count toward the burst label.
     import time as _time
     now = _time.time()
     job = make_job(cli)
-    old = [now - 25 * 3600 + i for i in range(5)]
-    sig = cli.handle_done_claim(job, done_event(cli, ts=now - 10),
-                                job["slug"], now,
-                                done_ts_list=old + [now - 10])
-    assert sig is not None and sig["signal"] == "done-unverified"
-    assert "done_repeated_for_ts" not in job
+    old = [done_event(cli, ts=now - 25 * 3600 + i) for i in range(5)]
+    new = [done_event(cli, ts=now - 10)]
+    write_events(cli, "uuid-abc", old + new)
+    events = []
+    cli.triage_done_events(job, "uuid-abc", now, events)
+    # 6 dones total but only 1 in the 24h window -> no done-repeated label.
+    assert [e["signal"] for e in events] == ["done-unverified"] * 6
 
 
 # --- review round: verify_done_event fail-closed -----------------------------
@@ -597,6 +628,25 @@ def test_verify_done_rejects_job_without_slug(cli):
     ok, reason = cli.verify_done_event(job, done_event(cli), None)
     assert ok is False
     assert "slug" in reason
+
+
+def test_verify_done_ignores_planted_worktree(cli):
+    # The worktree is derived from the manager-side slug, never from
+    # agent-writable job.json (issue #11). A planted worktree -- even a
+    # dict that would crash os.path.realpath -- is inert: verification
+    # proceeds against the derived worktree.
+    job = make_job(cli)
+    job["worktree"] = {"planted": True}
+    with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
+        f.write("summary")
+    ok, reason = cli.verify_done_event(job, done_event(cli), job["slug"])
+    assert ok is True, reason
+    # A planted worktree cannot widen containment either: an event cwd
+    # inside the planted location but outside the derived worktree fails.
+    job["worktree"] = "/tmp/evil-work"
+    ok, reason = cli.verify_done_event(
+        job, done_event(cli, cwd="/tmp/evil-work"), job["slug"])
+    assert ok is False and "worktree" in reason
 
 
 def test_verify_done_rejects_summary_directory(cli):
@@ -694,100 +744,72 @@ def test_job_status_survives_forged_numerics(cli, tmp_path):
     assert (st["elapsed_h"] > (cli._num(job.get("budget_hours"), 8) or 8)) in (True, False)
 
 
-def test_done_repeated_flag_plant_does_not_suppress_notice(cli):
-    # Issue #23 B2: the legacy plant (done_repeated_paged=True, count<3)
-    # is migrated out and inert; a genuine 4th-in-24h claim still coalesces
-    # via the event-file-derived backoff.
-    import time as _time
-    now = _time.time()
+def test_legacy_cursor_latch_keys_are_migrated_out(cli):
+    # Remnants of earlier designs are dead weight that a future reader (or
+    # a confused merge) could mistake for live state; triage removes them.
     job = make_job(cli)
-    job["done_repeated_paged"] = True
-    job["done_page_window_start"] = now - 60
-    job["done_page_count"] = 0
-    sigs = []
-    for i in range(4):
-        ts_list = [now - 300 + j for j in range(i + 1)]
-        sig = cli.handle_done_claim(job, done_event(cli, ts=now - 300 + i),
-                                    job["slug"], now, done_ts_list=ts_list)
-        sigs.append(sig["signal"] if sig else None)
-    assert sigs[:3] == ["done-unverified"] * 3
-    assert sigs[3] == "done-repeated"
-    # legacy plant migrated out on the first triage
-    assert "done_repeated_paged" not in job
-    assert "done_page_count" not in job
-    assert "done_page_window_start" not in job
+    for k, v in (("done_claim_ts", 1.0), ("done_page_count", 5),
+                 ("done_page_window_start", 1.0), ("done_repeated_paged", True),
+                 ("done_repeated_for_ts", 1.0)):
+        job[k] = v
+    sig = cli.handle_done_claim(job, done_event(cli), job["slug"])
+    assert sig is not None
+    for k in ("done_claim_ts", "done_page_count", "done_page_window_start",
+              "done_repeated_paged", "done_repeated_for_ts"):
+        assert k not in job
 
 
 # --- issue #23: final security review of merged #19 (B1-B6, H1-H6) ----------
 
 
-def test_b1_planted_cursor_newer_than_file_dones_is_dropped(cli):
-    # B1 (HIGH): the agent plants done_claim_ts ~= now in its job.json; every
-    # genuine done has claim_ts <= plant time, so handle_done_claim's dedup
-    # would return None forever, silently. triage_done_events corroborates
-    # the cursor against the event file: a cursor newer than every done in
-    # the file is planted or stale, so it is dropped and the genuine claim
-    # fails OPEN (re-pages) instead of being suppressed.
+def test_b1_planted_cursor_cannot_suppress_genuine_claim(cli):
+    # B1, final review: the cursor is gone entirely. A planted done_claim_ts
+    # newer than every done in the file is ignored and migrated out; the
+    # genuine claim pages.
     import time as _time
     now = _time.time()
     job = make_job(cli)
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
-    write_events(cli, "uuid-abc", [done_event(ts=now - 300)])
-    job["done_claim_ts"] = now - 60  # agent planted: no done has this ts
+    write_events(cli, "uuid-abc", [done_event(cli, ts=now - 300)])
+    job["done_claim_ts"] = now - 60  # plant: inert
     events = []
     cli.triage_done_events(job, "uuid-abc", now, events)
     assert [e["signal"] for e in events] == ["done-claimed"]
-    # the cursor was re-anchored to the genuine claim, not the plant
-    assert job["done_claim_ts"] == now - 300
+    assert "done_claim_ts" not in job
 
 
-def test_b1_legitimate_cursor_equal_to_done_ts_is_kept(cli):
-    # The flip side: a cursor that matches a done event's ts is legitimate
-    # and must NOT be dropped (no re-page storm).
+def test_b1_same_claim_pages_every_pass_until_close(cli):
+    # The flip side of removing the cursor: no per-pass dedup. The operator
+    # closes the job to end the stream; watch skips closed jobs.
     import time as _time
     now = _time.time()
     job = make_job(cli)
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
-    write_events(cli, "uuid-abc", [done_event(ts=now - 300)])
-    job["done_claim_ts"] = now - 300  # equals the filed done's ts
-    events = []
-    cli.triage_done_events(job, "uuid-abc", now, events)
-    assert events == []
+    write_events(cli, "uuid-abc", [done_event(cli, ts=now - 300)])
+    for _ in range(3):
+        events = []
+        cli.triage_done_events(job, "uuid-abc", now, events)
+        assert [e["signal"] for e in events] == ["done-claimed"]
 
 
-def test_b2_planted_backoff_fields_are_inert(cli):
-    # B2 (HIGH): the agent plants done_page_count=5 / done_repeated_paged /
-    # done_page_window_start to make handle_done_claim return None on a
-    # genuine claim with zero noise. The backoff count is now derived from
-    # the event file, so the plant is inert and migrated out.
+def test_b2_planted_backoff_fields_do_not_suppress(cli):
+    # B2, final review: the burst label comes from the event file; planted
+    # job.json fields are inert and migrated out on first triage.
     import time as _time
     now = _time.time()
     job = make_job(cli)
     job["done_page_count"] = 5
     job["done_page_window_start"] = now - 60
     job["done_repeated_paged"] = True
-    sig = cli.handle_done_claim(job, done_event(ts=now - 10), now,
-                                done_ts_list=[])
+    job["done_repeated_for_ts"] = now
+    sig = cli.handle_done_claim(job, done_event(cli, ts=now - 10), job["slug"],
+                                now, recent_count=0)
     assert sig is not None and sig["signal"] == "done-unverified"
     for k in ("done_page_count", "done_page_window_start",
-              "done_repeated_paged"):
+              "done_repeated_paged", "done_repeated_for_ts"):
         assert k not in job
-
-
-def test_b2_planted_repeated_for_ts_fails_open(cli):
-    # The replacement latch (done_repeated_for_ts) is sanitized on read: a
-    # plant fails open to re-paging, never to suppression.
-    import time as _time
-    now = _time.time()
-    job = make_job(cli)
-    job["done_repeated_for_ts"] = now  # plant: claims "already coalesced"
-    ts_list = [now - 300 + j for j in range(4)] + [now - 10]
-    sig = cli.handle_done_claim(job, done_event(ts=now - 10), now,
-                                done_ts_list=ts_list)
-    assert sig is not None and sig["signal"] == "done-repeated"
-    assert job["done_repeated_for_ts"] == now - 10
 
 
 def test_b3_displacing_forgery_does_not_suppress_genuine_claim(cli):
@@ -800,7 +822,7 @@ def test_b3_displacing_forgery_does_not_suppress_genuine_claim(cli):
     job = make_job(cli)
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
-    genuine = done_event(ts=now - 300, detail="genuine")
+    genuine = done_event(cli, ts=now - 300, detail="genuine")
     forgery = done_event(ts=now - 200, detail="forged",
                          session_id="bogus", cwd="/nope")
     write_events(cli, "uuid-abc", [genuine, forgery])
@@ -819,7 +841,7 @@ def test_b4_non_dict_event_lines_are_ignored(cli):
     os.makedirs(cli.EVENTS_DIR, exist_ok=True)
     p = os.path.join(cli.EVENTS_DIR, "uuid-abc.jsonl")
     with open(p, "w") as f:
-        f.write("[1,2]\n\"x\"\n" + json.dumps(done_event()) + "\n")
+        f.write("[1,2]\n\"x\"\n" + json.dumps(done_event(cli)) + "\n")
     evs = list(cli._iter_events("uuid-abc"))
     assert len(evs) == 1 and evs[0]["state"] == "done"
     assert cli.last_event("uuid-abc")["state"] == "done"
@@ -840,7 +862,7 @@ def test_b5_load_job_pins_slug_to_directory_name(cli):
         json.dump({"slug": "../victim", "state": "active"}, f)
     job = cli.load_job("demo")
     assert job["slug"] == "demo"
-    cli.save_job(job)
+    cli.save_job(job, "demo")
     with open(os.path.join(victim, "job.json")) as f:
         assert json.load(f)["slug"] == "victim", "victim record untouched"
     with open(os.path.join(demo, "job.json")) as f:
@@ -854,6 +876,16 @@ def test_b6_clean_text_strips_cr_and_bare_esc(cli):
     out = cli._clean_text("abc\rmal\x1bc\x1b7\x1b8\x1bM\x1b(Xdef\x1b[2K")
     assert "\r" not in out and "\x1b" not in out
     assert "abc" in out and "mal" in out and "def" in out
+
+
+def test_clean_text_strips_c1_controls(cli, stop_hook):
+    # Final security review: the C1 range \x80-\x9f (e.g. \x9b2K, the
+    # 8-bit form of CSI) erased/spoofed terminal output just like C0.
+    assert "\x9b" not in cli._clean_text("ok\x9b2Kmal")
+    assert "\x85" not in cli._clean_text("ok\x85mal")
+    # The hook source sanitizer strips the C1 byte itself (the inert
+    # parameter letters remain as plain text, no escape can form).
+    assert stop_hook._clean("ok\x9b2K") == "ok2K"
 
 
 def test_b6_stop_hook_strips_cr_and_bare_esc(tmp_path):
@@ -903,11 +935,36 @@ def test_h2_non_string_session_uuid_neutralized(cli):
     # treated as absent.
     job = make_job(cli)
     job["session_uuid"] = {"planted": True}
-    st = cli.job_status(job)  # must not raise
+    st = cli.job_status(job, job["slug"])  # must not raise
     assert st["session_uuid"] is None
     job["session_uuid"] = ["a", "b"]
-    st = cli.job_status(job)
+    st = cli.job_status(job, job["slug"])
     assert st["session_uuid"] is None
+
+
+def test_malformed_session_uuid_is_loud_not_silent(cli):
+    # Final review (arch): present-but-malformed must page events-tampered,
+    # not silently blind liveness and done triage. Genuinely absent stays
+    # silent (legitimate initial discovery).
+    job = make_job(cli)
+    job["session_uuid"] = {"planted": True}
+    assert cli._session_uuid_ok(job) == (None, True)
+    job["session_uuid"] = "../../evil"
+    assert cli._session_uuid_ok(job) == (None, True)
+    job["session_uuid"] = "x" * 200  # overlong
+    assert cli._session_uuid_ok(job) == (None, True)
+    job["session_uuid"] = None
+    assert cli._session_uuid_ok(job) == (None, False)
+    job["session_uuid"] = ""
+    assert cli._session_uuid_ok(job) == (None, False)
+    assert cli._session_uuid_ok(make_job(cli)) == ("uuid-abc", False)
+    # A traversal-shaped uuid can never become a path.
+    assert cli._event_path("../../evil") is None
+    assert cli.head_info("../../evil") == (None, 0)
+    # ...and verify_done_event fails closed on it.
+    job["session_uuid"] = {"planted": True}
+    ok, _ = cli.verify_done_event(job, done_event(cli), job["slug"])
+    assert ok is False
 
 
 def test_h3_cmd_status_survives_garbage_ts(cli, capsys):
@@ -938,7 +995,7 @@ def test_h4_verify_done_rejects_non_string_cwd(cli):
     job = make_job(cli)
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
-    ok, reason = cli.verify_done_event(job, done_event(cwd=123))
+    ok, reason = cli.verify_done_event(job, done_event(cwd=123), job["slug"])
     assert ok is False and "cwd" in reason
 
 
@@ -959,6 +1016,68 @@ def test_h5_stop_hook_does_not_block_on_fifo_event_file(tmp_path):
              env)  # timeout=30 in run_hook; would hang pre-fix
 
 
+def test_event_scan_truncated_signals_loudly(cli):
+    # Final review (sec + arch): the 2 MB window is containment, not
+    # correctness -- a file exceeding it must produce a loud per-pass
+    # signal, never a silent blind spot.
+    os.makedirs(cli.EVENTS_DIR, exist_ok=True)
+    p = os.path.join(cli.EVENTS_DIR, "uuid-abc.jsonl")
+    with open(p, "wb") as f:
+        f.truncate(cli._EVENT_SCAN_MAX_BYTES + 1)
+    assert cli._event_scan_truncated("uuid-abc") is True
+    with open(p, "wb") as f:
+        f.truncate(cli._EVENT_SCAN_MAX_BYTES)
+    assert cli._event_scan_truncated("uuid-abc") is False
+    assert cli._event_scan_truncated("nope-no-such-uuid") is False
+
+
+def test_iter_events_line_boundary_not_dropped(cli):
+    # Eng review: when the scan window starts exactly on a line boundary,
+    # the first genuine line must not be dropped as a "fragment".
+    os.makedirs(cli.EVENTS_DIR, exist_ok=True)
+    p = os.path.join(cli.EVENTS_DIR, "uuid-abc.jsonl")
+    line = json.dumps(done_event(cli, detail="x")) + "\n"
+    per = len(line.encode())
+    with open(p, "w") as f:
+        f.write(line * 10)
+    evs = list(cli._iter_events("uuid-abc", max_bytes=per * 4))
+    assert len(evs) == 4, "window on a line boundary must keep every line"
+    # A mid-line window start still drops only the fragment.
+    evs2 = list(cli._iter_events("uuid-abc", max_bytes=per * 4 - 1))
+    assert len(evs2) == 3
+
+
+def test_stop_hook_refuses_fifo_with_reader(tmp_path):
+    # Final review (eng): O_NONBLOCK only fails on a reader-less FIFO. With
+    # a reader attached the open succeeds -- the fstat regular-file guard
+    # must still refuse the write.
+    import stat as _stat
+    import time as _time
+    home = tmp_path / "home"
+    home.mkdir()
+    evdir = home / ".local" / "share" / "muse-job" / "events"
+    evdir.mkdir(parents=True)
+    fifo = str(evdir / "sid-fr.jsonl")
+    os.mkfifo(fifo)
+    rfd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        env = dict(os.environ, HOME=str(home))
+        run_hook("stop.py",
+                 {"session_id": "sid-fr",
+                  "last_assistant_message": "DONE: x", "cwd": "/t"},
+                 env)
+        _time.sleep(0.2)
+        try:
+            data = os.read(rfd, 65536)
+        except OSError:
+            data = b""
+        assert data == b"", "hook must not write through a FIFO"
+        assert _stat.S_ISFIFO(os.lstat(fifo).st_mode)
+    finally:
+        os.close(rfd)
+        os.unlink(fifo)
+
+
 def test_h6_event_scan_is_capped(cli):
     # H6: the scan reads only the tail of the file -- a GB-scale appended
     # file must not become a RAM/CPU DoS on the manager per pass.
@@ -969,7 +1088,7 @@ def test_h6_event_scan_is_capped(cli):
     with open(p, "w") as f:
         for _ in range(total_lines):
             f.write(junk)
-        f.write(json.dumps(done_event(ts=2.0)) + "\n")
+        f.write(json.dumps(done_event(cli, ts=2.0)) + "\n")
     evs = list(cli._iter_events("uuid-abc", max_bytes=4096))
     assert 0 < len(evs) < total_lines, "scan must be tail-capped"
     # newest events are still found by the capped scan

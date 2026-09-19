@@ -5,6 +5,7 @@ always exits 0, emits no decision JSON."""
 import json
 import os
 import re
+import stat
 import sys
 import time
 
@@ -19,7 +20,7 @@ _ANSI_RE = re.compile(
     r"\x1b\[[0-9;?]*[ -/]*[@-~]"          # CSI sequences
     r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC ... BEL | ST
     r"|\x1b"                               # bare ESC (reset, save/restore, RI, charset)
-    r"|[\x00-\x08\x0b\x0c\r\x0e-\x1f\x7f]"  # C0 controls + CR
+    r"|[\x00-\x08\x0b\x0c\r\x0e-\x1f\x7f\x80-\x9f]"  # C0 controls + CR + C1
 )
 
 # Session ids come from the hook payload. The same-user job agent knows its
@@ -56,6 +57,17 @@ def _append_event(evdir, sid, evt):
                      os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
                      | os.O_NONBLOCK,
                      0o644)
+        # Final review (eng): fstat the opened descriptor and refuse
+        # non-regular files. O_NONBLOCK only fails on a reader-less FIFO; a
+        # FIFO WITH a reader would otherwise receive the event bytes. Refuse
+        # to write anywhere but a real file. See session-end.py.
+        try:
+            opened_regular = stat.S_ISREG(os.fstat(fd).st_mode)
+        except OSError:
+            opened_regular = False
+        if not opened_regular:
+            os.close(fd)
+            return
     except OSError:
         return  # ELOOP on a symlinked file, or any other fs problem
     try:
