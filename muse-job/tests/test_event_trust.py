@@ -327,10 +327,15 @@ def test_done_claim_missing_ts_pages(cli):
 
 # --- check_events_liveness ---------------------------------------------------
 
-def live_status(tmux_alive=True, last_hook_event=None, started_ago_s=3600):
+def live_status(tmux_alive=True, last_hook_event=None, started_ago_s=3600,
+               session_created=None):
+    # session_created: tmux server-side session creation epoch (the
+    # unspoofable grace anchor, issue #23 sec review). None -> the job.json
+    # anchor fallback is used, as on a tmux-unreachable pass.
     return {
         "tmux_alive": tmux_alive,
         "last_hook_event": last_hook_event,
+        "session_created": session_created,
     }
 
 
@@ -1114,3 +1119,154 @@ def test_h6_event_scan_is_capped(cli):
     assert 0 < len(evs) < total_lines, "scan must be tail-capped"
     # newest events are still found by the capped scan
     assert evs[-1]["state"] == "done"
+
+# --- issue #23 review round 2: _session_anchor fail-closed + tmux grace anchor ---
+
+def test_anchor_explicit_none_falls_back_to_started_at(cli):
+    # eng/sec review: cmd_spawn writes "session_started_at": None on failed
+    # discovery. Present-None must be treated as missing (fall back to
+    # started_at), not slide the anchor to `now` on every pass -- the old
+    # code kept the grace unsatisfiable forever for discovery-failed jobs.
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    job["session_uuid"] = None
+    job["session_started_at"] = None  # failed discovery, key present
+    job["started_at"] = now - 2 * 3600
+    sig = cli.check_events_liveness(job, live_status(), now)
+    assert sig is not None and sig["signal"] == "events-tampered"
+    assert "discovery failed" in sig["detail"] or "uuid wiped" in sig["detail"]
+    # Within grace: still silent.
+    job["started_at"] = now - 10 * 60
+    assert cli.check_events_liveness(job, live_status(), now) is None
+
+
+def test_anchor_poisoned_pages_immediately(cli):
+    # arch review: wiping the uuid AND poisoning/deleting the anchors (one
+    # agent write) must page on the very next pass -- never stay dark.
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    job["session_uuid"] = ""
+    job["session_started_at"] = "soon"  # poisoned; started_at never set
+    sig = cli.check_events_liveness(job, live_status(), now)
+    assert sig is not None and sig["signal"] == "events-tampered"
+    assert "anchor" in sig["detail"]
+
+
+def test_recorded_uuid_poisoned_anchor_pages(cli):
+    # arch review: a recorded uuid with no trustworthy anchor is anomalous
+    # (spawn/resume always set both together) -- page, don't stay dark.
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    job["session_started_at"] = float("nan")
+    job["started_at"] = True
+    sig = cli.check_events_liveness(job, live_status(), now)
+    assert sig is not None and sig["signal"] == "events-tampered"
+    assert "anchor" in sig["detail"]
+
+
+def test_anchor_bump_loop_still_pages_absent_uuid(cli):
+    # sec review: an agent bumping session_started_at to ~now on every pass
+    # must NOT keep the discovery grace open -- the tmux server-side
+    # session creation time anchors the grace instead.
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    job["session_uuid"] = None
+    job["session_started_at"] = now  # the bump: would have silenced the old code
+    job["started_at"] = now
+    st = live_status(session_created=now - 2 * 3600)
+    sig = cli.check_events_liveness(job, st, now)
+    assert sig is not None and sig["signal"] == "events-tampered"
+    # Within the tmux-anchored grace: still silent (no false positive).
+    st = live_status(session_created=now - 10 * 60)
+    assert cli.check_events_liveness(job, st, now) is None
+
+
+def test_anchor_bump_loop_still_pages_events_missing(cli):
+    # sec review: the same bump defeats the events-missing grace on the old
+    # code; the tmux anchor closes it there too.
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    job["session_started_at"] = now  # bumped
+    job["started_at"] = now
+    st = live_status(last_hook_event=None, session_created=now - 2 * 3600)
+    sig = cli.check_events_liveness(job, st, now)
+    assert sig is not None and sig["signal"] == "events-missing"
+
+
+def test_tmux_anchor_unreachable_falls_back_to_job_json(cli):
+    # When tmux is unreachable (session_created None), the sanitized
+    # job.json anchor is the fallback -- a healthy job stays silent.
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    job["session_started_at"] = now - 10 * 60
+    job["started_at"] = now - 10 * 60
+    sig = cli.check_events_liveness(
+        job, live_status(last_hook_event={"ts": now - 60}), now)
+    assert sig is None
+
+
+def test_grace_anchor_prefers_tmux_over_job_json(cli):
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    job["session_started_at"] = now - 10 * 60
+    assert cli._grace_anchor(job, live_status(), now) == job["session_started_at"]
+    assert cli._grace_anchor(
+        job, live_status(session_created=now - 5000), now) == now - 5000
+    # Garbage session_created falls back to the job.json anchor.
+    assert cli._grace_anchor(
+        job, live_status(session_created="x"), now) == job["session_started_at"]
+    # No trustworthy anchor anywhere -> None (callers page loudly).
+    job["session_started_at"] = None
+    job.pop("started_at", None)
+    assert cli._grace_anchor(job, live_status(), now) is None
+
+
+# --- issue #23 B6: status/list sinks sanitize agent-controlled fields ---
+
+def _write_job_json(cli, job):
+    import json as _json
+    with open(os.path.join(cli.job_dir(job["slug"]), "job.json"), "w") as f:
+        _json.dump(job, f)
+
+
+def test_status_sinks_strip_terminal_escapes(cli, capsys):
+    # sec review: cmd_status printed ev.event / ev.state / job_state /
+    # session_status raw -- a forged event line could repaint the
+    # operator's terminal (the exact B6 attack, via the event field).
+    import argparse as _argparse
+    job = make_job(cli)
+    job["state"] = "active\r\x1b[2KFAKE-JOBSTATE"
+    _write_job_json(cli, job)
+    os.makedirs(cli.EVENTS_DIR, exist_ok=True)
+    forged = {"event": "turn\r\x1b[2KFAKE-EVENT", "state": "done\rFAKE-STATE",
+              "session_id": "uuid-abc", "cwd": "/jobs/demo/work",
+              "detail": "x", "ts": 1.0}
+    with open(os.path.join(cli.EVENTS_DIR, "uuid-abc.jsonl"), "w") as f:
+        f.write(json.dumps(forged) + "\n")
+    view = os.path.join(cli.VIEW_DIR, "uuid-abc")
+    os.makedirs(view, exist_ok=True)
+    with open(os.path.join(view, "HEAD.json"), "w") as f:
+        f.write(json.dumps({"status": "ok\r\x1b[2KFAKE-STATUS"}))
+    assert cli.cmd_status(_argparse.Namespace(slug="demo", json=False)) == 0
+    out = capsys.readouterr().out
+    assert "\r" not in out and "\x1b" not in out
+    for marker in ("FAKE-EVENT", "FAKE-STATE", "FAKE-JOBSTATE", "FAKE-STATUS"):
+        assert marker in out, f"sanitized text should still show ({marker})"
+
+
+def test_list_sanitizes_job_state(cli, capsys):
+    import argparse as _argparse
+    job = make_job(cli)
+    job["state"] = "active\r\x1b[2KFAKE"
+    _write_job_json(cli, job)
+    assert cli.cmd_list(_argparse.Namespace(json=False)) == 0
+    out = capsys.readouterr().out
+    assert "\r" not in out and "\x1b" not in out
+    assert "FAKE" in out

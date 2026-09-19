@@ -227,11 +227,14 @@ def save_job(job, slug):
 
 
 def tmux_alive(slug):
-    p = subprocess.run(
-        ["tmux", "has-session", "-t", f"mjob-{slug}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        p = subprocess.run(
+            ["tmux", "has-session", "-t", f"mjob-{slug}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return False  # tmux not installed: no session can be alive
     return p.returncode == 0
 
 
@@ -681,7 +684,7 @@ def _session_uuid_ok(job):
     """Return (uuid, malformed) for the job's recorded session uuid.
 
     Genuinely absent (None/"") is (None, False): silence during legitimate
-    initial discovery. Present-but-malformed -- non-string, empty, overlong,
+    initial discovery. Present-but-malformed -- non-string, overlong,
     or outside [A-Za-z0-9_-] -- is (None, True): the caller must page
     events-tampered rather than silently skipping the job's event stream.
     """
@@ -722,6 +725,12 @@ def head_info(uuid):
 # containment, not correctness; bounded event-file growth/rotation on the
 # manager side is the real fix (issue #27).
 _EVENT_SCAN_MAX_BYTES = 2 * 1024 * 1024
+
+# Discovery-grace window for the liveness signals (issue #23): an absent
+# session_uuid (or a stale event stream) is legitimate only this long after
+# the session started. Anchored to the tmux session creation time (server
+# side) via _grace_anchor, with _session_anchor as fallback.
+_DISCOVERY_GRACE_S = 30 * 60
 
 
 def _iter_events(uuid, max_bytes=_EVENT_SCAN_MAX_BYTES):
@@ -977,17 +986,68 @@ def _num(v, default):
 
 
 def _session_anchor(job, now):
-    """Sanitized liveness anchor: the current session's start time.
+    """Sanitized liveness anchor: the current session's start time, or None.
 
     job.json is agent-writable (issue #11), so garbage is normalized here --
-    but an agent rewriting the anchor to ~now on every pass is the same class
-    of cooperative forgery as faked heartbeat lines: documented as a residual
-    in check_events_liveness, not defeated.
+    and a missing or poisoned anchor is *untrustworthy*, never innocent: fail
+    closed (return None) so callers page loudly instead of anchoring grace
+    to `now` and staying dark forever (sec/eng/arch review, issue #23).
+
+    Present-None is treated as missing: cmd_spawn writes
+    "session_started_at": None on failed uuid discovery, so the anchor
+    falls back to started_at in that case.
     """
-    v = job.get("session_started_at", job.get("started_at", now))
+    v = job.get("session_started_at")
+    if v is None:  # absent OR explicitly None (failed discovery writes None)
+        v = job.get("started_at")
     if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
-        return now
+        return None
     return min(v, now)
+
+
+def _tmux_session_created(slug):
+    """tmux server-side session creation epoch, or None if unreachable.
+
+    Issue #23 (sec review): the job.json anchor is agent-writable, so an
+    agent can bump session_started_at to ~now on every pass and keep the
+    discovery grace open forever with the same write primitive the uuid
+    wipe needs. The tmux session creation time is server-side state the
+    agent cannot rewrite through job.json. An agent that kills its own
+    session to mint a fresh timestamp trips the loud tmux-dead path, so
+    there is no silent bypass.
+    """
+    p = None
+    try:
+        p = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", f"mjob-{slug}",
+             "#{session_created}"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    except FileNotFoundError:
+        return None  # tmux not installed: unreachable
+    if p.returncode != 0:
+        return None
+    try:
+        return int(p.stdout.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def _grace_anchor(job, st, now):
+    """Anchor for the liveness grace windows: tmux server-side session
+    creation time when available, else the sanitized job.json anchor.
+
+    Falls back to _session_anchor only when tmux is unreachable (a brief
+    race at most -- the watch path already established tmux is alive).
+    Returns None only when NO trustworthy anchor exists; callers page
+    loudly on None (fail closed).
+    """
+    created = st.get("session_created")
+    if isinstance(created, bool) or not isinstance(created, (int, float)) \
+            or created != created:
+        created = None
+    if created is not None:
+        return min(created, now)
+    return _session_anchor(job, now)
 
 
 def triage_done_events(job, uuid, now, events):
@@ -1016,18 +1076,21 @@ def check_events_liveness(job, st, now):
     """Watchdog liveness (issue #3): detect event-file blinding.
 
     Recency-based: page when the newest parseable hook event is older than
-    30 minutes (or there are none at all) while tmux is alive and a session
-    uuid is recorded. The 30m grace is anchored to `session_started_at` --
-    set at spawn and refreshed when the resume fallback re-discovers a new
-    session uuid -- not to spawn time, so a resumed job gets a fresh grace
-    window instead of paging on every pass.
+    the discovery grace (or there are none at all) while tmux is alive and
+    a session uuid is recorded. The grace is anchored to the tmux
+    server-side session creation time when available -- the agent cannot
+    rewrite it through job.json -- with the sanitized job.json anchor
+    (`session_started_at`, refreshed when the resume fallback re-discovers
+    a new session uuid) as fallback, so a resumed job still gets a fresh
+    grace window instead of paging on every pass.
 
-    Honest residuals (documented, not defeated): the anchor and the event
-    stream both live where the same-user agent can reach them -- an agent
-    rewriting `session_started_at` to ~now on every pass, or appending
-    periodic junk heartbeat lines, defeats recency detection. This catches
-    deletion and total silence, not an agent actively gaming job.json or the
-    event file.
+    Honest residuals (documented, not defeated): the event stream itself
+    lives where the same-user agent can reach it -- an agent appending
+    periodic junk heartbeat lines defeats recency detection. The job.json
+    anchor fallback is agent-writable; it is only trusted when tmux is
+    unreachable, and a missing/poisoned anchor pages loudly (fail closed).
+    This catches deletion and total silence, not an agent actively gaming
+    the event file.
 
     Fail-loud: pages on every watch pass while the condition holds. An
     earlier design deduped via a latch in job.json; that latch was plantable
@@ -1043,30 +1106,46 @@ def check_events_liveness(job, st, now):
         # Paged loudly as events-tampered by the caller; liveness has
         # nothing trustworthy to assess, so it stays silent here.
         return None
+    # The grace anchor is the tmux server-side session creation time when
+    # available (the agent cannot rewrite it through job.json); the
+    # sanitized job.json anchor is only the fallback. anchor None means no
+    # trustworthy anchor exists at all -- page, never go dark (fail closed).
+    anchor = _grace_anchor(job, st, now)
     if not uuid:
         # Final review (arch): an absent uuid is legitimate ONLY during
         # initial discovery (cmd_spawn discovers within ~90s). job.json is
         # agent-writable: wiping session_uuid to "" or deleting the key
         # blinded liveness AND done triage with zero signal on any pass.
-        # After the session_started_at + 30m grace, an absent uuid on a
-        # live tmux session pages loudly instead of staying dark. (A job
-        # whose spawn discovery genuinely failed also pages -- correctly:
-        # the watchdog is blind to it either way.)
-        if now - _session_anchor(job, now) > 30 * 60:
-            return {"signal": "events-tampered",
-                    "detail": "tmux alive but no session uuid recorded past "
-                              "the discovery grace window; the watchdog "
-                              "cannot see this job's events (uuid wiped or "
-                              "discovery failed)"}
+        # After the discovery grace, an absent uuid on a live tmux session
+        # pages loudly instead of staying dark. (A job whose spawn discovery
+        # genuinely failed also pages -- correctly: the watchdog is blind to
+        # it either way.)
+        if anchor is None or now - anchor > _DISCOVERY_GRACE_S:
+            detail = ("tmux alive but no session uuid recorded past "
+                      "the discovery grace window; the watchdog "
+                      "cannot see this job's events (uuid wiped or "
+                      "discovery failed)")
+            if anchor is None:
+                detail += " -- and no trustworthy session anchor exists"
+            return {"signal": "events-tampered", "detail": detail}
         return None
     if event_file_tampered(uuid):
         return None  # handled by the dedicated events-tampered signal
+    if anchor is None:
+        # A recorded session uuid with no trustworthy anchor is anomalous:
+        # spawn and resume always set the anchor alongside the uuid. The
+        # watchdog cannot bound the recency grace, so page loudly instead
+        # of staying dark (anchor poisoned or tmux unreachable + garbage
+        # job.json).
+        return {"signal": "events-tampered",
+                "detail": "tmux alive and session uuid recorded, but no "
+                          "trustworthy session anchor exists; cannot bound "
+                          "the liveness grace (anchor poisoned?)"}
     le = st["last_hook_event"]
     le_ts = _claim_ts(le, now) if isinstance(le, dict) else 0
-    sess_start = _session_anchor(job, now)
-    if le_ts >= sess_start:
+    if le_ts >= anchor:
         return None
-    if now - sess_start <= 30 * 60:
+    if now - anchor <= _DISCOVERY_GRACE_S:
         return None
     return {"signal": "events-missing",
             "detail": "tmux alive and session uuid recorded, but the newest "
@@ -1103,6 +1182,10 @@ def job_status(job, slug):
         "slug": slug,
         "job_state": job.get("state"),
         "tmux_alive": alive,
+        # Server-side session creation time: the unspoofable anchor for the
+        # liveness grace windows (issue #23, sec review). None when tmux is
+        # unreachable; _grace_anchor falls back to the job.json anchor then.
+        "session_created": _tmux_session_created(slug) if alive else None,
         "session_uuid": uuid,
         "session_status": hstatus,
         "bytes_total": nbytes,
@@ -1135,8 +1218,11 @@ def cmd_status(args):
         print(json.dumps(st, indent=2, default=str))
     else:
         ev = st["last_hook_event"] or {}
-        print(f"job {st['slug']}: state={st['job_state']} tmux={'up' if st['tmux_alive'] else 'down'} "
-              f"session={st['session_status']} bytes={st['bytes_total']} (+{st['bytes_delta']})")
+        # Issue #23 B6: job_state (job.json) and session_status (HEAD.json) are
+        # agent-influenced; sanitize before printing to the operator's
+        # terminal (\r + escape sequences could repaint the rendered line).
+        print(f"job {st['slug']}: state={_clean_text(st['job_state'])} tmux={'up' if st['tmux_alive'] else 'down'} "
+              f"session={_clean_text(st['session_status'])} bytes={st['bytes_total']} (+{st['bytes_delta']})")
         if ev:
             flag = ""
             if ev.get("state") == "done":
@@ -1147,7 +1233,10 @@ def cmd_status(args):
                 flag = (" (claims done; protocol checks passed)"
                         if ok else
                         f" (claims done; protocol check failed: {reason})")
-            print(f"  last turn: {ev.get('event')}/{ev.get('state')}{flag} "
+            # Issue #23 B6: event/state come from the agent-writable event file
+            # (the agent can append lines directly, bypassing hook
+            # sanitizers) -- strip terminal escapes the same as detail.
+            print(f"  last turn: {_clean_text(ev.get('event'))}/{_clean_text(ev.get('state'))}{flag} "
                   f"{_safe_hhmm(ev.get('ts'))} "
                   f"{_clean_text(ev.get('detail',''))[:100]}")
         if st["progress_age_s"] is not None:
@@ -1179,7 +1268,8 @@ def cmd_list(args):
         print(json.dumps(out, indent=2))
     else:
         for j in out:
-            print(f"{j['slug']}: {j['state']} tmux={'up' if j['tmux_alive'] else 'down'} {j['elapsed_h']}h")
+            # Issue #23 B6: state comes from agent-writable job.json -- sanitize.
+            print(f"{j['slug']}: {_clean_text(j['state'])} tmux={'up' if j['tmux_alive'] else 'down'} {j['elapsed_h']}h")
     return 0
 
 
