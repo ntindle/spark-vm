@@ -74,12 +74,14 @@ than its own checkout. `muse-job --version` reads the repo file.
 
 1. Bump `VERSION` on `main` (one commit, message like `release: bump VERSION
    to 0.2.0`). Keep the change version-only so the auto-deployer treats it as
-   a version bump and nothing else — except `CHANGELOG.md`: in the same
-   commit, move the `## [Unreleased]` section into
-   `## [0.2.0] - YYYY-MM-DD` (pattern: `## [x.y.z] - YYYY-MM-DD`), add the
-   tag-compare link at the bottom of the changelog, and leave a fresh empty
-   `## [Unreleased]` section behind for the next PR (the ritual is documented
-   at the top of `CHANGELOG.md`).
+   a version bump and nothing else — except `CHANGELOG.md`, when it exists
+   (the changelog ritual): in the same commit, move the `## [Unreleased]`
+   section into `## [0.2.0] - YYYY-MM-DD` (pattern: `## [x.y.z] -
+   YYYY-MM-DD`), add the tag-compare link at the bottom of the changelog,
+   and leave a fresh empty `## [Unreleased]` section behind for the next PR
+   (the ritual is documented at the top of `CHANGELOG.md`). The release
+   script uses the changelog section when present and falls back to the
+   merged-PR list when it isn't.
 2. Push to `main`. The release workflow (`.github/workflows/release.yml`)
    fires on any push that touches `VERSION` and cuts the release
    automatically: it runs `scripts/cut-release.sh --ci`, which preflights
@@ -91,11 +93,17 @@ than its own checkout. `muse-job --version` reads the repo file.
    prereleases (`-rc.1`) are marked prerelease on GitHub. Merging to main
    is the release authorization — treat VERSION bumps like releases in
    review, and consider a GitHub tag-protection ruleset for `v*` so only
-   the workflow can create release tags.
+   the workflow can create release tags. Note: if two VERSION bumps land
+   in quick succession, the superseded run fails its in-sync preflight by
+   design — only the latest VERSION gets a release.
 3. Manual path: `scripts/cut-release.sh` (dry-run by default — prints the
    plan and the notes draft, changes nothing); `cut-release.sh --execute
    --yes` cuts it by hand. It publishes via `gh`, or the GitHub API with
-   `$GITHUB_TOKEN` when `gh` is unavailable.
+   `$GITHUB_TOKEN` when `gh` is unavailable. If `--execute` pushes the tag
+   but publishing fails, recover with `cut-release.sh --publish-only
+   --yes` — it regenerates the notes and publishes the release for the
+   existing tag (refuses when the tag is missing or a release already
+   exists).
 4. The auto-deployer's next tick sees the `VERSION` change, redeploys the
    proxy-confirm unit plus cred-ui, and records `to_version` in its audit log.
    The deployed version now maps to a release tag: the release notes carry

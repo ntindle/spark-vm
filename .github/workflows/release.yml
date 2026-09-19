@@ -3,8 +3,9 @@
 # The release itself is cut by scripts/cut-release.sh (preflight checks,
 # release-notes assembly, immutable tag, published release). This workflow
 # only decides *when*: a push to main that touches VERSION, or a manual
-# dispatch. Concurrency serializes rapid successive bumps so two runs can
-# never race on the same tag.
+# dispatch. The concurrency group serializes workflow runs; a run whose
+# bump was superseded by a newer push fails the script's in-sync preflight
+# by design — only the latest VERSION is ever released.
 
 name: Cut release
 

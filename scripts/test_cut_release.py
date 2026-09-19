@@ -169,6 +169,93 @@ def test_dry_run_ranges_pr_list_from_previous_tag(workrepo):
     assert "## Merged since v0.1.0" in r.stdout
 
 
+def test_dry_run_without_changelog(workrepo):
+    (workrepo / "CHANGELOG.md").unlink()
+    git("add", "-A", cwd=workrepo)
+    git("commit", "-m", "docs: drop changelog", cwd=workrepo)
+    git("push", "origin", "main", cwd=workrepo)
+    r = run_script(workrepo, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "No curated CHANGELOG.md section" in r.stdout
+
+
+def test_changelog_section_with_build_metadata(workrepo):
+    (workrepo / "VERSION").write_text("1.2.0+build\n")
+    changelog = workrepo / "CHANGELOG.md"
+    changelog.write_text(
+        "# Changelog\n\n## [Unreleased]\n\n"
+        "## [1.2.000build] - 2026-09-19\n\n### Added\n- DECOY SECTION\n\n"
+        "## [1.2.0+build] - 2026-09-19\n\n### Added\n- Real bullet for build metadata\n\n"
+    )
+    git("add", "-A", cwd=workrepo)
+    git("commit", "-m", "release: bump VERSION to 1.2.0+build", cwd=workrepo)
+    git("push", "origin", "main", cwd=workrepo)
+    r = run_script(workrepo, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "Real bullet for build metadata" in r.stdout
+    assert "DECOY SECTION" not in r.stdout
+
+
+def test_ci_superseded_bump_fails_sync_by_design(workrepo, tmp_path, fake_gh):
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", str(workrepo.parent / "origin.git"),
+                    str(other)], check=True, capture_output=True, timeout=60)
+    (other / "VERSION").write_text("0.2.0\n")
+    (other / "extra.txt").write_text("y\n")
+    git("add", "-A", cwd=other)
+    git("commit", "-m", "release: bump VERSION to 0.2.1", cwd=other)
+    git("push", "origin", "main", cwd=other)
+    git("checkout", "--detach", "HEAD", cwd=workrepo)  # the superseded bump
+    r, _ = run_with_gh(workrepo, fake_gh, "--ci",
+                       env={"GITHUB_REF": "refs/heads/main"})
+    assert r.returncode != 0
+    assert "is not" in r.stderr and "origin/main" in r.stderr
+    assert bare_tags(workrepo) == []  # no release cut for the superseded bump
+
+
+def test_publish_only_refuses_when_nothing_to_publish(workrepo, fake_gh):
+    r, _ = run_with_gh(workrepo, fake_gh, "--publish-only", "--yes")
+    assert r.returncode != 0
+    assert "does not exist locally" in r.stderr
+
+
+def test_publish_only_refuses_already_published(workrepo, fake_gh):
+    git("tag", "-a", "v0.2.0", "-m", "release v0.2.0", cwd=workrepo)
+    git("push", "origin", "v0.2.0", cwd=workrepo)
+    # The fake gh exits 0 for everything, so `gh release view` succeeds.
+    r, _ = run_with_gh(workrepo, fake_gh, "--publish-only", "--yes")
+    assert r.returncode != 0
+    assert "already published" in r.stderr
+
+
+def test_publish_only_recovers_after_failed_publish(workrepo, tmp_path):
+    badbin = tmp_path / "badcurl"
+    badbin.mkdir()
+    bad = badbin / "curl"
+    bad.write_text("#!/bin/sh\nexit 1\n")
+    bad.chmod(bad.stat().st_mode | stat.S_IXUSR)
+    no_gh_env = {"PATH": str(badbin) + os.pathsep + os.environ.get("PATH", ""),
+                 "CUT_RELEASE_NO_GH": "1", "GITHUB_TOKEN": "fake"}
+    r = run_script(workrepo, "--execute", "--yes", env=no_gh_env)
+    assert r.returncode != 0
+    assert bare_tags(workrepo) == ["v0.2.0"]  # tag pushed, publish failed
+
+    goodbin = tmp_path / "goodcurl"
+    goodbin.mkdir()
+    good = goodbin / "curl"
+    good.write_text(FAKE_CURL)
+    good.chmod(good.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    curl_log = tmp_path / "curl2.log"
+    r2 = run_script(workrepo, "--publish-only", "--yes",
+                    env={"PATH": str(goodbin) + os.pathsep + os.environ.get("PATH", ""),
+                         "CUT_RELEASE_NO_GH": "1", "GITHUB_TOKEN": "sekrit",
+                         "CURL_LOG": str(curl_log)})
+    assert r2.returncode == 0, r2.stderr + r2.stdout
+    assert "published release v0.2.0" in r2.stdout
+    log = curl_log.read_text()
+    assert "sekrit" not in log
+
+
 # --- refusals ---
 
 def test_refuses_dirty_tree(workrepo):

@@ -16,9 +16,12 @@
 #   3. In --execute: creates an annotated, immutable tag v<VERSION>, pushes
 #      it, and publishes a GitHub release (via `gh`, or the API with
 #      $GITHUB_TOKEN when `gh` is unavailable).
+#   4. In --publish-only: recovers from a tag-pushed/publish-failed state
+#      (the tag exists on the remote but no release does) by regenerating
+#      the notes and publishing the release for the existing tag.
 #
-# Usage: cut-release.sh [--dry-run] [--execute [--yes]] [--ci]
-#                        [--notes-file PATH] [--remote NAME]
+# Usage: cut-release.sh [--dry-run] [--execute [--yes]] [--publish-only]
+#                        [--ci] [--notes-file PATH] [--remote NAME]
 #                        [-h|--help]
 #
 #   --dry-run      (default) validate everything, print the plan and the
@@ -44,8 +47,8 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: cut-release.sh [--dry-run] [--execute [--yes]] [--ci]
-                      [--notes-file PATH] [--remote NAME] [-h|--help]
+Usage: cut-release.sh [--dry-run] [--execute [--yes]] [--publish-only]
+                      [--ci] [--notes-file PATH] [--remote NAME] [-h|--help]
 
 Cut a GitHub release for the current VERSION on main: preflight checks,
 release-notes assembly (CHANGELOG.md section + merged PRs since the
@@ -55,6 +58,8 @@ previous tag), annotated tag v<VERSION>, and a published GitHub release.
                  (default)
   --execute      cut the release for real; requires --yes (implied by --ci)
   --yes          confirm an --execute run
+  --publish-only publish the release for the already-pushed tag v<VERSION>
+                 (recovery: --execute pushed the tag but publishing failed)
   --ci           workflow mode: check GITHUB_REF is refs/heads/main instead
                  of the local branch, then execute without --yes
   --notes-file PATH  also write the generated notes to PATH
@@ -81,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) MODE="dry-run"; shift ;;
         --execute) MODE="execute"; shift ;;
+        --publish-only) MODE="publish-only"; shift ;;
         --yes) CONFIRM=1; shift ;;
         --ci) CI=1; MODE="execute"; shift ;;
         --notes-file) [[ $# -ge 2 ]] || die "--notes-file needs a path"; NOTES_FILE="$2"; shift 2 ;;
@@ -119,29 +125,48 @@ git fetch --quiet -- "$REMOTE" "refs/heads/main:refs/remotes/$REMOTE/main" \
     "refs/tags/*:refs/tags/*" \
     || die "could not fetch $REMOTE (network? remote name? --remote to override)"
 HEAD_SHA="$(git rev-parse HEAD)"
-REMOTE_SHA="$(git rev-parse "$REMOTE/main")"
-[[ "$HEAD_SHA" == "$REMOTE_SHA" ]] \
-    || die "HEAD ($HEAD_SHA) is not $REMOTE/main ($REMOTE_SHA); pull/rebase first"
-
-# --- preflight: tag must not exist anywhere (tags are immutable) ---
-git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
-    && die "tag $TAG already exists locally; releases are immutable, bump VERSION first"
-REMOTE_TAGS="$(git ls-remote --tags "$REMOTE" "$TAG")" \
+# The fetch above already pulled remote tags into the local tag namespace,
+# so the local existence check below fires first; the ls-remote is
+# belt-and-braces for a tag created on the remote between the fetch and
+# this check.
+REMOTE_TAGS_ALL="$(git ls-remote --tags "$REMOTE" "$TAG")" \
     || die "could not list remote tags on $REMOTE"
-[[ -z "$REMOTE_TAGS" ]] \
-    || die "tag $TAG already exists on $REMOTE; releases are immutable, bump VERSION first"
 
-# --- preflight: VERSION must be newer than every existing release tag ---
-# (merging to main is the release authorization, so a downgrade typo must
-# not silently publish a confusing release).
-MAX_TAG="$(git tag --list 'v*' | sort -V | tail -n 1 || true)"
-if [[ -n "$MAX_TAG" ]]; then
-    printf '%s\n%s\n' "$MAX_TAG" "$TAG" | sort -V -C \
-        || die "VERSION $VERSION is not newer than latest release $MAX_TAG"
+if [[ "$MODE" == "publish-only" ]]; then
+    # Recovery mode: a previous --execute pushed the tag but publishing
+    # failed. The tag must already exist on both sides; the release must
+    # not. No in-sync check: later commits may have merged since.
+    git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
+        || die "--publish-only: tag $TAG does not exist locally; run --execute first"
+    [[ -n "$REMOTE_TAGS_ALL" ]] \
+        || die "--publish-only: tag $TAG is not on $REMOTE; run --execute first"
+    RELEASE_REF="$TAG"
+    RELEASE_SHA="$(git rev-list -n 1 "$TAG")"
+else
+    REMOTE_SHA="$(git rev-parse "$REMOTE/main")"
+    [[ "$HEAD_SHA" == "$REMOTE_SHA" ]] \
+        || die "HEAD ($HEAD_SHA) is not $REMOTE/main ($REMOTE_SHA); pull/rebase first"
+    # --- preflight: tag must not exist anywhere (tags are immutable) ---
+    git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
+        && die "tag $TAG already exists locally; releases are immutable, bump VERSION first"
+    [[ -z "$REMOTE_TAGS_ALL" ]] \
+        || die "tag $TAG already exists on $REMOTE; releases are immutable, bump VERSION first"
+    # --- preflight: VERSION must be newer than every existing release tag ---
+    # (merging to main is the release authorization, so a downgrade typo must
+    # not silently publish a confusing release).
+    MAX_TAG="$(git tag --list 'v*' | sort -V | tail -n 1 || true)"
+    if [[ -n "$MAX_TAG" ]]; then
+        printf '%s\n%s\n' "$MAX_TAG" "$TAG" | sort -V -C \
+            || die "VERSION $VERSION is not newer than latest release $MAX_TAG"
+    fi
+    RELEASE_REF="HEAD"
+    RELEASE_SHA="$HEAD_SHA"
 fi
 
 # --- release-notes assembly ---
-PREV_TAG="$(git tag --list 'v*' --sort=-v:refname | head -n 1 || true)"
+# PREV_TAG excludes the tag being (re-)released, so --publish-only ranges
+# from the previous release to the tag's commit, not to HEAD.
+PREV_TAG="$(git tag --list 'v*' --sort=-v:refname | grep -vxF "$TAG" | head -n 1 || true)"
 NOTES_DIR="$(mktemp -d)"
 NOTES="$NOTES_DIR/notes.md"
 trap 'rm -rf "$NOTES_DIR"' EXIT
@@ -151,13 +176,16 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
     echo
     SECTION=""
     if [[ -f CHANGELOG.md ]]; then
-        # Extract the Keep-a-Changelog section for this version: "## [x.y.z]"
-        # (or "## [vx.y.z]"); any other level-2 header ends the section.
-        # Escape every regex metacharacter so prerelease/build suffixes
-        # (e.g. the + in 1.2.3+build) match literally.
-        VER_ESC="$(printf '%s' "$VERSION" | sed -e 's/[][\.*^$()+?{}|\\]/\\&/g')"
-        SECTION="$(awk -v ver="$VER_ESC" '
-            /^## / { insec = ($0 ~ "^## \\[v?" ver "\\]"); next }
+        # Extract the Keep-a-Changelog section for this version. Literal
+        # prefix comparison, never a regex: semver build metadata like the
+        # + in 1.2.0+build must match exactly, never as a pattern.
+        SECTION="$(awk -v ver="$VERSION" '
+            /^## / {
+                h = "## [" ver "]"; hv = "## [v" ver "]";
+                insec = (substr($0, 1, length(h)) == h) || \
+                        (substr($0, 1, length(hv)) == hv);
+                next
+            }
             insec { print }
         ' CHANGELOG.md)"
     fi
@@ -170,10 +198,10 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
     fi
     echo
     if [[ -n "$PREV_TAG" ]]; then
-        RANGE="$PREV_TAG..HEAD"
+        RANGE="$PREV_TAG..$RELEASE_REF"
         echo "## Merged since $PREV_TAG"
     else
-        RANGE="HEAD"
+        RANGE="$RELEASE_REF"
         echo "## Merged (first release)"
     fi
     echo
@@ -192,7 +220,7 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
     echo
     echo "---"
     echo "Release tag \`$TAG\` (immutable — tags are never moved or re-cut)."
-    echo "Full commit \`$HEAD_SHA\`."
+    echo "Full commit \`$RELEASE_SHA\`."
 } > "$NOTES"
 
 if [[ -n "$NOTES_FILE" ]]; then
@@ -204,6 +232,67 @@ echo "cut-release.sh: ---- release-notes draft ----"
 cat "$NOTES"
 echo "cut-release.sh: ---- end draft ----"
 
+have_gh() { [[ -z "${CUT_RELEASE_NO_GH:-}" ]] && command -v gh >/dev/null 2>&1; }
+
+publish_release() {
+    # Publish the GitHub release for $TAG from $NOTES. In --publish-only
+    # mode the release must not already exist (the API path fail-closes on
+    # this anyway: a duplicate tag returns 422 with no html_url).
+    if [[ "$MODE" == "publish-only" ]] && have_gh \
+            && gh release view "$TAG" >/dev/null 2>&1; then
+        die "release $TAG is already published"
+    fi
+    GH_ARGS=(release create "$TAG" --title "$TAG" --notes-file "$NOTES" --target main)
+    if [[ "$VERSION" == *-* ]]; then
+        GH_ARGS+=(--prerelease)
+        echo "cut-release.sh: prerelease version detected; marking GitHub release as prerelease"
+    fi
+    if have_gh; then
+        gh "${GH_ARGS[@]}" || die "gh release create failed"
+    elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        # API fallback for operators without `gh`. The token comes from the
+        # environment only and is never printed, logged, or placed on a command
+        # line: it travels in a 0600 curl config file under the trap-cleaned
+        # temp dir, so it never appears in ps output.
+        PAYLOAD="$NOTES_DIR/payload.json"
+        CURL_CFG="$NOTES_DIR/curl.cfg"
+        printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" > "$CURL_CFG"
+        chmod 600 "$CURL_CFG"
+        TAG="$TAG" REPO="$REPO" VERSION="$VERSION" NOTES_PATH="$NOTES" \
+            python3 - > "$PAYLOAD" <<'PYEOF' || die "release payload build failed"
+import json, os
+with open(os.environ["NOTES_PATH"], encoding="utf-8") as f:
+    body = f.read()
+print(json.dumps({
+    "tag_name": os.environ["TAG"],
+    "target_commitish": "main",
+    "name": os.environ["TAG"],
+    "body": body,
+    "draft": False,
+    "prerelease": "-" in os.environ["VERSION"],
+}))
+PYEOF
+        curl -sS -X POST -K "$CURL_CFG" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/releases" \
+            -d @"$PAYLOAD" -o "$NOTES_DIR/release.json" \
+            || die "release API call failed"
+        python3 - "$NOTES_DIR/release.json" <<'PYEOF' || die "release API returned an error"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    d = json.load(f)
+url = d.get("html_url")
+if not url:
+    sys.stderr.write("github API error: %s\n" % json.dumps(d)[:500])
+    sys.exit(1)
+print("release URL: %s" % url)
+PYEOF
+    else
+        die "no 'gh' on PATH and GITHUB_TOKEN unset; cannot publish the release (tag $TAG is on the remote; re-run with --publish-only once publishing is possible)"
+    fi
+    echo "cut-release.sh: published release $TAG on $REPO"
+}
+
 if [[ "$MODE" == "dry-run" ]]; then
     echo "cut-release.sh: dry run — nothing changed."
     echo "cut-release.sh: --execute --yes would run:"
@@ -212,6 +301,13 @@ if [[ "$MODE" == "dry-run" ]]; then
     exit 0
 fi
 
+if [[ "$MODE" == "publish-only" ]]; then
+    [[ "$CONFIRM" == "1" ]] || die "--publish-only needs --yes (re-run with --yes to confirm)"
+    publish_release
+    exit 0
+fi
+
+# --- execute ---
 if [[ "$CI" != "1" && "$CONFIRM" != "1" ]]; then
     die "--execute needs --yes (re-run with --yes to confirm)"
 fi
@@ -225,53 +321,4 @@ git push "$REMOTE" "$TAG" \
          die "git push of $TAG failed (local tag removed; fix and re-run)"; }
 echo "cut-release.sh: pushed $TAG to $REMOTE"
 
-# --- execute: publish the release ---
-GH_ARGS=(release create "$TAG" --title "$TAG" --notes-file "$NOTES" --target main)
-if [[ "$VERSION" == *-* ]]; then
-    GH_ARGS+=(--prerelease)
-    echo "cut-release.sh: prerelease version detected; marking GitHub release as prerelease"
-fi
-if [[ -z "${CUT_RELEASE_NO_GH:-}" ]] && command -v gh >/dev/null 2>&1; then
-    gh "${GH_ARGS[@]}" || die "gh release create failed"
-elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    # API fallback for operators without `gh`. The token comes from the
-    # environment only and is never printed, logged, or placed on a command
-    # line: it travels in a 0600 curl config file under the trap-cleaned
-    # temp dir, so it never appears in ps output.
-    PAYLOAD="$NOTES_DIR/payload.json"
-    CURL_CFG="$NOTES_DIR/curl.cfg"
-    printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" > "$CURL_CFG"
-    chmod 600 "$CURL_CFG"
-    TAG="$TAG" REPO="$REPO" VERSION="$VERSION" NOTES_PATH="$NOTES" \
-        python3 - > "$PAYLOAD" <<'PYEOF' || die "release payload build failed"
-import json, os
-with open(os.environ["NOTES_PATH"], encoding="utf-8") as f:
-    body = f.read()
-print(json.dumps({
-    "tag_name": os.environ["TAG"],
-    "target_commitish": "main",
-    "name": os.environ["TAG"],
-    "body": body,
-    "draft": False,
-    "prerelease": "-" in os.environ["VERSION"],
-}))
-PYEOF
-    curl -sS -X POST -K "$CURL_CFG" \
-        -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/$REPO/releases" \
-        -d @"$PAYLOAD" -o "$NOTES_DIR/release.json" \
-        || die "release API call failed"
-    python3 - "$NOTES_DIR/release.json" <<'PYEOF' || die "release API returned an error"
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as f:
-    d = json.load(f)
-url = d.get("html_url")
-if not url:
-    sys.stderr.write("github API error: %s\n" % json.dumps(d)[:500])
-    sys.exit(1)
-print("release URL: %s" % url)
-PYEOF
-else
-    die "no 'gh' on PATH and GITHUB_TOKEN unset; cannot publish the release (tag $TAG was still pushed)"
-fi
-echo "cut-release.sh: published release $TAG on $REPO"
+publish_release
