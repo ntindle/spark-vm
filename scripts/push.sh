@@ -136,7 +136,8 @@ fi
 # --- push through the proxy ---
 if ! "${PROXY_GIT[@]}" push origin HEAD; then
     echo "Push failed. If this is an auth (401/403) error, install a GitHub token:" >&2
-    echo "  Create a fine-grained PAT with contents:write on ntindle/spark-vm, then run:" >&2
+    echo "  Create a fine-grained PAT with contents:write (+ workflows if the" >&2
+    echo "  push touches anything under .github/workflows/) on ntindle/spark-vm, then run:" >&2
     echo "  cred set github   # paste the token at the prompt (your own SSH session)" >&2
     echo "  (Pushing changes under .github/workflows/ additionally needs the" >&2
     echo "   workflow scope on the token.)" >&2
