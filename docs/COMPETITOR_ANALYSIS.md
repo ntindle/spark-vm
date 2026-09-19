@@ -8,11 +8,44 @@ pricing pages, launch coverage, third-party benchmarks) surveyed 2026-09-18
 (morning), with a same-day pm watch update (TermSquad re-check, egress/isolation
 scorecard fills, market moves) and an evening consolidation pass (AgentComputer
 Firecracker VM manager + WSO2 k8s runtime pinned on primary sources, TermSquad
-herdr#3415 date correction, OpenAI Agents API terms).
+herdr#3415 date correction, OpenAI Agents API terms), plus a 2026-09-19
+consolidation pass folding three delta watch updates (night, morning, midday).
 This is a strategy input, not a spec — it feeds the backlog and the gap
 analysis. It extends the competitive map in `docs/RESEARCH_AGENT_SANDBOX_ADOPTION.md`
 (research archetype, PR #25) with prices, axis scorecards, and a first
-TermSquad watch pass (backlog R3).
+TermSquad watch pass (backlog R3). The three folded watch docs are archived under `docs/archive/competitor-watch/`
+(verbatim content, archival banner prepended); see "Corpus conventions" below
+for the left edge / reach-back / cadence rules this consolidation declares.
+
+## Corpus conventions
+
+Declared 2026-09-19 (closes the night pass's watch-methodology follow-up).
+This section is the canonical home of the watch-process rules; the
+BACKLOG.md block points here.
+
+- **Left edge:** the Sept-2026 competitive map in this doc (PR #26,
+  deepened by the #34 pm watch, the #54 evening-pass consolidation, and
+  this pass). Watch docs are delta-only against the *previous watch doc*,
+  which chains back to this baseline.
+- **Watch-doc naming:** watch passes land as
+  `docs/COMPETITOR_WATCH_YYYY-MM-DD.md`, with `_EVENING`/`_NIGHT`/`_MORNING`/`_MIDDAY`
+  suffixes for same-day repeats; each is delta-only against the previous
+  watch doc.
+- **Reach-back policy:** a watch pass backfills a pre-window item only
+  when a primary-source verification or a factual correction demands it
+  (the #82 pattern — the five queued verifications, the CVE date
+  corrections); otherwise pre-window items are not re-researched.
+- **Deep-scan cadence:** on-demand by review/meta runs, not by the hourly
+  loop. The hourly pass stays delta-only.
+- **Consolidation queue:** this pass folds #64 (night) → #82 (morning) →
+  #102 (midday) → this doc (#54's evening-pass consolidation merged
+  separately as 1c244be). Consolidated watch docs are archived under
+  `docs/archive/competitor-watch/` (verbatim content, archival banner
+  prepended) and superseded.
+- **Compaction:** after each consolidation, superseded dated watch-update
+  sections in this doc are candidates for summarization by a review/meta
+  run — the baseline stays skimmable; the archived watch docs preserve the
+  record.
 
 **Scope note:** the market splits into two segments and spark-vm only plays in
 one of them. **Task-scoped sandboxes** (E2B, Daytona, Modal, Vercel, Cloudflare,
@@ -368,6 +401,196 @@ evening consolidation's deltas folded in (marked "Evening pass").
   rate-card parity. **Egress stays the only thin spot** — undocumented on all
   public pages (C12 narrows to egress-only).
 
+## Watch update — 2026-09-19 (night + morning + midday): market moves and verifications
+
+Three delta watch passes (night ~23:57–00:30 CDT, morning ~04:57–05:30, midday
+~10:55–11:35), each delta-only against the previous pass, folded here. The
+morning pass closed the research run's five queued verification items against
+primary sources, with two factual corrections to the queue. **VERIFIED** = read
+on a vendor's own page, doc, repo, or security announcement in a watch pass
+(link inline). **INFERRED** = third-party characterization, labeled as such.
+
+- **Docker Sandboxes — sandbox-escape week (four vulnerabilities, one release).**
+  **VERIFIED (Docker's own
+  [security announcements](https://docs.docker.com/security/security-announcements),
+  fix shipped in 0.42.0 on Sep 7, records published Sep 15):** CVE-2026-77179
+  (Critical, macOS only, 0.28.0–<0.42.0; CVSS 9.4 per third-party trackers, not
+  vendor-stated) — "the virtio-fs host server on macOS followed symlinks when
+  reopening an unlinked file from a stored path. A malicious guest could replace
+  a parent directory with a symlink, escape the shared workspace, and read or
+  modify arbitrary host files as the VMM user, potentially leading to code
+  execution on the host"; CVE-2026-79994 (High, CVSS 8.7 per third-party
+  trackers, not vendor-stated, 0.37.0–<0.42.0) — "the guest-to-host Unix domain
+  socket relay checked that a socket path was inside an authorized workspace
+  but reconnected using the path name." No exploitation mentioned in the
+  vendor announcement. **CORRECTION to the queue:** the queue tied these to
+  Docker Desktop — **no evidence ties either CVE to Docker Desktop; both are
+  Docker Sandboxes only.** **INFERRED (Severity Daily, quoting Docker's own
+  release notes):** the same 0.42.0 release notes (roughly thirty bug-fix
+  entries) contain two more *explicitly-described-as-vulnerabilities* entries —
+  host D-Bus transport opened by a sandboxed process to "execute an arbitrary
+  command on the host", and cross-sandbox OAuth login hijack by pre-claiming
+  the callback port — neither CVE named in the notes at all; the critical
+  virtio-fs fix shipped unlabeled, eight days before the CVE records. Docker
+  has not connected the D-Bus fix to either CVE. The D-Bus/OAuth quotes are
+  third-party-quoted-from-vendor, not yet read directly on the vendor's
+  release-notes page — a direct read is owed before any derivative publishes
+  them. Docker's stated remediation (third-party press roundup): upgrade to
+  0.42.0+, or use `--clone` mode — with Docker's own caveat that clone mode
+  mounts the repo read-only at `/run/sandbox/source` but **does not prevent
+  reads** (untracked files such as `.env` stay readable inside the sandbox).
+  CVE-2026-79994's record initially listed a never-published 0.41.0 as the fix
+  version, corrected to 0.42.0 ~1h after publication. Credits: Oren Yomtov of
+  accomplish.ai (CVE-2026-77179), Jurre van Bergen of ThreatNotify
+  (CVE-2026-79994). **v0.43.0 (Sep 15) trust-model tightening, VERIFIED in
+  Docker's own release notes:** `shareSkills` in `sbxenv.yaml` replaced with
+  `skills` (`off|readonly|readwrite`); MCP OAuth client secrets renamed to
+  `mcp:<server>:client_secret` (old name no longer read); env files can
+  reference `${{ env.projectDir }}` / `${{ env.fileDir }}`. **Implication:**
+  the shared-workspace boundary is the trust story of a persistent-VM-for-agents
+  product, and this is the loudest object lesson that "a microVM + mounted
+  host folder" is a fragile model. spark-vm's full-VM-without-host-folder-sharing
+  design is outside the shared-workspace guest→host sub-class both CVEs broke
+  (win #3 adjacent), while the D-Bus daemon-boundary and OAuth port-claim
+  classes are owned-risk categories any managed product retains — including a
+  hosted spark-vm — so treat them as owned risks, not solved-by-architecture.
+  Docker is actively converging on "agent runs without keys inside"
+  (read-only skill sharing by default, host-side credential proxying), so the
+  credential-proxy differentiation (win #3) must rest on persistence +
+  request-body-scope substitution + open source, not isolation hygiene alone.
+  Strong raw material for the O13 trust/transparency doc, with the honest
+  scoping above. **Corpus note:** Docker Sandboxes enters the watch corpus
+  via this event (security event, not a full profile yet) — the next
+  competitor pass should add its at-a-glance row with a price signal.
+- **Cloudflare × Cursor (Sep 2) — new to the corpus, pre-window.** **VERIFIED
+  (Cloudflare's own
+  [press release](https://www.cloudflare.com/press/press-releases/2026/cloudflare-expands-support-for-ai-coding-agents-with-cursor-cloud-agents-on-cloudflare-sandboxes/),
+  Sep 2, 2026):** Cursor Cloud Agents' tool work (terminal, filesystem,
+  browser) can execute inside **Cloudflare Sandboxes in the customer's own
+  Cloudflare account**, while Cursor keeps the agent loop (inference,
+  planning, orchestration) via Cursor Self-Hosted Machines; outbound HTTPS
+  from the worker to Cursor's backend; no inbound access into the customer
+  network. Framed as a pattern, "builds on Cloudflare's work with other
+  leading AI agent platforms, including Devin Outposts and Claude Managed
+  Agents." **Implication:** the customer-controlled-execution thesis now has
+  a big-vendor execution-layer play — execution inside the customer's own
+  Cloudflare account rhymes uncomfortably with "your own computer", so do not
+  pitch control as the differentiator. The axes this move does not contest are
+  **persistence** and the **approval loop**. Note the mirror for the hosted
+  vision: spark-vm hosted is also converging toward provider-infra,
+  customer-scoped execution, so the hosted differentiation story cannot rest
+  on account-scoping either. Candidate one-line note for
+  `docs/POSITIONING.md`, reworded around persistence + approval loop.
+- **GitHub Copilot — enterprise-managed sandbox controls (JetBrains IDEs,
+  public preview).** **VERIFIED (GitHub Changelog,
+  [Sep 8, 2026 entry](https://github.blog/changelog/2026-09-08-enterprise-managed-sandbox-in-copilot-for-jetbrains/);
+  CORRECTION to the queue, which dated this Sep 16):** "Enterprise
+  administrators can now centrally configure sandbox behavior for GitHub
+  Copilot in JetBrains IDEs. Managed policies can control sandbox
+  enablement, filesystem and network access, proxy settings, developer-tool
+  access, macOS Keychain access, and more." "Managed restrictions take
+  precedence over user settings. Copilot locks affected controls in the IDE
+  and identifies settings managed by your organization" — plus enterprise
+  policy diagnostics. **Implication:** GitHub is turning every Copilot
+  install into a centrally-governed execution environment; "governed sandbox"
+  is becoming enterprise table stakes. The hosted-product pitch needs an
+  org-policy layer to compete with enterprise expectations, not just
+  solo-developer isolation (H16; the org-policy research pass already folded
+  this, PR #101).
+- **OpenRouter `openrouter:shell` (beta) — VERIFIED
+  ([server-tools docs](https://openrouter.ai/docs/guides/features/server-tools/shell)):**
+  "The `openrouter:shell` server tool gives a model a hosted shell: a
+  sandbox-backed clone of OpenAI's hosted `shell` tool that works with any
+  model." "OpenRouter executes the commands in order, each in its own
+  invocation, inside a sandboxed container." Ephemeral-sandbox pricing
+  $0.0001/active-second (THIRD-PARTY roundup). **Implication:** ephemeral
+  hosted sandboxes are being commoditized as an API primitive. spark-vm's
+  moat is the opposite direction — persistent, stateful VMs with sign-up —
+  so positioning should lean hard into persistence and long-lived agent
+  workflows, not compete on ephemeral exec. Per-second ephemeral exec is the
+  pricing floor; per-computer persistence is the premium (C2).
+- **Tencent BrowserSkill — open-sourced (June 2026, coverage Sep 18).**
+  **VERIFIED ([github.com/tencent/browserskill](https://github.com/tencent/browserskill)
+  README + PRIVACY.md):** "BrowserSkill connects Cursor, Claude Code, Codex,
+  OpenClaw, CodeBuddy, WorkBuddy, Pi, Hermes Agent, and other shell-capable
+  AI agents to your already logged-in browser." Browser tasks run in a
+  separate, visible Agent Window; Rust `bsk` CLI/daemon + Chrome/Edge
+  extension; agents reuse real login state; per-tab borrow/return consent;
+  human-in-the-loop handoff for captchas/logins. **Implication:**
+  real-authenticated-browser automation is now mainstream agent capability,
+  not a hack — an "agent window"-style isolated-but-logged-in browsing
+  surface is a feature users will expect on spark-vm, and the
+  borrow/return consent model is a good pattern to reuse for anything
+  spark-vm does with user credentials.
+- **TermSquad (C1) — no in-window moves; spec completed, watch-method gap.**
+  **VERIFIED (termsquad.com/pricing, refetched 2026-09-19):** $9/$19/$29/$49
+  unchanged — Starter $9 (2 vCPU / 4 GB / 40 GB), Builder $19 (4 / 8 / 75),
+  **Power $29 = 6 vCPU / 12 GB / 100 GB**, Ultra $49 (8 / 24 / 200 NVMe).
+  FAQ reorganization
+  (stop-behavior, backup/restore, multi-region America/Europe/Asia-Oceania) —
+  doc depth, not a product signal; session model and agent-as-customer
+  absence unchanged. **Watch-method gap:** TermSquad routes product updates
+  to x.com/trytermsquad, which is login-gated for read-only fetches — the
+  "no new announcement" call covers the open web only; find a non-gated
+  update surface (C1).
+- **WSO2 Agent Manager (C10) — reception: thin; stays open.**
+  INFERRED (wire republication, Sep 16–18): GA coverage remains
+  wire-syndication of the Sep 15 announcement, plus a badsignal.ai editorial
+  take (third-party, from the midday pass); no broad independent developer
+  reaction beyond that. Wire-claimed traction details (INFERRED, vendor-sourced —
+  claims to corroborate, not adoption evidence): Forrester Agent Control
+  Plane Landscape Q2 2026 inclusion; AI Tech Awards 2026 "Best Innovation in
+  Open Source AI"; Agentic AI Foundation membership; OpenID Foundation
+  whitepaper co-authorship. Technical corroboration (VERIFIED,
+  [wso2/agent-manager#1390](https://github.com/wso2/agent-manager/pull/1390),
+  OTel ingestion on VM installs): the sandbox NetworkPolicy `except` list
+  exists in the wild — consistent with the k8s-pod + NetworkPolicy egress
+  pinning. Next milestone: Sep 29 webinar.
+- **Baseten/Blaxel (C11) — nothing shipped; stays open.** VERIFIED (GitHub
+  releases): no `blaxel-ai/sandbox` releases after v0.2.59 (Sep 18);
+  v0.2.59 = sandbox-welcome-response API-link tweak, v0.2.58 = dependabot
+  patches + unix-socket export skip — maintenance, no capability or pricing
+  change. The `deepseek-harness-blaxel-sandbox` IDE plugin shipped 0.1.2
+  (Sep 3); 0.1.3 unreleased. INFERRED: Baseten's only post-acquisition
+  product news is a Google Cloud Marketplace launch + Hybrid Mode early
+  access — not a code-execution offering.
+- **OpenAI Agents API (C9) — nine partners, unchanged; stays open.**
+  INFERRED (third-party roundups): still Blaxel, Cloudflare, Daytona,
+  DigitalOcean, E2B, Modal, Oracle, Runloop, Vercel; beta terms unchanged
+  (1h inactive deletion, US-only residency, no ZDR even self-hosted). No
+  adoption figures disclosed. Third-party ephemeral-exec pricing datapoint
+  ([aicraftjournal](https://aicraftjournal.com/articles/openai-agents-api-public-beta-no-extra-fee-hosted-sandbox-1gb-003),
+  unverified against OpenAI's own pricing page): OpenAI-hosted sandbox 1 GB
+  at **$0.03/20min** — directional floor for C2, not corpus fact.
+  Observation: the Agents API separates the harness (OpenAI runs the loop,
+  sessions, compaction) from execution (your infra / partner sandbox / VPC),
+  normalizing bring-your-own-sandbox as a first-class shape — which supports
+  the hosted spark-vm pitch: a *persistent, full-VM, sign-up-and-use*
+  computer where the platform operates the loop and the tenant's box is the
+  execution plane, positioned against the ephemeral-exec pricing floor rather
+  than competing with it.
+- **AgentComputer (C12) — egress-only, confirmed.** VERIFIED (GitHub API):
+  `AgentComputerAI/computer-host` and `-computer-guest` untouched since
+  2026-04-30, no releases, pricing/docs unchanged; egress still undocumented
+  on all public pages. The org was formerly getcompanion-ai ("Companion") —
+  search color for future passes. The narrowed C12 stands.
+- **FastGPT v4.16.0 (Sep 14) — small provider-switch signal.** INFERRED (PR
+  Newswire recap): v4.16.0 deprecates the E2B sandbox-provider config;
+  existing E2B users must switch to `opensandbox` or `sealosdevbox`
+  providers (new sandbox tuning vars: CPU, memory 2048 MiB, storage 1 GiB,
+  auto-suspend 60 min, auto-archive 7 days). One line, not a backlog item:
+  an OSS agent-platform deprecating E2B as a sandbox provider suggests the
+  task-scoped sandbox defaults are less sticky than their partner logos
+  imply.
+- **Surveillance result:** otherwise quiet across the tracked set in all
+  three windows — no launches, pricing/tier changes, or partner moves
+  (E2B, Daytona, Modal, Runloop, Northflank, Vercel, Cloudflare, GitHub
+  Copilot, OpenRouter, Tencent, WSO2 beyond the above). Out-of-window
+  context: "Plugin4Shell" 0-click RCE (Sep 17, Air security startup; Claude
+  Code and Codex patched, Gemini CLI deprecated, Copilot unpatched —
+  third-party) — an agent-ecosystem security signal for any trust doc, but
+  pre-window.
+
 ## Implications → backlog
 
 - **C1 — TermSquad recurring watch** (competitor): egress-controls docs,
@@ -381,12 +604,15 @@ evening consolidation's deltas folded in (marked "Evening pass").
   negative, confirm it periodically, and **survey agent frameworks too**
   (Vercel `eve` ships one as a separate product from the Sandbox SKU). R3's
   first pass is done; the pm watch pass is done; the evening consolidation is
-  done (this doc); the watch continues.
+  done (this doc); the watch continues. 2026-09-19 pass adds: find a non-login-gated TermSquad update surface (x.com/trytermsquad is login-gated; the "no new announcement" call covers the open web only).
 - **C2 — Pricing-page inputs** (sales): TermSquad $9–$49, AgentComputer
   usage-based PAYG (no flat plan published — earlier $20/mo directory claim
   refuted; new Enterprise tier observed 2026-09-18, absent from the morning
   survey, pricing unpublished), E2B Pro $150 floor, DIY $4/mo — feed the
-  pricing-page thinking item and R4.
+  pricing-page thinking item and R4. 2026-09-19 pass adds the ephemeral-exec
+  floor: OpenRouter `openrouter:shell` ~$0.0001/active-second (third-party
+  roundup) and OpenAI-hosted sandbox 1 GB at ~$0.03/20min (third-party,
+  unverified) — directional, not corpus fact.
 - **C3 — swapd-vs-injection comparators** (docs, feeds R6): E2B per-host
   request transforms (beta), Vercel credential brokering (every plan),
   Cloudflare outbound handlers, Microsandbox network-layer injection (OSS).
@@ -399,7 +625,13 @@ evening consolidation's deltas folded in (marked "Evening pass").
   half is now confirmed by Vercel's own firewall docs); E2B's
   accept-before-decide TCP behavior is attributed by MarkTechPost to E2B's own
   docs. Make the security-docs comparison
-  per-vendor with links.
+  per-vendor with links. 2026-09-19 (out-of-band corroboration, not a watch
+  delta): Vercel's "every plan" half is now vendor-verified — Vercel's own
+  [KB](https://vercel.com/kb/guide/vercel-sandbox-vs-e2b) (published
+  2026-03-20, updated 2026-09-04) states credential-brokering transformation
+  rules are "available on all plans, including Hobby", quoted verbatim in
+  the open H16 org-policy research (PR #101); the E2B vendor links stay open
+  for the docs run.
 - **C4 — Orchestration gap** (hosted product): TermSquad Squad vs muse-job
   single-operator — file as a product gap for the hosted vision.
 - **C5 — Idle economics for the free tier** (sales, feeds R4): always-on bills
@@ -424,7 +656,15 @@ evening consolidation's deltas folded in (marked "Evening pass").
 - **C7 — Positioning defense** (marketing, feeds R5): TermSquad now occupies
   the persistence headline in-market; the "real computer that stays yours" +
   credential-proxy differentiator needs to land publicly before the window
-  narrows further.
+  narrows further. 2026-09-19: three more moves narrow the claimable axes —
+  Cloudflare × Cursor plays customer-controlled execution (do not pitch
+  control), Docker v0.43.0 converges on "agent runs without keys inside"
+  (credential-proxy claims must argue mechanism + OSS, not posture), and
+  VMware Private AI Cloud (deny-by-default Tanzu sandboxes + isolated
+  credential store, VMware Explore 2026 ~Sep 1 — INFERRED, third-party) is a
+  third enterprise-governance corroborator; the surviving axes are
+  persistence + approval loop + OSS. Add the one-line note to
+  `docs/POSITIONING.md` (candidate, from the night pass).
 - **C8 — Buyer-vs-user packaging analysis** (sales/product): the hosted
   product's *user* is the Muse but the *buyer* is a human/org. Map both
   journeys: what trust evidence each gate requires (audit trail,
@@ -439,7 +679,11 @@ evening consolidation's deltas folded in (marked "Evening pass").
   network-on-by-default w/ template policy, outbound disable/allowlist,
   1h inactive deletion, US-only beta, no ZDR even self-hosted. Track what the
   default sandbox surface converges on — platform defaults set the bar our
-  hosted story must clear.
+  hosted story must clear. 2026-09-19 observation: the Agents API normalizes
+  bring-your-own-sandbox (harness from OpenAI, execution from you) as a
+  first-class shape — supports the hosted pitch of a persistent full-VM
+  where the platform operates the loop and the tenant's box is the execution
+  plane.
 - **C10 — WSO2 Agent Manager watch** (competitor, evening pass): GA Sep 15;
   runtime pinned on primary evidence (k8s pods +
   [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496),
@@ -456,6 +700,20 @@ evening consolidation's deltas folded in (marked "Evening pass").
   Firecracker VM manager, computer-host/guest repos, pricing, cold-storage
   model, Enterprise tier). Remaining gap: egress posture is undocumented on
   every public page.
+- **C13 — Sandbox-escape-week competitive positioning** (marketing, feeds
+  O13): Docker Sandboxes closed four sandbox-boundary vulns in one release,
+  with the critical virtio-fs fix shipping unlabeled. The trust/transparency
+  doc's negative-example material is strong but partially sourced
+  (D-Bus/OAuth quotes need a direct vendor release-notes read first); honest
+  scoping holds spark-vm outside the shared-workspace guest→host sub-class
+  but inside the D-Bus-daemon/OAuth-port owned-risk classes. Also: a usable
+  contrast — the two shared-workspace guest→host breaks are outside the
+  full-VM sub-class, which is consistent with (not proof of) the
+  no-host-folder-sharing architecture choice; the D-Bus-daemon and
+  OAuth-port classes are owned risks for a hosted spark-vm too, and the doc
+  must not claim the full-VM model is clear of them. Disclosure-timeline
+  guidance: verify all version numbers against vendor pages only in any
+  trust/transparency derivative (Docker mis-listed a fix version once).
 
 ## Sources
 
@@ -523,3 +781,30 @@ MS-exclusivity end (date corrections, were misdated as September in research
 notes — independently corroborated by
 [the-decoder](https://the-decoder.com/openai-lands-on-aws-one-day-after-microsoft-deal-restructuring/)
 coverage of the Apr 28 AWS event).
+
+**2026-09-19 consolidation pass (night + morning + midday watches):** primary:
+[Docker security announcements](https://docs.docker.com/security/security-announcements)
+(CVE-2026-77179/79994, fixed 0.42.0 Sep 7, records published Sep 15);
+[docker/sbx-releases](https://github.com/docker/sbx-releases) (v0.43.0 trust-model
+tightening, Sep 15); [Cloudflare press release: Cursor Cloud Agents on Cloudflare
+Sandboxes](https://www.cloudflare.com/press/press-releases/2026/cloudflare-expands-support-for-ai-coding-agents-with-cursor-cloud-agents-on-cloudflare-sandboxes/)
+(Sep 2, 2026); [GitHub Changelog: enterprise-managed sandbox in Copilot for
+JetBrains](https://github.blog/changelog/2026-09-08-enterprise-managed-sandbox-in-copilot-for-jetbrains/)
+(Sep 8, 2026); [OpenRouter server-tools/shell](https://openrouter.ai/docs/guides/features/server-tools/shell)
+(`openrouter:shell` beta); [tencent/browserskill](https://github.com/tencent/browserskill)
+(BrowserSkill README + PRIVACY.md); termsquad.com/pricing (refetched 2026-09-19 —
+Power tier 6 vCPU, $9/$19/$29/$49 unchanged);
+[wso2/agent-manager#1390](https://github.com/wso2/agent-manager/pull/1390) (OTel
+ingestion on VM installs, NetworkPolicy `except` list in the wild);
+[blaxel-ai/sandbox releases](https://github.com/blaxel-ai/sandbox/releases/tag/v0.2.59)
+(v0.2.59/v0.2.58, maintenance); [AgentComputerAI/computer-host](https://github.com/AgentComputerAI/computer-host)
+and [computer-guest](https://github.com/AgentComputerAI/computer-guest)
+(untouched since 2026-04-30). Third-party (INFERRED): Severity Daily on the
+Docker 0.42.0 D-Bus/OAuth vuln entries; thehackernews / realhacker.news /
+hacklido Docker CVE press roundup; TechGig / arabianbusinessweek / menews247 /
+uaenews247 / channelpostmea on WSO2 GA reception; runtimewire, cellcog,
+aicraftjournal on Agents API terms (+ OpenAI-hosted sandbox $0.03/20min per
+1 GB, unverified); fourweekmba on the unchanged nine-partner set;
+aicraftjournal/OpenRouter third-party roundup on `$0.0001/active-second`
+ephemeral pricing; morningstar PR Newswire on FastGPT v4.16.0; itsfoss Local
+AI Weekly on BrowserSkill (Sep 18).
