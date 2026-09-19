@@ -75,6 +75,9 @@ class ReadValueVerbatimTests(unittest.TestCase):
     def test_trailing_newlines_preserved(self):
         self.assertEqual(self._read(b"tok\n\n"), "tok\n\n")
 
+    def test_whitespace_only_value_preserved(self):
+        self.assertEqual(self._read(b"  \n"), "  \n")
+
     def test_leading_and_trailing_spaces_preserved(self):
         self.assertEqual(self._read(b" tok "), " tok ")
 

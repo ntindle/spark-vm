@@ -519,11 +519,15 @@ class SwapAddon:
             return None
         lines = [l for l in text.splitlines() if l.strip()]
         if not lines or lines[0].strip() != MULTI_MARKER:
-            # Verbatim, never stripped (#88): every supported store path
-            # chomps exactly one trailing newline at write time (`cred set`
-            # stdin, cred-ui paste), so the stored bytes ARE the intended
-            # value. A read-side strip() corrupts secrets that legitimately
-            # start/end with whitespace (auth failures on swapped requests).
+            # Verbatim, never stripped (#88): write paths chomp exactly one
+            # trailing newline exactly once — `cred set` stdin and cred-ui
+            # paste at the frontend, cred-store-set-inference at its own
+            # boundary; the narrow main writer (proxy/cred-store-set)
+            # stores stdin verbatim and its frontends chomp first. So the
+            # stored bytes ARE the intended value. A read-side strip()
+            # corrupts secrets that legitimately start/end with whitespace
+            # (auth failures on swapped requests). Direct narrow-writer
+            # use must pipe exact bytes (printf '%s', never echo).
             return text
         values = {}
         for lineno, line in enumerate(lines[1:], start=2):
@@ -1519,6 +1523,15 @@ class SwapAddon:
                                         False))
             elif self._scrubbable_entry(name, None, val):
                 triples.append((val, "hsurr:%s" % name, False))
+                # #88: a whitespace-significant value (e.g. stored
+                # "sk-abc123\n") must still scrub the bare rendering
+                # servers echo back trimmed ("invalid key 'sk-abc123'").
+                # The request side swaps the verbatim value; the scrub
+                # side must cover both renderings or the trimmed echo
+                # leaks past the scrubber.
+                bare = val.strip()
+                if bare != val and self._scrubbable_entry(name, None, bare):
+                    triples.append((bare, "hsurr:%s" % name, False))
         triples.sort(key=lambda t: len(t[0]), reverse=True)
         return triples
 

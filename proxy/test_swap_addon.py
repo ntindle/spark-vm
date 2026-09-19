@@ -1049,6 +1049,56 @@ class SwapAddonTests(unittest.TestCase):
             self.assertEqual(p.read_bytes(), b"LLM-test-key-bytes")
             self.assertEqual(p.stat().st_mode & 0o777, 0o600)
 
+    def test_issue88_inference_writer_chomps_one_trailing_newline(self):
+        """#88 (arch B1): cred-store-set-inference is its own frontend —
+        nothing chomps before it — so it chomps exactly one trailing
+        newline at the store boundary. Readers return stored bytes
+        verbatim, so without this an incidental newline (echo idiom)
+        would be injected into the provider Authorization header."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-store-set-inference")
+        cases = [
+            (b"LLM-key\n", b"LLM-key"),      # echo idiom: chomped
+            (b"LLM-key\r\n", b"LLM-key"),    # CRLF idiom: chomped
+            (b"LLM-key\n\n", b"LLM-key\n"),  # only one: legit newline kept
+            (b"LLM-key", b"LLM-key"),        # printf idiom: untouched
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            for stdin_bytes, expected in cases:
+                env = dict(os.environ, INFERENCE_SECRETS_DIR=d)
+                r = subprocess.run([script], input=stdin_bytes,
+                                   capture_output=True, env=env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual((Path(d) / "llm-api").read_bytes(),
+                                 expected, stdin_bytes)
+
+    def test_issue88_inference_writer_refuses_newline_only_input(self):
+        """#88: a single newline chomps to empty — refused like any empty
+        secret, never stored as a zero-byte key."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-store-set-inference")
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, INFERENCE_SECRETS_DIR=d)
+            r = subprocess.run([script], input=b"\n",
+                               capture_output=True, env=env)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertFalse((Path(d) / "llm-api").exists())
+
+    def test_issue88_scrub_covers_bare_and_verbatim_renderings(self):
+        """#88 (arch B2): a whitespace-significant single value must scrub
+        both the verbatim stored rendering AND the bare rendering servers
+        echo back trimmed — otherwise the trimmed echo leaks past the
+        scrubber while the swap itself works."""
+        a = make_addon(secrets={"k": "secrettok12\n"})
+        text = ("verbatim: [secrettok12\n] bare: 'secrettok12' "
+                "other: secrettok1")
+        scrubbed = a._scrub_text_value(text)
+        self.assertNotIn("secrettok12\n", scrubbed)
+        self.assertNotIn("'secrettok12'", scrubbed)
+        self.assertIn("hsurr:k", scrubbed)
+        # no over-scrub: a shorter innocent token is untouched
+        self.assertIn("secrettok1", scrubbed)
+
     def test_nit_inference_recipe_names_right_files(self):
         """REVIEW item 46: the install recipe must bind the provider in
         inference-hosts.allow (never the main hosts.allow) and run the

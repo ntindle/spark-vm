@@ -3,6 +3,15 @@
 # Invoked as: sudo -u swapd /usr/local/bin/cred-store-set <name>
 # Reads the secret value from stdin, writes it atomically to
 # /home/swapd/secrets/<name> (0600, swapd-owned).
+#
+# Store contract (#88): this writer stores stdin VERBATIM — no newline
+# handling here. Every frontend chomps exactly one trailing newline from
+# human input before invoking it (`cred set` stdin, cred-ui paste), so
+# stored bytes == intended value; all readers (`cred get`, fill_secret,
+# swap proxy) return the stored bytes verbatim. Direct invocation must
+# pipe exact bytes (printf '%s', never echo) — do NOT add a chomp here:
+# it would double-chomp behind the frontends and corrupt secrets that
+# legitimately end in a newline.
 # Root-owned 0755; ntindle cannot modify this script, only execute it
 # via the sudoers entry.
 set -euo pipefail
