@@ -1263,7 +1263,9 @@ class ProxyHardeningRoundTests(unittest.TestCase):
         resp.headers["X-OTP"] = "otp " + code
         flow = Flow(Request("github.com", "/headers"))
         flow.response = resp
-        a.response(flow)
+        # headers are scrubbed at responseheaders time (they must not
+        # wait for a body that, on a stream, never finishes)
+        a.responseheaders(flow)
         self.assertEqual(resp.headers.get("X-Echo-Auth"),
                          "Bearer hsurr:github")
         cookies = resp.headers.get_all("Set-Cookie")
@@ -1281,14 +1283,14 @@ class ProxyHardeningRoundTests(unittest.TestCase):
         resp2.headers["Content-Length"] = code
         flow = Flow(Request("github.com", "/"))
         flow.response = resp2
-        a.response(flow)
+        a.responseheaders(flow)
         self.assertEqual(resp2.headers.get("Content-Length"), code)
         # non-allowlisted host: headers untouched
         other = FakeResponse(b"ghp_TOKEN", "text/plain")
         other.headers["X-Echo"] = "ghp_TOKEN"
         flow = Flow(Request("evil.example", "/"))
         flow.response = other
-        a.response(flow)
+        a.responseheaders(flow)
         self.assertEqual(other.headers.get("X-Echo"), "ghp_TOKEN")
 
     def test_71_oversize_request_body_passes_through_unswapped(self):
@@ -1422,6 +1424,69 @@ class PushNotifyHookTests(unittest.TestCase):
         with mock.patch.object(sa, "_load_push_module",
                                return_value=FakeMod):
             sa._push_notify({"id": "abc123"})  # must not raise
+
+
+class SecuritySweepTests(unittest.TestCase):
+    """2026-09-19 build-loop security sweep (open-source track)."""
+
+    def test_host_list_trailing_dot(self):
+        """DNS treats "host." as identical to "host": the ssrf.deny name
+        entries (finding-47 self-peer guard) must match with or without
+        the trailing dot, or one character bypasses the name check."""
+        self.assertTrue(sa._host_in_list("spark-vm.axolotl-sirius.ts.net.",
+                                        ["spark-vm.axolotl-sirius.ts.net"]))
+        self.assertTrue(sa._host_in_list("github.com.", ["github.com"]))
+        self.assertTrue(sa._host_in_list("sub.example.com.",
+                                        [".example.com"]))
+        self.assertTrue(sa._host_in_list("sub.example.com",
+                                        [".example.com."]))
+        # still a real matcher, not a prefix match
+        self.assertFalse(sa._host_in_list("evilexample.com.", ["example.com"]))
+        self.assertFalse(sa._host_in_list("example.com.evil.",
+                                         ["example.com"]))
+
+    def test_grant_path_prefix_smuggling_refused(self):
+        """The grants.json path_prefix branch gets the finding-42
+        smuggling guard (%, ;, \\) that the registry allowed_paths
+        branch already had: a backslash separator must not escape the
+        grant's prefix on a lenient backend."""
+        a = make_addon(hosts=["api.example.com"],
+                       secrets={"api": "API-TOKEN"},
+                       registry={"api": {"allowed_hosts": ["api.example.com"],
+                                         "allowed_paths": ["/other"]}})
+        grant = {"credential": "api", "host": "api.example.com",
+                 "method": "POST", "path_prefix": "/v1",
+                 "expires": "2999-01-01T00:00:00+00:00"}
+        a._grants = lambda: [grant]
+        ok, reason = a._credential_allows_request(
+            "api", "api.example.com", "POST", "/v1/\\../admin")
+        self.assertEqual((ok, reason), (False, "path-not-allowed"))
+        # the refusal is hard, not per-grant: an evasive path is not
+        # retried against a wider second grant
+        a._grants = lambda: [dict(grant, path_prefix="/")]
+        ok, reason = a._credential_allows_request(
+            "api", "api.example.com", "POST", "/v1/;x/admin")
+        self.assertEqual((ok, reason), (False, "path-not-allowed"))
+        # a clean in-prefix path still swaps through the grant
+        req = Request("api.example.com", "/v1/repos", method="POST",
+                      headers=[("Authorization", "Bearer hsurr:api")])
+        a._grants = lambda: [grant]
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"), "Bearer API-TOKEN")
+
+    def test_responseheaders_scrubs_streaming_headers(self):
+        """Streaming/SSE responses never finish the buffered body hook,
+        so secret-bearing headers must be scrubbed at responseheaders
+        time — the body hook firing (or not) cannot be the gate."""
+        a = make_addon()
+        resp = FakeResponse(b'data: {"x": 1}\n\n', "text/event-stream")
+        resp.headers["Set-Cookie"] = "session=correct horse; Path=/"
+        flow = Flow(Request("github.com", "/stream"))
+        flow.response = resp
+        a.responseheaders(flow)  # headers arrive; the body never completes
+        cookies = resp.headers.get_all("Set-Cookie")
+        self.assertTrue(all("correct horse" not in c for c in cookies))
+        self.assertIn("session=hsurr:acme:password; Path=/", cookies)
 
 
 if __name__ == "__main__":

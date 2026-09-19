@@ -245,6 +245,23 @@ class SenderTests(unittest.TestCase):
         self.assertFalse(s.enabled)
         self.assertEqual(s.notify_approval({"id": "abc"}), 0)
 
+    def test_world_readable_keys_warn(self):
+        """Issue #77 (L2): a group/world-readable vapid.json logs a
+        loud warning; the keys still load (availability), the operator
+        is told to chmod 600."""
+        os.chmod(self.keys, 0o644)
+        with self.assertLogs(push.log, level="WARNING") as cm:
+            s = push.PushSender(self.keys, self.subs, "mailto:x")
+        self.assertTrue(s.enabled)
+        self.assertTrue(any("chmod 600" in m for m in cm.output))
+
+    def test_owner_only_keys_no_warn(self):
+        """A 0600 keys file loads silently."""
+        os.chmod(self.keys, 0o600)
+        with self.assertNoLogs(push.log, level="WARNING"):
+            s = push.PushSender(self.keys, self.subs, "mailto:x")
+        self.assertTrue(s.enabled)
+
     def test_public_key_exposed(self):
         self.assertEqual(len(b64url_decode(self.sender.public_key_b64u)), 65)
 

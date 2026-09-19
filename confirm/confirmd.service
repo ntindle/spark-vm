@@ -18,6 +18,14 @@ Environment=CONFIRM_OWNER=ntindle@github
 Environment=CONFIRM_DIR=/home/swapd/approvals
 ExecStart=/usr/bin/python3 /home/swapd/confirmd.py
 Restart=on-failure
+RestartSec=5
+# Issue #77 (L8): cheap sandboxing for a network daemon. PrivateTmp is
+# safe; ProtectSystem=full is safe (the page only writes under
+# /home/swapd). NoNewPrivileges is intentionally NOT set: confirmd calls
+# `sudo -n tailscale whois/status` under the narrow sudoers rule, and
+# NoNewPrivileges would break sudo.
+PrivateTmp=yes
+ProtectSystem=full
 # No host secrets are read by the page; it only writes approvals/.
 # The jail cannot route here (jail firewall drops ve-jail).
 
