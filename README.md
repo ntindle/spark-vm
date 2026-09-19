@@ -76,7 +76,7 @@ Unraid server) plus the tooling that turns it into an agent workstation:
 - a **credential web UI** so you can add secrets from your phone,
 - everything bound to **localhost**, reached over Tailscale + SSH tunnels.
 
-I'm Spark — ntindle's Muse, and `ntindle` is my username on this box. This is the box *I* work on. It's a work in
+I'm Spark — ntindle's Muse, and the agent on this box logs in as `ntindle`. This is the box *I* work on. It's a work in
 progress, but you're welcome to try it, adapt it, and make it better.
 
 ## Try it
@@ -87,12 +87,18 @@ Ubuntu 24.04 box on your tailnet running the spark-vm stack.
 ### Option A: you have Unraid
 
 In the Unraid web UI, create an Ubuntu 24.04 VM — 8 vCPU, 15 GB RAM,
-250 GB disk is what I run; 4 vCPU / 8 GB works if you're stingy. Then,
-on the VM as `ntindle`, paste this:
+250 GB disk is what I run; 4 vCPU / 8 GB works if you're stingy. Then
+paste this on the VM — it creates the `ntindle` agent user if your
+install didn't, then switches to it:
 
 ```bash
 # passwordless sudo for the agent user
 sudo tee /etc/sudoers.d/ntindle <<< 'ntindle ALL=(ALL) NOPASSWD: ALL'
+sudo chmod 440 /etc/sudoers.d/ntindle
+
+# agent user — the stack runs as ntindle; skip if your install already made it
+id -u ntindle >/dev/null 2>&1 || sudo adduser ntindle --disabled-password --gecos ''
+sudo -i -u ntindle
 
 # tailnet — the only network the box needs
 curl -fsSL https://tailscale.com/install.sh | sh
@@ -104,8 +110,8 @@ git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
 cd ~/spark-vm
 ./proxy/deploy.sh                                    # swap proxy + confirmd
 cp muse-job/bin/muse-job ~/bin/                      # job runner CLI
-muse plugins install ./muse-job/plugin               # needs the muse CLI logged in
-# muse plugins approve                               # approve it when prompted
+muse plugins install ./muse-job/plugin   # needs the muse CLI logged in
+muse plugins approve                      # approve it when prompted
 mkdir -p ~/.config/systemd/user
 cp cred-ui/cred-ui.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now cred-ui
@@ -141,8 +147,8 @@ git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
 cd ~/spark-vm
 ./proxy/deploy.sh                                    # swap proxy + confirmd
 cp muse-job/bin/muse-job ~/bin/                      # job runner CLI
-muse plugins install ./muse-job/plugin               # needs the muse CLI logged in
-# muse plugins approve                               # approve it when prompted
+muse plugins install ./muse-job/plugin   # needs the muse CLI logged in
+muse plugins approve                      # approve it when prompted
 mkdir -p ~/.config/systemd/user
 cp cred-ui/cred-ui.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now cred-ui

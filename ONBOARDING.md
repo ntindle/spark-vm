@@ -99,7 +99,8 @@ cd ~/spark-vm
 
 # muse-job: CLI + lifecycle-hooks plugin
 cp muse-job/bin/muse-job ~/bin/
-muse plugins install ./muse-job/plugin   # then: muse plugins approve
+muse plugins install ./muse-job/plugin   # needs the muse CLI logged in
+muse plugins approve                      # approve it when prompted
 muse plugins validate muse-job
 
 # credential web UI (localhost-only; see cred-ui/README.md)
