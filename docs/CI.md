@@ -26,8 +26,9 @@ shellcheck --severity=error $(git ls-files '*.sh')
 # https://github.com/lycheeverse/lychee/releases)
 lychee --no-progress --exclude-mail '**/*.md'
 
-# PNG smoke test (same scripts CI runs)
-pip install playwright && python3 -m playwright install chromium
+# PNG smoke test (same scripts CI runs; --with-deps handles OS deps)
+pip install playwright && python3 -m playwright install --with-deps chromium
+rm -f /tmp/pw-test.png  # stale screenshot must not mask a pw-test failure
 python3 scripts/pw-test.py && python3 scripts/png-check.py
 ```
 
