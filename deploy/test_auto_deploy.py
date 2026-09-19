@@ -91,12 +91,19 @@ echo MANIFEST_OK
 
 
 def test_manifest_no_path_overlap():
+    """Directory prefixes must be claimed by exactly one component (ambiguous
+    deploy mapping otherwise). Exact-file entries (no trailing slash) MAY be
+    shared — e.g. VERSION is claimed by both proxy and cred-ui so a
+    version-only release refreshes every component that reports it; the
+    change->component mapping stays deterministic."""
     r = source_and(r'''
 set -e
 tmp=$(mktemp); tmp2=$(mktemp)
-for c in "${COMPONENTS[@]}"; do get_arr "$c" paths; done | sort >"$tmp"
+for c in "${COMPONENTS[@]}"; do get_arr "$c" paths; done | grep '/$' | sort >"$tmp"
 sort -u "$tmp" >"$tmp2"
-cmp -s "$tmp" "$tmp2" || { echo "OVERLAP"; diff "$tmp" "$tmp2"; exit 1; }
+cmp -s "$tmp" "$tmp2" || { echo "DIR-OVERLAP"; diff "$tmp" "$tmp2"; exit 1; }
+# the deliberate exact-file sharing is documented, not accidental
+[ "$(for c in "${COMPONENTS[@]}"; do get_arr "$c" paths; done | grep -cx '^VERSION$')" = 2 ]
 echo NO_OVERLAP
 ''')
     assert "NO_OVERLAP" in r.stdout, r.stderr + r.stdout
@@ -362,3 +369,205 @@ def test_scripts_syntax():
                  "|| echo NO_SHELLCHECK")
     if "NO_SHELLCHECK" not in r.stdout:
         assert r.returncode == 0, r.stdout + r.stderr
+
+
+# --- version stamping (docs/VERSIONING.md) ------------------------------------
+
+def test_version_paths_map_exactly():
+    """VERSION (bare file entry) maps to proxy AND cred-ui — a version-only
+    release must refresh every component that reports the version
+    (docs/VERSIONING.md). docs/VERSIONING.md matches nothing — the
+    exact-match rule for non-slash entries."""
+    r = source_and('printf "VERSION\\ndocs/VERSIONING.md\\nproxy/swap_addon.py\\n"'
+                   ' | components_for_files')
+    assert r.returncode == 0, r.stderr
+    assert sorted(r.stdout.split()) == ["cred-ui", "proxy"], r.stdout
+
+
+def test_proxy_install_paths_cover_version_files():
+    """VERSION + the reader must be rollback-restorable like every other file
+    proxy/deploy.sh installs (same class as the sudoers regression)."""
+    r = source_and('get_arr proxy install_paths')
+    assert r.returncode == 0, r.stderr
+    listed = {line.strip() for line in r.stdout.splitlines() if line.strip()}
+    for t in ("/home/swapd/VERSION", "/home/swapd/sparkvm_version.py"):
+        assert t in listed, "missing from proxy_install_paths: %s" % t
+    # Non-vacuous: deploy.sh really does install those targets.
+    with open(os.path.join(REPO, "proxy", "deploy.sh")) as f:
+        body = f.read()
+    assert "/home/swapd/VERSION" in body
+    assert "/home/swapd/sparkvm_version.py" in body
+
+
+def test_version_state_roundtrip(tmp_path):
+    r = source_and('write_version 1.2.3; [ "$(deployed_version)" = 1.2.3 ] '
+                   '&& echo VER_OK',
+                   env_extra={"UPDATER_STATE_DIR": str(tmp_path)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "VER_OK" in r.stdout
+    assert (tmp_path / "deployed-version").read_text().strip() == "1.2.3"
+
+
+def test_new_version_reads_real_value(tmp_path):
+    """new_version() reports a real VERSION from the mirror — the previous
+    deploy-version test only covered the no-VERSION "unknown" case, so a
+    hardcoded `echo unknown` would have passed it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "VERSION").write_text("3.2.1\n")
+    r = source_and('[ "$(new_version)" = 3.2.1 ] && echo REAL_OK',
+                   env_extra={"UPDATER_REPO": str(repo)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "REAL_OK" in r.stdout
+
+
+def test_sync_version_from_deployed(tmp_path):
+    """sync_version_from_deployed: real value recorded, missing file ->
+    unknown, hostile bytes sanitized to unknown (never raw into state)."""
+    state = tmp_path / "state"
+    swapd = tmp_path / "swapd"
+    state.mkdir(); swapd.mkdir()
+    env = {"UPDATER_STATE_DIR": str(state), "SWAPD_HOME": str(swapd)}
+    (swapd / "VERSION").write_text("7.7.7\n")
+    r = source_and('[ "$(sync_version_from_deployed)" = 7.7.7 ] && echo SYNC_OK',
+                   env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "SYNC_OK" in r.stdout
+    assert (state / "deployed-version").read_text().strip() == "7.7.7"
+    (swapd / "VERSION").write_text('9.9.9"}\n{"forged":1}\n')
+    r = source_and('[ "$(sync_version_from_deployed)" = unknown ] && echo SAN_OK',
+                   env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "SAN_OK" in r.stdout
+    assert (state / "deployed-version").read_text().strip() == "unknown"
+    (swapd / "VERSION").unlink()
+    r = source_and('[ "$(sync_version_from_deployed)" = unknown ] && echo MISS_OK',
+                   env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "MISS_OK" in r.stdout
+
+
+def _commit_all(repo, msg):
+    subprocess.run(["git", "add", "."], cwd=repo, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "-c", "commit.gpgsign=false", "commit", "-qm", msg],
+                   cwd=repo, check=True, capture_output=True)
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                          check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def test_install_component_syncs_version_with_checkout(tmp_path):
+    """A checkout-synced component's install also refreshes the root VERSION
+    in the working checkout — otherwise a version-only deploy leaves
+    cred-ui reporting the old release (QA regression)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (updater / "cred-ui" / "cred-ui.py").write_text("# ui v2")
+    (updater / "VERSION").write_text("9.9.9\n")
+    new = _commit_all(updater, "cred-ui + VERSION")
+    r = source_and("install_component cred-ui %s" % new,
+                   env_extra={"UPDATER_STATE_DIR": str(state),
+                              "UPDATER_REPO": str(updater),
+                              "WORKING_CHECKOUT": str(checkout),
+                              "SKIP_SUDO": "1",
+                              "AUTO_DEPLOY_NO_MAIN": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (checkout / "cred-ui" / "cred-ui.py").read_text() == "# ui v2"
+    assert (checkout / "VERSION").read_text() == "9.9.9\n"
+
+
+def test_snapshot_restores_checkout_version(tmp_path):
+    """The root VERSION file travels with checkout syncs, so it must be
+    snapshotted and restored too — else rollback leaves new-VERSION under
+    old code."""
+    state = tmp_path / "state"
+    checkout = tmp_path / "checkout"
+    checkout_ui = checkout / "cred-ui"
+    state.mkdir(); checkout_ui.mkdir(parents=True)
+    (checkout_ui / "cred-ui.py").write_text("UI CODE")
+    (checkout / "VERSION").write_text("1.1.1\n")
+    env = {"UPDATER_STATE_DIR": str(state),
+           "WORKING_CHECKOUT": str(checkout),
+           "SKIP_SUDO": "1",
+           "AUTO_DEPLOY_NO_MAIN": "1"}
+    snap = tmp_path / "snap"
+    r = source_and("snapshot_component cred-ui %s" % snap, env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    manifest = (snap / "MANIFEST").read_text()
+    assert "CHECKOUT cred-ui VERSION" in manifest, manifest
+    (checkout / "VERSION").write_text("2.2.2\n")
+    r = source_and("restore_snapshot %s" % snap, env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (checkout / "VERSION").read_text() == "1.1.1\n"
+    assert (checkout_ui / "cred-ui.py").read_text() == "UI CODE"
+
+
+def test_version_state_defaults_unknown(tmp_path):
+    r = source_and('[ "$(deployed_version)" = unknown ] && echo VER_UNKNOWN',
+                   env_extra={"UPDATER_STATE_DIR": str(tmp_path)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "VER_UNKNOWN" in r.stdout
+
+
+def test_clean_version_sanitizes_hostile_input():
+    """clean_version: strict semver passes through, everything else —
+    quotes, backslashes, newlines — becomes "unknown". VERSION is
+    attacker-influenced (merged PRs, swapd-writable deployed copy) and is
+    interpolated into audit JSON, so this is the injection boundary."""
+    r = source_and(r'''
+set -e
+[ "$(clean_version '1.2.3')" = 1.2.3 ]
+[ "$(clean_version '1.2.3-rc.1+b1')" = '1.2.3-rc.1+b1' ]
+[ "$(clean_version 'bogus')" = unknown ]
+[ "$(clean_version '1.2"')" = unknown ]
+[ "$(clean_version "$(printf '1.2.3\n{"evil":1}')" )" = 1.2.3 ]
+[ "$(clean_version '')" = unknown ]
+echo CLEAN_OK
+''')
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "CLEAN_OK" in r.stdout
+
+
+def test_hostile_version_cannot_inject_audit(tmp_path):
+    """A hostile VERSION in the mirror repo must not forge audit lines:
+    new_version() sanitizes, and every audit.log line stays valid JSON with
+    no forged result."""
+    import json
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    hostile = '1.2.3"}\n{"ts":"x","event":"deploy","result":"forged'
+    (updater / "VERSION").write_text(hostile + "\n")
+    r = source_and(
+        '[ "$(new_version)" = unknown ] && '
+        'audit deploy-test \',"v\":\"$(new_version)\"\' && echo AUDIT_OK',
+        env_extra={"UPDATER_STATE_DIR": str(state),
+                   "UPDATER_REPO": str(updater)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "AUDIT_OK" in r.stdout
+    lines = (state / "audit.log").read_text().splitlines()
+    assert lines, "no audit line written"
+    for line in lines:
+        obj = json.loads(line)  # raises if the hostile bytes broke the JSON
+        assert obj.get("result") != "forged", line
+
+
+def test_pull_only_deploy_records_version(tmp_path):
+    """A pull-only deploy still records the deployed version and stamps the
+    audit line with to_version/from_version (docs/VERSIONING.md)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    # Watermark at mid: the pending range (mid -> docs_only) is docs-only,
+    # i.e. pull-only — no gates, installs, or health checks run.
+    (state / "deployed-commit").write_text(mid + "\n")
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; cmd_deploy; echo DEPLOY_OK",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "DEPLOY_OK" in r.stdout
+    # The fixture repo has no VERSION file at its root.
+    assert (state / "deployed-version").read_text().strip() == "unknown"
+    audit = (state / "audit.log").read_text()
+    assert '"result":"pull-only"' in audit, audit
+    assert '"to_version":"unknown"' in audit, audit
+    assert '"from_version":"unknown"' in audit, audit

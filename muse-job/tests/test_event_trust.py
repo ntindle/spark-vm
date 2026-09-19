@@ -8,8 +8,8 @@ Covers the fix in two rounds:
      symlinks, ANSI/control-character sanitization of agent-influenced text.
   2. `muse-job watch`/`status` treat hook `done` events as cooperative
      telemetry: `verify_done_event` cross-checks a done event against the
-     job's recorded session uuid, worktree cwd, and a non-empty SUMMARY.md
-     regular file before the operator acts on it. Fail closed. The review
+     job's recorded session uuid, the slug-derived worktree cwd, and a
+     non-empty SUMMARY.md regular file before the operator acts on it. Fail closed. The review
      round added: whole-file done-claim scanning (burial resistance),
      read-side sanitization of the agent-writable dedup cursor, re-page
      backoff (done-repeated coalescing), recency-based events-missing
@@ -128,9 +128,16 @@ def make_job(cli, slug="demo"):
     return job
 
 
-def done_event(**kw):
+def done_event(cli=None, slug="demo", **kw):
+    # Default cwd is the DERIVED worktree (~/muse-jobs/<slug>/work):
+    # verify_done_event derives it from the manager-side slug, never from
+    # the agent-writable job.json record.
+    cwd = kw.pop("cwd", None)
+    if cwd is None:
+        assert cli is not None, "done_event needs cli or an explicit cwd"
+        cwd = os.path.join(cli.job_dir(slug), "work")
     ev = {"event": "stop", "state": "done", "session_id": "uuid-abc",
-          "cwd": "/jobs/demo/work", "detail": "finished", "ts": 1.0}
+          "cwd": cwd, "detail": "finished", "ts": 1.0}
     ev.update(kw)
     return ev
 
@@ -139,14 +146,14 @@ def test_verify_done_happy_path(cli):
     job = make_job(cli)
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("# Summary\nDone.\n")
-    assert cli.verify_done_event(job, done_event()) == (True, "")
+    assert cli.verify_done_event(job, done_event(cli), job["slug"]) == (True, "")
 
 
 def test_verify_done_rejects_missing_summary(cli):
     # The forge scenario from issue #3: agent appends a fake done line to its
     # own event file but never wrote SUMMARY.md. Must fail closed.
     job = make_job(cli)
-    ok, reason = cli.verify_done_event(job, done_event())
+    ok, reason = cli.verify_done_event(job, done_event(cli), job["slug"])
     assert ok is False
     assert "SUMMARY.md" in reason
 
@@ -154,7 +161,7 @@ def test_verify_done_rejects_missing_summary(cli):
 def test_verify_done_rejects_empty_summary(cli):
     job = make_job(cli)
     open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w").close()
-    ok, reason = cli.verify_done_event(job, done_event())
+    ok, reason = cli.verify_done_event(job, done_event(cli), job["slug"])
     assert ok is False
     assert "empty" in reason
 
@@ -164,7 +171,7 @@ def test_verify_done_rejects_wrong_session(cli):
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
     ok, reason = cli.verify_done_event(
-        job, done_event(session_id="some-other-session"))
+        job, done_event(cli, session_id="some-other-session"), job["slug"])
     assert ok is False
     assert "session" in reason
 
@@ -173,35 +180,51 @@ def test_verify_done_rejects_cwd_mismatch(cli):
     job = make_job(cli)
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
-    ok, reason = cli.verify_done_event(job, done_event(cwd="/tmp/evil"))
+    ok, reason = cli.verify_done_event(job, done_event(cli, cwd="/tmp/evil"), job["slug"])
     assert ok is False
     assert "cwd" in reason
 
 
-def test_verify_done_accepts_cwd_under_worktree(cli, tmp_path):
+def test_verify_done_accepts_cwd_under_worktree(cli):
     # The agent may legitimately cd into a subdir before ending the turn;
-    # raw string equality would false-positive here (review finding).
+    # raw string equality would false-positive here (review finding). The
+    # worktree is DERIVED from the manager-side slug.
     job = make_job(cli)
-    work = tmp_path / "jobs" / "demo" / "work"
-    work.mkdir(parents=True)
-    job["worktree"] = str(work)
+    work = os.path.join(cli.job_dir("demo"), "work")
+    os.makedirs(work, exist_ok=True)
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
-    sub = str(work / "subdir")
-    assert cli.verify_done_event(job, done_event(cwd=sub)) == (True, "")
+    sub = os.path.join(work, "subdir")
+    assert cli.verify_done_event(
+        job, done_event(cli, cwd=sub), job["slug"]) == (True, "")
     # ...but a sibling-prefix path must not pass via startswith tricks.
-    evil = str(work) + "-evil"
-    ok, _ = cli.verify_done_event(job, done_event(cwd=evil))
+    evil = work + "-evil"
+    ok, _ = cli.verify_done_event(
+        job, done_event(cli, cwd=evil), job["slug"])
     assert ok is False
+
+
+def test_verify_done_ignores_forged_recorded_worktree(cli):
+    # Arch review: the recorded `worktree` field is agent-writable (issue
+    # #11) and must not steer the cwd containment check -- a forged
+    # worktree pointing at the forged event's cwd must still fail.
+    job = make_job(cli)
+    job["worktree"] = "/tmp/evil-work"
+    with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
+        f.write("summary")
+    ok, reason = cli.verify_done_event(
+        job, done_event(cli, cwd="/tmp/evil-work"), job["slug"])
+    assert ok is False
+    assert "cwd" in reason
 
 
 def test_verify_done_rejects_missing_cwd(cli):
     job = make_job(cli)
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
-    ev = done_event()
+    ev = done_event(cli)
     del ev["cwd"]
-    ok, reason = cli.verify_done_event(job, ev)
+    ok, reason = cli.verify_done_event(job, ev, job["slug"])
     assert ok is False
     assert "cwd" in reason
 
@@ -211,7 +234,7 @@ def test_verify_done_rejects_job_without_session_uuid(cli):
     job["session_uuid"] = None
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
-    ok, reason = cli.verify_done_event(job, done_event())
+    ok, reason = cli.verify_done_event(job, done_event(cli), job["slug"])
     assert ok is False
     assert "uuid" in reason
 
@@ -229,7 +252,7 @@ def test_full_forgery_never_transitions_to_done(cli):
     job = make_job(cli)
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("# forged summary\nAll done (not really).")
-    sig = cli.handle_done_claim(job, done_event())
+    sig = cli.handle_done_claim(job, done_event(cli), job["slug"])
     assert sig is not None
     assert sig["signal"] == "done-claimed"
     # The whole point: no state transition on telemetry, however convincing.
@@ -240,7 +263,7 @@ def test_full_forgery_never_transitions_to_done(cli):
 def test_lazy_forgery_pages_done_unverified(cli):
     # The lazy attack: fake done line, no SUMMARY.md.
     job = make_job(cli)
-    sig = cli.handle_done_claim(job, done_event())
+    sig = cli.handle_done_claim(job, done_event(cli), job["slug"])
     assert sig is not None
     assert sig["signal"] == "done-unverified"
     assert job["state"] == "active"
@@ -250,13 +273,13 @@ def test_done_claim_dedupes_on_event_ts(cli):
     # One claim pages once; without dedup every 15-minute watch pass would
     # re-page the same stale done line forever (engineering review).
     job = make_job(cli)
-    ev = done_event(ts=100.0)
-    first = cli.handle_done_claim(job, ev)
+    ev = done_event(cli, ts=100.0)
+    first = cli.handle_done_claim(job, ev, job["slug"])
     assert first is not None and first["signal"] == "done-unverified"
     job["done_claim_ts"] = 100.0  # what watch_one records after emitting
-    assert cli.handle_done_claim(job, ev) is None
+    assert cli.handle_done_claim(job, ev, job["slug"]) is None
     # A NEWER done event (agent genuinely finished later) pages again.
-    assert cli.handle_done_claim(job, done_event(ts=200.0)) is not None
+    assert cli.handle_done_claim(job, done_event(cli, ts=200.0), job["slug"]) is not None
 
 
 def test_done_claim_future_ts_cannot_suppress_later_claim(cli):
@@ -265,12 +288,12 @@ def test_done_claim_future_ts_cannot_suppress_later_claim(cli):
     import time as _time
     job = make_job(cli)
     now = _time.time()
-    forged = done_event(ts=now + 10 * 365 * 24 * 3600)  # +10 years
-    assert cli.handle_done_claim(job, forged, now) is not None
+    forged = done_event(cli, ts=now + 10 * 365 * 24 * 3600)  # +10 years
+    assert cli.handle_done_claim(job, forged, job["slug"], now) is not None
     job["done_claim_ts"] = cli._claim_ts(forged, now)
     assert job["done_claim_ts"] <= now  # clamped, not 10y out
-    genuine = done_event(ts=now + 60)
-    assert cli.handle_done_claim(job, genuine, now + 60) is not None
+    genuine = done_event(cli, ts=now + 60)
+    assert cli.handle_done_claim(job, genuine, job["slug"], now + 60) is not None
 
 
 def test_done_claim_nan_ts_dedupes(cli):
@@ -278,19 +301,19 @@ def test_done_claim_nan_ts_dedupes(cli):
     import time as _time
     job = make_job(cli)
     now = _time.time()
-    ev = done_event(ts=float("nan"))
-    assert cli.handle_done_claim(job, ev, now) is not None
+    ev = done_event(cli, ts=float("nan"))
+    assert cli.handle_done_claim(job, ev, job["slug"], now) is not None
     job["done_claim_ts"] = cli._claim_ts(ev, now)
-    assert cli.handle_done_claim(job, ev, now) is None
+    assert cli.handle_done_claim(job, ev, job["slug"], now) is None
 
 
 def test_done_claim_missing_ts_dedupes(cli):
     job = make_job(cli)
-    ev = done_event()
+    ev = done_event(cli)
     del ev["ts"]
-    assert cli.handle_done_claim(job, ev) is not None
+    assert cli.handle_done_claim(job, ev, job["slug"]) is not None
     job["done_claim_ts"] = 0  # watch_one records 0 for ts-less events
-    assert cli.handle_done_claim(job, ev) is None
+    assert cli.handle_done_claim(job, ev, job["slug"]) is None
 
 
 # --- check_events_liveness ---------------------------------------------------
@@ -347,8 +370,9 @@ def test_events_missing_silent_without_session_uuid(cli):
 
 def test_find_session_excludes_old_uuid(cli, tmp_path):
     # Issue #3 round-2 review: the resume fallback must not re-adopt the dead
-    # session's registration. Within the 10s since_ts slack the old record
-    # still qualifies and sorts first -- only an explicit exclude is robust.
+    # session's registration -- an explicit exclude is robust even within the
+    # 10s since_ts slack. Newest-first otherwise: the just-launched session
+    # is the one discovery wants.
     import time as _time
     sessdir = os.path.join(str(tmp_path), ".local", "share", "muse-job", "sessions")
     os.makedirs(sessdir, exist_ok=True)
@@ -357,8 +381,8 @@ def test_find_session_excludes_old_uuid(cli, tmp_path):
         with open(os.path.join(sessdir, sid + ".json"), "w") as f:
             json.dump({"session_id": sid, "cwd": "/w", "first_seen": seen,
                        "tools": [{"name": "bash"}]}, f)
-    assert cli.find_session("/w", now) == "old-uuid"  # the trap, documented
-    assert cli.find_session("/w", now, exclude="old-uuid") == "new-uuid"
+    assert cli.find_session("/w", now) == "new-uuid"
+    assert cli.find_session("/w", now, exclude="new-uuid") == "old-uuid"
 
 
 def test_classify_markers(stop_hook):
@@ -442,7 +466,7 @@ def test_session_end_hook_sanitizes_reason(tmp_path):
 def test_last_event_refuses_symlink(cli, tmp_path):
     os.makedirs(cli.EVENTS_DIR, exist_ok=True)
     target = tmp_path / "t.jsonl"
-    target.write_text(json.dumps(done_event()) + "\n")
+    target.write_text(json.dumps(done_event(cli)) + "\n")
     os.symlink(str(target), os.path.join(cli.EVENTS_DIR, "uuid-abc.jsonl"))
     assert cli.last_event("uuid-abc") is None
     assert cli.event_file_symlinked("uuid-abc") is True
@@ -452,8 +476,8 @@ def test_handle_done_claim_sanitizes_forged_detail(cli):
     # Forged event lines bypass the hook sanitizer; the manager must clean
     # agent-influenced text before embedding it in signals.
     job = make_job(cli)
-    ev = done_event(detail="done\x1b[2K\x1b[1AFAKE verified")
-    sig = cli.handle_done_claim(job, ev)
+    ev = done_event(cli, detail="done\x1b[2K\x1b[1AFAKE verified")
+    sig = cli.handle_done_claim(job, ev, job["slug"])
     assert "\x1b" not in sig["detail"]
 
 
@@ -477,7 +501,7 @@ def test_buried_done_claim_still_pages(cli):
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
     write_events(cli, "uuid-abc", [
-        done_event(ts=now - 300),
+        done_event(cli, ts=now - 300),
         {"event": "stop", "state": "idle", "session_id": "uuid-abc",
          "cwd": "/jobs/demo/work", "ts": now},
     ])
@@ -486,7 +510,7 @@ def test_buried_done_claim_still_pages(cli):
     # ...but the claim scan still finds the done line.
     done_ev, _ts = cli.latest_done_event("uuid-abc", now)
     assert done_ev is not None and done_ev["state"] == "done"
-    sig = cli.handle_done_claim(job, done_ev, now)
+    sig = cli.handle_done_claim(job, done_ev, job["slug"], now)
     assert sig is not None and sig["signal"] == "done-claimed"
 
 
@@ -494,8 +518,8 @@ def test_latest_done_event_picks_newest(cli):
     import time as _time
     now = _time.time()
     write_events(cli, "uuid-abc", [
-        done_event(ts=now - 300, detail="first"),
-        done_event(ts=now - 100, detail="second"),
+        done_event(cli, ts=now - 300, detail="first"),
+        done_event(cli, ts=now - 100, detail="second"),
     ])
     done_ev, ts = cli.latest_done_event("uuid-abc", now)
     assert done_ev["detail"] == "second"
@@ -511,7 +535,7 @@ def test_stored_done_claim_ts_future_forgery_ignored(cli):
     now = _time.time()
     job = make_job(cli)
     job["done_claim_ts"] = now + 10 * 365 * 24 * 3600
-    sig = cli.handle_done_claim(job, done_event(ts=now - 10), now)
+    sig = cli.handle_done_claim(job, done_event(cli, ts=now - 10), job["slug"], now)
     assert sig is not None, "forged future cursor must not suppress paging"
 
 
@@ -520,7 +544,7 @@ def test_stored_done_claim_ts_garbage_ignored(cli):
     now = _time.time()
     job = make_job(cli)
     job["done_claim_ts"] = "soon"
-    assert cli.handle_done_claim(job, done_event(ts=now - 10), now) is not None
+    assert cli.handle_done_claim(job, done_event(cli, ts=now - 10), job["slug"], now) is not None
 
 
 def test_done_claims_coalesce_after_three_pages(cli):
@@ -531,7 +555,7 @@ def test_done_claims_coalesce_after_three_pages(cli):
     job = make_job(cli)
     sigs = []
     for i in range(5):
-        sig = cli.handle_done_claim(job, done_event(ts=now - 300 + i), now)
+        sig = cli.handle_done_claim(job, done_event(cli, ts=now - 300 + i), job["slug"], now)
         sigs.append(sig["signal"] if sig else None)
     assert sigs[:3] == ["done-unverified"] * 3
     assert sigs[3] == "done-repeated"
@@ -544,23 +568,25 @@ def test_done_claim_window_resets_after_24h(cli):
     job = make_job(cli)
     job["done_page_window_start"] = now - 25 * 3600
     job["done_page_count"] = 3
-    sig = cli.handle_done_claim(job, done_event(ts=now - 10), now)
+    sig = cli.handle_done_claim(job, done_event(cli, ts=now - 10), job["slug"], now)
     assert sig is not None and sig["signal"] == "done-unverified"
     assert job["done_page_count"] == 1
 
 
 # --- review round: verify_done_event fail-closed -----------------------------
 
-def test_verify_done_rejects_missing_worktree(cli):
-    # Engineering B1: realpath("") is the CLI's own cwd -- the check must
-    # fail closed, not compare against an attacker-influenced path.
+def test_verify_done_rejects_job_without_slug(cli):
+    # The worktree is derived from the manager-side slug; without a usable
+    # slug the check fails closed instead of comparing against
+    # realpath("") -- the CLI's own cwd, an attacker-influenced path
+    # (old Engineering B1, which keyed this on the recorded worktree).
     job = make_job(cli)
-    job["worktree"] = ""
+    del job["slug"]
     with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
         f.write("summary")
-    ok, reason = cli.verify_done_event(job, done_event())
+    ok, reason = cli.verify_done_event(job, done_event(cli), None)
     assert ok is False
-    assert "worktree" in reason
+    assert "slug" in reason
 
 
 def test_verify_done_rejects_summary_directory(cli):
@@ -568,7 +594,7 @@ def test_verify_done_rejects_summary_directory(cli):
     # must not satisfy the "non-empty SUMMARY.md" check.
     job = make_job(cli)
     os.makedirs(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), exist_ok=True)
-    ok, reason = cli.verify_done_event(job, done_event())
+    ok, reason = cli.verify_done_event(job, done_event(cli), job["slug"])
     assert ok is False
 
 
@@ -651,7 +677,7 @@ def test_job_status_survives_forged_numerics(cli, tmp_path):
     job["started_at"] = "x"
     job["last_bytes"] = {"evil": 1}
     job["budget_hours"] = "never"
-    st = cli.job_status(job)  # must not raise
+    st = cli.job_status(job, job["slug"])  # must not raise
     assert isinstance(st["elapsed_h"], float)
     assert st["bytes_delta"] >= 0
     # budget comparison path used by cmd_watch must not raise either.
@@ -669,7 +695,7 @@ def test_done_repeated_flag_plant_does_not_suppress_notice(cli):
     job["done_page_count"] = 0
     sigs = []
     for i in range(4):
-        sig = cli.handle_done_claim(job, done_event(ts=now - 300 + i), now)
+        sig = cli.handle_done_claim(job, done_event(cli, ts=now - 300 + i), job["slug"], now)
         sigs.append(sig["signal"] if sig else None)
     assert sigs[:3] == ["done-unverified"] * 3
     assert sigs[3] == "done-repeated"

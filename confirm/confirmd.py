@@ -37,10 +37,31 @@ import pwd
 import re
 import secrets
 import subprocess
+import sys
 import time
 import urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# --- spark-vm version stamping (docs/VERSIONING.md) ---
+# Single-source repo VERSION: reported at startup and on /api/version.
+# Import is best-effort — a missing/invalid VERSION must never break startup.
+_SV_HERE = os.path.dirname(os.path.abspath(__file__))
+_SV_CAND = os.path.normpath(os.path.join(_SV_HERE, "..", "scripts"))
+if os.path.isfile(os.path.join(_SV_CAND, "sparkvm_version.py")):
+    if _SV_CAND not in sys.path:
+        sys.path.insert(0, _SV_CAND)
+elif _SV_HERE not in sys.path:
+    # Deployed standalone (e.g. /home/swapd): helper + VERSION sit next to us.
+    sys.path.insert(0, _SV_HERE)
+try:
+    from sparkvm_version import sparkvm_version as _sv_fn
+    SPARKVM_VERSION = _sv_fn(start=_SV_HERE)
+except Exception:
+    # Best-effort stamp (SyntaxError included): a broken reader or VERSION
+    # must never break the component's startup.
+    SPARKVM_VERSION = "0.0.0-unknown"
+# --- end version stamping ---
 
 PORT = int(os.environ.get("CONFIRM_PORT", "8443"))
 CERT = os.environ.get("CONFIRM_CERT", "/home/swapd/confirmd/cert.crt")
@@ -803,6 +824,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         # Issue #1: JSON feeds for the live list pollers. Same auth
         # gate as the pages; allowlisted fields only (see the helpers).
+        if self.path == "/api/version":
+            self._send_json(_version_payload())
+            return
         if self.path == "/api/pending":
             items = _sort_pending(load_pending())
             self._send_json([_pending_api_item(it) for it in items])
@@ -1133,6 +1157,12 @@ class Handler(BaseHTTPRequestHandler):
         pass  # refusals go to the audit log; answers are in answered/
 
 
+def _version_payload():
+    """Unit-testable /api/version payload (docs/VERSIONING.md)."""
+    return {"service": "confirmd", "version": SPARKVM_VERSION,
+            "handler": Handler.server_version}
+
+
 def main():
     # Finding 67: print the resolved origins at startup so the journal
     # shows them; a missing ts.net name must be visible, not silent.
@@ -1144,6 +1174,7 @@ def main():
     if not PUSH_ENABLED:
         print("confirmd PUSH_DISABLED_REASON=%s" % PUSH_DISABLED_REASON,
               flush=True)
+    print("confirmd version=%s" % SPARKVM_VERSION, flush=True)
     for d in (pending_dir(), answered_dir(), consumed_dir()):
         os.makedirs(d, exist_ok=True)
     import ssl

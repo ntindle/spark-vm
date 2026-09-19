@@ -20,19 +20,19 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 
 | Repo path | Deployed to |
 |---|---|
-| `bin/muse-job` | `/home/spark/bin/muse-job` (on PATH) |
-| `bin/muse-job-watchdog` | `/home/spark/bin/muse-job-watchdog` |
-| `bin/muse-job-sweep` | `/home/spark/bin/muse-job-sweep` |
-| `plugin/` | `/home/spark/muse-job-plugin/` (source) → installed as user-scope plugin via `muse plugins install --force` + `approve` |
+| `bin/muse-job` | `/home/ntindle/bin/muse-job` (on PATH) |
+| `bin/muse-job-watchdog` | `/home/ntindle/bin/muse-job-watchdog` |
+| `bin/muse-job-sweep` | `/home/ntindle/bin/muse-job-sweep` |
+| `plugin/` | `/home/ntindle/muse-job-plugin/` (source) → installed as user-scope plugin via `muse plugins install --force` + `approve` |
 
 Redeploy: copy the files over, then reinstall the plugin with `--force`
 (plugin installs copy, not symlink).
 
 ## Job runtime
 
-- One git worktree + branch per job under `/home/spark/muse-jobs/<slug>/`
+- One git worktree + branch per job under `/home/ntindle/muse-jobs/<slug>/`
 - One tmux session `mjob-<slug>` running interactive `muse --yolo`
-- Job prompt at `/home/spark/muse-jobs/<slug>/prompt.md`, progress in `PROGRESS.md`
+- Job prompt at `/home/ntindle/muse-jobs/<slug>/prompt.md`, progress in `PROGRESS.md`
 
 ## Crons (operator box, not spark-vm)
 

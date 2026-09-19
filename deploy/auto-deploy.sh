@@ -61,6 +61,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 : "${SKIP_SUDO:=0}"
 
 WATERMARK="$UPDATER_STATE_DIR/deployed-commit"
+VERSION_STATE="$UPDATER_STATE_DIR/deployed-version"
 BLOCKED_COMMIT="$UPDATER_STATE_DIR/blocked-commit"
 AUDIT_LOG="$UPDATER_STATE_DIR/audit.log"
 LOCK_FILE="$UPDATER_STATE_DIR/auto-deploy.lock"
@@ -151,6 +152,36 @@ write_watermark() {
     printf '%s\n' "$1" >"$WATERMARK.tmp" && mv -f "$WATERMARK.tmp" "$WATERMARK"
 }
 
+write_version() {
+    # Atomic deployed-version update (docs/VERSIONING.md): same torn-write
+    # reasoning as the watermark — a half-written version file would lie
+    # about which release is actually deployed.
+    printf '%s\n' "$1" >"$VERSION_STATE.tmp" && mv -f "$VERSION_STATE.tmp" "$VERSION_STATE"
+}
+
+# Strict semver (mirrors scripts/sparkvm_version.py). VERSION is
+# attacker-influenced — merged PRs feed new_version(), the deployed
+# standalone copy at $SWAPD_HOME/VERSION is swapd-writable and feeds the
+# rollback paths — and the result is interpolated raw into audit JSON.
+# Never let unvalidated bytes near an audit line.
+_semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+clean_version() {
+    # clean_version <candidate>: print it iff strict semver, else "unknown".
+    local v="${1%%$'\n'*}"
+    if [[ "$v" =~ $_semver_re ]]; then printf '%s' "$v"; else printf 'unknown'; fi
+}
+
+deployed_version() {
+    # The VERSION the updater last deployed ("unknown" when nothing has
+    # recorded one yet, or the recorded bytes are not valid semver).
+    clean_version "$(cat "$VERSION_STATE" 2>/dev/null || echo unknown)"
+}
+
+new_version() {
+    # The VERSION stamped in the mirror at the commit being deployed.
+    clean_version "$(cat "$UPDATER_REPO/VERSION" 2>/dev/null || echo unknown)"
+}
+
 newest_snapshot() {
     # Prints the newest snapshot dir, or nothing.
     find "$SNAPSHOT_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
@@ -184,12 +215,19 @@ check_upstream_pinned() {
 
 components_for_files() {
     # stdin: changed repo paths, one per line. stdout: component names, unique.
+    # A path entry ending in "/" is a directory prefix; a bare entry (e.g.
+    # "VERSION") matches that exact file only — so docs/VERSIONING.md and any
+    # other top-level VERSION* path do not trigger on the VERSION entry.
     local f c pfx
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         for c in "${COMPONENTS[@]}"; do
             while IFS= read -r pfx; do
-                if [[ "$f" == "$pfx"* ]]; then echo "$c"; break; fi
+                if [[ "$pfx" == */ ]]; then
+                    if [[ "$f" == "$pfx"* ]]; then echo "$c"; break; fi
+                elif [[ "$f" == "$pfx" ]]; then
+                    echo "$c"; break
+                fi
             done < <(get_arr "$c" paths)
         done
     done | sort -u
@@ -254,8 +292,18 @@ check_checkout_sync_ready() {
         log "  $c: uncommitted changes in $dest — refusing to overwrite (commit or stash first)"
         return 1
     fi
+    # Version stamping (docs/VERSIONING.md): the root VERSION file travels
+    # with every checkout sync, so it gets the same fail-closed treatment.
+    if [ -e "$WORKING_CHECKOUT/VERSION" ] && [ -n "$(git -C "$WORKING_CHECKOUT" status --porcelain -- VERSION)" ]; then
+        log "  $c: uncommitted changes in $WORKING_CHECKOUT/VERSION — refusing to overwrite (commit or stash first)"
+        return 1
+    fi
     if ! git -C "$UPDATER_REPO" cat-file -e "$new:$sub" 2>/dev/null; then
         log "  $c: subtree $sub not present at $new — FAIL CLOSED"
+        return 1
+    fi
+    if ! git -C "$UPDATER_REPO" cat-file -e "$new:VERSION" 2>/dev/null; then
+        log "  $c: VERSION not present at $new — FAIL CLOSED"
         return 1
     fi
     return 0
@@ -293,6 +341,19 @@ snapshot_component() {
             echo "CHECKOUT $c $sub" >>"$snapdir/MANIFEST"
         else
             echo "CHECKOUT-ABSENT $c $sub" >>"$snapdir/MANIFEST"
+        fi
+        # Version stamping (docs/VERSIONING.md): the root VERSION file is
+        # synced alongside the subtree (see install_component) — snapshot it
+        # too, or a rollback leaves the new VERSION under the old code.
+        vdest="$WORKING_CHECKOUT/VERSION"
+        if [ -e "$vdest" ]; then
+            mkdir -p "$snapdir/checkout-$(vpre "$c")" || {
+                log "ERROR: cannot create checkout snapshot dir for $c"; return 1; }
+            cp -a "$vdest" "$snapdir/checkout-$(vpre "$c")/" || {
+                log "ERROR: checkout VERSION snapshot of $vdest failed"; return 1; }
+            echo "CHECKOUT $c VERSION" >>"$snapdir/MANIFEST"
+        else
+            echo "CHECKOUT-ABSENT $c VERSION" >>"$snapdir/MANIFEST"
         fi
     fi
     return 0
@@ -358,6 +419,15 @@ install_component() {
         rm -rf "$WORKING_CHECKOUT/$sub" || return 1
         if ! git -C "$UPDATER_REPO" archive "$new" "$sub" | tar -x -C "$WORKING_CHECKOUT"; then
             log "  $c: subtree sync FAILED"
+            return 1
+        fi
+        # Version stamping (docs/VERSIONING.md): the component resolves the
+        # repo VERSION by walking up from the working checkout, so the root
+        # VERSION file must travel with the sync — a version-only deploy
+        # otherwise leaves it reporting the old release.
+        log "  $c: syncing VERSION from mirror@$new into $WORKING_CHECKOUT"
+        if ! git -C "$UPDATER_REPO" archive "$new" VERSION | tar -x -C "$WORKING_CHECKOUT"; then
+            log "  $c: VERSION sync FAILED"
             return 1
         fi
     fi
@@ -444,6 +514,17 @@ health_check() {
 
 # --- rollback driver -------------------------------------------------------------
 
+sync_version_from_deployed() {
+    # sync_version_from_deployed — re-derive the updater's deployed-version
+    # from the installed standalone VERSION file. Used after rollbacks, which
+    # restore the old installed files: the updater state must agree with
+    # what is actually on disk (docs/VERSIONING.md). Prints the new value.
+    # Sanitized: the deployed copy is swapd-writable and attacker-influenced.
+    local v; v="$(clean_version "$(cat "$SWAPD_HOME/VERSION" 2>/dev/null || echo unknown)")"
+    write_version "$v"
+    printf '%s' "$v"
+}
+
 do_rollback() {
     # do_rollback <snapdir> <old> <new> <failed-component> <phase>
     # Restore the snapshot, restart + health-check, mark the commit blocked
@@ -473,7 +554,10 @@ do_rollback() {
         alert "rolled back to $old but a component is unhealthy — operator intervention required"
     fi
     printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
-    audit 'deploy' ',"result":"rolled-back","from":"'"$old"'","to":"'"$new"'"'
+    # The restored snapshot reverted the deployed standalone files, so the
+    # deployed version is whatever the restored VERSION file says.
+    local rbv; rbv="$(sync_version_from_deployed)"
+    audit 'deploy' ',"result":"rolled-back","from":"'"$old"'","to":"'"$new"'","to_version":"'"$rbv"'"'
     return 1
 }
 
@@ -601,7 +685,9 @@ cmd_deploy() {
     if [ "${#COMPS[@]}" -eq 0 ]; then
         log "no deployable components changed — advancing watermark only"
         write_watermark "$new"
-        audit 'deploy' ',"result":"pull-only","from":"'"$old"'","to":"'"$new"'"'
+        local pnv pov; pnv="$(new_version)"; pov="$(deployed_version)"
+        write_version "$pnv"
+        audit 'deploy' ',"result":"pull-only","from":"'"$old"'","to":"'"$new"'","to_version":"'"$pnv"'","from_version":"'"$pov"'"'
         return 0
     fi
     # Components sharing an install unit deploy together (proxy+confirm share
@@ -679,13 +765,16 @@ cmd_deploy() {
         health_check "$c" || { do_rollback "$snapdir" "$old" "$new" "$c" "health"; return 1; }
     done
 
-    # 6. success: advance watermark, clear any block, prune, audit
+    # 6. success: advance watermark, record deployed version, clear any
+    # block, prune, audit
     write_watermark "$new"
+    local nv ov; nv="$(new_version)"; ov="$(deployed_version)"
+    write_version "$nv"
     rm -f "$BLOCKED_COMMIT" "$LAST_FAILURE"
     prune_snapshots
     local complist; complist="$(printf '%s\n' "${COMPS[@]}" | tr '\n' ' ' | xargs)"
-    audit 'deploy' ',"result":"ok","from":"'"$old"'","to":"'"$new"'","components":"'"$complist"'"'
-    log "deployed $new — components: $complist"
+    audit 'deploy' ',"result":"ok","from":"'"$old"'","to":"'"$new"'","components":"'"$complist"'","to_version":"'"$nv"'","from_version":"'"$ov"'"'
+    log "deployed $new ($nv) — components: $complist"
 }
 
 cmd_rollback() {
@@ -719,18 +808,20 @@ cmd_rollback() {
         return 1
     fi
     write_watermark "$from"
+    local rbv; rbv="$(sync_version_from_deployed)"
     if [ "$unhealthy" -eq 1 ]; then
         alert "manual rollback to $from completed but a component is unhealthy"
         audit 'rollback' ',"result":"rollback-unhealthy","to":"'"$from"'","snapshot":"'"$snapdir"'"'
         return 1
     fi
-    audit 'rollback' ',"result":"manual-rollback","to":"'"$from"'","snapshot":"'"$snapdir"'"'
-    log "rolled back; watermark now $from; services restarted + healthy"
+    audit 'rollback' ',"result":"manual-rollback","to":"'"$from"'","snapshot":"'"$snapdir"'","to_version":"'"$rbv"'"'
+    log "rolled back; watermark now $from; version now $rbv; services restarted + healthy"
 }
 
 cmd_status() {
     echo "state dir:  $UPDATER_STATE_DIR"
     echo "watermark:  $(cat "$WATERMARK" 2>/dev/null || echo '(none)')"
+    echo "deployed version: $(deployed_version)"
     echo "blocked:    $(cat "$BLOCKED_COMMIT" 2>/dev/null || echo '(none)')"
     echo "audit log:  $AUDIT_LOG ($(wc -l <"$AUDIT_LOG" 2>/dev/null || echo 0) lines)"
     echo "snapshots:  $(find "$SNAPSHOT_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
