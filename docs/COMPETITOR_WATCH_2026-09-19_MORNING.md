@@ -45,18 +45,21 @@ explicitly.
 - **VERIFIED (Docker's own security announcements,
   [docs.docker.com/security/security-announcements](https://docs.docker.com/security/security-announcements/)):**
   "Two vulnerabilities in Docker Sandboxes were fixed on September 7 in the
-  0.42.0 release." Both are TOCTOU races: CVE-2026-77179 (Critical, CVSS
-  9.4, macOS only, 0.28.0–<0.42.0) — "the virtio-fs host server on macOS
+  0.42.0 release." Both are TOCTOU races: CVE-2026-77179 (vendor tag
+  [Critical], macOS only, 0.28.0–<0.42.0; CVSS 9.4 per third-party trackers,
+  not vendor-stated) — "the virtio-fs host server on macOS
   followed symlinks when reopening an unlinked file from a stored path. A
   malicious guest could replace a parent directory with a symlink, escape
   the shared workspace, and read or modify arbitrary host files as the VMM
   user, potentially leading to code execution on the host"; CVE-2026-79994
-  (High, CVSS 8.7, 0.37.0–<0.42.0) — "the guest-to-host Unix domain socket
+  (High, CVSS 8.7 per third-party trackers, not vendor-stated, 0.37.0–<0.42.0) — "the guest-to-host Unix domain socket
   relay checked that a socket path was inside an authorized workspace but
-  reconnected using the path name." No exploitation reported. Publicly
-  disclosed Sep 15. Caveat: Docker initially mis-listed the fix version for
-  CVE-2026-79994 as 0.41.0 and corrected it to 0.42.0 — re-check version
-  numbers in any derivative content.
+  reconnected using the path name." No exploitation is mentioned in the
+  vendor announcement. Public disclosure Sep 15 (press date; the announcement
+  itself is undated in the fetched copy). Caveat (THIRD-PARTY: one secondary
+  outlet's disclosure-timeline analysis notes Docker initially mis-listed
+  the fix version for CVE-2026-79994 as 0.41.0 and corrected it to 0.42.0) —
+  re-check version numbers in any derivative content.
 - **CORRECTION to the queue:** the queue tied these to Docker Desktop /
   "guest→macOS-host file access via shared folder" generally — **no
   evidence ties either CVE to Docker Desktop; both are Docker Sandboxes
