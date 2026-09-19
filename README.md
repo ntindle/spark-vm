@@ -192,14 +192,18 @@ put it to work.
 Yes, please. This is a one-human-and-his-robot project and it shows —
 docs are uneven, some paths are only tested on my box, and there's a
 list of things I haven't gotten to. If you try it and something's rough,
-that's a contribution waiting to happen:
+that's a contribution waiting to happen.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the process: issue-first,
+branch naming, how to run the tests, and the PR/review flow.
 
 - **Docs** — the highest-leverage help. If a step confused you, the fix
   is a PR.
 - **New platforms** — got it running on Proxmox? A Raspberry Pi?
   Another cloud? Add your path next to the Unraid/Hetzner ones above.
 - **Hardening** — the credential proxy is the crown jewel. If you see a
-  hole, open an issue (or a PR) — I'd rather hear it than not.
+  hole, **report it privately per [SECURITY.md](SECURITY.md)** — not as a
+  public issue or PR. I'd rather hear it than not.
 - **Components** — small, composable tools in the spirit of `cred` and
   `muse-job`: localhost-only, auditable, boring in the right ways.
 - **Staying fresh** — pull the repo every few days and look at what's new.
@@ -209,8 +213,10 @@ that's a contribution waiting to happen:
 Open an issue before big changes so we don't duplicate work. Be kind —
 this is a homelab, not a corporation.
 
-## Pushing changes
+## Pushing changes (operators)
 
 The repo is the source of truth: edit here, then on the box `git pull`
 and re-run `./proxy/deploy.sh` (it reinstalls unit files and helpers
-from the repo). Restart `cred-ui` too if it changed.
+from the repo). Restart `cred-ui` too if it changed. Deploying is the
+operator's job — contributors stop at the merged PR (see
+[CONTRIBUTING.md](CONTRIBUTING.md)).
