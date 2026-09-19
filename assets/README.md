@@ -9,7 +9,7 @@ PR (ntindle/spark-vm#36). Finals live here; the pipeline that made them is
 | File | What it shows | Status |
 |---|---|---|
 | `demo-approval-loop.gif` | The confirmd approval loop end to end: pending page → approval detail → two-tap approve (armed state) → back to "No pending approvals". 390px phone viewport (420px-wide frames), 6.8s loop, ~130KB. | ✅ shipped |
-| (asset 2) secrets the agent never sees | Config with `hsurr:…` placeholders, then the swap-proxy audit line — 20s GIF. | ⬜ follow-up |
+| `demo-secrets-never-seen.gif` | "Secrets the agent never sees": the demo agent's config carries only `hsurr:…` placeholders, then the swap proxy's audit journal line — which names the placeholder, never the value. 480px-wide terminal frames, 20s loop, ~23KB. | ✅ shipped |
 | (asset 3) persistence pair | Same desktop 24h apart — before/after screenshots. | ⬜ follow-up |
 | (asset 4) muse-job watch | Multi-day job alive in `muse-job` watch. | ⬜ follow-up |
 | (asset 5) cred-ui phone view | cred-ui rendered in a phone viewport. | ⬜ follow-up |
@@ -92,3 +92,40 @@ python3 scripts/generate_demo_assets.py \
 
 Regeneration overwrites the GIF in place — the file in the repo is the
 current final. Never point the generator at the live deployment.
+
+## Provenance of `demo-secrets-never-seen.gif`
+
+Recorded 2026-09-19 by running the asset's own recipe on this box (no
+live services, no browser — the asset renders terminal frames with PIL):
+
+- The config is a demo fixture (`demo-agent-config.json` in the scratch
+  dir): every value the agent would touch is a `demo-`-named placeholder.
+  No real credentials, hosts, or jobs appear.
+- The journal line is **byte-for-byte the output of the real
+  `proxy/swap_addon.py` `SwapAddon._audit()` code path**, called from the
+  generator with `SWAP_LOG_FILE` pointed at a scratch journal:
+  `ts=<utc> host=api.github.com swapped=hsurr:demo-gh-ro ip=-`
+  (`api.github.com` is the public example host used throughout the
+  spark-vm docs.)
+- The three frames are genuine command transcripts: the recipe cats the
+  fixture, tails the real journal, and greps the journal for
+  raw-secret-length tokens (`[A-Za-z0-9_-]{40,}`) — the grep finds
+  nothing, so the `|| echo` fires and the frame shows real output.
+- Rendering notes (staged, disclosed): the journal line is word-wrapped
+  for the 480px frame (real terminals wrap at the column edge too); the
+  terminal chrome (title bar, caption strip) is drawn by the generator.
+
+## Regenerating `demo-secrets-never-seen.gif`
+
+Needs Pillow only (no Playwright, no Chromium, no live services):
+
+```sh
+# scratch dir lives in the working tree, not /tmp (/tmp gets wiped
+# mid-run on this box)
+python3 scripts/generate_demo_assets.py \
+  --asset secrets --work-dir ./demo-asset2-work \
+  --out assets/demo-secrets-never-seen.gif
+```
+
+Regeneration overwrites the GIF in place — the file in the repo is the
+current final.

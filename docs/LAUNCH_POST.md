@@ -23,6 +23,8 @@ Publish-ready launch copy for the open-source release of
 >   the proxy swaps them for real secrets at the last moment, on
 >   allowlisted hosts only, and every swap is audited. The agent is
 >   powerful — and never trusted with the raw materials.
+>
+>   ![The agent's config holds only placeholders; the proxy's audit journal names the placeholder, never the value.](../assets/demo-secrets-never-seen.gif)
 > - **Per-action approvals.** Sensitive actions pause for a tap on your
 >   phone before they run. Consent, not blanket lockdown.
 >
