@@ -44,13 +44,15 @@ follow the industry split rather than invent one.
 
 ## 3. Inventory: first-run interactive state per component
 
-Verified against the repo (main @ 8aa7d0d):
+Inventory from the repo (main @ 8aa7d0d); the Muse-CLI auth-flow detail is
+operator-box knowledge (the live spark-vm's Muse Code login), not
+repo-verified — noted in the row:
 
 | Component | First-run interactive state today | Pre-seed class |
 |---|---|---|
-| `muse-job` → `muse --yolo` | Muse CLI auth: `~/.config/muse/auth.json` via interactive device-code login, or a provider key | IMAGE: CLI + plugin installed/approved; INJECT: tenant inference credential |
+| `muse-job` → `muse --yolo` | Muse CLI auth must exist before a job spawns (operator box today: `~/.config/muse/auth.json` via device-code login — operator-box knowledge, not in the repo) or a provider key is swapped in | IMAGE: CLI + plugin installed/approved; INJECT: tenant inference credential |
 | Inference proxy `:18081` | `llm-api` stored human-only via a fixed registry path (SETUP.md "Inference-model recipe") | IMAGE: proxy unit + registry path; INJECT: the key itself (operator, provision time) |
-| `cred` / swapd | `cred set` human-only in the human's own SSH session; cred-ui localhost-only (ONBOARDING.md §5) | IMAGE: swapd + CA + grant writers + trust store; INJECT: tenant creds via the signup funnel (H15) |
+| `cred` / swapd | cred-ui localhost-only (ONBOARDING.md §4); `cred set` human-only in the human's own SSH session (ONBOARDING.md §5) | IMAGE: swapd + CA + grant writers + trust store; INJECT: tenant creds via the signup funnel (H15) |
 | `confirmd` | the approvals URL must reach the human (the summons, R1 §3) | IMAGE: confirmd; INJECT: per-tenant approvals URL (H10) |
 | CUA desktop | `./cua/cua-desktop.sh start` (Xvfb :98, XFCE, cua-driver, bridge :18731) | IMAGE: everything, autostarted at boot |
 | SSH / tailnet | key-only SSH, tailnet join, the VM user | IMAGE: users, sshd config, CA trust; INJECT: tenant keys/identity (H9) |
@@ -90,15 +92,18 @@ it must satisfy exactly:
 2. Exit 0, zero prompts. Any prompt, hang, or timeout = the box fails the
    harness check: report and stop, same handling as a failed smoke check.
    The probe must never improvise credentials or walk anyone through a login.
-3. What it verifies, in order: (a) `muse-job` can spawn a headless turn;
-   (b) the turn's model calls route through the inference proxy and the
-   proxy swaps in a valid credential (proves the injected `llm-api`
-   equivalent is present and working — this is the auth that matters);
-   (c) `confirmd` answers (proves the approvals path the first task needs
-   is up). A cheap token-burn probe (a single minimal completion) is
-   preferable to a full `muse --yolo` spawn inside the 10 s budget — the
-   exact command is the feature run's call, this is the contract it must
-   satisfy.
+3. What it verifies, in order: (a) the runtime a spawned turn drives is
+   authenticated — a headless `muse-job` spawn's model calls must route
+   through the inference proxy and the proxy must swap in a valid
+   credential (proves the injected `llm-api` equivalent is present and
+   working — this is the auth that matters); (b) `confirmd` answers
+   (proves the approvals path the first task needs is up). A cheap
+   token-burn probe (a single minimal completion through the same proxy
+   path) is acceptable evidence for (a) inside the 10 s budget — it need
+   not be a full `muse --yolo` spawn, as long as it exercises the
+   identical auth path. Probe runs on every image build and every
+   provision burn inference spend: keep them minimal and count them under
+   the tenant's metered usage (H12), never the operator's silent overhead.
 4. The golden-image gate (R1 §6.7) runs the probe on every image build and
    refuses to publish the image if it fails — the PuppyOne rule: keep the
    runtime install path working with injection disabled, so a broken image
@@ -109,19 +114,24 @@ it must satisfy exactly:
 1. **Whose inference credential funds the tenant Muse.** The probe verifies
    *a* credential is installed and working; it cannot decide the funding
    model. Operator-funded `llm-api` + per-tenant metering (H12) vs
-   bring-your-own-key at signup is the NEEDS_USER.md Billing decision —
-   R2's implementation is blocked on it, not on engineering.
+   bring-your-own-key at signup is the remaining Billing-provider decision —
+   the no-free-tier / card-required-trial / per-box substance is already
+   decided (NEEDS_USER.md), the provider choice and its consequence are not.
+   R2's implementation works around this with the operator's current
+   default; it does not resolve it.
 2. **Muse CLI auth must be proxy-key-based, never OAuth.** The operator's
    device-code login (`~/.config/muse/auth.json`) does not transfer to
    tenants and must never be baked into the image. The tenant path is the
    inference proxy's swapped credential; the refresh/re-auth path is an
    operator runbook, never a tenant-interactive flow.
-3. **Tenant identity injection waits on the tailnet decision.** Whether
-   injection means tailnet ACLs or SSH certs (H3/H9, NEEDS_USER.md) changes
-   the inject step's shape; the tenant secret-onboarding funnel (H15)
-   likewise gates the cred-injection half. R2 should ship the image half
-   and the injector *interface* now, and fill the identity step when the
-   operator decides.
+3. **Tenant identity injection: tailnet shape is decided, H9's mechanics are
+   not.** NEEDS_USER.md records BYO Tailscale (the tenant links their own
+   tailnet at signup), so the injector's identity step is cert/SSH-key
+   issuance per H9 — not tailnet ACLs. What stays open: H9's fingerprint
+   verification and re-link rate limits, and the H15 tenant
+   secret-onboarding funnel that gates the cred-injection half. R2 ships the
+   image half and the injector *interface* now; the H9 mechanics fill the
+   identity step when H9 lands.
 
 ## 7. Handoff to the feature run
 
@@ -130,7 +140,10 @@ The build-loop `feature` implementation of R2 should deliver, in order:
 (2) the provision-time injector implementing §4's inject list against the
 H4 `provision` interface; (3) `<harness-auth-probe>` per §5;
 (4) the golden-image gate refusing broken images; (5) the R1 first-run
-script run green against the result. Snags 1–3 above stay tracked in
+script run green against the result. Injector failure semantics: if
+provision-time injection fails, box-live must not flip — it maps to R1's
+`provisioning-failed` taxonomy ("Box setup failed — we're retrying"), never
+to a silently degraded box. Snags 1–3 above stay tracked in
 NEEDS_USER.md / H9 / H12 / H15 — the feature run does not resolve them,
 it works around them with the operator's current defaults.
 
