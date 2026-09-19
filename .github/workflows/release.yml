@@ -1,0 +1,35 @@
+# Cut a GitHub release whenever VERSION changes on main.
+#
+# The release itself is cut by scripts/cut-release.sh (preflight checks,
+# release-notes assembly, immutable tag, published release). This workflow
+# only decides *when*: a push to main that touches VERSION, or a manual
+# dispatch. Concurrency serializes rapid successive bumps so two runs can
+# never race on the same tag.
+
+name: Cut release
+
+on:
+  push:
+    branches: [main]
+    paths: ['VERSION']
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the release tag + publish the GitHub release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Cut release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/cut-release.sh --ci

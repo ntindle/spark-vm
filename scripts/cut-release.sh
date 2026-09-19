@@ -1,0 +1,258 @@
+#!/bin/bash
+# cut-release.sh -- cut a GitHub release for the current VERSION on main.
+#
+# This is the operator half of GitHub #53 ("Automate GitHub releases from
+# VERSION"). The release workflow (.github/workflows/release.yml) calls this
+# script in --ci mode when VERSION changes on main; an operator can run it by
+# hand for a manual release.
+#
+# What it does:
+#   1. Preflights: on main (or GITHUB_REF=refs/heads/main in --ci), clean
+#      tree, VERSION is strict semver, HEAD is in sync with the remote's
+#      main, and tag v<VERSION> does not exist locally or on the remote.
+#   2. Assembles release notes: the curated CHANGELOG.md section for this
+#      version when it exists, plus the merged-PR list since the previous
+#      tag. Notes are printed (and optionally written) in --dry-run.
+#   3. In --execute: creates an annotated, immutable tag v<VERSION>, pushes
+#      it, and publishes a GitHub release (via `gh`, or the API with
+#      $GITHUB_TOKEN when `gh` is unavailable).
+#
+# Usage: cut-release.sh [--dry-run] [--execute [--yes]] [--ci]
+#                        [--notes-file PATH] [--remote NAME]
+#                        [-h|--help]
+#
+#   --dry-run      (default) validate everything, print the plan and the
+#                  release-notes draft, change nothing.
+#   --execute      actually cut the release. Requires --yes (except in
+#                  --ci, where the workflow dispatch is the confirmation).
+#   --yes          confirm the --execute run (no prompt).
+#   --ci           workflow mode: verify GITHUB_REF is refs/heads/main
+#                  instead of checking the local branch (CI checks out
+#                  detached), then execute.
+#   --notes-file   write the generated release notes to PATH as well.
+#   --remote       git remote to use (default: origin; env CUT_RELEASE_REMOTE).
+#
+# Env: CUT_RELEASE_REMOTE (default origin), CUT_RELEASE_REPO (default
+#      ntindle/spark-vm), CUT_RELEASE_DIR (repo root override; testing hook),
+#      CUT_RELEASE_NO_GH (set to force the API fallback even when `gh`
+#      exists; testing hook), GITHUB_TOKEN (API fallback when `gh` is
+#      unavailable; never logged).
+#
+# Never commits secrets: the token is read from the environment only.
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: cut-release.sh [--dry-run] [--execute [--yes]] [--ci]
+                      [--notes-file PATH] [--remote NAME] [-h|--help]
+
+Cut a GitHub release for the current VERSION on main: preflight checks,
+release-notes assembly (CHANGELOG.md section + merged PRs since the
+previous tag), annotated tag v<VERSION>, and a published GitHub release.
+
+  --dry-run      validate + print the plan and notes draft, change nothing
+                 (default)
+  --execute      cut the release for real; requires --yes (implied by --ci)
+  --yes          confirm an --execute run
+  --ci           workflow mode: check GITHUB_REF is refs/heads/main instead
+                 of the local branch, then execute without --yes
+  --notes-file PATH  also write the generated notes to PATH
+  --remote NAME  git remote to use (default: origin)
+  -h, --help     show this help
+
+Environment: CUT_RELEASE_REMOTE, CUT_RELEASE_REPO (default
+ntindle/spark-vm), CUT_RELEASE_DIR (repo-root override, testing hook),
+CUT_RELEASE_NO_GH (force the API fallback; testing hook),
+GITHUB_TOKEN (API fallback when `gh` is unavailable).
+EOF
+}
+
+die() { echo "cut-release.sh: $*" >&2; exit 1; }
+
+MODE="dry-run"
+CONFIRM=0
+CI=0
+NOTES_FILE=""
+REMOTE="${CUT_RELEASE_REMOTE:-origin}"
+REPO="${CUT_RELEASE_REPO:-ntindle/spark-vm}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) MODE="dry-run"; shift ;;
+        --execute) MODE="execute"; shift ;;
+        --yes) CONFIRM=1; shift ;;
+        --ci) CI=1; MODE="execute"; shift ;;
+        --notes-file) [[ $# -ge 2 ]] || die "--notes-file needs a path"; NOTES_FILE="$2"; shift 2 ;;
+        --remote) [[ $# -ge 2 ]] || die "--remote needs a name"; REMOTE="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        -*) die "unknown flag: $1 (see --help)" ;;
+        *) die "unexpected argument: $1 (see --help)" ;;
+    esac
+done
+
+REPO_DIR="${CUT_RELEASE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+cd "$REPO_DIR"
+[[ -d .git ]] || die "not a git repo: $REPO_DIR"
+
+# --- preflight: right ref ---
+if [[ "$CI" == "1" ]]; then
+    [[ "${GITHUB_REF:-}" == "refs/heads/main" ]] \
+        || die "--ci requires GITHUB_REF=refs/heads/main (got '${GITHUB_REF:-<unset>}')"
+else
+    BRANCH="$(git symbolic-ref --short -q HEAD || true)"
+    [[ -n "$BRANCH" ]] || die "detached HEAD outside --ci; release only from main"
+    [[ "$BRANCH" == "main" ]] || die "must run on main (on '$BRANCH')"
+fi
+
+# --- preflight: clean tree ---
+[[ -z "$(git status --porcelain)" ]] || die "working tree not clean; commit or stash first"
+
+# --- preflight: VERSION is strict semver ---
+VERSION="$(python3 scripts/sparkvm_version.py --check 2>/dev/null)" \
+    || die "VERSION is missing or not strict semver (scripts/sparkvm_version.py --check failed)"
+TAG="v$VERSION"
+echo "cut-release.sh: VERSION=$VERSION tag=$TAG"
+
+# --- preflight: in sync with the remote ---
+git fetch --quiet "$REMOTE" "refs/heads/main:refs/remotes/$REMOTE/main" \
+    "+refs/tags/*:refs/tags/*" \
+    || die "could not fetch $REMOTE (network? remote name? --remote to override)"
+HEAD_SHA="$(git rev-parse HEAD)"
+REMOTE_SHA="$(git rev-parse "$REMOTE/main")"
+[[ "$HEAD_SHA" == "$REMOTE_SHA" ]] \
+    || die "HEAD ($HEAD_SHA) is not $REMOTE/main ($REMOTE_SHA); pull/rebase first"
+
+# --- preflight: tag must not exist anywhere (tags are immutable) ---
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
+    && die "tag $TAG already exists locally; releases are immutable, bump VERSION first"
+REMOTE_TAGS="$(git ls-remote --tags "$REMOTE" "$TAG")" \
+    || die "could not list remote tags on $REMOTE"
+[[ -z "$REMOTE_TAGS" ]] \
+    || die "tag $TAG already exists on $REMOTE; releases are immutable, bump VERSION first"
+
+# --- release-notes assembly ---
+PREV_TAG="$(git tag --list 'v*' --sort=-v:refname | head -n 1 || true)"
+NOTES_DIR="$(mktemp -d)"
+NOTES="$NOTES_DIR/notes.md"
+trap 'rm -rf "$NOTES_DIR"' EXIT
+
+{
+    echo "## Highlights"
+    echo
+    SECTION=""
+    if [[ -f CHANGELOG.md ]]; then
+        # Extract the Keep-a-Changelog section for this version: "## [x.y.z]"
+        # (or "## [vx.y.z]"); any other level-2 header ends the section.
+        VER_ESC="${VERSION//./\\.}"
+        SECTION="$(awk -v ver="$VER_ESC" '
+            /^## / { insec = ($0 ~ "^## \\[v?" ver "\\]"); next }
+            insec { print }
+        ' CHANGELOG.md)"
+    fi
+    if [[ -n "${SECTION//[[:space:]]/}" ]]; then
+        printf '%s\n' "$SECTION"
+        echo "cut-release.sh: using CHANGELOG.md section for $VERSION" >&2
+    else
+        echo "_No curated CHANGELOG.md section for $VERSION — notes assembled from merged PRs._"
+        echo "cut-release.sh: WARNING: no CHANGELOG.md section for $VERSION" >&2
+    fi
+    echo
+    if [[ -n "$PREV_TAG" ]]; then
+        RANGE="$PREV_TAG..HEAD"
+        echo "## Merged since $PREV_TAG"
+    else
+        RANGE="HEAD"
+        echo "## Merged (first release)"
+    fi
+    echo
+    # Squash-merge subjects look like "subject (#123)"; plain subjects pass through.
+    git log --first-parent --format='%s' "$RANGE" | while IFS= read -r subject; do
+        if [[ "$subject" =~ \(#([0-9]+)\) ]]; then
+            num="${BASH_REMATCH[1]}"
+            title="${subject% \(#$num\)}"
+            echo "- #$num — $title"
+        else
+            echo "- $subject"
+        fi
+    done
+    echo
+    echo "---"
+    echo "Release tag \`$TAG\` (immutable — tags are never moved or re-cut)."
+    echo "Full commit \`$HEAD_SHA\`."
+} > "$NOTES"
+
+if [[ -n "$NOTES_FILE" ]]; then
+    cp "$NOTES" "$NOTES_FILE"
+    echo "cut-release.sh: notes written to $NOTES_FILE"
+fi
+
+echo "cut-release.sh: ---- release-notes draft ----"
+cat "$NOTES"
+echo "cut-release.sh: ---- end draft ----"
+
+if [[ "$MODE" == "dry-run" ]]; then
+    echo "cut-release.sh: dry run — nothing changed."
+    echo "cut-release.sh: --execute --yes would run:"
+    echo "  git tag -a $TAG -m <message> && git push $REMOTE $TAG"
+    echo "  gh release create $TAG --title $TAG --notes-file <notes> --target main"
+    exit 0
+fi
+
+if [[ "$CI" != "1" && "$CONFIRM" != "1" ]]; then
+    die "--execute needs --yes (re-run with --yes to confirm)"
+fi
+
+# --- execute: tag ---
+TAG_MSG="spark-vm $TAG"
+git tag -a "$TAG" -m "$TAG_MSG" || die "git tag failed"
+echo "cut-release.sh: created tag $TAG on $HEAD_SHA"
+git push "$REMOTE" "$TAG" || die "git push of $TAG failed"
+echo "cut-release.sh: pushed $TAG to $REMOTE"
+
+# --- execute: publish the release ---
+GH_ARGS=(release create "$TAG" --title "$TAG" --notes-file "$NOTES" --target main)
+if [[ "$VERSION" == *-* ]]; then
+    GH_ARGS+=(--prerelease)
+    echo "cut-release.sh: prerelease version detected; marking GitHub release as prerelease"
+fi
+if [[ -z "${CUT_RELEASE_NO_GH:-}" ]] && command -v gh >/dev/null 2>&1; then
+    gh "${GH_ARGS[@]}" || die "gh release create failed"
+elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    # API fallback for operators without `gh`. The token comes from the
+    # environment only and is never printed or logged.
+    PAYLOAD="$NOTES_DIR/payload.json"
+    TAG="$TAG" REPO="$REPO" VERSION="$VERSION" NOTES_PATH="$NOTES" \
+        python3 - > "$PAYLOAD" <<'PYEOF' || die "release payload build failed"
+import json, os
+with open(os.environ["NOTES_PATH"], encoding="utf-8") as f:
+    body = f.read()
+print(json.dumps({
+    "tag_name": os.environ["TAG"],
+    "target_commitish": "main",
+    "name": os.environ["TAG"],
+    "body": body,
+    "draft": False,
+    "prerelease": "-" in os.environ["VERSION"],
+}))
+PYEOF
+    curl -sS -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $GITHUB_TOKEN" \
+        "https://api.github.com/repos/$REPO/releases" \
+        -d @"$PAYLOAD" -o "$NOTES_DIR/release.json" \
+        || die "release API call failed"
+    python3 - "$NOTES_DIR/release.json" <<'PYEOF' || die "release API returned an error"
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    d = json.load(f)
+url = d.get("html_url")
+if not url:
+    sys.stderr.write("github API error: %s\n" % json.dumps(d)[:500])
+    sys.exit(1)
+print("release URL: %s" % url)
+PYEOF
+else
+    die "no 'gh' on PATH and GITHUB_TOKEN unset; cannot publish the release (tag $TAG was still pushed)"
+fi
+echo "cut-release.sh: published release $TAG on $REPO"
