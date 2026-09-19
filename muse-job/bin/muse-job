@@ -50,6 +50,17 @@ HOME = os.path.expanduser("~")
 JOBS_DIR = os.path.join(HOME, "muse-jobs")
 REPOS_DIR = os.path.join(HOME, "repos")
 EVENTS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "events")
+
+# Mirrors the hooks' _SID_RE (plugin/hooks/stop.py and session-start.py):
+# session uuids are agent-writable (issue #11), so every manager-side use
+# that builds a filesystem path from job["session_uuid"] must refuse
+# values outside this whitelist. Without it a forged uuid ("../../x",
+# "a/b") steers event/view reads outside EVENTS_DIR / VIEW_DIR,
+# corrupting the liveness and done-claim signals this tool exists to
+# harden (arch review round 3). The three sinks below fail closed on a
+# non-matching uuid; watch_one also pages needs-attention, since a
+# plantable latch in job.json would let the agent silence it permanently.
+_UUID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 SESSIONS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
 SESSION_INDEX = os.path.join(HOME, ".local", "share", "muse", "session-index.db")
 VIEW_DIR = os.path.join(HOME, ".local", "share", "muse", "sessions", ".msp-view-v1")
@@ -115,16 +126,90 @@ def job_json_path(slug):
     return os.path.join(job_dir(slug), "job.json")
 
 
+def trusted_job_paths(slug, job):
+    """Paths the destructive commands (close, resume) may act on.
+
+    job.json is agent-writable (issue #11): the job agent runs as the same
+    user and can rewrite it wholesale. So:
+
+    - `worktree` and `branch` are RE-DERIVED from the slug -- the derived
+      layout (`~/muse-jobs/<slug>/work`, branch `job/<slug>`) is the
+      canonical contract (see TOOL_INTERFACE.md). A recorded value that
+      diverges from it fails closed with an explicit message: silent
+      override would turn tampering (or an unsupported migration) into
+      confident destruction of the wrong thing.
+    - `pristine` cannot be re-derived, so it is containment-checked against
+      `~/repos` AND bound to this job: the derived worktree must be a
+      registered worktree of that repo (`git worktree list`). Containment
+      alone would let a forged pristine point at any repo dir under
+      `~/repos` and run `branch -D job/<slug>` there.
+
+    Fail closed on any mismatch. Returns (worktree, pristine, branch).
+    """
+    jd = job_dir(slug)
+    work = os.path.join(jd, "work")
+    branch = f"job/{slug}"
+    pristine = job.get("pristine")
+    if not isinstance(pristine, str) or not pristine:
+        raise RuntimeError("job has no recorded pristine repo; refusing destructive op")
+    rp, rr = os.path.realpath(pristine), os.path.realpath(REPOS_DIR)
+    if rp != rr and not rp.startswith(rr + os.sep):
+        raise RuntimeError(
+            f"recorded pristine repo {pristine!r} is outside {REPOS_DIR}; "
+            "refusing destructive op (possible job.json tampering)")
+    rec_work = job.get("worktree")
+    if rec_work and os.path.realpath(rec_work) != os.path.realpath(work):
+        raise RuntimeError(
+            f"recorded worktree {rec_work!r} diverged from the derived "
+            f"layout {work!r} -- possible job.json tampering or an "
+            "unsupported migration; refusing destructive op")
+    rec_branch = job.get("branch")
+    if rec_branch and rec_branch != branch:
+        raise RuntimeError(
+            f"recorded branch {rec_branch!r} diverged from the derived "
+            f"layout {branch!r} -- possible job.json tampering or an "
+            "unsupported migration; refusing destructive op")
+    try:
+        out = run("git", "-C", pristine, "worktree", "list", "--porcelain",
+                  timeout=30).stdout.decode()
+    except Exception:
+        raise RuntimeError(
+            f"cannot list worktrees of pristine repo {pristine!r}; "
+            "refusing destructive op")
+    registered = {os.path.realpath(line.split(None, 1)[1])
+                  for line in out.splitlines()
+                  if line.startswith("worktree ") and len(line.split(None, 1)) == 2}
+    if os.path.realpath(work) not in registered:
+        raise RuntimeError(
+            f"derived worktree {work!r} is not a registered worktree of "
+            f"{pristine!r} -- possible job.json tampering (forged pristine); "
+            "refusing destructive op")
+    return work, pristine, branch
+
+
 def load_job(slug):
     p = job_json_path(slug)
     if not os.path.exists(p):
         raise RuntimeError(f"unknown job: {slug}")
     with open(p) as f:
-        return json.load(f)
+        d = json.load(f)
+    # Pin the slug to the manager-side value: job.json is agent-writable
+    # (issue #11) and every read-modify-write path (save_job, job_status,
+    # verify_done_event's SUMMARY.md check) builds filesystem paths from the
+    # slug. A recorded "slug": "victim" would overwrite another job's record;
+    # "slug": "../../x" would write outside ~/muse-jobs. Every caller already
+    # passes the trusted slug (argv / lock slug / listdir entry).
+    d["slug"] = slug
+    return d
 
 
-def save_job(job):
-    p = job_json_path(job["slug"])
+def save_job(job, slug):
+    # The write path comes from the MANAGER-side slug (argv / lock slug /
+    # listdir entry), never job["slug"]: job.json is agent-writable
+    # (issue #11), so a recorded "slug": "victim" / "../../x" must not
+    # redirect the write. Callers pass their trusted slug; load_job also
+    # pins the record's slug as defense in depth.
+    p = job_json_path(slug)
     tmp = p + ".tmp"
     with open(tmp, "w") as f:
         json.dump(job, f, indent=2)
@@ -162,6 +247,21 @@ def cmd_spawn(args):
     slug = args.slug
     if not slug_ok(slug):
         raise RuntimeError(f"bad slug: {slug}")
+
+    def go():
+        # Serialized on the per-slug lock (like cmd_steer): the exists
+        # pre-check races without it -- a concurrent same-slug spawn during
+        # the minutes-long clone would also pass the check, then fail
+        # `worktree add -b` (branch already exists), and the except-cleanup
+        # would destroy the WINNER's worktree, branch, and job dir.
+        # Inside the lock the loser fails fast at the exists check.
+        _spawn(slug, args)
+
+    with_lock(slug, go)
+    return 0
+
+
+def _spawn(slug, args):
     jd = job_dir(slug)
     if os.path.exists(jd):
         raise RuntimeError(f"job dir exists: {jd}")
@@ -183,39 +283,58 @@ def cmd_spawn(args):
 
     work = os.path.join(jd, "work")
     os.makedirs(os.path.join(jd, "tmp"), exist_ok=True)
-    run("git", "-C", pristine, "worktree", "add", work, "-b", f"job/{slug}", sha)
+    try:
+        run("git", "-C", pristine, "worktree", "add", work, "-b", f"job/{slug}", sha)
 
-    with open(prompt_file) as f:
-        prompt = f.read()
-    full_prompt = PREAMBLE.format(jobdir=jd) + prompt
-    with open(os.path.join(jd, "prompt.md"), "w") as f:
-        f.write(full_prompt)
-    for name in ("SUMMARY.md", "QUESTIONS.md", "PROGRESS.md"):
-        open(os.path.join(jd, name), "a").close()
+        with open(prompt_file) as f:
+            prompt = f.read()
+        full_prompt = PREAMBLE.format(jobdir=jd) + prompt
+        with open(os.path.join(jd, "prompt.md"), "w") as f:
+            f.write(full_prompt)
+        for name in ("SUMMARY.md", "QUESTIONS.md", "PROGRESS.md"):
+            open(os.path.join(jd, name), "a").close()
 
-    job = {
-        "slug": slug,
-        "repo": args.repo,
-        "pristine": pristine,
-        "worktree": work,
-        "branch": f"job/{slug}",
-        "base": base,
-        "base_sha": sha,
-        "tmux": f"mjob-{slug}",
-        "session_uuid": None,
-        "state": "active",
-        "budget_hours": args.budget_hours,
-        "started_at": time.time(),
-        # Anchor for the events-missing liveness grace (issue #3): tracks the
-        # CURRENT session, refreshed by the resume fallback when it discovers
-        # a new session uuid. Falls back to started_at for legacy records.
-        "session_started_at": None,
-        "last_bytes": 0,
-        "last_diffstat": "",
-        "diffstat_strikes": 0,
-        "pr_url": None,
-    }
-    save_job(job)
+        job = {
+            "slug": slug,
+            "repo": args.repo,
+            "pristine": pristine,
+            "worktree": work,
+            "branch": f"job/{slug}",
+            "base": base,
+            "base_sha": sha,
+            "tmux": f"mjob-{slug}",
+            "session_uuid": None,
+            "state": "active",
+            "budget_hours": args.budget_hours,
+            "started_at": time.time(),
+            # Anchor for the events-missing liveness grace (issue #3): tracks the
+            # CURRENT session, refreshed by the resume fallback when it discovers
+            # a new session uuid. Falls back to started_at for legacy records.
+            "session_started_at": None,
+            "last_bytes": 0,
+            "last_diffstat": "",
+            "diffstat_strikes": 0,
+            "pr_url": None,
+        }
+        save_job(job, slug)
+    except BaseException:
+        # Don't leave a job dir without a job.json: the next spawn with the
+        # same slug would fail "job dir exists" until someone rm -rf's it by
+        # hand, and a half-added `job/<slug>` branch would break the retry's
+        # `worktree add -b` too. BaseException (not Exception) so SIGTERM /
+        # KeyboardInterrupt mid-spawn -- the clone can run minutes -- also
+        # cleans up. Best-effort git cleanup, then remove the dir.
+        try:
+            run("git", "-C", pristine, "worktree", "remove", "--force", work,
+                check=False)
+            run("git", "-C", pristine, "branch", "-D", f"job/{slug}",
+                check=False)
+        except Exception:
+            # Cleanup must not mask the original failure (e.g. git missing
+            # -> FileNotFoundError, or a hung git -> timeout).
+            pass
+        shutil.rmtree(jd, ignore_errors=True)
+        raise
 
     if tmux_alive(slug):
         run("tmux", "kill-session", "-t", f"mjob-{slug}", check=False)
@@ -246,7 +365,7 @@ def cmd_spawn(args):
     else:
         job["session_uuid"] = uuid
         job["session_started_at"] = time.time()
-        save_job(job)
+        save_job(job, slug)
     print(json.dumps({"slug": slug, "session_uuid": uuid, "worktree": work}))
     return 0
 
@@ -284,6 +403,7 @@ def find_session(workdir, since_ts, exclude=None):
         cands = []
         if not os.path.isdir(SESSIONS_DIR):
             return None
+        rwork = os.path.realpath(workdir)
         for fn in os.listdir(SESSIONS_DIR):
             if not fn.endswith(".json"):
                 continue
@@ -294,14 +414,53 @@ def find_session(workdir, since_ts, exclude=None):
                 continue
             if exclude is not None and rec.get("session_id") == exclude:
                 continue
-            if rec.get("cwd") == workdir and rec.get("first_seen", 0) >= since_ts - 10:
+            rcwd = os.path.realpath(rec.get("cwd") or "")
+            if rcwd == rwork and rec.get("first_seen", 0) >= since_ts - 10:
                 cands.append((rec["first_seen"], rec["session_id"], rec))
         cands.sort()
         main = [c for c in cands if _is_main_session(c[2])]
         pool = main or cands
-        return pool[0][1] if pool else None
+        # Newest first: the just-launched / just-resumed session is the one
+        # we want. Oldest-first could adopt a stale dead registration --
+        # notably on close+respawn of the same slug within the 10s slack,
+        # where the old registration still matches.
+        return pool[-1][1] if pool else None
     except Exception:
         return None
+
+
+def session_bound_to_workdir(uuid, workdir):
+    """True iff the hook registry binds this session uuid to this workdir.
+
+    `job["session_uuid"]` is agent-writable (issue #11), and `muse resume
+    <uuid>` attaches the operator's tmux to whatever session the uuid names
+    -- a forged uuid steers resume across the job boundary. Re-validate the
+    binding at resume time and fail closed: the registry record's cwd must
+    realpath-match the slug-derived workdir. This closes the direct job.json
+    forgery (no matching record -> no resume). Residual, stated plainly: the
+    registry itself is same-user-writable, so this is consistency
+    enforcement -- planting a matching record takes a second, noisier write
+    outside the job dir -- not authentication. (The done-claim triage in
+    verify_done_event carries the same cooperative-telemetry caveat.)
+    """
+    try:
+        rwork = os.path.realpath(workdir)
+        if not os.path.isdir(SESSIONS_DIR):
+            return False
+        for fn in os.listdir(SESSIONS_DIR):
+            if not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(SESSIONS_DIR, fn)) as f:
+                    rec = json.load(f)
+            except Exception:
+                continue
+            if (rec.get("session_id") == uuid
+                    and os.path.realpath(rec.get("cwd") or "") == rwork):
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _input_box_has_text(pane, needle):
@@ -374,7 +533,27 @@ def cmd_steer(args):
     return 0
 
 
+def maybe_adopt_session(job, slug):
+    """Late session-uuid adoption for jobs whose spawn-time discovery missed.
+
+    Returns (uuid_or_None, attention_detail_or_None). Fails closed: `started_at`
+    is agent-writable (issue #11), and a garbage value would make find_session
+    search from epoch zero -- adopting the oldest-ever registration, possibly
+    a dead session, and blinding liveness/done-claim/tamper monitoring to the
+    real session permanently (adoption is one-shot). Refuse loudly instead.
+    """
+    work = os.path.join(job_dir(slug), "work")
+    ts = _num(job.get("started_at"), 0)
+    if ts <= 0:
+        return None, ("job started_at is invalid; refusing late session uuid "
+                      "adoption (possible job.json tampering)")
+    found = find_session(work, ts)
+    return (found, None) if found else (None, None)
+
+
 def head_info(uuid):
+    if not _UUID_RE.match(uuid or ""):
+        return None, 0  # forged uuid: refuse to read outside VIEW_DIR
     p = os.path.join(VIEW_DIR, uuid, "HEAD.json")
     try:
         with open(p) as f:
@@ -391,6 +570,8 @@ def _iter_events(uuid):
     a symlink so hook appends corrupt another job's state -- reading through
     it would follow the link. The caller pages `events-tampered` for that.
     """
+    if not _UUID_RE.match(uuid or ""):
+        return  # forged uuid: refuse to read outside EVENTS_DIR
     p = os.path.join(EVENTS_DIR, uuid + ".jsonl")
     try:
         if os.path.islink(p):
@@ -411,6 +592,8 @@ def _iter_events(uuid):
 
 def event_file_symlinked(uuid):
     """True when the session's event file is a symlink (tampering, issue #3)."""
+    if not _UUID_RE.match(uuid or ""):
+        return False  # malformed uuid gets its own needs-attention signal
     try:
         return os.path.islink(os.path.join(EVENTS_DIR, uuid + ".jsonl"))
     except OSError:
@@ -440,7 +623,7 @@ def latest_done_event(uuid, now):
     return best, best_ts
 
 
-def verify_done_event(job, ev):
+def verify_done_event(job, ev, slug):
     """Triage a hook `done` event: protocol compliance, NOT authenticity.
 
     Hook events are cooperative telemetry, not ground truth: the job agent
@@ -450,9 +633,15 @@ def verify_done_event(job, ev):
     verifies that the agent *followed the done protocol*, not that the work
     happened or that the event is genuine.
 
+    `slug` is the manager-side job slug (argv / directory listing), never
+    job["slug"]: the worktree under test is DERIVED from it, because
+    job.json is agent-writable (issue #11) and the recorded `worktree`
+    field must not steer a security check -- a forged worktree would make
+    a forged event's cwd pass containment.
+
     A `done` event passes triage only when all of:
       1. the event names this job's recorded session uuid,
-      2. the event carries a cwd at or under the job worktree,
+      2. the event carries a cwd at or under the derived job worktree,
       3. the job dir holds a non-empty SUMMARY.md regular file.
     Returns (True, "") or (False, reason). Fail closed. Callers must NEVER
     transition job state on the result alone -- see handle_done_claim.
@@ -466,15 +655,16 @@ def verify_done_event(job, ev):
     cwd = ev.get("cwd")
     if not cwd:
         return False, "event carries no cwd"
-    work = job.get("worktree") or ""
-    if not work:
-        # Fail closed: os.path.realpath("") is the CLI process's own cwd,
-        # an attacker-influenced comparison with no security meaning.
-        return False, "job has no recorded worktree"
+    if not slug_ok(slug or ""):
+        # The slug feeds a path join below. Production callers pass the
+        # argv/listdir slug; a forged job["slug"] (or a missing one) must
+        # fail closed here, never widen the containment check silently.
+        return False, "no valid job slug to derive the worktree from"
+    work = os.path.join(job_dir(slug), "work")
     rcwd, rwork = os.path.realpath(cwd), os.path.realpath(work)
     if rcwd != rwork and not rcwd.startswith(rwork + os.sep):
         return False, f"event cwd {cwd!r} is outside the job worktree"
-    sp = os.path.join(job_dir(job["slug"]), "SUMMARY.md")
+    sp = os.path.join(job_dir(slug), "SUMMARY.md")
     try:
         # Must be a real non-empty file: getsize() succeeds on directories,
         # so `mkdir SUMMARY.md` would otherwise satisfy this check.
@@ -529,12 +719,15 @@ def _sanitize_window_start(v, now):
     return v
 
 
-def handle_done_claim(job, ev, now=None):
+def handle_done_claim(job, ev, slug, now=None):
     """Triage a hook `done` event into an operator page.
 
     Never transitions job state (issue #3): the event is forgeable by the
     same-user job agent, so a `done` line is only ever a *claim* the operator
     must confirm (inspect SUMMARY.md, then `muse-job close`).
+
+    `slug` is threaded through to verify_done_event (manager-side slug, so
+    the worktree check is derived, not read from agent-writable job.json).
 
     Returns a signal dict, or None if this exact claim was already paged.
     `done-claimed` = the agent followed the done protocol;
@@ -562,7 +755,7 @@ def handle_done_claim(job, ev, now=None):
         job["done_page_count"] = 0
         job.pop("done_repeated_paged", None)
     count = _sanitize_count(job.get("done_page_count"))
-    ok, reason = verify_done_event(job, ev)
+    ok, reason = verify_done_event(job, ev, slug)
     detail = _clean_text(ev.get("detail", ""))
     if ok:
         label = "done-claimed"
@@ -667,15 +860,14 @@ def dir_size(path):
     return total
 
 
-def job_status(job):
-    slug = job["slug"]
+def job_status(job, slug):
     alive = tmux_alive(slug)
     uuid = job.get("session_uuid")
     hstatus, nbytes = head_info(uuid) if uuid else (None, 0)
     delta = nbytes - _num(job.get("last_bytes"), 0)
     if delta:
         job["last_bytes"] = nbytes
-        save_job(job)
+        save_job(job, slug)
     ev = last_event(uuid) if uuid else None
     try:
         pm = os.path.getmtime(os.path.join(job_dir(slug), "PROGRESS.md"))
@@ -700,7 +892,7 @@ def job_status(job):
 
 def cmd_status(args):
     job = load_job(args.slug)
-    st = job_status(job)
+    st = job_status(job, args.slug)
     if args.json:
         print(json.dumps(st, indent=2, default=str))
     else:
@@ -713,7 +905,7 @@ def cmd_status(args):
                 # Issue #3: a `done` line is a claim, never proof -- the
                 # same-user agent can forge every check. Label what the
                 # triage actually established, nothing more.
-                ok, reason = verify_done_event(job, ev)
+                ok, reason = verify_done_event(job, ev, args.slug)
                 flag = (" (claims done; protocol checks passed)"
                         if ok else
                         f" (claims done; protocol check failed: {reason})")
@@ -738,7 +930,10 @@ def cmd_list(args):
                         "state": job.get("state"),
                         "tmux_alive": tmux_alive(slug),
                         "session_uuid": job.get("session_uuid"),
-                        "elapsed_h": round((time.time() - job.get("started_at", time.time())) / 3600, 1),
+                        # Sanitized like job_status (issue #3): a non-numeric
+                        # started_at in agent-writable job.json must not make
+                        # the job silently vanish from `list`.
+                        "elapsed_h": round((time.time() - _num(job.get("started_at"), time.time())) / 3600, 1),
                     })
                 except Exception:
                     pass
@@ -774,7 +969,18 @@ def cmd_resume(args):
     uuid = job.get("session_uuid")
     if not uuid:
         raise RuntimeError("no session uuid recorded; cannot resume")
-    work = job["worktree"]
+    # Re-derive from the slug: job["worktree"] is agent-writable (issue #11)
+    # and must not choose where the operator's tmux starts a shell.
+    work, _, _ = trusted_job_paths(args.slug, job)
+    # Re-validate the uuid->workdir binding: job["session_uuid"] is
+    # agent-writable, and `muse resume <uuid>` would otherwise attach the
+    # operator's tmux to whatever session a forged uuid names (cross-job
+    # steering). Fail closed with an explicit message.
+    if not uuid or not session_bound_to_workdir(uuid, work):
+        raise RuntimeError(
+            f"recorded session uuid {uuid!r} is not bound to this job's "
+            f"workdir {work!r} in the hook registry -- possible job.json "
+            "tampering; refusing resume")
     run("tmux", "new-session", "-d", "-s", f"mjob-{args.slug}", "-x", "220", "-y", "60",
         "-c", work)
     run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
@@ -820,7 +1026,7 @@ def cmd_resume(args):
             # done_page_count/window intentionally kept: the re-page backoff
             # is per job, not per session (rate-limits pager fatigue across
             # resumes too).
-            save_job(job)
+            save_job(job, args.slug)
         else:
             print("WARNING: new session uuid not discovered; watch keeps "
                   "reading the old session's events", file=sys.stderr)
@@ -831,18 +1037,31 @@ def cmd_resume(args):
 
 
 def cmd_close(args):
-    job = load_job(args.slug)
-    run("tmux", "kill-session", "-t", f"mjob-{args.slug}", check=False)
-    work = job["worktree"]
-    pristine = job["pristine"]
+    def go():
+        # Serialized on the per-slug lock: without it a close racing a
+        # spawn could delete the job dir / branch out from under the
+        # in-flight spawn (same hazard class as the spawn-spawn race).
+        _close(args.slug)
+
+    with_lock(args.slug, go)
+    return 0
+
+
+def _close(slug):
+    job = load_job(slug)
+    run("tmux", "kill-session", "-t", f"mjob-{slug}", check=False)
+    # Destructive git inputs re-derived from the slug, never from the
+    # agent-writable job.json (issue #11): a recorded branch="main" must not
+    # reach `git branch -D`, nor a recorded worktree pointing at another
+    # job's tree reach `worktree remove --force`.
+    work, pristine, branch = trusted_job_paths(slug, job)
     if os.path.isdir(work):
         run("git", "-C", pristine, "worktree", "remove", "--force", work, check=False)
     run("git", "-C", pristine, "worktree", "prune", check=False)
     # Delete the job branch so re-spawning the same slug works
     # (worktree add -b would otherwise fail: branch already exists).
-    branch = job.get("branch") or f"job/{args.slug}"
     run("git", "-C", pristine, "branch", "-D", branch, check=False)
-    jd = job_dir(args.slug)
+    jd = job_dir(slug)
     tmpd = os.path.join(jd, "tmp")
     shutil.rmtree(tmpd, ignore_errors=True)
     for fn in os.listdir(jd):
@@ -851,8 +1070,8 @@ def cmd_close(args):
             run("gzip", "-f", p, check=False)
     job["state"] = "closed"
     job["closed_at"] = time.time()
-    save_job(job)
-    print(json.dumps({"slug": args.slug, "state": "closed"}))
+    save_job(job, slug)
+    print(json.dumps({"slug": slug, "state": "closed"}))
     return 0
 
 
@@ -878,7 +1097,7 @@ def cmd_watch(args):
             return
         if job.get("state") not in ("active", "blocked"):
             return
-        st = job_status(job)
+        st = job_status(job, slug)
         now = time.time()
 
         if not st["tmux_alive"]:
@@ -892,7 +1111,38 @@ def cmd_watch(args):
                                "detail": f"tmux dead and resume failed: {e}"})
             return
 
+        if not job.get("session_uuid"):
+            # Spawn's 90s uuid discovery can miss a slow first model call.
+            # Without a uuid the job is half-blind (no liveness, done-claim,
+            # or tamper signals) and un-resumable, forever. Adopt it lazily
+            # when the hook registration appears. The workdir is re-derived
+            # from the slug, not read from agent-writable job.json.
+            found, attention = maybe_adopt_session(job, slug)
+            if found:
+                job["session_uuid"] = found
+                job["session_started_at"] = time.time()
+                save_job(job, slug)
+                events.append({"job": slug, "signal": "session-adopted",
+                               "detail": "late session uuid discovery; "
+                                         "liveness monitoring now active"})
+            elif attention:
+                # Fail loud on every pass while the condition holds (same
+                # policy as events-tampered): a plantable latch in job.json
+                # would let the agent silence this permanently.
+                events.append({"job": slug, "signal": "needs-attention",
+                               "detail": attention})
+
         uuid = job.get("session_uuid")
+        if uuid and not _UUID_RE.match(uuid):
+            # Agent-writable field (issue #11): a forged uuid must not steer
+            # event/view reads outside their dirs (arch review round 3). The
+            # sinks above fail closed on it; say so loudly, every pass while
+            # it holds -- the same plantable-latch reasoning as events-tampered.
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": "recorded session uuid is malformed; "
+                           "refusing to read event paths (possible job.json "
+                           "tampering)"})
+            uuid = None
 
         # Issue #3: a symlinked event file is tampering, not silence. Page it
         # on every pass while the condition holds (fail loud). An earlier
@@ -917,7 +1167,7 @@ def cmd_watch(args):
         estate = ev.get("state")
         if estate == "blocked" and job.get("state") != "blocked":
             job["state"] = "blocked"
-            save_job(job)
+            save_job(job, slug)
             events.append({"job": slug, "signal": "blocked",
                            "detail": _clean_text(ev.get("detail", ""))})
         elif estate == "question":
@@ -933,24 +1183,26 @@ def cmd_watch(args):
         if uuid:
             done_ev, _done_ts = latest_done_event(uuid, now)
             if done_ev is not None:
-                sig = handle_done_claim(job, done_ev, now)
+                sig = handle_done_claim(job, done_ev, slug, now)
                 if sig is not None:
                     sig["job"] = slug
                     events.append(sig)
-                    save_job(job)
+                    save_job(job, slug)
 
         if st["elapsed_h"] > (_num(job.get("budget_hours"), 8) or 8):
             events.append({"job": slug, "signal": "budget-exceeded",
                            "detail": f"{st['elapsed_h']:.1f}h > {job.get('budget_hours')}h budget (notify only)"})
 
         # Thrash heuristic: bytes growing, no progress heartbeat, no diff change.
-        diffstat = git_diffstat(job["worktree"])
+        # The worktree is re-derived from the slug: job["worktree"] is
+        # agent-writable (issue #11) and must not choose what we diff.
+        diffstat = git_diffstat(os.path.join(job_dir(slug), "work"))
         if diffstat == job.get("last_diffstat") and diffstat:
             job["diffstat_strikes"] = _num(job.get("diffstat_strikes"), 0) + 1
         else:
             job["diffstat_strikes"] = 0
             job["last_diffstat"] = diffstat
-        save_job(job)
+        save_job(job, slug)
         pa = st["progress_age_s"]
         if (st["bytes_delta"] > 0 and pa is not None and pa > 90 * 60
                 and job["diffstat_strikes"] >= 3):

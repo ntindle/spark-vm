@@ -53,7 +53,10 @@ def main():
         d = json.loads(raw) if raw.strip() else {}
     except Exception:
         d = {}
-    sid = d.get("session_id") or "unknown"
+    sid = d.get("session_id")
+    if not sid:
+        return  # see stop.py: events for an unknown session id are
+                # write-only garbage; skip them.
     # SECURITY (issue #3): hardcoded, never from the environment. See stop.py.
     evdir = os.path.expanduser("~/.local/share/muse-job/events")
     try:

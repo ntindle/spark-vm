@@ -81,7 +81,11 @@ def main():
         d = json.loads(raw) if raw.strip() else {}
     except Exception:
         d = {}
-    sid = d.get("session_id") or "unknown"
+    sid = d.get("session_id")
+    if not sid:
+        return  # no session id: nothing records it and no manager path ever
+                # reads it back, so appending to events/unknown.jsonl would be
+                # write-only garbage (session-start.py already skips these).
     state, detail = classify(d.get("last_assistant_message") or "")
     # SECURITY (issue #3): the event sink path is hardcoded, NEVER taken from
     # the environment. Hooks run as children of the job's `muse` process, so a
