@@ -8,13 +8,14 @@ code that enforces it.
 
 ## The one-paragraph version
 
-Your persistent computer is a real VM, not a mounted folder. The agent
-gets its own machine — its own filesystem, its own user, its own
+Your persistent computer is a real machine, not a mounted folder. The
+agent gets its own machine — its own filesystem, its own user, its own
 network rules — and nothing inside that machine is a window onto the
-host. Host folders are never shared into it. Credentials are swapped at
-the network edge by a proxy the agent can't see around, so the agent
-never holds the raw materials. Approvals are human-gated. The rest of
-this document is the evidence for those sentences.
+host. In the jail architecture, host folders are never shared into the
+agent's machine. Credentials are swapped at the network edge by a proxy
+the agent can't see around, so the agent never holds the raw materials.
+Approvals are human-gated. The rest of this document is the evidence
+for those sentences.
 
 ## Why this matters: the Docker Sandboxes escape week
 
@@ -42,27 +43,48 @@ edited by Docker at any time):
   vulnerability where a malicious sandbox could hijack another sandbox's
   OAuth login by pre-claiming its callback port."*
 - Both CVEs were disclosed on 2026-09-15, **eight days after the fix
-  shipped** in 0.42.0. Disclosure note: earlier reads of this same page
-  (2026-09-17) found neither CVE named; Docker has since amended the
-  notes to name both verbatim. The version number is the signal —
-  release-note prose lagged the fix, and the fix preceded the CVE.
+  shipped** in 0.42.0 (the disclosure date is reported by third-party
+  security press, e.g.
+  [realhacker.news](https://realhacker.news/critical-docker-sandboxes-flaw-lets-malicious-guest-code-read-and-modify-macos-host-files/);
+  the CVE records themselves were not readable on cve.org directly at
+  write time). Disclosure note: our midday competitor watch
+  (`docs/COMPETITOR_WATCH_2026-09-19_MIDDAY.md`) recorded third-party
+  reads that the 0.42.0 notes named neither CVE; read directly on
+  docs.docker.com on 2026-09-19, the notes now name both verbatim.
+  The version number is the signal — release-note prose lagged the fix,
+  and the fix preceded the CVE.
+- Third-party press credited Oren Yomtov of accomplish.ai with finding
+  CVE-2026-77179 and Jurre van Bergen of ThreatNotify with finding
+  CVE-2026-79994.
 
 The architectural fact underneath, also from Docker's own docs
 ([architecture page](https://docs.docker.com/ai/sandboxes/architecture/)):
 `sbx run` still defaults to mounting the current directory into the
 sandbox "through a filesystem passthrough" — the sandbox sees your
-actual host files. That shared-workspace boundary is the trust story of
-a persistent-computer product, and this week proved how fragile the
-"microVM + mounted host folder" model is when the passthrough has a
-symlink bug.
+actual host files. Two qualifications, because a trust doc can't afford
+selective contrast: since 0.42.0, `sbx create` can omit the workspace
+path entirely ("the sandbox has no host workspace bind mount"), and
+Docker sandboxes are hypervisor-isolated microVMs — a *stronger*
+isolation primitive than our OS container (see owned-risk #1 below).
+But the passthrough default was the default when both CVEs shipped,
+and `sbx run` still mounts the current directory. That shared-workspace
+boundary is the trust story of a persistent-computer product, and this
+week proved how fragile the "microVM + mounted host folder" model is
+when the passthrough has a symlink bug.
 
-**What spark-vm takes from this:** the boundary both CVEs broke — a
-shared host folder the guest can see — does not exist in our reference
-architecture. There is no passthrough to have a symlink bug in.
+**What spark-vm takes from this:** the two CVEs are different classes.
+CVE-2026-77179's class — a shared-workspace *filesystem passthrough*
+with a symlink bug — has no analog in the jail: there is no passthrough
+to break. CVE-2026-79994's class — a host *relay* (guest-to-host Unix
+socket path validation) — maps directly onto spark-vm's own
+deliberately exposed relay surfaces: the DNATed proxy ports and the
+tailnet SSH forward. Those are owned as a surface in risk #2, not
+claimed away.
 
 ## What spark-vm does differently
 
-The reference deployment (Owner decision 2, `jail/README.md`) puts the
+The committed architecture (Owner decision 2, `jail/README.md`) — not
+yet the default deployment, which is still a plain box — puts the
 agent's SSH login inside a persistent **systemd-nspawn container** that
 mirrors the agent's runtime cell (`jail/cell-mirror.md`):
 
@@ -90,11 +112,11 @@ mirrors the agent's runtime cell (`jail/cell-mirror.md`):
   never in the jail. The jail never holds a real secret, only
   `hsurr:` placeholders.
 
-So the Docker escape-week attack class — guest exploits a shared-folder
-passthrough to reach host files — has no corresponding surface here.
-The Docker D-Bus class (guest → management daemon → host command) is
-the class we watch instead, and it's addressed below as an owned risk,
-not a solved one.
+So the CVE-2026-77179 class — guest exploits a shared-folder
+passthrough to reach host files — has no corresponding surface in the
+jail. The Docker D-Bus class and the CVE-2026-79994 socket-relay class
+(guest → host relay → host capabilities) are the classes we watch
+instead, and they're addressed below as owned risks, not solved ones.
 
 ## What we do not claim (owned risks)
 
@@ -106,23 +128,30 @@ Plainly, because a trust doc that only lists wins is marketing copy:
    We track this the way the week taught everyone to: the boundary is
    the product, and it gets re-examined when the ecosystem learns
    something new (this document exists because of that habit).
-2. **The D-Bus class is ours too.** Docker's D-Bus fix is a
-   guest→daemon→host path. Our jail's deliberate host exposures are
-   exactly two: the proxy ports (DNATed, audited) and the SSH relay
-   (tailnet only). Those are allowlisted, not shared folders — but they
-   are surfaces, and any finding against them lands here as a finding,
-   not a footnote.
+2. **The D-Bus class and the -79994 relay class are ours too.**
+   Docker's D-Bus fix is a guest→daemon→host path; CVE-2026-79994 is a
+   guest→host-relay path-validation bug. Our jail's deliberate host
+   exposures are exactly two: the proxy ports (DNATed, audited) and the
+   SSH relay (tailnet only). Those are allowlisted, not shared folders —
+   but they are surfaces, and any finding against them lands here as a
+   finding, not a footnote.
 3. **Multi-tenancy is future work.** The OAuth-port-claim class —
    one sandbox attacking another's login flow — has no spark-vm analog
    today because there is one tenant per box. A hosted spark-vm with
    many tenants *will* have cross-tenant surfaces; the multi-tenancy
    audit (H11) gates the hosted design on answering them. We do not
    claim hosted trust properties for a product that isn't built yet.
-4. **The guarantee is scoped to the jail architecture.** A plain-box
-   self-host deployment (no jail) has no guest→host boundary because
-   the agent's computer *is* the box — the trust boundary is between
-   the box and the rest of the operator's network, and the agent runs
-   with the box user's privileges. Know which shape you're running.
+4. **The guarantee is scoped to the jail architecture — which is not
+   the default deployment.** The jail is committed (Owner decision 2)
+   but `docs/HOSTED_GAP_ANALYSIS.md` characterizes it honestly: "spec +
+   `build.sh` exist; cell isolation is a plan, not a guarantee" — it
+   appears in neither `deploy/components.conf` nor ONBOARDING.md/SETUP.md.
+   Everything in "What spark-vm does differently" describes that
+   architecture, not what ships by default today. A plain-box self-host
+   deployment (no jail) has no guest→host boundary because the agent's
+   computer *is* the box — the trust boundary is between the box and
+   the rest of the operator's network, and the agent runs with the box
+   user's privileges. Know which shape you're running.
 5. **The agent trusts swapd for TLS.** The swapd CA is installed in the
    jail's trust store so HTTPS inspection works; the agent is expected
    to notice that its "secure" connections terminate at a proxy. That
@@ -141,8 +170,8 @@ block is in `jail/README.md`; the short version:
 
 ```bash
 # the jail really has no host mounts
-systemd-nspawn --machine=jail ... # or: inspect /etc/systemd/nspawn/jail.nspawn [Files]
-grep -c 'Bind' /etc/systemd/nspawn/jail.nspawn   # expect 0
+sed -n '/^\[Files\]/,/^$/p' /etc/systemd/nspawn/jail.nspawn
+grep -c '^Bind' /etc/systemd/nspawn/jail.nspawn || true   # expect 0
 # guest root is not host root
 machinectl shell root@jail /bin/sh -c 'cat /proc/1/uid_map'  # expect 0 2000000 65536
 # direct egress is dead from inside the jail
@@ -153,9 +182,9 @@ ssh -p 2222 muse@<tailnet-ip> 'curl -s --max-time 8 -o /dev/null -w "%{http_code
 
 - Vendor facts in the escape-week section were read on
   `docs.docker.com` on **2026-09-19** (Docker Sandboxes release notes,
-  0.42.0, released 2026-09-07; architecture page). Re-check them when
-  Docker publishes; this document's job is to move when the ecosystem
-  does.
+  0.42.0, released 2026-09-07; architecture page). This document carries
+  the date each vendor fact was read — treat dated facts as snapshots,
+  not standing claims.
 - spark-vm claims are code-verified against the cited files at this
   commit. If a cited line moves, the claim moves with it — file an
   issue if you catch drift.
