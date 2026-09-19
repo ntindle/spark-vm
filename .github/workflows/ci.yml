@@ -1,0 +1,80 @@
+# spark-vm CI: python tests, shellcheck, markdown link check, PNG smoke test.
+#
+# Run locally with:
+#   cd proxy   && python3 -m pytest test_swap_addon.py test_grant_writer.py test_round6.py
+#   cd confirm && python3 -m pytest test_confirmd.py
+#   cd deploy  && python3 -m pytest test_auto_deploy.py
+#   cd muse-job && python3 -m pytest tests/test_event_trust.py
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  python-tests:
+    name: python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: proxy tests (swap addon, grant writer)
+        run: python3 -m pytest test_swap_addon.py test_grant_writer.py test_round6.py -q
+        working-directory: proxy
+      - name: confirmd tests
+        run: python3 -m pytest test_confirmd.py -q
+        working-directory: confirm
+      - name: auto-deploy tests
+        run: python3 -m pytest test_auto_deploy.py -q
+        working-directory: deploy
+      - name: muse-job trust tests
+        run: python3 -m pytest tests/test_event_trust.py -q
+        working-directory: muse-job
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck on all shell scripts
+        # severity=error gates on real breakage (syntax/misuse), not style notes
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scannable: sh
+          severity: error
+
+  markdown-links:
+    name: markdown link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check links in all markdown docs
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: "--no-progress --exclude-mail '**/*.md'"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  png-check:
+    name: PNG screenshot smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install playwright
+          python3 -m playwright install chromium
+          sudo python3 -m playwright install-deps chromium
+      - name: Screenshot + validate PNG signature
+        run: |
+          python3 scripts/pw-test.py
+          python3 scripts/png-check.py
