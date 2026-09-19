@@ -66,16 +66,17 @@ a surface that doesn't exist yet (the dead-form rule, `LANDING_PAGE_COPY.md`
 
 The waitlist retires as a funnel when signup opens (`WAITLIST_OPERATIONS.md`
 §8, PR #68): confirmed entries become the day-1 invite queue; no parallel
-funnels. The waitlist *pages* stay live (unconfirmed → confirmed keeps
-working for the post-launch waitlist, if any) but the CTA job changes from
-"join the list" to the signup flow below.
+funnels. The waitlist pages stay live (confirm/forget links keep resolving
+through their claim windows — `WAITLIST_OPERATIONS.md` §8 designs no
+post-launch waitlist and forbids parallel funnels) but the CTA job changes
+from "join the list" to the signup flow below.
 
 ### Surface 2 — signup era (hosted launch)
 
 The signup web UI: account creation (email + magic link), plan + card on
 file, enrollment-token handoff, pending-key approval (fingerprint), tenant
-status polling. This is `HOSTED_SIGNUP_ONBOARDING.md` §5 rendered as
-screens — see §5 below. Gated on the operator packet (§10): control-plane
+status polling. This is `HOSTED_SIGNUP_ONBOARDING.md` §5 rendered as the
+screens in §5. Gated on the operator packet (§10): control-plane
 Fly machine + sparkvm.dev front door live, billing provider chosen.
 
 ### Surface 3 — dashboard era (post first-box)
@@ -123,7 +124,8 @@ Section order and copy are `LANDING_PAGE_COPY.md` §§2–3 as merged — this
 doc specifies only the build-side additions:
 
 - `<head>`: exactly the tag set from `FUNNEL_MEASUREMENT.md` §5 (PR #99) —
-  `og:url`, `og:type`, `og:title`, `og:description` (scoped to *this
+  the plain `<meta name="description">`, `og:url`, `og:type`, `og:title`,
+  `og:description` (scoped to *this
   page*, no product-wide trackers claim), `og:image` (the persistence pair
   from the demo-assets plan — `assets/README.md` asset 3, currently a
   follow-up; the page build produces `og-persistence-pair.png`,
@@ -145,18 +147,29 @@ doc specifies only the build-side additions:
   pre-launch pilot phase is disclosed in the FAQ (same checklist item),
   so the page never promises what the spec doesn't deliver.
 - The form itself (§4.2) is the only interactive element on the page.
+- **`/waitlist` is a dedicated minimal page** (every CTA links there; it is
+  not an anchor on the landing page). It carries the same `<head>` tag set
+  as the landing page (`og:url` points at the marketing page — the share
+  target is the product, not the form), `<title>` "Join the waitlist —
+  spark-vm", a heading plus one line of the `LANDING_PAGE_COPY.md` §3 hero
+  microcopy for context, the §4.2 form, the path-A inbox line (the Muse
+  reader's entry point, no separate discovery), and a back-to-`/` link.
+  No OG identity of its own — a share of the form unfurls as the product.
 
 ### 4.2 The waitlist form (path B) + the email path (path A)
 
 - **Form fields:** owner email (required), Muse contact email (optional —
   "where should we reach your agent"), nothing else
-  (`WAITLIST_OPERATIONS.md` §2, PR #68). Honeypot + time-trap +
-  per-IP rate limit, per `LANDING_PAGE_COPY.md` §4.
+  (`WAITLIST_OPERATIONS.md` §2, PR #68). Visible `<label>`s,
+  `autocomplete="email"` and `inputmode="email"` on both inputs;
+  honeypot + time-trap + per-IP rate limit, per `LANDING_PAGE_COPY.md` §4.
 - **Form endpoint:** `POST /waitlist/form` on the control plane —
   validates, writes a validated row only, returns a static "check your
   inbox" page (never JSON the page JS would parse — there is no page JS).
-  Honeypot trips are *accepted silently* (200, same rendering) — the spam
-  learns nothing.
+  The page echoes the full self-submitted owner address (it came from the
+  reader's own form — no privacy cost) with a "wrong address? go back"
+  link, so a typo'd submission can be caught. Honeypot trips are
+  *accepted silently* (200, same rendering) — the spam learns nothing.
 - **Email path (path A):** the page prints the waitlist inbox address
   alongside the form CTA ("Your agent can start the signup — the
   confirmation email goes to your owner," `LANDING_PAGE_COPY.md` §3 hero
@@ -205,23 +218,37 @@ screens and their honesty constraints.
 
 **Stale-line flag (typeset-time correction):** H3 §5 was written before
 the Billing decision. Two of its lines are stale and must NOT be rendered:
-"pick plan (free tier first; paid later — operator decision)" and the
-landing-page "free tier recommended for adoption." The decided shape is
+"pick plan (free tier first; paid later — operator decision)" and
+"Plan/pricing summary (operator decision; free tier recommended for
+adoption)." The decided shape is
 **no free tier at launch; card-required trial possible, trial terms TBD**
 (NEEDS_USER.md Billing). The plan screen shows the trial on the decided
 terms and never prints "free tier" (`FIRST_RUN_ACTIVATION.md` §7).
 
 Screens, in order:
 
+0. **Claim (the invite gate)** — the launch is wave-gated
+   (`WAITLIST_OPERATIONS.md` §7, PR #68): invites go in FIFO order, the
+   invite email carries a "Claim your box" link, the invite expires in 14
+   days and the slot rolls over. The signup URL is invite-claimed: a signed
+   invite link lands the reader on claim, which pre-fills the owner email
+   from the waitlist entry and skips email re-verification (reachability
+   already proven — `WAITLIST_OPERATIONS.md` §8, PR #68). A non-invited
+   visitor sees a plain holding page — "your invite hasn't arrived yet"
+   with a link back to the waitlist page, never a dead form and never an
+   open signup (an open page would admit out-of-wave tenants and break
+   both the FIFO promise and the capacity gate). An expired-invite click
+   renders the roll-over rule from §7 (back of the confirmed queue, no
+   re-confirmation needed) — never "your invite expired, start over."
 1. **Account** — email + magic link (no password to phish — H3 §5).
    Signup pre-fills the owner email from the waitlist entry and **skips
    email re-verification** (reachability already proven —
    `WAITLIST_OPERATIONS.md` §8, PR #68); it does not skip identity linking.
-2. **Plan + card on file** — the decided billing shape; exact tiers land
-   with the launch (`LANDING_PAGE_COPY.md` §3 pricing teaser, non-promissory).
-   The waitlist→signup bridge metric (`FUNNEL_MEASUREMENT.md` §7, PR #99 —
-   waitlist→identity-linked, kept visible, never folded into the page
-   metric) starts emitting here.
+2. **Plan + card on file** — the decided billing shape. The exact tiers
+   come from the decided-pricing source the invite email uses ("filled at
+   send time from the decided pricing" — `WAITLIST_OPERATIONS.md` §7,
+   PR #68); the signup UI names that same source so the email and the
+   screen cannot drift.
 3. **Link identity** — name the box; the enrollment token (shown once,
    "copy for your Muse" — H3 §5); the pending-key approval UI: the key
    fingerprint rendered **prominently** with the H3 re-link email UX
@@ -229,17 +256,28 @@ Screens, in order:
    §4 pattern, `WAITLIST_OPERATIONS.md` §4, PR #68). If the waitlisted
    `muse_pubkey` matches the presented key, the UI shows the continuity
    hint ("matches the key your agent submitted" — convenience, not trust —
-   `WAITLIST_OPERATIONS.md` §8, PR #68).
+   `WAITLIST_OPERATIONS.md` §8, PR #68). The waitlist→identity-linked
+   bridge metric (`FUNNEL_MEASUREMENT.md` §7, PR #99 — waitlist→signup,
+   kept visible, never folded into the page metric) starts emitting here.
 4. **Bring your tailnet** — BYO Tailscale link step (decided, NEEDS_USER.md
    Tailnet). H3 §11.2's open tailnet-shape question is closed; the signup
    UI renders the decided shape, not the question.
 5. **Status** — the page and the Muse both poll `GET /tenant/status`;
    when it flips to `live`, both see "your box is ready" (H3 §5). The
-   first-10-minutes clock starts at box-ready, not at signup (H3 §5) —
-   the signup page says so plainly, so nobody stares at a spinner.
+   human's page is no-JS (`FUNNEL_MEASUREMENT.md` §3, PR #99): refresh is
+   `<meta http-equiv="refresh">` plus a manual "Check status" plain-form
+   POST. The first-10-minutes clock starts at box-ready, not at signup
+   (H3 §5) — the signup page says so plainly, so nobody stares at a spinner.
 6. **Connection bundle** — the Muse's relay hostname + short-lived cert;
    the human's one-command cred-ui tunnel script (H3 §5). The human's
    first-credential install via cred-ui stays the one designed-manual step.
+
+**Abandonment / re-entry:** the funnel re-enters at the first incomplete
+screen, server-derived from tenant state — it never restarts, and it never
+re-asks for the card. An account without a box renders the funnel, never
+the dashboard (the dashboard "ships after the first boxes are
+provisionable" — §2 — and an empty one would be dead navigation wearing a
+nicer hat).
 
 **Scope discipline:** the signup UI is a funnel, not a dashboard
 (H3 §5: "It is a funnel, not a dashboard"). Account management beyond the
@@ -257,7 +295,10 @@ never render a panel whose substrate doesn't exist.
   dashboard shows the decided billing surface's last-four/expiry only.
 - **Boxes** — the tenant's boxes: name, status (`provisioning` /
   `live` / `suspended` / `waking` per the H4 PR #40 contract extensions),
-  connection-bundle re-issue, destroy. Status states beyond `live`
+  connection-bundle re-issue, destroy. Destroy is two-step: an explicit
+  "Destroy this box" confirmation screen (typed box name or a second
+  rendering's confirm button) — a consequential action gets a
+  consequential interaction. Status states beyond `live`
   require the H4 driver to ship the PR #40 extensions
   (`suspended`/`waking` + async `dial()`); until then the panel shows
   `provisioning`/`live` only and says nothing about suspend.
@@ -278,14 +319,22 @@ never render a panel whose substrate doesn't exist.
 ## 7. Endpoint surface (control plane, pre-signup public set)
 
 The waitlist-era control plane exposes exactly these public endpoints
-(besides the confirm page, §4.3); everything else is operator-side:
+(the confirm page included); everything else is operator-side:
 
 | endpoint | method | notes |
 |---|---|---|
 | `/waitlist/form` | POST | path-B form intake; honeypot/time-trap; per-IP limit; validated rows only (§4.2) |
 | `/waitlist/confirm` | GET / POST | GET renders, POST confirms; token as form field on POST (§4.3) |
-| `/waitlist/forget` | GET / POST | signed forget-me link from every email footer; honored ≤7d with confirmation sent (`WAITLIST_OPERATIONS.md` §5, PR #68) |
+| `/waitlist/forget` | GET / POST | signed forget-me link from every email footer; honored ≤7d with confirmation sent (`WAITLIST_OPERATIONS.md` §5, PR #68). GET renders only — **never changes state**; POST performs the deletion. See below. |
 | `/go/selfhost` | GET | first-party redirect to the repo URL, `src=selfhost` counted in our log (§4.1) |
+
+**`/waitlist/forget` GET/POST split** (the §4.3 pattern, with the same
+mail-scanner threat model — a scanner fetching the forget link must not
+delete data): GET renders a forget-confirmation page with the masked owner
+line (same first-3-chars rule as §4.3), a plain "this deletes your waitlist
+entry" line, and a confirm button; POST performs the deletion and renders
+"forgotten"; a re-click after deletion renders the already-forgotten
+rendering verbatim. No state change on GET.
 
 **Not exposed:** no unauthenticated position lookup (enumeration oracle —
 `WAITLIST_OPERATIONS.md` §6, PR #68); queue position is disclosed only
@@ -318,7 +367,9 @@ checklist, re-run at build time — docs drift).
 ## 9. Honesty compliance notes
 
 - `POSITIONING.md` anti-claims hold on every surface: no
-  persistence-uniqueness claim, the sentinel is unnamed, no hosted
+  persistence-uniqueness claim, the sentinel is never presented as shipped
+  (named as future or not at all — the §3 hosting line is infra-spec, not
+  customer copy), no hosted
   pricing/tiers/free-tier wording anywhere — including the dashboard's
   plan panel (tiers land with the launch; until then the panel shows the
   decided shape, not numbers).
