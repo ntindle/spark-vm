@@ -1194,7 +1194,9 @@ def job_status(job, slug):
         "progress_age_s": progress_age,
         "dir_bytes": dir_size(job_dir(slug)),
         "elapsed_h": (time.time() - _num(job.get("started_at"), time.time())) / 3600,
-        "budget_hours": job.get("budget_hours"),
+        # Issue #23 B6: budget_hours is agent-writable (job.json); coerce at the
+        # source so the terminal render below can never carry escapes.
+        "budget_hours": _num(job.get("budget_hours"), 8),
     }
 
 
@@ -1522,7 +1524,7 @@ def cmd_watch(args):
 
         if st["elapsed_h"] > (_num(job.get("budget_hours"), 8) or 8):
             events.append({"job": slug, "signal": "budget-exceeded",
-                           "detail": f"{st['elapsed_h']:.1f}h > {job.get('budget_hours')}h budget (notify only)"})
+                           "detail": f"{st['elapsed_h']:.1f}h > {_num(job.get('budget_hours'), 8)}h budget (notify only)"})
 
         # Thrash heuristic: bytes growing, no progress heartbeat, no diff change.
         # The worktree is re-derived from the slug: job["worktree"] is

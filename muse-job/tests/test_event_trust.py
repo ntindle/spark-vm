@@ -1243,6 +1243,12 @@ def test_status_sinks_strip_terminal_escapes(cli, capsys):
     import argparse as _argparse
     job = make_job(cli)
     job["state"] = "active\r\x1b[2KFAKE-JOBSTATE"
+    # The budget line only renders when PROGRESS.md exists; budget_hours is
+    # agent-writable job.json and used to interpolate raw (sec round 2).
+    job["budget_hours"] = "8\r\x1b[2KFAKE-BUDGET"
+    jd = cli.job_dir(job["slug"])
+    with open(os.path.join(jd, "PROGRESS.md"), "w") as f:
+        f.write("# progress\n")
     _write_job_json(cli, job)
     os.makedirs(cli.EVENTS_DIR, exist_ok=True)
     forged = {"event": "turn\r\x1b[2KFAKE-EVENT", "state": "done\rFAKE-STATE",
@@ -1259,6 +1265,10 @@ def test_status_sinks_strip_terminal_escapes(cli, capsys):
     assert "\r" not in out and "\x1b" not in out
     for marker in ("FAKE-EVENT", "FAKE-STATE", "FAKE-JOBSTATE", "FAKE-STATUS"):
         assert marker in out, f"sanitized text should still show ({marker})"
+    # budget_hours is coerced to a number at the source: the hostile string
+    # renders as the default 8, with no raw bytes and no FAKE-BUDGET text.
+    assert "FAKE-BUDGET" not in out
+    assert "/ budget 8h" in out
 
 
 def test_list_sanitizes_job_state(cli, capsys):
