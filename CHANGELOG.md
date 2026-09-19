@@ -37,7 +37,8 @@ This changelog only works if entries land with the change, not after it:
 ### Added
 - Changelog ritual: this `CHANGELOG.md` (Keep a Changelog format), the
   per-PR entry requirement in `CONTRIBUTING.md`, and release-time rollover
-  in `docs/VERSIONING.md` (PR number to be filled when the PR opens)
+  in `docs/VERSIONING.md`
+  ([#65](https://github.com/ntindle/spark-vm/pull/65))
 - Approval pages rebuilt mobile-friendly: the pending list auto-refreshes,
   Approve is a two-tap confirm safe against double-taps, and the answered
   page keeps the 100 most recent ([#20](https://github.com/ntindle/spark-vm/pull/20),
