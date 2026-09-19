@@ -178,7 +178,10 @@ spark-vm hosted waitlist — one click confirms this address."
 **Reminder (DRAFT):** one reminder at +7 days, same link (fresh token if
 the old one is within 7 days of expiry). The reminder carries the queue
 position (§7) — the nudge is the highest-leverage email in the funnel, so
-it gets the full draft:
+it gets the full draft. Opener split by path like the confirm email —
+Path A: "Your agent put this address on the spark-vm hosted waitlist.";
+Path B: "You asked to join the spark-vm hosted waitlist with this
+address.":
 
 > Subject: Reminder: your spark-vm waitlist spot is waiting on one click
 >
@@ -296,8 +299,8 @@ from the decided pricing, never templated in advance):
 > and put a card on file. Your box is a real computer — files, jobs, and
 > the desktop persist.
 >
-> You're #N in line — this invite expires in 14 days. After that your
-> spot goes to the next entry in line.
+> You held #N in line — this invite expires in 14 days. After that it
+> rolls to the next entry in line.
 
 **Expiry:** 14 days; expired invites roll the slot to the next confirmed
 entry and the expired entry rejoins `confirmed` at the back of the queue
