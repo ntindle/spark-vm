@@ -43,14 +43,12 @@ edited by Docker at any time):
   vulnerability where a malicious sandbox could hijack another sandbox's
   OAuth login by pre-claiming its callback port."*
 - Both CVEs were disclosed on 2026-09-15, **eight days after the fix
-  shipped** in 0.42.0 (the disclosure date is reported by third-party
-  security press, e.g.
+  shipped** in 0.42.0 (reported by third-party security press, e.g.
   [realhacker.news](https://realhacker.news/critical-docker-sandboxes-flaw-lets-malicious-guest-code-read-and-modify-macos-host-files/);
   the CVE records themselves were not readable on cve.org directly at
-  write time). Disclosure note: our midday competitor watch
-  (`docs/COMPETITOR_WATCH_2026-09-19_MIDDAY.md`) recorded third-party
-  reads that the 0.42.0 notes named neither CVE; read directly on
-  docs.docker.com on 2026-09-19, the notes now name both verbatim.
+  write time). Disclosure note: third-party reads found the 0.42.0
+  notes named neither CVE as of 2026-09-17 (same article); read directly
+  on docs.docker.com on 2026-09-19, the notes now name both verbatim.
   The version number is the signal — release-note prose lagged the fix,
   and the fix preceded the CVE.
 - Third-party press credited Oren Yomtov of accomplish.ai with finding
