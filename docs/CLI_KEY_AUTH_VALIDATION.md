@@ -79,10 +79,10 @@ box state ever touched was the throwaway fakehome (deleted).
   the inference proxy is header-only by construction (finding 31:
   prompt page content must never traverse credential insertion).
 - **F5 — No OAuth credential is consulted at inference time when
-  `META_API_KEY` is set.** The runs made their requests without
-  consulting `auth.json` (`muse login --help`: *"META_API_KEY always
-  takes priority over the account login"*; no browser code-approval flow
-  was triggered). Untested: behavior with `~/.config/muse/auth.json`
+  `META_API_KEY` is set.** The runs made their requests with no evidence
+  the OAuth credential was used (`muse login --help`: *"META_API_KEY
+  always takes priority over the account login"*; no browser
+  code-approval flow was triggered). Untested: behavior with `~/.config/muse/auth.json`
   entirely absent — the experiment ran with the operator's `auth.json`
   present-but-unconsulted. The tenant image must prove the absent-file
   case: require the R2 `<harness-auth-probe>` (§5) to run on a golden
