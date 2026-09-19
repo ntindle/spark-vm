@@ -2,7 +2,7 @@
 
 **Status:** design doc — implements H8's filing step (file the shape before
 marketing claims anything about teams). Companion to backlog H8 (filed from
-the competitor pass, PR #26) and `HOSTED_GAP_ANALYSIS.md` (which names it).
+the competitor pass, PR #26) and `docs/HOSTED_GAP_ANALYSIS.md` (which names it).
 
 **Path convention:** all paths are from the repo root (`muse-job/` holds the
 job-runner CLI).
