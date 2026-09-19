@@ -303,6 +303,73 @@ def test_snapshot_and_rollback(tmp_path):
     assert (sysd / "swap-proxy.service").read_text() == "OLD UNIT"
 
 
+def test_restore_absent_branch_skips_unstatable_paths(tmp_path):
+    """restore_snapshot must not fail on ABSENT entries it cannot stat.
+
+    Regression (CI on #39): the manifest carries literal system paths
+    (/etc/sudoers.d/swapd, the CA bundle) recorded ABSENT; on the CI runner
+    (non-root) their parent dirs are not stat-able, so `rm -f` died with
+    Permission denied on a file that was never there and the whole rollback
+    reported failure. restore_snapshot now checks existence first (through
+    sudo_run, honoring the same privilege the removal would use) and skips
+    what it cannot see. In production the timer runs privileged, so the check
+    sees exactly what the removal would touch — no behavior change there.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("EACCES-on-stat only manifests for unprivileged users")
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    live = tmp_path / "live"
+    live.mkdir()
+    doomed = live / "doomed"
+    doomed.write_text("x")
+    blind = tmp_path / "blind"
+    blind.mkdir()
+    blind.chmod(0o000)
+    try:
+        (snap / "MANIFEST").write_text(
+            "ABSENT %s\nABSENT %s/ghost\n" % (doomed, blind))
+        r = source_and("restore_snapshot %s" % snap,
+                       env_extra={"UPDATER_STATE_DIR": str(tmp_path),
+                                  "SKIP_SUDO": "1",
+                                  "AUTO_DEPLOY_NO_MAIN": "1"})
+        assert r.returncode == 0, r.stdout + r.stderr
+        # the present-but-absent-at-snapshot file must still be removed —
+        # the fix must not become a blanket skip of the ABSENT branch
+        assert not doomed.exists()
+    finally:
+        blind.chmod(0o755)
+
+
+def test_restore_absent_branch_removes_dangling_symlink(tmp_path):
+    """A dangling symlink at an ABSENT-recorded path must still be removed.
+
+    Guard for the stat-check fix: `test -e` is false for dangling symlinks,
+    so the existence gate needs the `test -L` disjunct — otherwise rollback
+    would leave a deploy-created dangling symlink (e.g. in /etc/sudoers.d/)
+    in place, regressing the old unconditional `rm -f` coverage. `rm -f`
+    unlinks only the symlink, never its target.
+    """
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    live = tmp_path / "live"
+    live.mkdir()
+    target = live / "real-target"
+    target.write_text("x")
+    link = live / "link"
+    link.symlink_to(target)
+    (snap / "MANIFEST").write_text("ABSENT %s\n" % link)
+    target.unlink()  # dangle the link after recording it
+    assert not link.exists() and os.path.islink(link)
+    r = source_and("restore_snapshot %s" % snap,
+                   env_extra={"UPDATER_STATE_DIR": str(tmp_path),
+                              "SKIP_SUDO": "1",
+                              "AUTO_DEPLOY_NO_MAIN": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not os.path.islink(link), "dangling symlink must be unlinked"
+    assert "removing" in r.stdout + r.stderr
+
+
 # --- health checks -------------------------------------------------------------
 
 def test_tcp_ok_detects_listener():

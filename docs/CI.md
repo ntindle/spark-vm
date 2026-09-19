@@ -7,7 +7,7 @@ against `main`, and on manual `workflow_dispatch` runs.
 |---|---|
 | `python-tests` | pytest suites: `proxy/` (swap addon incl. `test_round6.py`, grant writer), `confirm/` (confirmd), `deploy/` (auto-deploy), `muse-job/tests` (event trust). Installs `shellcheck` via apt first — `test_auto_deploy.py::test_scripts_syntax` gates on shellcheck *warnings* and must not depend on whatever the runner image happens to carry. |
 | `shellcheck` | shellcheck at `--severity=error` over every `*.sh` (gates on real breakage, not style) |
-| `markdown-links` | lychee checks every link in every `*.md` (`--exclude-loopback`: docs reference localhost service addresses that can never resolve on a runner). Mail links are excluded by lychee's default in current versions — do not pass `--exclude-mail`; the flag was removed upstream and fails the step. |
+| `markdown-links` | lychee checks every link in every `*.md` (`--exclude-loopback`: docs reference localhost service addresses that can never resolve on a runner; `--exclude` for the three bot-blocking hosts — medium.com, businesswire.com, globenewswire.com — see the local-run block below). Mail links are excluded by lychee's default in current versions — do not pass `--exclude-mail`; the flag was removed upstream and fails the step. |
 | `png-check` | Playwright screenshots example.com (`scripts/pw-test.py`) and `scripts/png-check.py` validates the PNG signature/dimensions |
 
 # replicate the CI jobs locally before opening a PR:
@@ -27,7 +27,16 @@ shellcheck --severity=error $(git ls-files '*.sh')
 # NOTE: --exclude-mail does NOT exist in current lychee (removed upstream;
 # mail links are excluded by default). --exclude-loopback keeps docs'
 # localhost service references (cred-ui, proxy) from failing the run.
-lychee --no-progress --exclude-loopback '**/*.md'
+# medium.com, businesswire.com, globenewswire.com are excluded at host level:
+# they block automated fetchers (Medium 403s all bots; the newswires reject
+# lychee's HTTP client) — false positives, not broken links. Host-level, not
+# per-URL: any new link from these hosts would trip the same bot blocks, so
+# the exclusion has to cover the whole host. When ADDING a link from one of
+# these hosts, open it in a real browser (they serve browsers fine) and
+# confirm the page loads and matches the headline you cite — a browser 404
+# means the link is genuinely broken: fix the link, don't extend the
+# exclusion. Last hand-verified 2026-09-19.
+lychee --no-progress --exclude-loopback --exclude 'https?://(www\.)?medium\.com/.*' --exclude 'https?://(www\.)?businesswire\.com/.*' --exclude 'https?://(www\.)?globenewswire\.com/.*' '**/*.md'
 
 # PNG smoke test (same scripts CI runs; --with-deps handles OS deps)
 pip install playwright && python3 -m playwright install --with-deps chromium

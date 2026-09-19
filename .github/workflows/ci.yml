@@ -77,11 +77,29 @@ jobs:
         # default); passing it fails the step with "unexpected argument".
         # --exclude-loopback: docs reference localhost service addresses
         # (cred-ui, proxy) that can never resolve on a CI runner.
+        # Bot-blocking hosts (2026-09-19, CI on #39): medium.com 403s every
+        # automated fetcher, and businesswire.com / globenewswire.com reject
+        # lychee's HTTP client (HTTP/2 protocol errors) — the flagged URLs
+        # were all hand-verified live that day, so these are false positives,
+        # not broken links. Excluded at host level (not per-URL): new links
+        # from these hosts trip the same bot blocks, so the exclusion must
+        # cover the whole host. When adding a link from one of these hosts,
+        # open it in a real browser and confirm the page loads and matches
+        # the cited headline; a browser 404 means the link is genuinely
+        # broken — fix the link, don't extend the exclusion.
+        # BACKSLASH NOTE: this string is YAML double-quoted, so the two-char `\\`
+        # in this file reaches the action as a single `\`; the action evals
+        # its args through bash single quotes (which pass backslashes
+        # through literally), so lychee finally sees `\.` (regex: literal
+        # dot). Do NOT "fix" these to `\\\\` — that
+        # makes the regex demand a literal backslash and silently disables
+        # all three excludes. (Backslash counts are easy to misread through
+        # tool display escaping — verify with `od -c`, not by eye.)
         # SHA-pinned (e7477775783ea5526144ba13e8db5eec57747ce8, v2.9.0) so a
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
