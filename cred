@@ -215,7 +215,7 @@ def parse_placement(spec):
         if kind in ("custom_header", "query_param") and re.match(
                 r"^[A-Za-z0-9_.-]+$", value or ""):
             return {kind: value}
-    raise CredentialError("invalid placement %r \u2014 " + PLACEMENT_USAGE % (spec,))
+    raise CredentialError(("invalid placement %r \u2014 " + PLACEMENT_USAGE) % (spec,))
 
 
 def cmd_register(args):
