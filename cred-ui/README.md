@@ -21,7 +21,7 @@ It listens on **127.0.0.1:18740** only. Reach it over an SSH tunnel:
 ssh -L 18740:127.0.0.1:18740 ntindle@spark-vm
 ```
 
-Then open http://127.0.0.1:18740 in a browser.
+Then open `http://127.0.0.1:18740` in a browser.
 
 ## What it does
 
