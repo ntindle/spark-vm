@@ -469,14 +469,29 @@ class SwapAddonTests(unittest.TestCase):
         a = make_addon()
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "x"
-            p.write_text("token=abc=def\n")
+            p.write_text("token=abc=def")
             self.assertEqual(a._load_secret_file(p), "token=abc=def")
             p.write_text("#hsurr:multi\nuser=jdoe\npassword=x\n")
             self.assertEqual(a._load_secret_file(p),
                              {"user": "jdoe", "password": "x"})
             # no marker, no entries: single value even with '=' inside
-            p.write_text("user=jdoe\npassword=x\n")
+            p.write_text("user=jdoe\npassword=x")
             self.assertEqual(a._load_secret_file(p), "user=jdoe\npassword=x")
+
+    def test_issue88_single_value_read_is_verbatim(self):
+        """#88: the read path must return the stored bytes exactly. Every
+        supported store path chomps one trailing newline at write time, so
+        whatever is in the file IS the intended value — a read-side strip()
+        corrupts secrets that legitimately start or end with whitespace."""
+        a = make_addon()
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x"
+            # legitimately trailing newlines survive the read
+            p.write_text("tok\n\n")
+            self.assertEqual(a._load_secret_file(p), "tok\n\n")
+            # legitimately leading/trailing spaces survive the read
+            p.write_text(" tok ")
+            self.assertEqual(a._load_secret_file(p), " tok ")
 
     def test_bug_register_does_not_break_single_value_secret(self):
         """REVIEW item 35 (regression): `cred register <name> --host <h>`

@@ -17,6 +17,7 @@ from dynamic_credentials import (
     DynamicCredentialError,
     dynamic_credential_entry,
 )
+import fill_secret
 
 
 class NameValidationTests(unittest.TestCase):
@@ -51,6 +52,46 @@ class NameValidationTests(unittest.TestCase):
         for bad in (None, 123, ["x"], {"n": "x"}):
             with self.assertRaises(DynamicCredentialError, msg=repr(bad)):
                 dynamic_credential_entry(bad)
+
+
+class ReadValueVerbatimTests(unittest.TestCase):
+    """#88: _read_value must return the stored bytes exactly — no strip().
+
+    Every supported store path chomps one trailing newline at write time,
+    so the file contents ARE the intended value. Stubs subprocess.run (the
+    sudo cat); no real secrets, no sudo needed."""
+
+    def _read(self, stored: bytes) -> str:
+        class Proc:
+            returncode = 0
+            stdout = stored
+        real_run = fill_secret.subprocess.run
+        fill_secret.subprocess.run = lambda *a, **k: Proc()
+        try:
+            return fill_secret._read_value("gh", "access_token")
+        finally:
+            fill_secret.subprocess.run = real_run
+
+    def test_trailing_newlines_preserved(self):
+        self.assertEqual(self._read(b"tok\n\n"), "tok\n\n")
+
+    def test_leading_and_trailing_spaces_preserved(self):
+        self.assertEqual(self._read(b" tok "), " tok ")
+
+    def test_plain_value_unchanged(self):
+        self.assertEqual(self._read(b"tok"), "tok")
+
+    def test_missing_credential_raises(self):
+        class Proc:
+            returncode = 1
+            stdout = b""
+        real_run = fill_secret.subprocess.run
+        fill_secret.subprocess.run = lambda *a, **k: Proc()
+        try:
+            with self.assertRaises(DynamicCredentialError):
+                fill_secret._read_value("gh", "access_token")
+        finally:
+            fill_secret.subprocess.run = real_run
 
 
 if __name__ == "__main__":

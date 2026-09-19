@@ -519,7 +519,12 @@ class SwapAddon:
             return None
         lines = [l for l in text.splitlines() if l.strip()]
         if not lines or lines[0].strip() != MULTI_MARKER:
-            return text.strip()
+            # Verbatim, never stripped (#88): every supported store path
+            # chomps exactly one trailing newline at write time (`cred set`
+            # stdin, cred-ui paste), so the stored bytes ARE the intended
+            # value. A read-side strip() corrupts secrets that legitimately
+            # start/end with whitespace (auth failures on swapped requests).
+            return text
         values = {}
         for lineno, line in enumerate(lines[1:], start=2):
             m = ENTRY_LINE_RE.match(line)

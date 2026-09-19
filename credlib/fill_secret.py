@@ -56,7 +56,12 @@ def _read_value(credential_name, entry_name):
     # single whole secret, even when they look like k=v lines (e.g. a base64
     # token ending in "==").
     if not lines or lines[0].strip() != MULTI_MARKER:
-        return text.strip()
+        # Verbatim, never stripped (#88): every supported store path chomps
+        # exactly one trailing newline at write time (`cred set` stdin,
+        # cred-ui paste), so the stored bytes ARE the intended value. A
+        # read-side strip() corrupts secrets that legitimately start/end
+        # with whitespace (e.g. stored "a\n" reads back as "a").
+        return text
     parsed = {}
     for line in lines[1:]:
         m = ENTRY_LINE_RE.match(line)
