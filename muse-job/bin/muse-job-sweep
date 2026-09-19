@@ -72,8 +72,14 @@ def active_session_uuids():
         try:
             with open(jf) as f:
                 d = json.load(f)
-            if d.get("state") in ("active", "blocked") and d.get("session_uuid"):
-                uuids.add(d["session_uuid"])
+            sid = d.get("session_uuid")
+            # Issue #23 H1: a planted non-string session_uuid (dict/list)
+            # used to raise TypeError in the set comprehension below and
+            # kill the entire sweep run (not per-job contained) -- a
+            # disk-guardian DoS. Filter to non-empty strings.
+            if (d.get("state") in ("active", "blocked")
+                    and isinstance(sid, str) and sid):
+                uuids.add(sid)
         except Exception:
             continue
     return uuids

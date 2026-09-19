@@ -246,6 +246,19 @@ NEVER_SWAP_HEADERS = frozenset({"referer", "origin"})
 
 log = logging.getLogger(__name__)
 
+
+def _open_audit_log():
+    """Open the audit log for append, creating it 0600 if missing.
+
+    Plain Path.open("a") inherits the process umask, so the first
+    audit line written under mitmdump's/systemd's default 022 left
+    swap.log world-readable — it carries credential names, hosts,
+    methods, path prefixes, and egress IPs. os.open's mode applies
+    only at creation; it never widens an existing file.
+    """
+    fd = os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    return os.fdopen(fd, "a", encoding="utf-8")
+
 # --- spark-vm version stamping (docs/VERSIONING.md) ---
 # Single-source repo VERSION: logged at addon load so the journal shows which
 # release is actually running. Best-effort — never break the addon on a bad
@@ -284,10 +297,15 @@ def _totp_code(seed, at=None):
 
 def _host_in_list(host, entries):
     """Match host against exact names or leading-dot subdomain entries,
-    the same shape dynamic_credentials.ensure_allowed_url takes."""
-    h = (host or "").lower().split(":")[0]
+    the same shape dynamic_credentials.ensure_allowed_url takes.
+
+    Trailing dots are stripped on both sides: DNS treats
+    "example.com." as identical to "example.com", so without this a
+    one-character suffix bypassed the ssrf.deny name entries (the
+    finding-47 self-peer guard)."""
+    h = (host or "").lower().split(":")[0].rstrip(".")
     for entry in entries or []:
-        e = str(entry).lower()
+        e = str(entry).lower().rstrip(".")
         if h == e or (e.startswith(".") and h.endswith(e)):
             return True
     return False
@@ -771,6 +789,14 @@ class SwapAddon:
                 continue
             prefix = g.get("path_prefix") or "/"
             norm = _normalize_path(path or "/")
+            if "%" in norm or ";" in norm or "\\" in norm:
+                # Same smuggling guard as the registry allowed_paths
+                # branch below (finding 42): after fixpoint decoding
+                # these can only be tricks for lenient servers (double-
+                # decode residue, path parameters, backslash
+                # separators). An evasive path matches no grant — hard
+                # refuse rather than trying the next grant.
+                return False, "path-not-allowed"
             if not _path_allowed(norm, [prefix]):
                 continue
             return True, ""
@@ -914,7 +940,7 @@ class SwapAddon:
         refusal: a secret is never released without a trail."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as f:
+            with _open_audit_log() as f:
                 f.write("ts=%s host=%s swapped=%s ip=%s\n"
                         % (ts, host, matched,
                            getattr(self, "_current_egress_ip", None) or "-"))
@@ -928,7 +954,7 @@ class SwapAddon:
         22): the binding verdict leaves a trail even when nothing leaks."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as f:
+            with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=hsurr:%s reason=%s ip=%s\n"
                         % (ts, host, name, reason,
                            getattr(self, "_current_egress_ip", None) or "-"))
@@ -943,7 +969,7 @@ class SwapAddon:
         and tests can stub it like them."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as f:
+            with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=%s reason=%s ip=%s\n"
                         % (ts, host, refused, reason,
                            getattr(self, "_current_egress_ip", None) or "-"))
@@ -957,7 +983,7 @@ class SwapAddon:
         an exfiltration attempt is visible in the log."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as f:
+            with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=authority-mismatch "
                         "authority=%s ip=%s\n"
                         % (ts, host, authority or "-",
@@ -1169,7 +1195,7 @@ class SwapAddon:
         verdict leaves a trail even though nothing was sent."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as f:
+            with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=egress reason=%s ip=%s\n"
                         % (ts, host, reason, ip))
         except OSError as e:
@@ -1507,16 +1533,45 @@ class SwapAddon:
                 new_text = new_text.replace(value, placeholder)
         return new_text
 
-    def response(self, flow):
-        """Scrub known secret values out of text responses from allowlisted
-        hosts (finding 4), replacing each with its placeholder. Images and
-        binary bodies are a stated residual risk, not a solved one.
+    def responseheaders(self, flow):
+        """Scrub response headers as soon as they arrive.
 
-        Finding 70: response HEADERS are scrubbed too. An allowlisted
-        host that echoes request headers (a /headers-style endpoint) or
-        returns the credential in a header (X-Subject-Token, Set-Cookie)
-        would otherwise hand the real value back through the driver's
-        header reads while the body is scrubbed.
+        mitmproxy forwards response headers to the client immediately,
+        while the body-scrubbing `response` hook only fires after the
+        whole body is buffered. A never-ending (streaming/SSE) response
+        from an allowlisted host would therefore deliver secret-bearing
+        headers (Set-Cookie, X-Subject-Token, an echoing /headers
+        endpoint) unscrubbed — the body hook never fires for a stream.
+        Header values are short, so there is no size cap to check here;
+        triples are computed once, not per header value. (Streaming
+        *bodies* remain a residual risk — filed as
+        https://github.com/ntindle/spark-vm/issues/92 — but headers no
+        longer depend on the body finishing.)
+        """
+        self._maybe_reload()
+        req = flow.request
+        host = req.pretty_host if req else ""
+        if not self._host_allowed(host):
+            return
+        resp = flow.response
+        if resp is None:
+            return
+        triples = self._secret_replacements()
+        for key in list(resp.headers.keys()):
+            if key.lower() in self._NEVER_SCRUB_RESPONSE_HEADERS:
+                continue
+            vals = resp.headers.get_all(key)
+            new_vals = [self._scrub_text_value(v, triples) for v in vals]
+            if new_vals != vals:
+                resp.headers.set_all(key, new_vals)
+
+    def response(self, flow):
+        """Scrub known secret values out of text response bodies from
+        allowlisted hosts (finding 4), replacing each with its
+        placeholder. Images and binary bodies are a stated residual
+        risk, not a solved one. Response *headers* are scrubbed in
+        `responseheaders` (they must not wait for the body); this hook
+        handles the body only.
 
         Finding 70b: framing headers (content-length, transfer-encoding)
         are NEVER scrubbed. A whole-token TOTP triple could otherwise
@@ -1535,20 +1590,10 @@ class SwapAddon:
         resp = flow.response
         if resp is None:
             return
-        # Header scrubbing first: header values are short, so there is
-        # no size cap to check here. Triples are computed once, not per
-        # header value.
-        triples = self._secret_replacements()
-        for key in list(resp.headers.keys()):
-            if key.lower() in self._NEVER_SCRUB_RESPONSE_HEADERS:
-                continue
-            vals = resp.headers.get_all(key)
-            new_vals = [self._scrub_text_value(v, triples) for v in vals]
-            if new_vals != vals:
-                resp.headers.set_all(key, new_vals)
         if not self._is_scrubbable_content_type(
                 resp.headers.get("content-type", "")):
             return
+        triples = self._secret_replacements()
         # finding 40c: check the byte size BEFORE decoding the body
         if len(resp.content or b"") > self._MAX_SCRUB_BYTES:
             return
