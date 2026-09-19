@@ -11,7 +11,8 @@ The `meta` archetype is the rotation auditor: it reviews both loops, names
 what is starved, over-served, or missing, and proposes concrete rotation
 changes. Findings continue the numbering of the two previous audits
 (F1–F7 in `docs/LOOP_ROTATION_AUDIT.md`, 2026-09-18; F8–F14 in
-`docs/LOOP_ROTATION_AUDIT_2026-09-19.md`, 2026-09-19 ~01:25 CDT).
+`docs/LOOP_ROTATION_AUDIT_2026-09-19.md`, 2026-09-19 ~01:25 CDT — unmerged,
+PR #67).
 
 Scope of this audit: both loops' runs from 2026-09-19 ~01:25 CDT (the last
 audit) through ~15:25 CDT — a full third build-loop cycle (9 runs:
