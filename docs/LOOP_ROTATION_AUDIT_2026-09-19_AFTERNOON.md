@@ -54,7 +54,7 @@ Strategy loop (9 logged turns + 1 unlogged concurrent turn):
 | research ~09:54 | PR #101 (open) — org-policy vendor landscape (H16 research half) | **hosted-product** |
 | competitor ~10:54 | PR #102 (open) — midday watch (Docker escape-week deepens) | open-source |
 | marketing ~11:54 | PR #109 (merged `ee6a733`) — demo asset 2: "secrets the agent never sees" GIF | open-source |
-| sales 12:54 (unlogged, concurrent) | PR #111 (open) + **direct push `b3f54bf` to main** (see F19) | **hosted-product** |
+| sales 12:54 (unlogged, concurrent) | PR #111 (open) — initial spec on the branch, no RUNLOG entry (see F19) | **hosted-product** |
 | sales 13:54 (+15:35 round 3) | PR #111 review rounds 2–3: unanimous final SHIP IT, merge-blocked on #68 → #99 | **hosted-product** |
 
 Merges in window: **12 PR merges — 11 loop-executed + 1 operator**
@@ -123,12 +123,12 @@ window: surveyed 19 PRs, merged the 4 oldest-first with merge-record
 comments, recorded the #66-on-#59 stacking topology, used update-branch
 to green #66. The queue is owned now, not dormant.
 
-**F14 — RETIRED as a question, QUALIFIED in practice.** The standing
-merge rule has an exercised path — 7 loop merges under live green CI
-this window, all on clean mergeable + documented unanimous SHIP IT. But
-the same window contains a demonstrated bypass (F19): the rule is real
-when followed, and unenforced against unlogged turns pushing outside the
-branch/PR flow.
+**F14 — RETIRED.** The standing merge rule has an exercised path:
+7 loop merges under live green CI this window, all on clean mergeable +
+documented unanimous SHIP IT. (The round-1 draft qualified this with a
+suspected direct-push bypass; Product's round-2 evidence showed the
+suspected commit went to its strategy branch through the normal flow —
+see F19.)
 
 **F15 — Sign-off documentation meets dependency order.** PR #111 has
 unanimous final SHIP IT (Product/Design/Docs, 3 rounds), 4/4 green CI,
@@ -169,25 +169,23 @@ hasn't happened. The corpus convention ("watch docs are delta-only")
 assumes a consolidation pass the rotation hasn't scheduled. (P15 makes
 the next competitor turn that pass — a one-shot, not a standing cap.)
 
-**F19 — NEW: direct-push bypass by an unlogged turn.** Commit
-`b3f54bf` ("docs: H15 signup web UI + human dashboard build spec",
-357-line new file `docs/HOSTED_SIGNUP_WEB_UI.md`) landed **directly on
-main at 13:11 CDT** — no PR, no merge commit, no recorded adversarial
-review — authored `ntindle@users.noreply.github.com`, the loop's own
-Git-Data-API push identity, from the unlogged concurrent 12:54 sales
-turn (branch name `strategy/h15-waitlist-page-build-20260919-1254`;
-PR #111 created one minute later). The content was reviewed *after* the
-push (13:54–16:05, unanimous SHIP IT on the final code), so this is a
-sequencing violation, not an unreviewed ship — but at push time the
-spec had zero review, and the commit message names the #68 → #99 → #111
-dependency order the push itself ignored. Consequences live on main
-*now*: main carries the **pre-review version** of the spec while PR #111
-carries the reviewed final (`b4f142fe`) — the file updates only when
-#111 merges. The failure mode is structural: an unlogged turn operated
-outside every control (no RUNLOG entry, no branch/PR flow), and the
-loop's push tooling allowed a main-branch write. (P18 hardens the
-tooling; the unlogged-turn hazard is noted for the strategy loop's
-own discipline.)
+**F19 — Unlogged turn leaves a RUNLOG gap (and this audit misread the
+commit).** The 12:54 sales turn left no RUNLOG entry of its own — the only
+record is the 13:54 turn's reference and the branch name
+`strategy/h15-waitlist-page-build-20260919-1254`. Its actual git behavior
+was normal flow: commit `b3f54bf` (357-line initial H15 spec) went to the
+strategy branch (branch CreateEvent 5 seconds after the commit timestamp;
+the file is absent on `origin/main`), and PR #111 opened a minute later.
+The round-1 draft of this audit asserted a direct-to-main bypass from the
+observation "direct child of `bdac62a`" — true but non-discriminating,
+since a branch forked from the main tip has the same parent; both the
+worker and the Architecture round-1 reviewer fell for it. Product's
+round-2 evidence (events API, `ls-tree` on `origin/main`) corrected it,
+and the correction is recorded here rather than silently dropped. Two
+lessons: (1) turns must log their runs — an unlogged turn is invisible to
+the next auditor; (2) verify the ref, not the parent, before asserting
+where a commit landed (the F17 pattern: a conclusive-looking observation
+that doesn't discriminate).
 
 ## Proposals (for the loops to adopt — not applied by this audit)
 
@@ -235,11 +233,13 @@ form no approval can stall: with 48 open issues and the surge rule
 firing every turn, fix capacity goes to closure first. Adoptable by the
 next fix turn directly; recorded in BACKLOG.md.
 
-**P18 — Push tooling refuses main-branch writes (`dx`).** The loop's Git
-Data API push helpers must reject any ref update targeting `main`
-(allowlist: `hourly/*`, `strategy/*`, `draft/*` branches only) — the
-F19 bypass becomes structurally impossible instead of merely
-prohibited. Next `dx` turn implements + tests it.
+**P18 — Push tooling refuses main-branch writes (`dx`, defense in
+depth).** The loop's Git Data API push helpers should reject any ref
+update targeting `main` (allowlist: `hourly/*`, `strategy/*`, `draft/*`
+branches only). No incident motivates this — the suspected F19 bypass
+turned out to be normal branch flow — but the guard is cheap and makes
+the playbook-prohibited path structurally impossible. Next `dx` turn
+implements + tests it.
 
 ## Adoption checklist (for the next loops, in order)
 
@@ -262,12 +262,13 @@ prohibited. Next `dx` turn implements + tests it.
 The loop is healthier than at the last audit: CI is real and green, the
 merge rule has an exercised path (7 loop merges under live green CI),
 the repo turn owns the queue, and one-shot proposals converge
-(P8/P9/P11 done). Three things need attention: **(1)** the F19 bypass —
-an unlogged turn pushed a 357-line spec straight to main, and main now
-carries the pre-review version until #111 merges (P18 hardens the
-tooling); **(2)** the issue queue (+26 net this window) with fix
-capacity aimed at hygiene, not closure (P17); **(3)** the advisory
-machinery's own convergence — standing-rule proposals accumulate while
-user-approval items stall without a delivery path (P12 now has one;
-F11 is a user ruling, not a loop defect). Two user decisions filed in
-NEEDS_USER.md this run (P12 bundle, F11 tilt ruling).
+(P8/P9/P11 done). Three things need attention: **(1)** the issue queue
+(+26 net this window) with fix capacity aimed at hygiene, not closure
+(P17); **(2)** the advisory machinery's own convergence — standing-rule
+proposals accumulate while user-approval items stall without a delivery
+path (P12 now has one; F11 is a user ruling, not a loop defect);
+**(3)** loop logging discipline — the 12:54 turn left no RUNLOG entry
+(F19), and this audit's own round-1 misread of `b3f54bf` (corrected by
+Product in round 2) is a standing reminder to verify refs, not parents.
+Two user decisions filed in NEEDS_USER.md this run (P12 bundle, F11
+tilt ruling).
