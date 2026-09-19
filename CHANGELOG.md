@@ -12,62 +12,100 @@ This changelog only works if entries land with the change, not after it:
 
 1. **Every PR that changes anything user- or operator-visible adds one or
    two bullets under `## [Unreleased]`**, in the right section
-   (`Added` / `Changed` / `Fixed` / `Security`), written for the person
-   running spark-vm, not the person who wrote the diff. Link the PR number.
-   Reviewers ask for the entry if it's missing (see `CONTRIBUTING.md`).
+   (`Added` / `Changed` / `Fixed` / `Security`). Write for the person
+   running spark-vm, not the person who wrote the diff — no file paths,
+   function names, or internal audit numbering — and link the PR number.
+   Reviewers request changes when the entry is missing: it's a merge gate,
+   not a suggestion (see `CONTRIBUTING.md`).
 2. **Trivial scope** (typo, single-line doc fix, formatting) doesn't need an
    entry; merge notes are enough.
 3. **At release time**, the release commit (the `VERSION` bump — see
    `docs/VERSIONING.md`, "Cutting a release") moves the whole
-   `## [Unreleased]` section into `## [x.y.z] - YYYY-MM-DD`, and adds the
-   compare links at the bottom of this file. No release has been cut yet,
-   so there are no compare links — the first release creates the first one.
-4. Docs are a first-class product here, so shipped docs land in `Added`
-   like features do. Loop research notes that stay in the agent workspace
-   (`agent_notes/`) are not repo changes and don't get entries.
+   `## [Unreleased]` section into `## [0.2.0] - YYYY-MM-DD` (pattern:
+   `## [x.y.z] - YYYY-MM-DD`), adds the compare links at the bottom of
+   this file, and leaves a fresh empty `## [Unreleased]` section behind
+   for the next PR.
+4. Docs are a first-class product here, so anything merged under `docs/`
+   gets an entry like a feature. Notes that never land in the repo — e.g.
+   the loop's working notes in its `agent_notes/` workspace (not part of
+   this repo) — don't get entries.
+5. **A revert is a change too**: the revert PR gets its own entry noting
+   the reversal, so the changelog reads forward in time.
 
 ## [Unreleased]
 
 ### Added
-- `confirmd` approval pages rebuilt mobile-friendly: auto-refreshing
-  pending list, tap-race-safe two-tap Approve, and an answered page capped
-  at the 100 newest (#20)
-- VAPID Web Push notifications for `confirmd` approvals: VAPID keygen,
-  Web Push (RFC 8030/8292/8291) sender with subscription store, per-approval
-  notify hook, push controls on the pending and approval pages, and
-  `--test-push` operator verification (`confirm/push.py`,
-  `docs/PUSH_NOTIFICATIONS.md`) (#48)
-- Version reporting everywhere: single `VERSION` source, `sparkvm_version()`
-  reader, startup stamps on `confirmd`/`swap_addon`/`cred-ui`, `GET
-  /api/version` on `confirmd` and `cred-ui`, `muse-job --version`
-  (#52)
-- `deploy/auto-deploy.sh`: unattended redeploy updater for live services —
-  the loop's merged code reaches the box without an operator pull (#29)
-- `muse-job`: session-lifecycle trust-boundary hardening (#43); event-trust
-  hardening (#19)
-- Hosted-product design docs: signup/onboarding identity-linking + provider
-  interface (#24); push-notification deployment guide; first-run activation
-  funnel; agent-sandbox adoption research; pre-seeded harness research;
-  beta-Muse first-run pilot protocol; hosted pricing thinking; hosted
-  vision-vs-repo gap analysis
-- Positioning + marketing docs: competitor analysis of agent VM/sandbox
-  offerings (Sep 2026); persistence-as-headline positioning; launch
-  announcement copy; README 30-second-scan clarity pass
-- Contributor hygiene: `CONTRIBUTING.md`, `SECURITY.md`, MIT `LICENSE`
-- CUA: `PANEL_SPEC.md` so anyone can build their own control panel, plus a
-  worked Blender example; `cua-bridge` tunnel-endpoint allowlist for the
-  SSH-forwarded path
+- Changelog ritual: this `CHANGELOG.md` (Keep a Changelog format), the
+  per-PR entry requirement in `CONTRIBUTING.md`, and release-time rollover
+  in `docs/VERSIONING.md` (PR number to be filled when the PR opens)
+- Approval pages rebuilt mobile-friendly: the pending list auto-refreshes,
+  Approve is a two-tap confirm safe against double-taps, and the answered
+  page keeps the 100 most recent ([#20](https://github.com/ntindle/spark-vm/pull/20),
+  fixes [#1](https://github.com/ntindle/spark-vm/issues/1))
+- Push notifications for approvals: get a push on your phone/desktop when an
+  approval is pending; the operator generates one keypair, you subscribe on
+  the pending page, and `--test-push` verifies delivery end to end
+  ([#48](https://github.com/ntindle/spark-vm/pull/48), closes
+  [#2](https://github.com/ntindle/spark-vm/issues/2))
+- One version everywhere: every component now reports the same `VERSION` —
+  `confirmd` and `cred-ui` at startup and on `/api/version`, `muse-job
+  --version` — so an operator can always answer "what's actually deployed?"
+  ([#52](https://github.com/ntindle/spark-vm/pull/52))
+- Unattended redeploy updater: merged code reaches the live services on its
+  own, with the deployed version recorded in the audit log and rollback
+  covered ([#29](https://github.com/ntindle/spark-vm/pull/29), fixes
+  [#22](https://github.com/ntindle/spark-vm/issues/22))
+- `muse-job` hardened against hostile agent output: session-lifecycle trust
+  boundary ([#43](https://github.com/ntindle/spark-vm/pull/43)) and
+  event-trust hardening ([#19](https://github.com/ntindle/spark-vm/pull/19),
+  fixes [#3](https://github.com/ntindle/spark-vm/issues/3))
+- Control-panel spec so anyone can build their own computer-control panel,
+  with a worked Blender example; the bridge allows the SSH-forwarded tunnel
+  endpoint ([`811920b`](https://github.com/ntindle/spark-vm/commit/811920b),
+  [`57f24f5`](https://github.com/ntindle/spark-vm/commit/57f24f5),
+  [`fc06cbb`](https://github.com/ntindle/spark-vm/commit/fc06cbb))
+- Hosted-product design docs: signup/onboarding identity linking with a
+  provider-agnostic provisioning interface
+  ([#24](https://github.com/ntindle/spark-vm/pull/24)); first-run activation
+  funnel ([#37](https://github.com/ntindle/spark-vm/pull/37)); agent-sandbox
+  adoption research ([#25](https://github.com/ntindle/spark-vm/pull/25));
+  pre-seeded harness research ([#51](https://github.com/ntindle/spark-vm/pull/51));
+  beta-Muse first-run pilot protocol ([#32](https://github.com/ntindle/spark-vm/pull/32));
+  hosted pricing thinking ([#30](https://github.com/ntindle/spark-vm/pull/30));
+  hosted vision-vs-repo gap analysis
+  ([#31](https://github.com/ntindle/spark-vm/pull/31))
+- Strategy and positioning docs: agent VM/sandbox competitor analysis
+  ([#26](https://github.com/ntindle/spark-vm/pull/26)); GPU path research for
+  the provider decision ([#40](https://github.com/ntindle/spark-vm/pull/40));
+  evening competitor-watch pass ([#44](https://github.com/ntindle/spark-vm/pull/44));
+  persistence-as-headline positioning
+  ([#28](https://github.com/ntindle/spark-vm/pull/28)); launch announcement
+  copy ([#36](https://github.com/ntindle/spark-vm/pull/36)); README
+  30-second-scan clarity pass ([#46](https://github.com/ntindle/spark-vm/pull/46))
+- Contributor hygiene: `CONTRIBUTING.md`, `SECURITY.md`
+  ([#58](https://github.com/ntindle/spark-vm/pull/58)), MIT `LICENSE`
+  ([`52960f0`](https://github.com/ntindle/spark-vm/commit/52960f0))
 
 ### Changed
-- Onboarding docs standardized on the `ntindle` deployment user (#35)
-- Agent identity is `spark`, not `ntindle`: `$HOME`-relative paths
-  everywhere, docs use `spark` as the example user
-- `scripts/push.sh` / `pull.sh` hardened: dry-run, preflight checks,
-  space-safe secret scan (#33)
+- Identity cleanup: deployment docs use the `ntindle` login account
+  ([#35](https://github.com/ntindle/spark-vm/pull/35)); separately, the
+  agent itself is `spark`, and every path in the repo is `$HOME`-relative
+  so docs never hardcode a username
+  ([`a8fd18d`](https://github.com/ntindle/spark-vm/commit/a8fd18d))
+- README rewritten around the bigger-computer idea, with the Spark
+  illustration ([`c09a65a`](https://github.com/ntindle/spark-vm/commit/c09a65a),
+  [`7e7ffea`](https://github.com/ntindle/spark-vm/commit/7e7ffea))
+- `push.sh` / `pull.sh` sync scripts: dry-run mode, preflight checks, and a
+  space-safe secret scan ([#33](https://github.com/ntindle/spark-vm/pull/33))
 
 ### Fixed
-- `muse-job` refuses to steer into a dead TUI pane (#45, fixes #4)
+- `muse-job` detects a dead terminal pane and refuses to steer into it
+  instead of typing into the void
+  ([#45](https://github.com/ntindle/spark-vm/pull/45), fixes
+  [#4](https://github.com/ntindle/spark-vm/issues/4))
 
 ### Security
-- Proxy hardening round: findings 70–75, 70b, 71b (#18)
-- Fixed critical + high findings from the security code review
+- Proxy hardening round
+  ([#18](https://github.com/ntindle/spark-vm/pull/18))
+- Fixed critical and high findings from the security code review
+  ([`dd382af`](https://github.com/ntindle/spark-vm/commit/dd382af))
