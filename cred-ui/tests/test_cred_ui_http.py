@@ -201,6 +201,8 @@ def test_snapshot_renders_placement_only(monkeypatch):
         lambda: {"gh": {
             "access_token": {"placement": "bearer_header",
                              "mystery": {"x": 1}},  # future dict key
+            "scrub": {"enabled": True},  # sibling dict with NO placement:
+            # must be omitted (old code leaked it as {"scrub": None})
             "allowed_hosts": ["api.github.com"],
         }},
     )
