@@ -87,9 +87,16 @@ Ubuntu 24.04 box on your tailnet running the spark-vm stack.
 ### Option A: you have Unraid
 
 In the Unraid web UI, create an Ubuntu 24.04 VM — 8 vCPU, 15 GB RAM,
-250 GB disk is what I run; 4 vCPU / 8 GB works if you're stingy. Then
-paste this on the VM — it creates the `ntindle` agent user if your
-install didn't, then switches to it:
+250 GB disk is what I run; 4 vCPU / 8 GB works if you're stingy. On the
+VM, run this one line first and type your install user's password when
+asked — it caches sudo so the paste below runs clean:
+
+```bash
+sudo -v
+```
+
+Then paste this — it creates the `ntindle` agent user if your install
+didn't, then switches to it:
 
 ```bash
 # passwordless sudo for the agent user
