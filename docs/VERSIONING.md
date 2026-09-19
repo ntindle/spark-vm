@@ -59,12 +59,16 @@ auto-deployer's rollback snapshots cover them: a rollback restores the old
 VERSION alongside the old code.
 
 A version-only change (bumping `VERSION` with no component edits) is claimed
-by the `proxy` component as an exact-file path (`"VERSION"` in
-`proxy_paths`). Bare (non-`/`-suffixed) entries match exactly — `docs/
-VERSIONING.md` does **not** match — so the updater redeploys the
-proxy-confirm unit and the new version takes effect. `cred-ui` runs from the
-working checkout and sees `VERSION` directly; `muse-job --version` reads the
-repo file.
+by the `proxy` AND `cred-ui` components as an exact-file path (`"VERSION"`
+in `proxy_paths` and `cred_ui_paths`). Bare (non-`/`-suffixed) entries match
+exactly — `docs/VERSIONING.md` does **not** match — so the updater redeploys
+the proxy-confirm unit plus cred-ui and the new version takes effect
+everywhere. (Exact-file entries may be claimed by more than one component;
+directory prefixes still must not overlap — see `test_manifest_no_path_overlap`.)
+When cred-ui's checkout subtree is synced, the root `VERSION` file travels
+with it, and rollback snapshots cover it: a rollback restores the old
+VERSION alongside the old code, so cred-ui never reports a version newer
+than its own checkout. `muse-job --version` reads the repo file.
 
 ## Cutting a release
 
@@ -73,9 +77,9 @@ repo file.
    a version bump and nothing else.
 2. Tag the commit: `git tag v0.2.0 && git push origin v0.2.0`.
 3. The auto-deployer's next tick sees the `VERSION` change, redeploys the
-   proxy-confirm unit, and records `to_version` in its audit log.
+   proxy-confirm unit plus cred-ui, and records `to_version` in its audit log.
 4. Verify: `auto-deploy.sh status` shows the new version; `confirmd`'s journal
-   and `/api/version` agree.
+   and `/api/version`, and cred-ui's `/api/version`, all agree.
 
 Never hand-edit `/home/swapd/VERSION` or the deployed copies — they are
 deployment outputs. If they disagree with the updater's `deployed-version`

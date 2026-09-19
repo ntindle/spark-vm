@@ -292,8 +292,18 @@ check_checkout_sync_ready() {
         log "  $c: uncommitted changes in $dest — refusing to overwrite (commit or stash first)"
         return 1
     fi
+    # Version stamping (docs/VERSIONING.md): the root VERSION file travels
+    # with every checkout sync, so it gets the same fail-closed treatment.
+    if [ -e "$WORKING_CHECKOUT/VERSION" ] && [ -n "$(git -C "$WORKING_CHECKOUT" status --porcelain -- VERSION)" ]; then
+        log "  $c: uncommitted changes in $WORKING_CHECKOUT/VERSION — refusing to overwrite (commit or stash first)"
+        return 1
+    fi
     if ! git -C "$UPDATER_REPO" cat-file -e "$new:$sub" 2>/dev/null; then
         log "  $c: subtree $sub not present at $new — FAIL CLOSED"
+        return 1
+    fi
+    if ! git -C "$UPDATER_REPO" cat-file -e "$new:VERSION" 2>/dev/null; then
+        log "  $c: VERSION not present at $new — FAIL CLOSED"
         return 1
     fi
     return 0
@@ -331,6 +341,19 @@ snapshot_component() {
             echo "CHECKOUT $c $sub" >>"$snapdir/MANIFEST"
         else
             echo "CHECKOUT-ABSENT $c $sub" >>"$snapdir/MANIFEST"
+        fi
+        # Version stamping (docs/VERSIONING.md): the root VERSION file is
+        # synced alongside the subtree (see install_component) — snapshot it
+        # too, or a rollback leaves the new VERSION under the old code.
+        vdest="$WORKING_CHECKOUT/VERSION"
+        if [ -e "$vdest" ]; then
+            mkdir -p "$snapdir/checkout-$(vpre "$c")" || {
+                log "ERROR: cannot create checkout snapshot dir for $c"; return 1; }
+            cp -a "$vdest" "$snapdir/checkout-$(vpre "$c")/" || {
+                log "ERROR: checkout VERSION snapshot of $vdest failed"; return 1; }
+            echo "CHECKOUT $c VERSION" >>"$snapdir/MANIFEST"
+        else
+            echo "CHECKOUT-ABSENT $c VERSION" >>"$snapdir/MANIFEST"
         fi
     fi
     return 0
@@ -396,6 +419,15 @@ install_component() {
         rm -rf "$WORKING_CHECKOUT/$sub" || return 1
         if ! git -C "$UPDATER_REPO" archive "$new" "$sub" | tar -x -C "$WORKING_CHECKOUT"; then
             log "  $c: subtree sync FAILED"
+            return 1
+        fi
+        # Version stamping (docs/VERSIONING.md): the component resolves the
+        # repo VERSION by walking up from the working checkout, so the root
+        # VERSION file must travel with the sync — a version-only deploy
+        # otherwise leaves it reporting the old release.
+        log "  $c: syncing VERSION from mirror@$new into $WORKING_CHECKOUT"
+        if ! git -C "$UPDATER_REPO" archive "$new" VERSION | tar -x -C "$WORKING_CHECKOUT"; then
+            log "  $c: VERSION sync FAILED"
             return 1
         fi
     fi
@@ -482,6 +514,17 @@ health_check() {
 
 # --- rollback driver -------------------------------------------------------------
 
+sync_version_from_deployed() {
+    # sync_version_from_deployed — re-derive the updater's deployed-version
+    # from the installed standalone VERSION file. Used after rollbacks, which
+    # restore the old installed files: the updater state must agree with
+    # what is actually on disk (docs/VERSIONING.md). Prints the new value.
+    # Sanitized: the deployed copy is swapd-writable and attacker-influenced.
+    local v; v="$(clean_version "$(cat "$SWAPD_HOME/VERSION" 2>/dev/null || echo unknown)")"
+    write_version "$v"
+    printf '%s' "$v"
+}
+
 do_rollback() {
     # do_rollback <snapdir> <old> <new> <failed-component> <phase>
     # Restore the snapshot, restart + health-check, mark the commit blocked
@@ -513,8 +556,7 @@ do_rollback() {
     printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
     # The restored snapshot reverted the deployed standalone files, so the
     # deployed version is whatever the restored VERSION file says.
-    local rbv; rbv="$(clean_version "$(cat "$SWAPD_HOME/VERSION" 2>/dev/null || echo unknown)")"
-    write_version "$rbv"
+    local rbv; rbv="$(sync_version_from_deployed)"
     audit 'deploy' ',"result":"rolled-back","from":"'"$old"'","to":"'"$new"'","to_version":"'"$rbv"'"'
     return 1
 }
@@ -766,8 +808,7 @@ cmd_rollback() {
         return 1
     fi
     write_watermark "$from"
-    local rbv; rbv="$(clean_version "$(cat "$SWAPD_HOME/VERSION" 2>/dev/null || echo unknown)")"
-    write_version "$rbv"
+    local rbv; rbv="$(sync_version_from_deployed)"
     if [ "$unhealthy" -eq 1 ]; then
         alert "manual rollback to $from completed but a component is unhealthy"
         audit 'rollback' ',"result":"rollback-unhealthy","to":"'"$from"'","snapshot":"'"$snapdir"'"'
