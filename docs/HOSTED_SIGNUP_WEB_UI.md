@@ -114,7 +114,15 @@ zone active). H15's surfaces land on this shape:
   validated rows.
 - **Metrics** — `scripts/funnel_metrics.py` runs on the control-plane
   host, reading the access-log rollups + the store (`FUNNEL_MEASUREMENT.md`
-  §7, PR #99). The day-1 query pack ships with the page-build PR.
+  §7, PR #99). The rollups' log source, named: a first-party Cloudflare
+  Worker in front of the Pages assets records method/path/query + hashed
+  IP to the control plane per hit (no client JS — the Worker, not a
+  beacon), because Pages' free tier exposes no raw request logs for "the
+  page server's own access log" (`FUNNEL_MEASUREMENT.md` §3, PR #99) to
+  read. Log retention: the page-build runbook states the raw-log retention
+  policy explicitly (FUNNEL §3.1) — the honest claim is "no IPs retained
+  in the metrics store," never "we collect nothing." The day-1 query pack
+  ships with the page-build PR.
 
 ## 4. Surface 1 build spec — the waitlist page
 
@@ -134,7 +142,8 @@ doc specifies only the build-side additions:
 - The two CTAs from the flow map: primary "Join the waitlist"
   (the form, §4.2), secondary quiet "Self-host today" text link —
   exactly twice (under the hero button, in the FAQ), via a first-party
-  redirect (`/go/selfhost?src=selfhost` → the repo URL) so `src=` stays
+  redirect (`/go/selfhost?src=selfhost` → the repo README's Try-it section,
+  per `LANDING_PAGE_COPY.md` §5 checklist item 9) so `src=` stays
   on our domain (`FUNNEL_MEASUREMENT.md` §3.2, PR #99).
 - Each waitlist CTA is a distinct first-party URL with its section bucket:
   `/waitlist?src=hero`, `?src=trust`, `?src=faq`, `?src=final`
@@ -146,7 +155,8 @@ doc specifies only the build-side additions:
   how-it-works step 1 — `WAITLIST_OPERATIONS.md` §10, PR #68) and the
   pre-launch pilot phase is disclosed in the FAQ (same checklist item),
   so the page never promises what the spec doesn't deliver.
-- The form itself (§4.2) is the only interactive element on the page.
+- The form itself (§4.2) is the only interactive element on the `/waitlist`
+  page.
 - **`/waitlist` is a dedicated minimal page** (every CTA links there; it is
   not an anchor on the landing page). It carries the same `<head>` tag set
   as the landing page (`og:url` points at the marketing page — this spec's
@@ -162,7 +172,9 @@ doc specifies only the build-side additions:
 - **Form fields:** owner email (required), Muse contact email (optional —
   "where should we reach your agent"), nothing else
   (`WAITLIST_OPERATIONS.md` §2, PR #68). Visible `<label>`s,
-  `autocomplete="email"` and `inputmode="email"` on both inputs;
+  `autocomplete="email"` and `inputmode="email"` on the owner-email input;
+  `autocomplete="off"` and `inputmode="email"` on the optional Muse-contact
+  field (so browser autofill doesn't misfire the owner's address there);
   honeypot + time-trap + per-IP rate limit, per `LANDING_PAGE_COPY.md` §4.
 - **Form endpoint:** `POST /waitlist/form` on the control plane —
   validates, writes a validated row only, returns a static "check your
@@ -236,12 +248,19 @@ Screens, in order:
    from the waitlist entry and skips email re-verification (reachability
    already proven — `WAITLIST_OPERATIONS.md` §8, PR #68). A non-invited
    visitor sees a plain holding page — "your invite hasn't arrived yet"
-   with a link back to the waitlist page, never a dead form and never an
-   open signup (an open page would admit out-of-wave tenants and break
-   both the FIFO promise and the capacity gate). An expired-invite click
-   renders the roll-over rule from §7 (back of the confirmed queue, no
-   re-confirmation needed) — never "your invite expired, start over."
-1. **Account** — email + magic link (no password to phish — H3 §5).
+   with the FIFO/wave explainer (invites go in waitlist order; yours
+   arrives by email when your wave opens) and at most a link back to `/`,
+   never a link back to the waitlist page and never an open signup. (The
+   signup-era waitlist page's CTA points at the signup flow below, which
+   rejects the non-invited visitor — a back-link would loop
+   claim → holding → /waitlist → claim.) An open page would admit
+   out-of-wave tenants and break both the FIFO promise and the capacity
+   gate. An expired-invite click
+   renders the roll-over rule from `WAITLIST_OPERATIONS.md` §7 (PR #68) —
+   back of the confirmed queue, no re-confirmation needed — never "your
+   invite expired, start over."
+1. **Account** — email + magic link (no password to phish — H3 §5; the
+   magic link establishes the session, it is not a re-verification).
    Signup pre-fills the owner email from the waitlist entry and **skips
    email re-verification** (reachability already proven —
    `WAITLIST_OPERATIONS.md` §8, PR #68); it does not skip identity linking.
@@ -250,8 +269,21 @@ Screens, in order:
    send time from the decided pricing" — `WAITLIST_OPERATIONS.md` §7,
    PR #68); the signup UI names that same source so the email and the
    screen cannot drift.
-3. **Link identity** — name the box; the enrollment token (shown once,
-   "copy for your Muse" — H3 §5); the pending-key approval UI: the key
+3. **Link identity** — name the box; the enrollment token (H3 §5:
+   single-use, 15-minute TTL, shown in the signup UI after magic-link
+   auth — the signup UI is its only channel). "Copy for your Muse" is a
+   real affordance, not a line of copy: the no-client-JS rule
+   (`FUNNEL_MEASUREMENT.md` §3) binds the marketing/waitlist/status
+   surfaces, not this screen, so the token screen may carry minimal
+   first-party JS for the copy button, with a selectable token block as
+   the no-JS fallback. Re-display rule (server-derived from tenant
+   state, matching the abandonment rule): the *current unspent* token
+   re-renders while the identity is still unlinked and the token is
+   unexpired; once linked or expired it is never re-rendered. A
+   lost/expired token is a *fresh* token, not a re-display — the H3 §4
+   re-link path (the Muse requests with its `muse_id`, the human approves
+   with one click); the funnel re-enters at screen 3 in that case. The
+   pending-key approval UI: the key
    fingerprint rendered **prominently** with the H3 re-link email UX
    requirement (prominent new fingerprint + rate limits — recorded in the
    loop's BACKLOG H3 follow-up; `WAITLIST_OPERATIONS.md` §4, PR #68,
@@ -334,7 +366,12 @@ never render a panel whose substrate doesn't exist.
   never implies multi-box approval routing it doesn't have.
 - **Usage** — metering panels (compute, approvals, suspend cycles).
   **Gated on H12** (metering hooks): no fabricated usage numbers, no
-  estimated bars — the panel ships when the data source ships.
+  estimated bars — the panel ships when the data source ships. The
+  suspend-cycles meter carries the *same* gate as the Boxes panel's
+  `suspended`/`waking` states — the H4 suspend/wake contract extensions
+  (unshipped H4 work, gated on the operator spend-cap packet): until then
+  the dashboard renders compute/approvals only and says nothing about
+  suspend, mirroring the Boxes panel's "provisioning/live only" rule.
 - **Explicitly not v1:** org-policy controls (**H16** — design/implementation
   open; the dashboard never promises centrally-governed policy before it
   ships), cross-tenant views (H11 audit pending), push-subscription
@@ -354,7 +391,7 @@ applies to every signed-link endpoint in both tables.
 | `/waitlist/form` | POST | path-B form intake; honeypot/time-trap; per-IP limit; validated rows only (§4.2) |
 | `/waitlist/confirm` | GET / POST | GET renders, POST confirms; token as form field on POST (§4.3) |
 | `/waitlist/forget` | GET / POST | signed forget-me link from every email footer; honored ≤7d with confirmation sent (`WAITLIST_OPERATIONS.md` §5, PR #68). GET renders only — **never changes state**; POST performs the deletion. See below. |
-| `/go/selfhost` | GET | first-party redirect to the repo URL, `src=selfhost` counted in our log (§4.1) |
+| `/go/selfhost` | GET | first-party redirect to the repo README's Try-it section, `src=selfhost` counted in our log (§4.1) |
 
 **`/waitlist/forget` GET/POST split** (the §4.3 pattern, with the same
 mail-scanner threat model — a scanner fetching the forget link must not
