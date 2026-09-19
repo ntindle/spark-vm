@@ -5,14 +5,14 @@ Delta-only update against the 2026-09-19 ~05:30 CDT morning baseline
 ~10:55 → ~11:35 CDT.
 
 Summary: **the sandbox-escape-week story deepens** — the same Docker
-Sandboxes 0.42.0 release that silently fixed CVE-2026-77179/79994 also
-closed two *other* sandbox-boundary vulnerabilities (host D-Bus command
-execution, cross-sandbox OAuth port claim), per a third-party read of the
-release notes. Otherwise the window is quiet: no new launches, pricing
-changes, tier changes, or partnership moves across the tracked set. C1,
-C9, C10, C11, C12 all stay open. This pass also closes the open #64
-methodology item by **declaring the corpus left edge and reach-back policy**
-(§8).
+Sandboxes 0.42.0 release that shipped the fix for CVE-2026-77179/79994
+unlabeled in its release notes also closed two *other* sandbox-boundary
+vulnerabilities (host D-Bus command execution, cross-sandbox OAuth port
+claim), per a third-party read of the release notes. Otherwise the window
+is quiet: no new launches, pricing changes, tier changes, or partnership
+moves across the tracked set. C1, C9, C10, C11, C12 all stay open. This
+pass also closes the open #64 methodology item by **declaring the corpus
+left edge and reach-back policy** (§6).
 
 Conventions: **VERIFIED** = read on a vendor's own page, doc, repo, or
 security announcement this run (link inline). **INFERRED** = third-party
@@ -49,15 +49,20 @@ explicitly.
   Credits: Oren Yomtov of accomplish.ai (CVE-2026-77179), Jurre van Bergen
   of ThreatNotify (CVE-2026-79994).
 - **Implication:** four sandbox-boundary vulnerabilities closed in a
-  single release — one guest→host file escape, one guest→host socket-relay
-  bug, one host D-Bus command-execution path, one cross-sandbox OAuth
-  hijack. The trust story of "microVM + mounted host folder" is now the
-  week's loudest object lesson, and Docker's unlabeled-shipping of the
-  critical fix is a disclosure-process data point. This is strong raw
-  material for the **O13 trust/transparency doc** (already a backlog item):
-  the shared-workspace boundary, not the hypervisor, is the whole trust
-  story — and spark-vm's full-VM-without-host-folder-sharing design
-  (`jail/README.md`) is architecturally outside this entire failure class.
+  single release — two vendor-announced (CVE-2026-77179/79994) plus two
+  reported via a third-party read of the release notes (D-Bus command
+  execution, OAuth port claim). The shared-workspace boundary is the
+  trust story of a persistent-VM-for-agents product, and this is the
+  week's loudest object lesson that "a microVM + mounted host folder" is
+  a fragile model; Docker's unlabeled-shipping of the critical fix is a
+  disclosure-process data point too. Strong raw material for the **O13
+  trust/transparency doc** (already a backlog item) — with honest
+  scoping: spark-vm's full-VM-without-host-folder-sharing design
+  (`jail/README.md`) is outside the shared-workspace guest→host
+  sub-class both CVEs broke, while the D-Bus daemon-boundary and OAuth
+  port-claim classes are surfaces any managed product retains —
+  including a hosted spark-vm — so the O13 writer must treat them as
+  owned-risk categories, not solved-by-architecture.
   Note for the O13 writer: the D-Bus and OAuth-port quotes are
   third-party-quoted-from-vendor here, not yet read directly on the
   vendor's release-notes page.
@@ -76,22 +81,24 @@ explicitly.
 
 ## 3. OpenAI Agents API — nine partners unchanged (C9 stays open)
 
-- Third-party roundups this week (fourweekmba, aicraftjournal, foundermag,
-  runtimewire, agentriot, dev.to — all THIRD-PARTY, all describing the
-  Sep 10 public beta) agree the partner set is unchanged: **Blaxel,
-  Cloudflare, Daytona, DigitalOcean, E2B, Modal, Oracle, Runloop, Vercel**.
-  No new partners, no terms changes (US-only data residency, no ZDR).
-- **INFERRED (aicraftjournal pricing data point — third-party, unverified
-  against OpenAI's own pricing page):** OpenAI-hosted sandbox 1 GB at
-  $0.03 per 20 minutes. Treated as a directional pricing floor for the
-  ephemeral-exec axis, not corpus fact.
-- **Observation (third-party, architectural):** the Agents API design
-  separates the harness (OpenAI runs the loop, sessions, compaction) from
-  execution (your infra / partner sandbox / VPC). The market's most
-  important platform is now *normalizing* bring-your-own-sandbox — the
-  self-hosted spark-vm story ("your computer stays yours, the platform
-  just drives it") is aligned with the direction of travel, not against
-  it. C9 stays open.
+- **INFERRED (third-party roundups describing the Sep 10 public beta,
+  e.g. [fourweekmba](https://fourweekmba.com/ai-openai-agents-api-public-beta-codex-harness/)):**
+  the partner set is unchanged — **Blaxel, Cloudflare, Daytona,
+  DigitalOcean, E2B, Modal, Oracle, Runloop, Vercel**. No new partners,
+  no terms changes (US-only data residency, no ZDR).
+- **INFERRED ([aicraftjournal pricing data point](https://aicraftjournal.com/articles/openai-agents-api-public-beta-no-extra-fee-hosted-sandbox-1gb-003)
+  — third-party, unverified against OpenAI's own pricing page):**
+  OpenAI-hosted sandbox 1 GB at $0.03 per 20 minutes. Directional pricing
+  floor for the ephemeral-exec axis, not corpus fact.
+- **Observation (third-party, architectural):** the Agents API separates
+  the harness (OpenAI runs the loop, sessions, compaction) from execution
+  (your infra / partner sandbox / VPC). The market's most important
+  platform is normalizing bring-your-own-sandbox as a first-class shape —
+  which supports the **hosted** spark-vm pitch: a *persistent, full-VM,
+  sign-up-and-use* computer where the platform operates the loop and the
+  tenant's box is the execution plane, positioned against the
+  ephemeral-exec pricing floor rather than competing with it. C9 stays
+  open.
 
 ## 4. Tracked set — no change detected
 
@@ -102,7 +109,8 @@ explicitly.
   badsignal.ai editorial take and a TechGig recap (both third-party).
   Next milestone: the Sep 29 webinar. C10 stays open.
 - **AgentComputer (C12):** repos unchanged (computer-guest untouched; no
-  new releases). C12 stays narrowed to egress-only, confirmed.
+  new releases). No change detected; C12's narrowed-to-egress-only status
+  stands.
 - **Quiet in window:** E2B, Daytona, Modal, Runloop, Northflank, Vercel,
   Cloudflare, GitHub Copilot (JetBrains controls — verified #82), the
   OpenRouter `openrouter:shell` tool (verified #82), Tencent BrowserSkill
@@ -112,8 +120,8 @@ explicitly.
 
 - **O13 (trust/transparency doc) gains material:** four boundary vulns in
   one Docker release + unlabeled critical fix + Docker's own "clone mode
-  doesn't prevent reads" caveat. The O13 writer now has a
-  fully-sourced negative example; the D-Bus/OAuth quotes need a direct
+  doesn't prevent reads" caveat. The O13 writer now has a strong but
+  partially-sourced negative example; the D-Bus/OAuth quotes need a direct
   read of the vendor release notes before publication
   (https://docs.docker.com/ai/sandboxes/release-notes/).
 - **C2 (pricing inputs) optional third-party datapoint:** OpenAI-hosted
@@ -123,9 +131,10 @@ explicitly.
 ## 6. Corpus left edge and reach-back policy (closes the #64 follow-up)
 
 - **Left edge:** the Sept-2026 competitive map in
-  `docs/COMPETITOR_ANALYSIS.md` (PR #26, deepened by the #34 pm watch,
-  being consolidated by open PR #54). Watch docs are delta-only against
-  the *previous watch doc*, which chains back to this baseline.
+  `docs/COMPETITOR_ANALYSIS.md` (PR #26, deepened by the #34 pm watch;
+  open PR #54 carries the still-pending evening-pass consolidation).
+  Watch docs are delta-only against the *previous watch doc*, which
+  chains back to this baseline.
 - **Reach-back policy:** a watch pass backfills a pre-window item only
   when a primary-source verification or a factual correction demands it
   (the #82 pattern); otherwise pre-window items are not re-researched.
