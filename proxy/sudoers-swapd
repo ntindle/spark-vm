@@ -1,9 +1,10 @@
 # spark-vm credential store: ntindle may touch swapd's secrets ONLY through
-# these narrow, name-validated wrapper scripts. No shell access, no
-# wildcards — a sudoers `*` matches `/`, so literal paths are used
-# everywhere below. Secrets are read/written/deleted only through
-# cred-store-{get,set,delete}, which validate the name against
-# ^[A-Za-z0-9_-]+$ and touch exactly one file under the store.
+# these narrow, name-validated wrapper scripts. No shell access — a sudoers
+# `*` in a path component matches `/`, so literal paths are used for every
+# command below. Exactly one argument wildcard exists in this file (the
+# whois peer IP, documented at the rule); argument wildcards cannot match
+# `/` their way into a different command the way path wildcards can, and
+# that one is read-only — see the rule's comment.
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-set
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-set-inference
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-get
@@ -18,6 +19,11 @@ ntindle ALL=(swapd) NOPASSWD: /usr/bin/tee -a /home/swapd/inference-hosts.allow
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/ls /home/swapd/inference-secrets
 # confirmd (finding 47, 63b): narrow tailscale rules for the self-peer
 # check. whois takes a peer IP; ip takes no args.
+# The whois rule carries the file's one intentional argument wildcard:
+# the peer IP varies per request, so it cannot be a literal. This is
+# safe because whois is a read-only single-peer lookup with no mutating
+# flags, and confirmd passes the peer IP as one argv element (no shell).
+# Do not extend the wildcard to any other tailscale subcommand.
 swapd ALL=(root) NOPASSWD: /usr/bin/tailscale whois --json *
 swapd ALL=(root) NOPASSWD: /usr/bin/tailscale ip
 swapd ALL=(root) NOPASSWD: /usr/bin/tailscale ip -4

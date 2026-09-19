@@ -13,6 +13,7 @@ The swapping proxy replaces these at request time, for allowlisted hosts only.
 """
 
 import json
+import re
 import subprocess
 import urllib.parse
 import urllib.request
@@ -23,6 +24,28 @@ SUDO = ["sudo", "-n", "-u", "swapd"]
 
 class DynamicCredentialError(Exception):
     """Raised for any credential resolution or placement problem."""
+
+
+# Credential and entry names are interpolated into filesystem paths by
+# some consumers (credlib/fill_secret.py reads
+# /home/swapd/secrets/<name>), so they must be validated before use:
+# no slashes, no dots, no shell. The same shape the swapd-side writers
+# enforce (proxy/cred-store-set).
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _validate_name(value, what):
+    """Reject anything that is not a safe credential/entry name.
+
+    Raises DynamicCredentialError. The old check here (the surrogate
+    "starts with hsurr:") was vacuous — the surrogate is constructed
+    with that prefix — and validated nothing.
+    """
+    if not isinstance(value, str) or not NAME_RE.match(value):
+        raise DynamicCredentialError(
+            "invalid %s name %r (use only [A-Za-z0-9_-], max 64 chars)"
+            % (what, value))
+    return value
 
 
 # ---------------------------------------------------------------- registry
@@ -55,9 +78,12 @@ def dynamic_credential_entry(credential_name, entry_name="access_token", *, time
     Returns {"name": entry_name, "surrogate": "hsurr:<name>:<entry>",
              "placement": <placement>}. Placement comes from the registry
     (/home/swapd/credentials.json); unregistered names default to
-    "bearer_header". Raises DynamicCredentialError if the surrogate does
-    not start with "hsurr:".
+    "bearer_header". Raises DynamicCredentialError on an invalid
+    credential or entry name (names reach filesystem paths in some
+    consumers, so validation happens here, at the choke point).
     """
+    _validate_name(credential_name, "credential")
+    _validate_name(entry_name, "entry")
     registry = _read_registry()
     placement = "bearer_header"
     entries = registry.get(credential_name)
@@ -66,9 +92,6 @@ def dynamic_credential_entry(credential_name, entry_name="access_token", *, time
         if isinstance(spec, dict) and "placement" in spec:
             placement = spec["placement"]
     surrogate = "hsurr:%s:%s" % (credential_name, entry_name)
-    if not surrogate.startswith("hsurr:"):
-        raise DynamicCredentialError(
-            "surrogate for %r does not start with hsurr:" % (credential_name,))
     return {"name": entry_name, "surrogate": surrogate, "placement": placement}
 
 

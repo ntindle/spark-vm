@@ -242,6 +242,27 @@ class GrantWriterTests(unittest.TestCase):
         self.assertIn("clamping", r.stderr)
         self.assertLessEqual(hours_left("ttl-over"), 168)
 
+    def test_grants_file_created_private(self):
+        """grants.json and the audit log are created 0600, not the
+        process umask's 0644: deploy installs grants.json 0600, and the
+        first grant-writer write used to silently widen it on rename.
+        Grant metadata (credential names, hosts, methods, paths) must
+        not be world-readable."""
+        old_umask = os.umask(0o022)
+        try:
+            r = self.run_writer(
+                "add", "--credential", "github", "--host", "github.com",
+                "--method", "POST", "--path-prefix", "/gists",
+                "--approval-id", "mode-test", "--job", "job1")
+            self.assertEqual(r.returncode, 0, r.stderr)
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(oct(os.stat(self.grants_file).st_mode & 0o777),
+                         "0o600")
+        audit = Path(self.tmp.name) / "audit.log"
+        self.assertTrue(audit.is_file())
+        self.assertEqual(oct(os.stat(audit).st_mode & 0o777), "0o600")
+
 
 if __name__ == "__main__":
     unittest.main()

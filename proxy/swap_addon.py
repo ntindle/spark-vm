@@ -246,6 +246,19 @@ NEVER_SWAP_HEADERS = frozenset({"referer", "origin"})
 
 log = logging.getLogger(__name__)
 
+
+def _open_audit_log():
+    """Open the audit log for append, creating it 0600 if missing.
+
+    Plain Path.open("a") inherits the process umask, so the first
+    audit line written under mitmdump's/systemd's default 022 left
+    swap.log world-readable — it carries credential names, hosts,
+    methods, path prefixes, and egress IPs. os.open's mode applies
+    only at creation; it never widens an existing file.
+    """
+    fd = os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    return os.fdopen(fd, "a", encoding="utf-8")
+
 # --- spark-vm version stamping (docs/VERSIONING.md) ---
 # Single-source repo VERSION: logged at addon load so the journal shows which
 # release is actually running. Best-effort — never break the addon on a bad
@@ -914,7 +927,7 @@ class SwapAddon:
         refusal: a secret is never released without a trail."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as f:
+            with _open_audit_log() as f:
                 f.write("ts=%s host=%s swapped=%s ip=%s\n"
                         % (ts, host, matched,
                            getattr(self, "_current_egress_ip", None) or "-"))
@@ -928,7 +941,7 @@ class SwapAddon:
         22): the binding verdict leaves a trail even when nothing leaks."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as f:
+            with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=hsurr:%s reason=%s ip=%s\n"
                         % (ts, host, name, reason,
                            getattr(self, "_current_egress_ip", None) or "-"))
@@ -943,7 +956,7 @@ class SwapAddon:
         and tests can stub it like them."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as f:
+            with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=%s reason=%s ip=%s\n"
                         % (ts, host, refused, reason,
                            getattr(self, "_current_egress_ip", None) or "-"))
@@ -957,7 +970,7 @@ class SwapAddon:
         an exfiltration attempt is visible in the log."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as f:
+            with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=authority-mismatch "
                         "authority=%s ip=%s\n"
                         % (ts, host, authority or "-",
@@ -1169,7 +1182,7 @@ class SwapAddon:
         verdict leaves a trail even though nothing was sent."""
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
-            with LOG_FILE.open("a", encoding="utf-8") as f:
+            with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=egress reason=%s ip=%s\n"
                         % (ts, host, reason, ip))
         except OSError as e:

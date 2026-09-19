@@ -37,6 +37,19 @@ GRANTS_LOCK = os.environ.get("SWAP_GRANTS_LOCK", GRANTS_FILE + ".lock")
 AUDIT_LOG = os.environ.get("SWAP_LOG_FILE", "/home/swapd/swap.log")
 
 
+def _open_private_append(path):
+    """Open path for append, creating it 0600 if it does not exist.
+
+    Plain open(path, "a") inherits the process umask, so a first write
+    under systemd's default 022 left the audit log world-readable; the
+    grants tmp file below had the same problem (0600 at deploy, 0644
+    after the first grant-writer write replaced the inode). os.open's
+    mode applies only at creation — it never widens an existing file.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    return os.fdopen(fd, "a", encoding="utf-8")
+
+
 def _audit(msg):
     """Append to the audit log. Returns True when durably written.
 
@@ -44,7 +57,7 @@ def _audit(msg):
     save a grant/revocation when the audit line cannot be recorded."""
     try:
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        with open(AUDIT_LOG, "a", encoding="utf-8") as f:
+        with _open_private_append(AUDIT_LOG) as f:
             f.write("ts=%s %s\n" % (ts, msg))
     except OSError:
         return False
@@ -67,9 +80,13 @@ def _load_grants():
 
 def _save_grants(grants):
     """Atomically write grants via temp-and-rename so readers never see
-    a partial file. The caller holds the lock file."""
+    a partial file. The caller holds the lock file. The temp file is
+    created 0600 (see _open_private_append): deploy.sh installs
+    grants.json 0600, and a 0644 temp file would silently widen it on
+    the first write's rename."""
     tmp = GRANTS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as t:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as t:
         json.dump({"grants": grants}, t, indent=2)
     os.replace(tmp, GRANTS_FILE)
 
