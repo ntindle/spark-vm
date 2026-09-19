@@ -2,6 +2,7 @@
 
 **Status:** research. The design/implementation of the org-policy layer is
 H16; this doc is its research half and design input.
+**Date:** 2026-09-19. Strategy loop, research archetype.
 **Feeds:** H16 (org-policy layer), H9 (tenant identity — policy needs a
 principal), H10 (per-tenant approvals — approval policy is one axis),
 H11 (multi-tenancy audit — audit is another axis).
@@ -13,7 +14,9 @@ resolved here).
 
 H16 says the hosted product needs an org-policy layer so the pitch works
 for enterprises, not just solo developers: per-agent filesystem/network
-rules plus audit. The open question this doc answers: **what do org-level
+rules plus audit. It follows PR #82's competitor watch (GitHub
+enterprise-managed sandbox policies, announced in the September 8, 2026
+changelog). The open question this doc answers: **what do org-level
 policies for agent VMs/sandboxes actually look like across the market,
 mechanism by mechanism — and what would spark-vm have to build to be
 credible on that axis?**
@@ -25,8 +28,8 @@ characterization (treat as lead, not fact).
 
 ### GitHub Copilot — enterprise-managed sandbox policies [V]
 
-Enterprise-managed sandbox policies for Copilot in JetBrains IDEs, public
-preview September 8, 2026 —
+Enterprise-managed sandbox policies for Copilot in JetBrains IDEs,
+announced in the September 8, 2026 changelog —
 [GitHub changelog](https://github.blog/changelog/2026-09-08-enterprise-managed-sandbox-in-copilot-for-jetbrains/):
 
 - **Scope (six controls):** sandbox enablement, filesystem access, network
@@ -94,13 +97,14 @@ at the endpoint, with detection + enforcement diagnostics.
 
 - `runloop.networkPolicy` (create/list/update egress rules) and
   `runloop.gatewayConfig` (API proxy configurations) are first-class SDK
-  resources — policy is managed like any other resource, runtime-updatable.
+  resources — policy is managed like any other resource, runtime-updatable
+  ([runloopai/api-client-ts README, "Available Resources"](https://github.com/runloopai/api-client-ts/blob/HEAD/README.md)).
 - Blueprints standardize environments across teams (org-level consistency
   via image, not per-box config).
 - Enterprise [3P]: SOC2, "Deploy to VPC" (infrastructure inside the
   customer's AWS VPC — policy enforcement under customer network control).
 
-### Upstash Box — per-box policy + Attach Headers [3P]
+### Upstash Box — per-box policy + Attach Headers [V own claims; Daytona characterizations [3P]]
 
 [Upstash blog comparison](https://github.com/upstash/upstash-web/blob/HEAD/data/blog/2026-06-18-upstash-box-vs-daytona.mdx)
 (Upstash-authored; Daytona characterizations treated as third-party):
@@ -116,7 +120,8 @@ at the endpoint, with detection + enforcement diagnostics.
 
 ### OSS structural analogs
 
-- **mattolson/agent-sandbox** (OSS): policy YAML for domain allowlists;
+- **mattolson/agent-sandbox** ([OSS](https://github.com/mattolson/agent-sandbox);
+  roadmap, secrets.md, m15 milestone): policy YAML for domain allowlists;
   mitmproxy sidecar with `PROXY_MODE=log` (observe-before-enforce — the
   logging mode shows what endpoints agents need before policy hardens),
   structured JSON logs, **two-layer enforcement** (proxy allowlist +
@@ -126,7 +131,8 @@ at the endpoint, with detection + enforcement diagnostics.
   the agent container, `basic`/`bearer` header transforms, logical secret
   IDs in policy. This is an independent re-derivation of swapd's
   placeholder-swap design — quotable corroboration for R6.
-- **abraxarion/agent-box** (OSS, Bubblewrap): honestly states its floor —
+- **abraxarion/agent-box** ([OSS](https://github.com/abraxarion/agent-box),
+  Bubblewrap): honestly states its floor —
   "Not secret isolation. Host-readable secrets remain readable" and
   "Network is all or nothing." The tier below which policy doesn't exist;
   spark-vm's policy layer competes above this.
@@ -135,13 +141,13 @@ at the endpoint, with detection + enforcement diagnostics.
 
 | Axis | GitHub Copilot | Vercel Sandbox | Daytona | Runloop | Upstash Box | spark-vm today |
 |---|---|---|---|---|---|---|
-| Org-level policy | ✅ managed policies, IDE-locked | org tiers (via plan) | ✅ org tiers gate overrides | ✅ networkPolicy API | per-box only | ❌ none |
-| FS access rules | ✅ managed FS access | VM boundary | sandbox boundary | sandbox boundary | sandbox boundary | VM boundary (no policy) |
-| Network rules | ✅ managed net access | ✅ domain+CIDR, deny-precedence, runtime-updatable | ✅ deny-all + allow lists, tier-gated | ✅ networkPolicy resource | ✅ domain/wildcard/CIDR, private-IPs-always-blocked | ✅ ssrf.allow/ssrf.deny + deny file (single-tenant) |
+| Org-level policy | ✅ managed policies, IDE-locked | — (per-box; no org-tier gating surfaced) | ✅ org tiers gate overrides | ✅ networkPolicy API | per-box only | ❌ none |
+| FS access rules | ✅ managed FS access | VM boundary | sandbox boundary | sandbox boundary | sandbox boundary | nspawn jail, no host mounts (no per-tenant rules) |
+| Network rules | ✅ managed net access | ✅ domain+CIDR, deny-precedence, runtime-updatable | ✅ deny-all + allow lists, tier-gated | ✅ networkPolicy resource | ✅ domain/wildcard/CIDR, private-IPs-always-blocked | ⚠️ allow-all posture; all jail egress forced through swap proxy (nftables DNAT, no direct egress/DNS); proxy refuses private ranges + ssrf.deny (deny-beats-allow, verified in swap_addon.py); no per-domain/CIDR policy rules |
 | Secret handling | ✅ managed Keychain access | ✅ brokered outside boundary (all plans) | env inside sandbox [3P] | gateway config | ✅ Attach Headers | ✅ swapd placeholder-swap |
-| Audit / attestation | ✅ enterprise policy diagnostics | SOC2 infra | ✅ audit logs, OpenTelemetry | SOC2 | — | audit log (single-tenant, confirmd) |
-| Policy as code/API | — | ✅ updateNetworkPolicy() | ✅ limits API [V platform] | ✅ SDK resource | — | ❌ config files only |
-| User-override-proof | ✅ "(managed)" locks | — | ✅ tier-gated overrides | — | — | n/a (single user) |
+| Audit / attestation | ✅ enterprise policy diagnostics | SOC2 infra | ✅ audit logs, OpenTelemetry | SOC2 | — | swap.log + confirmd daemon (single-tenant; no per-tenant attribution) |
+| Policy as code/API | — | ✅ updateNetworkPolicy() | ✅ limits API [V platform] | ✅ SDK resource | — | ❌ config files only (mtime hot-reload already runtime-updates config without restart; API management missing) |
+| User-override-proof | ✅ "(managed)" locks | — | ✅ tier-gated overrides | — | — | partial: nspawn boundary means the agent cannot read/rewrite host policy files (single user today) |
 
 ## 4. Recommendations for H16
 
@@ -151,7 +157,8 @@ Table-stakes axes (the market has converged; H16 should implement all six):
    proxy, dev-tool, and secret-scope axes (GitHub's six controls are the
    vocabulary). Stored host-side, never agent-writable (cf. mattolson's
    "the agent container must not be able to read or replace its own
-   secrets" rule; our H11 audit precedes any shared path — MEMORY).
+   secrets" rule; per the hosted unblock pass, H11's multi-tenancy audit
+   precedes any shared control paths).
 2. **Precedence rule**: managed policy beats per-agent/per-user settings,
    deny beats allow on conflicts (Vercel's rule, not E2B's inversion).
    spark-vm's `ssrf.deny` already follows deny-precedence — the org layer
@@ -160,8 +167,8 @@ Table-stakes axes (the market has converged; H16 should implement all six):
    runtime-updatable without restarting agents.
 4. **Diagnostics**: an agent-visible "what policy applies to me" endpoint —
    GitHub's enterprise policy diagnostics, but readable by the Muse itself
-   so a denied action is debuggable (nobody in the market does this for the
-   agent's own debugging; it's a differentiator).
+   so a denied action is debuggable (none of the vendors surveyed does this
+   for the agent's own debugging; it's a differentiator).
 5. **Audit**: every policy evaluation logged to the per-tenant audit log
    (feeds H11).
 6. **Observation-before-enforcement**: a log-only policy mode (mattolson's
@@ -171,14 +178,29 @@ Table-stakes axes (the market has converged; H16 should implement all six):
 Nobody-cover gaps (differentiators, not table stakes):
 - Policy simulation/dry-run ("what would this break?") before enforcing.
 - Agent-visible denial reasons (the Muse asks "why was this blocked?" and
-  gets the matching rule, not a dead end).
+  gets the matching rule, not a dead end) — bounded: the oracle returns the
+  rule *category* (e.g. "network policy: destination not allowlisted") plus
+  request context, never rule contents, rule IDs, or org policy text; the
+  surface is rate-limited/aggregated like any policy-probing vector, since
+  a hostile agent could otherwise enumerate the org's posture rule by rule.
 - Federated policy for BYO-infra (tailnet-shaped) deployments — GitHub's
   model assumes managed endpoints; spark-vm's self-hosted path needs policy
-  that travels with the box, not the dashboard.
+  that travels with the box, not the dashboard. Open design question for
+  H16: on the tailnet path the box owner *is* the org admin, so the
+  org/agent boundary the whole policy model assumes collapses. Is the
+  policy authority the local box owner, or a hosted control plane pushing
+  signed policy bundles the box verifies? H16 must answer this before the
+  differentiator is real.
 
 Sequencing: H9 (tenant identity) first — policy needs a principal; then
-H16's policy object + diagnostics; H10's approval policy and H11's audit
-ride on the same per-tenant substrate.
+H16's policy object + diagnostics. H11's per-tenant audit substrate
+co-ships with (or precedes) H16 enforcement, since axis 5 requires every
+policy evaluation to land in an attributed per-tenant log — H16 carries
+its own evaluation logging and H11 formalizes it. H10's approval policy
+rides the same substrate, but note it is real work beyond substrate reuse:
+confirmd is single-tenant today (Tailscale-identity web UI on the box),
+so per-tenant hosted approvals need identity-bound approval routing and
+push delivery on top.
 
 ## 5. Limitations
 
