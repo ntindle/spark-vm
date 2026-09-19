@@ -320,7 +320,13 @@ snapshot_component() {
         [ -n "$p" ] || continue
         # store under snapdir + absolute path, e.g. <snapdir>/home/swapd/swap_addon.py
         rel="$snapdir$p"
-        if [ -e "$p" ]; then
+        # Existence goes through sudo_run (same privilege the copy would use):
+        # on an unprivileged box a literal system path (e.g. /etc/sudoers.d/swapd)
+        # may not even be stat-able, and must be recorded ABSENT rather than
+        # failing the snapshot. The `test -L` disjunct keeps dangling symlinks
+        # snapshot-covered (`test -e` is false for them; `cp -a` preserves the
+        # link itself).
+        if sudo_run test -e "$p" || sudo_run test -L "$p"; then
             mkdir -p "$(dirname "$rel")" || {
                 log "ERROR: cannot create snapshot dir for $p"; return 1; }
             sudo_run cp -a "$p" "$rel" || {
@@ -369,8 +375,25 @@ restore_snapshot() {
         case "$line" in
             ABSENT\ *)
                 local p="${line#ABSENT }"
-                log "  removing $p (was absent at snapshot)"
-                sudo_run rm -f "$p" || rc=1
+                # Existence is checked first (through sudo_run, so the check
+                # honors the same privilege the removal would use): on an
+                # unprivileged box the manifest can carry literal system paths
+                # (e.g. /etc/sudoers.d/swapd) whose parent dir is not even
+                # stat-able — `rm -f` then dies with Permission denied on a
+                # file that was never there, failing the whole rollback.
+                # In production the timer runs privileged, so the check sees
+                # exactly what the removal would touch: no behavior change there.
+                # The `test -L` disjunct covers dangling symlinks (`test -e` is
+                # false for them): a deploy-created dangling symlink at an
+                # ABSENT path must still be unlinked on rollback, exactly as
+                # the old unconditional `rm -f` did. `rm -f` unlinks only the
+                # symlink, never its target.
+                if sudo_run test -e "$p" || sudo_run test -L "$p"; then
+                    log "  removing $p (was absent at snapshot)"
+                    sudo_run rm -f "$p" || rc=1
+                else
+                    log "  $p still absent (or not visible) — nothing to remove"
+                fi
                 ;;
             CHECKOUT\ *)
                 local c="${line#CHECKOUT }"; c="${c%% *}"
@@ -384,8 +407,13 @@ restore_snapshot() {
             CHECKOUT-ABSENT\ *)
                 local rest="${line#CHECKOUT-ABSENT }"
                 local sub2="${rest#* }"
+                if [ -z "$sub2" ]; then
+                    log "  corrupt MANIFEST CHECKOUT-ABSENT line (empty subtree): $line"
+                    rc=1
+                    continue
+                fi
                 log "  removing $WORKING_CHECKOUT/$sub2 (was absent at snapshot)"
-                rm -rf "$WORKING_CHECKOUT/$sub2" || rc=1
+                rm -rf "${WORKING_CHECKOUT:?}/${sub2:?}" || rc=1
                 ;;
             *)
                 log "  restoring $line"
@@ -416,7 +444,7 @@ install_component() {
     local sub; sub="$(get_str "$c" checkout_sync)"
     if [ -n "$sub" ]; then
         log "  $c: syncing subtree $sub from mirror@$new into $WORKING_CHECKOUT"
-        rm -rf "$WORKING_CHECKOUT/$sub" || return 1
+        rm -rf "${WORKING_CHECKOUT:?}/${sub:?}" || return 1
         if ! git -C "$UPDATER_REPO" archive "$new" "$sub" | tar -x -C "$WORKING_CHECKOUT"; then
             log "  $c: subtree sync FAILED"
             return 1
@@ -498,13 +526,13 @@ health_check() {
         [ -n "$h" ] || continue
         host="${h#tcp:}"; host="${host%:*}"; port="${h##*:}"
         log "  health: tcp $host:$port ..."
-        local i ok=0
-        for i in $(seq 1 20); do
+        local attempt ok=0
+        for attempt in $(seq 1 20); do
             if tcp_ok "$host" "$port"; then ok=1; break; fi
             sleep 0.5
         done
         if [ "$ok" != "1" ]; then
-            log "  health: tcp $host:$port FAILED"
+            log "  health: tcp $host:$port FAILED after $attempt tries"
             return 1
         fi
     done < <(get_arr "$c" health)

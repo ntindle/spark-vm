@@ -1,0 +1,124 @@
+# spark-vm CI: python tests, shellcheck, markdown link check, PNG smoke test.
+#
+# Run locally with:
+#   cd proxy   && python3 -m pytest test_swap_addon.py test_grant_writer.py test_round6.py
+#   cd confirm && python3 -m pytest test_confirmd.py
+#   cd deploy  && python3 -m pytest test_auto_deploy.py
+#   cd muse-job && python3 -m pytest tests/test_event_trust.py
+
+name: ci
+
+# Least privilege: this workflow only reads the repo and reports status.
+# Runs on push to main, where a compromised third-party action with a
+# writable token could otherwise touch a tree that auto-deploys sudoers
+# files, a CA bundle, and the credential-swapping proxy.
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  python-tests:
+    name: python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      # test_auto_deploy.py::test_scripts_syntax gates on shellcheck warnings;
+      # pin it explicitly rather than relying on the runner image carrying it.
+      # (2026-09-18: the runner-preinstalled shellcheck caught 5 warnings the
+      # PR author could not reproduce locally — the gate must be deterministic.)
+      - name: install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: proxy tests (swap addon, grant writer)
+        run: python3 -m pytest test_swap_addon.py test_grant_writer.py test_round6.py -q
+        working-directory: proxy
+      - name: confirmd tests
+        if: always()
+        run: python3 -m pytest test_confirmd.py -q
+        working-directory: confirm
+      - name: auto-deploy tests
+        if: always()
+        run: python3 -m pytest test_auto_deploy.py -q
+        working-directory: deploy
+      - name: muse-job trust tests
+        if: always()
+        run: python3 -m pytest tests/test_event_trust.py -q
+        working-directory: muse-job
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck on all shell scripts
+        # pinned SHA: action unmaintained since 2024, SHA protects against
+        # branch drift (00b27aa7cb85167568cb48a3838b75f4265f2bca, 2024-06-20)
+        # severity=error gates on real breakage (syntax/misuse), not style notes
+        uses: ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca
+        with:
+          severity: error
+
+  markdown-links:
+    name: markdown link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check links in all markdown docs
+        # --exclude-mail was removed upstream (lychee >= 0.20 excludes mail by
+        # default); passing it fails the step with "unexpected argument".
+        # --exclude-loopback: docs reference localhost service addresses
+        # (cred-ui, proxy) that can never resolve on a CI runner.
+        # Bot-blocking hosts (2026-09-19, CI on #39): medium.com 403s every
+        # automated fetcher, and businesswire.com / globenewswire.com reject
+        # lychee's HTTP client (HTTP/2 protocol errors) — the flagged URLs
+        # were all hand-verified live that day, so these are false positives,
+        # not broken links. Excluded at host level (not per-URL): new links
+        # from these hosts trip the same bot blocks, so the exclusion must
+        # cover the whole host. When adding a link from one of these hosts,
+        # open it in a real browser and confirm the page loads and matches
+        # the cited headline; a browser 404 means the link is genuinely
+        # broken — fix the link, don't extend the exclusion.
+        # BACKSLASH NOTE: this string is YAML double-quoted, so the two-char `\\`
+        # in this file reaches the action as a single `\`; the action evals
+        # its args through bash single quotes (which pass backslashes
+        # through literally), so lychee finally sees `\.` (regex: literal
+        # dot). Do NOT "fix" these to `\\\\` — that
+        # makes the regex demand a literal backslash and silently disables
+        # all three excludes. (Backslash counts are easy to misread through
+        # tool display escaping — verify with `od -c`, not by eye.)
+        # SHA-pinned (e7477775783ea5526144ba13e8db5eec57747ce8, v2.9.0) so a
+        # tag drift can't widen what this step can do.
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
+        with:
+          args: "--no-progress --exclude-loopback --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' '**/*.md'"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  png-check:
+    name: PNG screenshot smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install playwright
+          # --with-deps installs OS deps itself (escalates internally); a sudo
+          # install-deps line would fail since root's Python lacks the runner
+          # user's site-packages.
+          python3 -m playwright install --with-deps chromium
+      - name: Screenshot + validate PNG signature
+        run: |
+          rm -f /tmp/pw-test.png  # stale screenshot must not mask a pw-test failure
+          python3 scripts/pw-test.py
+          python3 scripts/png-check.py
