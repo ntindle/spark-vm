@@ -1084,6 +1084,32 @@ class SwapAddonTests(unittest.TestCase):
             self.assertNotEqual(r.returncode, 0)
             self.assertFalse((Path(d) / "llm-api").exists())
 
+    def test_issue88_inference_writer_chomp_never_masks_truncation(self):
+        """#88 (QA round 2): the capture cap is max_bytes+2 and a capture
+        that hit the cap is refused BEFORE the chomp — otherwise a chomp
+        could mask a truncated oversized input into a silently-truncated
+        store. A legit 64KiB key plus one echo newline still stores."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-store-set-inference")
+        with tempfile.TemporaryDirectory() as d:
+            # 64KiB key + one echo newline: accepted, chomped to 64KiB
+            env = dict(os.environ, INFERENCE_SECRETS_DIR=d)
+            r = subprocess.run([script], input=b"A" * 65536 + b"\n",
+                               capture_output=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((Path(d) / "llm-api").read_bytes(),
+                             b"A" * 65536)
+            # 64KiB+1 without a trailing newline: refused (over the max)
+            r = subprocess.run([script], input=b"A" * 65537,
+                               capture_output=True, env=env)
+            self.assertNotEqual(r.returncode, 0)
+            # oversized input whose 65537th captured byte is a newline:
+            # refused, never silently truncated-and-stored
+            r = subprocess.run(
+                [script], input=b"A" * 65536 + b"\n" + b"B" * 1000,
+                capture_output=True, env=env)
+            self.assertNotEqual(r.returncode, 0)
+
     def test_issue88_scrub_covers_bare_and_verbatim_renderings(self):
         """#88 (arch B2): a whitespace-significant single value must scrub
         both the verbatim stored rendering AND the bare rendering servers
