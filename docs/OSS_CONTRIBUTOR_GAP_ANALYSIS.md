@@ -6,9 +6,9 @@ journey hits. Findings are numbered G1–G10 by severity. Fixes made in the
 same PR are noted; everything else became a GitHub issue or an existing
 backlog seed.
 
-Baseline: `main` @ `8aa7d0d` (2026-09-18). Verified against the tree, not
-memory: `ls`, `git ls-files`, GitHub API reads of labels/issues, and two
-test runs.
+Baseline: `main` @ `7612c29` (2026-09-18, after the evening merge wave).
+Verified against the tree, not memory: `ls`, `git ls-files`, GitHub API
+reads of labels/issues, and test runs.
 
 ## Stage 1 — Discover & evaluate (lands on the repo page)
 
@@ -38,7 +38,7 @@ ENVIRONMENT.md exist.
   across four components, no root `pytest.ini`/`conftest.py`, no
   requirements file anywhere, and README/ONBOARDING never mention tests.
   The suites do pass under one command — `python3 -m pytest proxy/
-  confirm/ muse-job/ deploy/` is 167/167 green on `main` (verified this
+  confirm/ muse-job/ deploy/` is 227/227 green on `main` (verified this
   run) — but a newcomer has no way to know that. `CONTRIBUTING.md` now
   documents it. → filed as **#56** (single-command test story; left to a
   `dx` turn, issue is the tracker).
