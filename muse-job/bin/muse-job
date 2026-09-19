@@ -1037,9 +1037,27 @@ def check_events_liveness(job, st, now):
     Returns a signal dict or None.
     """
     uuid, malformed = _session_uuid_ok(job)
-    if not (st["tmux_alive"] and uuid):
-        # Malformed uuid is paged loudly as events-tampered by the caller;
-        # liveness has nothing trustworthy to assess, so it stays silent.
+    if not st["tmux_alive"]:
+        return None
+    if malformed:
+        # Paged loudly as events-tampered by the caller; liveness has
+        # nothing trustworthy to assess, so it stays silent here.
+        return None
+    if not uuid:
+        # Final review (arch): an absent uuid is legitimate ONLY during
+        # initial discovery (cmd_spawn discovers within ~90s). job.json is
+        # agent-writable: wiping session_uuid to "" or deleting the key
+        # blinded liveness AND done triage with zero signal on any pass.
+        # After the session_started_at + 30m grace, an absent uuid on a
+        # live tmux session pages loudly instead of staying dark. (A job
+        # whose spawn discovery genuinely failed also pages -- correctly:
+        # the watchdog is blind to it either way.)
+        if now - _session_anchor(job, now) > 30 * 60:
+            return {"signal": "events-tampered",
+                    "detail": "tmux alive but no session uuid recorded past "
+                              "the discovery grace window; the watchdog "
+                              "cannot see this job's events (uuid wiped or "
+                              "discovery failed)"}
         return None
     if event_file_tampered(uuid):
         return None  # handled by the dedicated events-tampered signal

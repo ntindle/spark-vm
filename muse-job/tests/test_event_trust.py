@@ -368,12 +368,33 @@ def test_events_missing_silent_when_tmux_dead(cli):
     assert cli.check_events_liveness(job, live_status(tmux_alive=False), now) is None
 
 
-def test_events_missing_silent_without_session_uuid(cli):
+def test_absent_session_uuid_silent_only_within_discovery_grace(cli):
+    # Final review (arch): an absent uuid is legitimate ONLY during initial
+    # discovery (~90s). Past the 30m grace it pages loudly -- wiping
+    # session_uuid to "" or deleting the key used to blind liveness AND
+    # done triage with zero signal on any pass.
+    import time as _time
+    now = _time.time()
     job = make_job(cli)
     job["session_uuid"] = None
-    job["started_at"] = 1_000_000.0
-    now = job["started_at"] + 5 * 3600
+    job["session_started_at"] = now - 60
     assert cli.check_events_liveness(job, live_status(), now) is None
+    job["session_started_at"] = now - 3600
+    sig = cli.check_events_liveness(job, live_status(), now)
+    assert sig is not None and sig["signal"] == "events-tampered"
+    assert "uuid" in sig["detail"]
+    # "" and a deleted key behave the same as None.
+    for wiped in ("",):
+        job["session_uuid"] = wiped
+        sig = cli.check_events_liveness(job, live_status(), now)
+        assert sig is not None and sig["signal"] == "events-tampered"
+    del job["session_uuid"]
+    sig = cli.check_events_liveness(job, live_status(), now)
+    assert sig is not None and sig["signal"] == "events-tampered"
+    # Tmux dead: nothing to page about (the resume path owns that).
+    sig = cli.check_events_liveness(
+        job, live_status(tmux_alive=False), now)
+    assert sig is None
 
 # --- find_session ------------------------------------------------------------
 
