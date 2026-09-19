@@ -18,7 +18,9 @@ This changelog only works if entries land with the change, not after it:
    Reviewers request changes when the entry is missing: it's a merge gate,
    not a suggestion (see `CONTRIBUTING.md`).
 2. **Trivial scope** (typo, single-line doc fix, formatting) doesn't need an
-   entry; merge notes are enough.
+   entry; merge notes are enough. **Seeding-batch exemption:** PRs authored
+   before this ritual merged (the 2026-09-19 queue-drain batch) are exempt —
+   the per-PR entry rule applies prospectively from this PR's merge.
 3. **At release time**, the release commit (the `VERSION` bump — see
    `docs/VERSIONING.md`, "Cutting a release") moves the whole
    `## [Unreleased]` section into `## [0.2.0] - YYYY-MM-DD` (pattern:
