@@ -4,7 +4,9 @@
 
 **Question:** who else offers VMs or sandboxes for agents, what do they charge,
 and where does spark-vm win or lag? **Method:** public sources (vendor docs,
-pricing pages, launch coverage, third-party benchmarks) surveyed 2026-09-18.
+pricing pages, launch coverage, third-party benchmarks) surveyed 2026-09-18
+(morning), with a same-day pm watch update (TermSquad re-check, egress/isolation
+scorecard fills, market moves).
 This is a strategy input, not a spec — it feeds the backlog and the gap
 analysis. It extends the competitive map in `docs/RESEARCH_AGENT_SANDBOX_ADOPTION.md`
 (research archetype, PR #25) with prices, axis scorecards, and a first
@@ -12,8 +14,11 @@ TermSquad watch pass (backlog R3).
 
 **Scope note:** the market splits into two segments and spark-vm only plays in
 one of them. **Task-scoped sandboxes** (E2B, Daytona, Modal, Vercel, Cloudflare,
-Runloop) rent *executions* — fast cold starts, per-second billing, sessions
-measured in hours. **Persistent computers** (TermSquad, AgentComputer,
+Runloop) rent *executions* — fast cold starts, the billing unit is compute
+time, state is an opt-in snapshot, and the environment has no standing
+address/identity between runs. (Blaxel's "perpetual sandboxes" and Baseten's
+"persistent sandboxes" are blurring the lifetime edge of this split — see
+the pm watch update.) **Persistent computers** (TermSquad, AgentComputer,
 Fly Sprites, Northflank, DIY VPS, spark-vm) rent *a machine that stays yours*.
 Comparisons across the split are category errors for pricing and cold start —
 but they are fair game on the two load-bearing axes (egress controls,
@@ -32,8 +37,8 @@ isolation), because those are where the trust story lives.
 | **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team |
 | **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
 | **Cloudflare Sandbox** | Task-scoped sandbox | Containers on Workers, sleeps at 10 min idle, disk resets on sleep | Active-CPU billing ($0.072/vCPU-hr); $5/mo Workers Paid floor |
-| **Runloop** | Task-scoped sandbox | Sandboxed dev environments (docs don't assert a custom hypervisor), SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
-| **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10) | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
+| **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
+| **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation ("fast, isolated, persistent sandboxes and storage where developers can run their own agentic workflows and tool execution") | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
 | **Microsandbox** | Task-scoped sandbox (OSS) | libkrun microVM, network-layer secret injection | Free, self-hosted (YC F26) |
 | **DIY floor** | Persistent computer | $4/mo droplet + the human does everything | $4/mo + labor |
 | **spark-vm (this project)** | Persistent computer (OSS + hosted-in-design) | Real VM, per-action human approvals (confirmd), credential proxy (swapd), tailnet-first networking | OSS: provider cost + operator time; hosted: TBD (pricing thinking is an open backlog item) |
@@ -84,10 +89,30 @@ mobile-friendly web terminal, managed backups/restores (conditional — see abov
 multi-region choice. Each is a product
 gap to file, not a reason to panic.
 
+**Watch update — 2026-09-18 (pm):** re-checked termsquad.com/pricing and
+/features/always-on-cloud-computer — **no change** ($9/$19/$29/$49 stands;
+session-model lines match character-for-character). New details from the pm
+pass: (1) the FAQ now names a 12-agent roster (Codex, Claude Code, OpenCode,
+Cursor, Antigravity, Grok Build, Command Code, Pi, Devin, Kimi Code,
+GitHub Copilot, Factory Droid); (2) the launch release confirms TermSquad
+uses Herdr for session management — and an open upstream bug
+([herdrdev/herdr#3415](https://github.com/herdrdev/herdr/issues/3415)) shows a
+reboot race that SIGHUPs panes during server shutdown, triggers
+`persist.clear`, and **loses the whole session on next boot** (the issue title
+supports the phrasing; the race is millisecond-level). TermSquad's own FAQ
+only promises persistence "through *normal* disconnects and reconnects", so
+their session persistence rides on Herdr's persist path — including the
+unresolved upstream reboot race above; whether TermSquad is exposed depends
+on their Herdr version/config (unconfirmed), and host-reboot survival is
+unpromised and undocumented;
+(3) host-failure restart policy is still undocumented; (4) still no
+isolation/security whitepaper, and egress controls are still undocumented on
+any public page.
+
 **Watch items for the next pass:** egress-controls documentation (still
-unpublished), Herdr session semantics (restart policy after host failure?),
-any isolation whitepaper, plan/spec changes, and any signal of an
-agent-as-customer offering.
+unpublished), Herdr session semantics (restart policy after host failure? —
+now also watch the #3415 reboot-race bug), any isolation whitepaper,
+plan/spec changes, any signal of an agent-as-customer offering.
 
 ## Axis scorecard 1 — egress controls (scored explicitly, per R3)
 
@@ -102,8 +127,9 @@ whether the sandbox can disable the policy.
 | **Modal** | `block_network=True` | CIDR + domain allowlists (beta) | Yes, replaceable post-create via `Sandbox._experimental_set_outbound_network_policy` | **Yes:** `secrets=` env-var injection on `Sandbox.create`/`exec` (plus inline secrets and OIDC) — documented; what Modal does *not* document is egress-time credential *brokering* (Vercel/Cloudflare-style), which remains swapd's edge, not the existence of injection itself |
 | **Vercel** | `deny-all` incl. DNS | Domains via SNI + IP/CIDR fallback | Yes, no restart | **Yes, on every plan:** credential brokering on egress, matchers by path/method/query/headers; the firewall/broker sits in front of the sandbox with TLS terminated in the proxy — secrets never enter the sandbox |
 | **Cloudflare** | `enableInternet=false` | `allowedHosts`/`deniedHosts`, globs | Yes, live | **Yes:** outbound handlers run in the Workers runtime *outside* the sandbox with binding access; `ctx.containerId` scopes credentials per instance |
-| **Runloop** | Per devbox | Yes | Per devbox | Opaque token injection via the account-level Secrets API (raw secret values never exposed to agent code or the Devbox shell, referenced by name) — "Credential Gateway" is not a name Runloop uses in its public docs |
-| **Microsandbox** | — | — | — | Network-layer secret injection; **OSS, self-hosted** |
+| **Runloop** | "Network Policies" per devbox (granularity not detailed in docs) | Per devbox, not detailed | Per devbox | Opaque token injection via the account-level Secrets API (raw secret values never exposed to agent code or the Devbox shell, referenced by name) — "Credential Gateway" is not a name Runloop uses in its public docs |
+| **Microsandbox** | First-match-wins policy, default-deny | Rules by direction/destination/protocol/ports; DNS interception; `--no-net` lockdown ([networking overview](https://github.com/superradcompany/microsandbox/blob/HEAD/docs/networking/overview.mdx)) | Not documented | Network-layer destination-bound secret injection (substituted host-side, allow-listed destinations only); **OSS, self-hosted** |
+| **Northflank** | Deny-all toggle | Allow by workload tags/projects, external IP/CIDR/FQDN; dedicated static egress IPs ([network policies docs](https://northflank.com/docs/v1/application/network/configure-network-policies)) | Config change | Not published |
 | **TermSquad** | Not published | Not published | Not published | Not published — raw creds live on the box per their FAQ |
 | **spark-vm / swapd** | ssrf.allow/ssrf.deny allowlists | Per-host allowlists | Config-driven | **Yes:** placeholder substitution at the egress proxy — request *and response* bodies scrubbed (76-test suite), 5 MB skip cap with durable audit line, TOTP scrub window; real secret values never enter the guest or the agent's view — only opaque `hsurr:` placeholders |
 
@@ -114,8 +140,9 @@ converging design — E2B, Vercel, Cloudflare, and **Daytona** all ship some for
 outbound-proxy substitution into HTTPS request headers, per-secret host
 allowlists, and response scrubbing — the same two halves swapd implements.
 swapd's remaining edges are narrower now: (1) it is **open source and
-self-hostable** (Microsandbox is the only other OSS entry, and it's a sandbox,
-not a persistent-box stack); (2) **request-body-scope substitution** — Daytona
+self-hostable** (Microsandbox is the only other OSS entry — a sandbox, not a persistent-box
+stack — and its first-match-wins egress policy is now documented, so the
+comparison there is mechanism-vs-mechanism, not posture-vs-posture); (2) **request-body-scope substitution** — Daytona
 substitutes headers only; bodies, query params, and plain HTTP pass through;
 (3) the **TOTP scrub window**; (4) **durable per-decision audit lines**; (5)
 policy the agent provably cannot disable (sudoers + grant-writer TTL clamps,
@@ -159,14 +186,23 @@ is still a design doc, not code. Until it ships, our isolation story is
 1. **A real computer that stays yours.** Full OS, unattended background jobs,
    cron loops, your own stack — no session clock at all. Matches TermSquad;
    beats every task-scoped sandbox on the no-session-clock axis by design
-   (their sessions are measured in hours and their idle billing punishes
-   exactly the workloads a persistent box exists for).
+   (their billing unit is executions and state is opt-in snapshot/resume, not
+   a standing box — the idle economics still punish exactly the workloads a
+   persistent box exists for).
 2. **Per-action human approvals.** confirmd (mobile-friendly, auto-refreshing,
    two-tap approve, push on the roadmap) — no per-action approval loop found
-   in any surveyed vendor's docs or product surface (2026-09-18). The
-   incumbents isolate sessions or broker credentials; none gives the human a
-   per-action approval loop for what the agent is about to do. (A surveyed
-   negative — confirm periodically; see C1.)
+   in any surveyed **sandbox or computer offering's** docs or product surface
+   (2026-09-18). The incumbents isolate sessions or broker credentials; none
+   gives the human a per-action approval loop for what the agent is about to
+   do. **Caveat (pm watch):** Vercel's `eve` agent *framework* — a separate
+   product from the Vercel Sandbox SKU — ships a genuine per-action human
+   approval loop ([eve.dev/docs/human-in-the-loop](https://eve.dev/docs/human-in-the-loop);
+   per-tool `approval` property, `always()/once()/never()/auto()` policies,
+   native approve/cancel across channels (Slack, Discord, Teams, Telegram,
+   Twilio, GitHub, Linear per the launch announcement)). So the differentiator holds
+   scoped to sandbox/computer *offerings* but is **broken scoped to the
+   vendor Vercel** — scope the claim that way in all outward copy (a surveyed
+   negative — confirm periodically; see C1).
 3. **The credential-proxy posture, as open source.** The injection half is
    converging — Daytona has shipped the full pattern (verified in their docs).
    swapd remains the only **OSS, self-hostable** implementation with
@@ -234,14 +270,57 @@ is still a design doc, not code. Until it ships, our isolation story is
    prospective user can read today says why this box over TermSquad's $9/mo
    one. (Feeds R5.)
 
+## Watch update — 2026-09-18 (pm): market moves
+
+Items from the pm watch pass, flagged against the morning survey:
+
+- **OpenAI Agents API public beta (Sep 10)** — managed Codex harness with
+  first-class sandbox integrations: **Blaxel, Cloudflare, Daytona,
+  DigitalOcean, E2B, Modal, Oracle, Runloop, Vercel**; no API fee, pay tokens
+  + container time. The biggest sandbox-space validation event this month —
+  and Blaxel was named a launch partner days after the Baseten acquisition.
+  Platform-shaping; track what the default sandbox surface converges on.
+- **WSO2 Agent Manager GA (Sep 15)** — open-source agent control plane with a
+  built-in sandboxed runtime, per-agent identity, and MCP governance. A new
+  "sovereign" OSS alternative that bundles its own sandbox — watch as a
+  direct OSS competitor.
+- **Baseten "Hosted Tools"** — no integration blog/changelog/docs since the
+  Sep 10 acquisition, but Baseten's newest blog post explicitly names Blaxel
+  as the sandbox foundation: *"Our acquisition of Blaxel accelerates the
+  complementary foundation: fast, isolated, persistent sandboxes and storage
+  where developers can run their own agentic workflows and tool execution."*
+  Direction-of-travel (in Hosted Tools generally, not Blaxel specifically):
+  code execution + browser use. Watch for a shipped product.
+- **Microsandbox v0.7.1** — guest filesystem flush policies for snapshots,
+  npm provenance, CLI/SDK version separation; weekly changelog cadence
+  continues. Egress policy docs now detailed (see scorecard 1).
+- **Northflank Network Policies** — now documented: deny-all toggle, allow by
+  workload tags/projects and external IP/CIDR/FQDN, dedicated static egress
+  IPs. A configurable-Kata/Firecracker/gVisor vendor with documented network
+  policy is worth a full pass next time.
+- **Runloop re-framing** — docs now call Devboxes "isolated, ephemeral
+  virtual machines" (hypervisor still unnamed) and promise "Network Policies"
+  for egress. Watch for doc upgrades; Runloop is unscored in scorecard 2
+  until the hypervisor is named — its "ephemeral virtual machines" claim would
+  place it alongside Vercel's "MicroVM per sandbox, ephemeral" row, not the
+  per-customer-computer row.
+- **Factory $200M at $5B** (Blackstone, Khosla, Sequoia, NEA) — coding-agent
+  infra, adjacent demand signal, not a sandbox move. (Factory Droid is on
+  TermSquad's agent roster.)
+- **AgentComputer** — still the thinnest coverage in the set (egress 0,
+  approval-loop coverage weak); no public acknowledgment of the Sprites rate
+  parity. Needs a direct re-check.
+
 ## Implications → backlog
 
 - **C1 — TermSquad recurring watch** (competitor): egress-controls docs,
-  Herdr session semantics (host-failure restart policy), any isolation
-  whitepaper, plan/spec changes, agent-as-customer signals. Also watch for any
-  vendor shipping a per-action human approval loop — win #2's differentiator
-  is a surveyed negative, confirm it periodically. R3's first pass
-  is done; the watch continues.
+  Herdr session semantics (host-failure restart policy; now also the upstream
+  #3415 reboot-race session-loss bug), any isolation whitepaper, plan/spec
+  changes, agent-as-customer signals. Also watch for any vendor shipping a
+  per-action human approval loop — win #2's differentiator is a surveyed
+  negative, confirm it periodically, and **survey agent frameworks too**
+  (Vercel `eve` ships one as a separate product from the Sandbox SKU). R3's
+  first pass is done; the pm watch pass is done (this doc); the watch continues.
 - **C2 — Pricing-page inputs** (sales): TermSquad $9–$49, AgentComputer
   usage-based (no flat plan published — earlier $20/mo directory claim refuted),
   E2B Pro $150 floor, DIY $4/mo — feed the pricing-page
@@ -288,6 +367,20 @@ is still a design doc, not code. Until it ships, our isolation story is
   it shapes the pricing-page item, R4, and the free-tier abuse constraints.
   The research doc's Limitations section flagged this; it drives pricing
   packaging and the compliance roadmap, so it gets its own item.
+- **C9 — OpenAI Agents API partnership watch** (competitor): Sep 10 public
+  beta names Blaxel/Cloudflare/Daytona/DigitalOcean/E2B/Modal/Oracle/Runloop/
+  Vercel as sandbox partners. Track what the default sandbox surface
+  converges on — platform defaults set the bar our hosted story must clear.
+- **C10 — WSO2 Agent Manager watch** (competitor): GA Sep 15, OSS control
+  plane bundling its own sandboxed runtime + MCP governance. Direct "sovereign"
+  OSS competitor; watch adoption.
+- **C11 — Baseten/Blaxel integration watch** (competitor): "Hosted Tools"
+  blog names Blaxel as the sandbox foundation (direction: code execution +
+  browser). Watch for a shipped product; an acquisition-turned-sandbox-product
+  changes the task-scoped landscape.
+- **C12 — AgentComputer direct re-check** (competitor): thinnest coverage in
+  the set; verify egress posture, hypervisor claims, and the Sprites
+  relationship directly against vendor sources.
 
 ## Sources
 
@@ -321,3 +414,17 @@ Tier 3/4 post-create policy changes); [docs.sprites.dev](https://docs.sprites.de
 (Fly Sprites PAYG + one Level 10 $20/mo plan, ~30s hibernate); Vercel
 [firewall docs](https://vercel.com/docs/sandbox/concepts/firewall)
 (DENY-wins precedence).
+
+**Pm watch (2026-09-18):** [eve.dev/docs/human-in-the-loop](https://eve.dev/docs/human-in-the-loop)
+and [vercel.com/blog/introducing-eve](https://vercel.com/blog/introducing-eve)
+(Vercel `eve` per-action human approvals — a separate product from the Sandbox
+SKU); [Northflank network policies docs](https://northflank.com/docs/v1/application/network/configure-network-policies);
+[Runloop Devboxes overview](https://docs.runloop.ai/docs/devboxes/overview)
+("isolated, ephemeral virtual machines", Network Policies);
+[Microsandbox networking overview](https://github.com/superradcompany/microsandbox/blob/HEAD/docs/networking/overview.mdx)
+(first-match-wins egress policy); [herdrdev/herdr#3415](https://github.com/herdrdev/herdr/issues/3415)
+(reboot-race session loss); [InfoWorld: OpenAI Agents API public beta](https://www.infoworld.com/article/4221163/openai-launches-managed-agents-api-to-simplify-enterprise-ai-agent-development.html);
+[GlobeNewswire: WSO2 Agent Manager GA](https://www.globenewswire.com/news-release/2026/09/15/3362114/0/en/wso2-agent-manager-brings-sovereign-ai-governance-to-enterprise-agent-sprawl.html);
+[Baseten blog: Introducing Baseten Hosted Tools](https://www.baseten.co/blog/introducing-baseten-hosted-tools/);
+[Microsandbox releases](https://github.com/superradcompany/microsandbox/releases)
+(v0.7.1); [WebProNews: Factory $200M at $5B](https://www.webpronews.com/factorys-5-billion-leap-ai-agents-take-over-enterprise-software-factories/).
