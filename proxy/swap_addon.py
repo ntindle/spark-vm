@@ -224,7 +224,9 @@ elif _SV_HERE not in sys.path:
 try:
     from sparkvm_version import sparkvm_version as _sv_fn
     SPARKVM_VERSION = _sv_fn(start=_SV_HERE)
-except (ImportError, OSError, ValueError):
+except Exception:
+    # Best-effort stamp (SyntaxError included): a broken reader or VERSION
+    # must never break the component's startup.
     SPARKVM_VERSION = "0.0.0-unknown"
 # --- end version stamping ---
 

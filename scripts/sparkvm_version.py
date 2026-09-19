@@ -51,7 +51,9 @@ def sparkvm_version(start=None):
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read().strip()
-    except OSError:
+    except (OSError, ValueError):
+        # OSError: unreadable; ValueError: undecodable bytes (UnicodeDecodeError
+        # is a ValueError) — both mean "no usable version", never a crash.
         return UNKNOWN
     return text if _SEMVER_RE.match(text) else UNKNOWN
 

@@ -57,3 +57,31 @@ def test_version_flag_subprocess():
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == _repo_version()
+
+
+def test_broken_reader_never_breaks_startup(tmp_path):
+    """A syntax-broken sparkvm_version.py must not break the CLI import —
+    the bootstrap's except Exception is the best-effort contract."""
+    import importlib.util
+
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "sparkvm_version.py").write_text("def broken(:\n")
+    (repo / "VERSION").write_text("9.9.9\n")
+    bin_dir = repo / "muse-job" / "bin"
+    bin_dir.mkdir(parents=True)
+    cli_copy = bin_dir / "muse-job"
+    cli_copy.write_bytes(open(CLI_PATH, "rb").read())
+
+    name = "muse_job_cli_broken_reader"
+    sys.modules.pop(name, None)
+    # Evict any cached reader: the snippet must re-import the broken file,
+    # not reuse a good copy cached by an earlier test module.
+    sys.modules.pop("sparkvm_version", None)
+    loader = importlib.machinery.SourceFileLoader(name, str(cli_copy))
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    loader.exec_module(mod)  # must not raise
+    assert mod.SPARKVM_VERSION == "0.0.0-unknown"

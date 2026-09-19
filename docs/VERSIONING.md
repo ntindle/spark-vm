@@ -36,7 +36,14 @@ Each Python component bootstraps the reader with a small snippet (see the top
 of `confirm/confirmd.py`): it puts `scripts/` (repo layout) or its own
 directory (deployed standalone layout, e.g. `/home/swapd`) on `sys.path`,
 imports `sparkvm_version`, and falls back to `"0.0.0-unknown"` if anything
-goes wrong.
+goes wrong — the import is wrapped in a broad `except Exception` because the
+stamp is explicitly best-effort and must never break a component's startup.
+
+Limitation: `muse-job --version` reports the real version only when run from a
+repo checkout. A copy installed elsewhere (e.g. `~/bin/muse-job`) has neither
+`scripts/` nor a sibling `VERSION` to resolve, so it prints `0.0.0-unknown`.
+The daemons and the updater — the parts the version story is for — are
+unaffected.
 
 ## How the deployed standalone files get the version
 

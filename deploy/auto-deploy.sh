@@ -204,8 +204,8 @@ check_upstream_pinned() {
 components_for_files() {
     # stdin: changed repo paths, one per line. stdout: component names, unique.
     # A path entry ending in "/" is a directory prefix; a bare entry (e.g.
-    # "VERSION") is an exact file path — so docs/VERSIONING.md does not match
-    # the VERSION entry.
+    # "VERSION") matches that exact file only — so docs/VERSIONING.md and any
+    # other top-level VERSION* path do not trigger on the VERSION entry.
     local f c pfx
     while IFS= read -r f; do
         [ -n "$f" ] || continue

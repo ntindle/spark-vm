@@ -39,6 +39,14 @@ def test_missing_version_returns_unknown(tmp_path):
     assert sparkvm_version(str(tmp_path)) == UNKNOWN
 
 
+def test_non_utf8_version_returns_unknown(tmp_path):
+    # UnicodeDecodeError is a ValueError: the never-raises contract holds.
+    (tmp_path / "VERSION").write_bytes(b"\xff\xfe\x00bad\n")
+    assert sparkvm_version(str(tmp_path)) == UNKNOWN
+    with pytest.raises(ValueError):
+        sparkvm_version_strict(str(tmp_path))
+
+
 def test_invalid_version_returns_unknown(tmp_path):
     (tmp_path / "VERSION").write_text("not-a-version\n")
     assert sparkvm_version(str(tmp_path)) == UNKNOWN
