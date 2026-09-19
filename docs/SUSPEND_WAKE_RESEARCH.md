@@ -17,7 +17,7 @@ own subject:
 
 The H3 signup design (`docs/HOSTED_SIGNUP_ONBOARDING.md`, PR #24) defines
 the interface every provider driver implements: `provision` / `status` /
-`dial` / `ssh_info` / `destroy`. This pass answers: how do agent-sandbox
+`dial` / `ssh_info` / `destroy` (plus a later `snapshot`). This pass answers: how do agent-sandbox
 and VM providers implement idle suspend and wake, and what contract should
 H4's `suspended`/`waking` states plus async `dial()` expose so it stays
 provider-agnostic.
@@ -28,9 +28,10 @@ changes. Third-party-sourced claims are marked [T]; vendor docs [V].
 
 ## The short version
 
-- Every serious provider suspends idle boxes and bills ~zero compute while
-  suspended; the suspend mechanism varies (memory snapshot vs disk-only vs
-  cold stop) and the contract must not promise memory preservation.
+- Every surveyed provider with a suspend story bills ~zero compute while
+  suspended (TermSquad is the counterexample: always-on, no idle
+  suspend); the suspend mechanism varies (memory snapshot vs disk-only
+  vs cold stop) and the contract must not promise memory preservation.
 - **Wake-on-HTTP is provider-native** (Fly Proxy autostart, Runloop
   `wake_on_http`); **wake-on-SSH is never provider-native** — it exists in
   the wild only as a gateway layer (sandbox0's ssh-gateway). Our
@@ -237,17 +238,29 @@ idle/suspend design, not shipped interfaces.
    the isolation shape (per-tenant box vs per-tenant processes) —
    BACKLOG.md already gates H13 on H11.
 5. **`dial()` semantics** — an amendment to H3 §6, not a re-specification.
-   H3 defines `dial(vm_id) -> bidirectional stream`; that return type
-   stays, and `ssh_info()` keeps returning the connection bundle. What
-   this research adds: `dial()` gets wake-wait semantics — it blocks
-   (bounded, with the sandbox0/OpenKruise patterns: first-writer-wins
-   concurrent dedup so N racing dials trigger one wake; failure
-   taxonomy from rec 2) until the box is `running`, then opens the
-   stream. The caller never distinguishes "was suspended" from "was
-   cold" at dial time — warm-vs-cold is a `status()` field (rec 1), not
-   a dial-time branch. Runloop's `503 + Retry-After: 5` is the HTTP
-   analog of the wait contract; our analog is a blocking dial with a
-   timeout, not a poll loop pushed onto every caller.
+   H3 defines `dial(vm_id) -> bidirectional stream` — the driver-built
+   stream the control plane uses for provisioning deploy; `ssh_info()`
+   keeps returning the connection bundle. The same `dial()` is the
+   wake primitive for both consumers: the provisioning sequence and the
+   rec-6 ssh-gateway. What this research adds: `dial()` gets
+   **wake-wait semantics** — it triggers a wake if the box is
+   `suspended`, then blocks (bounded, explicit timeout) until the box
+   is `running`, then opens the stream. First-writer-wins concurrent
+   dedup (OpenKruise) so N racing dials trigger one wake; failure
+   taxonomy from rec 2 ("waking up" vs "resume failed").
+
+   This **supersedes the trigger-wake + poll-status model that
+   GPU_PATH_RESEARCH.md proposed** ("dial() triggers wake and the caller
+   polls status until ready") — deliberately, and for a reason:
+   after reviewing the actual wake paths (sandbox0's gateway waits and
+   attaches; OpenKruise's connect blocks until Ready with 503-on-
+   timeout), a bounded-blocking dial gives every caller one call with
+   a timeout instead of pushing a poll loop onto every caller. If an
+   H4 driver author prefers trigger+poll for a specific provider, that
+   is an H4 design decision — the contract requires only that the
+   timeout be explicit and the rec-2 failure taxonomy be honored.
+   Warm-vs-cold stays a `status()` field (rec 1), never a dial-time
+   branch.
 6. **Wake-on-SSH-dial is a gateway, not a flag**. Fly and Runloop prove
    no provider wakes on SSH natively. The control plane needs an
    ssh-gateway (sandbox0's shape): intercept the SSH dial, resume-or-
@@ -279,7 +292,9 @@ idle/suspend design, not shipped interfaces.
 
 - **Claimable**: "suspends when idle; wakes on SSH dial"; "no compute
   charges while suspended"; "disk state always persists across
-  suspend."
+  suspend." **Claimable *once H13/H4 ship* — until then, suspend/wake
+  stays out of public copy: the hosted idle/suspend economics are
+  undecided per POSITIONING.md.**
 - **Forbidden**: "instant wake" (cold-start fallback exists); "zero cost
   when idle" (storage costs exist); "everything resumes exactly as it
   was" (memory preservation is provider-dependent); "cron keeps running
