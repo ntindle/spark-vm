@@ -38,6 +38,10 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 def _validate_name(value, what):
     """Reject anything that is not a safe credential/entry name.
 
+    Shared with credlib/fill_secret.py (imported there): both the
+    surrogate builders and the filesystem consumer validate through
+    this one function so the choke point cannot drift.
+
     Raises DynamicCredentialError. The old check here (the surrogate
     "starts with hsurr:") was vacuous — the surrogate is constructed
     with that prefix — and validated nothing.
