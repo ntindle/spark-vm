@@ -4,8 +4,8 @@
 marketing claims anything about teams). Companion to backlog H8 (filed from
 the competitor pass, PR #26) and `HOSTED_GAP_ANALYSIS.md` (which names it).
 
-**Path convention:** paths under `muse-job/` are relative to that directory;
-all other paths are from the repo root.
+**Path convention:** all paths are from the repo root (`muse-job/` holds the
+job-runner CLI).
 
 ## The gap
 
