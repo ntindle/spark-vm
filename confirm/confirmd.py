@@ -773,14 +773,28 @@ def _answered_api_item(it):
     }
 
 
-def _meta_line(parts):
-    """Engineering review: one named helper for the "kind · filed ·
-    expires" line, so the escape ordering is reviewable in one place."""
+def _meta_line_html(parts):
+    """Like _meta_line, but parts are already-escaped HTML (e.g. from
+    _fmt_time). The escape discipline still lives in one place."""
     parts = [p for p in parts if p]
     if not parts:
         return ""
-    return '<div class="meta">%s</div>' % " · ".join(
-        html.escape(str(p)) for p in parts)
+    return '<div class="meta">%s</div>' % " · ".join(parts)
+
+
+def _meta_line(parts):
+    """Engineering review: one named helper for the "kind · filed ·
+    expires" line, so the escape ordering is reviewable in one place."""
+    return _meta_line_html([html.escape(str(p)) for p in parts])
+
+
+def _fmt_time(iso):
+    """Design review: the detail page shows filed/expires in the same short
+    local style as the pending card (which formats them client-side with
+    fmtTime). The server cannot know the viewer's timezone, so the ISO
+    value is emitted into a span and formatted by a small script on the
+    page — never rendered raw."""
+    return '<span data-iso="%s"></span>' % html.escape(str(iso), quote=True)
 
 
 def _render_pending_list(items):
@@ -901,10 +915,10 @@ class Handler(BaseHTTPRequestHandler):
                          % html.escape(str(purpose)))
         filed = []
         if it.get("created"):
-            filed.append("filed %s" % it["created"])
+            filed.append("filed %s" % _fmt_time(it["created"]))
         if it.get("expires"):
-            filed.append("expires %s" % it["expires"])
-        return _meta_line(filed) + table + untrusted
+            filed.append("expires %s" % _fmt_time(it["expires"]))
+        return _meta_line_html(filed) + table + untrusted
 
     def do_GET(self):
         login = self._auth()
@@ -1038,6 +1052,21 @@ class Handler(BaseHTTPRequestHandler):
                     'b.classList.add("armed");'
                     'b.textContent="Tap again to confirm approval";'
                     '}});'
+                    "</script>"
+                    # Design review: format filed/expires in the same short
+                    # local style as the pending card's fmtTime. The server
+                    # cannot know the viewer's timezone, so _fmt_time emits
+                    # the ISO into a span and this formats it client-side.
+                    # IIFE on purpose: no JS globals (cf. the `var b`
+                    # collision the demo capture script works around).
+                    "<script>"
+                    "(function(){"
+                    "document.querySelectorAll('span[data-iso]').forEach("
+                    "function(s){"
+                    "var d=new Date(s.getAttribute('data-iso'));"
+                    "s.textContent=isNaN(d)?s.getAttribute('data-iso'):"
+                    "d.toLocaleString();});"
+                    "})();"
                     "</script>"
                     # Design B1: dismiss this approval's notification when
                     # the owner answers — otherwise a dead notification

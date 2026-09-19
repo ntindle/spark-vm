@@ -18,6 +18,17 @@ production.
 import os
 import sys
 
+# Engineering review: hard fences so this can never become an
+# unauthenticated approval server on the tailnet. The imported module
+# reads BIND/CONFIRM_DIR/GRANT_WRITER at import time, so the fences go
+# BEFORE the import.
+if os.environ.get("CONFIRM_DEMO") != "1":
+    sys.exit("demo_confirmd.py is DEMO-ONLY: set CONFIRM_DEMO=1 to run it.")
+os.environ.setdefault("CONFIRM_BIND", "127.0.0.1")  # loopback only, always
+if os.environ.get("CONFIRM_DIR", "") in ("", "/home/swapd/approvals"):
+    sys.exit("demo_confirmd.py is DEMO-ONLY: point CONFIRM_DIR at a scratch "
+             "directory, never the production approvals dir.")
+
 sys.path.insert(0, os.environ.get("CONFIRM_SRC") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "confirm"))
 import confirmd  # noqa: E402

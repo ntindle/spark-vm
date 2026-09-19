@@ -8,7 +8,7 @@ PR (ntindle/spark-vm#36). Finals live here; the pipeline that made them is
 
 | File | What it shows | Status |
 |---|---|---|
-| `demo-approval-loop.gif` | The confirmd approval loop end to end: pending page → approval detail → two-tap approve (armed state) → back to "No pending approvals". 390px phone viewport, 6.9s loop, 129KB. | ✅ shipped |
+| `demo-approval-loop.gif` | The confirmd approval loop end to end: pending page → approval detail → two-tap approve (armed state) → back to "No pending approvals". 390px phone viewport (420px-wide frames), 6.8s loop, ~130KB. | ✅ shipped |
 | (asset 2) secrets the agent never sees | Config with `hsurr:…` placeholders, then the swap-proxy audit line — 20s GIF. | ⬜ follow-up |
 | (asset 3) persistence pair | Same desktop 24h apart — before/after screenshots. | ⬜ follow-up |
 | (asset 4) muse-job watch | Multi-day job alive in `muse-job` watch. | ⬜ follow-up |
@@ -17,10 +17,11 @@ PR (ntindle/spark-vm#36). Finals live here; the pipeline that made them is
 ## Provenance of `demo-approval-loop.gif`
 
 Recorded 2026-09-19 against a **demo** confirmd instance on spark-vm
-(localhost only, ephemeral port, throwaway self-signed cert, throwaway
-VAPID keypair, scratch `CONFIRM_DIR`). Every approval in the frames is a
-demo filing (`credential=demo-github-ro`, `job=demo-muse-job`,
-purpose prefixed `demo:`) — no real credentials, hosts, or jobs appear.
+(localhost only, port 18923 — any free port works, throwaway self-signed
+cert, throwaway VAPID keypair, scratch `CONFIRM_DIR`). Every approval in
+the frames is a demo filing (`credential=demo-github-ro`,
+`job=demo-muse-job`, purpose prefixed `demo:`) — no real credentials,
+hosts, or jobs appear.
 
 The demo instance is the real `confirm/confirmd.py` with two **demo-only**
 overrides in `scripts/demo_confirmd.py` (never for production):
@@ -43,30 +44,45 @@ Frame staging (also demo-only, does not change the product):
 - The two taps are dispatched via `element.click()` in JS rather than
   synthetic pointer taps: headless mobile-emulation taps proved flaky,
   and the page's own two-tap handler (arm → confirm) runs unchanged either
-  way. The evaluate uses a uniquely-named variable on purpose — the page's
-  inline script declares a global `var b` for the approve button and its
-  click handler closes over it, so a generic `var b` in injected JS would
-  repoint the handler at the push button and silently break the arm.
+  way. (The injected snippet deliberately avoids a global `var b` — the
+  page's inline script already claims that name; see the code comment.)
+- The capture uses `ignore_https_errors` because the demo instance serves
+  a throwaway self-signed certificate.
 
 ## Regenerating
 
 On a machine with Playwright + Chromium and Pillow (e.g. spark-vm):
 
 ```sh
-# 1. demo instance (terminal A) — DEMO ONLY, never the live deployment
+# 0. scratch dir + throwaway TLS cert + no-op grant writer
+mkdir -p /tmp/demo-approvals
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/demo-approvals/key.pem \
+  -out /tmp/demo-approvals/cert.crt -days 1 -nodes -subj "/CN=demo"
+printf '#!/bin/sh\nexit 0\n' > /tmp/demo-approvals/grant-writer-stub
+chmod +x /tmp/demo-approvals/grant-writer-stub
+# throwaway VAPID keypair so push renders as configured (it is hidden in
+# the frames, but the recorded run had it configured); CONFIRM_VAPID_KEYS
+# names the JSON file, it is not the JSON itself
+python3 confirm/push.py --gen-keys /tmp/demo-approvals/vapid.json
+
+# 1. demo instance (terminal A) — DEMO ONLY, never the live deployment.
+#    demo_confirmd.py refuses to start without CONFIRM_DEMO=1, forces
+#    loopback bind, and refuses the production approvals dir.
+CONFIRM_DEMO=1 \
 CONFIRM_SRC=/path/to/spark-vm/confirm \
 CONFIRM_BIND=127.0.0.1 CONFIRM_PORT=18923 \
 CONFIRM_DIR=/tmp/demo-approvals \
 CONFIRM_CERT=/tmp/demo-approvals/cert.crt \
 CONFIRM_KEY=/tmp/demo-approvals/key.pem \
+CONFIRM_VAPID_KEYS=/tmp/demo-approvals/vapid.json \
 GRANT_WRITER=/tmp/demo-approvals/grant-writer-stub \
 python3 scripts/demo_confirmd.py
 
-# 2. file a demo approval (terminal B)
+# 2. file a demo approval (terminal B) — demo values only
 CONFIRM_DIR=/tmp/demo-approvals confirm/confirm-request \
-  --kind first-use --credential demo-cred --host demo.example.invalid \
-  --method GET --path-prefix / --job demo-job \
-  --purpose "demo: <what the frame should say>"
+  --kind first-use --credential demo-github-ro --host api.github.com \
+  --method GET --path-prefix /repos/ --scope read --job demo-muse-job \
+  --purpose "demo: first GitHub read from a fresh agent job"
 
 # 3. capture + assemble (terminal B)
 python3 scripts/generate_demo_assets.py \

@@ -26,11 +26,13 @@ except ImportError:
 
 
 # (frame name, seconds to hold in the GIF)
+# Design review: give time to information, not whitespace — the dense
+# detail frame holds longest, the empty "cleared" frame shortest.
 FRAME_HOLDS = {
-    "01-pending": 2.0,
-    "02-detail": 1.2,
-    "03-armed": 1.2,
-    "04-answered": 2.5,
+    "01-pending": 1.8,
+    "02-detail": 2.2,
+    "03-armed": 1.6,
+    "04-answered": 1.2,
 }
 
 
@@ -55,53 +57,61 @@ def capture(url, frames_dir):
     shots = []
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--no-sandbox"])
-        ctx = browser.new_context(
-            viewport={"width": 390, "height": 844},
-            device_scale_factor=2,
-            is_mobile=True,
-            ignore_https_errors=True,
-        )
-        page = ctx.new_page()
-        page.goto(url, wait_until="networkidle")
-        # Wait for the pending card the demo approval filed.
-        page.wait_for_selector(".card", timeout=15000)
-        page.wait_for_timeout(600)
-        _hide_push_artifact(page)
+        try:
+            ctx = browser.new_context(
+                viewport={"width": 390, "height": 844},
+                device_scale_factor=2,
+                is_mobile=True,
+                ignore_https_errors=True,
+            )
+            page = ctx.new_page()
+            page.goto(url, wait_until="networkidle")
+            # Wait for the pending card the demo approval filed.
+            try:
+                page.wait_for_selector(".card", timeout=15000)
+            except Exception:
+                sys.exit("no pending approval found at %s — file one first "
+                         "(see assets/README.md step 2)" % url)
+            page.wait_for_timeout(600)
+            _hide_push_artifact(page)
 
-        def snap(name):
-            path = os.path.join(frames_dir, name + ".png")
-            page.screenshot(path=path)
-            shots.append(path)
-            print("frame:", path)
-            return path
+            def snap(name):
+                path = os.path.join(frames_dir, name + ".png")
+                page.screenshot(path=path)
+                shots.append(path)
+                print("frame:", path)
+                return path
 
-        snap("01-pending")
-        # Open the approval detail page — server-rendered, two-tap approve.
-        href = page.locator(".card").first.get_attribute("href")
-        page.goto(url + href, wait_until="networkidle")
-        page.wait_for_selector("#approveBtn", timeout=15000)
-        page.wait_for_timeout(600)
-        _hide_push_artifact(page)
-        snap("02-detail")
-        # Tap via JS dispatch: the page's own two-tap handler runs unchanged,
-        # but headless mobile-emulation taps are flaky, so the clicks are
-        # dispatched deterministically (documented in assets/README.md).
-        page.evaluate("document.getElementById('approveBtn').click()")
-        page.wait_for_selector("#approveBtn.armed", timeout=10000)
-        page.wait_for_timeout(700)
-        _hide_push_artifact(page)
-        snap("03-armed")
-        page.evaluate("document.getElementById('approveBtn').click()")
-        # POST /answer 303-redirects to / — wait for the landing, then snap.
-        page.wait_for_url(url + "/", timeout=15000)
-        page.wait_for_timeout(800)
-        _hide_push_artifact(page)
-        snap("04-answered")
-        browser.close()
+            snap("01-pending")
+            # Open the approval detail page — server-rendered, two-tap approve.
+            href = page.locator(".card").first.get_attribute("href")
+            page.goto(url + href, wait_until="networkidle")
+            page.wait_for_selector("#approveBtn", timeout=15000)
+            page.wait_for_timeout(600)
+            _hide_push_artifact(page)
+            snap("02-detail")
+            # Tap via JS dispatch: the page's own two-tap handler runs unchanged,
+            # but headless mobile-emulation taps are flaky, so the clicks are
+            # dispatched deterministically (documented in assets/README.md).
+            page.evaluate("document.getElementById('approveBtn').click()")
+            page.wait_for_selector("#approveBtn.armed", timeout=10000)
+            page.wait_for_timeout(700)
+            _hide_push_artifact(page)
+            snap("03-armed")
+            page.evaluate("document.getElementById('approveBtn').click()")
+            # POST /answer 303-redirects to / — wait for the landing, then snap.
+            page.wait_for_url(url + "/", timeout=15000)
+            page.wait_for_timeout(800)
+            _hide_push_artifact(page)
+            snap("04-answered")
+        finally:
+            browser.close()
     return shots
 
 
 def assemble(shots, out_path, max_width=420):
+    if not shots:
+        raise ValueError("assemble() needs at least one frame")
     holds = FRAME_HOLDS
     frames = []
     for s in shots:
@@ -128,7 +138,11 @@ def main():
     ap.add_argument("--frames-dir", default="/tmp/demo-frames")
     ap.add_argument("--out", required=True, help="output GIF path")
     args = ap.parse_args()
-    shots = capture(args.url, args.frames_dir)
+    # Engineering review: a trailing-slash --url (exactly what a browser
+    # address bar yields) would build "//approval/<id>" and 404, and break
+    # the wait_for_url match on the 303 landing. Normalize once.
+    url = args.url.rstrip("/")
+    shots = capture(url, args.frames_dir)
     if len(shots) < 4:
         sys.exit("expected 4 frames, got %d — the demo flow broke" % len(shots))
     assemble(shots, args.out)
