@@ -154,18 +154,15 @@ def assemble(shots, out_path, max_width=420, holds=None):
 # at a scratch journal. Nothing shown is a real secret.
 
 SECRETS_FRAMES = [
-    # (stem, caption, [(kind, text)]); kind "cmd" renders "$ <text>" in
-    # white, kind "out" renders gray output text.
+    # (stem, caption). The commands staged in each frame are the ones the
+    # generator actually executes in the work dir (see generate_secrets) —
+    # the frames are genuine transcripts, not re-typings.
     ("s1-config",
-     "1/3 — the agent's config: placeholders only, never real secrets",
-     [("cmd", "cat ~/.config/demo-agent/config.json")]),
+     "1/3 — the agent's config: placeholders only, never real secrets"),
     ("s2-journal",
-     "2/3 — the swap proxy's audit journal: it names the placeholder, never the value",
-     [("cmd", "tail -1 demo-swap.log")]),
+     "2/3 — the swap proxy's audit journal: it names the placeholder, never the value"),
     ("s3-proof",
-     "3/3 — grep the journal for raw secret patterns: nothing to find",
-     [("cmd", "grep -oE '[A-Za-z0-9_-]{40,}' demo-swap.log || "
-              "echo 'no 40+ char tokens anywhere in the journal'")]),
+     "3/3 — grep the journal for raw secret patterns: nothing to find"),
 ]
 SECRETS_HOLDS = {"s1-config": 6.0, "s2-journal": 7.0, "s3-proof": 7.0}
 
@@ -261,14 +258,19 @@ def generate_secrets(repo_root, work_dir, frames_dir):
     print("journal line:", journal_line)
 
     shots = []
+    # Every frame is a genuine transcript: the displayed command is run
+    # for real in the work dir and its real stdout is rendered. Nothing
+    # is re-typed.
     transcripts = {
-        "s1-config": [("cmd", "cat ~/.config/demo-agent/config.json"),
-                      ("out", _FIXTURE.rstrip("\n"))],
+        "s1-config": [("cmd", "cat demo-agent-config.json"),
+                      ("out", _sh("cat demo-agent-config.json", work_dir))],
         "s2-journal": [("cmd", "tail -1 demo-swap.log"),
-                       ("out", journal_line)],
+                       ("out", _sh("tail -1 demo-swap.log", work_dir))],
         "s3-proof": [("cmd", "grep -oE '[A-Za-z0-9_-]{40,}' demo-swap.log || "
                              "echo 'no 40+ char tokens anywhere in the journal'"),
-                     ("out", "no 40+ char tokens anywhere in the journal")],
+                     ("out", _sh("grep -oE '[A-Za-z0-9_-]{40,}' demo-swap.log || "
+                                 "echo 'no 40+ char tokens anywhere in the journal'",
+                                 work_dir))],
     }
     # Uniform frame height: compute every frame's transcript segments,
     # take the tallest body, and render all frames to it (GIF viewers
@@ -277,20 +279,11 @@ def generate_secrets(repo_root, work_dir, frames_dir):
     cw = max(font_probe.getlength("0123456789abcdef"), 1) / 16
     ncols = int((_TERM_W - 2 * _TERM_PAD) / cw)
     specs = {}
-    for stem, caption, _ in SECRETS_FRAMES:
-        spec = list(transcripts[stem])
-        if stem == "s3-proof":
-            # Run the proof for real against the scratch journal: grep
-            # finds no raw-secret-length tokens, so the || echo fires and
-            # the frame shows genuine command output.
-            proof = _sh("grep -oE '[A-Za-z0-9_-]{40,}' demo-swap.log || "
-                        "echo 'no 40+ char tokens anywhere in the journal'",
-                        work_dir)
-            spec = [spec[0], ("out", proof)]
-        specs[stem] = (caption, _flatten_transcript(spec, ncols))
+    for stem, caption in SECRETS_FRAMES:
+        specs[stem] = (caption, _flatten_transcript(transcripts[stem], ncols))
     lh = _TERM_FONT + 6
     max_body = max(_TERM_PAD + len(s) * lh + 8 for _, s in specs.values())
-    for stem, caption, _ in SECRETS_FRAMES:
+    for stem, caption in SECRETS_FRAMES:
         caption_, segs = specs[stem]
         im = _render_terminal_segs(caption_, segs, max_body)
         path = os.path.join(frames_dir, stem + ".png")
@@ -339,6 +332,13 @@ def _shell_quote(s):
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
+def _ensure_out_dir(out_path):
+    # The recipe only works because assets/ exists in a checkout; don't
+    # fail obscurely if someone points --out at a fresh directory.
+    d = os.path.dirname(os.path.abspath(out_path))
+    os.makedirs(d, exist_ok=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--asset", choices=("approval-loop", "secrets"),
@@ -358,6 +358,7 @@ def main():
         shots, _ = generate_secrets(repo_root, args.work_dir, args.frames_dir)
         if len(shots) != 3:
             sys.exit("expected 3 frames, got %d" % len(shots))
+        _ensure_out_dir(args.out)
         assemble(shots, args.out, max_width=_TERM_W, holds=SECRETS_HOLDS)
         return
     if not args.url:
@@ -369,6 +370,7 @@ def main():
     shots = capture(url, args.frames_dir)
     if len(shots) < 4:
         sys.exit("expected 4 frames, got %d — the demo flow broke" % len(shots))
+    _ensure_out_dir(args.out)
     assemble(shots, args.out)
 
 

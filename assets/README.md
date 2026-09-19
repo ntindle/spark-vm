@@ -99,18 +99,21 @@ Recorded 2026-09-19 by running the asset's own recipe on this box (no
 live services, no browser — the asset renders terminal frames with PIL):
 
 - The config is a demo fixture (`demo-agent-config.json` in the scratch
-  dir): every value the agent would touch is a `demo-`-named placeholder.
-  No real credentials, hosts, or jobs appear.
+  work dir): every credential value the agent would touch is a
+  `demo-`-named placeholder (`hsurr:demo-gh-ro`, `demo-agent`). No real
+  secrets appear. The only real-world string anywhere in the asset is
+  `api.github.com` — the public example host used throughout the
+  spark-vm docs.
 - The journal line is **byte-for-byte the output of the real
   `proxy/swap_addon.py` `SwapAddon._audit()` code path**, called from the
   generator with `SWAP_LOG_FILE` pointed at a scratch journal:
   `ts=<utc> host=api.github.com swapped=hsurr:demo-gh-ro ip=-`
-  (`api.github.com` is the public example host used throughout the
-  spark-vm docs.)
-- The three frames are genuine command transcripts: the recipe cats the
-  fixture, tails the real journal, and greps the journal for
-  raw-secret-length tokens (`[A-Za-z0-9_-]{40,}`) — the grep finds
-  nothing, so the `|| echo` fires and the frame shows real output.
+- The three frames are genuine command transcripts: the generator runs
+  `cat demo-agent-config.json`, `tail -1 demo-swap.log`, and
+  `grep -oE '[A-Za-z0-9_-]{40,}' demo-swap.log || echo '...'` for real
+  in the scratch work dir and renders the real stdout. The displayed
+  paths are the scratch work dir's real relative paths, not the agent's
+  real config location.
 - Rendering notes (staged, disclosed): the journal line is word-wrapped
   for the 480px frame (real terminals wrap at the column edge too); the
   terminal chrome (title bar, caption strip) is drawn by the generator.
@@ -121,7 +124,7 @@ Needs Pillow only (no Playwright, no Chromium, no live services):
 
 ```sh
 # scratch dir lives in the working tree, not /tmp (/tmp gets wiped
-# mid-run on this box)
+# mid-run on this box); its contents are git-ignored, safe to delete
 python3 scripts/generate_demo_assets.py \
   --asset secrets --work-dir ./demo-asset2-work \
   --out assets/demo-secrets-never-seen.gif
