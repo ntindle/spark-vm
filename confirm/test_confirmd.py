@@ -200,6 +200,22 @@ class ConfirmdTests(unittest.TestCase):
         self.assertTrue(cd._csrf_nonce_ok(it, n2))
         self.assertEqual(len(it["_csrf_nonces"]), 1)
 
+    def test_75_nonce_ttl_enforced_at_verify(self):
+        """The TTL is enforced at verification time too, not only at
+        mint (security review): an entry backdated past the TTL is
+        rejected even if no new mint pruned it."""
+        it = {}
+        n = cd._mint_csrf_nonce(it)
+        self.assertTrue(cd._csrf_nonce_ok(it, n))
+        it["_csrf_nonces"][-1]["ts"] -= (cd._CSRF_RING_TTL + 1)
+        self.assertFalse(cd._csrf_nonce_ok(it, n))
+
+    def test_75_ring_knobs_have_sane_defaults(self):
+        """The env-overridable ring knobs (arch review R1) default to
+        the conservative 3 nonces / 15 minutes."""
+        self.assertEqual(cd._CSRF_RING_SIZE, 3)
+        self.assertEqual(cd._CSRF_RING_TTL, 15 * 60)
+
     def test_75_nonce_not_leaked_to_answered(self):
         """The ring is stripped before the item reaches answered/."""
         it = {"_csrf_nonces": [{"nonce": "f" * 32, "ts": 0}]}
@@ -216,6 +232,12 @@ class ConfirmdTests(unittest.TestCase):
             shutil.rmtree(self.approvals / "answered")
             d = cd.answered_dir()
             self.assertTrue(os.path.isdir(d))
+
+    def test_77_aid_lock_is_per_approval(self):
+        """_aid_lock returns a stable per-aid lock (arch review B2/B3):
+        same aid -> same lock, different aid -> different lock."""
+        self.assertIs(cd._aid_lock("abc"), cd._aid_lock("abc"))
+        self.assertIsNot(cd._aid_lock("abc"), cd._aid_lock("xyz"))
 
     def test_77_whois_cache_capped(self):
         """The whois cache does not grow without bound (L10)."""
