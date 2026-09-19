@@ -101,6 +101,14 @@ REPO_DIR="${CUT_RELEASE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$REPO_DIR"
 [[ -d .git ]] || die "not a git repo: $REPO_DIR"
 
+# Fail fast on a missing confirmation, before any network I/O.
+if [[ "$MODE" == "execute" && "$CI" != "1" && "$CONFIRM" != "1" ]]; then
+    die "--execute needs --yes (re-run with --yes to confirm)"
+fi
+if [[ "$MODE" == "publish-only" && "$CONFIRM" != "1" ]]; then
+    die "--publish-only needs --yes (re-run with --yes to confirm)"
+fi
+
 # --- preflight: right ref ---
 if [[ "$CI" == "1" ]]; then
     [[ "${GITHUB_REF:-}" == "refs/heads/main" ]] \
@@ -206,12 +214,14 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
     fi
     echo
     # Squash-merge subjects look like "subject (#123)"; plain subjects pass
-    # through. Carriage returns are stripped: a crafted subject must not be
-    # able to smuggle terminal control sequences into the published notes.
+    # through. The PR reference is anchored to the end of the subject so a
+    # subject containing an earlier "(#N)" keeps its full title.
+    # Carriage returns are stripped: a crafted subject must not be able to
+    # smuggle terminal control sequences into the published notes.
     git log --first-parent --format='%s' "$RANGE" | tr -d '\r' | while IFS= read -r subject; do
-        if [[ "$subject" =~ \(#([0-9]+)\) ]]; then
-            num="${BASH_REMATCH[1]}"
-            title="${subject% \(#$num\)}"
+        if [[ "$subject" =~ ^(.*)\ \(#([0-9]+)\)$ ]]; then
+            num="${BASH_REMATCH[2]}"
+            title="${BASH_REMATCH[1]}"
             echo "- #$num — $title"
         else
             echo "- $subject"
@@ -294,7 +304,7 @@ PYEOF
 }
 
 if [[ "$MODE" == "dry-run" ]]; then
-    echo "cut-release.sh: dry run — nothing changed."
+    echo "cut-release.sh: dry run — no tag created, no release published."
     echo "cut-release.sh: --execute --yes would run:"
     echo "  git tag -a $TAG -m <message> && git push $REMOTE $TAG"
     echo "  gh release create $TAG --title $TAG --notes-file <notes> --target main"
@@ -302,19 +312,16 @@ if [[ "$MODE" == "dry-run" ]]; then
 fi
 
 if [[ "$MODE" == "publish-only" ]]; then
-    [[ "$CONFIRM" == "1" ]] || die "--publish-only needs --yes (re-run with --yes to confirm)"
     publish_release
     exit 0
 fi
 
-# --- execute ---
-if [[ "$CI" != "1" && "$CONFIRM" != "1" ]]; then
-    die "--execute needs --yes (re-run with --yes to confirm)"
-fi
+# --- execute: confirmation was already gated up front ---
 
 # --- execute: tag ---
 TAG_MSG="spark-vm $TAG"
-git tag -a "$TAG" -m "$TAG_MSG" || die "git tag failed"
+git tag -a "$TAG" -m "$TAG_MSG" \
+    || die "git tag failed (is a tagger identity configured? user.name/user.email)"
 echo "cut-release.sh: created tag $TAG on $HEAD_SHA"
 git push "$REMOTE" "$TAG" \
     || { git tag -d "$TAG" >/dev/null 2>&1 || true

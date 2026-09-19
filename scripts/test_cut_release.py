@@ -256,6 +256,44 @@ def test_publish_only_recovers_after_failed_publish(workrepo, tmp_path):
     assert "sekrit" not in log
 
 
+def test_refuses_when_tag_moved_on_remote(workrepo):
+    # A tag that exists locally but points elsewhere than the remote's tag
+    # must fail closed: the non-forced tag fetch refuses to clobber it.
+    (workrepo / "second.txt").write_text("s\n")
+    git("add", "-A", cwd=workrepo)
+    git("commit", "-m", "second commit", cwd=workrepo)
+    git("push", "origin", "main", cwd=workrepo)
+    git("tag", "v0.2.0", cwd=workrepo)
+    git("push", "origin", "v0.2.0", cwd=workrepo)
+    git("tag", "-d", "v0.2.0", cwd=workrepo)
+    git("tag", "v0.2.0", "HEAD~1", cwd=workrepo)  # stale local tag
+    r = run_script(workrepo, "--dry-run")
+    assert r.returncode != 0
+    assert "could not fetch" in r.stderr
+
+
+def test_pr_reference_anchored_to_end_of_subject(workrepo):
+    (workrepo / "feat2.txt").write_text("x\n")
+    git("add", "-A", cwd=workrepo)
+    git("commit", "-m", "fix (#1) thing (#22)", cwd=workrepo)
+    git("push", "origin", "main", cwd=workrepo)
+    r = run_script(workrepo, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "- #22 — fix (#1) thing" in r.stdout
+
+
+def test_release_workflow_pins_checkout_and_sets_identity():
+    wf = os.path.join(REPO, ".github", "workflows", "release.yml")
+    text = open(wf, encoding="utf-8").read()
+    # No floating action tag: checkout is SHA-pinned...
+    assert "actions/checkout@" in text
+    assert "actions/checkout@v" not in text.replace(
+        "actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "")
+    # ...and the job configures a git identity, because `git tag -a`
+    # embeds a tagger identity that actions/checkout does not set.
+    assert "github-actions[bot]" in text
+
+
 # --- refusals ---
 
 def test_refuses_dirty_tree(workrepo):
