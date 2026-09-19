@@ -6,6 +6,12 @@
 # The name is fixed: the inference proxy (finding 31) holds exactly one
 # credential. INFERENCE_SECRETS_DIR overrides the directory for tests;
 # production always uses the fixed default below.
+#
+# Store contract (#88): readers return stored bytes verbatim, so the
+# incidental newline from shell idioms (echo/printf add one) is removed
+# HERE — exactly one trailing newline, exactly once. This writer is its
+# own frontend (no chomping caller stands in front of it), so exactly-once
+# is safe; API keys never legitimately end in a newline.
 # Root-owned 0755; ntindle cannot modify this script, only execute it
 # via the sudoers entry.
 set -euo pipefail
@@ -18,9 +24,33 @@ tmp="$(mktemp "$dir/.tmp.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 chmod 600 "$tmp"
 
-# Read stdin capped at max_bytes+1 so an oversized value is detectable.
-# head exits 0 even when the input is shorter.
-head -c $((max_bytes + 1)) > "$tmp"
+# Read stdin capped at max_bytes+2 so an oversized value is detectable even
+# after the one-newline chomp below: if the capture hit the cap we cannot
+# tell a legit 64KiB+newline input from a truncated longer one, so fail
+# closed. (A chomp must never mask truncation — QA round 2.)
+head -c $((max_bytes + 2)) > "$tmp"
+size="$(wc -c < "$tmp")"
+if [ "$size" -gt $((max_bytes + 1)) ]; then
+    echo "cred-store-set-inference: secret exceeds 64 KiB" >&2
+    exit 2
+fi
+
+# Chomp exactly one trailing newline (#88): echo/printf-style invocations
+# add one, and readers return stored bytes verbatim, so the store boundary
+# is where the incidental newline is removed. Interior content untouched.
+python3 - "$tmp" <<'PYEOF'
+import sys
+p = sys.argv[1]
+with open(p, "rb") as f:
+    data = f.read()
+if data.endswith(b"\r\n"):
+    data = data[:-2]
+elif data.endswith(b"\n"):
+    data = data[:-1]
+with open(p, "wb") as f:
+    f.write(data)
+PYEOF
+
 size="$(wc -c < "$tmp")"
 if [ "$size" -eq 0 ]; then
     echo "cred-store-set-inference: refusing to store an empty secret" >&2

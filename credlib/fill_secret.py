@@ -56,7 +56,16 @@ def _read_value(credential_name, entry_name):
     # single whole secret, even when they look like k=v lines (e.g. a base64
     # token ending in "==").
     if not lines or lines[0].strip() != MULTI_MARKER:
-        return text.strip()
+        # Verbatim, never stripped (#88): write paths chomp exactly one
+        # trailing newline exactly once — `cred set` stdin and cred-ui
+        # paste at the frontend, cred-store-set-inference at its own
+        # boundary; the narrow main writer (proxy/cred-store-set) stores
+        # stdin verbatim and its frontends chomp first. So the stored
+        # bytes ARE the intended value, and a read-side strip() corrupts
+        # secrets that legitimately start/end with whitespace (stored
+        # "a\n" would read back as "a"). Direct narrow-writer use must
+        # pipe exact bytes (printf '%s', never echo).
+        return text
     parsed = {}
     for line in lines[1:]:
         m = ENTRY_LINE_RE.match(line)
