@@ -72,10 +72,17 @@ MUSE = os.path.join(HOME, ".local", "bin", "muse")
 # security labels on those lines (issue #3 review). Mirrors the sanitizer in
 # plugin/hooks/stop.py, which cleans hook-written fields at the source --
 # this one covers forged event lines that bypass the hooks entirely.
+# Issue #23 B6: also strip CR (\x0d, excluded from the C0 range before)
+# and bare ESC sequences (\x1bc terminal reset, \x1b7/\x1b8, \x1bM, \x1b(X
+# charset shifts) -- a forged detail of "\r" + padding in `muse-job status`
+# (terminal f-string) overwrote the rendered line and displayed a fake
+# verified-done label. The bare-\x1b alternative is ordered AFTER CSI/OSC
+# so full sequences are consumed whole, not left as garbage tails.
 _ANSI_RE = re.compile(
     r"\x1b\[[0-9;?]*[ -/]*[@-~]"
     r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
-    r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+    r"|\x1b"
+    r"|[\x00-\x08\x0b\x0c\r\x0e-\x1f\x7f]"
 )
 
 
@@ -670,12 +677,26 @@ def head_info(uuid):
         return None, 0
 
 
-def _iter_events(uuid):
+# Issue #23 H6: the event-file scan is capped to the last 2 MB. A full-file
+# readlines() per job per watch pass is a RAM/CPU DoS on the manager against
+# a GB-scale appended file. Documented tradeoff: a genuine event pushed past
+# the tail window is invisible to the scan -- the dedup-cursor corroboration
+# in triage_done_events fails OPEN in that case (re-page, never suppress).
+_EVENT_SCAN_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _iter_events(uuid, max_bytes=_EVENT_SCAN_MAX_BYTES):
     """Yield parseable event dicts from the session's event file, oldest first.
 
     Refuses symlinked event files (issue #3): the same-user agent can plant
     a symlink so hook appends corrupt another job's state -- reading through
     it would follow the link. The caller pages `events-tampered` for that.
+
+    Only dicts are yielded (issue #23 B4): a forged non-dict JSON line
+    (`[1,2]`, `"x"`) would otherwise reach `ev.get("state")` and raise
+    AttributeError, blinding that job's watch pass permanently (the line
+    persists until the 30-day prune; cmd_status crashes the same way).
+    The docstring promises event *dicts*; enforce it at the source.
     """
     if not _UUID_RE.match(uuid or ""):
         return  # forged uuid: refuse to read outside EVENTS_DIR
@@ -683,18 +704,27 @@ def _iter_events(uuid):
     try:
         if os.path.islink(p):
             return
-        with open(p) as f:
-            lines = f.readlines()
+        with open(p, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            data = f.read()
     except OSError:
         return
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if size > max_bytes and lines:
+        # The scan started mid-file; the first line is a fragment. Drop it.
+        lines = lines[1:]
     for line in lines:
         line = line.strip()
         if not line:
             continue
         try:
-            yield json.loads(line)
+            obj = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(obj, dict):
+            yield obj
 
 
 def event_file_symlinked(uuid):
@@ -730,6 +760,23 @@ def latest_done_event(uuid, now):
     return best, best_ts
 
 
+def done_events(uuid, now):
+    """All `done`-state events in the file, oldest first by normalized ts.
+
+    Issue #23 B3: the newest-only triage let a newer lazy forgery displace
+    a genuine done claim in the same watch window -- the watch pass triaged
+    only the forgery (done-unverified) and the genuine done-claimed page
+    never fired. Callers iterate every done and triage each one with
+    handle_done_claim; the dedup cursor stays inside handle_done_claim.
+    """
+    evs = []
+    for e in _iter_events(uuid):
+        if e.get("state") == "done":
+            evs.append((e, _claim_ts(e, now)))
+    evs.sort(key=lambda t: t[1])
+    return evs
+
+
 def verify_done_event(job, ev, slug):
     """Triage a hook `done` event: protocol compliance, NOT authenticity.
 
@@ -754,13 +801,15 @@ def verify_done_event(job, ev, slug):
     transition job state on the result alone -- see handle_done_claim.
     """
     ev = ev or {}
-    uuid = job.get("session_uuid")
+    uuid = _uuid_or_none(job)
     if not uuid:
         return False, "job has no recorded session uuid"
     if ev.get("session_id") != uuid:
         return False, "event session_id does not match the job's session"
     cwd = ev.get("cwd")
-    if not cwd:
+    # Issue #23 H4: os.path.realpath(123) raises TypeError, contained
+    # per-job but persistent. Fail closed on a non-string cwd.
+    if not isinstance(cwd, str) or not cwd:
         return False, "event carries no cwd"
     if not slug_ok(slug or ""):
         # The slug feeds a path join below. Production callers pass the
@@ -814,11 +863,13 @@ def _stored_claim_ts(job, now):
     return v
 
 
-def _sanitize_count(v):
-    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
-
-
-def _sanitize_window_start(v, now):
+def _sanitized_repeated_for_ts(job, now):
+    """Read-side sanitization of the done-repeated dedup marker (issue #23
+    B2). job.json is agent-writable (issue #11): a planted value must fail
+    open to re-paging, never to suppression -- so garbage/future reads as
+    absent (no marker), not as a suppression.
+    """
+    v = job.get("done_repeated_for_ts")
     if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
         return None
     if v > now:
@@ -826,7 +877,7 @@ def _sanitize_window_start(v, now):
     return v
 
 
-def handle_done_claim(job, ev, slug, now=None):
+def handle_done_claim(job, ev, slug, now=None, done_ts_list=()):
     """Triage a hook `done` event into an operator page.
 
     Never transitions job state (issue #3): the event is forgeable by the
@@ -843,11 +894,15 @@ def handle_done_claim(job, ev, slug, now=None):
 
     Dedup is on the normalized claim ts (_claim_ts) against the SANITIZED
     stored cursor (_stored_claim_ts): an already-paged claim never re-pages,
-    a newer `done` does. Re-page backoff: after 3 pages inside a 24h window
-    the claim stream coalesces into a single `done-repeated` page per window,
-    so an agent minting a fresh `done` every pass cannot page the operator
-    into ignoring the signal. The caller persists the job record after a
-    non-None return.
+    a newer `done` does. Re-page backoff: after 3 done claims inside a 24h
+    window the claim stream coalesces into `done-repeated` pages, so an
+    agent minting a fresh `done` every pass cannot page the operator into
+    ignoring the signal. The backoff count is derived from `done_ts_list`
+    (the normalized ts of every done event in the event file, caller
+    supplied), NEVER from agent-writable job.json fields (issue #23 B2 --
+    a planted done_page_count/done_repeated_paged used to swallow genuine
+    claims silently). The caller persists the job record after a non-None
+    return.
     """
     if now is None:
         now = time.time()
@@ -856,12 +911,6 @@ def handle_done_claim(job, ev, slug, now=None):
     prev = _stored_claim_ts(job, now)
     if prev is not None and claim_ts <= prev:
         return None
-    win = _sanitize_window_start(job.get("done_page_window_start"), now)
-    if win is None or now - win > 24 * 3600:
-        win = now
-        job["done_page_count"] = 0
-        job.pop("done_repeated_paged", None)
-    count = _sanitize_count(job.get("done_page_count"))
     ok, reason = verify_done_event(job, ev, slug)
     detail = _clean_text(ev.get("detail", ""))
     if ok:
@@ -873,17 +922,27 @@ def handle_done_claim(job, ev, slug, now=None):
         text = (f"agent claims done but failed protocol cross-check: "
                 f"{reason}; possible forgery: {detail}")
     job["done_claim_ts"] = claim_ts
-    if count >= 3:
-        if job.get("done_repeated_paged"):
+    # Legacy agent-writable backoff fields (issue #23 B2) are dead: the
+    # plant is inert now that the count comes from the event file, and
+    # leaving the keys around would re-create the confusion. Migrate them out.
+    for k in ("done_page_count", "done_page_window_start", "done_repeated_paged"):
+        job.pop(k, None)
+    # The latch is done_repeated_for_ts -- the claim ts that triggered the
+    # last coalesced page, sanitized on read. Invariant: a strictly newer
+    # claim always produces at least a done-repeated page; suppressing the
+    # page budget would require appending actual fake dones, each of which
+    # pages -- fail loud.
+    recent = [ts for ts in done_ts_list
+              if isinstance(ts, (int, float)) and not isinstance(ts, bool)
+              and ts == ts and 0 <= now - ts <= 24 * 3600]
+    if len(recent) > 3:
+        rep = _sanitized_repeated_for_ts(job, now)
+        if rep is not None and rep == claim_ts:
             return None
-        job["done_repeated_paged"] = True
+        job["done_repeated_for_ts"] = claim_ts
         return {"signal": "done-repeated",
-                "detail": f"{count + 1} done claims in 24h; coalesced: {text}"}
-    job["done_page_window_start"] = win
-    job["done_page_count"] = count + 1
-    # A planted done_repeated_paged=True with count<3 is always stale or
-    # forged; pop it to maintain the invariant flag <=> count>=3 in-window.
-    job.pop("done_repeated_paged", None)
+                "detail": f"{len(recent)} done claims in 24h; coalesced: {text}"}
+    job.pop("done_repeated_for_ts", None)
     return {"signal": label, "detail": text}
 
 
@@ -914,6 +973,44 @@ def _session_anchor(job, now):
     return min(v, now)
 
 
+def triage_done_events(job, uuid, now, events):
+    """Corroborate the dedup cursor and triage every done event in the file.
+
+    Issue #23 B1: a cursor newer than the newest done in the file is planted
+    or stale -- a legitimate cursor always equals some done event's ts. Drop
+    it (fail open, re-page) BEFORE triage, so a planted cursor can never
+    silently suppress genuine claims. Issue #23 B3: iterate oldest-first so
+    a newer forgery can never displace a genuine claim in the same window.
+    Appends signal dicts (with `job` filled) to `events` and persists the
+    job record after each emitted signal.
+    """
+    slug = job["slug"]
+    evs = done_events(uuid, now)
+    prev = _stored_claim_ts(job, now)
+    if evs and prev is not None and prev > max(ts for _, ts in evs):
+        job.pop("done_claim_ts", None)
+        prev = None
+    recent = [ts for _, ts in evs if now - ts <= 24 * 3600]
+    for ev, _ts in evs:
+        sig = handle_done_claim(job, ev, slug, now, done_ts_list=recent)
+        if sig is not None:
+            sig["job"] = slug
+            events.append(sig)
+            save_job(job, slug)
+
+
+def _uuid_or_none(job):
+    """Neutralize a non-string session uuid (issue #23 H2).
+
+    job.json is agent-writable: a planted dict/list session_uuid used to
+    reach `uuid + ".jsonl"` and raise TypeError, blinding that job's watch
+    pass persistently (contained per-job, but persistent). Treat garbage
+    as absent.
+    """
+    uuid = job.get("session_uuid")
+    return uuid if isinstance(uuid, str) and uuid else None
+
+
 def check_events_liveness(job, st, now):
     """Watchdog liveness (issue #3): detect event-file blinding.
 
@@ -938,7 +1035,7 @@ def check_events_liveness(job, st, now):
     the correct behavior.
     Returns a signal dict or None.
     """
-    uuid = job.get("session_uuid")
+    uuid = _uuid_or_none(job)
     if not (st["tmux_alive"] and uuid):
         return None
     if event_file_symlinked(uuid):
@@ -969,7 +1066,7 @@ def dir_size(path):
 
 def job_status(job, slug):
     alive = tmux_alive(slug)
-    uuid = job.get("session_uuid")
+    uuid = _uuid_or_none(job)
     hstatus, nbytes = head_info(uuid) if uuid else (None, 0)
     delta = nbytes - _num(job.get("last_bytes"), 0)
     if delta:
@@ -997,6 +1094,19 @@ def job_status(job, slug):
     }
 
 
+def _safe_hhmm(ts):
+    """Render an agent-influenced event ts for display, never raising
+    (issue #23 H3): a forged "ts": "x" used to raise TypeError and
+    "ts": 1e30 OverflowError in time.localtime, killing `muse-job status`
+    persistently. Garbage renders as ??:??."""
+    try:
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or ts != ts:
+            return "??:??"
+        return time.strftime("%H:%M", time.localtime(ts))
+    except (OverflowError, OSError, ValueError):
+        return "??:??"
+
+
 def cmd_status(args):
     job = load_job(args.slug)
     st = job_status(job, args.slug)
@@ -1017,7 +1127,7 @@ def cmd_status(args):
                         if ok else
                         f" (claims done; protocol check failed: {reason})")
             print(f"  last turn: {ev.get('event')}/{ev.get('state')}{flag} "
-                  f"{time.strftime('%H:%M', time.localtime(ev.get('ts', 0)))} "
+                  f"{_safe_hhmm(ev.get('ts'))} "
                   f"{_clean_text(ev.get('detail',''))[:100]}")
         if st["progress_age_s"] is not None:
             print(f"  PROGRESS.md age: {st['progress_age_s']/60:.0f}m  elapsed: {st['elapsed_h']:.1f}h / budget {st['budget_hours']}h")
@@ -1073,7 +1183,7 @@ def cmd_resume(args):
     job = load_job(args.slug)
     if tmux_alive(args.slug):
         raise RuntimeError("tmux session already alive")
-    uuid = job.get("session_uuid")
+    uuid = _uuid_or_none(job)
     if not uuid:
         raise RuntimeError("no session uuid recorded; cannot resume")
     # Re-derive from the slug: job["worktree"] is agent-writable (issue #11)
@@ -1130,9 +1240,9 @@ def cmd_resume(args):
             # must restart here, not at the original spawn.
             job["session_started_at"] = t0
             job.pop("done_claim_ts", None)
-            # done_page_count/window intentionally kept: the re-page backoff
-            # is per job, not per session (rate-limits pager fatigue across
-            # resumes too).
+            # The re-page backoff is event-file derived (issue #23 B2), so
+            # it survives resumes automatically; nothing per-job to keep.
+            job.pop("done_repeated_for_ts", None)
             save_job(job, args.slug)
         else:
             print("WARNING: new session uuid not discovered; watch keeps "
@@ -1281,20 +1391,15 @@ def cmd_watch(args):
             events.append({"job": slug, "signal": "question",
                            "detail": _clean_text(ev.get("detail", ""))})
 
-        # Issue #3: a hook `done` is only ever a claim -- the same-user agent
-        # can forge every check -- so it never transitions job state. Scan
-        # the WHOLE event file for the newest done line (a forged trailing
-        # `idle` line must not bury a genuine claim) and triage it into an
-        # operator page. handle_done_claim owns the dedup cursor and the
-        # re-page backoff; the caller just persists the record.
+        # Issue #23 B1/B2/B3: a hook `done` is only ever a claim -- the
+        # same-user agent can forge every check -- so it never transitions
+        # job state. triage_done_events corroborates the dedup cursor
+        # against the event file (planted cursor => fail open, re-page),
+        # then triages EVERY done event oldest-first (a newer forgery can
+        # never displace a genuine claim), with the re-page backoff derived
+        # from the event file, not from agent-writable job.json.
         if uuid:
-            done_ev, _done_ts = latest_done_event(uuid, now)
-            if done_ev is not None:
-                sig = handle_done_claim(job, done_ev, slug, now)
-                if sig is not None:
-                    sig["job"] = slug
-                    events.append(sig)
-                    save_job(job, slug)
+            triage_done_events(job, uuid, now, events)
 
         if st["elapsed_h"] > (_num(job.get("budget_hours"), 8) or 8):
             events.append({"job": slug, "signal": "budget-exceeded",

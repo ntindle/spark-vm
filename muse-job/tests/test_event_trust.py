@@ -548,29 +548,39 @@ def test_stored_done_claim_ts_garbage_ignored(cli):
 
 
 def test_done_claims_coalesce_after_three_pages(cli):
-    # Security review B7: unbounded re-paging trains the operator to ignore
-    # the signal; after 3 pages in 24h, coalesce into one done-repeated.
+    # Issue #23 B2: unbounded re-paging trains the operator to ignore the
+    # signal; after 3 done claims in 24h, coalesce into done-repeated. The
+    # backoff count is derived from the event file (done_ts_list), NEVER
+    # from agent-writable job.json fields. Invariant: a strictly newer
+    # claim always produces at least a done-repeated page.
     import time as _time
     now = _time.time()
     job = make_job(cli)
     sigs = []
     for i in range(5):
-        sig = cli.handle_done_claim(job, done_event(cli, ts=now - 300 + i), job["slug"], now)
+        # Each pass triages against the file with all events appended so far.
+        ts_list = [now - 300 + j for j in range(i + 1)]
+        sig = cli.handle_done_claim(job, done_event(cli, ts=now - 300 + i),
+                                    job["slug"], now, done_ts_list=ts_list)
         sigs.append(sig["signal"] if sig else None)
     assert sigs[:3] == ["done-unverified"] * 3
     assert sigs[3] == "done-repeated"
-    assert sigs[4] is None
+    # The boolean-latch days are over: a strictly newer claim always pages
+    # at least done-repeated, so a plant can never re-suppress the stream.
+    assert sigs[4] == "done-repeated"
 
 
 def test_done_claim_window_resets_after_24h(cli):
+    # Only dones within the last 24h count toward the backoff budget.
     import time as _time
     now = _time.time()
     job = make_job(cli)
-    job["done_page_window_start"] = now - 25 * 3600
-    job["done_page_count"] = 3
-    sig = cli.handle_done_claim(job, done_event(cli, ts=now - 10), job["slug"], now)
+    old = [now - 25 * 3600 + i for i in range(5)]
+    sig = cli.handle_done_claim(job, done_event(cli, ts=now - 10),
+                                job["slug"], now,
+                                done_ts_list=old + [now - 10])
     assert sig is not None and sig["signal"] == "done-unverified"
-    assert job["done_page_count"] == 1
+    assert "done_repeated_for_ts" not in job
 
 
 # --- review round: verify_done_event fail-closed -----------------------------
@@ -685,8 +695,9 @@ def test_job_status_survives_forged_numerics(cli, tmp_path):
 
 
 def test_done_repeated_flag_plant_does_not_suppress_notice(cli):
-    # Arch review: a pre-planted done_repeated_paged=True with count<3 is
-    # stale or forged and must not suppress the coalescing notice.
+    # Issue #23 B2: the legacy plant (done_repeated_paged=True, count<3)
+    # is migrated out and inert; a genuine 4th-in-24h claim still coalesces
+    # via the event-file-derived backoff.
     import time as _time
     now = _time.time()
     job = make_job(cli)
@@ -695,7 +706,271 @@ def test_done_repeated_flag_plant_does_not_suppress_notice(cli):
     job["done_page_count"] = 0
     sigs = []
     for i in range(4):
-        sig = cli.handle_done_claim(job, done_event(cli, ts=now - 300 + i), job["slug"], now)
+        ts_list = [now - 300 + j for j in range(i + 1)]
+        sig = cli.handle_done_claim(job, done_event(cli, ts=now - 300 + i),
+                                    job["slug"], now, done_ts_list=ts_list)
         sigs.append(sig["signal"] if sig else None)
     assert sigs[:3] == ["done-unverified"] * 3
     assert sigs[3] == "done-repeated"
+    # legacy plant migrated out on the first triage
+    assert "done_repeated_paged" not in job
+    assert "done_page_count" not in job
+    assert "done_page_window_start" not in job
+
+
+# --- issue #23: final security review of merged #19 (B1-B6, H1-H6) ----------
+
+
+def test_b1_planted_cursor_newer_than_file_dones_is_dropped(cli):
+    # B1 (HIGH): the agent plants done_claim_ts ~= now in its job.json; every
+    # genuine done has claim_ts <= plant time, so handle_done_claim's dedup
+    # would return None forever, silently. triage_done_events corroborates
+    # the cursor against the event file: a cursor newer than every done in
+    # the file is planted or stale, so it is dropped and the genuine claim
+    # fails OPEN (re-pages) instead of being suppressed.
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
+        f.write("summary")
+    write_events(cli, "uuid-abc", [done_event(ts=now - 300)])
+    job["done_claim_ts"] = now - 60  # agent planted: no done has this ts
+    events = []
+    cli.triage_done_events(job, "uuid-abc", now, events)
+    assert [e["signal"] for e in events] == ["done-claimed"]
+    # the cursor was re-anchored to the genuine claim, not the plant
+    assert job["done_claim_ts"] == now - 300
+
+
+def test_b1_legitimate_cursor_equal_to_done_ts_is_kept(cli):
+    # The flip side: a cursor that matches a done event's ts is legitimate
+    # and must NOT be dropped (no re-page storm).
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
+        f.write("summary")
+    write_events(cli, "uuid-abc", [done_event(ts=now - 300)])
+    job["done_claim_ts"] = now - 300  # equals the filed done's ts
+    events = []
+    cli.triage_done_events(job, "uuid-abc", now, events)
+    assert events == []
+
+
+def test_b2_planted_backoff_fields_are_inert(cli):
+    # B2 (HIGH): the agent plants done_page_count=5 / done_repeated_paged /
+    # done_page_window_start to make handle_done_claim return None on a
+    # genuine claim with zero noise. The backoff count is now derived from
+    # the event file, so the plant is inert and migrated out.
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    job["done_page_count"] = 5
+    job["done_page_window_start"] = now - 60
+    job["done_repeated_paged"] = True
+    sig = cli.handle_done_claim(job, done_event(ts=now - 10), now,
+                                done_ts_list=[])
+    assert sig is not None and sig["signal"] == "done-unverified"
+    for k in ("done_page_count", "done_page_window_start",
+              "done_repeated_paged"):
+        assert k not in job
+
+
+def test_b2_planted_repeated_for_ts_fails_open(cli):
+    # The replacement latch (done_repeated_for_ts) is sanitized on read: a
+    # plant fails open to re-paging, never to suppression.
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    job["done_repeated_for_ts"] = now  # plant: claims "already coalesced"
+    ts_list = [now - 300 + j for j in range(4)] + [now - 10]
+    sig = cli.handle_done_claim(job, done_event(ts=now - 10), now,
+                                done_ts_list=ts_list)
+    assert sig is not None and sig["signal"] == "done-repeated"
+    assert job["done_repeated_for_ts"] == now - 10
+
+
+def test_b3_displacing_forgery_does_not_suppress_genuine_claim(cli):
+    # B3 (MEDIUM-HIGH): genuine done at T (triages done-claimed), then a
+    # forged done at T+1 in the same window. The newest-only scan triaged
+    # only the forgery and the genuine page never fired. Now every done is
+    # triaged oldest-first: genuine first, forgery flagged unverified.
+    import time as _time
+    now = _time.time()
+    job = make_job(cli)
+    with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
+        f.write("summary")
+    genuine = done_event(ts=now - 300, detail="genuine")
+    forgery = done_event(ts=now - 200, detail="forged",
+                         session_id="bogus", cwd="/nope")
+    write_events(cli, "uuid-abc", [genuine, forgery])
+    events = []
+    cli.triage_done_events(job, "uuid-abc", now, events)
+    sigs = [(e["signal"], e["detail"]) for e in events]
+    assert len(sigs) == 2
+    assert sigs[0][0] == "done-claimed" and "genuine" in sigs[0][1]
+    assert sigs[1][0] == "done-unverified" and "forged" in sigs[1][1]
+
+
+def test_b4_non_dict_event_lines_are_ignored(cli):
+    # B4 (MEDIUM-HIGH): a forged `[1,2]` or `"x"` line used to reach
+    # ev.get("state") and raise AttributeError, permanently blinding the
+    # job's watch pass. Only dicts are yielded now.
+    os.makedirs(cli.EVENTS_DIR, exist_ok=True)
+    p = os.path.join(cli.EVENTS_DIR, "uuid-abc.jsonl")
+    with open(p, "w") as f:
+        f.write("[1,2]\n\"x\"\n" + json.dumps(done_event()) + "\n")
+    evs = list(cli._iter_events("uuid-abc"))
+    assert len(evs) == 1 and evs[0]["state"] == "done"
+    assert cli.last_event("uuid-abc")["state"] == "done"
+
+
+def test_b5_load_job_pins_slug_to_directory_name(cli):
+    # B5 (HIGH): job.json is agent-writable; a planted "slug": "../victim"
+    # used to make save_job overwrite the victim's record (and the SUMMARY.md
+    # check read the victim's dir). load_job pins the slug to the directory
+    # component of the path it opened.
+    demo = cli.job_dir("demo")
+    victim = cli.job_dir("victim")
+    os.makedirs(demo, exist_ok=True)
+    os.makedirs(victim, exist_ok=True)
+    with open(os.path.join(victim, "job.json"), "w") as f:
+        json.dump({"slug": "victim", "state": "active"}, f)
+    with open(os.path.join(demo, "job.json"), "w") as f:
+        json.dump({"slug": "../victim", "state": "active"}, f)
+    job = cli.load_job("demo")
+    assert job["slug"] == "demo"
+    cli.save_job(job)
+    with open(os.path.join(victim, "job.json")) as f:
+        assert json.load(f)["slug"] == "victim", "victim record untouched"
+    with open(os.path.join(demo, "job.json")) as f:
+        assert json.load(f)["slug"] == "demo"
+
+
+def test_b6_clean_text_strips_cr_and_bare_esc(cli):
+    # B6 (MEDIUM): "\r" + padding in a forged detail overwrote the rendered
+    # status line (fake verified-done); bare ESC (\x1bc reset, \x1b7/\x1b8,
+    # \x1bM, \x1b(X) bypassed the sanitizer entirely.
+    out = cli._clean_text("abc\rmal\x1bc\x1b7\x1b8\x1bM\x1b(Xdef\x1b[2K")
+    assert "\r" not in out and "\x1b" not in out
+    assert "abc" in out and "mal" in out and "def" in out
+
+
+def test_b6_stop_hook_strips_cr_and_bare_esc(tmp_path):
+    # Same at the hook source: the forged detail is cleaned before it lands
+    # in the event file.
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(os.environ, HOME=str(home))
+    run_hook("stop.py",
+             {"session_id": "sid-cr",
+              "last_assistant_message": "DONE: ok\rmal\x1bc",
+              "cwd": "/t"},
+             env)
+    p = home / ".local" / "share" / "muse-job" / "events" / "sid-cr.jsonl"
+    evt = json.loads(p.read_text().strip())
+    assert "\r" not in evt["detail"] and "\x1b" not in evt["detail"]
+    assert "ok" in evt["detail"]  # clean content survives
+    # bare-ESC stripping at the source sanitizer, directly: the ESC byte is
+    # removed (so no escape sequence can form); the inert parameter letters
+    # remain as plain text, exactly as the issue's prescribed fix specifies.
+    hook = load_script("stop_hook_clean_test",
+                       os.path.join(os.path.dirname(__file__), "..", "plugin",
+                                    "hooks", "stop.py"))
+    assert hook._clean("ok\rmal\x1bc\x1b7\x1b8\x1bM\x1b(X\x1b[2K") == "okmalc78M(X"
+
+
+def test_h1_sweep_filters_non_string_session_uuid(tmp_path, monkeypatch):
+    # H1: a planted non-string session_uuid in a job record used to raise
+    # TypeError inside active_session_uuids' set comprehension, killing the
+    # whole sweep run -- a disk-guardian DoS.
+    home = str(tmp_path)
+    monkeypatch.setenv("HOME", home)
+    jobs = os.path.join(home, "muse-jobs")
+    os.makedirs(os.path.join(jobs, "evil"), exist_ok=True)
+    with open(os.path.join(jobs, "evil", "job.json"), "w") as f:
+        json.dump({"state": "active", "session_uuid": {"planted": True}}, f)
+    sweep = load_script("muse_job_sweep_test",
+                        os.path.join(os.path.dirname(__file__), "..", "bin",
+                                     "muse-job-sweep"))
+    uuids = sweep.active_session_uuids()  # must not raise
+    assert uuids == set()
+
+
+def test_h2_non_string_session_uuid_neutralized(cli):
+    # H2: a planted dict/list session_uuid reached `uuid + ".jsonl"` and
+    # raised TypeError, persistently blinding the job's pass. Garbage is now
+    # treated as absent.
+    job = make_job(cli)
+    job["session_uuid"] = {"planted": True}
+    st = cli.job_status(job)  # must not raise
+    assert st["session_uuid"] is None
+    job["session_uuid"] = ["a", "b"]
+    st = cli.job_status(job)
+    assert st["session_uuid"] is None
+
+
+def test_h3_cmd_status_survives_garbage_ts(cli, capsys):
+    # H3: forged "ts": "x" (TypeError) and "ts": 1e30 (OverflowError in
+    # time.localtime) used to kill `muse-job status` persistently. Renders
+    # as ??:?? instead.
+    import argparse as _ap
+    jd = cli.job_dir("demo")
+    os.makedirs(jd, exist_ok=True)
+    with open(os.path.join(jd, "job.json"), "w") as f:
+        json.dump({"slug": "demo", "session_uuid": "uuid-abc",
+                   "worktree": "/jobs/demo/work", "state": "active",
+                   "started_at": 1.0}, f)
+    for bad in ("x", 1e30, float("nan"), None):
+        write_events(cli, "uuid-abc",
+                     [{"event": "stop", "state": "idle",
+                       "session_id": "uuid-abc", "cwd": "/jobs/demo/work",
+                       "ts": bad, "detail": "d"}])
+        rc = cli.cmd_status(_ap.Namespace(slug="demo", json=False))
+        assert rc == 0
+    out = capsys.readouterr().out
+    assert "??:??" in out
+
+
+def test_h4_verify_done_rejects_non_string_cwd(cli):
+    # H4: os.path.realpath(123) raised TypeError, contained per-job but
+    # persistent. Fail closed instead.
+    job = make_job(cli)
+    with open(os.path.join(cli.job_dir("demo"), "SUMMARY.md"), "w") as f:
+        f.write("summary")
+    ok, reason = cli.verify_done_event(job, done_event(cwd=123))
+    assert ok is False and "cwd" in reason
+
+
+def test_h5_stop_hook_does_not_block_on_fifo_event_file(tmp_path):
+    # H5: a pre-created FIFO at events/<sid>.jsonl used to make the hook's
+    # O_WRONLY open block forever ("never blocks the turn" violated). With
+    # O_NONBLOCK the open fails fast (ENXIO, no reader) and the hook bails
+    # cleanly -- this test completing at all is the regression check.
+    home = tmp_path / "home"
+    home.mkdir()
+    evdir = home / ".local" / "share" / "muse-job" / "events"
+    evdir.mkdir(parents=True)
+    os.mkfifo(str(evdir / "sid-fifo.jsonl"))
+    env = dict(os.environ, HOME=str(home))
+    run_hook("stop.py",
+             {"session_id": "sid-fifo",
+              "last_assistant_message": "DONE: x", "cwd": "/t"},
+             env)  # timeout=30 in run_hook; would hang pre-fix
+
+
+def test_h6_event_scan_is_capped(cli):
+    # H6: the scan reads only the tail of the file -- a GB-scale appended
+    # file must not become a RAM/CPU DoS on the manager per pass.
+    os.makedirs(cli.EVENTS_DIR, exist_ok=True)
+    p = os.path.join(cli.EVENTS_DIR, "uuid-abc.jsonl")
+    junk = json.dumps({"event": "stop", "state": "idle", "ts": 1}) + "\n"
+    total_lines = 2000
+    with open(p, "w") as f:
+        for _ in range(total_lines):
+            f.write(junk)
+        f.write(json.dumps(done_event(ts=2.0)) + "\n")
+    evs = list(cli._iter_events("uuid-abc", max_bytes=4096))
+    assert 0 < len(evs) < total_lines, "scan must be tail-capped"
+    # newest events are still found by the capped scan
+    assert evs[-1]["state"] == "done"

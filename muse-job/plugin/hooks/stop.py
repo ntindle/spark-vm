@@ -11,11 +11,15 @@ import time
 # Matches the sanitizer in bin/muse-job (_clean_text): ANSI/OSC escapes and
 # C0 controls. `detail` lands in the event log and is printed verbatim by
 # `muse-job status` and the watch pages -- a raw \x1b[2K could erase the
-# security label on the very next line (issue #3 review).
+# security label on the very next line (issue #3 review). Issue #23 B6:
+# also strip CR (\x0d) and bare ESC sequences (\x1bc reset, \x1b7/\x1b8,
+# \x1bM, \x1b(X) -- "\r" + padding overwrites the rendered status line and
+# displays a fake verified-done label. Bare-\x1b is ordered AFTER CSI/OSC.
 _ANSI_RE = re.compile(
     r"\x1b\[[0-9;?]*[ -/]*[@-~]"          # CSI sequences
     r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC ... BEL | ST
-    r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"   # C0 controls
+    r"|\x1b"                               # bare ESC (reset, save/restore, RI, charset)
+    r"|[\x00-\x08\x0b\x0c\r\x0e-\x1f\x7f]"  # C0 controls + CR
 )
 
 # Session ids come from the hook payload. The same-user job agent knows its
@@ -43,8 +47,14 @@ def _append_event(evdir, sid, evt):
         os.makedirs(evdir, exist_ok=True)
         if os.path.islink(evdir):  # re-check after makedirs (best effort)
             return
+        # Issue #23 H5: O_NONBLOCK. A pre-created FIFO at events/<sid>.jsonl
+        # used to make O_WRONLY block indefinitely (ENXIO-free) -- the
+        # "never blocks the turn" guarantee was violated. With O_NONBLOCK,
+        # open() on a reader-less FIFO fails fast with ENXIO and we bail
+        # cleanly. Regular files are unaffected (nonblock is a no-op there).
         fd = os.open(os.path.join(evdir, sid + ".jsonl"),
-                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
+                     | os.O_NONBLOCK,
                      0o644)
     except OSError:
         return  # ELOOP on a symlinked file, or any other fs problem
