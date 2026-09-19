@@ -98,6 +98,14 @@ sudo chmod 440 /etc/sudoers.d/ntindle
 
 # agent user — the stack runs as ntindle; skip if your install already made it
 id -u ntindle >/dev/null 2>&1 || sudo adduser ntindle --disabled-password --gecos ''
+
+# let the agent (and you) SSH in as ntindle over Tailscale — skip silently
+# if you logged in with a password instead of a key
+if [ -f ~/.ssh/authorized_keys ]; then
+  sudo install -d -o ntindle -g ntindle -m 700 ~ntindle/.ssh
+  sudo install -o ntindle -g ntindle -m 600 ~/.ssh/authorized_keys ~ntindle/.ssh/authorized_keys
+fi
+
 sudo -i -u ntindle
 
 # tailnet — the only network the box needs
@@ -109,14 +117,20 @@ sudo loginctl enable-linger ntindle
 git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
 cd ~/spark-vm
 ./proxy/deploy.sh                                    # swap proxy + confirmd
+mkdir -p ~/bin                                        # fresh users have no ~/bin (~/.profile picks it up next login)
 cp muse-job/bin/muse-job ~/bin/                      # job runner CLI
 muse plugins install ./muse-job/plugin   # needs the muse CLI logged in
-muse plugins approve                      # approve it when prompted
 mkdir -p ~/.config/systemd/user
 cp cred-ui/cred-ui.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now cred-ui
 ./cua/cua-desktop.sh start                           # the desktop it can drive
 ```
+
+Then run `muse plugins approve` and approve the muse-job plugin when
+prompted. (If you logged in with a password instead of a key, the block
+couldn't copy an SSH key over — add your public key to
+`~ntindle/.ssh/authorized_keys` before expecting agent SSH access over
+Tailscale.)
 
 ### Option B: Hetzner (or any cloud VPS)
 
@@ -131,6 +145,13 @@ adduser ntindle --disabled-password --gecos ''
 usermod -aG sudo ntindle
 echo 'ntindle ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ntindle
 chmod 440 /etc/sudoers.d/ntindle
+
+# let the agent (and you) SSH in as ntindle over Tailscale — skip silently
+# if you logged in with a password instead of a key
+if [ -f ~/.ssh/authorized_keys ]; then
+  install -d -o ntindle -g ntindle -m 700 ~ntindle/.ssh
+  install -o ntindle -g ntindle -m 600 ~/.ssh/authorized_keys ~ntindle/.ssh/authorized_keys
+fi
 ```
 
 Then `ssh ntindle@<vps-ip>` and paste the same tailnet + stack block as
@@ -146,14 +167,17 @@ sudo loginctl enable-linger ntindle
 git clone https://github.com/ntindle/spark-vm.git ~/spark-vm
 cd ~/spark-vm
 ./proxy/deploy.sh                                    # swap proxy + confirmd
+mkdir -p ~/bin                                        # fresh users have no ~/bin (~/.profile picks it up next login)
 cp muse-job/bin/muse-job ~/bin/                      # job runner CLI
 muse plugins install ./muse-job/plugin   # needs the muse CLI logged in
-muse plugins approve                      # approve it when prompted
 mkdir -p ~/.config/systemd/user
 cp cred-ui/cred-ui.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now cred-ui
 ./cua/cua-desktop.sh start                           # the desktop it can drive
 ```
+
+Then run `muse plugins approve` and approve the muse-job plugin when
+prompted.
 
 ### Then: give it secrets (the human part)
 
