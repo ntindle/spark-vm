@@ -43,8 +43,10 @@ interface), which is #47's other half and already scoped in the ticket.
 | Selkies-GStreamer | WebRTC | Browser (HTML5) | Open source | Upstream alive; "in need of maintainers" |
 | Moonlight-Web + Sunshine (or its own engine) | WebRTC | Browser | GPLv3 (web); Sunshine GPLv3 | Active (release days ago) |
 | Sunshine alone + Moonlight native clients | GameStream (RTSP/RTP) | Native clients | GPLv3 | Mature |
-| RustDesk | Custom (TCP/UDP) | Native; 3rd-party browser clients only | License needs verification (see §4.3) | Active, but no first-party web client |
+| RustDesk | Custom (TCP/UDP) | Native; 3rd-party browser clients only | License needs verification (see §2.3) | Active, but no first-party web client |
 | KasmVNC | VNC over WebSocket | Browser | Open source | Active |
+| Xpra | Xpra protocol over TCP/WebSocket (adaptive batch encoding) | Browser (HTML5) + native | Open source (GPLv2+) | Active; rejected §2.8 |
+| MeshCentral | VNC-class desktop + terminal over web | Browser | Apache-2.0 | Active; rejected for latency bar |
 | Apache Guacamole | Guacamole protocol over HTTP | Browser (clientless) | Apache 2.0 | Mature, Java stack |
 | noVNC | VNC over WebSocket | Browser | Open source | Baseline — slow over the internet |
 | ttyd / xterm.js | WebSocket | Browser | Open source | Terminal only |
@@ -66,8 +68,7 @@ high-performance replacement for noVNC and Apache Guacamole.
 
 Fit notes:
 
-- **Transport:** WebRTC native — the only candidate purpose-built for the
-  WebRTC-class bar. ✓
+- **Transport:** WebRTC native — purpose-built for the WebRTC-class bar. ✓
 - **Client:** pure browser. ✓
 - **X11 fit:** X11 capture; designed for exactly our display model. ✓
 - **License:** open source. ✓
@@ -89,7 +90,12 @@ Fit notes:
 Moonlight-Web (https://github.com/linckosz/moonlight-web) is a C++/Qt server
 that streams over WebRTC (DataChannels + RTP) to a browser client — nothing to
 install on the client side. Codecs H.264/HEVC/AV1, hardware encode on
-NVENC/AMF/Quick Sync/VA-API/VideoToolbox with software fallback. It either
+NVENC/AMF/Quick Sync/VA-API/VideoToolbox with software fallback. The project
+claims under-20 ms glass-to-glass over LAN Wi-Fi and ~25 ms over the internet
+— project claims (https://github.com/linckosz/moonlight-web), not our
+measurements. Codec licensing diligence still owed: H.264 sits in a patent
+pool, HEVC's pools are fragmented, AV1 is royalty-free, x264 is GPL — the
+hosted product needs a counsel-level answer before committing to a codec. It either
 brings **its own capture & encode engine** (host is streaming-ready with no
 Sunshine, no pairing) or pairs with Sunshine/Apollo/Wolf hosts over the
 GameStream protocol. Input: keyboard, mouse (pointer-lock), touch trackpad,
@@ -108,12 +114,21 @@ Fit notes:
 - **Client:** browser-native; the project's entire premise is zero-install
   clients. ✓
 - **X11 fit:** Sunshine captures Linux desktops (X11 path established); the
-  Moonlight-Web own-engine path also claims Linux hosts. Needs verification
-  against Xvfb specifically (all the gaming docs assume a real GPU/display
-  session; Xvfb + software encode is the degenerate case).
-- **License:** GPLv3 throughout — self-hostable, server-side; fine for the OSS
-  project (no SaaS-linking concern at the box level since we run, not
-  distribute, the host; still, record the license in any vendoring decision).
+  Moonlight-Web own-engine path also claims Linux hosts. The own-engine path is
+  the risky one for our stack: the upstream README states the native engine
+  "captures a GPU surface and hands it straight to the GPU encoder" and that
+  "if it cannot run at all (headless machine, no usable encoder, Windows
+  ARM64), the card simply does not appear" — a headless Xvfb box is exactly the
+  case where the native engine offers nothing (verified against
+  https://github.com/linckosz/moonlight-web, 2026-09-18). Needs verification
+  against Xvfb specifically; see the reordered fallback in §4.
+- **License:** GPLv3 throughout. Two hard constraints for this repo (MIT-licensed):
+  (1) the improvement loop must NEVER vendor GPLv3 code into the repo tree —
+  consume the streamer strictly as an external dependency (container image /
+  OS package), keeping our own code MIT; (2) serving Moonlight-Web's GPLv3 web
+  client JavaScript to tenants *is* distribution, so any gesture-set or other
+  client modification triggers the GPLv3 source-offer obligation — satisfiable
+  for an OSS project, but it must be honored, not assumed away.
 - **Risk 1 — the one-click internet relay:** the project offers opt-in public
   URLs at `stream.moonlightweb.top` with automatic DNS/TLS, and notes that
   existing subdomains are kept "until February 2027." A hosted product must
@@ -131,8 +146,9 @@ Fit notes:
 ### 2.3 RustDesk — rejected for this surface
 
 RustDesk is the strongest OSS answer for native-client remote control
-(self-hostable hbbs/hbbr relay, E2E encrypted, H.265, widely reported
-<50 ms on LAN). But it fails the browser-native requirement: there is no
+(self-hostable hbbs/hbbr relay, E2E encrypted, H.265; anecdotal reports
+suggest sub-50 ms on LAN — unverified). But it fails the browser-native
+requirement: there is no
 first-party web client — the web console is a **Pro (paid)** feature
 (http://www.makeuseof.com/rustdesk-teamviewer-alternative-self-hosted-remote-desktop/),
 and third-party browser clients are immature (one working deployment reports
@@ -151,8 +167,7 @@ it in the back pocket as a native-client alternative for power users.
 ### 2.4 KasmVNC — rejected for this surface
 
 KasmVNC is the modern OSS VNC server: web-native client, webp encoding,
-vendor-claimed 30% better compression than classic VNC
-(https://kasm.com/kasmvnc?hsa_acc=5549526009&hsa_cam=18158486598&hsa_grp=140562225317&hsa_ad=618515358701&hsa_src=d&hsa_tgt&hsa_kw&hsa_mt&hsa_net=adwords&hsa_ver=3&gad_campaignid=18158486598
+vendor-claimed 30% better compression than classic VNC (kasm.com product page
 — vendor claim, unverified). A recent independent research note chose KasmVNC
 over TigerVNC+noVNC (single component, seamless clipboard) while rejecting
 Guacamole as duplicated gateway weight
@@ -179,46 +194,89 @@ no better than TCP VNC (bad performance over the internet)"
 screenshot-sync class the UX spec forbids. Kept as the measured baseline in
 any prototype bake-off, nothing more.
 
-### 2.7 Terminal: ttyd + xterm.js
+### 2.8 Xpra — in the bake-off, not the primary
+
+Xpra (https://github.com/diyism/xpra) is the closest analog to Selkies for this
+exact stack and was wrongly omitted from the first draft of this doc:
+browser-native via an HTML5 client (xpra required only on the host), attaches
+to Xvfb (it connects as a compositing window manager to an Xvfb display;
+https://en.wikipedia.org/wiki/Xpra), `xpra shadow` attaches to an *existing*
+desktop session — i.e. it can sit on `:98` without displacing the CUA stack's
+display, and it is actively maintained (upstream changelog updated ~19 days
+before this research; recent entries include "significant latency and
+performance improvements": https://github.com/xpra-org/xpra/blob/HEAD/docs/CHANGELOG.md).
+
+It is not the primary because it fails requirement 1: its documented transports
+are TCP, SSL, SSH, HTTP/WebSockets, and RFB on a single port
+(https://github.com/diyism/xpra) — adaptive batch encoding over TCP-class
+transport, not WebRTC media with ICE/SRTP. Field notes report latency problems
+on slower systems and low bandwidth
+(https://github.com/velvet-os/velvet-os.github.io/blob/HEAD/using-xpra-as-remote-desktop.md).
+It belongs in the prototype bake-off as fallback #2 (ahead of KasmVNC/noVNC):
+if both WebRTC candidates fail on a CPU-only Xvfb box, Xpra's shadow mode is
+the best non-WebRTC answer, and its HTML5 client already works through the SSH
+tunnels we use today.
+
+### 2.9 Terminal: ttyd + xterm.js
 
 The terminal half of #47 needs no research gamble: ttyd (or equivalent
 pty-to-WebSocket bridge) + xterm.js in the browser is the standard,
-boring, correct answer. It rides the same auth/audit story as the desktop
-stream and can ship independently of the desktop transport decision.
+boring, correct answer. It can ship independently of the desktop transport
+decision. Two caveats for the implementation run: ttyd's built-in auth is
+basic-auth, not tenant-scoped — it must sit behind the H9 identity / proxy
+auth layer, not be exposed directly; and ttyd has no native audit log, so the
+session audit story from §5 must be built around it rather than assumed from it.
 
 ## 3. Scoring against the requirements
 
-| Requirement (§1) | Selkies-GStreamer | Moonlight-Web | RustDesk | KasmVNC | Guacamole | noVNC |
-|---|---|---|---|---|---|---|
-| 1. WebRTC-class latency | ✓ native | ✓ native | ~ (native app only) | ✗ VNC-class | ✗ | ✗ |
-| 2. Browser-native client | ✓ | ✓ | ✗ (3rd-party, immature) | ✓ | ✓ | ✓ |
-| 3. OSS / parity | ✓ | ✓ (GPLv3) | license TBD | ✓ | ✓ (Apache 2.0) | ✓ |
-| 4. X11 (`:98`) fit | ✓ by design | verify on Xvfb | ✓ | ✓ | ✓ | ✓ |
-| 5. Per-tenant deploy | ✓ (per-box process) | ✓ (per-box process) | ✓ | ✓ | ~ (shared gateway) | ✓ |
-| 6. Provider-agnostic | ✓ | ✓ (LAN-only mode) | ✓ | ✓ | ✓ | ✓ |
-| Maintenance health | ⚠ needs maintainers | ✓ active | ✓ active | ✓ active | ✓ mature | ✓ mature |
+| Requirement (§1) | Selkies-GStreamer | Moonlight-Web | RustDesk | KasmVNC | Xpra | Guacamole | MeshCentral | noVNC |
+|---|---|---|---|---|---|---|---|---|
+| 1. WebRTC-class latency | ✓ native | ✓ native | ~ (native app only) | ✗ VNC-class | ✗ TCP/batch | ✗ | ✗ VNC-class | ✗ |
+| 2. Browser-native client | ✓ | ✓ | ✗ (3rd-party, immature) | ✓ | ✓ (HTML5) | ✓ | ✓ | ✓ |
+| 3. OSS / parity | ✓ | ✓ (GPLv3, constraints in §2.2) | license TBD | ✓ | ✓ | ✓ (Apache 2.0) | ✓ (Apache 2.0) | ✓ |
+| 4. X11 (`:98`) fit | ✓ by design | verify on Xvfb | ✓ | ✓ | ✓ (shadow mode) | ✓ | ✓ | ✓ |
+| 5. Per-tenant deploy | ✓ (per-box process) | ✓ (per-box process) | ✓ | ✓ | ✓ | ~ (shared gateway) | ~ (mesh mgmt) | ✓ |
+| 6. Provider-agnostic | ✓ | ✓ (LAN-only mode) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Maintenance health | ⚠ needs maintainers | ✓ active | ✓ active | ✓ active | ✓ active | ✓ mature | ✓ active | ✓ mature |
 
 ## 4. Recommendation
 
 **Prototype Selkies-GStreamer first** as the desktop transport for #47, with
-Moonlight-Web (+ Sunshine as host, LAN-only) as the fallback if the prototype
-gates fail. Ship the ttyd/xterm.js terminal independently — it does not wait
-for the desktop decision.
+a reordered fallback ladder: **Sunshine as host (X11 capture, software encode)
++ Moonlight-Web as the web client** if Selkies fails gate 2; **Xpra in shadow
+mode** if both WebRTC candidates fail on a CPU-only Xvfb box. Ship the
+ttyd/xterm.js terminal independently — it does not wait for the desktop
+decision.
 
 Why Selkies first: it is the only candidate that is simultaneously
-browser-native, WebRTC, open source, and designed for the exact X11 software
-stack we already run. The maintenance risk is real but bounded: the prototype
-gates below will surface it before any commitment, and the fallback keeps us
-from being stranded.
+browser-native, WebRTC, X11-native, and open source. (Xpra matches on
+browser-native + X11 + OSS but is TCP/WebSocket transport, not WebRTC-class —
+see §2.8.)
 
-### Why not Moonlight-Web first
+On the maintenance risk, honestly: it is **structural, not bounded**. The
+prototype gates measure technology (encode, latency, capture, input); a
+"needs maintainers" project can pass all of them and still rot from browser
+codec/API churn — exactly the failure mode named in §2.1. So the maintenance
+answer is a policy, not a prototype: pin the dependency, consume it as an
+external container image (never vendored into this repo — see the GPL
+constraints in §2.2), run a quarterly upstream-health check as a standing
+loop item, and define the re-platform trigger now: if upstream goes >3 months
+without a commit or leaves browser-compat issues unaddressed for >3 months,
+the recommendation flips to the Sunshine + Moonlight-Web fallback without
+re-litigating this doc. Gate 1 (below) is the first instance of that check.
 
-It is the stronger *project* (active releases days ago, richer client), but
-the weaker *fit*: gaming-shaped input assumptions, a heavier C++/Qt packaging
-story for the fleet, and the one-click relay is a trap we must actively avoid.
-It is the right fallback precisely because those are integration problems, not
-physics problems — if Selkies can't hit the latency bar on a CPU-only box,
-Moonlight-Web's software-fallback encode path is the next thing to measure.
+### Why not Moonlight-Web's native engine first
+
+The native engine is the stronger *project* (active releases days ago, richer
+client), but the weaker fit for our degenerate case: the upstream README
+itself says that on a headless machine with no usable encoder "the card
+simply does not appear." So the fail-branch of gate 2 points at **Sunshine as
+the host** — X11/XShm capture and a mature headless + software-encode story —
+with Moonlight-Web serving only as the browser client (its GameStream-client
+mode), LAN-only, no relay. The Moonlight-Web native engine gets measured only
+if the prototype box has a usable hardware encoder. Beyond that: gaming-shaped
+input assumptions, a heavier C++/Qt packaging story for the fleet, and the
+one-click relay is a trap we must actively avoid.
 
 ### Explicitly not promised
 
@@ -234,13 +292,40 @@ Moonlight-Web's software-fallback encode path is the next thing to measure.
 1. Per-box `selkies-gstreamer` process, bound to **localhost only** on the
    tenant box, capturing Xvfb `:98`. No public ingress — consistent with the
    H3 provisioning interface's `public_ingress: false` clause.
-2. Human reachability rides existing paths: the SSH tunnel (self-hosted, same
-   pattern as the CUA bridge on 127.0.0.1:18731) or the tailnet; hosted adds
-   provider ingress per the control-plane design. No new public listener is
-   invented here.
+2. Human reachability — signaling and media are two different paths, and the
+   doc's first draft wrongly treated WebRTC media like a plain TCP service:
+   - **Signaling** (SDP/HTTP) can ride anything: the SSH tunnel, the tailnet,
+     provider ingress. This part works like the CUA bridge pattern.
+   - **Media** needs ICE connectivity between browser and streamer, and
+     `ssh -L` forwards TCP only. Establishing media over an SSH tunnel
+     requires ICE-TCP candidates or a TURN server reachable through the
+     tunnel — possible, but it is an explicit design, not "the same pattern
+     as the CUA bridge on 127.0.0.1:18731."
+   - **Bind address:** "localhost-only" contradicts tailnet reachability. A
+     socket bound to localhost is not reachable from another tailnet node.
+     The streamer must bind the tailnet interface (behind tailnet ACLs) or a
+     tailnet-side forwarder must exist — this is an open design decision, not
+     a default.
+   - **Hosted:** provider ingress (L7 HTTP / TCP LB) cannot carry ICE/RTP
+     media. A hosted fleet behind provider NAT needs STUN for discovery and,
+     in the common symmetric-NAT case, a **TURN relay through which 100% of
+     media flows**. That relay is real infrastructure: an operator-run
+     component, a bandwidth-cost line (likely the dominant infra cost for
+     this surface), and audit scope. Media relayed through TURN is
+     SRTP-encrypted — the relay sees ciphertext, not pixels — but it is
+     still a trust and cost decision the control-plane design must own. The
+     third-party `stream.moonlightweb.top` relay is rejected for exactly
+     this reason (§2.2); the hosted product operates its own or does not
+     ship this surface.
+   No new public listener is invented here for the *streamer*, but the TURN
+   requirement for hosted is new infrastructure and must be costed and
+   designed before the prototype claims "works on hosted."
 3. Auth: tenant-scoped, delegated to the hosted identity service (H9) when it
-   exists; on the current single-owner box, the confirmd owner session is the
-   stopgap. Every stream session start/stop writes an audit line (same
+   exists. The identity-to-stream binding does not exist yet — confirmd
+   approves discrete credential-swap requests, not long-lived sessions, so
+   there is no confirmd session to reuse as a stopgap. Naming that binding
+   (session-scoped bearer, expiry, revocation on tenant-offboard) is H9/H11
+   work. Every stream session start/stop writes an audit line (same
    discipline as the swap proxy's audit log).
 4. Adaptive quality: degrade resolution/framerate under congestion per the UX
    spec — verify the candidate exposes this (WebRTC congestion control should,
@@ -252,24 +337,40 @@ Moonlight-Web's software-fallback encode path is the next thing to measure.
 ## 6. What this changes in the backlog
 
 - **#47** gains a transport answer: prototype Selkies-GStreamer → fallback
-  Moonlight-Web; terminal via ttyd/xterm.js ships independently. (Comment to
-  be posted on the issue when the PR merges.)
+  **Sunshine as host + Moonlight-Web web client** → Xpra shadow mode as the
+  non-WebRTC last resort; terminal via ttyd/xterm.js ships independently.
+  (Comment to be posted on the issue when the PR merges.)
 - New follow-up for a build-loop `feature` run: the §7 prototype itself
-  (bake-off harness + measured numbers + a go/no-go).
-- Guacamole stays a candidate for the later admin-bastion story, not this
-  surface.
+  (bake-off harness + measured numbers + a go/no-go), including the ICE/TURN
+  reachability design and the codec-licensing diligence line.
+- Guacamole stays a candidate for the later admin-bastion story; MeshCentral
+  rejected for this surface (VNC-class desktop fails the latency bar) but
+  noted for the same bastion conversation later.
+- License rule recorded: GPLv3 streamers are consumed as external dependencies
+  only — never vendored into the repo tree; client-code modifications honor
+  the GPLv3 source-offer obligation.
 
 ## 7. Prototype gates (go/no-go before implementation)
 
-1. **Maintenance health:** confirm the Selkies-GStreamer upstream is alive
-   (recent commits, responsive issue tracker) — the "needs maintainers" flag
-   must not mean "abandoned."
+1. **Maintenance health:** verify against the canonical upstream (not a fork
+   mirror): recent commits, responsive issue tracker. Fail threshold: no
+   commits or releases in the last 3 months, or browser-compat issues
+   unaddressed for 3+ months → the gate FAILS and the recommendation flips to
+   the Sunshine + Moonlight-Web fallback without re-litigating this doc.
+   Standing mitigation regardless of outcome: pinned external dependency,
+   quarterly upstream-health re-check as a loop item, re-platform trigger as
+   defined in §4.
 2. **CPU-only encode:** measure end-to-end glass-to-glass latency and FPS on a
    2–4 vCPU box with no GPU, software encode, 1080p and 720p. Pass = feels
-   real-time to a human tester against the noVNC baseline; fail = fall back
-   to Moonlight-Web and re-measure.
-3. **Xvfb capture:** verify clean capture of `:98` (no GPU/GLX assumptions in
-   the capture path).
+   real-time to a human tester against the noVNC baseline, with a <150 ms
+   glass-to-glass target alongside the subjective bar; fail = fall back to
+   Sunshine as host + Moonlight-Web web client and re-measure (the native
+   engine is measured only if the box has a usable hardware encoder).
+3. **Xvfb capture:** verify clean capture of the existing `:98` display (no
+   GPU/GLX assumptions in the capture path). Explicitly cover the
+   selkies-launches-its-own-X-server failure mode: the streamer must attach
+   to `:98`, not insist on owning the X server (which would orphan the CUA
+   stack's display and violate §1.4).
 4. **Input fidelity:** tap=click, hold=left-click, pinch zoom, cursor-drag —
    through the web client, plus the existing CUA driver's synthetic input
    continuing to work on the same display.
@@ -277,6 +378,10 @@ Moonlight-Web's software-fallback encode path is the next thing to measure.
    auditable session lifecycle. Feeds H11.
 6. **Congestion behavior:** confirm resolution/framerate degrades before
    latency does.
+7. **Reachability:** establish a real media session over EACH intended path —
+   SSH-forwarded, tailnet, and hosted-NAT-equivalent (through the TURN
+   relay). A LAN-only latency number does not pass this gate; ICE must
+   complete on every path the product will actually use.
 
 ## 8. Sources
 
@@ -300,8 +405,14 @@ All links verified live during this research pass (2026-09-18):
   https://github.com/linkzy/rustdesk-custom-web-client/blob/HEAD/docs/AI_GUIDELINES.md
 - License table (RustDesk AGPL-3.0 claim; Guacamole Apache-2.0) —
   https://github.com/tortuvshin/open-apps/blob/HEAD/content/records/rustdesk.md
-- KasmVNC vendor page (webp/30% claim — vendor, unverified) —
-  https://kasm.com/kasmvnc?hsa_acc=5549526009&hsa_cam=18158486598&hsa_grp=140562225317&hsa_ad=618515358701&hsa_src=d&hsa_tgt&hsa_kw&hsa_mt&hsa_net=adwords&hsa_ver=3&gad_campaignid=18158486598
+- Xpra project page (shadow mode, HTML5 client, connection types) —
+  https://github.com/diyism/xpra
+- Xpra operation (Xvfb compositing WM, HTML5 client) —
+  https://en.wikipedia.org/wiki/Xpra
+- Xpra upstream changelog (maintenance activity, latency improvements) —
+  https://github.com/xpra-org/xpra/blob/HEAD/docs/CHANGELOG.md
+- Xpra field note (latency caveat on slow systems) —
+  https://github.com/velvet-os/velvet-os.github.io/blob/HEAD/using-xpra-as-remote-desktop.md
 - Independent KasmVNC-vs-alternatives research note —
   https://github.com/whereiskurt/klanker-maker/blob/HEAD/.planning/phases/93-km-desktop-kasmvnc-backed-browser-xfce-remote-session-over-ssm-port-forward/93-RESEARCH.md
 - Guacamole vs noVNC performance discussion —
