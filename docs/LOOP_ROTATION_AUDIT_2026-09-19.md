@@ -6,34 +6,61 @@ changes. It never rewrites the rotation unilaterally — proposals below are
 filed for the loops (and the user) to adopt.
 
 Scope of this audit: both loops' runs from 2026-09-18 ~14:24 through
-2026-09-19 ~01:25 CDT, plus the operator's merge batch in between.
-Evidence: the goal RUNLOG.md, BACKLOG.md, NEEDS_USER.md, the GitHub API
-(22 open issues, 11 open PRs), main's commit log, and PLAYBOOK.md on disk.
-Findings continue the previous audit's numbering (F1–F7 in
-`docs/LOOP_ROTATION_AUDIT.md`, 2026-09-18).
+2026-09-19 ~01:25 CDT — a full second build-loop cycle (9 runs:
+arch → fix → feature → security → distribution → gap → dx → docs → repo;
+this run is the next `meta`) plus 11 strategy runs. Evidence: the goal
+RUNLOG.md, BACKLOG.md, NEEDS_USER.md, the GitHub API (22 open issues,
+11 open PRs), main's commit log, and PLAYBOOK.md on disk. Findings continue
+the previous audit's numbering (F1–F7 in `docs/LOOP_ROTATION_AUDIT.md`,
+2026-09-18).
+
+Terminology note: "the operator" in this doc means the human user/owner who
+provisions the hosted infrastructure and holds the GitHub token — distinct
+from the loop runs themselves.
 
 ## The loops, by the numbers
 
-Build loop (10 archetypes): **1 run** since the last audit — `repo`
-(CHANGELOG.md + release-note ritual, PR #65, clean, SHIP IT all roles).
-No fix, security, or distribution turn ran in the window.
+Build loop (9 runs, all open-source track):
 
-Strategy loop (research → competitor → marketing → sales): **3 runs** —
-`research` (desktop transport for #47, PR #63), `competitor` (night-pass
-watch, PR #64), `marketing` (README nits stacked on #59, PR #66). All three
-clean + unanimous SHIP IT, all three open.
+| archetype | shipped | note |
+|---|---|---|
+| arch | PR #43 (merged) — muse-job session-lifecycle trust boundary; filed #41, #42 | 5 commits, 72/72 tests |
+| fix | PR #45 (merged) — refused to steer into dead TUI (fixes severity:high #4) | 64/64 tests |
+| feature | PR #48 (merged) — H2 VAPID push notifications (closes #2) | track:open-source per triage |
+| security | PR #50 (open, **dirty**) — #23 B1–B6 hardening of merged #19 | rebase needed after merge batch |
+| distribution | PR #52 (merged) — single-source VERSION + deployed-version traceability | 204 tests |
+| gap | PR #58 (merged) — OSS contributor gap analysis + CONTRIBUTING.md + SECURITY.md | filed #55/#56/#57 |
+| dx | PR #60 (open, clean) — single-command test story (closes #56) | 292/292 tests |
+| docs | PR #62 (open, clean) — O3 follow-ups (Try-it user creation, plugin-install wording) | |
+| repo | PR #65 (open, clean) — CHANGELOG.md + release-note ritual | |
 
-Operator merge batch (2026-09-18 evening): **19 loop PRs merged**
-(#24–#26, #30–#33, #35–#38, #40, #43–#46, #48, #49, #51, #52), plus the
-MIT LICENSE commit outside the loop (closed #55). The strategy-doc pileup
-(F4) is gone by merge, not by loop action.
+Strategy loop (11 runs — 3 full cycles research → competitor → marketing →
+sales, plus a marketing tail):
+
+| archetype | shipped | track |
+|---|---|---|
+| research | PR #40 — GPU path research (C6) | open-source |
+| competitor | PR #44 — evening watch pass 2026-09-18 | open-source |
+| marketing | PR #46 — README 30-second-scan clarity pass | open-source |
+| sales | PR #49 — R1 first-ten-minutes spec | **hosted-product** |
+| research | PR #51 — R2 pre-seeded harness research | open-source |
+| competitor | PR #54 (open, **dirty**) — consolidation of #44's deltas into COMPETITOR_ANALYSIS.md | open-source |
+| marketing | PR #59 (open, clean) — README opener tightening | open-source |
+| sales | PR #61 (open, clean) — hosted landing page copy + conversion flow | **hosted-product** |
+| research | PR #63 (open, clean) — remote-desktop transport research for #47 | **hosted-product** |
+| competitor | PR #64 (open, clean) — night-pass watch 2026-09-19 | open-source |
+| marketing | PR #66 (open, clean) — README nits, stacked on #59 (merge order #59 → #66) | open-source |
+
+Operator merge batch (2026-09-18 ~20:26–20:46 CDT / 01:26–01:46 UTC 9/19):
+**22 PRs merged** — #24, #25, #26, #30, #31, #32, #33, #34, #35, #36, #37,
+#38, #40, #43, #44, #45, #46, #48, #49, #51, #52, #58. The strategy-doc
+pileup (F4) is gone by merge, not by loop action.
 
 PR queue now: 11 open. #39 (CI) mergeable `unstable`, **0 check runs on its
-head commit**; #50 (muse-job B1–B6 hardening) and #54 (competitor
-consolidation) `dirty` — main moved under them in the merge batch; #59–#65
-`clean`; #66 `clean`, stacked on #59's branch (merge order #59 → #66 noted).
-Main has **no branch protection** (verified via API) — every merge gate is
-the loop's own convention, not GitHub enforcement.
+head commit**; #50 and #54 `dirty` — main moved under them in the merge
+batch; #59–#65 `clean`; #66 `clean`, stacked on #59's branch. Main has
+**no branch protection** (verified via API) — every merge gate is the
+loop's own convention, not GitHub enforcement.
 
 Issue queue: 18 → 22. Closed: #2 (merged #48), #55 (LICENSE). Filed: #41,
 #42 (muse-job watch arch), #47 (live machine control), #53 (automate
@@ -69,12 +96,12 @@ into a doc the next loops evidently don't read — the loops read BACKLOG.md
 and PLAYBOOK.md every run, and neither carries the proposals. An advisory
 turn with no adoption mechanism is a write-only audit log.
 
-**F11 — The hosted track is parked behind stale blockers, not real ones.**
-Since the last audit: 0 hosted-track items advanced (both loops shipped
-open-source; `last_shipped_track: open-source` held all four runs). The
-"never stall + open-source-first" rules correctly keep the loop moving, but
-they systematically route around the hosted half of the goal. Worse, some
-stated blockers are stale against NEEDS_USER.md:
+**F11 — The build loop's whole second cycle was open-source; hosted
+implementation is untouched.** All 9 build runs shipped open-source track —
+correct per the open-source-first and never-stall rules, but it means every
+hosted *code* item (H4, H9–H15) sat idle while strategy shipped three
+hosted docs (#49, #61, #63). The hosted track is alive on paper (docs) and
+parked in code. Worse, some stated blockers are stale against NEEDS_USER.md:
 - H4 "BLOCKED on user: provider choice + API credentials" — but NEEDS_USER
   records **Fly.io DECIDED 2026-09-18** with the `custom.flyio` token
   connected and verified. The provider-agnostic interface + a Fly driver
@@ -84,22 +111,27 @@ stated blockers are stale against NEEDS_USER.md:
   (card-on-file trial). The remaining design surface is loop work.
 - H11 (multi-tenancy audit) is pure analysis: inventorying localhost-only /
   no-auth / single-owner assumptions needs no user input to start.
-The hosted stall is partly a freshness problem, not a dependency problem.
+The hosted code stall is partly a freshness problem, not a dependency
+problem.
 
-**F12 — Fix starvation persists (F1 unchanged).** Queue 18 → 22; the only
-fix-turn output in the window is #50, which is open *and dirty*. muse-job
-security/medium issues (#5–#13), proxy arch issues (#14–#17), and #56 (now
-answered by PR #60, awaiting merge) all sit. The P1 surge rule would have
-fired (queue ≥ 15 at every turn start) — it was never adopted (F10).
+**F12 — Fix turns work, but inflow beats drain.** The fix turn shipped and
+merged #45 (closing severity:high #4) — genuine fix capacity. But the
+queue still grew 18 → 22 (6 filed, 2 closed), and the other security
+follow-up (#50, also severity:high) is open *and dirty*. Meanwhile the
+filed items are shifting shape: proxy arch issues #14–#17 and muse-job
+watch issues #41/#42 are untouched, and no fix turn has worked outside
+muse-job/#4 this cycle. P1's surge rule would fire at every turn start
+(22 ≥ 15) — still unadopted (F10). The queue isn't just growing; it's
+diversifying away from what `fix` turns actually pick up.
 
-**F13 — F2 is closed by events, not by design.** The PR queue drained
-(24 → 11) because the operator merged the batch — the repo archetype never
-exercised the proposed queue duties, so the unowned-queue risk is dormant,
-not fixed. F4 (strategy pileup) deserves the same treatment: the re-pile
-conditions are already forming (11 open PRs, merge authority inert per
-F8/F14, strategy loop shipping 3 more PRs this window). #66's correct
-stack-on-branch + merge-order note shows the convention *can* work when a
-run bothers to write it down.
+**F13 — F2 is closed by events, not by design; F4's re-pile is forming.**
+The PR queue drained (24 → 11) because the operator merged the batch —
+the repo archetype never exercised the proposed queue duties, so the
+unowned-queue risk is dormant, not fixed. The re-pile conditions are
+already forming: 11 open PRs, merge authority inert (F8/F14), and both
+loops shipped 5 more PRs this window. #66's correct stack-on-branch +
+merge-order note shows the convention *can* work when a run bothers to
+write it down.
 
 **F14 — The "loop merges" rule still has no exercised path.** Adopted as
 standing policy 2026-09-18 ("merging is the loop's job"), but no run since
@@ -109,25 +141,22 @@ real, the first loop-executed merge needs to happen; if the operator
 prefers to keep merging, the playbook should say so instead of leaving
 runs in a wait-for-green-CI limbo.
 
-Terminology note: "the operator" in this doc means the human user/owner who
-provisions the hosted infrastructure and holds the GitHub token — distinct
-from the loop runs themselves.
-
 ## Proposals (for the loops to adopt — not applied by this audit)
 
-**P8 — One-time CI bootstrap merge.** Merge PR #39 on Engineering
-judgment, not CI-green: re-run the workflow's four jobs' underlying
-commands against the branch head locally —
-`python3 -m pytest` (root one-liner per CONTRIBUTING.md),
-`shellcheck` on the scripts the workflow scans,
-`lychee` on the markdown the workflow checks (fall back to `scripts/png-check.py`
-plus a manual link spot-check if lychee is unavailable locally),
-and the PNG/doc checks — record each result in RUNLOG. The bootstrap merge
-itself still needs unanimous SHIP IT from its routed roles on the final
-code: a one-time exception to the CI-green clause, not to the
-never-ship-without-approval rule. Squash-merge, note the exception on the
-PR. After #39 lands, the CI-green clause is live for everything else. This
-is a bootstrap, not a precedent.
+**P8 — One-time CI bootstrap merge.** Merge PR #39 on Engineering judgment,
+not CI-green: re-run the workflow's four jobs' underlying commands against
+the branch head locally — `python3 -m pytest` (root one-liner per
+CONTRIBUTING.md), `shellcheck` on the scripts the workflow scans, `lychee`
+on the markdown the workflow checks (fall back to `scripts/png-check.py`
+plus a manual link spot-check if lychee is unavailable locally), and the
+PNG/doc checks — record each result in RUNLOG. The bootstrap merge itself
+still needs unanimous SHIP IT from its routed roles on the final code.
+This is a one-time *recorded exception to the loop's own CI-green
+convention*, authorized under the user's standing "merging is the loop's
+job" grant — it resolves the "nobody is authorized" paradox without
+creating a general escape hatch (the playbook's no-escape-hatch culture
+for review approval stands). Squash-merge, note the exception on the PR.
+After #39 lands, the CI-green clause is live for everything else.
 
 **P9 — Dirty-PR rebase ownership.** The archetype that owns a dirty PR
 rebases it before any merge decision: next `fix` turn rebases #50 (it's the
@@ -136,11 +165,16 @@ stacking topology + "rebase needed" flags as P2 proposed.
 
 **P10 — Give proposals an adoption path.** Meta turns append the adoption
 checklist to the **top of BACKLOG.md** (the file every run reads), not just
-the audit doc; the `repo` archetype drains the checklist (propose text,
-run it past the user where the audit says "needs user approval").
-Placement: a dedicated `## Loop-rotation proposals (unadopted)` section
-above the existing archetype markers — it absorbs and supersedes the
-2026-09-18 audit's orphaned P1–P7 list rather than competing with it.
+the audit doc; the `repo` archetype drains the checklist. Placement: a
+dedicated `## Loop-rotation proposals (unadopted)` section above the
+existing archetype markers — it absorbs and supersedes the 2026-09-18
+audit's orphaned P1–P7 list rather than competing with it. Authority
+boundary: BACKLOG.md and RUNLOG.md are loop-owned and editable directly,
+but **PLAYBOOK.md is the user's rulebook** — amendments to it require user
+approval. "Drain" therefore means: the repo turn drafts the proposed rule
+text and flags it for the user; it lands in PLAYBOOK.md only after the
+user approves. Only the user-approval-flagged items (e.g. P7) were ever
+called out before; this makes the rule general.
 
 **P11 — Hosted unblock pass.** Next `gap` turn: audit every hosted item's
 stated blocker against NEEDS_USER.md; convert stale blockers into work
@@ -162,19 +196,23 @@ until the hosted launch is executable, since F3's speculative-inventory
 risk was realized, not retired. P4 (stall rule) likewise never adopted;
 keep it with an explicit re-arm condition: strategy turns flip to
 working-notes when ≥8 strategy PRs are open with no merge since the last
-strategy turn — the re-pile conditions are already forming (F13).
+strategy turn — the re-pile conditions are already forming (F13). Note
+P4's throttle and P2's reporting are different mechanisms (throttling ≠
+reporting); both stay.
 
 ## Adoption checklist (for the next loops, in order)
 
 - [ ] P8: next `repo` or `dx` turn executes the #39 bootstrap merge
       (local verification + recorded exception).
 - [ ] P9: next `fix` turn rebases #50; next strategy turn rebases #54.
-- [ ] P10: this audit's checklist appended to BACKLOG.md top section;
-      `repo` archetype owns draining it.
+- [ ] P10: this audit's checklist appended to BACKLOG.md top section
+      (absorbing the orphaned P1–P7 list); `repo` archetype owns draining
+      it; PLAYBOOK.md amendments need user approval.
 - [ ] P11: next `gap` turn runs the hosted unblock pass.
 - [ ] P12: adopt P1/P3/P4/P5/P6/P7 text into PLAYBOOK.md (P3 re-authorized
       with the #36/#28 park corrective; P4 with the ≥8-open-PRs re-arm
-      condition); rewrite P2's merge duties.
+      condition; all subject to user approval per P10); rewrite P2's
+      merge duties.
 - [ ] F14: decide whether loop-executed merges are real — first
       loop-executed merge, or playbook text saying the operator merges.
 - [ ] Record each adoption in BACKLOG.md; this audit's proposals stay filed
