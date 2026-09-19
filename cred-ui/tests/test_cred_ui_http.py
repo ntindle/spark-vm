@@ -139,6 +139,32 @@ def test_api_set_rejects_port_before_any_store(monkeypatch):
     assert calls == []  # no sudo writer ran: the secret was never stored
 
 
+@pytest.mark.parametrize("bad", [123, None, ["nested"], {"h": "x"}])
+def test_api_set_rejects_non_string_hosts(monkeypatch, bad):
+    """Non-string host values are a clean 400 (ValueError), not a TypeError
+    that escapes the handler and drops the connection."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    with pytest.raises(ValueError, match="bad host"):
+        cred_ui.api_set({
+            "name": "gh", "value": "tok", "entry": "access_token",
+            "placement": "bearer_header", "placement_arg": "",
+            "hosts": [bad],
+        })
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad", [123, None, ["nested"]])
+def test_api_host_rejects_non_string_host(monkeypatch, bad):
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    with pytest.raises(ValueError, match="bad host"):
+        cred_ui.api_host({"name": "gh", "host": bad}, add=True)
+    assert calls == []
+
+
 # --- delete failure must surface ------------------------------------------
 
 

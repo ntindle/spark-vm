@@ -5,6 +5,7 @@
 #   cd confirm && python3 -m pytest test_confirmd.py
 #   cd deploy  && python3 -m pytest test_auto_deploy.py
 #   cd muse-job && python3 -m pytest tests/test_event_trust.py
+#   python3 -m pytest cred-ui/tests/ -q
 
 name: ci
 
@@ -53,6 +54,9 @@ jobs:
         if: always()
         run: python3 -m pytest tests/test_event_trust.py -q
         working-directory: muse-job
+      - name: cred-ui tests
+        if: always()
+        run: python3 -m pytest cred-ui/tests/ -q
 
   shellcheck:
     name: shellcheck

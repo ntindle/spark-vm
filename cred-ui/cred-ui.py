@@ -94,7 +94,11 @@ _HOST_RE = re.compile(r"^\.?%s(\.%s)*$" % (_HOST_LABEL, _HOST_LABEL))
 
 
 def host_ok(h):
-    return bool(h) and len(h) <= 253 and bool(_HOST_RE.match(h))
+    # isinstance first: a non-string (int, list, ...) must be a clean
+    # False (do_POST answers ValueError with 400), not a TypeError that
+    # escapes the handler and drops the connection.
+    return (isinstance(h, str) and bool(h) and len(h) <= 253
+            and bool(_HOST_RE.match(h)))
 HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 PARAM_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
