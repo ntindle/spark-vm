@@ -720,7 +720,7 @@ def head_info(uuid):
 # no in-repo mechanism recovers it -- so truncation is a per-pass LOUD
 # signal (events-scan-truncated), never a silent condition. The 2 MB cap is
 # containment, not correctness; bounded event-file growth/rotation on the
-# manager side is the real fix (filed as a follow-up issue).
+# manager side is the real fix (issue #27).
 _EVENT_SCAN_MAX_BYTES = 2 * 1024 * 1024
 
 
