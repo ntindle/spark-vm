@@ -90,11 +90,15 @@ mirrors the agent's runtime cell (`jail/cell-mirror.md`):
 
 - **No host folders, ever.** `jail/build.sh` carries the deliberate
   decision: *"Deliberately no bind mounts: no host files inside the
-  jail."* The `[Files]` section of the `.nspawn` file contains only
-  `PrivateUsersOwnership` — nothing is shared in. (`jail/README.md`:
-  "**No host secrets/state/logs inside.** No bind mounts. Placeholders
-  only."; `jail/cell-mirror.md`: "no swapd-readable paths mounted in,
-  placeholders only".)
+  jail."* The `[Files]` section of the `.nspawn` file carries a single
+  key — `PrivateUsersOwnership` — nothing is shared in.
+  (`jail/README.md`: "**No host secrets/state/logs inside.** No bind
+  mounts. Placeholders only."; `jail/cell-mirror.md`: "no swapd-readable
+  paths mounted in, placeholders only".) One future exception is on the
+  record: `browser-driver/REVIEW.md` plans for `bdrive`'s *socket*
+  (not a folder) to be bind-mounted into the jail, SO_PEERCRED-gated to
+  the jail's mapped uid. The day that ships, it becomes the deliberate
+  exception to this bullet.
 - **Guest root is not host root.** `PrivateUsers=2000000:65536` maps
   container uid 0 to host uid 2000000 — a container escape still lands
   in an unprivileged host uid. (`PrivateUsers=yes` was deliberately
