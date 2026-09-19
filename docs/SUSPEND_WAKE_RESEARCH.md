@@ -17,7 +17,8 @@ own subject:
 
 The H3 signup design (`docs/HOSTED_SIGNUP_ONBOARDING.md`, PR #24) defines
 the interface every provider driver implements: `provision` / `status` /
-`dial` / `ssh_info` / `destroy` (plus a later `snapshot`). This pass answers: how do agent-sandbox
+`dial` / `ssh_info` / `destroy` (plus a later `snapshot`). This pass proposes
+adding a `suspend` verb (rec 2). It answers: how do agent-sandbox
 and VM providers implement idle suspend and wake, and what contract should
 H4's `suspended`/`waking` states plus async `dial()` expose so it stays
 provider-agnostic.
@@ -33,10 +34,10 @@ changes. Third-party-sourced claims are marked [T]; vendor docs [V].
   suspend); the suspend mechanism varies (memory snapshot vs disk-only
   vs cold stop) and the contract must not promise memory preservation.
 - **Wake-on-HTTP is provider-native** (Fly Proxy autostart, Runloop
-  `wake_on_http`); **wake-on-SSH is never provider-native** — it exists in
-  the wild only as a gateway layer (sandbox0's ssh-gateway). Our
-  wake-on-SSH-dial is control-plane code we build, not a provider feature
-  we inherit.
+  `wake_on_http`); **no surveyed provider offers wake-on-SSH natively** —
+  it exists in the wild only as a gateway layer (sandbox0's ssh-gateway).
+  Our wake-on-SSH-dial is control-plane code we build, not a provider
+  feature we inherit.
 - Idle detection splits: HTTP-traffic-scoped providers (Fly) vs explicit
   control-plane idle policy (Runloop) vs lease heartbeats (agentarea).
   The H13 idle detector is control-plane work regardless of provider.
@@ -60,9 +61,10 @@ changes. Third-party-sourced claims are marked [T]; vendor docs [V].
   start (seconds), never a warm memory resume. Memory-suspend is a
   shape-dependent axis the driver must document per shape.**
 - After resume the clock is briefly wrong — breaks JWT `nbf` validation,
-  cron, cache TTLs, TLS cert validation for a second or two. **Direct
-  implication for H3's short-lived SSH certs: cert validation needs a few
-  seconds of clock-skew leeway, or wake→SSH races fail intermittently.**
+  cron, cache TTLs, TLS cert validation for a few seconds until NTP syncs. **Direct
+  implication for H3's short-lived SSH certs: the validator (`sshd`) has no
+  clock-skew knob, so the fix goes to cert *issuance* (rec 7) — otherwise
+  wake→SSH races fail intermittently.**
 - Billing: suspended == stopped == storage-only (no CPU/RAM). Attached
   volume storage is billed while the volume exists, regardless of machine
   state.
@@ -121,7 +123,7 @@ changes. Third-party-sourced claims are marked [T]; vendor docs [V].
   snapshots are cleaned after 7–31 days with no work loss (disk state
   survives snapshot cleanup).
 
-### sandbox0 [V] — new to the corpus
+### sandbox0 [V] (`sandbox0-ai/sandbox0`) — new to the corpus
 
 - SSH-first product: `s0 sandbox get` returns ssh host/port/username; plain
   `ssh`/`sftp` clients.
@@ -176,17 +178,34 @@ These are research recommendations for the H4 Fly driver and the H13
 idle/suspend design, not shipped interfaces.
 
 1. **State model**: `provisioning | running | suspending | suspended |
-   waking | stopping | stopped | failed | destroyed`. The canonical
-   transitional name is `waking` (matches the H4 extension BACKLOG.md
-   already records, and sandbox0's `"sandbox is waking up"`). Keep
-   `suspended` distinct from `stopped` in status and in every UI that
-   shows it — one is the substrate (or control plane) idling a box out,
-   the other is an operator/destroy action (Cloudflare lesson). Expose
-   whether the last wake was a warm resume or a cold start as a
-   `status()` field — Fly and CodeSandbox both degrade silently, and
-   the caller needs to see it *after* the fact, not branch on it during
-   the dial. Migration from H3 §6's enum (`creating | ready | degraded |
-   dead`): `creating→provisioning`, `ready→running`, `dead` splits into
+   waking | stopping | stopped | failed | destroyed`. The model is
+   per-`vm_id` — one lifecycle per tenant box. If H11 answers
+   per-tenant *processes* instead of per-tenant boxes, the model itself
+   needs rework beyond the registry (rec 4); that gate is named here so
+   it isn't discovered in implementation. The canonical transitional
+   name is `waking` (matches the H4 extension BACKLOG.md already
+   records, and sandbox0's `"sandbox is waking up"`). Keep `suspended`
+   distinct from `stopped` in status and in every UI that shows it —
+   one is the substrate (or control plane) idling a box out, the other
+   is an operator/destroy action (Cloudflare lesson). **Mapping rule
+   for the cold-stop-degraded shape (rec 3): a driver-requested suspend
+   always surfaces as `suspended`, regardless of the substrate
+   mechanism** — the reference shape on Fly *is* a cold `stop` under
+   the hood, but the caller asked for suspend and the box will be
+   woken, so it is `suspended`, not `stopped`. Warm-vs-cold is carried
+   by the separate `status()` field (only meaningful post-wake), never
+   by the state name. `stopping`/`stopped` are entered only via
+   provider-initiated action outside the suspend path (host
+   maintenance, operator console stop) — the driver interface exposes
+   no stop verb; a driver whose provider never produces these states
+   documents the reduced model and drops `stopping`. `dial()` on a `stopped`
+   box starts it through the same wake path (never an error); `dial()`
+   refuses only
+   the terminal states (`destroyed`, or `failed` where the driver declines
+   retry).
+   Proposed migration from H3 §6's enum (`creating | ready | degraded |
+   dead`), for the H3/H4 design loops to adopt or amend:
+   `creating→provisioning`, `ready→running`, `dead` splits into
    `failed` (diagnosed, possibly retryable) and `destroyed` (terminal,
    operator/driver action). `degraded` stays — as an orthogonal health
    flag beside the lifecycle state, not as a lifecycle state itself.
@@ -199,12 +218,20 @@ idle/suspend design, not shipped interfaces.
      as still in progress). A bounded retry is allowed; an unbounded
      spinner is not.
    - *`destroy()` always wins*: a destroy racing an in-flight wake
-     cancels the wake; a `dial()` that arrives at a terminal box
-     observes the terminal state and refuses (never starts a wake).
-     The driver must be able to abandon in-flight transitions.
-   - *`suspend` of a non-runnable box is an explicit driver error*
+     cancels the wake; a destroy racing an in-flight *suspend* cancels
+     the suspend and discards the snapshot (Fly semantics: `stop` on a
+     suspended machine discards the snapshot). A `dial()` that arrives
+     at a terminal box observes the terminal state and refuses (never
+     starts a wake). The driver must be able to abandon in-flight
+     transitions.
+   - *`suspend` needs its verb*: the interface this pass proposes amends
+     H3 §6 with `suspend(vm_id)` alongside the `dial()` amendment (rec 5)
+     — without it there is nothing for the next rule to attach to:
+     *`suspend` of a non-runnable box is an explicit driver error*
      (silent no-ops hide broken idle detectors; the control plane
-     treats the error as log-and-skip).
+     treats the error as log-and-skip). `suspend()` on a driver whose
+     provider has no suspend story returns an explicit `Unsupported`
+     error (see the capability flag, rec 3) — never a silent no-op.
    - *`auto_resume` gate*: borrow sandbox0's per-tenant flag — whether
      inbound dials may wake a paused box at all. Abuse-relevant
      (cf. H13's abuse-controls input): a compromised or runaway tenant
@@ -213,7 +240,18 @@ idle/suspend design, not shipped interfaces.
    promise in-memory process survival across suspend — Runloop doesn't,
    sandbox0 doesn't, and Fly's suspend degrades to cold start.
    Provider drivers must document the axis per shape
-   (memory-suspend: yes / no / cold-stop-only). **And on the H4 Fly
+   (memory-suspend: yes / no / cold-stop-only). Warm resume is
+   best-effort and time-bounded, not a permanent shape property —
+   CodeSandbox cleans memory snapshots after 7–31 days (disk survives)
+   — so the axis documents the *mechanism*, not a durability promise.
+   The axis needs a no-suspend value, because the contract must not
+   silently assume suspend exists: TermSquad is always-on. We recommend
+   a machine-readable capability flag, e.g. `supports_suspend: bool`,
+   alongside the memory-preservation axis — prose documentation alone
+   won't do, because H13's idle economics will need to branch on it in
+   code. On a non-supporting driver: `status()` never reports
+   `suspended`; H13 skips idle-suspend for tenants on such drivers;
+   `suspend()` returns an explicit `Unsupported` error. **And on the H4 Fly
    driver the reference shape gets "cold-stop-only": H3 §6's fixed
    spec (Ubuntu 24.04, 8 vCPU / 15 GB RAM) exceeds Fly's memory-suspend
    cap (≤ 4 GB hard cap, ≤ 2 GB recommended), so the reference box's
@@ -224,16 +262,23 @@ idle/suspend design, not shipped interfaces.
 4. **Idle detection is control-plane work (H13)** — with one explicit
    provider-native disable. Fly's proxy autostop sees HTTP traffic only;
    SSH sessions and cron jobs are invisible to it, and it would suspend
-   boxes *underneath* running SSH sessions. So the H4 Fly driver sets
-   `auto_stop_machines = "off"` and the control plane drives suspend
-   through the Machines API — provider-native autostop is disabled,
-   not worked around. The registered-workload registry decides what
-   counts as activity: an SSH session, a running agent job, and —
-   critically — scheduled cron workloads. A box whose only workload is
-   cron must *wake on schedule*, not sleep through it; none of the
-   surveyed providers solve wake-on-schedule for us (Fly `schedule`
-   was considered and rejected: scheduled machines are disqualified
-   from suspending, and the config is static, not per-tenant dynamic).
+   boxes *underneath* running SSH sessions. So we recommend the H4 Fly
+   driver set `auto_stop_machines = "off"` and the control plane call
+   `driver.suspend()` (on Fly, the Machines API suspend endpoint) —
+   provider-native autostop is disabled, not worked around.
+   (`auto_start_machines` stays off too: with `public_ingress: false`
+   there is no HTTP ingress for it to auto-start on.) The
+   registered-workload registry decides what counts as activity: an SSH
+   session, a running agent job, and — critically — scheduled cron
+   workloads. A box whose only workload is cron must *wake on schedule*,
+   not sleep through it; none of the surveyed providers solve
+   wake-on-schedule for us. We advise against Fly `schedule` for this:
+   scheduled machines are disqualified from suspending, and the config
+   is static, not per-tenant dynamic. How a scheduled wake attaches is
+   an H13 design decision — either `dial()`-then-close through the
+   gateway or a dedicated `resume(vm_id)` verb sharing dial()'s wake
+   path; the contract requires only that the wake path (dedup +
+   failure taxonomy, rec 2) be shared, not duplicated.
    Sequencing note: the registry can't be finalized until H11 answers
    the isolation shape (per-tenant box vs per-tenant processes) —
    BACKLOG.md already gates H13 on H11.
@@ -249,18 +294,24 @@ idle/suspend design, not shipped interfaces.
    dedup (OpenKruise) so N racing dials trigger one wake; failure
    taxonomy from rec 2 ("waking up" vs "resume failed").
 
-   This **supersedes the trigger-wake + poll-status model that
-   GPU_PATH_RESEARCH.md proposed** ("dial() triggers wake and the caller
-   polls status until ready") — deliberately, and for a reason:
-   after reviewing the actual wake paths (sandbox0's gateway waits and
-   attaches; OpenKruise's connect blocks until Ready with 503-on-
-   timeout), a bounded-blocking dial gives every caller one call with
-   a timeout instead of pushing a poll loop onto every caller. If an
-   H4 driver author prefers trigger+poll for a specific provider, that
-   is an H4 design decision — the contract requires only that the
-   timeout be explicit and the rec-2 failure taxonomy be honored.
-   Warm-vs-cold stays a `status()` field (rec 1), never a dial-time
-   branch.
+   We **recommend** this bounded-blocking wake-wait `dial()` over the
+   trigger-wake + poll-status model `docs/GPU_PATH_RESEARCH.md` proposed
+   ("`dial()` on a `suspended` tenant triggers wake and the caller polls
+   `status` until `ready` (bounded blocking with an explicit timeout),"
+   quoted in full) — deliberately, and for a reason: after reviewing
+   the actual wake paths (sandbox0's gateway waits and attaches;
+   OpenKruise's connect blocks until Ready with 503-on-timeout), a
+   bounded-blocking dial gives every caller one call with a timeout
+   instead of pushing a poll loop onto every caller. The H4 design loop
+   adjudicates: GPU_PATH_RESEARCH.md's model remains the standing
+   recommendation until H4's design adopts or amends it. Either way, the
+   caller-visible contract is mandatory — `dial()` blocks bounded until
+   `running` and then returns the stream, or raises a rec-2-taxonomy
+   error within the explicit timeout; concurrent dials collapse to one
+   wake (first-writer-wins). A driver may implement that bounded wait
+   *internally* via trigger+poll, but may not push the poll loop back
+   onto callers. Warm-vs-cold stays a `status()` field (rec 1), never a
+   dial-time branch.
 6. **Wake-on-SSH-dial is a gateway, not a flag**. Fly and Runloop prove
    no provider wakes on SSH natively. The control plane needs an
    ssh-gateway (sandbox0's shape): intercept the SSH dial, resume-or-
@@ -279,9 +330,10 @@ idle/suspend design, not shipped interfaces.
    holds the skewed clock) has no clock-skew-tolerance knob for
    `valid_after`/`valid_before`. So do it at issuance: the CA backdates
    `valid_after` by ~60s (negligible against ≤ 24h certs with
-   50%-lifetime renewal), and/or the ssh-gateway gates SSH attach on
-   NTP sync after a wake. The H3 follow-up targets cert *issuance*,
-   not "cert validation."
+   50%-lifetime renewal). `valid_after` is the side to pad because
+   post-resume clocks run *behind* (Fly-confirmed); the
+   ssh-gateway-gates-on-NTP-sync alternative covers both directions.
+   The H3 follow-up targets cert *issuance*, not "cert validation."
 8. **Billing posture for the operator spend-cap packet** (NEEDS_USER.md):
    suspended = storage-only on Fly Machines, none-compute on Runloop,
    cold storage on Sprites. The per-run cap math should price "suspended
@@ -290,11 +342,12 @@ idle/suspend design, not shipped interfaces.
 
 ## Claimable vs forbidden (docs/marketing honesty)
 
-- **Claimable**: "suspends when idle; wakes on SSH dial"; "no compute
-  charges while suspended"; "disk state always persists across
-  suspend." **Claimable *once H13/H4 ship* — until then, suspend/wake
-  stays out of public copy: the hosted idle/suspend economics are
-  undecided per POSITIONING.md.**
+- **Claimable**: "suspends when idle; wakes on SSH dial (via the
+  ssh-gateway — the tailnet-direct path's interaction is TBD in H13)";
+  "no compute charges while suspended"; "disk state always persists
+  across suspend." **Claimable *once H13/H4 ship* — until then,
+  suspend/wake stays out of public copy: the hosted idle/suspend
+  economics are undecided per POSITIONING.md.**
 - **Forbidden**: "instant wake" (cold-start fallback exists); "zero cost
   when idle" (storage costs exist); "everything resumes exactly as it
   was" (memory preservation is provider-dependent); "cron keeps running
@@ -321,15 +374,23 @@ idle/suspend design, not shipped interfaces.
 - **H13** (suspend/idle design): control-plane idle detector +
   registered-workload registry (after H11 answers the isolation shape);
   wake-on-schedule for cron workloads; ssh-gateway wake-on-dial layer;
-  tailnet-direct SSH vs suspend interaction decision.
-- **H3** (signup doc): cert *issuance* backdates `valid_after` ~60s (or
-  gateway gates SSH attach on NTP sync after wake); record the
-  `dial()` wake-wait amendment and the status-enum migration
-  (`creating→provisioning`, `ready→running`, `degraded` as orthogonal
-  health flag).
-- **PRICING_THINKING.md**: idle/suspend economics can now move from TBD —
-  "suspends when idle, wakes on SSH dial; no compute charges while
-  suspended; disk persists" is vendor-grounded.
+  tailnet-direct SSH vs suspend interaction decision; choose the
+  per-tenant `auto_resume` default (sandbox0 pattern; the abuse angle —
+  a compromised or runaway tenant must not be re-wakeable by anyone
+  with the dial endpoint — is H13's input, not this doc's decision).
+- **H3** (signup doc): propose to the H3/H4 design loops — cert
+  *issuance* backdates `valid_after` ~60s (or gateway gates SSH attach
+  on NTP sync after wake); the `dial()` wake-wait amendment (rec 5)
+  and the status-enum migration (`creating→provisioning`,
+  `ready→running`, `degraded` as orthogonal health flag). This research
+  pass does not edit H3 §6.
+- **PRICING_THINKING.md**: draft the vendor-grounded idle/suspend
+  terms now ("suspends when idle, wakes on SSH dial; no compute charges
+  while suspended; disk persists"), but finalize only after H13's
+  provider/mechanism choice — per POSITIONING.md the hosted
+  idle/suspend economics stay undecided until then (the reference
+  shape's cold-stop-only reality on Fly changes the value proposition
+  versus warm resume).
 - **Competitor corpus (C1 watch)**: sandbox0 is new to the corpus —
   SSH-first agent sandbox with gateway wake + `auto_resume` gate; worth
   a watch entry.
