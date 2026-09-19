@@ -1544,8 +1544,9 @@ class SwapAddon:
         endpoint) unscrubbed — the body hook never fires for a stream.
         Header values are short, so there is no size cap to check here;
         triples are computed once, not per header value. (Streaming
-        *bodies* remain a residual risk — see the issue filed with this
-        change — but headers no longer depend on the body finishing.)
+        *bodies* remain a residual risk — filed as
+        https://github.com/ntindle/spark-vm/issues/92 — but headers no
+        longer depend on the body finishing.)
         """
         self._maybe_reload()
         req = flow.request

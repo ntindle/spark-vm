@@ -81,11 +81,14 @@ def _load_grants():
 def _save_grants(grants):
     """Atomically write grants via temp-and-rename so readers never see
     a partial file. The caller holds the lock file. The temp file is
-    created 0600 (see _open_private_append): deploy.sh installs
-    grants.json 0600, and a 0644 temp file would silently widen it on
-    the first write's rename."""
+    created 0600: deploy.sh installs grants.json 0600, and a 0644 temp
+    file would silently widen it on the first write's rename. Pre-existing
+    files keep their mode — this never widens, but does not tighten either.
+    fchmod covers a stale tmp left 0644 by a crashed pre-fix run (open
+    applies the mode only at creation)."""
     tmp = GRANTS_FILE + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as t:
         json.dump({"grants": grants}, t, indent=2)
     os.replace(tmp, GRANTS_FILE)

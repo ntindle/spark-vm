@@ -42,7 +42,7 @@ class NameValidationTests(unittest.TestCase):
         """Legitimate names are unaffected; surrogate format unchanged."""
         e = dynamic_credential_entry("github", entry_name="access_token")
         self.assertEqual(e["surrogate"], "hsurr:github:access_token")
-        e = dynamic_credential_entry("openai-api_key.2".replace(".", "-"))
+        e = dynamic_credential_entry("openai-api_key-2")
         self.assertEqual(e["surrogate"], "hsurr:openai-api_key-2:access_token")
         e = dynamic_credential_entry("a")
         self.assertEqual(e["surrogate"], "hsurr:a:access_token")

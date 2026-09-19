@@ -29,8 +29,9 @@ class DynamicCredentialError(Exception):
 # Credential and entry names are interpolated into filesystem paths by
 # some consumers (credlib/fill_secret.py reads
 # /home/swapd/secrets/<name>), so they must be validated before use:
-# no slashes, no dots, no shell. The same shape the swapd-side writers
-# enforce (proxy/cred-store-set).
+# no slashes, no dots, no shell. Same character class the swapd-side
+# writers enforce (proxy/cred-store-set), plus a 64-char length cap the
+# writers don't have (no legitimate name in the repo is near it).
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
