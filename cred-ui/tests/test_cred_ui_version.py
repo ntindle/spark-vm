@@ -15,8 +15,10 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 @pytest.fixture
 def _clean_reader_import():
     """Isolate the reader import: evict any cached/broken sparkvm_version and
-    put the real repo scripts dir first (the broken-reader mutation test in
-    muse-job leaves a tmp scripts dir at sys.path[0]). Restores on exit."""
+    put the real repo scripts dir first. (Defense-in-depth: muse-job's
+    broken-reader test used to leave a tmp scripts dir at sys.path[0]; it
+    restores state itself now, but ordering against any other sys.path
+    mutator still can't be assumed.) Restores on exit."""
     import sys as _sys
     saved_path = list(_sys.path)
     saved_mod = _sys.modules.pop("sparkvm_version", None)

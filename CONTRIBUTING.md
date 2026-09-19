@@ -32,18 +32,41 @@ work we sometimes forget.
 
 ## Running the tests
 
-There is not yet a single test command (tracked in
-[#56](https://github.com/ntindle/spark-vm/issues/56)). Until then, run the
-component suites directly from the repo root:
+One command, from the repo root:
 
 ```bash
-python3 -m pytest proxy/ confirm/ muse-job/ deploy/
+python3 -m pytest
 ```
 
-All suites pass on `main`; your PR should keep them green. Some components
-need extra packages (e.g. `python3-cryptography` for the VAPID push work) —
-if a suite fails on import, that's a missing dependency, not your bug; note
-it in the PR.
+`pytest.ini` discovers every suite (`proxy`, `confirm`, `muse-job/tests`,
+`deploy`, `scripts`, `cred-ui/tests`). All suites pass on `main`; your PR
+should keep them green.
+
+Install the test dependencies first:
+
+```bash
+pip install -r requirements-test.txt
+```
+
+Per-component dependency notes:
+
+| Component | Suites | Extra deps beyond stdlib + pytest |
+|---|---|---|
+| `proxy/` | `test_swap_addon`, `test_grant_writer`, `test_round6` | none (mitmproxy is a *deploy* dependency, installed by `proxy/deploy.sh`; no test module imports it) |
+| `confirm/` | `test_confirmd`, `test_push` | `cryptography` (VAPID / Web Push in `confirm/push.py`) |
+| `muse-job/tests/` | `test_event_trust`, `test_session_lifecycle`, `test_steer_tui_guard`, `test_version` | none |
+| `deploy/` | `test_auto_deploy` | none |
+| `scripts/` | `test_sparkvm_version` | none |
+| `cred-ui/tests/` | `test_cred_ui_version` | none |
+
+Two conventions keep the one-liner working: keep every `test_*.py`
+basename unique across the repo (pytest imports test modules by basename),
+and never leave `sys.path` / `sys.modules` mutations behind in a test —
+an order-dependent failure in the full run is a bug in the test, not in
+pytest.
+
+`cua/`, `jail/`, and `browser-driver/` have no automated suites yet
+(tracked in the backlog).
 
 ## Secrets: the one hard rule
 
