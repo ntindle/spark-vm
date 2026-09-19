@@ -573,7 +573,6 @@ def test_pull_only_deploy_records_version(tmp_path):
     assert '"result":"pull-only"' in audit, audit
     assert '"to_version":"unknown"' in audit, audit
     assert '"from_version":"unknown"' in audit, audit
-=======
     # Gate on shellcheck warnings, not just syntax. Explicit skip (not a
     # silent pass) when shellcheck is absent — CI installs it, so a skip
     # there means the workflow's install step broke and should be noticed.

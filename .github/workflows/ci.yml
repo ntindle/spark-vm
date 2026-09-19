@@ -8,6 +8,13 @@
 
 name: ci
 
+# Least privilege: this workflow only reads the repo and reports status.
+# Runs on push to main, where a compromised third-party action with a
+# writable token could otherwise touch a tree that auto-deploys sudoers
+# files, a CA bundle, and the credential-swapping proxy.
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -70,7 +77,9 @@ jobs:
         # default); passing it fails the step with "unexpected argument".
         # --exclude-loopback: docs reference localhost service addresses
         # (cred-ui, proxy) that can never resolve on a CI runner.
-        uses: lycheeverse/lychee-action@v2
+        # SHA-pinned (e7477775783ea5526144ba13e8db5eec57747ce8, v2.9.0) so a
+        # tag drift can't widen what this step can do.
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
           args: "--no-progress --exclude-loopback '**/*.md'"
         env:
