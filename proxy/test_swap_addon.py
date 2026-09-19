@@ -218,6 +218,14 @@ def totp(seed_b32, at, step=30, digits=6):
 
 class SwapAddonTests(unittest.TestCase):
 
+    def test_version_stamp_resolves_repo_version(self):
+        # docs/VERSIONING.md: the addon reports the single-source VERSION;
+        # never "0.0.0-unknown" when the repo checkout is intact.
+        repo = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(sa.__file__)), ".."))
+        with open(os.path.join(repo, "VERSION")) as f:
+            self.assertEqual(sa.SPARKVM_VERSION, f.read().strip())
+
     # --- holds today ------------------------------------------------
 
     def test_holds_browser_form_reencodes_value(self):

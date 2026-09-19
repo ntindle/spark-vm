@@ -445,5 +445,17 @@ class ConfirmdTests(unittest.TestCase):
         self.assertIn("document.hidden", cd.POLL_JS)
 
 
+    def test_version_payload_reports_repo_version(self):
+        p = cd._version_payload()
+        self.assertEqual(p["service"], "confirmd")
+        self.assertEqual(p["handler"], "confirmd/1")
+        self.assertRegex(p["version"],
+                         r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
+        # The reported version is the repo's single-source VERSION file.
+        repo = os.path.dirname(os.path.abspath(cd.__file__))
+        with open(os.path.join(repo, "..", "VERSION")) as f:
+            self.assertEqual(p["version"], f.read().strip())
+
+
 if __name__ == "__main__":
     unittest.main()
