@@ -257,8 +257,9 @@ Screens, in order:
    `muse_pubkey` matches the presented key, the UI shows the continuity
    hint ("matches the key your agent submitted" — convenience, not trust —
    `WAITLIST_OPERATIONS.md` §8, PR #68). The waitlist→identity-linked
-   bridge metric (`FUNNEL_MEASUREMENT.md` §7, PR #99 — waitlist→signup,
-   kept visible, never folded into the page metric) starts emitting here.
+   bridge metric (`FUNNEL_MEASUREMENT.md` §7, PR #99 —
+   waitlist→identity-linked, kept visible, never folded into the page
+   metric) starts emitting here.
 4. **Bring your tailnet** — BYO Tailscale link step (decided, NEEDS_USER.md
    Tailnet). H3 §11.2's open tailnet-shape question is closed; the signup
    UI renders the decided shape, not the question.
