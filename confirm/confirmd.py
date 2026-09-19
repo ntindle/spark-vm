@@ -38,8 +38,10 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
+from collections import defaultdict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -144,6 +146,79 @@ PAGE_ORIGINS = _page_origins()
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 
+# Issue #75: a small ring of valid CSRF nonces per approval. The old code
+# kept a single `_csrf` slot and rewrote it on every GET, so a second tab
+# (or back-button + resubmit) 403'd the first tab's form AND audit-logged
+# it as a CSRF violation — false positives that desensitized review of
+# real violations. Ring entries are {nonce, ts}; only the newest few are
+# accepted. Tradeoff (arch review R1): a larger ring keeps more tabs alive
+# but widens the concurrent-live-nonce window for the /answer race (#71) —
+# hence the conservative defaults, and env knobs for the operator.
+def _env_int(name, default, minimum):
+    try:
+        v = int(os.environ.get(name, str(default)))
+    except ValueError:
+        v = default
+    return max(v, minimum)
+
+_CSRF_RING_SIZE = _env_int("CONFIRM_CSRF_RING_SIZE", 3, 1)
+_CSRF_RING_TTL = _env_int("CONFIRM_CSRF_RING_TTL", 15 * 60, 60)  # seconds
+
+
+# Arch review B2/B3: per-approval in-process lock. ThreadingHTTPServer runs
+# one thread per request, so the GET load->mint->write-back sequence and
+# the POST check->mint->consume sequence must serialize per approval id —
+# otherwise concurrent GETs lose a minted nonce (last-writer-wins) and
+# concurrent POSTs race into the grant path (#71). Single-instance scope is
+# honest here (confirmd runs as one service); a multi-replica confirmd
+# would need the atomicity story redone (flock on the item file).
+# Memory: one lock per approval id ever seen; ids are bounded by pending
+# items, so no eviction.
+_aid_locks = defaultdict(threading.Lock)
+
+
+def _aid_lock(aid):
+    return _aid_locks[aid]
+
+
+def _mint_csrf_nonce(it):
+    """Mint a fresh CSRF nonce for an approval item, keeping a small ring
+    of recent nonces. Migrates the legacy single `_csrf` slot into the
+    ring on first use."""
+    now = time.time()
+    ring = [e for e in (it.get("_csrf_nonces") or [])
+            if isinstance(e, dict) and isinstance(e.get("ts"), (int, float))
+            and now - e["ts"] <= _CSRF_RING_TTL]
+    legacy = it.pop("_csrf", None)
+    if legacy and legacy not in {e.get("nonce") for e in ring}:
+        ring.append({"nonce": legacy, "ts": now})
+    nonce = secrets.token_urlsafe(24)
+    ring.append({"nonce": nonce, "ts": now})
+    it["_csrf_nonces"] = ring[-_CSRF_RING_SIZE:]
+    return nonce
+
+
+def _csrf_nonce_ok(it, csrf):
+    """True if `csrf` is a well-formed, unexpired nonce in the item's ring
+    (or its legacy single slot). The TTL is enforced at verification time
+    too, not only at mint (security review): a clock-jump-backward or a
+    never-re-GET'd item cannot keep a nonce valid past the TTL."""
+    if not NONCE_RE.match(csrf or ""):
+        return False
+    now = time.time()
+
+    def _fresh(e):
+        ts = e.get("ts")
+        return (isinstance(ts, (int, float))
+                and now - ts <= _CSRF_RING_TTL)
+
+    ring = it.get("_csrf_nonces") or []
+    candidates = {e.get("nonce") for e in ring
+                  if isinstance(e, dict) and _fresh(e)}
+    if it.get("_csrf"):
+        candidates.add(it["_csrf"])
+    return csrf in candidates
+
 # Finding 47: the host's own tailnet addresses. A peer presenting one
 # of these is the host itself (e.g. the swap proxy connecting out) —
 # never the human on a remote node.
@@ -202,6 +277,12 @@ def tailnet_login(peer_ip):
     except Exception:
         pass
     _whois_cache[peer_ip] = (login, now)
+    # Issue #77 (L10): hygiene cap on the otherwise-unbounded whois cache.
+    # Keyed by peer IP so it is tailnet-bounded, but a leak is a leak —
+    # evict oldest-inserted past the cap. Eviction cannot cause staleness
+    # beyond the existing 60s TTL: a miss just re-runs whois (arch R3).
+    while len(_whois_cache) > 4096:
+        _whois_cache.pop(next(iter(_whois_cache)))
     return login
 
 
@@ -222,7 +303,11 @@ def _find_login(obj):
 
 
 def audit_log(event, peer, login, detail=""):
-    """Finding 47/53(e): every refusal leaves a trail with peer and login."""
+    """Finding 47/53(e): every refusal leaves a trail with peer and login.
+    Event policy: malformed/missing CSRF nonces are logged as violations
+    ("csrf: bad nonce"); well-formed but stale/unknown nonces are logged
+    under the separable "csrf:stale-nonce" event (issue #75) so reviewer
+    signal stays clean without dropping the trail."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         with open(AUDIT, "a", encoding="utf-8") as f:
@@ -240,6 +325,9 @@ def pending_dir():
 
 def answered_dir():
     d = os.path.join(APPROVALS, "answered")
+    # Issue #77 (L5): create at the use site too, so a runtime-deleted
+    # answered/ cannot raise uncaught FileNotFoundError in /answer.
+    os.makedirs(d, exist_ok=True)
     return d
 
 
@@ -891,29 +979,40 @@ class Handler(BaseHTTPRequestHandler):
             if not ID_RE.match(aid):
                 self._err("bad id", 400)
                 return
-            p = os.path.join(pending_dir(), aid + ".json")
-            if not os.path.exists(p):
-                self._err("not found or already answered", 404)
-                return
-            with open(p) as f:
-                it = json.load(f)
-            if is_expired(it):
-                # Finding 53(a): refuse with a message, and reap.
+            # Arch review B3: the load->mint->write-back sequence runs under
+            # the per-aid lock — concurrent GETs must not lose each other's
+            # minted nonce (last-writer-wins).
+            with _aid_lock(aid):
+                p = os.path.join(pending_dir(), aid + ".json")
+                if not os.path.exists(p):
+                    self._err("not found or already answered", 404)
+                    return
                 try:
-                    os.remove(p)
-                except OSError:
-                    pass
-                audit_log("expired-reaped", self.client_address[0], login,
-                          "id=%s" % aid)
-                self._err("This approval expired and was removed.", 410)
-                return
-            # Finding 48: mint a CSRF nonce, store it in the pending file.
-            nonce = secrets.token_urlsafe(24)
-            it["_csrf"] = nonce
-            tmp = p + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(it, f, indent=2)
-            os.replace(tmp, p)
+                    with open(p) as f:
+                        it = json.load(f)
+                except (OSError, ValueError):
+                    # Issue #77 (L5): a corrupt/torn pending file must not
+                    # raise an uncaught exception into the page.
+                    self._err("not found or already answered", 404)
+                    return
+                if is_expired(it):
+                    # Finding 53(a): refuse with a message, and reap.
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+                    audit_log("expired-reaped", self.client_address[0], login,
+                              "id=%s" % aid)
+                    self._err("This approval expired and was removed.", 410)
+                    return
+                # Finding 48 + issue #75: mint a CSRF nonce, keeping a small
+                # ring of recent nonces in the pending file (a fresh GET in a
+                # second tab must not invalidate the first tab's form).
+                nonce = _mint_csrf_nonce(it)
+                tmp = p + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(it, f, indent=2)
+                os.replace(tmp, p)
             body = ("<h1>Approval %s</h1>%s"
                     '<p class="sub">Approving mints a credential grant for '
                     'this request. Denying discards it.</p>'
@@ -1026,15 +1125,45 @@ class Handler(BaseHTTPRequestHandler):
         if not ID_RE.match(aid) or decision not in ("approve", "deny"):
             self._err("bad request", 400)
             return
+        # Arch review B2: serialize the whole check->mint->consume
+        # section per approval id. Concurrent POSTs with two valid ring
+        # nonces must not both enter the grant path (#71); the loser of
+        # the race now sees a clean 404 ("not found or already
+        # answered") instead of an uncaught FileNotFoundError from
+        # os.remove(src).
+        with _aid_lock(aid):
+            return self._answer_locked(login, aid, csrf, decision)
+
+    def _answer_locked(self, login, aid, csrf, decision):
+        """POST /answer body. The caller holds _aid_lock(aid); every
+        early return inside is a normal handler response."""
         src = os.path.join(pending_dir(), aid + ".json")
         if not os.path.exists(src):
             self._err("not found or already answered", 404)
             return
-        with open(src) as f:
-            it = json.load(f)
-        # Finding 48: the nonce must match the one minted on GET.
-        if not NONCE_RE.match(csrf) or it.get("_csrf") != csrf:
+        try:
+            with open(src) as f:
+                it = json.load(f)
+        except (OSError, ValueError):
+            # Issue #77 (L5): a corrupt/torn pending file must not raise
+            # an uncaught exception into the POST path either.
+            self._err("not found or already answered", 404)
+            return
+        # Finding 48 + issue #75: the nonce must be well-formed, unexpired,
+        # and belong to the item's nonce ring. Malformed/missing nonces are
+        # audited as CSRF violations; a well-formed but stale/unknown nonce
+        # (second tab, back-button resubmit) is audited under its own event
+        # (arch review B1): attacker-shaped probes are exactly
+        # "well-formed but unknown," so the trail stays distinguishable
+        # without desensitizing review of real violations.
+        if not csrf or not NONCE_RE.match(csrf):
             self._deny(self.client_address[0], login, "csrf: bad nonce")
+            return
+        if not _csrf_nonce_ok(it, csrf):
+            audit_log("csrf:stale-nonce", self.client_address[0], login,
+                      "id=%s" % aid)
+            self._err("This form is stale — reload the page and try "
+                      "again.", 403)
             return
         # Finding 53(a): expired items are refused, not silently denied.
         if is_expired(it):
@@ -1054,6 +1183,7 @@ class Handler(BaseHTTPRequestHandler):
                        "bad requester: %s" % requester)
             return
         it.pop("_csrf", None)
+        it.pop("_csrf_nonces", None)
         it["decision"] = decision
         it["answered_at"] = datetime.now(timezone.utc).isoformat()
         it["answered_by"] = login
@@ -1093,6 +1223,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
         # Finding 56: one-way. Write to answered/, then move to consumed/.
         # The proxy never re-derives grants from these files.
+        # (answered_dir() re-creates the dir if it was deleted at
+        # runtime — issue #77 (L5).)
         dst = os.path.join(answered_dir(), aid + ".json")
         tmp = dst + ".tmp"
         with open(tmp, "w") as f:
@@ -1101,8 +1233,14 @@ class Handler(BaseHTTPRequestHandler):
         os.remove(src)
         try:
             os.replace(dst, os.path.join(consumed_dir(), aid + ".json"))
-        except OSError:
-            pass
+        except OSError as e:
+            # Issue #77 (L4): the old code swallowed a failed
+            # answered->consumed move silently, losing history. Journal
+            # it loudly instead — and when #72 designs the unified
+            # audit-failure mechanism, route this through it rather than
+            # leaving a second alerting channel (arch review R2).
+            print("confirmd WARNING: answered->consumed move failed for "
+                  "%s: %s" % (aid, e), flush=True)
         audit_log("answer", self.client_address[0], login,
                   "id=%s decision=%s requester=%s"
                   % (aid, decision, requester))
