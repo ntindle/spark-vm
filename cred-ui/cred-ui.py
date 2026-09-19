@@ -58,6 +58,12 @@ except Exception:
     SPARKVM_VERSION = "0.0.0-unknown"
 # --- end version stamping ---
 
+# index.html lives next to this file. Resolve it absolutely: the old code
+# relied on main()'s chdir, so any other way of starting the server
+# (systemd WorkingDirectory, tests) 500'd the homepage.
+_INDEX_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "index.html")
+
 BIND = "127.0.0.1"
 PORT = 18740
 
@@ -66,13 +72,29 @@ PORT = 18740
 # tunnel. Require our own Host header on every request and a custom header
 # on all POSTs, so a malicious web page can't drive the API (browsers must
 # preflight custom headers; we never answer with permissive CORS).
-ALLOWED_HOSTS = {"127.0.0.1:18740", "localhost:18740"}
+ALLOWED_HOSTS = {"%s:%d" % (BIND, PORT), "localhost:%d" % PORT}
+# NOTE: ALLOWED_HOSTS is derived from BIND/PORT above -- do not hand-edit
+# the set. A hand-maintained literal drifts the day PORT changes and the
+# CSRF gate then 403s everything including index.html.
 CSRF_HEADER = "X-Cred-UI"
 CSRF_VALUE = "1"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 ENTRY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-HOST_RE = re.compile(r"^[A-Za-z0-9_.-]{1,253}(:[0-9]{1,5})?$")
+# The narrow writer's check_host() (proxy/cred-registry-set) accepts exactly
+# ^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$ -- no underscores, no ports. The swap
+# addon strips ports when matching request hosts, so a port in the registry
+# would be dead config anyway. The UI must never accept what the writer
+# rejects: it previously did (ports, underscores), producing a confusing
+# post-store "add-host failed" after the secret was already written.
+# Labels are capped at 63 chars (DNS) and the whole name at 253; the writer
+# is looser, so this is a strict subset of what it accepts.
+_HOST_LABEL = r"[A-Za-z0-9-]{1,63}"
+_HOST_RE = re.compile(r"^\.?%s(\.%s)*$" % (_HOST_LABEL, _HOST_LABEL))
+
+
+def host_ok(h):
+    return bool(h) and len(h) <= 253 and bool(_HOST_RE.match(h))
 HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 PARAM_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
@@ -115,9 +137,12 @@ def snapshot():
     for name in sorted(set(reg) | have):
         entry = reg.get(name, {}) if isinstance(reg.get(name), dict) else {}
         hosts = entry.get("allowed_hosts", [])
+        # Render only the placement of each entry. Registry entry dicts may
+        # gain keys over time (scrub flags, grant metadata); an allowlist
+        # keeps a future secret-adjacent field from leaking into /api/creds.
         placements = {
-            k: v.get("placement") for k, v in entry.items()
-            if k != "allowed_hosts" and isinstance(v, dict)
+            k: v["placement"] for k, v in entry.items()
+            if k != "allowed_hosts" and isinstance(v, dict) and "placement" in v
         }
         creds.append({
             "name": name,
@@ -192,15 +217,17 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path == "/":
             try:
-                with open("index.html", "rb") as f:
+                with open(_INDEX_PATH, "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
             except OSError:
                 self._send(500, {"error": "index.html missing"})
         elif path == "/api/creds":
             try:
                 self._send(200, snapshot())
-            except Exception as e:  # noqa: BLE001
-                self._send(500, {"error": "read failed: %s" % e})
+            except Exception:  # noqa: BLE001
+                # Deliberately generic: interpolating the exception here
+                # would disclose local paths on a read failure.
+                self._send(500, {"error": "read failed"})
         elif path == "/api/version":
             self._send(200, {"service": "cred-ui", "version": SPARKVM_VERSION})
         else:
@@ -245,8 +272,9 @@ def api_set(data):
         raise ValueError("bad entry name")
     if not isinstance(value, str) or not value:
         raise ValueError("empty secret value")
-    if not isinstance(hosts, list) or not all(HOST_RE.match(h or "") for h in hosts):
-        raise ValueError("bad host (use hostname or hostname:port)")
+    if not isinstance(hosts, list) or not all(host_ok(h) for h in hosts):
+        raise ValueError("bad host (use a hostname: letters, digits, "
+                         "hyphens, dots; no underscores, no ports)")
     pjson = placement_json(kind, arg)
 
     # Strip at most one trailing newline -- pastes from password managers
@@ -275,9 +303,14 @@ def api_delete(data):
     name = data.get("name", "")
     if not NAME_RE.match(name):
         raise ValueError("bad credential name")
-    # Remove the stored value (the wrapper ignores "no such file" -- the
-    # registry may exist alone).
-    run(SECRET_DELETE + [name])
+    # Remove the stored value first (the wrapper ignores "no such file" --
+    # the registry may exist alone). A real failure must surface: deleting
+    # the registry while the value survives would report success with the
+    # secret still on disk (and a later re-registration would silently
+    # resurrect the stale value).
+    rc, _, err = run(SECRET_DELETE + [name])
+    if rc != 0:
+        raise RuntimeError("store delete failed: %s" % err.strip()[-200:])
     rc, _, err = run(REGISTRY_SET + ["remove", name])
     if rc != 0 and "not registered" not in err:
         raise RuntimeError("unregister failed: %s" % err.strip()[-200:])
@@ -289,8 +322,9 @@ def api_host(data, add):
     host = data.get("host", "")
     if not NAME_RE.match(name):
         raise ValueError("bad credential name")
-    if not HOST_RE.match(host or ""):
-        raise ValueError("bad host")
+    if not host_ok(host):
+        raise ValueError("bad host (use a hostname: letters, digits, "
+                         "hyphens, dots; no underscores, no ports)")
     rc, _, err = run(REGISTRY_SET + ["add-host" if add else "remove-host", name, host])
     if rc != 0:
         raise RuntimeError("host update failed: %s" % err.strip()[-200:])

@@ -44,9 +44,10 @@ def _load_cred_ui():
     mod = importlib.util.module_from_spec(spec)
     mod.__dict__["__file__"] = path  # the bootstrap walks up from __file__
     src = open(path, encoding="utf-8").read()
-    # Only run the module-level version bootstrap; the server class and
-    # main() must not execute at import.
-    code = compile(src.split("class CredHandler")[0], path, "exec")
+    # Load the whole module (the class is named Handler, not CredHandler;
+    # an older split-marker was a no-op and the full load is what these
+    # tests need). main() is guarded by __name__ so nothing runs.
+    code = compile(src, path, "exec")
     exec(code, mod.__dict__)
     return mod
 
