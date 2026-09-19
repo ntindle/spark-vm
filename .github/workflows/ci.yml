@@ -44,10 +44,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run shellcheck on all shell scripts
+        # pinned SHA: action unmaintained since 2024, SHA protects against
+        # branch drift (00b27aa7cb85167568cb48a3838b75f4265f2bca, 2024-06-20)
         # severity=error gates on real breakage (syntax/misuse), not style notes
-        uses: ludeeus/action-shellcheck@master
+        uses: ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca
         with:
-          scannable: sh
           severity: error
 
   markdown-links:
