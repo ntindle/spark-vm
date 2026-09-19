@@ -378,6 +378,13 @@ class PushSender:
                 raise ValueError("bad key lengths")
             self._private = doc["private"]
             self._public = doc["public"]
+            # Issue #77 (L2): a group/world-readable private key file was
+            # silently accepted. Warn loudly; the fix is `chmod 600`.
+            mode = os.stat(self.keys_path).st_mode & 0o777
+            if mode & 0o077:
+                log.warning("push: vapid keys file %s is group/world-readable "
+                            "(mode %o); chmod 600 recommended",
+                            self.keys_path, mode)
         except (OSError, ValueError, KeyError, TypeError) as e:
             # Engineering review: TypeError covers a keys file holding
             # valid JSON that isn't a dict (e.g. `[]`).

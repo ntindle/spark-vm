@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+# demo-asset intermediates (regenerable; keep out of git)
+/demo-frames/
+/demo-asset2-work/
