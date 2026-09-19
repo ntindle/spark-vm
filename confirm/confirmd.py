@@ -793,8 +793,11 @@ def _fmt_time(iso):
     local style as the pending card (which formats them client-side with
     fmtTime). The server cannot know the viewer's timezone, so the ISO
     value is emitted into a span and formatted by a small script on the
-    page — never rendered raw."""
-    return '<span data-iso="%s"></span>' % html.escape(str(iso), quote=True)
+    page — never rendered raw. The raw ISO stays as the span's text so
+    no-JS approvers still see the values (the consent form works without
+    JS, so no-JS is a supported path)."""
+    esc = html.escape(str(iso), quote=True)
+    return '<span data-iso="%s">%s</span>' % (esc, esc)
 
 
 def _render_pending_list(items):
