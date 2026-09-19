@@ -315,7 +315,7 @@ def test_event_paths_refuse_malformed_uuid(cli, tmp_path):
     job["session_uuid"] = "../evil"
     assert cli.head_info(job["session_uuid"]) == (None, 0)
     assert list(cli._iter_events(job["session_uuid"])) == []
-    assert cli.event_file_symlinked(job["session_uuid"]) is False
+    assert cli.event_file_tampered(job["session_uuid"]) is False
     assert cli.last_event(job["session_uuid"]) is None
     job["session_uuid"] = "a/b"
     assert list(cli._iter_events(job["session_uuid"])) == []
@@ -330,8 +330,9 @@ def test_event_paths_refuse_malformed_uuid(cli, tmp_path):
 
 
 def test_watch_flags_malformed_uuid(cli, monkeypatch, capsys):
-    """watch_one pages needs-attention (every pass) on a malformed recorded
-    uuid instead of feeding it to event-path reads (arch round-3 blocker)."""
+    """watch_one pages events-tampered (every pass) on a malformed recorded
+    uuid instead of feeding it to event-path reads (arch round-3 blocker;
+    final review reclasses malformed uuid as the tamper class)."""
     jd, job = make_job_dir(cli)
     job["session_uuid"] = "../../x"
     job["state"] = "active"
@@ -342,7 +343,7 @@ def test_watch_flags_malformed_uuid(cli, monkeypatch, capsys):
     lines = [json.loads(l) for l in capsys.readouterr().out.splitlines()
              if l.strip()]
     malformed = [e for e in lines
-                 if e.get("signal") == "needs-attention"
+                 if e.get("signal") == "events-tampered"
                  and "malformed" in e.get("detail", "")]
     assert malformed and malformed[0]["job"] == "demo", lines
 
