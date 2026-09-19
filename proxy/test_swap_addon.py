@@ -1373,5 +1373,56 @@ class ProxyHardeningRoundTests(unittest.TestCase):
         self.assertEqual(resp.content.count(b"hsurr:acme:totp"), 2)
 
 
+class PushNotifyHookTests(unittest.TestCase):
+    """H2 / QA B4: the _file_approval push hook fires, passes the filed
+    item through, and never raises — even when push.py is absent."""
+
+    def _drain(self, seen, want=1, timeout=5):
+        deadline = time.time() + timeout
+        while len(seen) < want and time.time() < deadline:
+            time.sleep(0.05)
+
+    def test_push_notify_delivers_item_off_thread(self):
+        seen = []
+
+        class _Sender:
+            def notify_approval(self, item):
+                seen.append(item)
+                return 1
+
+        class FakeMod:
+            class PushSender:
+                @staticmethod
+                def default():
+                    return _Sender()
+
+        with mock.patch.object(sa, "_load_push_module",
+                               return_value=FakeMod):
+            sa._push_notify({"id": "abc123", "summary": "x"})
+        self._drain(seen)
+        self.assertEqual(seen, [{"id": "abc123", "summary": "x"}])
+
+    def test_push_notify_loader_failure_never_raises(self):
+        with mock.patch.object(sa, "_load_push_module",
+                               side_effect=RuntimeError("no push.py")):
+            # Must not raise: the approval was already filed.
+            sa._push_notify({"id": "abc123"})
+
+    def test_push_notify_sender_failure_never_raises(self):
+        class _Sender:
+            def notify_approval(self, item):
+                raise OSError("push service down")
+
+        class FakeMod:
+            class PushSender:
+                @staticmethod
+                def default():
+                    return _Sender()
+
+        with mock.patch.object(sa, "_load_push_module",
+                               return_value=FakeMod):
+            sa._push_notify({"id": "abc123"})  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

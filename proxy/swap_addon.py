@@ -143,6 +143,7 @@ import re
 import socket
 import struct
 import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -178,6 +179,42 @@ GRANTS_FILE = _env_path("SWAP_GRANTS_FILE", "/home/swapd/grants.json")
 # Finding 60: the inference proxy gets no approvals directory at all.
 # It reads grants but never files or consumes approvals.
 APPROVALS_ENABLED = os.environ.get("SWAP_ENABLE_APPROVALS", "1") == "1"
+
+
+def _load_push_module():
+    """Load confirm/push.py from this addon's directory.
+
+    push.py is installed next to swap_addon.py (/home/swapd) by
+    proxy/deploy.sh; it is not on sys.path under mitmproxy, hence the
+    explicit importlib load rather than a plain import.
+    """
+    import importlib.util as _ilu
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = _ilu.spec_from_file_location(
+        "sparkvm_push", os.path.join(here, "push.py"))
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _push_notify(item):
+    """H2 (GitHub #2): VAPID push for a newly filed approval.
+
+    Fail-open: never raises — a push failure must never lose the filed
+    approval. Runs on a daemon thread: QA review found that synchronous
+    sequential sends (15s timeout each) on the mitmproxy flow thread
+    could stall the agent's already-refused request by 15s×N on a dead
+    push service. Fire-and-forget keeps the hot path fast; the push
+    module's own fail-open + idempotency semantics still apply.
+    """
+    def _run():
+        try:
+            _load_push_module().PushSender.default().notify_approval(item)
+        except Exception:
+            log.exception("swap: VAPID push failed for approval %s",
+                          item.get("id"))
+    t = threading.Thread(target=_run, name="swap-push-notify", daemon=True)
+    t.start()
 SSRF_ALLOW_FILE = _env_path("SWAP_SSRF_FILE", "/home/swapd/ssrf.allow")
 # Finding 47: hard-deny list. Entries here refuse egress even if
 # ssrf.allow names the host — it covers the host's own tailnet
@@ -687,6 +724,8 @@ class SwapAddon:
                 json.dump(item, f, indent=2)
             os.replace(tmp, os.path.join(pending, aid + ".json"))
             self._audit(None, "approval-filed:%s" % aid)
+            # H2 (GitHub #2): VAPID push to the owner's devices.
+            _push_notify(item)
         except OSError as e:
             log.warning("swap: cannot file approval: %s", e)
 

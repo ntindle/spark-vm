@@ -107,6 +107,9 @@ done
 # --- 2. confirmd ---------------------------------------------------------
 echo "[2/7] Installing confirmd..."
 sudo install -o swapd -g swapd -m 0644 confirm/confirmd.py /home/swapd/confirmd.py
+# H2: VAPID push sender, installed next to confirmd.py and swap_addon.py
+# (both import it from their own directory).
+sudo install -o swapd -g swapd -m 0644 confirm/push.py /home/swapd/push.py
 sudo install -o root -g root -m 0755 confirm/confirm-request /usr/local/bin/confirm-request
 
 # --- 3. ssrf.deny (finding 61) -------------------------------------------

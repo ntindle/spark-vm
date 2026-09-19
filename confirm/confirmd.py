@@ -19,6 +19,14 @@ Config (env):
   CONFIRM_OWNER expected Tailscale LoginName, e.g. ntindle@github
   CONFIRM_DIR   approvals dir (default /home/swapd/approvals)
   CONFIRM_AUDIT audit log for refusals (default /home/swapd/confirmd/audit.log)
+  CONFIRM_VAPID_KEYS  VAPID keypair JSON for push notifications, generated
+                      with `confirm/push.py --gen-keys` (default
+                      /home/swapd/confirmd/vapid.json). Unset/missing =>
+                      push disabled; the page works without it.
+  CONFIRM_PUSH_SUBS   push subscription store path (default
+                      $CONFIRM_DIR/push-subscriptions.json)
+  CONFIRM_VAPID_SUB   VAPID subject contact, e.g. mailto:owner@example.com
+                      (default mailto:confirmd@localhost)
 """
 
 import grp
@@ -61,6 +69,24 @@ KEY = os.environ.get("CONFIRM_KEY", "/home/swapd/confirmd/key.pem")
 OWNER = os.environ.get("CONFIRM_OWNER", "ntindle@github")
 APPROVALS = os.environ.get("CONFIRM_DIR", "/home/swapd/approvals")
 AUDIT = os.environ.get("CONFIRM_AUDIT", "/home/swapd/confirmd/audit.log")
+
+# H2 (GitHub #2): VAPID push notifications via confirm/push.py. Optional
+# and fail-closed: enabled only when CONFIRM_VAPID_KEYS names a readable
+# operator-generated keypair file AND the `cryptography` package imports.
+# Disabled => /api/push/config reports enabled=false, the subscribe
+# endpoints 503, and no push ever fires. The approvals page is unaffected.
+try:
+    import push as _push_mod  # noqa: F401 (sibling file, installed next to this one)
+    _PUSH = _push_mod.PushSender.default()
+    PUSH_ENABLED = _PUSH.enabled
+    # Product review: surface WHY push is disabled, not just that it is.
+    PUSH_DISABLED_REASON = _PUSH.disabled_reason
+    if not PUSH_ENABLED:
+        _PUSH = None
+except Exception as _push_import_err:
+    _PUSH = None
+    PUSH_ENABLED = False
+    PUSH_DISABLED_REASON = "import-failed: %s" % _push_import_err
 
 # Finding 53(f): bind address comes from tailscale, not a literal.
 def _tailnet_ip4():
@@ -466,6 +492,129 @@ function renderAnswered(list,items){
 </script>"""
 
 
+# H2 (GitHub #2): the service worker that shows push notifications.
+# Served at /sw.js under the same owner auth as the page (the fetch
+# comes from the owner's browser, so _auth passes). Registered with
+# scope = this origin, so notification taps open /approval/<id> on the
+# same origin the page was served from (IP or ts.net name — no origin
+# confusion in the push payload).
+_SW_JS = """"use strict";
+self.addEventListener("push", function(event) {
+  var data = {};
+  try { data = event.data.json(); } catch (e) { /* unencrypted/no body */ }
+  var title = data.title || "Approval needed";
+  var aid = data.approval_id || "";
+  // Per-approval tag: multiple pending approvals stack as separate
+  // notifications. (No renotify: each tag is pushed exactly once — the
+  // notified log makes re-alerts impossible, so claiming it would lie.)
+  var options = {
+    body: data.body || "Open confirmd to review.",
+    tag: aid ? ("approval-" + aid) : "approval",
+    data: { url: aid ? ("/approval/" + aid) : "/" }
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+self.addEventListener("notificationclick", function(event) {
+  event.notification.close();
+  var url = (event.notification.data && event.notification.data.url) || "/";
+  event.waitUntil(clients.openWindow(url));
+});
+"""
+
+
+# H2: page-side push subscription UX. The button starts hidden and is
+# revealed only when the browser supports push AND the server reports
+# push enabled. Subscribing POSTs the PushSubscription to
+# /api/push/subscribe; disabling removes it server-side too.
+_PUSH_JS = """<script>
+"use strict";
+(function(){
+  var btn=document.getElementById("pushBtn");
+  var st=document.getElementById("pushStatus");
+  function say(t){ if(st) st.textContent=t; }
+  function b64ToU8(s){
+    s=String(s).replace(/-/g, "+").replace(/_/g, "/");
+    while(s.length%4) s+="=";
+    var b=atob(s), a=new Uint8Array(b.length);
+    for(var i=0;i<b.length;i++) a[i]=b.charCodeAt(i);
+    return a;
+  }
+  if(!("serviceWorker" in navigator) || !("PushManager" in window)){
+    // Design review: on iOS, Web Push exists but requires the page to be
+    // added to the home screen first — PushManager is absent otherwise.
+    // Say that instead of the misleading "not supported".
+    var ua = navigator.userAgent || "";
+    if(/iPhone|iPad|iPod/.test(ua)){
+      say("on iPhone/iPad: add this page to your home screen, then open " +
+          "it from there to enable notifications");
+    } else {
+      say("push not supported in this browser");
+    }
+    return;
+  }
+  fetch("/api/push/config",{credentials:"same-origin"})
+    .then(function(r){ return r.json(); })
+    .then(function(cfg){
+      if(!cfg.enabled || !cfg.public_key){
+        // Product review: name the reason and the doc so the
+        // human-who-is-also-the-operator can fix it.
+        say("push not configured on this box" +
+            (cfg.disabled_reason ? (": " + cfg.disabled_reason) : "") +
+            " — see docs/PUSH_NOTIFICATIONS.md");
+        return;
+      }
+      btn.hidden=false;
+      return navigator.serviceWorker.register("/sw.js").then(function(reg){
+        return reg.pushManager.getSubscription().then(function(sub){
+          if(sub){
+            say("notifications on");
+            btn.textContent="Disable notifications";
+            btn.onclick=function(){
+              sub.unsubscribe().then(function(){
+                return fetch("/api/push/unsubscribe",{method:"POST",
+                  headers:{"Content-Type":"application/json"},
+                  body:JSON.stringify({endpoint:sub.endpoint})});
+              }).then(function(){ say("notifications off"); location.reload(); })
+                .catch(function(e){ say("could not disable: "+e.message); });
+            };
+            return;
+          }
+          btn.onclick=function(){
+            say("subscribing\\u2026");
+            reg.pushManager.subscribe({userVisibleOnly:true,
+                applicationServerKey:b64ToU8(cfg.public_key)})
+              .then(function(sub){
+                var j=sub.toJSON();
+                return fetch("/api/push/subscribe",{method:"POST",
+                  headers:{"Content-Type":"application/json"},
+                  body:JSON.stringify({endpoint:sub.endpoint,keys:j.keys})});
+              })
+              .then(function(r){
+                if(!r.ok) throw new Error("server refused ("+r.status+")");
+                say("notifications on"); location.reload();
+              })
+              .catch(function(e){
+                // Design review: the permission-denied path needs a
+                // recovery hint, not just the raw DOMException.
+                var msg = String((e && e.message) || e);
+                if(e && e.name === "NotAllowedError"){
+                  msg += " \u2014 allow notifications for this site in " +
+                         "the browser\u2019s site settings, then retry";
+                }
+                say("could not enable: " + msg);
+              });
+          };
+        });
+      });
+    })
+    .catch(function(){
+      say("push unavailable \u2014 the page itself may be unreachable, " +
+          "try reloading");
+    });
+})();
+</script>"""
+
+
 def _page(title, body, script=""):
     return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -688,14 +837,43 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json([_answered_api_item(it) for it in
                              _load_answered()[:_ANSWERED_FEED_LIMIT]])
             return
+        # H2 (GitHub #2): push subscription surface. The public key is
+        # public by design (the browser needs it to subscribe); the
+        # endpoint stays owner-authenticated like the rest of the page.
+        if self.path == "/api/push/config":
+            self._send_json({"enabled": PUSH_ENABLED,
+                             "public_key": (_PUSH.public_key_b64u
+                                            if _PUSH else None),
+                             "disabled_reason": PUSH_DISABLED_REASON})
+            return
+        if self.path == "/sw.js":
+            # The service worker is fetched by the owner's browser from
+            # the same origin, so _auth (already run) passes. Served
+            # with no-store: a stale worker would show stale copy.
+            data = _SW_JS.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path == "/":
             body = ('<h1>Pending approvals</h1>'
                     '<p class="sub" id="updated" role="status">live — checking every 5 s</p>'
                     '<div id="items">%s</div>'
+                    # H2: push subscription UX. The button stays hidden
+                    # until _PUSH_JS confirms browser support and the
+                    # server reports push enabled.
+                    '<p class="pushrow"><button class="btn" id="pushBtn" '
+                    'type="button" hidden>Enable notifications</button> '
+                    '<span id="pushStatus" class="sub" '
+                    'role="status"></span></p>'
                     '<p class="nav"><a href="/answered">answered history</a></p>'
                     % _render_pending_list(load_pending()))
             self._send_html(body, title="Pending approvals",
-                            script=POLL_JS + '<script>startPoll("/api/pending",'
+                            script=POLL_JS + _PUSH_JS
+                            + '<script>startPoll("/api/pending",'
                             'renderPending);</script>')
         elif self.path == "/answered":
             body = ('<h1>Answered approvals</h1>'
@@ -761,10 +939,41 @@ class Handler(BaseHTTPRequestHandler):
                     'b.classList.add("armed");'
                     'b.textContent="Tap again to confirm approval";'
                     '}});'
-                    "</script>") % (
+                    "</script>"
+                    # Design B1: dismiss this approval's notification when
+                    # the owner answers — otherwise a dead notification
+                    # lingers and taps through to a 404 ("already
+                    # answered"). Best-effort: the POST still answers even
+                    # if the service worker is unreachable.
+                    "<script>"
+                    '"use strict";'
+                    '(function(){'
+                    'var f=document.querySelector(\'form[action="/answer"]\');'
+                    'var i=document.querySelector(\'input[name="id"]\');'
+                    'if(!f||!i||!("serviceWorker" in navigator))return;'
+                    'var aid=i.value;'
+                    'f.addEventListener("submit",function(){'
+                    'try{'
+                    'navigator.serviceWorker.ready.then(function(r){'
+                    'return r.getNotifications({tag:"approval-"+aid});'
+                    '}).then(function(ns){'
+                    'ns.forEach(function(n){n.close();});'
+                    '}).catch(function(){});'
+                    '}catch(e){}'
+                    '});'
+                    '})();'
+                    "</script>"
+                    # Product nit: the deep-link target is where
+                    # notification taps land, so the push controls live
+                    # here too — not only on the pending page.
+                    '<p class="pushrow"><button class="btn" id="pushBtn" '
+                    'type="button" hidden>Enable notifications</button> '
+                    '<span id="pushStatus" class="sub" '
+                    'role="status"></span></p>') % (
                         html.escape(aid), self._render_item(it),
                         html.escape(aid), html.escape(nonce))
-            self._send_html(body, title="Approval %s" % aid)
+            self._send_html(body, title="Approval %s" % aid,
+                            script=_PUSH_JS)
         else:
             self.send_response(404)
             self.end_headers()
@@ -773,7 +982,8 @@ class Handler(BaseHTTPRequestHandler):
         login = self._auth()
         if login is None:
             return
-        if self.path != "/answer":
+        if self.path not in ("/answer", "/api/push/subscribe",
+                             "/api/push/unsubscribe"):
             self.send_response(404)
             self.end_headers()
             return
@@ -804,6 +1014,10 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0 or length > 4096:
             self._err("bad request", 400)
             return
+        # H2: push subscription management (owner-auth + CSRF checks
+        # above apply identically).
+        if self.path in ("/api/push/subscribe", "/api/push/unsubscribe"):
+            return self._push_endpoint(login, length)
         form = urllib.parse.parse_qs(
             self.rfile.read(length).decode(errors="replace"))
         aid = form.get("id", [""])[0]
@@ -896,6 +1110,49 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Location", "/")
         self.end_headers()
 
+    def _push_endpoint(self, login, length):
+        """H2 (GitHub #2): subscribe/unsubscribe this browser for Web Push.
+
+        Owner-authenticated via _auth (caller) with the same CSRF
+        defenses as /answer. Stores only the push-service endpoint plus
+        the browser-generated p256dh/auth keys — never secrets.
+        """
+        if not PUSH_ENABLED or _PUSH is None:
+            self._send_json({"ok": False, "error": "push not configured"},
+                            503)
+            return
+        try:
+            doc = json.loads(self.rfile.read(length).decode())
+        except (ValueError, UnicodeDecodeError):
+            self._send_json({"ok": False, "error": "bad JSON"}, 400)
+            return
+        endpoint = doc.get("endpoint") if isinstance(doc, dict) else None
+        if not isinstance(endpoint, str) or not endpoint:
+            self._send_json({"ok": False, "error": "endpoint required"},
+                            400)
+            return
+        peer = self.client_address[0]
+        if self.path == "/api/push/subscribe":
+            keys = doc.get("keys") if isinstance(doc.get("keys"), dict) else {}
+            try:
+                _PUSH.subs.add(endpoint, keys.get("p256dh"),
+                               keys.get("auth"))
+            except (ValueError, AttributeError, TypeError) as e:
+                audit_log("push-subscribe-rejected", peer, login,
+                          "err=%s" % e)
+                self._send_json({"ok": False, "error": str(e)}, 400)
+                return
+            # Log only the endpoint host: the full URL carries an opaque
+            # push-service token.
+            audit_log("push-subscribe", peer, login, "host=%s"
+                      % urllib.parse.urlparse(endpoint).netloc)
+            self._send_json({"ok": True})
+        else:
+            removed = _PUSH.subs.remove(endpoint)
+            audit_log("push-unsubscribe", peer, login,
+                      "removed=%s" % removed)
+            self._send_json({"ok": True})
+
     def log_message(self, *args):
         pass  # refusals go to the audit log; answers are in answered/
 
@@ -910,6 +1167,13 @@ def main():
     # Finding 67: print the resolved origins at startup so the journal
     # shows them; a missing ts.net name must be visible, not silent.
     print("confirmd PAGE_ORIGINS=%s" % sorted(PAGE_ORIGINS), flush=True)
+    # H2: push state must be visible, not silent — including the reason
+    # when disabled (Product review: "push not configured" alone is
+    # undiagnosable).
+    print("confirmd PUSH_ENABLED=%s" % PUSH_ENABLED, flush=True)
+    if not PUSH_ENABLED:
+        print("confirmd PUSH_DISABLED_REASON=%s" % PUSH_DISABLED_REASON,
+              flush=True)
     print("confirmd version=%s" % SPARKVM_VERSION, flush=True)
     for d in (pending_dir(), answered_dir(), consumed_dir()):
         os.makedirs(d, exist_ok=True)
