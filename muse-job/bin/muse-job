@@ -28,6 +28,22 @@ import subprocess
 import sys
 import time
 
+# --- spark-vm version stamping (docs/VERSIONING.md) ---
+# Best-effort: a missing/invalid VERSION must never break the CLI.
+_SV_HERE = os.path.dirname(os.path.abspath(__file__))
+_SV_CAND = os.path.normpath(os.path.join(_SV_HERE, "..", "..", "scripts"))
+if os.path.isfile(os.path.join(_SV_CAND, "sparkvm_version.py")):
+    if _SV_CAND not in sys.path:
+        sys.path.insert(0, _SV_CAND)
+elif _SV_HERE not in sys.path:
+    sys.path.insert(0, _SV_HERE)
+try:
+    from sparkvm_version import sparkvm_version as _sv_fn
+    SPARKVM_VERSION = _sv_fn(start=_SV_HERE)
+except (ImportError, OSError, ValueError):
+    SPARKVM_VERSION = "0.0.0-unknown"
+# --- end version stamping ---
+
 HOME = os.path.expanduser("~")
 JOBS_DIR = os.path.join(HOME, "muse-jobs")
 REPOS_DIR = os.path.join(HOME, "repos")
@@ -964,6 +980,12 @@ def cmd_watch(args):
 
 
 def main():
+    # --version before argparse: subparsers are required, so argparse alone
+    # would reject a bare --version. Only the bare flag counts, so a steer
+    # message containing "--version" is never hijacked.
+    if sys.argv[1:] in (["--version"], ["-V"]):
+        print(SPARKVM_VERSION)
+        return 0
     ap = argparse.ArgumentParser(prog="muse-job")
     sub = ap.add_subparsers(dest="cmd", required=True)
 

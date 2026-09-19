@@ -60,19 +60,26 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/cred-store-get proxy/cred-store-delete \
          proxy/with-proxy proxy/ssrf.deny proxy/sudoers-swapd \
          proxy/swap-proxy.service proxy/swap-inference.service \
-         confirm/confirmd.py confirm/confirm-request confirm/confirmd.service; do
+         confirm/confirmd.py confirm/confirm-request confirm/confirmd.service \
+         VERSION scripts/sparkvm_version.py; do
     if [ ! -f "$f" ]; then
         echo "ERROR: required repo file missing: $f — aborting before any mutation"
         exit 1
     fi
 done
 python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py \
+    scripts/sparkvm_version.py \
     || { echo "ERROR: python syntax check failed — aborting"; exit 1; }
 
 # --- 1. Python addons and scripts ---------------------------------------
 echo "[1/7] Installing proxy files to /home/swapd..."
 sudo install -o swapd -g swapd -m 0644 proxy/swap_addon.py /home/swapd/swap_addon.py
 sudo install -o swapd -g swapd -m 0755 proxy/grant-writer /home/swapd/grant-writer
+# Version stamping (docs/VERSIONING.md): the deployed standalone files resolve
+# the repo VERSION by walking up from their own directory, so install the
+# VERSION file and the reader next to them.
+sudo install -o swapd -g swapd -m 0644 VERSION /home/swapd/VERSION
+sudo install -o swapd -g swapd -m 0644 scripts/sparkvm_version.py /home/swapd/sparkvm_version.py
 sudo install -o root -g root -m 0755 proxy/cred-grant-revoke /usr/local/bin/cred-grant-revoke
 sudo install -o root -g root -m 0755 proxy/cred-registry-set /usr/local/bin/cred-registry-set
 sudo install -o root -g root -m 0755 proxy/cred-registry-set-inference /usr/local/bin/cred-registry-set-inference

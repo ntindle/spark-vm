@@ -142,6 +142,7 @@ import posixpath
 import re
 import socket
 import struct
+import sys
 import time
 import urllib.parse
 import uuid
@@ -207,6 +208,25 @@ ENCODED_PLACEHOLDER_RE = re.compile(
 NEVER_SWAP_HEADERS = frozenset({"referer", "origin"})
 
 log = logging.getLogger(__name__)
+
+# --- spark-vm version stamping (docs/VERSIONING.md) ---
+# Single-source repo VERSION: logged at addon load so the journal shows which
+# release is actually running. Best-effort — never break the addon on a bad
+# VERSION.
+_SV_HERE = os.path.dirname(os.path.abspath(__file__))
+_SV_CAND = os.path.normpath(os.path.join(_SV_HERE, "..", "scripts"))
+if os.path.isfile(os.path.join(_SV_CAND, "sparkvm_version.py")):
+    if _SV_CAND not in sys.path:
+        sys.path.insert(0, _SV_CAND)
+elif _SV_HERE not in sys.path:
+    # Deployed standalone (e.g. /home/swapd): helper + VERSION sit next to us.
+    sys.path.insert(0, _SV_HERE)
+try:
+    from sparkvm_version import sparkvm_version as _sv_fn
+    SPARKVM_VERSION = _sv_fn(start=_SV_HERE)
+except (ImportError, OSError, ValueError):
+    SPARKVM_VERSION = "0.0.0-unknown"
+# --- end version stamping ---
 
 
 def _totp_code(seed, at=None):
@@ -377,6 +397,7 @@ class SwapAddon:
         self._current_egress_ip = None  # pinned egress IP of the request
         # currently being swapped (for audit lines); reset per request.
         self._load()
+        log.warning("swap_addon: spark-vm version %s", SPARKVM_VERSION)
 
     @staticmethod
     def _basic_decoded(value):

@@ -32,10 +32,29 @@ Stdlib only.
 """
 
 import json
+import os
 import re
 import subprocess
+import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# --- spark-vm version stamping (docs/VERSIONING.md) ---
+# Single-source repo VERSION: reported at startup and on /api/version.
+# Best-effort — a missing/invalid VERSION must never break startup.
+_SV_HERE = os.path.dirname(os.path.abspath(__file__))
+_SV_CAND = os.path.normpath(os.path.join(_SV_HERE, "..", "scripts"))
+if os.path.isfile(os.path.join(_SV_CAND, "sparkvm_version.py")):
+    if _SV_CAND not in sys.path:
+        sys.path.insert(0, _SV_CAND)
+elif _SV_HERE not in sys.path:
+    sys.path.insert(0, _SV_HERE)
+try:
+    from sparkvm_version import sparkvm_version as _sv_fn
+    SPARKVM_VERSION = _sv_fn(start=_SV_HERE)
+except (ImportError, OSError, ValueError):
+    SPARKVM_VERSION = "0.0.0-unknown"
+# --- end version stamping ---
 
 BIND = "127.0.0.1"
 PORT = 18740
@@ -178,6 +197,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, snapshot())
             except Exception as e:  # noqa: BLE001
                 self._send(500, {"error": "read failed: %s" % e})
+        elif path == "/api/version":
+            self._send(200, {"service": "cred-ui", "version": SPARKVM_VERSION})
         else:
             self._send(404, {"error": "not found"})
 
@@ -277,6 +298,7 @@ def main():
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     print("cred-ui listening on http://%s:%d (localhost only)" % (BIND, PORT), flush=True)
+    print("cred-ui version=%s" % SPARKVM_VERSION, flush=True)
     srv.serve_forever()
 
 

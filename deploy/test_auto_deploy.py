@@ -362,3 +362,65 @@ def test_scripts_syntax():
                  "|| echo NO_SHELLCHECK")
     if "NO_SHELLCHECK" not in r.stdout:
         assert r.returncode == 0, r.stdout + r.stderr
+
+
+# --- version stamping (docs/VERSIONING.md) ------------------------------------
+
+def test_version_paths_map_exactly():
+    """VERSION (bare file entry) maps to proxy; docs/VERSIONING.md matches
+    nothing — the exact-match rule for non-slash entries."""
+    r = source_and('printf "VERSION\\ndocs/VERSIONING.md\\nproxy/swap_addon.py\\n"'
+                   ' | components_for_files')
+    assert r.returncode == 0, r.stderr
+    assert sorted(r.stdout.split()) == ["proxy"], r.stdout
+
+
+def test_proxy_install_paths_cover_version_files():
+    """VERSION + the reader must be rollback-restorable like every other file
+    proxy/deploy.sh installs (same class as the sudoers regression)."""
+    r = source_and('get_arr proxy install_paths')
+    assert r.returncode == 0, r.stderr
+    listed = {line.strip() for line in r.stdout.splitlines() if line.strip()}
+    for t in ("/home/swapd/VERSION", "/home/swapd/sparkvm_version.py"):
+        assert t in listed, "missing from proxy_install_paths: %s" % t
+    # Non-vacuous: deploy.sh really does install those targets.
+    with open(os.path.join(REPO, "proxy", "deploy.sh")) as f:
+        body = f.read()
+    assert "/home/swapd/VERSION" in body
+    assert "/home/swapd/sparkvm_version.py" in body
+
+
+def test_version_state_roundtrip(tmp_path):
+    r = source_and('write_version 1.2.3; [ "$(deployed_version)" = 1.2.3 ] '
+                   '&& echo VER_OK',
+                   env_extra={"UPDATER_STATE_DIR": str(tmp_path)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "VER_OK" in r.stdout
+    assert (tmp_path / "deployed-version").read_text().strip() == "1.2.3"
+
+
+def test_version_state_defaults_unknown(tmp_path):
+    r = source_and('[ "$(deployed_version)" = unknown ] && echo VER_UNKNOWN',
+                   env_extra={"UPDATER_STATE_DIR": str(tmp_path)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "VER_UNKNOWN" in r.stdout
+
+
+def test_pull_only_deploy_records_version(tmp_path):
+    """A pull-only deploy still records the deployed version and stamps the
+    audit line with to_version/from_version (docs/VERSIONING.md)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    # Watermark at mid: the pending range (mid -> docs_only) is docs-only,
+    # i.e. pull-only — no gates, installs, or health checks run.
+    (state / "deployed-commit").write_text(mid + "\n")
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; cmd_deploy; echo DEPLOY_OK",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "DEPLOY_OK" in r.stdout
+    # The fixture repo has no VERSION file at its root.
+    assert (state / "deployed-version").read_text().strip() == "unknown"
+    audit = (state / "audit.log").read_text()
+    assert '"result":"pull-only"' in audit, audit
+    assert '"to_version":"unknown"' in audit, audit
+    assert '"from_version":"unknown"' in audit, audit

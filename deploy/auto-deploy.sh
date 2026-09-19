@@ -61,6 +61,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 : "${SKIP_SUDO:=0}"
 
 WATERMARK="$UPDATER_STATE_DIR/deployed-commit"
+VERSION_STATE="$UPDATER_STATE_DIR/deployed-version"
 BLOCKED_COMMIT="$UPDATER_STATE_DIR/blocked-commit"
 AUDIT_LOG="$UPDATER_STATE_DIR/audit.log"
 LOCK_FILE="$UPDATER_STATE_DIR/auto-deploy.lock"
@@ -151,6 +152,24 @@ write_watermark() {
     printf '%s\n' "$1" >"$WATERMARK.tmp" && mv -f "$WATERMARK.tmp" "$WATERMARK"
 }
 
+write_version() {
+    # Atomic deployed-version update (docs/VERSIONING.md): same torn-write
+    # reasoning as the watermark — a half-written version file would lie
+    # about which release is actually deployed.
+    printf '%s\n' "$1" >"$VERSION_STATE.tmp" && mv -f "$VERSION_STATE.tmp" "$VERSION_STATE"
+}
+
+deployed_version() {
+    # The VERSION the updater last deployed ("unknown" when nothing has
+    # recorded one yet).
+    cat "$VERSION_STATE" 2>/dev/null || echo "unknown"
+}
+
+new_version() {
+    # The VERSION stamped in the mirror at the commit being deployed.
+    cat "$UPDATER_REPO/VERSION" 2>/dev/null || echo "unknown"
+}
+
 newest_snapshot() {
     # Prints the newest snapshot dir, or nothing.
     find "$SNAPSHOT_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
@@ -184,12 +203,19 @@ check_upstream_pinned() {
 
 components_for_files() {
     # stdin: changed repo paths, one per line. stdout: component names, unique.
+    # A path entry ending in "/" is a directory prefix; a bare entry (e.g.
+    # "VERSION") is an exact file path — so docs/VERSIONING.md does not match
+    # the VERSION entry.
     local f c pfx
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         for c in "${COMPONENTS[@]}"; do
             while IFS= read -r pfx; do
-                if [[ "$f" == "$pfx"* ]]; then echo "$c"; break; fi
+                if [[ "$pfx" == */ ]]; then
+                    if [[ "$f" == "$pfx"* ]]; then echo "$c"; break; fi
+                elif [[ "$f" == "$pfx" ]]; then
+                    echo "$c"; break
+                fi
             done < <(get_arr "$c" paths)
         done
     done | sort -u
@@ -473,7 +499,11 @@ do_rollback() {
         alert "rolled back to $old but a component is unhealthy — operator intervention required"
     fi
     printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
-    audit 'deploy' ',"result":"rolled-back","from":"'"$old"'","to":"'"$new"'"'
+    # The restored snapshot reverted the deployed standalone files, so the
+    # deployed version is whatever the restored VERSION file says.
+    local rbv; rbv="$(cat "$SWAPD_HOME/VERSION" 2>/dev/null || echo unknown)"
+    write_version "$rbv"
+    audit 'deploy' ',"result":"rolled-back","from":"'"$old"'","to":"'"$new"'","to_version":"'"$rbv"'"'
     return 1
 }
 
@@ -601,7 +631,9 @@ cmd_deploy() {
     if [ "${#COMPS[@]}" -eq 0 ]; then
         log "no deployable components changed — advancing watermark only"
         write_watermark "$new"
-        audit 'deploy' ',"result":"pull-only","from":"'"$old"'","to":"'"$new"'"'
+        local pnv pov; pnv="$(new_version)"; pov="$(deployed_version)"
+        write_version "$pnv"
+        audit 'deploy' ',"result":"pull-only","from":"'"$old"'","to":"'"$new"'","to_version":"'"$pnv"'","from_version":"'"$pov"'"'
         return 0
     fi
     # Components sharing an install unit deploy together (proxy+confirm share
@@ -679,13 +711,16 @@ cmd_deploy() {
         health_check "$c" || { do_rollback "$snapdir" "$old" "$new" "$c" "health"; return 1; }
     done
 
-    # 6. success: advance watermark, clear any block, prune, audit
+    # 6. success: advance watermark, record deployed version, clear any
+    # block, prune, audit
     write_watermark "$new"
+    local nv ov; nv="$(new_version)"; ov="$(deployed_version)"
+    write_version "$nv"
     rm -f "$BLOCKED_COMMIT" "$LAST_FAILURE"
     prune_snapshots
     local complist; complist="$(printf '%s\n' "${COMPS[@]}" | tr '\n' ' ' | xargs)"
-    audit 'deploy' ',"result":"ok","from":"'"$old"'","to":"'"$new"'","components":"'"$complist"'"'
-    log "deployed $new — components: $complist"
+    audit 'deploy' ',"result":"ok","from":"'"$old"'","to":"'"$new"'","components":"'"$complist"'","to_version":"'"$nv"'","from_version":"'"$ov"'"'
+    log "deployed $new ($nv) — components: $complist"
 }
 
 cmd_rollback() {
@@ -719,18 +754,21 @@ cmd_rollback() {
         return 1
     fi
     write_watermark "$from"
+    local rbv; rbv="$(cat "$SWAPD_HOME/VERSION" 2>/dev/null || echo unknown)"
+    write_version "$rbv"
     if [ "$unhealthy" -eq 1 ]; then
         alert "manual rollback to $from completed but a component is unhealthy"
         audit 'rollback' ',"result":"rollback-unhealthy","to":"'"$from"'","snapshot":"'"$snapdir"'"'
         return 1
     fi
-    audit 'rollback' ',"result":"manual-rollback","to":"'"$from"'","snapshot":"'"$snapdir"'"'
-    log "rolled back; watermark now $from; services restarted + healthy"
+    audit 'rollback' ',"result":"manual-rollback","to":"'"$from"'","snapshot":"'"$snapdir"'","to_version":"'"$rbv"'"'
+    log "rolled back; watermark now $from; version now $rbv; services restarted + healthy"
 }
 
 cmd_status() {
     echo "state dir:  $UPDATER_STATE_DIR"
     echo "watermark:  $(cat "$WATERMARK" 2>/dev/null || echo '(none)')"
+    echo "deployed version: $(deployed_version)"
     echo "blocked:    $(cat "$BLOCKED_COMMIT" 2>/dev/null || echo '(none)')"
     echo "audit log:  $AUDIT_LOG ($(wc -l <"$AUDIT_LOG" 2>/dev/null || echo 0) lines)"
     echo "snapshots:  $(find "$SNAPSHOT_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
