@@ -52,16 +52,6 @@ JOBS_DIR = os.path.join(HOME, "muse-jobs")
 REPOS_DIR = os.path.join(HOME, "repos")
 EVENTS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "events")
 
-# Mirrors the hooks' _SID_RE (plugin/hooks/stop.py and session-start.py):
-# session uuids are agent-writable (issue #11), so every manager-side use
-# that builds a filesystem path from job["session_uuid"] must refuse
-# values outside this whitelist. Without it a forged uuid ("../../x",
-# "a/b") steers event/view reads outside EVENTS_DIR / VIEW_DIR,
-# corrupting the liveness and done-claim signals this tool exists to
-# harden (arch review round 3). The three sinks below fail closed on a
-# non-matching uuid; watch_one also pages needs-attention, since a
-# plantable latch in job.json would let the agent silence it permanently.
-_UUID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 SESSIONS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
 SESSION_INDEX = os.path.join(HOME, ".local", "share", "muse", "session-index.db")
 VIEW_DIR = os.path.join(HOME, ".local", "share", "muse", "sessions", ".msp-view-v1")
