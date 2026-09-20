@@ -152,7 +152,9 @@ hosts pass through byte-for-byte (a one-line warning is logged, no values).
 Every swap is audit-logged to `/home/swapd/swap.log` as
 `ts=<utc> host=<host> swapped=<placeholder>` — never values.
 
-Secret files live in `/home/swapd/secrets/` (0700, swapd-only): one file per
+Secret files live in `/home/swapd/secrets/` (0700, swapd-only — enforced by
+`proxy/deploy.sh` on every deploy; the proxy warns at load if the mode ever
+drifts, issue #91): one file per
 credential name; the whole file is the value, unless the file's first
 line is the `#hsurr:multi` marker — that marker is the SOLE layout
 signal, so a single-value secret whose value looks like `k=v` is never

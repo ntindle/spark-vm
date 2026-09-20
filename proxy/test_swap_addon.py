@@ -672,6 +672,59 @@ class SwapAddonTests(unittest.TestCase):
         self.assertIn("shorter than 8 chars", msgs)
         self.assertNotIn("secret value 'x'", msgs)
 
+    def test_issue91_secrets_dir_0700_no_warning(self):
+        """Issue #91: a 0700 secrets dir is the documented state — no
+        group/other-readable warning at load."""
+        with tempfile.TemporaryDirectory() as d:
+            os.chmod(d, 0o700)
+            with mock.patch.object(sa, "SECRETS_DIR", Path(d)):
+                with self.assertNoLogs(sa.log, level="WARNING"):
+                    sa.SwapAddon._check_secrets_dir_mode()
+
+    def test_issue91_secrets_dir_0755_warns(self):
+        """Issue #91: a 0755 secrets dir warns loudly, naming the dir and
+        mode, never a secret value."""
+        with tempfile.TemporaryDirectory() as d:
+            os.chmod(d, 0o755)
+            (Path(d) / "acme").write_text("very-secret-value")
+            with mock.patch.object(sa, "SECRETS_DIR", Path(d)):
+                with self.assertLogs(sa.log, level="WARNING") as cm:
+                    sa.SwapAddon._check_secrets_dir_mode()
+        msgs = "\n".join(cm.output)
+        self.assertIn("group/other-readable", msgs)
+        self.assertIn("0755", msgs)
+        self.assertIn(str(d), msgs)
+        self.assertNotIn("very-secret-value", msgs)
+
+    def test_issue91_secrets_dir_missing_is_silent(self):
+        """Issue #91: a missing secrets dir does not emit a mode warning
+        (first boot before the narrow writers run)."""
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d) / "no-such-dir"
+            with mock.patch.object(sa, "SECRETS_DIR", missing):
+                with self.assertNoLogs(sa.log, level="WARNING"):
+                    sa.SwapAddon._check_secrets_dir_mode()
+
+    def test_issue91_secrets_dir_non_dir_is_silent(self):
+        """Issue #91: a non-directory secrets path emits no mode warning
+        (the listing path already warns on its own)."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "not-a-dir"
+            f.write_text("x")
+            with mock.patch.object(sa, "SECRETS_DIR", f):
+                with self.assertNoLogs(sa.log, level="WARNING"):
+                    sa.SwapAddon._check_secrets_dir_mode()
+
+    def test_issue91_secrets_dir_0770_warns(self):
+        """Issue #91: group bits alone also warn (0o077 mask, not just
+        the other bits)."""
+        with tempfile.TemporaryDirectory() as d:
+            os.chmod(d, 0o770)
+            with mock.patch.object(sa, "SECRETS_DIR", Path(d)):
+                with self.assertLogs(sa.log, level="WARNING") as cm:
+                    sa.SwapAddon._check_secrets_dir_mode()
+        self.assertIn("0770", "\n".join(cm.output))
+
     def test_bug_scrub_opt_out_and_totp_whole_token(self):
         """REVIEW item 36: an entry with scrub:false (usernames, emails)
         is never scrubbed; TOTP codes match as whole tokens only, so a
