@@ -186,6 +186,19 @@ for d in /home/swapd/secrets /home/swapd/inference-secrets; do
     sudo python3 proxy/enforce_secrets_dir.py "$d"
 done
 
+# --- 4d. inference SSRF allow file (findings 29, 31) -----------------------
+echo "[4d/7] Ensuring inference-ssrf.allow exists..."
+# The inference proxy reads its SSRF exceptions from its OWN file, never
+# the main proxy's shared /home/swapd/ssrf.allow (see
+# proxy/swap-inference.service): the gate fixture's loopback exemption
+# (harness/install-gate-fixture.sh) must never weaken the main proxy's
+# egress guard. Ships empty (default deny); deploy.sh never adds entries
+# -- the gate installer appends 127.0.0.1 and the provision-time injector
+# removes it before the real credential lands.
+if ! sudo test -e /home/swapd/inference-ssrf.allow; then
+    sudo install -o swapd -g swapd -m 0644 /dev/null /home/swapd/inference-ssrf.allow
+fi
+
 # --- 5. systemd units (finding 66) -----------------------------------------
 echo "[5/7] Installing systemd units..."
 sudo install -o root -g root -m 0644 proxy/swap-proxy.service /etc/systemd/system/swap-proxy.service

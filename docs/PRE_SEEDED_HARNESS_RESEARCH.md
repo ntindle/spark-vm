@@ -6,11 +6,14 @@ gate/provision modes, Bearer wire-shape assertion, placeholder-never-leaks
 assertion), `generate-image-manifest.sh` + `check-image-manifest.sh`
 (golden-image manifest + the injector's fail-closed preflight), 21 hermetic
 tests. **Slice 2 SHIPPED 2026-09-20** (`harness/`): `install-gate-fixture.sh`
-+ `echo-fixture.py` — the gate fixture installer (public non-secret
-`gate-dummy` credential through the narrow writers, `bearer_header`
-placement, loopback echo host bound + allowlisted) with the gate-fixture
-cleanup contract, 5 hermetic installer tests. Remaining for later feature
-slices: provision-time injector, image gate, R1 script green.
++ `echo-fixture.py` — the gate fixture installer (public non-secret dummy
+credential under the inference proxy's fixed `llm-api` name through the
+narrow writers, `bearer_header` placement, loopback echo host bound +
+allowlisted for swapping and exempted in the inference proxy's own
+`inference-ssrf.allow`, fail-closed against overwriting a real
+credential) with the gate-fixture cleanup contract, 8 hermetic installer
+tests. Remaining for later feature slices: provision-time injector,
+image gate, R1 script green.
 The remaining implementation (provision-time injector, image gate) is
 build-loop `feature` work; this doc remains the spec input for it.
 **Feeds:** `docs/FIRST_TEN_MINUTES_SPEC.md` §5 (the harness pre-seed contract
@@ -158,11 +161,12 @@ it must satisfy exactly:
    public dummy inference credential and points the probe at the echo host,
    so probe check (a) exercises the full swap path against a fixture; the
    real tenant key replaces the fixture at provision. Fixture lifecycle:
-   the echo-host binding and its `inference-hosts.allow` entry must be
-   torn down when the fixture is replaced — by the image-build gate
-   before publish, or by the provision-time injector when it installs the
-   real key — so no box holding a real credential can ever swap it toward
-   the echo server (see `harness/README.md` "Fixture lifecycle"). A gate
+   the echo-host binding, its `inference-hosts.allow` entry, and its
+   `inference-ssrf.allow` exemption must be torn down when the fixture is
+   replaced — by the image-build gate before publish, or by the
+   provision-time injector before it installs the real key — so no box
+   holding a real credential can ever swap it toward the echo server (see
+   `harness/README.md` "Fixture lifecycle"). A gate
    failure means the image is broken; a provision-time probe failure means
    the injected credential is wrong — the two are distinguishable by
    design.
