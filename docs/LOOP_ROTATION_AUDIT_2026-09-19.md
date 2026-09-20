@@ -1,18 +1,21 @@
 # spark-vm improvement loop — rotation audit (2026-09-19)
 
-> **Status at merge (2026-09-19 ~13:50 CDT)** — this audit was written at
-> ~01:25 CDT against a main with no CI. Since then the findings it
-> motivates have been worked: **P8 done** — #39's red CI jobs fixed and #39
-> squash-merged (`33950e2`); CI (4 jobs: python tests, shellcheck, markdown
-> link check, PNG smoke) is green on main. **P9 done** — #50 rebased and
-> merged (`beace9e`, closes #23); #54 rebased onto main. **P11 done** —
-> hosted unblock pass shipped as PR #100. **F8's premise is retired** ("no CI
-> on main" is false since `33950e2`); **F14 is retired** — loop-executed
-> merges are real (#39, #50, #79, #84, #97, #109, #110 merged by the loop
-> under the standing loop-merges rule). Queue counts in "by the numbers"
-> are a 01:25 snapshot (then 11 open PRs / 22 open issues; ~19 PRs /
-> 68 issues at 13:30, now being drained by the 2026-09-19 13:25 repo turn).
-> The findings and proposals below are preserved as the 01:25 history.
+> **Status as of 2026-09-20 ~02:55 CDT (refreshed at merge)** — this audit
+> was written 2026-09-19 ~01:25 CDT against a main with no CI. Since then
+> the findings it motivates have been worked: **P8 done** — #39's red CI
+> jobs fixed and #39 squash-merged (`33950e2`); CI (4 jobs: python tests,
+> shellcheck, markdown link check, PNG smoke) is green on main. **P9 done**
+> — #50 rebased and merged (`beace9e`, closes #23); #54 rebased and merged
+> (`1c244be`). **P11 done** — hosted unblock pass shipped and merged as PR
+> #100. **F8's premise is retired** ("no CI on main" is false since
+> `33950e2`); **F14 is retired** — loop-executed merges are real (#39, #50,
+> #79, #84, #97, #109, #110 merged by the loop under the standing
+> loop-merges rule). Queue counts in "by the numbers" are a 01:25 snapshot
+> (then 11 open PRs / 22 open issues; ~19 open PRs / ~48 open issues at
+> ~13:30). The merge queue was drained by the 2026-09-19 14:25 repo turn
+> (#54/#59/#60/#66) and the remaining docs queue by the 2026-09-20 02:24
+> repo turn. The findings and proposals below are preserved as the 01:25
+> history.
 
 The `meta` archetype is the rotation auditor: it reviews both loops, names
 what is starved, over-served, or missing, and proposes concrete rotation
