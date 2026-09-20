@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""<harness-auth-probe> -- R2's non-interactive harness readiness check.
+
+Contract (docs/PRE_SEEDED_HARNESS_RESEARCH.md section 5):
+    </dev/null timeout 10 harness-auth-probe
+
+Exit 0, zero prompts, stdin closed. Any prompt, hang, or timeout means the
+box fails the harness check: report and stop. The probe never improvises
+credentials, never walks anyone through a login, and never reads stdin.
+
+What it verifies, in order:
+  (a) the inference path -- a request carrying the inference placeholder
+      (default ``hsurr:llm-api``) is sent through the inference proxy
+      (default http://127.0.0.1:18081); the proxy must swap the placeholder
+      for the installed credential. In gate mode (the default) the upstream
+      is the public echo fixture, so the check proves the full swap path
+      end to end WITHOUT any real credential: the fixture credential is
+      public and non-secret. In provision mode (``HARNESS_PROBE_EXPECT=
+      auth-accepted``) the upstream is the real provider and the check
+      proves the swapped credential was accepted (any non-401/403).
+  (b) confirmd answers -- an HTTPS GET to ``/api/version`` on the confirmd
+      service. ANY HTTP response (200, 401, 403 -- confirmd is an
+      owner-authenticated service) proves the daemon is alive and serving;
+      connection refused / timeout / TLS failure means it is not.
+
+Environment:
+  HARNESS_INFERENCE_PROXY   inference proxy base URL
+                            (default http://127.0.0.1:18081)
+  HARNESS_PROBE_UPSTREAM     upstream base URL the probe request targets
+                            (default http://httpbin.org -- the gate fixture)
+  HARNESS_PROBE_PATH        path on the upstream
+                            (default /headers -- the echo endpoint)
+  HARNESS_INFERENCE_PLACEHOLDER
+                            placeholder the proxy swaps
+                            (default hsurr:llm-api)
+  HARNESS_PROBE_EXPECT      "echo" (default: echo-fixture semantics) or
+                            "auth-accepted" (provision mode: any status
+                            except 401/403 proves the credential was
+                            accepted; choose a path that is auth-gated)
+  HARNESS_CONFIRMD_URL      confirmd base URL
+                            (default https://<tailscale-ip4>:8443)
+  HARNESS_HTTP_TIMEOUT_S    per-request timeout in seconds (default 6)
+  HARNESS_DEADLINE_S        whole-probe internal deadline (default 9;
+                            the external `timeout 10` is the hard cap)
+
+Exit codes:
+  0  all checks passed
+  1  a check failed (detail in the JSON report on stdout)
+  2  misconfigured / refused to run (stdin is a TTY, bad env, confirmd
+     URL not derivable and not set)
+  3  internal deadline hit
+
+The probe handles only placeholder NAMES and the public gate-fixture
+dummy -- never real secret values. Stdout carries one JSON report line;
+human-readable one-liners go to stderr.
+"""
+
+import json
+import os
+import re
+import signal
+import socket
+import ssl
+import subprocess
+import sys
+import urllib.request
+import urllib.error
+
+# ---------------------------------------------------------------------------
+# version (best-effort, same pattern as confirmd: never break the probe)
+
+_UNKNOWN = "0.0.0-unknown"
+
+
+# The inference check MUST traverse the inference proxy: an ambient
+# no_proxy entry for the upstream would silently turn check (a) into a
+# direct connection, defeating the whole point of the probe. Drop the
+# bypass for this process (leaf process -- nothing else runs in it).
+# The confirmd check uses its own proxy-less opener regardless.
+for _k in ("no_proxy", "NO_PROXY"):
+    os.environ.pop(_k, None)
+
+
+def _version(start=None):
+    here = os.path.abspath(start or os.path.dirname(__file__))
+    d = here if os.path.isdir(here) else os.path.dirname(here)
+    for _ in range(8):
+        cand = os.path.join(d, "VERSION")
+        try:
+            with open(cand, "r", encoding="utf-8") as f:
+                v = f.read().strip().split()[0]
+        except OSError:
+            v = None
+        if v and re.match(r"^\d+\.\d+\.\d+", v):
+            return v
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return _UNKNOWN
+
+
+VERSION = _version()
+
+# ---------------------------------------------------------------------------
+# deadline
+
+EXIT_OK = 0
+EXIT_CHECK_FAILED = 1
+EXIT_MISUSE = 2
+EXIT_DEADLINE = 3
+
+
+class _Deadline(Exception):
+    pass
+
+
+def _on_deadline(signum, frame):
+    raise _Deadline()
+
+
+def _env_float(name, default):
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        v = float(raw)
+    except ValueError:
+        raise _Misuse("%s=%r is not a number" % (name, raw))
+    if v <= 0:
+        raise _Misuse("%s must be > 0" % name)
+    return v
+
+
+class _Misuse(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# confirmd URL derivation
+
+def _tailscale_ip4():
+    """Best-effort tailnet IPv4, like confirmd's CONFIRM_BIND default."""
+    try:
+        out = subprocess.run(
+            ["tailscale", "ip", "-4"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        ).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return None
+
+
+def _confirmd_url():
+    override = os.environ.get("HARNESS_CONFIRMD_URL")
+    if override:
+        return override.rstrip("/")
+    ip = _tailscale_ip4()
+    if not ip:
+        raise _Misuse(
+            "cannot derive the confirmd URL: `tailscale ip -4` gave "
+            "nothing; set HARNESS_CONFIRMD_URL (e.g. "
+            "https://<tailnet-ip>:8443)"
+        )
+    return "https://%s:8443" % ip
+
+
+# ---------------------------------------------------------------------------
+# HTTP helpers
+
+_UA = "spark-vm-harness-probe/%s" % VERSION
+_BODY_CAP = 131072  # 128 KiB; the probe only needs headers back
+
+
+def _read_capped(resp):
+    chunks = []
+    remaining = _BODY_CAP
+    while remaining > 0:
+        chunk = resp.read(min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _proxied_opener(proxy):
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+    )
+
+
+def _direct_opener(https_context=None):
+    # The confirmd check must never ride a proxy: it is a direct
+    # service-liveness check on the tailnet address. Passing the
+    # HTTPSHandler explicitly keeps build_opener from adding its own
+    # (verified) one, which would otherwise win the handler race.
+    handlers = [urllib.request.ProxyHandler({})]
+    if https_context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=https_context))
+    return urllib.request.build_opener(*handlers)
+
+
+def _unverified_context():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    # Liveness check only: we verify that confirmd ANSWERS, not that it
+    # is who it claims to be. The tenant's browser does the real auth.
+    return ctx
+
+
+# ---------------------------------------------------------------------------
+# check (a): the inference swap path
+
+def _check_inference(proxy, upstream, path, placeholder, expect, timeout):
+    target = upstream.rstrip("/") + path
+    detail = {"target": target, "expect": expect}
+    opener = _proxied_opener(proxy)
+    req = urllib.request.Request(
+        target,
+        headers={
+            "Authorization": "Bearer " + placeholder,
+            "User-Agent": _UA,
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        resp = opener.open(req, timeout=timeout)
+        status = resp.status
+        body = _read_capped(resp).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        # HTTPError still carries the upstream's answer -- read it, then
+        # judge it like any other status.
+        status = e.code
+        try:
+            body = _read_capped(e).decode("utf-8", "replace")
+        except Exception:
+            body = ""
+    except urllib.error.URLError as e:
+        reason = e.reason
+        name = reason.__class__.__name__ if not isinstance(reason, str) else "URLError"
+        return False, dict(detail, error="%s: %s" % (name, reason))
+    except socket.timeout:
+        return False, dict(detail, error="timeout after %ss" % timeout)
+    except _Deadline:
+        raise
+    except Exception as e:  # noqa: BLE001 -- report, never crash
+        return False, dict(detail, error="%s: %s" % (e.__class__.__name__, e))
+
+    detail["status"] = status
+    if expect == "auth-accepted":
+        # Provision mode: the upstream is the real provider. Any status
+        # other than 401/403 proves the swapped credential was accepted.
+        # (Choose a path that is auth-gated; an open path proves nothing.)
+        if status in (401, 403):
+            return False, dict(
+                detail,
+                error="upstream refused the swapped credential "
+                      "(HTTP %d) -- injected credential is wrong" % status,
+            )
+        return True, dict(detail, note="swapped credential accepted (HTTP %d)" % status)
+
+    if expect != "echo":
+        return False, dict(detail, error="unknown HARNESS_PROBE_EXPECT=%r" % expect)
+
+    # Gate mode: the upstream is the public echo fixture. The swap path is
+    # proven when (1) the echo host answers 200, (2) the Authorization it
+    # saw is NOT our placeholder (the proxy swapped it), and (3) the
+    # placeholder string appears nowhere in the echoed request (nothing
+    # traversed unswapped).
+    if status != 200:
+        return False, dict(detail, error="echo fixture returned HTTP %d" % status)
+    try:
+        echoed = json.loads(body)
+    except ValueError:
+        return False, dict(detail, error="echo fixture did not return JSON")
+    headers = echoed.get("headers") or {}
+    auth_seen = None
+    for k, v in headers.items():
+        if k.lower() == "authorization":
+            auth_seen = v
+            break
+    if auth_seen is None:
+        return False, dict(detail, error="echo fixture saw no Authorization header")
+    if auth_seen == "Bearer " + placeholder:
+        return False, dict(
+            detail,
+            error="placeholder reached the upstream UNSWAPPED -- "
+                  "the inference proxy did not swap %r" % placeholder,
+        )
+    if placeholder in body:
+        return False, dict(
+            detail,
+            error="placeholder string leaked into the upstream request",
+        )
+    detail["swapped_authorization_seen"] = True
+    return True, detail
+
+
+# ---------------------------------------------------------------------------
+# check (b): confirmd answers
+
+def _check_confirmd(base_url, timeout):
+    url = base_url + "/api/version"
+    detail = {"url": url}
+    if url.startswith("https://"):
+        opener = _direct_opener(https_context=_unverified_context())
+    else:
+        # Plain HTTP is a test-only affordance (the stub confirmd);
+        # production confirmd is always TLS.
+        opener = _direct_opener()
+    req = urllib.request.Request(
+        url, headers={"User-Agent": _UA}, method="GET"
+    )
+    try:
+        resp = opener.open(req, timeout=timeout)
+        status = resp.status
+    except urllib.error.HTTPError as e:
+        # confirmd's auth gate answers 401/403 to strangers -- that IS an
+        # answer: the daemon is alive and serving its API surface.
+        status = e.code
+    except urllib.error.URLError as e:
+        reason = e.reason
+        name = reason.__class__.__name__ if not isinstance(reason, str) else "URLError"
+        return False, dict(detail, error="%s: %s" % (name, reason))
+    except socket.timeout:
+        return False, dict(detail, error="timeout after %ss" % timeout)
+    except _Deadline:
+        raise
+    except Exception as e:  # noqa: BLE001 -- report, never crash
+        return False, dict(detail, error="%s: %s" % (e.__class__.__name__, e))
+    # Any HTTP response proves confirmd is up and serving.
+    return True, dict(detail, status=status,
+                      note="confirmd answered HTTP %d" % status)
+
+
+# ---------------------------------------------------------------------------
+# main
+
+def main(argv=None):
+    # Zero prompts, ever: if stdin is a terminal someone might be about to
+    # type into us. Refuse loudly instead of hanging on a read.
+    if sys.stdin.isatty():
+        sys.stderr.write(
+            "harness-auth-probe: refusing to run with a TTY on stdin -- "
+            "run as `</dev/null timeout 10 harness-auth-probe`\n"
+        )
+        return EXIT_MISUSE
+
+    try:
+        deadline = _env_float("HARNESS_DEADLINE_S", 9.0)
+        http_timeout = _env_float("HARNESS_HTTP_TIMEOUT_S", 6.0)
+        proxy = os.environ.get("HARNESS_INFERENCE_PROXY") or "http://127.0.0.1:18081"
+        upstream = os.environ.get("HARNESS_PROBE_UPSTREAM") or "http://httpbin.org"
+        path = os.environ.get("HARNESS_PROBE_PATH") or "/headers"
+        placeholder = os.environ.get("HARNESS_INFERENCE_PLACEHOLDER") or "hsurr:llm-api"
+        expect = os.environ.get("HARNESS_PROBE_EXPECT") or "echo"
+        confirmd_url = _confirmd_url()
+    except _Misuse as e:
+        sys.stderr.write("harness-auth-probe: %s\n" % e)
+        return EXIT_MISUSE
+
+    report = {
+        "probe": "harness-auth-probe",
+        "version": VERSION,
+        "ok": False,
+        "checks": {},
+    }
+
+    signal.signal(signal.SIGALRM, _on_deadline)
+    signal.alarm(int(deadline) if deadline == int(deadline) else int(deadline) + 1)
+    try:
+        ok_a, detail_a = _check_inference(
+            proxy, upstream, path, placeholder, expect, http_timeout)
+        report["checks"]["inference"] = {"ok": ok_a, "detail": detail_a}
+        if ok_a:
+            sys.stderr.write("harness-auth-probe: inference path OK "
+                             "(placeholder swapped through the proxy)\n")
+        else:
+            sys.stderr.write("harness-auth-probe: inference path FAILED: %s\n"
+                             % detail_a.get("error", detail_a))
+
+        ok_b, detail_b = _check_confirmd(confirmd_url, http_timeout)
+        report["checks"]["confirmd"] = {"ok": ok_b, "detail": detail_b}
+        if ok_b:
+            sys.stderr.write("harness-auth-probe: confirmd OK (answered HTTP %s)\n"
+                             % detail_b.get("status"))
+        else:
+            sys.stderr.write("harness-auth-probe: confirmd FAILED: %s\n"
+                             % detail_b.get("error", detail_b))
+    except _Deadline:
+        report["checks"]["deadline"] = {
+            "ok": False, "detail": {"error": "internal deadline hit"}}
+        sys.stdout.write(json.dumps(report) + "\n")
+        sys.stdout.flush()
+        return EXIT_DEADLINE
+    finally:
+        signal.alarm(0)
+
+    report["ok"] = all(c["ok"] for c in report["checks"].values())
+    sys.stdout.write(json.dumps(report) + "\n")
+    sys.stdout.flush()
+    return EXIT_OK if report["ok"] else EXIT_CHECK_FAILED
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -2,7 +2,15 @@
 
 **Status:** research + pre-seed contract. The implementation (golden-image
 build, provision-time injector, auth probe) is a build-loop `feature` item;
-this doc is its research half and its spec input.
+this doc is its research half and its spec input. **Implementation slice 1
+DONE 2026-09-19:** `<harness-auth-probe>` per §5 shipped as
+`provision/harness-auth-probe` (exit-0/zero-prompt/`</dev/null` contract,
+inference swap-path check in gate (`echo`) and provision (`auth-accepted`)
+modes, confirmd liveness check, JSON report, exit-code contract) plus
+`provision/install-gate-fixture.sh` (public non-secret dummy credential +
+`bearer_header` placement + echo host via the narrow writers, idempotent)
+and a 9-test hermetic suite. Remaining: (2) golden-image manifest,
+(3) provision-time injector, (4) image-build gate, (5) R1 first-run green.
 **Feeds:** `docs/FIRST_TEN_MINUTES_SPEC.md` §5 (the harness pre-seed contract
 is R2's interface — this doc fills it in; the spec is unmerged, PR #49 @
 `3788907` — this contract is pinned to that revision, re-check the section
