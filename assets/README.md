@@ -11,7 +11,7 @@ PR (ntindle/spark-vm#36). Finals live here; the pipeline that made them is
 | `demo-approval-loop.gif` | The confirmd approval loop end to end: pending page → approval detail → two-tap approve (armed state) → back to "No pending approvals". 390px phone viewport (420px-wide frames), 6.8s loop, ~130KB. | ✅ shipped |
 | `demo-secrets-never-seen.gif` | "Secrets the agent never sees": the demo agent's config carries only `hsurr:…` placeholders, then the swap proxy's audit journal line — which names the placeholder, never the value. 480px-wide terminal frames, 20s loop, ~23KB. | ✅ shipped |
 | (asset 3) persistence pair | Same desktop 24h apart — before/after screenshots. | ⬜ follow-up |
-| (asset 4) muse-job watch | Multi-day job alive in `muse-job` watch. | ⬜ follow-up |
+| `demo-musejob-watch.gif` | "Long-lived jobs stay alive": real `muse-job` spawn → status → status 20+ minutes later on a demo job (480px terminal frames, 7.2s loop, ~29KB). | ✅ shipped |
 | `demo-cred-ui-phone.gif` | cred-ui on a phone viewport: the add/update form full-width, stored credentials as stacked cards. 390px phone viewport (410px-wide frames), 4.8s loop, ~55KB. | ✅ shipped |
 
 ## Provenance of `demo-approval-loop.gif`
@@ -172,6 +172,95 @@ full-width delete button (`cred-ui/index.html` media query); the header
 row is wrapped in `<thead>` so it hides cleanly (the JS previously emitted
 a bare `<tr>`, which browsers auto-wrap in `tbody`, defeating the
 `thead { display: none }` rule). Desktop rendering is unchanged.
+
+## Provenance of `demo-musejob-watch.gif`
+
+Recorded 2026-09-20 against a **demo** muse-job on spark-vm (the box's own
+`muse-job` CLI, job slug `demo-watch-job`). The frames are that one demo
+job's real CLI output, verbatim — long lines are wrapped by the
+generator, never edited. No real user jobs appear.
+
+What actually happened (disclosed, because it matters): the demo agent hit
+a **429 subscription-quota error** on its first turn and never executed its
+planned workload (test suite + heartbeats). So the three frames show
+something more honest than the plan: the *job* — tmux session, worktree,
+`state=active tmux=up session=healthy` — stayed up for 24+ minutes while
+the agent inside was blocked, and the two captured statuses show `status`
+reporting healthy with elapsed growing (0.0h → 0.4h). Session persistence
+is exactly what the asset claims; it claims no agent progress. The job
+was closed after capture (`muse-job close demo-watch-job`).
+
+Frame staging (also demo-only, does not change the product):
+
+- The displayed commands are the canonical box forms (`muse-job spawn …`);
+  the remote-exec `PATH=…` prefix is dropped. The stdout below each
+  command is the verbatim output.
+- The window chrome (title bar reading "demo — long-lived jobs stay
+  alive") and the per-frame caption strips ("1/3 — …") are drawn by the
+  generator, as with asset 2; only the transcript body under each command
+  is verbatim output.
+
+The asset does not claim the demo job ran for days — it claims the
+mechanics that make days-long jobs work: spawn gets a tmux session and a
+worktree, and `status` keeps reporting `state=active tmux=up
+session=healthy` as elapsed grows. (The loop's own production jobs
+routinely run 70h+; a 74.8h active job was observed on the box the same
+day.)
+
+## Regenerating `demo-musejob-watch.gif`
+
+Needs Pillow and ssh access to a box with `muse-job` installed. Run steps
+0–3 and 5 on the box (ssh in; the `PATH=` prefix is only needed over ssh,
+skip it when running on the box itself). Then copy `demo-asset4-captures/`
+to the root of your repo checkout and run step 4 there.
+
+```sh
+# 0. scratch capture dir + demo prompt file on the box (harmless workload
+#    only: test suite, then 5-minute heartbeats; no PRs, no network beyond
+#    localhost, no credential files). If the agent 429s on quota like it
+#    did for us, the session-persistence story still holds -- the frames
+#    only need spawn + two statuses.
+mkdir -p demo-asset4-captures
+cat > /home/ntindle/demo-watch-prompt.md <<'EOF'
+demo-watch-job: long-lived heartbeat job for a launch marketing GIF.
+
+Do this, in order:
+1. Run the spark-vm python test suite from /home/ntindle/spark-vm
+   (python3 -m pytest -x -q) and write the pass/fail summary as the
+   first lines of PROGRESS.md in your worktree.
+2. Then stay alive: every 5 minutes append one timestamped line
+   "heartbeat <ISO8601> still alive" to PROGRESS.md in your worktree.
+   Keep the tmux session healthy and keep working until steered or closed.
+Do not open any PRs, do not touch the network beyond localhost, do not
+read any credential files. End blocked turns with BLOCKED:.
+EOF
+
+# 1. spawn the demo job (PATH= is only needed over ssh; skip it on the box).
+#    If spawn fails with "ambiguous argument 'origin/HEAD'" (cloning a
+#    local --repo path leaves origin/HEAD unset), fix it once and retry:
+#      git -C ~/repos/spark-vm symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+{ echo '$ muse-job spawn demo-watch-job --repo /home/ntindle/spark-vm --prompt-file /home/ntindle/demo-watch-prompt.md --budget-hours 2'; \
+  muse-job spawn demo-watch-job --repo /home/ntindle/spark-vm \
+    --prompt-file /home/ntindle/demo-watch-prompt.md --budget-hours 2; } \
+  > demo-asset4-captures/w1-spawn.txt
+
+# 2. wait ~30s for the tmux session to come up, then status
+{ echo '$ muse-job status demo-watch-job'; muse-job status demo-watch-job; } \
+  > demo-asset4-captures/w2-status.txt
+
+# 3. wait ~20 minutes, then status again (elapsed grows, still alive) --
+#    this is the last capture
+{ echo '$ muse-job status demo-watch-job'; muse-job status demo-watch-job; } \
+  > demo-asset4-captures/w3-status-later.txt
+
+# 4. render + assemble
+python3 scripts/generate_demo_assets.py \
+  --asset musejob-watch --capture-dir ./demo-asset4-captures \
+  --frames-dir ./demo-asset4-work --out assets/demo-musejob-watch.gif
+
+# 5. close the demo job when done
+muse-job close demo-watch-job
+```
 
 ## Regenerating `demo-cred-ui-phone.gif`
 
