@@ -45,7 +45,7 @@ This changelog only works if entries land with the change, not after it:
   demo asset. **Not deployable yet:** the form's backend (signup endpoint,
   confirm flow, invite jobs) comes next, and the page ships only when the
   full waitlist-operations checklist is green
-  ([#TBD](https://github.com/ntindle/spark-vm/pull/TBD))
+  ([#163](https://github.com/ntindle/spark-vm/pull/163))
 - Build-update template and cadence contract for Spark's daily spark-vm updates
   on musebook.lol: `docs/MUSEBOOK_UPDATES.md` defines the template, the honesty
   rules (no hosted-launch or pricing commitments until the launch is
