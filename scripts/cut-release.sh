@@ -190,7 +190,7 @@ new_tag = sys.argv[1]
 new_key = _key(new_tag)
 latest, latest_key = None, None
 tags = subprocess.run(["git", "tag", "--list", "v*"],
-                      capture_output=True, text=True).stdout.split()
+                      capture_output=True, text=True, check=True).stdout.split()
 for t in tags:
     if t == new_tag:
         continue
@@ -225,6 +225,10 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
         # Extract the Keep-a-Changelog section for this version. Literal
         # prefix comparison, never a regex: semver build metadata like the
         # + in 1.2.0+build must match exactly, never as a pattern.
+        # The section is contributor-controlled (per-PR entries are
+        # mandatory), so it goes through the same control-character filter
+        # as commit subjects: the notes draft is printed to the operator's
+        # terminal in every mode.
         SECTION="$(awk -v ver="$VERSION" '
             /^## / {
                 h = "## [" ver "]"; hv = "## [v" ver "]";
@@ -233,7 +237,7 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
                 next
             }
             insec { print }
-        ' CHANGELOG.md)"
+        ' CHANGELOG.md | LC_ALL=C tr -d '\000-\010\013-\037\177')"
     fi
     if [[ -n "${SECTION//[[:space:]]/}" ]]; then
         printf '%s\n' "$SECTION"

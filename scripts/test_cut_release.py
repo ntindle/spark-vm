@@ -400,6 +400,22 @@ def test_subject_control_characters_stripped(workrepo):
     assert "fix: handle evil [2J[31mRED[0m subject" in r.stdout
 
 
+def test_changelog_section_control_characters_stripped(workrepo):
+    # Same class as subjects: changelog entries are contributor-controlled
+    # and the notes draft is printed to the operator's terminal.
+    body = ("# Changelog\n\n## [Unreleased]\n\n"
+            "## [0.2.0] - 2026-09-19\n\n### Added\n"
+            "- poisoned \x1b[2J\x1b[31mRED\x1b[0m entry\n")
+    (workrepo / "CHANGELOG.md").write_text(body)
+    git("add", "-A", cwd=workrepo)
+    git("commit", "-m", "docs: poison changelog", cwd=workrepo)
+    git("push", "origin", "main", cwd=workrepo)
+    r = run_script(workrepo, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "\x1b" not in r.stdout
+    assert "poisoned [2J[31mRED[0m entry" in r.stdout
+
+
 def test_execute_removes_local_tag_when_push_fails(workrepo, fake_gh):
     hook = workrepo.parent / "origin.git" / "hooks" / "update"
     hook.write_text("#!/bin/sh\necho 'tag push blocked' >&2\nexit 1\n")
