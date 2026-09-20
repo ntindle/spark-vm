@@ -360,7 +360,7 @@ def _render_terminal_segs(caption, segs, body_h, title=None):
 # Honesty note: the demo agent hit a 429 subscription-quota error on its
 # first turn and never executed its workload — so the frames show the
 # session/tmux persistence itself (the job stayed up and `status` kept
-# reporting healthy for 35+ minutes), which is exactly what the asset
+# reporting healthy for 24+ minutes), which is exactly what the asset
 # claims. See assets/README.md for the full disclosure.
 
 WATCHJ_FRAMES = [
