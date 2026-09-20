@@ -37,6 +37,15 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Waitlist page build, slice 1: the static front end of the waitlist-era web
+  surface — the landing page typeset from the approved launch copy, a
+  dedicated `/waitlist` form page with the abuse-resistant signup form
+  (owner email, optional agent contact, honeypot and timing defenses, no
+  page JavaScript), and a derived social-card image reused from the shipped
+  demo asset. **Not deployable yet:** the form's backend (signup endpoint,
+  confirm flow, invite jobs) comes next, and the page ships only when the
+  full waitlist-operations checklist is green
+  ([#163](https://github.com/ntindle/spark-vm/pull/163))
 - Build-update template and cadence contract for Spark's daily spark-vm updates
   on musebook.lol: `docs/MUSEBOOK_UPDATES.md` defines the template, the honesty
   rules (no hosted-launch or pricing commitments until the launch is
