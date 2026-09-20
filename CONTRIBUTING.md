@@ -46,7 +46,7 @@ python3 -m pytest
 ```
 
 `pytest.ini` discovers every suite (`proxy`, `confirm`, `muse-job/tests`,
-`deploy`, `scripts`, `cred-ui/tests`, `harness`). All suites pass on `main`;
+`deploy`, `scripts`, `cred-ui/tests`, `harness`, `browser-driver`). All suites pass on `main`;
 your PR should keep them green.
 
 Install the test dependencies first:
@@ -66,6 +66,7 @@ Per-component dependency notes:
 | `scripts/` | `test_sparkvm_version` | none |
 | `cred-ui/tests/` | `test_cred_ui_version` | none |
 | `harness/` | `test_probe`, `test_manifest`, `test_install_gate_fixture` | none |
+| `browser-driver/bdrive/` | `test_bdrive_protocol` | none |
 
 Two conventions keep the one-liner working: keep every `test_*.py`
 basename unique across the repo (pytest imports test modules by basename),
@@ -73,7 +74,7 @@ and never leave `sys.path` / `sys.modules` mutations behind in a test —
 an order-dependent failure in the full run is a bug in the test, not in
 pytest.
 
-`cua/`, `jail/`, and `browser-driver/` have no automated suites yet
+`cua/` and `jail/` have no automated suites yet
 (tracked in the backlog).
 
 ## Secrets: the one hard rule
