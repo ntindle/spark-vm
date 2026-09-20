@@ -31,6 +31,15 @@ chrome-headless-shell -- no Playwright needed:
 Only ever point this at a DEMO cred-ui instance -- never the live one.
 The headless-shell binary is found via $CHROME_HEADLESS_SHELL or the
 Playwright browser cache.
+
+Asset 4 (long-lived jobs stay alive) renders terminal frames from
+verbatim captures of a REAL demo muse-job on spark-vm -- see
+assets/README.md for the capture recipe (spawn, status, status 20+
+minutes later), then:
+    python3 scripts/generate_demo_assets.py \
+        --asset musejob-watch --capture-dir ./demo-asset4-captures \
+        --out assets/demo-musejob-watch.gif
+The frames show real command output; long lines are wrapped, never edited.
 """
 import argparse
 import os
@@ -304,8 +313,9 @@ def generate_secrets(repo_root, work_dir, frames_dir):
     return shots, journal_line
 
 
-def _render_terminal_segs(caption, segs, body_h):
+def _render_terminal_segs(caption, segs, body_h, title=None):
     """Render one terminal frame from pre-flattened segments."""
+    title = title or "demo — secrets the agent never sees"
     font = _mono_font(_TERM_FONT)
     small = _mono_font(11)
     scw = max(small.getlength("0123456789abcdef"), 1) / 16
@@ -319,7 +329,7 @@ def _render_terminal_segs(caption, segs, body_h):
     d.rectangle([0, 0, _TERM_W, _TERM_TITLE_H], fill=_BAR)
     for i, c in enumerate(("#ff5f57", "#febc2e", "#28c840")):
         d.ellipse([12 + i * 18, 10, 22 + i * 18, 20], fill=c)
-    d.text((_TERM_W // 2, 15), "demo — secrets the agent never sees",
+    d.text((_TERM_W // 2, 15), title,
            font=small, fill=_OUT, anchor="mm")
     prompt_w = font.getlength("$ ")
     y = _TERM_TITLE_H + _TERM_PAD
@@ -337,6 +347,76 @@ def _render_terminal_segs(caption, segs, body_h):
         d.text((_TERM_PAD, ty), ln, font=small, fill=_CAPTION)
         ty += 15
     return im
+
+
+# --- Asset 4: "long-lived jobs stay alive" (muse-job watch) ---
+#
+# Frames are genuine transcripts from a REAL demo muse-job on spark-vm:
+# spawn -> status -> status 20+ minutes later. The recipe (in
+# assets/README.md) runs each command on the box and saves its verbatim
+# stdout to the capture dir; this function only renders. Nothing is
+# re-typed. Long output lines are wrapped, never edited.
+#
+# Honesty note: the demo agent hit a 429 subscription-quota error on its
+# first turn and never executed its workload — so the frames show the
+# session/tmux persistence itself (the job stayed up and `status` kept
+# reporting healthy for 35+ minutes), which is exactly what the asset
+# claims. See assets/README.md for the full disclosure.
+
+WATCHJ_FRAMES = [
+    ("w1-spawn",
+     "1/3 — one command: the job gets a session and a worktree"),
+    ("w2-status",
+     "2/3 — status: state=active, tmux=up, session=healthy"),
+    ("w3-status-later",
+     "3/3 — 20+ minutes later: still alive, elapsed still growing"),
+]
+WATCHJ_HOLDS = {"w1-spawn": 2.0, "w2-status": 2.4, "w3-status-later": 2.8}
+_WATCHJ_TITLE = "demo — long-lived jobs stay alive"
+
+
+def _read_capture(capture_dir, stem):
+    # One verbatim transcript per frame: the first line is the command
+    # as typed ("$ <cmd>"), the rest is its real stdout.
+    path = os.path.join(capture_dir, stem + ".txt")
+    if not os.path.isfile(path):
+        sys.exit("missing capture file: %s "
+                 "(run the assets/README.md capture recipe first)" % path)
+    with open(path) as f:
+        lines = f.read().splitlines()
+    if not lines or not lines[0].startswith("$ "):
+        sys.exit("capture file %s must start with a '$ <cmd>' line" % path)
+    text = "\n".join(lines)
+    if "demo-watch-job" not in text:
+        sys.exit("capture file %s does not mention demo-watch-job — "
+                 "wrong job captured?" % path)
+    return [("cmd", lines[0][2:]), ("out", "\n".join(lines[1:]))]
+
+
+def generate_musejob_watch(capture_dir, frames_dir):
+    """Render the asset-4 frames from the verbatim box captures."""
+    os.makedirs(frames_dir, exist_ok=True)
+    font_probe = _mono_font(_TERM_FONT)
+    cw = max(font_probe.getlength("0123456789abcdef"), 1) / 16
+    ncols = int((_TERM_W - 2 * _TERM_PAD) / cw)
+    specs = {}
+    for stem, caption in WATCHJ_FRAMES:
+        specs[stem] = (caption,
+                       _flatten_transcript(_read_capture(capture_dir, stem),
+                                           ncols))
+    # Uniform frame height (GIF viewers crop or flash on mixed sizes).
+    lh = _TERM_FONT + 6
+    max_body = max(_TERM_PAD + len(s) * lh + 8 for _, s in specs.values())
+    shots = []
+    for stem, caption in WATCHJ_FRAMES:
+        caption_, segs = specs[stem]
+        im = _render_terminal_segs(caption_, segs, max_body,
+                                   title=_WATCHJ_TITLE)
+        path = os.path.join(frames_dir, stem + ".png")
+        im.save(path)
+        shots.append(path)
+        print("frame:", path, im.size)
+    return shots
 
 
 # --- Asset 5: cred-ui on a phone viewport ---
@@ -488,7 +568,7 @@ def _ensure_out_dir(out_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--asset", choices=("approval-loop", "secrets",
-                                       "credui-phone"),
+                                       "credui-phone", "musejob-watch"),
                     default="approval-loop")
     ap.add_argument("--url", help="demo confirmd base URL (approval-loop only); "
                     "demo cred-ui base URL (credui-phone only)")
@@ -498,6 +578,10 @@ def main():
     ap.add_argument("--frames-dir", default="./demo-frames")
     ap.add_argument("--work-dir", default="./demo-asset2-work",
                     help="scratch dir for --asset secrets (fixture + journal)")
+    ap.add_argument("--capture-dir", default="./demo-asset4-captures",
+                    help="dir of verbatim box captures for --asset "
+                         "musejob-watch (w1-spawn.txt, w2-status.txt, "
+                         "w3-status-later.txt)")
     ap.add_argument("--out", required=True, help="output GIF path")
     args = ap.parse_args()
     if args.asset == "secrets":
@@ -508,6 +592,13 @@ def main():
             sys.exit("expected 3 frames, got %d" % len(shots))
         _ensure_out_dir(args.out)
         assemble(shots, args.out, max_width=_TERM_W, holds=SECRETS_HOLDS)
+        return
+    if args.asset == "musejob-watch":
+        shots = generate_musejob_watch(args.capture_dir, args.frames_dir)
+        if len(shots) != 3:
+            sys.exit("expected 3 frames, got %d" % len(shots))
+        _ensure_out_dir(args.out)
+        assemble(shots, args.out, max_width=_TERM_W, holds=WATCHJ_HOLDS)
         return
     if args.asset == "credui-phone":
         if not args.url:
