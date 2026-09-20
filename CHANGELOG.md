@@ -150,6 +150,31 @@ This changelog only works if entries land with the change, not after it:
   space-safe secret scan ([#33](https://github.com/ntindle/spark-vm/pull/33))
 
 ### Fixed
+- Root deploy writes stop following symlinks in `/home/swapd`: `cp`/`tee`/
+  `chown`/`chmod` on `ssrf.deny`, `grants.json`, and `swap.log` would have let
+  a swapd-level attacker plant a symlink at a root-write destination and get
+  the next unattended deploy to write/chown through it (same class as #91,
+  fixed for the secrets dirs; the grants.json instance is #128). The new
+  `proxy/safe_install.py` refuses symlinks fail-closed, creates with
+  `O_EXCL`+`O_NOFOLLOW`, and `fchown`s/`fchmod`s the open fd; steps 3/4/4a of
+  `proxy/deploy.sh` use it
+  ([#143](https://github.com/ntindle/spark-vm/pull/143), fixes
+  [#128](https://github.com/ntindle/spark-vm/issues/128)) Also fixes a latent grants.json wipe: the old
+  existence check ran as the deploy user, so when `/home/swapd` wasn't
+  traversable it always took the create branch and `sudo tee` truncated the
+  file on every deploy.
+- `confirmd` and its health check no longer pin the box's tailnet IP: the
+  `CONFIRM_BIND` literal is gone from `confirm/confirmd.service` (the daemon
+  already resolves its bind via `tailscale ip -4` at startup), and the
+  updater's health entry is `tcp:TAILNET:8443`, resolved at check time. A
+  tailnet rekey/IP change survives a restart instead of wedging the service
+  or failing every deploy's health check (rollback of a good deploy)
+  ([#143](https://github.com/ntindle/spark-vm/pull/143))
+- The updater now warns when it runs stale code: `init` records the checkout
+  commit the installed copy came from, and `status`/`check` warn when
+  `origin/main` carries newer `deploy/` changes not live because `init`
+  wasn't re-run
+  ([#143](https://github.com/ntindle/spark-vm/pull/143))
 - `muse-job` detects a dead terminal pane and refuses to steer into it
   instead of typing into the void
   ([#45](https://github.com/ntindle/spark-vm/pull/45), fixes

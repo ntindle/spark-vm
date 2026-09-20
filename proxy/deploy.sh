@@ -60,6 +60,7 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/cred-store-verify-inference \
          proxy/cred-store-get proxy/cred-store-delete \
          proxy/with-proxy proxy/ssrf.deny proxy/sudoers-swapd \
+         proxy/safe_install.py \
          proxy/swap-proxy.service proxy/swap-inference.service \
          confirm/confirmd.py confirm/confirm-request confirm/confirmd.service \
          VERSION scripts/sparkvm_version.py; do
@@ -69,7 +70,7 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
     fi
 done
 python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py \
-    scripts/sparkvm_version.py \
+    proxy/safe_install.py scripts/sparkvm_version.py \
     || { echo "ERROR: python syntax check failed — aborting"; exit 1; }
 # VERSION feeds audit JSON via the updater: a non-semver VERSION must fail
 # the deploy here, loudly, rather than become "unknown" downstream.
@@ -117,39 +118,50 @@ sudo install -o root -g root -m 0755 confirm/confirm-request /usr/local/bin/conf
 
 # --- 3. ssrf.deny (finding 61) -------------------------------------------
 echo "[3/7] Installing ssrf.deny..."
-# Start from the repo file (has the ts.net name), then append the host's
-# current tailscale IPs (box-specific, finding 47).
-sudo cp proxy/ssrf.deny /home/swapd/ssrf.deny
-if command -v tailscale >/dev/null 2>&1; then
-    tailscale ip 2>/dev/null | while read -r ip; do
-        if [ -n "$ip" ]; then
-            # Avoid duplicates.
-            if ! sudo grep -qxF "$ip" /home/swapd/ssrf.deny 2>/dev/null; then
-                echo "$ip" | sudo tee -a /home/swapd/ssrf.deny >/dev/null
-            fi
-        fi
-    done
-else
-    echo "WARNING: tailscale not found; ssrf.deny has only the ts.net name"
-fi
-sudo chown swapd:swapd /home/swapd/ssrf.deny
-sudo chmod 0644 /home/swapd/ssrf.deny
+# Build the full denylist (repo file + this box's tailscale IPs, deduped,
+# order-preserving) and write it with the symlink-safe helper: cp/tee/chown/
+# chmod all FOLLOW symlinks, so a swapd-planted /home/swapd/ssrf.deny ->
+# /etc/... would get this (unattended, root) deploy to write through it --
+# and chown would hand the target to swapd (same class as #91/#128; GNU
+# `install` in steps 1/2 replaces symlinks instead, so those are safe).
+# The file is rebuilt declaratively each deploy (repo + current tailscale
+# IPs); box-local manual additions are not preserved -- the repo is the
+# only source (finding 19).
+tmp_deny="$(sudo mktemp /tmp/ssrf-deny.XXXXXX)"
+{
+    cat proxy/ssrf.deny
+    if command -v tailscale >/dev/null 2>&1; then
+        # Start from the repo file (has the ts.net name), then the host's
+        # current tailscale IPs (box-specific, finding 47).
+        tailscale ip 2>/dev/null || true
+    else
+        echo "WARNING: tailscale not found; ssrf.deny has only the ts.net name" >&2
+    fi
+} | awk 'NF && !seen[$0]++' | sudo tee "$tmp_deny" >/dev/null
+sudo python3 proxy/safe_install.py --src "$tmp_deny" \
+    --owner swapd --group swapd --mode 0644 /home/swapd/ssrf.deny
+sudo rm -f "$tmp_deny"
 
 # --- 4. grants.json (finding 60) ------------------------------------------
 echo "[4/7] Ensuring grants.json exists..."
-if [ ! -f /home/swapd/grants.json ]; then
-    echo '{"grants": []}' | sudo tee /home/swapd/grants.json >/dev/null
-fi
-sudo chown swapd:swapd /home/swapd/grants.json
-sudo chmod 0600 /home/swapd/grants.json
+# The existence check AND the create must run under the same privilege:
+# the old `[ -f ]` ran as the deploy user, so when /home/swapd was not
+# traversable the guard always took the create branch -- and the old
+# `sudo tee` (truncate, not append) then wiped grants.json on EVERY deploy.
+# --create-only does check-and-create atomically as root (O_EXCL), and the
+# owner/mode are enforced on the fd, never through a symlink (#128 class).
+printf '{"grants": []}\n' | sudo python3 proxy/safe_install.py --stdin \
+    --create-only --owner swapd --group swapd --mode 0600 \
+    /home/swapd/grants.json
 
 # --- 4a. audit log (swap.log) ---------------------------------------------
 echo "[4a/7] Tightening any pre-existing audit log..."
 # The writers create swap.log 0600, but a log left 0644 by the old code
-# stays that way (creation-only mode). Tighten it here every deploy.
+# stays that way (creation-only mode). Tighten it here every deploy --
+# through the symlink-safe helper (chown/chmod follow symlinks, #91 class).
 if sudo test -f /home/swapd/swap.log; then
-    sudo chown swapd:swapd /home/swapd/swap.log
-    sudo chmod 0600 /home/swapd/swap.log
+    sudo python3 proxy/safe_install.py --owner swapd --group swapd \
+        --mode 0600 /home/swapd/swap.log
 fi
 
 # --- 4b. with-proxy + its CA bundle (owner decision 13) ------------------
@@ -221,6 +233,9 @@ if ! sudo visudo -c -f "$tmp_sudoers"; then
     exit 1
 fi
 sudo mv -f "$tmp_sudoers" /etc/sudoers.d/swapd
+# (rename(2) replaces a destination symlink instead of writing through it --
+# verified empirically -- and /etc/sudoers.d is root-owned, so only root
+# could plant one there anyway.)
 
 # --- 7. daemon-reload and restart (finding 66) -------------------------------
 if [ "$NO_RESTART" = "1" ]; then
