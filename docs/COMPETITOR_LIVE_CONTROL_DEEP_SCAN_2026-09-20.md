@@ -36,15 +36,22 @@ tests whether that is a real gap or whether competitors cover it incidentally.
 | TermSquad | None found (no vendor evidence) | Browser Web Terminal + SSH | Stop is a power action; no stopped-state discount published | Not published |
 | Fly.io Sprites | None found | `sprite console` (full TTY), `sprite exec --tty`, detachable sessions | Auto-pause ~30s idle; warm 100–500ms, cold 1–2s; FS persists | Not named by vendor |
 | E2B | Browser desktop, 1 stream at a time | Terminal via SDK/desktop | Pause (FS+memory, resume ≈1s, pause ≈4s/GiB); FS-only cold-boot option | VNC streaming |
-| Daytona | Browser VNC desktop (Xvfb+XFCE+x11vnc+noVNC) | Web Terminal (org members only, STARTED only) | Stop/archive/delete; auto-stop/auto-archive/auto-delete; FS persists on runner until archived | VNC (noVNC) |
+| Daytona | Browser VNC desktop (Xvfb+XFCE+x11vnc+noVNC) | Web Terminal (org members only, STARTED only) | Pause/resume (VM classes only — FS+memory preserved; auto-pause) + stop/archive/delete; auto-stop/auto-archive/auto-delete; FS persists on runner until archived | VNC (noVNC) |
 | Docker Sandboxes | None (local microVM, no browser surface) | CLI shell, SSH/SFTP, terminal dashboard | stop = pause; auto-stop when idle; state persists across stop/restart | Local (no remote transport) |
 
-**Stream concurrency / ownership (scorecard gap):** E2B's SDK caps desktop
-streaming at one stream at a time (VERIFIED) — who holds control, concurrent
-viewers, and control handoff are the architecturally relevant axis for
-confirmd's approval model, and no other vendor in the set publishes a
-concurrency policy. #47 should define its stream-ownership semantics
-explicitly rather than inheriting E2B's implicit limit.
+**Stream concurrency / ownership (scorecard gap):** E2B documents a
+one-stream-at-a-time limit for desktop streaming (VERIFIED — "There can be
+only one stream at a time", "Creating multiple streams at the same time is
+not supported"; the SDK also exposes view-only URLs on the single stream via
+`get_url(view_only=True)`). No vendor evidence found for a published
+concurrency policy beyond E2B in this pass. The architecturally relevant axis
+for confirmd's approval model is three-fold: (1) the stream-count limit, (2)
+concurrent view-only viewers, and (3) interactive-control holding and
+handoff — and confirmd today approves discrete requests, not long-lived
+sessions (REMOTE_DESKTOP_TRANSPORT_RESEARCH.md §5.3). #47 should define its
+stream-ownership semantics explicitly — including the session-scoped
+bearer/expiry/revocation binding (H9/H11 work) — rather than inheriting E2B's
+documented limit.
 
 ## Per-provider detail
 
@@ -67,7 +74,8 @@ pause/resume/stop/restart/terminate only. Snapshot needs its own survey pass
   (running), cold storage $0.000027/GB-hour (stopped)
   ([pricing](https://www.agentcomputer.ai/pricing)).
 - **No vendor evidence found** for wake-latency figures or per-action approval
-  gates; browser surface is VNC/terminal-class, not low-latency video.
+  gates; browser surface is VNC/terminal-class, not low-latency video
+  (INFERRED).
 
 ### TermSquad
 
@@ -82,8 +90,7 @@ pause/resume/stop/restart/terminate only. Snapshot needs its own survey pass
   wake-latency figure, and no detailed storage semantics published — **no
   vendor evidence found** on all three.
 - **VERIFIED** — AI subscriptions/usage are not included (explicit on pricing
-  page); (INFERRED) the agent can still block on input/errors/limits despite
-  always-on compute.
+  page).
 
 ### Fly.io Sprites
 
@@ -141,6 +148,10 @@ pause/resume/stop/restart/terminate only. Snapshot needs its own survey pass
   moves a stopped sandbox's filesystem to object storage and frees disk quota;
   VM sandboxes offload filesystem state to nearby storage
   ([sandboxes lifecycle docs](https://www.daytona.io/docs/en/sandboxes/)).
+- **VERIFIED** — VM-class sandboxes support **pause/resume**: pausing preserves
+  filesystem + memory state, and non-ephemeral VM sandboxes default to a
+  60-minute auto-pause interval when neither auto-pause nor auto-stop is set
+  ([sandboxes docs](https://www.daytona.io/docs/en/sandboxes/)).
 - **VERIFIED** — $0.0504/vCPU-hour, $0.0162/GiB-hour, storage
   $0.000108/GiB-hour after the first 5 GiB free, per-second billing, $200 free
   compute ([pricing](https://www.daytona.io/pricing)).
@@ -179,7 +190,7 @@ move by any of the six providers in the ~6-hour window. Nearest-in-time
 items, all outside the window: a **THIRD-PARTY** EINPresswire release dated
 2026-09-15 for TermSquad's always-on cloud computer launch
 ([einpresswire](https://www.einpresswire.com/article/942479573/termsquad-launches-an-always-on-cloud-computer-for-ai-coding-agents));
-Docker Sandboxes release notes updated 2026-09-18 (two days early).
+Docker Sandboxes [release notes](https://docs.docker.com/ai/sandboxes/release-notes/) updated 2026-09-18 (two days early).
 
 ## Where spark-vm wins
 
@@ -189,9 +200,17 @@ Docker Sandboxes release notes updated 2026-09-18 (two days early).
    degrade-resolution/framerate fallback — is a genuine latency
    differentiator (INFERRED — this compares unshipped design intent against
    shipped product, so the win is a bet, not a measured fact). Build-cost
-   caveat: the trust context's tailnet-first networking makes WebRTC NAT
-   traversal largely moot, which materially changes the cost calculus of
-   this win.
+   caveat: BYO-tailnet changes the cost picture for device-on-tailnet paths —
+   the tenant's own devices join a tailnet with their box, so media traversal
+   is handled by Tailscale (including DERP relaying — still relaying,
+   delegated to Tailscale's infra, not operator-run TURN). That shrinks the
+   operator-side bandwidth cost for device-on-tailnet viewers, but it doesn't
+   vanish: REMOTE_DESKTOP_TRANSPORT_RESEARCH.md §5.2's TURN-relay model stands
+   as the fallback for non-tailnet viewer paths (public link shares, devices
+   without the Tailscale client). One deployment dependency is unacknowledged
+   by #47's mobile-first UX spec: reaching the streamer from a phone browser
+   needs the Tailscale client on that device — a client install the web-UI
+   story otherwise avoids.
 2. **Per-action human approvals.** No vendor in the surveyed six publishes a
    per-action human approval gate for live control (AgentComputer: none
    found; Daytona: org members get terminal access, not approvals; E2B:
@@ -206,7 +225,8 @@ Docker Sandboxes release notes updated 2026-09-18 (two days early).
    swapd/confirmd architecture intends to — note this compares shipped
    components (swapd/confirmd) bundled with the unbuilt streaming design,
    so it is a direction win, not a current product win.
-4. **Mobile-first control UX.** TermSquad's own launch coverage advertises a
+4. **Mobile-first control UX** (design-intent win — the #47 stack is spec'd,
+   not shipped). TermSquad's own launch coverage advertises a
    "mobile-friendly web terminal" reachable by phone (THIRD-PARTY,
    2026-09-15 EINPresswire release cited in the side-check above) — the
    closest existing mobile surface, so the absolute claim "nobody publishes
@@ -218,12 +238,14 @@ Docker Sandboxes release notes updated 2026-09-18 (two days early).
 
 1. **E2B and Daytona ship desktop control today** — it is a parity target, not
    a blank slate. #47's scope (start/stop/pause/resume/restart/snapshot/
-   terminal/desktop) matches E2B's paused-session model and Daytona's
-   stop/archive/delete model. Match their lifecycle completeness.
+   terminal/desktop) matches E2B's paused-session model and Daytona's VM
+   pause/resume + stop/archive/delete model on the surveyed lifecycle axes;
+   snapshot parity needs its own survey (see scope note). Match their
+   lifecycle completeness.
 2. **Published resume targets.** Fly.io Sprites publishes 100–500 ms warm
    wake / 1–2 s cold wake; E2B publishes resume ≈ 1 s, pause ≈ 4 s/GiB.
    spark-vm should set and publish a comparable resume target for #47, or the
-   streaming win looks unmeasured. (INFERRED.)
+   streaming win looks unmeasured. (Product judgment.)
 3. **Stopped-state cost story.** AgentComputer publishes cold storage at
    $0.000027/GB-hour; E2B bills only running time; Fly.io stops compute
    billing on hibernate. spark-vm's hosted pricing story needs an equally
@@ -252,18 +274,21 @@ Docker Sandboxes release notes updated 2026-09-18 (two days early).
 - **C16 — #47 control-plane-visible lifecycle parity audit** (competitor):
   audit the #47 ticket scope against this scan's scorecard for the
   control-plane-visible lifecycle only (pause/resume/stop/start/restart —
-  E2B's paused-session model and Daytona's stop lifecycle are the parity
-  targets), and file gaps as #47 sub-items. Explicitly out of scope for this
-  item: Daytona's archive/offload (a storage-backend/object-storage feature
-  conditional on the provider substrate supporting it, not a control-plane
-  parity item) and snapshot semantics (not surveyed in this pass — needs its
-  own survey; snapshot coverage was not in the scorecard).
+  E2B's paused-session model, Daytona VM pause/resume, and Daytona's
+  stop/archive/delete model are the parity targets), and file gaps as #47
+  sub-items. Split archive in two: the storage-offload backend stays out of
+  scope (substrate-conditional); the control-plane-visible archived state +
+  auto-archive/auto-delete policy model are in scope, because lifecycle
+  completeness (lag #1) and stopped/cold billing (C15) both require modeling
+  retained states beyond stopped. Explicitly out of scope: snapshot semantics
+  (not surveyed in this pass — needs its own survey; snapshot coverage was
+  not in the scorecard).
 
 ## Sources
 
 Survey conducted 2026-09-20 ~14:54–15:04 CDT; per-item inline links above are
 the source record. Note on one corpus date: the morning watch's "June-2026
-BrowserSkill open-sourcing" attestation is corroborated here only by
-THIRD-PARTY coverage; the BrowserSkill repo itself was not re-read in this
-pass (out of scope for this axis).
+BrowserSkill open-sourcing" attestation is corpus-verified against the primary
+repo 2026-09-18 (COMPETITOR_ANALYSIS.md); not re-read in this pass (out of
+scope for this axis).
 
