@@ -10,7 +10,7 @@ PR (ntindle/spark-vm#36). Finals live here; the pipeline that made them is
 |---|---|---|
 | `demo-approval-loop.gif` | The confirmd approval loop end to end: pending page → approval detail → two-tap approve (armed state) → back to "No pending approvals". 390px phone viewport (420px-wide frames), 6.8s loop, ~130KB. | ✅ shipped |
 | `demo-secrets-never-seen.gif` | "Secrets the agent never sees": the demo agent's config carries only `hsurr:…` placeholders, then the swap proxy's audit journal line — which names the placeholder, never the value. 480px-wide terminal frames, 20s loop, ~23KB. | ✅ shipped |
-| (asset 3) persistence pair | Same desktop 24h apart — before/after screenshots. | ⬜ follow-up |
+| `demo-persistence-pair.gif` | "The same desktop, days apart": the persistence pair — frame 1 is Xvfb :98's birth record (`ps -o pid,etime,lstart,cmd`, showing 4d+ elapsed in-frame), frame 2 re-verifies the same pid/start alive days later, with the Sep-16 tmux job sessions still there. 480px-wide terminal frames, 12s loop, ~20KB. | ✅ shipped |
 | `demo-musejob-watch.gif` | "Long-lived jobs stay alive": real `muse-job` spawn → status → status 20+ minutes later on a demo job (480px terminal frames, 7.2s loop, ~29KB). | ✅ shipped |
 | `demo-cred-ui-phone.gif` | cred-ui on a phone viewport: the add/update form full-width, stored credentials as stacked cards. 390px phone viewport (410px-wide frames), 4.8s loop, ~55KB. | ✅ shipped |
 
@@ -133,6 +133,76 @@ python3 scripts/generate_demo_assets.py \
 
 Regeneration overwrites the GIF in place — the file in the repo is the
 current final.
+
+## Provenance of `demo-persistence-pair.gif`
+
+Recorded 2026-09-20 from the **live** spark-vm box (not a demo
+instance — the subject is the box's own long-lived desktop session):
+
+- Frame 1 is the verbatim stdout of `ps -o pid,etime,lstart,cmd -p 20640`:
+  Xvfb `:98` (the display the CUA driver clicks through) started
+  **Wed 2026-09-16 02:07:35** and had been alive 4d 1h01m at capture
+  (the `ELAPSED` column proves the age inside the frame itself).
+- Frame 2 is the verbatim stdout of three commands run in the same
+  capture session, seconds later: `uptime` (4 days, 21:14),
+  `ps -o pid,lstart -p 20640` (same pid, same start time), and
+  `tmux ls` (the Sep-16 `muse-job` sessions still alive).
+- The full capture lives verbatim in
+  `assets/persistence-capture-2026-09-20.json` (commands + stdout +
+  capture timestamp + re-capture recipe). The generator renders the
+  frames from that file and computes the day gap from its timestamps —
+  a re-capture renders its own honest elapsed time. All timestamps in
+  the fixture are tz-aware (`-05:00`, America/Chicago); the loader
+  refuses tz-naive timestamps rather than guessing.
+
+The launch-post plan asked for "same desktop 24h apart — before/after
+screenshots". Staging a fake 24h gap was rejected as dishonest; this
+asset shows the real thing instead — a session that has genuinely been
+alive for days, proven by its own start-time record. The claim is the
+mechanics (birth record → still alive), never more. Note the gap is
+Xvfb's own lifetime (4d 1h01m at capture), not the box's 4d 21h14m
+uptime — both are shown, honestly labeled, in the two frames.
+
+## Regenerating `demo-persistence-pair.gif`
+
+Re-rendering needs Pillow only (no box):
+
+```sh
+python3 scripts/generate_demo_assets.py \
+  --asset persistence --out assets/demo-persistence-pair.gif
+```
+
+Re-capturing (refreshes the fixture; needs SSH to spark-vm). The
+`[X]` in the pgrep pattern keeps pgrep from matching its own command
+line; `date -Iseconds` supplies the tz-aware `captured_at`; append the
+box's UTC offset to the `lstart` value for `xvfb_started`:
+
+```sh
+ssh ntindle@spark-vm 'PID=$(pgrep -f "[X]vfb :98" | head -1); \
+  echo "PID=$PID"; \
+  ps -o pid,etime,lstart,cmd -p "$PID"; \
+  uptime; \
+  ps -o pid,lstart -p "$PID"; \
+  tmux ls 2>/dev/null; \
+  date -Iseconds'
+# map the sections to fixture keys, in order:
+#   birth.stdout   <- ps -o pid,etime,lstart,cmd output
+#   uptime.stdout  <- uptime output
+#   live.stdout    <- ps -o pid,lstart output
+#   tmux.stdout    <- tmux ls output
+#   xvfb_pid       <- the PID= line
+#   xvfb_started   <- the lstart value + the box's UTC offset
+#                    (e.g. 2026-09-16T02:07:35-05:00)
+#   captured_at    <- the date -Iseconds output
+# save as assets/persistence-capture-<date>.json, then render with:
+python3 scripts/generate_demo_assets.py \
+  --asset persistence --fixture persistence-capture-<date>.json \
+  --out assets/demo-persistence-pair.gif
+```
+
+Regeneration overwrites the GIF in place — the file in the repo is the
+current final. Never fabricate the capture: the fixture is the audit
+trail.
 
 ## Provenance of `demo-cred-ui-phone.gif`
 

@@ -136,8 +136,9 @@ doc specifies only the build-side additions:
   the `<meta name="description">` (non-OG), `og:url`, `og:type`, `og:title`,
   `og:description` (scoped to *this
   page*, no product-wide trackers claim), `og:image` (the persistence pair
-  from the demo-assets plan — `assets/README.md` asset 3, currently a
-  follow-up; the page build produces `og-persistence-pair.png`,
+  from the demo-assets plan — `assets/README.md` asset 3, now shipped as
+  `assets/demo-persistence-pair.gif`; the page build derives
+  `og-persistence-pair.png` from it — reuse, don't reshoot,
   first-party hosted, no query-string trackers), `og:image:alt`,
   `twitter:card`. No `fb:app_id`, no pre-claimed handles.
 - The two CTAs from the flow map: primary "Join the waitlist"
@@ -475,9 +476,10 @@ operator item it is.
 
 ## 11. Follow-ups (not this run)
 
-- Demo-assets plan asset 3 (the persistence pair PNG — `assets/README.md`):
-  the OG image build produces it; reuse, don't reshoot
-  (`FUNNEL_MEASUREMENT.md` §5, PR #99).
+- Demo-assets plan asset 3 (the persistence pair — `assets/README.md`,
+  now shipped as `assets/demo-persistence-pair.gif`):
+  the OG image build derives `og-persistence-pair.png` from it; reuse,
+  don't reshoot (`FUNNEL_MEASUREMENT.md` §5, PR #99).
 - A/B candidates (`LANDING_PAGE_COPY.md` §7) become testable after 4 weeks
   of baseline primary traffic (`FUNNEL_MEASUREMENT.md` §9, PR #99).
 - The H3 §11 open questions the signup UI inherits (re-verify the list at

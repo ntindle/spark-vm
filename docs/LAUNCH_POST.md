@@ -20,6 +20,8 @@ Publish-ready launch copy for the open-source release of
 > - **A computer that persists.** Files, long-running jobs, and the desktop
 >   are still there tomorrow. No session clock to beat.
 >
+>   ![The same desktop session, days apart: Xvfb :98's birth record, then the same pid still alive with its job sessions intact.](../assets/demo-persistence-pair.gif)
+>
 >   ![One command spawns a job; the session stays up — status, 20+ minutes later, still healthy.](../assets/demo-musejob-watch.gif)
 > - **A credential proxy.** Your agent writes `hsurr:<name>` placeholders;
 >   the proxy swaps them for real secrets at the last moment, on
