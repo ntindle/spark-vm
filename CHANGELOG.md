@@ -37,6 +37,16 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Waitlist page build, slice 2: the waitlist service backend — the form
+  endpoint (honeypot and timing-trap defenses that accept spam silently,
+  per-IP rate limiting, email normalization and dedup), the double-opt-in
+  confirm flow (render-only link page, one-click confirm, single-use
+  HMAC-signed tokens with 14-day expiry, the 3-per-day email cap), and
+  funnel-event logging the metrics script already consumes. The operator
+  key and data dir come from environment variables, never the repo. Still
+  not deployable: reminder/drop jobs, the email-parsing path, invites,
+  and forget-me land next; the page ships only when the full
+  waitlist-operations checklist is green (#165)
 - Waitlist page build, slice 1: the static front end of the waitlist-era web
   surface — the landing page typeset from the approved launch copy, a
   dedicated `/waitlist` form page with the abuse-resistant signup form
@@ -51,19 +61,6 @@ This changelog only works if entries land with the change, not after it:
   rules (no hosted-launch or pricing commitments until the launch is
   executable), and a sample post
   ([#162](https://github.com/ntindle/spark-vm/pull/162))
-- Gate fixture installer for the image-build gate: `install-gate-fixture.sh`
-  installs the public non-secret dummy credential under the inference
-  proxy's fixed `llm-api` name through the standard credential writers,
-  binds and allowlists the loopback echo host (including the inference
-  proxy's own SSRF allow file, so the main proxy's egress guard is
-  untouched), starts the loopback echo fixture, and runs the harness auth
-  probe in gate mode to prove the swap path — fail-closed against
-  overwriting a real credential (the guard blind-verifies the stored
-  value is the public dummy via `proxy/cred-store-verify-inference`,
-  never reading it), with the fixture teardown contract owned
-  by the image-build gate / provision-time injector before any real
-  credential lands
-  ([#126](https://github.com/ntindle/spark-vm/pull/126))
 - Funnel query pack for the waitlist operator: a log-derived, no-cookie,
   no-tracker weekly report (page conversion, CTA click-through by section,
   interim raw vs DMARC-aligned confirm rate with the manufactured-row spray

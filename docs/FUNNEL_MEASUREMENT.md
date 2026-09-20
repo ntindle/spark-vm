@@ -208,7 +208,7 @@ human interest. The idempotent re-click `WAITLIST_OPERATIONS.md` §4 specifies
   spot — you're joining as `<masked>`" plus one button, "Yes, hold my
   place." **No state change on GET.** `<masked>` is the first 3 characters
   of the owner's local part plus "…" (e.g. `spa…`) — never the full local
-  part, never the domain. If the local part is shorter than 3 characters,
+  part, never the domain. If the local part is 3 characters or fewer,
   render `•••` (mask fully) instead — the mask never discloses the full
   local part at any length. The confirm page submits via plain form POST, so
   confirmation needs no JavaScript.
