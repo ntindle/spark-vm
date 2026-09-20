@@ -106,6 +106,11 @@ This changelog only works if entries land with the change, not after it:
   instead of typing into the void
   ([#45](https://github.com/ntindle/spark-vm/pull/45), fixes
   [#4](https://github.com/ntindle/spark-vm/issues/4))
+- Setup no longer teaches a shell-history-leaking secret install: the
+  `cred set` examples now use the no-echo prompt (or `read -rs` when the
+  no-echo prompt isn't convenient) so typed values never land in shell
+  history
+  (fixes [#89](https://github.com/ntindle/spark-vm/issues/89))
 
 ### Security
 - Proxy hardening round
