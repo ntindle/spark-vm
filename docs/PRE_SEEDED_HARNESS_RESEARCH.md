@@ -1,8 +1,15 @@
 # Pre-seeded harness research (R2)
 
-**Status:** research + pre-seed contract. The implementation (golden-image
-build, provision-time injector, auth probe) is a build-loop `feature` item;
-this doc is its research half and its spec input.
+**Status:** research + pre-seed contract, implementation in slices. **Slice 1
+SHIPPED 2026-09-19** (`harness/`): `harness-auth-probe` (the R1 §5 probe —
+gate/provision modes, Bearer wire-shape assertion, placeholder-never-leaks
+assertion), `generate-image-manifest.sh` + `check-image-manifest.sh`
+(golden-image manifest + the injector's fail-closed preflight), 21 hermetic
+tests. Remaining for later feature slices: gate fixture installer (+
+gate-fixture cleanup), provision-time injector, image gate, R1 script green.
+The remaining implementation (provision-time injector, gate fixture
+installer, image gate) is build-loop `feature` work; this doc remains the
+spec input for it.
 **Feeds:** `docs/FIRST_TEN_MINUTES_SPEC.md` §5 (the harness pre-seed contract
 is R2's interface — this doc fills it in; the spec is unmerged, PR #49 @
 `3788907` — this contract is pinned to that revision, re-check the section

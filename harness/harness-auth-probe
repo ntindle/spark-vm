@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""harness-auth-probe — the non-interactive harness auth check (R1 spec §5).
+
+Contract (from docs/FIRST_TEN_MINUTES_SPEC.md §5, defined per harness by R2
+in docs/PRE_SEEDED_HARNESS_RESEARCH.md §5):
+
+    </dev/null timeout 10 <harness-auth-probe>
+
+Exit 0, zero prompts, stdin closed, 10-second external cap. Verifies, in
+order:
+  (a) the tenant runtime's model calls route through the inference proxy
+      (:18081) and the proxy swaps in a valid credential;
+  (b) confirmd answers (the approvals path the first task needs is up).
+
+Modes:
+  gate      — image-build gate. The CLI is pointed at the gate fixture's
+              echo host through the inference proxy with the public dummy
+              placeholder (hsurr:gate-dummy). The echo server records the
+              Authorization header the origin received; the probe asserts
+              the swapped value arrived with the exact
+              "Authorization: Bearer <...>" wire shape and that the
+              placeholder never reached the origin. The CLI's own exit code
+              is informational only here: the echo fixture is not a model
+              and its response body is not a completion — what matters is
+              the swapped header reaching the origin.
+  provision — provision-time check on a live tenant box. The CLI is pointed
+              at the provider through the inference proxy with the tenant's
+              injected placeholder (hsurr:llm-api). There is no echo log on
+              the real provider, so the assertion is the CLI call succeeding:
+              the provider accepted the swapped real key.
+              Failure classes are distinguishable by design: exit 3 is an
+              environment/fixture-install problem (CLI missing, fixture
+              absent, echo log unreadable); a gate-mode exit 1 is an
+              image-path problem (CLI ignoring the proxy env, placeholder
+              reaching the origin unswapped, a hung CLI vehicle, or the
+              fixture itself misinstalled); a provision-mode exit 1 is a
+              credential-acceptance problem (provider rejected the swapped
+              key — a down proxy on the tenant box is not excluded, so treat
+              repeated provision failures as image/infra, not just wrong
+              credential).
+
+The probe never handles a real secret: every credential it names is an
+hsurr:<name> placeholder. The real value is swapped in by the proxy at
+egress and never touches this process.
+
+Routing: the CLI reaches the inference proxy as a forward proxy via
+HTTPS_PROXY/HTTP_PROXY env (the swap-inference mitmdump runs in forward
+mode; the registry matches on the CONNECT target host). NO_PROXY/no_proxy
+are stripped from the child's environment so nothing silently bypasses the
+proxy. Whether the Muse CLI honors proxy env vars is validated by the
+gate-mode integration run: if it does not, no records reach the echo log
+and the probe fails closed naming the routing attempted.
+
+Exit codes: 0 ok · 1 check failed · 2 usage/config error · 3 environment
+error (fail-closed: muse CLI missing, fixture absent, unreadable echo log).
+"""
+
+import argparse
+import json
+import os
+import shutil
+import ssl
+import subprocess
+import sys
+import time
+import urllib.request
+
+CLI_TIMEOUT_S = 6.0       # budget for the CLI vehicle call (gate + provision)
+CONFIRMD_TIMEOUT_S = 3.0  # budget for the confirmd liveness check
+
+EXIT_OK = 0
+EXIT_CHECK_FAILED = 1
+EXIT_USAGE = 2
+EXIT_ENV = 3
+
+
+def die(code, msg):
+    print(f"harness-auth-probe: {msg}", file=sys.stderr)
+    return code
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(
+        prog="harness-auth-probe",
+        description="R2 non-interactive harness auth check (R1 §5 contract).",
+    )
+    p.add_argument("--mode", choices=("gate", "provision"),
+                   default=os.environ.get("PROBE_MODE", "gate"))
+    return p.parse_args(argv)
+
+
+def child_env(proxy, key_name):
+    """Environment for the CLI vehicle: placeholder key + forced proxy routing."""
+    env = dict(os.environ)
+    env["META_API_KEY"] = f"hsurr:{key_name}"
+    env["HTTPS_PROXY"] = proxy
+    env["HTTP_PROXY"] = proxy
+    env["https_proxy"] = proxy
+    env["http_proxy"] = proxy
+    # Never let a bypass list silently route around the swapping proxy.
+    for var in ("NO_PROXY", "no_proxy"):
+        env.pop(var, None)
+    return env
+
+
+def run_cli(muse_bin, base_url, proxy, key_name):
+    """Run the CLI vehicle. Returns (returncode, stdout_tail, stderr_tail, timed_out)."""
+    cmd = [muse_bin, "exec", "--provider", "meta",
+           "--base-url", base_url,
+           "--reasoning-effort", "minimal", "ping"]
+    try:
+        proc = subprocess.run(
+            cmd, env=child_env(proxy, key_name),
+            stdin=subprocess.DEVNULL,          # contract: stdin closed
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=CLI_TIMEOUT_S, check=False, text=True,
+        )
+        return proc.returncode, proc.stdout[-2000:], proc.stderr[-2000:], False
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or b"")
+        err = (e.stderr or b"")
+        if isinstance(out, bytes):
+            out, err = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+        return None, out[-2000:], err[-2000:], True
+    except OSError as e:
+        return None, "", f"failed to execute {muse_bin}: {e}", False
+
+
+def read_new_records(echo_log, since_size):
+    """Read echo-log records appended since since_size. Fail closed on unreadable log."""
+    try:
+        with open(echo_log, "rb") as f:
+            f.seek(since_size)
+            data = f.read()
+    except OSError as e:
+        return None, f"cannot read echo log {echo_log}: {e}"
+    records = []
+    for line in data.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            return None, f"echo log {echo_log} contains a non-JSON line"
+    return records, None
+
+
+def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped):
+    try:
+        # If the log is truncated between getsize and read, the seek below
+        # lands past EOF and yields an empty read — fail-closed "no requests".
+        since_size = os.path.getsize(echo_log)
+    except OSError as e:
+        return die(EXIT_ENV, f"gate fixture echo log not readable: {echo_log}: {e}")
+
+    rc, out, err, timed_out = run_cli(muse_bin, base_url, proxy, key_name)
+    print(f"[gate] cli vehicle rc={rc} timed_out={timed_out} "
+          f"stdout_tail={out[-300:]!r} stderr_tail={err[-300:]!r}", file=sys.stderr)
+    if timed_out:
+        # A hang is not explained by the fixture's non-model response body
+        # (which justifies ignoring a nonzero exit): a CLI that cannot finish
+        # a model call against a localhost fixture in CLI_TIMEOUT_S is a
+        # broken image. R1 §5: hang = fail.
+        return die(EXIT_CHECK_FAILED,
+                   f"cli vehicle timed out after {CLI_TIMEOUT_S}s against the "
+                   f"gate fixture via {proxy}: the image's CLI cannot complete "
+                   "a model call — failing the gate.")
+
+    records, err = read_new_records(echo_log, since_size)
+    if err:
+        return die(EXIT_ENV, err)
+    auths = [r.get("authorization", "") for r in records if isinstance(r, dict)]
+    if not auths:
+        return die(EXIT_CHECK_FAILED,
+                   "no requests reached the echo fixture through the inference "
+                   f"proxy (routing attempted: HTTPS_PROXY={proxy}). Either the "
+                   "gate fixture is not installed, the proxy is down, or the "
+                   "muse CLI ignored the proxy env — investigate before trusting "
+                   "this image.")
+    placeholder = f"hsurr:{key_name}"
+    want = f"Bearer {expected_swapped}"
+    bad = [a for a in auths if a != want or placeholder in a]
+    if bad:
+        return die(EXIT_CHECK_FAILED,
+                   f"{len(bad)}/{len(auths)} origin-received Authorization "
+                   "headers failed the wire-shape assertion (want exactly "
+                   f"{want!r}; placeholder {placeholder!r} "
+                   "must never reach the origin).")
+    print(f"[gate] auth path ok: {len(auths)} request(s), swapped credential "
+          "reached the origin with the Bearer wire shape.", file=sys.stderr)
+    return EXIT_OK
+
+
+def check_provision(muse_bin, base_url, proxy, key_name):
+    # Known limitation: provision mode has no echo log (the real provider),
+    # so it trusts the CLI's exit code. A CLI that exited 0 without sending
+    # anything would pass here; gate mode is protected against that class by
+    # the echo-log assertion. The failure message below keeps the ambiguity
+    # explicit rather than claiming more than the signal supports.
+    rc, out, err, timed_out = run_cli(muse_bin, base_url, proxy, key_name)
+    if timed_out:
+        return die(EXIT_CHECK_FAILED,
+                   f"cli vehicle timed out after {CLI_TIMEOUT_S}s against "
+                   f"{base_url} via {proxy}: the injected credential path is "
+                   "not answering.")
+    if rc != 0:
+        return die(EXIT_CHECK_FAILED,
+                   f"cli vehicle exited {rc} against the provider via the "
+                   f"inference proxy — the provider did not accept the swapped "
+                   f"credential (injected {key_name!r} is wrong or the proxy "
+                   f"is down). stderr_tail={err[-300:]!r}")
+    print("[provision] auth path ok: provider accepted the swapped credential.",
+          file=sys.stderr)
+    return EXIT_OK
+
+
+def check_confirmd(confirmd_url):
+    """Liveness of the approvals path: any HTTP response counts as answering."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE  # liveness, not identity (self-signed cert)
+    # Bypass any ambient proxy env: this check is always same-host.
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=ctx),
+    )
+    req = urllib.request.Request(confirmd_url.rstrip("/") + "/", method="GET")
+    try:
+        with opener.open(req, timeout=CONFIRMD_TIMEOUT_S) as resp:
+            status = resp.status
+    except Exception as e:  # noqa: BLE001 — any failure means "not answering"
+        return die(EXIT_CHECK_FAILED, f"confirmd did not answer at "
+                                      f"{confirmd_url}: {e!r}")
+    print(f"[confirmd] answers at {confirmd_url} (HTTP {status}).", file=sys.stderr)
+    return EXIT_OK
+
+
+def main(argv=None):
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    proxy = os.environ.get("PROBE_PROXY", "http://127.0.0.1:18081")
+    muse_bin = os.environ.get("PROBE_MUSE_BIN", "muse")
+    confirmd_url = os.environ.get("PROBE_CONFIRMD_URL", "https://127.0.0.1:8443")
+    t0 = time.monotonic()
+
+    muse_path = shutil.which(muse_bin)
+    if not muse_path:
+        return die(EXIT_ENV, f"muse CLI not found as {muse_bin!r} — the image "
+                             "must bake the CLI before this probe can pass.")
+
+    if args.mode == "gate":
+        base_url = os.environ.get("PROBE_BASE_URL")
+        echo_log = os.environ.get("PROBE_ECHO_LOG")
+        expected = os.environ.get("PROBE_EXPECTED_SWAPPED")
+        key_name = os.environ.get("PROBE_KEY_NAME", "gate-dummy")
+        missing = [n for n, v in (("PROBE_BASE_URL", base_url),
+                                  ("PROBE_ECHO_LOG", echo_log),
+                                  ("PROBE_EXPECTED_SWAPPED", expected)) if not v]
+        if missing:
+            return die(EXIT_USAGE, f"gate mode requires {', '.join(missing)} "
+                                   "(the gate installs the fixture; see "
+                                   "harness/README.md).")
+        rc = check_gate(muse_path, base_url, proxy, key_name, echo_log, expected)
+    else:
+        base_url = os.environ.get("PROBE_BASE_URL")
+        if not base_url:
+            return die(EXIT_USAGE, "provision mode requires PROBE_BASE_URL "
+                                   "(the provider base URL).")
+        key_name = os.environ.get("PROBE_KEY_NAME", "llm-api")
+        rc = check_provision(muse_path, base_url, proxy, key_name)
+
+    if rc != EXIT_OK:
+        return rc
+    rc = check_confirmd(confirmd_url)
+    if rc != EXIT_OK:
+        return rc
+    dt = time.monotonic() - t0
+    print(f"harness-auth-probe: OK ({args.mode} mode, {dt:.1f}s)", file=sys.stderr)
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())
