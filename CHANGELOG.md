@@ -24,9 +24,9 @@ This changelog only works if entries land with the change, not after it:
 3. **At release time**, the release commit (the `VERSION` bump — see
    `docs/VERSIONING.md`, "Cutting a release") moves the whole
    `## [Unreleased]` section into `## [0.2.0] - YYYY-MM-DD` (pattern:
-   `## [x.y.z] - YYYY-MM-DD`), adds the compare links at the bottom of
-   this file, and leaves a fresh empty `## [Unreleased]` section behind
-   for the next PR.
+   `## [x.y.z] - YYYY-MM-DD`), adds the compare links in the footer
+   scaffold at the bottom of this file (uncomment and fill it in), and
+   leaves a fresh empty `## [Unreleased]` section behind for the next PR.
 4. Docs are a first-class product here, so anything merged under `docs/`
    gets an entry like a feature. Notes that never land in the repo — e.g.
    the loop's working notes in its `agent_notes/` workspace (not part of
@@ -112,3 +112,10 @@ This changelog only works if entries land with the change, not after it:
   ([#18](https://github.com/ntindle/spark-vm/pull/18))
 - Fixed critical and high findings from the security code review
   ([`dd382af`](https://github.com/ntindle/spark-vm/commit/dd382af))
+
+<!-- Compare-link footer (ritual rule 3): at release time, uncomment and fill
+     in. Keep [unreleased] pointing at HEAD; add one link per release, newest
+     first. (Keep-a-Changelog convention: lowercase ref names.)
+[unreleased]: https://github.com/ntindle/spark-vm/compare/vX.Y.Z...HEAD
+[x.y.z]: https://github.com/ntindle/spark-vm/compare/vW.X.Y...vX.Y.Z
+-->
