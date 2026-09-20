@@ -23,7 +23,7 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 | `bin/muse-job` | `/home/ntindle/bin/muse-job` (on PATH) |
 | `bin/muse-job-watchdog` | `/home/ntindle/bin/muse-job-watchdog` |
 | `bin/muse-job-sweep` | `/home/ntindle/bin/muse-job-sweep` |
-| `plugin/` | `/home/ntindle/muse-job-plugin/` (source) → installed as user-scope plugin via `muse plugins install --force` + `approve` |
+| `plugin/` | `/home/ntindle/muse-job-plugin/` (source) → user-scope plugin: `muse plugins install ./muse-job/plugin` (run from `~/spark-vm`), then `muse plugins approve` (`--force` on reinstall) |
 
 Redeploy: copy the files over, then reinstall the plugin with `--force`
 (plugin installs copy, not symlink).
