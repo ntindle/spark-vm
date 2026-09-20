@@ -108,6 +108,11 @@ This changelog only works if entries land with the change, not after it:
   space-safe secret scan ([#33](https://github.com/ntindle/spark-vm/pull/33))
 
 ### Fixed
+- Credential registration is now atomic: registering a credential together
+  with its host bindings lands in a single locked write, so a mid-save
+  failure can no longer leave it registered with only some of its intended
+  hosts (fixes [#116](https://github.com/ntindle/spark-vm/issues/116) and
+  [#146](https://github.com/ntindle/spark-vm/issues/146))
 - `muse-job` detects a dead terminal pane and refuses to steer into it
   instead of typing into the void
   ([#45](https://github.com/ntindle/spark-vm/pull/45), fixes

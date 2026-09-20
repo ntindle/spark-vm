@@ -293,13 +293,12 @@ def api_set(data):
     rc, _, err = run(STORE_SET + [name], inp=secret)
     if rc != 0:
         raise RuntimeError("store failed: %s" % err.strip()[-200:])
-    rc, _, err = run(REGISTRY_SET + ["set", name, entry, pjson])
+    # Atomic register + host binding (#116): one writer call, so a
+    # mid-loop writer failure can never leave the credential registered
+    # with only a prefix of its intended hosts.
+    rc, _, err = run(REGISTRY_SET + ["set-with-hosts", name, entry, pjson] + hosts)
     if rc != 0:
         raise RuntimeError("register failed (secret IS stored): %s" % err.strip()[-200:])
-    for h in hosts:
-        rc, _, err = run(REGISTRY_SET + ["add-host", name, h])
-        if rc != 0:
-            raise RuntimeError("add-host %s failed: %s" % (h, err.strip()[-200:]))
     return {"ok": True, "name": name}
 
 

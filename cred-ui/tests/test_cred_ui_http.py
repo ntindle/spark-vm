@@ -168,6 +168,29 @@ def test_api_host_rejects_non_string_host(monkeypatch, bad):
 # --- delete failure must surface ------------------------------------------
 
 
+def test_api_set_is_one_atomic_registry_call(monkeypatch):
+    """#116: api_set must register + bind hosts in a single
+    `set-with-hosts` writer call — never a set + N x add-host sequence,
+    which could leave a credential registered with only a prefix of its
+    intended hosts on mid-loop writer failure."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    out = cred_ui.api_set({
+        "name": "gh", "value": "tok", "entry": "access_token",
+        "placement": "bearer_header", "placement_arg": "",
+        "hosts": ["api.github.com", ".example.com"],
+    })
+    assert out == {"ok": True, "name": "gh"}
+    registry_calls = [c for c in calls if "cred-registry-set" in " ".join(c)]
+    assert len(registry_calls) == 1
+    action = registry_calls[0]
+    # REGISTRY_SET = ["sudo", "-n", "-u", "swapd", <writer>]: action at [5].
+    assert action[5] == "set-with-hosts"
+    assert action[6:9] == ["gh", "access_token", '"bearer_header"']
+    assert action[9:] == ["api.github.com", ".example.com"]
+
+
 def test_api_delete_surfaces_store_failure(monkeypatch):
     calls = []
 

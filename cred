@@ -244,19 +244,15 @@ def cmd_register(args):
             raise CredentialError(
                 "usage: cred register <name> [--entry <entry>] [%s] "
                 "[--host <h>]..." % PLACEMENT_USAGE)
-    p = run_as_swapd(["/usr/local/bin/cred-registry-set", "set",
-                      name, entry, json.dumps(placement)])
+    # Atomic register + host binding (#146): one writer call, so a
+    # mid-loop writer failure can never leave the credential registered
+    # with only a prefix of its intended hosts.
+    p = run_as_swapd(["/usr/local/bin/cred-registry-set", "set-with-hosts",
+                      name, entry, json.dumps(placement)] + hosts)
     if p.returncode != 0:
         err = p.stderr.decode("utf-8", "replace").strip()
         raise CredentialError(err or "cred-registry-set failed")
     sys.stdout.write(p.stdout.decode("utf-8", "replace"))
-    for h in hosts:
-        p = run_as_swapd(["/usr/local/bin/cred-registry-set", "add-host",
-                          name, h])
-        if p.returncode != 0:
-            err = p.stderr.decode("utf-8", "replace").strip()
-            raise CredentialError(err or "cred-registry-set failed")
-        sys.stdout.write(p.stdout.decode("utf-8", "replace"))
 
 
 def cmd_unregister(args):

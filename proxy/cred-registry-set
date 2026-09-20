@@ -2,6 +2,8 @@
 # cred-registry-set — narrow writer for the swapd credential registry.
 # Invoked as swapd via sudo:
 #   cred-registry-set set <name> <entry> <placement-json>
+#   cred-registry-set set-with-hosts <name> <entry> <placement-json> [host]...
+#       atomic registration + host binding in one locked write (#146, #116)
 #   cred-registry-set remove <name> [entry]
 #   cred-registry-set add-host <name> <host>
 #   cred-registry-set remove-host <name> <host>
@@ -27,12 +29,14 @@ def fail(msg):
     sys.exit(1)
 
 args = sys.argv[1:]
-ACTIONS = ("set", "remove", "add-host", "remove-host",
+ACTIONS = ("set", "set-with-hosts", "remove", "add-host", "remove-host",
            "add-method", "remove-method", "clear-method-limit",
            "add-path", "remove-path", "clear-path-limit",
            "set-scrub")
 if not args or args[0] not in ACTIONS:
-    fail("usage: set <name> <entry> <placement-json> | remove <name> [entry] "
+    fail("usage: set <name> <entry> <placement-json> "
+         "| set-with-hosts <name> <entry> <placement-json> [host]... "
+         "| remove <name> [entry] "
          "| add-host <name> <host> | remove-host <name> <host> "
          "| add-method <name> <METHOD> | remove-method <name> <METHOD> "
          "| clear-method-limit <name> "
@@ -88,6 +92,27 @@ def check_entry(s):
     if s in RESERVED_ENTRIES:
         fail("entry name %r is reserved" % (s,))
 
+def parse_placement(pjson):
+    """Parse + validate a placement JSON document (shared by set and
+    set-with-hosts so both actions accept exactly the same grammar)."""
+    try:
+        placement = json.loads(pjson)
+    except ValueError:
+        fail("placement is not valid JSON")
+    ok = (
+        placement in ("bearer_header", "url_path_segment")
+        or (
+            isinstance(placement, dict)
+            and len(placement) == 1
+            and list(placement)[0] in ("custom_header", "query_param", "url_path_segment")
+            and isinstance(list(placement.values())[0], str)
+            and re.match(r"^[A-Za-z0-9_.-]+$", list(placement.values())[0])
+        )
+    )
+    if not ok:
+        fail("invalid placement %r" % (placement,))
+    return placement
+
 def save():
     # Crash-durable: mkstemp in the same directory (0600), fsync the
     # file, rename atomically, fsync the directory.
@@ -118,25 +143,37 @@ if action == "set":
     _, name, entry, pjson = args
     check(name, "name")
     check_entry(entry)
-    try:
-        placement = json.loads(pjson)
-    except ValueError:
-        fail("placement is not valid JSON")
-    ok = (
-        placement in ("bearer_header", "url_path_segment")
-        or (
-            isinstance(placement, dict)
-            and len(placement) == 1
-            and list(placement)[0] in ("custom_header", "query_param", "url_path_segment")
-            and isinstance(list(placement.values())[0], str)
-            and re.match(r"^[A-Za-z0-9_.-]+$", list(placement.values())[0])
-        )
-    )
-    if not ok:
-        fail("invalid placement %r" % (placement,))
+    placement = parse_placement(pjson)
     reg.setdefault(name, {})[entry] = {"placement": placement}
     save()
     print("registered '%s' entry '%s'" % (name, entry))
+elif action == "set-with-hosts":
+    # Atomic register + host binding (#146, #116): every argument is
+    # validated BEFORE any mutation, then the whole operation lands in
+    # one locked read-modify-write. Frontends must use this instead of
+    # a set + N x add-host sequence, which could leave a credential
+    # registered with only a prefix of its intended hosts on mid-loop
+    # writer failure.
+    if len(args) < 4:
+        fail("usage: cred-registry-set set-with-hosts <name> <entry> "
+             "<placement-json> [host]...")
+    _, name, entry, pjson = args[:4]
+    check(name, "name")
+    check_entry(entry)
+    placement = parse_placement(pjson)
+    hosts = [check_host(h) for h in args[4:]]
+    entry_spec = reg.setdefault(name, {})
+    if not isinstance(entry_spec, dict):
+        fail("registry entry for '%s' is not an object" % (name,))
+    entry_spec[entry] = {"placement": placement}
+    bound = entry_spec.setdefault("allowed_hosts", [])
+    if not isinstance(bound, list):
+        fail("allowed_hosts for '%s' is not a list" % (name,))
+    for h in hosts:
+        if h not in bound:
+            bound.append(h)
+    save()
+    print("registered '%s' entry '%s' with %d host(s)" % (name, entry, len(bound)))
 elif action == "remove":
     if len(args) not in (2, 3):
         fail("usage: cred-registry-set remove <name> [entry]")
