@@ -209,3 +209,68 @@ def test_bridge_line_when_instrumented(tmp_path):
     # 1 linked / 3 confirmed-from-window, never folded into the primary.
     assert "identity-linked / confirmed waitlist entries: 1/3 = 33.3%" in proc.stdout
     assert "not instrumented yet" not in proc.stdout
+
+
+def test_rollup_windows_on_day_bucket_not_emission(tmp_path):
+    # The nightly rollup job routinely emits after midnight: a rollup for
+    # bucket 2026-09-13 emitted at 2026-09-14T00:05 must count for 2026-09-13.
+    rows = [
+        {"event": "page_view_day", "at": "2026-09-14T00:05:00Z",
+         "ref": "2026-09-13", "attrs": {"count": 40}},
+        {"event": "page_view_day", "at": "2026-09-14T00:05:00Z",
+         "ref": "2026-09-14", "attrs": {"count": 10}},
+    ]
+    proc = run(write_events(tmp_path, rows), "--since", "2026-09-13",
+               "--until", "2026-09-13")
+    assert proc.returncode == 0, proc.stderr
+    assert "confirmed (submitted in window) / unique visitors: 0/40 = 0.0%" \
+        in proc.stdout
+
+
+def test_bad_day_bucket_rejected(tmp_path):
+    rows = [
+        {"event": "page_view_day", "at": "2026-09-14T00:00:00Z", "ref": "r1",
+         "attrs": {"count": 1}}
+    ]
+    proc = run(write_events(tmp_path, rows), *WINDOW)
+    assert proc.returncode == 2
+    assert "bad day-bucket ref 'r1'" in proc.stderr
+
+
+def test_reminder_sent_alone_is_not_a_reminder_conversion(tmp_path):
+    # §7's numerator is "confirmed with via=reminder" — a reminder merely
+    # sent does not credit the reminder program with the original link's
+    # conversion.
+    rows = [
+        {"event": "waitlist_submitted", "at": "2026-09-14T10:00:00Z",
+         "ref": "r1", "attrs": {"path": "email", "inbound_auth": True}},
+        {"event": "confirm_sent", "at": "2026-09-14T10:05:00Z", "ref": "r1",
+         "attrs": {}},
+        {"event": "reminder_sent", "at": "2026-09-21T11:00:00Z", "ref": "r1",
+         "attrs": {}},
+        {"event": "confirmed", "at": "2026-09-22T09:00:00Z", "ref": "r1",
+         "attrs": {"via": "original"}},
+    ]
+    proc = run(write_events(tmp_path, rows), *WINDOW)
+    assert proc.returncode == 0, proc.stderr
+    assert "confirmed via reminder / reminder_sent: 0/1 = 0.0%" in proc.stdout
+
+
+def test_unknown_src_warns_on_stderr(tmp_path):
+    rows = [
+        {"event": "cta_click", "at": "2026-09-14T00:00:00Z", "ref": "2026-09-14",
+         "attrs": {"src": "heros", "count": 3}},
+    ]
+    proc = run(write_events(tmp_path, rows), *WINDOW)
+    assert proc.returncode == 0, proc.stderr
+    assert "unknown cta_click src 'heros'" in proc.stderr
+    # ... but the bucket still counts (warn, don't drop).
+    assert "  heros: 3" in proc.stdout
+
+
+def test_negative_duration_disclosure(tmp_path):
+    proc = run(write_events(tmp_path), *WINDOW)
+    assert proc.returncode == 0, proc.stderr
+    # r10's claimed-before-invite row is excluded from the medians and
+    # disclosed in the report, not silently dropped.
+    assert "medians exclude 1 negative-duration row(s)" in proc.stdout

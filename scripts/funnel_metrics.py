@@ -61,6 +61,11 @@ KNOWN_EVENTS = {
 
 ROLLUP_EVENTS = {"page_view_day", "crawler_hits", "cta_click"}
 
+# The canonical CTA section sources the page build wires (doc section 3.2).
+# Anything else is passed through but flagged on stderr — a typoed
+# ?src= would otherwise silently open a new bucket.
+KNOWN_SRCS = {"hero", "trust", "faq", "final", "selfhost"}
+
 
 def parse_ts(value):
     """Parse an ISO-8601 timestamp into an aware datetime; raise ValueError."""
@@ -102,9 +107,27 @@ def load_events(path):
                     "at": parse_ts(obj.get("at")),
                     "ref": obj.get("ref"),
                     "attrs": obj.get("attrs") or {},
+                    "lineno": lineno,
                 }
             )
     return rows
+
+
+def rollup_day(row):
+    """The day-bucket a rollup row belongs to — the ref, not the emission time.
+
+    Rollups are computed by a nightly job that routinely runs after
+    midnight, so the canonical date key is the day-bucket in `ref`
+    (doc sections 3.1 and 3.4), not `at`.
+    """
+    ref = row["ref"]
+    try:
+        return date.fromisoformat(ref)
+    except (ValueError, TypeError):
+        raise ValueError(
+            f"rollup event {row['event']} (line {row['lineno']}): "
+            f"bad day-bucket ref {ref!r}"
+        )
 
 
 def rollup_count(rows, event):
@@ -164,7 +187,27 @@ def compute(rows, since, until):
     def in_window(r):
         return since <= r["at"].date() <= until
 
-    rollups = [r for r in rows if in_window(r)]
+    # Rollups window on their day-bucket (the nightly job emits after
+    # midnight); row events window on the anchor event's date.
+    rollups = [
+        r
+        for r in rows
+        if r["event"] in ROLLUP_EVENTS and since <= rollup_day(r) <= until
+    ]
+
+    def warn_src(row):
+        src = row["attrs"].get("src")
+        if src and src not in KNOWN_SRCS:
+            print(
+                f"warning: line {row['lineno']}: unknown cta_click src "
+                f"{src!r} (expected one of {sorted(KNOWN_SRCS)}) — "
+                f"possible ?src= typo on the page",
+                file=sys.stderr,
+            )
+
+    for row in rollups:
+        if row["event"] == "cta_click":
+            warn_src(row)
 
     # Primary: confirmed (submitted in window) / unique visitors in window.
     submitted_in_window = {
@@ -229,7 +272,9 @@ def compute(rows, since, until):
         - 100.0 * raw_confirmed / raw_sent
     )
 
-    # Reminder lift: confirmed via=reminder / reminder_sent, cohort-scoped.
+    # Reminder lift: confirmed WITH via=reminder / reminder_sent, cohort-
+    # scoped. The numerator keys on the via attribute alone — a reminder
+    # merely sent is not a conversion the reminder earned (doc section 7).
     reminded = {
         r["ref"]
         for r in rows
@@ -238,7 +283,7 @@ def compute(rows, since, until):
     via_reminder = {
         r["ref"]
         for r in confirmed_from_window
-        if r["attrs"].get("via") == "reminder" or r["ref"] in reminded
+        if r["attrs"].get("via") == "reminder"
     }
     pack["reminder_lift"] = (len(via_reminder), len(reminded))
 
@@ -247,11 +292,15 @@ def compute(rows, since, until):
         r["ref"]: r["at"] for r in rows if r["event"] == "invite_sent" and in_window(r)
     }
     claim_at = {r["ref"]: r["at"] for r in rows if r["event"] == "claimed"}
-    invite_claim_hours = [
-        hours_between(claim_at[ref], invite_rows[ref])
-        for ref in invite_rows
-        if ref in claim_at and claim_at[ref] >= invite_rows[ref]
-    ]
+    invite_claim_hours = []
+    invite_rot = 0
+    for ref in invite_rows:
+        if ref not in claim_at:
+            continue
+        if claim_at[ref] >= invite_rows[ref]:
+            invite_claim_hours.append(hours_between(claim_at[ref], invite_rows[ref]))
+        else:
+            invite_rot += 1
     pack["invite_claim"] = (
         len({ref for ref in invite_rows if ref in claim_at}),
         len(invite_rows),
@@ -265,12 +314,19 @@ def compute(rows, since, until):
         if r["event"] == "waitlist_submitted" and r["ref"] in submitted_in_window
     }
     confirm_at = {r["ref"]: r["at"] for r in confirmed_from_window}
-    submit_confirm_hours = [
-        hours_between(confirm_at[ref], submitted_at[ref])
-        for ref in confirm_at
-        if ref in submitted_at and confirm_at[ref] >= submitted_at[ref]
-    ]
+    submit_confirm_hours = []
+    submit_rot = 0
+    for ref in confirm_at:
+        if ref not in submitted_at:
+            continue
+        if confirm_at[ref] >= submitted_at[ref]:
+            submit_confirm_hours.append(
+                hours_between(confirm_at[ref], submitted_at[ref])
+            )
+        else:
+            submit_rot += 1
     pack["submit_confirm_median_hours"] = median_hours(submit_confirm_hours)
+    pack["negative_durations_excluded"] = invite_rot + submit_rot
 
     # Diagnostics.
     pack["crawler_hits"] = rollup_count(rollups, "crawler_hits")
@@ -361,6 +417,10 @@ def report(pack):
         "",
         "SHARE-SIGNAL (excluded from the primary denominator by construction)",
         f"  crawler_hits in window: {pack['crawler_hits']}",
+        "",
+        f"DATA HYGIENE: medians exclude {pack['negative_durations_excluded']} "
+        f"negative-duration row(s) — follow-on events that precede their "
+        f"anchor (data rot, never averaged into a latency number)",
     ]
     return "\n".join(lines) + "\n"
 
