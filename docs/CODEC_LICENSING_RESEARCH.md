@@ -73,13 +73,14 @@ video-licensing program was NOT verified this session (§8 item 7).
 the full cap for the binary modules **it builds and distributes**; downstream
 users of Cisco's binaries are covered. **The grant does NOT travel with the
 source — a self-compiled openh264 is outside Cisco's umbrella**
-[VENDOR-VERIFIED (Cisco 2013 announcement):
+[THIRD-PARTY — reported by eWeek and The Register on Cisco's 2013 announcement:
 https://www.eweek.com/networking/cisco-open-sources-h-264-codec-for-web-communications/;
 https://www.theregister.com/2013/10/30/cisco_open_source_h264_stack/;
 THIRD-PARTY on the self-build exclusion:
 https://github.com/phpboyscout/ffmpeg-wasi/blob/HEAD/docs/explanation/licensing.md].
 Cisco's stated scope was "effectively free for use in WebRTC"; whether that
-extends to hosted remote-desktop streaming is a counsel question (§8 item 3).
+extends to hosted remote-desktop streaming is a counsel question (§8 item 3),
+and the grant's 2026 currency was not verified this session (§8 item 10).
 
 **openh264 encoder capability:** BSD-2-Clause source [VENDOR-VERIFIED —
 https://github.com/cisco/openh264/blob/HEAD/README.md], but the encoder is
@@ -124,17 +125,26 @@ patents of **11 patent holders**, with the right for Google to **sublicense
 those techniques to any user of VP8 — whether the implementation is Google's
 or another entity's** — plus sublicensing for **one next-generation VPx
 codec**. MPEG LA **discontinued its effort to form a VP8 patent pool**
-[VENDOR-VERIFIED — https://9to5google.com/2013/03/07/google-licenses-mpeg-la-patents-for-vp8-video-format/;
-full text: https://www.design-reuse.com/news/202523471-google-and-mpeg-la-announce-agreement-covering-vp8-video-format/;
+[VENDOR-VERIFIED — full text of the release, reprinted at
+https://www.design-reuse.com/news/202523471-google-and-mpeg-la-announce-agreement-covering-vp8-video-format/;
+THIRD-PARTY press report:
+https://9to5google.com/2013/03/07/google-licenses-mpeg-la-patents-for-vp8-video-format/;
+Google's terms note via
 https://lists.w3.org/Archives/Public/public-html/2013Mar/0055.html].
 
 **Current standing:** no reversal or new VP8 pool found through 2026-09-20;
 the industry treats VP8 as royalty-free [THIRD-PARTY —
-https://bloggeek.me/webrtc-h264-video-codec-hardware-support/]. The WebM
-Project's patent-license pages were not re-verified this session (§8 item 9).
-The sublicense covers VP8 **implementations by anyone** — including a
-server-side encoder the fleet runs — which is the cleanest patent story of
-any codec here [INFERRED from the release text].
+https://bloggeek.me/webrtc-h264-video-codec-hardware-support/]. The deal's
+terms: [VENDOR-VERIFIED — full text of the Google/MPEG LA release, reprinted:
+https://www.design-reuse.com/news/202523471-google-and-mpeg-la-announce-agreement-covering-vp8-video-format/;
+announcement reported THIRD-PARTY by
+https://9to5google.com/2013/03/07/google-licenses-mpeg-la-patents-for-vp8-video-format/
+and Google's own terms note,
+https://lists.w3.org/Archives/Public/public-html/2013Mar/0055.html].
+The WebM Project's patent-license pages were not re-verified this session
+(§8 item 9). The sublicense covers VP8 **implementations by anyone** —
+including a server-side encoder the fleet runs — which is the cleanest patent
+story of any codec here [INFERRED from the release text].
 
 ### 2.4 VP9
 
@@ -156,9 +166,12 @@ weakens it for us (§5).
 perpetual, worldwide, non-exclusive, no-charge, **royalty-free**, irrevocable
 (except as expressly stated) patent license to its **Necessary Claims** to
 make, use, sell, offer for sale, import or distribute any Implementation"*
-[VENDOR-VERIFIED via AOM docs quoted in
-https://www.wowza.com/blog/av1-codec-aomedia-video-1-explained and
-https://github.com/neohade/aether-premiere-av1-vp9-importer/blob/HEAD/README.md].
+[VENDOR-VERIFIED — the license text itself, §1.1:
+https://aomedia.org/license/patent-license/]. Two further terms worth noting:
+§1.2.2 states the license is *directly from Licensor to Licensee* — no
+rights are received from suppliers or distributors (no pass-through);
+§1.3 is a defensive-termination clause (a licensee that asserts an
+Implementation infringes Necessary Claims loses the grant).
 **Key limit: it covers only AOMedia members' Necessary Claims.**
 Third-party claims are now materializing:
 
@@ -254,7 +267,11 @@ works only in Safari. **H.264 maximizes client reach.**
 
 ## 5. What comparable OSS projects choose
 
-One line each, with source:
+One line each, with source. **Sourcing caveat:** the project-position claims
+below are a single-source aggregation — the third-party community doc cited
+for each; the projects' own docs were not checked this session. Primary
+sourcing is a follow-up before these positions harden into architecture
+decisions.
 
 - **Selkies-GStreamer:** default/recommended software encoder is **x264enc**
   (GPL); `vp8enc` "recommended under 2K" — accepts a GPL encoder for quality;
@@ -294,6 +311,16 @@ posture is preferred. **Do not ship AV1 or HEVC for the CPU-only tier**
 (encode cost; Safari gaps). When GPU hosts exist later, add NVENC/VAAPI
 H.264 → AV1 exactly the way Sunshine/Parsec do.
 
+**Gate on counsel (§8 items 1–2): this primary-path recommendation is the
+research answer, not an approval to build on.** Do not bake `x264enc` (or
+`gst-plugins-ugly`) into fleet golden images, and do not ship monetized
+streams, until counsel items 1–2 are answered — they determine both the
+AVC-pool royalty position (unit counting; whether a paid remote-desktop
+service is "Internet Broadcast AVC Video") and the GPL distribution question
+for the image builder. The golden-image recipe is an H4 input, so this
+question will resurface when H4 unblocks. H.264 desktop bitrates also feed
+the TURN-relay bandwidth model in the transport doc §5.2.
+
 **(b) Self-hosted users:** document the same ladder in the repo: `x264enc`
 (default) → `openh264enc` (BSD, lower quality) → `vp8enc` (best patent
 story, no Safari) → hardware `nvh264enc`/`vah264enc` when a GPU exists. Keep
@@ -314,7 +341,8 @@ The product **may** say (with the cited caveat attached):
   AOMedia Patent License 1.0 — a grant that covers members' patents only;
   third-party pools (Sisvel; Access Advance's in-formation AV1 pool) exist."
 - "VP8 implementers are covered by the 2013 Google–MPEG LA sublicense
-  framework, which extends to any VP8 implementation."
+  framework, which extends to any VP8 implementation (per the 2013
+  announcement's terms; WebM license pages not re-verified — §8 item 9)."
 - "The AVC patent pool's published licensing summaries include a 100,000
   units/year royalty-free threshold (confirm current Via LA terms with
   counsel)."
@@ -349,6 +377,10 @@ The product **must not** say:
 7. **Avanci's video program** — existence/scope not verified this session.
 8. **Jurisdiction:** fleet regions (US vs EU software-patent differences).
 9. **WebM Project patent-license pages** (VP8/VP9) — re-verify current text.
+10. **Cisco openh264 grant currency:** every source verifying the grant's
+    terms this session is 2013-era — confirm the royalty arrangement is
+    still active in 2026 and Cisco still distributes prebuilt binaries with
+    the cap paid.
 
 ## 9. Sources
 
