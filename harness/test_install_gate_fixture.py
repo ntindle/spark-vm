@@ -11,10 +11,11 @@ just the happy path):
 - Fake store writer: the real proxy/cred-store-set-inference hardcodes
   the credential filename -- the inference proxy holds exactly one
   credential (finding 31) -- so the fake writes stdin to
-  ``$INFERENCE_SECRETS_DIR/llm-api`` regardless of any name. A
-  regression that renamed the fixture credential would leave the fake
-  proxy with no ``llm-api`` file and the happy-path test would fail,
-  exactly like the real ``unknown-credential`` refusal.
+  ``$INFERENCE_SECRETS_DIR/llm-api`` regardless of any name argument. A
+  regression that renamed the fixture credential would be caught two
+  ways: the happy-path test asserts the dummy lands at the fixed
+  ``llm-api`` filename, and the fake proxy's secrets[name] lookup would
+  miss -- mirroring the real ``unknown-credential`` refusal.
 - Fake registry writer: maintains the real JSON schema
   (``{"<name>": {"<entry>": {"placement": ...}, "allowed_hosts": [...]}}``,
   placement parsed with json.loads, hosts deduped) so the installer's
@@ -81,6 +82,40 @@ except Exception as e:  # noqa: BLE001 -- stub only
     sys.stderr.write("fake-muse: %r\\n" % (e,))
     sys.exit(3)
 sys.exit(0)
+"""
+
+# Fake sudo: asserts the production privilege argv (-u swapd), then
+# enforces the production sudoers allowlist (proxy/sudoers-swapd): the
+# two narrow writers, `ls` on the secrets dir, `cat` on the inference
+# registry, and `tee -a` on the two allow files. Anything else is denied
+# (exit 98), so a sudoed read that production would refuse -- e.g. a
+# regressed run_priv grep/test/tail -- fails loudly instead of being
+# masked by a permissive fake. Paths come from the test env, mirroring
+# the installer's env seams.
+FAKE_SUDO = """#!/bin/sh
+if [ "$1" != "-u" ] || [ "$2" != "swapd" ]; then
+  echo "fake-sudo: expected '-u swapd', got: $1 $2" >&2
+  exit 99
+fi
+shift 2
+case "$1" in
+  "$CRED_STORE_SET_INFERENCE"|"$CRED_REGISTRY_SET_INFERENCE") ;;
+  ls|/bin/ls|/usr/bin/ls)
+    [ "$2" = "$INFERENCE_SECRETS_DIR" ] || \
+      { echo "fake-sudo: ls denied for $2" >&2; exit 98; } ;;
+  cat|/bin/cat|/usr/bin/cat)
+    [ "$2" = "$INFERENCE_REGISTRY_FILE" ] || \
+      { echo "fake-sudo: cat denied for $2" >&2; exit 98; } ;;
+  tee|/bin/tee|/usr/bin/tee)
+    [ "$2" = "-a" ] || \
+      { echo "fake-sudo: tee denied (not append)" >&2; exit 98; }
+    case "$3" in
+      "$INFERENCE_HOSTS_ALLOW"|"$INFERENCE_SSRF_ALLOW") ;;
+      *) echo "fake-sudo: tee denied for $3" >&2; exit 98 ;;
+    esac ;;
+  *) echo "fake-sudo: denied: $1" >&2; exit 98 ;;
+esac
+exec "$@"
 """
 
 # Fake store writer: mirrors the real writer's fixed-name contract --
@@ -204,17 +239,10 @@ def stack(tmp_path):
     (bin_dir / "fake-store-writer").write_text(FAKE_STORE_WRITER)
     (bin_dir / "fake-registry-writer").write_text(FAKE_REGISTRY_WRITER)
     (bin_dir / "fake-muse").write_text(FAKE_MUSE)
-    # Fake sudo: asserts the production privilege argv (-u swapd), then
-    # execs the remaining argv directly, so a test can exercise the
-    # installer's default SUDO_PREFIX value end to end.
-    (bin_dir / "sudo").write_text(
-        "#!/bin/sh\n"
-        "if [ \"$1\" != \"-u\" ] || [ \"$2\" != \"swapd\" ]; then\n"
-        "  echo \"fake-sudo: expected '-u swapd', got: $1 $2\" >&2\n"
-        "  exit 99\n"
-        "fi\n"
-        "shift 2\n"
-        "exec \"$@\"\n")
+    # Fake sudo: asserts the production privilege argv (-u swapd) and
+    # enforces the production sudoers allowlist, so a test can exercise
+    # the installer's default SUDO_PREFIX value end to end.
+    (bin_dir / "sudo").write_text(FAKE_SUDO)
     for f in ("fake-store-writer", "fake-registry-writer", "fake-muse",
               "sudo"):
         os.chmod(bin_dir / f, 0o755)
@@ -354,17 +382,29 @@ def test_installer_repairs_missing_trailing_newline(stack):
 
 
 def test_installer_privilege_prefix(stack):
-    # Exercises the production default SUDO_PREFIX ("sudo -u swapd")
-    # through the fake sudo, which asserts the -u swapd argv. A
-    # privilege-path breakage is fail-closed (sudo error -> set -e ->
-    # nonzero exit), so this pins the argv rather than the behavior.
+    # Exercises the REAL production default SUDO_PREFIX ("sudo -u
+    # swapd") end to end through the fake sudo, which asserts the -u
+    # swapd argv AND enforces the production sudoers allowlist (writers,
+    # ls on the secrets dir, cat on the registry, tee -a on the allow
+    # files). Popping SUDO_PREFIX -- not setting it -- is what reaches
+    # the script's `${SUDO_PREFIX-sudo -u swapd}` default branch;
+    # setting it explicitly would bypass that seam. Run twice:
+    # idempotency must hold under the restricted privilege too (no
+    # duplicate entries), and the missing-newline repair must work with
+    # unprivileged reads.
     (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
      echo_log, _proxy) = stack
-    env["SUDO_PREFIX"] = "sudo -u swapd"
+    env.pop("SUDO_PREFIX", None)
+    with open(ssrf_allow_file, "w", encoding="utf-8") as f:
+        f.write("10.0.0.1")  # no trailing newline
+    proc = _run_installer(env)
+    assert proc.returncode == 0, proc.stderr.decode()
     proc = _run_installer(env)
     assert proc.returncode == 0, proc.stderr.decode()
     assert (secrets_dir / KEY_NAME).read_text() == INSTALLER_DUMMY
-    assert ssrf_allow_file.read_text().splitlines() == ["127.0.0.1"]
+    assert ssrf_allow_file.read_text().splitlines() == ["10.0.0.1",
+                                                        "127.0.0.1"]
+    assert allow_file.read_text().splitlines() == ["127.0.0.1"]
 
 
 def test_installer_missing_writer_fails(stack):
@@ -396,8 +436,90 @@ def test_installer_probe_failure_propagates(stack):
     assert proc.returncode != 0
     # The failure is genuinely the wire-shape assertion, not an
     # incidental error: the unswapped placeholder reached the echo
-    # origin.
+    # origin, and the probe said so on stderr.
     assert PLACEHOLDER in echo_log.read_text()
+    assert b"wire-shape" in proc.stderr
     # The fixture writes still happened (the failure is the verification,
     # not the install).
     assert (secrets_dir / KEY_NAME).read_text() == INSTALLER_DUMMY
+
+
+def test_installer_recovers_partial_install(stack):
+    # A crash after the registry/allowlists writes but before the store
+    # write must not wedge the installer: with no llm-api file the guard
+    # takes the fresh-install path and the re-run completes. (The store
+    # write is deliberately last for exactly this reason.)
+    (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
+     echo_log, _proxy) = stack
+    registry_file.write_text(json.dumps({
+        KEY_NAME: {
+            "access_token": {"placement": "bearer_header"},
+            "allowed_hosts": ["127.0.0.1"],
+        }
+    }))
+    allow_file.write_text("127.0.0.1\n")
+    ssrf_allow_file.write_text("127.0.0.1\n")
+    proc = _run_installer(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert (secrets_dir / KEY_NAME).read_text() == INSTALLER_DUMMY
+    assert allow_file.read_text().splitlines() == ["127.0.0.1"]
+    assert ssrf_allow_file.read_text().splitlines() == ["127.0.0.1"]
+
+
+def test_installer_refuses_stale_fixture_binding(stack):
+    # A real tenant key landed on a box whose fixture binding was never
+    # torn down: the superset allowed_hosts is a stale fixture binding,
+    # NOT a previous fixture run, and must be refused -- the exact-match
+    # signature exists so the installer never destroys a real key.
+    (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
+     echo_log, _proxy) = stack
+    (secrets_dir / KEY_NAME).write_text("REAL-KEY-SENTINEL")
+    registry_file.write_text(json.dumps({
+        KEY_NAME: {
+            "access_token": {"placement": "bearer_header"},
+            "allowed_hosts": ["127.0.0.1", "api.provider.example"],
+        }
+    }))
+    proc = _run_installer(env)
+    assert proc.returncode == 2
+    assert b"refusing" in proc.stderr
+    assert b"stale fixture binding" in proc.stderr
+    # Fail-closed: the real key is byte-identical, nothing was written.
+    assert (secrets_dir / KEY_NAME).read_text() == "REAL-KEY-SENTINEL"
+    assert not allow_file.exists()
+    assert not ssrf_allow_file.exists()
+
+
+def test_installer_refuses_corrupt_registry(stack):
+    # A corrupt registry at the guard check fails closed: refuse, and
+    # never touch the stored credential.
+    (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
+     echo_log, _proxy) = stack
+    (secrets_dir / KEY_NAME).write_text("REAL-KEY-SENTINEL")
+    registry_file.write_text("{not json")
+    proc = _run_installer(env)
+    assert proc.returncode == 2
+    assert b"refusing" in proc.stderr
+    assert (secrets_dir / KEY_NAME).read_text() == "REAL-KEY-SENTINEL"
+    assert not allow_file.exists()
+    assert not ssrf_allow_file.exists()
+
+
+def test_installer_missing_secrets_dir_fails_recoverably(stack):
+    # A missing secrets dir fails the install (the store writer cannot
+    # run) -- and the state left behind must be recoverable: fixing the
+    # layout lets the next run complete.
+    (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
+     echo_log, proxy) = stack
+    env = dict(env)
+    env["INFERENCE_SECRETS_DIR"] = str(secrets_dir / "no-such-dir")
+    proc = _run_installer(env)
+    assert proc.returncode != 0
+    # Recoverable: fixing the layout lets the next run complete. The
+    # fake proxy's secrets dir follows the seam, like the real _resolve.
+    (secrets_dir / "no-such-dir").mkdir()
+    proxy.RequestHandlerClass.secrets_dir = str(secrets_dir / "no-such-dir")
+    proc = _run_installer(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert (secrets_dir / "no-such-dir" / KEY_NAME).read_text() == \
+        INSTALLER_DUMMY

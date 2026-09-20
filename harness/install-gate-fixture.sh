@@ -29,11 +29,13 @@
 # registry, hosts, and ssrf files per request, so no restart is needed.
 #
 # Fail-closed: if the inference secrets dir already holds `llm-api` and
-# the registry does NOT show this fixture's signature (`llm-api` bound
-# to the loopback echo host), the installer refuses to run -- that is a
-# real tenant credential, and overwriting it would destroy the box's
-# only inference key. A previous fixture run (dummy + fixture binding)
-# is detected and safely reinstalled, keeping the idempotency promise.
+# the registry does NOT show exactly this fixture's signature (`llm-api`
+# bound ONLY to the loopback echo host), the installer refuses to run --
+# that is a real tenant credential (or a stale fixture binding left
+# behind when one landed), and overwriting it would destroy the box's
+# only inference key. A previous fixture run (dummy + the echo-host-only
+# binding) is detected and safely reinstalled, keeping the idempotency
+# promise.
 #
 # NEVER install a real credential with this script. The fixture dummy is
 # public by design; a real key here would be baked into image layers and
@@ -79,6 +81,11 @@
 # PROBE_CONFIRMD_URL) directly; export those around this script to
 # override them.
 set -euo pipefail
+# The installer appends to the allow files via tee: without a sane umask a
+# missing allow file would be created 0666&~umask (world-writable SSRF
+# allow file). deploy.sh pre-creates the inference files 0644, but this
+# seam must not depend on that.
+umask 022
 
 # Public, non-secret, on purpose. Keep it obviously-not-a-key.
 # The public dummy credential installed by the gate fixture. Public by
@@ -131,9 +138,13 @@ run_priv() { $SUDO_PREFIX "$@"; }
 # existence check uses the sudoers-allowed `ls` on the secrets dir (the
 # secret VALUE is never read -- the agent must never see real secrets).
 # If llm-api is already stored, proceed only when the registry shows
-# this fixture's own signature (llm-api bound to the loopback echo
-# host) -- i.e. a previous gate run's dummy, safe to reinstall.
-# Anything else is a real tenant key: refuse.
+# EXACTLY this fixture's own signature: llm-api bound to the loopback
+# echo host and NOTHING else -- i.e. a previous gate run's dummy, safe
+# to reinstall. A superset (the echo host alongside other hosts) means a
+# real tenant key landed on a box whose fixture binding was never torn
+# down: that is a stale fixture binding, NOT a previous fixture run, and
+# the installer must refuse rather than destroy the tenant's only
+# inference credential. Anything else is a real tenant key: refuse.
 if run_priv ls "$SECRETS_DIR" 2>/dev/null | grep -qx "$KEY_NAME"; then
     if ! run_priv cat "$REGISTRY_FILE" 2>/dev/null | KEY_NAME="$KEY_NAME" ECHO_HOST="$ECHO_HOST" python3 -c '
 import json, os, sys
@@ -143,34 +154,36 @@ except Exception:
     sys.exit(1)
 entry = reg.get(os.environ["KEY_NAME"])
 hosts = entry.get("allowed_hosts") if isinstance(entry, dict) else None
-sys.exit(0 if isinstance(hosts, list) and os.environ["ECHO_HOST"] in hosts else 1)
+sys.exit(0 if isinstance(hosts, list) and hosts == [os.environ["ECHO_HOST"]] else 1)
 '; then
-        echo "install-gate-fixture: refusing: $SECRETS_DIR/$KEY_NAME already holds a credential that is not this fixture ($KEY_NAME is not bound to the gate echo host) -- the gate fixture must never overwrite a real inference credential" >&2
+        echo "install-gate-fixture: refusing: $SECRETS_DIR/$KEY_NAME already holds a credential that is not this fixture ($KEY_NAME is not bound ONLY to the gate echo host -- a real tenant key, or a stale fixture binding left behind when one landed) -- the gate fixture must never overwrite a real inference credential" >&2
         exit 2
     fi
-    echo "install-gate-fixture: previous fixture run detected ($KEY_NAME bound to $ECHO_HOST); reinstalling the public dummy"
+    echo "install-gate-fixture: previous fixture run detected ($KEY_NAME bound only to $ECHO_HOST); reinstalling the public dummy"
 fi
 
-# allowlist_add <file> <entry>: idempotent append. If a pre-existing
-# file lacks its trailing newline, a bare append would merge lines --
-# terminate it first. (The single backslash in '\n' is intentional:
-# printf interprets it as a newline; '\\n' would append a literal
-# backslash-n. Verified with od -c; do not "fix".)
+# allowlist_add <file> <entry>: idempotent append. The reads run as the
+# invoking user, NOT through run_priv: production sudoers grants only
+# `tee -a` on the allow files, so a sudoed read would be denied inside the
+# `if` conditions (set -e never trips there) and silently break
+# idempotency + the newline repair. The files are 0644; only the appends
+# need privilege. If a pre-existing file lacks its trailing newline, a
+# bare append would merge lines -- terminate it first. (The single
+# backslash in '\n' is intentional: printf interprets it as a newline; a
+# two-backslash '\\n' would append a literal backslash-n. Verified with
+# od -c; do not "fix".)
 allowlist_add() {
     local file="$1" entry="$2"
-    if run_priv grep -qxF "$entry" "$file" 2>/dev/null; then
+    if grep -qxF "$entry" "$file" 2>/dev/null; then
         echo "install-gate-fixture: $entry already in $(basename "$file")"
     else
         echo "install-gate-fixture: adding $entry to $(basename "$file")"
-        if run_priv test -s "$file" && [ -n "$(run_priv tail -c 1 "$file")" ]; then
+        if [ -s "$file" ] && [ -n "$(tail -c 1 "$file" 2>/dev/null)" ]; then
             printf '\n' | run_priv tee -a "$file" >/dev/null
         fi
         printf '%s\n' "$entry" | run_priv tee -a "$file" >/dev/null
     fi
 }
-
-echo "install-gate-fixture: installing public dummy credential '$KEY_NAME'"
-printf '%s' "$FIXTURE_DUMMY" | run_priv "$STORE_WRITER"
 
 echo "install-gate-fixture: registering bearer_header placement"
 run_priv "$REGISTRY_WRITER" set "$KEY_NAME" access_token '"bearer_header"'
@@ -183,6 +196,14 @@ allowlist_add "$ALLOW_FILE" "$ECHO_HOST"
 
 echo "install-gate-fixture: exempting $ECHO_HOST from the inference SSRF guard"
 allowlist_add "$SSRF_ALLOW_FILE" "$ECHO_HOST"
+
+# The store write goes LAST, deliberately: a crash anywhere above leaves
+# no llm-api file (fresh-install path on re-run) or a complete fixture
+# signature (reinstall path). A crash after an earlier store write would
+# leave the dummy with a partial registry binding -- the guard would
+# refuse the re-run as "not this fixture" and wedge the installer.
+echo "install-gate-fixture: installing public dummy credential '$KEY_NAME'"
+printf '%s' "$FIXTURE_DUMMY" | run_priv "$STORE_WRITER"
 
 # Truncate the echo log so the probe reads only this run's records
 # (the canonical probe ignores records predating its getsize call, but a
@@ -217,6 +238,9 @@ fi
 echo "install-gate-fixture: echo fixture on 127.0.0.1:$port, log $ECHO_LOG"
 
 echo "install-gate-fixture: verifying with the probe (gate mode)"
+# External cap is 15s -- deliberately looser than the probe docstring's
+# 10s contract line: headroom for slow boxes. The probe's own budgets
+# are 6s (CLI vehicle) + 3s (confirmd), so 10s would leave ~1s of margin.
 PROBE_MODE=gate \
 PROBE_BASE_URL="http://127.0.0.1:${port}" \
 PROBE_ECHO_LOG="$ECHO_LOG" \
