@@ -14,7 +14,7 @@ import json
 import os
 import subprocess
 import sys
-import textwrap
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -274,3 +274,80 @@ def test_negative_duration_disclosure(tmp_path):
     # r10's claimed-before-invite row is excluded from the medians and
     # disclosed in the report, not silently dropped.
     assert "medians exclude 1 negative-duration row(s)" in proc.stdout
+
+
+def test_non_dict_attrs_rejected_with_line(tmp_path):
+    rows = [
+        {"event": "confirmed", "at": "2026-09-14T10:00:00Z", "ref": "r1",
+         "attrs": "nope"},
+    ]
+    proc = run(write_events(tmp_path, rows), *WINDOW)
+    assert proc.returncode == 2
+    assert ":1: attrs must be an object" in proc.stderr
+
+
+@pytest.mark.parametrize("count", ["x", -5, True, 1.5])
+def test_cta_click_bad_count_rejected(tmp_path, count):
+    rows = [
+        {"event": "cta_click", "at": "2026-09-14T00:00:00Z", "ref": "2026-09-14",
+         "attrs": {"src": "hero", "count": count}},
+    ]
+    proc = run(write_events(tmp_path, rows), *WINDOW)
+    assert proc.returncode == 2
+    assert "attrs.count must be a non-negative int" in proc.stderr
+
+
+def test_rollup_bool_count_rejected(tmp_path):
+    # JSON true would silently count as 1 without the bool guard.
+    rows = [
+        {"event": "page_view_day", "at": "2026-09-14T00:00:00Z",
+         "ref": "2026-09-14", "attrs": {"count": True}},
+    ]
+    proc = run(write_events(tmp_path, rows), *WINDOW)
+    assert proc.returncode == 2
+    assert "attrs.count must be a non-negative int" in proc.stderr
+
+
+def test_timezone_offset_windows_on_utc_date(tmp_path):
+    # 2026-09-14T00:30:00+02:00 == 2026-09-13T22:30Z: the UTC date is Sept 13,
+    # so the row belongs to the Sept-13 cohort, not Sept 14.
+    rows = [
+        {"event": "page_view_day", "at": "2026-09-14T00:05:00Z",
+         "ref": "2026-09-13", "attrs": {"count": 50}},
+        {"event": "waitlist_submitted", "at": "2026-09-14T00:30:00+02:00",
+         "ref": "r1", "attrs": {"path": "email", "inbound_auth": True}},
+        {"event": "confirmed", "at": "2026-09-14T10:00:00Z", "ref": "r1",
+         "attrs": {"via": "original"}},
+    ]
+    proc = run(write_events(tmp_path, rows), "--since", "2026-09-14",
+               "--until", "2026-09-14")
+    assert proc.returncode == 0, proc.stderr
+    assert ("confirmed (submitted in window) / unique visitors: "
+            "n/a (denominator 0)") in proc.stdout
+    proc = run(write_events(tmp_path, rows), "--since", "2026-09-13",
+               "--until", "2026-09-13")
+    assert proc.returncode == 0, proc.stderr
+    assert ("confirmed (submitted in window) / unique visitors: "
+            "1/50 = 2.0%") in proc.stdout
+
+
+def test_default_window_is_seven_inclusive_utc_days(tmp_path):
+    proc = run(write_events(tmp_path, rows=[]))
+    assert proc.returncode == 0, proc.stderr
+    today = datetime.now(timezone.utc).date()
+    expected = (f"window {(today - timedelta(days=6)).isoformat()}"
+                f"..{today.isoformat()}")
+    assert expected in proc.stdout
+
+
+def test_orphan_confirmation_diagnostic(tmp_path):
+    rows = [
+        {"event": "confirmed", "at": "2026-09-14T10:00:00Z", "ref": "ghost",
+         "attrs": {"via": "original"}},
+    ]
+    proc = run(write_events(tmp_path, rows), *WINDOW)
+    assert proc.returncode == 0, proc.stderr
+    # Dropped from every numerator (no submission anchor) but visible in
+    # the hygiene line, not silently swallowed.
+    assert ("1 confirmation(s) dropped with no matching "
+            "waitlist_submitted row") in proc.stdout

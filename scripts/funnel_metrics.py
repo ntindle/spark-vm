@@ -24,6 +24,11 @@ crawler_hits, cta_click) filter on their own day-bucket date, while the
 row-event metrics filter on the *anchor* event's date — a confirmation
 that lands after the window still counts for a submission inside it.
 
+Duplicate rows for one ref (two waitlist_submitted, two invite_sent, …):
+the last emission wins. An exporter emitting each event exactly once
+never sees this; the tie-break exists so a duplicated export can't
+silently average two truths.
+
 Privacy posture: the script never sees an IP or a raw user agent. Unique
 visitors come from the pre-aggregated page_view_day rollups, whose
 day-buckets were computed server-side with the daily-rotating HMAC salt
@@ -95,18 +100,25 @@ def load_events(path):
                 raise ValueError(f"{path}:{lineno}: bad JSON: {exc}") from exc
             if not isinstance(obj, dict):
                 raise ValueError(f"{path}:{lineno}: row must be an object")
-            event = obj.get("event")
-            if event not in KNOWN_EVENTS:
-                raise ValueError(
-                    f"{path}:{lineno}: unknown event {event!r} "
-                    f"(expected one of {sorted(KNOWN_EVENTS)})"
-                )
+            try:
+                event = obj.get("event")
+                if event not in KNOWN_EVENTS:
+                    raise ValueError(
+                        f"unknown event {event!r} "
+                        f"(expected one of {sorted(KNOWN_EVENTS)})"
+                    )
+                at = parse_ts(obj.get("at"))
+                attrs = obj.get("attrs") or {}
+                if not isinstance(attrs, dict):
+                    raise ValueError(f"attrs must be an object, got {attrs!r}")
+            except ValueError as exc:
+                raise ValueError(f"{path}:{lineno}: {exc}") from exc
             rows.append(
                 {
                     "event": event,
-                    "at": parse_ts(obj.get("at")),
+                    "at": at,
                     "ref": obj.get("ref"),
-                    "attrs": obj.get("attrs") or {},
+                    "attrs": attrs,
                     "lineno": lineno,
                 }
             )
@@ -130,21 +142,28 @@ def rollup_day(row):
         )
 
 
+def validated_count(row):
+    """attrs.count for a rollup row: non-negative int, defaulting to 1.
+
+    JSON booleans are ints in Python — True would silently count as 1 —
+    so they are rejected explicitly.
+    """
+    count = row["attrs"].get("count", 1)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError(
+            f"rollup event {row['event']} (line {row['lineno']}): "
+            f"attrs.count must be a non-negative int, got {count!r}"
+        )
+    return count
+
+
 def rollup_count(rows, event):
     """Sum pre-aggregated rollup rows (attrs.count; missing count reads as 1)."""
     total = 0
     for row in rows:
         if row["event"] != event:
             continue
-        if event in ROLLUP_EVENTS and not isinstance(row["ref"], str):
-            raise ValueError(f"rollup event {event} needs a day-bucket ref")
-        count = row["attrs"].get("count", 1)
-        if not isinstance(count, int) or count < 0:
-            raise ValueError(
-                f"rollup event {event}: attrs.count must be a non-negative int, "
-                f"got {count!r}"
-            )
-        total += count
+        total += validated_count(row)
     return total
 
 
@@ -185,7 +204,10 @@ def compute(rows, since, until):
     pack = {"since": since.isoformat(), "until": until.isoformat()}
 
     def in_window(r):
-        return since <= r["at"].date() <= until
+        # UTC date: the report header promises "(UTC, inclusive)", and
+        # parse_ts accepts explicit offsets — a +02:00 timestamp must not
+        # window on its local date.
+        return since <= r["at"].astimezone(timezone.utc).date() <= until
 
     # Rollups window on their day-bucket (the nightly job emits after
     # midnight); row events window on the anchor event's date.
@@ -230,7 +252,7 @@ def compute(rows, since, until):
     for row in rollups:
         if row["event"] != "cta_click":
             continue
-        count = row["attrs"].get("count", 1)
+        count = validated_count(row)
         src = row["attrs"].get("src")
         if src:
             by_src[src] = by_src.get(src, 0) + count
@@ -331,6 +353,17 @@ def compute(rows, since, until):
     # Diagnostics.
     pack["crawler_hits"] = rollup_count(rollups, "crawler_hits")
     pack["rows_read"] = len(rows)
+    # Confirmations with no matching submission anywhere in the store are
+    # data rot: the cohort design drops them from every numerator, and the
+    # count is surfaced so the operator can see the rot.
+    all_submitted_refs = {r["ref"] for r in rows if r["event"] == "waitlist_submitted"}
+    pack["dropped_confirmations"] = len(
+        {
+            r["ref"]
+            for r in confirmed_rows
+            if in_window(r) and r["ref"] not in all_submitted_refs
+        }
+    )
 
     # Bridge: kept visible, never folded into the page metric. The signup
     # build has not landed its events yet; if it has, compute them.
@@ -420,7 +453,9 @@ def report(pack):
         "",
         f"DATA HYGIENE: medians exclude {pack['negative_durations_excluded']} "
         f"negative-duration row(s) — follow-on events that precede their "
-        f"anchor (data rot, never averaged into a latency number)",
+        f"anchor (data rot, never averaged into a latency number); "
+        f"{pack['dropped_confirmations']} confirmation(s) dropped with no "
+        f"matching waitlist_submitted row",
     ]
     return "\n".join(lines) + "\n"
 
@@ -449,7 +484,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     try:
-        until = date.fromisoformat(args.until) if args.until else date.today()
+        until = (
+            date.fromisoformat(args.until)
+            if args.until
+            else datetime.now(timezone.utc).date()
+        )
     except ValueError:
         print(f"error: --until is not a date: {args.until!r}", file=sys.stderr)
         return 2
