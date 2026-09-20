@@ -350,6 +350,56 @@ def test_refuses_version_not_newer_than_latest_tag(workrepo):
     assert "not newer than latest release v0.5.0" in r.stderr
 
 
+def _retarget_version(work, version):
+    (work / "VERSION").write_text(version + "\n")
+    write_changelog(work, version)
+    git("add", "-A", cwd=work)
+    git("commit", "-m", "release: bump VERSION to %s" % version, cwd=work)
+    git("push", "origin", "main", cwd=work)
+
+
+def test_rc_to_final_promotion_passes(workrepo):
+    # sort -V orders v0.2.0 before v0.2.0-rc.1 and would refuse this;
+    # semver §11 says the prerelease has LOWER precedence, so the
+    # promotion must pass.
+    git("tag", "v0.2.0-rc.1", cwd=workrepo)
+    git("push", "origin", "v0.2.0-rc.1", cwd=workrepo)
+    git("tag", "-d", "v0.2.0-rc.1", cwd=workrepo)
+    r = run_script(workrepo, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "VERSION=0.2.0 tag=v0.2.0" in r.stdout
+
+
+def test_rc_to_rc2_promotion_passes(workrepo):
+    _retarget_version(workrepo, "0.2.0-rc.2")
+    git("tag", "v0.2.0-rc.1", cwd=workrepo)
+    git("push", "origin", "v0.2.0-rc.1", cwd=workrepo)
+    git("tag", "-d", "v0.2.0-rc.1", cwd=workrepo)
+    r = run_script(workrepo, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "VERSION=0.2.0-rc.2 tag=v0.2.0-rc.2" in r.stdout
+
+
+def test_final_to_rc_is_refused(workrepo):
+    _retarget_version(workrepo, "0.2.0-rc.1")
+    git("tag", "v0.2.0", cwd=workrepo)
+    git("push", "origin", "v0.2.0", cwd=workrepo)
+    git("tag", "-d", "v0.2.0", cwd=workrepo)
+    r = run_script(workrepo, "--dry-run")
+    assert r.returncode != 0
+    assert "not newer than latest release v0.2.0" in r.stderr
+
+
+def test_subject_control_characters_stripped(workrepo):
+    evil = "fix: handle evil \x1b[2J\x1b[31mRED\x1b[0m subject"
+    git("commit", "--allow-empty", "-m", evil, cwd=workrepo)
+    git("push", "origin", "main", cwd=workrepo)
+    r = run_script(workrepo, "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert "\x1b" not in r.stdout
+    assert "fix: handle evil [2J[31mRED[0m subject" in r.stdout
+
+
 def test_execute_removes_local_tag_when_push_fails(workrepo, fake_gh):
     hook = workrepo.parent / "origin.git" / "hooks" / "update"
     hook.write_text("#!/bin/sh\necho 'tag push blocked' >&2\nexit 1\n")

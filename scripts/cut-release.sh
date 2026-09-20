@@ -162,11 +162,49 @@ else
     # --- preflight: VERSION must be newer than every existing release tag ---
     # (merging to main is the release authorization, so a downgrade typo must
     # not silently publish a confusing release).
-    MAX_TAG="$(git tag --list 'v*' | sort -V | tail -n 1 || true)"
-    if [[ -n "$MAX_TAG" ]]; then
-        printf '%s\n%s\n' "$MAX_TAG" "$TAG" | sort -V -C \
-            || die "VERSION $VERSION is not newer than latest release $MAX_TAG"
-    fi
+    # Real semver-§11 precedence, not `sort -V`: GNU sort -V orders v1.2.4
+    # BEFORE v1.2.4-rc.1, which would wrongly refuse the legitimate rc ->
+    # final promotion (a prerelease has LOWER precedence than its normal
+    # version). The regex below is kept in sync with
+    # scripts/sparkvm_version.py.
+    SEMVER_MSG="$(python3 - "$TAG" <<'PYEOF' 2>&1
+import re, subprocess, sys
+_semver_re = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$")
+def _key(tag):
+    v = tag[1:] if tag.startswith("v") else tag
+    m = _semver_re.match(v)
+    if not m:
+        return None
+    major, minor, patch, pre, _build = m.groups()
+    if pre is None:
+        prekey = (1,)  # no prerelease: higher precedence than any prerelease
+    else:
+        ids = tuple((0, int(i)) if i.isdigit() else (1, i)
+                    for i in pre.split("."))
+        prekey = (0, ids)
+    return (int(major), int(minor), int(patch), prekey)
+new_tag = sys.argv[1]
+new_key = _key(new_tag)
+latest, latest_key = None, None
+tags = subprocess.run(["git", "tag", "--list", "v*"],
+                      capture_output=True, text=True).stdout.split()
+for t in tags:
+    if t == new_tag:
+        continue
+    k = _key(t)
+    if k is None:
+        continue  # not a semver tag; TAG itself passed the strict check above
+    if latest_key is None or k > latest_key:
+        latest, latest_key = t, k
+if latest is not None and not new_key > latest_key:
+    sys.stderr.write("VERSION %s is not newer than latest release %s\n"
+                     % (new_tag[1:], latest))
+    sys.exit(1)
+PYEOF
+)" || die "$SEMVER_MSG"
     RELEASE_REF="HEAD"
     RELEASE_SHA="$HEAD_SHA"
 fi
@@ -216,9 +254,13 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
     # Squash-merge subjects look like "subject (#123)"; plain subjects pass
     # through. The PR reference is anchored to the end of the subject so a
     # subject containing an earlier "(#N)" keeps its full title.
-    # Carriage returns are stripped: a crafted subject must not be able to
-    # smuggle terminal control sequences into the published notes.
-    git log --first-parent --format='%s' "$RANGE" | tr -d '\r' | while IFS= read -r subject; do
+    # Control characters are stripped: a crafted subject must not be able to
+    # smuggle terminal control sequences into the published notes (the
+    # --dry-run draft is printed to the operator's terminal, and any
+    # contributor's PR title becomes a notes line). All C0 controls and DEL
+    # go; tab and newline are kept (newline separates the subjects).
+    # LC_ALL=C keeps tr byte-oriented so the ranges match single bytes.
+    git log --first-parent --format='%s' "$RANGE" | LC_ALL=C tr -d '\000-\010\013-\037\177' | while IFS= read -r subject; do
         if [[ "$subject" =~ ^(.*)\ \(#([0-9]+)\)$ ]]; then
             num="${BASH_REMATCH[2]}"
             title="${BASH_REMATCH[1]}"
