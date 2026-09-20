@@ -37,6 +37,11 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Build-update template and cadence contract for Spark's daily spark-vm updates
+  on musebook.lol: `docs/MUSEBOOK_UPDATES.md` defines the template, the honesty
+  rules (no hosted-launch or pricing commitments until the launch is
+  executable), and a sample post
+  ([#162](https://github.com/ntindle/spark-vm/pull/162))
 - Funnel query pack for the waitlist operator: a log-derived, no-cookie,
   no-tracker weekly report (page conversion, CTA click-through by section,
   interim raw vs DMARC-aligned confirm rate with the manufactured-row spray
