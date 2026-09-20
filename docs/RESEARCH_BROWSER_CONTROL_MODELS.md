@@ -24,10 +24,11 @@ CLI flags, and the maintainers fixed three fail-open paths in Sep 2026
 | Where the browser runs | On the **user's own machine**, inside their real logged-in Chromium/Edge profile | On **spark-vm** (hosted) or the user's self-hosted box — a server-side browser under service account `bdrive` |
 | Whose login state it rides | The user's real profile: cookies, extensions, saved sessions — "no separate test accounts, no credential handoff" | A dedicated `bdrive` profile at `/home/bdrive/profile/` — deliberately NOT the user's everyday profile |
 | Agent control surface | Rust `bsk` CLI/daemon + Chrome/Edge extension; agent talks to the CLI over shell, never to the browser directly; extension drives tabs via CDP (`debugger` permission), DOM snapshots + `@e` refs | Fixed `bdrive` action protocol (SPEC §5) + on-box agent loop `obox` (observe→decide→act) |
-| Visibility to the human | **Separate, visible Agent Window** — the user watches the agent work in a window of its own while keeping their own windows | Headless service; the orchestrator gets terminal reports, not a live window (live machine control ticket #47 may add desktop streaming later) |
-| Credential story | Reuses the user's existing logged-in sessions; extension "does not read or transmit cookies, browsing history, bookmarks, downloads, saved passwords, or autofill data" (PRIVACY.md); skill rules forbid extracting tokens/secrets from pages | Nobody sees real values anywhere in the stack: the agent types `hsurr:` placeholders; the swap proxy substitutes values at egress for allowlisted hosts |
+| Visibility to the human | **Separate, visible Agent Window** — the user watches the agent work in a window of its own while keeping their own windows. The Agent Window shares the profile's session state (the structural fact behind the PR #3 cross-session sandbox break in §2) | Headless in practice (no visible window; observability via audit/terminal reports, SPEC §13); the orchestrator gets terminal reports, not a live window (live machine control ticket #47 may add desktop streaming later) |
+| Credential story | Reuses the user's existing logged-in sessions; extension "does not read or transmit cookies, browsing history, bookmarks, downloads, saved passwords, or autofill data" (PRIVACY.md); skill rules forbid extracting tokens/secrets from pages | No component on the box holds *stored* secrets: agent/driver/browser see only `hsurr:` placeholders; the swap proxy substitutes values at egress. Two stated transient exceptions per SPEC §7: trusted card fill (bdrive holds real card values in memory during the fill) and the one-shot OTP relay |
 | Concurrency with the human | Explicit borrow/return: the agent must borrow a user tab explicitly, return it when done, and "leave the rest of your browser alone" | No human on the box's browser at all — tabs are agent-only (SPEC §3: one browser process, one persistent context, tabs as sessions) |
-| Trust anchor | The user's own machine: extension talks only to a local daemon ("communicates exclusively with a local daemon running on your own computer"; no remote servers, no telemetry) | The box: orchestrator submits briefs; driver executes a fixed action set; swap proxy enforces egress; nspawn jail enforces process isolation |
+| Agent-visible page data | The agent sees the rendered content of the user's real logged-in sessions (balances, PII on-screen) — PRIVACY.md promises the *extension* doesn't read cookies/history, not that the agent is shielded from page content | Response echo goes through SPEC §6's scrubbing (the untrusted-data envelope neutralizes `hsurr:` strings); the agent sees page content, but stored secrets never live in the browsing stack |
+| Trust anchor | The user's own machine: extension talks only to a local daemon ("communicates exclusively with a local daemon running on your own computer"; no remote servers, no telemetry) | The box: orchestrator submits briefs; driver executes a fixed action set; swap proxy enforces egress; the nspawn jail (spec'd, not yet landed — SPEC §2/§16) will enforce process isolation |
 
 ## 2. BrowserSkill's borrow/return consent model — the details worth stealing
 
@@ -86,16 +87,25 @@ note: standard MIT text, no special terms).
   over the tailnet; the user doesn't need a browser open locally, and the
   agent works when the user's laptop is asleep. BrowserSkill's model assumes
   the user's machine is on with the browser running.
-- **Provable isolation.** Enforcement split (fixed action protocol, nftables
-  uid egress, swap proxy, nspawn jail) vs. BrowserSkill's window-level
-  isolation on the user's own profile, where a confused-deputy extension bug
-  (see PR #3) touches the user's real sessions.
-- **Secret compartmentalization.** The `hsurr:` placeholder model means the
-  browsing stack never holds a real value; BrowserSkill never exposes
-  secrets to the agent either, but it *does* run inside the profile that
-  holds them.
+- **Provable isolation *(design)*.** Enforcement split in the spec (fixed
+  action protocol, swap proxy, plus the nspawn jail and the nftables uid-
+  egress rule — both decided 2026-09-15 but **not yet landed**; SPEC §2/§15/§16).
+  Until they land, the orchestrator's "cannot" rows are policy, not
+  enforcement. Blast-radius caveat per SPEC §2: a compromised driver rides
+  the profile's session cookies — the same is true of the managed agent's
+  browser. Contrast with BrowserSkill's window-level isolation on the user's
+  own profile, where a confused-deputy extension bug (PR #3) touches the
+  user's real sessions.
+- **Secret compartmentalization.** No *stored* secret enters the browsing
+  stack (`hsurr:` placeholder model, modulo SPEC §7's transient card-fill /
+  OTP exceptions); BrowserSkill never exposes secrets to the agent either,
+  but it *does* run inside the profile that holds them.
 - **Multi-tenant story.** spark-vm's model extends to hosted tenants (#47,
   H11); BrowserSkill is single-user-local by design.
+- **No harness lock-in (parity note).** The BrowserSkill "no harness lock-in"
+  row is not exclusive: spark-vm's `bdrive` protocol is transport-agnostic
+  JSON and "the orchestrator is replaceable without changing `bdrive`, swapd
+  or the confirmation page" (SPEC §3).
 
 ## 4. Implications for spark-vm (H17 / #47 / #132)
 
@@ -105,7 +115,16 @@ note: standard MIT text, no special terms).
    hosted control plane lets an operator (or agent) touch on a live box:
    the gate must live where the CLI cannot override it, default to deny on
    timeout, and treat every fail-open as a bug. PRs #3/#5/#16 are the
-   anti-patterns to test against.
+   anti-patterns to test against. Transfer scope, not verbatim: the reusable
+   pattern is **consent at session establishment** with deny-on-timeout and
+   explicit re-prompt/reset semantics for long-lived control sessions —
+   BrowserSkill's 60s *per-borrow* timeout does not transfer verbatim to
+   #47's long terminal/desktop sessions (per-borrow re-prompting would be
+   unusable, and a long-lived bypass would silently defeat fail-closed).
+   Consent-authority binding in spark-vm: the tailnet confirmation page
+   authenticated by Tailscale identity (SPEC §8) — the orchestrator (the CLI
+   analog) cannot answer its own prompts, mirroring why browser-side
+   settings must be authoritative over `--unattended`.
 2. **Visible-window principle for the H17 UX.** spark-vm's driver is
    headless-by-spec; when #47 adds desktop streaming, the BrowserSkill
    precedent says the agent's browser should be a *visibly distinct
@@ -117,9 +136,10 @@ note: standard MIT text, no special terms).
    `obox`'s `need_info` parking: state that the agent borrows should be
    released, not leaked, when a job parks or dies.
 4. **Do not adopt the ride-the-user's-profile model.** It trades away
-   spark-vm's core differentiator (provable server-side isolation and the
-   placeholder credential story) for convenience. The borrow/consent
-   *mechanics* are stealable; the *trust topology* is not.
+   spark-vm's core differentiator (server-side isolation — spec'd as the
+   *design* target posture, with jail + nftables egress still to land per
+   §3 — and the placeholder credential story) for convenience. The
+   borrow/consent *mechanics* are stealable; the *trust topology* is not.
 5. **License note:** MIT upstream — if spark-vm ever wants to borrow (pun
    intended) code or protocol ideas, the license permits it with the usual
    attribution. This supersedes the R17 note's "MIT attribution is
