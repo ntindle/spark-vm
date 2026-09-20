@@ -74,7 +74,13 @@ than its own checkout. `muse-job --version` reads the repo file.
 
 1. Bump `VERSION` on `main` (one commit, message like `release: bump VERSION
    to 0.2.0`). Keep the change version-only so the auto-deployer treats it as
-   a version bump and nothing else.
+   a version bump and nothing else — except `CHANGELOG.md`: in the same
+   commit, move the `## [Unreleased]` section into
+   `## [0.2.0] - YYYY-MM-DD` (pattern: `## [x.y.z] - YYYY-MM-DD`),
+   add/update the compare links in the footer scaffold at the bottom of the
+   changelog, and leave a fresh empty
+   `## [Unreleased]` section behind for the next PR (the ritual is documented
+   at the top of `CHANGELOG.md`).
 2. Tag the commit: `git tag v0.2.0 && git push origin v0.2.0`.
 3. The auto-deployer's next tick sees the `VERSION` change, redeploys the
    proxy-confirm unit plus cred-ui, and records `to_version` in its audit log.
