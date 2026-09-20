@@ -22,28 +22,37 @@ The markup carries placeholders the operator fills when §10 goes live:
 - `https://<host>/` in every `<head>` tag set — the production host.
   No URL shorteners; the image URL must not carry query-string trackers
   (`docs/FUNNEL_MEASUREMENT.md` §5).
-- `{{WAITLIST_INBOX}}` on `waitlist.html` — the operator-provisioned
-  dedicated AgentMail inbox (`docs/WAITLIST_OPERATIONS.md` §10).
-- `/go/selfhost?src=selfhost` — a first-party redirect to the repo README's
-  Try-it section (`https://github.com/ntindle/spark-vm#try-it`; re-verify the
-  anchor at deploy time). `src=` stays on our domain
-  (`docs/FUNNEL_MEASUREMENT.md` §3.2).
+- On `waitlist.html` the path-A box carries a launch-frame sentence with the
+  inbox substitution point recorded in an HTML comment only — no raw
+  `{{WAITLIST_INBOX}}` token and no repo-internal doc path in human-facing
+  copy. The operator substitutes the dedicated AgentMail inbox
+  (`docs/WAITLIST_OPERATIONS.md` §10) at launch.
 - The pricing-teaser link points at the public thinking doc
   (`docs/PRICING_THINKING.md`); it becomes the pricing page when one exists.
 
+(`/go/selfhost?src=selfhost` is page-build code the loop owns, not operator
+packet: on Pages it needs a static redirect shim. It ships in a later markup
+slice — listed under the remainder below.)
+
 ## og:image provenance
 
-`assets/og-persistence-pair.png` (1200×630) is derived — not reshot — from
-the shipped demo asset `assets/demo-persistence-pair.gif` (asset 3, PR #137),
-per `docs/FUNNEL_MEASUREMENT.md` §5 and `docs/HOSTED_SIGNUP_WEB_UI.md` §4.1:
+`assets/og-persistence-pair.png` (1200×630) is composed — not reshot — from
+BOTH frames of the shipped demo asset `assets/demo-persistence-pair.gif`
+(asset 3, PR #137), per `docs/FUNNEL_MEASUREMENT.md` §5 and
+`docs/HOSTED_SIGNUP_WEB_UI.md` §4.1:
 
 ```
-python3 site/derive_og_image.py   # extracts GIF frame 0 (the Xvfb birth
-                                  # record), scales to 1200 wide, centers on
-                                  # a 1200×630 dark canvas. Requires Pillow.
+python3 site/derive_og_image.py   # crops each frame's window-chrome title
+                                  # bar (it duplicates the card headline),
+                                  # lays the then/now pair side by side with
+                                  # "1/2 — then" / "2/2 — now" sublabels, and
+                                  # adds a legible headline + wordmark.
+                                  # Requires Pillow. Deterministic: same
+                                  # source frames → same PNG.
 ```
 
-Re-running is deterministic: same source frame → same PNG.
+The card carries the `og:image:alt` promise ("The same desktop, today and
+tomorrow — nothing lost overnight") because it now actually shows the pair.
 
 ## What this slice does and does not include
 
@@ -57,14 +66,19 @@ twice (hero, FAQ — the two-CTA cap); the §4.2 form markup (required owner
 email with `autocomplete="email"`/`inputmode="email"`, optional agent-contact
 email with `autocomplete="off"`, off-screen honeypot, `rendered_at` time-trap
 field for the page-serving layer to stamp — there is no page JS); the path-A
-inbox line; the 14-day claim-window line.
+inbox line; the 14-day claim-window line; and the page-disclosure gates from
+`docs/WAITLIST_OPERATIONS.md` §10 — FAQ Q6 discloses the pre-launch pilot
+cohort before waitlist-order general invites (no dates), so the page never
+promises what the operator plan doesn't deliver.
 
-**Not yet (H15 PR 1 remainder, backend):** `POST /waitlist/form` endpoint,
-the §4.3 confirm flow (`GET` renders-only / `POST` confirms), the HMAC token
-signer, the +7d reminder / 14d drop jobs, the path-A email parser, the invite
-sender, the forget-me handler, and the `funnel_events` logging
-(`docs/FUNNEL_MEASUREMENT.md` §3.4). `scripts/funnel_metrics.py` (PR #141)
-already ships the consumer side of that logging.
+**Not yet (H15 PR 1 remainder = H15 §8's "§7 waitlist-era endpoint surface"
+plus markup):** `POST /waitlist/form` endpoint, the §4.3 confirm flow
+(`GET` renders-only / `POST` confirms), the HMAC token signer, the +7d
+reminder / 14d drop jobs, the path-A email parser, the invite sender, the
+forget-me handler, the `/go/selfhost` static redirect shim, and the
+`funnel_events` logging (`docs/FUNNEL_MEASUREMENT.md` §3.4).
+`scripts/funnel_metrics.py` (PR #141) already ships the consumer side of
+that logging.
 
 ## Honesty re-verification (build time, 2026-09-20)
 
@@ -82,7 +96,19 @@ checklist was re-run against this slice's base (`a7bbe00`):
 - No trial terms, no "free trial" wording, no "session clock" one-liner, no
   launch date anywhere in the markup.
 - Q4's hosting claim ("we run the machine") stands on the decided Fly.io
-  provider (NEEDS_USER.md, token connected) — unchanged from approved copy.
+  provider: DECIDED 2026-09-18 in the operator-decision register
+  (`NEEDS_USER.md`, kept at the goal-workspace level, not in the repo —
+  Fly.io chosen, `custom.flyio` token connected), with the repo-side record
+  in `docs/HOSTED_UNBLOCK_PASS.md` (2026-09-18 decisions). Unchanged from
+  approved copy.
 - LICENSE (MIT) present on the base the slice branched from.
+- Page-disclosure gates (`docs/WAITLIST_OPERATIONS.md` §10) covered: FAQ Q6
+  states the 14-day claim window AND discloses the pre-launch pilot cohort
+  (no dates, non-promissory wording — "a small pilot cohort of beta Muses
+  gets early boxes; general invites then go out in waitlist order").
+- "Your agent can start the signup — the confirmation email goes to your
+  owner" is the approved §3 hero microcopy, verbatim (also used as the
+  `/waitlist` context line per §4.1); the owner-frame voice is intentional,
+  not a wobble.
 - The §5 dead-form item stays OPEN: the form posts to an endpoint that does
   not exist yet — hence this directory is explicitly not deployable.

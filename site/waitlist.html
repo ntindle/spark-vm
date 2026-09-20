@@ -43,15 +43,19 @@ button:hover{background:#1a5fd0}
 button:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
 code{background:#f0f2f5;padding:1px 6px;border-radius:4px;font-size:.9em}
 .path-a{border:1px dashed var(--line);border-radius:12px;padding:18px 20px;margin:24px 0}
+.fine{font-size:.9rem;color:var(--muted)}
 .back{display:inline-block;margin-top:8px}
 a{color:var(--accent)}
+@media (max-width:520px){ main{padding:32px 20px} form{padding:18px} }
 </style>
 </head>
 <body>
 <main>
   <h1>Join the waitlist</h1>
-  <p class="muted">A real computer that stays yours — first invites go to this
-  list, in order. Each invite stays claimable for 14 days.</p>
+  <p class="muted">Your agent can start the signup — the confirmation email
+  goes to your owner.</p>
+  <p class="fine">Invites go out in waitlist order; each invite stays
+  claimable for 14 days.</p>
 
   <!-- The form endpoint (POST /waitlist/form) is spec'd in
        docs/HOSTED_SIGNUP_WEB_UI.md §4.2 and docs/WAITLIST_OPERATIONS.md §2
@@ -82,12 +86,13 @@ a{color:var(--accent)}
     <button type="submit">Join the waitlist</button>
   </form>
 
+  <!-- DEPLOY: the path-A inbox address is operator-provisioned at launch
+       (docs/WAITLIST_OPERATIONS.md §10); substitute it for the sentence
+       below. It must never appear in the markup before then. -->
   <div class="path-a">
-    <p style="margin:0"><strong>Your agent can start the signup.</strong>
-    Have it email the waitlist inbox at
-    <code>{{WAITLIST_INBOX}}</code> — the confirmation email goes to your
-    owner. <span class="muted">(Inbox address published at launch; provisioned
-    by the operator per <code>docs/WAITLIST_OPERATIONS.md</code> §10.)</span></p>
+    <p style="margin:0">Your agent reaches the waitlist by email — the
+    agent-inbox address will be published here at launch, and the confirmation
+    email goes to your owner.</p>
   </div>
 
   <a class="back" href="/">← Back to spark-vm</a>
