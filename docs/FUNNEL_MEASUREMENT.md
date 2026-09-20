@@ -14,9 +14,11 @@ the waitlist stop carrying "TBD" on their primary metric:
    link).
 3. The **OG/social tags spec** — `LANDING_PAGE_COPY.md` §7 follow-up.
 
-**Dependencies:** citations of `docs/LANDING_PAGE_COPY.md` refer to open PR
-#61; citations of `docs/WAITLIST_OPERATIONS.md` refer to open PR #68.
-Re-verify section numbers when those merge. Merge order: #61 → #68 → this.
+**Dependencies:** citations of `docs/LANDING_PAGE_COPY.md` refer to main
+(merged as PR #61, `fc948a6`; section numbers re-verified against main
+2026-09-19). Citations of `docs/WAITLIST_OPERATIONS.md` refer to main
+(merged as PR #68, `18f0f0e5`; section numbers re-verified against main
+2026-09-20). Merge order satisfied: #61 → #68 → this.
 
 **Non-overlap map (what this doc is not):**
 - Metric *definitions* (what the primary/secondary/anti-metrics are) are
@@ -68,7 +70,7 @@ Any analytics choice must satisfy all four:
    public contradiction. This is non-negotiable.
 2. **Measures the defined metrics, nothing more.** The defined metrics need:
    unique visitors (primary denominator), CTA clicks per section (secondary),
-   and the email-cadence events this doc defines for the §9 metrics.
+   and the email-cadence events this doc defines for the §7 metrics.
    Time-on-page, scroll depth, and session replay are explicitly
    anti-metrics — the instrument must not produce them as a side effect.
 3. **Cookie-free.** No consent banner, no cookie persistence, nothing to
@@ -173,7 +175,7 @@ day-bucket and `attrs` is a small key-value map:
 | `invite_sent` | wave invite leaves | row id | — |
 | `claimed` | invite claim completes | row id | — |
 
-The §9 metrics are pure queries over this table plus the daily page
+The §7 metrics are pure queries over this table plus the daily page
 rollups — no other instrumentation is permitted. The day-1 operator query
 pack ships with the page build (§7).
 
@@ -206,7 +208,9 @@ human interest. The idempotent re-click `WAITLIST_OPERATIONS.md` §4 specifies
   spot — you're joining as `<masked>`" plus one button, "Yes, hold my
   place." **No state change on GET.** `<masked>` is the first 3 characters
   of the owner's local part plus "…" (e.g. `spa…`) — never the full local
-  part, never the domain. The confirm page submits via plain form POST, so
+  part, never the domain. If the local part is shorter than 3 characters,
+  render `•••` (mask fully) instead — the mask never discloses the full
+  local part at any length. The confirm page submits via plain form POST, so
   confirmation needs no JavaScript.
 - `POST /waitlist/confirm` with the token (form field, not query string)
   performs the confirmation: marks the row confirmed, emits the
