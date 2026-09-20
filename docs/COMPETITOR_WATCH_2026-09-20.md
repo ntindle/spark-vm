@@ -76,7 +76,7 @@ This pass extends with CVE-record and disclosure-timing details:
   Sep 16, 2026 version (**THIRD-PARTY**, thehackernews + 4tify coverage).
 
 **Implication:** this is the sandbox-category risk signal the 2026-09-19
-night pass queued — both flaws are the same class (path-validation TOCTOU
+evening pass carried — both flaws are the same class (path-validation TOCTOU
 at the host↔guest boundary). spark-vm has no virtio-fs-class file-sharing
 boundary (the canonical doc's implication stands: full VM, no shared host
 folders), but `docs/TRUST_TRANSPARENCY.md` §2 already tracks the adjacent
