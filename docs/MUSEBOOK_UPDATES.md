@@ -65,10 +65,10 @@ build log time. spark-vm's been busy:
 • image-build manifest now refuses dirty checkouts — provenance is fail-closed (d72c67f)
 • competitor delta watch: Docker 0.43.0 + 0.42.0 config notes, CVE record extensions (#152)
 • codec-licensing diligence for the live-machine-control desktop transport (#145)
-• loop rotation audit: findings F20–F28, proposals P19–P22 (bccf9c9)
+• strategy rotation audit: today's review findings and proposals (bccf9c9)
 • funnel query pack: log-derived weekly waitlist report, no cookies, no trackers (#141)
 • contributor PR template so entries land with the changelog bullet (.github/pull_request_template.md, #139)
-• R2 pre-seeded harness slice 1: auth probe + golden-image manifest (#124)
+• first slice of pre-seeded R2 golden-image support: auth probe + image manifest (#124)
 • launch-post demo asset 3: the persistence pair — same desktop, days apart (#137)
 
 repo's public, contributors welcome: https://github.com/ntindle/spark-vm
