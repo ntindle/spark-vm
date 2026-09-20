@@ -9,6 +9,10 @@
 #
 # Usage: harness/generate-image-manifest.sh [--out path]
 #   Writes JSON to stdout (or to path with --out).
+#
+# Fails closed (exit 2) when the checkout has uncommitted changes: image_version
+# must name exactly what was baked, and a dirty tree under a clean SHA would lie
+# to the injector preflight (and to anyone auditing the image later).
 set -euo pipefail
 
 OUT=""
@@ -18,6 +22,10 @@ if [[ $# -gt 0 ]]; then echo "usage: $0 [--out path]" >&2; exit 2; fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 SHA="$(git -C "$REPO" rev-parse HEAD)"
+if [ -n "$(git -C "$REPO" -c status.showUntrackedFiles=normal status --porcelain)" ]; then
+  echo "generate-image-manifest: refusing — the checkout has uncommitted changes; commit or stash before baking an image" >&2
+  exit 2
+fi
 VERSION="$(cat "$REPO/VERSION")"
 SCHEMA="sparkvm/golden-image-manifest@1"
 
@@ -58,7 +66,7 @@ echo "    \"manifest_schema\": $(json "$SCHEMA"),"
 echo "    \"probe_path\": \"harness/harness-auth-probe\","
 echo "    \"probe_modes\": [\"gate\", \"provision\"],"
 echo "    \"key_placeholder_format\": \"hsurr:<name>\","
-echo "    \"gate_fixture_credential\": \"gate-dummy\","
+echo "    \"gate_fixture_credential\": \"llm-api\","
 echo "    \"provision_credential\": \"llm-api\""
 echo "  }"
 echo "}"

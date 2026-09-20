@@ -37,6 +37,57 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- A docs index for the docs tree (`docs/README.md`): the 40-plus doc corpus
+  organized by what you're trying to do — start-here contributor picks,
+  hosted-product design specs, the product-research corpus, the dated
+  competitor corpus, and loop governance, with a keep-this-index-honest rule
+  for new docs; the root README's repo-layout table links to it (#171)
+- Live-control competitor deep-scan for the #47 control-plane design: six
+  providers (AgentComputer, TermSquad, Fly.io Sprites, E2B, Daytona, Docker
+  Sandboxes) scored on browser desktop streaming, live terminal,
+  suspend/wake, and transport, with where-we-win/lag findings feeding three
+  new backlog items — the #47 resume-latency target (C14), the stopped/cold
+  cost tier for hosted pricing (C15), and the control-plane-visible lifecycle
+  parity audit (C16) (#168)
+- Waitlist page build, slice 2: the waitlist service backend — the form
+  endpoint (honeypot and timing-trap defenses that accept spam silently,
+  per-IP rate limiting, email normalization and dedup), the double-opt-in
+  confirm flow (render-only link page, one-click confirm, single-use
+  HMAC-signed tokens with 14-day expiry, the 3-per-day email cap), and
+  funnel-event logging the metrics script already consumes. The operator
+  key and data dir come from environment variables, never the repo. Still
+  not deployable: reminder/drop jobs, the email-parsing path, invites,
+  and forget-me land next; the page ships only when the full
+  waitlist-operations checklist is green (#165)
+- Waitlist page build, slice 3a: the waitlist lifecycle jobs — one reminder
+  email at +7 days (the last touch; there is no third email) and automatic
+  drop of unconfirmed rows at 14 days, run as operator cron jobs with a
+  cross-process lock so they never race the live service. The drop deadline
+  is fixed at first signup and never postponed by re-signups. Oversized
+  requests now close the HTTP connection instead of risking a desynced
+  keep-alive. Still not deployable: the email-parsing path, invites, and
+  forget-me land next; the page ships only when the full
+  waitlist-operations checklist is green (#172)
+- Browser-driver first code (H17, [#132](https://github.com/ntindle/spark-vm/issues/132)):
+  the fixed `bdrive` action protocol as validated Python — the narrow action
+  vocabulary the on-box browser service will accept, with ref-scoped element
+  locators, receipt semantics, and hermetic tests. Deferred to later slices:
+  the Chromium execution backend, the daemon socket, box hardening, the
+  `obox` agent loop, and the card pathway + Web Push (#166)
+- Waitlist page build, slice 1: the static front end of the waitlist-era web
+  surface — the landing page typeset from the approved launch copy, a
+  dedicated `/waitlist` form page with the abuse-resistant signup form
+  (owner email, optional agent contact, honeypot and timing defenses, no
+  page JavaScript), and a derived social-card image reused from the shipped
+  demo asset. **Not deployable yet:** the form's backend (signup endpoint,
+  confirm flow, invite jobs) comes next, and the page ships only when the
+  full waitlist-operations checklist is green
+  ([#163](https://github.com/ntindle/spark-vm/pull/163))
+- Build-update template and cadence contract for Spark's daily spark-vm updates
+  on musebook.lol: `docs/MUSEBOOK_UPDATES.md` defines the template, the honesty
+  rules (no hosted-launch or pricing commitments until the launch is
+  executable), and a sample post
+  ([#162](https://github.com/ntindle/spark-vm/pull/162))
 - Funnel query pack for the waitlist operator: a log-derived, no-cookie,
   no-tracker weekly report (page conversion, CTA click-through by section,
   interim raw vs DMARC-aligned confirm rate with the manufactured-row spray
@@ -113,6 +164,31 @@ This changelog only works if entries land with the change, not after it:
   failure can no longer leave it registered with only some of its intended
   hosts (fixes [#116](https://github.com/ntindle/spark-vm/issues/116) and
   [#146](https://github.com/ntindle/spark-vm/issues/146))
+- Root deploy writes stop following symlinks in `/home/swapd`: `cp`/`tee`/
+  `chown`/`chmod` on `ssrf.deny`, `grants.json`, and `swap.log` would have let
+  a swapd-level attacker plant a symlink at a root-write destination and get
+  the next unattended deploy to write/chown through it (same class as #91,
+  fixed for the secrets dirs; the grants.json instance is #128). The new
+  `proxy/safe_install.py` refuses symlinks fail-closed, creates with
+  `O_EXCL`+`O_NOFOLLOW`, and `fchown`s/`fchmod`s the open fd; steps 3/4/4a of
+  `proxy/deploy.sh` use it
+  ([#143](https://github.com/ntindle/spark-vm/pull/143), fixes
+  [#128](https://github.com/ntindle/spark-vm/issues/128)) Also fixes a latent grants.json wipe: the old
+  existence check ran as the deploy user, so when `/home/swapd` wasn't
+  traversable it always took the create branch and `sudo tee` truncated the
+  file on every deploy.
+- `confirmd` and its health check no longer pin the box's tailnet IP: the
+  `CONFIRM_BIND` literal is gone from `confirm/confirmd.service` (the daemon
+  already resolves its bind via `tailscale ip -4` at startup), and the
+  updater's health entry is `tcp:TAILNET:8443`, resolved at check time. A
+  tailnet rekey/IP change survives a restart instead of wedging the service
+  or failing every deploy's health check (rollback of a good deploy)
+  ([#143](https://github.com/ntindle/spark-vm/pull/143))
+- The updater now warns when it runs stale code: `init` records the checkout
+  commit the installed copy came from, and `status`/`check` warn when
+  `origin/main` carries newer `deploy/` changes not live because `init`
+  wasn't re-run
+  ([#143](https://github.com/ntindle/spark-vm/pull/143))
 - `muse-job` detects a dead terminal pane and refuses to steer into it
   instead of typing into the void
   ([#45](https://github.com/ntindle/spark-vm/pull/45), fixes

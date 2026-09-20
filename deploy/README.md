@@ -113,7 +113,7 @@ half-deployed state rollback exists to fix.
 | component | repo paths | services restarted | gate | install | health |
 |---|---|---|---|---|---|
 | `proxy` | `proxy/` | swap-proxy, swap-inference | pytest (swap addon, grant writer, round6) | `proxy/deploy.sh --no-restart` | tcp 127.0.0.1:18080, 18081 |
-| `confirm` | `confirm/` | confirmd | pytest (confirmd) | (shares proxy's unit) | tcp 100.65.241.20:8443 |
+| `confirm` | `confirm/` | confirmd | pytest (confirmd) | (shares proxy's unit) | tcp TAILNET:8443 (resolved at check time) |
 | `cred-ui` | `cred-ui/` | cred-ui (user unit) | py_compile | subtree sync into checkout | tcp 127.0.0.1:18740 |
 
 Add a component by extending `deploy/components.conf` (paths, services, gate,
@@ -126,12 +126,18 @@ so the installed copy picks it up.
   second, but an in-flight swap at that instant fails closed on the client
   (which retries). A quiet-moment/drain scheduler is a follow-up, not this
   slice.
-- **confirmd's health IP is the box's tailnet address** (`100.65.241.20:8443`),
-  taken from `confirm/confirmd.service`. If the box's tailnet IP changes,
-  update `components.conf` and re-run `init`.
+- **confirmd's health target is the box's tailnet address, resolved live.**
+  `components.conf` names it `TAILNET:8443` and the updater resolves the
+  current `tailscale ip -4` at check time; `confirmd.service` likewise no
+  longer pins the literal IP (`confirmd.py` resolves its bind address via
+  `tailscale ip -4` at startup). A tailnet rekey/IP change survives a restart
+  instead of wedging the service or failing every health check.
 - **The updater does not self-update.** A merged fix to `auto-deploy.sh`
   itself, or a new `components.conf` entry, takes effect only after the
-  operator re-runs `auto-deploy.sh init` from an updated checkout.
+  operator re-runs `auto-deploy.sh init` from an updated checkout. `init`
+  records the checkout commit the installed copy came from; `status` and
+  `check` warn when `origin/main` carries newer `deploy/` changes, so the
+  staleness is visible instead of silent.
 - **cred-ui's runtime is the working checkout.** The updater owns the
   `cred-ui/` subtree once enabled (uncommitted changes there fail the deploy
   closed); don't hand-edit it on the box.

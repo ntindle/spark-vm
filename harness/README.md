@@ -27,13 +27,53 @@ Implements the executable half of the R2 pre-seeded-harness contract
   `--expect-version` (defaults to the current checkout's HEAD; the
   injector passes its own pinned SHA).
 
+- **`install-gate-fixture.sh`** — installs the gate fixture the `gate`-mode
+  probe asserts against: the public dummy inference credential under the
+  proxy's single fixed credential name (`llm-api`) through the narrow
+  writers, its `bearer_header` placement, the loopback echo host bound in
+  the inference registry and allowlisted in `inference-hosts.allow`, and
+  the loopback host exempted in the inference proxy's own
+  `inference-ssrf.allow` (never the main proxy's shared file), then
+  starts the loopback echo fixture and runs the probe in gate mode to
+  prove the wiring. Idempotent; safe to re-run. Fail-closed: refuses to
+  run if `llm-api` already holds a non-fixture credential. The guard
+  verifies two things without ever reading the stored value: the registry
+  shows `llm-api` bound ONLY to the loopback echo host, AND a blind
+  compare (`proxy/cred-store-verify-inference`) confirms the stored
+  value is the public fixture dummy. That second check is what makes
+  the guard honest — a signature-only check could not distinguish a
+  previous fixture run from a real tenant key installed without the
+  documented teardown (the registry would show the same signature in
+  both cases), and overwriting it would destroy the box's only
+  inference key. The echo
+  fixture and its log are gate-scratch (started and killed by the
+  installer, never a service).
+- **`echo-fixture.py`** — the echo origin the installer starts: a
+  loopback-only HTTP server that appends one
+  `{"method","path","authorization"}` JSONL record per request to the log
+  and answers 200. Same record format as the hermetic echo server in
+  `test_probe.py`.
+
+## Fixture lifecycle
+
+The fixture binds `llm-api` to the loopback echo host, allowlists
+`127.0.0.1` in `inference-hosts.allow`, **and** exempts it in the
+inference proxy's own `inference-ssrf.allow`. That binding must NEVER
+coexist with a real credential: after the gate passes, the echo host MUST
+be removed from `inference-hosts.allow` AND from `inference-ssrf.allow`,
+and the `llm-api`→echo-host binding MUST be unbound — by the image-build
+gate before the image is published, or by the provision-time injector
+before it installs the real tenant key. Whichever stage runs last owns
+the teardown. The gate is only safe because the fixture dummy is public
+(`GATE-FIXTURE-DUMMY-NOT-A-SECRET`, baked into this repo on purpose);
+the teardown is what keeps it safe once a real key exists. **Never run
+`install-gate-fixture.sh` on a box holding a real credential** (it
+refuses, but don't rely on the guard alone), and never install a real
+credential with it (real keys travel the human-only grant-writer path,
+SETUP.md "Inference-model recipe").
+
 ## Still to come (next feature slices)
 
-- **Gate fixture installer** — installs the public dummy inference
-  credential (`gate-dummy`) into the inference registry and the echo host
-  into the gate-scoped allowlist, starts the echo server, and runs the
-  probe in gate mode. Includes the gate-fixture cleanup (remove the
-  echo-host allowlist entry at box-live).
 - **Provision-time injector** — implements the research §4 inject list
   (tenant identity, inference credential by-name reference, fresh swapd
   CA, confirmd tenant attribution, first-task slot) against the H4

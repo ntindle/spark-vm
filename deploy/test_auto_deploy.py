@@ -647,3 +647,118 @@ def test_pull_only_deploy_records_version(tmp_path):
         pytest.skip("shellcheck not installed; syntax-only gate applied")
     r = run_bash("shellcheck -S warning deploy/auto-deploy.sh proxy/deploy.sh")
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+# --- tailnet health token + updater drift ---------------------------------------
+
+def test_resolve_health_host_passthrough():
+    """Literal hosts are returned unchanged."""
+    r = source_and('resolve_health_host 127.0.0.1')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "127.0.0.1"
+
+
+def test_resolve_health_host_tailnet(tmp_path):
+    """TAILNET resolves via `tailscale ip -4` (first line, trimmed)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "tailscale"
+    fake.write_text('#!/bin/sh\nprintf "100.99.0.1\\nfd7a:x::1\\n"\n')
+    fake.chmod(0o755)
+    env = {"PATH": str(bindir) + os.pathsep + os.environ["PATH"]}
+    r = source_and('resolve_health_host TAILNET', env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "100.99.0.1", r.stdout
+
+
+def test_resolve_health_host_tailnet_unresolvable(tmp_path):
+    """TAILNET with a failing tailscale yields empty -- the health check
+    then fails closed with a clear message instead of probing a stale IP."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "tailscale"
+    fake.write_text('#!/bin/sh\nexit 1\n')
+    fake.chmod(0o755)
+    env = {"PATH": str(bindir) + os.pathsep + os.environ["PATH"]}
+    r = source_and('resolve_health_host TAILNET', env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "", r.stdout
+
+
+def _drift_fixture(tmp_path, touch_deploy):
+    """Mirror repo whose origin/main advanced past the recorded source
+    commit; optionally with a deploy/ change in range."""
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=mirror, check=True,
+                                    capture_output=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    run("git", "config", "commit.gpgsign", "false")
+    (mirror / "deploy").mkdir()
+    (mirror / "deploy" / "auto-deploy.sh").write_text("v1")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "base")
+    src = subprocess.run(["git", "rev-parse", "HEAD"], cwd=mirror,
+                         capture_output=True, text=True).stdout.strip()
+    if touch_deploy:
+        (mirror / "deploy" / "auto-deploy.sh").write_text("v2")
+    else:
+        (mirror / "docs").mkdir()
+        (mirror / "docs" / "note.md").write_text("n")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "advance")
+    run("git", "update-ref", "refs/remotes/origin/main", "HEAD")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "updater-source-commit").write_text(src + "\n")
+    return state, src
+
+
+def test_check_updater_drift_warns(tmp_path):
+    """origin/main with newer deploy/ changes than the recorded source
+    commit produces the re-run-init warning."""
+    state, _ = _drift_fixture(tmp_path, touch_deploy=True)
+    r = source_and('check_updater_drift',
+                   env_extra={"UPDATER_STATE_DIR": str(state),
+                              "UPDATER_REPO": str(tmp_path / "mirror")})
+    assert "WARNING: updater code is stale" in r.stderr, r.stderr + r.stdout
+    assert "re-run './deploy/auto-deploy.sh init'" in r.stderr
+
+
+def test_check_updater_drift_quiet_when_docs_only(tmp_path):
+    """origin/main advanced but touched only docs -- no warning."""
+    state, _ = _drift_fixture(tmp_path, touch_deploy=False)
+    r = source_and('check_updater_drift',
+                   env_extra={"UPDATER_STATE_DIR": str(state),
+                              "UPDATER_REPO": str(tmp_path / "mirror")})
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" not in r.stderr, r.stderr
+
+
+def test_check_updater_drift_quiet_when_current(tmp_path):
+    """Source commit == origin/main -- no warning."""
+    state, _ = _drift_fixture(tmp_path, touch_deploy=True)
+    cur = subprocess.run(["git", "rev-parse", "origin/main"],
+                         cwd=tmp_path / "mirror",
+                         capture_output=True, text=True).stdout.strip()
+    (state / "updater-source-commit").write_text(cur + "\n")
+    r = source_and('check_updater_drift',
+                   env_extra={"UPDATER_STATE_DIR": str(state),
+                              "UPDATER_REPO": str(tmp_path / "mirror")})
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" not in r.stderr, r.stderr
+
+
+def test_record_updater_source_records_checkout_head(tmp_path):
+    """init's helper records the checkout's HEAD sha (40 hex)."""
+    state = tmp_path / "state"
+    state.mkdir()
+    r = source_and('record_updater_source',
+                   env_extra={"UPDATER_STATE_DIR": str(state)})
+    assert r.returncode == 0, r.stderr
+    recorded = (state / "updater-source-commit").read_text().strip()
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO,
+                          capture_output=True, text=True).stdout.strip()
+    assert recorded == head and re.fullmatch(r"[0-9a-f]{40}", recorded)

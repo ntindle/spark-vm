@@ -209,6 +209,7 @@ put it to work.
 | Path | What it is |
 | ---- | ---------- |
 | `ONBOARDING.md` | From-zero guide: Tailscale join, VM setup, SSH wiring, deploy order, verify checklist |
+| `docs/` ([index](docs/README.md)) | Long-form docs: positioning, hosted-product specs, research corpus, competitor corpus, loop governance |
 | `ENVIRONMENT.md` / `SETUP.md` | Environment notes and the credential-system writeup |
 | `proxy/` | Transparent-swapping egress proxy (`deploy.sh` installs it + the inference proxy + `confirmd`) |
 | `cred/` / `credlib/` | The `cred` CLI and its library: `hsurr:<name>` placeholders, narrow sudo writers, audit trail |
