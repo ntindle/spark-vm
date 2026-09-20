@@ -278,8 +278,10 @@ Rules for the build:
 
 - `og:image` is the persistence pair from the demo-assets plan — **reuse,
   don't reshoot** (`LANDING_PAGE_COPY.md` §7). The verifiable location is
-  `assets/README.md` (asset 3, currently a follow-up — the PNG does not
-  exist in the repo yet). The filename `og-persistence-pair.png` is this
+  `assets/README.md` (asset 3, now shipped as
+  `assets/demo-persistence-pair.gif`; the page build derives
+  `og-persistence-pair.png` from it — reuse, don't reshoot). The filename
+  `og-persistence-pair.png` is this
   doc's invention; the page build produces it. First-party hosted; the
   image URL must not carry query-string trackers.
 - The `og:description` names the no-trackers property explicitly — scoped

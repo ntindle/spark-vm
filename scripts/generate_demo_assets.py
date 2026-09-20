@@ -32,6 +32,16 @@ Only ever point this at a DEMO cred-ui instance -- never the live one.
 The headless-shell binary is found via $CHROME_HEADLESS_SHELL or the
 Playwright browser cache.
 
+Asset 3 (the same desktop, days apart) renders two terminal frames
+with PIL only — no browser, no live services at render time:
+    python3 scripts/generate_demo_assets.py \
+        --asset persistence --out assets/demo-persistence-pair.gif
+The frames come from a committed verbatim capture
+(assets/persistence-capture-*.json) of the real spark-vm desktop
+session (Xvfb :98); re-rendering needs no box, re-capturing needs SSH.
+Pass --fixture <name> to render from a newer capture under assets/
+(re-capture recipe in assets/README.md).
+
 Asset 4 (long-lived jobs stay alive) renders terminal frames from
 verbatim captures of a REAL demo muse-job on spark-vm -- see
 assets/README.md for the capture recipe (spawn, status, status 20+
@@ -42,9 +52,11 @@ minutes later), then:
 The frames show real command output; long lines are wrapped, never edited.
 """
 import argparse
+import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -317,14 +329,20 @@ def generate_secrets(repo_root, work_dir, frames_dir):
     return shots, journal_line
 
 
-def _render_terminal_segs(caption, segs, body_h, title=None):
-    """Render one terminal frame from pre-flattened segments."""
+def _render_terminal_segs(caption, segs, body_h, title=None,
+                         body_font_size=_TERM_FONT, pad=_TERM_PAD):
+    """Render one terminal frame from pre-flattened segments.
+
+    body_font_size/pad exist for the persistence asset's denser terminal
+    (12px body, 10px pad); every other asset uses the shared defaults, so
+    their frames are pixel-identical to before.
+    """
     title = title or "demo — secrets the agent never sees"
-    font = _mono_font(_TERM_FONT)
+    font = _mono_font(body_font_size)
     small = _mono_font(11)
     scw = max(small.getlength("0123456789abcdef"), 1) / 16
-    lh = _TERM_FONT + 6
-    cap_lines = _wrap_term(caption, int((_TERM_W - 2 * _TERM_PAD) / scw), hang="")
+    lh = body_font_size + 6
+    cap_lines = _wrap_term(caption, int((_TERM_W - 2 * pad) / scw), hang="")
     cap_h = _TERM_CAPTION_H if len(cap_lines) <= 2 else _TERM_CAPTION_H + 14
     h = _TERM_TITLE_H + body_h + cap_h
 
@@ -336,21 +354,158 @@ def _render_terminal_segs(caption, segs, body_h, title=None):
     d.text((_TERM_W // 2, 15), title,
            font=small, fill=_OUT, anchor="mm")
     prompt_w = font.getlength("$ ")
-    y = _TERM_TITLE_H + _TERM_PAD
+    y = _TERM_TITLE_H + pad
     for show_prompt, ln in segs:
         if show_prompt:
-            d.text((_TERM_PAD, y), "$", font=font, fill=_PROMPT)
-            d.text((_TERM_PAD + prompt_w, y), ln, font=font, fill=_CMD)
+            d.text((pad, y), "$", font=font, fill=_PROMPT)
+            d.text((pad + prompt_w, y), ln, font=font, fill=_CMD)
         else:
-            d.text((_TERM_PAD, y), ln, font=font, fill=_OUT)
+            d.text((pad, y), ln, font=font, fill=_OUT)
         y += lh
     cy = _TERM_TITLE_H + body_h
     d.rectangle([0, cy, _TERM_W, h], fill=_BAR)
     ty = cy + 10
     for ln in cap_lines:
-        d.text((_TERM_PAD, ty), ln, font=small, fill=_CAPTION)
+        d.text((pad, ty), ln, font=small, fill=_CAPTION)
         ty += 15
     return im
+
+
+# --- Asset 3: "the same desktop, days apart" (persistence pair) ---
+#
+# The launch-post plan called for "same desktop 24h apart — before/after
+# screenshots". Staging a fake 24h gap would be dishonest, so this asset
+# shows something better: the box's REAL long-lived desktop session.
+# Xvfb :98 (the display the CUA driver clicks through) started Wed
+# 2026-09-16 and was still serving days later — frame 1 is the session's
+# birth record, frame 2 re-verifies it alive. The gap is whatever the
+# committed capture says; the captions compute it from the fixture, so a
+# re-capture renders its own honest elapsed time.
+#
+# The fixture (assets/persistence-capture-*.json) is the verbatim stdout
+# of the displayed commands, captured live on spark-vm. Re-rendering
+# needs no box; re-capturing needs SSH to the box (recipe in
+# assets/README.md). The validator fails loudly on a missing, empty, or
+# malformed fixture so a broken capture never renders a silent frame.
+
+PERSISTENCE_HOLDS = {"p1-birth": 5.0, "p2-now": 7.0}
+PERSISTENCE_DEFAULT_FIXTURE = "persistence-capture-2026-09-20.json"
+
+
+def _load_persistence_fixture(repo_root, fixture_name=None):
+    name = fixture_name or PERSISTENCE_DEFAULT_FIXTURE
+    path = os.path.join(repo_root, "assets", name)
+    if not os.path.isfile(path):
+        sys.exit("persistence fixture missing: %s (re-capture recipe in "
+                 "assets/README.md; --fixture selects another)" % path)
+    with open(path) as f:
+        try:
+            fx = json.load(f)
+        except ValueError as e:
+            sys.exit("persistence fixture malformed: %s" % e)
+    if not isinstance(fx, dict):
+        sys.exit("persistence fixture malformed: top level must be an "
+                 "object, got %s" % type(fx).__name__)
+    for key in ("birth", "live", "uptime", "tmux"):
+        entry = fx.get(key)
+        if not isinstance(entry, dict):
+            sys.exit("persistence fixture malformed: %r must be an object "
+                     "with cmd/stdout, got %s"
+                     % (key, type(entry).__name__))
+        if not isinstance(entry.get("stdout"), str) \
+                or not entry["stdout"].strip():
+            sys.exit("persistence fixture has empty/non-string stdout "
+                     "for %r" % key)
+    for key in ("xvfb_pid", "xvfb_started", "captured_at"):
+        if key not in fx:
+            sys.exit("persistence fixture missing key: %r" % key)
+    pid = fx["xvfb_pid"]
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        sys.exit("persistence fixture: xvfb_pid must be an integer, got %r"
+                 % (pid,))
+    try:
+        started = datetime.fromisoformat(fx["xvfb_started"])
+        captured = datetime.fromisoformat(fx["captured_at"])
+    except (ValueError, TypeError) as e:
+        sys.exit("persistence fixture has unparseable timestamp: %s" % e)
+    # No silent tz guessing: the recipe writes offset-bearing ISO
+    # timestamps (from `date -Iseconds` on the box), and the loader
+    # refuses anything else.
+    if started.tzinfo is None or captured.tzinfo is None:
+        sys.exit("persistence fixture timestamps must be tz-aware (append "
+                 "the box's UTC offset, see the re-capture recipe)")
+    if captured < started:
+        sys.exit("persistence fixture: captured_at is before xvfb_started "
+                 "(would render a false negative-day gap)")
+    return fx
+
+
+def _elide_term(text, ncols):
+    """Hard-elide terminal lines longer than ncols with an explicit ….
+
+    Persistence-asset only (Design review): keeps the frames readable
+    without editing the evidence — the fixture retains the verbatim
+    stdout as the audit trail.
+    """
+    return "\n".join(ln if len(ln) <= ncols else ln[:ncols - 1] + "…"
+                     for ln in text.split("\n"))
+
+
+def generate_persistence(repo_root, frames_dir, fixture_name=None):
+    """Render the asset-3 pair from the committed verbatim capture."""
+    fx = _load_persistence_fixture(repo_root, fixture_name)
+    os.makedirs(frames_dir, exist_ok=True)
+    started = datetime.fromisoformat(fx["xvfb_started"])
+    captured = datetime.fromisoformat(fx["captured_at"])
+    days = (captured - started).days
+    elapsed = "%d day%s" % (days, "" if days == 1 else "s")
+    pid = fx["xvfb_pid"]
+    title = "demo — the same desktop, days apart"
+
+    # Denser terminal than asset 2's shared rendering (Design review):
+    # 12px body + 10px pad raises the column budget for the long verbatim
+    # ps/tmux lines; anything still over elides with … (audit trail stays
+    # in the fixture). Asset 2's frames are untouched (defaults above).
+    body_font, pad = 12, 10
+    font_probe = _mono_font(body_font)
+    cw = max(font_probe.getlength("0123456789abcdef"), 1) / 16
+    ncols = int((_TERM_W - 2 * pad) / cw)
+    transcripts = {
+        "p1-birth": [
+            ("cap", "1/2 — then: Xvfb :98's birth record, captured live "
+                    "on spark-vm"),
+            ("cmd", fx["birth"]["cmd"]),
+            ("out", _elide_term(fx["birth"]["stdout"].rstrip("\n"), ncols)),
+        ],
+        "p2-now": [
+            ("cap", "2/2 — now, %s later: same pid, same start — Sep-16 "
+                    "job sessions intact." % elapsed),
+            ("cmd", fx["uptime"]["cmd"]),
+            ("out", _elide_term(fx["uptime"]["stdout"].rstrip("\n"), ncols)),
+            ("cmd", fx["live"]["cmd"]),
+            ("out", fx["live"]["stdout"].rstrip("\n")),
+            ("cmd", fx["tmux"]["cmd"]),
+            ("out", _elide_term(fx["tmux"]["stdout"].rstrip("\n"), ncols)),
+        ],
+    }
+    specs = {}
+    for stem, items in transcripts.items():
+        caption = items[0][1]
+        segs = _flatten_transcript(items[1:], ncols)
+        specs[stem] = (caption, segs)
+    lh = body_font + 6
+    max_body = max(pad + len(s) * lh + 8 for _, s in specs.values())
+    shots = []
+    for stem in ("p1-birth", "p2-now"):
+        caption, segs = specs[stem]
+        im = _render_terminal_segs(caption, segs, max_body, title=title,
+                                  body_font_size=body_font, pad=pad)
+        path = os.path.join(frames_dir, stem + ".png")
+        im.save(path)
+        shots.append(path)
+        print("frame:", path, im.size)
+    print("pid %s, gap %s (fixture %s)" % (pid, elapsed, fx["captured_at"]))
+    return shots
 
 
 # --- Asset 4: "long-lived jobs stay alive" (muse-job watch) ---
@@ -572,6 +727,7 @@ def _ensure_out_dir(out_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--asset", choices=("approval-loop", "secrets",
+                                       "persistence",
                                        "credui-phone", "musejob-watch"),
                     default="approval-loop")
     ap.add_argument("--url", help="demo confirmd base URL (approval-loop only); "
@@ -586,6 +742,10 @@ def main():
                     help="dir of verbatim box captures for --asset "
                          "musejob-watch (w1-spawn.txt, w2-status.txt, "
                          "w3-status-later.txt)")
+    ap.add_argument("--fixture", default=None,
+                    help="fixture filename under assets/ for --asset "
+                         "persistence (default: "
+                         "persistence-capture-2026-09-20.json)")
     ap.add_argument("--out", required=True, help="output GIF path")
     args = ap.parse_args()
     if args.asset == "secrets":
@@ -596,6 +756,15 @@ def main():
             sys.exit("expected 3 frames, got %d" % len(shots))
         _ensure_out_dir(args.out)
         assemble(shots, args.out, max_width=_TERM_W, holds=SECRETS_HOLDS)
+        return
+    if args.asset == "persistence":
+        repo_root = os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))
+        shots = generate_persistence(repo_root, args.frames_dir, args.fixture)
+        if len(shots) != 2:
+            sys.exit("expected 2 frames, got %d" % len(shots))
+        _ensure_out_dir(args.out)
+        assemble(shots, args.out, max_width=_TERM_W, holds=PERSISTENCE_HOLDS)
         return
     if args.asset == "musejob-watch":
         shots = generate_musejob_watch(args.capture_dir, args.frames_dir)
