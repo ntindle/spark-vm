@@ -490,6 +490,34 @@ def test_installer_refuses_stale_fixture_binding(stack):
     assert not ssrf_allow_file.exists()
 
 
+def test_installer_refuses_unreadable_allow_file(stack):
+    # The allow files live under /home/swapd, which is 0700
+    # (proxy/deploy.sh): a non-root invoker cannot traverse there, so the
+    # unprivileged reads must fail CLOSED -- never append blindly. A
+    # masked EACCES would look exactly like "entry absent" and silently
+    # duplicate entries on every re-run while the newline repair stayed
+    # dead. A 000 dir models the 0700 production layout for the test user.
+    if os.geteuid() == 0:
+        pytest.skip("needs a non-root invoker: root traverses 000 dirs")
+    (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
+     echo_log, _proxy) = stack
+    blocked = secrets_dir / "blocked"
+    blocked.mkdir()
+    env = dict(env)
+    env["INFERENCE_HOSTS_ALLOW"] = str(blocked / "inference-hosts.allow")
+    env["INFERENCE_SSRF_ALLOW"] = str(blocked / "inference-ssrf.allow")
+    blocked.chmod(0o000)
+    try:
+        proc = _run_installer(env)
+    finally:
+        blocked.chmod(0o755)
+    assert proc.returncode == 2
+    assert b"refusing" in proc.stderr
+    assert b"cannot read" in proc.stderr
+    # Refused before any credential state: nothing was stored.
+    assert not (secrets_dir / KEY_NAME).exists()
+
+
 def test_installer_refuses_corrupt_registry(stack):
     # A corrupt registry at the guard check fails closed: refuse, and
     # never touch the stored credential.

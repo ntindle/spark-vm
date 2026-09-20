@@ -83,8 +83,9 @@
 set -euo pipefail
 # The installer appends to the allow files via tee: without a sane umask a
 # missing allow file would be created 0666&~umask (world-writable SSRF
-# allow file). deploy.sh pre-creates the inference files 0644, but this
-# seam must not depend on that.
+# allow file). deploy.sh pre-creates inference-ssrf.allow 0644, but
+# inference-hosts.allow is created on demand here -- this seam must not
+# depend on either.
 umask 022
 
 # Public, non-secret, on purpose. Keep it obviously-not-a-key.
@@ -162,18 +163,49 @@ sys.exit(0 if isinstance(hosts, list) and hosts == [os.environ["ECHO_HOST"]] els
     echo "install-gate-fixture: previous fixture run detected ($KEY_NAME bound only to $ECHO_HOST); reinstalling the public dummy"
 fi
 
+# allowlist_readable <file>: fail-closed readability check for the
+# allow files. The reads in allowlist_add run as the invoking user, NOT
+# through run_priv (production sudoers grants only `tee -a` on the allow
+# files), and the allow files live under /home/swapd, which is 0700
+# (proxy/deploy.sh): the 0644 file mode alone does NOT make them readable
+# to a non-root invoker. A masked EACCES would look exactly like "entry
+# absent" and silently break idempotency + the newline repair, so an
+# unreadable allow file is a hard refusal, never a blind append.
+# Exit 0: file is readable, or absent (tee -a creates it). Exit 1:
+# unreadable (PermissionError on stat, or stat succeeded but R_OK denied).
+allowlist_readable() {
+    python3 - "$1" <<'EOF'
+import os, sys
+p = sys.argv[1]
+try:
+    os.stat(p)
+except FileNotFoundError:
+    sys.exit(0)
+except PermissionError:
+    sys.exit(1)
+except OSError:
+    sys.exit(1)
+sys.exit(0 if os.access(p, os.R_OK) else 1)
+EOF
+}
+
 # allowlist_add <file> <entry>: idempotent append. The reads run as the
 # invoking user, NOT through run_priv: production sudoers grants only
 # `tee -a` on the allow files, so a sudoed read would be denied inside the
 # `if` conditions (set -e never trips there) and silently break
-# idempotency + the newline repair. The files are 0644; only the appends
-# need privilege. If a pre-existing file lacks its trailing newline, a
-# bare append would merge lines -- terminate it first. (The single
-# backslash in '\n' is intentional: printf interprets it as a newline; a
-# two-backslash '\\n' would append a literal backslash-n. Verified with
-# od -c; do not "fix".)
+# idempotency + the newline repair. Only the appends need privilege.
+# allowlist_readable (above) fails closed when the invoking user cannot
+# read the file -- the 0644 mode is not enough under /home/swapd's 0700.
+# If a pre-existing file lacks its trailing newline, a bare append would
+# merge lines -- terminate it first. (The single backslash in '\n' is
+# intentional: printf interprets it as a newline; a two-backslash '\\n'
+# would append a literal backslash-n. Verified with od -c; do not "fix".)
 allowlist_add() {
     local file="$1" entry="$2"
+    if ! allowlist_readable "$file"; then
+        echo "install-gate-fixture: refusing -- cannot read $file as the invoking user; will not append blindly (check /home/swapd traversal)" >&2
+        exit 2
+    fi
     if grep -qxF "$entry" "$file" 2>/dev/null; then
         echo "install-gate-fixture: $entry already in $(basename "$file")"
     else
