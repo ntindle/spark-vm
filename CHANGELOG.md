@@ -37,6 +37,11 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- A docs index for the docs tree (`docs/README.md`): the 40-plus doc corpus
+  organized by what you're trying to do — start-here contributor picks,
+  hosted-product design specs, the product-research corpus, the dated
+  competitor corpus, and loop governance, with a keep-this-index-honest rule
+  for new docs; the root README's repo-layout table links to it (#171)
 - Live-control competitor deep-scan for the #47 control-plane design: six
   providers (AgentComputer, TermSquad, Fly.io Sprites, E2B, Daytona, Docker
   Sandboxes) scored on browser desktop streaming, live terminal,
