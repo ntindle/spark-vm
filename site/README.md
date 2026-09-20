@@ -1,10 +1,19 @@
 # site/ — the waitlist-era web surface (H15, surface 1)
 
-**Status: build slice 1 of H15 PR 1 — static markup only.** This directory holds
-the waitlist page build's front end per `docs/HOSTED_SIGNUP_WEB_UI.md` §4:
-the landing page (`index.html`, typesets `docs/LANDING_PAGE_COPY.md` §§2–3),
-the dedicated form page (`waitlist.html`, per §4.1), and the derived
-`og:image` (`assets/og-persistence-pair.png`).
+**Status: build slices 1–2 of H15 PR 1.** Slice 1 shipped the static
+markup (PR #163); slice 2 ships the backend half of the endpoint surface
+(`site/waitlistd.py` + `scripts/test_waitlistd.py`, 25 tests): `POST
+/waitlist/form`, the §4.3 confirm flow (`GET` renders-only / `POST`
+confirms, token as form field), the HMAC token signer (single-use, 14-day
+expiry, operator key via `WAITLIST_HMAC_KEY` — never in the repo), and
+`funnel_events` logging per `docs/FUNNEL_MEASUREMENT.md` §3.4
+(verified parseable by `scripts/funnel_metrics.py`).
+
+**Not yet (slice 3 = H15 §8's remaining "§7 waitlist-era endpoint
+surface"):** the +7d reminder / 14d drop jobs, the path-A email parser,
+the invite sender, the forget-me handler, and the `/go/selfhost` static
+redirect shim. The page is still NOT deployable — the dead-form rule
+holds until every §10 checklist item is live.
 
 ## The dead-form rule (read before deploying anything)
 
@@ -72,13 +81,13 @@ cohort before waitlist-order general invites (no dates), so the page never
 promises what the operator plan doesn't deliver.
 
 **Not yet (H15 PR 1 remainder = H15 §8's "§7 waitlist-era endpoint surface"
-plus markup):** `POST /waitlist/form` endpoint, the §4.3 confirm flow
-(`GET` renders-only / `POST` confirms), the HMAC token signer, the +7d
-reminder / 14d drop jobs, the path-A email parser, the invite sender, the
-forget-me handler, the `/go/selfhost` static redirect shim, and the
-`funnel_events` logging (`docs/FUNNEL_MEASUREMENT.md` §3.4).
-`scripts/funnel_metrics.py` (PR #141) already ships the consumer side of
-that logging.
+plus markup):** the +7d reminder / 14d drop jobs, the path-A email parser,
+the invite sender, the forget-me handler, and the `/go/selfhost` static
+redirect shim. Slice 2 already ships: `POST /waitlist/form` endpoint, the
+§4.3 confirm flow (`GET` renders-only / `POST` confirms), the HMAC token
+signer, and the `funnel_events` logging (`docs/FUNNEL_MEASUREMENT.md`
+§3.4). `scripts/funnel_metrics.py` (PR #141) already ships the consumer
+side of that logging.
 
 ## Honesty re-verification (build time, 2026-09-20)
 
