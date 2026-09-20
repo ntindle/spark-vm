@@ -10,9 +10,11 @@ form"*) never typeset atop a dead form. Copy blocks are **DRAFTS**, not
 published copy.
 
 **Dependency:** every `docs/LANDING_PAGE_COPY.md` citation below refers to
-open PR #61 (`strategy/landing-page-copy-20260918-2155`) — re-verify
-section numbers when it merges. This spec is contingent on #61 landing;
-merge order is #61 → this.
+main (merged as PR #61, `fc948a6`; section numbers re-verified against main
+2026-09-19). The HTTP method shape of the confirm flow (§4) is decided by
+open PR #99 (`docs/FUNNEL_MEASUREMENT.md` §4), which supersedes this doc's
+GET language — GET renders the confirm page, POST confirms; merge order is
+this → #99.
 
 **Non-overlap map (what this doc is not):**
 - The page strategy (conversion job, section order, copy blocks,
@@ -144,6 +146,9 @@ H3 follow-up.)
 `{owner_email, entry_id, issued_at}`, single-use, 14-day expiry (7 days to
 the reminder + 7 days grace, then the entry drops per §5 retention).
 Confirmation is a GET on a signed link — no account, no password.
+*Note: the HTTP method shape is decided by open PR #99
+(`docs/FUNNEL_MEASUREMENT.md` §4), which supersedes this section's GET
+language — GET renders the confirm page, POST confirms.*
 Re-clicking a consumed token renders "you're already confirmed," not an
 error. Re-submitting while pending re-sends the confirm email with a
 fresh token (counts toward the 3/24h limit).
@@ -354,6 +359,12 @@ criterion:
 
 - [ ] **Waitlist inbox** provisioned (dedicated AgentMail inbox) + inbound
   verified (send→receive round trip).
+- [ ] **Inbox address printed on the page**: the waitlist copy block prints
+  the dedicated Path-A inbox address alongside the form CTA (§2) — the
+  Muse's discovery step. (A printed agent address is not a mailto-link CTA:
+  `LANDING_PAGE_COPY.md` §4's "a mailto link is not a funnel" rule stands;
+  the address is discovery affordance, the form CTA remains the conversion
+  instrument.)
 - [ ] **Store** (operator-side, §5 schema) with encrypted-at-rest owner
   emails.
 - [ ] **Path-A parser**: email → validated row; exclusion list + `Owner:`
@@ -364,6 +375,8 @@ criterion:
 - [ ] **Confirm sender + token signer**: HMAC, single-use, 14d expiry;
   idempotent re-click ("you're already confirmed"); rate-limited
   (all reply types counted); reminder job at +7d; drop job at +14d.
+  HTTP method shape per the §4 note (open PR #99 supersedes the GET
+  language: GET renders the confirm page, POST confirms).
 - [ ] **Abuse controls** (§6) live on both paths; no unauthenticated
   position lookup.
 - [ ] **Invite sender**: fills pricing + trial terms at send time; 14d
@@ -375,9 +388,10 @@ criterion:
   confirm-rate reporting until then; bridge + funnel-health queries
   defined.
 - [ ] **Page disclosure gates**: the 14-day invite claim window is stated
-  on the page (FAQ Q6 or how-it-works step 1); the pre-launch pilot phase
-  is disclosed in the FAQ — so the page never promises what this spec
-  doesn't deliver.
+  on the page (FAQ Q6 or how-it-works step 1) — DRAFT acceptance copy:
+  *"Invites are claimed within 14 days — unclaimed spots roll to the next
+  reader in line."*; the pre-launch pilot phase is disclosed in the FAQ —
+  so the page never promises what this spec doesn't deliver.
 - [ ] **Copy review**: the drafts above re-read against
   `POSITIONING.md` anti-claims at send time (docs drift).
 
