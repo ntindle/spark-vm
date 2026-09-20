@@ -172,6 +172,7 @@ day-bucket and `attrs` is a small key-value map:
 | `confirm_sent` | confirm email leaves the sender | row id | — |
 | `confirmed` | the POST confirm lands (see §4) | row id | `via`: `original` or `reminder` |
 | `reminder_sent` | +7d job fires | row id | — |
+| `dropped` | 14d drop job fires on an unconfirmed row (`WAITLIST_OPERATIONS.md` §4) | row id | — |
 | `invite_sent` | wave invite leaves | row id | — |
 | `claimed` | invite claim completes | row id | — |
 
