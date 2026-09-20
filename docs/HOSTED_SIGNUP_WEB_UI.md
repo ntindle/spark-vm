@@ -10,9 +10,10 @@ copy.
 
 **Dependencies:** citations of `docs/LANDING_PAGE_COPY.md` refer to the merged
 version on main (PR #61 landed). Citations of `docs/WAITLIST_OPERATIONS.md`
-refer to open PR #68 and of `docs/FUNNEL_MEASUREMENT.md` to open PR #99 —
-re-verify section numbers when those merge. Merge order: #61 (done) → #68 →
-#99 → this.
+refer to the merged version on main (PR #68, `18f0f0e5`) and of
+`docs/FUNNEL_MEASUREMENT.md` to the merged version on main (PR #99, `c9e859e5`)
+— section numbers re-verified against main 2026-09-20. Merge order satisfied:
+#61 (done) → #68 → #99 → this.
 
 **Non-overlap map (what this doc is not):**
 - The front-door strategy (conversion job, section order, copy blocks, page
