@@ -161,7 +161,13 @@ def _scratch_repo_with_generator(tmp_path):
     shutil.copy(GEN, gen)
     (scratch / "VERSION").write_text("0.0.0-test\n")
     for argv in (["git", "init"], ["git", "config", "user.email", "t@t"],
-                 ["git", "config", "user.name", "t"], ["git", "add", "-A"],
+                 ["git", "config", "user.name", "t"],
+                 # Hermetic against ambient gitconfig: a global commit.gpgsign
+                 # would make the setup commit fail, and a global
+                 # status.showUntrackedFiles=no would hide untracked files.
+                 ["git", "config", "commit.gpgsign", "false"],
+                 ["git", "config", "status.showUntrackedFiles", "normal"],
+                 ["git", "add", "-A"],
                  ["git", "commit", "-m", "x"]):
         subprocess.run(argv, cwd=scratch, check=True, capture_output=True,
                        timeout=30)
@@ -179,7 +185,7 @@ def test_generate_refuses_dirty_checkout(tmp_path):
     (scratch / "VERSION").write_text("0.0.0-dirty\n")
     p = subprocess.run([gen, "--out", str(tmp_path / "m2.json")],
                        capture_output=True, text=True, timeout=30)
-    assert p.returncode != 0
+    assert p.returncode == 2
     assert "uncommitted changes" in p.stderr
     assert not (tmp_path / "m2.json").exists()
     # Untracked file: also a dirty tree (it would be baked too).
@@ -187,5 +193,16 @@ def test_generate_refuses_dirty_checkout(tmp_path):
     (scratch / "junk.txt").write_text("junk\n")
     p = subprocess.run([gen, "--out", str(tmp_path / "m3.json")],
                        capture_output=True, text=True, timeout=30)
-    assert p.returncode != 0
+    assert p.returncode == 2
     assert "uncommitted changes" in p.stderr
+    assert not (tmp_path / "m3.json").exists()
+    # Staged-but-uncommitted change: still uncommitted, still refused.
+    (scratch / "junk.txt").unlink()
+    (scratch / "VERSION").write_text("0.0.0-staged\n")
+    subprocess.run(["git", "add", "VERSION"], cwd=scratch, check=True,
+                   capture_output=True, timeout=30)
+    p = subprocess.run([gen, "--out", str(tmp_path / "m4.json")],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 2
+    assert "uncommitted changes" in p.stderr
+    assert not (tmp_path / "m4.json").exists()
