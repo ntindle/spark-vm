@@ -10,7 +10,12 @@ Group=swapd
 # Runs as swapd (owner decision 3: "swapd or bdrive serves the page").
 # Binds the tailnet address only; every request is authenticated by
 # Tailscale identity against CONFIRM_OWNER.
-Environment=CONFIRM_BIND=100.65.241.20
+# No CONFIRM_BIND pin here on purpose: confirmd.py resolves the bind address
+# at startup via `tailscale ip -4` (finding 53(f) -- "bind address comes from
+# tailscale, not a literal"), so a tailnet rekey/IP change survives a restart
+# instead of wedging the service on a stale address. If tailscaled is down at
+# start, confirmd falls back to the last-known literal and Restart=on-failure
+# retries until the tailnet is back (the unit already orders After=tailscaled).
 Environment=CONFIRM_PORT=8443
 Environment=CONFIRM_CERT=/home/swapd/confirmd/cert.crt
 Environment=CONFIRM_KEY=/home/swapd/confirmd/key.pem

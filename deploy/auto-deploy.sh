@@ -147,6 +147,24 @@ tcp_ok() {
     (exec 3<>/dev/tcp/"$host"/"$port") 2>/dev/null
 }
 
+resolve_health_host() {
+    # resolve_health_host <host> — the literal host, except the TAILNET token
+    # which resolves to this box's current tailnet IPv4 at check time. A
+    # pinned tailnet IP goes stale on rekey and turns every later deploy
+    # into a false health failure (rollback of a good deploy + blocked
+    # commit); resolving at check time keeps the health check honest.
+    # Prints the host, or nothing when TAILNET cannot be resolved.
+    local host="$1"
+    if [ "$host" = "TAILNET" ]; then
+        # The || true matters: auto-deploy.sh runs under set -e with
+        # pipefail, so a failing tailscale must yield empty here (the
+        # caller fails the health check closed), not abort the script.
+        tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]' || true
+        return 0
+    fi
+    printf '%s' "$host"
+}
+
 write_watermark() {
     # Atomic watermark update: a torn write must never strand the updater.
     printf '%s\n' "$1" >"$WATERMARK.tmp" && mv -f "$WATERMARK.tmp" "$WATERMARK"
@@ -525,6 +543,11 @@ health_check() {
     while IFS= read -r h; do
         [ -n "$h" ] || continue
         host="${h#tcp:}"; host="${host%:*}"; port="${h##*:}"
+        host="$(resolve_health_host "$host")"
+        if [ -z "$host" ]; then
+            log "  health: could not resolve tailnet IP for $h"
+            return 1
+        fi
         log "  health: tcp $host:$port ..."
         local attempt ok=0
         for attempt in $(seq 1 20); do
@@ -604,8 +627,37 @@ cmd_init() {
     fi
     install -m 0755 "$SCRIPT_DIR/auto-deploy.sh" "$INSTALLED_BIN/auto-deploy.sh"
     install -m 0644 "$UPDATER_COMPONENTS_CONF" "$INSTALLED_BIN/components.conf"
+    record_updater_source
     log "installed updater to $INSTALLED_BIN (timer ExecStart must point here)"
     log "init done. Next: install the systemd unit + timer (see README.md)."
+}
+
+record_updater_source() {
+    # Record which checkout commit the installed updater copy came from, so
+    # status/check can warn when the timer runs stale code: merging a fix to
+    # auto-deploy.sh or components.conf does NOT take effect until init is
+    # re-run (README "known limitations"), and nothing used to say so.
+    # Best-effort: "unknown" when the updater wasn't installed from a git
+    # checkout (then drift checks stay quiet).
+    local sha
+    sha="$(git -C "$SCRIPT_DIR/.." rev-parse HEAD 2>/dev/null || echo unknown)"
+    printf '%s\n' "$sha" >"$UPDATER_STATE_DIR/updater-source-commit" 2>/dev/null || true
+}
+
+check_updater_drift() {
+    # Warn when origin/main contains deploy/ changes newer than the commit
+    # the installed updater copy came from -- i.e. merged updater fixes that
+    # are not live because nobody re-ran init. Quiet when the source commit
+    # is unknown or the histories are unrelated (test fixtures).
+    local src cur
+    src="$(cat "$UPDATER_STATE_DIR/updater-source-commit" 2>/dev/null || echo unknown)"
+    cur="$(git -C "$UPDATER_REPO" rev-parse origin/main 2>/dev/null || echo unknown)"
+    [ "$src" != "unknown" ] && [ "$cur" != "unknown" ] && [ "$src" != "$cur" ] || return 0
+    git -C "$UPDATER_REPO" merge-base --is-ancestor "$src" "$cur" 2>/dev/null || return 0
+    git -C "$UPDATER_REPO" diff --quiet "$src" "$cur" -- deploy/ 2>/dev/null && return 0
+    log "WARNING: updater code is stale: installed copy came from $src,"
+    log "WARNING: origin/main $cur carries newer deploy/ changes that are NOT live."
+    log "WARNING: re-run './deploy/auto-deploy.sh init' from an updated checkout."
 }
 
 # pending_range return codes: 0 = range ready on stdout; 1 = nothing to do
@@ -675,6 +727,7 @@ cmd_check() {
         local c
         for c in "${comps[@]}"; do log "  - $c"; done
     fi
+    check_updater_drift
 }
 
 cmd_deploy() {
@@ -862,6 +915,7 @@ cmd_status() {
     else
         echo "timer:      not enabled"
     fi
+    check_updater_drift
 }
 
 usage() {
