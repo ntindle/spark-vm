@@ -90,6 +90,9 @@ jobs:
         # not broken links. fourweekmba.com 403s automated fetchers (bot-block;
         # page hand-verified live 2026-09-20 via real browser — full article
         # loads, headline matches the midday watch's Agents API citation).
+        # tvgreport.com 522s automated fetchers (bot-block; article
+        # hand-verified live 2026-09-20 via real browser — full article
+        # loads, headline matches the competitor-watch citation).
         # Excluded at host level (not per-URL): new links
         # from these hosts trip the same bot blocks, so the exclusion must
         # cover the whole host. When adding a link from one of these hosts,
@@ -114,7 +117,7 @@ jobs:
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
