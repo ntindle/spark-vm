@@ -37,6 +37,12 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Funnel query pack for the waitlist operator: a log-derived, no-cookie,
+  no-tracker weekly report (page conversion, CTA click-through by section,
+  interim raw vs DMARC-aligned confirm rate with the manufactured-row spray
+  signature, reminder lift, invite-to-claim, submit-to-confirm latency) —
+  the §7 deliverable of the funnel measurement spec
+  ([#141](https://github.com/ntindle/spark-vm/pull/141))
 - Changelog ritual: this `CHANGELOG.md` (Keep a Changelog format), the
   per-PR entry requirement in `CONTRIBUTING.md`, and release-time rollover
   in `docs/VERSIONING.md`

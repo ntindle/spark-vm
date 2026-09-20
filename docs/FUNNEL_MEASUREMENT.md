@@ -363,9 +363,13 @@ made exact: the `WAITLIST_OPERATIONS.md` §10 "Metrics wiring" item closes
 
 ## 9. Follow-ups (not this run)
 
-- Page build (H15-era): typeset the §5 tags, wire the `src=` CTA URLs,
-  ship `scripts/funnel_metrics.py` with the page PR — the §10 "Metrics
-  wiring" checklist item closes here, not in a follow-up.
+- Page build (H15-era): typeset the §5 tags, wire the `src=` CTA URLs.
+  `scripts/funnel_metrics.py` shipped early as a standalone slice
+  (2026-09-20, `strategy/funnel-metrics-query-pack-20260920-0454`) — the
+  §10 "Metrics wiring" checklist item's *script* half is done; the
+  wiring half (tags + src= CTAs feeding it) still belongs to the page
+  build. Bridge metric computation still lands with signup; A/B after 4
+  weeks of baseline.
 - Bridge metric computation lands with signup; the waitlist→identity-linked
   drop-off query is defined now (§7) so signup's schema can emit into
   `funnel_events` from day one.
