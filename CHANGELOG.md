@@ -67,7 +67,7 @@ This changelog only works if entries land with the change, not after it:
   requests now close the HTTP connection instead of risking a desynced
   keep-alive. Still not deployable: the email-parsing path, invites, and
   forget-me land next; the page ships only when the full
-  waitlist-operations checklist is green (#TBD)
+  waitlist-operations checklist is green (#172)
 - Browser-driver first code (H17, [#132](https://github.com/ntindle/spark-vm/issues/132)):
   the fixed `bdrive` action protocol as validated Python — the narrow action
   vocabulary the on-box browser service will accept, with ref-scoped element
