@@ -36,9 +36,16 @@ Implements the executable half of the R2 pre-seeded-harness contract
   `inference-ssrf.allow` (never the main proxy's shared file), then
   starts the loopback echo fixture and runs the probe in gate mode to
   prove the wiring. Idempotent; safe to re-run. Fail-closed: refuses to
-  run if `llm-api` already holds a non-fixture credential (a real
-  tenant key, or a stale fixture binding left behind when one landed).
-  The echo
+  run if `llm-api` already holds a non-fixture credential. The guard
+  verifies two things without ever reading the stored value: the registry
+  shows `llm-api` bound ONLY to the loopback echo host, AND a blind
+  compare (`proxy/cred-store-verify-inference`) confirms the stored
+  value is the public fixture dummy. That second check is what makes
+  the guard honest — a signature-only check could not distinguish a
+  previous fixture run from a real tenant key installed without the
+  documented teardown (the registry would show the same signature in
+  both cases), and overwriting it would destroy the box's only
+  inference key. The echo
   fixture and its log are gate-scratch (started and killed by the
   installer, never a service).
 - **`echo-fixture.py`** — the echo origin the installer starts: a

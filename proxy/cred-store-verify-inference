@@ -1,0 +1,98 @@
+#!/bin/bash
+# cred-store-verify-inference — narrow BLIND COMPARE for the inference
+# proxy's secret store. Invoked as:
+#   sudo -u swapd /usr/local/bin/cred-store-verify-inference
+# Reads the candidate value from stdin (piped, never argv or env —
+# finding 46) and compares it against the stored
+# <dir>/llm-api. Exits 0 on match, 1 on mismatch, 2 on a missing or
+# unreadable store file or an oversized candidate.
+#
+# The stored value is NEVER printed, logged, or otherwise revealed —
+# the only bit this leaks is "the stored value equals the caller-supplied
+# candidate", and the compare is constant-time (hmac.compare_digest) so
+# a mismatch leaks nothing through timing either. The sole intended
+# caller is the gate fixture installer's fail-closed guard, which feeds
+# it its own PUBLIC dummy: that bit then reveals nothing about a real
+# credential. (An attacker probing arbitrary candidates gets a 1-bit
+# oracle per invocation against a high-entropy stored key — and that
+# attacker already holds the sudo-allowed cred-store-set-inference, i.e.
+# full overwrite of the same file, so the oracle buys nothing new.)
+#
+# Why this exists (Security review, PR #126 reconcile): the guard must
+# refuse to overwrite a real inference credential, but the agent may
+# never READ a secret — and a registry binding-signature check alone
+# cannot distinguish "previous fixture run" from "real key installed
+# without the documented teardown". The blind compare closes that hole:
+# the reinstall path requires the stored value to BE the public dummy.
+#
+# Staging mirrors cred-store-set-inference (umask 077, 0600 tmp in the
+# secrets dir, trap cleanup); the candidate is public-by-design in the
+# intended call, but the hygiene is identical so the file stays safe if
+# it ever carries something else.
+#
+# INFERENCE_SECRETS_DIR overrides the directory for tests; production
+# always uses the fixed default below.
+#
+# Root-owned 0755; ntindle cannot modify this script, only execute it
+# via the sudoers entry.
+set -euo pipefail
+umask 077
+
+dir="${INFERENCE_SECRETS_DIR:-/home/swapd/inference-secrets}"
+file="$dir/llm-api"
+max_bytes=65536
+
+tmp="$(mktemp "$dir/.verify.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+chmod 600 "$tmp"
+
+# Read stdin capped at max_bytes+2; same fail-closed truncation guard as
+# cred-store-set-inference. A chomp must never mask truncation.
+head -c $((max_bytes + 2)) > "$tmp"
+size="$(wc -c < "$tmp")"
+if [ "$size" -gt $((max_bytes + 1)) ]; then
+    echo "cred-store-verify-inference: candidate exceeds 64 KiB" >&2
+    exit 2
+fi
+
+# Chomp exactly one trailing newline, exactly like
+# cred-store-set-inference: echo/printf-style invocations add one, and
+# the writer removes it at the store boundary — so the compare must see
+# what the writer stored. Interior content untouched.
+python3 - "$tmp" <<'PYEOF'
+import sys
+p = sys.argv[1]
+with open(p, "rb") as f:
+    data = f.read()
+if data.endswith(b"\r\n"):
+    data = data[:-2]
+elif data.endswith(b"\n"):
+    data = data[:-1]
+with open(p, "wb") as f:
+    f.write(data)
+PYEOF
+
+size="$(wc -c < "$tmp")"
+if [ "$size" -eq 0 ]; then
+    echo "cred-store-verify-inference: refusing to compare an empty candidate" >&2
+    exit 2
+fi
+if [ "$size" -gt "$max_bytes" ]; then
+    echo "cred-store-verify-inference: candidate exceeds 64 KiB" >&2
+    exit 2
+fi
+
+# Blind compare: the stored value never leaves this process. Exit 0 on
+# match, 1 on mismatch, 2 when the store file is missing/unreadable.
+python3 - "$tmp" "$file" <<'PYEOF'
+import hmac, sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        candidate = f.read()
+    with open(sys.argv[2], "rb") as f:
+        stored = f.read()
+except OSError as e:
+    sys.stderr.write("cred-store-verify-inference: cannot read store: %s\n" % e)
+    sys.exit(2)
+sys.exit(0 if hmac.compare_digest(candidate, stored) else 1)
+PYEOF

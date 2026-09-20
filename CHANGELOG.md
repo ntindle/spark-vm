@@ -58,7 +58,9 @@ This changelog only works if entries land with the change, not after it:
   proxy's own SSRF allow file, so the main proxy's egress guard is
   untouched), starts the loopback echo fixture, and runs the harness auth
   probe in gate mode to prove the swap path — fail-closed against
-  overwriting a real credential, with the fixture teardown contract owned
+  overwriting a real credential (the guard blind-verifies the stored
+  value is the public dummy via `proxy/cred-store-verify-inference`,
+  never reading it), with the fixture teardown contract owned
   by the image-build gate / provision-time injector before any real
   credential lands
   ([#126](https://github.com/ntindle/spark-vm/pull/126))

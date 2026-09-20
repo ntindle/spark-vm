@@ -7,6 +7,15 @@
 # that one is read-only — see the rule's comment.
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-set
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-set-inference
+# inference proxy (Security review, PR #126 reconcile): blind compare
+# for the gate fixture installer's fail-closed guard. Reads the
+# candidate from stdin, exits 0/1/2, and NEVER prints the stored value;
+# the installer compares against its own public dummy, so the one leaked
+# bit reveals nothing about a real credential. No wildcard needed (the
+# path is the inference proxy's single fixed credential name, the
+# candidate travels on stdin), and the file's one-wildcard invariant
+# stays intact.
+ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-verify-inference
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-get
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-delete
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-registry-set

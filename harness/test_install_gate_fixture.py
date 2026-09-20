@@ -1,7 +1,8 @@
 """Hermetic tests for harness/install-gate-fixture.sh.
 
 The installer ships test seams for exactly this purpose
-(CRED_STORE_SET_INFERENCE, CRED_REGISTRY_SET_INFERENCE,
+(CRED_STORE_SET_INFERENCE, CRED_STORE_VERIFY_INFERENCE,
+CRED_REGISTRY_SET_INFERENCE,
 INFERENCE_HOSTS_ALLOW, INFERENCE_SSRF_ALLOW, INFERENCE_SECRETS_DIR,
 INFERENCE_REGISTRY_FILE, SUDO_PREFIX, HARNESS_GATE_ECHO_LOG).
 
@@ -20,6 +21,11 @@ just the happy path):
   (``{"<name>": {"<entry>": {"placement": ...}, "allowed_hosts": [...]}}``,
   placement parsed with json.loads, hosts deduped) so the installer's
   fail-closed guard reads a faithful registry.
+- Fake store verify writer: mirrors proxy/cred-store-verify-inference's
+  exit-code contract -- 0 iff stdin byte-equals
+  ``$INFERENCE_SECRETS_DIR/llm-api``, 1 on mismatch, 2 when the store
+  file is missing. (cmp, not constant-time: the fake only needs exit
+  fidelity, not the timing posture.)
 - Fake swap proxy: resolves ``secrets[name]`` from the fake secrets dir
   files (filename = credential name), mirroring
   ``proxy/swap_addon.py`` ``_resolve`` -- an unknown name leaves the
@@ -99,7 +105,7 @@ if [ "$1" != "-u" ] || [ "$2" != "swapd" ]; then
 fi
 shift 2
 case "$1" in
-  "$CRED_STORE_SET_INFERENCE"|"$CRED_REGISTRY_SET_INFERENCE") ;;
+  "$CRED_STORE_SET_INFERENCE"|"$CRED_STORE_VERIFY_INFERENCE"|"$CRED_REGISTRY_SET_INFERENCE") ;;
   ls|/bin/ls|/usr/bin/ls)
     [ "$2" = "$INFERENCE_SECRETS_DIR" ] || \
       { echo "fake-sudo: ls denied for $2" >&2; exit 98; } ;;
@@ -124,6 +130,27 @@ FAKE_STORE_WRITER = """#!/bin/sh
 # Mirror proxy/cred-store-set-inference: the name is fixed, the
 # inference proxy holds exactly one credential (finding 31).
 cat > "$INFERENCE_SECRETS_DIR/llm-api"
+"""
+
+# Fake store verify writer: mirrors proxy/cred-store-verify-inference's
+# exit-code contract only (blind compare, nothing revealed): 0 iff stdin
+# byte-equals the stored llm-api, 1 on mismatch, 2 on a missing store
+# file. cmp is not constant-time, but the fake only needs exit fidelity
+# -- the timing posture belongs to the real binary, which the hermetic
+# tests cannot observe anyway.
+FAKE_STORE_VERIFY = """#!/bin/sh
+tmp="$(mktemp)"
+cat > "$tmp"
+if [ ! -f "$INFERENCE_SECRETS_DIR/llm-api" ]; then
+  rm -f "$tmp"
+  exit 2
+fi
+if cmp -s "$tmp" "$INFERENCE_SECRETS_DIR/llm-api"; then
+  rm -f "$tmp"
+  exit 0
+fi
+rm -f "$tmp"
+exit 1
 """
 
 # Fake registry writer: mirrors proxy/cred-registry-set's JSON schema
@@ -237,14 +264,15 @@ def stack(tmp_path):
     echo_log = tmp_path / "echo.log"
 
     (bin_dir / "fake-store-writer").write_text(FAKE_STORE_WRITER)
+    (bin_dir / "fake-store-verify").write_text(FAKE_STORE_VERIFY)
     (bin_dir / "fake-registry-writer").write_text(FAKE_REGISTRY_WRITER)
     (bin_dir / "fake-muse").write_text(FAKE_MUSE)
     # Fake sudo: asserts the production privilege argv (-u swapd) and
     # enforces the production sudoers allowlist, so a test can exercise
     # the installer's default SUDO_PREFIX value end to end.
     (bin_dir / "sudo").write_text(FAKE_SUDO)
-    for f in ("fake-store-writer", "fake-registry-writer", "fake-muse",
-              "sudo"):
+    for f in ("fake-store-writer", "fake-store-verify", "fake-registry-writer",
+              "fake-muse", "sudo"):
         os.chmod(bin_dir / f, 0o755)
 
     proxy = _serve(_SwapProxyHandler, swap=True,
@@ -254,6 +282,7 @@ def stack(tmp_path):
     env = dict(os.environ)
     env.update({
         "CRED_STORE_SET_INFERENCE": str(bin_dir / "fake-store-writer"),
+        "CRED_STORE_VERIFY_INFERENCE": str(bin_dir / "fake-store-verify"),
         "CRED_REGISTRY_SET_INFERENCE": str(bin_dir / "fake-registry-writer"),
         "INFERENCE_HOSTS_ALLOW": str(allow_file),
         "INFERENCE_SSRF_ALLOW": str(ssrf_allow_file),
@@ -366,7 +395,33 @@ def test_installer_reinstalls_previous_fixture(stack):
     }))
     proc = _run_installer(env)
     assert proc.returncode == 0, proc.stderr.decode()
-    assert b"previous fixture run detected" in proc.stdout
+    assert b"previous fixture run verified" in proc.stdout
+
+
+def test_installer_refuses_real_key_with_exact_fixture_signature(stack):
+    # The Security-round hole: a real tenant key landed on a box whose
+    # echo-only fixture binding was never torn down. The registry shows
+    # EXACTLY the fixture signature, so a signature-only guard would take
+    # the "previous fixture run" path and destroy the real key. The blind
+    # dummy compare must refuse instead -- and the real key must survive
+    # byte-identical, with nothing else written.
+    (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
+     echo_log, _proxy) = stack
+    (secrets_dir / KEY_NAME).write_text("REAL-TENANT-KEY-SENTINEL")
+    registry_file.write_text(json.dumps({
+        KEY_NAME: {
+            "access_token": {"placement": "bearer_header"},
+            "allowed_hosts": ["127.0.0.1"],
+        }
+    }))
+    proc = _run_installer(env)
+    assert proc.returncode == 2
+    assert b"refusing" in proc.stderr
+    assert b"NOT the public fixture dummy" in proc.stderr
+    # Fail-closed: the real key is byte-identical, nothing was written.
+    assert (secrets_dir / KEY_NAME).read_text() == "REAL-TENANT-KEY-SENTINEL"
+    assert not allow_file.exists()
+    assert not ssrf_allow_file.exists()
 
 
 def test_installer_repairs_missing_trailing_newline(stack):

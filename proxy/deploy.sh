@@ -57,6 +57,7 @@ echo "[0/7] Preflight (no mutations yet)..."
 for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/cred-registry-set proxy/cred-registry-set-inference \
          proxy/cred-store-set proxy/cred-store-set-inference \
+         proxy/cred-store-verify-inference \
          proxy/cred-store-get proxy/cred-store-delete \
          proxy/with-proxy proxy/ssrf.deny proxy/sudoers-swapd \
          proxy/swap-proxy.service proxy/swap-inference.service \
@@ -89,13 +90,15 @@ sudo install -o root -g root -m 0755 proxy/cred-registry-set /usr/local/bin/cred
 sudo install -o root -g root -m 0755 proxy/cred-registry-set-inference /usr/local/bin/cred-registry-set-inference
 sudo install -o root -g root -m 0755 proxy/cred-store-set /usr/local/bin/cred-store-set
 sudo install -o root -g root -m 0755 proxy/cred-store-set-inference /usr/local/bin/cred-store-set-inference
+sudo install -o root -g root -m 0755 proxy/cred-store-verify-inference /usr/local/bin/cred-store-verify-inference
 sudo install -o root -g root -m 0755 proxy/cred-store-get /usr/local/bin/cred-store-get
 sudo install -o root -g root -m 0755 proxy/cred-store-delete /usr/local/bin/cred-store-delete
 # Verify the security-critical writers landed root-owned 0755. Any
 # install failure above aborts via set -e; this guards against silent
 # drift (a stale or tampered /usr/local/bin).
 for f in cred-registry-set cred-registry-set-inference cred-store-set \
-         cred-store-set-inference cred-store-get cred-store-delete \
+         cred-store-set-inference cred-store-verify-inference cred-store-get \
+         cred-store-delete \
          cred-grant-revoke; do
     got="$(stat -c '%U:%a' "/usr/local/bin/$f")"
     if [ "$got" != "root:755" ]; then

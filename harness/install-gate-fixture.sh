@@ -28,14 +28,16 @@
 # Idempotent: safe to re-run. The inference proxy hot-reloads the
 # registry, hosts, and ssrf files per request, so no restart is needed.
 #
-# Fail-closed: if the inference secrets dir already holds `llm-api` and
-# the registry does NOT show exactly this fixture's signature (`llm-api`
-# bound ONLY to the loopback echo host), the installer refuses to run --
-# that is a real tenant credential (or a stale fixture binding left
-# behind when one landed), and overwriting it would destroy the box's
-# only inference key. A previous fixture run (dummy + the echo-host-only
-# binding) is detected and safely reinstalled, keeping the idempotency
-# promise.
+# Fail-closed: if the inference secrets dir already holds `llm-api`, the
+# installer proceeds only when the registry shows exactly this fixture's
+# signature (`llm-api` bound ONLY to the loopback echo host) AND a blind
+# compare (proxy/cred-store-verify-inference) confirms the stored value
+# is the public dummy -- never a real tenant key, whose value is never
+# read. Anything else (a real tenant key, a stale fixture binding left
+# behind when one landed -- including a real key whose echo-only binding
+# was never torn down) is refused, loudly, before anything is written.
+# A previous fixture run (dummy + the echo-host-only binding) is
+# detected and safely reinstalled, keeping the idempotency promise.
 #
 # NEVER install a real credential with this script. The fixture dummy is
 # public by design; a real key here would be baked into image layers and
@@ -58,6 +60,10 @@
 # Env overrides (tests / nonstandard layouts):
 #   CRED_STORE_SET_INFERENCE inference secret writer (default
 #                            /usr/local/bin/cred-store-set-inference)
+#   CRED_STORE_VERIFY_INFERENCE
+#                            inference store blind-compare writer (default
+#                            /usr/local/bin/cred-store-verify-inference;
+#                            never reveals the stored value)
 #   CRED_REGISTRY_SET_INFERENCE
 #                            inference registry writer (default
 #                            /usr/local/bin/cred-registry-set-inference)
@@ -98,6 +104,15 @@ FIXTURE_DUMMY="GATE-FIXTURE-DUMMY-NOT-A-SECRET"
 # fixed ... (finding 31)"), so the fixture MUST live under this name.
 # Keep in sync with KEY_NAME in harness/test_install_gate_fixture.py.
 KEY_NAME="llm-api"
+# The blind compare for the fail-closed guard: exits 0 iff the stored
+# llm-api value is exactly the public dummy, 1 on mismatch, 2 when the
+# store file is missing. It NEVER reveals the stored value -- see
+# proxy/cred-store-verify-inference. Without it the guard could only
+# check the registry binding signature, which cannot distinguish a
+# previous fixture run from a real tenant key installed without the
+# documented teardown. Keep in sync with CRED_STORE_VERIFY_INFERENCE in
+# harness/test_install_gate_fixture.py.
+STORE_VERIFY_WRITER="${CRED_STORE_VERIFY_INFERENCE:-/usr/local/bin/cred-store-verify-inference}"
 ECHO_HOST="127.0.0.1"
 
 STORE_WRITER="${CRED_STORE_SET_INFERENCE:-/usr/local/bin/cred-store-set-inference}"
@@ -119,6 +134,10 @@ if [ ! -x "$STORE_WRITER" ]; then
     echo "install-gate-fixture: store writer not executable: $STORE_WRITER (CRED_STORE_SET_INFERENCE)" >&2
     exit 2
 fi
+if [ ! -x "$STORE_VERIFY_WRITER" ]; then
+    echo "install-gate-fixture: store verify writer not executable: $STORE_VERIFY_WRITER (CRED_STORE_VERIFY_INFERENCE)" >&2
+    exit 2
+fi
 if [ ! -x "$REGISTRY_WRITER" ]; then
     echo "install-gate-fixture: registry writer not executable: $REGISTRY_WRITER (CRED_REGISTRY_SET_INFERENCE)" >&2
     exit 2
@@ -136,16 +155,29 @@ fi
 run_priv() { $SUDO_PREFIX "$@"; }
 
 # Fail-closed guard: never overwrite a real inference credential. The
-# existence check uses the sudoers-allowed `ls` on the secrets dir (the
-# secret VALUE is never read -- the agent must never see real secrets).
-# If llm-api is already stored, proceed only when the registry shows
-# EXACTLY this fixture's own signature: llm-api bound to the loopback
-# echo host and NOTHING else -- i.e. a previous gate run's dummy, safe
-# to reinstall. A superset (the echo host alongside other hosts) means a
-# real tenant key landed on a box whose fixture binding was never torn
-# down: that is a stale fixture binding, NOT a previous fixture run, and
-# the installer must refuse rather than destroy the tenant's only
-# inference credential. Anything else is a real tenant key: refuse.
+# guard verifies TWO things, and the stored VALUE is never read — the
+# agent must never see real secrets:
+#   1. the registry binding signature (via the sudoers-allowed `cat`):
+#      llm-api bound to the loopback echo host and NOTHING else;
+#   2. the stored value is exactly the public fixture dummy, through the
+#      BLIND compare proxy/cred-store-verify-inference (reads the public
+#      dummy on stdin, exits 0/1/2 without ever revealing the stored
+#      value — constant-time, nothing printed).
+# The blind compare is what makes the guard honest: a signature-only
+# check cannot distinguish "a previous gate run's dummy" from "a real
+# tenant key installed without the documented teardown" (the registry
+# would still show exactly the fixture signature in both cases), so the
+# reinstall path REQUIRES the stored value to be the dummy. A real key
+# under an echo-only binding is refused here, not overwritten.
+# Residual: the check-then-write is not atomic — a credential landing in
+# the tiny window between the verify and the store write would still be
+# refused by the NEXT run, not this one. Same-box sequential actors only;
+# acceptable for a build gate.
+# A superset (the echo host alongside other hosts) means a real tenant
+# key landed on a box whose fixture binding was never torn down: that is
+# a stale fixture binding, NOT a previous fixture run, and the installer
+# must refuse rather than destroy the tenant's only inference
+# credential. Anything else is a real tenant key: refuse.
 if run_priv ls "$SECRETS_DIR" 2>/dev/null | grep -qx "$KEY_NAME"; then
     if ! run_priv cat "$REGISTRY_FILE" 2>/dev/null | KEY_NAME="$KEY_NAME" ECHO_HOST="$ECHO_HOST" python3 -c '
 import json, os, sys
@@ -160,7 +192,15 @@ sys.exit(0 if isinstance(hosts, list) and hosts == [os.environ["ECHO_HOST"]] els
         echo "install-gate-fixture: refusing: $SECRETS_DIR/$KEY_NAME already holds a credential that is not this fixture ($KEY_NAME is not bound ONLY to the gate echo host -- a real tenant key, or a stale fixture binding left behind when one landed) -- the gate fixture must never overwrite a real inference credential" >&2
         exit 2
     fi
-    echo "install-gate-fixture: previous fixture run detected ($KEY_NAME bound only to $ECHO_HOST); reinstalling the public dummy"
+    # The signature matched -- now confirm the stored value is really the
+    # public dummy before calling this a previous fixture run. A real key
+    # installed without teardown has the same signature, and overwriting
+    # it with the dummy would destroy the box's only inference key.
+    if ! printf '%s' "$FIXTURE_DUMMY" | run_priv "$STORE_VERIFY_WRITER"; then
+        echo "install-gate-fixture: refusing: $SECRETS_DIR/$KEY_NAME is bound only to the gate echo host but its stored value is NOT the public fixture dummy (a real tenant key landed without the documented teardown, or the fixture state is corrupt) -- the gate fixture must never overwrite a real inference credential" >&2
+        exit 2
+    fi
+    echo "install-gate-fixture: previous fixture run verified ($KEY_NAME holds the public dummy and is bound only to $ECHO_HOST); reinstalling the public dummy"
 fi
 
 # allowlist_readable <file>: fail-closed readability check for the
