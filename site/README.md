@@ -19,17 +19,20 @@ connection instead of risking a desynced keep-alive.
 
 **Not yet (slice 3 remainder = H15 §8's remaining "§7 waitlist-era endpoint
 surface"):** the path-A email parser, the invite sender, the forget-me
-handler, and the `/go/selfhost` static redirect shim. The page is still
-NOT deployable — the dead-form rule holds until every §10 checklist item
-is live.
+handler, the `/go/selfhost` static redirect shim, and the 30-day
+post-drop purge (WAITLIST_OPERATIONS.md §5 — deferred from this slice's
+drop job, which retains dropped rows for a separate operator pass). The
+page is still NOT deployable — the dead-form rule holds until every §10
+checklist item is live.
 
 ## The dead-form rule (read before deploying anything)
 
 `docs/WAITLIST_OPERATIONS.md` §10 + `docs/HOSTED_SIGNUP_WEB_UI.md` §4.4:
 **the page ships only when every §10 checklist item is live** — the form
 endpoint, the confirm flow, the token signer, the reminder/drop jobs, the
-inbox. This slice ships *markup only*; the backend does not exist yet, so
-**nothing in this directory is deployable**. A page typeset atop a dead form
+inbox. Slices 1–3a exist only in this repo — the §10 operator checklist
+(deployed endpoint, reminder/drop cron, inbox) is not live, so **nothing
+in this directory is deployable**. A page typeset atop a dead form
 is the trust wound the spec was written to prevent.
 
 ## Deploy-time substitutions (operator)
@@ -90,7 +93,8 @@ promises what the operator plan doesn't deliver.
 
 **Not yet (H15 PR 1 remainder = H15 §8's "§7 waitlist-era endpoint surface"
 plus markup):** the path-A email parser, the invite sender, the forget-me
-handler, and the `/go/selfhost` static redirect shim. Slices 2–3a already
+handler, the `/go/selfhost` static redirect shim, and the 30-day
+post-drop purge (WAITLIST_OPERATIONS.md §5). Slices 2–3a already
 ship: `POST /waitlist/form` endpoint, the §4.3 confirm flow (`GET`
 renders-only / `POST` confirms), the HMAC token signer, the +7d reminder
 and 14d drop jobs (cross-process data lock, fixed drop deadline, cap-aware

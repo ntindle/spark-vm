@@ -22,6 +22,7 @@ stdlib only, no network except one loopback integration test for the 413
 
 import importlib.util
 import json
+import multiprocessing
 import os
 import socket
 import sys
@@ -397,11 +398,14 @@ def test_data_lock_serializes_concurrent_submits():
     def worker(i):
         # NOTE: do NOT take data_lock() here — submit_form() already takes
         # data_lock + the service lock itself, and flock on a second fd
-        # from the same process blocks (deadlock). The point of this test
-        # is that 8 racing submits each serialize through submit_form's own
-        # locking.
+        # from the same process blocks (deadlock).
+        #
+        # Every thread submits the SAME address: the dedup check-then-act
+        # is the shared path this test must serialize. (Eight distinct
+        # addresses would never touch the shared path — a lock-free
+        # implementation would pass identically.)
         try:
-            svc.submit_form({"owner_email": f"w{i}@example.com"},
+            svc.submit_form({"owner_email": "race@example.com"},
                             "127.0.0.1")
         except Exception as exc:  # noqa: BLE001
             errors.append(exc)
@@ -414,8 +418,45 @@ def test_data_lock_serializes_concurrent_submits():
     assert not errors
     svc2 = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
                               clock=MutClock())
-    assert len(svc2.rows) == 8
-    assert len({r["owner_email"] for r in svc2.rows.values()}) == 8
+    raced = [r for r in svc2.rows.values()
+             if r["owner_email"] == "race@example.com"]
+    assert len(raced) == 1  # the dedup race created exactly one row
+
+
+def _child_remind_worker(data_dir, key_hex, out_q):
+    """Mimic `waitlist_jobs.py --remind` in a SEPARATE process: take the
+    cross-process lock, reload from disk, scan. Module-level so the
+    multiprocessing child can run it; the child inherits the already
+    imported wd module but builds its own service instance — the only
+    thing the two processes share is the data dir and the flock."""
+    key = bytes.fromhex(key_hex)
+    with wd.data_lock(data_dir):
+        service = wd.WaitlistService(data_dir, key,
+                                     "https://waitlist.example.invalid")
+        service.reload()
+        out_q.put(service.send_reminders())
+
+
+def test_two_job_processes_send_exactly_one_reminder():
+    # The data lock's actual purpose: two --remind cron instances (or a
+    # job racing the live daemon) must not double-send. Without the lock
+    # both processes see the due row and both spool a reminder; with it,
+    # exactly one does.
+    clock = MutClock(start=wd.utcnow() - timedelta(days=8))
+    svc, tmp, _ = make_service(clock=clock)
+    submit(svc, "dupe@example.com")
+    ctx = multiprocessing.get_context("fork")
+    out_q = ctx.Queue()
+    procs = [ctx.Process(target=_child_remind_worker,
+                         args=(tmp, KEY.hex(), out_q)) for _ in range(2)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+    assert all(p.exitcode == 0 for p in procs)
+    assert sorted(out_q.get() for _ in procs) == [0, 1]
+    assert len([d for d in spool_docs(tmp)
+                if d.get("kind") == "reminder"]) == 1
 
 
 # -- CLI ------------------------------------------------------------------
