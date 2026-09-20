@@ -15,7 +15,7 @@ credential — the guard requires the registry to show `llm-api` bound
 only to the echo host AND a blind compare
 (`proxy/cred-store-verify-inference`, which never reveals the stored
 value) to confirm the stored value is the public dummy — with the
-gate-fixture cleanup contract, 9 hermetic installer
+gate-fixture cleanup contract, 20 hermetic installer
 tests. Remaining for later feature slices: provision-time injector
 (which owns the gate-fixture teardown — unbind the llm-api→echo-host
 binding and remove the echo host from inference-hosts.allow and

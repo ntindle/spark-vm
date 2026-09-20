@@ -28,6 +28,11 @@
 # Idempotent: safe to re-run. The inference proxy hot-reloads the
 # registry, hosts, and ssrf files per request, so no restart is needed.
 #
+# Runs as root during image build (like proxy/deploy.sh): /home/swapd is
+# 0700, so a non-root invoker always fails closed at the allow-file
+# readability check below. The refusal message says so; do not "fix" it
+# by loosening traversal.
+#
 # Fail-closed: if the inference secrets dir already holds `llm-api`, the
 # installer proceeds only when the registry shows exactly this fixture's
 # signature (`llm-api` bound ONLY to the loopback echo host) AND a blind
@@ -285,12 +290,16 @@ printf '%s' "$FIXTURE_DUMMY" | run_priv "$STORE_WRITER"
 # Start the echo fixture; its "PORT=<n>" stdout line is the readiness
 # signal. Killed on exit (trap) -- the fixture is gate-scratch, never a
 # service. Stderr is captured so a startup failure is diagnosable.
-port_file="$(mktemp)"
-err_file="$(mktemp)"
+# One temp dir, not two mktemp files: a failed second mktemp would leak
+# the first (the trap is not installed yet). mktemp -d either succeeds
+# or set -e exits before anything needs cleaning.
+tmpdir="$(mktemp -d)"
+port_file="$tmpdir/port"
+err_file="$tmpdir/err"
 ECHO_FIXTURE_LOG="$ECHO_LOG" ECHO_FIXTURE_PORT="$ECHO_PORT" \
     "$ECHO_FIXTURE" >"$port_file" 2>"$err_file" &
 echo_pid=$!
-trap 'kill "$echo_pid" 2>/dev/null || true; rm -f "$port_file" "$err_file"' EXIT
+trap 'kill "$echo_pid" 2>/dev/null || true; rm -rf "$tmpdir"' EXIT
 
 port=""
 deadline=$((SECONDS + 10))

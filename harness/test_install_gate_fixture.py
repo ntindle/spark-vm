@@ -121,6 +121,13 @@ case "$1" in
     esac ;;
   *) echo "fake-sudo: denied: $1" >&2; exit 98 ;;
 esac
+# Test-only invocation log: proves the installer really went through the
+# privilege path instead of around it (QA round 2 B4). SUDO_CALL_LOG is
+# unset in production -- and the real sudo's env_reset would strip it
+# even if it were set -- so this changes nothing outside tests.
+if [ -n "${SUDO_CALL_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$SUDO_CALL_LOG"
+fi
 exec "$@"
 """
 
@@ -156,6 +163,9 @@ exit 1
 # Fake registry writer: mirrors proxy/cred-registry-set's JSON schema
 # for the verbs the installer uses (placement via json.loads, hosts
 # deduped) so the installer's fail-closed guard reads a faithful file.
+# Placement validation mirrors the real writer (bearer_header /
+# url_path_segment / single-key custom_header|query_param|url_path_segment
+# dicts); the fake rejects anything else, like the real one does.
 FAKE_REGISTRY_WRITER = """#!/usr/bin/env python3
 import json, os, sys
 reg_path = os.environ["FAKE_REGISTRY_FILE"]
@@ -166,7 +176,16 @@ if os.path.exists(reg_path):
 args = sys.argv[1:]
 if args[0] == "set":
     _, name, entry, pjson = args
-    reg.setdefault(name, {})[entry] = {"placement": json.loads(pjson)}
+    placement = json.loads(pjson)
+    valid = placement in ("bearer_header", "url_path_segment") or (
+        isinstance(placement, dict) and len(placement) == 1
+        and list(placement)[0] in ("custom_header", "query_param",
+                                   "url_path_segment"))
+    if not valid:
+        sys.stderr.write("fake-registry-writer: invalid placement %r\\n"
+                         % (pjson,))
+        sys.exit(2)
+    reg.setdefault(name, {})[entry] = {"placement": placement}
 elif args[0] == "add-host":
     _, name, host = args
     hosts = reg.setdefault(name, {}).setdefault("allowed_hosts", [])
@@ -424,6 +443,28 @@ def test_installer_refuses_real_key_with_exact_fixture_signature(stack):
     assert not ssrf_allow_file.exists()
 
 
+def test_installer_refuses_unknown_registry_entry(stack):
+    # Valid registry, but llm-api is bound only to the real provider --
+    # the injector tore the echo binding down when the key landed. A real
+    # tenant key with no fixture signature at all: refuse, loudly, and
+    # leave the key byte-identical.
+    (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
+     echo_log, _proxy) = stack
+    (secrets_dir / KEY_NAME).write_text("REAL-TENANT-KEY-SENTINEL")
+    registry_file.write_text(json.dumps({
+        KEY_NAME: {
+            "access_token": {"placement": "bearer_header"},
+            "allowed_hosts": ["api.provider.example"],
+        }
+    }))
+    proc = _run_installer(env)
+    assert proc.returncode == 2
+    assert b"refusing" in proc.stderr
+    assert (secrets_dir / KEY_NAME).read_text() == "REAL-TENANT-KEY-SENTINEL"
+    assert not allow_file.exists()
+    assert not ssrf_allow_file.exists()
+
+
 def test_installer_repairs_missing_trailing_newline(stack):
     (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
      echo_log, _proxy) = stack
@@ -447,15 +488,31 @@ def test_installer_privilege_prefix(stack):
     # idempotency must hold under the restricted privilege too (no
     # duplicate entries), and the missing-newline repair must work with
     # unprivileged reads.
+    # The fake sudo logs every invocation it allows to SUDO_CALL_LOG;
+    # asserting the log is non-empty and names the privileged calls is
+    # what makes this test prove the default was USED, not bypassed (QA
+    # round 2 B4: a regressed empty default would leave the log empty).
     (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
      echo_log, _proxy) = stack
     env.pop("SUDO_PREFIX", None)
+    bin_dir = os.path.dirname(env["CRED_STORE_SET_INFERENCE"])
+    call_log = os.path.join(bin_dir, "sudo-calls.log")
+    env["SUDO_CALL_LOG"] = call_log
     with open(ssrf_allow_file, "w", encoding="utf-8") as f:
         f.write("10.0.0.1")  # no trailing newline
     proc = _run_installer(env)
     assert proc.returncode == 0, proc.stderr.decode()
     proc = _run_installer(env)
     assert proc.returncode == 0, proc.stderr.decode()
+    # A bypassed privilege default leaves no log file at all -- read
+    # guarded so the failure is the assertion below, not a traceback.
+    calls = open(call_log, encoding="utf-8").read() \
+        if os.path.exists(call_log) else ""
+    assert calls, "no privileged calls logged: the installer bypassed sudo"
+    assert env["CRED_STORE_SET_INFERENCE"] in calls
+    assert env["CRED_STORE_VERIFY_INFERENCE"] in calls
+    assert env["CRED_REGISTRY_SET_INFERENCE"] in calls
+    assert "tee -a" in calls
     assert (secrets_dir / KEY_NAME).read_text() == INSTALLER_DUMMY
     assert ssrf_allow_file.read_text().splitlines() == ["10.0.0.1",
                                                         "127.0.0.1"]
@@ -476,6 +533,44 @@ def test_installer_missing_echo_fixture_fails(stack):
     proc = _run_installer(env)
     assert proc.returncode == 2
     assert b"ECHO_FIXTURE" in proc.stderr
+
+
+def test_installer_echo_fixture_startup_failure(stack):
+    # A fixture that dies before printing PORT=: the installer must take
+    # the exit-3 branch (distinct from the not-executable precheck),
+    # surface the fixture's stderr, and say so loudly. The
+    # credential/registry/allowlist writes precede the fixture start, so
+    # the failure is the verification step, not the install -- the
+    # install half is complete (and a re-run recovers it).
+    (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
+     echo_log, _proxy) = stack
+    bin_dir = os.path.dirname(env["CRED_STORE_SET_INFERENCE"])
+    crashing = os.path.join(bin_dir, "fake-echo-crash")
+    with open(crashing, "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\necho 'fake-echo: boom' >&2\nexit 1\n")
+    os.chmod(crashing, 0o755)
+    env = dict(env)
+    env["ECHO_FIXTURE"] = crashing
+    proc = _run_installer(env)
+    assert proc.returncode == 3
+    assert b"failed to start" in proc.stderr
+    assert b"fake-echo: boom" in proc.stderr
+    assert (secrets_dir / KEY_NAME).read_text() == INSTALLER_DUMMY
+
+
+@pytest.mark.parametrize("var", ["CRED_REGISTRY_SET_INFERENCE",
+                                 "CRED_STORE_VERIFY_INFERENCE",
+                                 "HARNESS_PROBE_BIN"])
+def test_installer_missing_binary_fails(stack, var):
+    # The remaining -x prechecks (registry writer, store verify writer,
+    # probe) fail closed with the env-var name in the message -- the
+    # same contract the store-writer and echo-fixture prechecks have
+    # individually tested above.
+    env, *_ = stack
+    env[var] = "/nonexistent/binary"
+    proc = _run_installer(env)
+    assert proc.returncode == 2
+    assert var.encode() in proc.stderr
 
 
 def test_installer_probe_failure_propagates(stack):
