@@ -220,14 +220,18 @@ def _wrap_term(text, n, hang="  "):
     # assets/README.md; its bytes are the real _audit() output.)
     out = []
     for line in text.splitlines() or [""]:
-        first = True
         while len(line) > n:
             cut = line.rfind(" ", 0, n)
-            if cut <= 0:
+            # A "space" that is only the hang indent is not a word
+            # boundary; hard-cut mid-token instead so every pass strictly
+            # shortens the line (long unbroken tokens in real captures
+            # must not spin forever).
+            hard = cut < 0 or line[cut] != " " or cut <= len(hang)
+            if hard:
                 cut = n
             out.append(line[:cut])
-            line = hang + line[cut:].lstrip(" ")
-            first = False
+            rest = line[cut:] if hard else line[cut + 1:]
+            line = hang + rest.lstrip(" ")
         out.append(line)
     return out
 
@@ -382,7 +386,7 @@ def _read_capture(capture_dir, stem):
     if not os.path.isfile(path):
         sys.exit("missing capture file: %s "
                  "(run the assets/README.md capture recipe first)" % path)
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         lines = f.read().splitlines()
     if not lines or not lines[0].startswith("$ "):
         sys.exit("capture file %s must start with a '$ <cmd>' line" % path)
