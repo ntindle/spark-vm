@@ -153,7 +153,10 @@ instance — the subject is the box's own long-lived desktop session):
   frames from that file and computes the day gap from its timestamps —
   a re-capture renders its own honest elapsed time. All timestamps in
   the fixture are tz-aware (`-05:00`, America/Chicago); the loader
-  refuses tz-naive timestamps rather than guessing.
+  refuses tz-naive timestamps rather than guessing. Lines longer than
+  the frame's column budget are hard-elided with an explicit `…`
+  marker in the render only — the fixture keeps the complete verbatim
+  stdout as the audit trail.
 
 The launch-post plan asked for "same desktop 24h apart — before/after
 screenshots". Staging a fake 24h gap was rejected as dishonest; this
