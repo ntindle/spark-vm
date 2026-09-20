@@ -75,6 +75,7 @@ isolation), because those are where the trust story lives.
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
 | **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation ("fast, isolated, persistent sandboxes and storage where developers can run their own agentic workflows and tool execution") | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
 | **Microsandbox** | Task-scoped sandbox (OSS) | libkrun microVM, network-layer secret injection | Free, self-hosted (YC F26) |
+| **Docker Sandboxes** (evening pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, kits, skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
 | **DIY floor** | Persistent computer | $4/mo droplet + the human does everything | $4/mo + labor |
 | **spark-vm (this project)** | Persistent computer (OSS + hosted-in-design) | Real VM, per-action human approvals (confirmd), credential proxy (swapd), tailnet-first networking | OSS: provider cost + operator time; hosted: TBD (pricing thinking is an open backlog item) |
@@ -460,8 +461,14 @@ on a vendor's own page, doc, repo, or security announcement in a watch pass
   request-body-scope substitution + open source, not isolation hygiene alone.
   Strong raw material for the O13 trust/transparency doc, with the honest
   scoping above. **Corpus note:** Docker Sandboxes enters the watch corpus
-  via this event (security event, not a full profile yet) — the next
-  competitor pass should add its at-a-glance row with a price signal.
+  via this event (security event, not a full profile yet). **2026-09-19
+  evening pass: at-a-glance row added with the vendor-verified price
+  signal (`sbx` CLI free; org governance paid); the D-Bus/OAuth
+  vendor-quote debt closed — both quotes are now vendor text from the
+  release notes, and the notes now name CVE-2026-77179/79994 (the
+  consolidation's morning read showed no CVE names; the amendment timing
+  is the author's inference, not vendor fact; see
+  `docs/COMPETITOR_WATCH_2026-09-19_EVENING.md`).
 - **Cloudflare × Cursor (Sep 2) — new to the corpus, pre-window.** **VERIFIED
   (Cloudflare's own
   [press release](https://www.cloudflare.com/press/press-releases/2026/cloudflare-expands-support-for-ai-coding-agents-with-cursor-cloud-agents-on-cloudflare-sandboxes/),
@@ -714,6 +721,17 @@ on a vendor's own page, doc, repo, or security announcement in a watch pass
   must not claim the full-VM model is clear of them. Disclosure-timeline
   guidance: verify all version numbers against vendor pages only in any
   trust/transparency derivative (Docker mis-listed a fix version once).
+  **2026-09-19 evening pass:** the D-Bus/OAuth direct-read debt is closed —
+  both quotes are now vendor text from Docker's own release notes, and the
+  notes now name CVE-2026-77179/79994 (the consolidation's morning read
+  showed no CVE names; the amendment timing is the author's inference, not
+  vendor fact — the "shipped unlabeled" framing above is time-bounded to
+  ship time and the morning read, corrected-by-amendment in the current
+  notes); the at-a-glance row
+  carries the vendor-verified price signal (`sbx` CLI free; org governance
+  paid). Docker AI Governance (central network/filesystem/MCP policies,
+  sign-in enforcement, audit logs) added as an H16 vendor candidate.
+  See `docs/COMPETITOR_WATCH_2026-09-19_EVENING.md`.
 
 ## Sources
 
