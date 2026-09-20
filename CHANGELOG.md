@@ -110,7 +110,8 @@ This changelog only works if entries land with the change, not after it:
   `cred set` examples now use the no-echo prompt (or `read -rs` when the
   no-echo prompt isn't convenient) so typed values never land in shell
   history
-  (fixes [#89](https://github.com/ntindle/spark-vm/issues/89))
+  ([#135](https://github.com/ntindle/spark-vm/pull/135), fixes
+  [#89](https://github.com/ntindle/spark-vm/issues/89))
 
 ### Security
 - Proxy hardening round
