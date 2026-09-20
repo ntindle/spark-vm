@@ -1,0 +1,6 @@
+# Test dependencies: `pip install -r requirements-test.txt`
+# then `python3 -m pytest` from the repo root (see pytest.ini).
+pytest>=8
+cryptography>=42  # confirm/test_push.py — VAPID / Web Push (confirm/push.py)
+# Note: mitmproxy is a *deploy* dependency of the swap proxy (installed by
+# proxy/deploy.sh), not a test dependency — no test module imports it.

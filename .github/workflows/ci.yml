@@ -5,6 +5,7 @@
 #   cd confirm && python3 -m pytest test_confirmd.py
 #   cd deploy  && python3 -m pytest test_auto_deploy.py
 #   cd muse-job && python3 -m pytest tests/test_event_trust.py
+#   python3 -m pytest cred-ui/tests/ -q
 
 name: ci
 
@@ -53,6 +54,9 @@ jobs:
         if: always()
         run: python3 -m pytest tests/test_event_trust.py -q
         working-directory: muse-job
+      - name: cred-ui tests
+        if: always()
+        run: python3 -m pytest cred-ui/tests/ -q
 
   shellcheck:
     name: shellcheck
@@ -77,8 +81,10 @@ jobs:
         # default); passing it fails the step with "unexpected argument".
         # --exclude-loopback: docs reference localhost service addresses
         # (cred-ui, proxy) that can never resolve on a CI runner.
-        # Bot-blocking hosts (2026-09-19, CI on #39): medium.com 403s every
-        # automated fetcher, and businesswire.com / globenewswire.com reject
+        # Bot-blocking hosts: medium.com 403s every automated fetcher
+        # (2026-09-19, CI on #39); www.daytona.io 403s automated fetchers too
+        # (bot-block; security exhibit page hand-verified live 2026-09-20,
+        # quoted text matches verbatim). businesswire.com / globenewswire.com reject
         # lychee's HTTP client (HTTP/2 protocol errors) — the flagged URLs
         # were all hand-verified live that day, so these are false positives,
         # not broken links. Excluded at host level (not per-URL): new links
@@ -99,7 +105,7 @@ jobs:
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

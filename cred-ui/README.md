@@ -28,6 +28,9 @@ Then open `http://127.0.0.1:18740` in a browser.
 - **Add / update**: name, secret value, entry (default `access_token`),
   placement (`Authorization: Bearer` header, custom header, query param,
   or URL path segment), and allowed hosts — one form, no CLI flags.
+  Hosts must be plain hostnames (letters, digits, hyphens, dots —
+  no underscores, no ports): the narrow writer enforces this, and the UI
+  validates up front so a bad host never fails *after* the secret is stored.
 - **List**: every credential with value-stored / registered state,
   entries, placements, and hosts. **Values are never displayed.**
 - **Hosts**: add or remove allowed hosts inline per credential.

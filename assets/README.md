@@ -12,7 +12,7 @@ PR (ntindle/spark-vm#36). Finals live here; the pipeline that made them is
 | `demo-secrets-never-seen.gif` | "Secrets the agent never sees": the demo agent's config carries only `hsurr:…` placeholders, then the swap proxy's audit journal line — which names the placeholder, never the value. 480px-wide terminal frames, 20s loop, ~23KB. | ✅ shipped |
 | (asset 3) persistence pair | Same desktop 24h apart — before/after screenshots. | ⬜ follow-up |
 | (asset 4) muse-job watch | Multi-day job alive in `muse-job` watch. | ⬜ follow-up |
-| (asset 5) cred-ui phone view | cred-ui rendered in a phone viewport. | ⬜ follow-up |
+| `demo-cred-ui-phone.gif` | cred-ui on a phone viewport: the add/update form full-width, stored credentials as stacked cards. 390px phone viewport (410px-wide frames), 4.8s loop, ~55KB. | ✅ shipped |
 
 ## Provenance of `demo-approval-loop.gif`
 
@@ -91,7 +91,8 @@ python3 scripts/generate_demo_assets.py \
 ```
 
 Regeneration overwrites the GIF in place — the file in the repo is the
-current final. Never point the generator at the live deployment.
+current final.
+
 
 ## Provenance of `demo-secrets-never-seen.gif`
 
@@ -132,3 +133,93 @@ python3 scripts/generate_demo_assets.py \
 
 Regeneration overwrites the GIF in place — the file in the repo is the
 current final.
+
+## Provenance of `demo-cred-ui-phone.gif`
+
+Recorded 2026-09-19 against a **demo** cred-ui instance on this box
+(localhost only, port 18740 — the port is hardcoded in `cred-ui.py`).
+The demo is the real `cred-ui/cred-ui.py` with **no code overrides**:
+reads went through the real `sudo -u swapd cat /home/swapd/credentials.json`
+and `sudo -u swapd ls /home/swapd/secrets` paths against a scratch
+`swapd` layout holding only the demo fixture. The fixture registry has
+two demo-named entries (`demo-github-ro`, registered + bearer-header
+placement on `api.github.com`; `demo-llm-api`, registered + custom-header
+placement on `inference.example.com`, no value) and the secret file is
+**empty** — so the "● value stored" state renders with no value content
+anywhere in the asset. No real credentials, hosts, or values appear.
+
+Write paths were never exercised: the narrow sudo writers
+(`/usr/local/bin/cred-store-set`, …) don't exist on the demo box, so the
+asset shows read/render paths only — the Save/delete/host buttons are
+visible but never clicked.
+
+Frame staging (also demo-only, does not change the product):
+
+- The two frames are the top and bottom 390×844 viewports cropped from a
+  single 390px-wide full-page capture: exactly the pixels a phone user
+  sees at the top of the page and scrolled to the bottom. The GIF's
+  "scroll" is a cut between the two real viewports, not a re-render.
+- The phone bezel, notch bar, and caption strips are drawn by the
+  generator; scrollbars hidden (`--hide-scrollbars`); the capture waits
+  on `--virtual-time-budget` so the page's 3s auto-refresh fetch of
+  `/api/creds` completes before the shot.
+
+One small product fix the asset required: the stored-credentials table
+overflowed at phone widths (hosts and delete columns clipped off-screen),
+so the "phone view" claim was false until fixed. Below 520px each row now
+renders as a stacked card with inline NAME/STATE/HOSTS labels and a
+full-width delete button (`cred-ui/index.html` media query); the header
+row is wrapped in `<thead>` so it hides cleanly (the JS previously emitted
+a bare `<tr>`, which browsers auto-wrap in `tbody`, defeating the
+`thead { display: none }` rule). Desktop rendering is unchanged.
+
+## Regenerating `demo-cred-ui-phone.gif`
+
+Needs Pillow + a `chrome-headless-shell` binary (Playwright's browser
+cache has one; no Playwright Python package needed):
+
+```sh
+# 0. scratch swapd layout with the demo fixture (demo-named only;
+#    the secret file stays EMPTY -- nothing real ever lands here).
+#    cred-ui.py reads via `sudo -n -u swapd …` (no password prompt), so
+#    run step 1 as root, or install the two read rules from
+#    proxy/sudoers-swapd (the `/usr/bin/cat /home/swapd/credentials.json`
+#    and `/usr/bin/ls /home/swapd/secrets` lines) for your user --
+#    otherwise /api/creds silently returns an empty list and the captured
+#    asset shows no credentials.
+sudo useradd -r -M -s /usr/sbin/nologin swapd   # if the user is absent
+sudo mkdir -p /home/swapd/secrets
+sudo tee /home/swapd/credentials.json > /dev/null <<'EOF'
+{
+  "demo-github-ro": {
+    "allowed_hosts": ["api.github.com"],
+    "access_token": {"placement": "bearer_header"}
+  },
+  "demo-llm-api": {
+    "allowed_hosts": ["inference.example.com"],
+    "api_key": {"placement": {"custom_header": "X-Api-Key"}}
+  }
+}
+EOF
+sudo touch /home/swapd/secrets/demo-github-ro
+sudo chown -R swapd:swapd /home/swapd
+sudo chmod 700 /home/swapd
+sudo chmod 600 /home/swapd/credentials.json /home/swapd/secrets/demo-github-ro
+
+# 1. demo instance (terminal A) -- DEMO ONLY, localhost bind is hardcoded
+python3 cred-ui/cred-ui.py   # listens on 127.0.0.1:18740
+
+# 2. capture + assemble (terminal B)
+# CHROME_HEADLESS_SHELL is optional -- the generator auto-discovers the
+# Playwright browser cache; set it only to pin a specific binary.
+export CHROME_HEADLESS_SHELL=~/.cache/ms-playwright/chromium_headless_shell-<build>/chrome-headless-shell-linux64/chrome-headless-shell
+python3 scripts/generate_demo_assets.py \
+  --asset credui-phone --url http://127.0.0.1:18740 \
+  --frames-dir ./demo-asset5-work --out assets/demo-cred-ui-phone.gif
+
+# 3. tear down the demo layout when done
+# kill the cred-ui.py process, then: sudo userdel -r swapd
+```
+
+Regeneration overwrites the GIF in place — the file in the repo is the
+current final. Never point the generator at the live cred-ui deployment.

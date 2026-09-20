@@ -20,6 +20,17 @@ the output of the real SwapAddon._audit() code path (the script calls
 it with SWAP_LOG_FILE pointed at the scratch journal). The transcript
 frames are genuine command output: the recipe cats the fixture, tails
 the real journal, and greps it for raw secret patterns.
+
+Asset 5 (cred-ui on a phone) screenshots the REAL cred-ui page served by
+the real cred-ui.py against a scratch swapd fixture (demo-named entries
+only, empty secret files) at a 390px phone width, via
+chrome-headless-shell -- no Playwright needed:
+    python3 scripts/generate_demo_assets.py \
+        --asset credui-phone --url http://127.0.0.1:18740 \
+        --out assets/demo-cred-ui-phone.gif
+Only ever point this at a DEMO cred-ui instance -- never the live one.
+The headless-shell binary is found via $CHROME_HEADLESS_SHELL or the
+Playwright browser cache.
 """
 import argparse
 import os
@@ -328,6 +339,141 @@ def _render_terminal_segs(caption, segs, body_h):
     return im
 
 
+# --- Asset 5: cred-ui on a phone viewport ---
+#
+# Screenshots the REAL cred-ui page (served by the real cred-ui.py against
+# a scratch swapd fixture -- demo-named entries only, empty secret files)
+# at a 390px phone width with chrome-headless-shell, then cuts the full
+# page into the two viewports a user would actually scroll between. The
+# GIF's "scroll" is a cut between two real viewports, not a re-render.
+# Frames get a slim phone bezel + caption strip drawn by the generator.
+
+CREDUI_FRAMES = [
+    ("c1-form",
+     "1/2 — the add/update form on a phone viewport: full width, no sideways scroll"),
+    ("c2-list",
+     "2/2 — stored credentials as stacked cards: names, states, hosts — values never appear"),
+]
+CREDUI_HOLDS = {"c1-form": 2.2, "c2-list": 2.6}
+
+_PHONE_W = 390          # viewport width the frames claim
+_BEZEL = 10             # side bezel
+_NOTCH_H = 30           # top bar with the page title
+_CAPTION_H = 58
+_PHONE_BG, _PHONE_BEZEL, _PHONE_CAP = "#0a0a0a", "#1f1f1f", "#d29922"
+
+
+def _headless_shell():
+    env = os.environ.get("CHROME_HEADLESS_SHELL")
+    if env and os.path.isfile(env):
+        return env
+    import glob
+    hits = glob.glob(os.path.expanduser(
+        "~/.cache/ms-playwright/chromium_headless_shell-*/"
+        "chrome-headless-shell-linux64/chrome-headless-shell"))
+    if hits:
+        return sorted(hits)[-1]
+    sys.exit("chrome-headless-shell not found: set CHROME_HEADLESS_SHELL "
+             "or install it via Playwright (playwright install chromium)")
+
+
+def _content_bottom(im):
+    # Last row whose pixels vary -- i.e. the page's real content end.
+    g = im.convert("L")
+    px, w, h = g.load(), g.width, g.height
+    for y in range(h - 1, -1, -1):
+        row = [px[x, y] for x in range(0, w, 4)]
+        if max(row) - min(row) > 12:
+            return y + 1
+    return h
+
+
+def capture_credui_phone(url, frames_dir):
+    """Capture the two phone viewports of the demo cred-ui page."""
+    os.makedirs(frames_dir, exist_ok=True)
+    shell = _headless_shell()
+    full = os.path.join(frames_dir, "credui-full.png")
+    cmd = [shell, "--no-sandbox", "--hide-scrollbars",
+           "--window-size=%d,2000" % _PHONE_W,
+           "--virtual-time-budget=9000",
+           "--screenshot=" + full, url.rstrip("/")]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if not os.path.isfile(full):
+        sys.exit("headless capture failed: %s" % (r.stderr or r.stdout)[-500:])
+    page = Image.open(full).convert("RGB")
+    bottom = _content_bottom(page)
+    # The two viewports a phone user scrolls between: top of page, and
+    # scrolled to the bottom (list card). Honest pixels, honest crops.
+    viewports = [
+        ("c1-form", (0, 0, _PHONE_W, min(_PHONE_W * 844 // 390, bottom))),
+        ("c2-list", (0, max(0, bottom - 844), _PHONE_W, bottom)),
+    ]
+    shots = []
+    for stem, box in viewports:
+        shot = page.crop(box)
+        # Pad a short final viewport to 390x844 so frames are uniform
+        # (GIF viewers crop or flash on mixed frame sizes).
+        if shot.height < 844:
+            pad = Image.new("RGB", (_PHONE_W, 844), "#111111")
+            pad.paste(shot, (0, 0))
+            shot = pad
+        path = os.path.join(frames_dir, stem + ".png")
+        shot.save(path)
+        shots.append(path)
+        print("frame:", path, shot.size)
+    return shots
+
+
+def _render_phone_frame(caption, shot_path):
+    """Draw the slim phone bezel + notch bar + caption strip around a shot."""
+    shot = Image.open(shot_path).convert("RGB")
+    if shot.width != _PHONE_W:
+        shot = shot.resize((_PHONE_W, int(shot.height * _PHONE_W / shot.width)),
+                           Image.LANCZOS)
+    sw, sh = shot.size
+    font = _mono_font(13)
+    small = _mono_font(11)
+    cap_lines = _wrap_term(caption, int((sw - 28) / max(small.getlength("0"), 1)),
+                           hang="")
+    cap_h = _CAPTION_H + (14 if len(cap_lines) > 2 else 0)
+    w = sw + 2 * _BEZEL
+    h = _NOTCH_H + sh + cap_h + _BEZEL
+    im = Image.new("RGB", (w, h), _PHONE_BEZEL)
+    d = ImageDraw.Draw(im)
+    # screen well
+    d.rectangle([_BEZEL, _NOTCH_H, _BEZEL + sw, _NOTCH_H + sh], fill="#111111")
+    im.paste(shot, (_BEZEL, _NOTCH_H))
+    # notch pill
+    d.rounded_rectangle([w // 2 - 52, 8, w // 2 + 52, 22], radius=7,
+                        fill=_PHONE_BG)
+    d.text((w // 2, 15), "cred-ui · spark-vm", font=small, fill="#8b949e",
+           anchor="mm")
+    # caption strip
+    cy = _NOTCH_H + sh
+    ty = cy + 12
+    for ln in cap_lines:
+        d.text((_BEZEL + 4, ty), ln, font=small, fill=_PHONE_CAP)
+        ty += 15
+    return im
+
+
+def generate_credui_phone(url, frames_dir):
+    shots = capture_credui_phone(url, frames_dir)
+    if len(shots) != 2:
+        sys.exit("expected 2 phone frames, got %d" % len(shots))
+    framed = []
+    framed_dir = os.path.join(frames_dir, "framed")
+    os.makedirs(framed_dir, exist_ok=True)
+    for (stem, caption), shot in zip(CREDUI_FRAMES, shots):
+        im = _render_phone_frame(caption, shot)
+        # Keep the original stem so assemble() finds the per-frame holds.
+        path = os.path.join(framed_dir, stem + ".png")
+        im.save(path)
+        framed.append(path)
+        print("framed:", path, im.size)
+    return framed
+
+
 def _shell_quote(s):
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
@@ -341,9 +487,11 @@ def _ensure_out_dir(out_path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--asset", choices=("approval-loop", "secrets"),
+    ap.add_argument("--asset", choices=("approval-loop", "secrets",
+                                       "credui-phone"),
                     default="approval-loop")
-    ap.add_argument("--url", help="demo confirmd base URL (approval-loop only)")
+    ap.add_argument("--url", help="demo confirmd base URL (approval-loop only); "
+                    "demo cred-ui base URL (credui-phone only)")
     # ./demo-frames default: /tmp gets wiped mid-run on this box, keep
     # intermediates in the working tree (asset-1's documented recipe
     # doesn't pass --frames-dir, so it just lands there instead of /tmp).
@@ -360,6 +508,14 @@ def main():
             sys.exit("expected 3 frames, got %d" % len(shots))
         _ensure_out_dir(args.out)
         assemble(shots, args.out, max_width=_TERM_W, holds=SECRETS_HOLDS)
+        return
+    if args.asset == "credui-phone":
+        if not args.url:
+            sys.exit("--url is required for --asset credui-phone "
+                     "(a DEMO cred-ui instance -- never the live one)")
+        shots = generate_credui_phone(args.url, args.frames_dir)
+        _ensure_out_dir(args.out)
+        assemble(shots, args.out, max_width=410, holds=CREDUI_HOLDS)
         return
     if not args.url:
         sys.exit("--url is required for --asset approval-loop")

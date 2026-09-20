@@ -74,14 +74,15 @@ than its own checkout. `muse-job --version` reads the repo file.
 
 1. Bump `VERSION` on `main` (one commit, message like `release: bump VERSION
    to 0.2.0`). Keep the change version-only so the auto-deployer treats it as
-   a version bump and nothing else — except `CHANGELOG.md`, when it exists
-   (the changelog ritual): in the same commit, move the `## [Unreleased]`
+   a version bump and nothing else — except `CHANGELOG.md` (the changelog
+   ritual): in the same commit, move the `## [Unreleased]`
    section into `## [0.2.0] - YYYY-MM-DD` (pattern: `## [x.y.z] -
-   YYYY-MM-DD`), add the tag-compare link at the bottom of the changelog,
+   YYYY-MM-DD`), add/update the compare links in the footer scaffold at the
+   bottom of the changelog,
    and leave a fresh empty `## [Unreleased]` section behind for the next PR
    (the ritual is documented at the top of `CHANGELOG.md`). The release
-   script uses the changelog section when present and falls back to the
-   merged-PR list when it isn't.
+   script uses the changelog section, falling back to the
+   merged-PR list.
 2. Push to `main`. The release workflow (`.github/workflows/release.yml`)
    fires on any push that touches `VERSION` and cuts the release
    automatically: it runs `scripts/cut-release.sh --ci`, which preflights

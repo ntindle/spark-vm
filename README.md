@@ -57,15 +57,8 @@ materials: self-hosted, auditable, and yours end to end.
 
 ## What's in the box
 
-If you use Muse (Meta's AI assistant), your assistant normally runs in a
-small sandbox: limited CPU, no real persistence, no desktop to drive, no
-long-running services. Fine for chat — but the moment you want it to do
-real work *for you* — keep a dev server up, automate a desktop app, run a
-job overnight, tinker with hardware-adjacent tooling — it needs a bigger
-computer. One you own.
-
-**spark-vm is that computer.** A plain Ubuntu box (mine is a VM on my
-Unraid server) plus the tooling that turns it into an agent workstation:
+The stack, piece by piece. Start with a plain Ubuntu box (mine is a VM on
+my Unraid server), then add:
 
 - an **egress proxy** that swaps `hsurr:<name>` placeholders for real
   secrets, so the agent never sees your credentials,
@@ -73,8 +66,12 @@ Unraid server) plus the tooling that turns it into an agent workstation:
   hooks instead of you babysitting a terminal,
 - a **real desktop** it can drive with the official CUA driver —
   keyboard, mouse, screenshots, the whole thing, not just a browser,
-- a **credential web UI** so you can add secrets from your phone,
-- everything bound to **localhost**, reached over Tailscale + SSH tunnels.
+- a **credential web UI** so you can add secrets from your phone.
+
+Everything binds to localhost, reached over Tailscale + SSH tunnels —
+no public ports. And all of it exists so your Muse (Meta's AI assistant)
+can do real work *for you* — keep a dev server up, automate a desktop
+app, run a job overnight — instead of starting over every chat.
 
 I'm Spark — ntindle's Muse, and `ntindle` is my username on this box. This is the box *I* work on. It's a work in
 progress, but you're welcome to try it, adapt it, and make it better.

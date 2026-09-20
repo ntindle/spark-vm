@@ -469,14 +469,29 @@ class SwapAddonTests(unittest.TestCase):
         a = make_addon()
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "x"
-            p.write_text("token=abc=def\n")
+            p.write_text("token=abc=def")
             self.assertEqual(a._load_secret_file(p), "token=abc=def")
             p.write_text("#hsurr:multi\nuser=jdoe\npassword=x\n")
             self.assertEqual(a._load_secret_file(p),
                              {"user": "jdoe", "password": "x"})
             # no marker, no entries: single value even with '=' inside
-            p.write_text("user=jdoe\npassword=x\n")
+            p.write_text("user=jdoe\npassword=x")
             self.assertEqual(a._load_secret_file(p), "user=jdoe\npassword=x")
+
+    def test_issue88_single_value_read_is_verbatim(self):
+        """#88: the read path must return the stored bytes exactly. Every
+        supported store path chomps one trailing newline at write time, so
+        whatever is in the file IS the intended value — a read-side strip()
+        corrupts secrets that legitimately start or end with whitespace."""
+        a = make_addon()
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x"
+            # legitimately trailing newlines survive the read
+            p.write_text("tok\n\n")
+            self.assertEqual(a._load_secret_file(p), "tok\n\n")
+            # legitimately leading/trailing spaces survive the read
+            p.write_text(" tok ")
+            self.assertEqual(a._load_secret_file(p), " tok ")
 
     def test_bug_register_does_not_break_single_value_secret(self):
         """REVIEW item 35 (regression): `cred register <name> --host <h>`
@@ -656,6 +671,59 @@ class SwapAddonTests(unittest.TestCase):
         self.assertIn("acme", msgs)
         self.assertIn("shorter than 8 chars", msgs)
         self.assertNotIn("secret value 'x'", msgs)
+
+    def test_issue91_secrets_dir_0700_no_warning(self):
+        """Issue #91: a 0700 secrets dir is the documented state — no
+        group/other-readable warning at load."""
+        with tempfile.TemporaryDirectory() as d:
+            os.chmod(d, 0o700)
+            with mock.patch.object(sa, "SECRETS_DIR", Path(d)):
+                with self.assertNoLogs(sa.log, level="WARNING"):
+                    sa.SwapAddon._check_secrets_dir_mode()
+
+    def test_issue91_secrets_dir_0755_warns(self):
+        """Issue #91: a 0755 secrets dir warns loudly, naming the dir and
+        mode, never a secret value."""
+        with tempfile.TemporaryDirectory() as d:
+            os.chmod(d, 0o755)
+            (Path(d) / "acme").write_text("very-secret-value")
+            with mock.patch.object(sa, "SECRETS_DIR", Path(d)):
+                with self.assertLogs(sa.log, level="WARNING") as cm:
+                    sa.SwapAddon._check_secrets_dir_mode()
+        msgs = "\n".join(cm.output)
+        self.assertIn("group/other-readable", msgs)
+        self.assertIn("0755", msgs)
+        self.assertIn(str(d), msgs)
+        self.assertNotIn("very-secret-value", msgs)
+
+    def test_issue91_secrets_dir_missing_is_silent(self):
+        """Issue #91: a missing secrets dir does not emit a mode warning
+        (first boot before the narrow writers run)."""
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d) / "no-such-dir"
+            with mock.patch.object(sa, "SECRETS_DIR", missing):
+                with self.assertNoLogs(sa.log, level="WARNING"):
+                    sa.SwapAddon._check_secrets_dir_mode()
+
+    def test_issue91_secrets_dir_non_dir_is_silent(self):
+        """Issue #91: a non-directory secrets path emits no mode warning
+        (the listing path already warns on its own)."""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "not-a-dir"
+            f.write_text("x")
+            with mock.patch.object(sa, "SECRETS_DIR", f):
+                with self.assertNoLogs(sa.log, level="WARNING"):
+                    sa.SwapAddon._check_secrets_dir_mode()
+
+    def test_issue91_secrets_dir_0770_warns(self):
+        """Issue #91: group bits alone also warn (0o077 mask, not just
+        the other bits)."""
+        with tempfile.TemporaryDirectory() as d:
+            os.chmod(d, 0o770)
+            with mock.patch.object(sa, "SECRETS_DIR", Path(d)):
+                with self.assertLogs(sa.log, level="WARNING") as cm:
+                    sa.SwapAddon._check_secrets_dir_mode()
+        self.assertIn("0770", "\n".join(cm.output))
 
     def test_bug_scrub_opt_out_and_totp_whole_token(self):
         """REVIEW item 36: an entry with scrub:false (usernames, emails)
@@ -1033,6 +1101,82 @@ class SwapAddonTests(unittest.TestCase):
             p = Path(d) / "llm-api"
             self.assertEqual(p.read_bytes(), b"LLM-test-key-bytes")
             self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+
+    def test_issue88_inference_writer_chomps_one_trailing_newline(self):
+        """#88 (arch B1): cred-store-set-inference is its own frontend —
+        nothing chomps before it — so it chomps exactly one trailing
+        newline at the store boundary. Readers return stored bytes
+        verbatim, so without this an incidental newline (echo idiom)
+        would be injected into the provider Authorization header."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-store-set-inference")
+        cases = [
+            (b"LLM-key\n", b"LLM-key"),      # echo idiom: chomped
+            (b"LLM-key\r\n", b"LLM-key"),    # CRLF idiom: chomped
+            (b"LLM-key\n\n", b"LLM-key\n"),  # only one: legit newline kept
+            (b"LLM-key", b"LLM-key"),        # printf idiom: untouched
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            for stdin_bytes, expected in cases:
+                env = dict(os.environ, INFERENCE_SECRETS_DIR=d)
+                r = subprocess.run([script], input=stdin_bytes,
+                                   capture_output=True, env=env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual((Path(d) / "llm-api").read_bytes(),
+                                 expected, stdin_bytes)
+
+    def test_issue88_inference_writer_refuses_newline_only_input(self):
+        """#88: a single newline chomps to empty — refused like any empty
+        secret, never stored as a zero-byte key."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-store-set-inference")
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, INFERENCE_SECRETS_DIR=d)
+            r = subprocess.run([script], input=b"\n",
+                               capture_output=True, env=env)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertFalse((Path(d) / "llm-api").exists())
+
+    def test_issue88_inference_writer_chomp_never_masks_truncation(self):
+        """#88 (QA round 2): the capture cap is max_bytes+2 and a capture
+        that hit the cap is refused BEFORE the chomp — otherwise a chomp
+        could mask a truncated oversized input into a silently-truncated
+        store. A legit 64KiB key plus one echo newline still stores."""
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "cred-store-set-inference")
+        with tempfile.TemporaryDirectory() as d:
+            # 64KiB key + one echo newline: accepted, chomped to 64KiB
+            env = dict(os.environ, INFERENCE_SECRETS_DIR=d)
+            r = subprocess.run([script], input=b"A" * 65536 + b"\n",
+                               capture_output=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((Path(d) / "llm-api").read_bytes(),
+                             b"A" * 65536)
+            # 64KiB+1 without a trailing newline: refused (over the max)
+            r = subprocess.run([script], input=b"A" * 65537,
+                               capture_output=True, env=env)
+            self.assertNotEqual(r.returncode, 0)
+            # oversized input whose 65537th captured byte is a newline:
+            # refused, never silently truncated-and-stored
+            r = subprocess.run(
+                [script], input=b"A" * 65536 + b"\n" + b"B" * 1000,
+                capture_output=True, env=env)
+            self.assertNotEqual(r.returncode, 0)
+
+    def test_issue88_scrub_covers_bare_and_verbatim_renderings(self):
+        """#88 (arch B2): a whitespace-significant single value must scrub
+        both the verbatim stored rendering AND the bare rendering servers
+        echo back trimmed — otherwise the trimmed echo leaks past the
+        scrubber while the swap itself works."""
+        a = make_addon(secrets={"k": "secrettok12\n"})
+        text = ("verbatim: [secrettok12\n] bare: 'secrettok12' "
+                "other: secrettok1")
+        scrubbed = a._scrub_text_value(text)
+        self.assertNotIn("secrettok12\n", scrubbed)
+        self.assertNotIn("'secrettok12'", scrubbed)
+        self.assertIn("hsurr:k", scrubbed)
+        # no over-scrub: a shorter innocent token is untouched
+        self.assertIn("secrettok1", scrubbed)
 
     def test_nit_inference_recipe_names_right_files(self):
         """REVIEW item 46: the install recipe must bind the provider in

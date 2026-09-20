@@ -519,7 +519,16 @@ class SwapAddon:
             return None
         lines = [l for l in text.splitlines() if l.strip()]
         if not lines or lines[0].strip() != MULTI_MARKER:
-            return text.strip()
+            # Verbatim, never stripped (#88): write paths chomp exactly one
+            # trailing newline exactly once — `cred set` stdin and cred-ui
+            # paste at the frontend, cred-store-set-inference at its own
+            # boundary; the narrow main writer (proxy/cred-store-set)
+            # stores stdin verbatim and its frontends chomp first. So the
+            # stored bytes ARE the intended value. A read-side strip()
+            # corrupts secrets that legitimately start/end with whitespace
+            # (auth failures on swapped requests). Direct narrow-writer
+            # use must pipe exact bytes (printf '%s', never echo).
+            return text
         values = {}
         for lineno, line in enumerate(lines[1:], start=2):
             m = ENTRY_LINE_RE.match(line)
@@ -529,6 +538,32 @@ class SwapAddon:
                 log.warning("swap: secret %s line %d is not k=v; dropped",
                             path.name, lineno)
         return values
+
+    @staticmethod
+    def _check_secrets_dir_mode():
+        # Issue #91: SETUP.md documents the secrets dir as 0700 swapd-only,
+        # and proxy/deploy.sh now enforces that, but the addon runs against
+        # any directory (SWAP_SECRETS_DIR is env-overridable per finding 31,
+        # so the inference instance checks its own dir here too). Warn
+        # loudly at load if group/other can list it: credential NAMES
+        # (not values — files are 0600) would be visible to local users.
+        try:
+            mode = os.stat(SECRETS_DIR).st_mode
+        except OSError:
+            return
+        # 0o170000/0o040000 are the S_IFMT/S_IFDIR bits; only a directory
+        # mode is meaningful here (a non-dir secrets path already fails the
+        # listing below into its own warning). Note: effective ACL grants
+        # surface in st_mode's group-class mask, so named-user/group ACLs
+        # granting read trip this warning too; purely ineffective ACL
+        # entries are ignored, which is the right semantics.
+        if mode & 0o170000 != 0o040000:
+            return
+        if mode & 0o077:
+            log.warning(
+                "swap: secrets dir %s is group/other-readable (mode %04o) — "
+                "credential names are visible to local users (issue #91)",
+                SECRETS_DIR, mode & 0o777)
 
     def _load(self):
         registry = {}
@@ -543,6 +578,7 @@ class SwapAddon:
             log.warning("swap: cannot read registry: %s", e)
         self.registry = registry
         secrets = {}
+        self._check_secrets_dir_mode()
         try:
             if SECRETS_DIR.is_dir():
                 for p in SECRETS_DIR.iterdir():
@@ -1514,6 +1550,15 @@ class SwapAddon:
                                         False))
             elif self._scrubbable_entry(name, None, val):
                 triples.append((val, "hsurr:%s" % name, False))
+                # #88: a whitespace-significant value (e.g. stored
+                # "sk-abc123\n") must still scrub the bare rendering
+                # servers echo back trimmed ("invalid key 'sk-abc123'").
+                # The request side swaps the verbatim value; the scrub
+                # side must cover both renderings or the trimmed echo
+                # leaks past the scrubber.
+                bare = val.strip()
+                if bare != val and self._scrubbable_entry(name, None, bare):
+                    triples.append((bare, "hsurr:%s" % name, False))
         triples.sort(key=lambda t: len(t[0]), reverse=True)
         return triples
 

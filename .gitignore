@@ -3,3 +3,4 @@ __pycache__/
 # demo-asset intermediates (regenerable; keep out of git)
 /demo-frames/
 /demo-asset2-work/
+/demo-asset5-work/
