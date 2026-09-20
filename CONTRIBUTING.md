@@ -46,8 +46,8 @@ python3 -m pytest
 ```
 
 `pytest.ini` discovers every suite (`proxy`, `confirm`, `muse-job/tests`,
-`deploy`, `scripts`, `cred-ui/tests`). All suites pass on `main`; your PR
-should keep them green.
+`deploy`, `scripts`, `cred-ui/tests`, `harness`). All suites pass on `main`;
+your PR should keep them green.
 
 Install the test dependencies first:
 
@@ -65,6 +65,7 @@ Per-component dependency notes:
 | `deploy/` | `test_auto_deploy` | none |
 | `scripts/` | `test_sparkvm_version` | none |
 | `cred-ui/tests/` | `test_cred_ui_version` | none |
+| `harness/` | `test_probe`, `test_manifest`, `test_install_gate_fixture` | none |
 
 Two conventions keep the one-liner working: keep every `test_*.py`
 basename unique across the repo (pytest imports test modules by basename),

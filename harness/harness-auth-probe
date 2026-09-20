@@ -15,7 +15,7 @@ order:
 Modes:
   gate      — image-build gate. The CLI is pointed at the gate fixture's
               echo host through the inference proxy with the public dummy
-              placeholder (hsurr:gate-dummy). The echo server records the
+              placeholder (hsurr:llm-api). The echo server records the
               Authorization header the origin received; the probe asserts
               the swapped value arrived with the exact
               "Authorization: Bearer <...>" wire shape and that the
@@ -252,7 +252,7 @@ def main(argv=None):
         base_url = os.environ.get("PROBE_BASE_URL")
         echo_log = os.environ.get("PROBE_ECHO_LOG")
         expected = os.environ.get("PROBE_EXPECTED_SWAPPED")
-        key_name = os.environ.get("PROBE_KEY_NAME", "gate-dummy")
+        key_name = os.environ.get("PROBE_KEY_NAME", "llm-api")
         missing = [n for n, v in (("PROBE_BASE_URL", base_url),
                                   ("PROBE_ECHO_LOG", echo_log),
                                   ("PROBE_EXPECTED_SWAPPED", expected)) if not v]

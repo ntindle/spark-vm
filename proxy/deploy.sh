@@ -57,6 +57,7 @@ echo "[0/7] Preflight (no mutations yet)..."
 for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/cred-registry-set proxy/cred-registry-set-inference \
          proxy/cred-store-set proxy/cred-store-set-inference \
+         proxy/cred-store-verify-inference \
          proxy/cred-store-get proxy/cred-store-delete \
          proxy/with-proxy proxy/ssrf.deny proxy/sudoers-swapd \
          proxy/swap-proxy.service proxy/swap-inference.service \
@@ -89,13 +90,15 @@ sudo install -o root -g root -m 0755 proxy/cred-registry-set /usr/local/bin/cred
 sudo install -o root -g root -m 0755 proxy/cred-registry-set-inference /usr/local/bin/cred-registry-set-inference
 sudo install -o root -g root -m 0755 proxy/cred-store-set /usr/local/bin/cred-store-set
 sudo install -o root -g root -m 0755 proxy/cred-store-set-inference /usr/local/bin/cred-store-set-inference
+sudo install -o root -g root -m 0755 proxy/cred-store-verify-inference /usr/local/bin/cred-store-verify-inference
 sudo install -o root -g root -m 0755 proxy/cred-store-get /usr/local/bin/cred-store-get
 sudo install -o root -g root -m 0755 proxy/cred-store-delete /usr/local/bin/cred-store-delete
 # Verify the security-critical writers landed root-owned 0755. Any
 # install failure above aborts via set -e; this guards against silent
 # drift (a stale or tampered /usr/local/bin).
 for f in cred-registry-set cred-registry-set-inference cred-store-set \
-         cred-store-set-inference cred-store-get cred-store-delete \
+         cred-store-set-inference cred-store-verify-inference cred-store-get \
+         cred-store-delete \
          cred-grant-revoke; do
     got="$(stat -c '%U:%a' "/usr/local/bin/$f")"
     if [ "$got" != "root:755" ]; then
@@ -185,6 +188,19 @@ for d in /home/swapd/secrets /home/swapd/inference-secrets; do
     sudo mkdir -p "$d"
     sudo python3 proxy/enforce_secrets_dir.py "$d"
 done
+
+# --- 4d. inference SSRF allow file (findings 29, 31) -----------------------
+echo "[4d/7] Ensuring inference-ssrf.allow exists..."
+# The inference proxy reads its SSRF exceptions from its OWN file, never
+# the main proxy's shared /home/swapd/ssrf.allow (see
+# proxy/swap-inference.service): the gate fixture's loopback exemption
+# (harness/install-gate-fixture.sh) must never weaken the main proxy's
+# egress guard. Ships empty (default deny); deploy.sh never adds entries
+# -- the gate installer appends 127.0.0.1 and the provision-time injector
+# removes it before the real credential lands.
+if ! sudo test -e /home/swapd/inference-ssrf.allow; then
+    sudo install -o swapd -g swapd -m 0644 /dev/null /home/swapd/inference-ssrf.allow
+fi
 
 # --- 5. systemd units (finding 66) -----------------------------------------
 echo "[5/7] Installing systemd units..."

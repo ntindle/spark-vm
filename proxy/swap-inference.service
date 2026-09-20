@@ -8,13 +8,17 @@ User=swapd
 # Finding 31: obox's LLM calls go through this separate mitmdump
 # instance, not the main swap proxy. It has its own secrets dir holding
 # ONLY the provider API key, its own hosts file holding ONLY the
-# provider, its own registry, and its own audit log. The provider must
-# never appear in the main proxy's hosts.allow.
+# provider, its own registry, its own audit log, and its own SSRF allow
+# file. The provider must never appear in the main proxy's hosts.allow,
+# and the inference SSRF file must never be the main proxy's shared one:
+# the gate fixture (harness/install-gate-fixture.sh) needs a loopback
+# exemption for its echo origin, and that exemption must never weaken
+# the main proxy's finding-29 egress guard.
 Environment=SWAP_SECRETS_DIR=/home/swapd/inference-secrets
 Environment=SWAP_HOSTS_FILE=/home/swapd/inference-hosts.allow
 Environment=SWAP_REGISTRY_FILE=/home/swapd/inference-registry.json
 Environment=SWAP_LOG_FILE=/home/swapd/inference-swap.log
-Environment=SWAP_SSRF_FILE=/home/swapd/ssrf.allow
+Environment=SWAP_SSRF_FILE=/home/swapd/inference-ssrf.allow
 Environment=SWAP_INFERENCE_MODE=1
 # Finding 60: the inference proxy has no approvals directory. It reads
 # grants.json but never files approvals or consumes answers.

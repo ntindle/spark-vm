@@ -314,6 +314,17 @@ your own SSH session:
    sudo -u swapd /usr/local/bin/cred-registry-set-inference add-host llm-api api.provider.example
    ```
 
+   > **Gate-fixture warning:** if this box ever ran the harness gate
+   > fixture (`harness/install-gate-fixture.sh`), remove its leftover
+   > state BEFORE the real key lands: unbind `llm-api` from `127.0.0.1`
+   > in the registry, and delete the `127.0.0.1` lines from
+   > `/home/swapd/inference-hosts.allow` and
+   > `/home/swapd/inference-ssrf.allow`. Otherwise the fixture's echo
+   > binding survives next to the provider binding — and a later gate
+   > re-run would fail closed (or worse, the fixture lifecycle contract
+   > is broken: a real key must never coexist with the echo-host
+   > entries). See `harness/README.md` "Fixture lifecycle".
+
 4. **Restart the inference proxy** and check the journal for refused
    lines (placeholder names only, never values):
    ```

@@ -7,6 +7,15 @@
 # that one is read-only — see the rule's comment.
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-set
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-set-inference
+# inference proxy (Security review, PR #126 reconcile): blind compare
+# for the gate fixture installer's fail-closed guard. Reads the
+# candidate from stdin, exits 0/1/2, and NEVER prints the stored value;
+# the installer compares against its own public dummy, so the one leaked
+# bit reveals nothing about a real credential. No wildcard needed (the
+# path is the inference proxy's single fixed credential name, the
+# candidate travels on stdin), and the file's one-wildcard invariant
+# stays intact.
+ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-verify-inference
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-get
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-delete
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-registry-set
@@ -17,6 +26,11 @@ ntindle ALL=(swapd) NOPASSWD: /usr/bin/ls /home/swapd/secrets
 # inference proxy (finding 31): append-only hosts file, listable secrets dir
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/tee -a /home/swapd/inference-hosts.allow
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/ls /home/swapd/inference-secrets
+# inference proxy (findings 29, 31): the gate fixture's loopback SSRF
+# exemption lives in the inference instance's OWN ssrf file, never the
+# main proxy's shared one -- the main proxy's egress guard is untouched.
+# The install-gate-fixture fail-closed guard lists the secrets dir above.
+ntindle ALL=(swapd) NOPASSWD: /usr/bin/tee -a /home/swapd/inference-ssrf.allow
 # confirmd (finding 47, 63b): narrow tailscale rules for the self-peer
 # check. whois takes a peer IP; ip takes no args.
 # The whois rule carries the file's one intentional argument wildcard:
