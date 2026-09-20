@@ -405,18 +405,22 @@ THIRD-PARTY, I = INFERRED.
   https://www.mactech.com/2010/08/27/mpeg-la-offers-h-264-video-license-royalty-free-for-life/
 - CDM: MPEG LA extends royalty-free H.264 license analysis (T) —
   https://cdm.link/editorial-mpeg-la-extends-royalty-free-license-for-h-264-sorta-but-not-much-changes/
-- eWeek: Cisco open-sources H.264 codec, 2013 (V — Cisco announcement via) —
+- eWeek: Cisco open-sources H.264 codec, 2013 (T — reporting Cisco's
+  announcement) —
   https://www.eweek.com/networking/cisco-open-sources-h-264-codec-for-web-communications/
-- The Register: Cisco open-source H.264 stack, 2013 (V) —
+- The Register: Cisco open-source H.264 stack, 2013 (T — reporting Cisco's
+  announcement) —
   https://www.theregister.com/2013/10/30/cisco_open_source_h264_stack/
 - ffmpeg-wasi licensing explainer on Cisco grant self-build exclusion (T) —
   https://github.com/phpboyscout/ffmpeg-wasi/blob/HEAD/docs/explanation/licensing.md
 - openh264 README (V) — https://github.com/cisco/openh264/blob/HEAD/README.md
-- 9to5Google: Google licenses MPEG LA patents for VP8, 2013-03-07 (V) —
+- 9to5Google: Google licenses MPEG LA patents for VP8, 2013-03-07 (T —
+  press report) —
   https://9to5google.com/2013/03/07/google-licenses-mpeg-la-patents-for-vp8-video-format/
-- Design-Reuse: Google/MPEG LA VP8 agreement full text (V) —
+- Design-Reuse: Google/MPEG LA VP8 agreement full text, reprint (V — the
+  release text itself) —
   https://www.design-reuse.com/news/202523471-google-and-mpeg-la-announce-agreement-covering-vp8-video-format/
-- W3C public-html list: VP8 terms note (V) —
+- W3C public-html list: Google's VP8 terms note, archived (T) —
   https://lists.w3.org/Archives/Public/public-html/2013Mar/0055.html
 - bloggeek: WebRTC H.264 video codec hardware support (T) —
   https://bloggeek.me/webrtc-h264-video-codec-hardware-support/
