@@ -37,6 +37,24 @@
   #status { min-height: 1.2em; font-size: .85rem; margin-top: 10px; }
   #refresh-note { font-size: .78rem; color: #777; }
   .hidden { display: none; }
+  /* Phone view: the stored-credentials table is ~500px wide at full
+     layout, so at phone widths it overflows and clips the hosts and
+     delete columns. Below 520px each row becomes a stacked card, so
+     cred-ui is genuinely usable over an SSH tunnel from a phone. */
+  @media (max-width: 520px) {
+    #list table, #list tbody, #list tr, #list td { display: block; width: 100%;
+      box-sizing: border-box; }
+    #list thead { display: none; }
+    #list tr { border: 1px solid #333; border-radius: 10px; padding: 4px 12px 8px;
+      margin-bottom: 12px; background: #1c1c1c; }
+    #list td { border-bottom: none; padding: 6px 0; }
+    #list td:nth-child(1)::before { content: "Name"; }
+    #list td:nth-child(2)::before { content: "State"; }
+    #list td:nth-child(3)::before { content: "Hosts"; }
+    #list td::before { display: block; font-size: .72rem; color: #999;
+      text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
+    #list td:nth-child(4) .danger { width: 100%; }
+  }
 </style>
 </head>
 <body>
@@ -107,7 +125,7 @@ function render(creds) {
   // rebuilding the table via innerHTML would destroy it and lose the text.
   if (document.activeElement && $('list').contains(document.activeElement)) return;
   if (!creds.length) { $('list').innerHTML = '<p class="sub">none stored</p>'; return; }
-  let h = '<table><tr><th>Name</th><th>State</th><th>Hosts</th><th></th></tr>';
+  let h = '<table><thead><tr><th>Name</th><th>State</th><th>Hosts</th><th></th></tr></thead><tbody>';
   for (const c of creds) {
     const entries = Object.entries(c.entries).map(([e, p]) =>
       '<div class="mono">' + esc(e) + ' → ' + esc(typeof p === 'string' ? p : JSON.stringify(p)) + '</div>').join('');
@@ -123,7 +141,7 @@ function render(creds) {
          '<button class="small" data-add-btn="' + esc(c.name) + '">+</button></div></td>' +
          '<td><button class="danger" data-del="' + esc(c.name) + '">delete</button></td></tr>';
   }
-  $('list').innerHTML = h + '</table>';
+  $('list').innerHTML = h + '</tbody></table>';
 }
 
 $('list').addEventListener('click', async ev => {
