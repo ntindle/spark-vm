@@ -888,3 +888,56 @@ def test_redacted_params_cover_wait_and_gesture():
     assert wait_gone.redacted_params() == {"text_gone": "<redacted>"}
     assert gesture.redacted_params()["instruction"] == "<redacted>"
     assert gesture.redacted_params()["gesture"] == "circle"
+
+
+# ---------------------------------------------------------------------------
+# Round-4 fixes: security delta re-review blockers (B8, B9)
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_errors_never_echo_giant_values():
+    # B8: every rejection path must bound its error string — a daemon
+    # logging rejections must not get a log-pipeline DoS per request.
+    big = "x" * (20 * 1024 * 1024)
+    cases = [
+        ({"action": "goto", "url": big}, "bad_params"),  # scan runs first
+        ({"action": big}, "bad_params"),  # giant name: scan runs first
+        ({"action": "click", "ref": "@e1", big: 1}, "bad_params"),  # key
+        ({"action": "snapshot", "timeout_ms": big}, "bad_params"),
+        (big, "bad_params"),  # non-dict action: type name only
+    ]
+    for action, code in cases:
+        with pytest.raises(P.ProtocolError) as exc:
+            P.validate_call(call([action]))
+        assert exc.value.code == code
+        assert len(str(exc.value)) < 10000, (code, len(str(exc.value)))
+        assert big not in str(exc.value)
+    # A short unknown name still gets unknown_action with a bounded echo.
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "eval"}]))
+    assert exc.value.code == "unknown_action"
+    assert len(str(exc.value)) < 10000
+
+
+def test_envelope_string_caps():
+    # B9: envelope strings are not action params; they are capped at the
+    # envelope level instead.
+    big = "x" * (50 * 1024 * 1024)
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call({"session": big, "actions": [{"action": "state"}]})
+    assert exc.value.code == "bad_envelope"
+    assert big not in str(exc.value)
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "state"}], ref_scope=big))
+    assert exc.value.code == "bad_envelope"
+    # A non-string ref_scope is meaningless; reject it too.
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "state"}], ref_scope=123))
+    assert exc.value.code == "bad_envelope"
+    # Page-derived observation envelope: a hostile page controls title.
+    obs = {"url": "https://x", "title": big, "target": "tgt",
+           "ref_scope": "rs", "ax": []}
+    with pytest.raises(P.ProtocolError) as exc:
+        O.validate_observation(obs)
+    assert exc.value.code == "bad_observation"
+    assert big not in str(exc.value)

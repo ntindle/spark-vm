@@ -449,15 +449,18 @@ def _action_entry(name):
     if not isinstance(name, str):
         raise ProtocolError(
             "unknown_action",
-            "action name must be a string, got %r" % (name,),
+            "action name must be a string, got %s" % type(name).__name__,
         )
     try:
         return _ACTIONS[name]
     except KeyError:
+        # Truncate: a giant unknown name must not be echoed into the
+        # error (log-pipeline DoS). The up-front size scan usually
+        # rejects those first; this is the backstop.
         raise ProtocolError(
             "unknown_action",
-            "%r is not in the fixed vocabulary (rejected, not interpreted)"
-            % (name,),
+            "unknown action (len %d), rejected not interpreted: %.200s"
+            % (len(name), name),
         )
 
 
@@ -599,35 +602,58 @@ class ValidatedCall:
     actions: tuple
 
 
-def _check_param_lengths(name, index, params):
-    """Cap every string parameter at MAX_PARAM_LEN.
+def _safe_key(key):
+    """A parameter key safe to embed in an error message."""
+    if isinstance(key, str):
+        if len(key) <= 200:
+            return key
+        return key[:200] + "…(len %d)" % len(key)
+    return "<%s>" % type(key).__name__
 
-    A compromised orchestrator must not exhaust daemon memory with one
-    giant value (e.g. a 50MB goto.url). The error reports the length,
-    never the value, so a rejected giant value cannot amplify into a
-    giant log line either.
+
+def _check_action_size(obj, index):
+    """Length-scan the raw action object before anything interprets it.
+
+    Validators and error paths use ``%r`` liberally; if a giant value
+    reaches a validator first, the rejection message echoes the whole
+    value into the error/log line — a log-pipeline DoS per request.
+    Keys, values (including nested list/tuple string members), the
+    action name, and ``timeout_ms`` are therefore scanned up front;
+    anything over MAX_PARAM_LEN fails loud here, with the length (never
+    the value) in the message. Values that pass the scan are at most
+    1MiB, which also bounds every downstream ``%r`` echo.
     """
-    for key, value in params.items():
+    if not isinstance(obj, dict):
+        raise ProtocolError(
+            "bad_params",
+            "actions[%d] must be an object, got %s"
+            % (index, type(obj).__name__),
+        )
+
+    def too_long(value):
         if isinstance(value, str):
-            strings = (value,)
-        elif isinstance(value, (list, tuple)):
-            strings = tuple(value)
-        else:
-            continue
-        for s in strings:
-            if isinstance(s, str) and len(s) > MAX_PARAM_LEN:
-                raise ProtocolError(
-                    "bad_params",
-                    "actions[%d] (%s): param %r exceeds %d chars (len %d)"
-                    % (index, name, key, MAX_PARAM_LEN, len(s)),
-                )
+            return len(value) > MAX_PARAM_LEN
+        if isinstance(value, (list, tuple)):
+            return any(too_long(v) for v in value)
+        return False
+
+    for key, value in obj.items():
+        if isinstance(key, str) and len(key) > MAX_PARAM_LEN:
+            raise ProtocolError(
+                "bad_params",
+                "actions[%d]: parameter name exceeds %d chars (len %d)"
+                % (index, MAX_PARAM_LEN, len(key)),
+            )
+        if too_long(value):
+            raise ProtocolError(
+                "bad_params",
+                "actions[%d] (%s): value exceeds %d chars"
+                % (index, _safe_key(key), MAX_PARAM_LEN),
+            )
 
 
 def _validate_action_object(obj, index):
-    if not isinstance(obj, dict):
-        raise ProtocolError(
-            "bad_params", "actions[%d] must be an object, got %r" % (index, obj)
-        )
+    _check_action_size(obj, index)
     name = obj.get("action")
     validator, _stage, _needs_ref, _obs_only = _action_entry(name)
     params = {k: v for k, v in obj.items() if k not in ("action", "timeout_ms")}
@@ -636,10 +662,9 @@ def _validate_action_object(obj, index):
         raise ProtocolError(
             "bad_params",
             "actions[%d] (%s): unknown parameter(s) %s"
-            % (index, name, sorted(unknown)),
+            % (index, name, sorted(unknown, key=_safe_key)),
         )
     validator(params)
-    _check_param_lengths(name, index, params)
     timeout_ms = obj.get("timeout_ms", 0)
     if timeout_ms:
         _check_timeout_ms(timeout_ms)
@@ -697,6 +722,12 @@ def validate_call(payload, scope=None):
     session = payload.get("session")
     if not is_nonempty_str(session):
         raise ProtocolError("bad_envelope", "call.session must be non-empty")
+    if len(session) > MAX_PARAM_LEN:
+        raise ProtocolError(
+            "bad_envelope",
+            "call.session exceeds %d chars (len %d)"
+            % (MAX_PARAM_LEN, len(session)),
+        )
     raw_actions = payload.get("actions")
     if not isinstance(raw_actions, list) or not raw_actions:
         raise ProtocolError(
@@ -738,6 +769,17 @@ def validate_call(payload, scope=None):
         )
 
     ref_scope = payload.get("ref_scope")
+    # Envelope-level cap (B9): ref_scope is not an action param, so the
+    # action scan does not cover it. Non-strings are rejected too — the
+    # token is meaningless unless it is a string.
+    if ref_scope is not None and (
+        not isinstance(ref_scope, str) or len(ref_scope) > MAX_PARAM_LEN
+    ):
+        raise ProtocolError(
+            "bad_envelope",
+            "call.ref_scope must be a string of at most %d chars"
+            % MAX_PARAM_LEN,
+        )
     # Any action addressing an element ref — mandatory or optional
     # (press/scroll/get_text/get_html take an optional ref) — needs the
     # live observation token (SPEC §4).

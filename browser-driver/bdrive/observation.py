@@ -14,7 +14,7 @@ Like ``bdrive.protocol``, this module is pure validation — no browser,
 no I/O.
 """
 
-from bdrive.protocol import REF_RE, ProtocolError, is_nonempty_str
+from bdrive.protocol import MAX_PARAM_LEN, REF_RE, ProtocolError, is_nonempty_str
 
 
 #: Hard cap on AX tree depth. The tree is derived from the rendered
@@ -106,6 +106,17 @@ def validate_observation(obs):
     :class:`ProtocolError` with code ``bad_observation``."""
     if not isinstance(obs, dict):
         raise ProtocolError("bad_observation", "observation must be an object")
+    # Envelope-level cap (B9): url/title/target/ref_scope are
+    # page-derived (a hostile page controls document.title) and are not
+    # action params, so the call-level scan does not cover them.
+    for key in ("url", "title", "target", "ref_scope"):
+        value = obs.get(key)
+        if isinstance(value, str) and len(value) > MAX_PARAM_LEN:
+            raise ProtocolError(
+                "bad_observation",
+                "observation.%s exceeds %d chars (len %d)"
+                % (key, MAX_PARAM_LEN, len(value)),
+            )
     if not is_nonempty_str(obs.get("url")):
         raise ProtocolError("bad_observation", "observation.url required")
     if not isinstance(obs.get("title"), str):
