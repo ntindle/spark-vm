@@ -38,9 +38,24 @@ directory `0700`, files `0600`. Backend is selected by `SPARK_CRED_BACKEND`
 code is structured so it slots in without changing callers).
 
 ```bash
-# store a secret (piped, or interactive no-echo prompt with confirmation)
-echo -n "sk-..." | cred set openai-api-key
-cred set github-token            # prompts twice, no echo
+# store a secret — always at the no-echo prompt, or via read -rs below.
+# Never type or paste the real value into an echo command: it would land
+# in shell history. (cred takes no argv value, so history is the only
+# leak path.)
+cred set openai-api-key         # prompts twice, no echo
+cred set github-token
+
+# When the no-echo prompt isn't convenient (e.g. pasting a one-liner into
+# a remote shell): read the value without echo FIRST — run this line
+# ALONE, paste the value, press Enter. Don't paste this whole block at
+# once, or the next line would become your "secret". (Prompt printed via
+# printf because zsh's read -p means coprocess, not "prompt".)
+printf 'Secret: ' >&2; read -rs SECRET
+
+# Then store it. printf is deliberate: a value starting with -e or -n
+# would be swallowed by echo as an option.
+printf '%s' "$SECRET" | cred set openai-api-key
+unset SECRET
 
 # read one back (no trailing newline — safe to pipe)
 cred get openai-api-key
@@ -131,7 +146,7 @@ First-time auth: create a fine-grained PAT with **contents: write** on
 `ntindle/spark-vm`, then store it (once). Never paste it into chat or a file:
 
 ```bash
-echo '<token>' | cred set github
+cred set github                  # paste at the no-echo prompt; never in an echo command
 ```
 
 `push.sh` reads the token via `cred get github` at push time, refuses to
