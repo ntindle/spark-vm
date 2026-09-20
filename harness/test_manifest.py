@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 
 HARNESS = os.path.dirname(os.path.abspath(__file__))
@@ -145,3 +146,46 @@ def test_check_usage_errors(tmp_path):
                            timeout=30)
         assert p.returncode == 2, argv
         assert "usage" in p.stderr
+
+
+def _scratch_repo_with_generator(tmp_path):
+    """Copy the generator into a scratch git repo and return (gen_path, repo).
+
+    The generator stamps the checkout it lives in, so a scratch repo lets us
+    exercise the dirty-checkout guard without touching the real checkout.
+    """
+    scratch = tmp_path / "scratch"
+    harness_dir = scratch / "harness"
+    harness_dir.mkdir(parents=True)
+    gen = harness_dir / "generate-image-manifest.sh"
+    shutil.copy(GEN, gen)
+    (scratch / "VERSION").write_text("0.0.0-test\n")
+    for argv in (["git", "init"], ["git", "config", "user.email", "t@t"],
+                 ["git", "config", "user.name", "t"], ["git", "add", "-A"],
+                 ["git", "commit", "-m", "x"]):
+        subprocess.run(argv, cwd=scratch, check=True, capture_output=True,
+                       timeout=30)
+    return str(gen), scratch
+
+
+def test_generate_refuses_dirty_checkout(tmp_path):
+    gen, scratch = _scratch_repo_with_generator(tmp_path)
+    # Clean checkout: generates fine.
+    p = subprocess.run([gen, "--out", str(tmp_path / "m1.json")],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    # Tracked modification: fail closed — a dirty tree must never be stamped
+    # with a clean SHA.
+    (scratch / "VERSION").write_text("0.0.0-dirty\n")
+    p = subprocess.run([gen, "--out", str(tmp_path / "m2.json")],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode != 0
+    assert "uncommitted changes" in p.stderr
+    assert not (tmp_path / "m2.json").exists()
+    # Untracked file: also a dirty tree (it would be baked too).
+    (scratch / "VERSION").write_text("0.0.0-test\n")
+    (scratch / "junk.txt").write_text("junk\n")
+    p = subprocess.run([gen, "--out", str(tmp_path / "m3.json")],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode != 0
+    assert "uncommitted changes" in p.stderr
