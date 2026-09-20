@@ -301,7 +301,7 @@ Screens, in order:
    approval completion). This is PR 2's one extension to the
    `FUNNEL_MEASUREMENT.md` §3.4 event table, per §9's "emit into
    `funnel_events` from day one" — the "no other instrumentation" line
-   scopes §9's waitlist-era metrics, not the signup era.
+   scopes §7's waitlist-era metrics, not the signup era.
 4. **Bring your tailnet** — BYO Tailscale link step (decided, NEEDS_USER.md
    Tailnet). H3 §11.2's open tailnet-shape question is closed; the signup
    UI renders the decided shape, not the question.
