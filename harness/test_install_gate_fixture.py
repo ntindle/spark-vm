@@ -204,7 +204,19 @@ def stack(tmp_path):
     (bin_dir / "fake-store-writer").write_text(FAKE_STORE_WRITER)
     (bin_dir / "fake-registry-writer").write_text(FAKE_REGISTRY_WRITER)
     (bin_dir / "fake-muse").write_text(FAKE_MUSE)
-    for f in ("fake-store-writer", "fake-registry-writer", "fake-muse"):
+    # Fake sudo: asserts the production privilege argv (-u swapd), then
+    # execs the remaining argv directly, so a test can exercise the
+    # installer's default SUDO_PREFIX value end to end.
+    (bin_dir / "sudo").write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" != \"-u\" ] || [ \"$2\" != \"swapd\" ]; then\n"
+        "  echo \"fake-sudo: expected '-u swapd', got: $1 $2\" >&2\n"
+        "  exit 99\n"
+        "fi\n"
+        "shift 2\n"
+        "exec \"$@\"\n")
+    for f in ("fake-store-writer", "fake-registry-writer", "fake-muse",
+              "sudo"):
         os.chmod(bin_dir / f, 0o755)
 
     proxy = _serve(_SwapProxyHandler, swap=True,
@@ -341,6 +353,20 @@ def test_installer_repairs_missing_trailing_newline(stack):
     assert ssrf_allow_file.read_text().splitlines() == ["10.0.0.1", "127.0.0.1"]
 
 
+def test_installer_privilege_prefix(stack):
+    # Exercises the production default SUDO_PREFIX ("sudo -u swapd")
+    # through the fake sudo, which asserts the -u swapd argv. A
+    # privilege-path breakage is fail-closed (sudo error -> set -e ->
+    # nonzero exit), so this pins the argv rather than the behavior.
+    (env, secrets_dir, registry_file, allow_file, ssrf_allow_file,
+     echo_log, _proxy) = stack
+    env["SUDO_PREFIX"] = "sudo -u swapd"
+    proc = _run_installer(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert (secrets_dir / KEY_NAME).read_text() == INSTALLER_DUMMY
+    assert ssrf_allow_file.read_text().splitlines() == ["127.0.0.1"]
+
+
 def test_installer_missing_writer_fails(stack):
     env, *_ = stack
     env["CRED_STORE_SET_INFERENCE"] = "/nonexistent/writer"
@@ -368,6 +394,10 @@ def test_installer_probe_failure_propagates(stack):
     finally:
         proxy.RequestHandlerClass.swap = True
     assert proc.returncode != 0
+    # The failure is genuinely the wire-shape assertion, not an
+    # incidental error: the unswapped placeholder reached the echo
+    # origin.
+    assert PLACEHOLDER in echo_log.read_text()
     # The fixture writes still happened (the failure is the verification,
     # not the install).
     assert (secrets_dir / KEY_NAME).read_text() == INSTALLER_DUMMY

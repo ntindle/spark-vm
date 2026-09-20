@@ -11,9 +11,12 @@ credential under the inference proxy's fixed `llm-api` name through the
 narrow writers, `bearer_header` placement, loopback echo host bound +
 allowlisted for swapping and exempted in the inference proxy's own
 `inference-ssrf.allow`, fail-closed against overwriting a real
-credential) with the gate-fixture cleanup contract, 8 hermetic installer
-tests. Remaining for later feature slices: provision-time injector,
-image gate, R1 script green.
+credential) with the gate-fixture cleanup contract, 9 hermetic installer
+tests. Remaining for later feature slices: provision-time injector
+(which owns the gate-fixture teardown — unbind the llm-api→echo-host
+binding and remove the echo host from inference-hosts.allow and
+inference-ssrf.allow — before the real key lands), image gate, R1
+script green.
 The remaining implementation (provision-time injector, image gate) is
 build-loop `feature` work; this doc remains the spec input for it.
 **Feeds:** `docs/FIRST_TEN_MINUTES_SPEC.md` §5 (the harness pre-seed contract
