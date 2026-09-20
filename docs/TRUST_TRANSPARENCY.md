@@ -137,6 +137,123 @@ Plainly, because a trust doc that only lists wins is marketing copy:
    SSH relay (tailnet only). Those are allowlisted, not shared folders —
    but they are surfaces, and any finding against them lands here as a
    finding, not a footnote.
+
+   **Relay audit (2026-09-20, the -79994 / D-Bus class against the two
+   exposures + the planned bdrive socket bind-mount).** The class in
+   CVE-2026-79994 is a *path-validation race*: the guest steers a
+   host-side relay toward an arbitrary host socket by swapping a path
+   (symlink) between the relay's check and its connect
+   (characterization per the escape-week section above — release notes
+   read 2026-09-19).
+   Applied to our exposures:
+
+   - **Proxy relay (jail → mitmdump).** `jail/build.sh` DNATs
+     `iifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 }`
+     to host `127.0.0.1`; the nftables `input` chain accepts those
+     two dports from `ve-jail` (plus established/related return legs)
+     and drops everything else — including every other 127.0.0.1
+     port (so `route_localnet=1` on `ve-jail`, finding 51, cannot be
+     used to reach loopback services like cred-ui's tunnel). Honest
+     caveat on the bound: the port-accept rule itself carries no daddr
+     match, so the jail can open 18080/18081 on *any* host address, not
+     just 127.0.0.1 — harmless in practice because mitmdump listens
+     only on 127.0.0.1, but the rules do not state the tighter bound.
+     The
+     relay target is a fixed IP:port pair — there is no path, no
+     symlink, nothing guest-influenced to race. The -79994 mechanism
+     has no target here: nothing about the relay can be redirected.
+     What the jail *can* do through it is bounded by the listener:
+     mitmdump with `--set listen_host=127.0.0.1` and no web UI
+     (`proxy/swap-proxy.service`, `proxy/swap-inference.service`). If
+     swapd's services stop, the relay fails closed (nothing listens).
+     The real frontier is therefore not the relay but the proxy's own
+     handling — e.g. #92 (SSE bodies bypass response scrubbing) and
+     #94 (open-redirect on an allowlisted host) are proxy bugs,
+     tracked as proxy bugs, not relay bugs.
+   - **SSH relay (tailnet → jail sshd).** `iifname "tailscale0" tcp
+     dport 2222 dnat ip to 10.99.0.2:22`, and the `forward` chain
+     accepts new/established traffic only to `10.99.0.2:22`. Again
+     static: no dynamic path, nothing for a client to race — the
+     -79994 class has no mechanism here. Deployment constraint to
+     note: the rule has no daddr match, so if this box ever enables
+     Tailscale subnet routing or exit-node, transit :2222 traffic
+     arriving on tailscale0 would be swallowed by the DNAT. The
+     exposure is *scope*, not path: every tailnet peer can open TCP
+     to the jail's sshd. Authentication is key-only, root login
+     disabled, `AllowUsers muse` only (the `90-jail.conf` stanza
+     written by `jail/build.sh`) — so the blast radius is exactly
+     "tailnet members with a key for `muse`", and on the current
+     single-owner box that is the owner. On a hosted multi-tenant
+     box the tailnet itself is the tenancy boundary, and that
+     boundary is the H11 multi-tenancy audit's problem — not solved
+     here, stated here. The D-Bus-class analog (a guest reaching a
+     host daemon that acts on the host) does not exist in this
+     relay: sshd runs *inside* the jail; the host's daemons learn
+     nothing from a connection that lands in the container.
+   - **Planned bdrive socket bind-mount (not yet shipped)** — the
+     future exception noted above, under the "No host folders, ever" bullet.
+     REVIEW's round-7 owner decision specifies bind-mounting bdrive's socket into the
+     jail (`[Files] Bind=`) with SO_PEERCRED acceptance of exactly
+     two uids: the jail's `muse` user as seen from the host (its
+     mapped uid in the `2000000` range) and, later, `obox`. For the
+     day that ships, this document holds the daemon slice to six
+     requirements, tracked as #169 (the socket is the one relay
+     whose target involves a filesystem path, so it is the one place
+     the -79994/-77179 classes could ever reach us): (1) bind the
+     socket's *directory* (`/run/bdrive`), never the socket file
+     alone — this is the document's own refinement of REVIEW's round-7
+     owner decision ("bdrive's socket is bind-mounted into the jail"):
+     a file bind mount goes stale the moment the daemon recreates the
+     socket (unlink + re-bind leaves the jail holding a dead inode),
+     while a directory bind always sees the current listener; (2)
+     `RuntimeDirectoryPreserve=yes` on the service so a restart
+     never wedges the jail's view (REVIEW finding 72); (3)
+     SO_PEERCRED on every accepted connection — kernel-provided, no
+     TOCTOU — matching the *exact* numeric mapped uid of the jail's
+     `muse` user (2000000 + the container uid, resolved at daemon
+     install from the jail's uid_map; never match the whole range,
+     which would admit other host identities mapped at the same
+     offset — refining the round-7 owner decision's "its mapped uid
+     in the `2000000` range" parenthetical, per REVIEW finding 73),
+     and `obox` later — with finding 73's limit stated plainly: this
+     gate distinguishes the jail from the host, never identities
+     *within* the jail. A compromised jail root can `setuid` to the
+     accepted uid inside the container and SO_PEERCRED will faithfully
+     report it, so the daemon must treat every accepted peer as "the
+     jail" (one trust domain), never as proof of *which* jail user
+     connected; (4) the daemon never
+     resolves a client-supplied listen/connect path — the socket
+     path comes from daemon config, never from the wire
+     (`browser-driver/bdrive/config.py` already keeps it
+     env-scoped, and that must survive); any other daemon-side path
+     taken from the action protocol (downloads, profile dirs) must
+     be resolved with dirfd pinning + `O_NOFOLLOW`; (5)
+     `/run/bdrive` 0710 with group = exactly the client gid(s)
+     (traverse, no list) and socket 0770, so the jail's accepted uid
+     can reach the listener but enumerate nothing, while the jail's
+     *other* mapped uids (jail root = host 2000000) cannot traverse
+     or connect as themselves — this is a host-side boundary only:
+     per finding 73 a compromised jail root can assume the accepted
+     uid inside the container, so the daemon must never treat the
+     accepted uid/gid as proof of which jail user connected; (6) the
+     directory contains only the socket file — no
+     pidfiles, logs, or other daemon state where the jail's accepted
+     uid could read them — the daemon owns the directory with no
+     group write, so the jail can never plant symlinks there, and
+     the daemon fails closed if the directory contains unexpected
+     entries.
+   - **D-Bus class, stated:** no D-Bus socket is shared into the jail
+     — `build.sh`'s `[Files]` section carries no `Bind=` at all, and
+     systemd-nspawn forwards no host D-Bus socket into the container
+     by default (`man systemd-nspawn`; a behavioral claim, not a
+     vendor read). There is no guest→daemon→host path to audit. The
+     one D-Bus-adjacent surface to watch is the confirmation page's
+     answer→grant channel (`jail/confirm-page.md`): when it is
+     implemented, the grant must be produced host-side from the
+     human's browser session on confirmd — the jail must never hold
+     a channel the host interprets as an approval. That is the
+     standing watch item; finding 47 (the proxy hard-denies the page
+     to jail traffic) is the current enforcement.
 3. **Multi-tenancy is future work.** The OAuth-port-claim class —
    one sandbox attacking another's login flow — has no spark-vm analog
    today because there is one tenant per box. A hosted spark-vm with
