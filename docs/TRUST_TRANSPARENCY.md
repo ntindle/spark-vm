@@ -187,7 +187,7 @@ Plainly, because a trust doc that only lists wins is marketing copy:
      nothing from a connection that lands in the container.
    - **Planned bdrive socket bind-mount (not yet shipped)** — the
      future exception noted above, under "No host folders, ever".
-     REVIEW round 8 specifies bind-mounting bdrive's socket into the
+     REVIEW's round-7 owner decision specifies bind-mounting bdrive's socket into the
      jail (`[Files] Bind=`) with SO_PEERCRED acceptance of exactly
      two uids: the jail's `muse` user as seen from the host (its
      mapped uid in the `2000000` range) and, later, `obox`. For the
@@ -207,7 +207,8 @@ Plainly, because a trust doc that only lists wins is marketing copy:
      `muse` user (2000000 + the container uid, resolved at daemon
      install from the jail's uid_map; `jail/build.sh` does not pin
      the guest uid, so a range check would also admit jail root —
-     never match the range), and `obox` later; (4) the daemon never
+     never match the range; refining the round-7 owner decision's
+     "mapped uid in the 2000000 range" parenthetical), and `obox` later; (4) the daemon never
      resolves a client-supplied listen/connect path — the socket
      path comes from daemon config, never from the wire
      (`browser-driver/bdrive/config.py` already keeps it
