@@ -8,8 +8,8 @@ window ~18:00 → ~23:00 CDT). This pass surveyed 2026-09-20 ~08:00 →
 Summary: this pass **re-verified** the five items the 2026-09-19 passes had
 already consolidated into `docs/COMPETITOR_ANALYSIS.md` against vendor
 primaries (direct reads this run). Beyond re-verification it adds: (1)
-itemized 0.43.0 config/management notes the corpus had not recorded (see
-§1); (2) CVE-record detail extensions (CVSS, affected ranges, disclosure
+itemized config/management notes from the 0.43.0 (Sep 15) and 0.42.0
+(Sep 7) sections that the corpus had not recorded (see §1); (2) CVE-record detail extensions (CVSS, affected ranges, disclosure
 timing, KEV status — §2); (3) a hardened BrowserSkill license attribution
 (THIRD-PARTY/unconfirmed — §5); and (4) a **restored** corroboration caveat
 on the GitHub Copilot item that the evening pass carried and this doc's
@@ -44,19 +44,28 @@ not previously recorded in the corpus:
   no longer spend seconds retrying WebSocket connections to the local model
   server.
 - Add, update, list, and remove sandbox skills directly from Git
-  repositories with `sbx skills`; read-only `sbx` commands (`secret ls`,
-  `version`, `mcp ls`, `skills ls`, `policy inspect`, kit verification)
-  accept `--json`; clipboard commands inside local sandboxes can copy to
-  the host clipboard.
+  repositories with `sbx skills`.
 - `sbx env run/create/rm` detect name conflicts with sandboxes created
   outside `sbx env` and give guidance instead of mis-managing them; every
   `sbx env` subcommand accepts `--name`.
 
+Also on the same vendor page, from the **0.42.0 (Sep 7)** section — not
+previously itemized in the corpus, and misdated as 0.43.0 in this doc's
+first draft (verified against the live page this pass):
+
+- Add, update, list, and remove sandbox skills directly from Git
+  repositories with `sbx skills`.
+- Read-only `sbx` commands (`secret ls`, `version`, `mcp ls`, `skills ls`,
+  `policy inspect`, kit verification) accept `--json`.
+- Clipboard commands inside local sandboxes can copy to the host
+  clipboard.
+
 **Implication:** Docker keeps converging sandbox skills + MCP secrets into
 first-class config surface — the same governance plane as its paid Docker AI
 Governance offering. For spark-vm's hosted signup story, the axis to watch
-is not the config surface itself but the *paid governance tier* — centrally
-managed network/filesystem/MCP policies + sign-in enforcement + audit logs.
+is not the config surface itself but the *governance tier* — centrally
+managed network/filesystem/MCP policies + sign-in enforcement + audit logs
+(Docker AI Governance offering).
 Backlog H16 (hosted org-policy layer) already carries this; no new item.
 
 ## 2. Docker Sandboxes CVEs CVE-2026-77179 / CVE-2026-79994 — CVE-record extension
@@ -65,15 +74,17 @@ The corpus already consolidated these (`COMPETITOR_ANALYSIS.md:417-445`,
 incl. the evening pass's vendor-direct read of the amended 0.42.0 notes).
 This pass extends with CVE-record and disclosure-timing details:
 
-- **CVE-2026-77179 — Critical, CVSS 9.4.** virtio-fs host-server symlink
+- **CVE-2026-77179 — Critical (vendor severity label).** CVSS 9.4 per
+  third-party trackers, not vendor-stated. virtio-fs host-server symlink
   race (macOS). Affected: 0.28.0 → before 0.42.0, **macOS only**.
-- **CVE-2026-79994 — High, CVSS 8.7.** guest-to-host Unix-domain-socket
+- **CVE-2026-79994 — High (vendor severity label).** CVSS 8.7 per
+  third-party trackers, not vendor-stated. guest-to-host Unix-domain-socket
   relay TOCTOU race. Affected: 0.37.0 → before 0.42.0 (no platform stated).
 - Fixed in **0.42.0, released 2026-09-07**; CVE records published ~Sep 15;
   security-press disclosure coverage dated Sep 17 (**THIRD-PARTY**).
-- Docker reports **no known exploitation**; CISA's assessment lists
-  exploitation as none; neither CVE is in the KEV catalog as of the
-  Sep 16, 2026 version (**THIRD-PARTY**, thehackernews + 4tify coverage).
+- No exploitation mentioned in the vendor announcement; neither CVE is in
+  the KEV catalog as of the Sep 16, 2026 version (**THIRD-PARTY**, not
+  verified against cisa.gov in this pass).
 
 **Implication:** this is the sandbox-category risk signal the 2026-09-19
 evening pass carried — both flaws are the same class (path-validation TOCTOU
