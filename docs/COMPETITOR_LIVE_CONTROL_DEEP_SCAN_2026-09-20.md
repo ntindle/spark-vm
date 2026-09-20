@@ -10,8 +10,9 @@ third-party reporting; INFERRED = my characterization, labeled as such.
 **Why this axis:** #47's design commits to real-time (WebRTC-class) streaming
 with degrade-resolution/framerate fallback, and explicitly rules out
 slow-screenshot-polling frame sync. Nobody on the field-at-a-glance table
-advertises live human-facing machine control as a product surface — this scan
-tests whether that is a real gap or whether competitors cover it incidentally.
+advertises low-latency, human-first machine control as a product surface —
+this scan tests whether that is a real gap or whether competitors cover it
+incidentally.
 
 ## spark-vm's #47 control-plane baseline (what we intend to be compared against)
 
@@ -25,6 +26,9 @@ tests whether that is a real gap or whether competitors cover it incidentally.
 - Transport requirement (user's #1): WebRTC-class low-latency streaming, never
   slow screenshot-polling frame sync; degrade resolution/framerate on bad
   networks but never settle into slow-sync mode.
+- Transport stack (from REMOTE_DESKTOP_TRANSPORT_RESEARCH.md): prototype
+  Selkies-GStreamer first; fallback ladder Sunshine host + Moonlight-Web web
+  client, then Xpra shadow mode; terminal ships independently via ttyd/xterm.js.
 - Trust context: per-action human approvals (confirmd), credential proxy
   (swapd), tailnet-first networking.
 
@@ -48,7 +52,7 @@ concurrency policy beyond E2B in this pass. The architecturally relevant axis
 for confirmd's approval model is three-fold: (1) the stream-count limit, (2)
 concurrent view-only viewers, and (3) interactive-control holding and
 handoff — and confirmd today approves discrete requests, not long-lived
-sessions (REMOTE_DESKTOP_TRANSPORT_RESEARCH.md §5.3). #47 should define its
+sessions (REMOTE_DESKTOP_TRANSPORT_RESEARCH.md §5, 'Auth' (item 3)). #47 should define its
 stream-ownership semantics explicitly — including the session-scoped
 bearer/expiry/revocation binding (H9/H11 work) — rather than inheriting E2B's
 documented limit.
@@ -57,8 +61,10 @@ documented limit.
 
 **Scope note:** this pass did not survey snapshot semantics (what gets
 snapshotted, restore granularity, snapshot cost) — the scorecard covers
-pause/resume/stop/restart/terminate only. Snapshot needs its own survey pass
-(flagged under C16 below).
+desktop/screen, terminal, suspend/wake, and transport only. File browsing
+and restart are likewise unscored here (evidence exists for some providers
+but the columns are omitted — flag as a gap for the C16 audit to close).
+Snapshot needs its own survey pass (flagged under C16 below).
 
 ### AgentComputer
 
@@ -85,10 +91,11 @@ pause/resume/stop/restart/terminate only. Snapshot needs its own survey pass
 - **No vendor evidence found** for graphical remote desktop, VNC, WebRTC, or
   the Web Terminal's underlying transport.
 - **VERIFIED** — Monthly plans $9/$19/$29/$49, advertised online 24/7
-  ([pricing](https://termsquad.com/pricing)). Stop is a machine power action,
-  not immediate subscription cancellation; no stopped-state discount, no
-  wake-latency figure, and no detailed storage semantics published — **no
-  vendor evidence found** on all three.
+  ([pricing](https://termsquad.com/pricing)). Stop reads as a machine power
+  action, not immediate subscription cancellation (INFERRED — no vendor page
+  names it as such); no stopped-state discount, no wake-latency figure, and
+  no detailed storage semantics published — **no vendor evidence found** on
+  all three.
 - **VERIFIED** — AI subscriptions/usage are not included (explicit on pricing
   page).
 
@@ -190,35 +197,43 @@ move by any of the six providers in the ~6-hour window. Nearest-in-time
 items, all outside the window: a **THIRD-PARTY** EINPresswire release dated
 2026-09-15 for TermSquad's always-on cloud computer launch
 ([einpresswire](https://www.einpresswire.com/article/942479573/termsquad-launches-an-always-on-cloud-computer-for-ai-coding-agents));
-Docker Sandboxes [release notes](https://docs.docker.com/ai/sandboxes/release-notes/) updated 2026-09-18 (two days early).
+Docker Sandboxes [release notes](https://docs.docker.com/ai/sandboxes/release-notes/) updated 2026-09-18 (two days before this survey's window).
 
 ## Where spark-vm wins
 
-1. **Low-latency streaming vs VNC.** Every vendor that offers browser desktop
-   control names VNC as the transport (E2B, Daytona, AgentComputer's CLI
-   graphical access). #47's WebRTC-class streaming requirement — with
-   degrade-resolution/framerate fallback — is a genuine latency
-   differentiator (INFERRED — this compares unshipped design intent against
-   shipped product, so the win is a bet, not a measured fact). Build-cost
-   caveat: BYO-tailnet changes the cost picture for device-on-tailnet paths —
-   the tenant's own devices join a tailnet with their box, so media traversal
-   is handled by Tailscale (including DERP relaying — still relaying,
-   delegated to Tailscale's infra, not operator-run TURN). That shrinks the
-   operator-side bandwidth cost for device-on-tailnet viewers, but it doesn't
-   vanish: REMOTE_DESKTOP_TRANSPORT_RESEARCH.md §5.2's TURN-relay model stands
-   as the fallback for non-tailnet viewer paths (public link shares, devices
-   without the Tailscale client). One deployment dependency is unacknowledged
-   by #47's mobile-first UX spec: reaching the streamer from a phone browser
-   needs the Tailscale client on that device — a client install the web-UI
-   story otherwise avoids.
+1. **Low-latency streaming vs VNC.** Daytona and AgentComputer name VNC as the
+   transport for their browser/desktop surfaces; E2B streams the desktop via
+   its own SDK streaming (transport not named by the vendor) — the closest
+   existing reference, and not a VNC framebuffer, so treat it as the
+   competitive bar rather than lumping it under VNC. #47's WebRTC-class
+   streaming requirement — with degrade-resolution/framerate fallback — is a
+   genuine latency differentiator (INFERRED — this compares unshipped design
+   intent against shipped product, so the win is a bet, not a measured fact).
+   Build-cost caveat (INFERRED — conditional on an open corpus question): by
+   BYO-tailnet (bring-your-own-tailnet — the tenant's own devices joining a
+   tailnet with their box), the cost picture for device-on-tailnet paths would
+   change — media traversal would be handled by Tailscale (including DERP
+   relaying — still relaying, delegated to Tailscale's infra, not
+   operator-run TURN), shrinking operator-side bandwidth cost for those
+   viewers. But per the corpus this path is undecided, not planned:
+   REMOTE_DESKTOP_TRANSPORT_RESEARCH.md §5, 'Human reachability' (item 2)
+   leaves the streamer binding an open design decision, and
+   HOSTED_SIGNUP_ONBOARDING.md calls tailnet join an optimization, not a
+   requirement, with the operator-run TURN relay as the primary path. So a
+   phone browser without the Tailscale client reaches the streamer via the
+   relay (operator pays the bandwidth); the client is needed only for the
+   delegated low-operator-cost path. What #47's mobile UX spec leaves open is
+   *which* path mobile targets and its cost/client-install trade-off — the
+   decision is not yet made, not unacknowledged.
 2. **Per-action human approvals.** No vendor in the surveyed six publishes a
    per-action human approval gate for live control (AgentComputer: none
    found; Daytona: org members get terminal access, not approvals; E2B:
    interactive or view-only URLs, no approval UX). "Unique in the set" is
-   scoped to these six — Vercel's `eve` framework ships per-action
-   approvals, but that holds for sandbox/computer offerings, not for vendor
-   Vercel's own surface (corpus, 2026-09-19 pm watch) — so the approval-UX
-   win is real but not landscape-unique.
+   scoped to these six — Vercel's `eve` agent framework (a separate product
+   from the Vercel Sandbox SKU) ships a genuine per-action human approval
+   loop, so the uniqueness claim holds scoped to sandbox/computer offerings
+   but breaks scoped to the vendor Vercel (corpus, 2026-09-18 pm watch) —
+   so the approval-UX win is real but not landscape-unique.
 3. **Governance baked into control (design-direction win).** Daytona has org
    membership; Docker has paid AI Governance; none tie credential proxying +
    approvals + streaming into the control plane the way spark-vm's
@@ -244,8 +259,10 @@ Docker Sandboxes [release notes](https://docs.docker.com/ai/sandboxes/release-no
    lifecycle completeness.
 2. **Published resume targets.** Fly.io Sprites publishes 100–500 ms warm
    wake / 1–2 s cold wake; E2B publishes resume ≈ 1 s, pause ≈ 4 s/GiB.
-   spark-vm should set and publish a comparable resume target for #47, or the
-   streaming win looks unmeasured. (Product judgment.)
+   spark-vm should set and publish its own measured resume/wake target for
+   #47 — whatever the boat.dev/provider baseline shows — or the streaming
+   win looks unmeasured. (Product judgment; see C14: competitor figures are
+   market context only, not the number.)
 3. **Stopped-state cost story.** AgentComputer publishes cold storage at
    $0.000027/GB-hour; E2B bills only running time; Fly.io stops compute
    billing on hibernate. spark-vm's hosted pricing story needs an equally
@@ -254,7 +271,8 @@ Docker Sandboxes [release notes](https://docs.docker.com/ai/sandboxes/release-no
    terminal-only users; the desktop + streaming + approvals stack must justify
    the complexity gap (marketing framing, not just engineering).
 5. **Docker's free local-first model** is unbeatable on price for local use;
-   spark-vm wins on hosted control, latency, and governance — not on price.
+   spark-vm wins on hosted control, latency (design-intent), and governance
+   — not on price.
 
 ## Implications → backlog
 
@@ -280,15 +298,18 @@ Docker Sandboxes [release notes](https://docs.docker.com/ai/sandboxes/release-no
   scope (substrate-conditional); the control-plane-visible archived state +
   auto-archive/auto-delete policy model are in scope, because lifecycle
   completeness (lag #1) and stopped/cold billing (C15) both require modeling
-  retained states beyond stopped. Explicitly out of scope: snapshot semantics
-  (not surveyed in this pass — needs its own survey; snapshot coverage was
-  not in the scorecard).
+  retained states beyond stopped. Audit note: restore-path parity (Daytona's
+  archive↔resume round-trip) belongs in the audit too — lifecycle
+  completeness covers transitions, not just state names. Explicitly out of
+  scope: snapshot semantics (not surveyed in this pass — needs its own
+  survey; snapshot coverage was not in the scorecard).
 
 ## Sources
 
 Survey conducted 2026-09-20 ~14:54–15:04 CDT; per-item inline links above are
 the source record. Note on one corpus date: the morning watch's "June-2026
-BrowserSkill open-sourcing" attestation is corpus-verified against the primary
-repo 2026-09-18 (COMPETITOR_ANALYSIS.md); not re-read in this pass (out of
-scope for this axis).
+BrowserSkill open-sourcing" attestation was verified against the upstream
+repo (github.com/tencent/browserskill) with coverage dated 2026-09-18, as
+recorded in COMPETITOR_ANALYSIS.md; not re-read in this pass (out of scope
+for this axis).
 

@@ -37,6 +37,13 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Live-control competitor deep-scan for the #47 control-plane design: six
+  providers (AgentComputer, TermSquad, Fly.io Sprites, E2B, Daytona, Docker
+  Sandboxes) scored on browser desktop streaming, live terminal,
+  suspend/wake, and transport, with where-we-win/lag findings feeding three
+  new backlog items — the #47 resume-latency target (C14), the stopped/cold
+  cost tier for hosted pricing (C15), and the control-plane-visible lifecycle
+  parity audit (C16) (#168)
 - Waitlist page build, slice 2: the waitlist service backend — the form
   endpoint (honeypot and timing-trap defenses that accept spam silently,
   per-IP rate limiting, email normalization and dedup), the double-opt-in
