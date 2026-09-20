@@ -143,8 +143,8 @@ Plainly, because a trust doc that only lists wins is marketing copy:
    CVE-2026-79994 is a *path-validation race*: the guest steers a
    host-side relay toward an arbitrary host socket by swapping a path
    (symlink) between the relay's check and its connect
-   (characterization per Docker's Sandboxes 0.42.0 release notes, read
-   on docs.docker.com 2026-09-19 — see the escape-week section above).
+   (characterization per the escape-week section above — release notes
+   read 2026-09-19).
    Applied to our exposures:
 
    - **Proxy relay (jail → mitmdump).** `jail/build.sh` DNATs
@@ -153,13 +153,18 @@ Plainly, because a trust doc that only lists wins is marketing copy:
      two dports from `ve-jail` (plus established/related return legs)
      and drops everything else — including every other 127.0.0.1
      port (so `route_localnet=1` on `ve-jail`, finding 51, cannot be
-     used to reach loopback services like cred-ui's tunnel). The
+     used to reach loopback services like cred-ui's tunnel). Honest
+     caveat on the bound: the port-accept rule itself carries no daddr
+     match, so the jail can open 18080/18081 on *any* host address, not
+     just 127.0.0.1 — harmless in practice because mitmdump listens
+     only on 127.0.0.1, but the rules do not state the tighter bound.
+     The
      relay target is a fixed IP:port pair — there is no path, no
      symlink, nothing guest-influenced to race. The -79994 mechanism
      has no target here: nothing about the relay can be redirected.
      What the jail *can* do through it is bounded by the listener:
      mitmdump with `--set listen_host=127.0.0.1` and no web UI
-     (`proxy/swap-proxy.service`, `swap-inference.service`). If
+     (`proxy/swap-proxy.service`, `proxy/swap-inference.service`). If
      swapd's services stop, the relay fails closed (nothing listens).
      The real frontier is therefore not the relay but the proxy's own
      handling — e.g. #92 (SSE bodies bypass response scrubbing) and
@@ -186,29 +191,37 @@ Plainly, because a trust doc that only lists wins is marketing copy:
      relay: sshd runs *inside* the jail; the host's daemons learn
      nothing from a connection that lands in the container.
    - **Planned bdrive socket bind-mount (not yet shipped)** — the
-     future exception noted above, under "No host folders, ever".
+     future exception noted above, under the "No host folders, ever" bullet.
      REVIEW's round-7 owner decision specifies bind-mounting bdrive's socket into the
      jail (`[Files] Bind=`) with SO_PEERCRED acceptance of exactly
      two uids: the jail's `muse` user as seen from the host (its
      mapped uid in the `2000000` range) and, later, `obox`. For the
-     day that ships, this document binds the daemon slice to six
+     day that ships, this document holds the daemon slice to six
      requirements, tracked as #169 (the socket is the one relay
      whose target involves a filesystem path, so it is the one place
      the -79994/-77179 classes could ever reach us): (1) bind the
      socket's *directory* (`/run/bdrive`), never the socket file
-     alone — file bind mounts go stale when the daemon recreates
-     the socket, and unlink+bind races are exactly the -79994 shape
-     (refining REVIEW's round-7 owner decision "bdrive's socket is
-     bind-mounted into the jail", per finding 72's fix); (2)
+     alone — this is the document's own refinement of REVIEW's round-7
+     owner decision ("bdrive's socket is bind-mounted into the jail"):
+     a file bind mount goes stale the moment the daemon recreates the
+     socket (unlink + re-bind leaves the jail holding a dead inode),
+     while a directory bind always sees the current listener; (2)
      `RuntimeDirectoryPreserve=yes` on the service so a restart
      never wedges the jail's view (REVIEW finding 72); (3)
      SO_PEERCRED on every accepted connection — kernel-provided, no
      TOCTOU — matching the *exact* numeric mapped uid of the jail's
      `muse` user (2000000 + the container uid, resolved at daemon
-     install from the jail's uid_map; `jail/build.sh` does not pin
-     the guest uid, so a range check would also admit jail root —
-     never match the range; refining the round-7 owner decision's
-     "mapped uid in the 2000000 range" parenthetical), and `obox` later; (4) the daemon never
+     install from the jail's uid_map; never match the whole range,
+     which would admit other host identities mapped at the same
+     offset — refining the round-7 owner decision's "its mapped uid
+     in the `2000000` range" parenthetical, per REVIEW finding 73),
+     and `obox` later — with finding 73's limit stated plainly: this
+     gate distinguishes the jail from the host, never identities
+     *within* the jail. A compromised jail root can `setuid` to the
+     accepted uid inside the container and SO_PEERCRED will faithfully
+     report it, so the daemon must treat every accepted peer as "the
+     jail" (one trust domain), never as proof of *which* jail user
+     connected; (4) the daemon never
      resolves a client-supplied listen/connect path — the socket
      path comes from daemon config, never from the wire
      (`browser-driver/bdrive/config.py` already keeps it
@@ -217,9 +230,13 @@ Plainly, because a trust doc that only lists wins is marketing copy:
      be resolved with dirfd pinning + `O_NOFOLLOW`; (5)
      `/run/bdrive` 0710 with group = exactly the client gid(s)
      (traverse, no list) and socket 0770, so the jail's accepted uid
-     can reach the listener but enumerate nothing, and the jail's
-     *other* mapped uids (jail root = host 2000000) cannot reach it
-     at all; (6) the directory contains only the socket file — no
+     can reach the listener but enumerate nothing, while the jail's
+     *other* mapped uids (jail root = host 2000000) cannot traverse
+     or connect as themselves — this is a host-side boundary only:
+     per finding 73 a compromised jail root can assume the accepted
+     uid inside the container, so the daemon must never treat the
+     accepted uid/gid as proof of which jail user connected; (6) the
+     directory contains only the socket file — no
      pidfiles, logs, or other daemon state where the jail's accepted
      uid could read them — the daemon owns the directory with no
      group write, so the jail can never plant symlinks there, and
