@@ -5,11 +5,14 @@ SHIPPED 2026-09-19** (`harness/`): `harness-auth-probe` (the R1 §5 probe —
 gate/provision modes, Bearer wire-shape assertion, placeholder-never-leaks
 assertion), `generate-image-manifest.sh` + `check-image-manifest.sh`
 (golden-image manifest + the injector's fail-closed preflight), 21 hermetic
-tests. Remaining for later feature slices: gate fixture installer (+
-gate-fixture cleanup), provision-time injector, image gate, R1 script green.
-The remaining implementation (provision-time injector, gate fixture
-installer, image gate) is build-loop `feature` work; this doc remains the
-spec input for it.
+tests. **Slice 2 SHIPPED 2026-09-20** (`harness/`): `install-gate-fixture.sh`
++ `echo-fixture.py` — the gate fixture installer (public non-secret
+`gate-dummy` credential through the narrow writers, `bearer_header`
+placement, loopback echo host bound + allowlisted) with the gate-fixture
+cleanup contract, 5 hermetic installer tests. Remaining for later feature
+slices: provision-time injector, image gate, R1 script green.
+The remaining implementation (provision-time injector, image gate) is
+build-loop `feature` work; this doc remains the spec input for it.
 **Feeds:** `docs/FIRST_TEN_MINUTES_SPEC.md` §5 (the harness pre-seed contract
 is R2's interface — this doc fills it in; the spec is unmerged, PR #49 @
 `3788907` — this contract is pinned to that revision, re-check the section
@@ -154,9 +157,15 @@ it must satisfy exactly:
    because the image carries the gate fixture (§4): the gate installs the
    public dummy inference credential and points the probe at the echo host,
    so probe check (a) exercises the full swap path against a fixture; the
-   real tenant key replaces the fixture at provision. A gate failure means
-   the image is broken; a provision-time probe failure means the injected
-   credential is wrong — the two are distinguishable by design.
+   real tenant key replaces the fixture at provision. Fixture lifecycle:
+   the echo-host binding and its `inference-hosts.allow` entry must be
+   torn down when the fixture is replaced — by the image-build gate
+   before publish, or by the provision-time injector when it installs the
+   real key — so no box holding a real credential can ever swap it toward
+   the echo server (see `harness/README.md` "Fixture lifecycle"). A gate
+   failure means the image is broken; a provision-time probe failure means
+   the injected credential is wrong — the two are distinguishable by
+   design.
 
 ## 6. Top-3 snags (what still needs a human after R2)
 

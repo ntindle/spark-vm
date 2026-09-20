@@ -51,6 +51,13 @@ This changelog only works if entries land with the change, not after it:
   rules (no hosted-launch or pricing commitments until the launch is
   executable), and a sample post
   ([#162](https://github.com/ntindle/spark-vm/pull/162))
+- Gate fixture installer for the image-build gate: `install-gate-fixture.sh`
+  installs the public non-secret `gate-dummy` credential through the narrow
+  writers, starts the loopback echo fixture, and runs the harness auth probe
+  in gate mode to prove the swap path — with the fixture teardown contract
+  (echo-host binding and allowlist entry removed before a real credential
+  lands) so the fixture can never coexist with a real key
+  ([#126](https://github.com/ntindle/spark-vm/pull/126))
 - Funnel query pack for the waitlist operator: a log-derived, no-cookie,
   no-tracker weekly report (page conversion, CTA click-through by section,
   interim raw vs DMARC-aligned confirm rate with the manufactured-row spray
