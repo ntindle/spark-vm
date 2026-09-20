@@ -104,11 +104,17 @@ jobs:
         # makes the regex demand a literal backslash and silently disables
         # all three excludes. (Backslash counts are easy to misread through
         # tool display escaping — verify with `od -c`, not by eye.)
+        # Ritual compare links (github.com/ntindle/spark-vm/compare/...) are
+        # excluded: the release ritual (docs/VERSIONING.md) writes them at
+        # bump time pointing at the tag the release workflow cuts AFTER merge,
+        # so they 404 by design until the release lands. They are
+        # machine-generated from the ritual's fixed pattern, so a typo there
+        # is near-impossible and excluding them hides no real link.
         # SHA-pinned (e7477775783ea5526144ba13e8db5eec57747ce8, v2.9.0) so a
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
