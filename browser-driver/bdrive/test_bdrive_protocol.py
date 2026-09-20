@@ -779,3 +779,112 @@ def test_observation_frame_edges():
     O.validate_observation(obs(ax=[node]))
     with pytest.raises(O.ProtocolError):
         O.validate_observation(obs(ax=[dict(node, frame="")]))
+
+
+# ---------------------------------------------------------------------------
+# Round-3 fixes: security re-review blockers (B1–B5)
+# ---------------------------------------------------------------------------
+
+
+def test_non_ascii_ref_scope_rejected_as_protocol_error():
+    # B1: hmac.compare_digest raises TypeError on non-ASCII str; the
+    # module's fail-closed contract demands ProtocolError instead — the
+    # exact path a compromised orchestrator would fuzz.
+    scope = P.RefScope()
+    scope.rotate()
+    assert not scope.accepts("rs_\U0001F600evil")
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(
+            call([{"action": "click", "ref": "@e1"}],
+                 ref_scope="rs_\U0001F600evil"),
+            scope=scope,
+        )
+    assert exc.value.code == "stale_ref_scope"
+
+
+def _deep_tree(depth):
+    node = {"ref": "@e1", "role": "button", "name": "x",
+            "enabled": True, "visible": True}
+    root = node
+    for _ in range(depth):
+        child = {"ref": "@e1", "role": "button", "name": "x",
+                 "enabled": True, "visible": True}
+        node["children"] = [child]
+        node = child
+    return [root]
+
+
+def test_deeply_nested_ax_tree_rejected_as_protocol_error():
+    # B2: the AX tree is page-derived (attacker-controlled); a hostile
+    # page must not crash the daemon with RecursionError.
+    obs = {"url": "https://x", "title": "t", "target": "tgt",
+           "ref_scope": "rs", "ax": _deep_tree(2000)}
+    with pytest.raises(P.ProtocolError) as exc:
+        O.validate_observation(obs)
+    assert exc.value.code == "bad_observation"
+    # A deep-but-legal tree still validates and redacts without recursion.
+    red = O.redact_for_history(
+        {"url": "https://x", "title": "t", "target": "tgt",
+         "ref_scope": "rs", "ax": _deep_tree(500)})
+    assert red["ax_node_count"] == 501
+
+
+def test_call_duration_budget():
+    # B3: 256 x 300s waits must not validate (a 21.3h serial wedge).
+    scope = P.RefScope()
+    token = scope.rotate()
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(
+            call([{"action": "wait", "time_ms": 300_000}] * 256,
+                 ref_scope=token),
+            scope=scope,
+        )
+    assert exc.value.code == "call_budget_exceeded"
+    # At the budget (2 x 300s) is fine.
+    P.validate_call(
+        call([{"action": "wait", "time_ms": 300_000}] * 2,
+             ref_scope=token),
+        scope=scope,
+    )
+
+
+def test_param_length_cap():
+    # B4: giant string params fail loud — and the rejection must not
+    # echo the giant value into the error/log line.
+    big = "x" * (P.MAX_PARAM_LEN + 1)
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "goto", "url": "https://x/" + big}]))
+    assert exc.value.code == "bad_params"
+    assert big not in str(exc.value)
+    # Exactly at the cap is fine.
+    P.validate_call(call([{"action": "goto",
+                           "url": "https://x/" + "u" * (P.MAX_PARAM_LEN - 10)}]))
+
+
+def test_grant_ids_count_cap():
+    # B4: unbounded grant_ids is a memory DoS from one call.
+    with pytest.raises(P.ProtocolError) as exc:
+        P.validate_call(call([{"action": "upload", "ref": "@e1",
+                               "grant_ids": ["g%d" % i
+                                             for i in
+                                             range(P.MAX_GRANT_IDS + 1)]}]))
+    assert exc.value.code == "bad_params"
+    P.validate_call(call([{"action": "upload", "ref": "@e1",
+                           "grant_ids": ["g%d" % i
+                                         for i in range(P.MAX_GRANT_IDS)]}]))
+
+
+def test_redacted_params_cover_wait_and_gesture():
+    # B5: wait.text/text_gone and gesture.instruction are page/operator
+    # text and must be redacted from logs like any other field contents.
+    validated = P.validate_call(call([
+        {"action": "wait", "text": "Account balance: $12,345.67"},
+        {"action": "wait", "text_gone": "Loading secrets"},
+        {"action": "gesture", "instruction": "circle the SSN field",
+         "gesture": "circle"},
+    ], ref_scope="tok"))
+    wait_text, wait_gone, gesture = validated.actions
+    assert wait_text.redacted_params() == {"text": "<redacted>"}
+    assert wait_gone.redacted_params() == {"text_gone": "<redacted>"}
+    assert gesture.redacted_params()["instruction"] == "<redacted>"
+    assert gesture.redacted_params()["gesture"] == "circle"

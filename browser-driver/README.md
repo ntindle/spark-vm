@@ -28,7 +28,7 @@ stdlib-only:
   The protocol layer deliberately never reads it: no deployment
   assumption (same-box proxy included) is cemented behind the
   interface.
-- `test_bdrive_protocol.py` — 53 hermetic tests, wired into the root
+- `test_bdrive_protocol.py` — 81 hermetic tests, wired into the root
   `pytest.ini`.
 
 Wire format of a call:
@@ -79,7 +79,10 @@ If the spec is later amended, this note and the table move with it.
 4. **obox** — the agent loop; a later H17 slice (SPEC §16 item 2:
    `submit`/`steer`/`status`/`report`, the observe-decide-act loop
    against `bdrive`, `need_info` parking, the untrusted-data envelope
-   and `hsurr:` neutralization). Runs as `obox`.
+   and `hsurr:` neutralization). Runs as `obox`. Upload grant
+   issuance is obox+swapd work (SPEC §10: task-bound `grant_ids`);
+   until it exists, this slice's protocol only consumes opaque,
+   shape-validated grant IDs.
 5. **Card pathway + Web Push (SPEC §16 round 10)** — issuer helper,
    `card-<job>` entries, `fill_card`, cancellation at job end; Web
    Push for the confirmation page (manifest, service worker, VAPID,

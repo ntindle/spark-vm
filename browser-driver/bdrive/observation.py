@@ -17,49 +17,70 @@ no I/O.
 from bdrive.protocol import REF_RE, ProtocolError, is_nonempty_str
 
 
+#: Hard cap on AX tree depth. The tree is derived from the rendered
+#: page DOM — attacker-controlled on any hostile site — so a recursive
+#: walk is a RecursionError DoS reachable by merely visiting a malicious
+#: page. Traversal is iterative and anything deeper than this fails loud
+#: as ProtocolError, never as a raw RecursionError.
+MAX_AX_DEPTH = 1000
+
+
 def _check_node(node, path):
-    if not isinstance(node, dict):
-        raise ProtocolError(
-            "bad_observation", "%s: AX node must be an object" % path
-        )
-    ref = node.get("ref")
-    if not is_nonempty_str(ref) or not REF_RE.match(ref):
-        raise ProtocolError(
-            "bad_observation", "%s: node ref must look like @e1" % path
-        )
-    if not is_nonempty_str(node.get("role")):
-        raise ProtocolError(
-            "bad_observation", "%s: node role must be non-empty" % path
-        )
-    if not isinstance(node.get("name"), str):
-        raise ProtocolError(
-            "bad_observation", "%s: node name must be a string" % path
-        )
-    for flag in ("enabled", "visible"):
-        if not isinstance(node.get(flag), bool):
+    # Iterative: an explicit stack of (node, path, depth) instead of
+    # recursion, so a hostile page cannot crash the daemon via
+    # RecursionError (the daemon catches only ProtocolError).
+    stack = [(node, path, 0)]
+    while stack:
+        node, path, depth = stack.pop()
+        if depth > MAX_AX_DEPTH:
             raise ProtocolError(
-                "bad_observation", "%s: node %s must be a bool" % (path, flag)
+                "bad_observation",
+                "%s: AX tree exceeds max depth %d" % (path, MAX_AX_DEPTH),
             )
-    children = node.get("children", [])
-    if not isinstance(children, list):
-        raise ProtocolError(
-            "bad_observation", "%s: children must be an array" % path
-        )
-    for i, child in enumerate(children):
-        _check_node(child, "%s.children[%d]" % (path, i))
-    frame = node.get("frame")
-    if frame is not None and not is_nonempty_str(frame):
-        raise ProtocolError(
-            "bad_observation", "%s: frame must be a non-empty string" % path
-        )
-    unknown = set(node) - {
-        "ref", "role", "name", "enabled", "visible", "children", "frame",
-    }
-    if unknown:
-        raise ProtocolError(
-            "bad_observation",
-            "%s: unknown node field(s) %s" % (path, sorted(unknown)),
-        )
+        if not isinstance(node, dict):
+            raise ProtocolError(
+                "bad_observation", "%s: AX node must be an object" % path
+            )
+        ref = node.get("ref")
+        if not is_nonempty_str(ref) or not REF_RE.match(ref):
+            raise ProtocolError(
+                "bad_observation", "%s: node ref must look like @e1" % path
+            )
+        if not is_nonempty_str(node.get("role")):
+            raise ProtocolError(
+                "bad_observation", "%s: node role must be non-empty" % path
+            )
+        if not isinstance(node.get("name"), str):
+            raise ProtocolError(
+                "bad_observation", "%s: node name must be a string" % path
+            )
+        for flag in ("enabled", "visible"):
+            if not isinstance(node.get(flag), bool):
+                raise ProtocolError(
+                    "bad_observation",
+                    "%s: node %s must be a bool" % (path, flag),
+                )
+        children = node.get("children", [])
+        if not isinstance(children, list):
+            raise ProtocolError(
+                "bad_observation", "%s: children must be an array" % path
+            )
+        for i, child in enumerate(children):
+            stack.append((child, "%s.children[%d]" % (path, i), depth + 1))
+        frame = node.get("frame")
+        if frame is not None and not is_nonempty_str(frame):
+            raise ProtocolError(
+                "bad_observation",
+                "%s: frame must be a non-empty string" % path,
+            )
+        unknown = set(node) - {
+            "ref", "role", "name", "enabled", "visible", "children", "frame",
+        }
+        if unknown:
+            raise ProtocolError(
+                "bad_observation",
+                "%s: unknown node field(s) %s" % (path, sorted(unknown)),
+            )
 
 
 def build_observation(url, title, target, ref_scope, nodes):
@@ -121,7 +142,14 @@ def redact_for_history(obs):
     validate_observation(obs)
 
     def count(nodes):
-        return sum(1 + count(n.get("children", [])) for n in nodes)
+        # Iterative: the tree can be hostile-nested (see MAX_AX_DEPTH).
+        total = 0
+        stack = list(nodes)
+        while stack:
+            node = stack.pop()
+            total += 1
+            stack.extend(node.get("children", []))
+        return total
 
     return {
         "url": obs["url"],

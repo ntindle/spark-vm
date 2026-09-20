@@ -83,7 +83,9 @@ class ProtocolError(ValueError):
 
 REF_RE = re.compile(r"\A@e[0-9]+\Z")  # \A..\Z, not ^..$: "@e1\n" must not pass
 
-#: Actions the v1 daemon serves (SPEC §16 item 1).
+#: Actions the v1 daemon serves (SPEC §16 item 1, with the
+#: README-documented staging deltas: ``forward`` promoted to v1, the
+#: five unstaged actions held to v1.1).
 STAGE_V1 = "v1"
 #: Actions declared by the protocol but served by the v1.1 daemon.
 STAGE_V1_1 = "v1.1"
@@ -115,6 +117,19 @@ MAX_TIMEOUT_MS = 300_000
 #: Hard ceiling on the actions array in one call: an unbounded array
 #: is a CPU/memory DoS vector from a compromised orchestrator.
 MAX_ACTIONS_PER_CALL = 256
+
+#: Hard cap on any one string parameter (url, fill.text, wait.text,
+#: gesture.instruction, grant_ids entries, …). A compromised orchestrator
+#: must not be able to exhaust daemon memory with one giant value.
+MAX_PARAM_LEN = 1_048_576
+
+#: Hard cap on upload.grant_ids entries (same rationale).
+MAX_GRANT_IDS = 64
+
+#: Cumulative per-call duration budget: timeout_ms + wait.time_ms +
+#: gesture.click_hold_ms summed over the whole array. Per-action caps
+#: alone do not stop a serial wedge (256 × 300s waits = 21.3h); this does.
+MAX_CALL_BUDGET_MS = 600_000
 
 
 def is_nonempty_str(value):
@@ -284,6 +299,12 @@ def _v_upload(params):
     ):
         raise ProtocolError(
             "bad_params", "upload.grant_ids must be a non-empty list of strings"
+        )
+    if len(grant_ids) > MAX_GRANT_IDS:
+        raise ProtocolError(
+            "bad_params",
+            "upload.grant_ids has %d entries, max %d"
+            % (len(grant_ids), MAX_GRANT_IDS),
         )
 
 
@@ -470,8 +491,11 @@ class RefScope:
     by the daemon (see ``bdrive.observation.redact_for_history``).
 
     Tokens are unguessable (``secrets.token_hex``); comparisons are
-    constant-time. The socket peer check is the real gate — this is
-    defense in depth against a confused-deputy replaying an old tree.
+    constant-time. The socket peer check authenticates the caller — against
+    a compromised caller it gates nothing. ``ref_scope`` freshness is the
+    actual anti-replay control: refs are valid only with the token from the
+    newest observation, and a daemon author must treat this check as the
+    load-bearing one, not defense in depth.
     """
 
     def __init__(self):
@@ -492,6 +516,11 @@ class RefScope:
     def accepts(self, token):
         """True only when ``token`` is the live observation token."""
         if not is_nonempty_str(token) or self._token is None:
+            return False
+        if not token.isascii():
+            # compare_digest raises TypeError on non-ASCII str; issued
+            # tokens are always ASCII, so this rejects attacker input
+            # cleanly instead of crashing the caller.
             return False
         return hmac.compare_digest(token, self._token)
 
@@ -517,6 +546,12 @@ SENSITIVE_PARAMS = {
     "type": frozenset({"text"}),
     "select": frozenset({"value"}),
     "goto": frozenset({"url"}),
+    # wait.text / wait.text_gone are verbatim page text the agent
+    # asserted on; gesture.instruction is freeform operator text that
+    # routinely quotes page content. Both must be redacted from logs
+    # like any other field contents (SPEC §13).
+    "wait": frozenset({"text", "text_gone"}),
+    "gesture": frozenset({"instruction"}),
 }
 
 
@@ -564,6 +599,30 @@ class ValidatedCall:
     actions: tuple
 
 
+def _check_param_lengths(name, index, params):
+    """Cap every string parameter at MAX_PARAM_LEN.
+
+    A compromised orchestrator must not exhaust daemon memory with one
+    giant value (e.g. a 50MB goto.url). The error reports the length,
+    never the value, so a rejected giant value cannot amplify into a
+    giant log line either.
+    """
+    for key, value in params.items():
+        if isinstance(value, str):
+            strings = (value,)
+        elif isinstance(value, (list, tuple)):
+            strings = tuple(value)
+        else:
+            continue
+        for s in strings:
+            if isinstance(s, str) and len(s) > MAX_PARAM_LEN:
+                raise ProtocolError(
+                    "bad_params",
+                    "actions[%d] (%s): param %r exceeds %d chars (len %d)"
+                    % (index, name, key, MAX_PARAM_LEN, len(s)),
+                )
+
+
 def _validate_action_object(obj, index):
     if not isinstance(obj, dict):
         raise ProtocolError(
@@ -580,6 +639,7 @@ def _validate_action_object(obj, index):
             % (index, name, sorted(unknown)),
         )
     validator(params)
+    _check_param_lengths(name, index, params)
     timeout_ms = obj.get("timeout_ms", 0)
     if timeout_ms:
         _check_timeout_ms(timeout_ms)
@@ -622,6 +682,15 @@ def validate_call(payload, scope=None):
     transport-level validation only). Raises :class:`ProtocolError`
     with a machine-readable ``code`` on any violation. Returns a
     :class:`ValidatedCall`.
+
+    Daemon contract (TOCTOU): the scope check inside this function is
+    only valid at the moment it runs. The daemon must treat
+    validate→execute as atomic for the scope — either hold a
+    per-session lock across validate+execute, or re-check
+    ``scope.accepts(call.ref_scope)`` immediately before executing the
+    first ref-addressing action and abort the call on mismatch. A
+    rotation between validation and execution means the tree the refs
+    were validated against is no longer live.
     """
     if not isinstance(payload, dict):
         raise ProtocolError("bad_envelope", "call must be a JSON object")
@@ -650,6 +719,23 @@ def validate_call(payload, scope=None):
             "snapshot is never combined with other actions in one call",
         )
     _check_post_navigation_rule(validated)
+
+    # Cumulative duration budget: timeout_ms + wait.time_ms +
+    # gesture.click_hold_ms across the whole array. Per-action caps do
+    # not stop a serial wedge (256 x 300s waits); the call-level budget
+    # does.
+    budget = sum(a.timeout_ms for a in validated)
+    for action in validated:
+        if action.name == "wait":
+            budget += action.params.get("time_ms", 0)
+        elif action.name == "gesture":
+            budget += action.params.get("click_hold_ms", 0)
+    if budget > MAX_CALL_BUDGET_MS:
+        raise ProtocolError(
+            "call_budget_exceeded",
+            "call's cumulative duration %d ms exceeds budget %d ms"
+            % (budget, MAX_CALL_BUDGET_MS),
+        )
 
     ref_scope = payload.get("ref_scope")
     # Any action addressing an element ref — mandatory or optional
@@ -687,6 +773,13 @@ class ActionReceipt:
     action: str
     status: str
     actionability_reason: str | None = None
+    # error carries a human string — and it must NEVER carry field
+    # contents (card values, OTP codes, resolved hsurr: placeholders,
+    # verbatim page text). Playwright errors routinely echo page text,
+    # and CallResult.to_dict flows to obox → the terminal report → the
+    # orchestrator. The daemon (a later slice) must sanitize or
+    # whitelist error strings; this slice states the invariant so the
+    # daemon author has a contract to implement against.
     error: str | None = None
 
     def __post_init__(self):
