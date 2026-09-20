@@ -95,7 +95,15 @@ claims under-20 ms glass-to-glass over LAN Wi-Fi and ~25 ms over the internet
 — project claims (https://github.com/linckosz/moonlight-web), not our
 measurements. Codec licensing diligence still owed: H.264 sits in a patent
 pool, HEVC's pools are fragmented, AV1 is royalty-free, x264 is GPL — the
-hosted product needs a counsel-level answer before committing to a codec. It either
+hosted product needs a counsel-level answer before committing to a codec. That
+research half is now done — see `docs/CODEC_LICENSING_RESEARCH.md`
+(research date 2026-09-20): patent-pool positions for H.264/HEVC/VP8/VP9/AV1
+labeled VENDOR-VERIFIED / THIRD-PARTY / INFERRED, x264 GPL vs openh264
+encoder licensing, browser WebRTC decode reality (H.264 is the only codec in
+every major browser incl. all of iOS), OSS-project precedent, and the
+recommendation — H.264 Baseline via `x264enc` for the CPU-only fleet,
+AV1/HEVC not shipped for that tier. The remaining half is counsel-level
+sign-off (§8 of that doc, 9 items) before monetized streaming. It either
 brings **its own capture & encode engine** (host is streaming-ready with no
 Sunshine, no pairing) or pairs with Sunshine/Apollo/Wolf hosts over the
 GameStream protocol. Input: keyboard, mouse (pointer-lock), touch trackpad,
