@@ -168,6 +168,24 @@ else
 fi
 sudo install -o root -g root -m 0755 proxy/with-proxy /usr/local/bin/with-proxy
 
+# --- 4c. secrets dirs (issue #91) -------------------------------------------
+echo "[4c/7] Enforcing secrets dir ownership and mode..."
+# SETUP.md documents the secrets dirs as 0700 swapd-only, but nothing
+# created or enforced them: cred-store-set's mktemp fails closed when the
+# dir is absent, and a dir left 0755 would expose credential NAMES to all
+# local users (values stay 0600, and names are already listable via the
+# sudoers `ls` entry — impact is minimal, but the doc must hold).
+# Enforce it on every deploy, alongside grants.json (4) and swap.log (4a).
+# The helper refuses symlinks outright: chown/chmod follow them, so a
+# swapd-level attacker who planted a secrets-dir symlink at /etc would
+# otherwise get the next (unattended) deploy to hand them a system dir.
+# Enforcement is race-free (lstat + O_NOFOLLOW open + fchown/fchmod on
+# the fd) and prints a WARNING whenever it actually repaired drift.
+for d in /home/swapd/secrets /home/swapd/inference-secrets; do
+    sudo mkdir -p "$d"
+    sudo python3 proxy/enforce_secrets_dir.py "$d"
+done
+
 # --- 5. systemd units (finding 66) -----------------------------------------
 echo "[5/7] Installing systemd units..."
 sudo install -o root -g root -m 0644 proxy/swap-proxy.service /etc/systemd/system/swap-proxy.service
