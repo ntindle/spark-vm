@@ -36,6 +36,8 @@ This changelog only works if entries land with the change, not after it:
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-20
+
 ### Added
 - A docs index for the docs tree (`docs/README.md`): the 40-plus doc corpus
   organized by what you're trying to do — start-here contributor picks,
@@ -201,12 +203,4 @@ This changelog only works if entries land with the change, not after it:
 - Fixed critical and high findings from the security code review
   ([`dd382af`](https://github.com/ntindle/spark-vm/commit/dd382af))
 
-<!-- Compare-link footer (ritual rule 3): at release time, uncomment and fill
-     in. Keep [unreleased] pointing at HEAD; add one link per release, newest
-     first. (Keep-a-Changelog convention: lowercase ref names.)
-     If this is the first release there is no previous tag yet -- drop the
-     [x.y.z] line for now and re-add it at the second release, comparing the
-     two tags.
-[unreleased]: https://github.com/ntindle/spark-vm/compare/vX.Y.Z...HEAD
-[x.y.z]: https://github.com/ntindle/spark-vm/compare/vW.X.Y...vX.Y.Z
--->
+[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.2.0...HEAD
