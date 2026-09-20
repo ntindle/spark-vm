@@ -96,7 +96,10 @@ than its own checkout. `muse-job --version` reads the repo file.
    review, and consider a GitHub tag-protection ruleset for `v*` so only
    the workflow can create release tags. Note: if two VERSION bumps land
    in quick succession, the superseded run fails its in-sync preflight by
-   design — only the latest VERSION gets a release.
+   design (when the older run is still queued). A run already past its
+   fetch when the newer push lands completes and publishes first; the
+   concurrency group serializes the runs so both releases happen in push
+   order.
 3. Manual path: `scripts/cut-release.sh` (dry-run by default — prints the
    plan and the notes draft, changes nothing); `cut-release.sh --execute
    --yes` cuts it by hand. It publishes via `gh`, or the GitHub API with
