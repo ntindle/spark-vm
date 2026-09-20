@@ -78,9 +78,10 @@ a{color:var(--accent)}
       <label for="website">Website</label>
       <input type="text" id="website" name="website" tabindex="-1" autocomplete="off">
     </div>
-    <!-- Time-trap: the page-serving layer stamps render time here at serve
-         time (there is no page JS). Submissions faster than humanly possible
-         are treated as automated. -->
+    <!-- Time-trap: under static hosting there is no serving layer to stamp
+         render time, so this stays empty and the service skips the trap for
+         stamp-less submissions. A present stamp (future stamped clients) is
+         evaluated: fills faster than 3 seconds are treated as automated. -->
     <input type="hidden" name="rendered_at" value="">
 
     <button type="submit">Join the waitlist</button>

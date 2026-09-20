@@ -161,6 +161,19 @@ def test_honeypot_is_silent_accept():
     assert spool_files(tmp) == []
 
 
+def test_silent_accept_renders_same_as_success():
+    # HOSTED_SIGNUP_WEB_UI.md §4.2: the honeypot's 200 must use the SAME
+    # rendering as a real success — a distinguishable body leaks the signal.
+    svc, tmp = make_service()
+    _, ok_body = svc.submit_form(
+        form_fields("sam@example.com"), "1.2.3.4")
+    status, silent_body = svc.submit_form(
+        form_fields("sam@example.com", website="http://spam"), "5.6.7.8")
+    assert status == 200
+    assert silent_body == ok_body
+    assert len(svc.rows) == 1  # the honeypot trip wrote nothing
+
+
 def test_time_trap_fast_submission_is_silent_accept():
     svc, tmp = make_service()
     status, _ = svc.submit_form(
@@ -170,13 +183,38 @@ def test_time_trap_fast_submission_is_silent_accept():
     assert read_events(tmp) == []
 
 
-def test_time_trap_missing_stamp_is_silent_accept():
+def test_time_trap_missing_stamp_proceeds():
+    # The static form stamps nothing (no serving layer under Pages) — a
+    # missing stamp is the form's legitimate state, not bot-shaped.
     svc, tmp = make_service()
-    fields = form_fields("bot@example.com")
+    fields = form_fields("human@example.com")
     del fields["rendered_at"]
     status, _ = svc.submit_form(fields, "1.2.3.4")
     assert status == 200
+    assert len(svc.rows) == 1
+    assert len(spool_files(tmp)) == 1
+
+
+def test_time_trap_empty_stamp_proceeds():
+    # This is the literal value slice 1's form sends: rendered_at="".
+    svc, tmp = make_service()
+    status, _ = svc.submit_form(
+        form_fields("human2@example.com", rendered_at=""), "1.2.3.4")
+    assert status == 200
+    assert len(svc.rows) == 1
+    assert len(spool_files(tmp)) == 1
+    kinds = [e["event"] for e in read_events(tmp)]
+    assert "waitlist_submitted" in kinds and "confirm_sent" in kinds
+
+
+def test_time_trap_unparseable_stamp_is_silent_accept():
+    svc, tmp = make_service()
+    status, _ = svc.submit_form(
+        form_fields("bot@example.com", rendered_at="not-a-number"),
+        "1.2.3.4")
+    assert status == 200
     assert svc.rows == {}
+    assert read_events(tmp) == []
 
 
 def test_per_ip_rate_limit_is_silent_accept():
@@ -197,7 +235,8 @@ def test_per_ip_rate_limit_is_silent_accept():
 
 def test_invalid_email_is_400_not_silent():
     svc, tmp = make_service()
-    for bad in ["not-an-email", "a@b", "@example.com", "x" * 300 + "@e.com"]:
+    for bad in ["not-an-email", "a@b", "@example.com", "+tag@example.com",
+                "x" * 300 + "@e.com"]:
         status, body = svc.submit_form(form_fields(bad), "1.2.3.4")
         assert status == 400, bad
         assert "look right" in body
@@ -234,6 +273,74 @@ def test_resubmit_pending_refreshes_and_invalidates_old_token():
     assert token2 != token1
     row, ok = svc.validate_token(token2)
     assert ok
+
+
+def test_cap_suppressed_resubmit_keeps_old_token_live():
+    # The 3/24h cap must never strand the user: a suppressed re-send keeps
+    # the earlier token live and renders honest copy (no "we sent an email"
+    # claim for an email that never went out).
+    svc, tmp = make_service(clock=TickClock())
+    svc.submit_form(form_fields("capped@example.com"), "1.2.3.4")
+    for _ in range(2):
+        svc.submit_form(form_fields("capped@example.com"), "1.2.3.4")
+    docs = spool_docs_newest_first(tmp)
+    assert len(docs) == 3
+    m = re.search(r"token=([A-Za-z0-9_.\-]+)", docs[0]["body"])
+    assert m
+    live_token = m.group(1)
+    # Fourth submit: the cap suppresses the send.
+    status, body = svc.submit_form(form_fields("capped@example.com"),
+                                   "1.2.3.4")
+    assert status == 200
+    assert len(spool_files(tmp)) == 3  # nothing new spooled
+    assert "earlier link still works" in body
+    assert "We sent a confirmation email to" not in body
+    # The earlier token is still the live one — the user can confirm.
+    row, ok = svc.validate_token(live_token)
+    assert ok
+    status, body = svc.confirm_post(live_token)
+    assert status == 200 and "You\u2019re on the list" in body
+
+
+def test_concurrent_double_submit_creates_one_row():
+    # A racing double-click must not break the one-pending-entry invariant.
+    svc, tmp = make_service()
+    barrier = threading.Barrier(2)
+    results = []
+
+    def worker():
+        barrier.wait()
+        results.append(svc.submit_form(
+            form_fields("race@example.com"), "1.2.3.4"))
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert all(s == 200 for s, _ in results)
+    assert len(svc.rows) == 1
+    kinds = [e["event"] for e in read_events(tmp)]
+    assert kinds.count("waitlist_submitted") == 1  # the invariant
+    # The race loser becomes a legitimate re-submit: fresh token, re-send.
+    row = next(iter(svc.rows.values()))
+    assert row["owner_email"] == "race@example.com"
+    assert row["status"] == "pending"
+    live_row, ok = svc.validate_token(row["active_token"])
+    assert ok and live_row["entry_id"] == row["entry_id"]
+
+
+def test_torn_rows_line_does_not_brick_restart():
+    # A kill -9 mid-append tears the last line; restart must skip it, not die.
+    svc, tmp = make_service()
+    svc.submit_form(form_fields("torn@example.com"), "1.2.3.4")
+    with open(os.path.join(tmp, "rows.jsonl"), "a",
+              encoding="utf-8") as fh:
+        fh.write('{"entry_id": "deadbeef", "owner_email": "half-writt')
+        fh.write("\n")
+    svc2 = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid")
+    assert "torn@example.com" in svc2.by_email
+    assert len(svc2.rows) == 1
 
 
 def test_resubmit_when_confirmed_is_idempotent():
@@ -407,6 +514,18 @@ def test_masked_owner_short_local_part():
     assert "ab…" not in body
 
 
+def test_masked_owner_three_char_local_part():
+    # FUNNEL_MEASUREMENT.md §4.2: 'sam…' IS the full local part — a 3-char
+    # local must mask fully, like the shorter ones.
+    svc, tmp = make_service()
+    svc.submit_form(form_fields("sam@x.io"), "1.2.3.4")
+    token, _ = extract_token_from_spool(tmp)
+    _, body = svc.confirm_get(token)
+    assert "•••" in body
+    assert "sam@" not in body
+    assert "sam…" not in body
+
+
 def test_pages_carry_no_page_js_and_escape_user_content():
     svc, tmp = make_service()
     svc.submit_form(form_fields("nina@example.com"), "1.2.3.4")
@@ -514,6 +633,21 @@ def test_http_round_trip(live_server):
     assert _get(port, "/nope")[0] == 404
     assert _get(port, "/waitlist/form")[0] == 404
     assert _get(port, "/waitlist/position?email=x@y.z")[0] == 404
+
+
+def test_oversized_body_is_413(live_server):
+    port, tmp = live_server
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    big = "owner_email=" + urllib.parse.quote("x" * 70000 + "@e.com")
+    conn.request("POST", "/waitlist/form", big,
+                 {"Content-Type": "application/x-www-form-urlencoded"})
+    resp = conn.getresponse()
+    assert resp.status == 413
+    resp.read()
+    # Rejected before the service layer: nothing written.
+    rows_path = os.path.join(tmp, "rows.jsonl")
+    assert (not os.path.exists(rows_path)
+            or os.path.getsize(rows_path) == 0)
 
 
 def test_confirm_page_strips_preview_metadata(live_server):

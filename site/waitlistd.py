@@ -31,10 +31,12 @@ Design decisions (all per the cited specs, no improvisation):
   (•••) per §4.2; the mask never discloses the full local part.
 - The confirm-email body is the WAITLIST_OPERATIONS.md §4 DRAFT for
   path B (the form path; path A lands with the email parser).
-- Honeypot trips and time-trap failures are accepted SILENTLY: HTTP 200
-  with the same rendering as a success, nothing written, nothing
+- Honeypot trips are accepted SILENTLY: HTTP 200 with the same rendering
+  as a success, nothing written, nothing
   emitted — the spam learns nothing (HOSTED_SIGNUP_WEB_UI.md §4.2).
-- Per-IP rate-limit trips are silent for the same reason.
+- Time-trap failures and per-IP rate-limit trips are silent for the same
+  reason (a service-local anti-abuse choice; §4.2's silence mandate covers
+  honeypot trips).
 - Email normalization: lowercase + strip everything after "+" in the
   local part; one pending entry per normalized address — re-submits
   refresh the timestamp and re-send the confirm email with a fresh
@@ -90,6 +92,7 @@ import os
 import re
 import secrets
 import sys
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -169,16 +172,21 @@ def normalize_email(addr: str):
         return None
     local, domain = addr.rsplit("@", 1)
     local = local.split("+", 1)[0].lower()
+    if not local:
+        # "+tag@example.com" passes the regex but strips to nothing — there
+        # is no local part to deliver to.
+        return None
     domain = domain.lower()
     return f"{local}@{domain}"
 
 
 def masked_owner(normalized: str) -> str:
-    """First 3 chars of the local part + ellipsis — except a local part
-    shorter than 3 chars, which renders fully masked (FUNNEL_MEASUREMENT.md
-    §4.2: the mask never discloses the full local part at any length)."""
+    """First 3 chars of the local part + ellipsis — except a local part of
+    3 chars or fewer, which renders fully masked (FUNNEL_MEASUREMENT.md
+    §4.2: the mask never discloses the full local part at any length —
+    'sam' + '…' IS the full local part)."""
     local = normalized.split("@", 1)[0]
-    if len(local) < 3:
+    if len(local) <= 3:
         return "•••"
     return f"{local[:3]}…"
 
@@ -204,6 +212,9 @@ class WaitlistService:
         self.by_email = {}      # normalized owner_email -> entry_id
         self.consumed = set()   # consumed/invalidated token strings
         self._ip_hits = {}      # client ip -> [epoch ...] (in-process)
+        # Serializes the check-then-act sections (dedup on submit, consume
+        # on confirm) — the handler runs on ThreadingHTTPServer threads.
+        self._lock = threading.Lock()
         self._load()
 
     # -- persistence ------------------------------------------------------
@@ -217,11 +228,25 @@ class WaitlistService:
         rows_path = os.path.join(self.data_dir, "rows.jsonl")
         if os.path.exists(rows_path):
             with open(rows_path, encoding="utf-8") as fh:
-                for line in fh:
+                for lineno, line in enumerate(fh, 1):
                     line = line.strip()
                     if not line:
                         continue
-                    row = json.loads(line)
+                    # A kill -9 can tear the last append mid-line; a single
+                    # torn line must never brick a restart — skip it loudly
+                    # and load everything else.
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        sys.stderr.write(
+                            "waitlistd: skipping torn rows.jsonl line "
+                            f"{lineno}\n")
+                        continue
+                    if not isinstance(row, dict) or not row.get("entry_id"):
+                        sys.stderr.write(
+                            "waitlistd: skipping malformed rows.jsonl line "
+                            f"{lineno}\n")
+                        continue
                     self.rows[row["entry_id"]] = row
                     if row.get("status") in ("pending", "confirmed"):
                         self.by_email[row["owner_email"]] = row["entry_id"]
@@ -359,48 +384,69 @@ class WaitlistService:
         """Handle POST /waitlist/form.
 
         Returns (status, html). Honeypot/time-trap/rate-limit trips are
-        silent accepts: 200 with the success rendering, nothing written.
+        silent accepts: 200 with the same rendering as a real success
+        (HOSTED_SIGNUP_WEB_UI.md §4.2 — the spam learns nothing), nothing
+        written. The §4.2 silence mandate covers honeypot trips; time-trap
+        and IP-rate-limit trips share the same rendering as a service-local
+        anti-abuse choice.
         """
         honeypot = (fields.get("website") or "").strip()
-        rendered_at = fields.get("rendered_at") or ""
+        rendered_at = (fields.get("rendered_at") or "").strip()
+        owner_raw = (fields.get("owner_email") or "").strip()
         silent = False
         if honeypot:
             silent = True
-        else:
+        elif rendered_at:
+            # The static form stamps nothing (no serving layer under Pages),
+            # so a missing stamp is the form's legitimate state and proceeds.
+            # A present-but-unparseable stamp, or a stamp showing a sub-3s
+            # fill, is bot-shaped.
             try:
-                rendered = float(rendered_at)
-                if time.time() - rendered < TIME_TRAP_MIN_SECONDS:
+                if time.time() - float(rendered_at) < TIME_TRAP_MIN_SECONDS:
                     silent = True
             except (TypeError, ValueError):
-                silent = True  # missing or unparseable stamp: bot-shaped
+                silent = True
         if silent or self._ip_limited(client_ip):
-            return 200, page_check_inbox(None)
+            return 200, page_check_inbox(owner_raw)
 
-        owner_raw = (fields.get("owner_email") or "").strip()
         owner = normalize_email(owner_raw)
         if owner is None:
             return 400, page_invalid_email()
         muse_raw = (fields.get("muse_email") or "").strip()
         muse_contact = normalize_email(muse_raw) if muse_raw else None
 
-        existing_id = self.by_email.get(owner)
-        if existing_id:
-            row = self.rows[existing_id]
-            if row["status"] == "confirmed":
-                # Idempotent: already on the list. No new event, no email.
-                return 200, page_confirmed()
-            # Pending re-submit: refresh, invalidate the old token, issue a
-            # fresh one, re-send (counts toward the 3/24h cap).
-            row["submitted_at"] = iso_z(self.clock())
-            if muse_contact:
-                row["muse_contact"] = muse_contact
-            if row.get("active_token"):
-                self._consume_token(row["active_token"])
-                row["active_token"] = None
-            self._save_row(row)
-            self._queue_confirm_email(row)  # silently capped
-            return 200, page_check_inbox(owner_raw)
+        # The dedup check and everything downstream of it are check-then-act
+        # — serialize them so a racing double-submit can't create two rows
+        # for one address.
+        with self._lock:
+            existing_id = self.by_email.get(owner)
+            if existing_id:
+                return self._resubmit(self.rows[existing_id], owner_raw,
+                                      muse_contact)
+            return self._create_row(owner, owner_raw, muse_contact)
 
+    def _resubmit(self, row, owner_raw, muse_contact):
+        """Pending re-submit: refresh, re-send a fresh token (counts toward
+        the 3/24h cap). The old token dies only when the replacement email
+        actually goes out — a cap-suppressed re-send must never strand the
+        user with zero live tokens."""
+        if row["status"] == "confirmed":
+            # Idempotent: already on the list. No new event, no email.
+            return 200, page_confirmed()
+        row["submitted_at"] = iso_z(self.clock())
+        if muse_contact:
+            row["muse_contact"] = muse_contact
+        old_token = row.get("active_token")
+        self._save_row(row)
+        if self._queue_confirm_email(row):
+            if old_token:
+                self._consume_token(old_token)
+            return 200, page_check_inbox(owner_raw)
+        # Capped: the earlier link still works — say so honestly instead of
+        # claiming an email was sent.
+        return 200, page_already_sent(owner_raw)
+
+    def _create_row(self, owner, owner_raw, muse_contact):
         entry_id = secrets.token_urlsafe(12)
         row = {
             "entry_id": entry_id,
@@ -439,23 +485,27 @@ class WaitlistService:
         return 200, page_pending_button(token, masked_owner(row["owner_email"]))
 
     def confirm_post(self, token):
-        """POST /waitlist/confirm — token as form field. Confirms."""
-        row, status = self._lookup_token_row(token or "")
-        if status == "invalid":
-            return 200, page_expired()
-        if row["status"] == "confirmed":
-            # Idempotent re-POST: same rendering as a fresh confirmation,
-            # verbatim — never an error (WAITLIST_OPERATIONS.md §4).
+        """POST /waitlist/confirm — token as form field. Confirms.
+
+        The lookup-then-consume is check-then-act — serialized so two
+        racing POSTs of one fresh token can't double-emit `confirmed`."""
+        with self._lock:
+            row, status = self._lookup_token_row(token or "")
+            if status == "invalid":
+                return 200, page_expired()
+            if row["status"] == "confirmed":
+                # Idempotent re-POST: same rendering as a fresh confirmation,
+                # verbatim — never an error (WAITLIST_OPERATIONS.md §4).
+                return 200, page_confirmed()
+            if status != "ok":
+                return 200, page_expired()
+            row["status"] = "confirmed"
+            row["confirmed_at"] = iso_z(self.clock())
+            self._save_row(row)
+            self._consume_token(token)  # single-use: this token can never confirm again
+            self._emit("confirmed", row["entry_id"], {"via": "original"})
+            # POST-success renders exactly like already-confirmed, verbatim.
             return 200, page_confirmed()
-        if status != "ok":
-            return 200, page_expired()
-        row["status"] = "confirmed"
-        row["confirmed_at"] = iso_z(self.clock())
-        self._save_row(row)
-        self._consume_token(token)  # single-use: this token can never confirm again
-        self._emit("confirmed", row["entry_id"], {"via": "original"})
-        # POST-success renders exactly like already-confirmed, verbatim.
-        return 200, page_confirmed()
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +534,26 @@ button{{font:inherit;padding:.7rem 1.4rem;border-radius:8px;border:1px solid #1a
 </body>
 </html>
 """
+
+
+def page_already_sent(owner_raw):
+    """Honest rendering for a cap-suppressed re-send: the earlier confirm
+    link still works — never claim an email went out when it didn't."""
+    addr = html.escape(owner_raw.strip(), quote=True)
+    return PAGE_SHELL.format(
+        title="Check your inbox",
+        body=(
+            "<h1>Check your inbox</h1>"
+            "<p>You\u2019re one click away from the spark-vm hosted waitlist.</p>"
+            f"<p>We already sent a confirmation email to <strong>{addr}</strong> "
+            "— your earlier link still works. New emails are limited to keep "
+            "inboxes quiet, so give it a little time, then check spam.</p>"
+            '<p class="muted">Wrong address? <a href="/waitlist">Go back</a> '
+            "and re-enter it.</p>"
+            "<p class=\"muted\">Unconfirmed addresses are dropped automatically "
+            "after 14 days.</p>"
+        ),
+    )
 
 
 def page_check_inbox(owner_raw):
@@ -568,6 +638,11 @@ def page_expired():
 # HTTP wiring
 # ---------------------------------------------------------------------------
 
+# Largest form body we'll parse; the form has three short fields.
+MAX_BODY_BYTES = 65536
+
+_OVERSIZED = object()  # _fields sentinel: body over MAX_BODY_BYTES
+
 
 class _Handler(BaseHTTPRequestHandler):
     service = None  # set by serve()
@@ -588,23 +663,45 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _fields(self):
-        length = int(self.headers.get("Content-Length") or 0)
+        """Parse the form body. Returns the fields dict, None for a
+        malformed body, or the _OVERSIZED sentinel when the body exceeds
+        MAX_BODY_BYTES (never buffer unbounded input)."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return None
+        if length < 0:
+            return None
+        if length > MAX_BODY_BYTES:
+            return _OVERSIZED
         raw = self.rfile.read(length) if length > 0 else b""
         parsed = urllib.parse.parse_qs(
             raw.decode("utf-8", "replace"), keep_blank_values=True
         )
         return {k: v[0] for k, v in parsed.items() if v}
 
+    def _bad_request(self, status, title):
+        self._send(status, PAGE_SHELL.format(
+            title=title, body=f"<h1>{title}</h1>"))
+
     def do_POST(self):  # noqa: N802
         path = urllib.parse.urlsplit(self.path).path
+        fields = self._fields() if path in (
+            "/waitlist/form", "/waitlist/confirm") else {}
+        if fields is _OVERSIZED:
+            self._bad_request(413, "Request too large")
+            return
+        if fields is None:
+            self._bad_request(400, "Bad request")
+            return
         if path == "/waitlist/form":
             status, body = self.service.submit_form(
-                self._fields(), self.client_address[0]
+                fields, self.client_address[0]
             )
             self._send(status, body)
         elif path == "/waitlist/confirm":
             status, body = self.service.confirm_post(
-                self._fields().get("token")
+                fields.get("token")
             )
             self._send(status, body)
         else:
@@ -665,7 +762,12 @@ def load_config(argv):
     host = os.environ.get("WAITLIST_PUBLIC_HOST",
                            "https://waitlist.example.invalid")
     bind = os.environ.get("WAITLIST_BIND", "127.0.0.1")
-    port = int(os.environ.get("WAITLIST_PORT", "8765"))
+    try:
+        port = int(os.environ.get("WAITLIST_PORT", "8765"))
+    except (TypeError, ValueError):
+        sys.stderr.write(
+            "waitlistd: WAITLIST_PORT is not an integer.\n")
+        raise SystemExit(2)
     return key, data_dir, host, bind, port
 
 
