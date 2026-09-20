@@ -47,6 +47,12 @@ This changelog only works if entries land with the change, not after it:
   not deployable: reminder/drop jobs, the email-parsing path, invites,
   and forget-me land next; the page ships only when the full
   waitlist-operations checklist is green (#165)
+- Browser-driver first code (H17, [#132](https://github.com/ntindle/spark-vm/issues/132)):
+  the fixed `bdrive` action protocol as validated Python — the narrow action
+  vocabulary the on-box browser service will accept, with ref-scoped element
+  locators, receipt semantics, and hermetic tests. Deferred to later slices:
+  the Chromium execution backend, the daemon socket, box hardening, the
+  `obox` agent loop, and the card pathway + Web Push (PR number filled at open)
 - Waitlist page build, slice 1: the static front end of the waitlist-era web
   surface — the landing page typeset from the approved launch copy, a
   dedicated `/waitlist` form page with the abuse-resistant signup form
