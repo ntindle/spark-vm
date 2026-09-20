@@ -1,27 +1,38 @@
 # site/ — the waitlist-era web surface (H15, surface 1)
 
-**Status: build slices 1–2 of H15 PR 1.** Slice 1 shipped the static
-markup (PR #163); slice 2 ships the backend half of the endpoint surface
+**Status: build slices 1–3a of H15 PR 1.** Slice 1 shipped the static
+markup (PR #163); slice 2 shipped the backend half of the endpoint surface
 (`site/waitlistd.py` + `scripts/test_waitlistd.py`, 25 tests): `POST
 /waitlist/form`, the §4.3 confirm flow (`GET` renders-only / `POST`
 confirms, token as form field), the HMAC token signer (single-use, 14-day
 expiry, operator key via `WAITLIST_HMAC_KEY` — never in the repo), and
 `funnel_events` logging per `docs/FUNNEL_MEASUREMENT.md` §3.4
-(verified parseable by `scripts/funnel_metrics.py`).
+(verified parseable by `scripts/funnel_metrics.py`). Slice 3a ships the
+waitlist lifecycle jobs (`site/waitlist_jobs.py` + `scripts/test_waitlist_jobs.py`,
+21 tests): the +7d reminder job and the 14d drop job, run as operator cron
+against the operator data dir with a cross-process data lock so they never
+race the live daemon. The drop deadline is fixed at first submission and
+never refreshed by re-submits; a cap-deferred reminder retries on the next
+run instead of being skipped. Slice 3a also closes the deferred
+Engineering blocker on oversized requests: a 413 now closes the HTTP
+connection instead of risking a desynced keep-alive.
 
-**Not yet (slice 3 = H15 §8's remaining "§7 waitlist-era endpoint
-surface"):** the +7d reminder / 14d drop jobs, the path-A email parser,
-the invite sender, the forget-me handler, and the `/go/selfhost` static
-redirect shim. The page is still NOT deployable — the dead-form rule
-holds until every §10 checklist item is live.
+**Not yet (slice 3 remainder = H15 §8's remaining "§7 waitlist-era endpoint
+surface"):** the path-A email parser, the invite sender, the forget-me
+handler, the `/go/selfhost` static redirect shim, and the 30-day
+post-drop purge (WAITLIST_OPERATIONS.md §5 — deferred from this slice's
+drop job, which retains dropped rows for a separate operator pass). The
+page is still NOT deployable — the dead-form rule holds until every §10
+checklist item is live.
 
 ## The dead-form rule (read before deploying anything)
 
 `docs/WAITLIST_OPERATIONS.md` §10 + `docs/HOSTED_SIGNUP_WEB_UI.md` §4.4:
 **the page ships only when every §10 checklist item is live** — the form
 endpoint, the confirm flow, the token signer, the reminder/drop jobs, the
-inbox. This slice ships *markup only*; the backend does not exist yet, so
-**nothing in this directory is deployable**. A page typeset atop a dead form
+inbox. Slices 1–3a exist only in this repo — the §10 operator checklist
+(deployed endpoint, reminder/drop cron, inbox) is not live, so **nothing
+in this directory is deployable**. A page typeset atop a dead form
 is the trust wound the spec was written to prevent.
 
 ## Deploy-time substitutions (operator)
@@ -81,11 +92,13 @@ cohort before waitlist-order general invites (no dates), so the page never
 promises what the operator plan doesn't deliver.
 
 **Not yet (H15 PR 1 remainder = H15 §8's "§7 waitlist-era endpoint surface"
-plus markup):** the +7d reminder / 14d drop jobs, the path-A email parser,
-the invite sender, the forget-me handler, and the `/go/selfhost` static
-redirect shim. Slice 2 already ships: `POST /waitlist/form` endpoint, the
-§4.3 confirm flow (`GET` renders-only / `POST` confirms), the HMAC token
-signer, and the `funnel_events` logging (`docs/FUNNEL_MEASUREMENT.md`
+plus markup):** the path-A email parser, the invite sender, the forget-me
+handler, the `/go/selfhost` static redirect shim, and the 30-day
+post-drop purge (WAITLIST_OPERATIONS.md §5). Slices 2–3a already
+ship: `POST /waitlist/form` endpoint, the §4.3 confirm flow (`GET`
+renders-only / `POST` confirms), the HMAC token signer, the +7d reminder
+and 14d drop jobs (cross-process data lock, fixed drop deadline, cap-aware
+retries), and the `funnel_events` logging (`docs/FUNNEL_MEASUREMENT.md`
 §3.4). `scripts/funnel_metrics.py` (PR #141) already ships the consumer
 side of that logging.
 
@@ -119,5 +132,7 @@ checklist was re-run against this slice's base (`a7bbe00`):
   owner" is the approved §3 hero microcopy, verbatim (also used as the
   `/waitlist` context line per §4.1); the owner-frame voice is intentional,
   not a wobble.
-- The §5 dead-form item stays OPEN: the form posts to an endpoint that does
-  not exist yet — hence this directory is explicitly not deployable.
+- The §5 dead-form item stays OPEN: the form endpoint, confirm flow, and
+  lifecycle jobs exist only in this repo — none of §10's operator checklist
+  (deployed endpoint, reminder/drop cron, inbox) is live yet, so the pages
+  are still explicitly not deployable.

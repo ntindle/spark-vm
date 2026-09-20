@@ -45,7 +45,9 @@ Design decisions (all per the cited specs, no improvisation):
 - funnel_events per docs/FUNNEL_MEASUREMENT.md §3.4: exactly the
   (event, at, ref, attrs) 4-tuples this slice can emit —
   `waitlist_submitted` (attrs path=form), `confirm_sent` (no attrs),
-  `confirmed` (attrs via=original). `scripts/funnel_metrics.py` (PR #141)
+  `confirmed` (attrs via=original|reminder — via follows which email
+  carried the live token), `reminder_sent` (no attrs, +7d job),
+  `dropped` (no attrs, 14d job). `scripts/funnel_metrics.py` (PR #141)
   is the consumer; the emitted JSONL must stay parseable by it.
 - No unauthenticated position lookup exists anywhere in this service:
   queue position is disclosed only inside signed emails
@@ -79,11 +81,19 @@ feed NEEDS_USER.md's Abuse-controls item — LANDING_PAGE_COPY.md §4):
     EMAIL_SEND_WINDOW = 86400     24h, all reply types counted together
                                   (WAITLIST_OPERATIONS.md §4).
     TOKEN_TTL_SECONDS = 14*86400 — confirm-link lifetime.
+    REMINDER_LEAD_SECONDS = 7*86400 — the +7d reminder fires when
+        now >= drop_at - REMINDER_LEAD_SECONDS.
+    DROP_TTL_SECONDS = 14*86400 — drop_at is set once at row creation
+        (= submitted_at + DROP_TTL_SECONDS) and is NEVER refreshed by a
+        re-submit: WAITLIST_OPERATIONS.md §4 drops "unconfirmed 14 days
+        after submission", and a re-submit must not postpone the drop.
 
 stdlib only. Tested by scripts/test_waitlistd.py.
 """
 
 import base64
+import contextlib
+import fcntl
 import hashlib
 import hmac
 import html
@@ -95,7 +105,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------------------
@@ -108,6 +118,8 @@ IP_RATE_WINDOW = 3600
 EMAIL_SEND_CAP = 3
 EMAIL_SEND_WINDOW = 86400
 TOKEN_TTL_SECONDS = 14 * 86400
+REMINDER_LEAD_SECONDS = 7 * 86400
+DROP_TTL_SECONDS = 14 * 86400
 
 EMAIL_RE = re.compile(
     r"^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,}$"
@@ -123,6 +135,27 @@ COPY_CONFIRMED = (
 COPY_EXPIRED = "This link expired — waitlist links last 14 days."
 COPY_REJOIN = "Join the waitlist again"
 CONFIRM_SUBJECT = "Confirm your spark-vm waitlist spot"
+REMINDER_SUBJECT = "Reminder: your spark-vm waitlist spot is waiting on one click"
+
+# Reminder email, verbatim from docs/WAITLIST_OPERATIONS.md §4 DRAFT
+# (opener split by submission path). The {position} line is the queue
+# position per §7 ("You're #N in line"); {confirm_link} follows the
+# prominent-action pattern and carries the same (or a fresh) token.
+REMINDER_OPENERS = {
+    "email": "Your agent put this address on the spark-vm hosted waitlist.",
+    "form": "You asked to join the spark-vm hosted waitlist with this address.",
+}
+
+REMINDER_BODY = """\
+{opener}
+
+[ Confirm this address ]: {confirm_link}
+
+You're #{position} in line — we don't estimate dates. Confirm it so we
+can email you when hosted boxes open up. No card, no commitment.
+
+This is the last reminder; unconfirmed spots are dropped automatically.
+"""
 
 CONFIRM_BODY_PATH_B = """\
 You joined the spark-vm hosted waitlist — one click confirms this address.
@@ -192,6 +225,35 @@ def masked_owner(normalized: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Cross-process data lock
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def data_lock(data_dir):
+    """Advisory exclusive lock on the data dir, shared by the daemon and
+    the lifecycle-job CLI (site/waitlist_jobs.py).
+
+    waitlistd serializes its own threads with self._lock, but the jobs
+    run as a SEPARATE process — the check-then-act sections (dedup on
+    submit, token consume on confirm, reminder/drop scans) must not race
+    across processes. Every mutating entry point takes this lock with the
+    thread lock nested INSIDE it (lock order: data lock first, thread lock
+    second — the jobs never take the thread lock, so there is no cycle).
+
+    fcntl is POSIX-only, but the operator surface is Linux; the service
+    already refuses to run without an operator-owned data dir, and the
+    lock file lives inside it (never the repo)."""
+    path = os.path.join(data_dir, "waitlist.lock")
+    with open(path, "a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+# ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 
@@ -247,6 +309,18 @@ class WaitlistService:
                             "waitlistd: skipping malformed rows.jsonl line "
                             f"{lineno}\n")
                         continue
+                    if "drop_at" not in row and row.get("submitted_at"):
+                        # Rows written before the lifecycle jobs existed have
+                        # no drop_at. Backfill from submitted_at (the best
+                        # available stand-in; new rows always set drop_at at
+                        # creation, so this path fades as rows churn).
+                        try:
+                            first = datetime.fromisoformat(
+                                row["submitted_at"].replace("Z", "+00:00"))
+                        except ValueError:
+                            first = self.clock()
+                        row["drop_at"] = iso_z(first + timedelta(
+                            seconds=DROP_TTL_SECONDS))
                     self.rows[row["entry_id"]] = row
                     if row.get("status") in ("pending", "confirmed"):
                         self.by_email[row["owner_email"]] = row["entry_id"]
@@ -254,6 +328,35 @@ class WaitlistService:
         if os.path.exists(consumed_path):
             with open(consumed_path, encoding="utf-8") as fh:
                 self.consumed = {ln.strip() for ln in fh if ln.strip()}
+
+    def reload(self):
+        """Re-read the data dir from disk. The lifecycle-job CLI runs as a
+        separate process: it calls reload() under data_lock() before
+        scanning, so a scan never works from a view the live daemon has
+        already moved past."""
+        self.rows = {}
+        self.by_email = {}
+        self.consumed = set()
+        self._ip_hits = {}
+        self._load()
+
+    def _refresh_under_lock(self):
+        """Re-read persistent rows/tokens under data_lock()+self._lock.
+
+        The lifecycle-job CLI mutates rows.jsonl/consumed_tokens.txt in a
+        separate process between daemon requests; without this, the
+        check-then-act sections would run against a stale in-memory view
+        (e.g. a job drops a row the daemon still thinks is pending, or a
+        reminder minted a token the daemon's view doesn't know). Callers
+        hold both locks already. _ip_hits is in-process abuse-rate state
+        that has no on-disk representation — refreshing it would reset
+        every request's rate window, so it is deliberately preserved."""
+        ip_hits = self._ip_hits
+        self.rows = {}
+        self.by_email = {}
+        self.consumed = set()
+        self._load()
+        self._ip_hits = ip_hits
 
     def _save_row(self, row):
         self._append("rows.jsonl", row)
@@ -358,6 +461,10 @@ class WaitlistService:
         token = self.mint_token(row["entry_id"], row["owner_email"])
         link = f"{self.public_host}/waitlist/confirm?token={token}"
         row["active_token"] = token  # the one live token for this row
+        # Which email carried the live token — drives the `via` attr on
+        # the `confirmed` event (FUNNEL_MEASUREMENT.md §3.4: original |
+        # reminder). The reminder overwrites this when it sends.
+        row["active_token_kind"] = "confirm"
         doc = {
             "to": row["owner_email"],
             "subject": CONFIRM_SUBJECT,
@@ -377,6 +484,148 @@ class WaitlistService:
         self._save_row(row)
         self._emit("confirm_sent", row["entry_id"])
         return True
+
+    def queue_position(self, entry_id):
+        """1-based place in the invite queue, for the reminder's "#N in
+        line" line (WAITLIST_OPERATIONS.md §4 draft, §7 order).
+
+        §7 orders the queue FIFO by confirmed_at — confirmed entries are
+        ahead of every pending entry (they will be invited first), and
+        within each group the order is first-submitted-first. A pending
+        entry's position is the place it holds the moment it confirms.
+        entry_id breaks ties so the order is total and deterministic."""
+        def rank_key(row):
+            if row["status"] == "confirmed":
+                return (0, row.get("confirmed_at") or "", row["entry_id"])
+            return (1, row.get("submitted_at") or "", row["entry_id"])
+
+        queued = [r for r in self.rows.values()
+                  if r["status"] in ("pending", "confirmed")]
+        queued.sort(key=rank_key)
+        for i, row in enumerate(queued, 1):
+            if row["entry_id"] == entry_id:
+                return i
+        return None
+
+    def reminder_due(self, row):
+        """True for a pending row that has reached the +7d reminder point
+        and has never been reminded."""
+        if row.get("status") != "pending" or row.get("reminder_sent_at"):
+            return False
+        try:
+            drop_at = datetime.fromisoformat(
+                row["drop_at"].replace("Z", "+00:00"))
+        except (KeyError, ValueError, AttributeError):
+            return False
+        now = self.clock()
+        if now >= drop_at:
+            # A row past its drop deadline is drop_expired()'s job, never
+            # send_reminders()' — no reminder goes out after the row should
+            # already have been dropped.
+            return False
+        return now >= drop_at - timedelta(
+            seconds=REMINDER_LEAD_SECONDS)
+
+    def drop_due(self, row):
+        """True for a pending row whose 14-day drop deadline has passed."""
+        if row.get("status") != "pending":
+            return False
+        try:
+            drop_at = datetime.fromisoformat(
+                row["drop_at"].replace("Z", "+00:00"))
+        except (KeyError, ValueError, AttributeError):
+            return False
+        return self.clock() >= drop_at
+
+    def _queue_reminder_email(self, row):
+        """Spool the +7d reminder per WAITLIST_OPERATIONS.md §4 DRAFT.
+
+        Same link as the confirm email (fresh token only if the live token
+        is within 7 days of expiry — at the +7d point a submit-minted token
+        has exactly ~7 days left, so the normal case re-mints; a token
+        re-minted by a late re-submit stays). Counts toward the 3/24h cap
+        like every other transactional send. Returns True when the email
+        went out; False when the cap deferred it (the job retries on the
+        next cron run — the old token stays live, nothing is marked)."""
+        if not self._email_send_allowed(row):
+            return False
+        old_token = row.get("active_token")
+        use_token = None
+        if old_token:
+            try:
+                issued = int(old_token.split(".", 3)[1])
+                remaining = TOKEN_TTL_SECONDS - (
+                    self.clock().timestamp() - issued)
+                # "within 7 days of expiry" — the §4 draft's freshness rule.
+                if remaining > REMINDER_LEAD_SECONDS:
+                    use_token = old_token
+            except (ValueError, IndexError):
+                use_token = None
+        if use_token is None:
+            use_token = self.mint_token(row["entry_id"], row["owner_email"])
+            row["active_token"] = use_token
+        # Even when the reminder reuses the live confirm token, the human
+        # clicked the REMINDER email — the `confirmed` event must say so.
+        row["active_token_kind"] = "reminder"
+        link = f"{self.public_host}/waitlist/confirm?token={use_token}"
+        opener = REMINDER_OPENERS.get(row.get("source"), REMINDER_OPENERS["form"])
+        position = self.queue_position(row["entry_id"])
+        doc = {
+            "to": row["owner_email"],
+            "subject": REMINDER_SUBJECT,
+            "kind": "reminder",
+            "body": REMINDER_BODY.format(
+                opener=opener,
+                confirm_link=link,
+                position=position if position is not None else "?",
+            ),
+            "queued_at": iso_z(self.clock()),
+            "entry_id": row["entry_id"],
+        }
+        name = (f"{row['entry_id']}-{int(self.clock().timestamp())}-"
+                f"{secrets.token_hex(4)}.json")
+        with open(os.path.join(self.spool_dir, name), "w",
+                  encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2, sort_keys=True)
+        row["email_sends"] = row.get("email_sends", []) + [
+            self.clock().timestamp()
+        ]
+        row["reminder_sent_at"] = iso_z(self.clock())
+        self._save_row(row)
+        if use_token != old_token and old_token:
+            self._consume_token(old_token)
+        self._emit("reminder_sent", row["entry_id"])
+        return True
+
+    def send_reminders(self):
+        """+7d job: remind every due row. Returns the reminder count."""
+        sent = 0
+        for row in sorted(self.rows.values(),
+                          key=lambda r: r.get("submitted_at") or ""):
+            if self.reminder_due(row) and self._queue_reminder_email(row):
+                sent += 1
+        return sent
+
+    def drop_expired(self):
+        """14d job: drop every unconfirmed row past its deadline. Returns
+        the dropped entry_ids. Status `dropped` is terminal
+        (WAITLIST_OPERATIONS.md §5); the row is retained 30 days for the
+        §5 retention rule, then purged by a separate operator pass."""
+        dropped = []
+        for row in sorted(self.rows.values(),
+                          key=lambda r: r.get("submitted_at") or ""):
+            if not self.drop_due(row):
+                continue
+            token = row.get("active_token")
+            if token:
+                self._consume_token(token)
+                row["active_token"] = None
+            row["status"] = "dropped"
+            row["dropped_at"] = iso_z(self.clock())
+            self._save_row(row)
+            self._emit("dropped", row["entry_id"])
+            dropped.append(row["entry_id"])
+        return dropped
 
     # -- the form ----------------------------------------------------------
 
@@ -417,8 +666,14 @@ class WaitlistService:
 
         # The dedup check and everything downstream of it are check-then-act
         # — serialize them so a racing double-submit can't create two rows
-        # for one address.
-        with self._lock:
+        # for one address. The thread lock covers the daemon's own threads;
+        # the data lock covers the lifecycle-job process too (lock order:
+        # data lock outside, thread lock inside).
+        with data_lock(self.data_dir), self._lock:
+            # The lifecycle-job CLI mutates rows on disk between daemon
+            # requests — refresh the persistent view before the check,
+            # or dedup could act on rows a job already dropped/confirmed.
+            self._refresh_under_lock()
             existing_id = self.by_email.get(owner)
             if existing_id:
                 return self._resubmit(self.rows[existing_id], owner_raw,
@@ -448,13 +703,21 @@ class WaitlistService:
 
     def _create_row(self, owner, owner_raw, muse_contact):
         entry_id = secrets.token_urlsafe(12)
+        submitted = self.clock()
         row = {
             "entry_id": entry_id,
             "owner_email": owner,
             "muse_contact": muse_contact,
             "path": "form",
             "source": "form",
-            "submitted_at": iso_z(self.clock()),
+            "submitted_at": iso_z(submitted),
+            # The drop deadline is fixed at first submission and NEVER
+            # refreshed by re-submits (drop-date semantics: a re-submit
+            # refreshes submitted_at, the confirm link, and the token —
+            # not the 14-day drop clock).
+            "drop_at": iso_z(submitted + timedelta(
+                seconds=DROP_TTL_SECONDS)),
+            "reminder_sent_at": None,
             "confirmed_at": None,
             "status": "pending",
             "email_sends": [],
@@ -474,8 +737,15 @@ class WaitlistService:
         already-confirmed state (WAITLIST_OPERATIONS.md §4: a re-click is
         never an error); a token invalidated by a re-submit renders the
         expired state — that link genuinely no longer works.
+
+        Read-only, but rendered under the data lock with a fresh view:
+        a job (or racing POST) may have consumed/re-minted the token or
+        dropped the row since the daemon's view was loaded, and this page
+        is what the user actually judges the link by.
         """
-        row, status = self._lookup_token_row(token or "")
+        with data_lock(self.data_dir), self._lock:
+            self._refresh_under_lock()
+            row, status = self._lookup_token_row(token or "")
         if status == "invalid":
             return 200, page_expired()
         if row["status"] == "confirmed":
@@ -488,8 +758,13 @@ class WaitlistService:
         """POST /waitlist/confirm — token as form field. Confirms.
 
         The lookup-then-consume is check-then-act — serialized so two
-        racing POSTs of one fresh token can't double-emit `confirmed`."""
-        with self._lock:
+        racing POSTs of one fresh token can't double-emit `confirmed`.
+        (Thread lock inside the data lock — same order as submit_form.)"""
+        with data_lock(self.data_dir), self._lock:
+            # Same staleness concern as submit_form: a job may have
+            # consumed this token (reminder re-mint) or dropped the row
+            # since the daemon's view was loaded.
+            self._refresh_under_lock()
             row, status = self._lookup_token_row(token or "")
             if status == "invalid":
                 return 200, page_expired()
@@ -503,7 +778,9 @@ class WaitlistService:
             row["confirmed_at"] = iso_z(self.clock())
             self._save_row(row)
             self._consume_token(token)  # single-use: this token can never confirm again
-            self._emit("confirmed", row["entry_id"], {"via": "original"})
+            via = ("reminder" if row.get("active_token_kind") == "reminder"
+                   else "original")
+            self._emit("confirmed", row["entry_id"], {"via": via})
             # POST-success renders exactly like already-confirmed, verbatim.
             return 200, page_confirmed()
 
@@ -689,6 +966,10 @@ class _Handler(BaseHTTPRequestHandler):
         fields = self._fields() if path in (
             "/waitlist/form", "/waitlist/confirm") else {}
         if fields is _OVERSIZED:
+            # Engineering deferred blocker (PR #165): on keep-alive
+            # connections the unread remainder of an oversized body would
+            # desync the next request — close instead of persisting.
+            self.close_connection = True
             self._bad_request(413, "Request too large")
             return
         if fields is None:

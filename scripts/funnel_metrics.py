@@ -57,6 +57,7 @@ KNOWN_EVENTS = {
     "confirm_sent",
     "confirmed",
     "reminder_sent",
+    "dropped",
     "invite_sent",
     "claimed",
     # Bridge-line events; not yet emitted by any build (land with signup).
