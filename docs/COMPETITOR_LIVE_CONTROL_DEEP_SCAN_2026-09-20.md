@@ -35,7 +35,7 @@ tests whether that is a real gap or whether competitors cover it incidentally.
 | AgentComputer | Browser/VNC via `computer open --vnc` | CLI + ConnectRPC streaming exec | Start/stop endpoints; file ops on stopped VMs, no runtime charge | VNC + ConnectRPC |
 | TermSquad | None found (no vendor evidence) | Browser Web Terminal + SSH | Stop is a power action; no stopped-state discount published | Not published |
 | Fly.io Sprites | None found | `sprite console` (full TTY), `sprite exec --tty`, detachable sessions | Auto-pause ~30s idle; warm 100–500ms, cold 1–2s; FS persists | Not named by vendor |
-| E2B | Browser desktop, 1 stream at a time | Terminal via SDK/desktop | Pause (FS+memory, resume ≈1s, pause ≈4s/GiB); FS-only cold-boot option | VNC streaming |
+| E2B | Browser desktop, 1 stream at a time | Terminal via SDK/desktop | Pause (FS+memory, resume ≈1s, pause ≈4s/GiB); FS-only cold-boot option | Desktop streaming (SDK) |
 | Daytona | Browser VNC desktop (Xvfb+XFCE+x11vnc+noVNC) | Web Terminal (org members only, STARTED only) | Pause/resume (VM classes only — FS+memory preserved; auto-pause) + stop/archive/delete; auto-stop/auto-archive/auto-delete; FS persists on runner until archived | VNC (noVNC) |
 | Docker Sandboxes | None (local microVM, no browser surface) | CLI shell, SSH/SFTP, terminal dashboard | stop = pause; auto-stop when idle; state persists across stop/restart | Local (no remote transport) |
 
@@ -116,9 +116,9 @@ pause/resume/stop/restart/terminate only. Snapshot needs its own survey pass
 
 ### E2B
 
-- **VERIFIED** — Browser desktop uses explicitly named **VNC streaming**, with
-  interactive or view-only URLs and optional generated-key authentication
-  ([computer-use docs](https://github.com/e2b-dev/docs/blob/HEAD/docs/use-cases/computer-use.mdx)).
+- **VERIFIED** — Browser desktop streams the screen with interactive or
+  view-only URLs and optional generated-key authentication
+  ([desktop repo](https://github.com/e2b-dev/desktop)).
 - **VERIFIED** — SDK limitation: only one stream at a time
   ([desktop repo](https://github.com/e2b-dev/desktop)).
 - **VERIFIED** — Pause preserves filesystem + memory/processes by default;
