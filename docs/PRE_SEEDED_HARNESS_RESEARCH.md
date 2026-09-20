@@ -155,9 +155,15 @@ it must satisfy exactly:
    because the image carries the gate fixture (§4): the gate installs the
    public dummy inference credential and points the probe at the echo host,
    so probe check (a) exercises the full swap path against a fixture; the
-   real tenant key replaces the fixture at provision. A gate failure means
-   the image is broken; a provision-time probe failure means the injected
-   credential is wrong — the two are distinguishable by design.
+   real tenant key replaces the fixture at provision. Fixture lifecycle:
+   the echo-host binding and its `inference-hosts.allow` entry must be
+   torn down when the fixture is replaced — by the image-build gate
+   before publish, or by the provision-time injector when it installs the
+   real key — so no box holding a real credential can ever swap it toward
+   the public echo host (see provision/README.md "Fixture lifecycle"). A
+   gate failure means the image is broken; a provision-time probe failure
+   means the injected credential is wrong — the two are distinguishable
+   by design.
 
 ## 6. Top-3 snags (what still needs a human after R2)
 

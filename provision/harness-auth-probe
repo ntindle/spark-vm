@@ -19,9 +19,11 @@ What it verifies, in order:
       auth-accepted``) the upstream is the real provider and the check
       proves the swapped credential was accepted (any non-401/403).
   (b) confirmd answers -- an HTTPS GET to ``/api/version`` on the confirmd
-      service. ANY HTTP response (200, 401, 403 -- confirmd is an
-      owner-authenticated service) proves the daemon is alive and serving;
-      connection refused / timeout / TLS failure means it is not.
+      service. Any 2xx/3xx/4xx response (200, 401, 403 -- confirmd is an
+      owner-authenticated service, so a refusal is still an answer)
+      proves the daemon is alive and serving; a 5xx means "alive but
+      broken" and fails the check, as do connection refused / timeout /
+      TLS failure.
 
 Environment:
   HARNESS_INFERENCE_PROXY   inference proxy base URL
@@ -84,6 +86,13 @@ for _k in ("no_proxy", "NO_PROXY"):
 def _version(start=None):
     here = os.path.abspath(start or os.path.dirname(__file__))
     d = here if os.path.isdir(here) else os.path.dirname(here)
+    # Strict semver, mirroring scripts/sparkvm_version.py (the probe
+    # deploys standalone and cannot import repo modules -- same pattern
+    # as confirmd). Anything else yields 0.0.0-unknown.
+    semver = re.compile(
+        r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+        r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+        r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$")
     for _ in range(8):
         cand = os.path.join(d, "VERSION")
         try:
@@ -91,7 +100,7 @@ def _version(start=None):
                 v = f.read().strip().split()[0]
         except OSError:
             v = None
-        if v and re.match(r"^\d+\.\d+\.\d+", v):
+        if v and semver.match(v):
             return v
         parent = os.path.dirname(d)
         if parent == d:
@@ -244,6 +253,8 @@ def _check_inference(proxy, upstream, path, placeholder, expect, timeout):
         status = e.code
         try:
             body = _read_capped(e).decode("utf-8", "replace")
+        except _Deadline:
+            raise
         except Exception:
             body = ""
     except urllib.error.URLError as e:
@@ -265,13 +276,13 @@ def _check_inference(proxy, upstream, path, placeholder, expect, timeout):
         if status in (401, 403):
             return False, dict(
                 detail,
-                error="upstream refused the swapped credential "
-                      "(HTTP %d) -- injected credential is wrong" % status,
+                error="upstream or proxy refused the swapped credential "
+                      "(HTTP %d) -- the injected credential is wrong or "
+                      "the proxy refused the request" % status,
             )
         return True, dict(detail, note="swapped credential accepted (HTTP %d)" % status)
 
-    if expect != "echo":
-        return False, dict(detail, error="unknown HARNESS_PROBE_EXPECT=%r" % expect)
+    # Gate mode from here on: expect was validated to be "echo" in main().
 
     # Gate mode: the upstream is the public echo fixture. The swap path is
     # proven when (1) the echo host answers 200, (2) the Authorization it
@@ -339,7 +350,14 @@ def _check_confirmd(base_url, timeout):
         raise
     except Exception as e:  # noqa: BLE001 -- report, never crash
         return False, dict(detail, error="%s: %s" % (e.__class__.__name__, e))
-    # Any HTTP response proves confirmd is up and serving.
+    # An HTTP response proves the daemon is alive and serving -- except a
+    # 5xx, which is "alive but broken": the approvals path is not up, so
+    # the readiness check fails. (401/403 are confirmd's auth gate
+    # answering strangers -- that IS an answer.)
+    if status >= 500:
+        return False, dict(detail, status=status,
+                           error="confirmd answered HTTP %d -- "
+                                 "the approvals path is not healthy" % status)
     return True, dict(detail, status=status,
                       note="confirmd answered HTTP %d" % status)
 
@@ -349,8 +367,14 @@ def _check_confirmd(base_url, timeout):
 
 def main(argv=None):
     # Zero prompts, ever: if stdin is a terminal someone might be about to
-    # type into us. Refuse loudly instead of hanging on a read.
-    if sys.stdin.isatty():
+    # type into us. Refuse loudly instead of hanging on a read. Closed
+    # stdin (sys.stdin is None under 0<&-) is in-contract -- it is not a
+    # TTY, so the probe proceeds.
+    try:
+        stdin_is_tty = sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        stdin_is_tty = False
+    if stdin_is_tty:
         sys.stderr.write(
             "harness-auth-probe: refusing to run with a TTY on stdin -- "
             "run as `</dev/null timeout 10 harness-auth-probe`\n"
@@ -363,8 +387,17 @@ def main(argv=None):
         proxy = os.environ.get("HARNESS_INFERENCE_PROXY") or "http://127.0.0.1:18081"
         upstream = os.environ.get("HARNESS_PROBE_UPSTREAM") or "http://httpbin.org"
         path = os.environ.get("HARNESS_PROBE_PATH") or "/headers"
+        if not path.startswith("/"):
+            # "headers" would build "http://host:portheaders" and fail
+            # opaquely as a connection error -- fail loud instead.
+            raise _Misuse("HARNESS_PROBE_PATH must start with '/': %r" % path)
         placeholder = os.environ.get("HARNESS_INFERENCE_PLACEHOLDER") or "hsurr:llm-api"
         expect = os.environ.get("HARNESS_PROBE_EXPECT") or "echo"
+        if expect not in ("echo", "auth-accepted"):
+            # Bad env, not a failed check: a harness gate branching on
+            # exit codes must not misclassify a config typo.
+            raise _Misuse(
+                "HARNESS_PROBE_EXPECT must be 'echo' or 'auth-accepted': %r" % expect)
         confirmd_url = _confirmd_url()
     except _Misuse as e:
         sys.stderr.write("harness-auth-probe: %s\n" % e)
@@ -378,7 +411,9 @@ def main(argv=None):
     }
 
     signal.signal(signal.SIGALRM, _on_deadline)
-    signal.alarm(int(deadline) if deadline == int(deadline) else int(deadline) + 1)
+    # Floor, never round up: the external `timeout 10` is the hard cap, so
+    # the internal deadline must stay strictly inside it.
+    signal.alarm(max(1, int(deadline)))
     try:
         ok_a, detail_a = _check_inference(
             proxy, upstream, path, placeholder, expect, http_timeout)
@@ -401,16 +436,27 @@ def main(argv=None):
     except _Deadline:
         report["checks"]["deadline"] = {
             "ok": False, "detail": {"error": "internal deadline hit"}}
-        sys.stdout.write(json.dumps(report) + "\n")
-        sys.stdout.flush()
-        return EXIT_DEADLINE
+        return _emit(report, EXIT_DEADLINE)
     finally:
         signal.alarm(0)
 
     report["ok"] = all(c["ok"] for c in report["checks"].values())
-    sys.stdout.write(json.dumps(report) + "\n")
-    sys.stdout.flush()
-    return EXIT_OK if report["ok"] else EXIT_CHECK_FAILED
+    return _emit(report, EXIT_OK if report["ok"] else EXIT_CHECK_FAILED)
+
+
+def _emit(report, code):
+    """Write the one JSON report line. A closed stdout must not produce a
+    traceback with a misleading exit code: fail loud as misuse instead."""
+    try:
+        sys.stdout.write(json.dumps(report) + "\n")
+        sys.stdout.flush()
+    except (OSError, AttributeError, ValueError):
+        sys.stderr.write(
+            "harness-auth-probe: cannot write the JSON report -- "
+            "stdout is closed or unwritable\n"
+        )
+        return EXIT_MISUSE
+    return code
 
 
 if __name__ == "__main__":

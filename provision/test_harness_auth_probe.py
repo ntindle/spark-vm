@@ -22,7 +22,11 @@ import pytest
 PROBE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                      "harness-auth-probe")
 PLACEHOLDER = "hsurr:llm-api"
-FIXTURE_DUMMY = "gate-fixture-dummy-not-a-secret"
+# The stub proxy's stand-in for the swapped-in credential. This MUST be the
+# same value install-gate-fixture.sh installs (FIXTURE_DUMMY there) -- the
+# dummy is public by design, and the two files drift silently if the values
+# ever diverge. (The probe itself only ever sees the placeholder name.)
+FIXTURE_DUMMY = "GATE-FIXTURE-DUMMY-NOT-A-SECRET"
 
 
 def _free_port():
@@ -118,6 +122,38 @@ class _HangHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         # Never answer: exercises the probe's internal deadline.
         threading.Event().wait(30)
+
+    def log_message(self, *a):
+        pass
+
+
+class _ConfigurableEchoHandler(BaseHTTPRequestHandler):
+    """Echo stand-in with a canned body, for negative parse paths."""
+    body = b""
+    content_type = "application/json"
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", self.content_type)
+        self.send_header("Content-Length", str(len(self.body)))
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, *a):
+        pass
+
+
+class _ConfirmdStatusHandler(BaseHTTPRequestHandler):
+    """confirmd stand-in answering any configured status."""
+    status = 200
+
+    def do_GET(self):
+        body = b'{"error":"boom"}' if self.status >= 500 else b'{"version":"x"}'
+        self.send_response(self.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, *a):
         pass
@@ -220,6 +256,9 @@ def test_https_confirmd_unverified_tls(echo, confirmd):
         cf.write(cert.public_bytes(serialization.Encoding.PEM))
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cf.name, kf.name)
+    # Wrapping after serve_forever started is benign: it replaces the
+    # listening socket object in place (same fd, selector unaffected) and
+    # no connection can exist yet -- the probe only runs below.
     confirmd.socket = ctx.wrap_socket(confirmd.socket, server_side=True)
     try:
         proxy = _serve(_SwapProxyHandler, echo_port=echo.server_address[1], swap=True)
@@ -253,7 +292,7 @@ def test_unswapped_placeholder_fails(echo, confirmd):
         proxy.shutdown()
     assert proc.returncode == 1
     detail = report["checks"]["inference"]["detail"]
-    assert detail["ok"] is False if "ok" in detail else True
+    assert report["checks"]["inference"]["ok"] is False
     assert "UNSWAPPED" in detail.get("error", "")
 
 
@@ -353,3 +392,137 @@ def test_confirmd_url_not_derivable_without_tailscale():
     )
     assert proc.returncode == 2
     assert b"HARNESS_CONFIRMD_URL" in proc.stderr
+
+
+def test_bad_expect_is_misuse(echo, confirmd):
+    # A typo'd HARNESS_PROBE_EXPECT is bad env (exit 2), not a failed
+    # check (exit 1): a harness gate branching on exit codes must not
+    # misclassify a config typo.
+    proxy = _serve(_SwapProxyHandler, echo_port=echo.server_address[1], swap=True)
+    try:
+        env = _base_env(echo, confirmd, proxy.server_address[1])
+        env["HARNESS_PROBE_EXPECT"] = "ECHO"
+        proc, _ = _run_probe(env)
+    finally:
+        proxy.shutdown()
+    assert proc.returncode == 2
+    assert b"HARNESS_PROBE_EXPECT" in proc.stderr
+
+
+def test_bad_probe_path_is_misuse(echo, confirmd):
+    # "headers" without a leading slash would build
+    # "http://host:portheaders" and fail opaquely -- refuse loudly.
+    proxy = _serve(_SwapProxyHandler, echo_port=echo.server_address[1], swap=True)
+    try:
+        env = _base_env(echo, confirmd, proxy.server_address[1])
+        env["HARNESS_PROBE_PATH"] = "headers"
+        proc, _ = _run_probe(env)
+    finally:
+        proxy.shutdown()
+    assert proc.returncode == 2
+    assert b"HARNESS_PROBE_PATH" in proc.stderr
+
+
+def test_closed_stdout_is_misuse(echo, confirmd):
+    # Closed stdout must not produce a traceback with a misleading
+    # exit code: fail loud as misuse (exit 2).
+    def _close_stdout():
+        os.close(1)
+
+    proxy = _serve(_SwapProxyHandler, echo_port=echo.server_address[1], swap=True)
+    try:
+        env = dict(os.environ)
+        env.update(_base_env(echo, confirmd, proxy.server_address[1]))
+        proc = subprocess.run(
+            [sys.executable, PROBE],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,  # closed in the child by preexec_fn
+            stderr=subprocess.PIPE,
+            timeout=30,
+            env=env,
+            preexec_fn=_close_stdout,
+        )
+    finally:
+        proxy.shutdown()
+    assert proc.returncode == 2
+    assert b"Traceback" not in proc.stderr
+    assert b"stdout" in proc.stderr
+
+
+def test_closed_stdin_proceeds(echo, confirmd):
+    # Closed stdin (0<&-) is in-contract: it is not a TTY, so the probe
+    # must run to completion, not crash on sys.stdin.isatty().
+    def _close_stdin():
+        os.close(0)
+
+    proxy = _serve(_SwapProxyHandler, echo_port=echo.server_address[1], swap=True)
+    try:
+        env = dict(os.environ)
+        env.update(_base_env(echo, confirmd, proxy.server_address[1]))
+        proc = subprocess.run(
+            [sys.executable, PROBE],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            env=env,
+            preexec_fn=_close_stdin,
+        )
+    finally:
+        proxy.shutdown()
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert b"Traceback" not in proc.stderr
+
+
+def test_echo_html_body_fails(echo, confirmd):
+    html_echo = _serve(_ConfigurableEchoHandler,
+                       body=b"<html>not json</html>",
+                       content_type="text/html")
+    try:
+        proxy = _serve(_SwapProxyHandler,
+                       echo_port=html_echo.server_address[1], swap=True)
+        try:
+            env = _base_env(echo, confirmd, proxy.server_address[1])
+            proc, report = _run_probe(env)
+        finally:
+            proxy.shutdown()
+    finally:
+        html_echo.shutdown()
+    assert proc.returncode == 1
+    assert "did not return JSON" in report["checks"]["inference"]["detail"]["error"]
+
+
+def test_echo_missing_headers_key_fails(echo, confirmd):
+    json_echo = _serve(_ConfigurableEchoHandler, body=b'{"ok":true}')
+    try:
+        proxy = _serve(_SwapProxyHandler,
+                       echo_port=json_echo.server_address[1], swap=True)
+        try:
+            env = _base_env(echo, confirmd, proxy.server_address[1])
+            proc, report = _run_probe(env)
+        finally:
+            proxy.shutdown()
+    finally:
+        json_echo.shutdown()
+    assert proc.returncode == 1
+    # A JSON body with no "headers" key means no Authorization was seen.
+    assert "saw no Authorization header" in report["checks"]["inference"]["detail"]["error"]
+
+
+def test_confirmd_500_fails_check(echo, confirmd):
+    # 5xx is "alive but broken": the approvals path is not up.
+    broken = _serve(_ConfirmdStatusHandler, status=500)
+    try:
+        proxy = _serve(_SwapProxyHandler,
+                       echo_port=echo.server_address[1], swap=True)
+        try:
+            env = _base_env(echo, confirmd, proxy.server_address[1])
+            env["HARNESS_CONFIRMD_URL"] = "http://127.0.0.1:%d" % broken.server_address[1]
+            proc, report = _run_probe(env)
+        finally:
+            proxy.shutdown()
+    finally:
+        broken.shutdown()
+    assert proc.returncode == 1
+    assert report["checks"]["inference"]["ok"] is True
+    assert report["checks"]["confirmd"]["ok"] is False
+    assert "not healthy" in report["checks"]["confirmd"]["detail"]["error"]
