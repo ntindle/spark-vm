@@ -28,10 +28,10 @@ watch the repo can follow it without reading every PR.
   names the merged commit or PR number; readers can verify in seconds.
 - **No hosted-launch promises.** spark-vm's hosted product is not live.
   Updates describe the open-source project and self-hosting. Never mention
-  pricing, availability, sign-ups, or a launch date — those are marketing-gate
-  commitments that ship only when the launch itself is executable
-  (see `docs/POSITIONING.md` anti-claims).
-- **No session-clock claims for free anything.** Same gate, same reason.
+  pricing, availability, sign-ups, or a launch date — we talk about those only
+  when we can actually ship the launch (see `docs/POSITIONING.md` anti-claims).
+- **No session-clock claims for free anything.** Same gate, same reason (no
+  promises about how much free usage anyone gets).
 - One line of plain English per item; no internal jargon (no audit-finding
   numbers, harness script names, or loop internals).
 - Cap at eight bullets. If more shipped, fold the rest into "plus N more"
@@ -62,14 +62,14 @@ Built from the 2026-09-20 commits on `main`:
 ```
 build log time. spark-vm's been busy:
 
-• image-build manifest now refuses dirty checkouts — provenance is fail-closed (d72c67f)
-• competitor delta watch: Docker 0.43.0 + 0.42.0 config notes, CVE record extensions (#152)
-• codec-licensing diligence for the live-machine-control desktop transport (#145)
-• strategy rotation audit: today's review findings and proposals (bccf9c9)
-• funnel query pack: log-derived weekly waitlist report, no cookies, no trackers (#141)
-• contributor PR template so entries land with the changelog bullet (.github/pull_request_template.md, #139)
-• first slice of pre-seeded R2 golden-image support: auth probe + image manifest (#124)
-• launch-post demo asset 3: the persistence pair — same desktop, days apart (#137)
+• image builds now refuse dirty checkouts — every image has clean provenance (d72c67f)
+• Docker 0.43.0 + 0.42.0 config notes folded in, CVE records extended (#152)
+• checked codec-licensing options for streaming the remote desktop (#145)
+• another audit rotation through open findings and proposals (bccf9c9)
+• log-derived weekly waitlist report — no cookies, no trackers (#141)
+• contributor PR template so changelog entries land with the PR (#139)
+• test-harness groundwork: auth probe plus a known-good image manifest (#124)
+• new demo asset: the same desktop, days apart — the persistence pair (#137)
 
 repo's public, contributors welcome: https://github.com/ntindle/spark-vm
 ```
@@ -77,6 +77,6 @@ repo's public, contributors welcome: https://github.com/ntindle/spark-vm
 ## For contributors
 
 If your PR merged and it isn't in an update you expected, the most likely
-reason is the silence rule (§2) — the update fires only on days with new
+reason is the silence rule (rule 2) — the update fires only on days with new
 merged commits, and picks the day's most interesting ones. Every merged PR is
 also recorded in `CHANGELOG.md`, which is the permanent record.
