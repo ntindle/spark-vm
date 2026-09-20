@@ -3,38 +3,38 @@
 The `docs/` tree is the project's long-form memory: strategy research,
 hosted-product design, and contributor process. It has grown past
 browsing-by-guessing, so this index is the map — grouped by what you're
-trying to do, with the newest corpus work first.
+trying to do, with the dated corpora newest-first.
 
-If you only read one thing per group, read the **start here** pick.
+If you only read one thing per group, read the **start here** pick —
+the one row per group marked that way.
 
 ## Start here (contributors)
 
 | Doc | What it is |
 | --- | ---------- |
-| [POSITIONING.md](POSITIONING.md) | The canonical copy bank: headline, differentiators, proof points, anti-claims, one-liners. Start here if you'll write *any* outward-facing copy about spark-vm. |
+| [POSITIONING.md](POSITIONING.md) | **(start here)** The canonical copy bank: headline, differentiators, proof points, anti-claims, one-liners. Start here if you'll write *any* outward-facing copy about spark-vm. |
 | [TRUST_TRANSPARENCY.md](TRUST_TRANSPARENCY.md) | The trust posture in one place: what the agent can touch, the secrets-swapping proxy, deliberately exposed host surfaces, and vendor-trust attestations. |
 | [CI.md](CI.md) | What runs in CI on every PR and how to reproduce it locally. |
 | [VERSIONING.md](VERSIONING.md) | How versions are cut, what the changelog ritual demands, and release mechanics. |
 | [OSS_CONTRIBUTOR_GAP_ANALYSIS.md](OSS_CONTRIBUTOR_GAP_ANALYSIS.md) | What a contributor hits on day one vs what the repo offers — the contributor-UX gap list. |
-| [MUSEBOOK_UPDATES.md](MUSEBOOK_UPDATES.md) | The cadence contract for Spark's build updates on musebook.lol: format, honesty rules, sample post. |
 
 ## Hosted-product design (the roadmap, in spec form)
 
-These are design documents, not commitments — they describe the hosted
+These are design documents, specs, copy, and gap lists — not commitments.
 vision the loop is working toward. Open-source/self-hosted is the
 primary product; hosted work is framed so the self-hosted path keeps
 working.
 
 | Doc | What it is |
 | --- | ---------- |
-| [HOSTED_GAP_ANALYSIS.md](HOSTED_GAP_ANALYSIS.md) | Vision vs repo state: the master gap list for the hosted product. |
+| [HOSTED_GAP_ANALYSIS.md](HOSTED_GAP_ANALYSIS.md) | **(start here)** Vision vs repo state: the master gap list for the hosted product. |
 | [DAY_ONE_GAP_ANALYSIS.md](DAY_ONE_GAP_ANALYSIS.md) | What a tenant Muse needs on day one vs what the repo has. |
 | [HOSTED_SIGNUP_ONBOARDING.md](HOSTED_SIGNUP_ONBOARDING.md) | End-to-end signup UX for another Muse: discover → sign up → identity → provisioned box. |
 | [HOSTED_SIGNUP_WEB_UI.md](HOSTED_SIGNUP_WEB_UI.md) | Build spec for the hosted signup web UI + human dashboard (H15). |
 | [FIRST_RUN_ACTIVATION.md](FIRST_RUN_ACTIVATION.md) | The hosted first-run activation design. |
 | [FIRST_TEN_MINUTES_SPEC.md](FIRST_TEN_MINUTES_SPEC.md) | The exact hosted first run, minute by minute (R1). |
 | [FUNNEL_MEASUREMENT.md](FUNNEL_MEASUREMENT.md) | What gets measured through the funnel, and how. |
-| [LANDING_PAGE_COPY.md](LANDING_PAGE_COPY.md) | Hosted landing page copy + conversion flow. |
+| [LANDING_PAGE_COPY.md](LANDING_PAGE_COPY.md) | Hosted landing page copy + conversion flow (design thinking, not published copy). |
 | [LAUNCH_POST.md](LAUNCH_POST.md) | The public launch announcement copy (self-hosted framed). |
 | [PRICING_THINKING.md](PRICING_THINKING.md) | Pricing design thinking, explicitly not a commitment. |
 | [WAITLIST_OPERATIONS.md](WAITLIST_OPERATIONS.md) | Waitlist ops spec: confirm flows, reminder/drop jobs, funnel events. |
@@ -51,7 +51,7 @@ follow-up tickets before treating anything as current intent.
 
 | Doc | What it is |
 | --- | ---------- |
-| [REMOTE_DESKTOP_TRANSPORT_RESEARCH.md](REMOTE_DESKTOP_TRANSPORT_RESEARCH.md) | Remote-desktop transport options for live machine control (#47). |
+| [REMOTE_DESKTOP_TRANSPORT_RESEARCH.md](REMOTE_DESKTOP_TRANSPORT_RESEARCH.md) | **(start here)** Remote-desktop transport options for live machine control (#47). |
 | [CODEC_LICENSING_RESEARCH.md](CODEC_LICENSING_RESEARCH.md) | Codec licensing for the live-machine-control surface. |
 | [GPU_PATH_RESEARCH.md](GPU_PATH_RESEARCH.md) | GPU options for the box. |
 | [SECRETS_POSTURE_RESEARCH.md](SECRETS_POSTURE_RESEARCH.md) | How agent-sandbox vendors handle credentials — what to copy, what to avoid. |
@@ -69,12 +69,12 @@ as historical.
 
 | Doc | What it is |
 | --- | ---------- |
-| [COMPETITOR_LIVE_CONTROL_DEEP_SCAN_2026-09-20.md](COMPETITOR_LIVE_CONTROL_DEEP_SCAN_2026-09-20.md) | Six-provider deep-scan of live machine control vs #47 (AgentComputer, TermSquad, Fly.io Sprites, E2B, Daytona, Docker Sandboxes). |
+| [COMPETITOR_LIVE_CONTROL_DEEP_SCAN_2026-09-20.md](COMPETITOR_LIVE_CONTROL_DEEP_SCAN_2026-09-20.md) | **(start here)** Six-provider deep-scan of live machine control vs #47 (AgentComputer, TermSquad, Fly.io Sprites, E2B, Daytona, Docker Sandboxes). |
 | [COMPETITOR_WATCH_2026-09-20.md](COMPETITOR_WATCH_2026-09-20.md) | Latest morning competitor watch. |
 | [COMPETITOR_WATCH_2026-09-19_EVENING.md](COMPETITOR_WATCH_2026-09-19_EVENING.md) | Competitor watch, 2026-09-19 evening. |
 | [COMPETITOR_WATCH_2026-09-18.md](COMPETITOR_WATCH_2026-09-18.md) | Competitor watch, 2026-09-18 evening. |
 | [COMPETITOR_ANALYSIS.md](COMPETITOR_ANALYSIS.md) | The September 2026 baseline competitor analysis. |
-| [archive/competitor-watch/](archive/competitor-watch/) | Earlier 2026-09-19 watch passes (morning, midday, evening). |
+| [archive/competitor-watch/](archive/competitor-watch/) (folder) | Earlier 2026-09-19 watch passes (morning, midday, evening). |
 
 ## Loop governance
 
@@ -83,10 +83,11 @@ interest if you're working *on* the loop itself.
 
 | Doc | What it is |
 | --- | ---------- |
-| [LOOP_ROTATION_AUDIT_2026-09-20.md](LOOP_ROTATION_AUDIT_2026-09-20.md) | Latest rotation audit (2026-09-20). |
+| [LOOP_ROTATION_AUDIT_2026-09-20.md](LOOP_ROTATION_AUDIT_2026-09-20.md) | **(start here)** Latest rotation audit (2026-09-20). |
 | [LOOP_ROTATION_AUDIT_2026-09-19_AFTERNOON.md](LOOP_ROTATION_AUDIT_2026-09-19_AFTERNOON.md) | Rotation audit, 2026-09-19 afternoon. |
 | [LOOP_ROTATION_AUDIT_2026-09-19.md](LOOP_ROTATION_AUDIT_2026-09-19.md) | Rotation audit, 2026-09-19. |
 | [LOOP_ROTATION_AUDIT.md](LOOP_ROTATION_AUDIT.md) | Rotation audit, 2026-09-18 (first). |
+| [MUSEBOOK_UPDATES.md](MUSEBOOK_UPDATES.md) | The cadence contract for Spark's build updates on musebook.lol: format, honesty rules, sample post. |
 
 ## Keeping this index honest
 
