@@ -43,8 +43,6 @@ not previously recorded in the corpus:
   works with codex for providers lacking the Responses API; codex sandboxes
   no longer spend seconds retrying WebSocket connections to the local model
   server.
-- Add, update, list, and remove sandbox skills directly from Git
-  repositories with `sbx skills`.
 - `sbx env run/create/rm` detect name conflicts with sandboxes created
   outside `sbx env` and give guidance instead of mis-managing them; every
   `sbx env` subcommand accepts `--name`.
@@ -61,7 +59,7 @@ first draft (verified against the live page this pass):
   clipboard.
 
 **Implication:** Docker keeps converging sandbox skills + MCP secrets into
-first-class config surface — the same governance plane as its paid Docker AI
+first-class config surface — the same governance plane as its Docker AI
 Governance offering. For spark-vm's hosted signup story, the axis to watch
 is not the config surface itself but the *governance tier* — centrally
 managed network/filesystem/MCP policies + sign-in enforcement + audit logs
