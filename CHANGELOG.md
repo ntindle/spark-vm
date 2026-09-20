@@ -46,7 +46,7 @@ This changelog only works if entries land with the change, not after it:
   key and data dir come from environment variables, never the repo. Still
   not deployable: reminder/drop jobs, the email-parsing path, invites,
   and forget-me land next; the page ships only when the full
-  waitlist-operations checklist is green (PR number TBD)
+  waitlist-operations checklist is green (#165)
 - Waitlist page build, slice 1: the static front end of the waitlist-era web
   surface — the landing page typeset from the approved launch copy, a
   dedicated `/waitlist` form page with the abuse-resistant signup form
