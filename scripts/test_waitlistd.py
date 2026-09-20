@@ -52,6 +52,22 @@ KEY = b"test-hmac-key-32-bytes-long-000000"
 NOW = datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc)
 
 
+class TickClock:
+    """A controllable clock that advances one step per call. The default
+    frozen clock ties queued_at for same-second sends, which leaves
+    spool_docs_newest_first() undefined — tests that order two sends must
+    tick instead."""
+
+    def __init__(self, start=NOW, step_seconds=1):
+        self.t = start
+        self.step = timedelta(seconds=step_seconds)
+
+    def __call__(self):
+        cur = self.t
+        self.t = self.t + self.step
+        return cur
+
+
 def make_service(**kw):
     tmp = tempfile.mkdtemp(prefix="waitlistd-test-")
     clock = kw.pop("clock", None)
@@ -200,7 +216,9 @@ def test_email_normalization_and_plus_tag_dedup():
 
 
 def test_resubmit_pending_refreshes_and_invalidates_old_token():
-    svc, tmp = make_service()
+    # Two sends happen within the same frozen second under the default
+    # clock — tick so spool_docs_newest_first() is deterministic.
+    svc, tmp = make_service(clock=TickClock())
     svc.submit_form(form_fields("nina@example.com"), "1.2.3.4")
     token1, _ = extract_token_from_spool(tmp)
     svc.submit_form(form_fields("nina@example.com"), "1.2.3.4")
@@ -264,7 +282,7 @@ def test_get_pending_renders_button_and_changes_nothing():
     spool_before = spool_files(tmp)
     status, body = svc.confirm_get(token)
     assert status == 200
-    assert "Confirm this address" in body
+    assert "Yes, hold my place." in body
     assert "nin…" in body  # masked owner line
     assert "nina@example.com" not in body  # never the full address
     assert "each invite holds for 14 days" in body
@@ -325,7 +343,7 @@ def test_get_on_consumed_token_renders_already_confirmed():
     status, body = svc.confirm_get(token)
     assert status == 200
     assert "You\u2019re on the list" in body
-    assert "Confirm this address" not in body  # no button
+    assert "Yes, hold my place." not in body  # no button
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +400,11 @@ def test_masked_owner_short_local_part():
     svc.submit_form(form_fields("ab@x.io"), "1.2.3.4")
     token, _ = extract_token_from_spool(tmp)
     _, body = svc.confirm_get(token)
-    assert "ab…" in body
+    # FUNNEL_MEASUREMENT.md §4.2: a <3-char local part masks fully — the
+    # full local part must never be disclosed.
+    assert "•••" in body
+    assert "ab@" not in body
+    assert "ab…" not in body
 
 
 def test_pages_carry_no_page_js_and_escape_user_content():
@@ -414,7 +436,9 @@ def test_emitted_events_parse_with_funnel_metrics():
         "funnel_metrics", os.path.join(SCRIPTS, "funnel_metrics.py"))
     fm = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fm)
-    svc, tmp = make_service()
+    # Two sends within one frozen second tie queued_at — tick so the
+    # newest-first ordering is deterministic.
+    svc, tmp = make_service(clock=TickClock())
     svc.submit_form(form_fields("a@example.com"), "1.1.1.1")
     svc.submit_form(form_fields("b@example.com"), "2.2.2.2")
     # The newest spooled email carries b@example.com's live token.
@@ -478,7 +502,7 @@ def test_http_round_trip(live_server):
     token, _ = extract_token_from_spool(tmp)
     status, body = _get(port, "/waitlist/confirm?token=" +
                         urllib.parse.quote(token))
-    assert status == 200 and "Confirm this address" in body
+    assert status == 200 and "Yes, hold my place." in body
     # Token in the QUERY STRING must not confirm on POST.
     status, body = _post(port, "/waitlist/confirm?token=" +
                          urllib.parse.quote(token), {})
@@ -490,6 +514,26 @@ def test_http_round_trip(live_server):
     assert _get(port, "/nope")[0] == 404
     assert _get(port, "/waitlist/form")[0] == 404
     assert _get(port, "/waitlist/position?email=x@y.z")[0] == 404
+
+
+def test_confirm_page_strips_preview_metadata(live_server):
+    # FUNNEL_MEASUREMENT.md §4.2: the confirm page is fetched by scanners and
+    # unfurlers — Referrer-Policy + X-Robots-Tag must be HTTP headers (a meta
+    # robots tag alone does not reach them), and no OG/Twitter tags may ship.
+    port, tmp = live_server
+    _post(port, "/waitlist/form", {
+        "owner_email": "live2@example.com", "muse_email": "",
+        "website": "", "rendered_at": str(time.time() - 10)})
+    token, _ = extract_token_from_spool(tmp)
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/waitlist/confirm?token=" +
+                 urllib.parse.quote(token))
+    resp = conn.getresponse()
+    assert resp.getheader("Referrer-Policy") == "no-referrer"
+    assert resp.getheader("X-Robots-Tag") == "noindex, nofollow"
+    body = resp.read().decode("utf-8")
+    assert "og:" not in body
+    assert "twitter:" not in body
 
 
 def test_cli_config_fail_closed(tmp_path):

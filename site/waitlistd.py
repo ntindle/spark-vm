@@ -25,9 +25,10 @@ Design decisions (all per the cited specs, no improvisation):
 - GET /waitlist/confirm never changes state: no row writes, no token
   consumption, no funnel events, no spool writes (FUNNEL_MEASUREMENT.md
   §4 — the mail-scanner threat model).
-- Confirm-page copy is verbatim from docs/FUNNEL_MEASUREMENT.md §4.3
-  (four states). Masked owner line: first 3 chars of the local part +
-  "…" (HOSTED_SIGNUP_WEB_UI.md §4.3).
+- Confirm-page copy is verbatim from docs/FUNNEL_MEASUREMENT.md §§4.2–4.3
+  (the button page shape — headline, masked line, "Yes, hold my place." —
+  and the four states' copy). Short-local-part masking renders fully
+  (•••) per §4.2; the mask never discloses the full local part.
 - The confirm-email body is the WAITLIST_OPERATIONS.md §4 DRAFT for
   path B (the form path; path A lands with the email parser).
 - Honeypot trips and time-trap failures are accepted SILENTLY: HTTP 200
@@ -173,8 +174,12 @@ def normalize_email(addr: str):
 
 
 def masked_owner(normalized: str) -> str:
-    """First 3 chars of the local part + ellipsis (HOSTED_SIGNUP_WEB_UI.md §4.3)."""
+    """First 3 chars of the local part + ellipsis — except a local part
+    shorter than 3 chars, which renders fully masked (FUNNEL_MEASUREMENT.md
+    §4.2: the mask never discloses the full local part at any length)."""
     local = normalized.split("@", 1)[0]
+    if len(local) < 3:
+        return "•••"
     return f"{local[:3]}…"
 
 
@@ -518,14 +523,17 @@ def page_pending_button(token, masked):
     tok = html.escape(token, quote=True)
     who = html.escape(masked, quote=True)
     return PAGE_SHELL.format(
-        title="Confirm your waitlist spot",
+        title="Confirm your spot",
         body=(
-            "<h1>Confirm your waitlist spot</h1>"
-            f"<p>Confirming the address <strong>{who}</strong>.</p>"
+            # Headline + button verbatim from docs/FUNNEL_MEASUREMENT.md §4.2:
+            # "Confirm your spot — you're joining as `<masked>`", one button
+            # "Yes, hold my place."
+            "<h1>Confirm your spot — you\u2019re joining as "
+            f"<strong>{who}</strong></h1>"
             "<p>" + html.escape(COPY_PENDING_LINE) + "</p>"
             '<form action="/waitlist/confirm" method="post">'
             f'<input type="hidden" name="token" value="{tok}">'
-            "<button type=\"submit\">Confirm this address</button>"
+            '<button type="submit">Yes, hold my place.</button>'
             "</form>"
             "<p class=\"muted\">No card is required for the waitlist, and this "
             "confirmation doesn\u2019t commit you to anything.</p>"
@@ -571,6 +579,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        # FUNNEL_MEASUREMENT.md §4.2: the confirm page is fetched by scanners
+        # and unfurlers — strip preview metadata and the referrer at the
+        # HTTP layer (the meta robots tag alone does not reach them).
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Robots-Tag", "noindex, nofollow")
         self.end_headers()
         self.wfile.write(data)
 
