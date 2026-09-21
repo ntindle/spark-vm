@@ -37,6 +37,15 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch 2026-09-21 evening (docs/COMPETITOR_WATCH_2026-09-21_EVENING.md):
+  quiet window — zero in-window deltas across the tracked set since the
+  afternoon pass; one pre-window miss filed as watch item C18
+  (h-sandbox/"Harakiri Sandbox" — open-source self-hosted sandbox
+  control plane launched 2026-09-09, with a host-bound-egress credential
+  vault and an OpenSandbox execution adapter, the closest open-source
+  shape to spark-vm's secrets posture); AgentComputer's "unverifiable"
+  egress posture refined to a stronger negative (real product with real
+  pricing, still no stated egress policy). (#TBD)
 - Approvals-plane gap analysis: a new doc walks the full path from a gated
   action to a human answer and back (refusal → filing → pending → human
   answer UX → push summons → terminal decision delivery → audit trail),
