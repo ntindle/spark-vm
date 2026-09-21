@@ -96,7 +96,9 @@ def test_help_branch_precedes_all_side_effects():
 
 @pytest.mark.parametrize("mutant", [
     # Process substitution executes a command without "$(" or a backtick;
-    # each of these ran real commands in bash AND passed the old gate.
+    # each of these ran real commands in bash and evaded the old
+    # substitution pre-check (the last two were caught by the old
+    # pattern check, which is exactly why the pre-check is the fix).
     "for a in <(touch /tmp/pw4); do X=1; done",
     "for a in x <(touch /tmp/pw5); do X=1; done",
     "for a in >(touch /tmp/pw6); do X=1; done",
