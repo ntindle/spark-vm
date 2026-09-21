@@ -596,6 +596,11 @@ def test_error_taxonomy_pinned():
         "INVALID_TRANSITION", "UNSUPPORTED", "WAKE_FAILED", "WAKE_TIMEOUT",
         "TERMINAL", "NOT_RUNNABLE", "ATTESTATION_FAILED", "INVALID_ARGUMENT", "PROVISION_FAILED",
     }
+    # Same rename-breaks-loudly protection for the F2 resume-path surface
+    # (QA round-2 discrimination note).
+    assert {k.name: k.value for k in pi.WakeKind} == {
+        "WARM": "warm", "COLD": "cold", "REPROVISIONED": "reprovisioned",
+    }
 
 
 def test_nonpositive_timeout_rejected():
