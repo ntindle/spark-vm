@@ -98,12 +98,45 @@ def test_recovery_literal_is_shell_inert(cli):
 
 
 def test_banner_cleared_predicate(cli):
-    assert cli._pane_banner_cleared("some output\n❯ ")
-    assert cli._pane_banner_cleared("❯ /resume --last")
-    assert not cli._pane_banner_cleared(BANNER_PANE)
-    assert not cli._pane_banner_cleared("")
+    assert cli._pane_banner_cleared("some output\n❯ ", "muse")
+    # Our own unsubmitted echo of the recovery command (the TUI swallowed
+    # the Enter) is not a cleared banner: the banner screen is still up.
+    assert not cli._pane_banner_cleared("❯ /resume --last", "muse")
+    assert not cli._pane_banner_cleared(BANNER_PANE, "muse")
+    assert not cli._pane_banner_cleared("", "muse")
     # Banner gone but no input box yet (TUI still booting) is not cleared.
-    assert not cli._pane_banner_cleared("  Thinking…\n")
+    assert not cli._pane_banner_cleared("  Thinking…\n", "muse")
+
+
+def test_banner_cleared_into_shell_pane_is_not_cleared(cli):
+    # The TUI died after a failed recovery: the banner scrolled out of the
+    # tail and the pane dropped to a shell whose prompt starts with ❯
+    # (issue #4). Content alone would read this as cleared and the watchdog
+    # would log a false tui-recovered.
+    pane = "muse exited: stream error\n❯ "
+    assert not cli._pane_banner_cleared(pane, "bash")
+    assert not cli._pane_banner_cleared(pane, "zsh")
+
+
+# The TUI swallowed the Enter on our own /resume --last: the banner screen
+# is still up, with our unsubmitted command sitting in the input box.
+SWALLOWED_ENTER_PANE = (
+    "◆ model failed: model stream idle timeout after 180000ms\n"
+    + "─" * 40 + "\n"
+    + "❯ /resume --last\n"
+    + "─" * 40 + "\n"
+    + "  muse-spark-1.3-contributor · max · ~/work · YOLO\n"
+)
+
+
+def test_swallowed_enter_echo_is_neither_cleared_nor_live(cli):
+    # The recovery echo is not a cleared banner, and the dead banner screen
+    # must not classify as a live TUI -- both predicates used to say yes.
+    assert not cli._pane_banner_cleared(SWALLOWED_ENTER_PANE, "muse")
+    assert not cli._pane_shows_live_tui(SWALLOWED_ENTER_PANE, "muse")
+    assert not cli._pane_shows_live_tui(
+        SWALLOWED_ENTER_PANE, "muse-bin-1.3.0-R3401.1")
+    assert not cli._pane_shows_resume_banner(SWALLOWED_ENTER_PANE, "muse")
 
 
 def test_live_idle_with_footer_below_input_box(cli):
@@ -135,15 +168,19 @@ def test_stale_banner_in_scrollback_does_not_block_live_tui(cli):
     pane = BANNER_PANE + "\n" * 30 + live_tail
     assert cli._pane_shows_live_tui(pane, "muse-bin-1.3.0-R3401.1")
     assert not cli._pane_shows_resume_banner(pane, "muse-bin-1.3.0-R3401.1")
-    assert cli._pane_banner_cleared(pane)
+    assert cli._pane_banner_cleared(pane, "muse-bin-1.3.0-R3401.1")
 
 
 def test_trust_prompt_blocks_live_predicate(cli):
+    # A live-looking input box is also in the tail, so the fixture
+    # discriminates the trust check itself: the old last-line-only code
+    # accepted this pane.
     pane = ("cd '/home/ntindle/muse-jobs/demo/work' && muse resume 'x'\n"
             "Do you trust this workspace?\n"
             "Workspace: /home/ntindle/muse-jobs/demo/work\n"
             "> 1  Trust and continue\n"
-            "  2  Quit\n")
+            "  2  Quit\n"
+            "❯ \n")
     assert not cli._pane_shows_live_tui(pane, "muse")
     # ...but once answered and scrolled past, the TUI is live again.
     assert cli._pane_shows_live_tui(pane + "\n" * 20 + "❯ \n", "muse")
@@ -217,3 +254,104 @@ def test_answer_trust_prompt_no_prompt_returns_false(cli, monkeypatch):
         return orig(slug, timeout=timeout)
 
     assert fast("demo") is False
+
+
+class FakeClock:
+    """Deterministic clock so _recover_resume_banner's poll finishes
+    instantly (same pattern as test_steer_tui_guard.py)."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self):
+        return self.now
+
+    def sleep(self, s):
+        self.now += s
+
+
+class FakeRun:
+    """Fake tmux runner. `panes` is the capture-pane script: successive
+    capture-pane calls pop from the list, and the last entry repeats.
+    `pane_cmd` is the foreground process display-message reports."""
+
+    def __init__(self, panes, pane_cmd="muse"):
+        self.panes = list(panes)
+        self.pane_cmd = pane_cmd
+        self.calls = []
+
+    def __call__(self, *argv, **kw):
+        self.calls.append(argv)
+        if argv[1] == "capture-pane":
+            out = self.panes.pop(0) if len(self.panes) > 1 else self.panes[0]
+
+            class P:
+                returncode = 0
+                stdout = out.encode()
+                stderr = b""
+
+            return P()
+        if argv[1] == "display-message":
+
+            class P:
+                returncode = 0
+                stderr = b""
+
+            P.stdout = self.pane_cmd.encode()
+            return P()
+
+        class P:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return P()
+
+    def sent_keys(self):
+        return [c for c in self.calls if c[1] == "send-keys"]
+
+
+LIVE_RECOVERED_PANE = (
+    "◆ resumed cleanly.\n"
+    + "─" * 40 + "\n"
+    + "❯ \n"
+    + "─" * 40 + "\n"
+    + "  muse-spark-1.3-contributor · max · ~/work · YOLO\n"
+)
+
+
+def _recover_harness(cli, monkeypatch, panes, pane_cmd="muse"):
+    fr = FakeRun(panes, pane_cmd=pane_cmd)
+    monkeypatch.setattr(cli, "run", fr)
+    monkeypatch.setattr(cli, "time", FakeClock())
+    return fr
+
+
+def test_recover_resume_banner_success(cli, monkeypatch):
+    # Banner clears into a live TUI: True, with text and Enter as
+    # SEPARATE send-keys calls (the project's tmux input rule).
+    fr = _recover_harness(cli, monkeypatch,
+                          [BANNER_PANE, LIVE_RECOVERED_PANE])
+    assert cli._recover_resume_banner("demo") is True
+    sent = fr.sent_keys()
+    assert sent[0][1:] == ("send-keys", "-t", "mjob-demo", "-l",
+                           cli._RESUME_BANNER_CMD)
+    assert sent[1][1:] == ("send-keys", "-t", "mjob-demo", "Enter")
+
+
+def test_recover_resume_banner_timeout_returns_false(cli, monkeypatch):
+    # Banner never clears: polls to the deadline, returns False -- the
+    # watchdog then logs a loud tui-unrecovered, never a silent stall.
+    fr = _recover_harness(cli, monkeypatch, [BANNER_PANE])
+    assert cli._recover_resume_banner("demo", timeout=60) is False
+    assert fr.sent_keys()  # the /resume --last attempt did go out
+
+
+def test_recover_resume_banner_requires_tui_process(cli, monkeypatch):
+    # The banner scrolled out of the tail and the pane dropped to a shell
+    # with a ❯ prompt (issue #4): content alone would read this as cleared.
+    # Recovery must report False, not a false tui-recovered.
+    shell_pane = "muse exited: stream error\n❯ "
+    fr = _recover_harness(cli, monkeypatch, [shell_pane], pane_cmd="bash")
+    assert cli._recover_resume_banner("demo", timeout=60) is False
+    assert fr.sent_keys()

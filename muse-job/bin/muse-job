@@ -518,6 +518,15 @@ def _pane_shows_live_tui(pane, pane_cmd):
             box = i
     if box is None:
         return False
+    # A dead banner screen whose input box holds our own unsubmitted
+    # recovery command (the TUI swallowed the Enter) is not a live TUI:
+    # the banner hint line is replaced by our typed text, so the banner
+    # check above already missed it. Classifying this as live would
+    # silence the watchdog on a dead pane and let a later _steer paste
+    # agent text into the dead box. Fail closed: the watchdog emits a
+    # loud tui-dead every pass instead.
+    if _RESUME_BANNER_CMD in tail[box]:
+        return False
     return all(_tui_chrome_line(l.strip()) for l in tail[box + 1:])
 
 
@@ -662,21 +671,34 @@ def _pane_shows_resume_banner(pane, pane_cmd):
                for line in _pane_tail(pane).splitlines())
 
 
-def _pane_banner_cleared(pane):
+def _pane_banner_cleared(pane, pane_cmd):
     """True when the resume banner is gone from the tail and a TUI input box
     is showing there.
 
     Recovery-poll predicate only: it decides a boolean (recovered or not),
-    never authorizes pasting agent text. A loose True here cannot cause an
-    unsafe steer -- _steer re-checks _pane_shows_live_tui strictly before
-    any paste.
+    never authorizes pasting agent text. Both signals are required -- the
+    process signal matters here too:
+
+    - A pane that dropped to a shell after a failed /resume carries a `❯`
+      prompt line (issue #4): content alone would read it as cleared, and
+      the watchdog would log a false `tui-recovered`.
+    - An unsubmitted echo of our own recovery command in the input box (the
+      TUI swallowed the Enter) is not a cleared banner: the banner screen
+      is still up and the hint line is replaced by our typed text.
+
+    A loose True here cannot cause an unsafe steer (_steer re-checks
+    _pane_shows_live_tui strictly before any paste), but it WOULD make the
+    watchdog claim a dead pane is live again -- the exact silent masquerade
+    this file exists to kill.
     """
-    if not pane:
+    if not pane or not _is_tui_process(pane_cmd):
         return False
-    tail = _pane_tail(pane)
-    if _RESUME_BANNER_TEXT in tail:
+    tail = _pane_tail(pane).splitlines()
+    if any(_RESUME_BANNER_TEXT in line for line in tail):
         return False
-    return any(line.strip().startswith("❯") for line in tail.splitlines())
+    if any(_RESUME_BANNER_CMD in line for line in tail):
+        return False
+    return any(line.strip().startswith("❯") for line in tail)
 
 
 def _recover_resume_banner(slug, timeout=60):
@@ -685,7 +707,11 @@ def _recover_resume_banner(slug, timeout=60):
     Uses raw tmux send-keys (never _steer: _steer refuses dead panes by
     design, and this pane is definitionally dead). Text and Enter are
     separate send-keys calls, per the project's tmux input rule. Returns
-    True when the banner clears and a TUI input box is showing afterwards.
+    True only when the banner is gone AND the pane passes the same
+    two-signal bar as _pane_shows_live_tui (foreground process is the TUI,
+    input box showing, no unsubmitted recovery echo): anything less would
+    let the watchdog log `tui-recovered` for a shell pane (issue #4) or a
+    dead banner screen.
     """
     target = f"mjob-{slug}"
     run("tmux", "send-keys", "-t", target, "-l", _RESUME_BANNER_CMD)
@@ -693,8 +719,8 @@ def _recover_resume_banner(slug, timeout=60):
     run("tmux", "send-keys", "-t", target, "Enter")
     deadline = time.time() + timeout
     while True:
-        pane, _cmd = _capture_pane_state(target)
-        if _pane_banner_cleared(pane):
+        pane, cmd = _capture_pane_state(target)
+        if _pane_banner_cleared(pane, cmd):
             return True
         if time.time() >= deadline:
             return False
@@ -1515,9 +1541,11 @@ def cmd_resume(args):
     time.sleep(15)
     pane = run("tmux", "capture-pane", "-p", "-t", f"mjob-{args.slug}").stdout.decode(
         errors="replace")
-    # Only fall back on a genuine "session not found" style message. The old
-    # pattern included a bare "error", which normal TUI output (e.g.
-    # "0 errors", a filename) could trigger -- abandoning a good session.
+    # Only fall back on a genuine "session not found" style message. The
+    # previous inline pattern lived inside a broader wording match that
+    # normal TUI output (e.g. "0 errors", a filename) could trip --
+    # abandoning a good session; the tightened _RESUME_GONE_RE above is
+    # restricted to gone-session wordings.
     if _RESUME_GONE_RE.search(pane):
         # Fallback: fresh TUI, continue from git state.
         run("tmux", "send-keys", "-t", f"mjob-{args.slug}", "q")
