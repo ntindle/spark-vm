@@ -123,6 +123,11 @@ This changelog only works if entries land with the change, not after it:
   the real `cua/bin/cua-desktop.sh` path (the script moved into `cua/bin/`
   and the old `./cua/cua-desktop.sh` reference broke the desktop step of
   the copy-paste install block) (#182).
+- The approvals page daemon no longer accumulates unbounded state over its
+  lifetime: answered history on disk is now retained to the newest thousand
+  entries (tunable), instead of growing one file per approval forever while
+  every poll re-read all of them; the per-approval lock entries are likewise
+  released when an approval is answered or expires (#196).
 
 ## [0.2.0] - 2026-09-20
 

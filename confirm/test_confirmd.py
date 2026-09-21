@@ -560,6 +560,120 @@ class ConfirmdTests(unittest.TestCase):
         with open(os.path.join(repo, "..", "VERSION")) as f:
             self.assertEqual(p["version"], f.read().strip())
 
+    # --- arch 2026-09-21: bound daemon-lifetime state growth ---
+
+    def _seed_consumed(self, names, base_mtime):
+        consumed = self.approvals / "consumed"
+        for i, name in enumerate(names):
+            p = consumed / name
+            p.write_text("{}")
+            # Stagger mtimes: names[0] oldest.
+            ts = base_mtime + i * 10
+            os.utime(p, (ts, ts))
+        return consumed
+
+    def test_prune_consumed_keeps_newest(self):
+        """consumed/ keeps the newest N files by mtime, drops the rest."""
+        names = ["a%d.json" % i for i in range(5)]
+        self._seed_consumed(names, 1_700_000_000)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._prune_consumed(limit=3)
+        remaining = sorted(p.name for p in (self.approvals / "consumed")
+                           .iterdir())
+        self.assertEqual(remaining, names[2:])
+
+    def test_prune_consumed_noop_when_under_limit(self):
+        """Fewer files than the keep count: nothing is deleted."""
+        names = ["a0.json", "a1.json"]
+        self._seed_consumed(names, 1_700_000_000)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._prune_consumed(limit=3)
+        remaining = sorted(p.name for p in (self.approvals / "consumed")
+                           .iterdir())
+        self.assertEqual(remaining, names)
+
+    def test_prune_consumed_ignores_non_json(self):
+        """Non-.json files (e.g. a torn .tmp) are never pruned."""
+        names = ["a%d.json" % i for i in range(3)]
+        consumed = self._seed_consumed(names, 1_700_000_000)
+        (consumed / "stray.tmp").write_text("x")
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._prune_consumed(limit=1)
+        remaining = sorted(p.name for p in consumed.iterdir())
+        self.assertEqual(remaining, ["a2.json", "stray.tmp"])
+
+    def test_prune_consumed_creates_missing_dir(self):
+        """consumed_dir() makedirs at the use site: prune never raises."""
+        import shutil
+        shutil.rmtree(self.approvals / "consumed")
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._prune_consumed(limit=3)  # must not raise
+        self.assertTrue((self.approvals / "consumed").is_dir())
+
+    def test_consumed_keep_minimum_covers_feed(self):
+        """The keep floor (100) is coherent with the answered-feed cap."""
+        self.assertGreaterEqual(cd._CONSUMED_KEEP, cd._ANSWERED_FEED_LIMIT)
+
+    def test_evict_aid_lock(self):
+        """The per-aid lock entry is dropped once the item leaves pending;
+        evicting an absent id is a no-op."""
+        cd._aid_lock("evict-me")
+        self.assertIn("evict-me", cd._aid_locks)
+        cd._evict_aid_lock("evict-me")
+        self.assertNotIn("evict-me", cd._aid_locks)
+        cd._evict_aid_lock("never-there")  # must not raise
+
+    def test_answer_locked_evicts_aid_lock(self):
+        """Wiring, not just the helper: answering (deny branch, no grant
+        subprocess) must drop the per-aid lock entry. Deleting the
+        _evict_aid_lock call in the consume path must fail this."""
+        aid = "evict-wire-consume-1"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00"}
+        nonce = cd._mint_csrf_nonce(it)
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            json.dumps(it))
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        h.send_response = lambda code: None
+        h.send_header = lambda k, v: None
+        h.end_headers = lambda: None
+        cd._aid_lock(aid)  # ensure the entry exists pre-answer
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"):
+            h._answer_locked("ntindle@github", aid, nonce, "deny")
+        self.assertNotIn(aid, cd._aid_locks)
+        # And the answer actually landed in consumed/.
+        self.assertTrue(
+            (self.approvals / "consumed" / (aid + ".json")).exists())
+
+    def test_get_expired_reap_evicts_aid_lock(self):
+        """Wiring: the GET expired-reap path must drop the per-aid lock
+        entry too. Deleting that _evict_aid_lock call must fail this."""
+        aid = "evict-wire-reap-1"
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            json.dumps({"id": aid, "summary": "s", "kind": "first-use",
+                        "created": "2026-09-18T10:00:00+00:00",
+                        "expires": "2020-01-01T00:00:00+00:00"}))
+        h = cd.Handler.__new__(cd.Handler)
+        h.path = "/approval/" + aid
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        cd._aid_lock(aid)  # ensure the entry exists pre-reap
+        with mock.patch.object(cd.Handler, "_auth",
+                               return_value="ntindle@github"), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)), \
+             mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            h.do_GET()
+        self.assertEqual(got["code"], 410)
+        self.assertNotIn(aid, cd._aid_locks)
+        self.assertFalse(
+            (self.approvals / "pending" / (aid + ".json")).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

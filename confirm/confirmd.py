@@ -171,14 +171,28 @@ _CSRF_RING_TTL = _env_int("CONFIRM_CSRF_RING_TTL", 15 * 60, 60)  # seconds
 # otherwise concurrent GETs lose a minted nonce (last-writer-wins) and
 # concurrent POSTs race into the grant path (#71). Single-instance scope is
 # honest here (confirmd runs as one service); a multi-replica confirmd
-# would need the atomicity story redone (flock on the item file).
-# Memory: one lock per approval id ever seen; ids are bounded by pending
-# items, so no eviction.
+# would need the atomicity story redone (flock on the item file) — tracked
+# as a #69 child issue.
+# Lifecycle: the entry is evicted whenever the item leaves pending —
+# answered, expired-reaped under the per-aid lock (GET/POST paths), or
+# expired-reaped by load_pending()'s Finding-58 render reap. Without
+# eviction the dict would grow by one entry per approval for the
+# daemon's whole lifetime.
 _aid_locks = defaultdict(threading.Lock)
 
 
 def _aid_lock(aid):
     return _aid_locks[aid]
+
+
+def _evict_aid_lock(aid):
+    """Drop the per-aid lock once its item has left pending. Safe to call
+    while holding the lock: a thread that grabbed the object before
+    eviction still serializes on it and then sees the file gone (404);
+    threads arriving later get a fresh lock. Assumes an aid's item never
+    comes back — aids are random hex in practice, so an evicted entry
+    cannot alias a live item's lock."""
+    _aid_locks.pop(aid, None)
 
 
 def _mint_csrf_nonce(it):
@@ -358,6 +372,12 @@ def load_pending():
             exp = _parse_expiry(it.get("expires"))
             if exp is not None and now >= exp:
                 os.remove(p)
+                # Arch 2026-09-21: keep the per-aid lock registry bounded —
+                # the item left pending here too. Safe without the lock:
+                # a thread holding the old object still serializes on it
+                # and then sees the file gone; later threads get a fresh
+                # lock and 404 on the exists check.
+                _evict_aid_lock(fn[:-len(".json")])
                 continue
             items.append(it)
         except Exception:
@@ -760,6 +780,45 @@ def _load_answered():
 _ANSWERED_FEED_LIMIT = 100
 
 
+# Arch 2026-09-21: the answered feed shows the 100 most recent, but
+# consumed/ grew without bound — one file per approval for the daemon's
+# whole lifetime — while every 5 s /api/answered poll (and every
+# /answered render) re-listed, re-parsed, and re-sorted ALL of them.
+# Keep the newest N on disk; the audit log stays the durable trail.
+# Minimum 100 keeps the on-disk history coherent with the feed cap.
+_CONSUMED_KEEP = _env_int("CONFIRM_CONSUMED_KEEP", 1000, 100)
+
+
+def _prune_consumed(limit=None):
+    """Delete consumed/ history beyond the newest `limit` files (by mtime).
+
+    Called after each answer is consumed. Pruning is mtime-ordered on
+    purpose: it never parses file contents, so the prune itself stays
+    cheap even as history grows. Races with a concurrent answer are
+    benign — only the oldest files are ever deletion candidates, and a
+    lost race surfaces as FileNotFoundError, which is tolerated."""
+    if limit is None:
+        limit = _CONSUMED_KEEP
+    d = consumed_dir()
+    try:
+        entries = []
+        for fn in os.listdir(d):
+            if not fn.endswith(".json"):
+                continue
+            try:
+                entries.append((os.path.getmtime(os.path.join(d, fn)), fn))
+            except OSError:
+                continue
+        entries.sort()
+    except OSError:
+        return
+    for _, fn in entries[:max(0, len(entries) - limit)]:
+        try:
+            os.remove(os.path.join(d, fn))
+        except OSError:
+            pass
+
+
 def _answered_api_item(it):
     """Issue #1: JSON surface for the answered-history poller.
     Allowlisted fields only."""
@@ -1018,6 +1077,7 @@ class Handler(BaseHTTPRequestHandler):
                         os.remove(p)
                     except OSError:
                         pass
+                    _evict_aid_lock(aid)
                     audit_log("expired-reaped", self.client_address[0], login,
                               "id=%s" % aid)
                     self._err("This approval expired and was removed.", 410)
@@ -1203,6 +1263,7 @@ class Handler(BaseHTTPRequestHandler):
                 os.remove(src)
             except OSError:
                 pass
+            _evict_aid_lock(aid)
             audit_log("expired-reaped", self.client_address[0], login,
                       "id=%s" % aid)
             self._err("This approval expired and was removed.", 410)
@@ -1263,6 +1324,7 @@ class Handler(BaseHTTPRequestHandler):
             json.dump(it, f, indent=2)
         os.replace(tmp, dst)
         os.remove(src)
+        _evict_aid_lock(aid)
         try:
             os.replace(dst, os.path.join(consumed_dir(), aid + ".json"))
         except OSError as e:
@@ -1273,6 +1335,9 @@ class Handler(BaseHTTPRequestHandler):
             # leaving a second alerting channel (arch review R2).
             print("confirmd WARNING: answered->consumed move failed for "
                   "%s: %s" % (aid, e), flush=True)
+        # Arch 2026-09-21: bound the answered-history directory (see
+        # _prune_consumed); the audit log stays the durable trail.
+        _prune_consumed()
         audit_log("answer", self.client_address[0], login,
                   "id=%s decision=%s requester=%s"
                   % (aid, decision, requester))
