@@ -53,6 +53,21 @@ Implements the executable half of the R2 pre-seeded-harness contract
   `{"method","path","authorization"}` JSONL record per request to the log
   and answers 200. Same record format as the hermetic echo server in
   `test_probe.py`.
+- **`provider_iface.py`** — the H4 provider-agnostic driver contract: the
+  six verbs (`provision` / `status` / `suspend` / `dial` / `ssh_info` /
+  `destroy`, `snapshot` reserved), the validated lifecycle state machine
+  (`provisioning | running | suspending | suspended | waking | stopping |
+  stopped | failed | destroyed`, `degraded` as an orthogonal health flag),
+  wake-wait `dial()` semantics, the per-shape capability flags
+  (`supports_suspend`, `memory_resume` axis), the billing-facing
+  `retention` descriptor, the per-tenant `auto_resume` gate, and the
+  fail-closed `public_ingress: false` spec invariant with a
+  driver-attested network-isolation check, the park-mechanics axes
+  (`wake_reprovisions` per-shape flag + `wake_kind` resume-path surface
+  for RunPod-style backends whose "suspend" is park), and a note that the
+  per-`vm_id` lifecycle is provisional on H11's isolation answer. Covered by
+  `test_provider_iface.py` (41 contract tests incl. a fake in-memory
+  driver exercising the full lifecycle).
 
 ## Fixture lifecycle
 
@@ -77,7 +92,8 @@ SETUP.md "Inference-model recipe").
 - **Provision-time injector** — implements the research §4 inject list
   (tenant identity, inference credential by-name reference, fresh swapd
   CA, confirmd tenant attribution, first-task slot) against the H4
-  `provision` interface, with the manifest preflight above.
+  provider interface (`provider_iface.py`), with the manifest preflight
+  above.
 - **Image gate** — refuses to publish the image when the gate-mode probe
   fails (the PuppyOne rule).
 
