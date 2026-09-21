@@ -32,6 +32,11 @@ def ci_job_check_names(ci_yml_path):
     Anything else (missing `jobs:` key, zero parsed jobs) raises, so a
     future reformat of ci.yml fails loudly instead of silently comparing
     the wrong thing.
+
+    Trailing `#` comments on job-id lines are stripped before detection —
+    without that, `  extra-job:  # comment` would not parse as a job and
+    the new job would drift invisibly. Surrounding quotes on `name:`
+    values are stripped (GitHub shows the unquoted value).
     """
     lines = Path(ci_yml_path).read_text().splitlines()
     try:
@@ -48,18 +53,27 @@ def ci_job_check_names(ci_yml_path):
         indent = len(line) - len(line.lstrip(" "))
         if indent == 0:
             break  # next top-level key: left the jobs: section
-        if indent == 2 and line.rstrip().endswith(":"):
-            if job_id is not None:
-                names.append(job_name or job_id)
-            job_id = stripped[:-1]
-            job_name = None
+        if indent == 2:
+            head = line.split(" #", 1)[0].rstrip()
+            if head.endswith(":"):
+                if job_id is not None:
+                    names.append(job_name or job_id)
+                job_id = head.strip()[:-1]
+                job_name = None
         elif (
             indent == 4
             and job_id is not None
             and job_name is None
             and stripped.startswith("name:")
         ):
-            job_name = stripped[len("name:"):].strip()
+            value = stripped[len("name:"):].split(" #", 1)[0].strip()
+            if (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in ("'", '"')
+            ):
+                value = value[1:-1]
+            job_name = value
     if job_id is not None:
         names.append(job_name or job_id)
     if not names:
@@ -228,6 +242,28 @@ class TestMainBranchRuleset(unittest.TestCase):
             self._parse_variant("on: push\n")  # no `jobs:` key at all
         with self.assertRaises(ValueError):
             self._parse_variant("jobs:\n")  # `jobs:` with zero jobs
+
+    def test_parser_survives_trailing_comment_on_job_id(self):
+        # A trailing `#` comment on a job-id line must not make the parser
+        # silently skip the job — that would let drift hide behind a comment.
+        variant = (
+            CI_YML.read_text()
+            + "\n  extra-job:  # brand-new check, JSON not yet updated\n"
+            + "    name: extra check\n    runs-on: ubuntu-latest\n"
+        )
+        parsed = self._parse_variant(variant)
+        self.assertIn("extra check", parsed)
+        self.assertNotEqual(parsed, self._declared_contexts())
+
+    def test_parser_strips_quotes_from_name(self):
+        # GitHub shows the unquoted value of `name: "foo"`; the parser must
+        # match that, not the literal quoted string.
+        variant = CI_YML.read_text().replace(
+            "name: shellcheck", 'name: "shellcheck"', 1
+        )
+        parsed = self._parse_variant(variant)
+        self.assertIn("shellcheck", parsed)
+        self.assertEqual(parsed, self._declared_contexts())
 
 
 class TestNoSecretsInRulesets(unittest.TestCase):
