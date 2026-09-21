@@ -270,10 +270,19 @@ Didn't ask for this? Ignore this email — unconfirmed addresses are
 dropped automatically.
 """ + FORGET_FOOTER
 
-# Path-A clarification reply, verbatim from docs/WAITLIST_OPERATIONS.md
-# §2 DRAFT. Sent only when the inbound message passes SPF/DKIM/DMARC
+# Path-A clarification reply. First paragraph verbatim from
+# docs/WAITLIST_OPERATIONS.md §2 DRAFT; the `Owner:`-line example below
+# it teaches the parser's documented override syntax (it is an addition,
+# not spec text). Sent only when the inbound message passes SPF/DKIM/DMARC
 # alignment on the From domain; unauthenticated mail goes to the silent
 # operator triage queue instead (no backscatter — §6).
+#
+# Deliberately NO forget footer: the clarification is a reply about
+# intake, not about a row — nothing is waitlisted yet, so a deletion
+# link would be dishonest, and a signed token to an unverified sender
+# would be a deletion oracle aimed at the wrong inbox. §5's "every
+# email footer" rule covers emails about a live row; once the owner
+# address is confirmed, every email after that carries the link.
 CLARIFY_SUBJECT = "Which address should we use for the spark-vm waitlist?"
 
 CLARIFY_BODY = """\
@@ -283,7 +292,10 @@ the invite.
 
 If you meant to give it in your first email, put it on its own line
 like this: Owner: you@example.com
-""" + FORGET_FOOTER
+
+Nothing is waitlisted yet, so there's no deletion link in this email —
+reply with the owner address and every email after that carries one.
+"""
 
 # Reply-"forget me" confirmation email (WAITLIST_OPERATIONS.md §5): a
 # reply saying "forget me" is NOT honored on its own (Reply From is
@@ -490,6 +502,16 @@ class WaitlistService:
                     self.rows[row["entry_id"]] = row
                     if row.get("status") in ("pending", "confirmed"):
                         self.by_email[row["owner_email"]] = row["entry_id"]
+                    else:
+                        # Same invariant as _save_row: invited/dropped rows
+                        # are never index-resolved. Without this, a
+                        # post-restart _load would phantom-index invited
+                        # rows that _save_row had popped — making
+                        # invited-row handling depend on process age
+                        # (resubmission could "resubmit" an invited row
+                        # with a dead confirm link, or duplicate it).
+                        # Invited rows are found by _live_row_by_email.
+                        self.by_email.pop(row["owner_email"], None)
         consumed_path = os.path.join(self.data_dir, "consumed_tokens.txt")
         if os.path.exists(consumed_path):
             with open(consumed_path, encoding="utf-8") as fh:
@@ -531,6 +553,21 @@ class WaitlistService:
             self.by_email[row["owner_email"]] = row["entry_id"]
         else:
             self.by_email.pop(row["owner_email"], None)
+
+    def _live_row_by_email(self, owner):
+        """Find a live row for the normalized owner address, whatever its
+        status — pending, confirmed, or invited. by_email only resolves
+        pending/confirmed (the resubmission-relevant states), so invited
+        rows need this explicit scan: forget replies must find them, and
+        the submit paths must no-op on them, without resubmission ever
+        treating an invited row as pending. Dropped/purged rows are not
+        live — a re-submit after a drop starts a fresh row."""
+        for row in self.rows.values():
+            if (row.get("owner_email") == owner and
+                    row.get("status") in ("pending", "confirmed",
+                                          "invited")):
+                return row
+        return None
 
     def _emit(self, event, ref, attrs=None):
         self._append(
@@ -608,10 +645,17 @@ class WaitlistService:
                 entry_id, issued_s, nonce, sig = token.split(".", 3)
             issued = int(issued_s)
             b64url_decode(sig)  # structural check
-        except (ValueError, Exception):
+        except (ValueError, AttributeError, TypeError):
             return None, "invalid"
         row = self.rows.get(entry_id)
-        if row is None or row.get("status") not in ("pending", "confirmed"):
+        if row is None:
+            return None, "invalid"
+        # The forget link ships in every email footer (§5) — including
+        # the invite email — so it must validate for invited rows.
+        # Confirm tokens stay restricted to pending/confirmed.
+        live = ("pending", "confirmed", "invited") if kind == "forget" \
+            else ("pending", "confirmed")
+        if row.get("status") not in live:
             return None, "invalid"
         if kind == "forget":
             payload = (f"forget.{entry_id}.{issued}.{nonce}."
@@ -974,6 +1018,13 @@ class WaitlistService:
             if existing_id:
                 return self._resubmit(self.rows[existing_id], owner_raw,
                                       muse_contact)
+            live = self._live_row_by_email(owner)
+            if live is not None and live.get("status") == "invited":
+                # Already invited: no new row, no email, nothing
+                # refreshed — the claim email already went out. Say so
+                # honestly instead of "check your inbox" for a confirm
+                # link that would be dead on arrival.
+                return 200, page_already_invited(owner_raw)
             return self._create_row(owner, owner_raw, muse_contact)
 
     def _resubmit_core(self, row, muse_contact):
@@ -1176,16 +1227,14 @@ class WaitlistService:
         """Spool the §2 clarification reply ("we couldn't tell which
         address is the owner"). The caller guarantees the inbound message
         passed DMARC alignment — never call this for unauthenticated
-        mail (silent triage instead)."""
-        body = CLARIFY_BODY.format(
-            forget_link="(none — this email carries no deletion link)")
-        # The clarification is a reply about intake, not about a row: it
-        # carries no forget footer action of its own, so render the §5
-        # footer inert rather than emitting a second live forget link to
-        # a sender who may not own any row. (FORGET_FOOTER is baked into
-        # CLARIFY_BODY; the format call above neutralizes its link slot.)
-        return self._spool_patha_email(sender, CLARIFY_SUBJECT, body,
-                                       "clarification")
+        mail (silent triage instead).
+
+        Takes the data + thread locks: the ledger read (cap check) and
+        the append+prune rewrite must be atomic against racing
+        invocations, and this method's only caller holds no lock."""
+        with data_lock(self.data_dir), self._lock:
+            return self._spool_patha_email(sender, CLARIFY_SUBJECT,
+                                           CLARIFY_BODY, "clarification")
 
     def handle_forget_reply(self, sender):
         """A reply saying "forget me" (WAITLIST_OPERATIONS.md §5).
@@ -1204,17 +1253,20 @@ class WaitlistService:
         """
         with data_lock(self.data_dir), self._lock:
             self._refresh_under_lock()
-            entry_id = self.by_email.get(sender)
-            if not entry_id:
+            # The explicit live-row scan (not by_email): invited owners
+            # must find their row here — by_email deliberately excludes
+            # invited rows so resubmission never treats them as pending.
+            row = self._live_row_by_email(sender)
+            if row is None:
                 return "no_row", None
-            row = self.rows[entry_id]
-            token = self.mint_forget_token(entry_id, row["owner_email"])
+            token = self.mint_forget_token(row["entry_id"],
+                                               row["owner_email"])
             forget_link = f"{self.public_host}/waitlist/forget?token={token}"
             sent = self._spool_patha_email(
                 sender, FORGET_REQUEST_SUBJECT,
                 FORGET_REQUEST_BODY.format(owner_email=row["owner_email"],
                                            forget_link=forget_link),
-                "forget_request", entry_id)
+                "forget_request", row["entry_id"])
             return ("forget_request_sent" if sent
                     else "forget_request_capped"), row
 
@@ -1224,11 +1276,12 @@ class WaitlistService:
         (WAITLIST_OPERATIONS.md §2), the email half of H15's intake.
 
         Carries the email path's defenses instead of the form's: no
-        honeypot/time-trap/IP-limit (there is no page), but the caller
-        must enforce the per-sender intake limit BEFORE calling (the
-        limit belongs to the sender, and dedup may resolve to a different
-        row — checking after dedup would let a fleet rotate owners past
-        the cap).
+        honeypot/time-trap/IP-limit (there is no page). The per-sender
+        intake limit (§6) is enforced HERE, inside the lock, before
+        dedup — the limit belongs to the sender, and dedup may resolve
+        to a different row, so checking after dedup would let a fleet
+        rotate owners past the cap; checking outside the lock would let
+        a racing second invocation slip past before the first records.
 
         Returns (outcome, row) where outcome is one of:
           "created"        — new row; confirm email queued (path-A opener)
@@ -1237,18 +1290,33 @@ class WaitlistService:
           "confirmed"      — row already confirmed; idempotent, no email
           "confirm_capped" — accepted but the 3/24h cap suppressed the
                              re-send; the earlier link still works.
+          "already_invited" — the owner was already invited off the
+                             waitlist; no new row, no email, nothing
+                             refreshed. The submission ledger event is
+                             still recorded (the §6 budget counts
+                             attempts).
+          "intake_limited" — per-sender 3/day tripped; nothing written
+                             except the triage the caller performs.
 
         The check-then-act section (dedup on submit) is serialized under
         the data lock + thread lock, like every other mutating path.
         """
         with data_lock(self.data_dir), self._lock:
             self._refresh_under_lock()
+            if self.patha_intake_limited(sender):
+                return "intake_limited", None
             self._record_patha_event(sender, "submission")
             existing_id = self.by_email.get(owner)
             if existing_id:
                 outcome = self._resubmit_core(self.rows[existing_id],
                                               sender)
                 return outcome, self.rows[existing_id]
+            live = self._live_row_by_email(owner)
+            if live is not None and live.get("status") == "invited":
+                # The owner already holds a claim email — re-submitting
+                # must not duplicate the row, refresh anything, or queue
+                # a confirm email whose link would be dead on arrival.
+                return "already_invited", live
             _, _page = self._create_row(
                 owner, owner, sender, path="email",
                 inbound_auth=inbound_auth, pubkey=pubkey, usecase=usecase)
@@ -1378,6 +1446,12 @@ class WaitlistService:
             # lookup would fail anyway, but mark it consumed explicitly.
             if live_token:
                 self._consume_token(live_token)
+            # Same for a live invite token (invited rows can be
+            # forget-deleted now that the forget link validates for
+            # them) — a deleted row's claim link must die with it.
+            live_invite = row.get("active_invite_token")
+            if live_invite:
+                self._consume_token(live_invite)
             self._consume_token(token)
             del self.rows[entry_id]
             if self.by_email.get(owner) == entry_id:
@@ -1468,11 +1542,11 @@ class WaitlistService:
     def _queue_invite_email(self, row, position, pricing_lines, trial_terms):
         """Spool the §7 invite email: pricing + trial terms filled at send
         time from the decided pricing (the template never contains
-        numbers), the invitee's signed position line ("You held #N in
-        line"), and the claim link. Counts toward the 3/24h cap like every
-        other transactional send. Returns True when the email went out,
-        False when the cap suppressed it (the wave then skips the row —
-        its slot is not consumed)."""
+        pricing numbers), the invitee's signed position line ("You held
+        #N in line"), and the claim link. Counts toward the 3/24h cap like
+        every other transactional send. Returns True when the email went
+        out, False when the cap suppressed it (the wave then skips the
+        row — its slot is not consumed)."""
         if not self._email_send_allowed(row):
             return False
         token = self.mint_invite_token(row["entry_id"], row["owner_email"])
@@ -1514,15 +1588,23 @@ class WaitlistService:
     def send_invite_wave(self, *, pricing_lines, trial_terms, wave, count):
         """Operator-driven invite wave (WAITLIST_OPERATIONS.md §7).
 
-        Takes the top `count` confirmed rows FIFO by confirmed_at, marks
-        each invited (status, invited_at, invite_expires_at = now + 14d,
-        invite_wave = wave), and spools the §7 invite email with the
+        Invites up to `count` confirmed rows, FIFO by confirmed_at,
+        scanning past cap-suppressed rows so a capped head-of-line
+        row never eats a wave slot. Each invited row is marked invited
+        (status, invited_at, invite_expires_at = now + 14d,
+        invite_wave = wave), and the §7 invite email goes out with the
         pricing/trial terms filled at send time. Emits `invite_sent`
         (FUNNEL_MEASUREMENT.md §3.4) per mailed row.
 
         Rows past the 3/24h email cap are NOT invited this wave — they
         stay confirmed for a later wave (their slot is not consumed).
         Returns the invited entry_ids in wave order.
+
+        Caller must hold data_lock (the operator CLI does) — like the
+        lifecycle jobs' send_reminders/drop_unconfirmed, this method
+        mutates the store and spools without taking the lock itself.
+        A large wave holds that lock for the whole run (N spool writes);
+        the documented wave sizes (tens of rows) keep this fine.
         """
         now = self.clock()
         eligible = [r for r in self.rows.values()
@@ -1531,7 +1613,9 @@ class WaitlistService:
         eligible.sort(key=lambda r: (r.get("confirmed_at") or "",
                                      r["entry_id"]))
         invited = []
-        for row in eligible[:count]:
+        for row in eligible:
+            if len(invited) >= count:
+                break
             # Position is the invitee's confirmed-queue rank — compute
             # before flipping the status (invited rows are not ranked).
             position = self.queue_position(row["entry_id"])
@@ -1565,6 +1649,9 @@ class WaitlistService:
         queries are constrained to the taxonomy).
 
         Returns the rolled entry_ids. Idempotent.
+
+        Caller must hold data_lock (the operator CLI does) — same
+        convention as send_invite_wave.
         """
         rolled = []
         for row in self.rows.values():
@@ -1649,6 +1736,24 @@ def page_already_sent(owner_raw):
             "and re-enter it.</p>"
             "<p class=\"muted\">Unconfirmed addresses are dropped automatically "
             "after 14 days.</p>"
+        ),
+    )
+
+
+def page_already_invited(owner_raw):
+    """Honest rendering for a re-submit on an already-invited address:
+    no new row, no new email — the claim email already went out."""
+    addr = html.escape(owner_raw.strip(), quote=True)
+    return PAGE_SHELL.format(
+        title="Already invited",
+        body=(
+            "<h1>Already invited</h1>"
+            f"<p><strong>{addr}</strong> has already been invited off the "
+            "waitlist — the claim email went to that address.</p>"
+            "<p>Check your inbox (and spam) for the invite; the claim "
+            "link inside is good for 14 days.</p>"
+            '<p class="muted">Lost the email? The operator can re-send '
+            "it — re-entering the address here won&#x2019;t.</p>"
         ),
     )
 

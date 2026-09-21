@@ -19,7 +19,9 @@ primary) on top of waitlistd.WaitlistService:
       the parser must never become a backscatter reflector, §6);
     - a reply saying "forget me" → the §5 confirmation email containing
       the signed forget link (never direct deletion — Reply From is
-      forgeable, that's a deletion oracle);
+      forgeable, that's a deletion oracle). Forget intent is checked
+      BEFORE the per-sender intake gate: a spam-prevention limit must
+      never swallow a deletion request;
     - per-sender rate limit: 3 submissions / sender / day (§6).
 
 The parser never authenticates mail itself: the operator's inbound reader
@@ -79,6 +81,10 @@ CANDIDATE_RE = re.compile(
 )
 FORGET_RE = re.compile(r"\bforget[-\s]?me\b", re.IGNORECASE)
 MAX_USECASE_CHARS = 280
+# Intake size cap: anything bigger than 1 MiB is not a signup email.
+# parse_message itself has no cap (the email library handles headers),
+# so the CLI enforces this on the raw bytes before triaging.
+MAX_RAW_BYTES = 1024 * 1024
 
 
 def parse_message(raw):
@@ -125,16 +131,26 @@ def _strip_display_name(addr):
 def extract_owner_candidate(body, from_addr, inbox_addr):
     """Return the single validated owner candidate, or None.
 
-    §2 parsing: an explicit `Owner: addr` line overrides extraction;
-    otherwise every email-shaped token in the body is a candidate, minus
-    the exclusion list (the From address, the inbox's own address, any
-    @agentmail.to address). Exactly one candidate → return it (validated
-    + normalized); zero or ≥2 → None (the caller sends the clarification
-    reply or triages).
+    §2 parsing: an explicit `Owner: addr` line overrides extraction.
+    The override is still sanity-filtered, but ONLY against the
+    inbox's own address and @agentmail.to — naming those as the owner
+    is pathological (a confirm email addressed to the inbox itself, or
+    to an agent address that can never approve spend). The From
+    address is deliberately NOT excluded from the override: a
+    human-driven Muse's From address routinely IS the owner's address,
+    and extraction's From-exclusion exists to disambiguate among
+    multiple candidates, not to veto an explicit statement. Exactly
+    one candidate → return it (validated + normalized); zero or ≥2 →
+    None (the caller sends the clarification reply or triages).
     """
     m = OWNER_LINE_RE.search(body)
     if m:
         owner = normalize_email(m.group(1).strip().strip("<>"))
+        if owner:
+            inbox_norm = normalize_email(_strip_display_name(inbox_addr))
+            if owner == inbox_norm or \
+                    owner.endswith("@" + AGENTMAIL_DOMAIN):
+                return None  # pathological override: clarify
         return owner  # None when the labeled line is not a valid address
     excluded = set()
     for addr in (from_addr, inbox_addr):
@@ -156,10 +172,21 @@ def extract_owner_candidate(body, from_addr, inbox_addr):
     return None
 
 
+FORGET_NEGATED_RE = re.compile(
+    r"\b(do\s*(?:n'?t|not)|does\s*(?:n'?t|not)|did\s*(?:n'?t|not)|never)"
+    r"\s+forget[-\s]?me\b",
+    re.IGNORECASE)
+
+
 def detect_forget_intent(subject, body):
-    """True when the message is a "forget me" reply (§5)."""
-    return bool(FORGET_RE.search(subject or "") or
-                FORGET_RE.search(body or ""))
+    """True when the message is a "forget me" reply (§5).
+
+    Negated forms ("please don't forget me") are NOT forget intent —
+    routing those to the deletion flow would be the wrong shape."""
+    text = f"{subject or ''}\n{body or ''}"
+    if FORGET_NEGATED_RE.search(text):
+        return False
+    return bool(FORGET_RE.search(text))
 
 
 def extract_pubkey(body):
@@ -193,14 +220,17 @@ def process_inbound(service, raw, *, auth, inbox_addr):
       "clarification_capped"  clarification suppressed by the cap
       "forget_request_sent"   §5 forget-confirmation email spooled
       "forget_request_capped" forget confirmation suppressed by the cap
+      "already_invited"       owner already holds a claim email — no-op
       "intake_limited"        per-sender 3/day tripped — silent
       "triage"                silent triage (unauthenticated or garbage);
                               outcome["reason"] + ["triage_file"] say why
 
-    The per-sender intake limit is enforced before parsing (§6); the
-    intake event is recorded by submit_email only on the accept path —
-    clarification/triage/forget-request replies do not consume intake
-    budget.
+    Forget intent is checked BEFORE the intake gate (§5's deletion right
+    outranks the §6 spam budget): a sender who burned their 3/day and
+    then says "forget me" still gets the confirmation email. The intake
+    limit itself is enforced atomically inside submit_email (check +
+    ledger record under the lock), so process_inbound never pre-checks.
+    Clarification/triage replies do not consume intake budget.
     """
     if auth not in ("pass", "fail"):
         raise ValueError(f"auth must be 'pass' or 'fail', got {auth!r}")
@@ -213,12 +243,11 @@ def process_inbound(service, raw, *, auth, inbox_addr):
     if not sender:
         service.triage_inbound(raw, "no usable From address")
         return {"outcome": "triage", "reason": "no_from"}
-    if service.patha_intake_limited(sender):
-        service.triage_inbound(raw, "per-sender intake limit (3/day)")
-        return {"outcome": "intake_limited"}
 
     # The §5 forget path: a reply saying "forget me" is never honored on
     # its own — it triggers the confirmation email with the signed link.
+    # Checked before the intake gate: a deletion request must never be
+    # swallowed by a spam-prevention limit.
     if detect_forget_intent(subject, body):
         outcome, row = service.handle_forget_reply(sender)
         if outcome == "no_row":
@@ -244,8 +273,12 @@ def process_inbound(service, raw, *, auth, inbox_addr):
     outcome, row = service.submit_email(
         owner=owner, sender=sender, inbound_auth=(auth == "pass"),
         pubkey=extract_pubkey(body), usecase=extract_usecase(body))
+    if outcome == "intake_limited":
+        triaged = service.triage_inbound(
+            raw, "per-sender intake limit (3/day)")
+        return {"outcome": "intake_limited", "triage_file": triaged}
     result = {"outcome": {"created": "accepted"}.get(outcome, outcome),
-              "entry_id": row["entry_id"]}
+              "entry_id": row["entry_id"] if row else None}
     return result
 
 
@@ -302,13 +335,21 @@ def load_config(argv):
 
 def main(argv):
     auth, key, data_dir, host, inbox = load_config(argv)
-    raw = sys.stdin.read()
+    raw = sys.stdin.read(MAX_RAW_BYTES + 1)
     if not raw.strip():
         sys.stderr.write("waitlist_patha: no message on stdin.\n")
         raise SystemExit(2)
     service = WaitlistService(data_dir, key, host)
-    # submit_email / handle_forget_reply take the data + thread locks
-    # themselves — the single-message CLI holds none.
+    if len(raw) > MAX_RAW_BYTES:
+        # Oversize intake: never parse it, just triage the head for the
+        # operator to eyeball. The cap keeps a hostile feed from making
+        # the parser chew gigabytes.
+        triaged = service.triage_inbound(
+            raw[:MAX_RAW_BYTES], "message exceeds 1 MiB intake cap")
+        sys.stdout.write(f"waitlist_patha: triage ({triaged})\n")
+        return 0
+    # submit_email / handle_forget_reply / spool_clarification take the
+    # data + thread locks themselves — the single-message CLI holds none.
     result = process_inbound(service, raw, auth=auth, inbox_addr=inbox)
     sys.stdout.write(f"waitlist_patha: {result['outcome']}"
                      + (f" entry={result['entry_id']}"

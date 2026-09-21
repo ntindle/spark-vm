@@ -11,7 +11,7 @@ waitlistd.WaitlistService:
         confirmed_at are marked invited (invite_wave = NAME,
         invite_expires_at = now + 14d) and the §7 invite email goes out —
         pricing lines + trial terms filled at send time from the decided
-        pricing (the template never contains numbers; compliance:
+        pricing (the template never contains pricing numbers; compliance:
         WAITLIST_OPERATIONS.md §7 + §11). Emits `invite_sent`
         (FUNNEL_MEASUREMENT.md §3.4) per mailed row. Rows past the 3/24h
         transactional-email cap stay confirmed for a later wave.
@@ -48,6 +48,16 @@ Config (env — same fail-loud contract as waitlistd/waitlist_jobs):
                          unset or unwritable. Never the repo.
     WAITLIST_PUBLIC_HOST public origin for links in queued email
                          (default https://waitlist.example.invalid).
+    WAITLIST_CLAIM_LIVE  set to exactly "1" only when GET
+                         /waitlist/claim actually serves invite tokens.
+                         REQUIRED for a real --send-wave (not for
+                         --dry-run or --rollover): the invite email's
+                         single prominent action is the claim link, and
+                         nothing but this attestation stands between an
+                         operator typo and a wave of dead-CTA first
+                         touches. The page stays non-deployable until
+                         every WAITLIST_OPERATIONS.md §10 item is live;
+                         this is the guard at the send moment.
 
 stdlib only. Tested by scripts/test_waitlist_invites.py.
 """
@@ -123,6 +133,18 @@ def main(argv):
         raise SystemExit(2)
     dry_run = "--dry-run" in argv
     key, data_dir, host = load_config(argv)
+
+    if want_wave and not dry_run and \
+            os.environ.get("WAITLIST_CLAIM_LIVE") != "1":
+        # The dead-form rule protects the page; this protects the
+        # sender. A wave's only CTA is the claim link — refuse to send
+        # one while the claim route is unbuilt.
+        sys.stderr.write(
+            "waitlist_invites: refusing to send a wave — "
+            "WAITLIST_CLAIM_LIVE is not \"1\". Set it only when GET "
+            "/waitlist/claim serves invite tokens "
+            "(WAITLIST_OPERATIONS.md §10).\n")
+        raise SystemExit(2)
 
     wave = count = pricing = terms = None
     if want_wave:

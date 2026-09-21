@@ -318,6 +318,7 @@ def test_cli_wave_and_rollover(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("WAITLIST_DATA", str(data))
     monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
                        "https://waitlist.example.invalid")
+    monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
     service = wd.WaitlistService(str(data), KEY,
                                  "https://waitlist.example.invalid",
                                  clock=MutClock())
@@ -354,3 +355,133 @@ def test_cli_rejects_empty_pricing(tmp_path, monkeypatch):
                  "--pricing-file", str(pricing),
                  "--trial-terms-file", str(terms)])
     assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 fixes
+# ---------------------------------------------------------------------------
+
+
+def _invite_row(service, tmp, clock, email="a@example.com"):
+    row = confirm_row(service, email, clock)
+    invited = service.send_invite_wave(pricing_lines=PRICING,
+                                       trial_terms=TERMS, wave="w1",
+                                       count=5)
+    assert invited == [row["entry_id"]]
+    return service.rows[row["entry_id"]]
+
+
+def _forget_token_from_invite_email(tmp):
+    doc = [d for d in spool_docs(tmp) if d.get("kind") == "invite"][0]
+    marker = "token=forget."
+    idx = doc["body"].index(marker)
+    return "forget." + doc["body"][idx + len(marker):].split()[0].strip()
+
+
+def test_invite_email_forget_link_validates():
+    # Eng B1 / QA B1: the §5 forget footer in the invite email must
+    # validate for invited rows.
+    service, tmp, clock = make_service()
+    row = _invite_row(service, tmp, clock)
+    token = _forget_token_from_invite_email(tmp)
+    found, status = service._lookup_token_row(token, kind="forget")
+    assert status == "ok"
+    assert found["entry_id"] == row["entry_id"]
+
+
+def test_forget_post_on_invited_row():
+    # The full delete path works for invited rows: row gone, invite
+    # token consumed with it.
+    service, tmp, clock = make_service()
+    row = _invite_row(service, tmp, clock)
+    invite_token = row["active_invite_token"]
+    token = _forget_token_from_invite_email(tmp)
+    status, _page = service.forget_post(token)
+    assert status == 200
+    assert row["entry_id"] not in service.rows
+    assert invite_token in service.consumed
+    # The row is gone, so the claim lookup honestly reports invalid —
+    # there is nothing left to claim.
+    _, status = service.lookup_invite_token(invite_token)
+    assert status == "invalid"
+
+
+def test_wave_backfills_past_capped():
+    # Eng M2 / QA m3: a capped head-of-line row must not eat a wave
+    # slot — count=1 invites the next eligible row.
+    service, tmp, clock = make_service()
+    first = confirm_row(service, "a@example.com", clock,
+                        at=NOW - timedelta(days=2))
+    second = confirm_row(service, "b@example.com", clock,
+                         at=NOW - timedelta(days=1))
+    third = confirm_row(service, "c@example.com", clock, at=NOW)
+    first["email_sends"] = [clock().timestamp()] * 3
+    service._save_row(first)
+    invited = wave(service, count=1)
+    assert invited == [second["entry_id"]]
+    assert service.rows[first["entry_id"]]["status"] == "confirmed"
+    assert service.rows[third["entry_id"]]["status"] == "confirmed"
+
+
+def test_rollover_idempotent():
+    # QA m5: a second rollover run finds nothing to roll.
+    service, tmp, clock = make_service()
+    row = _invite_row(service, tmp, clock)
+    clock.advance(days=15)
+    assert service.rollover_expired_invites() == [row["entry_id"]]
+    assert service.rollover_expired_invites() == []
+
+
+def test_submit_form_already_invited():
+    # Eng M1, form path: an invited owner's re-submit is an honest
+    # no-op — no duplicate row, no dead confirm email.
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="w1", count=5)
+    rows_before = len(service.rows)
+    status, page = service.submit_form({"owner_email": "a@example.com"},
+                                       "127.0.0.1")
+    assert status == 200
+    assert "Already invited" in page
+    assert len(service.rows) == rows_before
+    assert service.rows[row["entry_id"]]["status"] == "invited"
+    # The invite token survived (the no-op must not clobber it).
+    found, status = service.lookup_invite_token(
+        service.rows[row["entry_id"]]["active_invite_token"])
+    assert status == "ok"
+
+
+def test_cli_claim_live_guard(tmp_path, monkeypatch, capsys):
+    # Design Major 1: a real wave refuses to send while the claim route
+    # is unbuilt; --dry-run and --rollover are unaffected.
+    pricing = tmp_path / "pricing.txt"
+    terms = tmp_path / "terms.txt"
+    _write(str(pricing), PRICING)
+    _write(str(terms), TERMS)
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
+    monkeypatch.setenv("WAITLIST_DATA", str(data))
+    monkeypatch.delenv("WAITLIST_CLAIM_LIVE", raising=False)
+    argv = ["--send-wave", "--wave", "w1", "--count", "1",
+            "--pricing-file", str(pricing),
+            "--trial-terms-file", str(terms)]
+    with pytest.raises(SystemExit) as exc:
+        wi.main(argv)
+    assert exc.value.code == 2
+    assert "WAITLIST_CLAIM_LIVE" in capsys.readouterr().err
+    # --dry-run needs no attestation...
+    assert wi.main(argv + ["--dry-run"]) == 0
+    # ...and the attestation unlocks the real wave.
+    monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
+    service = wd.WaitlistService(str(data), KEY,
+                                 "https://waitlist.example.invalid",
+                                 clock=MutClock())
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    assert wi.main(argv) == 0
+    assert "invited 1 row(s)" in capsys.readouterr().out

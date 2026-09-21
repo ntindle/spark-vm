@@ -362,3 +362,121 @@ def test_cli_requires_auth_flag():
     with pytest.raises(SystemExit) as exc:
         wp.load_config([])
     assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 fixes
+# ---------------------------------------------------------------------------
+
+
+def test_forget_intent_checked_before_intake_gate():
+    # QA B2: a spam-prevention limit must never swallow a §5 deletion
+    # request. The sender owns a row AND burned the 3/day budget.
+    service, tmp, clock = make_service()
+    for i in range(3):
+        raw = make_msg("a@example.com", f"Owner: o{i}@example.com")
+        assert wp.process_inbound(service, raw, auth="pass",
+                                  inbox_addr=INBOX)["outcome"] == "accepted"
+    assert service.by_email.get("o0@example.com")
+    forget_raw = make_msg("a@example.com", "Owner: o0@example.com\n"
+                                           "please forget me")
+    # o0's owner is o0@example.com, not the sender — craft the owned row:
+    owned = make_msg("b@example.com", "Owner: b@example.com")
+    wp.process_inbound(service, owned, auth="pass", inbox_addr=INBOX)
+    clock.advance(hours=25)  # fresh budget day for b@example.com
+    for i in range(3):
+        raw = make_msg("b@example.com", f"Owner: q{i}@example.com")
+        wp.process_inbound(service, raw, auth="pass", inbox_addr=INBOX)
+    forget_raw = make_msg("b@example.com", "please forget me")
+    result = wp.process_inbound(service, forget_raw, auth="pass",
+                                inbox_addr=INBOX)
+    assert result["outcome"] == "forget_request_sent"
+
+
+def test_owner_override_excluded_addresses_clarify():
+    # QA m2: the Owner: override can't register a pathological owner —
+    # the inbox's own address and @agentmail.to are still filtered.
+    # The From address is deliberately NOT filtered on the override: a
+    # human-driven Muse's From routinely IS the owner's address.
+    assert wp.extract_owner_candidate("Owner: muse@x.io", "muse@x.io",
+                                      INBOX) == "muse@x.io"
+    assert wp.extract_owner_candidate(f"Owner: {INBOX}", "muse@x.io",
+                                      INBOX) is None
+    assert wp.extract_owner_candidate("Owner: spark@agentmail.to",
+                                      "muse@x.io", INBOX) is None
+    # ...but a real override still wins.
+    assert wp.extract_owner_candidate("Owner: owner@example.com\n"
+                                      "cc: a@example.com",
+                                      "muse@x.io", INBOX) == \
+        "owner@example.com"
+
+
+def test_forget_intent_negation():
+    # Eng m4: "don't forget me" is not a deletion request.
+    assert not wp.detect_forget_intent("hi", "please don't forget me")
+    assert not wp.detect_forget_intent("hi", "do not forget me, thanks")
+    assert not wp.detect_forget_intent("hi", "never forget me")
+    assert wp.detect_forget_intent("hi", "please forget me")
+
+
+def test_load_config_missing_env(monkeypatch):
+    monkeypatch.delenv("WAITLIST_HMAC_KEY", raising=False)
+    monkeypatch.setenv("WAITLIST_DATA", "/tmp")
+    monkeypatch.setenv("WAITLIST_INBOX", INBOX)
+    with pytest.raises(SystemExit) as exc:
+        wp.load_config(["--auth", "pass"])
+    assert exc.value.code == 2
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
+    monkeypatch.delenv("WAITLIST_DATA", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        wp.load_config(["--auth", "pass"])
+    assert exc.value.code == 2
+    monkeypatch.setenv("WAITLIST_DATA", "/tmp")
+    monkeypatch.delenv("WAITLIST_INBOX", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        wp.load_config(["--auth", "pass"])
+    assert exc.value.code == 2
+
+
+def test_oversize_stdin_triaged(tmp_path, monkeypatch, capsys):
+    # Eng m3: a >1 MiB message is triaged, never parsed.
+    import io
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
+    monkeypatch.setenv("WAITLIST_DATA", str(data))
+    monkeypatch.setenv("WAITLIST_INBOX", INBOX)
+    monkeypatch.setattr("sys.stdin",
+                        io.StringIO("x" * (wp.MAX_RAW_BYTES + 100)))
+    assert wp.main(["--auth", "pass"]) == 0
+    assert "triage" in capsys.readouterr().out
+    assert len(os.listdir(str(data / "triage"))) == 1
+
+
+def test_clarification_body_has_no_dead_footer():
+    # Design blocker 1: the clarification must not contradict itself —
+    # no forget footer at all, honest closing instead.
+    body = wd.CLARIFY_BODY
+    assert "a fresh one arrives with every email" not in body
+    assert "no deletion link in this email" in body
+    assert "{forget_link}" not in body
+
+
+def test_already_invited_patha_noop():
+    service, tmp, clock = make_service()
+    raw = make_msg("owner@example.com", "Owner: owner@example.com")
+    wp.process_inbound(service, raw, auth="pass", inbox_addr=INBOX)
+    row = service.rows[service.by_email["owner@example.com"]]
+    service.confirm_post(row["active_token"])
+    invited = service.send_invite_wave(
+        pricing_lines="P", trial_terms="T", wave="w1", count=5)
+    assert invited == [row["entry_id"]]
+    before_rows = len(service.rows)
+    before_spool = len(spool_docs(tmp))
+    again = make_msg("muse@x.io", "Owner: owner@example.com")
+    result = wp.process_inbound(service, again, auth="pass",
+                                inbox_addr=INBOX)
+    assert result["outcome"] == "already_invited"
+    assert len(service.rows) == before_rows  # no duplicate row
+    assert len(spool_docs(tmp)) == before_spool  # no new email
+    assert service.rows[row["entry_id"]]["status"] == "invited"
