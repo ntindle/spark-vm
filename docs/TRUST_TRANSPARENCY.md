@@ -44,7 +44,7 @@ edited by Docker at any time):
   OAuth login by pre-claiming its callback port."*
 - Both CVEs were disclosed on 2026-09-15, **eight days after the fix
   shipped** in 0.42.0 (reported by third-party security press, e.g.
-  [realhacker.news](https://realhacker.news/critical-docker-sandboxes-flaw-lets-malicious-guest-code-read-and-modify-macos-host-files/);
+  [The Hacker News](http://thehackernews.com/2026/09/critical-docker-sandboxes-flaw-lets.html);
   the CVE records themselves were not readable on cve.org directly at
   write time). Disclosure note: third-party reads found the 0.42.0
   notes named neither CVE as of 2026-09-17 (same article); read directly
