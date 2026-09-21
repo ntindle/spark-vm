@@ -144,6 +144,13 @@ This changelog only works if entries land with the change, not after it:
   "Waitlist-era" label. (#201)
 
 ### Security
+- The with-proxy CA bundle and the jail's swapd-CA install no longer read the
+  swapd-controlled CA through symlink-following `cat`/`cp` as root: a new
+  `proxy/build_ca_bundle.py` refuses a planted symlink (or FIFO/directory) at
+  the CA source and writes the bundle through the existing safe installer
+  (root:root 0644) — a swapd-level attacker can no longer get the next
+  unattended deploy to leak a root-readable file into the world-readable
+  bundle (#144, #207).
 - The swap proxy's audit log is now bounded: deploy installs a logrotate
   policy covering every `*swap*.log` under the proxy home (including
   `SWAP_LOG_FILE` overrides like the inference proxy's log) —
