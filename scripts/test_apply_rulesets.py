@@ -8,19 +8,63 @@ decision, exercised with --execute by a human.
 import json
 import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RULESETS = ROOT / "deploy" / "rulesets"
 SCRIPT = ROOT / "scripts" / "apply-rulesets.sh"
+CI_YML = ROOT / ".github" / "workflows" / "ci.yml"
 
-CI_CHECK_NAMES = {
-    "python tests",
-    "shellcheck",
-    "markdown link check",
-    "PNG screenshot smoke test",
-}
+
+def ci_job_check_names(ci_yml_path):
+    """Check-run names GitHub derives from ci.yml's jobs: `name:` if set, else the job id.
+
+    Purpose-built minimal parser (no PyYAML — the CI python-tests job
+    installs only pytest, so this must not need anything else). It
+    understands only this file's shape:
+
+        jobs:
+          <job-id>:          # exactly two-space indent
+            name: <display>   # first four-space-indented `name:` wins
+
+    Anything else (missing `jobs:` key, zero parsed jobs) raises, so a
+    future reformat of ci.yml fails loudly instead of silently comparing
+    the wrong thing.
+    """
+    lines = Path(ci_yml_path).read_text().splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line == "jobs:")
+    except StopIteration:
+        raise ValueError(f"{ci_yml_path}: no top-level `jobs:` key")
+    names = []
+    job_id = None
+    job_name = None
+    for line in lines[start + 1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            break  # next top-level key: left the jobs: section
+        if indent == 2 and line.rstrip().endswith(":"):
+            if job_id is not None:
+                names.append(job_name or job_id)
+            job_id = stripped[:-1]
+            job_name = None
+        elif (
+            indent == 4
+            and job_id is not None
+            and job_name is None
+            and stripped.startswith("name:")
+        ):
+            job_name = stripped[len("name:"):].strip()
+    if job_id is not None:
+        names.append(job_name or job_id)
+    if not names:
+        raise ValueError(f"{ci_yml_path}: parsed zero jobs under `jobs:`")
+    return set(names)
 
 
 def load(name):
@@ -113,14 +157,77 @@ class TestMainBranchRuleset(unittest.TestCase):
             if r["type"] == "required_status_checks"
         )
         contexts = {c["context"] for c in checks["parameters"]["required_status_checks"]}
-        self.assertEqual(contexts, CI_CHECK_NAMES)
+        # Exact set equality in BOTH directions: the declared ruleset must
+        # require exactly the checks ci.yml defines — no lagging behind a
+        # renamed/added job, and no requiring a check that no longer exists.
+        self.assertEqual(contexts, ci_job_check_names(CI_YML))
         self.assertTrue(checks["parameters"]["strict_required_status_checks_policy"])
 
-    def test_ci_check_names_still_match_ci_yml(self):
-        # The ruleset hardcodes job names; if ci.yml renames a job, both must move.
-        yml = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-        for name in CI_CHECK_NAMES:
-            self.assertIn(f"name: {name}", yml)
+    def test_ci_job_check_names_are_the_declared_four(self):
+        # Known-good anchor: the protection is *supposed* to require exactly
+        # these four checks. A ci.yml job rename/add/remove must update this
+        # set deliberately, under review, together with the ruleset JSON —
+        # the equality test above then forces the JSON to follow.
+        self.assertEqual(
+            ci_job_check_names(CI_YML),
+            {
+                "python tests",
+                "shellcheck",
+                "markdown link check",
+                "PNG screenshot smoke test",
+            },
+        )
+
+    def _declared_contexts(self):
+        checks = next(
+            r for r in load("main-branch-protection.json")["rules"]
+            if r["type"] == "required_status_checks"
+        )
+        return {c["context"] for c in checks["parameters"]["required_status_checks"]}
+
+    def _parse_variant(self, variant_text):
+        with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as f:
+            f.write(variant_text)
+            path = f.name
+        try:
+            return ci_job_check_names(path)
+        finally:
+            os.unlink(path)
+
+    def test_parser_fires_on_an_added_job(self):
+        # Non-vacuity: a fifth ci.yml job must change the parsed set, so the
+        # exact-equality guard cannot pass while the ruleset JSON lags behind.
+        variant = (
+            CI_YML.read_text()
+            + "\n  extra-job:\n    name: extra check\n    runs-on: ubuntu-latest\n"
+        )
+        parsed = self._parse_variant(variant)
+        self.assertIn("extra check", parsed)
+        self.assertNotEqual(parsed, self._declared_contexts())
+
+    def test_parser_fires_on_a_renamed_job(self):
+        variant = CI_YML.read_text().replace("name: shellcheck", "name: shell lint", 1)
+        self.assertNotEqual(variant, CI_YML.read_text())  # the replace landed
+        parsed = self._parse_variant(variant)
+        self.assertIn("shell lint", parsed)
+        self.assertNotIn("shellcheck", parsed)
+        self.assertNotEqual(parsed, self._declared_contexts())
+
+    def test_parser_prefers_job_id_when_name_absent(self):
+        # GitHub falls back to the job id when `name:` is absent; the parser
+        # must too — here the fallback reproduces the same check name, so the
+        # declared set still matches.
+        variant = CI_YML.read_text().replace("    name: shellcheck\n", "", 1)
+        self.assertNotEqual(variant, CI_YML.read_text())  # the replace landed
+        parsed = self._parse_variant(variant)
+        self.assertIn("shellcheck", parsed)  # falls back to the job id
+        self.assertEqual(parsed, self._declared_contexts())
+
+    def test_parser_raises_on_unreadable_shape(self):
+        with self.assertRaises(ValueError):
+            self._parse_variant("on: push\n")  # no `jobs:` key at all
+        with self.assertRaises(ValueError):
+            self._parse_variant("jobs:\n")  # `jobs:` with zero jobs
 
 
 class TestNoSecretsInRulesets(unittest.TestCase):
