@@ -236,7 +236,9 @@ confirmation email containing the signed forget link, and the row is
 deleted only after the link is clicked (proving inbox access), within 7
 days, with a confirmation sent.
 
-**Retention:** unconfirmed → dropped at 14d, row deleted 30d after drop;
+**Retention:** unconfirmed → dropped at 14d, row deleted 30d after drop —
+a dropped row with no recorded drop date is never auto-purged (the 30
+days cannot be proven); the operator removes it by hand;
 confirmed → kept until launch + 90 days (the invite window), then
 anonymized to counts; invited-but-expired → returns to `confirmed` with
 `confirmed_at` reset to the expiry time (back of the queue, no

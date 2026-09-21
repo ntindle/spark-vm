@@ -58,6 +58,8 @@ KNOWN_EVENTS = {
     "confirmed",
     "reminder_sent",
     "dropped",
+    "purged",  # 30d post-drop row deletion (WAITLIST_OPERATIONS.md §5);
+    # counted in rows_read like `dropped`; compute() has no purge metric.
     "invite_sent",
     "claimed",
     # Bridge-line events; not yet emitted by any build (land with signup).

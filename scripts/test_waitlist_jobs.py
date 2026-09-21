@@ -387,7 +387,7 @@ def test_purge_spares_young_dropped_confirmed_and_pending():
     assert svc.rows[confirmed_id]["status"] == "confirmed"
 
 
-def test_purge_never_touches_rows_with_unknown_drop_date():
+def test_purge_never_touches_rows_with_unknown_drop_date(monkeypatch):
     tmp = tempfile.mkdtemp(prefix="waitlist-jobs-undated-")
     rows = [
         {"entry_id": "nodate", "owner_email": "nodate@example.com",
@@ -395,6 +395,13 @@ def test_purge_never_touches_rows_with_unknown_drop_date():
          "drop_at": "2026-01-15T00:00:00Z"},
         {"entry_id": "garbled", "owner_email": "garbled@example.com",
          "status": "dropped", "dropped_at": "not-a-date",
+         "submitted_at": "2026-01-01T00:00:00Z",
+         "drop_at": "2026-01-15T00:00:00Z"},
+        # Hand-edited store: parseable but timezone-naive. Must not crash
+        # the run — a naive date can't be anchored to the retention clock,
+        # so it's never purge-due.
+        {"entry_id": "naive", "owner_email": "naive@example.com",
+         "status": "dropped", "dropped_at": "2026-01-01T00:00:00",
          "submitted_at": "2026-01-01T00:00:00Z",
          "drop_at": "2026-01-15T00:00:00Z"},
         {"entry_id": "pending1", "owner_email": "pending@example.com",
@@ -407,11 +414,68 @@ def test_purge_never_touches_rows_with_unknown_drop_date():
     clock = MutClock(start=datetime(2027, 6, 1, tzinfo=timezone.utc))
     svc = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
                              clock=clock)
-    for eid in ("nodate", "garbled", "pending1"):
+    for eid in ("nodate", "garbled", "naive", "pending1"):
         assert svc.purge_due(svc.rows[eid]) is False
     assert svc.purge_dropped() == []
     svc.reload()
-    assert set(svc.rows) == {"nodate", "garbled", "pending1"}
+    assert set(svc.rows) == {"nodate", "garbled", "naive", "pending1"}
+    # The whole CLI entry point must survive the naive row too — one bad
+    # row must not crash the cron job.
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
+    monkeypatch.setenv("WAITLIST_DATA", tmp)
+    assert wj.main(["--purge", "--dry-run"]) == 0
+
+
+def test_purge_boundary_exactly_thirty_days():
+    svc, tmp, clock = make_service()
+    submit(svc, "boundary@example.com")
+    clock.advance(days=15)
+    entry_id = svc.drop_expired()[0]
+    dropped_at = datetime.fromisoformat(
+        svc.rows[entry_id]["dropped_at"].replace("Z", "+00:00"))
+    clock.t = dropped_at + timedelta(days=30) - timedelta(seconds=1)
+    assert svc.purge_due(svc.rows[entry_id]) is False  # one second early
+    clock.t = dropped_at + timedelta(days=30)
+    assert svc.purge_due(svc.rows[entry_id]) is True  # exactly 30d — due
+
+
+def test_purged_event_emitted_before_rewrite():
+    svc, tmp, clock = make_service()
+    submit(svc, "audit@example.com")
+    clock.advance(days=15)
+    svc.drop_expired()
+    clock.advance(days=31)
+    def boom():
+        raise RuntimeError("boom")
+    svc._rewrite_rows = boom
+    with pytest.raises(RuntimeError, match="boom"):
+        svc.purge_dropped()
+    # The contract: the `purged` audit event lands BEFORE the rewrite, so
+    # the counts survive the deletion even if the rewrite fails.
+    evs = events(tmp)
+    assert [e for e in evs if e["event"] == "purged"]
+
+
+def test_resubmit_after_purge_starts_clean():
+    svc, tmp, clock = make_service()
+    submit(svc, "reborn@example.com")
+    first_id = svc.by_email["reborn@example.com"]
+    clock.advance(days=15)
+    svc.drop_expired()
+    clock.advance(days=31)
+    assert svc.purge_dropped() == [first_id]
+    status, _ = submit(svc, "reborn@example.com")
+    assert status == 200
+    second_id = svc.by_email["reborn@example.com"]
+    assert second_id != first_id  # genuinely new row, not the dropped one
+    svc.reload()
+    assert set(svc.rows) == {second_id}
+    assert svc.rows[second_id]["status"] == "pending"
+    on_disk = rows_on_disk(tmp)
+    # Append-only shape: the resubmit may append twice (row + send
+    # record); load merges by entry_id, so assert the deduped contract.
+    assert {r["entry_id"] for r in on_disk} == {second_id}
+    assert on_disk[-1].get("dropped_at") is None
 
 
 def test_purge_idempotent_and_skips_rewrite_when_nothing_due():
@@ -484,10 +548,13 @@ def test_dropped_and_reminder_events_parse_in_funnel_metrics():
     svc.send_reminders()
     clock.advance(days=7)
     svc.drop_expired()
+    clock.advance(days=31)
+    purged = svc.purge_dropped()
+    assert len(purged) == 1
     rows = fm.load_events(os.path.join(tmp, "funnel_events.jsonl"))
     kinds = {r["event"] for r in rows}
     assert {"waitlist_submitted", "confirm_sent", "reminder_sent",
-            "dropped"} <= kinds
+            "dropped", "purged"} <= kinds
 
 
 # -- 413 closes keep-alive (PR #165 deferred Engineering blocker) ----------

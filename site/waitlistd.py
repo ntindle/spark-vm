@@ -643,7 +643,10 @@ class WaitlistService:
         date we cannot prove the 30 days elapsed, and deleting early
         would break the retention promise. drop_expired always stamps
         dropped_at, so in practice this path only covers hand-edited
-        stores — the operator deletes those by hand."""
+        stores — the operator deletes those by hand. A timezone-naive
+        dropped_at is treated the same way (a hand edit we cannot anchor
+        to the retention clock), NOT normalized to UTC: normalizing could
+        delete up to 14h early against the §5 promise."""
         if row.get("status") != "dropped":
             return False
         dropped_at = row.get("dropped_at")
@@ -652,10 +655,15 @@ class WaitlistService:
         try:
             dropped = datetime.fromisoformat(
                 dropped_at.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
+            return self.clock() >= dropped + timedelta(
+                seconds=PURGE_TTL_SECONDS)
+        except (ValueError, AttributeError, TypeError):
+            # Garbled date (ValueError), non-string (AttributeError), or
+            # naive datetime vs the aware clock (TypeError): none of these
+            # prove the 30 days elapsed, so none is ever purge-due. The
+            # TypeError case matters — an uncaught one would crash the
+            # whole --purge run and every retry until hand-fixed.
             return False
-        return self.clock() >= dropped + timedelta(
-            seconds=PURGE_TTL_SECONDS)
 
     def _rewrite_rows(self):
         """Atomically rewrite rows.jsonl from the in-memory rows — the
@@ -687,7 +695,10 @@ class WaitlistService:
     def purge_dropped(self):
         """30d job: permanently delete every purge-due dropped row.
         Returns the purged entry_ids. Emits a `purged` funnel event per
-        row BEFORE the rewrite so the counts survive the deletion.
+        row BEFORE the rewrite so the counts survive the deletion —
+        emit-before is deliberate and at-least-once: a kill between the
+        emit and the rewrite duplicates the event on retry, which the
+        operator query pack dedupes by (event, ref).
         Idempotent: a second run finds nothing due."""
         due = [row for row in sorted(
             self.rows.values(), key=lambda r: r.get("submitted_at") or "")
@@ -695,7 +706,8 @@ class WaitlistService:
         for row in due:
             self._emit("purged", row["entry_id"])
             del self.rows[row["entry_id"]]
-            self.by_email.pop(row.get("owner_email"), None)
+            if self.by_email.get(row.get("owner_email")) == row["entry_id"]:
+                del self.by_email[row["owner_email"]]
         if due:
             self._rewrite_rows()
         return [row["entry_id"] for row in due]
