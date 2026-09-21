@@ -5,7 +5,7 @@ against `main`, and on manual `workflow_dispatch` runs.
 
 | Job | What it runs |
 |---|---|
-| `python-tests` | pytest suites: `proxy/` (swap addon incl. `test_round6.py`, grant writer), `confirm/` (confirmd), `deploy/` (auto-deploy), `muse-job/tests` (event trust). Installs `shellcheck` via apt first — `test_auto_deploy.py::test_scripts_syntax` gates on shellcheck *warnings* and must not depend on whatever the runner image happens to carry. |
+| `python-tests` | pytest suites: `proxy/` (swap addon incl. `test_round6.py`, grant writer), `confirm/` (confirmd), `deploy/` (auto-deploy), `muse-job/tests` (event trust), `cred-ui/tests` (cred-ui HTTP), `cua/` (cua-bridge), `jail/` (build.sh smoke). Installs `shellcheck` via apt first — `test_auto_deploy.py::test_scripts_syntax` gates on shellcheck *warnings* and must not depend on whatever the runner image happens to carry. |
 | `shellcheck` | shellcheck at `--severity=error` over every `*.sh` (gates on real breakage, not style) |
 | `markdown-links` | lychee checks every link in every `*.md` (`--exclude-loopback`: docs reference localhost service addresses that can never resolve on a runner; `--exclude` for the three bot-blocking hosts — medium.com, businesswire.com, globenewswire.com — see the local-run block below). Mail links are excluded by lychee's default in current versions — do not pass `--exclude-mail`; the flag was removed upstream and fails the step. |
 | `png-check` | Playwright screenshots example.com (`scripts/pw-test.py`) and `scripts/png-check.py` validates the PNG signature/dimensions |
@@ -18,6 +18,9 @@ cd proxy   && python3 -m pytest test_swap_addon.py test_grant_writer.py test_rou
 cd confirm && python3 -m pytest test_confirmd.py
 cd deploy  && python3 -m pytest test_auto_deploy.py
 cd muse-job && python3 -m pytest tests/test_event_trust.py
+python3 -m pytest cred-ui/tests/ -q
+cd cua     && python3 -m pytest test_cua_bridge.py -q
+cd jail    && python3 -m pytest test_build_smoke.py -q
 
 # shellcheck (same --severity=error gate as CI)
 shellcheck --severity=error $(git ls-files '*.sh')

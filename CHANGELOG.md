@@ -37,6 +37,16 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- First test suites for the two remaining untested components (O4): `cua/`
+  gets hermetic tests for the `cua-bridge.py` localhost bridge — launch
+  allowlist enforcement, the CSRF/host gate, window picking, and the
+  click/type/key/launch endpoints (including the desktop→window coordinate
+  mapping and the panel global-click branch) — plus syntax/shebang checks
+  for the `cua/bin` shell scripts; `jail/` gets a hermetic smoke test for
+  `build.sh` pinning its strict mode, idempotency guards, and the jail's
+  documented isolation properties (no bind mounts, no DNS, proxy-only
+  nftables egress, explicit UID range, sshd hardening, swapd CA temp
+  cleanup). Both suites are wired into the CI `python-tests` job. (#187)
 - Stopped/cold retention tier thinking (C15): the hosted pricing thinking
   now names the stopped-state cost story the live-control deep scan found
   missing — a published $0.000027/GB-hour cold-storage anchor (≈$0.79/mo

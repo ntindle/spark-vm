@@ -6,6 +6,8 @@
 #   cd deploy  && python3 -m pytest test_auto_deploy.py
 #   cd muse-job && python3 -m pytest tests/test_event_trust.py
 #   python3 -m pytest cred-ui/tests/ -q
+#   cd cua     && python3 -m pytest test_cua_bridge.py -q
+#   cd jail    && python3 -m pytest test_build_smoke.py -q
 
 name: ci
 
@@ -57,6 +59,14 @@ jobs:
       - name: cred-ui tests
         if: always()
         run: python3 -m pytest cred-ui/tests/ -q
+      - name: cua bridge tests
+        if: always()
+        run: python3 -m pytest test_cua_bridge.py -q
+        working-directory: cua
+      - name: jail build smoke tests
+        if: always()
+        run: python3 -m pytest test_build_smoke.py -q
+        working-directory: jail
 
   shellcheck:
     name: shellcheck
