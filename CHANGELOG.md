@@ -160,6 +160,16 @@ This changelog only works if entries land with the change, not after it:
   "Waitlist-era" label. (#201)
 
 ### Security
+- The swap proxy's audit log is now bounded: deploy installs a logrotate
+  policy covering every `*swap*.log` under the proxy home (including
+  `SWAP_LOG_FILE` overrides like the inference proxy's log) —
+  size-triggered rotation keeping 12 compressed generations. The log
+  previously grew without limit until a full disk failed every swap
+  closed (a total outage of credentialed egress). The proxy also guards
+  the log's filesystem before each audit write: it warns loudly
+  (rate-limited) while space runs low and refuses swaps fail-closed when
+  space is critical, so the no-swap-without-a-trail invariant holds even
+  if rotation is not installed. Both thresholds are env-tunable (#198, #202).
 - The egress proxy no longer swaps a credential anywhere when its registry
   placement is declared but not recognized (e.g. a typo'd placement kind):
   such swaps are now refused with a loud warning instead of silently
