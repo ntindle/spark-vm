@@ -1690,14 +1690,18 @@ class SecuritySweepTests(unittest.TestCase):
 
 class AuditLogDiskGuardTests(unittest.TestCase):
     """Probe: single test."""
-    def test_plenty_space_writes_quietly(self):
-        """Healthy disk: the audit line lands and no warning is logged."""
+    def test_unqueryable_filesystem_proceeds(self):
+        """When the filesystem cannot be queried the guard is unknowable
+        and the write proceeds — the guard is defense in depth; the
+        write itself still fails closed on a real ENOSPC."""
         with tempfile.TemporaryDirectory() as tmp:
-            with self._patched(tmp, 10 * 1024**3):
+            log_file = Path(tmp) / "swap.log"
+            with (mock.patch.object(sa, "LOG_FILE", log_file),
+                  mock.patch("os.statvfs", side_effect=OSError(2, "nope"))):
                 a = self._addon_with_real_audit()
-                with self.assertNoLogs(sa.log, level="WARNING"):
-                    self.assertTrue(a._audit("api.github.com", "github"))
-                self.assertTrue((Path(tmp) / "swap.log").exists())
+                self.assertIsNone(sa._audit_disk_free_bytes())
+                self.assertTrue(a._audit("api.github.com", "github"))
+                self.assertTrue(log_file.exists())
 
 
 if __name__ == "__main__":
