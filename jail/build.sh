@@ -24,7 +24,7 @@ ROOTFS=/var/lib/machines/$MACHINE
 HOST_VETH_IP=10.99.0.1
 GUEST_IP=10.99.0.2
 CIDR=30
-JAIL_SSH_PORT=2222          # on the tailnet interface only
+JAIL_SSH_PORT=2222          # on the tailnet interface only (single source: used in the nftables conf + verify line below)
 REBUILD_ROOTFS=0
 for a in "$@"; do [ "$a" = "--rebuild-rootfs" ] && REBUILD_ROOTFS=1; done
 # Help/usage path: render the header doc and exit BEFORE any side
@@ -135,7 +135,7 @@ $SUDO systemctl daemon-reload
 say "jail firewall"
 # (route_localnet is set per-interface on ve-jail from the veth
 # drop-in above, not globally.)
-$SUDO tee /etc/nftables-jail.conf >/dev/null <<'EOF'
+$SUDO tee /etc/nftables-jail.conf >/dev/null <<EOF
 # Proxy-only egress for the jail's veth (ve-jail). Evaluated before the
 # base filter chains (priority -10 < filter 0), so nothing later can
 # re-allow what this drops. Lives in its own table; Docker/Tailscale
@@ -149,7 +149,7 @@ table inet jail {
         iifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat to 127.0.0.1
         # Tailnet -> jail sshd (the agent login). Tailnet interface only.
         # (dnat ip: inet-family tables need the address family explicit.)
-        iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22
+        iifname "tailscale0" tcp dport $JAIL_SSH_PORT dnat ip to 10.99.0.2:22
     }
     chain input {
         type filter hook input priority -10; policy accept;
@@ -203,7 +203,7 @@ if ! $SUDO machinectl show $MACHINE >/dev/null 2>&1; then
     $SUDO machinectl start $MACHINE
 fi
 # Wait for the guest's systemd to settle.
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
     if $SUDO systemd-run --machine=$MACHINE --wait --pipe /bin/true 2>/dev/null; then
         break
     fi
@@ -235,7 +235,7 @@ systemctl enable --now systemd-networkd
 # file above is actually applied, then wait for the address.
 systemctl restart systemd-networkd'
 say "waiting for guest address $GUEST_IP"
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
     if run_guest /bin/bash -c 'ip -4 addr show host0 | grep -q '"$GUEST_IP"'' 2>/dev/null; then
         break
     fi
@@ -350,5 +350,5 @@ exec "\$@"
 EOF
 chmod 755 /usr/local/bin/with-proxy'
 
-say "done. Verify with:  ssh -p 2222 $JAIL_USER@<tailnet-ip>"
+say "done. Verify with:  ssh -p $JAIL_SSH_PORT $JAIL_USER@<tailnet-ip>"
 say "Then remove the swapd CA from the HOST trust store (see jail/README)."
