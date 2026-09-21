@@ -158,27 +158,40 @@ Suspend loses *uptime*, never *files*.
 
 ### Stopped/cold retention tier (C15)
 
-The competitive gap the live-control deep scan named: every comparable
-product has an explicit stopped-state cost story, and this thinking did
-not — the always-on cost story otherwise loses to TermSquad's $9/mo flat
-and to published cold-storage rates. The market anchors (all VERIFIED
-against vendor pages in the 2026-09-20 deep scan, links there):
+The competitive gap the live-control deep scan named: this thinking had
+no stopped-state cost story at all — while the task-scoped products
+publish explicit stopped-state pricing (AgentComputer's cold rate, E2B's
+running-only billing) and TermSquad answers with flat $9/mo always-on
+and no stopped story whatsoever. The market anchors below, each labeled
+with its actual source and evidence grade (the deep scan's
+VERIFIED/INFERRED discipline; Fly Machines from the suspend/wake
+research):
 
-- **AgentComputer** publishes two storage rates: hot $0.000683/GB-hour for
-  running computers, **cold $0.000027/GB-hour for stopped** — file
-  operations keep working on stopped computers without accruing runtime.
-- **E2B** bills per second of *running* sandbox time only; no separate
-  paused-storage price was located on the pages read. The sandbox is the
-  unit: idle means paused-or-dead, never billed-but-idle.
-- **TermSquad** ($9/mo starter, always-on) publishes no stopped-state
-  discount at all — stopping is a power action, not a billing state. That
-  is the simplicity the stopped tier has to beat or match.
-- **Fly.io** (our provider pick) stops compute billing on hibernate; a
-  stopped machine retains its volume. The H4 provider interface ships this
-  as the `RetentionInfo` descriptor on `BoxStatus`
-  (`harness/provider_iface.py`): `disk_gb_retained`, `RetentionKind`
-  (volume/snapshot/none), and a `storage_billable` flag per state — the
-  control plane already exposes what billing needs to consume.
+- **AgentComputer** (VERIFIED, deep scan) publishes two storage rates: hot
+  $0.000683/GB-hour for running computers, **cold $0.000027/GB-hour for
+  stopped** — file operations keep working on stopped computers without
+  accruing runtime.
+- **E2B** (VERIFIED, deep scan) bills per second of *running* sandbox time
+  only; no separate paused-storage price was located on the pages read.
+  The sandbox is the unit: idle means paused-or-dead, never
+  billed-but-idle.
+- **TermSquad** (VERIFIED: $9/mo starter, always-on, no stopped-state
+  discount published; INFERRED: stopping reads as a power action, not a
+  billing state — no vendor page names the subscription semantics). Its
+  answer to the stopped question is flat $9 always-on — the opposite of a
+  stopped-state cost story, and the simplicity the stopped tier has to
+  beat or match.
+- **Fly.io** (our provider pick): the deep scan VERIFIED that Sprites
+  stops compute billing on hibernate; the Machines story comes from the
+  suspend/wake research ([V] in its Fly Machines section): suspended ==
+  stopped == storage-only (no CPU/RAM), and attached volume storage is
+  billed while the volume exists, regardless of machine state. The H4
+  driver contract ships this as the `RetentionInfo` descriptor on
+  `BoxStatus` (`harness/provider_iface.py`): `disk_gb_retained`,
+  `RetentionKind` (volume/snapshot/none), and a `storage_billable` flag
+  per state — the driver contract exposes what the billing consumer will
+  need. (No control plane exists yet — #47 is still a ticket — so "driver
+  contract," not "control plane," is the honest subject.)
 
 The math that makes the tier cheap: at AgentComputer's published cold
 rate, a stopped 40 GB box (Tier-1-parity disk) costs
@@ -191,32 +204,51 @@ job to measure, not this section's.
 
 Proposed shape (thinking, not committed — gated on the Billing decision,
 NEEDS_USER.md): a **Stopped tier** that keeps the disk and the box's
-identity at near-cost flat pricing, with wake-on-dial returning the box to
-its paid tier. It is NOT a free tier by another name: card-on-file stays
-(the decided abuse direction), and it buys retention, not compute. The
-paid line stays "your computer never sleeps" — the stopped tier answers
-"what happens when I don't need it for a month," which is where both
-TermSquad's $9 flat and AgentComputer's $0.79/mo cold rate currently make
-this thinking look like it has no answer.
+identity (its `vm_id`) at near-cost flat pricing, with wake-on-dial
+returning the box to its paid tier. It is NOT a free tier by another
+name: card-on-file stays (the decided abuse direction), and it buys
+retention, not compute. The paid line stays "your computer never
+sleeps" — the stopped tier answers "what happens when I don't need it
+for a month," which is where both TermSquad's $9 flat and the derived
+$0.79/mo cold-storage figure currently make this thinking look like it
+has no answer.
 
 Funnel reading: §4's "Upgrades sell compute, never persistence" stands —
 the stopped tier sells *persistence without compute*, the same principle
 from the other side. Trial interplay is TBD (Billing/Abuse): a trial box
 that idles into stopped must say so plainly ("Sleeps after N idle days —
 your files are always there," §5), and the stopped state must not
-resurrect the retired free-tier shape (R4 note). Object-storage offload
-(Daytona's archive model) is explicitly out of this tier's first shape —
-volume-retained stopped only; offload is a later cost optimization, not
-launch thinking.
+resurrect the retired free-tier shape (R4 note). Note the C16 audit's
+F3/C15 cross-link: the idle auto-policy (which states a box moves into,
+and when) and the stopped tier (what retained states cost) are the same
+decision made twice if #47 doesn't own the lifecycle model — the policy
+that moves a box into stopped is the tier's entry rule. Object-storage
+offload (Daytona's archive model) is explicitly out of this tier's first
+shape — volume-retained stopped only; offload is a later cost
+optimization, not launch thinking.
 
 Build surface (the C15 cross-component note): the H4 interface's
-`retention` descriptor is the control-plane→billing contract — shipped in
-PR #183. What remains is the billing consumer: meter `disk_gb_retained`
-per stopped box per hour, price it at the stopped-tier rate, and surface
-the stopped burn on the same buyer dashboard the paid tiers require
-(spend visibility is the buyer story). Until that consumer exists, the
-stopped tier is thinking, not product — §5's honesty rule holds: the
-pricing page names no stopped row until Billing decides it.
+`retention` descriptor is the driver-contract half of the
+control-plane→billing contract — shipped in PR #183. What remains is
+three pieces, not just the billing consumer. First, the entry path: the
+H4 contract has no user-initiated stop verb — `suspend()` always surfaces
+as SUSPENDED (even where the backend cold-stops), and STOPPED means
+provider/operator-stopped outside the suspend path — so a user cannot put
+their box into the Stopped tier through the control plane today. The stop
+affordance is a #47-scope decision (C16 audit F4, filed as #180): the tier
+needs a control-plane stop that records user-stopped as tier-eligible,
+distinct from SUSPENDED, which stays on the paid tier. Second, the billing
+consumer: meter `disk_gb_retained` per stopped box per hour, gated on
+`storage_billable` and `kind` (a `SNAPSHOT`-kind or
+`storage_billable=false` backend changes the cost basis), price it at the
+stopped-tier rate, and surface the stopped burn on the same buyer
+dashboard the paid tiers require (spend visibility is the buyer story).
+Third, the exit observation: `status()` is poll-based with no transition
+events, so the STOPPED→WAKING→RUNNING return to the paid tier needs a
+defined observation mechanism (poll cadence or a transition hook), or
+billing misprices the wake window. Until all three exist, the stopped
+tier is thinking, not product — §5's honesty rule holds: the pricing
+page names no stopped row until Billing decides it.
 
 ## 4. What converts (funnel reading)
 
