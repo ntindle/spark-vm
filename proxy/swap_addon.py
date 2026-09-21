@@ -134,6 +134,7 @@ placeholder went somewhere it should not.
 import asyncio
 import base64
 import binascii
+import errno
 import hashlib
 import hmac
 import ipaddress
@@ -156,6 +157,14 @@ from pathlib import Path
 def _env_path(name, default):
     v = os.environ.get(name)
     return Path(v) if v else Path(default)
+
+
+def _env_int(name, default):
+    """Integer env override; falls back to default on missing/garbage."""
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 # All paths are env-overridable so a second mitmdump instance can run
@@ -257,9 +266,91 @@ def _open_audit_log():
     swap.log world-readable — it carries credential names, hosts,
     methods, path prefixes, and egress IPs. os.open's mode applies
     only at creation; it never widens an existing file.
+
+    Finding 198: the log is bounded by the logrotate policy installed
+    by proxy/deploy.sh (proxy/swap-logrotate.conf), and guarded here —
+    below LOG_MIN_FREE_BYTES free the open refuses with ENOSPC (so
+    _audit returns False and the swap fails closed), and below
+    LOG_WARN_FREE_BYTES it proceeds but warns loudly (rate-limited, so
+    the warn band doesn't spam the journal) so the operator gets a
+    signal before the fail-closed cascade.
     """
+    global _LAST_LOW_SPACE_WARN_AT
+    free = _audit_disk_free_bytes()
+    if free is not None and free < LOG_WARN_FREE_BYTES:
+        # Rate-limited: the warn band can persist for a long time and the
+        # check runs on every audit write; unthrottled, the warning would
+        # spam the journal — whose writes consume the very disk being
+        # warned about.
+        now = time.monotonic()
+        if now - _LAST_LOW_SPACE_WARN_AT >= _LOW_SPACE_WARN_COOLDOWN_S:
+            _LAST_LOW_SPACE_WARN_AT = now
+            log.warning(
+                "swap: audit-log filesystem low on space (%d bytes free): "
+                "below %d bytes audit writes refuse and swaps fail closed — "
+                "check the logrotate policy installed by proxy/deploy.sh",
+                free, LOG_MIN_FREE_BYTES)
+    if free is not None and free < LOG_MIN_FREE_BYTES:
+        raise OSError(errno.ENOSPC,
+                      "audit-log filesystem critically low on space "
+                      "(%d bytes free); refusing to protect the audit trail"
+                      % free)
     fd = os.open(LOG_FILE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     return os.fdopen(fd, "a", encoding="utf-8")
+
+
+def _normalize_guard_thresholds(warn, minimum):
+    """Clamp disk-guard thresholds to sane values.
+
+    Negative values can only come from an owner typo in the environment
+    (the jail cannot set the proxy's environment); clamp to 0 rather
+    than silently disabling the guard. The warn band must sit at or
+    above the refuse threshold — an inverted pair is repaired by raising
+    the warn level up to the refuse level, never by lowering refusal.
+    """
+    warn = max(0, warn)
+    minimum = max(0, minimum)
+    if warn < minimum:
+        warn = minimum
+    return warn, minimum
+
+
+# Finding 198: the audit trail is bounded two ways. The logrotate policy
+# installed by proxy/deploy.sh rotates the audit logs — the trail is
+# preserved, never silently dropped. As defense in depth, the addon
+# guards the log's filesystem before every audit write:
+#   * below LOG_MIN_FREE_BYTES the write refuses with ENOSPC, so _audit
+#     returns False and the swap is refused — the no-swap-without-trail
+#     invariant holds even when rotation is not installed or the disk
+#     filled from elsewhere;
+#   * below LOG_WARN_FREE_BYTES the write still proceeds, but a loud
+#     journal warning (rate-limited) gives the operator a signal BEFORE
+#     the fail-closed cascade.
+#
+# Tunables, read once at addon import — a change needs a proxy restart:
+#   SWAP_LOG_WARN_FREE_BYTES (default 256MiB): warn band floor.
+#   SWAP_LOG_MIN_FREE_BYTES  (default 16MiB):  refuse floor (ENOSPC).
+#   SWAP_LOG_WARN_COOLDOWN_S (default 300):   minimum seconds between
+#       low-space warnings, so the warn band doesn't spam the journal.
+LOG_WARN_FREE_BYTES, LOG_MIN_FREE_BYTES = _normalize_guard_thresholds(
+    _env_int("SWAP_LOG_WARN_FREE_BYTES", 256 * 1024 * 1024),
+    _env_int("SWAP_LOG_MIN_FREE_BYTES", 16 * 1024 * 1024))
+_LOW_SPACE_WARN_COOLDOWN_S = _env_int("SWAP_LOG_WARN_COOLDOWN_S", 300)
+_LAST_LOW_SPACE_WARN_AT = 0.0
+
+
+def _audit_disk_free_bytes():
+    """Free bytes available to the proxy on the audit log's filesystem.
+
+    Returns None when the filesystem cannot be queried — the guard is
+    defense in depth, so an unknowable answer proceeds to the write and
+    the write itself still fails closed on a real ENOSPC.
+    """
+    try:
+        st = os.statvfs(os.path.dirname(os.path.abspath(LOG_FILE)))
+    except OSError:
+        return None
+    return st.f_bavail * st.f_frsize
 
 # --- spark-vm version stamping (docs/VERSIONING.md) ---
 # Single-source repo VERSION: logged at addon load so the journal shows which
