@@ -137,6 +137,13 @@ This changelog only works if entries land with the change, not after it:
   every poll re-read all of them; the per-approval lock entries are likewise
   released when an approval is answered or expires (#196).
 
+### Security
+- The egress proxy no longer swaps a credential anywhere when its registry
+  placement is declared but not recognized (e.g. a typo'd placement kind):
+  such swaps are now refused with a loud warning instead of silently
+  degrading the location restriction into swap-anywhere. Entries with no
+  declared placement keep the migration behavior (#197).
+
 ## [0.2.0] - 2026-09-20
 
 ### Added
