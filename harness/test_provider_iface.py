@@ -198,6 +198,7 @@ class FakeDriver:
         )
         self.fail_next_wake = False
         self.stall_wake = False
+        self.woke = set()  # vm_ids whose last RUNNING came from a wake
 
     def _set(self, vm_id, new):
         old = self.boxes[vm_id]["state"]
@@ -231,9 +232,20 @@ class FakeDriver:
 
     def status(self, vm_id):
         st = self.boxes[vm_id]["state"]
+        caps = self.capabilities
+        # FLY F2: surface which resume path the last wake took.
+        wake_kind = None
+        if vm_id in self.woke and st is PS.RUNNING:
+            if caps.wake_reprovisions:
+                wake_kind = pi.WakeKind.REPROVISIONED
+            elif caps.memory_resume == pi.MemoryResume.FULL:
+                wake_kind = pi.WakeKind.WARM
+            else:
+                wake_kind = pi.WakeKind.COLD
         return pi.BoxStatus(vm_id=vm_id, state=st,
-                            capabilities=self.capabilities,
-                            retention=self._retention_for(vm_id))
+                            capabilities=caps,
+                            retention=self._retention_for(vm_id),
+                            wake_kind=wake_kind)
 
     def suspend(self, vm_id, timeout_s=120.0):
         self._check_timeout(timeout_s)
@@ -278,6 +290,7 @@ class FakeDriver:
                 raise pi.ProviderError(pi.ErrorKind.WAKE_FAILED,
                                        "resume attempt ended")
             self._set(vm_id, PS.RUNNING)
+            self.woke.add(vm_id)
         return io.BytesIO(b"")
 
     def ssh_info(self, vm_id):
@@ -464,6 +477,50 @@ def test_protocol_default_snapshot_raises_unsupported():
     with pytest.raises(pi.ProviderError) as exc:
         BareDriver().snapshot("vm-x", "label")
     assert exc.value.kind == pi.ErrorKind.UNSUPPORTED
+
+
+def test_wake_kind_surfaces_resume_path():
+    # FLY F2 (Architecture Blocking 1): the driver surfaces which resume
+    # path the last wake took, so the control plane can distinguish wake
+    # from park-reset.
+    cases = [
+        # (capabilities, expected wake_kind)
+        (pi.ProviderCapabilities(supports_suspend=True,
+                                 memory_resume=pi.MemoryResume.COLD_ONLY),
+         pi.WakeKind.COLD),
+        (pi.ProviderCapabilities(supports_suspend=True,
+                                 memory_resume=pi.MemoryResume.FULL),
+         pi.WakeKind.WARM),
+        (pi.ProviderCapabilities(supports_suspend=True,
+                                 memory_resume=pi.MemoryResume.COLD_ONLY,
+                                 wake_reprovisions=True),
+         pi.WakeKind.REPROVISIONED),  # RunPod-style: suspend is park
+    ]
+    for i, (caps, expected) in enumerate(cases):
+        d = FakeDriver(capabilities=caps)
+        res = d.provision(make_spec(tenant_id=f"t-wake-{i}"))
+        assert d.status(res.vm_id).wake_kind is None  # no wake yet
+        d._set(res.vm_id, PS.RUNNING)
+        d.suspend(res.vm_id)
+        d.dial(res.vm_id).close()
+        got = d.status(res.vm_id)
+        assert got.state == PS.RUNNING
+        assert got.wake_kind == expected, (caps, expected)
+        assert got.capabilities.wake_reprovisions == (expected ==
+                                                      pi.WakeKind.REPROVISIONED)
+
+
+def test_warm_resume_property():
+    d = FakeDriver()
+    res = d.provision(make_spec())
+    st = d.status(res.vm_id)
+    assert st.warm_resume is None  # no wake yet
+    assert pi.BoxStatus(vm_id="x", state=PS.RUNNING,
+                        wake_kind=pi.WakeKind.WARM).warm_resume is True
+    assert pi.BoxStatus(vm_id="x", state=PS.RUNNING,
+                        wake_kind=pi.WakeKind.COLD).warm_resume is False
+    assert pi.BoxStatus(vm_id="x", state=PS.RUNNING,
+                        wake_kind=pi.WakeKind.REPROVISIONED).warm_resume is False
 
 
 def test_illegal_transition_never_reported_even_by_fake():

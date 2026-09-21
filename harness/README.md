@@ -62,8 +62,11 @@ Implements the executable half of the R2 pre-seeded-harness contract
   (`supports_suspend`, `memory_resume` axis), the billing-facing
   `retention` descriptor, the per-tenant `auto_resume` gate, and the
   fail-closed `public_ingress: false` spec invariant with a
-  driver-attested network-isolation check. Covered by
-  `test_provider_iface.py` (38 contract tests incl. a fake in-memory
+  driver-attested network-isolation check, the park-mechanics axes
+  (`wake_reprovisions` per-shape flag + `wake_kind` resume-path surface
+  for RunPod-style backends whose "suspend" is park), and a note that the
+  per-`vm_id` lifecycle is provisional on H11's isolation answer. Covered by
+  `test_provider_iface.py` (40 contract tests incl. a fake in-memory
   driver exercising the full lifecycle).
 
 ## Fixture lifecycle

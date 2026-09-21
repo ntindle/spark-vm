@@ -23,7 +23,12 @@ contract so the Fly driver (and any later driver) has a fixed target:
   `status()` suspended ↔ Fly `suspended`, and the reference shape's suspend
   degrading to a cold stop under the hood.
 - `docs/GPU_PATH_RESEARCH.md` H4 consequences: an **open** `gpu_class`
-  shape descriptor (not a closed enum), the suspend-vs-park distinction,
+  shape descriptor (not a closed enum); the suspend-vs-park distinction as
+  **axes, not states** — `ProviderCapabilities.wake_reprovisions` flags
+  park-style backends (RunPod's "suspend" is actually park: terminate
+  compute, keep the data volume, wake = re-boot the golden image + re-run
+  tenant bootstrap), and `BoxStatus.wake_kind` surfaces which resume path
+  a wake actually took (FLY F2's "surface which resume path was taken");
   and `destroy` deleting volumes.
 - C14/C15 (competitor deep-scan follow-ups): the control plane must expose
   stopped-state resource retention (disk) to billing — carried here as the
@@ -39,18 +44,27 @@ contract so the Fly driver (and any later driver) has a fixed target:
 Adjudications this module makes (the research docs defer these to "the H4
 design loop" — this is that loop; each is cited so a later turn can amend):
 
-1. **No `parked` state.** `FLY_DRIVER_RESEARCH.md` F2 mapped Fly `stop` to a
-   contract-level `parked`. `SUSPEND_WAKE_RESEARCH.md` rec 1's mapping rule
-   supersedes it: a driver-requested suspend *always* surfaces as
-   `suspended`, regardless of the substrate mechanism (on the Fly reference
-   shape that is a cold `stop` under the hood — the caller asked for suspend
-   and the box will be woken, so it is `suspended`, not `stopped`).
-   Warm-vs-cold is carried by the separate `memory_resume` axis, never by
-   the state name. Park-as-idle-economics (terminate compute, keep the data
-   volume, re-provision from the golden image on wake) is a control-plane
-   composition for H13, not a driver-reported state.
+1. **No `parked` state — but park mechanics are representable.**
+   `FLY_DRIVER_RESEARCH.md` F2 mapped Fly `stop` to a contract-level
+   `parked`. `SUSPEND_WAKE_RESEARCH.md` rec 1's mapping rule supersedes it:
+   a driver-requested suspend *always* surfaces as `suspended`, regardless
+   of the substrate mechanism (on the Fly reference shape that is a cold
+   `stop` under the hood — the caller asked for suspend and the box will be
+   woken, so it is `suspended`, not `stopped`). Warm-vs-cold is carried by
+   the separate `memory_resume` axis, never by the state name. For
+   genuinely park-style backends (RunPod: new pod id, new SSH endpoint,
+   bootstrap re-run on wake) the contract carries the distinction on two
+   axes instead of a state: `wake_reprovisions` (per-shape: this driver's
+   suspend is park — wake re-boots the golden image and re-runs tenant
+   bootstrap, so the control plane must ensure bootstrap idempotency and
+   re-query `ssh_info()` after wake) and `wake_kind` (per-status: which
+   resume path the last wake took — F2's "surface which resume path was
+   taken", verbatim). A dedicated `park()` verb is **deferred to H13**
+   (it would share `dial`'s wake path per rec 4); when it ships it gets a
+   loud-`UNSUPPORTED` Protocol default like `snapshot()`, so explicit
+   subclasses keep working and structural implementers must add it.
 2. **`degraded` is an orthogonal health flag**, not a lifecycle state
-   (rec 1). H3 §6's `degraded` and the H15 signup UI's status mapping
+   (rec 1). H3 §6's `degraded` and the hosted signup UI's status mapping
    (`creating→provisioning`, `ready→live`) are UI-layer concerns; this
    module defines driver-level states, and documents the migration.
 3. **Bounded-blocking `dial()`** (rec 5) over trigger-wake + poll-status:
@@ -59,6 +73,23 @@ design loop" — this is that loop; each is cited so a later turn can amend):
    rec-2-taxonomy error within the timeout. A driver may implement the
    wait internally via trigger+poll, but may not push the poll loop onto
    callers.
+4. **`destroy(vm_id)`, not H3's `destroy(tenant_id)`.** H3 §6's only verb
+   taking `tenant_id` was `destroy`; this contract scopes destruction to
+   one box. Multi-box tenants (CPU box + GPU box on the GPU path) need
+   per-box destroy — the GPU path arguably requires it.
+5. **The per-`vm_id` lifecycle model is provisional on H11.** One lifecycle
+   per tenant box is the model rec 1 proposes — *unless* H11 answers
+   per-tenant *processes* instead of per-tenant boxes, in which case this
+   model needs rework beyond the registry (rec 1 names that gate so it
+   isn't discovered in implementation). This contract is written against
+   the per-box answer; if H11 lands the other way, the state machine,
+   verbs, and this module get revised together.
+
+Evolution policy: capability and status surfaces extend by addition (new
+axes, new enum members). New *verbs* ship with loud-`UNSUPPORTED`
+Protocol defaults — explicit subclasses inherit them, structural
+implementers must define them (never a silent no-op). `snapshot()`
+already follows this rule; the deferred `park()` will too.
 
 What this module is NOT: not a driver (no Fly API calls — dry-run only
 until the operator's spend-cap packet, NEEDS_USER.md), not the control
@@ -86,6 +117,11 @@ class ProviderState(str, enum.Enum):
     possibly retryable) and ``destroyed`` (terminal). ``degraded`` left
     H3's enum entirely — it is the orthogonal ``Health`` flag below.
     (SUSPEND_WAKE_RESEARCH.md rec 1.)
+
+    Provisional on H11: this is one lifecycle per tenant *box*. If H11
+    answers per-tenant *processes* instead of per-tenant boxes, this model
+    needs rework beyond the registry (rec 1 names the gate here so it
+    isn't discovered in implementation).
     """
 
     PROVISIONING = "provisioning"  # provision accepted; box not yet usable
@@ -124,6 +160,20 @@ class MemoryResume(str, enum.Enum):
     NONE = "none"          # provider has no suspend story at all
 
 
+class WakeKind(str, enum.Enum):
+    """Which resume path the most recent wake actually took
+    (FLY_DRIVER_RESEARCH.md F2: "The driver must surface which resume path
+    was taken so the control plane can distinguish wake from park-reset").
+    Meaningful only post-wake; None on BoxStatus = unknown / no wake yet."""
+
+    WARM = "warm"                    # memory snapshot restored; tenant state
+                                     # intact
+    COLD = "cold"                    # cold start from the retained disk
+    REPROVISIONED = "reprovisioned"  # golden image re-booted and tenant
+                                     # bootstrap re-run (park-style backends,
+                                     # e.g. RunPod)
+
+
 class RetentionKind(str, enum.Enum):
     """What survives in a non-running state, for the billing surface
     (C15: the control plane must expose stopped-state resource retention
@@ -154,6 +204,14 @@ class ProviderCapabilities:
 
     supports_suspend: bool
     memory_resume: MemoryResume
+    # Park-style backends (GPU_PATH_RESEARCH.md: "Suspend is not one thing";
+    # RunPod's "suspend" is actually park — terminate the compute, keep the
+    # data volume, wake = re-boot the golden image + re-run tenant
+    # bootstrap). When True, the control plane must ensure tenant bootstrap
+    # idempotency (H19) and re-query ssh_info() after every wake, because
+    # endpoints/fingerprints may change. The H4 contract must state which
+    # each driver offers — this flag is that statement.
+    wake_reprovisions: bool = False
     # Provider suspend limits that shape the guarantee, e.g. Fly's ≤4 GB
     # memory-suspend cap. None = no published cap.
     max_suspend_memory_gb: int | None = None
@@ -242,10 +300,18 @@ class BoxStatus:
     state: ProviderState
     health: Health = Health.OK
     capabilities: ProviderCapabilities | None = None
-    # Warm-vs-cold, meaningful only post-wake (rec 1). None = unknown / n/a.
-    warm_resume: bool | None = None
+    # Which resume path the most recent wake took (FLY F2). None = unknown /
+    # no wake yet — meaningful only post-wake.
+    wake_kind: WakeKind | None = None
     # Billing surface (C15). None only while provisioning/running.
     retention: RetentionInfo | None = None
+
+    @property
+    def warm_resume(self) -> bool | None:
+        """rec-1 vocabulary over wake_kind: True iff the last wake was warm."""
+        if self.wake_kind is None:
+            return None
+        return self.wake_kind is WakeKind.WARM
 
 
 # ---------------------------------------------------------------------------
@@ -382,9 +448,10 @@ class ProviderDriver(typing.Protocol):
         ...
 
     def status(self, vm_id: str) -> BoxStatus:
-        """Current driver-level state. `warm_resume` is meaningful only
-        post-wake; `retention` must be set for every non-running state
-        (C15 billing surface)."""
+        """Current driver-level state. `wake_kind` is meaningful only
+        post-wake (FLY F2: which resume path the last wake took).
+        `retention` must be set for every non-running state except
+        PROVISIONING (nothing retained yet — C15 billing surface)."""
         ...
 
     def suspend(self, vm_id: str, timeout_s: float = 120.0) -> None:
@@ -404,13 +471,17 @@ class ProviderDriver(typing.Protocol):
         dials collapse to one wake (first-writer-wins). Raises
         WAKE_TIMEOUT while the wake is still in flight (poll and retry),
         WAKE_FAILED when the attempt ended (box back in SUSPENDED),
-        TERMINAL on destroyed / declined-retry failed. timeout_s must be
-        positive; non-positive values raise INVALID_ARGUMENT (caller bug)."""
+        TERMINAL on destroyed / declined-retry failed / closed auto_resume
+        gate (a gated box is healthy-but-not-wakeable — TERMINAL means
+        "this dial will never open", not "the box is dead"). timeout_s must
+        be positive; non-positive values raise INVALID_ARGUMENT (caller bug)."""
         ...
 
     def ssh_info(self, vm_id: str) -> SshInfo:
         """The connection bundle: relay endpoint + attested VM host-key
-        fingerprint."""
+        fingerprint. On park-style backends (`wake_reprovisions`), a wake
+        may yield a new endpoint/fingerprint — the control plane re-queries
+        ssh_info() after every WAKING→RUNNING transition."""
         ...
 
     def destroy(self, vm_id: str) -> None:
