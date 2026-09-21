@@ -45,7 +45,7 @@ This changelog only works if entries land with the change, not after it:
   vault and an OpenSandbox execution adapter, the closest open-source
   shape to spark-vm's secrets posture); AgentComputer's "unverifiable"
   egress posture refined to a stronger negative (real product with real
-  pricing, still no stated egress policy). (#TBD)
+  pricing, still no stated egress policy). (#216)
 - Approvals-plane gap analysis: a new doc walks the full path from a gated
   action to a human answer and back (refusal → filing → pending → human
   answer UX → push summons → terminal decision delivery → audit trail),
