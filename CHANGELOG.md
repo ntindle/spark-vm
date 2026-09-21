@@ -43,7 +43,7 @@ This changelog only works if entries land with the change, not after it:
   failed attempts with a loud log line. On the healthy path delivery
   waits for the next worker pass (up to 30s, tunable via
   `--worker-interval`). Runs wherever the deployment lives (self-hosted
-  or hosted), like confirmd.
+  or hosted), like confirmd. (PR #204)
 - Competitor watch 2026-09-21 (docs/COMPETITOR_WATCH_2026-09-21.md): quiet
   window — no launches, pricing changes, partner moves, or version bumps
   across the tracked set since the 2026-09-20 pass; boat.dev's rate card
