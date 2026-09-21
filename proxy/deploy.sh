@@ -63,14 +63,14 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/safe_install.py \
          proxy/swap-proxy.service proxy/swap-inference.service \
          confirm/confirmd.py confirm/confirm-request confirm/confirmd.service \
-         confirm/push-worker.service \
+         confirm/push-worker.service confirm/push.py \
          VERSION scripts/sparkvm_version.py; do
     if [ ! -f "$f" ]; then
         echo "ERROR: required repo file missing: $f — aborting before any mutation"
         exit 1
     fi
 done
-python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py \
+python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py confirm/push.py \
     proxy/safe_install.py scripts/sparkvm_version.py \
     || { echo "ERROR: python syntax check failed — aborting"; exit 1; }
 # VERSION feeds audit JSON via the updater: a non-semver VERSION must fail
@@ -277,7 +277,7 @@ done
 if [ "$proxy_ready" != "1" ]; then
     echo "  WARNING: proxy port 18080 not listening after $attempt tries"
 fi
-for svc in swap-proxy swap-inference confirmd; do
+for svc in swap-proxy swap-inference confirmd push-worker; do
     if sudo systemctl is-active --quiet "$svc.service"; then
         echo "  $svc: active"
     else

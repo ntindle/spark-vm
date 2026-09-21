@@ -335,6 +335,9 @@ class NotifiedLog:
 
 AID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SEND_TIMEOUT = 15
+# Summary truncation shared by the wire builder and enqueue: the worker
+# rebuilds the payload through the truncating builder anyway.
+_SUMMARY_CAP = 200
 
 
 def _default_keys_path() -> str:
@@ -514,8 +517,8 @@ def _build_approval_payload(item: dict) -> tuple:
     """
     aid = str(item.get("id") or "")
     summary = str(item.get("summary") or "New approval request")
-    if len(summary) > 200:
-        summary = summary[:197] + "..."
+    if len(summary) > _SUMMARY_CAP:
+        summary = summary[:_SUMMARY_CAP - 3] + "..."
     payload = json.dumps(
         {"title": "Approval needed",
          "body": summary,
@@ -572,7 +575,15 @@ QUEUE_BACKOFF_CAP = 1800.0
 # Claim lease: a worker pass marks due entries "inflight" and bumps
 # next_at by this, so a second concurrent pass (or a crashed pass)
 # can't double-send — entries become due again only after the lease.
-QUEUE_CLAIM_TTL = 300.0
+# 30 minutes, renewed between entries mid-pass (_touch), so the lease
+# can't expire during a backlog storm; the remaining double-send window
+# needs a single entry with >120 subscriptions at 15s each — impossible
+# on a single-owner box.
+QUEUE_CLAIM_TTL = 1800.0
+# Module-level throttle for the disabled-sender warning: one line per
+# hour per process, not one per pass.
+_DISABLED_LOG_INTERVAL = 3600.0
+_last_disabled_log = 0.0
 
 
 def _queue_next_at(attempts: int, now: float) -> float:
@@ -605,18 +616,19 @@ class PushQueue:
 
     @classmethod
     def default(cls):
-        subs_path = _default_subs_path()
         return cls(_default_queue_path(), _default_dead_path(),
-                   subs_path + ".notified.json")
+                   _default_notified_path())
 
     # -- enqueue ------------------------------------------------------
     def enqueue(self, item: dict) -> str:
         """File an approval for worker delivery.
 
-        Returns "queued" | "duplicate" | "notified" | "invalid".
-        Fail-open: never raises — a queue failure must never lose the
-        filed approval (the worker simply never learns about it; the
-        loud log line is the signal).
+        Returns "queued" | "duplicate" | "notified" | "invalid" | "error".
+        "invalid" is a bad approval id; "error" is a queue I/O failure —
+        distinct so the operator can tell a poisoned journal from a
+        malformed id. Fail-open: never raises — a queue failure must
+        never lose the filed approval (the worker simply never learns
+        about it; the loud log line is the signal).
         """
         try:
             aid, _payload = _build_approval_payload(item)
@@ -627,7 +639,12 @@ class PushQueue:
             if self.notified.seen(aid):
                 return "notified"
             now = time.time()
+            # Truncate at enqueue for symmetry with the wire builder —
+            # the worker rebuilds the payload through the truncating
+            # builder anyway, so the extra bytes serve no purpose.
             summary = str(item.get("summary") or "New approval request")
+            if len(summary) > _SUMMARY_CAP:
+                summary = summary[:_SUMMARY_CAP - 3] + "..."
             with _locked(self.queue_path):
                 if self._aid_present(aid):
                     return "duplicate"
@@ -650,7 +667,7 @@ class PushQueue:
             return "queued"
         except Exception:
             log.exception("push-queue: enqueue failed")
-            return "invalid"
+            return "error"
 
     def _read_all(self):
         """All journal entries in file order; corrupt lines are logged
@@ -702,9 +719,12 @@ class PushQueue:
     def run_once(self, sender=None, now=None) -> dict:
         """One delivery pass over due entries. Returns a stats dict.
 
-        Never raises. With a disabled sender (no keys / no crypto) the
-        pass is skipped loudly and entries stay queued — they deliver
-        once the operator configures keys.
+        Never raises once the journal is readable: send crashes and
+        journal write failures during finalization are logged and the
+        entry is left for a later pass (counted in stats["errors"]).
+        With a disabled sender (no keys / no crypto) the pass is
+        skipped loudly and entries stay queued — they deliver once the
+        operator configures keys.
         """
         stats = {"processed": 0, "sent": 0, "rescheduled": 0, "dead": 0,
                  "errors": 0}
@@ -712,8 +732,11 @@ class PushQueue:
         if sender is None:
             sender = PushSender.default()
         if not sender.enabled:
-            log.warning("push-queue: worker pass skipped — push disabled "
-                        "(%s)", sender.disabled_reason)
+            global _last_disabled_log
+            if now - _last_disabled_log >= _DISABLED_LOG_INTERVAL:
+                log.warning("push-queue: worker pass skipped — push "
+                            "disabled (%s)", sender.disabled_reason)
+                _last_disabled_log = now
             stats["disabled"] = True
             return stats
         # Claim due entries under the lock; the sends happen unlocked so
@@ -736,32 +759,52 @@ class PushQueue:
             aid = e["aid"]
             stats["processed"] += 1
             try:
+                if sender.notified.seen(aid):
+                    # A previous pass already delivered this (crash
+                    # between mark and finalize): drop it WITHOUT
+                    # re-sending. The mark is only written when every
+                    # subscription resolved ok/pruned, so skip is safe.
+                    log.info("push-queue: %s already notified, dropping "
+                             "without resend", aid)
+                    self._finalize(aid, remove=True)
+                    continue
                 _built_aid, payload = _build_approval_payload(
                     {"id": aid, "summary": e.get("summary", "")})
                 _sent, pending = sender._send_payload(aid, payload)
+                # Heartbeat the claim lease: a long send phase must not
+                # outlive the TTL and let a concurrent pass double-send.
+                self._touch(aid, time.time())
             except Exception:
                 log.exception("push-queue: delivery crashed for %s", aid)
                 _sent, pending = 0, True
-            if pending:
-                attempts = int(e.get("attempts", 0)) + 1
-                if attempts >= QUEUE_MAX_ATTEMPTS:
-                    self._dead_letter(e, attempts, "max-attempts")
-                    self._finalize(aid, remove=True)
-                    stats["dead"] += 1
+            try:
+                if pending:
+                    attempts = int(e.get("attempts", 0)) + 1
+                    if attempts >= QUEUE_MAX_ATTEMPTS:
+                        self._dead_letter(e, attempts, "max-attempts")
+                        self._finalize(aid, remove=True)
+                        stats["dead"] += 1
+                    else:
+                        self._finalize(
+                            aid, attempts=attempts,
+                            next_at=_queue_next_at(attempts, now),
+                            state="pending")
+                        stats["rescheduled"] += 1
+                        log.warning("push-queue: attempt %d/%d failed for "
+                                    "%s; next try in %.0fs",
+                                    attempts, QUEUE_MAX_ATTEMPTS, aid,
+                                    _queue_next_at(attempts, now) - now)
                 else:
-                    self._finalize(
-                        aid, attempts=attempts,
-                        next_at=_queue_next_at(attempts, now),
-                        state="pending")
-                    stats["rescheduled"] += 1
-                    log.warning("push-queue: attempt %d/%d failed for %s; "
-                                "next try in %.0fs",
-                                attempts, QUEUE_MAX_ATTEMPTS, aid,
-                                _queue_next_at(attempts, now) - now)
-            else:
-                sender.notified.mark(aid)
-                self._finalize(aid, remove=True)
-                stats["sent"] += 1
+                    sender.notified.mark(aid)
+                    self._finalize(aid, remove=True)
+                    stats["sent"] += 1
+            except Exception:
+                # Journal write failed mid-finalization: the entry stays
+                # inflight and is re-claimed after the TTL; the seen-guard
+                # above prevents a resend when the mark already landed.
+                log.exception("push-queue: journal write failed for %s",
+                              aid)
+                stats["errors"] += 1
         return stats
 
     def run_forever(self, interval: float = 30.0):
@@ -778,6 +821,45 @@ class PushQueue:
                 # suspenders so the service can never die silently.
                 log.exception("push-queue: worker pass crashed")
             time.sleep(interval)
+
+    def _touch(self, aid: str, now: float):
+        """Renew one entry's claim lease mid-pass (under the lock)."""
+        with _locked(self.queue_path):
+            entries = self._read_all()
+            for e in entries:
+                if e.get("aid") == aid and e.get("state") == "inflight":
+                    e["next_at"] = now + QUEUE_CLAIM_TTL
+            self._rewrite(entries)
+
+    def _requeue(self, aid: str) -> str:
+        """Move the most recent dead-letter record for `aid` back to
+        the queue (operator recovery). Never raises."""
+        try:
+            if not AID_RE.match(aid or ""):
+                return "invalid"
+            match = None
+            with _locked(self.dead_path):
+                try:
+                    with open(self.dead_path, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                r = json.loads(line)
+                            except ValueError:
+                                continue
+                            if isinstance(r, dict) and r.get("aid") == aid:
+                                match = r
+                except FileNotFoundError:
+                    pass
+            if match is None:
+                return "not-found"
+            return self.enqueue({"id": aid,
+                                 "summary": match.get("summary", "")})
+        except Exception:
+            log.exception("push-queue: requeue failed for %s", aid)
+            return "error"
 
     def _finalize(self, aid: str, remove: bool = False, attempts: int = 0,
                   next_at: float = 0.0, state: str = "pending"):
@@ -798,12 +880,34 @@ class PushQueue:
             self._rewrite(kept)
 
     def _dead_letter(self, entry: dict, attempts: int, reason: str):
-        """Move an exhausted entry to the dead-letter file, loudly."""
+        """Move an exhausted entry to the dead-letter file, loudly.
+
+        Idempotent: a crash between the append and the queue removal
+        replays this on the next pass, and the aid-presence check below
+        skips the duplicate record.
+        """
+        aid = entry.get("aid")
         record = dict(entry)
         record["dead_at"] = time.time()
         record["dead_reason"] = reason
         record["attempts"] = attempts
         with _locked(self.dead_path):
+            try:
+                with open(self.dead_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            r = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(r, dict) and r.get("aid") == aid:
+                            log.info("push-queue: %s already dead-lettered, "
+                                     "skipping duplicate record", aid)
+                            return
+            except FileNotFoundError:
+                pass
             fd = os.open(self.dead_path,
                          os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
@@ -815,9 +919,8 @@ class PushQueue:
             except BaseException:
                 raise
         log.error("push-queue: DEAD-LETTERED approval %s after %d attempts "
-                  "(%s) — see %s; re-enqueue by re-filing or clearing the "
-                  "notified mark", entry.get("aid"), attempts, reason,
-                  self.dead_path)
+                  "(%s) — see %s; recover with: python3 push.py --requeue "
+                  "%s", aid, attempts, reason, self.dead_path, aid)
 
 
 # --------------------------------------------------------------------------
@@ -843,7 +946,14 @@ def main(argv):
     ap.add_argument("--worker-interval", type=float, default=30.0,
                     metavar="SECONDS",
                     help="seconds between worker passes (default 30)")
+    ap.add_argument("--requeue", metavar="AID",
+                    help="move a dead-lettered approval's most recent "
+                         "record back onto the queue (operator recovery)")
     args = ap.parse_args(argv)
+    if args.requeue:
+        res = PushQueue.default()._requeue(args.requeue)
+        print("requeue %s: %s" % (args.requeue, res))
+        return 0 if res in ("queued", "duplicate", "notified") else 1
     if args.worker_once:
         stats = PushQueue.default().run_once()
         print("push worker pass: %s" % (stats,))

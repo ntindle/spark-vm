@@ -113,7 +113,13 @@ class TestEnqueue(unittest.TestCase):
             os.path.join(self._td.name, "dead.jsonl"),
             os.path.join(self._td.name, "notified.json"))
         Path(os.path.join(self._td.name, "is-a-file")).write_text("x")
-        self.assertEqual(bad.enqueue({"id": "a1"}), "invalid")
+        self.assertEqual(bad.enqueue({"id": "a1"}), "error")
+
+    def test_enqueue_truncates_summary(self):
+        self.q.enqueue({"id": "a1", "summary": "y" * 5000})
+        entry = read_entries(self.q.queue_path)[0]
+        self.assertEqual(len(entry["summary"]), 200)
+        self.assertTrue(entry["summary"].endswith("..."))
 
     def test_journal_lines_are_jsonl(self):
         self.q.enqueue({"id": "a1"})
@@ -266,6 +272,49 @@ class TestRunOnce(unittest.TestCase):
         stats = self.q.run_once(sender=self.sender, now=time.time())
         self.assertEqual(stats["sent"], 1)
         self.assertTrue(self.sender.notified.seen("a1"))
+
+    def test_claimed_entry_already_notified_drops_without_resend(self):
+        # Crash between notified.mark and _finalize: the entry is still
+        # in the journal but the mark landed. The next pass must drop it
+        # WITHOUT sending again (Eng B1).
+        self.q.enqueue({"id": "a1"})
+        self.q.notified.mark("a1")  # as the crashed pass did
+        stats = self.q.run_once(sender=self.sender,
+                                now=time.time() + 5)
+        self.assertEqual(stats["processed"], 1)
+        self.assertEqual(stats["sent"], 0)
+        self.assertEqual(self.sender.calls, [])
+        self.assertEqual(read_entries(self.q.queue_path), [])
+
+    def test_touch_renews_claim_lease(self):
+        self.q.enqueue({"id": "a1"})
+        with push._locked(self.q.queue_path):
+            entries = self.q._read_all()
+            entries[0]["state"] = "inflight"
+            entries[0]["next_at"] = 1000.0
+            self.q._rewrite(entries)
+        self.q._touch("a1", 2000.0)
+        entry = read_entries(self.q.queue_path)[0]
+        self.assertEqual(entry["next_at"], 2000.0 + push.QUEUE_CLAIM_TTL)
+
+    def test_requeue_moves_dead_letter_back(self):
+        q, sender = make_queue(self._td.name, {"a1": "retry"})
+        q.enqueue({"id": "a1", "summary": "hello"})
+        now = time.time() + 5
+        for _ in range(push.QUEUE_MAX_ATTEMPTS):
+            q.run_once(sender=sender, now=now)
+            now = push._queue_next_at(99, now) + 1
+        self.assertEqual(read_entries(q.queue_path), [])
+        self.assertEqual(q._requeue("a1"), "queued")
+        entries = read_entries(q.queue_path)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["summary"], "hello")
+
+    def test_requeue_unknown_aid(self):
+        self.assertEqual(self.q._requeue("nope"), "not-found")
+
+    def test_requeue_invalid_aid(self):
+        self.assertEqual(self.q._requeue("bad id!"), "invalid")
 
     def test_enqueue_during_inflight_is_duplicate(self):
         q, sender = make_queue(self._td.name, {"a1": "retry"})

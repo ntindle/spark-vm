@@ -68,15 +68,19 @@ secrets ever live in the repo.
    `push-worker.service`) picks due entries up and sends one encrypted
    push per stored subscription, with exponential-backoff retry on
    transient failures (1m → 2m → 4m → 8m → 16m → 30m → 30m, then
-   dead-letter). The service worker (`/sw.js`) shows the notification;
-   tapping it opens `/approval/<id>`.
+   dead-letter). On the healthy path enqueue is immediate but delivery
+   waits for the next worker pass — up to `--worker-interval` (default
+   30s) after filing, tunable down for faster alerts. The service
+   worker (`/sw.js`) shows the notification; tapping it opens
+   `/approval/<id>`.
 
 ## The push worker (H14 part a)
 
 `push.py --worker` is the standalone push service: it loops
 (`--worker-interval`, default 30s), claims due queue entries under an
-exclusive lock (claimed entries get a 300s lease so a crashed worker
-can't double-send — claims self-heal after the lease), and delivers
+exclusive lock (claimed entries get a 30-minute lease, renewed between
+entries mid-pass, so a crashed worker can't double-send — claims
+self-heal after the lease), and delivers
 each with the exact same wire payload as the inline path (shared
 builder). Outcomes:
 
@@ -92,20 +96,28 @@ builder). Outcomes:
   operator signal. The approval itself is unaffected (it was filed and
   answered normally); only the notification was lost.
 
+Note the timing tradeoff of durability: a retry that succeeds after a
+push outage can surface "Approval needed" minutes later, for an
+approval already answered. Tapping it opens the approval page, which
+always shows the current state — so a stale notification is a mild
+annoyance, never a wrong action.
+
 Runbook:
 
 ```sh
 sudo systemctl status push-worker            # the service (enabled by deploy.sh)
 sudo -u swapd python3 /home/swapd/push.py --worker-once   # one pass, prints stats
-tail -1 /home/swapd/approvals/push-queue-dead.jsonl      # dead letters
+tail -1 /home/swapd/approvals/push-queue-dead.jsonl || echo "no dead letters"
+# recover one dead-lettered approval (most recent record goes back on the queue):
+sudo -u swapd python3 /home/swapd/push.py --requeue <approval-id>
 ```
 
-A dead-lettered approval can be re-filed (or its notified mark cleared)
-to re-enqueue it. With push disabled (no keys / no `cryptography`) the
-worker skips passes loudly and entries stay queued — they deliver once
-the operator configures keys. The journal, dead-letter file, and their
-lock sidecars are created mode 0600 and carry approval ids + summaries
-only — never secrets.
+With push disabled (no keys / no `cryptography`) the worker skips
+passes (one warning line per hour, not per pass) and entries stay
+queued — they deliver once the operator configures keys. The journal
+and dead-letter file are created mode 0600 and carry approval ids +
+summaries only — never secrets; their lock sidecars (`.lock`) are
+created with the default umask and carry no data.
 
 ## Security notes
 
