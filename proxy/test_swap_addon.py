@@ -1333,6 +1333,58 @@ class AuthorityAndPlacementTests(unittest.TestCase):
         a.request(Flow(req))
         self.assertEqual(req.path, "/?token=ghp_TOKEN")
 
+    def test_placement_unknown_string_fails_closed(self):
+        """A typo'd placement string must degrade to no swap, never to
+        swap-anywhere (issue #197)."""
+        registry = {"github": {"allowed_hosts": ["api.github.com"],
+                           "access_token": {"placement": "bearer-header"}}}
+        a = make_addon(registry=registry)
+        req = Request("api.github.com", "/",
+                      [("Authorization", "Bearer hsurr:github")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer hsurr:github")
+        self.assertIn(("api.github.com", "github", "placement-mismatch"),
+                      a.refused)
+
+    def test_placement_unknown_kind_fails_closed(self):
+        """A typo'd placement kind must degrade to no swap (#197)."""
+        registry = {"github": {"allowed_hosts": ["api.github.com"],
+                           "access_token":
+                               {"placement": {"qurey_param": "token"}}}}
+        a = make_addon(registry=registry)
+        req = Request("api.github.com", "/?token=hsurr:github")
+        a.request(Flow(req))
+        self.assertEqual(req.path, "/?token=hsurr:github")
+        self.assertIn(("api.github.com", "github", "placement-mismatch"),
+                      a.refused)
+
+    def test_placement_malformed_shape_fails_closed(self):
+        """A multi-key placement dict is malformed: fail closed (#197)."""
+        registry = {"github": {"allowed_hosts": ["api.github.com"],
+                           "access_token":
+                               {"placement": {"query_param": "token",
+                                              "custom_header": "X-T"}}}}
+        a = make_addon(registry=registry)
+        req = Request("api.github.com", "/?token=hsurr:github")
+        a.request(Flow(req))
+        self.assertEqual(req.path, "/?token=hsurr:github")
+        self.assertIn(("api.github.com", "github", "placement-mismatch"),
+                      a.refused)
+
+    def test_placement_absent_still_swaps_anywhere(self):
+        """No declared placement keeps the migration behavior: swaps
+        anywhere (#197 must not regress it)."""
+        registry = {"github": {"allowed_hosts": ["api.github.com"]}}
+        a = make_addon(registry=registry)
+        req = Request("api.github.com", "/",
+                      [("Authorization", "Bearer hsurr:github")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Authorization"),
+                         "Bearer ghp_TOKEN")
+        self.assertNotIn(("api.github.com", "github", "placement-mismatch"),
+                         a.refused)
+
     def test_pinning_failure_fails_closed(self):
         """If the pin cannot be applied to the server connection, the
         connection is killed rather than left unpinned."""
