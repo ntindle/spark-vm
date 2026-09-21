@@ -33,7 +33,8 @@ _SIDE_EFFECT_FREE = (
     re.compile(r"^(readonly|export|declare|local)?\s*"             # VAR=...
                r"[A-Za-z_][A-Za-z0-9_]*="),
     re.compile(r"^for\s+\w+\s+in\b.*\bdo\b.*\bdone\s*$"),         # one-line for
-    re.compile(r"^\[.*\]\s*(&&|\|\|)\s*\S"),                      # [ .. ] && cmd
+    re.compile(r"^\[.*\]\s*(&&|\|\|)\s*"                          # [ .. ] && VAR=...
+               r"[A-Za-z_][A-Za-z0-9_]*="),
 )
 
 
@@ -71,6 +72,10 @@ def test_help_branch_precedes_all_side_effects():
         i for i, ln in enumerate(code)
         if re.search(r'\[\s*"\$\{1:-\}"\s*=\s*"--help"\s*\]', ln))
     for ln in code[:idx]:
+        # Command substitution can run arbitrary commands — never allowed
+        # above the --help branch, even inside an assignment.
+        assert "$(" not in ln and "`" not in ln, (
+            f"command substitution above the --help branch: {ln!r}")
         assert any(p.search(ln) for p in _SIDE_EFFECT_FREE), (
             f"statement above the --help branch may have side effects: {ln!r}")
 
