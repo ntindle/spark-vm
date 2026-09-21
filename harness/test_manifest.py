@@ -31,11 +31,16 @@ def _skip_generate_tests_on_dirty_checkout(request):
     # marked tests shell out to the real generator, so on a dirty working
     # tree they cannot run — skip explicitly (with the remedy) instead of
     # failing cry-wolf red. CI checks out clean, so it always runs them.
-    if (request.node.get_closest_marker("needs_clean_checkout")
-            and not _checkout_is_clean()):
-        pytest.skip(
-            "checkout has uncommitted changes; generate-image-manifest.sh "
-            "refuses by design on a dirty tree — commit or stash to run")
+    if request.node.get_closest_marker("needs_clean_checkout"):
+        try:
+            clean = _checkout_is_clean()
+        except (subprocess.TimeoutExpired, OSError):
+            pytest.skip("could not determine checkout cleanliness "
+                        "(git status failed) — refusing to run generator tests")
+        if not clean:
+            pytest.skip(
+                "checkout has uncommitted changes; generate-image-manifest.sh "
+                "refuses by design on a dirty tree — commit or stash to run")
 
 
 def git_head():

@@ -17,12 +17,24 @@ build.sh itself.
 """
 
 import os
+import re
 import subprocess
 
 import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD_SH = os.path.join(REPO_ROOT, "jail", "build.sh")
+
+# Statement kinds that are provably side-effect-free: anything else above
+# the --help branch is treated as a potential side effect and fails
+# test_help_branch_precedes_all_side_effects.
+_SIDE_EFFECT_FREE = (
+    re.compile(r"^set\s"),                                        # set -euo pipefail
+    re.compile(r"^(readonly|export|declare|local)?\s*"             # VAR=...
+               r"[A-Za-z_][A-Za-z0-9_]*="),
+    re.compile(r"^for\s+\w+\s+in\b.*\bdo\b.*\bdone\s*$"),         # one-line for
+    re.compile(r"^\[.*\]\s*(&&|\|\|)\s*\S"),                      # [ .. ] && cmd
+)
 
 
 def run_bash(*argv, cwd=REPO_ROOT):
@@ -46,6 +58,21 @@ def test_help_runs_from_another_cwd():
         ["bash", BUILD_SH, "--help"],
         capture_output=True, text=True, timeout=60, cwd="/tmp")
     assert r.returncode == 0, r.stderr
+
+
+def test_help_branch_precedes_all_side_effects():
+    # The --help contract ("exits before any side effect") is enforced
+    # structurally: if a future edit inserts a side-effecting statement
+    # above the --help branch, this fails even though --help still exits 0.
+    lines = open(BUILD_SH).read().splitlines()
+    code = [ln.split("#", 1)[0].rstrip() for ln in lines]
+    code = [ln for ln in code if ln.strip()]
+    idx = next(
+        i for i, ln in enumerate(code)
+        if re.search(r'\[\s*"\$\{1:-\}"\s*=\s*"--help"\s*\]', ln))
+    for ln in code[:idx]:
+        assert any(p.search(ln) for p in _SIDE_EFFECT_FREE), (
+            f"statement above the --help branch may have side effects: {ln!r}")
 
 
 def test_shell_syntax():

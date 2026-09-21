@@ -268,3 +268,95 @@ def test_launch_app_spawns_allowlisted_app_with_x11_env(monkeypatch):
     assert "WAYLAND_DISPLAY" not in env
     assert captured["start_new_session"] is True
     assert captured["stdout"] is bridge.subprocess.DEVNULL
+    assert captured["stderr"] is bridge.subprocess.DEVNULL
+
+
+# ---------------------------------------------------------------------------
+# do_POST wiring (these routes previously had zero coverage: a removed CSRF
+# gate or a deleted panel special-case escaped every test — QA blocker 1)
+# ---------------------------------------------------------------------------
+
+def _post_handler(monkeypatch, path, body, windows, host="127.0.0.1:18731",
+                  csrf="1"):
+    """A Handler ready for do_POST with canned list_windows/click drivers."""
+    seen = []
+
+    def fake(tool, args):
+        seen.append((tool, args))
+        if tool == "list_windows":
+            return {"windows": windows}
+        return {"ok": True}
+
+    monkeypatch.setattr(bridge, "call", fake)
+    h = _handler(command="POST", host=host, csrf=csrf)
+    h.path = path
+    h._body = lambda: body
+    sent = []
+    h._json = lambda obj, code=200: sent.append((code, obj))
+    return h, sent, seen
+
+
+def test_post_click_panel_uses_desktop_scope_absolute_coords(monkeypatch):
+    panel = _win("top panel", 0, 0, 1920, 30, z=999, app="Xfce4-panel", pid=9)
+    h, sent, seen = _post_handler(monkeypatch, "/api/click",
+                                  {"x": 50, "y": 10}, [panel])
+    h.do_POST()
+    clicks = [args for tool, args in seen if tool == "click"]
+    # XSendEvent clicks die on the panel: absolute XTEST click, no pid.
+    assert clicks == [{"x": 50, "y": 10, "button": "left",
+                       "scope": "desktop"}]
+    assert sent[0][0] == 200 and sent[0][1]["ok"] is True
+
+
+def test_post_click_window_uses_window_relative_coords(monkeypatch):
+    w = _win("editor", 100, 200, 800, 600, z=3, pid=7)
+    h, sent, seen = _post_handler(monkeypatch, "/api/click",
+                                  {"x": 150, "y": 230}, [w])
+    h.do_POST()
+    clicks = [args for tool, args in seen if tool == "click"]
+    assert clicks == [{"pid": 7, "window_id": w["window_id"],
+                       "x": 50, "y": 30, "button": "left"}]
+    assert "scope" not in clicks[0]
+    assert sent[0][0] == 200
+
+
+def test_post_click_evil_host_blocked_before_driver(monkeypatch):
+    w = _win("editor", 0, 0, 800, 600, z=1, pid=7)
+    h, sent, seen = _post_handler(monkeypatch, "/api/click", {"x": 1, "y": 1},
+                                  [w], host="evil.example:18731")
+    h.do_POST()
+    assert sent == [(403, {"error": "forbidden"})]
+    assert seen == []  # the driver was never touched
+
+
+def test_post_launch_empty_app_rejected(monkeypatch):
+    h, sent, seen = _post_handler(monkeypatch, "/api/launch", {"app": ""}, [])
+    h.do_POST()
+    assert sent == [(400, {"error": "empty app"})]
+    assert seen == []
+
+
+def test_post_type_routes_through_focus_and_foreground(monkeypatch):
+    w = _win("editor", 0, 0, 800, 600, z=5, pid=11)
+    h, sent, seen = _post_handler(monkeypatch, "/api/type",
+                                  {"text": "hello"}, [w])
+    h.do_POST()
+    assert [tool for tool, _ in seen] == ["list_windows", "bring_to_front",
+                                          "type_text"]
+    _, type_args = seen[2]
+    assert type_args["delivery_mode"] == "foreground"
+    assert type_args["text"] == "hello"
+    assert sent[0][0] == 200
+
+
+@pytest.mark.parametrize("command", ["PUT", "DELETE"])
+def test_csrf_ok_write_methods_require_header(command):
+    assert _handler(command, csrf="1")._csrf_ok() is True
+    assert _handler(command, csrf="0")._csrf_ok() is False
+    assert _handler(command, csrf=None)._csrf_ok() is False
+
+
+def test_body_too_large_returns_none():
+    h = _handler("POST")
+    h.headers = {"Content-Length": "1000001"}
+    assert h._body() is None
