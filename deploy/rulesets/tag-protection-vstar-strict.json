@@ -25,13 +25,6 @@
     },
     {
       "type": "deletion"
-    },
-    {
-      "parameters": {
-        "operator": "starts_with",
-        "pattern": "v*"
-      },
-      "type": "tag_name_pattern"
     }
   ],
   "target": "tag"

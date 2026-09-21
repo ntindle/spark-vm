@@ -50,14 +50,14 @@ class TestTagRulesets(unittest.TestCase):
         self.assertIn("update", types)
         self.assertIn("deletion", types)
 
-    def test_base_has_tag_name_pattern_guard(self):
-        patterns = [
-            r for r in load("tag-protection-vstar.json")["rules"]
-            if r["type"] == "tag_name_pattern"
-        ]
-        self.assertEqual(len(patterns), 1)
-        self.assertEqual(patterns[0]["parameters"]["operator"], "starts_with")
-        self.assertEqual(patterns[0]["parameters"]["pattern"], "v*")
+    def test_no_dead_tag_name_pattern_rule(self):
+        # The tag_name_pattern rule was removed: with operator "starts_with"
+        # GitHub interprets the pattern literally, so "v*" would match only
+        # tags literally beginning "v*" (i.e. nothing real). Scoping to v*
+        # tags is done by the ref_name condition, which uses fnmatch.
+        for name in ("tag-protection-vstar.json", "tag-protection-vstar-strict.json"):
+            types = {r["type"] for r in load(name)["rules"]}
+            self.assertNotIn("tag_name_pattern", types, name)
 
     def test_base_has_no_bypass(self):
         # The base variant is absolute: even the owner cannot move a tag.
@@ -187,12 +187,70 @@ class TestApplyScript(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("not valid JSON", p.stderr)
 
+    def test_missing_name_errors(self):
+        noname = Path("/tmp/apply_rulesets_noname.json")
+        noname.write_text('{"foo": 1}')
+        try:
+            p = self.run_script("--file", str(noname))
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("no .name", p.stderr)
+        finally:
+            noname.unlink(missing_ok=True)
+
     def test_dry_run_never_prints_the_token(self):
         p = self.run_script("--file", "deploy/rulesets/tag-protection-vstar.json",
                      env_token="ghp_faketoken1234567890")
         self.assertEqual(p.returncode, 0)
         self.assertNotIn("ghp_faketoken1234567890", p.stdout)
         self.assertNotIn("ghp_faketoken1234567890", p.stderr)
+
+
+class TestNormalizeFilter(unittest.TestCase):
+    FILTER = ROOT / "scripts" / "ruleset-normalize.jq"
+
+    def norm(self, doc):
+        p = subprocess.run(
+            ["jq", "-c", "-f", str(self.FILTER)],
+            input=json.dumps(doc), capture_output=True, text=True,
+        )
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_canonicalizes_live_envelope(self):
+        # A canned "live" payload: reordered rules, shuffled keys, and API
+        # envelope fields (id, source, _links) the declared file lacks.
+        live = {
+            "id": 12345,
+            "source": {"type": "Repository"},
+            "_links": {"self": {"href": "https://api.github.com/..."}},
+            "name": "release-tag-protection",
+            "enforcement": "active",
+            "target": "tag",
+            "conditions": {"ref_name": {"exclude": [], "include": ["refs/tags/v*"]}},
+            "rules": [
+                {"type": "deletion", "parameters": {}},
+                {"type": "update", "parameters": {}},
+            ],
+        }
+        self.assertEqual(self.norm(live), self.norm(load("tag-protection-vstar.json")))
+
+    def test_detects_enforcement_drift(self):
+        declared = load("tag-protection-vstar.json")
+        mutated = json.loads(json.dumps(declared))
+        mutated["enforcement"] = "disabled"
+        self.assertNotEqual(self.norm(mutated), self.norm(declared))
+
+    def test_detects_rule_drift(self):
+        declared = load("tag-protection-vstar.json")
+        mutated = json.loads(json.dumps(declared))
+        mutated["rules"] = [r for r in mutated["rules"] if r["type"] != "deletion"]
+        self.assertNotEqual(self.norm(mutated), self.norm(declared))
+
+    def test_detects_bypass_drift(self):
+        declared = load("tag-protection-vstar-strict.json")
+        mutated = json.loads(json.dumps(declared))
+        mutated["bypass_actors"] = []
+        self.assertNotEqual(self.norm(mutated), self.norm(declared))
 
 
 if __name__ == "__main__":

@@ -35,8 +35,8 @@ one auditable command; no automation applies these.
 ## Apply
 
 ```bash
-GITHUB_TOKEN=<admin token> scripts/apply-rulesets.sh \
-    --file deploy/rulesets/tag-protection-vstar.json --execute --yes
+export GITHUB_TOKEN=<an admin-scoped token>  # plain repo scope cannot manage rulesets
+scripts/apply-rulesets.sh --file deploy/rulesets/tag-protection-vstar.json --execute --yes
 ```
 
 - Dry-run (default): prints the plan, touches nothing, needs no token.
@@ -60,3 +60,8 @@ GITHUB_TOKEN=<admin token> scripts/apply-rulesets.sh \
 - Emergency: repository admins can bypass or disable any ruleset from the
   repo settings page; re-run with `--check` afterwards to confirm the
   declared state is back in force.
+- If `--check` ever reports perpetual drift you cannot explain, the API may
+  be returning default-populated keys inside `rules[].parameters` that the
+  declared files don't carry — compare the normalized forms (`jq -c -f
+  scripts/ruleset-normalize.jq`) to see exactly which field differs before
+  re-applying.

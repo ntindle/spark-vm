@@ -23,22 +23,33 @@ OWNER=ntindle
 REPO=spark-vm
 FILE=""
 MODE=dry-run
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-    sed -n '1,20p' "$0"
-    echo
-    echo "Flags: --file PATH  --check | --execute --yes  [--owner O] [--repo R]  [-h|--help]"
+    cat <<'EOF'
+Usage: apply-rulesets.sh --file PATH [--check | --execute --yes] [--owner O] [--repo R]
+
+  (no flags)       dry-run: print the reconciliation plan, touch nothing
+  --check          compare live repo rulesets against the file (exit 2 on drift)
+  --execute --yes  create the ruleset, or update it in place (matched by name)
+
+Applying repo settings is an OWNER DECISION (issue #174). Not run by automation.
+EOF
     exit "${1:-0}"
+}
+
+need_value() { # need_value FLAG COUNT — die unless the flag has a following value
+    [[ "$2" -ge 2 ]] || { echo "apply-rulesets.sh: $1 needs a value" >&2; usage 1; }
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --file)  FILE="${2:?--file needs a path}"; shift 2 ;;
+        --file)  need_value --file $#; FILE="$2"; shift 2 ;;
         --check) MODE=check; shift ;;
         --execute) MODE=execute; shift ;;
         --yes) CONFIRM=1; shift ;;  # acknowledgement flag, like cut-release.sh
-        --owner) OWNER="${2:?--owner needs a value}"; shift 2 ;;
-        --repo)  REPO="${2:?--repo needs a value}"; shift 2 ;;
+        --owner) need_value --owner $#; OWNER="$2"; shift 2 ;;
+        --repo)  need_value --repo $#; REPO="$2"; shift 2 ;;
         -h|--help) usage 0 ;;
         *) echo "apply-rulesets.sh: unknown flag $1" >&2; usage 1 ;;
     esac
@@ -54,6 +65,9 @@ fi
 PAYLOAD="$(jq -c . "$FILE" 2>/dev/null)" \
     || { echo "apply-rulesets.sh: $FILE is not valid JSON" >&2; exit 1; }
 NAME="$(printf '%s' "$PAYLOAD" | jq -r '.name')"
+# A ruleset document needs a name — without it, create/update can't match.
+[[ "$NAME" != "null" && -n "$NAME" ]] \
+    || { echo "apply-rulesets.sh: $FILE has no .name — not a ruleset document" >&2; exit 1; }
 
 api() { # api METHOD PATH [BODY] — prints response body; never logs the token
     local method="$1" path="$2" body="${3:-}"
@@ -77,12 +91,9 @@ require_token() {
         || { echo "apply-rulesets.sh: GITHUB_TOKEN is unset; refusing to talk to the API" >&2; exit 1; }
 }
 
-# normalize FILE-body and live-body to the semantic fields, sorted for compare
+# normalize JSON-doc to the canonical semantic form (see ruleset-normalize.jq)
 normalize() {
-    jq -c '{name, target, enforcement,
-            bypass_actors: (.bypass_actors // []),
-            conditions,
-            rules: [.rules[] | {type, parameters: (.parameters // {})}] | sort_by(.type)}'
+    jq -c -f "$SCRIPT_DIR/ruleset-normalize.jq"
 }
 
 live_rulesets() {
@@ -90,7 +101,7 @@ live_rulesets() {
 }
 
 live_match() { # prints the live ruleset id whose name == $NAME, or nothing
-    live_rulesets | jq -r --arg n "$NAME" '.[] | select(.name == $n) | .id' | head -1
+    live_rulesets | jq -r --arg n "$NAME" '[.[] | select(.name == $n) | .id] | first // empty'
 }
 
 case "$MODE" in
