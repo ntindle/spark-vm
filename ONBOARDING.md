@@ -116,7 +116,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now cred-ui
 
 # CUA desktop driver (whole-desktop control; see cua/README.md)
-./cua/cua-desktop.sh start
+./cua/bin/cua-desktop.sh start
 ```
 
 That starts the full desktop stack (details in `cua/README.md`):
@@ -136,7 +136,7 @@ That starts the full desktop stack (details in `cua/README.md`):
   (socket `127.0.0.1:9876`, untouched); the bridge can launch the Blender
   GUI on `:98` to view and drive it.
 
-Verify: `./cua/cua-desktop.sh status` — every component should report ok,
+Verify: `./cua/bin/cua-desktop.sh status` — every component should report ok,
 and `curl 127.0.0.1:18731/api/status` should answer.
 
 After `git pull`, re-run `./proxy/deploy.sh` (it reinstalls unit files and

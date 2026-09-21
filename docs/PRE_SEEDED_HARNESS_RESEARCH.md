@@ -76,7 +76,7 @@ repo-verified — noted in the row:
 | Inference proxy `:18081` | `llm-api` stored human-only via a fixed registry path (SETUP.md "Inference-model recipe") | IMAGE: proxy unit + registry path + gate fixture (dummy credential + echo host, public); INJECT: the key itself (operator, provision time, by-name reference) |
 | `cred` / swapd | cred-ui localhost-only (ONBOARDING.md §4); `cred set` human-only in the human's own SSH session (ONBOARDING.md §5) | IMAGE: swapd daemon + grant writers + bundle-build step; FIRST-BOOT: fresh swapd CA generated per tenant, cert installed into the trust bundle (never bake the CA private key — mitmdump generates it at `/home/swapd/.mitmproxy/`) |
 | `confirmd` | the approvals URL must reach the human (the summons, R1 §4) | IMAGE: confirmd; INJECT: per-tenant approvals URL (H10) |
-| CUA desktop | `./cua/cua-desktop.sh start` (Xvfb :98, XFCE, cua-driver, bridge :18731) | IMAGE: everything, autostarted at boot |
+| CUA desktop | `./cua/bin/cua-desktop.sh start` (Xvfb :98, XFCE, cua-driver, bridge :18731) | IMAGE: everything, autostarted at boot |
 | SSH / tailnet | key-only SSH, tailnet join, the VM user | IMAGE: users, sshd config, CA trust; INJECT: tenant keys/identity (H9) |
 | muse-job plugin | `muse plugins install --force` + `approve` | IMAGE: installed + approved in the image |
 
