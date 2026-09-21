@@ -697,8 +697,9 @@ class WaitlistService:
         Returns the purged entry_ids. Emits a `purged` funnel event per
         row BEFORE the rewrite so the counts survive the deletion —
         emit-before is deliberate and at-least-once: a kill between the
-        emit and the rewrite duplicates the event on retry, which the
-        operator query pack dedupes by (event, ref).
+        emit and the rewrite duplicates the event on retry, which is
+        inert (no §7 metric counts purges; only the rows_read hygiene
+        counter ticks).
         Idempotent: a second run finds nothing due."""
         due = [row for row in sorted(
             self.rows.values(), key=lambda r: r.get("submitted_at") or "")
