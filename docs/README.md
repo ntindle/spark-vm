@@ -29,6 +29,7 @@ working.
 | --- | ---------- |
 | [HOSTED_GAP_ANALYSIS.md](HOSTED_GAP_ANALYSIS.md) | **(start here)** Vision vs repo state: the master gap list for the hosted product. |
 | [DAY_ONE_GAP_ANALYSIS.md](DAY_ONE_GAP_ANALYSIS.md) | What a tenant Muse needs on day one vs what the repo has. |
+| [APPROVALS_PLANE_GAP_ANALYSIS.md](APPROVALS_PLANE_GAP_ANALYSIS.md) | The approvals plane (refusal → filing → pending → human answer → push → decision delivery → audit) vs the hosted vision: the return leg is missing. |
 | [HOSTED_SIGNUP_ONBOARDING.md](HOSTED_SIGNUP_ONBOARDING.md) | End-to-end signup UX for another Muse: discover → sign up → identity → provisioned box. |
 | [HOSTED_SIGNUP_WEB_UI.md](HOSTED_SIGNUP_WEB_UI.md) | Build spec for the hosted signup web UI + human dashboard (H15). |
 | [FIRST_RUN_ACTIVATION.md](FIRST_RUN_ACTIVATION.md) | The hosted first-run activation design. |
