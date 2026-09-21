@@ -142,7 +142,7 @@ This changelog only works if entries land with the change, not after it:
   placement is declared but not recognized (e.g. a typo'd placement kind):
   such swaps are now refused with a loud warning instead of silently
   degrading the location restriction into swap-anywhere. Entries with no
-  declared placement keep the migration behavior (#197).
+  declared placement keep the migration behavior (#197, #200).
 
 ## [0.2.0] - 2026-09-20
 
