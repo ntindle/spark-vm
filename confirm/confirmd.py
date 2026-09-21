@@ -173,9 +173,11 @@ _CSRF_RING_TTL = _env_int("CONFIRM_CSRF_RING_TTL", 15 * 60, 60)  # seconds
 # honest here (confirmd runs as one service); a multi-replica confirmd
 # would need the atomicity story redone (flock on the item file) — tracked
 # as a #69 child issue.
-# Lifecycle: the entry is evicted when the item leaves pending (answered
-# or expired-reaped). Without eviction the dict would grow by one entry
-# per approval for the daemon's whole lifetime.
+# Lifecycle: the entry is evicted whenever the item leaves pending —
+# answered, expired-reaped under the per-aid lock (GET/POST paths), or
+# expired-reaped by load_pending()'s Finding-58 render reap. Without
+# eviction the dict would grow by one entry per approval for the
+# daemon's whole lifetime.
 _aid_locks = defaultdict(threading.Lock)
 
 
@@ -187,7 +189,9 @@ def _evict_aid_lock(aid):
     """Drop the per-aid lock once its item has left pending. Safe to call
     while holding the lock: a thread that grabbed the object before
     eviction still serializes on it and then sees the file gone (404);
-    threads arriving later get a fresh lock."""
+    threads arriving later get a fresh lock. Assumes an aid's item never
+    comes back — aids are random hex in practice, so an evicted entry
+    cannot alias a live item's lock."""
     _aid_locks.pop(aid, None)
 
 
@@ -368,6 +372,12 @@ def load_pending():
             exp = _parse_expiry(it.get("expires"))
             if exp is not None and now >= exp:
                 os.remove(p)
+                # Arch 2026-09-21: keep the per-aid lock registry bounded —
+                # the item left pending here too. Safe without the lock:
+                # a thread holding the old object still serializes on it
+                # and then sees the file gone; later threads get a fresh
+                # lock and 404 on the exists check.
+                _evict_aid_lock(fn[:-len(".json")])
                 continue
             items.append(it)
         except Exception:
@@ -779,7 +789,7 @@ _ANSWERED_FEED_LIMIT = 100
 _CONSUMED_KEEP = _env_int("CONFIRM_CONSUMED_KEEP", 1000, 100)
 
 
-def _prune_consumed(limit=_CONSUMED_KEEP):
+def _prune_consumed(limit=None):
     """Delete consumed/ history beyond the newest `limit` files (by mtime).
 
     Called after each answer is consumed. Pruning is mtime-ordered on
@@ -787,6 +797,8 @@ def _prune_consumed(limit=_CONSUMED_KEEP):
     cheap even as history grows. Races with a concurrent answer are
     benign — only the oldest files are ever deletion candidates, and a
     lost race surfaces as FileNotFoundError, which is tolerated."""
+    if limit is None:
+        limit = _CONSUMED_KEEP
     d = consumed_dir()
     try:
         entries = []

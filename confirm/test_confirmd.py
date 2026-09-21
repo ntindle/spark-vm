@@ -623,6 +623,57 @@ class ConfirmdTests(unittest.TestCase):
         self.assertNotIn("evict-me", cd._aid_locks)
         cd._evict_aid_lock("never-there")  # must not raise
 
+    def test_answer_locked_evicts_aid_lock(self):
+        """Wiring, not just the helper: answering (deny branch, no grant
+        subprocess) must drop the per-aid lock entry. Deleting the
+        _evict_aid_lock call in the consume path must fail this."""
+        aid = "evict-wire-consume-1"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00"}
+        nonce = cd._mint_csrf_nonce(it)
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            json.dumps(it))
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        h.send_response = lambda code: None
+        h.send_header = lambda k, v: None
+        h.end_headers = lambda: None
+        cd._aid_lock(aid)  # ensure the entry exists pre-answer
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"):
+            h._answer_locked("ntindle@github", aid, nonce, "deny")
+        self.assertNotIn(aid, cd._aid_locks)
+        # And the answer actually landed in consumed/.
+        self.assertTrue(
+            (self.approvals / "consumed" / (aid + ".json")).exists())
+
+    def test_get_expired_reap_evicts_aid_lock(self):
+        """Wiring: the GET expired-reap path must drop the per-aid lock
+        entry too. Deleting that _evict_aid_lock call must fail this."""
+        aid = "evict-wire-reap-1"
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            json.dumps({"id": aid, "summary": "s", "kind": "first-use",
+                        "created": "2026-09-18T10:00:00+00:00",
+                        "expires": "2020-01-01T00:00:00+00:00"}))
+        h = cd.Handler.__new__(cd.Handler)
+        h.path = "/approval/" + aid
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        cd._aid_lock(aid)  # ensure the entry exists pre-reap
+        with mock.patch.object(cd.Handler, "_auth",
+                               return_value="ntindle@github"), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)), \
+             mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            h.do_GET()
+        self.assertEqual(got["code"], 410)
+        self.assertNotIn(aid, cd._aid_locks)
+        self.assertFalse(
+            (self.approvals / "pending" / (aid + ".json")).exists())
+
 
 if __name__ == "__main__":
     unittest.main()
