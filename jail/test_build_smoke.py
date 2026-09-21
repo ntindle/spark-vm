@@ -94,6 +94,29 @@ class TestIsolation:
     def test_nftables_drops_traffic_into_jail(self, active):
         assert 'oifname "ve-jail" log prefix "jail-fwd-indrop: " drop' in active
 
+    def test_nftables_accept_head_is_proxy_and_ssh_only(self, active):
+        # Pin the allow head, not just the drop tail: these are the ONLY
+        # things the jail can reach. Exact lines so a widened rule fails
+        # loudly instead of hiding behind the passing drop pins.
+        assert 'iifname "ve-jail" tcp dport { 18080, 18081 } accept' in active
+        assert 'iifname "ve-jail" ct state established,related accept' in active
+        assert ('iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 '
+                'tcp dport 22 ct state new,established accept') in active
+        assert 'oifname "ve-jail" ct state established,related accept' in active
+        assert ('iifname "ve-jail" ip daddr 10.99.0.1 '
+                'tcp dport { 18080, 18081 } dnat to 127.0.0.1') in active
+        assert ('iifname "tailscale0" tcp dport 2222 '
+                'dnat ip to 10.99.0.2:22') in active
+        # No broader jail-side accept: every `iifname "ve-jail" … accept`
+        # line must be one of the pinned narrow rules above.
+        for line in active.splitlines():
+            line = line.strip()
+            if line.startswith('iifname "ve-jail"') and line.endswith("accept"):
+                assert line in (
+                    'iifname "ve-jail" tcp dport { 18080, 18081 } accept',
+                    'iifname "ve-jail" ct state established,related accept',
+                ), line
+
     def test_route_localnet_scoped_to_veth(self, active):
         assert "net.ipv4.conf.ve-$MACHINE.route_localnet=1" in active
         assert "net.ipv4.conf.all.route_localnet" not in active
@@ -102,7 +125,13 @@ class TestIsolation:
         assert "PermitRootLogin no" in active
         assert "PasswordAuthentication no" in active
         assert "KbdInteractiveAuthentication no" in active
+        assert "X11Forwarding no" in active
         assert 'AllowUsers \'"$JAIL_USER"\'' in active
+        # Deliberate hardening tradeoff: ~/.ssh/environment carries the
+        # proxy vars for non-interactive ssh (documented in build.sh). Pin
+        # it so a change fails loudly instead of silently widening or
+        # narrowing session env.
+        assert "PermitUserEnvironment yes" in active
 
     def test_guest_network_shadows_systemd_default(self, active):
         # Same-name file wins over /usr/lib's default; a differently-named

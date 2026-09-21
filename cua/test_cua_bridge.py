@@ -18,7 +18,6 @@ import importlib.util
 import io
 import json
 import os
-import py_compile
 import stat
 import subprocess
 import sys
@@ -93,6 +92,27 @@ class TestLaunchApp:
     def test_rejects_unknown_app(self, bridge):
         with pytest.raises(ValueError, match="not allowlisted"):
             bridge.launch_app("evil-app")
+
+    def test_allowlist_contains_exactly_expected_apps(self, bridge):
+        # The allowlist is the security boundary for GUI spawning: pin its
+        # exact contents so a new entry (e.g. a shell) can't slip in silently.
+        assert set(bridge.LAUNCH_ALLOWLIST) == {
+            "xterm", "terminal", "chromium", "blender"}
+        assert bridge.LAUNCH_ALLOWLIST["xterm"] == [
+            "xterm", "-geometry", "100x30+40+40"]
+        assert bridge.LAUNCH_ALLOWLIST["terminal"] == [
+            "xfce4-terminal", "--geometry=100x30+40+40"]
+        chrome = bridge.LAUNCH_ALLOWLIST["chromium"]
+        assert chrome[0].endswith("chrome-linux64/chrome")
+        # --no-sandbox is a deliberate sandbox-weakening flag (root-owned
+        # Chromium under Xvfb); pin it so it can't be added OR removed
+        # without a loud test failure.
+        assert "--no-sandbox" in chrome
+        assert "--window-size=1260,740" in chrome
+        assert "--window-position=10,30" in chrome
+        assert bridge.LAUNCH_ALLOWLIST["blender"] == [
+            os.path.join(os.path.expanduser("~"),
+                         "cua/bin/launch-blender-gui.sh")]
 
     def test_rejects_app_whose_binary_is_missing(self, bridge, monkeypatch):
         monkeypatch.setattr(bridge, "LAUNCH_ALLOWLIST",
