@@ -226,6 +226,10 @@ class FakeDriver:
     def provision(self, spec):
         vm_id = f"vm-{spec.tenant_id}"
         self.boxes[vm_id] = {"state": PS.PROVISIONING, "spec": spec}
+        # A re-provisioned box has no wake history (Engineering round 2 B1:
+        # vm_ids are deterministic, so stale wake_kind would otherwise leak
+        # across the destroy/re-provision boundary).
+        self.woke.discard(vm_id)
         return pi.ProvisionResult(
             vm_id=vm_id, mgmt_endpoint="mgmt.example.invalid",
             capabilities=self.capabilities)
@@ -299,9 +303,11 @@ class FakeDriver:
 
     def destroy(self, vm_id):
         # Idempotent; destroy always wins (no transition check — terminal
-        # cleanup cancels in-flight transitions by definition).
+        # cleanup cancels in-flight transitions by definition). Clears wake
+        # history with the box (Engineering round 2 B1).
         if vm_id in self.boxes:
             self.boxes[vm_id]["state"] = PS.DESTROYED
+        self.woke.discard(vm_id)
 
     def attest_network_isolation(self, vm_id):
         return pi.NetworkAttestation(public_ingress_observed=False)
@@ -508,6 +514,27 @@ def test_wake_kind_surfaces_resume_path():
         assert got.wake_kind == expected, (caps, expected)
         assert got.capabilities.wake_reprovisions == (expected ==
                                                       pi.WakeKind.REPROVISIONED)
+
+
+def test_wake_kind_cleared_on_destroy_and_reprovision():
+    # Engineering round 2 B1: vm_ids are deterministic, so wake history
+    # must not leak across the destroy/re-provision boundary — a
+    # control plane trusting a stale REPROVISIONED could wrongly assume
+    # (or skip) a bootstrap re-run.
+    d = FakeDriver(capabilities=pi.ProviderCapabilities(
+        supports_suspend=True, memory_resume=pi.MemoryResume.COLD_ONLY,
+        wake_reprovisions=True))
+    res = d.provision(make_spec(tenant_id="t-reprov"))
+    d._set(res.vm_id, PS.RUNNING)
+    d.suspend(res.vm_id)
+    d.dial(res.vm_id).close()
+    assert d.status(res.vm_id).wake_kind == pi.WakeKind.REPROVISIONED
+    d.destroy(res.vm_id)
+    assert d.status(res.vm_id).wake_kind is None
+    res2 = d.provision(make_spec(tenant_id="t-reprov"))  # same vm_id
+    assert res2.vm_id == res.vm_id
+    d._set(res2.vm_id, PS.RUNNING)  # deploy, no wake
+    assert d.status(res2.vm_id).wake_kind is None
 
 
 def test_warm_resume_property():
