@@ -141,7 +141,7 @@ This changelog only works if entries land with the change, not after it:
   authenticate with a placeholder too), the layout table's `deploy` row
   drops a redundant word, `harness` links the pre-seeded-harness research
   doc instead of assuming its jargon, and `site` drops the time-stamped
-  "Waitlist-era" label. (PRNUM)
+  "Waitlist-era" label. (#201)
 
 ### Security
 - The egress proxy no longer swaps a credential anywhere when its registry
