@@ -11,10 +11,14 @@ endpoint surface:
     POST /waitlist/forget    token as form field; deletes the row (slice 3c)
     GET  /go/selfhost        logs cta_click, 302s to the self-host docs (slice 3c)
 
-Deliberately NOT in this slice (H15 PR 1 remainder): the path-A email
-parser and the invite sender. Per docs/WAITLIST_OPERATIONS.md §10 +
-site/README.md, the page is still NOT deployable — the dead-form rule
-holds until every §10 item is live.
+The path-A email parser (WAITLIST_OPERATIONS.md §2) and the invite
+sender (§7) landed in a later slice — they extend this module (submit_email,
+mint_invite_token, send_invite_wave, rollover_expired_invites) plus the
+operator CLIs site/waitlist_patha.py and site/waitlist_invites.py. Per
+docs/WAITLIST_OPERATIONS.md §10 + site/README.md, the page is still NOT
+deployable — the dead-form rule holds until every §10 item is live
+(the claim route the invite email links to, GET /waitlist/claim, is not
+yet served by this daemon — it belongs to the signup-era surface).
 
 Design decisions (all per the cited specs, no improvisation):
 
@@ -31,8 +35,9 @@ Design decisions (all per the cited specs, no improvisation):
   (the button page shape — headline, masked line, "Yes, hold my place." —
   and the four states' copy). Short-local-part masking renders fully
   (•••) per §4.2; the mask never discloses the full local part.
-- The confirm-email body is the WAITLIST_OPERATIONS.md §4 DRAFT for
-  path B (the form path; path A lands with the email parser).
+- The confirm-email body is the WAITLIST_OPERATIONS.md §4 DRAFT with
+  the path-split opener: path-B rows get the form opener, path-A rows the
+  "your agent asked" opener.
 - Honeypot trips are accepted SILENTLY: HTTP 200 with the same rendering
   as a success, nothing written, nothing
   emitted — the spam learns nothing (HOSTED_SIGNUP_WEB_UI.md §4.2).
@@ -135,9 +140,16 @@ EMAIL_SEND_CAP = 3
 EMAIL_SEND_WINDOW = 86400
 TOKEN_TTL_SECONDS = 14 * 86400
 FORGET_TTL_SECONDS = 7 * 86400
+INVITE_TTL_SECONDS = 14 * 86400  # invite claim window (WAITLIST_OPERATIONS §7)
 REMINDER_LEAD_SECONDS = 7 * 86400
 DROP_TTL_SECONDS = 14 * 86400
 PURGE_TTL_SECONDS = 30 * 86400
+
+# Path-A (email) intake: max submissions per sender address per 24h
+# (WAITLIST_OPERATIONS.md §6 — "a Muse fleet *can* spray"; the confirm
+# gate is what makes spraying worthless).
+PATHA_INTAKE_LIMIT = 3
+PATHA_INTAKE_WINDOW = 86400
 
 # /go/selfhost — where the marketing page's self-host CTA lands
 # (site/index.html, docs/FUNNEL_MEASUREMENT.md §3.2's `selfhost` CTA
@@ -231,6 +243,103 @@ when you claim your box.
 
 Didn't ask for this? Ignore this email — unconfirmed addresses are
 dropped automatically.
+""" + FORGET_FOOTER
+
+# Path-A confirm email: the §4 DRAFT with the path-A opener ("Your agent
+# asked to join the spark-vm hosted waitlist with this address as the
+# owner contact."). Landed with the email parser (slice 3 remainder) —
+# before that only the path-B body existed. The rest of the body is
+# identical to path B: the funnel confirms the right human, not the Muse.
+CONFIRM_BODY_PATH_A = """\
+Your agent asked to join the spark-vm hosted waitlist with this address
+as the owner contact.
+
+[ Confirm this address ]: {confirm_link}
+
+What this means: we'll email you when hosted boxes open up — with real
+pricing before we ask for anything else.
+
+No card is required for the waitlist, and this confirmation doesn't
+commit you to anything.
+
+What this doesn't mean: this confirms we can reach you. It doesn't
+verify your agent's identity — linking your agent's identity happens
+when you claim your box.
+
+Didn't ask for this? Ignore this email — unconfirmed addresses are
+dropped automatically.
+""" + FORGET_FOOTER
+
+# Path-A clarification reply, verbatim from docs/WAITLIST_OPERATIONS.md
+# §2 DRAFT. Sent only when the inbound message passes SPF/DKIM/DMARC
+# alignment on the From domain; unauthenticated mail goes to the silent
+# operator triage queue instead (no backscatter — §6).
+CLARIFY_SUBJECT = "Which address should we use for the spark-vm waitlist?"
+
+CLARIFY_BODY = """\
+We couldn't tell which address is the owner. Please reply with exactly
+one owner email address — the human who'll approve spend and receive
+the invite.
+
+If you meant to give it in your first email, put it on its own line
+like this: Owner: you@example.com
+""" + FORGET_FOOTER
+
+# Reply-"forget me" confirmation email (WAITLIST_OPERATIONS.md §5): a
+# reply saying "forget me" is NOT honored on its own (Reply From is
+# forgeable — a deletion oracle) — it triggers this confirmation email
+# containing the signed forget link, and the row is deleted only after
+# the link is clicked (proving inbox access), within 7 days, with a
+# confirmation sent. Sent to the sender's address — only when it matches
+# a row's owner email, so a forget reply can never touch someone else's
+# row.
+FORGET_REQUEST_SUBJECT = "Confirm deleting your spark-vm waitlist entry"
+
+FORGET_REQUEST_BODY = """\
+We got your "forget me" reply for {owner_email}.
+
+Click this link to confirm the deletion:
+
+[ Delete your waitlist entry ]: {forget_link}
+
+The link lasts 7 days. Deleting removes everything we stored for this
+address; if you rejoin later, you'll start at the back of the line —
+waitlist order follows the confirmation date.
+
+If you didn't send that reply, ignore this email — nothing is deleted
+unless you click the link.
+"""
+
+# Invite email, verbatim from docs/WAITLIST_OPERATIONS.md §7 DRAFT. The
+# pricing lines and trial terms are filled at send time from the decided
+# pricing — the template never contains numbers (compliance: pricing
+# appears exactly once before any card ask — here, in the invite email;
+# no "free tier" wording; no launch-date promises). {position} is the
+# invitee's signed position line ("You held #N in line"). The claim link
+# points at the signup-era claim route — GET /waitlist/claim is not yet
+# served by waitlistd (signup-era surface, H15 stage 2); the email's
+# honesty posture holds because the route exists in the plan the invite
+# references, and the claim expiry clock is real: the invite expires in
+# 14 days and the slot rolls to the next entry in line.
+INVITE_SUBJECT = "You're off the waitlist — claim your box"
+
+INVITE_BODY = """\
+You're off the waitlist — hosted boxes are open.
+
+[ Claim your box ]: {claim_link}
+
+Pricing first — the exact numbers, before we ask for anything:
+{pricing_lines}
+
+{trial_terms}
+
+What happens next: you'll link your agent's identity (it proves itself
+with a key, you approve the fingerprint), bring your Tailscale tailnet,
+and put a card on file. Your box is a real computer — files, jobs, and
+the desktop persist.
+
+You held #{position} in line — this invite expires in 14 days. After
+that it rolls to the next entry in line.
 """ + FORGET_FOOTER
 
 
@@ -562,10 +671,14 @@ class WaitlistService:
         # the `confirmed` event (FUNNEL_MEASUREMENT.md §3.4: original |
         # reminder). The reminder overwrites this when it sends.
         row["active_token_kind"] = "confirm"
+        # The §4 DRAFT splits the confirm opener by submission path:
+        # path-A rows get the "your agent asked" opener, path-B the form one.
+        body_tpl = (CONFIRM_BODY_PATH_A if row.get("path") == "email"
+                    else CONFIRM_BODY_PATH_B)
         doc = {
             "to": row["owner_email"],
             "subject": CONFIRM_SUBJECT,
-            "body": CONFIRM_BODY_PATH_B.format(
+            "body": body_tpl.format(
                 confirm_link=link, forget_link=forget_link),
             "queued_at": iso_z(self.clock()),
             "entry_id": row["entry_id"],
@@ -863,14 +976,19 @@ class WaitlistService:
                                       muse_contact)
             return self._create_row(owner, owner_raw, muse_contact)
 
-    def _resubmit(self, row, owner_raw, muse_contact):
-        """Pending re-submit: refresh, re-send a fresh token (counts toward
-        the 3/24h cap). The old token dies only when the replacement email
-        actually goes out — a cap-suppressed re-send must never strand the
-        user with zero live tokens."""
+    def _resubmit_core(self, row, muse_contact):
+        """Pending re-submit core, shared by both intake paths (form and
+        email). Refresh, re-send a fresh token (counts toward the 3/24h
+        cap). The old token dies only when the replacement email actually
+        goes out — a cap-suppressed re-send must never strand the user
+        with zero live tokens.
+
+        Returns one of "confirmed" | "resubmitted" | "confirm_capped";
+        the caller renders that outcome for its own channel.
+        """
         if row["status"] == "confirmed":
             # Idempotent: already on the list. No new event, no email.
-            return 200, page_confirmed()
+            return "confirmed"
         row["submitted_at"] = iso_z(self.clock())
         if muse_contact:
             row["muse_contact"] = muse_contact
@@ -879,20 +997,31 @@ class WaitlistService:
         if self._queue_confirm_email(row):
             if old_token:
                 self._consume_token(old_token)
-            return 200, page_check_inbox(owner_raw)
-        # Capped: the earlier link still works — say so honestly instead of
-        # claiming an email was sent.
-        return 200, page_already_sent(owner_raw)
+            return "resubmitted"
+        # Capped: the earlier link still works — the caller says so
+        # honestly instead of claiming an email was sent.
+        return "confirm_capped"
 
-    def _create_row(self, owner, owner_raw, muse_contact):
+    def _resubmit(self, row, owner_raw, muse_contact):
+        """Form-path pending re-submit: _resubmit_core, rendered as the
+        form's pages."""
+        outcome = self._resubmit_core(row, muse_contact)
+        return 200, {
+            "confirmed": page_confirmed(),
+            "resubmitted": page_check_inbox(owner_raw),
+            "confirm_capped": page_already_sent(owner_raw),
+        }[outcome]
+
+    def _create_row(self, owner, owner_raw, muse_contact, *, path="form",
+                    inbound_auth=None, pubkey=None, usecase=None):
         entry_id = secrets.token_urlsafe(12)
         submitted = self.clock()
         row = {
             "entry_id": entry_id,
             "owner_email": owner,
             "muse_contact": muse_contact,
-            "path": "form",
-            "source": "form",
+            "path": path,
+            "source": path,
             "submitted_at": iso_z(submitted),
             # The drop deadline is fixed at first submission and NEVER
             # refreshed by re-submits (drop-date semantics: a re-submit
@@ -906,10 +1035,224 @@ class WaitlistService:
             "email_sends": [],
             "active_token": None,
         }
+        if path == "email":
+            # The §5 data model: inbound_auth records the SPF/DKIM/DMARC
+            # result for path A (it gates the clarification reply); the
+            # §3.4 funnel event carries path + inbound_auth for email rows.
+            row["inbound_auth"] = bool(inbound_auth)
+        if pubkey:
+            row["muse_pubkey"] = pubkey  # pre-registration hint only (§2)
+        if usecase:
+            row["use_case"] = usecase  # ≤280 chars, verbatim (§2)
         self._save_row(row)
-        self._emit("waitlist_submitted", entry_id, {"path": "form"})
+        attrs = {"path": path}
+        if path == "email":
+            attrs["inbound_auth"] = bool(inbound_auth)
+        self._emit("waitlist_submitted", entry_id, attrs)
         self._queue_confirm_email(row)  # first send is always under the cap
         return 200, page_check_inbox(owner_raw)
+
+
+    # -- path-A email intake -------------------------------------------------
+
+    def _record_patha_event(self, address, kind):
+        """Append a path-A ledger event and prune entries older than 48h.
+
+        The ledger (patha_events.jsonl, operator data dir) carries two
+        event kinds, both keyed by address:
+          "submission" — one email intake attempt (the §6 per-sender
+            3/day limit counts these);
+          "email"      — one path-A transactional send TO that address
+            (clarification / forget-request replies — the §4 3/24h cap
+            counts these, alongside the row-bound sends the cap targets).
+        Appends are single-line O_APPEND writes; pruning rewrites under
+        the caller's data lock.
+        """
+        now = self.clock().timestamp()
+        self._append("patha_events.jsonl",
+                     {"address": address, "kind": kind,
+                      "at": iso_z(self.clock())})
+        cutoff = now - 2 * 86400
+        path = os.path.join(self.data_dir, "patha_events.jsonl")
+        kept = []
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        obj = json.loads(line)
+                        ts = datetime.fromisoformat(
+                            obj["at"].replace("Z", "+00:00")).timestamp()
+                    except (KeyError, ValueError, TypeError):
+                        continue  # garbled ledger line: drop on prune
+                    if ts > cutoff:
+                        kept.append(line)
+        except OSError:
+            return
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.writelines(kept)
+
+    def _count_patha_events(self, address, kind, window):
+        cutoff = self.clock().timestamp() - window
+        path = os.path.join(self.data_dir, "patha_events.jsonl")
+        count = 0
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        continue
+                    if obj.get("address") != address or \
+                            obj.get("kind") != kind:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(
+                            obj["at"].replace("Z", "+00:00")).timestamp()
+                    except (KeyError, ValueError, TypeError):
+                        continue
+                    if ts > cutoff:
+                        count += 1
+        except OSError:
+            return 0
+        return count
+
+    def patha_intake_limited(self, sender):
+        """True when the sender already submitted PATHA_INTAKE_LIMIT times
+        in PATHA_INTAKE_WINDOW (§6 — 3 submissions / sender / day)."""
+        return (self._count_patha_events(sender, "submission",
+                                         PATHA_INTAKE_WINDOW)
+                >= PATHA_INTAKE_LIMIT)
+
+    def _patha_send_allowed(self, recipient):
+        """The §4 3/24h transactional-email cap for path-A sends to an
+        address that usually has no row (clarification / forget-request
+        replies go to the sender, not the owner). Row-bound sends keep
+        using the row's email_sends ledger via _email_send_allowed."""
+        return (self._count_patha_events(recipient, "email",
+                                         EMAIL_SEND_WINDOW)
+                < EMAIL_SEND_CAP)
+
+    def triage_inbound(self, raw, reason):
+        """Silent triage for unauthenticated or otherwise unprocessable
+        inbound mail (§2/§6 — no outbound reply, ever, so the parser can
+        never become a backscatter reflector). The raw message plus the
+        loop-generated reason land in the operator data dir's triage/
+        subdir for the operator to eyeball. Returns the triage filename.
+        """
+        triage_dir = os.path.join(self.data_dir, "triage")
+        os.makedirs(triage_dir, exist_ok=True)
+        name = (f"{int(self.clock().timestamp())}-"
+                f"{secrets.token_hex(4)}.eml")
+        with open(os.path.join(triage_dir, name), "w",
+                  encoding="utf-8") as fh:
+            fh.write(f"X-Waitlist-Triage-Reason: {reason}\n\n")
+            fh.write(raw if isinstance(raw, str) else "")
+        return name
+
+    def _spool_patha_email(self, to, subject, body, kind, entry_id=None):
+        """Spool a path-A transactional email (clarification reply or
+        forget-request confirmation) to the sender's address. The §4
+        3/24h cap is enforced against the path-A ledger. Returns True
+        when the email went out, False when the cap suppressed it."""
+        if not self._patha_send_allowed(to):
+            return False
+        doc = {
+            "to": to,
+            "subject": subject,
+            "kind": kind,
+            "body": body,
+            "queued_at": iso_z(self.clock()),
+            "entry_id": entry_id,
+        }
+        name = (f"patha-{int(self.clock().timestamp())}-"
+                f"{secrets.token_hex(4)}.json")
+        with open(os.path.join(self.spool_dir, name), "w",
+                  encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2, sort_keys=True)
+        self._record_patha_event(to, "email")
+        return True
+
+    def spool_clarification(self, sender):
+        """Spool the §2 clarification reply ("we couldn't tell which
+        address is the owner"). The caller guarantees the inbound message
+        passed DMARC alignment — never call this for unauthenticated
+        mail (silent triage instead)."""
+        body = CLARIFY_BODY.format(
+            forget_link="(none — this email carries no deletion link)")
+        # The clarification is a reply about intake, not about a row: it
+        # carries no forget footer action of its own, so render the §5
+        # footer inert rather than emitting a second live forget link to
+        # a sender who may not own any row. (FORGET_FOOTER is baked into
+        # CLARIFY_BODY; the format call above neutralizes its link slot.)
+        return self._spool_patha_email(sender, CLARIFY_SUBJECT, body,
+                                       "clarification")
+
+    def handle_forget_reply(self, sender):
+        """A reply saying "forget me" (WAITLIST_OPERATIONS.md §5).
+
+        Never deletes directly: Reply From is forgeable, so honoring it
+        would be a deletion oracle. Only when the sender's normalized
+        address matches a live row's owner email, spool the confirmation
+        email containing the signed forget link — the row is deleted only
+        after that link is clicked (proving inbox access), within 7 days,
+        with a confirmation sent (the existing /waitlist/forget POST).
+
+        Returns (outcome, row-or-None). Outcomes:
+          "forget_request_sent"   — confirmation email spooled
+          "forget_request_capped" — the 3/24h cap suppressed the resend
+          "no_row"                — sender owns no row; caller triages
+        """
+        with data_lock(self.data_dir), self._lock:
+            self._refresh_under_lock()
+            entry_id = self.by_email.get(sender)
+            if not entry_id:
+                return "no_row", None
+            row = self.rows[entry_id]
+            token = self.mint_forget_token(entry_id, row["owner_email"])
+            forget_link = f"{self.public_host}/waitlist/forget?token={token}"
+            sent = self._spool_patha_email(
+                sender, FORGET_REQUEST_SUBJECT,
+                FORGET_REQUEST_BODY.format(owner_email=row["owner_email"],
+                                           forget_link=forget_link),
+                "forget_request", entry_id)
+            return ("forget_request_sent" if sent
+                    else "forget_request_capped"), row
+
+    def submit_email(self, *, owner, sender, inbound_auth, pubkey=None,
+                     usecase=None):
+        """Path-A intake for one validated email submission
+        (WAITLIST_OPERATIONS.md §2), the email half of H15's intake.
+
+        Carries the email path's defenses instead of the form's: no
+        honeypot/time-trap/IP-limit (there is no page), but the caller
+        must enforce the per-sender intake limit BEFORE calling (the
+        limit belongs to the sender, and dedup may resolve to a different
+        row — checking after dedup would let a fleet rotate owners past
+        the cap).
+
+        Returns (outcome, row) where outcome is one of:
+          "created"        — new row; confirm email queued (path-A opener)
+          "resubmitted"    — existing pending row refreshed + fresh
+                             confirm email
+          "confirmed"      — row already confirmed; idempotent, no email
+          "confirm_capped" — accepted but the 3/24h cap suppressed the
+                             re-send; the earlier link still works.
+
+        The check-then-act section (dedup on submit) is serialized under
+        the data lock + thread lock, like every other mutating path.
+        """
+        with data_lock(self.data_dir), self._lock:
+            self._refresh_under_lock()
+            self._record_patha_event(sender, "submission")
+            existing_id = self.by_email.get(owner)
+            if existing_id:
+                outcome = self._resubmit_core(self.rows[existing_id],
+                                              sender)
+                return outcome, self.rows[existing_id]
+            _, _page = self._create_row(
+                owner, owner, sender, path="email",
+                inbound_auth=inbound_auth, pubkey=pubkey, usecase=usecase)
+            return "created", self.rows[self.by_email[owner]]
 
     # -- confirm -----------------------------------------------------------
 
@@ -1064,6 +1407,187 @@ class WaitlistService:
                   encoding="utf-8") as fh:
             json.dump(doc, fh, indent=2, sort_keys=True)
         return True
+
+
+    # -- invites -----------------------------------------------------------
+
+    def mint_invite_token(self, entry_id, normalized_email):
+        """Mint an invite token: HMAC-signed, single-use, 14-day expiry
+        (WAITLIST_OPERATIONS.md §7). Wire format `invite.{entry_id}.
+        {issued}.{nonce}.{sig}` with "invite" in the HMAC payload — the
+        `invite.` prefix makes cross-kind validation structurally
+        impossible (a confirm/forget token never parses as invite and
+        vice versa), mirroring the confirm/forget domain separation."""
+        issued = int(self.clock().timestamp())
+        nonce = secrets.token_urlsafe(6)
+        payload = (f"invite.{entry_id}.{issued}.{nonce}."
+                   f"{normalized_email}").encode()
+        sig = b64url_encode(
+            hmac.new(self.hmac_key, payload, hashlib.sha256).digest())
+        return f"invite.{entry_id}.{issued}.{nonce}.{sig}"
+
+    def lookup_invite_token(self, token):
+        """Parse + HMAC-verify an invite token and return its row.
+
+        Returns (row, status) where status is one of:
+          "ok"       — live, unexpired invite on a live invited row
+          "consumed" — used, superseded, or otherwise retired
+          "expired"  — issued more than INVITE_TTL_SECONDS (14d) ago
+          "invalid"  — malformed, wrong kind, bad HMAC, or the row is
+                       not in `invited` status
+        """
+        try:
+            tkind, entry_id, issued_s, nonce, sig = token.split(".", 4)
+            if tkind != "invite":
+                return None, "invalid"
+            issued = int(issued_s)
+            b64url_decode(sig)  # structural check
+        except (ValueError, Exception):
+            return None, "invalid"
+        row = self.rows.get(entry_id)
+        if row is None:
+            return None, "invalid"
+        payload = (f"invite.{entry_id}.{issued}.{nonce}."
+                   f"{row['owner_email']}").encode()
+        expected_sig = b64url_encode(
+            hmac.new(self.hmac_key, payload, hashlib.sha256).digest())
+        if not hmac.compare_digest(expected_sig, sig):
+            return None, "invalid"
+        if token in self.consumed or token != row.get("active_invite_token"):
+            # Consumed, or superseded by a newer wave's token — either
+            # way this token no longer claims anything. Checked before
+            # the status gate so a retired token stays "consumed" after
+            # the row rolls back to confirmed.
+            return None, "consumed"
+        if row.get("status") != "invited":
+            return None, "invalid"
+        if self.clock().timestamp() - issued > INVITE_TTL_SECONDS:
+            return row, "expired"
+        return row, "ok"
+
+    def _queue_invite_email(self, row, position, pricing_lines, trial_terms):
+        """Spool the §7 invite email: pricing + trial terms filled at send
+        time from the decided pricing (the template never contains
+        numbers), the invitee's signed position line ("You held #N in
+        line"), and the claim link. Counts toward the 3/24h cap like every
+        other transactional send. Returns True when the email went out,
+        False when the cap suppressed it (the wave then skips the row —
+        its slot is not consumed)."""
+        if not self._email_send_allowed(row):
+            return False
+        token = self.mint_invite_token(row["entry_id"], row["owner_email"])
+        old = row.get("active_invite_token")
+        if old:
+            self._consume_token(old)
+        row["active_invite_token"] = token
+        claim_link = f"{self.public_host}/waitlist/claim?token={token}"
+        forget_link = (
+            f"{self.public_host}/waitlist/forget?token="
+            f"{self.mint_forget_token(row['entry_id'], row['owner_email'])}"
+        )
+        doc = {
+            "to": row["owner_email"],
+            "subject": INVITE_SUBJECT,
+            "kind": "invite",
+            "body": INVITE_BODY.format(
+                claim_link=claim_link,
+                pricing_lines=pricing_lines,
+                trial_terms=trial_terms,
+                position=position if position is not None else "?",
+                forget_link=forget_link,
+            ),
+            "queued_at": iso_z(self.clock()),
+            "entry_id": row["entry_id"],
+        }
+        name = (f"{row['entry_id']}-invite-{int(self.clock().timestamp())}-"
+                f"{secrets.token_hex(4)}.json")
+        with open(os.path.join(self.spool_dir, name), "w",
+                  encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2, sort_keys=True)
+        row["email_sends"] = row.get("email_sends", []) + [
+            self.clock().timestamp()
+        ]
+        self._save_row(row)
+        self._emit("invite_sent", row["entry_id"])
+        return True
+
+    def send_invite_wave(self, *, pricing_lines, trial_terms, wave, count):
+        """Operator-driven invite wave (WAITLIST_OPERATIONS.md §7).
+
+        Takes the top `count` confirmed rows FIFO by confirmed_at, marks
+        each invited (status, invited_at, invite_expires_at = now + 14d,
+        invite_wave = wave), and spools the §7 invite email with the
+        pricing/trial terms filled at send time. Emits `invite_sent`
+        (FUNNEL_MEASUREMENT.md §3.4) per mailed row.
+
+        Rows past the 3/24h email cap are NOT invited this wave — they
+        stay confirmed for a later wave (their slot is not consumed).
+        Returns the invited entry_ids in wave order.
+        """
+        now = self.clock()
+        eligible = [r for r in self.rows.values()
+                    if r.get("status") == "confirmed"]
+        # §7 order: waitlist order, FIFO by confirmed_at.
+        eligible.sort(key=lambda r: (r.get("confirmed_at") or "",
+                                     r["entry_id"]))
+        invited = []
+        for row in eligible[:count]:
+            # Position is the invitee's confirmed-queue rank — compute
+            # before flipping the status (invited rows are not ranked).
+            position = self.queue_position(row["entry_id"])
+            row["status"] = "invited"
+            row["invited_at"] = iso_z(now)
+            row["invite_expires_at"] = iso_z(
+                now + timedelta(seconds=INVITE_TTL_SECONDS))
+            row["invite_wave"] = wave
+            self._save_row(row)
+            if self._queue_invite_email(row, position, pricing_lines,
+                                        trial_terms):
+                invited.append(row["entry_id"])
+            else:
+                # Capped: un-mark — the row stays confirmed and eligible
+                # for the next wave.
+                row["status"] = "confirmed"
+                for key in ("invited_at", "invite_expires_at",
+                            "invite_wave", "active_invite_token"):
+                    row.pop(key, None)
+                self._save_row(row)
+        return invited
+
+    def rollover_expired_invites(self):
+        """§7 expiry rollover: an unclaimed invite expires 14 days after
+        the wave. The slot rolls to the next confirmed entry (the next
+        wave invites it) and the expired entry rejoins `confirmed` at the
+        back of the queue — confirmed_at is reset to the EXPIRY time
+        (§5), not to now, and no re-confirmation is needed (the address
+        is already verified). The invite token is consumed. Emits no
+        funnel event (the §3.4 taxonomy has none for this; the metrics
+        queries are constrained to the taxonomy).
+
+        Returns the rolled entry_ids. Idempotent.
+        """
+        rolled = []
+        for row in self.rows.values():
+            if row.get("status") != "invited":
+                continue
+            try:
+                expiry = datetime.fromisoformat(
+                    row["invite_expires_at"].replace("Z", "+00:00"))
+            except (KeyError, ValueError, TypeError, AttributeError):
+                continue  # undated invite: the operator handles it by hand
+            if expiry > self.clock():
+                continue
+            token = row.get("active_invite_token")
+            if token:
+                self._consume_token(token)
+            row["status"] = "confirmed"
+            row["confirmed_at"] = iso_z(expiry)  # §5: back of the queue
+            for key in ("invited_at", "invite_expires_at",
+                        "invite_wave", "active_invite_token"):
+                row.pop(key, None)
+            self._save_row(row)
+            rolled.append(row["entry_id"])
+        return rolled
 
     # -- self-host CTA -----------------------------------------------------
 
