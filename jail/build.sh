@@ -276,11 +276,17 @@ passwd -l root'
 
 # ---------------------------------------------------------------- swapd CA inside the jail only
 say "swapd CA -> jail trust store"
-$SUDO cp /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem /tmp/swapd-mitmproxy.crt
-$SUDO chmod 644 /tmp/swapd-mitmproxy.crt
-$SUDO cp /tmp/swapd-mitmproxy.crt "$ROOTFS/usr/local/share/ca-certificates/swapd-mitmproxy.crt"
+# The CA source is swapd-writable: install it through build_ca_bundle.py,
+# which refuses a planted symlink at the source (issue #144 class — cp
+# follows symlinks, and the old /tmp staging copy was world-readable too).
+# --ca-only writes just the CA bytes straight into the rootfs (root:root
+# 0644 via safe_install), so no world-readable intermediate exists.
+CA_HELPER="$(dirname "$0")/../proxy/build_ca_bundle.py"
+[[ -f "$CA_HELPER" ]] || { echo "ERROR: $CA_HELPER missing (jail requires the proxy/ tree alongside it)"; exit 1; }
+$SUDO python3 "$CA_HELPER" --ca-only \
+    --ca /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem \
+    --dest "$ROOTFS/usr/local/share/ca-certificates/swapd-mitmproxy.crt"
 run_guest /usr/sbin/update-ca-certificates >/dev/null
-$SUDO rm -f /tmp/swapd-mitmproxy.crt
 
 # ---------------------------------------------------------------- agent user
 say "agent user $JAIL_USER"
