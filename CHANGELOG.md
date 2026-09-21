@@ -49,18 +49,18 @@ This changelog only works if entries land with the change, not after it:
   real script's argument parsing and exits before any side effect — plus
   the same script gates. Contributor docs updated; the single test
   command `python3 -m pytest` now covers every component
-  ([#PR](https://github.com/ntindle/spark-vm/pull/PR)).
+  ([#184](https://github.com/ntindle/spark-vm/pull/184)).
 - `confirm/test_push.py` no longer breaks collection on boxes without
   the `cryptography` package: it skips explicitly with the reason
   instead of erroring `python3 -m pytest` at import time
-  ([#PR](https://github.com/ntindle/spark-vm/pull/PR)).
+  ([#184](https://github.com/ntindle/spark-vm/pull/184)).
 - Manifest tests stop failing on dirty checkouts: the seven
   `test_manifest.py` tests that shell out to
   `generate-image-manifest.sh` (which refuses by design when the tree
   has uncommitted changes) now skip with an explicit "commit or stash"
   reason instead of failing cry-wolf red; a clean checkout — including
   CI — still runs all twelve
-  ([#PR](https://github.com/ntindle/spark-vm/pull/PR)).
+  ([#184](https://github.com/ntindle/spark-vm/pull/184)).
 - H4 provider interface contract: the provider-agnostic driver every
   sandbox backend implements, reconciling the H3 signup design, the
   suspend/wake and Fly/GPU provider research, and the #47 lifecycle
