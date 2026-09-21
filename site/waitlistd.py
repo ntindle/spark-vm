@@ -1612,13 +1612,18 @@ class WaitlistService:
         # §7 order: waitlist order, FIFO by confirmed_at.
         eligible.sort(key=lambda r: (r.get("confirmed_at") or "",
                                      r["entry_id"]))
+        # Position is the invitee's confirmed-queue rank. eligible is
+        # already in the FIFO order queue_position uses for confirmed
+        # rows, so the enumerate index + 1 IS the rank — snapshot it
+        # BEFORE the loop. (queue_position() called inside the loop
+        # would shrink as earlier rows flip to invited, since invited
+        # rows are not ranked — every later invite would read "#1".)
+        rank = {r["entry_id"]: i + 1 for i, r in enumerate(eligible)}
         invited = []
         for row in eligible:
             if len(invited) >= count:
                 break
-            # Position is the invitee's confirmed-queue rank — compute
-            # before flipping the status (invited rows are not ranked).
-            position = self.queue_position(row["entry_id"])
+            position = rank[row["entry_id"]]
             row["status"] = "invited"
             row["invited_at"] = iso_z(now)
             row["invite_expires_at"] = iso_z(
@@ -1751,9 +1756,12 @@ def page_already_invited(owner_raw):
             f"<p><strong>{addr}</strong> has already been invited off the "
             "waitlist — the claim email went to that address.</p>"
             "<p>Check your inbox (and spam) for the invite; the claim "
-            "link inside is good for 14 days.</p>"
-            '<p class="muted">Lost the email? The operator can re-send '
-            "it — re-entering the address here won&#x2019;t.</p>"
+            "link inside is good for 14 days after it was sent.</p>"
+            '<p class="muted">Lost the email? The invite expires 14 days '
+            "after it was sent — after that the slot rolls to the next "
+            "entry and you rejoin the line at the back, and you&#x2019;ll "
+            "be invited again in a later wave. Re-entering the address "
+            "here won&#x2019;t speed that up.</p>"
         ),
     )
 

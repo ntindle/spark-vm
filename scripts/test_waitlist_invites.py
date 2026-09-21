@@ -146,6 +146,27 @@ def test_invite_email_body():
     assert "free tier" not in doc["body"].lower()
 
 
+def test_wave_invite_position_lines_rank_each_row():
+    """Multi-row waves stamp each invite with the invitee's own rank.
+
+    Regression: send_invite_wave used to compute queue_position() inside
+    the loop, after earlier rows had flipped to invited (invited rows
+    are not ranked), so every invite after the first read "#1".
+    """
+    service, tmp, clock = make_service()
+    confirm_row(service, "a@example.com", clock, at=NOW - timedelta(days=2))
+    confirm_row(service, "b@example.com", clock, at=NOW - timedelta(days=1))
+    confirm_row(service, "c@example.com", clock, at=NOW)
+    invited = wave(service, count=3)
+    assert len(invited) == 3
+    docs = [d for d in spool_docs(tmp) if d.get("kind") == "invite"]
+    assert len(docs) == 3
+    bodies = {d["to"]: d["body"] for d in docs}
+    assert "You held #1 in line" in bodies["a@example.com"]
+    assert "You held #2 in line" in bodies["b@example.com"]
+    assert "You held #3 in line" in bodies["c@example.com"]
+
+
 def test_invite_emits_funnel_event():
     service, tmp, clock = make_service()
     row = confirm_row(service, "a@example.com", clock)
