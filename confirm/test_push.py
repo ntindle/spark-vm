@@ -20,6 +20,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import push
 from push import b64url_decode
 
+import pytest
+# The VAPID round-trip tests need the cryptography package. Skip explicitly
+# (same pattern as the shellcheck gates) instead of erroring collection on
+# boxes without it.
+pytest.importorskip("cryptography",
+                    reason="cryptography not installed — push-notification tests need it")
+
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import (

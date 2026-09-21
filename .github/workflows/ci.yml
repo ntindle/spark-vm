@@ -6,6 +6,7 @@
 #   cd deploy  && python3 -m pytest test_auto_deploy.py
 #   cd muse-job && python3 -m pytest tests/test_event_trust.py
 #   python3 -m pytest cred-ui/tests/ -q
+#   python3 -m pytest cua jail -q
 
 name: ci
 
@@ -46,6 +47,9 @@ jobs:
         if: always()
         run: python3 -m pytest test_confirmd.py -q
         working-directory: confirm
+      - name: cua and jail tests
+        if: always()
+        run: python3 -m pytest cua jail -q
       - name: auto-deploy tests
         if: always()
         run: python3 -m pytest test_auto_deploy.py -q
