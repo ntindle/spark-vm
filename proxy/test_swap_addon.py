@@ -16,6 +16,7 @@ allowed_hosts) directly.
 
 import base64
 import asyncio
+import errno
 import hashlib
 import hmac
 import ipaddress
@@ -1683,6 +1684,117 @@ class SecuritySweepTests(unittest.TestCase):
         cookies = resp.headers.get_all("Set-Cookie")
         self.assertTrue(all("correct horse" not in c for c in cookies))
         self.assertIn("session=hsurr:acme:password; Path=/", cookies)
+
+
+class AuditLogDiskGuardTests(unittest.TestCase):
+    """Finding 198: swap.log must be bounded, and the no-swap-without-
+    trail invariant must hold when the disk fills. The addon guards the
+    log's filesystem before every audit write (warn below
+    LOG_WARN_FREE_BYTES, refuse below LOG_MIN_FREE_BYTES); rotation
+    itself is the logrotate policy installed by proxy/deploy.sh."""
+
+    def _addon_with_real_audit(self, log_path):
+        a = make_addon()
+        del a._audit  # drop the make_addon stub; exercise the real one
+        return a
+
+    def _statvfs(self, free_bytes, block=4096):
+        blocks = (free_bytes + block - 1) // block
+        return os.statvfs_result(
+            (block, block, blocks * 2, blocks, blocks, 0, 0, 0, 0, 255))
+
+    def _patched(self, tmp_path, free_bytes):
+        """Context: LOG_FILE under tmp, guard thresholds pinned, and a
+        fake statvfs reporting free_bytes."""
+        from contextlib import ExitStack
+        log_file = Path(tmp_path) / "swap.log"
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(sa, "LOG_FILE", log_file))
+        stack.enter_context(mock.patch.object(sa, "LOG_WARN_FREE_BYTES",
+                                              256 * 1024 * 1024))
+        stack.enter_context(mock.patch.object(sa, "LOG_MIN_FREE_BYTES",
+                                              16 * 1024 * 1024))
+        stack.enter_context(mock.patch(
+            "os.statvfs", return_value=self._statvfs(free_bytes)))
+        return stack
+
+    def test_critical_space_refuses_swap(self):
+        """Below the minimum free space the audit write refuses with
+        ENOSPC, _audit returns False (the caller must refuse the swap),
+        and nothing is written — no swap without a trail."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._patched(tmp, 0):
+                a = self._addon_with_real_audit(tmp)
+                with self.assertRaises(OSError) as cm:
+                    sa._open_audit_log()
+                self.assertEqual(cm.exception.errno, errno.ENOSPC)
+                self.assertFalse(a._audit("api.github.com", "github"))
+                self.assertFalse((Path(tmp) / "swap.log").exists())
+
+    def test_low_space_warns_but_still_writes(self):
+        """Between the warn and refuse thresholds the write proceeds —
+        the operator gets a loud journal warning BEFORE the fail-closed
+        cascade, not only the cascade itself."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._patched(tmp, 100 * 1024 * 1024):
+                a = self._addon_with_real_audit(tmp)
+                with self.assertLogs(sa.log, level="WARNING") as logs:
+                    self.assertTrue(a._audit("api.github.com", "github"))
+                self.assertTrue(any("low on space" in m
+                                     for m in logs.output))
+                lines = (Path(tmp) / "swap.log").read_text().splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertIn("swapped=github", lines[0])
+
+    def test_plenty_space_writes_quietly(self):
+        """Healthy disk: the audit line lands and no warning is logged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._patched(tmp, 10 * 1024**3):
+                a = self._addon_with_real_audit(tmp)
+                with self.assertNoLogs(sa.log, level="WARNING"):
+                    self.assertTrue(a._audit("api.github.com", "github"))
+                self.assertTrue((Path(tmp) / "swap.log").exists())
+
+    def test_unqueryable_filesystem_proceeds(self):
+        """When the filesystem cannot be queried the guard is unknowable
+        and the write proceeds — the guard is defense in depth; the
+        write itself still fails closed on a real ENOSPC."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "swap.log"
+            with (mock.patch.object(sa, "LOG_FILE", log_file),
+                  mock.patch("os.statvfs", side_effect=OSError(2, "nope"))):
+                a = self._addon_with_real_audit(tmp)
+                self.assertIsNone(sa._audit_disk_free_bytes())
+                self.assertTrue(a._audit("api.github.com", "github"))
+                self.assertTrue(log_file.exists())
+
+    def test_logrotate_conf_bounds_the_trail(self):
+        """The deployed rotation policy: rename+create (no copytruncate),
+        0600 swapd-owned generations, a size trigger, and a generation
+        cap — and deploy.sh actually installs it with rollback coverage."""
+        conf = Path(os.path.dirname(os.path.abspath(__file__))) / \
+            "swap-logrotate.conf"
+        body = conf.read_text()
+        self.assertIn("/home/swapd/swap.log", body)
+        self.assertIn("/home/swapd/inference-swap.log", body)
+        self.assertRegex(body, r"create\s+0600\s+swapd\s+swapd")
+        self.assertRegex(body, r"(?m)^\s*size\s+\d+[MG]?\s*$")
+        self.assertRegex(body, r"(?m)^\s*rotate\s+\d+\s*$")
+        self.assertIn("missingok", body)
+        self.assertIn("notifempty", body)
+        # rename+create is the designed mode (the comment block explains
+        # why copytruncate is not used); pin the directive's absence.
+        self.assertNotRegex(body, r"(?m)^\s*copytruncate")
+        # Non-vacuous: the policy actually ships — deploy.sh installs it,
+        # and it is rollback-restorable via proxy_install_paths.
+        deploy = Path(os.path.dirname(os.path.abspath(__file__))) / \
+            "deploy.sh"
+        deploy_body = deploy.read_text()
+        self.assertIn("swap-logrotate.conf", deploy_body)
+        self.assertIn("/etc/logrotate.d/swap-proxy", deploy_body)
+        comp = Path(os.path.dirname(os.path.abspath(__file__))).parent / \
+            "deploy" / "components.conf"
+        self.assertIn("/etc/logrotate.d/swap-proxy", comp.read_text())
 
 
 if __name__ == "__main__":

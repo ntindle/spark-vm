@@ -163,6 +163,17 @@ if sudo test -f /home/swapd/swap.log; then
     sudo python3 proxy/safe_install.py --owner swapd --group swapd \
         --mode 0600 /home/swapd/swap.log
 fi
+echo "[4a/7] Installing swap.log rotation policy (GitHub #198)..."
+# The audit trail is bounded by rotation, not by hope: swap.log is
+# append-only, and a full disk fails EVERY swap closed (the audit write
+# is part of authorization) — a total outage of credentialed egress.
+# The addon opens/appends/closes per write (no persistent fd), so
+# logrotate's rename+create needs no postrotate signal and never drops a
+# line across the rotate boundary. Not --create-only: a tightened policy
+# must land on redeploy. Covers the inference proxy's audit log too.
+sudo python3 proxy/safe_install.py --stdin \
+    --owner root --group root --mode 0644 \
+    /etc/logrotate.d/swap-proxy < proxy/swap-logrotate.conf
 
 # --- 4b. with-proxy + its CA bundle (owner decision 13) ------------------
 echo "[4b/7] Building the with-proxy CA bundle and installing with-proxy..."
