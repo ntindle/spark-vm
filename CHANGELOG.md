@@ -37,6 +37,22 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Waitlist slice 3 remainder (H15 — path-A email parser + invite sender):
+  `site/waitlist_patha.py` implements the email intake path
+  (WAITLIST_OPERATIONS.md §2) — exclusion list (From, inbox,
+  @agentmail.to) applied before counting, `Owner:` line override, the
+  optional ed25519 pubkey + ≤280-char use-case line, exactly-one-candidate
+  proceeds to a validated row with the path-A confirm opener, zero/≥2
+  candidates get the §2 clarification reply only on DMARC-aligned mail
+  (unauthenticated mail is silently triaged — no backscatter), a reply
+  saying "forget me" triggers the §5 confirmation email with the signed
+  forget link (never direct deletion), and the §6 per-sender 3/day intake
+  limit; `site/waitlist_invites.py` drives §7 invite waves (top-N
+  confirmed FIFO by confirmed_at, pricing + trial terms filled at send
+  time from operator files, signed position line, 14-day `invite.`-prefixed
+  HMAC claim tokens, `invite_sent` funnel events) plus the expiry
+  rollover (unclaimed invites return to `confirmed` with confirmed_at
+  reset to the expiry time, no re-confirmation). (#203)
 - Competitor watch 2026-09-21 (docs/COMPETITOR_WATCH_2026-09-21.md): quiet
   window — no launches, pricing changes, partner moves, or version bumps
   across the tracked set since the 2026-09-20 pass; boat.dev's rate card
