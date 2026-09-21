@@ -41,7 +41,7 @@ confirm operator capacity allocation directly with boat.dev (the footnote's
 ask-us route).
 
 **INFERRED (flagged, not asserted):** since the ~Sept-19 refresh window, the
-page's comparison table now lists ten providers (Novita, Freestyle, exe.dev,
+page's comparison table now lists twelve providers (Novita, Freestyle, exe.dev,
 E2B, Daytona, Blaxel, Codespaces, Cloudflare, Modal, Islo, Runloop, Vercel
 Sandbox) where the 2026-09-21 baseline read quoted only E2B/Daytona. That
 read may simply have been partial — do not cite this as an expansion without
