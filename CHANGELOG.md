@@ -37,6 +37,15 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- H4 provider interface contract: the provider-agnostic driver every
+  sandbox backend implements, reconciling the H3 signup design, the
+  suspend/wake and Fly/GPU provider research, and the #47 lifecycle
+  audit into one buildable target — five verbs (provision, status,
+  suspend, wake-on-dial, destroy; snapshot reserved), a validated box
+  lifecycle state machine, per-shape suspend capability flags, a
+  billing-facing disk-retention descriptor for idle/stopped boxes, and
+  a fail-closed no-public-ingress rule the control plane verifies after
+  provisioning.
 - Lifecycle parity audit for the #47 live-machine-control ticket: #47's
   promised-vs-accepted lifecycle surface checked against the six-provider
   live-control scorecard. Found pause/resume promised in the ticket but
