@@ -186,7 +186,11 @@ sudo mkdir -p /usr/local/share/with-proxy-ca
 # root-readable file into this world-readable bundle). A missing CA on a
 # first deploy still skips LOUDLY inside the helper; the destination write
 # goes through safe_install (no symlink write-through, root:root 0644).
-sudo python3 proxy/build_ca_bundle.py
+# --dest is explicit (not just the helper default) so deploy.sh visibly
+# writes /usr/local/share/with-proxy-ca/ca-bundle.crt — the install-paths
+# coverage test pins that.
+sudo python3 proxy/build_ca_bundle.py \
+    --dest /usr/local/share/with-proxy-ca/ca-bundle.crt
 sudo install -o root -g root -m 0755 proxy/with-proxy /usr/local/bin/with-proxy
 
 # --- 4c. secrets dirs (issue #91) -------------------------------------------
