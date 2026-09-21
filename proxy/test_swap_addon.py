@@ -1689,7 +1689,33 @@ class SecuritySweepTests(unittest.TestCase):
 
 
 class AuditLogDiskGuardTests(unittest.TestCase):
-    """Probe: single test."""
+    """Probe: single test + helpers."""
+    def _addon_with_real_audit(self):
+        a = make_addon()
+        del a._audit  # drop the make_addon stub; exercise the real one
+        return a
+
+    def _statvfs(self, free_bytes, block=4096):
+        blocks = (free_bytes + block - 1) // block
+        return os.statvfs_result(
+            (block, block, blocks * 2, blocks, blocks, 0, 0, 0, 0, 255))
+
+    def _patched(self, tmp_path, free_bytes):
+        """Context: LOG_FILE under tmp, guard thresholds pinned, a fake
+        statvfs reporting free_bytes, and the warn throttle reset."""
+        from contextlib import ExitStack
+        sa._LAST_LOW_SPACE_WARN_AT = 0.0
+        log_file = Path(tmp_path) / "swap.log"
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(sa, "LOG_FILE", log_file))
+        stack.enter_context(mock.patch.object(sa, "LOG_WARN_FREE_BYTES",
+                                              256 * 1024 * 1024))
+        stack.enter_context(mock.patch.object(sa, "LOG_MIN_FREE_BYTES",
+                                              16 * 1024 * 1024))
+        stack.enter_context(mock.patch(
+            "os.statvfs", return_value=self._statvfs(free_bytes)))
+        return stack
+
     def test_unqueryable_filesystem_proceeds(self):
         """When the filesystem cannot be queried the guard is unknowable
         and the write proceeds — the guard is defense in depth; the
