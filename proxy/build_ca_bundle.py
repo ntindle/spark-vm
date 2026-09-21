@@ -33,12 +33,13 @@ Usage:
     build_ca_bundle.py [--dest PATH] [--ca-only] [--ca PATH] [--sys PATH]
                        [--owner NAME] [--group NAME] [--mode OCTAL]
 
-Exit codes: 0 ok (or loud first-deploy skip), 2 symlink/missing-source
-refusal (fail closed), 1 other error.
+Exit codes: 0 ok (or loud first-deploy skip), 2 symlink / non-regular /
+missing-source refusal (fail closed), 1 other error.
 """
 import argparse
 import errno
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -59,22 +60,43 @@ def _warn(msg):
     sys.stderr.write("build_ca_bundle: WARNING: %s\n" % msg)
 
 
-def read_ca_bytes(ca_path):
+def _missing_ca(ca_path, ca_only):
+    if ca_only:
+        _fail("%s missing -- the jail trust store needs the swapd CA"
+              % ca_path)
+    _warn("%s missing (first deploy?) -- skipping CA bundle; re-run "
+          "after the proxy has started once" % ca_path)
+    raise SystemExit(0)
+
+
+def read_ca_bytes(ca_path, ca_only=False):
     """Read the swapd-controlled CA cert, refusing symlinks atomically.
 
     ``O_NOFOLLOW`` makes the refusal part of the open itself: a symlink
     planted at *ca_path* (by swapd, or by anyone racing the deploy) fails
     with ELOOP instead of being read through. A dangling symlink also
     fails here — that is a broken/attacked deploy, not a first deploy,
-    so it fails closed rather than skipping silently.
+    so it fails closed rather than skipping silently. Non-regular files
+    (FIFO, directory, ...) are refused too: a planted FIFO would otherwise
+    block the privileged read forever, so the open is ``O_NONBLOCK`` and
+    the fd is fstat-checked before the first read (non-blocking is a
+    no-op for regular files).
     """
     try:
-        fd = os.open(ca_path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(ca_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        _missing_ca(ca_path, ca_only)  # raced away between check and open
     except OSError as e:
         if e.errno == errno.ELOOP:
             _fail("%s is a symlink -- refusing to read through it "
                   "(issue #144)" % ca_path)
         raise
+    # fstat the raw fd before fdopen: fdopen on a directory raises
+    # IsADirectoryError, and a FIFO open would block without O_NONBLOCK.
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        _fail("%s is not a regular file -- refusing to read it "
+              "(issue #144)" % ca_path)
     with os.fdopen(fd, "rb") as f:
         return f.read()
 
@@ -103,14 +125,10 @@ def main(argv):
     args = ap.parse_args(argv)
 
     if not os.path.lexists(args.ca):
-        if args.ca_only:
-            _fail("%s missing -- the jail trust store needs the swapd CA"
-                  % args.ca)
-        _warn("%s missing (first deploy?) -- skipping CA bundle; re-run "
-              "after the proxy has started once" % args.ca)
-        return 0
+        _missing_ca(args.ca, args.ca_only)
 
-    content = (read_ca_bytes(args.ca) if args.ca_only
+    content = (read_ca_bytes(args.ca, ca_only=args.ca_only)
+               if args.ca_only
                else build_bundle(args.sys, args.ca))
     try:
         result = safe_install(args.dest, content, owner=args.owner,

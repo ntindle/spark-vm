@@ -281,7 +281,9 @@ say "swapd CA -> jail trust store"
 # follows symlinks, and the old /tmp staging copy was world-readable too).
 # --ca-only writes just the CA bytes straight into the rootfs (root:root
 # 0644 via safe_install), so no world-readable intermediate exists.
-$SUDO python3 "$(dirname "$0")/../proxy/build_ca_bundle.py" --ca-only \
+CA_HELPER="$(dirname "$0")/../proxy/build_ca_bundle.py"
+[[ -f "$CA_HELPER" ]] || { echo "ERROR: $CA_HELPER missing (jail requires the proxy/ tree alongside it)"; exit 1; }
+$SUDO python3 "$CA_HELPER" --ca-only \
     --ca /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem \
     --dest "$ROOTFS/usr/local/share/ca-certificates/swapd-mitmproxy.crt"
 run_guest /usr/sbin/update-ca-certificates >/dev/null

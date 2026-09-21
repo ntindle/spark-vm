@@ -7,8 +7,8 @@ run in CI, so this pins what a smoke check CAN verify without executing it:
   - idempotency guards (re-runs must not re-bootstrap a good rootfs)
   - the jail's documented isolation properties (no bind mounts, no DNS,
     proxy-only nftables egress, explicit UID range, sshd hardening)
-  - secret hygiene (the swapd CA is copied from a host path and its temp
-    copy is removed; no embedded key material)
+  - secret hygiene (the swapd CA is installed via the symlink-safe
+    build_ca_bundle.py helper, never plain cp; no embedded key material)
 
 A future edit that silently drops one of these properties fails the suite.
 """

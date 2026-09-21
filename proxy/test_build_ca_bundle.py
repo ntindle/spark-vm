@@ -57,8 +57,7 @@ class TestBuildCaBundle(unittest.TestCase):
                              b"-----BEGIN CERTIFICATE-----\nCA\n")
             self.assertEqual(stat.S_IMODE(os.stat(dest).st_mode), 0o644)
 
-    def test_symlink_ca_is_refused_and_secret_not_leaked(self):
-        # The #144 attack: swapd plants ca -> a root-readable secret; the
+    def test_symlink_ca_is_refused_and_secret_not_leaked(self):        # The #144 attack: swapd plants ca -> a root-readable secret; the
         # old `cat` would follow it into the world-readable bundle.
         with tempfile.TemporaryDirectory() as d:
             sys_bundle, ca = self._files(d)
@@ -130,6 +129,37 @@ class TestBuildCaBundle(unittest.TestCase):
                           "--dest", str(dest))
             self.assertNotEqual(r.returncode, 0, r.stderr)
             self.assertEqual(target.read_text(), "precious\n")
+
+    def test_directory_ca_is_refused(self):
+        # A non-regular file at the CA path is not attacker CA bytes.
+        with tempfile.TemporaryDirectory() as d:
+            sys_bundle, _ = self._files(d)
+            ca_dir = Path(d) / "ca-dir"
+            ca_dir.mkdir()
+            dest = Path(d) / "ca-bundle.crt"
+            r = self._run("--sys", str(sys_bundle), "--ca", str(ca_dir),
+                          "--dest", str(dest))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertFalse(dest.exists())
+
+    def test_fifo_ca_is_refused_without_hanging(self):
+        # A planted FIFO must not block the privileged read forever.
+        with tempfile.TemporaryDirectory() as d:
+            sys_bundle, _ = self._files(d)
+            fifo = Path(d) / "mitmproxy-ca-cert.pem"
+            fifo.unlink()
+            os.mkfifo(fifo)
+            dest = Path(d) / "ca-bundle.crt"
+            try:
+                r = subprocess.run(
+                    [sys.executable, SCRIPT, "--owner", _me(),
+                     "--group", _me(), "--sys", str(sys_bundle),
+                     "--ca", str(fifo), "--dest", str(dest)],
+                    capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                self.fail("helper hung reading a FIFO at the CA source")
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertFalse(dest.exists())
 
 
 if __name__ == "__main__":
