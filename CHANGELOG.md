@@ -87,6 +87,16 @@ This changelog only works if entries land with the change, not after it:
   provider first; the baseline rate card is unchanged ($0.036/h default,
   stopped sandboxes free, $26 for one default running the whole month).
   (C17; #206)
+- Competitor watch 2026-09-21 afternoon
+  (docs/COMPETITOR_WATCH_2026-09-21_AFTERNOON.md): quiet window — no
+  launches, pricing changes, releases, or partner moves across the
+  tracked set since the morning pass; boat.dev's pricing page re-read
+  and unchanged, and its twelve-provider comparison table verified as
+  the page's current state (the earlier read was simply partial);
+  Microsandbox still at v0.7.1, Docker Sandboxes still at 0.43.0, Daytona
+  changelog still topped at v0.214.0 (Sep 15), TermSquad tiers
+  re-verified unchanged; WSO2 reception broadens slightly ahead of the
+  Sep 29 webinar. No corpus changes. (#209)
 - Secrets posture page (#189): frames the placeholder-swap design as
   independently re-derived — the pattern is convergent across the industry —
   and compares swapd mechanism-by-mechanism against E2B, Daytona, Vercel,
