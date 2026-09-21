@@ -87,6 +87,11 @@ feed NEEDS_USER.md's Abuse-controls item — LANDING_PAGE_COPY.md §4):
         (= submitted_at + DROP_TTL_SECONDS) and is NEVER refreshed by a
         re-submit: WAITLIST_OPERATIONS.md §4 drops "unconfirmed 14 days
         after submission", and a re-submit must not postpone the drop.
+    PURGE_TTL_SECONDS = 30*86400 — a dropped row is deleted
+        PURGE_TTL_SECONDS after dropped_at (WAITLIST_OPERATIONS.md §5:
+        "row deleted 30d after drop"). The funnel events stay: `dropped`
+        and `purged` events in funnel_events.jsonl are the audit trail —
+        the PII leaves with the row.
 
 stdlib only. Tested by scripts/test_waitlistd.py.
 """
@@ -120,6 +125,7 @@ EMAIL_SEND_WINDOW = 86400
 TOKEN_TTL_SECONDS = 14 * 86400
 REMINDER_LEAD_SECONDS = 7 * 86400
 DROP_TTL_SECONDS = 14 * 86400
+PURGE_TTL_SECONDS = 30 * 86400
 
 EMAIL_RE = re.compile(
     r"^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,}$"
@@ -610,7 +616,8 @@ class WaitlistService:
         """14d job: drop every unconfirmed row past its deadline. Returns
         the dropped entry_ids. Status `dropped` is terminal
         (WAITLIST_OPERATIONS.md §5); the row is retained 30 days for the
-        §5 retention rule, then purged by a separate operator pass."""
+        §5 retention rule, then purged by the --purge job
+        (purge_dropped)."""
         dropped = []
         for row in sorted(self.rows.values(),
                           key=lambda r: r.get("submitted_at") or ""):
@@ -626,6 +633,85 @@ class WaitlistService:
             self._emit("dropped", row["entry_id"])
             dropped.append(row["entry_id"])
         return dropped
+
+    def purge_due(self, row):
+        """A dropped row is due for purge once PURGE_TTL_SECONDS have
+        passed since it was dropped (WAITLIST_OPERATIONS.md §5: "row
+        deleted 30d after drop").
+
+        A dropped row with no dropped_at is NEVER purge-due: without a
+        date we cannot prove the 30 days elapsed, and deleting early
+        would break the retention promise. drop_expired always stamps
+        dropped_at, so in practice this path only covers hand-edited
+        stores — the operator deletes those by hand. A timezone-naive
+        dropped_at is treated the same way (a hand edit we cannot anchor
+        to the retention clock), NOT normalized to UTC: normalizing could
+        delete up to 14h early against the §5 promise."""
+        if row.get("status") != "dropped":
+            return False
+        dropped_at = row.get("dropped_at")
+        if not dropped_at:
+            return False
+        try:
+            dropped = datetime.fromisoformat(
+                dropped_at.replace("Z", "+00:00"))
+            return self.clock() >= dropped + timedelta(
+                seconds=PURGE_TTL_SECONDS)
+        except (ValueError, AttributeError, TypeError):
+            # Garbled date (ValueError), non-string (AttributeError), or
+            # naive datetime vs the aware clock (TypeError): none of these
+            # prove the 30 days elapsed, so none is ever purge-due. The
+            # TypeError case matters — an uncaught one would crash the
+            # whole --purge run and every retry until hand-fixed.
+            return False
+
+    def _rewrite_rows(self):
+        """Atomically rewrite rows.jsonl from the in-memory rows — the
+        purge path (this is the rewrite slice 3a's docstring deferred for
+        its own lock-discipline review; the --purge cron owns it now).
+
+        Contract: the caller holds data_lock() across reload() + scan +
+        rewrite, so no live daemon thread is mid-append (every daemon
+        mutation takes the data lock too). The temp file lands in the
+        data dir — same filesystem, so os.replace() is atomic: a kill -9
+        mid-write leaves either the old rows.jsonl or the new one, never
+        a torn one, and the loader's torn-line skip is the backstop.
+        Rows are written sorted by entry_id with one line per entry
+        (self.rows is already deduped — appends merge by entry_id on
+        load), so operator diffs are deterministic. funnel_events.jsonl
+        and consumed_tokens.txt are append-only and untouched — the
+        `dropped`/`purged` events are the audit trail; the PII leaves
+        with the row."""
+        path = os.path.join(self.data_dir, "rows.jsonl")
+        tmp = path + ".purge-tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for entry_id in sorted(self.rows):
+                fh.write(
+                    json.dumps(self.rows[entry_id], sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+
+    def purge_dropped(self):
+        """30d job: permanently delete every purge-due dropped row.
+        Returns the purged entry_ids. Emits a `purged` funnel event per
+        row BEFORE the rewrite so the counts survive the deletion —
+        emit-before is deliberate and at-least-once: a kill between the
+        emit and the rewrite duplicates the event on retry, which is
+        inert (no §7 metric counts purges; only the rows_read hygiene
+        counter ticks).
+        Idempotent: a second run finds nothing due."""
+        due = [row for row in sorted(
+            self.rows.values(), key=lambda r: r.get("submitted_at") or "")
+            if self.purge_due(row)]
+        for row in due:
+            self._emit("purged", row["entry_id"])
+            del self.rows[row["entry_id"]]
+            if self.by_email.get(row.get("owner_email")) == row["entry_id"]:
+                del self.by_email[row["owner_email"]]
+        if due:
+            self._rewrite_rows()
+        return [row["entry_id"] for row in due]
 
     # -- the form ----------------------------------------------------------
 

@@ -236,7 +236,9 @@ confirmation email containing the signed forget link, and the row is
 deleted only after the link is clicked (proving inbox access), within 7
 days, with a confirmation sent.
 
-**Retention:** unconfirmed → dropped at 14d, row deleted 30d after drop;
+**Retention:** unconfirmed → dropped at 14d, row deleted 30d after drop —
+a dropped row with no recorded drop date is never auto-purged (the 30
+days cannot be proven); the operator removes it by hand;
 confirmed → kept until launch + 90 days (the invite window), then
 anonymized to counts; invited-but-expired → returns to `confirmed` with
 `confirmed_at` reset to the expiry time (back of the queue, no
@@ -374,7 +376,9 @@ criterion:
   writes validated rows only.
 - [ ] **Confirm sender + token signer**: HMAC, single-use, 14d expiry;
   idempotent re-click ("you're already confirmed"); rate-limited
-  (all reply types counted); reminder job at +7d; drop job at +14d.
+  (all reply types counted); reminder job at +7d; drop job at +14d;
+  purge job 30d after drop (atomic rewrite; `purged` funnel events keep
+  the counts after the PII is deleted).
   HTTP method shape per the §4 note (open PR #99 supersedes the GET
   language: GET renders the confirm page, POST confirms).
 - [ ] **Abuse controls** (§6) live on both paths; no unauthenticated

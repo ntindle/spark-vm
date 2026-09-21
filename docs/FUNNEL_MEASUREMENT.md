@@ -173,6 +173,7 @@ day-bucket and `attrs` is a small key-value map:
 | `confirmed` | the POST confirm lands (see §4) | row id | `via`: `original` or `reminder` |
 | `reminder_sent` | +7d job fires | row id | — |
 | `dropped` | 14d drop job fires on an unconfirmed row (`WAITLIST_OPERATIONS.md` §4) | row id | — |
+| `purged` | 30d post-drop purge deletes a dropped row (`WAITLIST_OPERATIONS.md` §5); the row's PII is gone, the event keeps the counts | row id | — |
 | `invite_sent` | wave invite leaves | row id | — |
 | `claimed` | invite claim completes | row id | — |
 

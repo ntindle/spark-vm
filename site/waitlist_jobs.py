@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
-"""waitlist_jobs — the waitlist lifecycle cron jobs (H15 build, slice 3a).
+"""waitlist_jobs — the waitlist lifecycle cron jobs (H15 build, slice 3a/3b).
 
-Two cron entry points against the operator-side waitlist store
+Three cron entry points against the operator-side waitlist store
 (WAITLIST_OPERATIONS.md §10):
 
     waitlist_jobs.py --remind     the +7d reminder job (§4 draft)
     waitlist_jobs.py --drop       the 14d drop job (§4: unconfirmed →
                                   status `dropped`, no third email)
+    waitlist_jobs.py --purge      the 30d post-drop purge (§5: dropped →
+                                  row deleted; slice 3b)
 
-Both are idempotent, honor the 3/24h transactional-email cap, and take
-waitlistd's cross-process data lock around a reload + scan so they never
-race the live daemon (or a second cron instance).
+--purge is the operator pass slice 3a's docstring deferred: it rewrites
+rows.jsonl, so it has its own lock discipline (data lock held across
+reload + scan + atomic rewrite; os.replace() swap, fsync before the
+rename). The funnel events are the audit trail — `purged` is emitted per
+row before the rewrite; the PII leaves with the row.
 
-Operator cron shape (both jobs share the service's env):
+All are idempotent, --remind honors the 3/24h transactional-email cap,
+and each takes waitlistd's cross-process data lock around a reload +
+scan so they never race the live daemon (or a second cron instance).
+
+Operator cron shape (all three jobs share the service's env):
 
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... waitlist_jobs.py --remind
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... waitlist_jobs.py --drop
+    WAITLIST_HMAC_KEY=... WAITLIST_DATA=... waitlist_jobs.py --purge
 
 Config (env — same fail-loud contract as waitlistd):
     WAITLIST_HMAC_KEY    operator HMAC key — REQUIRED, fail loud if unset.
@@ -38,9 +47,15 @@ Drop semantics (§4, §5):
 - Unconfirmed at drop_at → status `dropped` (terminal), the live token
   consumed, a `dropped` funnel event emitted. No third email — the
   reminder was the last touch.
-- The row is retained 30 days after drop per §5, then purged by a
-  separate operator pass (purge is NOT in this job — it rewrites
-  rows.jsonl and needs its own lock-discipline review).
+- The row is retained 30 days after drop per §5, then purged by the
+  --purge job (its own atomic-rewrite lock discipline, below).
+
+Purge semantics (§5):
+- status `dropped` and now >= dropped_at + 30d → the row is deleted.
+  A `purged` funnel event is emitted per row before deletion, so the
+  counts survive the PII. A dropped row with no parseable dropped_at is
+  never purge-due (can't prove the 30 days elapsed; the operator handles
+  hand-edited stores by hand).
 
 stdlib only. Tested by scripts/test_waitlist_jobs.py.
 """
@@ -97,9 +112,10 @@ def load_job_config(argv):
 def main(argv):
     want_remind = "--remind" in argv
     want_drop = "--drop" in argv
-    if want_remind == want_drop:  # both or neither
+    want_purge = "--purge" in argv
+    if sum((want_remind, want_drop, want_purge)) != 1:
         sys.stderr.write(
-            "waitlist_jobs: pass exactly one of --remind or --drop\n")
+            "waitlist_jobs: pass exactly one of --remind, --drop, --purge\n")
         raise SystemExit(2)
     dry_run = "--dry-run" in argv
     key, data_dir, host = load_job_config(argv)
@@ -112,21 +128,30 @@ def main(argv):
                           if service.reminder_due(r)]
             due_drop = [r["entry_id"] for r in service.rows.values()
                         if service.drop_due(r)]
+            due_purge = [r["entry_id"] for r in service.rows.values()
+                         if service.purge_due(r)]
             if want_remind:
                 sys.stdout.write(
                     f"waitlist_jobs: dry-run — {len(due_remind)} reminder(s) "
                     f"due: {','.join(due_remind) or '(none)'}\n")
-            else:
+            elif want_drop:
                 sys.stdout.write(
                     f"waitlist_jobs: dry-run — {len(due_drop)} drop(s) due: "
                     f"{','.join(due_drop) or '(none)'}\n")
+            else:
+                sys.stdout.write(
+                    f"waitlist_jobs: dry-run — {len(due_purge)} purge(s) "
+                    f"due: {','.join(due_purge) or '(none)'}\n")
             return 0
         if want_remind:
             sent = service.send_reminders()
             sys.stdout.write(f"waitlist_jobs: sent {sent} reminder(s)\n")
-        else:
+        elif want_drop:
             dropped = service.drop_expired()
             sys.stdout.write(f"waitlist_jobs: dropped {len(dropped)} row(s)\n")
+        else:
+            purged = service.purge_dropped()
+            sys.stdout.write(f"waitlist_jobs: purged {len(purged)} row(s)\n")
     return 0
 
 
