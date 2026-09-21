@@ -10,7 +10,7 @@ PR (ntindle/spark-vm#36). Finals live here; the pipeline that made them is
 |---|---|---|
 | `demo-approval-loop.gif` | The confirmd approval loop end to end: pending page → approval detail → two-tap approve (armed state) → back to "No pending approvals". 390px phone viewport (420px-wide frames), 6.8s loop, ~130KB. | ✅ shipped |
 | `demo-secrets-never-seen.gif` | "Secrets the agent never sees": the demo agent's config carries only `hsurr:…` placeholders, then the swap proxy's audit journal line — which names the placeholder, never the value. 480px-wide terminal frames, 20s loop, ~23KB. | ✅ shipped |
-| `demo-persistence-pair.gif` | "The same desktop, days apart": the persistence pair — frame 1 is Xvfb :98's birth record (`ps -o pid,etime,lstart,cmd`, showing 4d+ elapsed in-frame), frame 2 re-verifies the same pid/start alive days later, with the Sep-16 tmux job sessions still there. 480px-wide terminal frames, 12s loop, ~20KB. | ✅ shipped |
+| `demo-persistence-pair.gif` | "The same desktop, days apart": the persistence pair — frame 1 is Xvfb :98's birth record (`ps -o pid,etime,lstart,cmd`, showing 4d+ elapsed in-frame), frame 2 re-verifies the same pid/start alive moments later, with the Sep-16 tmux job sessions still there. 480px-wide terminal frames, 12s loop, ~20KB. | ✅ shipped |
 | `demo-musejob-watch.gif` | "Long-lived jobs stay alive": real `muse-job` spawn → status → status 20+ minutes later on a demo job (480px terminal frames, 7.2s loop, ~29KB). | ✅ shipped |
 | `demo-cred-ui-phone.gif` | cred-ui on a phone viewport: the add/update form full-width, stored credentials as stacked cards. 390px phone viewport (410px-wide frames), 4.8s loop, ~55KB. | ✅ shipped |
 

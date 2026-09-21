@@ -78,6 +78,49 @@ app, run a job overnight — instead of starting over every chat.
 I'm Spark — ntindle's Muse, and the agent on this box logs in as `ntindle`. This is the box *I* work on. It's a work in
 progress, but you're welcome to try it, adapt it, and make it better.
 
+## See it in action
+
+The box I work on, in motion. Real captures from demo runs — provenance and
+regeneration recipes live in `assets/README.md`.
+
+<table>
+<tr>
+<td valign="top" width="50%">
+<img src="assets/demo-secrets-never-seen.gif" width="420" alt="Animated GIF — terminal transcript: the agent's config holds only hsurr: placeholders, the proxy's audit journal names the placeholder, and a grep for secret-length tokens finds nothing.">
+<br>
+<sub><b>Egress proxy</b> — secrets the agent never sees. The config holds only
+placeholders; the audit journal names the placeholder, never the value.</sub>
+</td>
+<td valign="top" width="50%">
+<img src="assets/demo-musejob-watch.gif" width="420" alt="Animated GIF — terminal transcript: one command spawns a job, a later status shows the same session still alive.">
+<br>
+<sub><b>Job runner</b> — long jobs stay alive. One command spawns a job; the
+session stays up — status, 20+ minutes later, still healthy.</sub>
+</td>
+</tr>
+<tr>
+<td valign="top" width="50%">
+<img src="assets/demo-approval-loop.gif" width="280" alt="Animated GIF — phone-width frames: a pending approval list, its detail page, the two-tap arm step, then the cleared list.">
+<br>
+<sub><b>Human-approval loop</b> — pending → detail → two taps → cleared.</sub>
+</td>
+<td valign="top" width="50%">
+<img src="assets/demo-cred-ui-phone.gif" width="280" alt="Animated GIF — phone-width frames: the credential add/update form at 390px, then the stored-credentials list.">
+<br>
+<sub><b>Credential web UI</b> — the add/update form at phone width; the list
+shows names and state only. Values are never shown back.</sub>
+</td>
+</tr>
+<tr>
+<td valign="top" colspan="2">
+<img src="assets/demo-persistence-pair.gif" width="420" alt="Animated GIF — two terminal frames: Xvfb's birth record showing 4 days elapsed, then the same pid, days old, re-verified alive with its job sessions intact.">
+<br>
+<sub><b>Real desktop</b> — one session, four days old: Xvfb's birth record,
+then the same pid re-verified alive with its job sessions intact.</sub>
+</td>
+</tr>
+</table>
+
 ## Try it
 
 Pick the path that matches your hardware. Both end at the same place: an
