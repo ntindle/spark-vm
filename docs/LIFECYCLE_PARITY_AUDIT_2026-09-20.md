@@ -40,7 +40,7 @@ Acceptance. §3 files the gaps.
 | snapshot | ✓ listed | ✓ listed | survey deferred to snapshot pass | covered-as-verb (semantics out of scope) |
 | terminal | ✓ listed | ✗ absent | AgentComputer ConnectRPC exec, Fly sprite console, E2B SDK terminal, Daytona Web Terminal STARTED-only (VERIFIED in deep-scan) | **absent from acceptance (F4 context)** |
 | desktop/stream | ✓ listed | ✗ absent | E2B one-stream-at-a-time limit; Daytona VNC; AgentComputer VNC (VERIFIED in deep-scan) | **ownership undefined (F2)** |
-| file browsing | ✗ not in #47 at all | ✗ | AgentComputer file ops on stopped VMs, no charge; Daytona file nav via Web Terminal STARTED-only (VERIFIED in deep-scan) | **scope undecided (F4)** |
+| file browsing | ✗ not in #47's What or Acceptance (scope notes list boat.dev's `files` verb) | ✗ | AgentComputer file ops on stopped VMs, no charge; Daytona file nav via Web Terminal STARTED-only (VERIFIED in deep-scan) | **scope undecided (F4)** |
 | idle auto-policy | ✗ | ✗ | Fly ~30s auto-pause; Daytona 60-min auto-pause default + auto-stop/auto-archive/auto-delete; E2B autoPause→pause-or-kill; CodeSandbox hibernate; TermSquad always-on (VERIFIED in deep-scan / SUSPEND_WAKE) | **absent (F3)** |
 | stopped-state billing | ✗ | ✗ | AgentComputer cold storage; E2B running-only billing; Fly hibernate = storage-only (VERIFIED in deep-scan) | owned by C15 |
 
@@ -59,12 +59,13 @@ corpus facts make the spec language non-trivial:
 2. boat.dev — the ticket's primary provider target — has **unverified**
    suspend/idle semantics (`SUSPEND_WAKE_RESEARCH.md`, "Open
    verification": "boat.dev: suspend/idle behavior — relevant to the
-   Fly-vs-boat fallback evaluation"). The ticket asserts boat.dev has
-   stop/snapshot/resume verbs; it must not assert memory-pause until the
-   verification pass runs.
-3. The wake contract already exists: H4's `suspended`/`waking` states +
-   async `dial()` wake, with wake-on-SSH as control-plane code (no
-   provider offers wake-on-SSH natively — `SUSPEND_WAKE_RESEARCH.md`).
+   Fly-vs-boat fallback evaluation"). The ticket asserts boat.dev's API
+   verbs (stop/snapshot/resume/fork/delete/files/commands/events/desktop);
+   it must not assert memory-pause until the verification pass runs.
+3. The recommended wake contract is already specified in the research:
+   H4's `suspended`/`waking` states + async `dial()` wake, with wake-on-SSH
+   as control-plane code (no surveyed provider offers wake-on-SSH natively
+   — `SUSPEND_WAKE_RESEARCH.md`).
 
 **Filed as #47 sub-item:** name pause/resume in the acceptance
 checkboxes, reference the H4 contract, and write the provider-agnostic
@@ -80,14 +81,18 @@ concurrent view-only viewers, or interactive-control holding and handoff
 (who owns the mouse when a Muse and a human both open the desktop?).
 
 This is also an approvals-model question: confirmd today approves
-*discrete requests*, not long-lived sessions (deep-scan scorecard gap,
-tying H9/H11). A live desktop is a session, and the session-scoped
-bearer/expiry/revocation binding belongs in the #47 spec before the
-streaming design lands.
+*discrete requests*, not long-lived sessions (deep-scan scorecard gap). A
+live desktop is a session. The session-scoped bearer/expiry/revocation
+binding is designed inside #47 — its own spec surface — built on H9's
+identity primitives (cert/bearer issuance) and informed by H11's isolation
+answer; the approvals-model evolution it implies (discrete approvals →
+long-lived session grants) belongs to H10's confirmd multi-tenant scope,
+not to H9/H11.
 
 **Filed as #47 sub-item:** define stream-ownership semantics (stream-count
-limit, view-only viewers, interactive hold/handoff, session-scoped
-auth binding to the H9/H11 session model).
+limit, view-only viewers, interactive hold/handoff, session-scoped auth
+binding designed inside #47 on H9's identity primitives; approvals-model
+evolution routed to H10).
 
 ### F3 — No idle lifecycle policy model
 
@@ -104,8 +109,9 @@ per `SUSPEND_WAKE_RESEARCH.md`).
 The policy model is also the billing model: E2B bills running time only,
 AgentComputer publishes a cold tier, Fly stops compute billing on
 hibernate. F3 and C15 (stopped/cold cost tier) are the same decision
-made twice if #47 doesn't own the lifecycle model — the sub-item says so
-explicitly and links C15's future issue.
+made twice if #47 doesn't own the lifecycle model. Direction: #47/H13
+define the lifecycle states; C15 prices retained resources per state —
+the cross-link is informational, not a dependency.
 
 **Filed as #47 sub-item:** define #47's idle lifecycle policy model
 (defaults per state, per-tenant control, H13 idle-detector ownership,
@@ -135,9 +141,11 @@ Daytona surfaces no distinct restart verb — restart is stop+start
 (THIRD-PARTY: ecosystem wrapper docs, "Stop the sandbox. The sandbox can
 be restarted later — files and state persist"). Recommended #47 spec
 language, for whoever writes the acceptance amendment: **restart =
-stop+start warm sequence; disk and configuration survive; in-memory
-process survival follows the same shape-dependent rules as pause/resume
-(F1).** No separate issue — the F1 sub-item carries it.
+stop+start sequence (in-place, not a reprovision; disk and configuration
+survive; in-memory process survival follows the same shape-dependent
+rules as pause/resume (F1)).** Not "warm": in the corpus vocabulary warm
+means memory retained, and on the H3 reference shape stop+start is cold.
+No separate issue — the F1 sub-item carries it.
 
 Audit note for the future snapshot survey (not filed): one ecosystem doc
 claims Daytona can only capture a snapshot while the sandbox is *stopped*
