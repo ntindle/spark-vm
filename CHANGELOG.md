@@ -64,7 +64,7 @@ This changelog only works if entries land with the change, not after it:
   allocation, so any 16-vCPU hosted sizing must confirm capacity with the
   provider first; the baseline rate card is unchanged ($0.036/h default,
   stopped sandboxes free, $26 for one default running the whole month).
-  (C17; PR TBD)
+  (C17; #206)
 - Secrets posture page (#189): frames the placeholder-swap design as
   independently re-derived — the pattern is convergent across the industry —
   and compares swapd mechanism-by-mechanism against E2B, Daytona, Vercel,
