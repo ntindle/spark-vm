@@ -488,15 +488,31 @@ def test_stdin_byte_boundary(tmp_path, monkeypatch, capsys):
 
 
 def test_multibyte_oversize_stdin_triaged(tmp_path, monkeypatch, capsys):
-    # Eng B2: 1 MiB of 4-byte UTF-8 is 4 MiB of raw input — it must
-    # trip the byte cap. (The old sys.stdin.read() character count let
-    # it through.)
-    payload = "😀".encode("utf-8") * (wp.MAX_RAW_BYTES // 4 + 10)
-    assert len(payload) > wp.MAX_RAW_BYTES
+    # Eng B2 / QA B3: the intake cap is enforced on BYTES, not
+    # characters. This is a VALID signup message whose character count
+    # fits under 1 MiB but whose byte count exceeds it — the old
+    # sys.stdin.read() character cap let it straight through (accepted
+    # + confirm spooled). The byte cap must triage it with the
+    # intake-cap reason and parse nothing at all.
+    body = "Owner: owner@example.com\n" + "\U0001F600" * 300000
+    text = make_msg("muse@x.io", body)
+    payload = text.encode("utf-8")
+    assert len(text) < wp.MAX_RAW_BYTES  # characters fit the cap
+    assert len(payload) > wp.MAX_RAW_BYTES  # bytes do not
     data = _cli_stdin(monkeypatch, tmp_path, payload)
     assert wp.main(["--auth", "pass"]) == 0
     assert "triage" in capsys.readouterr().out
-    assert len(os.listdir(str(data / "triage"))) == 1
+    triaged = os.listdir(str(data / "triage"))
+    assert len(triaged) == 1
+    with open(str(data / "triage" / triaged[0]), encoding="utf-8") as fh:
+        reason = fh.readline().strip()
+    assert reason == ("X-Waitlist-Triage-Reason: "
+                      "message exceeds 1 MiB intake cap")
+    assert spool_docs(data) == []  # never parsed: no mail spooled
+    rows_path = data / "rows.jsonl"
+    assert (not rows_path.exists()
+            or "owner@example.com" not in rows_path.read_text(
+                encoding="utf-8"))  # never parsed: no row created
 
 
 def test_non_utf8_stdin_triaged_lossily(tmp_path, monkeypatch, capsys):
