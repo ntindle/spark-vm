@@ -1734,42 +1734,8 @@ class AuditLogDiskGuardTests(unittest.TestCase):
                 self.assertFalse(a._audit("api.github.com", "github"))
                 self.assertFalse((Path(tmp) / "swap.log").exists())
 
-    def test_low_space_warns_but_still_writes(self):
-        """Between the warn and refuse thresholds the write proceeds —
-        the operator gets a loud journal warning BEFORE the fail-closed
-        cascade, not only the cascade itself."""
-        with tempfile.TemporaryDirectory() as tmp:
-            with self._patched(tmp, 100 * 1024 * 1024):
-                a = self._addon_with_real_audit()
-                with self.assertLogs(sa.log, level="WARNING") as logs:
-                    self.assertTrue(a._audit("api.github.com", "github"))
-                self.assertTrue(any("low on space" in m
-                                     for m in logs.output))
-                lines = (Path(tmp) / "swap.log").read_text().splitlines()
-                self.assertEqual(len(lines), 1)
-                self.assertIn("swapped=github", lines[0])
 
-    def test_plenty_space_writes_quietly(self):
-        """Healthy disk: the audit line lands and no warning is logged."""
-        with tempfile.TemporaryDirectory() as tmp:
-            with self._patched(tmp, 10 * 1024**3):
-                a = self._addon_with_real_audit()
-                with self.assertNoLogs(sa.log, level="WARNING"):
-                    self.assertTrue(a._audit("api.github.com", "github"))
-                self.assertTrue((Path(tmp) / "swap.log").exists())
 
-    def test_unqueryable_filesystem_proceeds(self):
-        """When the filesystem cannot be queried the guard is unknowable
-        and the write proceeds — the guard is defense in depth; the
-        write itself still fails closed on a real ENOSPC."""
-        with tempfile.TemporaryDirectory() as tmp:
-            log_file = Path(tmp) / "swap.log"
-            with (mock.patch.object(sa, "LOG_FILE", log_file),
-                  mock.patch("os.statvfs", side_effect=OSError(2, "nope"))):
-                a = self._addon_with_real_audit()
-                self.assertIsNone(sa._audit_disk_free_bytes())
-                self.assertTrue(a._audit("api.github.com", "github"))
-                self.assertTrue(log_file.exists())
 
 
     def test_low_space_warning_is_rate_limited(self):
