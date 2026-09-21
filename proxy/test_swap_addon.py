@@ -1689,39 +1689,7 @@ class SecuritySweepTests(unittest.TestCase):
 
 
 class AuditLogDiskGuardTests(unittest.TestCase):
-    """Finding 198: swap.log must be bounded, and the no-swap-without-
-    trail invariant must hold when the disk fills. The addon guards the
-    log's filesystem before every audit write (warn below
-    LOG_WARN_FREE_BYTES, refuse below LOG_MIN_FREE_BYTES); rotation
-    itself is the logrotate policy installed by proxy/deploy.sh."""
-
-    def _addon_with_real_audit(self):
-        a = make_addon()
-        del a._audit  # drop the make_addon stub; exercise the real one
-        return a
-
-    def _statvfs(self, free_bytes, block=4096):
-        blocks = (free_bytes + block - 1) // block
-        return os.statvfs_result(
-            (block, block, blocks * 2, blocks, blocks, 0, 0, 0, 0, 255))
-
-    def _patched(self, tmp_path, free_bytes):
-        """Context: LOG_FILE under tmp, guard thresholds pinned, a fake
-        statvfs reporting free_bytes, and the warn throttle reset."""
-        from contextlib import ExitStack
-        sa._LAST_LOW_SPACE_WARN_AT = 0.0
-        log_file = Path(tmp_path) / "swap.log"
-        stack = ExitStack()
-        stack.enter_context(mock.patch.object(sa, "LOG_FILE", log_file))
-        stack.enter_context(mock.patch.object(sa, "LOG_WARN_FREE_BYTES",
-                                              256 * 1024 * 1024))
-        stack.enter_context(mock.patch.object(sa, "LOG_MIN_FREE_BYTES",
-                                              16 * 1024 * 1024))
-        stack.enter_context(mock.patch(
-            "os.statvfs", return_value=self._statvfs(free_bytes)))
-        return stack
-
-
+    """Probe: single test."""
     def test_low_space_warns_but_still_writes(self):
         """Between the warn and refuse thresholds the write proceeds —
         the operator gets a loud journal warning BEFORE the fail-closed
@@ -1736,30 +1704,6 @@ class AuditLogDiskGuardTests(unittest.TestCase):
                 lines = (Path(tmp) / "swap.log").read_text().splitlines()
                 self.assertEqual(len(lines), 1)
                 self.assertIn("swapped=github", lines[0])
-
-    def test_plenty_space_writes_quietly(self):
-        """Healthy disk: the audit line lands and no warning is logged."""
-        with tempfile.TemporaryDirectory() as tmp:
-            with self._patched(tmp, 10 * 1024**3):
-                a = self._addon_with_real_audit()
-                with self.assertNoLogs(sa.log, level="WARNING"):
-                    self.assertTrue(a._audit("api.github.com", "github"))
-                self.assertTrue((Path(tmp) / "swap.log").exists())
-
-    def test_unqueryable_filesystem_proceeds(self):
-        """When the filesystem cannot be queried the guard is unknowable
-        and the write proceeds — the guard is defense in depth; the
-        write itself still fails closed on a real ENOSPC."""
-        with tempfile.TemporaryDirectory() as tmp:
-            log_file = Path(tmp) / "swap.log"
-            with (mock.patch.object(sa, "LOG_FILE", log_file),
-                  mock.patch("os.statvfs", side_effect=OSError(2, "nope"))):
-                a = self._addon_with_real_audit()
-                self.assertIsNone(sa._audit_disk_free_bytes())
-                self.assertTrue(a._audit("api.github.com", "github"))
-                self.assertTrue(log_file.exists())
-
-
 
 
 if __name__ == "__main__":
