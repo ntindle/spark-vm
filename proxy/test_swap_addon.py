@@ -1721,58 +1721,44 @@ class AuditLogDiskGuardTests(unittest.TestCase):
             "os.statvfs", return_value=self._statvfs(free_bytes)))
         return stack
 
-    def test_critical_space_refuses_swap(self):
-        """Below the minimum free space the audit write refuses with
-        ENOSPC, _audit returns False (the caller must refuse the swap),
-        and nothing is written — no swap without a trail."""
-        with tempfile.TemporaryDirectory() as tmp:
-            with self._patched(tmp, 0):
-                a = self._addon_with_real_audit()
-                with self.assertRaises(OSError) as cm:
-                    sa._open_audit_log()
-                self.assertEqual(cm.exception.errno, errno.ENOSPC)
-                self.assertFalse(a._audit("api.github.com", "github"))
-                self.assertFalse((Path(tmp) / "swap.log").exists())
 
-
-
-
-
-    def test_low_space_warning_is_rate_limited(self):
-        """The warn-band warning fires at most once per cooldown: the
-        mitigation must not spam the journal, whose writes consume the
-        very disk being warned about."""
+    def test_low_space_warns_but_still_writes(self):
+        """Between the warn and refuse thresholds the write proceeds —
+        the operator gets a loud journal warning BEFORE the fail-closed
+        cascade, not only the cascade itself."""
         with tempfile.TemporaryDirectory() as tmp:
             with self._patched(tmp, 100 * 1024 * 1024):
-                with mock.patch("time.monotonic", return_value=1000.0):
-                    with self.assertLogs(sa.log, level="WARNING"):
-                        sa._open_audit_log().close()
-                    # Second write inside the cooldown: warning suppressed,
-                    # write still proceeds.
-                    with self.assertNoLogs(sa.log, level="WARNING"):
-                        sa._open_audit_log().close()
-                # After the cooldown the warning fires again.
-                with mock.patch(
-                        "time.monotonic",
-                        return_value=1000.0 +
-                        sa._LOW_SPACE_WARN_COOLDOWN_S + 1):
-                    with self.assertLogs(sa.log, level="WARNING"):
-                        sa._open_audit_log().close()
+                a = self._addon_with_real_audit()
+                with self.assertLogs(sa.log, level="WARNING") as logs:
+                    self.assertTrue(a._audit("api.github.com", "github"))
+                self.assertTrue(any("low on space" in m
+                                     for m in logs.output))
+                lines = (Path(tmp) / "swap.log").read_text().splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertIn("swapped=github", lines[0])
 
-    def test_audit_log_opens_fresh_handle_per_write(self):
-        """Rotation safety depends on the open/append/close-per-write
-        discipline (no persistent fd): each _open_audit_log call must
-        open the file anew. A future persistent-fd refactor would break
-        logrotate's rename+create — this test pins the discipline."""
+    def test_plenty_space_writes_quietly(self):
+        """Healthy disk: the audit line lands and no warning is logged."""
         with tempfile.TemporaryDirectory() as tmp:
             with self._patched(tmp, 10 * 1024**3):
-                want = Path(tmp) / "swap.log"
-                with mock.patch("os.open", wraps=os.open) as mopen:
-                    sa._open_audit_log().close()
-                    sa._open_audit_log().close()
-                opens = [c for c in mopen.call_args_list
-                         if c.args and Path(c.args[0]) == want]
-                self.assertEqual(len(opens), 2)
+                a = self._addon_with_real_audit()
+                with self.assertNoLogs(sa.log, level="WARNING"):
+                    self.assertTrue(a._audit("api.github.com", "github"))
+                self.assertTrue((Path(tmp) / "swap.log").exists())
+
+    def test_unqueryable_filesystem_proceeds(self):
+        """When the filesystem cannot be queried the guard is unknowable
+        and the write proceeds — the guard is defense in depth; the
+        write itself still fails closed on a real ENOSPC."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "swap.log"
+            with (mock.patch.object(sa, "LOG_FILE", log_file),
+                  mock.patch("os.statvfs", side_effect=OSError(2, "nope"))):
+                a = self._addon_with_real_audit()
+                self.assertIsNone(sa._audit_disk_free_bytes())
+                self.assertTrue(a._audit("api.github.com", "github"))
+                self.assertTrue(log_file.exists())
+
 
 
 
