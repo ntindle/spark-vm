@@ -163,7 +163,7 @@ if sudo test -f /home/swapd/swap.log; then
     sudo python3 proxy/safe_install.py --owner swapd --group swapd \
         --mode 0600 /home/swapd/swap.log
 fi
-echo "[4a/7] Installing swap.log rotation policy (GitHub #198)..."
+echo "[4a.2/7] Installing swap.log rotation policy (GitHub #198)..."
 # The audit trail is bounded by rotation, not by hope: swap.log is
 # append-only, and a full disk fails EVERY swap closed (the audit write
 # is part of authorization) — a total outage of credentialed egress.

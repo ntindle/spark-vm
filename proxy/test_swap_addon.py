@@ -17,11 +17,13 @@ allowed_hosts) directly.
 import base64
 import asyncio
 import errno
+import fnmatch
 import hashlib
 import hmac
 import ipaddress
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -1693,7 +1695,7 @@ class AuditLogDiskGuardTests(unittest.TestCase):
     LOG_WARN_FREE_BYTES, refuse below LOG_MIN_FREE_BYTES); rotation
     itself is the logrotate policy installed by proxy/deploy.sh."""
 
-    def _addon_with_real_audit(self, log_path):
+    def _addon_with_real_audit(self):
         a = make_addon()
         del a._audit  # drop the make_addon stub; exercise the real one
         return a
@@ -1704,9 +1706,10 @@ class AuditLogDiskGuardTests(unittest.TestCase):
             (block, block, blocks * 2, blocks, blocks, 0, 0, 0, 0, 255))
 
     def _patched(self, tmp_path, free_bytes):
-        """Context: LOG_FILE under tmp, guard thresholds pinned, and a
-        fake statvfs reporting free_bytes."""
+        """Context: LOG_FILE under tmp, guard thresholds pinned, a fake
+        statvfs reporting free_bytes, and the warn throttle reset."""
         from contextlib import ExitStack
+        sa._LAST_LOW_SPACE_WARN_AT = 0.0
         log_file = Path(tmp_path) / "swap.log"
         stack = ExitStack()
         stack.enter_context(mock.patch.object(sa, "LOG_FILE", log_file))
@@ -1724,7 +1727,7 @@ class AuditLogDiskGuardTests(unittest.TestCase):
         and nothing is written — no swap without a trail."""
         with tempfile.TemporaryDirectory() as tmp:
             with self._patched(tmp, 0):
-                a = self._addon_with_real_audit(tmp)
+                a = self._addon_with_real_audit()
                 with self.assertRaises(OSError) as cm:
                     sa._open_audit_log()
                 self.assertEqual(cm.exception.errno, errno.ENOSPC)
@@ -1737,7 +1740,7 @@ class AuditLogDiskGuardTests(unittest.TestCase):
         cascade, not only the cascade itself."""
         with tempfile.TemporaryDirectory() as tmp:
             with self._patched(tmp, 100 * 1024 * 1024):
-                a = self._addon_with_real_audit(tmp)
+                a = self._addon_with_real_audit()
                 with self.assertLogs(sa.log, level="WARNING") as logs:
                     self.assertTrue(a._audit("api.github.com", "github"))
                 self.assertTrue(any("low on space" in m
@@ -1750,7 +1753,7 @@ class AuditLogDiskGuardTests(unittest.TestCase):
         """Healthy disk: the audit line lands and no warning is logged."""
         with tempfile.TemporaryDirectory() as tmp:
             with self._patched(tmp, 10 * 1024**3):
-                a = self._addon_with_real_audit(tmp)
+                a = self._addon_with_real_audit()
                 with self.assertNoLogs(sa.log, level="WARNING"):
                     self.assertTrue(a._audit("api.github.com", "github"))
                 self.assertTrue((Path(tmp) / "swap.log").exists())
@@ -1763,7 +1766,7 @@ class AuditLogDiskGuardTests(unittest.TestCase):
             log_file = Path(tmp) / "swap.log"
             with (mock.patch.object(sa, "LOG_FILE", log_file),
                   mock.patch("os.statvfs", side_effect=OSError(2, "nope"))):
-                a = self._addon_with_real_audit(tmp)
+                a = self._addon_with_real_audit()
                 self.assertIsNone(sa._audit_disk_free_bytes())
                 self.assertTrue(a._audit("api.github.com", "github"))
                 self.assertTrue(log_file.exists())
@@ -1771,12 +1774,23 @@ class AuditLogDiskGuardTests(unittest.TestCase):
     def test_logrotate_conf_bounds_the_trail(self):
         """The deployed rotation policy: rename+create (no copytruncate),
         0600 swapd-owned generations, a size trigger, and a generation
-        cap — and deploy.sh actually installs it with rollback coverage."""
-        conf = Path(os.path.dirname(os.path.abspath(__file__))) / \
-            "swap-logrotate.conf"
+        cap — and deploy.sh actually installs it with rollback coverage.
+        The stanza is a glob so SWAP_LOG_FILE overrides are covered too;
+        rotated generations must never re-match the glob."""
+        here = Path(os.path.dirname(os.path.abspath(__file__)))
+        conf = here / "swap-logrotate.conf"
         body = conf.read_text()
-        self.assertIn("/home/swapd/swap.log", body)
-        self.assertIn("/home/swapd/inference-swap.log", body)
+        m = re.search(r"(?m)^(/[^\s{]*\*swap\*[^\s{]*)\s*\{", body)
+        self.assertIsNotNone(m, "expected a *swap*.log glob stanza")
+        glob = m.group(1)
+        for default in ("/home/swapd/swap.log",
+                        "/home/swapd/inference-swap.log"):
+            self.assertTrue(fnmatch.fnmatch(default, glob),
+                            f"glob {glob} should cover {default}")
+        for rotated in ("/home/swapd/swap.log.1",
+                        "/home/swapd/swap.log.1.gz"):
+            self.assertFalse(fnmatch.fnmatch(rotated, glob),
+                             f"glob {glob} must not re-match {rotated}")
         self.assertRegex(body, r"create\s+0600\s+swapd\s+swapd")
         self.assertRegex(body, r"(?m)^\s*size\s+\d+[MG]?\s*$")
         self.assertRegex(body, r"(?m)^\s*rotate\s+\d+\s*$")
@@ -1787,14 +1801,57 @@ class AuditLogDiskGuardTests(unittest.TestCase):
         self.assertNotRegex(body, r"(?m)^\s*copytruncate")
         # Non-vacuous: the policy actually ships — deploy.sh installs it,
         # and it is rollback-restorable via proxy_install_paths.
-        deploy = Path(os.path.dirname(os.path.abspath(__file__))) / \
-            "deploy.sh"
-        deploy_body = deploy.read_text()
+        deploy_body = (here / "deploy.sh").read_text()
         self.assertIn("swap-logrotate.conf", deploy_body)
         self.assertIn("/etc/logrotate.d/swap-proxy", deploy_body)
-        comp = Path(os.path.dirname(os.path.abspath(__file__))).parent / \
-            "deploy" / "components.conf"
+        comp = here.parent / "deploy" / "components.conf"
         self.assertIn("/etc/logrotate.d/swap-proxy", comp.read_text())
+
+    def test_low_space_warning_is_rate_limited(self):
+        """The warn-band warning fires at most once per cooldown: the
+        mitigation must not spam the journal, whose writes consume the
+        very disk being warned about."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._patched(tmp, 100 * 1024 * 1024):
+                with mock.patch("time.monotonic", return_value=1000.0):
+                    with self.assertLogs(sa.log, level="WARNING"):
+                        sa._open_audit_log().close()
+                    # Second write inside the cooldown: warning suppressed,
+                    # write still proceeds.
+                    with self.assertNoLogs(sa.log, level="WARNING"):
+                        sa._open_audit_log().close()
+                # After the cooldown the warning fires again.
+                with mock.patch(
+                        "time.monotonic",
+                        return_value=1000.0 +
+                        sa._LOW_SPACE_WARN_COOLDOWN_S + 1):
+                    with self.assertLogs(sa.log, level="WARNING"):
+                        sa._open_audit_log().close()
+
+    def test_audit_log_opens_fresh_handle_per_write(self):
+        """Rotation safety depends on the open/append/close-per-write
+        discipline (no persistent fd): each _open_audit_log call must
+        open the file anew. A future persistent-fd refactor would break
+        logrotate's rename+create — this test pins the discipline."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._patched(tmp, 10 * 1024**3):
+                want = Path(tmp) / "swap.log"
+                with mock.patch("os.open", wraps=os.open) as mopen:
+                    sa._open_audit_log().close()
+                    sa._open_audit_log().close()
+                opens = [c for c in mopen.call_args_list
+                         if c.args and Path(c.args[0]) == want]
+                self.assertEqual(len(opens), 2)
+
+    def test_guard_thresholds_normalized(self):
+        """Negative env values clamp to 0 (no silent guard disable) and
+        an inverted warn<min pair is repaired by raising the warn band
+        up to the refuse floor — never by lowering refusal."""
+        self.assertEqual(sa._normalize_guard_thresholds(-5, -1), (0, 0))
+        self.assertEqual(sa._normalize_guard_thresholds(10, 100),
+                         (100, 100))
+        self.assertEqual(sa._normalize_guard_thresholds(300, 100),
+                         (300, 100))
 
 
 if __name__ == "__main__":

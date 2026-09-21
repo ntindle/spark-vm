@@ -271,16 +271,25 @@ def _open_audit_log():
     by proxy/deploy.sh (proxy/swap-logrotate.conf), and guarded here —
     below LOG_MIN_FREE_BYTES free the open refuses with ENOSPC (so
     _audit returns False and the swap fails closed), and below
-    LOG_WARN_FREE_BYTES it proceeds but warns loudly so the operator
-    gets a signal before the fail-closed cascade.
+    LOG_WARN_FREE_BYTES it proceeds but warns loudly (rate-limited, so
+    the warn band doesn't spam the journal) so the operator gets a
+    signal before the fail-closed cascade.
     """
+    global _LAST_LOW_SPACE_WARN_AT
     free = _audit_disk_free_bytes()
     if free is not None and free < LOG_WARN_FREE_BYTES:
-        log.warning(
-            "swap: audit-log filesystem low on space (%d bytes free): "
-            "below %d bytes audit writes refuse and swaps fail closed — "
-            "check the logrotate policy installed by proxy/deploy.sh",
-            free, LOG_MIN_FREE_BYTES)
+        # Rate-limited: the warn band can persist for a long time and the
+        # check runs on every audit write; unthrottled, the warning would
+        # spam the journal — whose writes consume the very disk being
+        # warned about.
+        now = time.monotonic()
+        if now - _LAST_LOW_SPACE_WARN_AT >= _LOW_SPACE_WARN_COOLDOWN_S:
+            _LAST_LOW_SPACE_WARN_AT = now
+            log.warning(
+                "swap: audit-log filesystem low on space (%d bytes free): "
+                "below %d bytes audit writes refuse and swaps fail closed — "
+                "check the logrotate policy installed by proxy/deploy.sh",
+                free, LOG_MIN_FREE_BYTES)
     if free is not None and free < LOG_MIN_FREE_BYTES:
         raise OSError(errno.ENOSPC,
                       "audit-log filesystem critically low on space "
@@ -290,20 +299,44 @@ def _open_audit_log():
     return os.fdopen(fd, "a", encoding="utf-8")
 
 
+def _normalize_guard_thresholds(warn, minimum):
+    """Clamp disk-guard thresholds to sane values.
+
+    Negative values can only come from an owner typo in the environment
+    (the jail cannot set the proxy's environment); clamp to 0 rather
+    than silently disabling the guard. The warn band must sit at or
+    above the refuse threshold — an inverted pair is repaired by raising
+    the warn level up to the refuse level, never by lowering refusal.
+    """
+    warn = max(0, warn)
+    minimum = max(0, minimum)
+    if warn < minimum:
+        warn = minimum
+    return warn, minimum
+
+
 # Finding 198: the audit trail is bounded two ways. The logrotate policy
-# installed by proxy/deploy.sh rotates swap.log (and the inference
-# proxy's inference-swap.log) — the trail is preserved, never silently
-# dropped. As defense in depth, the addon guards the log's filesystem
-# before every audit write:
+# installed by proxy/deploy.sh rotates the audit logs — the trail is
+# preserved, never silently dropped. As defense in depth, the addon
+# guards the log's filesystem before every audit write:
 #   * below LOG_MIN_FREE_BYTES the write refuses with ENOSPC, so _audit
 #     returns False and the swap is refused — the no-swap-without-trail
 #     invariant holds even when rotation is not installed or the disk
 #     filled from elsewhere;
 #   * below LOG_WARN_FREE_BYTES the write still proceeds, but a loud
-#     journal warning gives the operator a signal BEFORE the fail-closed
-#     cascade.
-LOG_WARN_FREE_BYTES = _env_int("SWAP_LOG_WARN_FREE_BYTES", 256 * 1024 * 1024)
-LOG_MIN_FREE_BYTES = _env_int("SWAP_LOG_MIN_FREE_BYTES", 16 * 1024 * 1024)
+#     journal warning (rate-limited) gives the operator a signal BEFORE
+#     the fail-closed cascade.
+#
+# Tunables, read once at addon import — a change needs a proxy restart:
+#   SWAP_LOG_WARN_FREE_BYTES (default 256MiB): warn band floor.
+#   SWAP_LOG_MIN_FREE_BYTES  (default 16MiB):  refuse floor (ENOSPC).
+#   SWAP_LOG_WARN_COOLDOWN_S (default 300):   minimum seconds between
+#       low-space warnings, so the warn band doesn't spam the journal.
+LOG_WARN_FREE_BYTES, LOG_MIN_FREE_BYTES = _normalize_guard_thresholds(
+    _env_int("SWAP_LOG_WARN_FREE_BYTES", 256 * 1024 * 1024),
+    _env_int("SWAP_LOG_MIN_FREE_BYTES", 16 * 1024 * 1024))
+_LOW_SPACE_WARN_COOLDOWN_S = _env_int("SWAP_LOG_WARN_COOLDOWN_S", 300)
+_LAST_LOW_SPACE_WARN_AT = 0.0
 
 
 def _audit_disk_free_bytes():
