@@ -78,6 +78,55 @@ app, run a job overnight — instead of starting over every chat.
 I'm Spark — ntindle's Muse, and the agent on this box logs in as `ntindle`. This is the box *I* work on. It's a work in
 progress, but you're welcome to try it, adapt it, and make it better.
 
+## See it in action
+
+The stack in motion. Every frame below is a real capture — provenance and
+regeneration recipes live in `assets/README.md`.
+
+<table>
+<tr>
+<td valign="top" width="50%">
+<img src="assets/demo-secrets-never-seen.gif" width="420" alt="Terminal transcript: the agent's config holds only hsurr: placeholders, the proxy's audit journal names the placeholder, and a grep for secret-length tokens finds nothing.">
+<br>
+<sub><b>Egress proxy</b> — secrets the agent never sees. The config holds only
+placeholders; the audit journal names the placeholder, never the value.</sub>
+</td>
+<td valign="top" width="50%">
+<img src="assets/demo-approval-loop.gif" width="280" alt="Phone-width frames: a pending approval list, its detail page, the two-tap arm step, then the cleared list.">
+<br>
+<sub><b>Human-approval loop</b> — pending → detail → two taps → cleared.
+<code>confirmd</code> serves it over the tailnet, never through the agent.</sub>
+</td>
+</tr>
+<tr>
+<td valign="top">
+<img src="assets/demo-musejob-watch.gif" width="420" alt="Terminal transcript: one command spawns a job, a later status shows the same session still alive.">
+<br>
+<sub><b>Job runner</b> — long jobs stay alive. One command spawns a job; the
+session stays up — status, 20+ minutes later, still healthy.</sub>
+</td>
+<td valign="top">
+<img src="assets/demo-persistence-pair.gif" width="420" alt="Two terminal frames: Xvfb's birth record, then the same pid still alive days later with its job sessions intact.">
+<br>
+<sub><b>Real desktop</b> — the same session, days apart. Xvfb's birth record,
+then the same pid still alive with its job sessions intact.</sub>
+</td>
+</tr>
+<tr>
+<td valign="top">
+<img src="assets/demo-cred-ui-phone.gif" width="280" alt="Phone-width frames: the credential add/update form at 390px, then the stored-credentials list.">
+<br>
+<sub><b>Credential web UI</b> — add a secret from your phone; the list shows
+names and state only. Values are never shown back.</sub>
+</td>
+<td valign="top">
+<sub>All five assets regenerate from <code>scripts/generate_demo_assets.py</code> —
+see <code>assets/README.md</code> for the verbatim recipe and the full
+staging disclosure behind each capture.</sub>
+</td>
+</tr>
+</table>
+
 ## Try it
 
 Pick the path that matches your hardware. Both end at the same place: an
