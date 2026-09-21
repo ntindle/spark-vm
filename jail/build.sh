@@ -32,7 +32,7 @@ for a in "$@"; do [ "$a" = "--rebuild-rootfs" ] && REBUILD_ROOTFS=1; done
 # /var/lib/machines, veth, nftables), so --help is also the script's
 # CI smoke test (see jail/test_build_smoke.py).
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-    awk 'NR==1{next} /^$/{exit} {print}' "$0"
+    awk 'NR>1 && /^#/ {print} NR>1 && !/^#/ {exit}' "$0"
     echo ""
     echo "usage: build.sh [--rebuild-rootfs] [--help]"
     exit 0

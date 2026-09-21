@@ -68,6 +68,18 @@ def test_help_runs_from_another_cwd():
     assert r.returncode == 0, r.stderr
 
 
+# Process substitution (<(...) / >(...)) executes a command exactly like
+# $(...) does, and neither contains "$(" nor a backtick — so the
+# pre-check must name it explicitly (the regexes' .* /\S* slots accept it).
+def _assert_side_effect_free(ln):
+    # Command or process substitution can run arbitrary commands — never
+    # allowed above the --help branch, even inside an assignment.
+    assert "$(" not in ln and "`" not in ln and "<(" not in ln and ">(" not in ln, (
+        f"command/process substitution above the --help branch: {ln!r}")
+    assert any(p.search(ln) for p in _SIDE_EFFECT_FREE), (
+        f"statement above the --help branch may have side effects: {ln!r}")
+
+
 def test_help_branch_precedes_all_side_effects():
     # The --help contract ("exits before any side effect") is enforced
     # structurally: if a future edit inserts a side-effecting statement
@@ -79,12 +91,23 @@ def test_help_branch_precedes_all_side_effects():
         i for i, ln in enumerate(code)
         if re.search(r'\[\s*"\$\{1:-\}"\s*=\s*"--help"\s*\]', ln))
     for ln in code[:idx]:
-        # Command substitution can run arbitrary commands — never allowed
-        # above the --help branch, even inside an assignment.
-        assert "$(" not in ln and "`" not in ln, (
-            f"command substitution above the --help branch: {ln!r}")
-        assert any(p.search(ln) for p in _SIDE_EFFECT_FREE), (
-            f"statement above the --help branch may have side effects: {ln!r}")
+        _assert_side_effect_free(ln)
+
+
+@pytest.mark.parametrize("mutant", [
+    # Process substitution executes a command without "$(" or a backtick;
+    # each of these ran real commands in bash AND passed the old gate.
+    "for a in <(touch /tmp/pw4); do X=1; done",
+    "for a in x <(touch /tmp/pw5); do X=1; done",
+    "for a in >(touch /tmp/pw6); do X=1; done",
+    "[ -n x ] && Y=<(touch /tmp/pw8)",
+    "for a in x; do X=<(touch /tmp/pw9); done",
+])
+def test_help_tripwire_rejects_process_substitution(mutant):
+    # Regression: the per-line gate must reject process substitution the
+    # same way it rejects command substitution.
+    with pytest.raises(AssertionError, match="substitution"):
+        _assert_side_effect_free(mutant)
 
 
 def test_shell_syntax():
