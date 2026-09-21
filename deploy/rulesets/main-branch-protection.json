@@ -1,0 +1,51 @@
+{
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "refs/heads/main"
+      ]
+    }
+  },
+  "enforcement": "active",
+  "name": "main-branch-protection",
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "parameters": {
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_approving_review_count": 0,
+        "required_review_thread_resolution": false
+      },
+      "type": "pull_request"
+    },
+    {
+      "parameters": {
+        "required_status_checks": [
+          {
+            "context": "python tests"
+          },
+          {
+            "context": "shellcheck"
+          },
+          {
+            "context": "markdown link check"
+          },
+          {
+            "context": "PNG screenshot smoke test"
+          }
+        ],
+        "strict_required_status_checks_policy": true
+      },
+      "type": "required_status_checks"
+    }
+  ],
+  "target": "branch"
+}

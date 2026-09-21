@@ -36,6 +36,18 @@ This changelog only works if entries land with the change, not after it:
 
 ## [Unreleased]
 
+### Added
+- Release and branch protection declared as code (`deploy/rulesets/`): a
+  `v*` tag ruleset that makes the release notes' "tags are never moved or
+  re-cut" claim platform-enforced (blocks tag update/deletion, with a
+  stricter variant that also restricts tag creation to the release
+  workflow), plus a `main` branch ruleset (no deletion, no force-pushes,
+  PR-required, all CI checks green on an up-to-date branch before merge —
+  deliberately no human-approval gate so the improvement loop can keep
+  self-merging). An auditable `scripts/apply-rulesets.sh` (dry-run default,
+  `--check` drift compare, `--execute --yes` idempotent apply) applies them;
+  applying is an owner decision (#174)
+
 ## [0.2.0] - 2026-09-20
 
 ### Added

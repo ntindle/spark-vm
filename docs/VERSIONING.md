@@ -94,7 +94,8 @@ than its own checkout. `muse-job --version` reads the repo file.
    prereleases (`-rc.1`) are marked prerelease on GitHub. Merging to main
    is the release authorization — treat VERSION bumps like releases in
    review, and consider a GitHub tag-protection ruleset for `v*` so only
-   the workflow can create release tags. Note: if two VERSION bumps land
+   the workflow can create release tags (declared in `deploy/rulesets/` —
+   see its README; applying them is an owner decision, issue #174). Note: if two VERSION bumps land
    in quick succession, the superseded run fails its in-sync preflight by
    design (when the older run is still queued). A run already past its
    fetch when the newer push lands completes and publishes first; the

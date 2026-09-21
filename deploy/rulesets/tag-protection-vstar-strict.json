@@ -1,0 +1,38 @@
+{
+  "bypass_actors": [
+    {
+      "actor_id": 41898282,
+      "actor_type": "Integration",
+      "bypass_mode": "always"
+    }
+  ],
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "refs/tags/v*"
+      ]
+    }
+  },
+  "enforcement": "active",
+  "name": "release-tag-protection",
+  "rules": [
+    {
+      "type": "creation"
+    },
+    {
+      "type": "update"
+    },
+    {
+      "type": "deletion"
+    },
+    {
+      "parameters": {
+        "operator": "starts_with",
+        "pattern": "v*"
+      },
+      "type": "tag_name_pattern"
+    }
+  ],
+  "target": "tag"
+}
