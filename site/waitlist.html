@@ -59,9 +59,15 @@ a{color:var(--accent)}
 
   <!-- The form endpoint (POST /waitlist/form) is spec'd in
        docs/HOSTED_SIGNUP_WEB_UI.md §4.2 and docs/WAITLIST_OPERATIONS.md §2
-       but not built yet — this markup slice never deploys until the
+       and built in site/waitlistd.py — the markup deploys only when the
        §10 checklist is green (the dead-form rule, site/README.md). -->
-  <form action="/waitlist/form" method="post">
+  <!-- DEPLOY: the form posts to the waitlistd control-plane origin —
+       substitute <control-plane-origin> with WAITLIST_PUBLIC_HOST's value
+       (the public origin serving POST /waitlist/form, e.g.
+       https://waitlist.example.com). A relative action would post to the
+       static Pages host, which has no serving layer — the dead-form rule
+       (site/README.md) forbids typesetting atop it. -->
+  <form action="https://<control-plane-origin>/waitlist/form" method="post">
     <label for="owner_email">Your email</label>
     <input type="email" id="owner_email" name="owner_email" required
            autocomplete="email" inputmode="email"

@@ -111,10 +111,48 @@ def test_selfhost_cta_exactly_twice():
     assert len(hits) == 2, f"self-host CTA found {len(hits)}x, want exactly 2"
 
 
+SELFHOST_TARGET = "https://github.com/ntindle/spark-vm#try-it"
+
+
+def test_go_selfhost_shim():
+    """The static /go/selfhost redirect shim (site/go/selfhost/index.html).
+
+    Pages has no serving layer, so the shim is a meta refresh to the
+    public repo's self-host section — the same target the waitlistd
+    control plane serves dynamically at GET /go/selfhost (with the
+    cta_click funnel event). No page JS anywhere: per
+    docs/FUNNEL_MEASUREMENT.md §2 the analytics are server-side, so the
+    shim must not beacon. The target is not a deploy-time placeholder —
+    it never changes per-deploy.
+    """
+    text, c = parse("go/selfhost/index.html")
+    assert c.scripts == 0, "shim must carry no JS"
+    refreshes = [m for m in c.metas if m.get("http-equiv") == "refresh"]
+    assert len(refreshes) == 1, "shim needs exactly one meta refresh"
+    assert refreshes[0]["content"] == f"0; url={SELFHOST_TARGET}"
+    # <link> tags aren't collected as metas — check the raw markup.
+    assert '<link rel="canonical"' in text
+    assert f'href="{SELFHOST_TARGET}"' in text, "canonical link must match"
+    assert text.count(SELFHOST_TARGET) >= 3, \
+        "refresh, canonical, and fallback anchor must all point at the target"
+    assert "noindex" in text, "shim must not be indexed"
+
+
+
 def test_waitlist_form_markup():
-    """Form markup per docs/HOSTED_SIGNUP_WEB_UI.md §4.2."""
+    """Form markup per docs/HOSTED_SIGNUP_WEB_UI.md §4.2.
+
+    The form posts to the waitlistd control-plane origin — a relative
+    action would post to the static Pages host, which has no serving
+    layer (the dead-form rule, site/README.md). The origin is the
+    deploy-time <control-plane-origin> placeholder (site/README.md
+    "Deploy-time substitutions"); the operator substitutes
+    WAITLIST_PUBLIC_HOST's value at launch.
+    """
     text, c = parse("waitlist.html")
-    assert 'action="/waitlist/form"' in text
+    assert 'action="https://<control-plane-origin>/waitlist/form"' in text, \
+        "form must post to the control-plane origin placeholder"
+    assert "<control-plane-origin>" in text  # placeholder, never a real host
     assert 'method="post"' in text
     owner = next(i for i in c.inputs if i.get("name") == "owner_email")
     assert "required" in owner, "owner email must be required"

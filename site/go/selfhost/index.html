@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Self-host spark-vm</title>
+<!-- Static redirect shim for the marketing page's /go/selfhost CTA
+     (site/index.html, docs/FUNNEL_MEASUREMENT.md §3.2's `selfhost` CTA
+     source). Pages has no serving layer, so this is a meta refresh;
+     the control-plane waitlistd serves the same path dynamically with
+     a 302 + cta_click funnel event. No click tracking exists on this
+     static page — per docs/FUNNEL_MEASUREMENT.md §2 the analytics are
+     server-side, so there is deliberately no page JS and no beacon.
+     DEPLOY: none — the target is the public repo README's self-host
+     section and never changes per-deploy. -->
+<meta http-equiv="refresh" content="0; url=https://github.com/ntindle/spark-vm#try-it">
+<link rel="canonical" href="https://github.com/ntindle/spark-vm#try-it">
+<meta name="robots" content="noindex, nofollow">
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:40rem;margin:0 auto;padding:2rem 1.25rem;color:#1a1a1a;line-height:1.6}</style>
+</head>
+<body>
+<p>Redirecting to the spark-vm self-host guide…</p>
+<p><a href="https://github.com/ntindle/spark-vm#try-it">Click here if you aren't redirected.</a></p>
+</body>
+</html>

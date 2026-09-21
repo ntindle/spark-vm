@@ -680,3 +680,235 @@ def test_cli_config_fail_closed(tmp_path):
         capture_output=True, text=True, env=env, timeout=15)
     assert proc.returncode == 2
     assert "WAITLIST_HMAC_KEY" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Forget-me handler + self-host shim (slice 3c)
+# ---------------------------------------------------------------------------
+
+
+def extract_forget_token(body):
+    m = re.search(r"waitlist/forget\?token=([A-Za-z0-9_.\-]+)", body)
+    assert m, "email body has no forget link"
+    return m.group(1)
+
+
+class MutableClock:
+    def __init__(self, start):
+        self.t = start
+
+    def __call__(self):
+        return self.t
+
+
+def _submit(svc, email):
+    status, _ = svc.submit_form(form_fields(email), "127.0.0.1")
+    assert status == 200
+    entry_id = svc.by_email[svc.rows and
+                            wd.normalize_email(email)]
+    return svc.rows[entry_id]
+
+
+def test_confirm_and_reminder_emails_carry_forget_footer():
+    clock = MutableClock(NOW)
+    svc, tmp = make_service(clock=clock)
+    row = _submit(svc, "forget1@example.com")
+    docs = spool_docs_newest_first(tmp)
+    assert docs, "expected a spooled confirm email"
+    body = docs[0]["body"]
+    forget_token = extract_forget_token(body)
+    # The forget link validates at the forget endpoint — not the confirm one.
+    status, html = svc.forget_get(forget_token)
+    assert status == 200 and "Delete your waitlist entry" in html
+    _, status = svc._lookup_token_row(forget_token)  # confirm-kind lookup
+    assert status == "invalid"
+
+    # The +7d reminder carries a forget footer too (submit at NOW, the
+    # reminder fires at drop_at - 7d = submitted_at + 7d).
+    clock.t = NOW + timedelta(seconds=wd.REMINDER_LEAD_SECONDS + 3600)
+    assert svc.send_reminders() == 1
+    reminders = [d for d in spool_docs_newest_first(tmp)
+                 if d.get("kind") == "reminder"]
+    assert reminders, "expected a spooled reminder"
+    extract_forget_token(reminders[0]["body"])
+
+
+def test_forget_token_domain_separation():
+    svc, tmp = make_service()
+    row = _submit(svc, "forget3@example.com")
+    confirm_token = row["active_token"]
+    forget_token = svc.mint_forget_token(row["entry_id"],
+                                         row["owner_email"])
+    # Confirm tokens fail at the forget endpoint; forget tokens fail at
+    # the confirm endpoint. Wrong-kind tokens are "invalid", never a row.
+    _, status = svc._lookup_token_row(confirm_token, kind="forget")
+    assert status == "invalid"
+    _, status = svc._lookup_token_row(forget_token, kind="confirm")
+    assert status == "invalid"
+    row2, status = svc._lookup_token_row(forget_token, kind="forget")
+    assert status == "ok" and row2["entry_id"] == row["entry_id"]
+
+
+def test_forget_get_renders_only():
+    svc, tmp = make_service()
+    row = _submit(svc, "forget4@example.com")
+    docs = spool_docs_newest_first(tmp)
+    forget_token = extract_forget_token(docs[0]["body"])
+    events_before = read_events(tmp)
+    status, html = svc.forget_get(forget_token)
+    assert status == 200
+    assert "Delete your waitlist entry" in html
+    assert "Yes, delete my entry." in html
+    # No state changed: no row writes, no consumption, no events.
+    assert forget_token not in svc.consumed
+    assert read_events(tmp) == events_before
+    assert svc.by_email.get(row["owner_email"]) == row["entry_id"]
+
+
+def test_forget_get_states():
+    svc, tmp = make_service()
+    # Invalid token: expired-page shape, never an error dump.
+    status, html = svc.forget_get("forget.nope.0.bad")
+    assert status == 200 and "last 7 days" in html
+    # Consumed token: the already-deleted page.
+    row = _submit(svc, "forget5@example.com")
+    docs = spool_docs_newest_first(tmp)
+    forget_token = extract_forget_token(docs[0]["body"])
+    status, html = svc.forget_post(forget_token)
+    assert status == 200 and "has been deleted" in html
+    status, html = svc.forget_get(forget_token)
+    assert status == 200 and "already deleted" in html
+    # And the consumed token stays single-use on POST too.
+    status, html = svc.forget_post(forget_token)
+    assert status == 200 and "already deleted" in html
+
+
+def test_forget_post_deletes_row_and_spools_confirmation():
+    svc, tmp = make_service()
+    row = _submit(svc, "forget6@example.com")
+    entry_id = row["entry_id"]
+    confirm_token = row["active_token"]
+    docs = spool_docs_newest_first(tmp)
+    forget_token = extract_forget_token(docs[0]["body"])
+    status, html = svc.forget_post(forget_token)
+    assert status == 200
+    assert "Your waitlist entry is gone" in html
+    # The row is gone — in memory and after a reload.
+    assert entry_id not in svc.rows
+    assert row["owner_email"] not in svc.by_email
+    svc.reload()
+    assert entry_id not in svc.rows
+    # Both tokens are dead.
+    _, status = svc._lookup_token_row(confirm_token)
+    assert status == "invalid"
+    # `forgot` event emitted; deletion confirmation spooled.
+    events = read_events(tmp)
+    assert [e for e in events
+            if e["event"] == "forgot" and e["ref"] == entry_id]
+    deleted = [d for d in spool_docs_newest_first(tmp)
+               if d.get("kind") == "deleted"]
+    assert deleted, "expected a spooled deletion confirmation"
+    assert deleted[0]["to"] == "forget6@example.com"
+    assert deleted[0]["subject"] == wd.FORGET_SUBJECT
+
+
+def test_forget_post_on_confirmed_row():
+    svc, tmp = make_service()
+    row = _submit(svc, "forget7@example.com")
+    token = row["active_token"]
+    status, _ = svc.confirm_post(token)
+    assert status == 200
+    assert svc.rows[row["entry_id"]]["status"] == "confirmed"
+    docs = spool_docs_newest_first(tmp)
+    forget_token = extract_forget_token(docs[0]["body"])
+    status, html = svc.forget_post(forget_token)
+    assert status == 200 and "gone" in html
+    assert row["entry_id"] not in svc.rows
+    events = read_events(tmp)
+    assert [e for e in events if e["event"] == "forgot"]
+
+
+def test_forget_token_expires_in_7d():
+    clock = MutableClock(NOW)
+    svc, tmp = make_service(clock=clock)
+    row = _submit(svc, "forget8@example.com")
+    forget_token = svc.mint_forget_token(row["entry_id"],
+                                         row["owner_email"])
+    clock.t = NOW + timedelta(seconds=wd.FORGET_TTL_SECONDS + 1)
+    row2, status = svc._lookup_token_row(forget_token, kind="forget")
+    assert status == "expired"
+    # The confirm token for the same row still has a week left.
+    row3, status = svc._lookup_token_row(row["active_token"])
+    assert status == "ok"
+
+
+def test_cta_selfhost_emits_and_returns_url():
+    svc, tmp = make_service()
+    url = svc.cta_selfhost("selfhost")
+    assert url == wd.SELFHOST_URL
+    events = read_events(tmp)
+    assert [e for e in events if e["event"] == "cta_click"
+            and e["attrs"].get("src") == "selfhost"]
+    # Unknown src: still logged, no src attr (funnel_metrics flags it).
+    url = svc.cta_selfhost("evil\"><script")
+    assert url == wd.SELFHOST_URL
+    events = read_events(tmp)
+    assert [e for e in events if e["event"] == "cta_click"
+            and "src" not in e["attrs"]]
+
+
+def test_forgot_event_parses_in_funnel_metrics():
+    # scripts/funnel_metrics.py raises ValueError on unknown events — the
+    # `forgot` addition must keep the emitted trail parseable.
+    svc, tmp = make_service()
+    row = _submit(svc, "forget9@example.com")
+    docs = spool_docs_newest_first(tmp)
+    svc.forget_post(extract_forget_token(docs[0]["body"]))
+    fm = load_funnel_metrics()
+    rows = fm.load_events(os.path.join(tmp, "funnel_events.jsonl"))
+    assert {r["event"] for r in rows} >= {
+        "waitlist_submitted", "confirm_sent", "forgot"}
+
+
+def load_funnel_metrics():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "funnel_metrics", os.path.join(SCRIPTS, "funnel_metrics.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_http_forget_round_trip(live_server):
+    port, tmp = live_server
+    status, _ = _post(port, "/waitlist/form", {
+        "owner_email": "live-forget@example.com", "muse_email": "",
+        "website": "", "rendered_at": str(time.time() - 10)})
+    assert status == 200
+    _, doc = extract_token_from_spool(tmp)
+    forget_token = extract_forget_token(doc["body"])
+    # GET renders the delete page; the token is in a form field.
+    status, body = _get(port, "/waitlist/forget?token=" +
+                        urllib.parse.quote(forget_token))
+    assert status == 200 and "Yes, delete my entry." in body
+    # Query-string token must not delete on POST.
+    status, body = _post(port, "/waitlist/forget?token=" +
+                         urllib.parse.quote(forget_token), {})
+    assert status == 200 and "last 7 days" in body
+    # Token as a FORM FIELD deletes.
+    status, body = _post(port, "/waitlist/forget",
+                         {"token": forget_token})
+    assert status == 200 and "Your waitlist entry is gone" in body
+
+
+def test_http_selfhost_redirect(live_server):
+    port, tmp = live_server
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/go/selfhost?src=selfhost")
+    resp = conn.getresponse()
+    assert resp.status == 302
+    assert resp.getheader("Location") == wd.SELFHOST_URL
+    resp.read()
+    events = read_events(tmp)
+    assert [e for e in events if e["event"] == "cta_click"
+            and e["attrs"].get("src") == "selfhost"]
