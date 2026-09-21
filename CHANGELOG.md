@@ -136,6 +136,12 @@ This changelog only works if entries land with the change, not after it:
   entries (tunable), instead of growing one file per approval forever while
   every poll re-read all of them; the per-approval lock entries are likewise
   released when an approval is answered or expires (#196).
+- README follow-up polish: "What's in the box" now names the inference
+  proxy alongside the egress proxy (the agent's own model API calls
+  authenticate with a placeholder too), the layout table's `deploy` row
+  drops a redundant word, `harness` links the pre-seeded-harness research
+  doc instead of assuming its jargon, and `site` drops the time-stamped
+  "Waitlist-era" label. (PRNUM)
 
 ### Security
 - The egress proxy no longer swaps a credential anywhere when its registry

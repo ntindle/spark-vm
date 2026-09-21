@@ -62,6 +62,9 @@ my Unraid server), then add:
 
 - an **egress proxy** that swaps `hsurr:<name>` placeholders for real
   secrets, so the agent never sees your credentials,
+- an **inference proxy** so the agent's own model API calls authenticate
+  with a placeholder too — the real provider key is swapped in on egress,
+  never seen by the agent,
 - a **human-approval loop** (`confirmd`) so sensitive actions wait for
   your two taps — served over the tailnet, never through the agent,
 - a **job runner** (`muse-job`) so it can run long tasks with lifecycle
@@ -265,9 +268,9 @@ put it to work.
 | `browser-driver/` | Browser-driving pieces |
 | `confirm/` | Human-confirmation flow for sensitive agent actions |
 | `jail/` | Sandboxing bits |
-| `deploy/` | Release automation: unattended redeploy updater + branch/tag protection rulesets-as-code |
-| `harness/` | Pre-seeded harness contract: golden-image manifest + harness auth probe |
-| `site/` | Waitlist-era web surface: landing page + waitlist signup backend |
+| `deploy/` | Release automation: unattended redeploys + branch/tag protection rulesets-as-code |
+| `harness/` | Pre-seeded harness contract: golden-image manifest + harness auth probe ([research](docs/PRE_SEEDED_HARNESS_RESEARCH.md)) |
+| `site/` | Waitlist web surface: landing page + waitlist signup backend |
 | `assets/` | Demo assets + hero art (marketing visuals, regenerated in place) |
 | `VERSION` / `CHANGELOG.md` / `CONTRIBUTING.md` | Versioning, the changelog ritual, and the contributor process |
 | `scripts/` | Assorted helpers |
