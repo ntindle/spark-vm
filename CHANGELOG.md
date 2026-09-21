@@ -96,7 +96,7 @@ This changelog only works if entries land with the change, not after it:
   Microsandbox still at v0.7.1, Docker Sandboxes still at 0.43.0, Daytona
   changelog still topped at v0.214.0 (Sep 15), TermSquad tiers
   re-verified unchanged; WSO2 reception broadens slightly ahead of the
-  Sep 29 webinar. No corpus changes. (PR TBD)
+  Sep 29 webinar. No corpus changes. (#209)
 - Secrets posture page (#189): frames the placeholder-swap design as
   independently re-derived — the pattern is convergent across the industry —
   and compares swapd mechanism-by-mechanism against E2B, Daytona, Vercel,
