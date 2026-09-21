@@ -44,7 +44,7 @@ This changelog only works if entries land with the change, not after it:
   end for the agent — refusals carry no approval id, answers deliver no
   decision, and expiry is a silent third outcome — and files two new issues
   (expiry's silent terminal outcome; answered-feed per-poll parse cost).
-  (PR TBD)
+  (#215)
 - Release-protection drift guard: the declared `main` branch ruleset's
   required CI checks are now verified bidirectionally against
   `.github/workflows/ci.yml` — renaming, adding, or removing a CI job fails
