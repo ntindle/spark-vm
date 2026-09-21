@@ -37,7 +37,7 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
-- Secrets posture page (#PRNUM): frames the placeholder-swap design as
+- Secrets posture page (#189): frames the placeholder-swap design as
   independently re-derived — the pattern is convergent across the industry —
   and compares swapd mechanism-by-mechanism against E2B, Daytona, Vercel,
   Cloudflare, and Microsandbox from their own docs (vendor links inline).
