@@ -221,10 +221,14 @@ class NetworkAttestation:
     no-public-ingress invariant — it cannot verify what it cannot see)."""
 
     public_ingress_observed: bool
+    # Must be empty whenever public_ingress_observed is False: there is no
+    # such thing as an observed ingress endpoint that is "fine" — any
+    # reported endpoint with the flag False is a driver inconsistency and
+    # fails closed (QA B5).
     observed_ingress: tuple[str, ...] = ()
 
     def assert_isolated(self) -> None:
-        if self.public_ingress_observed:
+        if self.public_ingress_observed or self.observed_ingress:
             raise ProviderError(
                 ErrorKind.ATTESTATION_FAILED,
                 f"driver attests public ingress {self.observed_ingress!r}: "
@@ -262,6 +266,8 @@ class ErrorKind(str, enum.Enum):
     PROVISION_FAILED = "provision-failed"
     ATTESTATION_FAILED = "attestation-failed"
     INVALID_TRANSITION = "invalid-transition"
+    INVALID_ARGUMENT = "invalid-argument"  # caller bug: non-positive
+                                           # timeout, malformed verb arg
 
 
 class ProviderError(Exception):
@@ -386,7 +392,8 @@ class ProviderDriver(typing.Protocol):
         (memory snapshot where supported, cold stop where not) and always
         surfaces as SUSPENDED per the mapping rule. Raises
         UNSUPPORTED where the provider has no suspend story (never a
-        silent no-op) and NOT_RUNNABLE off RUNNING."""
+        silent no-op) and NOT_RUNNABLE off RUNNING. timeout_s must be
+        positive; non-positive values raise INVALID_ARGUMENT (caller bug)."""
         ...
 
     def dial(self, vm_id: str, timeout_s: float = 300.0) -> typing.BinaryIO:
@@ -397,7 +404,8 @@ class ProviderDriver(typing.Protocol):
         dials collapse to one wake (first-writer-wins). Raises
         WAKE_TIMEOUT while the wake is still in flight (poll and retry),
         WAKE_FAILED when the attempt ended (box back in SUSPENDED),
-        TERMINAL on destroyed / declined-retry failed."""
+        TERMINAL on destroyed / declined-retry failed. timeout_s must be
+        positive; non-positive values raise INVALID_ARGUMENT (caller bug)."""
         ...
 
     def ssh_info(self, vm_id: str) -> SshInfo:

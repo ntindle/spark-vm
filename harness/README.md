@@ -54,7 +54,7 @@ Implements the executable half of the R2 pre-seeded-harness contract
   and answers 200. Same record format as the hermetic echo server in
   `test_probe.py`.
 - **`provider_iface.py`** — the H4 provider-agnostic driver contract: the
-  five verbs (`provision` / `status` / `suspend` / `dial` / `ssh_info` /
+  six verbs (`provision` / `status` / `suspend` / `dial` / `ssh_info` /
   `destroy`, `snapshot` reserved), the validated lifecycle state machine
   (`provisioning | running | suspending | suspended | waking | stopping |
   stopped | failed | destroyed`, `degraded` as an orthogonal health flag),
@@ -63,7 +63,7 @@ Implements the executable half of the R2 pre-seeded-harness contract
   `retention` descriptor, the per-tenant `auto_resume` gate, and the
   fail-closed `public_ingress: false` spec invariant with a
   driver-attested network-isolation check. Covered by
-  `test_provider_iface.py` (27 contract tests incl. a fake in-memory
+  `test_provider_iface.py` (38 contract tests incl. a fake in-memory
   driver exercising the full lifecycle).
 
 ## Fixture lifecycle
