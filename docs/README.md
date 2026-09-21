@@ -69,6 +69,7 @@ as historical.
 
 | Doc | What it is |
 | --- | ---------- |
+| [LIFECYCLE_PARITY_AUDIT_2026-09-20.md](LIFECYCLE_PARITY_AUDIT_2026-09-20.md) | C16 audit: #47's control-plane lifecycle scope vs the live-control scorecard — pause/resume acceptance gap, stream ownership, idle policy model, stopped-state/file-browsing scope; files #177–#180. |
 | [COMPETITOR_LIVE_CONTROL_DEEP_SCAN_2026-09-20.md](COMPETITOR_LIVE_CONTROL_DEEP_SCAN_2026-09-20.md) | **(start here)** Six-provider deep-scan of live machine control vs #47 (AgentComputer, TermSquad, Fly.io Sprites, E2B, Daytona, Docker Sandboxes). |
 | [COMPETITOR_WATCH_2026-09-20.md](COMPETITOR_WATCH_2026-09-20.md) | Latest morning competitor watch. |
 | [COMPETITOR_WATCH_2026-09-19_EVENING.md](COMPETITOR_WATCH_2026-09-19_EVENING.md) | Competitor watch, 2026-09-19 evening. |

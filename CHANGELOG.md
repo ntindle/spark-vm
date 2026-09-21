@@ -37,6 +37,14 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Lifecycle parity audit for the #47 live-machine-control ticket: #47's
+  promised-vs-accepted lifecycle surface checked against the six-provider
+  live-control scorecard. Found pause/resume promised in the ticket but
+  missing from its acceptance criteria, undefined stream-ownership
+  semantics for the live desktop, no idle lifecycle policy model, and an
+  undecided stopped-state/file-browsing scope — filed as #177, #178, #179,
+  and #180. Also closes the deep-scan's unscored file-browsing and restart
+  columns.
 - Release and branch protection declared as code (`deploy/rulesets/`): a
   `v*` tag ruleset that makes the release notes' "tags are never moved or
   re-cut" claim platform-enforced (blocks tag update/deletion, with a
