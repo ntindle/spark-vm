@@ -93,12 +93,20 @@ Doc: https://vercel.com/docs/sandbox/sdk-reference (NetworkPolicy class).
   `subnets.allow` and domain-based `allow` entries." The competitor doc's
   phrasing ("Denied ranges take precedence over allowed domains and address
   ranges") is the same substance in non-verbatim words — use Vercel's quote.
-- **Plan availability: UNVERIFIED.** The docs gate transforms on "Permissions
-  Required" but never name a plan; the pricing page lists sandbox quotas per
-  plan and says nothing about credential-brokering availability. The
-  "every plan" claim in the competitor doc's axis table was THIRD-PARTY
-  (community/security research) — it must not be cited as vendor fact. This
-  doc downgrades it.
+- **Plan availability: VENDOR-VERIFIED (re-verified 2026-09-21).** The
+  Vercel KB guide [Vercel Sandbox vs E2B](https://vercel.com/kb/guide/vercel-sandbox-vs-e2b)
+  (published 2026-03-20, updated 2026-09-04) states verbatim:
+  "Credential brokering transformation rules are available on all plans,
+  including Hobby." (The SDK-reference page gates transforms on
+  "Permissions Required" without naming a plan; the KB guide is the
+  authoritative plan statement. This supersedes the 2026-09-19 UNVERIFIED
+  reading of the SDK reference page alone.)
+- **Default internet access: VENDOR-VERIFIED** (recorded for the swapd-vs-
+  `allowOut` comparison): "Every sandbox has outbound access to the internet
+  by default. ... By default, internet access is enabled, but you can disable
+  it for security-sensitive workloads." Default is allow-all, not deny-all —
+  so the transform/egress split is between "default-open egress" and
+  "transforms that grant no egress".
 
 ### Cloudflare — VENDOR-VERIFIED
 
@@ -198,12 +206,10 @@ The honest, sourced edges swapd can claim — each one vendor-quoted above:
    "a policy ported without rewriting doesn't mean the same thing" is a
    docs-worthy operational lesson for anyone self-hosting.
 
-Things R6 must **not** claim: "credential brokering on every Vercel plan"
-(downgraded to THIRD-PARTY — plan availability is UNVERIFIED in vendor docs);
-Vercel's "secrets never enter the sandbox" in vendor's voice (implied, not
-stated); any first-mover claim (Daytona proves a major incumbent shipped the
-full pattern; Microsandbox independently derived the placeholder variant in
-the open).
+Things R6 must **not** claim: Vercel's "secrets never enter the sandbox" in
+vendor's voice (implied, not stated); any first-mover claim (Daytona proves a
+major incumbent shipped the full pattern; Microsandbox independently derived
+the placeholder variant in the open).
 
 ## Open verification (residual)
 

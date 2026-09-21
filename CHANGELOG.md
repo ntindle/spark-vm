@@ -37,6 +37,14 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Secrets posture page (#189): frames the placeholder-swap design as
+  independently re-derived — the pattern is convergent across the industry —
+  and compares swapd mechanism-by-mechanism against E2B, Daytona, Vercel,
+  Cloudflare, and Microsandbox from their own docs (vendor links inline).
+  States swapd's honest edges (request-body injection scope, response
+  scrubbing, per-decision audit-as-authorization) and its conceded gaps
+  (Microsandbox's DNS-pinned destination gate, E2B's per-request token
+  minting), plus the concrete `allowOut`-vs-swapd egress-grant difference.
 - First test suites for the two remaining untested components (O4): `cua/`
   gets hermetic tests for the `cua-bridge.py` localhost bridge — launch
   allowlist enforcement, the CSRF/host gate, window picking, and the
