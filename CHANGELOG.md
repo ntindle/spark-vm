@@ -37,6 +37,10 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Waitlist 30-day post-drop purge: `waitlist_jobs.py --purge` permanently
+  deletes dropped waitlist rows 30 days after the drop (the §5 retention
+  rule), via an atomic `rows.jsonl` rewrite under the same data lock as
+  the reminder/drop jobs — the funnel events stay as the audit trail.
 - H4 provider interface contract: the provider-agnostic driver every
   sandbox backend implements, reconciling the H3 signup design, the
   suspend/wake and Fly/GPU provider research, and the #47 lifecycle

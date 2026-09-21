@@ -374,7 +374,9 @@ criterion:
   writes validated rows only.
 - [ ] **Confirm sender + token signer**: HMAC, single-use, 14d expiry;
   idempotent re-click ("you're already confirmed"); rate-limited
-  (all reply types counted); reminder job at +7d; drop job at +14d.
+  (all reply types counted); reminder job at +7d; drop job at +14d;
+  purge job 30d after drop (atomic rewrite; `purged` funnel events keep
+  the counts after the PII is deleted).
   HTTP method shape per the §4 note (open PR #99 supersedes the GET
   language: GET renders the confirm page, POST confirms).
 - [ ] **Abuse controls** (§6) live on both paths; no unauthenticated
