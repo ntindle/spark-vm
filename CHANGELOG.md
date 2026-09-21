@@ -37,6 +37,14 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Approvals-plane gap analysis: a new doc walks the full path from a gated
+  action to a human answer and back (refusal → filing → pending → human
+  answer UX → push summons → terminal decision delivery → audit trail),
+  against the code as it stands today. Headline finding: the plane is a dead
+  end for the agent — refusals carry no approval id, answers deliver no
+  decision, and expiry is a silent third outcome — and files two new issues
+  (expiry's silent terminal outcome; answered-feed per-poll parse cost).
+  (#215)
 - Release-protection drift guard: the declared `main` branch ruleset's
   required CI checks are now verified bidirectionally against
   `.github/workflows/ci.yml` — renaming, adding, or removing a CI job fails
