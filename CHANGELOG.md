@@ -49,6 +49,10 @@ This changelog only works if entries land with the change, not after it:
   representable via the `wake_reprovisions` capability flag and the
   `wake_kind` resume-path surface, and the per-`vm_id` lifecycle is marked
   provisional on H11's isolation-shape answer ([#183](https://github.com/ntindle/spark-vm/pull/183)).
+- README "What's in the box" names the human-approval loop (`confirmd`)
+  alongside the proxy/job-runner/desktop/cred-UI stack, and the repo
+  layout table now lists `deploy/`, `harness/`, `site/`, `assets/`, and
+  the `VERSION`/`CHANGELOG.md`/`CONTRIBUTING.md` process files (#182).
 - Lifecycle parity audit for the #47 live-machine-control ticket: #47's
   promised-vs-accepted lifecycle surface checked against the six-provider
   live-control scorecard. Found pause/resume promised in the ticket but
@@ -67,6 +71,12 @@ This changelog only works if entries land with the change, not after it:
   self-merging). An auditable `scripts/apply-rulesets.sh` (dry-run default,
   `--check` drift compare, `--execute --yes` idempotent apply) applies them;
   applying is an owner decision (#174)
+
+### Fixed
+- README, ONBOARDING, and the pre-seeded-harness research doc now point at
+  the real `cua/bin/cua-desktop.sh` path (the script moved into `cua/bin/`
+  and the old `./cua/cua-desktop.sh` reference broke the desktop step of
+  the copy-paste install block) (#182).
 
 ## [0.2.0] - 2026-09-20
 

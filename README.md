@@ -62,6 +62,8 @@ my Unraid server), then add:
 
 - an **egress proxy** that swaps `hsurr:<name>` placeholders for real
   secrets, so the agent never sees your credentials,
+- a **human-approval loop** (`confirmd`) so sensitive actions wait for
+  your two taps — served over the tailnet, never through the agent,
 - a **job runner** (`muse-job`) so it can run long tasks with lifecycle
   hooks instead of you babysitting a terminal,
 - a **real desktop** it can drive with the official CUA driver —
@@ -127,7 +129,7 @@ muse plugins install ./muse-job/plugin   # needs the muse CLI logged in
 mkdir -p ~/.config/systemd/user
 cp cred-ui/cred-ui.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now cred-ui
-./cua/cua-desktop.sh start                           # the desktop it can drive
+./cua/bin/cua-desktop.sh start                       # the desktop it can drive
 ```
 
 Then run `muse plugins approve` and approve the muse-job plugin when
@@ -177,7 +179,7 @@ muse plugins install ./muse-job/plugin   # needs the muse CLI logged in
 mkdir -p ~/.config/systemd/user
 cp cred-ui/cred-ui.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now cred-ui
-./cua/cua-desktop.sh start                           # the desktop it can drive
+./cua/bin/cua-desktop.sh start                       # the desktop it can drive
 ```
 
 Then run `muse plugins approve` and approve the muse-job plugin when
@@ -220,6 +222,11 @@ put it to work.
 | `browser-driver/` | Browser-driving pieces |
 | `confirm/` | Human-confirmation flow for sensitive agent actions |
 | `jail/` | Sandboxing bits |
+| `deploy/` | Release automation: unattended redeploy updater + branch/tag protection rulesets-as-code |
+| `harness/` | Pre-seeded harness contract: golden-image manifest + harness auth probe |
+| `site/` | Waitlist-era web surface: landing page + waitlist signup backend |
+| `assets/` | Demo assets + hero art (marketing visuals, regenerated in place) |
+| `VERSION` / `CHANGELOG.md` / `CONTRIBUTING.md` | Versioning, the changelog ritual, and the contributor process |
 | `scripts/` | Assorted helpers |
 
 ## Contributing
