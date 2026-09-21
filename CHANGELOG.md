@@ -42,7 +42,7 @@ This changelog only works if entries land with the change, not after it:
   `.github/workflows/ci.yml` — renaming, adding, or removing a CI job fails
   the test suite until the declared ruleset is updated deliberately, so the
   release-tag/branch protection can no longer silently lag behind CI.
-  (PR TBD)
+  (#208)
 - Waitlist slice 3 remainder (H15 — path-A email parser + invite sender):
   `site/waitlist_patha.py` implements the email intake path
   (WAITLIST_OPERATIONS.md §2) — exclusion list (From, inbox,
