@@ -46,6 +46,17 @@ This changelog only works if entries land with the change, not after it:
   shape to spark-vm's secrets posture); AgentComputer's "unverifiable"
   egress posture refined to a stronger negative (real product with real
   pricing, still no stated egress policy). (#216)
+- `jail/build.sh` is safer to inspect and harder to drift: `--help` / `-h`
+  renders the script's header doc and exits before any side effect (also
+  the script's smoke test), and the tailnet→jail SSH port is now
+  single-sourced from `$JAIL_SSH_PORT` into the nftables DNAT rule via a
+  quoted heredoc + placeholder substitution — the applied conf always
+  carries the variable's value, with render-verified tests pinning it.
+- The single-command test story now actually covers every component:
+  `pytest.ini` discovers the `cua/` and `jail/` suites too, and
+  `confirm/test_push.py` skips explicitly (instead of erroring
+  collection) on boxes without the `cryptography` package, so
+  `python3 -m pytest` degrades gracefully.
 - Approvals-plane gap analysis: a new doc walks the full path from a gated
   action to a human answer and back (refusal → filing → pending → human
   answer UX → push summons → terminal decision delivery → audit trail),
