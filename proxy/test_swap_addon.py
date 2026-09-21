@@ -1709,7 +1709,12 @@ class AuditLogDiskGuardTests(unittest.TestCase):
         """Context: LOG_FILE under tmp, guard thresholds pinned, a fake
         statvfs reporting free_bytes, and the warn throttle reset."""
         from contextlib import ExitStack
-        sa._LAST_LOW_SPACE_WARN_AT = 0.0
+        # Reset the warn throttle to "never warned". time.monotonic() is
+        # seconds since boot, so resetting to 0.0 only works on machines
+        # with uptime past the cooldown — on a fresh CI runner the first
+        # warn-band write would be wrongly throttled. -inf means the
+        # next warn-band write always warns, on any uptime.
+        sa._LAST_LOW_SPACE_WARN_AT = float("-inf")
         log_file = Path(tmp_path) / "swap.log"
         stack = ExitStack()
         stack.enter_context(mock.patch.object(sa, "LOG_FILE", log_file))
