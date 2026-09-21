@@ -145,9 +145,10 @@ PURGE_TTL_SECONDS = 30 * 86400
 SELFHOST_URL = "https://github.com/ntindle/spark-vm#try-it"
 
 # The canonical CTA section sources the page build wires
-# (docs/FUNNEL_MEASUREMENT.md §3.2). A src outside this set is still
-# logged, but with no src attr — funnel_metrics.py flags unknown srcs
-# on stderr rather than opening a new bucket.
+# (docs/FUNNEL_MEASUREMENT.md §3.2). A src outside this set is logged
+# with no src attr — the daemon never emits unknown src values, so no
+# typoed ?src= can silently open a new rollup bucket. Mirrors KNOWN_SRCS
+# in scripts/funnel_metrics.py — keep the two in sync.
 CTA_SRCS = {"hero", "trust", "faq", "final", "selfhost"}
 
 EMAIL_RE = re.compile(
@@ -1071,9 +1072,10 @@ class WaitlistService:
 
         Emits a `cta_click` funnel event (docs/FUNNEL_MEASUREMENT.md §3.4)
         with the src attr when it is one of the canonical CTA section
-        sources — otherwise the event ships without a src attr and
-        funnel_metrics.py flags it on stderr (never opens a new bucket
-        silently)."""
+        sources — otherwise the event ships without a src attr. The
+        daemon never emits an unknown src value, so a typoed ?src= can
+        never silently open a new rollup bucket. CTA_SRCS mirrors
+        KNOWN_SRCS in scripts/funnel_metrics.py — keep the two in sync."""
         attrs = {"src": src} if src in CTA_SRCS else {}
         self._emit("cta_click", "selfhost", attrs)
         return SELFHOST_URL

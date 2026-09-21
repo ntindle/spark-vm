@@ -73,7 +73,9 @@ ROLLUP_EVENTS = {"page_view_day", "crawler_hits", "cta_click"}
 
 # The canonical CTA section sources the page build wires (doc section 3.2).
 # Anything else is passed through but flagged on stderr — a typoed
-# ?src= would otherwise silently open a new bucket.
+# ?src= would otherwise silently open a new bucket. Mirrors CTA_SRCS in
+# site/waitlistd.py (the daemon strips unknown srcs before emitting) —
+# keep the two in sync.
 KNOWN_SRCS = {"hero", "trust", "faq", "final", "selfhost"}
 
 

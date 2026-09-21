@@ -749,6 +749,17 @@ def test_forget_token_domain_separation():
     assert status == "ok" and row2["entry_id"] == row["entry_id"]
 
 
+def test_forget_get_with_confirm_token_renders_expired():
+    """A confirm token presented at /waitlist/forget renders the expired
+    page (200, never an error dump) — wrong-kind tokens are invalid."""
+    svc, tmp = make_service()
+    row = _submit(svc, "forget3b@example.com")
+    confirm_token = row["active_token"]
+    status, html = svc.forget_get(confirm_token)
+    assert status == 200
+    assert "expired" in html.lower() or "invalid" in html.lower()
+
+
 def test_forget_get_renders_only():
     svc, tmp = make_service()
     row = _submit(svc, "forget4@example.com")
