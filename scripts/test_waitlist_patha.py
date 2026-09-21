@@ -153,7 +153,17 @@ def test_plus_tag_normalized():
 def test_forget_intent_detected():
     assert wp.detect_forget_intent("Re: waitlist", "please forget me now")
     assert wp.detect_forget_intent("forget-me request", "hi")
+    assert wp.detect_forget_intent("Re: waitlist", "please forget me.")
     assert not wp.detect_forget_intent("join", "add me please")
+
+
+def test_forget_intent_not_triggered_by_addresses():
+    # Email addresses (and the flower) containing forget-me substrings must
+    # not route a signup into the forget flow.
+    assert not wp.detect_forget_intent("join", "my address is forget-me@example.com")
+    assert not wp.detect_forget_intent("join", "my address is forgetme@example.com")
+    assert not wp.detect_forget_intent("join", "contact x@forget-me.com for details")
+    assert not wp.detect_forget_intent("join", "i love forget-me-nots")
 
 
 def test_pubkey_extraction():

@@ -79,7 +79,7 @@ USECASE_LINE_RE = re.compile(r"(?im)^use case:\s*(.+?)\s*$")
 CANDIDATE_RE = re.compile(
     r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,}"
 )
-FORGET_RE = re.compile(r"\bforget[-\s]?me\b", re.IGNORECASE)
+FORGET_RE = re.compile(r"(?<![\w@.+-])forget[-\s]?me(?![\w@-])", re.IGNORECASE)
 MAX_USECASE_CHARS = 280
 # Intake size cap: anything bigger than 1 MiB is not a signup email.
 # parse_message itself has no cap (the email library handles headers),
