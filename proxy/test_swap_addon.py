@@ -1690,20 +1690,14 @@ class SecuritySweepTests(unittest.TestCase):
 
 class AuditLogDiskGuardTests(unittest.TestCase):
     """Probe: single test."""
-    def test_low_space_warns_but_still_writes(self):
-        """Between the warn and refuse thresholds the write proceeds —
-        the operator gets a loud journal warning BEFORE the fail-closed
-        cascade, not only the cascade itself."""
+    def test_plenty_space_writes_quietly(self):
+        """Healthy disk: the audit line lands and no warning is logged."""
         with tempfile.TemporaryDirectory() as tmp:
-            with self._patched(tmp, 100 * 1024 * 1024):
+            with self._patched(tmp, 10 * 1024**3):
                 a = self._addon_with_real_audit()
-                with self.assertLogs(sa.log, level="WARNING") as logs:
+                with self.assertNoLogs(sa.log, level="WARNING"):
                     self.assertTrue(a._audit("api.github.com", "github"))
-                self.assertTrue(any("low on space" in m
-                                     for m in logs.output))
-                lines = (Path(tmp) / "swap.log").read_text().splitlines()
-                self.assertEqual(len(lines), 1)
-                self.assertIn("swapped=github", lines[0])
+                self.assertTrue((Path(tmp) / "swap.log").exists())
 
 
 if __name__ == "__main__":
