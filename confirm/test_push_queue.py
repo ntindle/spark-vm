@@ -316,6 +316,52 @@ class TestRunOnce(unittest.TestCase):
     def test_requeue_invalid_aid(self):
         self.assertEqual(self.q._requeue("bad id!"), "invalid")
 
+    def test_dead_letter_replay_skips_duplicate_record(self):
+        # Crash between the dead-letter append and the queue removal:
+        # the replay must not append a second record (Eng round-2 S1).
+        q, sender = make_queue(self._td.name, {"a1": "retry"})
+        q.enqueue({"id": "a1"})
+        now = time.time() + 5
+        for i in range(push.QUEUE_MAX_ATTEMPTS - 1):
+            q.run_once(sender=sender, now=now)
+            now = push._queue_next_at(i + 1, now)
+        with mock.patch.object(q, "_finalize",
+                               side_effect=OSError("disk full")):
+            stats = q.run_once(sender=sender, now=now)
+        self.assertEqual(stats["errors"], 1)
+        self.assertEqual(len(read_entries(q.dead_path)), 1)
+        # Entry is still queued (finalize failed); force it due again.
+        with push._locked(q.queue_path):
+            entries = q._read_all()
+            entries[0]["next_at"] = time.time() - 1
+            q._rewrite(entries)
+        q.run_once(sender=sender, now=time.time() + 5)
+        self.assertEqual(len(read_entries(q.dead_path)), 1)
+        self.assertEqual(read_entries(q.queue_path), [])
+
+    def test_finalize_io_failure_counts_error_and_drops_on_replay(self):
+        # The send succeeded and the mark landed, but the finalize
+        # failed: counted in errors, and the replay drops the entry
+        # without re-sending (Eng round-2 S2).
+        self.q.enqueue({"id": "a1"})
+        with mock.patch.object(self.q, "_finalize",
+                               side_effect=OSError("disk full")):
+            stats = self.q.run_once(sender=self.sender,
+                                    now=time.time() + 5)
+        self.assertEqual(stats["errors"], 1)
+        self.assertEqual(stats["sent"], 0)
+        self.assertEqual(len(self.sender.calls), 1)
+        # The entry is still inflight (finalize failed); force it due.
+        with push._locked(self.q.queue_path):
+            entries = self.q._read_all()
+            entries[0]["next_at"] = time.time() - 1
+            self.q._rewrite(entries)
+        stats = self.q.run_once(sender=self.sender,
+                                now=time.time() + 5)
+        self.assertEqual(len(self.sender.calls), 1)  # sent exactly once
+        self.assertEqual(stats["sent"], 0)
+        self.assertEqual(read_entries(self.q.queue_path), [])
+
     def test_enqueue_during_inflight_is_duplicate(self):
         q, sender = make_queue(self._td.name, {"a1": "retry"})
         q.enqueue({"id": "a1"})
