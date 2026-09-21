@@ -37,6 +37,14 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch 2026-09-21 (docs/COMPETITOR_WATCH_2026-09-21.md): quiet
+  window — no launches, pricing changes, partner moves, or version bumps
+  across the tracked set since the 2026-09-20 pass; boat.dev's rate card
+  re-verified ($20/mo = 555h of 4vCPU/8GB) with an xlarge
+  capacity-allocation caveat flagged for verification before any 16-vCPU
+  sizing decision; version resolution — Microsandbox v0.7.1 confirmed on
+  the vendor releases page post-window (corpus record vindicated; no
+  corpus change). (#191)
 - Waitlist forget-me flow (H15 slice 3c): every transactional email footer
   now carries a signed one-click forget link (7-day, single-use,
   domain-separated from confirm tokens so the two can never validate at
