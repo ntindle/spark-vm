@@ -46,7 +46,7 @@ This changelog only works if entries land with the change, not after it:
   `build.sh` pinning its strict mode, idempotency guards, and the jail's
   documented isolation properties (no bind mounts, no DNS, proxy-only
   nftables egress, explicit UID range, sshd hardening, swapd CA temp
-  cleanup). Both suites are wired into the CI `python-tests` job.
+  cleanup). Both suites are wired into the CI `python-tests` job. (#187)
 - Stopped/cold retention tier thinking (C15): the hosted pricing thinking
   now names the stopped-state cost story the live-control deep scan found
   missing — a published $0.000027/GB-hour cold-storage anchor (≈$0.79/mo
