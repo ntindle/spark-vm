@@ -61,6 +61,7 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/cred-store-get proxy/cred-store-delete \
          proxy/with-proxy proxy/ssrf.deny proxy/sudoers-swapd \
          proxy/safe_install.py \
+         proxy/build_ca_bundle.py \
          proxy/swap-proxy.service proxy/swap-inference.service \
          confirm/confirmd.py confirm/confirm-request confirm/confirmd.service \
          VERSION scripts/sparkvm_version.py; do
@@ -180,18 +181,12 @@ echo "[4b/7] Building the with-proxy CA bundle and installing with-proxy..."
 # The swapd CA is not in the host store; with-proxy uses system CAs plus
 # the swapd CA cert. Rebuilt on every deploy so a rotated CA is picked up.
 sudo mkdir -p /usr/local/share/with-proxy-ca
-if sudo test -f /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem; then
-    sudo sh -c 'cat /etc/ssl/certs/ca-certificates.crt /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem > /usr/local/share/with-proxy-ca/ca-bundle.crt'
-    sudo chmod 0644 /usr/local/share/with-proxy-ca/ca-bundle.crt
-else
-    # First-time deploy: the proxy has never run, so it has not generated
-    # its CA yet. Skip the bundle LOUDLY rather than aborting mid-deploy;
-    # the restart below starts the proxy, which generates the CA, and the
-    # next deploy (or a manual re-run of this step) builds the bundle.
-    # Until then with-proxy refuses to run (it checks for the bundle).
-    echo "WARNING: /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem missing (first deploy?)"
-    echo "WARNING: skipping CA bundle; re-run deploy.sh after the proxy has started once"
-fi
+# The CA source is swapd-writable: build_ca_bundle.py refuses a planted
+# symlink there (issue #144 — the old `cat` followed it and would leak a
+# root-readable file into this world-readable bundle). A missing CA on a
+# first deploy still skips LOUDLY inside the helper; the destination write
+# goes through safe_install (no symlink write-through, root:root 0644).
+sudo python3 proxy/build_ca_bundle.py
 sudo install -o root -g root -m 0755 proxy/with-proxy /usr/local/bin/with-proxy
 
 # --- 4c. secrets dirs (issue #91) -------------------------------------------

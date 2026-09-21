@@ -143,10 +143,18 @@ class TestSecretHygiene:
     def test_swapd_ca_copied_from_host_path(self, active):
         assert "/home/swapd/.mitmproxy/mitmproxy-ca-cert.pem" in active
 
-    def test_swapd_ca_temp_copy_removed(self, active):
-        cp = active.index("cp /tmp/swapd-mitmproxy.crt")
-        rm = active.index("rm -f /tmp/swapd-mitmproxy.crt")
-        assert rm > cp, "temp CA copy must be removed after use"
+    def test_swapd_ca_installed_via_symlink_safe_helper(self, active):
+        # Issue #144 class: the CA source is swapd-writable, so the install
+        # must go through build_ca_bundle.py's O_NOFOLLOW refusal, not cp.
+        assert "build_ca_bundle.py" in active
+        assert "--ca-only" in active
+
+    def test_no_symlink_following_ca_copy(self, src):
+        # A bare `cp` of the swapd CA follows a planted symlink (#144).
+        for line in src.splitlines():
+            if "mitmproxy-ca-cert.pem" in line and not line.lstrip().startswith("#"):
+                assert not re.match(r"\s*\$SUDO cp ", line), \
+                    "plain cp of the swapd CA follows symlinks: %r" % line
 
     def test_no_embedded_pem(self, src):
         assert "-----BEGIN" not in src
