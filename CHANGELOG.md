@@ -52,7 +52,7 @@ This changelog only works if entries land with the change, not after it:
   time from operator files, signed position line, 14-day `invite.`-prefixed
   HMAC claim tokens, `invite_sent` funnel events) plus the expiry
   rollover (unclaimed invites return to `confirmed` with confirmed_at
-  reset to the expiry time, no re-confirmation). (#PRNUM)
+  reset to the expiry time, no re-confirmation). (#203)
 - Competitor watch 2026-09-21 (docs/COMPETITOR_WATCH_2026-09-21.md): quiet
   window — no launches, pricing changes, partner moves, or version bumps
   across the tracked set since the 2026-09-20 pass; boat.dev's rate card
