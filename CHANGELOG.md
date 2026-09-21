@@ -73,7 +73,7 @@ This changelog only works if entries land with the change, not after it:
   approval loop, job runner, desktop persistence, phone credential UI) now
   sit on the repo landing page next to the stack they demonstrate, with
   each frame's provenance and regeneration recipe in the assets notes
-  ([#PRNUM](https://github.com/ntindle/spark-vm/pull/PRNUM))
+  ([#188](https://github.com/ntindle/spark-vm/pull/188))
 - README "What's in the box" names the human-approval loop (`confirmd`)
   alongside the proxy/job-runner/desktop/cred-UI stack, and the repo
   layout table now lists `deploy/`, `harness/`, `site/`, `assets/`, and
