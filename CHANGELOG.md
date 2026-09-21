@@ -48,7 +48,7 @@ This changelog only works if entries land with the change, not after it:
   provisioning. Park-style backends (RunPod's "suspend" is park) are
   representable via the `wake_reprovisions` capability flag and the
   `wake_kind` resume-path surface, and the per-`vm_id` lifecycle is marked
-  provisional on H11's isolation-shape answer.
+  provisional on H11's isolation-shape answer ([#183](https://github.com/ntindle/spark-vm/pull/183)).
 - Lifecycle parity audit for the #47 live-machine-control ticket: #47's
   promised-vs-accepted lifecycle surface checked against the six-provider
   live-control scorecard. Found pause/resume promised in the ticket but
