@@ -174,8 +174,8 @@ against vendor pages in the 2026-09-20 deep scan, links there):
   discount at all — stopping is a power action, not a billing state. That
   is the simplicity the stopped tier has to beat or match.
 - **Fly.io** (our provider pick) stops compute billing on hibernate; a
-  stopped machine still retains (and bills) its volume. The H4 provider
-  interface ships this as the `RetentionInfo` descriptor on `BoxStatus`
+  stopped machine retains its volume. The H4 provider interface ships this
+  as the `RetentionInfo` descriptor on `BoxStatus`
   (`harness/provider_iface.py`): `disk_gb_retained`, `RetentionKind`
   (volume/snapshot/none), and a `storage_billable` flag per state — the
   control plane already exposes what billing needs to consume.
