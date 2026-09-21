@@ -33,8 +33,8 @@ placeholders. On each outbound request the proxy:
 - checks the placeholder against the credential registry,
 - injects the real value into **request bodies and headers** for hosts in
   `hosts.allow`,
-- scrubs known secret values back to placeholders in text bodies of responses
-  from allowlisted hosts (values under 8 characters are never scrubbed — a
+- scrubs known secret values back to placeholders in response headers and
+  text bodies of responses from allowlisted hosts (values under 8 characters are never scrubbed — a
   one-character password would otherwise rewrite ordinary prose; TOTP codes
   are matched as whole tokens; residual stated-not-solved: images and binary
   bodies),
@@ -42,8 +42,8 @@ placeholders. On each outbound request the proxy:
   refused host never even gets a SYN (private ranges, loopback, link-local,
   CGNAT/tailnet space, and the `ssrf.deny` hard list are refused by default;
   the deny list beats the allow list — deny-wins, same direction as Vercel),
-- refuses bodies over 5 MB with a durable audit line instead of parsing them
-  whole (a CPU/memory DoS guard on the addon itself).
+- refuses request bodies over 5 MB with a durable audit line instead of parsing
+  them whole (a CPU/memory DoS guard on the addon itself).
 
 The audit write is part of authorization: if the audit line cannot be durably
 recorded, the swap is refused. Every swap *and* every refusal is appended to
@@ -126,7 +126,8 @@ its own — the host must also be in `allowOut`. Transform registration and
 egress grant are two separate lists. In swapd, the swap decision and the
 egress eligibility check are joined at one point of policy:
 
-- swap happens only for hosts in `hosts.allow` (injection eligibility);
+- swap happens only for hosts in `hosts.allow` (injection eligibility, registry
+  binding assumed);
 - every host — swap or no swap — must clear the egress guard (private ranges
   refused by default, `ssrf.deny` beats `ssrf.allow`, authority mismatches
   refused) *before* connect (egress eligibility).
@@ -136,8 +137,10 @@ Both layers are default-deny where it matters: a fresh install ships
 practical difference for an operator: E2B's split lets you register
 transforms without opening egress; swapd's join means the injection
 allowlist is also where you reason about which destinations may receive
-secrets. Plain transit to public hosts still passes through swapd unchanged
-(E2B's default is deny-all) — swapd governs *secrets*, not all egress.
+secrets. Plain transit to public hosts still passes through swapd unchanged (in E2B,
+transform registration likewise grants no egress — though E2B sandboxes
+default to full internet access, not deny-all) — swapd governs *secrets*,
+not all egress.
 
 ## What this document is not
 
