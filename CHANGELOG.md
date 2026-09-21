@@ -37,6 +37,12 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Stopped/cold retention tier thinking (C15): the hosted pricing thinking
+  now names the stopped-state cost story the live-control deep scan found
+  missing — a published $0.000027/GB-hour cold-storage anchor (≈$0.79/mo
+  for a stopped 40 GB box), running-only billing precedent, and the
+  control-plane→billing contract the H4 provider interface already ships.
+  Thinking only; no pricing-page row until the Billing decision lands.
 - Waitlist 30-day post-drop purge: `waitlist_jobs.py --purge` permanently
   deletes dropped waitlist rows 30 days after the drop (the §5 retention
   rule), via an atomic `rows.jsonl` rewrite under the same data lock as
