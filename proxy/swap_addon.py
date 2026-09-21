@@ -31,7 +31,9 @@ header; {"custom_header": name} swaps only in that header;
 {"query_param": name} swaps only in the query string;
 {"url_path_segment": name} swaps only in the URL path. A declared
 placement that does not match the placeholder's location fails closed
-(no swap). An entry with no declared placement swaps anywhere
+(no swap). A declared placement shape the proxy does not recognize
+also fails closed (issue #197: a typo degrades to no swap, never to
+swap-anywhere). An entry with no declared placement swaps anywhere
 (migration).
 
 URL path: swapped per path segment. Segments whose decoded form did not
@@ -885,8 +887,10 @@ class SwapAddon:
         ("path", None), ("body", None). A credential with no declared
         placement swaps anywhere (migration). A declared placement
         restricts the swap to its location; anything else fails closed.
-        Unknown placement shapes fail open — never invent a restriction
-        the registry did not declare.
+        A declared placement shape the proxy does not recognize (issue
+        #197) also fails closed: a typo must degrade to no swap, never
+        to swap-anywhere. The refusal is loud — it names the credential
+        and the offending shape, never the secret value.
         """
         if location is None:
             return True
@@ -897,15 +901,24 @@ class SwapAddon:
         if not isinstance(entry_spec, dict):
             return True
         placement = entry_spec.get("placement")
+        if placement is None:
+            # No declared placement: the migration path — swaps anywhere.
+            return True
         area, detail = location
         if isinstance(placement, str):
             if placement == "bearer_header":
                 return area == "header" and detail == "authorization:bearer"
             if placement == "url_path_segment":
                 return area == "path"
-            return True
+            log.warning("swap: credential %r entry %r declares "
+                        "unrecognized placement %r; failing closed",
+                        name, entry, placement)
+            return False
         if not isinstance(placement, dict) or len(placement) != 1:
-            return True
+            log.warning("swap: credential %r entry %r declares malformed "
+                        "placement %r; failing closed",
+                        name, entry, placement)
+            return False
         kind, target = next(iter(placement.items()))
         target = str(target).lower()
         if kind == "custom_header":
@@ -916,7 +929,10 @@ class SwapAddon:
             return area == "query"
         if kind == "url_path_segment":
             return area == "path"
-        return True
+        log.warning("swap: credential %r entry %r declares unrecognized "
+                    "placement kind %r; failing closed",
+                    name, entry, kind)
+        return False
 
     def _resolve(self, name, entry, host, method=None, path=None,
                  location=None):
