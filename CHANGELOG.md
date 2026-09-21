@@ -53,7 +53,10 @@ This changelog only works if entries land with the change, not after it:
   quoted heredoc + placeholder substitution — the applied conf always
   carries the variable's value, with render-verified tests pinning it.
 - The single-command test story now actually covers every component:
-  `pytest.ini` discovers the `cua/` and `jail/` suites too, and
+  `pytest.ini` discovers the `cua/` and `jail/` suites too — including a
+  new `cua/test_shell_scripts.py` gate (`bash -n` + shellcheck warnings
+  for the four host-side `cua/bin` scripts that can't run in CI, with an
+  explicit skip when shellcheck is absent) — and
   `confirm/test_push.py` skips explicitly (instead of erroring
   collection) on boxes without the `cryptography` package, so
   `python3 -m pytest` degrades gracefully.
