@@ -7,12 +7,14 @@ endpoint surface:
     POST /waitlist/form      path-B form intake (§4.2)
     GET  /waitlist/confirm   renders only — never changes state (§4.3)
     POST /waitlist/confirm   token as form field, not query string (§4.3)
+    GET  /waitlist/forget    renders only — never changes state (slice 3c)
+    POST /waitlist/forget    token as form field; deletes the row (slice 3c)
+    GET  /go/selfhost        logs cta_click, 302s to the self-host docs (slice 3c)
 
-Deliberately NOT in this slice (H15 PR 1 remainder → slice 3): the +7d
-reminder / 14d drop jobs, the path-A email parser, the invite sender, the
-forget-me handler, and the /go/selfhost redirect shim. Per
-docs/WAITLIST_OPERATIONS.md §10 + site/README.md, the page is still NOT
-deployable — the dead-form rule holds until every §10 item is live.
+Deliberately NOT in this slice (H15 PR 1 remainder): the path-A email
+parser and the invite sender. Per docs/WAITLIST_OPERATIONS.md §10 +
+site/README.md, the page is still NOT deployable — the dead-form rule
+holds until every §10 item is live.
 
 Design decisions (all per the cited specs, no improvisation):
 
@@ -47,8 +49,10 @@ Design decisions (all per the cited specs, no improvisation):
   `waitlist_submitted` (attrs path=form), `confirm_sent` (no attrs),
   `confirmed` (attrs via=original|reminder — via follows which email
   carried the live token), `reminder_sent` (no attrs, +7d job),
-  `dropped` (no attrs, 14d job). `scripts/funnel_metrics.py` (PR #141)
-  is the consumer; the emitted JSONL must stay parseable by it.
+  `dropped` (no attrs, 14d job), `purged` (no attrs, 30d job),
+  `forgot` (no attrs — signed footer-link deletion), `cta_click`
+  (attrs src — the /go/selfhost shim). `scripts/funnel_metrics.py`
+  (PR #141) is the consumer; the emitted JSONL must stay parseable by it.
 - No unauthenticated position lookup exists anywhere in this service:
   queue position is disclosed only inside signed emails
   (WAITLIST_OPERATIONS.md §6). The "check your inbox" page echoes the
@@ -81,6 +85,13 @@ feed NEEDS_USER.md's Abuse-controls item — LANDING_PAGE_COPY.md §4):
     EMAIL_SEND_WINDOW = 86400     24h, all reply types counted together
                                   (WAITLIST_OPERATIONS.md §4).
     TOKEN_TTL_SECONDS = 14*86400 — confirm-link lifetime.
+    FORGET_TTL_SECONDS = 7*86400 — the §5 forget-link lifetime ("signed
+        footer link honored ≤7d"). Forget tokens are domain-separated
+        from confirm tokens by wire format (forget tokens are
+        `forget.`-prefixed 5-part; confirm tokens keep the pre-slice-3c
+        4-part format), so a confirm token can never validate at
+        /waitlist/forget and a forget token can never validate at
+        /waitlist/confirm.
     REMINDER_LEAD_SECONDS = 7*86400 — the +7d reminder fires when
         now >= drop_at - REMINDER_LEAD_SECONDS.
     DROP_TTL_SECONDS = 14*86400 — drop_at is set once at row creation
@@ -123,9 +134,22 @@ IP_RATE_WINDOW = 3600
 EMAIL_SEND_CAP = 3
 EMAIL_SEND_WINDOW = 86400
 TOKEN_TTL_SECONDS = 14 * 86400
+FORGET_TTL_SECONDS = 7 * 86400
 REMINDER_LEAD_SECONDS = 7 * 86400
 DROP_TTL_SECONDS = 14 * 86400
 PURGE_TTL_SECONDS = 30 * 86400
+
+# /go/selfhost — where the marketing page's self-host CTA lands
+# (site/index.html, docs/FUNNEL_MEASUREMENT.md §3.2's `selfhost` CTA
+# source). The repo README's "Try it" section is the self-host surface.
+SELFHOST_URL = "https://github.com/ntindle/spark-vm#try-it"
+
+# The canonical CTA section sources the page build wires
+# (docs/FUNNEL_MEASUREMENT.md §3.2). A src outside this set is logged
+# with no src attr — the daemon never emits unknown src values, so no
+# typoed ?src= can silently open a new rollup bucket. Mirrors KNOWN_SRCS
+# in scripts/funnel_metrics.py — keep the two in sync.
+CTA_SRCS = {"hero", "trust", "faq", "final", "selfhost"}
 
 EMAIL_RE = re.compile(
     r"^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,}$"
@@ -142,6 +166,17 @@ COPY_EXPIRED = "This link expired — waitlist links last 14 days."
 COPY_REJOIN = "Join the waitlist again"
 CONFIRM_SUBJECT = "Confirm your spark-vm waitlist spot"
 REMINDER_SUBJECT = "Reminder: your spark-vm waitlist spot is waiting on one click"
+
+# Every transactional email's footer carries the §5 signed forget link.
+# {forget_link} is the one-click forget URL for that row's signed token
+# (7-day lifetime, single-use). Kept as one paragraph of plain text so it
+# survives every mail client. Defined once and appended to every body —
+# never duplicated inline.
+FORGET_FOOTER = """\
+
+Forget this entirely? [ Delete your waitlist entry ]: {forget_link}
+This deletion link lasts 7 days — a fresh one arrives with every email.
+"""
 
 # Reminder email, verbatim from docs/WAITLIST_OPERATIONS.md §4 DRAFT
 # (opener split by submission path). The {position} line is the queue
@@ -161,6 +196,22 @@ You're #{position} in line — we don't estimate dates. Confirm it so we
 can email you when hosted boxes open up. No card, no commitment.
 
 This is the last reminder; unconfirmed spots are dropped automatically.
+""" + FORGET_FOOTER
+
+FORGET_SUBJECT = "Your spark-vm waitlist entry has been deleted"
+
+# Deletion confirmation, sent after the row is actually deleted
+# (WAITLIST_OPERATIONS.md §5: "the row is deleted only after the link is
+# clicked (proving inbox access), within 7 days, with a confirmation
+# sent"). Plain text, no links — there is nothing left to link to.
+FORGET_CONFIRM_BODY = """\
+Your spark-vm waitlist entry for {owner_email} has been deleted.
+
+All of its data is gone from the waitlist store. If you rejoin later,
+you'll start at the back of the line — waitlist order follows the
+confirmation date.
+
+Nothing else to do.
 """
 
 CONFIRM_BODY_PATH_B = """\
@@ -180,7 +231,7 @@ when you claim your box.
 
 Didn't ask for this? Ignore this email — unconfirmed addresses are
 dropped automatically.
-"""
+""" + FORGET_FOOTER
 
 
 # ---------------------------------------------------------------------------
@@ -392,29 +443,60 @@ class WaitlistService:
 
     # -- tokens -----------------------------------------------------------
 
-    def mint_token(self, entry_id, normalized_email, issued_at=None):
+    def mint_token(self, entry_id, normalized_email, issued_at=None,
+                   kind="confirm"):
+        """Mint an HMAC token. `kind` is "confirm" or "forget".
+
+        Confirm tokens keep the exact pre-slice-3c wire format AND HMAC
+        payload (`{entry_id}.{issued}.{nonce}` / payload including the
+        owner email only), so confirm links issued before this slice keep
+        validating. Forget tokens are kind-prefixed on the wire
+        (`forget.{entry_id}.{issued}.{nonce}.{sig}`) with "forget" in the
+        HMAC payload — the format difference alone makes cross-kind
+        validation structurally impossible (a 4-part token never parses
+        as 5-part and vice versa).
+        """
         issued = int((issued_at or self.clock()).timestamp())
         nonce = secrets.token_urlsafe(6)  # distinct tokens per mint, even
         # within the same second — a re-submit's fresh token never equals
         # the consumed one
+        if kind == "forget":
+            payload = (f"forget.{entry_id}.{issued}.{nonce}."
+                       f"{normalized_email}").encode()
+            sig = b64url_encode(
+                hmac.new(self.hmac_key, payload, hashlib.sha256).digest()
+            )
+            return f"forget.{entry_id}.{issued}.{nonce}.{sig}"
         payload = f"{entry_id}.{issued}.{nonce}.{normalized_email}".encode()
         sig = b64url_encode(
             hmac.new(self.hmac_key, payload, hashlib.sha256).digest()
         )
         return f"{entry_id}.{issued}.{nonce}.{sig}"
 
-    def _lookup_token_row(self, token):
-        """Parse + HMAC-verify a token and return its row.
+    def mint_forget_token(self, entry_id, normalized_email):
+        return self.mint_token(entry_id, normalized_email, kind="forget")
+
+    def _lookup_token_row(self, token, kind="confirm"):
+        """Parse + HMAC-verify a token of the given kind and return its row.
 
         Returns (row, status) where status is one of:
           "ok"        — live, unexpired, unconsumed token for a live row
           "consumed"  — token was used or invalidated (single-use)
-          "expired"   — issued more than TOKEN_TTL_SECONDS ago
-          "invalid"   — malformed, bad HMAC, or unknown/gone row
-        The caller maps these to the §4.3 page states.
+          "expired"   — issued more than the kind's TTL ago
+          "invalid"   — malformed, wrong kind, bad HMAC, or unknown/gone row
+        The caller maps these to the page states. TTL: 14d for confirm
+        (WAITLIST_OPERATIONS.md §4), 7d for forget (§5 "honored ≤7d").
+        The kind prefix makes cross-kind tokens unparseable: a confirm
+        token (4 parts) can never be a forget token (5 parts, "forget"
+        prefix) and vice versa.
         """
         try:
-            entry_id, issued_s, nonce, sig = token.split(".", 3)
+            if kind == "forget":
+                tkind, entry_id, issued_s, nonce, sig = token.split(".", 4)
+                if tkind != "forget":
+                    return None, "invalid"
+            else:
+                entry_id, issued_s, nonce, sig = token.split(".", 3)
             issued = int(issued_s)
             b64url_decode(sig)  # structural check
         except (ValueError, Exception):
@@ -422,8 +504,12 @@ class WaitlistService:
         row = self.rows.get(entry_id)
         if row is None or row.get("status") not in ("pending", "confirmed"):
             return None, "invalid"
-        payload = (f"{entry_id}.{issued}.{nonce}."
-                   f"{row['owner_email']}").encode()
+        if kind == "forget":
+            payload = (f"forget.{entry_id}.{issued}.{nonce}."
+                       f"{row['owner_email']}").encode()
+        else:
+            payload = (f"{entry_id}.{issued}.{nonce}."
+                       f"{row['owner_email']}").encode()
         expected_sig = b64url_encode(
             hmac.new(self.hmac_key, payload, hashlib.sha256).digest()
         )
@@ -431,7 +517,8 @@ class WaitlistService:
             return None, "invalid"
         if token in self.consumed:
             return row, "consumed"
-        if self.clock().timestamp() - issued > TOKEN_TTL_SECONDS:
+        ttl = FORGET_TTL_SECONDS if kind == "forget" else TOKEN_TTL_SECONDS
+        if self.clock().timestamp() - issued > ttl:
             return row, "expired"
         return row, "ok"
 
@@ -466,6 +553,10 @@ class WaitlistService:
             return False
         token = self.mint_token(row["entry_id"], row["owner_email"])
         link = f"{self.public_host}/waitlist/confirm?token={token}"
+        forget_link = (
+            f"{self.public_host}/waitlist/forget?token="
+            f"{self.mint_forget_token(row['entry_id'], row['owner_email'])}"
+        )
         row["active_token"] = token  # the one live token for this row
         # Which email carried the live token — drives the `via` attr on
         # the `confirmed` event (FUNNEL_MEASUREMENT.md §3.4: original |
@@ -474,7 +565,8 @@ class WaitlistService:
         doc = {
             "to": row["owner_email"],
             "subject": CONFIRM_SUBJECT,
-            "body": CONFIRM_BODY_PATH_B.format(confirm_link=link),
+            "body": CONFIRM_BODY_PATH_B.format(
+                confirm_link=link, forget_link=forget_link),
             "queued_at": iso_z(self.clock()),
             "entry_id": row["entry_id"],
         }
@@ -574,6 +666,10 @@ class WaitlistService:
         # clicked the REMINDER email — the `confirmed` event must say so.
         row["active_token_kind"] = "reminder"
         link = f"{self.public_host}/waitlist/confirm?token={use_token}"
+        forget_link = (
+            f"{self.public_host}/waitlist/forget?token="
+            f"{self.mint_forget_token(row['entry_id'], row['owner_email'])}"
+        )
         opener = REMINDER_OPENERS.get(row.get("source"), REMINDER_OPENERS["form"])
         position = self.queue_position(row["entry_id"])
         doc = {
@@ -583,6 +679,7 @@ class WaitlistService:
             "body": REMINDER_BODY.format(
                 opener=opener,
                 confirm_link=link,
+                forget_link=forget_link,
                 position=position if position is not None else "?",
             ),
             "queued_at": iso_z(self.clock()),
@@ -870,6 +967,119 @@ class WaitlistService:
             # POST-success renders exactly like already-confirmed, verbatim.
             return 200, page_confirmed()
 
+    # -- forget ----------------------------------------------------------
+
+    def forget_get(self, token):
+        """GET /waitlist/forget — renders only. Never changes state.
+
+        A fresh token renders the delete-confirmation page (the token
+        travels as a form field to the POST — the §4.3 GET-never-changes-
+        state rule holds here too). A consumed token renders the
+        already-deleted page (the consumed set is checked before the row
+        lookup: the row is gone by the time the token is consumed, so a
+        row-first lookup would misreport it as merely invalid); an
+        expired token, or a token for a gone row, renders the expired
+        page. Read-only, but rendered under the data lock with a fresh
+        view for the same reasons as confirm_get.
+        """
+        with data_lock(self.data_dir), self._lock:
+            self._refresh_under_lock()
+            if token and token.startswith("forget.") and token in self.consumed:
+                return 200, page_already_deleted()
+            row, status = self._lookup_token_row(token or "", kind="forget")
+        if status == "invalid":
+            return 200, page_forget_expired()
+        if status == "consumed":
+            return 200, page_already_deleted()
+        if status != "ok":
+            return 200, page_forget_expired()
+        return 200, page_forget_button(
+            token, masked_owner(row["owner_email"]))
+
+    def forget_post(self, token):
+        """POST /waitlist/forget — token as form field. Deletes the row.
+
+        Per WAITLIST_OPERATIONS.md §5 the row is deleted only after the
+        signed link is clicked (proving inbox access), within 7 days,
+        with a confirmation sent. The row leaves rows.jsonl via an atomic
+        rewrite (the purge path's _rewrite_rows); the PII is gone and the
+        `forgot` funnel event (FUNNEL_MEASUREMENT.md §3.4) keeps the
+        counts. The deletion confirmation email is spooled unconditionally —
+        the forget token is single-use and consumed before the spool, so
+        one row can produce at most one deletion notice (no mail-cannon
+        shape for the 3/24h cap to defend).
+
+        The lookup-then-delete is check-then-act — serialized under the
+        data lock + thread lock, like every other mutating path.
+        """
+        with data_lock(self.data_dir), self._lock:
+            self._refresh_under_lock()
+            if token and token.startswith("forget.") and token in self.consumed:
+                # The token already ran once — the row is gone (deletion
+                # is single-use by construction). Say so honestly.
+                return 200, page_already_deleted()
+            row, status = self._lookup_token_row(token or "", kind="forget")
+            if status == "invalid":
+                return 200, page_forget_expired()
+            if status == "consumed":
+                # Unreachable in practice (the fast path above catches
+                # every consumed forget token), kept as a belt-and-braces
+                # rendering if the consumed set ever diverges.
+                return 200, page_already_deleted()
+            if status != "ok":
+                return 200, page_forget_expired()
+            entry_id = row["entry_id"]
+            owner = row["owner_email"]
+            live_token = row.get("active_token")
+            # Kill the confirm token too — the row is gone, so its entry_id
+            # lookup would fail anyway, but mark it consumed explicitly.
+            if live_token:
+                self._consume_token(live_token)
+            self._consume_token(token)
+            del self.rows[entry_id]
+            if self.by_email.get(owner) == entry_id:
+                del self.by_email[owner]
+            self._rewrite_rows()
+            self._emit("forgot", entry_id)
+            self._queue_deleted_email(owner, entry_id)
+            return 200, page_deleted()
+
+    def _queue_deleted_email(self, owner_email, entry_id):
+        """Spool the deletion confirmation. No 3/24h cap ledger: the forget
+        token is single-use and consumed before this runs, so one row can
+        produce at most one deletion email — there is no mail-cannon shape
+        for the cap to defend (WAITLIST_OPERATIONS.md §6's cap targets the
+        re-sendable confirm/reminder/clarification loop)."""
+        doc = {
+            "to": owner_email,
+            "subject": FORGET_SUBJECT,
+            "kind": "deleted",
+            "body": FORGET_CONFIRM_BODY.format(owner_email=owner_email),
+            "queued_at": iso_z(self.clock()),
+            "entry_id": entry_id,
+        }
+        name = (f"{entry_id}-deleted-{int(self.clock().timestamp())}-"
+                f"{secrets.token_hex(4)}.json")
+        with open(os.path.join(self.spool_dir, name), "w",
+                  encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2, sort_keys=True)
+        return True
+
+    # -- self-host CTA -----------------------------------------------------
+
+    def cta_selfhost(self, src):
+        """Log the self-host CTA click and return the redirect target.
+
+        Emits a `cta_click` funnel event (docs/FUNNEL_MEASUREMENT.md §3.4)
+        with the src attr when it is one of the canonical CTA section
+        sources — otherwise the event ships without a src attr. The
+        daemon never emits an unknown src value, so a typoed ?src= can
+        never silently open a new rollup bucket. CTA_SRCS mirrors
+        KNOWN_SRCS in scripts/funnel_metrics.py — keep the two in sync."""
+        attrs = {"src": src} if src in CTA_SRCS else {}
+        self._emit("cta_click", "selfhost", attrs)
+        return SELFHOST_URL
+
 
 # ---------------------------------------------------------------------------
 # Pages (no page JS anywhere; all user content html-escaped)
@@ -997,6 +1207,68 @@ def page_expired():
     )
 
 
+def page_forget_button(token, masked):
+    tok = html.escape(token, quote=True)
+    who = html.escape(masked, quote=True)
+    return PAGE_SHELL.format(
+        title="Delete your waitlist entry",
+        body=(
+            # One button, plain form POST — deletion needs no JavaScript,
+            # and the §4.3 GET-never-changes-state rule holds: this page
+            # only renders.
+            "<h1>Delete your waitlist entry</h1>"
+            f"<p>This permanently deletes the waitlist entry for "
+            f"<strong>{who}</strong> — all of its data is gone, and "
+            "rejoining starts you at the back of the line. This can't be "
+            "undone.</p>"
+            '<form action="/waitlist/forget" method="post">'
+            f'<input type="hidden" name="token" value="{tok}">'
+            '<button type="submit">Yes, delete my entry.</button>'
+            "</form>"
+            '<p class="muted">Changed your mind? Just close this page — '
+            "nothing happens until you click the button.</p>"
+        ),
+    )
+
+
+def page_forget_expired():
+    # §5: the forget link is honored ≤7d. A token past that, or a token for
+    # a row that no longer exists, lands here — never an error dump.
+    return PAGE_SHELL.format(
+        title="Link expired",
+        body=(
+            "<h1>Link expired</h1>"
+            "<p>This deletion link is invalid or expired — deletion links "
+            "last 7 days, and a fresh one arrives with every waitlist "
+            "email.</p>"
+        ),
+    )
+
+
+def page_deleted():
+    return PAGE_SHELL.format(
+        title="Deleted",
+        body=(
+            "<h1>Deleted</h1>"
+            "<p>Your waitlist entry is gone — all of its data has been "
+            "deleted. We sent a confirmation email as well.</p>"
+        ),
+    )
+
+
+def page_already_deleted():
+    # Idempotent re-click after the single-use token ran: the entry is
+    # already gone — say so honestly, verbatim with page_deleted's body
+    # minus the email line.
+    return PAGE_SHELL.format(
+        title="Deleted",
+        body=(
+            "<h1>Deleted</h1>"
+            "<p>Your waitlist entry is gone — it was already deleted.</p>"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # HTTP wiring
 # ---------------------------------------------------------------------------
@@ -1047,10 +1319,20 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(status, PAGE_SHELL.format(
             title=title, body=f"<h1>{title}</h1>"))
 
+    def _redirect(self, url):
+        """302 with no body. Referrer stripped — the self-host CTA must not
+        leak the waitlist path's query into the README."""
+        self.send_response(302)
+        self.send_header("Location", url)
+        self.send_header("Content-Length", "0")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Robots-Tag", "noindex, nofollow")
+        self.end_headers()
+
     def do_POST(self):  # noqa: N802
         path = urllib.parse.urlsplit(self.path).path
         fields = self._fields() if path in (
-            "/waitlist/form", "/waitlist/confirm") else {}
+            "/waitlist/form", "/waitlist/confirm", "/waitlist/forget") else {}
         if fields is _OVERSIZED:
             # Engineering deferred blocker (PR #165): on keep-alive
             # connections the unread remainder of an oversized body would
@@ -1071,6 +1353,11 @@ class _Handler(BaseHTTPRequestHandler):
                 fields.get("token")
             )
             self._send(status, body)
+        elif path == "/waitlist/forget":
+            status, body = self.service.forget_post(
+                fields.get("token")
+            )
+            self._send(status, body)
         else:
             self._send(404, PAGE_SHELL.format(
                 title="Not found",
@@ -1083,6 +1370,13 @@ class _Handler(BaseHTTPRequestHandler):
             token = urllib.parse.parse_qs(parts.query).get("token", [None])[0]
             status, body = self.service.confirm_get(token)
             self._send(status, body)
+        elif parts.path == "/waitlist/forget":
+            token = urllib.parse.parse_qs(parts.query).get("token", [None])[0]
+            status, body = self.service.forget_get(token)
+            self._send(status, body)
+        elif parts.path == "/go/selfhost":
+            src = urllib.parse.parse_qs(parts.query).get("src", [None])[0]
+            self._redirect(self.service.cta_selfhost(src))
         else:
             self._send(404, PAGE_SHELL.format(
                 title="Not found",

@@ -37,6 +37,19 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Waitlist forget-me flow (H15 slice 3c): every transactional email footer
+  now carries a signed one-click forget link (7-day, single-use,
+  domain-separated from confirm tokens so the two can never validate at
+  each other's endpoint); the signed link renders a delete-confirmation
+  page and, on POST, atomically deletes the waitlist row, logs the
+  `forgot` funnel event, and spools the spec-mandated deletion
+  confirmation. The marketing page's `/go/selfhost` CTA now has both a
+  no-JavaScript static redirect shim for the static host and a dynamic
+  control-plane route that logs the `cta_click` event before redirecting
+  to the self-host guide. The waitlist form's action posts to the
+  control-plane origin via a deploy-time placeholder the operator fills
+  at launch (a relative action would post to the static host, which has
+  no serving layer). (#190)
 - Secrets posture page (#189): frames the placeholder-swap design as
   independently re-derived — the pattern is convergent across the industry —
   and compares swapd mechanism-by-mechanism against E2B, Daytona, Vercel,

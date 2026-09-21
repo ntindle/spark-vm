@@ -1,6 +1,6 @@
 # site/ — the waitlist-era web surface (H15, surface 1)
 
-**Status: build slices 1–3a of H15 PR 1.** Slice 1 shipped the static
+**Status: build slices 1–3c of H15 PR 1.** Slice 1 shipped the static
 markup (PR #163); slice 2 shipped the backend half of the endpoint surface
 (`site/waitlistd.py` + `scripts/test_waitlistd.py`, 25 tests): `POST
 /waitlist/form`, the §4.3 confirm flow (`GET` renders-only / `POST`
@@ -15,13 +15,23 @@ race the live daemon. The drop deadline is fixed at first submission and
 never refreshed by re-submits; a cap-deferred reminder retries on the next
 run instead of being skipped. Slice 3a also closes the deferred
 Engineering blocker on oversized requests: a 413 now closes the HTTP
-connection instead of risking a desynced keep-alive.
+connection instead of risking a desynced keep-alive. Slice 3b ships the
+30-day post-drop purge (WAITLIST_OPERATIONS.md §5), and slice 3c ships the
+signed forget-me flow plus the `/go/selfhost` routing: every transactional
+email footer carries the §5 signed one-click forget link (7-day, single-use,
+domain-separated token format so confirm tokens can never validate at the
+forget endpoint and vice versa); `GET /waitlist/forget` renders-only and
+`POST /waitlist/forget` atomically deletes the row, emits the `forgot`
+funnel event, and spools the §5-mandated deletion confirmation; the waitlist
+form's action posts to the control-plane origin via the deploy-time
+`<control-plane-origin>` placeholder (see "Deploy-time substitutions"
+below); and the marketing page's `/go/selfhost` CTA has both a static
+redirect shim (`site/go/selfhost/index.html`, no-JS meta refresh for Pages)
+and the dynamic control-plane route (`GET /go/selfhost` → 302 + `cta_click`
+event with canonical `src` validation).
 
 **Not yet (slice 3 remainder = H15 §8's remaining "§7 waitlist-era endpoint
-surface"):** the path-A email parser, the invite sender, the forget-me
-handler, the `/go/selfhost` static redirect shim, and the 30-day
-post-drop purge (WAITLIST_OPERATIONS.md §5 — deferred from this slice's
-drop job, which retains dropped rows for a separate operator pass). The
+surface"):** the path-A email parser and the invite sender. The
 page is still NOT deployable — the dead-form rule holds until every §10
 checklist item is live.
 
@@ -42,6 +52,11 @@ The markup carries placeholders the operator fills when §10 goes live:
 - `https://<host>/` in every `<head>` tag set — the production host.
   No URL shorteners; the image URL must not carry query-string trackers
   (`docs/FUNNEL_MEASUREMENT.md` §5).
+- On `waitlist.html` the form's `action` is
+  `https://<control-plane-origin>/waitlist/form` — the public origin
+  serving `POST /waitlist/form` (the `WAITLIST_PUBLIC_HOST` value). A
+  relative action would post to the static Pages host, which has no
+  serving layer. Substitute at launch; never ship the placeholder raw.
 - On `waitlist.html` the path-A box carries a launch-frame sentence with the
   inbox substitution point recorded in an HTML comment only — no raw
   `{{WAITLIST_INBOX}}` token and no repo-internal doc path in human-facing
@@ -50,9 +65,12 @@ The markup carries placeholders the operator fills when §10 goes live:
 - The pricing-teaser link points at the public thinking doc
   (`docs/PRICING_THINKING.md`); it becomes the pricing page when one exists.
 
-(`/go/selfhost?src=selfhost` is page-build code the loop owns, not operator
-packet: on Pages it needs a static redirect shim. It ships in a later markup
-slice — listed under the remainder below.)
+`/go/selfhost?src=selfhost` is page-build code the loop owns, not operator
+packet: on Pages it needs the static redirect shim
+(`site/go/selfhost/index.html` — a no-JS meta refresh to the public repo's
+self-host section; the target never changes per-deploy, so it is NOT a
+placeholder). The waitlistd control plane serves the same path dynamically
+with a 302 plus the `cta_click` funnel event.
 
 ## og:image provenance
 
@@ -92,15 +110,16 @@ cohort before waitlist-order general invites (no dates), so the page never
 promises what the operator plan doesn't deliver.
 
 **Not yet (H15 PR 1 remainder = H15 §8's "§7 waitlist-era endpoint surface"
-plus markup):** the path-A email parser, the invite sender, the forget-me
-handler, the `/go/selfhost` static redirect shim, and the 30-day
-post-drop purge (WAITLIST_OPERATIONS.md §5). Slices 2–3a already
-ship: `POST /waitlist/form` endpoint, the §4.3 confirm flow (`GET`
-renders-only / `POST` confirms), the HMAC token signer, the +7d reminder
-and 14d drop jobs (cross-process data lock, fixed drop deadline, cap-aware
-retries), and the `funnel_events` logging (`docs/FUNNEL_MEASUREMENT.md`
-§3.4). `scripts/funnel_metrics.py` (PR #141) already ships the consumer
-side of that logging.
+plus markup):** the path-A email parser and the invite sender.
+Slices 2–3c already ship: `POST /waitlist/form` endpoint, the §4.3 confirm
+flow (`GET` renders-only / `POST` confirms), the HMAC token signer, the +7d
+reminder and 14d drop jobs (cross-process data lock, fixed drop deadline,
+cap-aware retries), the 30-day post-drop purge, the signed forget-me flow
+(`GET /waitlist/forget` renders-only / `POST` deletes, single-use 7-day
+forget tokens, deletion confirmation per §5), the `/go/selfhost` static
+redirect shim plus dynamic control-plane route, and the `funnel_events`
+logging (`docs/FUNNEL_MEASUREMENT.md` §3.4). `scripts/funnel_metrics.py`
+(PR #141) already ships the consumer side of that logging.
 
 ## Honesty re-verification (build time, 2026-09-20)
 
