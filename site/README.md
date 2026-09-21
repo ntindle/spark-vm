@@ -34,8 +34,9 @@ event with canonical `src` validation).
 claim route the invite email links to — `GET /waitlist/claim` is the
 signup-era surface (H15 stage 2), not yet served by `waitlistd.py`.
 The page is still NOT deployable — the dead-form rule holds until every
-§10 checklist item is live (the deployed endpoint, the reminder/drop
-cron, the inbox, and now the claim route).
+§10 checklist item is live (including the deployed endpoint, the
+reminder/drop cron, and the inbox — plus the signup-era claim route,
+tracked separately from §10).
 
 ## The dead-form rule (read before deploying anything)
 

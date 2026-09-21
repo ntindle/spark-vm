@@ -506,3 +506,84 @@ def test_cli_claim_live_guard(tmp_path, monkeypatch, capsys):
     service.confirm_post(row["active_token"])
     assert wi.main(argv) == 0
     assert "invited 1 row(s)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Spool-then-commit wave (QA B3): a spool failure must not strand a row
+# ---------------------------------------------------------------------------
+
+
+def test_wave_spool_failure_leaves_row_confirmed(monkeypatch):
+    # A spool-write failure mid-wave (disk-full, crash window) must not
+    # strand the row as invited-without-email and must not consume the
+    # old token. The next wave retries cleanly — no duplicate mail to
+    # rows that already went out.
+    service, tmp, clock = make_service()
+    a = confirm_row(service, "a@example.com", clock,
+                    at=NOW - timedelta(days=2))
+    b = confirm_row(service, "b@example.com", clock,
+                    at=NOW - timedelta(days=1))
+    # B already holds a live invite token (reinvite shape) — it must
+    # survive the failed wave unconsumed.
+    old_token = service.mint_invite_token(b["entry_id"], "b@example.com")
+    b["active_invite_token"] = old_token
+    service._save_row(b)
+
+    real_open = open
+    fail = {"on": True}
+
+    def flaky_open(path, *args, **kwargs):
+        if (fail["on"] and isinstance(path, str)
+                and b["entry_id"] in path and "-invite-" in path):
+            raise OSError("simulated disk-full")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", flaky_open)
+
+    invited = wave(service, count=2, wave="wave1")
+    # A mailed fine; B's spool write failed → B untouched.
+    assert invited == [a["entry_id"]]
+    brow = service.rows[b["entry_id"]]
+    assert brow["status"] == "confirmed"
+    assert "invite_wave" not in brow
+    assert brow["active_invite_token"] == old_token  # not consumed
+    assert old_token not in service.consumed
+    assert len([d for d in spool_docs(tmp)
+                if d.get("kind") == "invite"]) == 1
+
+    # Disk recovers: the next wave retries B cleanly — one new token,
+    # the old one consumed only now, no duplicate mail to A.
+    fail["on"] = False
+    invited = wave(service, count=2, wave="wave2")
+    assert invited == [b["entry_id"]]
+    brow = service.rows[b["entry_id"]]
+    assert brow["status"] == "invited"
+    assert brow["active_invite_token"] != old_token
+    assert old_token in service.consumed
+    invites = [d for d in spool_docs(tmp) if d.get("kind") == "invite"]
+    assert len(invites) == 2
+    assert {d["to"] for d in invites} == {"a@example.com", "b@example.com"}
+
+
+# ---------------------------------------------------------------------------
+# Exact 14-day expiry boundary (QA B4): lookup and rollover agree
+# ---------------------------------------------------------------------------
+
+
+def test_invite_expiry_boundary_exact_14d():
+    # At exactly 14d the token is expired (age >= TTL) — lookup and
+    # the rollover job agree; one second earlier both say live.
+    service, tmp, clock = make_service()
+    row = confirm_row(service, "a@example.com", clock)
+    wave(service, count=1)
+    token = service.rows[row["entry_id"]]["active_invite_token"]
+    clock.advance(seconds=wd.INVITE_TTL_SECONDS - 1)
+    _, status = service.lookup_invite_token(token)
+    assert status == "ok"
+    assert service.rollover_expired_invites() == []
+    assert service.rows[row["entry_id"]]["status"] == "invited"
+    clock.advance(seconds=1)  # exactly 14d after the wave
+    _, status = service.lookup_invite_token(token)
+    assert status == "expired"
+    assert service.rollover_expired_invites() == [row["entry_id"]]
+    assert service.rows[row["entry_id"]]["status"] == "confirmed"

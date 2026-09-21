@@ -294,7 +294,7 @@ If you meant to give it in your first email, put it on its own line
 like this: Owner: you@example.com
 
 Nothing is waitlisted yet, so there's no deletion link in this email —
-reply with the owner address and every email after that carries one.
+reply with the owner address and every email after that carries a deletion link.
 """
 
 # Reply-"forget me" confirmation email (WAITLIST_OPERATIONS.md §5): a
@@ -699,10 +699,28 @@ class WaitlistService:
         row["email_sends"] = recent
         return len(recent) < EMAIL_SEND_CAP
 
+    def _unified_send_allowed(self, row):
+        """The §4 3/24h cap as a union: BOTH the row's email_sends
+        ledger and the path-A "email" ledger must allow the send.
+        Every transactional send is checked against both and recorded
+        in both, so confirm + reminder + invite + clarification +
+        forget-request sends to one address count together, per the
+        normative §4 text. (The path-A ledger sees every send; the row
+        ledger sees only sends to an address with a live row.)"""
+        return (self._email_send_allowed(row)
+                and self._patha_send_allowed(row["owner_email"]))
+
     def _queue_confirm_email(self, row):
         """Spool the confirm email; the operator's sender drains the spool.
-        Returns False when the 3/24h cap suppressed the send."""
-        if not self._email_send_allowed(row):
+        Returns False when the unified 3/24h cap suppressed the send.
+
+        The §4 cap is enforced as the UNION of the row's email_sends
+        ledger and the path-A "email" ledger (see _unified_send_allowed):
+        every send is checked against both and recorded in both, so
+        confirm + reminder + invite + clarification + forget-request
+        sends to one address count together, per the normative §4 text.
+        """
+        if not self._unified_send_allowed(row):
             return False
         token = self.mint_token(row["entry_id"], row["owner_email"])
         link = f"{self.public_host}/waitlist/confirm?token={token}"
@@ -736,6 +754,9 @@ class WaitlistService:
         row["email_sends"] = row.get("email_sends", []) + [
             self.clock().timestamp()
         ]
+        # Union half #2: the path-A ledger sees row-bound sends too, so a
+        # later clarification/forget-request to this address counts them.
+        self._record_patha_event(row["owner_email"], "email")
         self._save_row(row)
         self._emit("confirm_sent", row["entry_id"])
         return True
@@ -798,11 +819,12 @@ class WaitlistService:
         Same link as the confirm email (fresh token only if the live token
         is within 7 days of expiry — at the +7d point a submit-minted token
         has exactly ~7 days left, so the normal case re-mints; a token
-        re-minted by a late re-submit stays). Counts toward the 3/24h cap
-        like every other transactional send. Returns True when the email
-        went out; False when the cap deferred it (the job retries on the
+        re-minted by a late re-submit stays). Counts toward the unified
+        §4 3/24h cap like every other transactional send (union of the
+        row ledger and the path-A ledger — see _unified_send_allowed).
+        Returns True when the email went out; False when the cap deferred it (the job retries on the
         next cron run — the old token stays live, nothing is marked)."""
-        if not self._email_send_allowed(row):
+        if not self._unified_send_allowed(row):
             return False
         old_token = row.get("active_token")
         use_token = None
@@ -850,6 +872,8 @@ class WaitlistService:
         row["email_sends"] = row.get("email_sends", []) + [
             self.clock().timestamp()
         ]
+        # Union half #2 (see _unified_send_allowed).
+        self._record_patha_event(row["owner_email"], "email")
         row["reminder_sent_at"] = iso_z(self.clock())
         self._save_row(row)
         if use_token != old_token and old_token:
@@ -1175,37 +1199,66 @@ class WaitlistService:
                 >= PATHA_INTAKE_LIMIT)
 
     def _patha_send_allowed(self, recipient):
-        """The §4 3/24h transactional-email cap for path-A sends to an
-        address that usually has no row (clarification / forget-request
-        replies go to the sender, not the owner). Row-bound sends keep
-        using the row's email_sends ledger via _email_send_allowed."""
+        """The §4 3/24h transactional-email cap, path-A-ledger half of the
+        union (see _unified_send_allowed). Row-bound sends consult this
+        ledger too, and path-A sends consult the row ledger when the
+        recipient owns a live row — all reply types counted together,
+        per the normative §4 text."""
         return (self._count_patha_events(recipient, "email",
                                          EMAIL_SEND_WINDOW)
                 < EMAIL_SEND_CAP)
 
     def triage_inbound(self, raw, reason):
         """Silent triage for unauthenticated or otherwise unprocessable
-        inbound mail (§2/§6 — no outbound reply, ever, so the parser can
-        never become a backscatter reflector). The raw message plus the
-        loop-generated reason land in the operator data dir's triage/
-        subdir for the operator to eyeball. Returns the triage filename.
+        inbound mail (§2/§6 — no *reply* to an unauthenticated sender,
+        ever, so the parser can never become a backscatter reflector).
+        The raw message plus the loop-generated reason land in the
+        operator data dir's triage/ subdir for the operator to eyeball.
+        Returns the triage filename.
+
+        "No reply" is about replies to the sender (the clarification
+        path). The signup confirm email and the §5 forget-confirmation
+        email are owner-bound double-opt-in / proof-of-inbox challenges,
+        not replies — explicitly spec'd in §2/§4/§5, and bounded by the
+        unified §4 3/24h per-address cap. Accepts bytes or str; bytes
+        are decoded lossily so undecodable input can never crash the
+        write with surrogate escapes.
         """
         triage_dir = os.path.join(self.data_dir, "triage")
         os.makedirs(triage_dir, exist_ok=True)
         name = (f"{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.eml")
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8", errors="replace")
+        elif isinstance(raw, str):
+            text = raw
+        else:
+            text = ""
+        # Never let a lone surrogate (PEP 383 from a str-stdin read, or
+        # any other caller) crash the write: sanitize to U+FFFD first.
+        text = text.encode("utf-8", errors="replace").decode("utf-8")
         with open(os.path.join(triage_dir, name), "w",
                   encoding="utf-8") as fh:
             fh.write(f"X-Waitlist-Triage-Reason: {reason}\n\n")
-            fh.write(raw if isinstance(raw, str) else "")
+            fh.write(text)
         return name
 
     def _spool_patha_email(self, to, subject, body, kind, entry_id=None):
         """Spool a path-A transactional email (clarification reply or
         forget-request confirmation) to the sender's address. The §4
-        3/24h cap is enforced against the path-A ledger. Returns True
-        when the email went out, False when the cap suppressed it."""
+        3/24h cap is enforced as the UNION of the path-A ledger and the
+        row's email_sends ledger (see _unified_send_allowed): the send is
+        checked against both and recorded in both, so path-A replies
+        count together with confirms/reminders/invites to the same
+        address. Returns True when the email went out, False when the
+        cap suppressed it."""
         if not self._patha_send_allowed(to):
+            return False
+        # Union half #1: when the recipient owns a live row, the row's
+        # ledger must allow the send too — otherwise 3 clarifications +
+        # 3 confirms could reach one address inside 24h.
+        row = self._live_row_by_email(to)
+        if row is not None and not self._email_send_allowed(row):
             return False
         doc = {
             "to": to,
@@ -1221,6 +1274,12 @@ class WaitlistService:
                   encoding="utf-8") as fh:
             json.dump(doc, fh, indent=2, sort_keys=True)
         self._record_patha_event(to, "email")
+        if row is not None:
+            # Union half #2: the row ledger sees path-A sends too.
+            row["email_sends"] = row.get("email_sends", []) + [
+                self.clock().timestamp()
+            ]
+            self._save_row(row)
         return True
 
     def spool_clarification(self, sender):
@@ -1250,6 +1309,16 @@ class WaitlistService:
           "forget_request_sent"   — confirmation email spooled
           "forget_request_capped" — the 3/24h cap suppressed the resend
           "no_row"                — sender owns no row; caller triages
+
+        Forget tokens are intentionally NOT rotated on re-mint (unlike
+        confirm tokens): every issued forget link — including the footer
+        links in confirm/reminder/invite emails — must keep validating
+        until used or expired, because forget_get renders a consumed
+        token as "already deleted" and the §5 footer contract promises
+        any received email's link works. Residual is low: tokens are
+        single-use, bound to the owner's inbox, and row deletion kills
+        them all (forget_post consumes the used token; the row lookup
+        fails for the rest).
         """
         with data_lock(self.data_dir), self._lock:
             self._refresh_under_lock()
@@ -1506,7 +1575,7 @@ class WaitlistService:
         Returns (row, status) where status is one of:
           "ok"       — live, unexpired invite on a live invited row
           "consumed" — used, superseded, or otherwise retired
-          "expired"  — issued more than INVITE_TTL_SECONDS (14d) ago
+          "expired"  — issued at least INVITE_TTL_SECONDS (14d) ago
           "invalid"  — malformed, wrong kind, bad HMAC, or the row is
                        not in `invited` status
         """
@@ -1516,7 +1585,7 @@ class WaitlistService:
                 return None, "invalid"
             issued = int(issued_s)
             b64url_decode(sig)  # structural check
-        except (ValueError, Exception):
+        except Exception:
             return None, "invalid"
         row = self.rows.get(entry_id)
         if row is None:
@@ -1535,7 +1604,10 @@ class WaitlistService:
             return None, "consumed"
         if row.get("status") != "invited":
             return None, "invalid"
-        if self.clock().timestamp() - issued > INVITE_TTL_SECONDS:
+        if self.clock().timestamp() - issued >= INVITE_TTL_SECONDS:
+            # Boundary matches rollover_expired_invites (expired when
+            # expiry <= now): at exactly 14d the token is expired and
+            # the row rolls — never "ok" in one and expired in the other.
             return row, "expired"
         return row, "ok"
 
@@ -1543,17 +1615,21 @@ class WaitlistService:
         """Spool the §7 invite email: pricing + trial terms filled at send
         time from the decided pricing (the template never contains
         pricing numbers), the invitee's signed position line ("You held
-        #N in line"), and the claim link. Counts toward the 3/24h cap like
-        every other transactional send. Returns True when the email went
-        out, False when the cap suppressed it (the wave then skips the
-        row — its slot is not consumed)."""
-        if not self._email_send_allowed(row):
+        #N in line"), and the claim link. Counts toward the unified §4
+        3/24h cap like every other transactional send. Returns True when
+        the email went out; False when the cap suppressed it or the
+        spool write failed — the row is then untouched (still confirmed,
+        no token consumed), so the next wave retries it cleanly.
+
+        Spool-then-commit: the old token is consumed and the new token
+        recorded only AFTER the spool write succeeds. Committing first
+        could strand the row as invited-without-email (slot burned until
+        rollover) or leave the user with a consumed old token and no
+        delivered email."""
+        if not self._unified_send_allowed(row):
             return False
         token = self.mint_invite_token(row["entry_id"], row["owner_email"])
         old = row.get("active_invite_token")
-        if old:
-            self._consume_token(old)
-        row["active_invite_token"] = token
         claim_link = f"{self.public_host}/waitlist/claim?token={token}"
         forget_link = (
             f"{self.public_host}/waitlist/forget?token="
@@ -1575,12 +1651,23 @@ class WaitlistService:
         }
         name = (f"{row['entry_id']}-invite-{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.json")
-        with open(os.path.join(self.spool_dir, name), "w",
-                  encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=2, sort_keys=True)
+        try:
+            with open(os.path.join(self.spool_dir, name), "w",
+                      encoding="utf-8") as fh:
+                json.dump(doc, fh, indent=2, sort_keys=True)
+        except OSError:
+            # Spool failed: commit nothing. The old token (if any) stays
+            # live, the minted token is never referenced, and the row is
+            # still confirmed — the next wave retries it cleanly.
+            return False
+        if old:
+            self._consume_token(old)
+        row["active_invite_token"] = token
         row["email_sends"] = row.get("email_sends", []) + [
             self.clock().timestamp()
         ]
+        # Union half #2 (see _unified_send_allowed).
+        self._record_patha_event(row["owner_email"], "email")
         self._save_row(row)
         self._emit("invite_sent", row["entry_id"])
         return True
@@ -1590,15 +1677,20 @@ class WaitlistService:
 
         Invites up to `count` confirmed rows, FIFO by confirmed_at,
         scanning past cap-suppressed rows so a capped head-of-line
-        row never eats a wave slot. Each invited row is marked invited
-        (status, invited_at, invite_expires_at = now + 14d,
-        invite_wave = wave), and the §7 invite email goes out with the
-        pricing/trial terms filled at send time. Emits `invite_sent`
+        row never eats a wave slot. The §7 invite email goes out with
+        the pricing/trial terms filled at send time, and each mailed
+        row is THEN marked invited (status, invited_at,
+        invite_expires_at = now + 14d, invite_wave = wave) —
+        spool-then-mark, so no crash window can strand a row as
+        invited-without-email. Emits `invite_sent`
         (FUNNEL_MEASUREMENT.md §3.4) per mailed row.
 
         Rows past the 3/24h email cap are NOT invited this wave — they
         stay confirmed for a later wave (their slot is not consumed).
-        Returns the invited entry_ids in wave order.
+        A spool-write failure likewise leaves the row confirmed and
+        unconsumed; the wave continues and the CLI's invited count
+        shows fewer than requested — re-running the wave retries those
+        rows cleanly. Returns the invited entry_ids in wave order.
 
         Caller must hold data_lock (the operator CLI does) — like the
         lifecycle jobs' send_reminders/drop_unconfirmed, this method
@@ -1624,23 +1716,22 @@ class WaitlistService:
             if len(invited) >= count:
                 break
             position = rank[row["entry_id"]]
+            # The cap check and the spool write both happen inside
+            # _queue_invite_email BEFORE anything is marked: a capped
+            # row — or a row whose spool write failed — stays confirmed
+            # and keeps its slot for the next wave. (The old
+            # mark-then-unmark dance is gone: nothing is marked before
+            # the email exists.)
+            if not self._queue_invite_email(row, position, pricing_lines,
+                                            trial_terms):
+                continue
             row["status"] = "invited"
             row["invited_at"] = iso_z(now)
             row["invite_expires_at"] = iso_z(
                 now + timedelta(seconds=INVITE_TTL_SECONDS))
             row["invite_wave"] = wave
             self._save_row(row)
-            if self._queue_invite_email(row, position, pricing_lines,
-                                        trial_terms):
-                invited.append(row["entry_id"])
-            else:
-                # Capped: un-mark — the row stays confirmed and eligible
-                # for the next wave.
-                row["status"] = "confirmed"
-                for key in ("invited_at", "invite_expires_at",
-                            "invite_wave", "active_invite_token"):
-                    row.pop(key, None)
-                self._save_row(row)
+            invited.append(row["entry_id"])
         return invited
 
     def rollover_expired_invites(self):
@@ -1755,13 +1846,12 @@ def page_already_invited(owner_raw):
             "<h1>Already invited</h1>"
             f"<p><strong>{addr}</strong> has already been invited off the "
             "waitlist — the claim email went to that address.</p>"
-            "<p>Check your inbox (and spam) for the invite; the claim "
-            "link inside is good for 14 days after it was sent.</p>"
+            "<p>Check your inbox (and spam) for the invite.</p>"
             '<p class="muted">Lost the email? The invite expires 14 days '
             "after it was sent — after that the slot rolls to the next "
             "entry and you rejoin the line at the back, and you&#x2019;ll "
-            "be invited again in a later wave. Re-entering the address "
-            "here won&#x2019;t speed that up.</p>"
+            "be invited again in a later wave, when one runs. Re-entering "
+            "the address here won&#x2019;t speed that up.</p>"
         ),
     )
 

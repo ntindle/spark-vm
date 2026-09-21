@@ -10,16 +10,30 @@ primary) on top of waitlistd.WaitlistService:
       line overrides extraction. Optional: the Muse's ed25519 pubkey
       (single `ssh-ed25519 AAAA…` line — pre-registration hint only) and
       one use-case line (≤280 chars, verbatim).
-    - exactly one candidate → validated row via submit_email (§2/§6:
-      per-owner dedup on the normalized address; re-submits refresh the
-      timestamp; the path-A confirm opener goes out);
+    - exactly one candidate → validated row via submit_email — accepted
+      regardless of the auth verdict. §2/§6: per-owner dedup on the
+      normalized address; re-submits refresh the timestamp; the path-A
+      confirm opener goes out. The confirm email is a double opt-in
+      challenge to the *owner address* (not a reply to the sender):
+      the protection is the human click, per §3 ("Sybil resistance
+      comes from the confirm gate plus launch capacity, not from
+      sender attestation") and §6 ("the confirm gate is what makes
+      spraying worthless"). Third-party mail is bounded by the unified
+      §4 3/24h per-address cap (confirms + reminders + invites +
+      clarifications + forget-requests counted together), so a
+      rotatable From cannot turn the intake into a mail cannon;
     - zero or ≥2 candidates → the §2 clarification reply — ONLY when the
       inbound message passes SPF/DKIM/DMARC alignment on the From domain.
-      Unauthenticated mail is silently triaged (no outbound reply, ever —
-      the parser must never become a backscatter reflector, §6);
+      Unauthenticated ambiguous mail is silently triaged: the parser never
+      sends a *reply* to an unauthenticated sender (§6 — no backscatter).
+      (The signup and forget paths above/below DO send owner-bound mail
+      on unauthenticated input — that is deliberate, not a hole; see the
+      signup and forget bullets.);
     - a reply saying "forget me" → the §5 confirmation email containing
       the signed forget link (never direct deletion — Reply From is
-      forgeable, that's a deletion oracle). Forget intent is checked
+      forgeable, that's a deletion oracle). The confirmation goes to the
+      row's owner — the signed link (proving inbox access), not the
+      From, is what authorizes the deletion. Forget intent is checked
       BEFORE the per-sender intake gate: a spam-prevention limit must
       never swallow a deletion request;
     - per-sender rate limit: 3 submissions / sender / day (§6).
@@ -335,19 +349,25 @@ def load_config(argv):
 
 def main(argv):
     auth, key, data_dir, host, inbox = load_config(argv)
-    raw = sys.stdin.read(MAX_RAW_BYTES + 1)
-    if not raw.strip():
+    # Read BYTES and enforce the cap on byte length: sys.stdin.read()
+    # counts characters, so 1 MiB of 4-byte UTF-8 (4 MiB of raw input)
+    # would slip past a character cap. Decode lossily afterward — the
+    # pipeline triages anything it can't parse, and undecodable input
+    # must never crash the triage write with surrogate escapes.
+    raw_bytes = sys.stdin.buffer.read(MAX_RAW_BYTES + 1)
+    if not raw_bytes.strip():
         sys.stderr.write("waitlist_patha: no message on stdin.\n")
         raise SystemExit(2)
     service = WaitlistService(data_dir, key, host)
-    if len(raw) > MAX_RAW_BYTES:
+    if len(raw_bytes) > MAX_RAW_BYTES:
         # Oversize intake: never parse it, just triage the head for the
         # operator to eyeball. The cap keeps a hostile feed from making
         # the parser chew gigabytes.
         triaged = service.triage_inbound(
-            raw[:MAX_RAW_BYTES], "message exceeds 1 MiB intake cap")
+            raw_bytes[:MAX_RAW_BYTES], "message exceeds 1 MiB intake cap")
         sys.stdout.write(f"waitlist_patha: triage ({triaged})\n")
         return 0
+    raw = raw_bytes.decode("utf-8", errors="replace")
     # submit_email / handle_forget_reply / spool_clarification take the
     # data + thread locks themselves — the single-message CLI holds none.
     result = process_inbound(service, raw, auth=auth, inbox_addr=inbox)

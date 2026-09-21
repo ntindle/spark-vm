@@ -448,19 +448,73 @@ def test_load_config_missing_env(monkeypatch):
     assert exc.value.code == 2
 
 
-def test_oversize_stdin_triaged(tmp_path, monkeypatch, capsys):
-    # Eng m3: a >1 MiB message is triaged, never parsed.
+def _cli_stdin(monkeypatch, tmp_path, payload_bytes):
+    """Point the path-A CLI at a real binary-backed stdin."""
     import io
     data = tmp_path / "data"
-    data.mkdir()
+    data.mkdir(exist_ok=True)
     monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
     monkeypatch.setenv("WAITLIST_DATA", str(data))
     monkeypatch.setenv("WAITLIST_INBOX", INBOX)
     monkeypatch.setattr("sys.stdin",
-                        io.StringIO("x" * (wp.MAX_RAW_BYTES + 100)))
+                        io.TextIOWrapper(io.BytesIO(payload_bytes)))
+    return data
+
+
+def test_oversize_stdin_triaged(tmp_path, monkeypatch, capsys):
+    # Eng m3: a >1 MiB message is triaged, never parsed.
+    data = _cli_stdin(monkeypatch, tmp_path,
+                      b"x" * (wp.MAX_RAW_BYTES + 100))
     assert wp.main(["--auth", "pass"]) == 0
     assert "triage" in capsys.readouterr().out
     assert len(os.listdir(str(data / "triage"))) == 1
+
+
+def test_stdin_byte_boundary(tmp_path, monkeypatch, capsys):
+    # Eng B2 / QA B3: the cap is enforced on BYTES. Exactly 1 MiB
+    # passes through to parsing; 1 MiB + 1 byte triages.
+    msg = make_msg("muse@x.io", "Owner: owner@example.com").encode("utf-8")
+    assert len(msg) < wp.MAX_RAW_BYTES
+    pad = wp.MAX_RAW_BYTES - len(msg)
+    exact = msg + b" " * pad
+    assert len(exact) == wp.MAX_RAW_BYTES
+    _cli_stdin(monkeypatch, tmp_path, exact)
+    assert wp.main(["--auth", "pass"]) == 0
+    assert "accepted" in capsys.readouterr().out
+
+    _cli_stdin(monkeypatch, tmp_path, exact + b" ")
+    assert wp.main(["--auth", "pass"]) == 0
+    assert "triage" in capsys.readouterr().out
+
+
+def test_multibyte_oversize_stdin_triaged(tmp_path, monkeypatch, capsys):
+    # Eng B2: 1 MiB of 4-byte UTF-8 is 4 MiB of raw input — it must
+    # trip the byte cap. (The old sys.stdin.read() character count let
+    # it through.)
+    payload = "😀".encode("utf-8") * (wp.MAX_RAW_BYTES // 4 + 10)
+    assert len(payload) > wp.MAX_RAW_BYTES
+    data = _cli_stdin(monkeypatch, tmp_path, payload)
+    assert wp.main(["--auth", "pass"]) == 0
+    assert "triage" in capsys.readouterr().out
+    assert len(os.listdir(str(data / "triage"))) == 1
+
+
+def test_non_utf8_stdin_triaged_lossily(tmp_path, monkeypatch, capsys):
+    # Eng B2: undecodable input must not crash the pipeline — it is
+    # decoded lossily and handled like any other mail (here: zero owner
+    # candidates on auth=fail → silent triage, with the replacement
+    # character in the triage file).
+    payload = (b"From: muse@x.io\r\nTo: " + INBOX.encode() +
+               b"\r\nSubject: hi\r\n\r\n\xff\xfe not utf-8 \x80\x81\r\n")
+    data = _cli_stdin(monkeypatch, tmp_path, payload)
+    assert wp.main(["--auth", "fail"]) == 0
+    out = capsys.readouterr().out
+    assert "triage" in out
+    triaged = os.listdir(str(data / "triage"))
+    assert len(triaged) == 1
+    with open(str(data / "triage" / triaged[0]), encoding="utf-8") as fh:
+        content = fh.read()
+    assert "\ufffd" in content  # lossy decode marker, no surrogate crash
 
 
 def test_clarification_body_has_no_dead_footer():
@@ -490,3 +544,125 @@ def test_already_invited_patha_noop():
     assert len(service.rows) == before_rows  # no duplicate row
     assert len(spool_docs(tmp)) == before_spool  # no new email
     assert service.rows[row["entry_id"]]["status"] == "invited"
+
+
+# ---------------------------------------------------------------------------
+# Unauthenticated-mail contract (QA B1 resolution: Design option B)
+# ---------------------------------------------------------------------------
+# "No outbound reply, ever" governs *replies to an unauthenticated
+# sender* (the anti-backscatter rule — clarification only on auth=pass).
+# Owner-bound double-opt-in (§2) and forget-confirmation (§5) mail is
+# DELIBERATE on auth=fail input: the signed token link (proving inbox
+# access), not the From, is the authority; third-party spraying is
+# bounded by the unified §4 3/24h per-address cap.
+
+
+def test_unauthenticated_valid_signup_sends_owner_confirm():
+    # The confirm email is a double-opt-in challenge to the OWNER, not
+    # a reply to the sender — it goes out on auth=fail by design (§3:
+    # "Sybil resistance comes from the confirm gate ... not from
+    # sender attestation").
+    service, tmp, clock = make_service()
+    raw = make_msg("muse@x.io", "Owner: owner@example.com")
+    result = wp.process_inbound(service, raw, auth="fail",
+                               inbox_addr=INBOX)
+    assert result["outcome"] == "accepted"
+    docs = spool_docs(tmp)
+    assert len(docs) == 1
+    assert docs[0]["to"] == "owner@example.com"  # owner-bound, not sender
+    row = service.rows[result["entry_id"]]
+    assert row["inbound_auth"] is False
+
+
+def test_unauthenticated_forget_reply_sends_owner_confirmation():
+    # §5: the forget-confirmation email goes to the ROW OWNER on
+    # auth=fail input — the signed link (proving inbox access), not the
+    # From, authorizes the deletion. The reply itself deletes nothing.
+    service, tmp, clock = make_service()
+    raw = make_msg("owner@example.com", "Owner: owner@example.com")
+    created = wp.process_inbound(service, raw, auth="pass",
+                                inbox_addr=INBOX)
+    entry_id = created["entry_id"]
+    forget_raw = make_msg("owner@example.com", "please forget me",
+                          subject="Re: waitlist")
+    result = wp.process_inbound(service, forget_raw, auth="fail",
+                                inbox_addr=INBOX)
+    assert result["outcome"] == "forget_request_sent"
+    assert entry_id in service.rows  # NOT deleted by the reply
+    forget_doc = [d for d in spool_docs(tmp)
+                  if d.get("kind") == "forget_request"][0]
+    assert forget_doc["to"] == "owner@example.com"
+
+
+def test_unauthenticated_forget_unknown_sender_triaged_silently():
+    # No row for the sender → silent triage, zero spool output.
+    service, tmp, clock = make_service()
+    raw = make_msg("stranger@example.com", "forget me please")
+    result = wp.process_inbound(service, raw, auth="fail",
+                                inbox_addr=INBOX)
+    assert result["outcome"] == "triage"
+    assert result["reason"] == "forget_no_row"
+    assert spool_docs(tmp) == []
+
+
+# ---------------------------------------------------------------------------
+# Unified §4 3/24h cap (Eng B1): row + path-A ledgers count together
+# ---------------------------------------------------------------------------
+
+
+def test_unified_cap_counts_clarifications_against_confirms():
+    # 1 confirm + 2 clarifications to one address, then the 4th total
+    # send is suppressed — the old split ledgers allowed 3 + 3 = 6.
+    service, tmp, clock = make_service()
+    raw = make_msg("muse@x.io", "Owner: owner@example.com")
+    created = wp.process_inbound(service, raw, auth="pass",
+                                inbox_addr=INBOX)
+    assert created["outcome"] == "accepted"
+    assert len(spool_docs(tmp)) == 1  # the confirm
+    assert service.spool_clarification("owner@example.com") is True
+    assert service.spool_clarification("owner@example.com") is True
+    # The fourth total send inside 24h is suppressed even though each
+    # old-path ledger alone saw fewer than 3.
+    assert service.spool_clarification("owner@example.com") is False
+    assert len(spool_docs(tmp)) == 3
+
+
+def test_unified_cap_counts_confirms_against_clarifications():
+    # The other direction: path-A sends to an address with no row still
+    # count against the later row's budget once the row exists.
+    service, tmp, clock = make_service()
+    assert service.spool_clarification("owner@example.com") is True
+    assert service.spool_clarification("owner@example.com") is True
+    raw = make_msg("muse@x.io", "Owner: owner@example.com")
+    created = wp.process_inbound(service, raw, auth="pass",
+                                inbox_addr=INBOX)
+    # The confirm is the 3rd total send — allowed; the 4th is not.
+    assert created["outcome"] == "accepted"
+    assert len(spool_docs(tmp)) == 3
+    row = service.rows[created["entry_id"]]
+    assert service._queue_confirm_email(row) is False
+    assert len(spool_docs(tmp)) == 3
+
+
+def test_unified_cap_resets_after_24h():
+    service, tmp, clock = make_service()
+    raw = make_msg("muse@x.io", "Owner: owner@example.com")
+    wp.process_inbound(service, raw, auth="pass", inbox_addr=INBOX)
+    assert service.spool_clarification("owner@example.com") is True
+    assert service.spool_clarification("owner@example.com") is True
+    assert service.spool_clarification("owner@example.com") is False
+    clock.advance(hours=25)
+    # The 48h-pruned ledgers forgot the old sends — mail flows again.
+    assert service.spool_clarification("owner@example.com") is True
+
+
+def test_triage_inbound_accepts_bytes_and_surrogates():
+    # Eng B2: triage_inbound must never crash on non-UTF-8 bytes or
+    # lone surrogates — it decodes lossily / writes safely.
+    service, tmp, clock = make_service()
+    name = service.triage_inbound(b"\xff\xfe binary \x80", "binary")
+    with open(os.path.join(tmp, "triage", name), encoding="utf-8") as fh:
+        assert "\ufffd" in fh.read()
+    name = service.triage_inbound("lone \ud800 surrogate", "surrogate")
+    with open(os.path.join(tmp, "triage", name), encoding="utf-8") as fh:
+        assert "surrogate" in fh.read()

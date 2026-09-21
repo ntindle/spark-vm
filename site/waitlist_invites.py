@@ -5,16 +5,17 @@ slice 3 remainder).
 Implements docs/WAITLIST_OPERATIONS.md §7 (invite waves) on top of
 waitlistd.WaitlistService:
 
-    waitlist_invites.py --send-wave --wave NAME --count N \\
+    waitlist_invites.py --send-wave --wave NAME --count N \
         --pricing-file pricing.txt --trial-terms-file terms.txt
-        the operator opens a wave: the top N confirmed rows FIFO by
-        confirmed_at are marked invited (invite_wave = NAME,
-        invite_expires_at = now + 14d) and the §7 invite email goes out —
-        pricing lines + trial terms filled at send time from the decided
-        pricing (the template never contains pricing numbers; compliance:
-        WAITLIST_OPERATIONS.md §7 + §11). Emits `invite_sent`
-        (FUNNEL_MEASUREMENT.md §3.4) per mailed row. Rows past the 3/24h
-        transactional-email cap stay confirmed for a later wave.
+        the operator opens a wave: up to N confirmed rows FIFO by
+        confirmed_at are mailed the §7 invite email — pricing lines +
+        trial terms filled at send time from the decided pricing (the
+        template never contains pricing numbers; compliance:
+        WAITLIST_OPERATIONS.md §7 + §11) — and marked invited
+        (invite_wave = NAME, invite_expires_at = now + 14d). Emits
+        `invite_sent` (FUNNEL_MEASUREMENT.md §3.4) per mailed row. Rows
+        past the 3/24h transactional-email cap stay confirmed for a
+        later wave.
 
     waitlist_invites.py --rollover
         §7 expiry: unclaimed invites expire 14 days after the wave; the
@@ -184,7 +185,9 @@ def main(argv):
                 sys.stdout.write(
                     f"waitlist_invites: dry-run — {len(eligible)} "
                     f"confirmed row(s) eligible, wave {wave!r} would "
-                    f"invite up to {count}\n")
+                    f"invite up to {count} (rows past the 3/24h email cap "
+                    "stay confirmed — the real wave mails only cap-clear "
+                    "rows)\n")
                 return 0
             invited = service.send_invite_wave(
                 pricing_lines=pricing, trial_terms=terms,
