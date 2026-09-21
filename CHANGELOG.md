@@ -147,6 +147,10 @@ This changelog only works if entries land with the change, not after it:
 - Contributor hygiene: `CONTRIBUTING.md`, `SECURITY.md`
   ([#58](https://github.com/ntindle/spark-vm/pull/58)), MIT `LICENSE`
   ([`52960f0`](https://github.com/ntindle/spark-vm/commit/52960f0))
+- Fly.io driver research for H4: grounds the provider-agnostic provisioning
+  interface and planned contract extensions (suspend/wake, async dial,
+  gpu_class routing, destroy-deletes-volumes) against the real Machines API
+  ([#140](https://github.com/ntindle/spark-vm/pull/140))
 
 ### Changed
 - Identity cleanup: deployment docs use the `ntindle` login account
