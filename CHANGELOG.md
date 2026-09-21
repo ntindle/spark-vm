@@ -49,7 +49,7 @@ This changelog only works if entries land with the change, not after it:
   to the self-host guide. The waitlist form's action posts to the
   control-plane origin via a deploy-time placeholder the operator fills
   at launch (a relative action would post to the static host, which has
-  no serving layer).
+  no serving layer). (#190)
 - Secrets posture page (#189): frames the placeholder-swap design as
   independently re-derived — the pattern is convergent across the industry —
   and compares swapd mechanism-by-mechanism against E2B, Daytona, Vercel,
