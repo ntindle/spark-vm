@@ -14,8 +14,10 @@ Same vocabulary as the other agents this operator manages:
 
 Turn/state detection comes from the `muse-job` Muse plugin's Stop/SessionEnd
 hooks, which append machine-readable events to
-~/.local/share/muse-job/events/<session-uuid>.jsonl. This CLI never scrapes
-the TUI for state; the pane is only read to verify steer delivery.
+~/.local/share/muse-job/events/<session-uuid>.jsonl. The pane is additionally
+read for steer-delivery verification, the issue-#4 dead-pane refusal, and the
+watchdog's binary TUI-liveness probe (live / resume-banner / dead) -- never
+for turn content.
 """
 import argparse
 import fcntl
@@ -479,31 +481,44 @@ def _input_box_has_text(pane, needle):
 
 
 def _pane_shows_live_tui(pane, pane_cmd):
-    """Fail-closed check: is the Muse TUI actually up in this pane?
+    """Fail-closed check: is the Muse TUI actually at its input prompt?
 
     `_steer` used to check only `tmux_alive()` -- never what is in the pane.
     If the TUI has exited or crashed, the pane drops to a bash prompt and a
     pasted steer message is parsed by the shell: `$(...)`, backticks, `;`,
     `|` all execute (issue #4). Two independent signals are required:
 
-    1. Content: the TUI input box (`❯`) is the last non-empty viewport line
-       whenever the TUI is alive and in its normal state. Last-line, not
-       substring: a dead pane can leave a stale `❯` line in scrollback.
-    2. Process: the pane's foreground process must be the TUI itself
-       (`pane_current_command` in `_TUI_COMMANDS`). Content alone is
-       spoofable -- Starship's default prompt character is `❯`, so a dead
-       pane with such a prompt passes signal 1 deterministically. Process
-       identity is not spoofable by pane output.
+    1. Process: the pane's foreground process must be the TUI itself
+       (`_is_tui_process`). Content alone is spoofable -- Starship's default
+       prompt character is `❯`, so a dead pane with such a prompt passes
+       signal 2 deterministically. Process identity is not spoofable by
+       pane output.
+    2. Content: a TUI input-box line (`❯`) is visible in the viewport tail,
+       and none of the TUI's blocking states (resume banner, trust prompt)
+       is showing there. Everything below the input box must be TUI chrome
+       (divider rule / model footer): a shell prompt under a stale `❯` line
+       means the TUI died and the pane dropped to a shell (issue #4).
 
-    Both must hold; anything else (dead TUI, shell prompt, capture failure)
-    refuses.
+    The input box is NOT required to be the viewport's last line: in the
+    TUI's idle state the model footer renders below it. Blocking states are
+    matched on the tail only -- a stale banner scrolled into the upper
+    viewport must not misread a recovered TUI as still dead.
+
+    Anything else (dead TUI, shell prompt, capture failure) refuses.
     """
-    last = None
-    for line in pane.splitlines():
-        s = line.strip()
-        if s:
-            last = s
-    return bool(last) and last.startswith("❯") and pane_cmd in _TUI_COMMANDS
+    if not pane or not _is_tui_process(pane_cmd):
+        return False
+    tail = _pane_tail(pane).splitlines()
+    if any(_RESUME_BANNER_TEXT in line or _TRUST_PROMPT_TEXT in line
+           for line in tail):
+        return False
+    box = None
+    for i, line in enumerate(tail):
+        if line.strip().startswith("❯"):
+            box = i
+    if box is None:
+        return False
+    return all(_tui_chrome_line(l.strip()) for l in tail[box + 1:])
 
 
 def _wait_live_tui(slug, timeout=30):
@@ -534,6 +549,56 @@ def _wait_live_tui(slug, timeout=30):
 _TUI_COMMANDS = frozenset({"muse", "node"})
 
 
+def _is_tui_process(pane_cmd):
+    """True when the pane's foreground process is the Muse TUI itself.
+
+    Version-tolerant: the TUI binary presents as `muse-bin-<version>`
+    (observed muse-bin-1.3.0-R3233.1 and muse-bin-1.3.0-R3401.1) as well as
+    the plain `muse` launcher and `node`. Anything else (bash/sh/zsh/...)
+    means the pane is a shell -- even if its last line starts with `❯`
+    (issue #4). tmux reports the real foreground process name; pane output
+    cannot fake it, so widening the name set does not weaken the
+    anti-spoofing property: the bar is "the fg process really is the TUI
+    binary", not "the name is on a short list".
+    """
+    return pane_cmd in _TUI_COMMANDS or pane_cmd.startswith("muse-bin-")
+
+
+# Viewport tail examined for the TUI's current-state UI (input box, resume
+# banner, trust prompt). These elements always render near the bottom; the
+# upper viewport can hold stale copies (e.g. the banner text remains visible
+# above after a successful /resume), so whole-pane matching would misread a
+# recovered TUI as still dead.
+_VIEWPORT_TAIL_LINES = 12
+
+
+def _pane_tail(pane, n=_VIEWPORT_TAIL_LINES):
+    lines = pane.splitlines()
+    return "\n".join(lines[-n:])
+
+
+def _tui_chrome_line(s):
+    """Non-content lines the TUI renders below its input box: the divider
+    rule and the model footer (`name · plan · <cwd> · YOLO`). Anything else
+    below the input box -- e.g. a shell prompt under a stale `❯` line --
+    means the TUI is not at its input prompt (issue #4)."""
+    return not s or set(s) <= {"─", " "} or "·" in s
+
+
+# Substring of the TUI's own resume hint. If a future TUI version rewords
+# the banner, detection degrades to `tui-dead` (loud, manual remedy) --
+# fail-loud, never silent.
+_RESUME_BANNER_TEXT = "/resume reopens a past session"
+# Exact hint line rendered on the dead-session banner. Recovery is only
+# authorized on this exact line -- see _pane_shows_resume_banner.
+_RESUME_BANNER_LINE = "❯ /resume reopens a past session (--last for the latest)"
+
+# Substring of the TUI's workspace-trust gate ("Do you trust this
+# workspace? ... 1 Trust and continue"). Observed blocking `muse resume`
+# unattended 2026-09-21.
+_TRUST_PROMPT_TEXT = "Do you trust this workspace?"
+
+
 def _capture_pane_state(target):
     """(pane text, foreground process name) for the target's active pane.
 
@@ -559,6 +624,81 @@ def _dead_tui_msg(target, pane):
     tail = "\n".join(pane.splitlines()[-8:]) if pane else "<no pane captured>"
     return (f"pane of {target} does not show a live TUI input box -- refusing "
             f"to steer (issue #4; pane tail:\n{tail})")
+
+
+# --- dead-TUI detection and gentle recovery ---
+# A Muse session can die from underneath the TUI (observed: "model failed:
+# model stream idle timeout after 180000ms"): no Stop/SessionEnd hook fires,
+# the tmux session stays up, and the pane parks at the TUI's session-picker
+# banner ("/resume reopens a past session ..."). Hook-event liveness then
+# stays silent indefinitely while `status` reports session=healthy from
+# stale HEAD.json. The watchdog detects this state and attempts the gentle
+# recovery the banner itself advertises (`/resume --last`), which reopens
+# the SAME session uuid in place -- no kill, no new session, the event
+# stream continues.
+
+# Fixed literal sent to a resume-banner pane. Hardcoded, never
+# agent/user-influenced: even pasted into a misclassified pane it is a
+# command-not-found no-op -- no shell metacharacters, no interpolation.
+_RESUME_BANNER_CMD = "/resume --last"
+
+
+def _pane_shows_resume_banner(pane, pane_cmd):
+    """True when the pane is the TUI's dead-session banner, not a live TUI.
+
+    Two independent signals, same shape as _pane_shows_live_tui:
+    1. Process: the foreground process is still the muse binary. A dead pane
+       that dropped to a shell is NOT this -- never paste there (issue #4).
+    2. Content: the TUI's own resume hint sits on the input-box line in the
+       viewport tail.
+
+    The hint must match EXACTLY (`_RESUME_BANNER_LINE`): the recovery this
+    authorizes reopens the session, so a looser substring could fire on
+    agent-typed text sitting in a live input box.
+    """
+    if not pane or not _is_tui_process(pane_cmd):
+        return False
+    return any(line.strip() == _RESUME_BANNER_LINE
+               for line in _pane_tail(pane).splitlines())
+
+
+def _pane_banner_cleared(pane):
+    """True when the resume banner is gone from the tail and a TUI input box
+    is showing there.
+
+    Recovery-poll predicate only: it decides a boolean (recovered or not),
+    never authorizes pasting agent text. A loose True here cannot cause an
+    unsafe steer -- _steer re-checks _pane_shows_live_tui strictly before
+    any paste.
+    """
+    if not pane:
+        return False
+    tail = _pane_tail(pane)
+    if _RESUME_BANNER_TEXT in tail:
+        return False
+    return any(line.strip().startswith("❯") for line in tail.splitlines())
+
+
+def _recover_resume_banner(slug, timeout=60):
+    """Send the banner's own recovery command and wait for a live TUI.
+
+    Uses raw tmux send-keys (never _steer: _steer refuses dead panes by
+    design, and this pane is definitionally dead). Text and Enter are
+    separate send-keys calls, per the project's tmux input rule. Returns
+    True when the banner clears and a TUI input box is showing afterwards.
+    """
+    target = f"mjob-{slug}"
+    run("tmux", "send-keys", "-t", target, "-l", _RESUME_BANNER_CMD)
+    time.sleep(2)
+    run("tmux", "send-keys", "-t", target, "Enter")
+    deadline = time.time() + timeout
+    while True:
+        pane, _cmd = _capture_pane_state(target)
+        if _pane_banner_cleared(pane):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(5)
 
 
 def _steer(slug, message, verify=True):
@@ -613,8 +753,13 @@ def _steer(slug, message, verify=True):
     if not verify:
         return True
     needle = message.strip().splitlines()[0][:60] if message.strip() else ""
-    time.sleep(4)
-    for _ in range(3):
+    # The TUI can swallow Enters while it settles (observed after a resume:
+    # the paste rendered in the box but several Enters never submitted).
+    # Be patient here rather than declaring failure fast: the loop only
+    # re-sends Enter while our text is still sitting in the box, so once it
+    # submits, the box clears and no stray empty Enters go out.
+    time.sleep(8)
+    for _ in range(5):
         pane, pane_cmd = _capture_pane_state(target)
         # Issue #4, TOCTOU half: the TUI may have died between the pre-send
         # check and the Enter. A dead pane swallows the pasted text into a
@@ -629,7 +774,7 @@ def _steer(slug, message, verify=True):
         # Still sitting in the box (e.g. the paste rendered without
         # committing): try Enter once more.
         run("tmux", "send-keys", "-t", target, "Enter")
-        time.sleep(5)
+        time.sleep(10)
     return False
 
 
@@ -1168,10 +1313,20 @@ def job_status(job, slug):
         progress_age = time.time() - pm
     except OSError:
         progress_age = None
+    # Binary TUI-liveness probe for the watchdog and status render: tmux
+    # alive says nothing about the Muse session inside it (a model-stream
+    # death parks the pane at the TUI's resume banner with no hook event).
+    pane_live, pane_banner = False, False
+    if alive:
+        pane, pane_cmd = _capture_pane_state(f"mjob-{slug}")
+        pane_live = _pane_shows_live_tui(pane, pane_cmd)
+        pane_banner = (not pane_live) and _pane_shows_resume_banner(pane, pane_cmd)
     return {
         "slug": slug,
         "job_state": job.get("state"),
         "tmux_alive": alive,
+        "pane_live_tui": pane_live,
+        "pane_resume_banner": pane_banner,
         # Server-side session creation time: the unspoofable anchor for the
         # liveness grace windows (issue #23, sec review). None when tmux is
         # unreachable; _grace_anchor falls back to the job.json anchor then.
@@ -1215,6 +1370,16 @@ def cmd_status(args):
         # terminal (\r + escape sequences could repaint the rendered line).
         print(f"job {st['slug']}: state={_clean_text(st['job_state'])} tmux={'up' if st['tmux_alive'] else 'down'} "
               f"session={_clean_text(st['session_status'])} bytes={st['bytes_total']} (+{st['bytes_delta']})")
+        if st["tmux_alive"] and not st["pane_live_tui"]:
+            # The session=healthy above comes from HEAD.json and can be
+            # stale for days after a model-stream death; the pane probe is
+            # the ground truth for whether anything can make progress.
+            if st["pane_resume_banner"]:
+                print("  pane: TUI session exited (resume banner shown) -- "
+                      "watchdog will attempt /resume --last")
+            else:
+                print("  pane: TUI not live (no input box; not a resume banner either) -- "
+                      "inspect with `muse-job log`")
         if ev:
             flag = ""
             if ev.get("state") == "done":
@@ -1282,6 +1447,47 @@ def cmd_kill(args):
     return 0
 
 
+# `muse resume <uuid>` failure modes that mean "the old session is gone;
+# start a fresh TUI and continue from git state + prompt.md" instead of
+# reporting a successful resume. The TUI's wording varies across versions --
+# "no retained sessions found for this workspace" was observed 2026-09-21
+# when a model-stream death left no resumable session behind.
+_RESUME_GONE_RE = re.compile(
+    r"session not found|no session found|could not find session|"
+    r"unknown session|no such session|no retained sessions", re.I)
+
+
+def _answer_trust_prompt(slug, timeout=20):
+    """Answer the TUI's workspace-trust prompt if it is showing.
+
+    Called after launching a TUI in the job's own workdir (resume and the
+    fallback-fresh path). The workdir is slug-derived and operator-owned --
+    the job was spawned there -- so selecting "Trust and continue" grants
+    nothing the job's agent doesn't already have through its shell; it only
+    unblocks the TUI boot. Without this, resume hangs at the prompt
+    forever. Text and Enter are separate send-keys calls, per the tmux
+    input rule. Never raises: a missed prompt just leaves the existing
+    behavior (the caller proceeds and its own checks decide).
+    """
+    target = f"mjob-{slug}"
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline:
+            pane = run("tmux", "capture-pane", "-p", "-t", target,
+                       timeout=30).stdout.decode(errors="replace")
+            if _TRUST_PROMPT_TEXT in _pane_tail(pane):
+                run("tmux", "send-keys", "-t", target, "1", timeout=30)
+                time.sleep(1)
+                run("tmux", "send-keys", "-t", target, "Enter", timeout=30)
+                return True
+            if _pane_shows_live_tui(*_capture_pane_state(target)):
+                return False
+            time.sleep(2)
+    except Exception:
+        pass
+    return False
+
+
 def cmd_resume(args):
     job = load_job(args.slug)
     if tmux_alive(args.slug):
@@ -1305,20 +1511,21 @@ def cmd_resume(args):
         "-c", work)
     run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
         f"cd {shquote(work)} && muse resume {shquote(uuid)}", "Enter")
+    _answer_trust_prompt(args.slug)
     time.sleep(15)
     pane = run("tmux", "capture-pane", "-p", "-t", f"mjob-{args.slug}").stdout.decode(
         errors="replace")
     # Only fall back on a genuine "session not found" style message. The old
     # pattern included a bare "error", which normal TUI output (e.g.
     # "0 errors", a filename) could trigger -- abandoning a good session.
-    if re.search(r"session not found|no session found|could not find session|"
-                 r"unknown session|no such session", pane, re.I):
+    if _RESUME_GONE_RE.search(pane):
         # Fallback: fresh TUI, continue from git state.
         run("tmux", "send-keys", "-t", f"mjob-{args.slug}", "q")
         time.sleep(2)
         t0 = time.time()
         run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
             f"cd {shquote(work)} && muse --yolo", "Enter")
+        _answer_trust_prompt(args.slug)
         time.sleep(8)
         _steer(args.slug, "Continue the job described in ../prompt.md. "
                "Review git state (git log, git status, git diff) and PROGRESS.md, "
@@ -1428,6 +1635,38 @@ def cmd_watch(args):
                 events.append({"job": slug, "signal": "needs-attention",
                                "detail": f"tmux dead and resume failed: {e}"})
             return
+
+        # Dead-TUI detection: tmux is up but the Muse session inside it has
+        # exited (a model-stream death parks the pane at the TUI's resume
+        # banner; a crashed TUI drops to a shell). No hook ever fires for
+        # this, so without this check the job reads "active/healthy"
+        # indefinitely while nothing can make progress. No early return:
+        # the hook-telemetry signals below stay independent (fail-loud
+        # allows several signals per pass), and the recovery attempt only
+        # fires on the narrow resume-banner shape.
+        if not st["pane_live_tui"]:
+            if st["pane_resume_banner"]:
+                try:
+                    if _recover_resume_banner(slug):
+                        events.append({"job": slug, "signal": "tui-recovered",
+                                       "detail": "TUI session had exited to the resume banner; "
+                                                 "sent /resume --last and the TUI is live again"})
+                    else:
+                        events.append({"job": slug, "signal": "tui-unrecovered",
+                                       "detail": "TUI session exited to the resume banner; "
+                                                 "/resume --last did not restore a live TUI "
+                                                 "-- operator remedy: muse-job kill <slug>, then "
+                                                 "muse-job resume <slug>"})
+                except Exception as e:
+                    events.append({"job": slug, "signal": "tui-unrecovered",
+                                   "detail": f"resume-banner recovery raised: {e}"})
+            else:
+                events.append({"job": slug, "signal": "tui-dead",
+                               "detail": "tmux alive but the TUI is not live and no resume "
+                                         "banner is shown -- pane may be a shell or a crashed TUI; "
+                                         "refusing to send anything (issue #4). Operator remedy: "
+                                         "inspect with muse-job log, then muse-job kill <slug> "
+                                         "and muse-job resume <slug>"})
 
         if not job.get("session_uuid"):
             # Spawn's 90s uuid discovery can miss a slow first model call.
