@@ -41,6 +41,22 @@ This changelog only works if entries land with the change, not after it:
   deletes dropped waitlist rows 30 days after the drop (the §5 retention
   rule), via an atomic `rows.jsonl` rewrite under the same data lock as
   the reminder/drop jobs — the funnel events stay as the audit trail.
+- Automated test suites for the two components that had none: `cua/`
+  gets unit tests for the desktop bridge's window-picking, CSRF/host
+  allowlist, and launch allowlist (the driver's own calls are stubbed)
+  plus syntax and shellcheck gates over its shell scripts, and `jail/`
+  gets a build-script smoke test — `build.sh --help` now executes the
+  real script's argument parsing and exits before any side effect — plus
+  the same script gates. Contributor docs updated; the single test
+  command `python3 -m pytest` now covers every component
+  ([#PR](https://github.com/ntindle/spark-vm/pull/PR)).
+- Manifest tests stop failing on dirty checkouts: the seven
+  `test_manifest.py` tests that shell out to
+  `generate-image-manifest.sh` (which refuses by design when the tree
+  has uncommitted changes) now skip with an explicit "commit or stash"
+  reason instead of failing cry-wolf red; a clean checkout — including
+  CI — still runs all twelve
+  ([#PR](https://github.com/ntindle/spark-vm/pull/PR)).
 - H4 provider interface contract: the provider-agnostic driver every
   sandbox backend implements, reconciling the H3 signup design, the
   suspend/wake and Fly/GPU provider research, and the #47 lifecycle

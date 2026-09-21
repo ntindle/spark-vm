@@ -5,10 +5,37 @@ import os
 import shutil
 import subprocess
 
+import pytest
+
 HARNESS = os.path.dirname(os.path.abspath(__file__))
 GEN = os.path.join(HARNESS, "generate-image-manifest.sh")
 CHECK = os.path.join(HARNESS, "check-image-manifest.sh")
 SCHEMA = "sparkvm/golden-image-manifest@1"
+
+
+def _checkout_is_clean():
+    # Mirrors the generator's own dirty check (status.showUntrackedFiles
+    # forced: an ambient gitconfig could otherwise hide untracked files).
+    r = subprocess.run(
+        ["git", "-C", os.path.join(HARNESS, ".."),
+         "-c", "status.showUntrackedFiles=normal",
+         "status", "--porcelain"],
+        capture_output=True, text=True, timeout=30)
+    return r.returncode == 0 and not r.stdout.strip()
+
+
+@pytest.fixture(autouse=True)
+def _skip_generate_tests_on_dirty_checkout(request):
+    # generate-image-manifest.sh refuses (exit 2, by design) on a dirty
+    # checkout: image_version must attest exactly what was baked. The
+    # marked tests shell out to the real generator, so on a dirty working
+    # tree they cannot run — skip explicitly (with the remedy) instead of
+    # failing cry-wolf red. CI checks out clean, so it always runs them.
+    if (request.node.get_closest_marker("needs_clean_checkout")
+            and not _checkout_is_clean()):
+        pytest.skip(
+            "checkout has uncommitted changes; generate-image-manifest.sh "
+            "refuses by design on a dirty tree — commit or stash to run")
 
 
 def git_head():
@@ -18,6 +45,7 @@ def git_head():
     ).stdout.strip()
 
 
+@pytest.mark.needs_clean_checkout
 def test_generate_emits_valid_manifest(tmp_path):
     out = tmp_path / "manifest.json"
     p = subprocess.run([GEN, "--out", str(out)], capture_output=True,
@@ -40,6 +68,7 @@ def test_generate_emits_valid_manifest(tmp_path):
     assert "hsurr:" not in blob or "hsurr:<name>" in blob
 
 
+@pytest.mark.needs_clean_checkout
 def test_check_passes_fresh_manifest(tmp_path):
     out = tmp_path / "manifest.json"
     subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
@@ -50,6 +79,7 @@ def test_check_passes_fresh_manifest(tmp_path):
     assert "OK" in p.stderr
 
 
+@pytest.mark.needs_clean_checkout
 def test_check_fails_on_version_drift(tmp_path):
     out = tmp_path / "manifest.json"
     subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
@@ -63,6 +93,7 @@ def test_check_fails_on_version_drift(tmp_path):
     assert "DRIFT" in p.stderr
 
 
+@pytest.mark.needs_clean_checkout
 def test_check_fails_on_expect_version_mismatch(tmp_path):
     out = tmp_path / "manifest.json"
     subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
@@ -73,6 +104,7 @@ def test_check_fails_on_expect_version_mismatch(tmp_path):
     assert "DRIFT" in p.stderr
 
 
+@pytest.mark.needs_clean_checkout
 def test_check_fails_on_missing_keys(tmp_path):
     out = tmp_path / "manifest.json"
     subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
@@ -116,6 +148,7 @@ def _fresh_manifest(tmp_path):
     return out
 
 
+@pytest.mark.needs_clean_checkout
 def test_check_fails_on_nested_missing_subkeys(tmp_path):
     out = _fresh_manifest(tmp_path)
     m = json.loads(out.read_text())
@@ -128,6 +161,7 @@ def test_check_fails_on_nested_missing_subkeys(tmp_path):
     assert "missing keys" in p.stderr
 
 
+@pytest.mark.needs_clean_checkout
 def test_check_fails_cleanly_on_non_string_version(tmp_path):
     out = _fresh_manifest(tmp_path)
     m = json.loads(out.read_text())

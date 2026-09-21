@@ -27,6 +27,16 @@ CIDR=30
 JAIL_SSH_PORT=2222          # on the tailnet interface only
 REBUILD_ROOTFS=0
 for a in "$@"; do [ "$a" = "--rebuild-rootfs" ] && REBUILD_ROOTFS=1; done
+# Help/usage path: render the header doc and exit BEFORE any side
+# effect. Nothing below this point is safe on a dev box (sudo,
+# /var/lib/machines, veth, nftables), so --help is also the script's
+# CI smoke test (see jail/test_build_smoke.py).
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    awk 'NR==1{next} /^$/{exit} {print}' "$0"
+    echo ""
+    echo "usage: build.sh [--rebuild-rootfs] [--help]"
+    exit 0
+fi
 
 SUDO="sudo"
 say() { echo "==> $*"; }
