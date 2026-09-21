@@ -58,6 +58,13 @@ This changelog only works if entries land with the change, not after it:
   control-plane origin via a deploy-time placeholder the operator fills
   at launch (a relative action would post to the static host, which has
   no serving layer). (#190)
+- C17 resolution — boat.dev 16-vCPU caveat confirmed as current vendor
+  policy (docs/COMPETITOR_WATCH_2026-09-21_C17.md): the pricing page still
+  footnotes xlarge as needing a $100+/mo plan plus operator capacity
+  allocation, so any 16-vCPU hosted sizing must confirm capacity with the
+  provider first; the baseline rate card is unchanged ($0.036/h default,
+  stopped sandboxes free, $26 for one default running the whole month).
+  (PR TBD)
 - Secrets posture page (#189): frames the placeholder-swap design as
   independently re-derived — the pattern is convergent across the industry —
   and compares swapd mechanism-by-mechanism against E2B, Daytona, Vercel,
