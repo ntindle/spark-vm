@@ -88,15 +88,16 @@ last updated ~Sep 14 — both pre-window, so this is not an in-window
 delta, but the baseline never listed it. Filed as watch item **C18**
 in BACKLOG.md.
 
-Why it matters for spark-vm: this is the first open-source competitor
-in the tracked set that pairs a control plane with an egress-bound
-credential vault and a pluggable execution adapter — the closest
-open-source shape to spark-vm's own swapd-proxy posture plus the
-harness execution model. It belongs in the next corpus consolidation
-pass (the credential-vault + host-bound-egress design is directly
-comparable to spark-vm's secrets-posture doc and the R6 corpus work),
-and its OpenSandbox adapter choice is data for the H4 provider-adapter
-discussions. No urgency: pre-window launch, docs stable since Sep 14.
+**INFERRED** — why it matters for spark-vm: this is the first
+open-source competitor in the tracked set that pairs a control plane
+with an egress-bound credential vault and a pluggable execution adapter
+— the closest open-source shape to spark-vm's own swapd-proxy posture
+plus the harness execution model. It belongs in the next corpus
+consolidation pass (the credential-vault + host-bound-egress design is
+directly comparable to spark-vm's secrets-posture doc and the R6 corpus
+work), and its OpenSandbox adapter choice is data for the H4
+provider-adapter discussions. No urgency: pre-window launch, docs stable
+since Sep 14.
 
 ## 3. Standing items
 
