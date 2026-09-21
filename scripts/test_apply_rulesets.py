@@ -159,6 +159,14 @@ class TestApplyScript(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("GITHUB_TOKEN", p.stderr)
 
+    def test_execute_requires_yes_even_with_token(self):
+        # --execute without --yes must refuse BEFORE any network call.
+        p = self.run_script("--file", "deploy/rulesets/tag-protection-vstar.json",
+                            "--execute", env_token="ghp_faketoken1234567890")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--execute needs --yes", p.stderr)
+        self.assertNotIn("ghp_faketoken1234567890", p.stdout + p.stderr)
+
     def test_check_without_token_refuses(self):
         p = self.run_script("--file", "deploy/rulesets/tag-protection-vstar.json", "--check")
         self.assertNotEqual(p.returncode, 0)

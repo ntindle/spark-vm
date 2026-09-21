@@ -19,7 +19,11 @@ one auditable command; no automation applies these.
   files — they share the ruleset name `release-tag-protection`, so applying
   one replaces the other. The strict variant breaks the documented manual
   path (`cut-release.sh --execute` from a dev machine); use it only if you
-  are comfortable cutting every release through the workflow.
+  are comfortable cutting every release through the workflow. Note: GitHub
+  bypass is all-or-nothing — this also exempts the workflow actor from the
+  update/deletion rules, so any workflow running as `github-actions[bot]`
+  can move or delete `v*` tags. Prefer the base variant if that trade-off
+  is unacceptable.
 - `main-branch-protection.json` — **main branch protection** (owner proposal
   from issue #138). Blocks branch deletion and force-pushes, requires every
   change to land via PR, and requires all four CI checks green on an

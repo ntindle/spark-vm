@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
         --file)  FILE="${2:?--file needs a path}"; shift 2 ;;
         --check) MODE=check; shift ;;
         --execute) MODE=execute; shift ;;
-        --yes) shift ;;  # acknowledgement flag, like cut-release.sh
+        --yes) CONFIRM=1; shift ;;  # acknowledgement flag, like cut-release.sh
         --owner) OWNER="${2:?--owner needs a value}"; shift 2 ;;
         --repo)  REPO="${2:?--repo needs a value}"; shift 2 ;;
         -h|--help) usage 0 ;;
@@ -45,6 +45,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$FILE" ]] || { echo "apply-rulesets.sh: --file is required" >&2; usage 1; }
+if [[ "$MODE" == "execute" && "${CONFIRM:-}" != "1" ]]; then
+    echo "apply-rulesets.sh: --execute needs --yes (re-run with --yes to confirm)" >&2
+    exit 1
+fi
 [[ -f "$FILE" ]] || { echo "apply-rulesets.sh: file not found: $FILE" >&2; exit 1; }
 # jq validates the JSON and compacts it for transport in one pass.
 PAYLOAD="$(jq -c . "$FILE" 2>/dev/null)" \
@@ -82,7 +86,7 @@ normalize() {
 }
 
 live_rulesets() {
-    api GET "/repos/$OWNER/$REPO/rulesets"
+    api GET "/repos/$OWNER/$REPO/rulesets?per_page=100"
 }
 
 live_match() { # prints the live ruleset id whose name == $NAME, or nothing
