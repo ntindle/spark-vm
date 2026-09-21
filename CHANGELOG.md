@@ -42,7 +42,7 @@ This changelog only works if entries land with the change, not after it:
   rule), via an atomic `rows.jsonl` rewrite under the same data lock as
   the reminder/drop jobs — the funnel events stay as the audit trail.
 - Automated test suites for the two components that had none: `cua/`
-  gets 27 test cases for the desktop bridge's window-picking, CSRF/host
+  gets 35 test cases for the desktop bridge's window-picking, CSRF/host
   allowlist, and launch allowlist (the driver's own calls are stubbed)
   plus syntax and shellcheck gates over its shell scripts, and `jail/`
   gets a build-script smoke test — `build.sh --help` now executes the

@@ -28,13 +28,20 @@ BUILD_SH = os.path.join(REPO_ROOT, "jail", "build.sh")
 # Statement kinds that are provably side-effect-free: anything else above
 # the --help branch is treated as a potential side effect and fails
 # test_help_branch_precedes_all_side_effects.
+# NOTE: every pattern is full-line anchored ($). The earlier prefix-match
+# versions let side-effecting statements sail through (e.g. a one-line
+# `for` with an arbitrary body, `VAR=val cmd` env-prefix execution, or
+# `set -euo pipefail; touch /tmp/pwned` chained after an allowed prefix).
 _SIDE_EFFECT_FREE = (
-    re.compile(r"^set\s"),                                        # set -euo pipefail
-    re.compile(r"^(readonly|export|declare|local)?\s*"             # VAR=...
-               r"[A-Za-z_][A-Za-z0-9_]*="),
-    re.compile(r"^for\s+\w+\s+in\b.*\bdo\b.*\bdone\s*$"),         # one-line for
-    re.compile(r"^\[.*\]\s*(&&|\|\|)\s*"                          # [ .. ] && VAR=...
-               r"[A-Za-z_][A-Za-z0-9_]*="),
+    re.compile(r"^set(?:\s+[a-zA-Z-]+)+\s*$"),
+    re.compile(r"^(?:(?:readonly|export|declare|local)\s+)?"
+               r"(?:[A-Za-z_][A-Za-z0-9_]*="
+               r"(?:\"[^\"]*\"|'[^']*'|[^\s;|&(){}]*)\s*)+$"),
+    re.compile(r"^for\s+\w+\s+in\b.*\bdo\s+"
+               r"(?:\[.*?\]\s*(?:&&|\|\|)\s*)?"
+               r"[A-Za-z_][A-Za-z0-9_]*=\S*\s*;\s*done\s*$"),
+    re.compile(r"^\[.*\]\s*(?:&&|\|\|)\s*"
+               r"[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s*$"),
 )
 
 
