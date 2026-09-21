@@ -37,6 +37,11 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Push notifications now survive a dead push service: swapd enqueues every
+  filed approval and a standalone push worker (`push-worker.service`)
+  delivers with exponential-backoff retry, dead-lettering only after 8
+  failed attempts with a loud log line. Both-supported: the worker runs
+  wherever the deployment lives, like confirmd. (PR #TBD)
 - Competitor watch 2026-09-21 (docs/COMPETITOR_WATCH_2026-09-21.md): quiet
   window — no launches, pricing changes, partner moves, or version bumps
   across the tracked set since the 2026-09-20 pass; boat.dev's rate card

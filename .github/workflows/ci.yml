@@ -2,7 +2,7 @@
 #
 # Run locally with:
 #   cd proxy   && python3 -m pytest test_swap_addon.py test_grant_writer.py test_round6.py
-#   cd confirm && python3 -m pytest test_confirmd.py
+#   cd confirm && python3 -m pytest test_confirmd.py test_push.py test_push_queue.py
 #   cd deploy  && python3 -m pytest test_auto_deploy.py
 #   cd muse-job && python3 -m pytest tests/test_event_trust.py
 #   python3 -m pytest cred-ui/tests/ -q
@@ -35,6 +35,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest
+      # test_push.py imports the cryptography package at module level
+      # (the push tests exercise the real RFC 8291 encrypt/decrypt round
+      # trip); the runner image doesn't carry it.
+      - name: install cryptography (push tests)
+        run: pip install cryptography
       # test_auto_deploy.py::test_scripts_syntax gates on shellcheck warnings;
       # pin it explicitly rather than relying on the runner image carrying it.
       # (2026-09-18: the runner-preinstalled shellcheck caught 5 warnings the
@@ -46,7 +51,7 @@ jobs:
         working-directory: proxy
       - name: confirmd tests
         if: always()
-        run: python3 -m pytest test_confirmd.py -q
+        run: python3 -m pytest test_confirmd.py test_push.py test_push_queue.py -q
         working-directory: confirm
       - name: auto-deploy tests
         if: always()

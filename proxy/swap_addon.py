@@ -210,19 +210,25 @@ def _load_push_module():
 
 def _push_notify(item):
     """H2 (GitHub #2): VAPID push for a newly filed approval.
+    H14 (part a): enqueue for the standalone push worker instead of
+    sending inline.
 
     Fail-open: never raises — a push failure must never lose the filed
-    approval. Runs on a daemon thread: QA review found that synchronous
-    sequential sends (15s timeout each) on the mitmproxy flow thread
-    could stall the agent's already-refused request by 15s×N on a dead
-    push service. Fire-and-forget keeps the hot path fast; the push
-    module's own fail-open + idempotency semantics still apply.
+    approval. Runs on a daemon thread: enqueue is one locked append, but
+    keeping it off the flow thread preserves the H2 fire-and-forget
+    guarantee (and a poisoned queue file can't stall the agent's
+    already-refused request). The worker (`push.py --worker`) does the
+    sends with exponential-backoff retry; transient failures are retried,
+    not dropped.
     """
     def _run():
         try:
-            _load_push_module().PushSender.default().notify_approval(item)
+            res = _load_push_module().PushQueue.default().enqueue(item)
+            if res not in ("queued", "duplicate", "notified"):
+                log.warning("swap: push enqueue returned %s for approval %s",
+                            res, item.get("id"))
         except Exception:
-            log.exception("swap: VAPID push failed for approval %s",
+            log.exception("swap: push enqueue failed for approval %s",
                           item.get("id"))
     t = threading.Thread(target=_run, name="swap-push-notify", daemon=True)
     t.start()

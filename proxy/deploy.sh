@@ -63,6 +63,7 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/safe_install.py \
          proxy/swap-proxy.service proxy/swap-inference.service \
          confirm/confirmd.py confirm/confirm-request confirm/confirmd.service \
+         confirm/push-worker.service \
          VERSION scripts/sparkvm_version.py; do
     if [ ! -f "$f" ]; then
         echo "ERROR: required repo file missing: $f — aborting before any mutation"
@@ -230,6 +231,7 @@ echo "[5/7] Installing systemd units..."
 sudo install -o root -g root -m 0644 proxy/swap-proxy.service /etc/systemd/system/swap-proxy.service
 sudo install -o root -g root -m 0644 proxy/swap-inference.service /etc/systemd/system/swap-inference.service
 sudo install -o root -g root -m 0644 confirm/confirmd.service /etc/systemd/system/confirmd.service
+sudo install -o root -g root -m 0644 confirm/push-worker.service /etc/systemd/system/push-worker.service
 
 # --- 6. sudoers -------------------------------------------------------------
 echo "[6/7] Installing sudoers..."
@@ -257,10 +259,11 @@ if [ "$NO_RESTART" = "1" ]; then
 fi
 echo "[7/7] Reloading systemd and restarting services..."
 sudo systemctl daemon-reload
-sudo systemctl enable swap-proxy.service swap-inference.service confirmd.service
+sudo systemctl enable swap-proxy.service swap-inference.service confirmd.service push-worker.service
 sudo systemctl restart swap-proxy.service
 sudo systemctl restart swap-inference.service
 sudo systemctl restart confirmd.service
+sudo systemctl restart push-worker.service
 
 echo ""
 echo "=== verifying ==="

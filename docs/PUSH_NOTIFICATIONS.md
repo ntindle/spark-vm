@@ -60,12 +60,52 @@ secrets ever live in the repo.
    notifications for the site in the browser's site settings, then retry.
 
 4. **Notify (automatic):** when swapd files an approval
-   (`swap_addon._file_approval`), `_push_notify` fires
-   `PushSender.default().notify_approval(item)` on a **daemon thread** —
-   never on the mitmproxy flow thread, so a dead push service can't stall
-   the agent's request (15s timeout × N subscriptions). One encrypted
-   push per stored subscription. The service worker (`/sw.js`) shows the
-   notification; tapping it opens `/approval/<id>`.
+   (`swap_addon._file_approval`), `_push_notify` enqueues it —
+   `PushQueue.default().enqueue(item)` on a **daemon thread**, one locked
+   append to the durable queue journal
+   (`$CONFIRM_DIR/push-queue.jsonl`), never on the mitmproxy flow thread.
+   The standalone push worker (`push.py --worker`, shipped as
+   `push-worker.service`) picks due entries up and sends one encrypted
+   push per stored subscription, with exponential-backoff retry on
+   transient failures (1m → 2m → 4m → 8m → 16m → 30m → 30m, then
+   dead-letter). The service worker (`/sw.js`) shows the notification;
+   tapping it opens `/approval/<id>`.
+
+## The push worker (H14 part a)
+
+`push.py --worker` is the standalone push service: it loops
+(`--worker-interval`, default 30s), claims due queue entries under an
+exclusive lock (claimed entries get a 300s lease so a crashed worker
+can't double-send — claims self-heal after the lease), and delivers
+each with the exact same wire payload as the inline path (shared
+builder). Outcomes:
+
+- **All subscriptions delivered (or pruned):** the entry is removed and
+  the approval id is written to the notified log — no re-alert, ever.
+- **Transient failure** (timeout, 5xx, connection error): the entry is
+  rescheduled with backoff; the loud warning line names the attempt
+  count and the next retry.
+- **Permanent subscription death** (push service returns 404/410): the
+  subscription is pruned from the store; the entry still completes.
+- **8 failed attempts:** the entry is dead-lettered to
+  `$CONFIRM_DIR/push-queue-dead.jsonl` with a loud `ERROR` line — the
+  operator signal. The approval itself is unaffected (it was filed and
+  answered normally); only the notification was lost.
+
+Runbook:
+
+```sh
+sudo systemctl status push-worker            # the service (enabled by deploy.sh)
+sudo -u swapd python3 /home/swapd/push.py --worker-once   # one pass, prints stats
+tail -1 /home/swapd/approvals/push-queue-dead.jsonl      # dead letters
+```
+
+A dead-lettered approval can be re-filed (or its notified mark cleared)
+to re-enqueue it. With push disabled (no keys / no `cryptography`) the
+worker skips passes loudly and entries stay queued — they deliver once
+the operator configures keys. The journal, dead-letter file, and their
+lock sidecars are created mode 0600 and carry approval ids + summaries
+only — never secrets.
 
 ## Security notes
 
@@ -95,8 +135,9 @@ secrets ever live in the repo.
   double-notify. **Idempotency does NOT fire on total transient
   failure:** if every send raised or returned a retryable error, the
   approval is deliberately left unmarked — marking it would silently drop
-  the notification (the error is logged loudly instead). There is no
-  retry path yet (see H14).
+  the notification. The error is logged loudly, and the entry stays
+  queued (or is rescheduled with backoff) so the push worker retries it
+  — the worker is the retry path the idempotency note used to defer.
 - **Race safety:** the subscription store and the notified log are
   mutated from two processes (confirmd's ThreadingHTTPServer and
   mitmproxy's swap_addon) and concurrent threads, so mutations hold an
@@ -126,12 +167,13 @@ secrets ever live in the repo.
 | `CONFIRM_VAPID_KEYS` | `/home/swapd/confirmd/vapid.json` | VAPID keypair JSON |
 | `CONFIRM_PUSH_SUBS` | `$CONFIRM_DIR/push-subscriptions.json` | subscription store |
 | `CONFIRM_VAPID_SUB` | `mailto:confirmd@localhost` | VAPID `sub` contact claim |
+| `CONFIRM_PUSH_QUEUE` | `$CONFIRM_DIR/push-queue.jsonl` | worker queue journal |
+| `CONFIRM_PUSH_DEAD` | `$CONFIRM_DIR/push-queue-dead.jsonl` | dead-letter file |
 
 ## Follow-ups (not this slice)
 
-- H14 (push service): a standalone push service with enqueue/hook
-  semantics instead of the in-`_file_approval` call.
-- Per-tenant subscription scoping (needs H10/H11).
+- H14 part b: confirmd approval-created hook + per-tenant subscription
+  scoping (needs H10/H11's tenant model).
 - iOS Safari note: Web Push on iOS requires the page added to the home
   screen; the status line says so explicitly (the button stays hidden).
 - Custom notification icon/badge in the service worker (currently
