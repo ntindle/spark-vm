@@ -401,10 +401,50 @@ def _host_in_list(host, entries):
     Trailing dots are stripped on both sides: DNS treats
     "example.com." as identical to "example.com", so without this a
     one-character suffix bypassed the ssrf.deny name entries (the
-    finding-47 self-peer guard)."""
-    h = (host or "").lower().split(":")[0].rstrip(".")
+    finding-47 self-peer guard).
+
+    IP literals (v4 and v6) are compared as normalized addresses, never
+    run through the hostname rules: splitting "::1" on ":" yields ""
+    and made every IPv6 literal unmatchable (issue #257 -- a "::1"
+    allowed_hosts entry was dead config, and enforcement checks built
+    on this function were blind to ::1). A single bracket pair is
+    stripped first ("[::1]", "[::1]:8080"); a trailing dot is stripped
+    too, so "::1." matches "::1". Hostname entries never match an IP
+    literal host, and CIDR entries never match here (they are
+    _parse_ssrf_allow's nets, not _host_in_list's entries)."""
+    h = (host or "").lower()
+    # Bracketed IPv6 literal, optionally with a :port (urllib's
+    # .hostname already strips these, but the matcher is also called
+    # directly with raw URL hosts).
+    if h.startswith("["):
+        end = h.find("]")
+        if end != -1:
+            h = h[1:end]
+    h = h.rstrip(".")
+    try:
+        h_ip = ipaddress.ip_address(h)
+    except ValueError:
+        h_ip = None
+    if h_ip is None:
+        # Hostname path: strip a :port suffix (the finding-47 shape);
+        # an IPv6 literal that failed parsing has no port to strip and
+        # simply falls through to a (non-)match below.
+        h = h.split(":")[0]
     for entry in entries or []:
-        e = str(entry).lower().rstrip(".")
+        e = str(entry).lower()
+        if e.startswith("["):
+            end = e.find("]")
+            if end != -1:
+                e = e[1:end]
+        e = e.rstrip(".")
+        if h_ip is not None:
+            try:
+                e_ip = ipaddress.ip_address(e)
+            except ValueError:
+                continue
+            if h_ip == e_ip:
+                return True
+            continue
         if h == e or (e.startswith(".") and h.endswith(e)):
             return True
     return False

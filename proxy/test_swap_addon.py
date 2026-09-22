@@ -1650,6 +1650,30 @@ class SecuritySweepTests(unittest.TestCase):
         self.assertFalse(sa._host_in_list("example.com.evil.",
                                          ["example.com"]))
 
+    def test_host_in_list_ipv6_literals(self):
+        """Issue #257: IPv6 literals are compared as normalized addresses,
+        never run through the hostname rules (splitting "::1" on ":"
+        yields "", which made every IPv6 literal unmatchable)."""
+        self.assertTrue(sa._host_in_list("::1", ["::1"]))
+        self.assertTrue(sa._host_in_list("[::1]", ["::1"]))
+        self.assertTrue(sa._host_in_list("[::1]:8080", ["::1"]))
+        self.assertTrue(sa._host_in_list("::1", ["[::1]"]))
+        self.assertTrue(sa._host_in_list("::1.", ["::1"]))
+        self.assertTrue(sa._host_in_list("fe80::1", ["fe80::1"]))
+        self.assertTrue(sa._host_in_list("0:0:0:0:0:0:0:1", ["::1"]))
+        self.assertTrue(sa._host_in_list("127.0.0.1", ["127.0.0.1"]))
+        self.assertTrue(sa._host_in_list("127.0.0.1:8080", ["127.0.0.1"]))
+        # a different literal does not match; hostname entries never
+        # match an IP-literal host (and vice versa); CIDR entries are
+        # _parse_ssrf_allow's business, not this function's
+        self.assertFalse(sa._host_in_list("::1", ["::2"]))
+        self.assertFalse(sa._host_in_list("::1", ["localhost"]))
+        self.assertFalse(sa._host_in_list("localhost", ["::1"]))
+        self.assertFalse(sa._host_in_list("::1", ["::1/128"]))
+        self.assertFalse(sa._host_in_list("127.0.0.1", ["127.0.0.0/8"]))
+        # malformed literals fall through to the hostname path harmlessly
+        self.assertFalse(sa._host_in_list("::1%!!", ["::1"]))
+
     def test_grant_path_prefix_smuggling_refused(self):
         """The grants.json path_prefix branch gets the finding-42
         smuggling guard (%, ;, \\) that the registry allowed_paths

@@ -16,11 +16,9 @@ Two halves:
    point. Do not "fix" it by editing the corpus: reconcile the two sides
    deliberately and update both together.
 
-The one deliberate divergence is pinned, not hidden: sa._host_in_list
-fumbles the "::1" literal ("::1".split(":")[0] == ""), so a "::1" binding
-never matches at enforcement; the injector's echo detection treats "::1"
-as live anyway (fail-closed superset). test_documented_ipv6_divergence
-asserts both sides of that fact.
+The injector's echo detection treats "::1" as live; since issue #257 the
+proxy agrees, so the two sides match on it again. test_ipv6_literals_match
+pins the fixed behavior on both sides.
 """
 
 import json
@@ -60,10 +58,18 @@ HOST_CORPUS = [
     ("127.0.0.1", ["127.0.0.1:8080"]),
     ("localhost", ["localhost"]),
     ("LOCALHOST", ["127.0.0.1", "localhost"]),
-    ("::1", ["::1"]),            # the fumble: both sides must agree (False)
+    ("::1", ["::1"]),            # issue #257: IP literals match (True)
     ("::1", ["127.0.0.1"]),
-    ("[::1]", ["::1"]),
-    ("fe80::1", ["fe80::1"]),    # fumbled the same way
+    ("[::1]", ["::1"]),            # bracketed literal, normalized (True)
+    ("[::1]:8080", ["::1"]),      # bracketed literal with port (True)
+    ("::1", ["[::1]"]),           # bracketed entry, normalized (True)
+    ("::1.", ["::1"]),            # trailing dot on a literal (True)
+    ("fe80::1", ["fe80::1"]),     # non-loopback v6 literal (True)
+    ("0:0:0:0:0:0:0:1", ["::1"]),  # normalized spelling of ::1 (True)
+    ("::1", ["::2"]),             # different literal (False)
+    ("::1", ["localhost"]),       # hostname entry never matches a literal (False)
+    ("127.0.0.1", ["::1"]),       # literal entry never matches a v4 host (False)
+    ("::ffff:127.0.0.1", ["::ffff:127.0.0.1"]),  # v4-mapped v6 (True)
     ("example.com", []),
     ("example.com", None),
     (None, ["example.com"]),
@@ -76,6 +82,10 @@ HOST_CORPUS = [
     ("127.1", ["127.0.0.1"]),    # not a match, no normalization
     ("123", [123]),              # non-string registry entries are str()'d
     ("127.0.0.1", [" 127.0.0.1 "]),  # entries are NOT whitespace-stripped
+    ("127.0.0.1", [".0.0.1"]),  # issue #257: IP literals never take the
+    # leading-dot subdomain rule (the old string-suffix accident) -- a
+    # partial-IP entry matches nothing at enforcement, so the injector
+    # must not flag it as an echo exemption either (False, both sides)
 ]
 
 SSRF_CORPUS = [
@@ -127,11 +137,13 @@ class TestDriftTripwire(unittest.TestCase):
                 self.assertEqual([str(n) for n in pn],
                                  [str(n) for n in sn])
 
-    def test_documented_ipv6_divergence(self):
-        # The proxy fumbles "::1" (split(":")[0] == ""); the injector
-        # deliberately treats it as a live echo alias (fail-closed
-        # superset). Both facts are pinned here.
-        self.assertFalse(sa._host_in_list("::1", ["::1"]))
+    def test_ipv6_literals_match(self):
+        # Issue #257: the proxy used to fumble "::1" (split(":")[0] == ""),
+        # so a "::1" binding never matched at enforcement. The matcher now
+        # compares IP literals as normalized addresses; the injector's
+        # echo layer agrees with no special case. Both facts pinned here.
+        self.assertTrue(sa._host_in_list("::1", ["::1"]))
+        self.assertTrue(pm.host_in_list("::1", ["::1"]))
         self.assertTrue(pm.is_echo_entry("::1"))
         self.assertTrue(pm.is_echo_entry("::1."))
 
