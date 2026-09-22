@@ -9,8 +9,13 @@ where it differs from the five vendors we read.
 **The one honest framing, up front:** the secret-injection posture is
 *independently re-derived*, not a proven lead. Daytona — a major incumbent —
 ships the full pattern, and Microsandbox independently derived the
-placeholder variant in the open. This document shows the pattern is
-convergent: every serious sandbox vendor has shipped some version of "the
+placeholder variant in the open. A third independent derivation is
+opencomputer.dev: their docs describe a secret-store egress proxy where the
+runtime runs with an opaque placeholder and the real key is swapped
+in-flight, only on the outbound HTTPS call to the model provider, under an
+egress allowlist ([credentials.mdx](https://github.com/diggerhq/opencomputer/blob/HEAD/docs/agent-sessions/credentials.mdx),
+verified 2026-09-21). This document shows the pattern is convergent: every
+serious sandbox vendor has shipped some version of "the
 proxy holds the secret, the sandbox doesn't". We make no first-mover claim.
 
 ## The pattern
