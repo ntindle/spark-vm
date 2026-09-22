@@ -9,8 +9,9 @@ launch terms before the idle/suspend economics are decided. **Decided
 2026-09-18 (owner): no free tier at launch** — launch is paid tiers plus
 possibly a free trial that requires a card on file up front (the card is the
 abuse control; see §3). The pricing *page* lands after the operator decides
-the remaining NEEDS_USER.md items (Billing: trial terms + provider, Abuse
-controls); this doc is what informs those decisions.
+the remaining NEEDS_USER.md items (Billing: trial terms + provider
+(boat.dev evaluation + per-run spend cap), Abuse controls); this doc is
+what informs those decisions.
 
 Strategy input feeding: R1 (first-10-minutes spec, done 2026-09-18),
 R4 ("works immediately" onboarding shape), C2 (competitor pricing inputs),
@@ -93,7 +94,7 @@ decision.
 
 GPU is priced separately everywhere (Daytona H100 $2.27/hr; Modal GPU inside
 sandbox at 3x rate). We have no GPU story today (C6 = the competitor-pass item
-asking for an explicit GPU criterion in the Neo provider choice) — the tiers
+asking for an explicit GPU criterion in the Sandbox provider choice) — the tiers
 below are
 CPU-only; GPU, if ever, is a metered add-on, never bundled into the flat
 tier (it would blow up the flat tier's margin). Metered GPU does not violate the
@@ -311,8 +312,9 @@ in order:
   to the trial row. That line is scoped to paid; the trial is time-boxed by
   definition, and printing the line next to it would say the opposite of
   the honest trial copy the row above just gave.
-- No promises today: the page stays a thinking item until Billing + Abuse +
-  Neo provider are decided (NEEDS_USER.md).
+- No promises today: the page stays a thinking item until Billing + Abuse
+  are decided and the provider item is closed (NEEDS_USER.md: boat.dev
+  evaluation + per-run spend cap).
 
 ## 6. Open decisions (feeds NEEDS_USER.md; nothing new asked here)
 
