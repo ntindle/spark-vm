@@ -12,11 +12,16 @@
 #      control plane's pinned image SHA (INJECT_IMAGE_VERSION, required).
 #      Fails closed on any drift -- the injector never provisions onto an
 #      image it was not pinned to.
-#   2. Gate-fixture teardown: unbinds the llm-api -> echo-host (127.0.0.1)
-#      registry binding through the narrow registry writer (idempotent),
-#      then VERIFIES the binding is gone AND that the echo host is absent
-#      from inference-hosts.allow and the inference proxy's own
-#      inference-ssrf.allow. Fail-closed: the injector has no narrow path
+#   2. Gate-fixture teardown: unbinds every llm-api -> echo-host registry
+#      binding through the narrow registry writer (idempotent per entry),
+#      then VERIFIES no effective echo binding remains AND that no echo
+#      exemption survives in inference-hosts.allow or the inference
+#      proxy's own inference-ssrf.allow. "Effective" uses the inference
+#      proxy's own matching semantics (mirrors of
+#      proxy/swap_addon.py::_host_in_list and _parse_ssrf_allow:
+#      case-insensitive, whitespace-stripped, trailing dots stripped,
+#      CIDR-aware) -- a check narrower than the enforcement point would
+#      let a real key coexist with a live exemption. Fail-closed: the
 #      to remove allowlist lines (production sudoers is append-only by
 #      design), so a surviving echo entry is REFUSED -- loudly, naming the
 #      image-build gate (which runs as root on the build box, pre-publish)
@@ -130,10 +135,11 @@ KEY_NAME="llm-api"
 # to exactly this host; any loopback alias still present in the allow
 # files fails closed (step 2).
 ECHO_HOST="127.0.0.1"
-# Loopback aliases the teardown treats as the echo host for the fail-
-# closed allowlist check. The fixture only ever used 127.0.0.1; the
-# aliases close the obvious bypass where a later fixture variant binds
-# `localhost` instead.
+# Loopback aliases the teardown treats as the echo host. The fixture only
+# ever used 127.0.0.1; the aliases close the obvious bypass where a later
+# fixture variant binds `localhost` instead. Matching is done with the
+# proxy's own semantics (see echo_bound_hosts / allowlist_echo_entries),
+# not exact string comparison.
 ECHO_ALIASES="127.0.0.1 localhost ::1"
 
 if [ -z "${INJECT_IMAGE_VERSION:-}" ]; then
@@ -197,21 +203,108 @@ sys.exit(0 if os.access(p, os.R_OK) else 1)
 EOF
 }
 
-# registry_bound_to_echo: exit 0 iff the inference registry currently
-# binds llm-api to the echo host. Reads through the sudoers-allowed cat;
-# a missing/unreadable registry means "no binding" (the key assertion in
-# step 3 fails closed on that case separately).
-registry_bound_to_echo() {
-    run_priv cat "$REGISTRY_FILE" 2>/dev/null | KEY_NAME="$KEY_NAME" ECHO_HOST="$ECHO_HOST" python3 -c '
+# echo_bound_hosts: print the llm-api allowed_hosts entries that are
+# effective echo exemptions, one per line, under the inference proxy's
+# own matching semantics (a mirror of proxy/swap_addon.py::_host_in_list:
+# both sides lowercased, ports and trailing dots stripped, leading-dot
+# subdomain entries honored). Exits 2 when the registry cannot be read
+# -- an unverifiable teardown is not a clean teardown (fail-closed).
+echo_bound_hosts() {
+    run_priv cat "$REGISTRY_FILE" 2>/dev/null | KEY_NAME="$KEY_NAME" ECHO_ALIASES="$ECHO_ALIASES" python3 -c '
 import json, os, sys
+
+def host_in_list(host, entries):
+    # Mirror of proxy/swap_addon.py::_host_in_list.
+    h = (host or "").lower().split(":")[0].rstrip(".")
+    for entry in entries or []:
+        e = str(entry).lower().rstrip(".")
+        if h == e or (e.startswith(".") and h.endswith(e)):
+            return True
+    return False
+
+aliases = os.environ["ECHO_ALIASES"].split()
 try:
     reg = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
+except Exception as e:
+    print("registry unreadable or invalid JSON: %s" % (e,), file=sys.stderr)
+    sys.exit(2)
 entry = reg.get(os.environ["KEY_NAME"])
 hosts = entry.get("allowed_hosts") if isinstance(entry, dict) else None
-sys.exit(0 if isinstance(hosts, list) and os.environ["ECHO_HOST"] in hosts else 1)
+if not isinstance(hosts, list):
+    hosts = []
+strs = [str(h) for h in hosts]
+bad = [s for s in strs if any(host_in_list(a, [s]) for a in aliases)]
+# The proxy matcher fumbles the "::1" literal (splitting on ":" yields
+# ""), so match it literally too: fail-closed superset, never a pass.
+bad += [s for s in strs
+        if s.strip().lower().rstrip(".") == "::1" and s not in bad]
+for s in bad:
+    print(s)
 '
+}
+
+# allowlist_echo_entries <kind> <file>: print the file's effective echo
+# exemptions, one per line, mirroring proxy/swap_addon.py's parsing --
+# strip, skip blanks/comments, lowercase hostnames at load; the ssrf
+# file (mirror of _parse_ssrf_allow) additionally honors CIDR literals
+# and promotes bare IPs to /32 or /128 nets, which are exemptions when
+# they cover 127.0.0.0/8 or ::1/128.
+allowlist_echo_entries() {
+    python3 - "$1" "$2" <<'PYEOF'
+import ipaddress, sys
+
+def host_in_list(host, entries):
+    # Mirror of proxy/swap_addon.py::_host_in_list.
+    h = (host or "").lower().split(":")[0].rstrip(".")
+    for entry in entries or []:
+        e = str(entry).lower().rstrip(".")
+        if h == e or (e.startswith(".") and h.endswith(e)):
+            return True
+    return False
+
+ALIASES = ["127.0.0.1", "localhost", "::1"]
+ECHO_NETS = [ipaddress.ip_network("127.0.0.0/8"),
+             ipaddress.ip_network("::1/128")]
+
+def is_echo_hostname(line):
+    if any(host_in_list(a, [line]) for a in ALIASES):
+        return True
+    return line.strip().lower().rstrip(".") == "::1"
+
+kind, path = sys.argv[1], sys.argv[2]
+bad = []
+with open(path, encoding="utf-8") as f:
+    for raw in f:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        entry = raw.rstrip("\n")
+        if kind == "ssrf":
+            # Mirror of proxy/swap_addon.py::_parse_ssrf_allow.
+            net = None
+            if "/" in line:
+                try:
+                    net = ipaddress.ip_network(line, strict=False)
+                except ValueError:
+                    pass  # falls through to hostname treatment
+            if net is None:
+                try:
+                    ipaddress.ip_address(line)
+                    net = ipaddress.ip_network(
+                        "%s/%s" % (line, "128" if ":" in line else "32"))
+                except ValueError:
+                    pass
+            if net is not None:
+                if any(net.overlaps(e) for e in ECHO_NETS):
+                    bad.append(entry)
+                continue
+            if is_echo_hostname(line):
+                bad.append(entry)
+        elif is_echo_hostname(line):
+            bad.append(entry)
+for b in bad:
+    print(b)
+PYEOF
 }
 
 # --- Step 1: manifest preflight -------------------------------------------
@@ -222,37 +315,59 @@ if ! "$MANIFEST_CHECK" "$MANIFEST" --expect-version "$IMAGE_VERSION" >&2; then
 fi
 
 # --- Step 2: gate-fixture teardown -----------------------------------------
-# Remove the llm-api -> echo-host binding through the narrow writer
-# (idempotent), then verify the binding is gone AND the echo host is
-# absent from both allow files. The injector cannot remove allowlist
-# lines through any narrow path (production sudoers is append-only by
-# design); a surviving echo entry fails closed here, naming the
-# image-build gate -- which runs as root on the build box pre-publish --
-# as the teardown owner.
+# Remove every llm-api echo-host binding through the narrow writer
+# (idempotent per entry), then verify no effective echo binding remains
+# AND no echo exemption survives in either allow file. The injector
+# cannot remove allowlist lines through any narrow path (production
+# sudoers is append-only by design); a surviving echo entry fails closed
+# here, naming the image-build gate -- which runs as root on the build
+# box pre-publish -- as the teardown owner. Every match below uses the
+# inference proxy's own semantics (mirrors of
+# proxy/swap_addon.py::_host_in_list and _parse_ssrf_allow): a check
+# narrower than the enforcement point would let a real key coexist with
+# a live exemption.
 TEARDOWN="absent"
-if registry_bound_to_echo; then
-    echo "inject-provision-state: unbinding $KEY_NAME from echo host $ECHO_HOST" >&2
-    # The real writer prints "unbound ..." to stdout on success; keep it
-    # on the log stream so stdout carries exactly the JSON report.
-    run_priv "$REGISTRY_WRITER" remove-host "$KEY_NAME" "$ECHO_HOST" >&2
-    TEARDOWN="removed"
-fi
-if registry_bound_to_echo; then
-    echo "inject-provision-state: refusing: $KEY_NAME is still bound to $ECHO_HOST after remove-host -- the registry writer did not apply the teardown" >&2
+if ! bound="$(echo_bound_hosts)"; then
+    echo "inject-provision-state: refusing: cannot read the inference registry -- will not verify the echo-host teardown blindly" >&2
     exit 1
 fi
-for f in "$ALLOW_FILE" "$SSRF_ALLOW_FILE"; do
+if [ -n "$bound" ]; then
+    echo "inject-provision-state: unbinding $KEY_NAME from echo host(s): $(printf '%s' "$bound" | tr '\n' ' ')" >&2
+    while IFS= read -r h; do
+        [ -n "$h" ] || continue
+        # The real writer prints "unbound ..." to stdout on success;
+        # keep it on the log stream so stdout carries exactly the JSON
+        # report. Note the writer lowercases its host argument and only
+        # removes exact (lowercased) matches: a variant it cannot remove
+        # is caught by the re-verification below, fail-closed.
+        run_priv "$REGISTRY_WRITER" remove-host "$KEY_NAME" "$h" >&2
+    done <<< "$bound"
+    TEARDOWN="removed"
+fi
+if ! bound="$(echo_bound_hosts)"; then
+    echo "inject-provision-state: refusing: cannot re-read the inference registry after teardown" >&2
+    exit 1
+fi
+if [ -n "$bound" ]; then
+    echo "inject-provision-state: refusing: $KEY_NAME is still bound to echo host(s) after remove-host: $(printf '%s' "$bound" | tr '\n' ' ') -- the narrow registry writer cannot remove this variant (exact lowercase matches only); the image is pathological, rebuild it" >&2
+    exit 1
+fi
+for spec in "hosts:$ALLOW_FILE" "ssrf:$SSRF_ALLOW_FILE"; do
+    kind="${spec%%:*}"; f="${spec#*:}"
     if ! allowlist_readable "$f"; then
         echo "inject-provision-state: refusing: cannot read $f as the invoking user -- will not verify the echo-host teardown blindly" >&2
         exit 1
     fi
-    # shellcheck disable=SC2086  # ECHO_ALIASES is intentionally word-split
-    for alias in $ECHO_ALIASES; do
-        if [ -f "$f" ] && grep -qxF "$alias" "$f" 2>/dev/null; then
-            echo "inject-provision-state: refusing: echo host '$alias' still present in $f -- the injector has no narrow path to remove allowlist lines (production sudoers is append-only by design); the image-build gate owns allowlist teardown pre-publish -- a box holding a real key must never keep a gate echo exemption" >&2
+    if [ -f "$f" ]; then
+        if ! bad="$(allowlist_echo_entries "$kind" "$f")"; then
+            echo "inject-provision-state: refusing: cannot parse $f -- will not verify the echo-host teardown blindly" >&2
             exit 1
         fi
-    done
+        if [ -n "$bad" ]; then
+            echo "inject-provision-state: refusing: echo exemption(s) still present in $f: $(printf '%s' "$bad" | tr '\n' ' ') -- the injector has no narrow path to remove allowlist lines (production sudoers is append-only by design); the image-build gate owns allowlist teardown pre-publish -- a box holding a real key must never keep a gate echo exemption" >&2
+            exit 1
+        fi
+    fi
 done
 echo "inject-provision-state: fixture teardown $TEARDOWN (no echo binding, no echo allowlist entries)" >&2
 
@@ -265,6 +380,18 @@ echo "inject-provision-state: fixture teardown $TEARDOWN (no echo binding, no ec
 # fixture dummy. The real value is never read.
 if ! run_priv cat "$REGISTRY_FILE" 2>/dev/null | KEY_NAME="$KEY_NAME" ECHO_ALIASES="$ECHO_ALIASES" python3 -c '
 import json, os, sys
+
+def host_in_list(host, entries):
+    # Mirror of proxy/swap_addon.py::_host_in_list: the proxy enforces
+    # the binding with these semantics, so the injector must too.
+    h = (host or "").lower().split(":")[0].rstrip(".")
+    for entry in entries or []:
+        e = str(entry).lower().rstrip(".")
+        if h == e or (e.startswith(".") and h.endswith(e)):
+            return True
+    return False
+
+aliases = os.environ["ECHO_ALIASES"].split()
 try:
     reg = json.load(sys.stdin)
 except Exception:
@@ -281,8 +408,10 @@ hosts = entry.get("allowed_hosts")
 if not isinstance(hosts, list) or not hosts:
     print("llm-api is bound to no hosts", file=sys.stderr)
     sys.exit(1)
-echo_aliases = set(os.environ["ECHO_ALIASES"].split())
-bad = [h for h in hosts if h in echo_aliases]
+strs = [str(h) for h in hosts]
+bad = [s for s in strs if any(host_in_list(a, [s]) for a in aliases)]
+bad += [s for s in strs
+        if s.strip().lower().rstrip(".") == "::1" and s not in bad]
 if bad:
     print("llm-api still bound to echo host(s): %s" % ",".join(bad), file=sys.stderr)
     sys.exit(1)
@@ -360,13 +489,15 @@ with open(os.environ["IDENTITY_SRC"], encoding="utf-8") as f:
     fi
     mkdir -p "$ssh_dir"
     chmod 0700 "$ssh_dir"
-    cp "$IDENTITY_SRC" "$ssh_dir/authorized_keys"
-    chmod 0600 "$ssh_dir/authorized_keys"
+    # install(1) creates the destination at 0600 directly: no transient
+    # world-readable window between cp and chmod.
+    install -m 0600 "$IDENTITY_SRC" "$ssh_dir/authorized_keys"
     # chown only when crossing users: as root in production the agent
     # user differs; in tests the invoker IS the agent user and a chown
-    # would need privilege for no reason.
+    # would need privilege for no reason. Non-recursive: with the
+    # symlink guards above there is nothing else under $ssh_dir to own.
     if [ "$(id -u)" != "$(id -u "$AGENT_USER")" ]; then
-        chown -R "$AGENT_USER" "$ssh_dir"
+        chown "$AGENT_USER" "$ssh_dir" "$ssh_dir/authorized_keys"
     fi
     if ! cmp -s "$IDENTITY_SRC" "$ssh_dir/authorized_keys"; then
         echo "inject-provision-state: refusing: installed authorized_keys is not byte-identical to the tenant material" >&2

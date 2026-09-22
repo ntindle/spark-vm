@@ -147,15 +147,27 @@ exit 1
 """
 
 # Fake registry writer: mirrors proxy/cred-registry-set's JSON schema
-# for the verbs the injector uses. remove-host is idempotent like the
-# real one (removes only when present).
+# and semantics for the verbs the injector uses. Like the real writer,
+# the host argument is validated by check_host (same regex) then
+# lowercased, and remove-host only removes exact (lowercased) matches --
+# so a non-lowercase variant in the registry (only reachable by
+# hand-editing the JSON as root, since add-host lowercases) survives
+# remove-host and must fail the injector closed, while a trailing-dot
+# variant makes the writer itself fail. remove-host is idempotent like
+# the real one.
 FAKE_REGISTRY_WRITER = """#!/usr/bin/env python3
-import json, os, sys
+import json, os, re, sys
 reg_path = os.environ["FAKE_REGISTRY_FILE"]
 reg = {}
 if os.path.exists(reg_path):
     with open(reg_path, encoding="utf-8") as f:
         reg = json.load(f)
+def check_host(h):
+    # Mirror of proxy/cred-registry-set::check_host.
+    if not re.match(r"^\\.?[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$", h or ""):
+        sys.stderr.write("invalid host %r\\n" % (h,))
+        sys.exit(1)
+    return h.lower()
 args = sys.argv[1:]
 if args[0] == "set":
     _, name, entry, pjson = args
@@ -163,11 +175,13 @@ if args[0] == "set":
     reg.setdefault(name, {})[entry] = {"placement": placement}
 elif args[0] == "add-host":
     _, name, host = args
+    host = check_host(host)
     hosts = reg.setdefault(name, {}).setdefault("allowed_hosts", [])
     if host not in hosts:
         hosts.append(host)
 elif args[0] == "remove-host":
     _, name, host = args
+    host = check_host(host)
     entry = reg.get(name)
     if isinstance(entry, dict):
         hosts = entry.get("allowed_hosts")
@@ -491,7 +505,8 @@ def test_refuses_allowlist_residue(stack):
     assert proc.returncode == 1
     # The refusal names the ACTUAL residue, not some other alias: the
     # inverted-grep mutation refuses on '::1' here and must not pass.
-    assert b"echo host '127.0.0.1' still present" in proc.stderr
+    assert b"echo exemption(s) still present in" in proc.stderr
+    assert b"127.0.0.1" in proc.stderr
     assert b"image-build gate" in proc.stderr
     # The binding teardown still happened (defense in depth); the key
     # is byte-identical; nothing was appended anywhere.
@@ -499,6 +514,98 @@ def test_refuses_allowlist_residue(stack):
     assert ECHO_HOST not in reg[KEY_NAME]["allowed_hosts"]
     assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
     assert paths["ssrf_allow_file"].exists() is False
+
+
+@pytest.mark.parametrize("residue", [
+    "  127.0.0.1  \n",   # leading/trailing whitespace
+    "LOCALHOST\n",       # case variant
+    "127.0.0.1.\n",      # trailing dot
+    ".0.0.1\n",          # leading-dot subdomain entry (proxy semantics)
+])
+def test_refuses_allowlist_format_variants(stack, residue):
+    # The proxy parses allowlist entries case-insensitively,
+    # whitespace-stripped, trailing-dot-stripped, with leading-dot
+    # subdomain matching (proxy/swap_addon.py::_host_in_list). The
+    # injector must enforce the proxy's semantics, not exact lines --
+    # each of these is a live echo exemption the old grep -qxF missed.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["allow_file"].write_text(residue)
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"echo exemption(s) still present in" in proc.stderr
+    assert residue.strip().encode() in proc.stderr
+    assert b"image-build gate" in proc.stderr
+
+
+@pytest.mark.parametrize("residue", [
+    "127.0.0.0/8\n",     # CIDR covering loopback
+    "127.0.0.1/32\n",    # bare IP promoted to /32
+    "LOCALHOST\n",       # hostname, case variant
+    "  ::1  \n",         # IPv6 loopback, padded
+])
+def test_refuses_ssrf_format_variants(stack, residue):
+    # Mirror of proxy/swap_addon.py::_parse_ssrf_allow: CIDR literals
+    # are honored, bare IPs become /32 (/128 for v6) nets, hostnames are
+    # lowercased. Each of these exempts the echo host from the proxy's
+    # SSRF guard.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["ssrf_allow_file"].write_text(residue)
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"echo exemption(s) still present in" in proc.stderr
+    assert residue.strip().encode() in proc.stderr
+    assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+
+
+def test_allowlist_ignores_comments_and_blanks(stack):
+    # No false positives: comments, blanks, and non-echo entries pass.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["allow_file"].write_text(
+        "# 127.0.0.1 -- this is a comment\n\napi.provider.example\n")
+    paths["ssrf_allow_file"].write_text("10.0.0.0/8\n")
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert _report(proc)["steps"]["fixture_teardown"] == "ok"
+
+
+def test_refuses_registry_case_variant(stack):
+    # "LOCALHOST" in allowed_hosts is honored by the proxy
+    # (_host_in_list lowercases) but the narrow writer lowercases its
+    # argument and only removes exact matches, so it cannot remove this
+    # variant: the injector must fail closed, not silently proceed.
+    env, paths = stack
+    (paths["secrets_dir"] / KEY_NAME).write_text(REAL_KEY)
+    paths["registry_file"].write_text(json.dumps({
+        KEY_NAME: {
+            "access_token": {"placement": "bearer_header"},
+            "allowed_hosts": ["LOCALHOST", PROVIDER_HOST],
+        }
+    }))
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"still bound to echo host(s)" in proc.stderr
+    assert b"LOCALHOST" in proc.stderr
+    assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+
+
+def test_refuses_registry_trailing_dot_variant(stack):
+    # "127.0.0.1." is stripped to the echo host by the proxy's matcher.
+    # The real writer's check_host rejects the trailing-dot form, so
+    # remove-host fails and the run fails closed (non-zero) either way.
+    env, paths = stack
+    (paths["secrets_dir"] / KEY_NAME).write_text(REAL_KEY)
+    paths["registry_file"].write_text(json.dumps({
+        KEY_NAME: {
+            "access_token": {"placement": "bearer_header"},
+            "allowed_hosts": ["127.0.0.1.", PROVIDER_HOST],
+        }
+    }))
+    proc = _run_injector(env)
+    assert proc.returncode != 0
+    assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
 
 
 def test_refuses_ssrf_allowlist_residue(stack):
@@ -509,7 +616,8 @@ def test_refuses_ssrf_allowlist_residue(stack):
     paths["ssrf_allow_file"].write_text(ECHO_HOST + "\n")
     proc = _run_injector(env)
     assert proc.returncode == 1
-    assert b"echo host '127.0.0.1' still present" in proc.stderr
+    assert b"echo exemption(s) still present in" in proc.stderr
+    assert b"127.0.0.1" in proc.stderr
     assert b"image-build gate" in proc.stderr
     assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
 
@@ -521,7 +629,8 @@ def test_refuses_loopback_alias_residue(stack):
     paths["allow_file"].write_text("localhost\n")
     proc = _run_injector(env)
     assert proc.returncode == 1
-    assert b"echo host 'localhost' still present" in proc.stderr
+    assert b"echo exemption(s) still present in" in proc.stderr
+    assert b"localhost" in proc.stderr
 
 
 def test_refuses_dummy_still_installed(stack):
