@@ -24,8 +24,10 @@ under `docs/COMPETITOR_WATCH_*.md` plus the C19/C20 Brig+Epho consolidation).
 **Freshness (2026-09-22):** all cited strategy docs are merged to `main`;
 cross-references point at the main versions. Price inputs re-checked
 through the 2026-09-21 watch reads — TermSquad tiers unchanged, boat.dev
-rate card unchanged, Epho added as a pricing-shape data point (C24). None
-of the in-window deltas move the tier anchors below.
+rate card unchanged, Epho added as a pricing-shape data point (C24). The
+tier anchors below are TermSquad-pegged (the $9 visible floor), not
+provider-costed, so none of the in-window deltas — boat.dev's $20 plan
+sits *above* the Tier-1 $9–19 band — move them.
 
 ## 1. Who actually pays (C8: buyer ≠ user)
 
@@ -80,7 +82,7 @@ sets the visible floor for "always-on computer for your agent." The DIY $5.70
 is the anchor the OSS self-host story already wins against — hosted has to
 earn its premium with *zero* setup, not with raw compute.
 
-Shape note (C20/C24 — Epho, verified https://epho.io 2026-09-21):
+Shape note (C20/C24 — Epho, verified https://epho.io 2026-09-22):
 bring-your-own-keys infra-only metering — model tokens are billed by the
 user's provider, never by Epho — carries zero model-token margin risk for the
 operator. The hosted box needs the agent's model access; billing tokens
@@ -274,7 +276,8 @@ in order:
    human step today, signup doc §8). Card on file up front is the abuse
    control, not a friction lever to optimize away.
 2. The approval-loop aha in the first session — will be engineered by the
-   first-10-minutes spec (R1, still a backlog item), not by copy.
+   first-10-minutes spec (R1, spec shipped 2026-09-18; the open work is
+   conformance gaps G3–G6), not by copy.
 3. The human sees the trust evidence (audit trail, spend cap — page must tag
    unbuilt controls honestly per §5) and approves paid.
 4. Upgrades sell compute, never persistence.
