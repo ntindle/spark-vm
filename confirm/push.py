@@ -437,6 +437,12 @@ class PushSender:
         except urllib.error.HTTPError as e:
             code = e.code
         if code in (200, 201, 202):
+            # Success is loud on stderr, mirroring the failure warning
+            # below: an operator tailing the worker sees each delivery,
+            # not just the failures.
+            print("push: send to %s returned %s"
+                  % (urllib.parse.urlparse(endpoint).netloc, code),
+                  file=sys.stderr)
             return "ok"
         if code in (404, 410):
             return "prune"  # subscription gone at the push service

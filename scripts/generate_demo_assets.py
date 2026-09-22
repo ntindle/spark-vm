@@ -238,24 +238,33 @@ def _mono_font(size):
 
 
 def _wrap_term(text, n, hang="  "):
-    # Word-wrap like a real terminal (break on spaces, not mid-token);
-    # continuation lines get the hang indent so the wrap is explicit.
+    # Word-wrap like a real terminal: prefer spaces, then JSON
+    # delimiters (the queue journal is spaceless compact JSON — breaking
+    # after "," or ":" keeps keys and values whole instead of splitting
+    # a token mid-word), and only hard-cut mid-token for truly unbroken
+    # runs (base64). Continuation lines get the hang indent so the wrap
+    # is explicit. Every branch strictly shortens the line, so unbroken
+    # tokens in real captures cannot spin forever.
     # (The journal line is rendered wrapped for the frame — disclosed in
-    # assets/README.md; its bytes are the real _audit() output.)
+    # assets/README.md; its bytes are the real queue output.)
     out = []
     for line in text.splitlines() or [""]:
         while len(line) > n:
             cut = line.rfind(" ", 0, n)
-            # A "space" that is only the hang indent is not a word
-            # boundary; hard-cut mid-token instead so every pass strictly
-            # shortens the line (long unbroken tokens in real captures
-            # must not spin forever).
-            hard = cut < 0 or line[cut] != " " or cut <= len(hang)
-            if hard:
-                cut = n
-            out.append(line[:cut])
-            rest = line[cut:] if hard else line[cut + 1:]
-            line = hang + rest.lstrip(" ")
+            if cut > len(hang):
+                # Break at the space; drop it, hang the continuation.
+                out.append(line[:cut])
+                line = hang + line[cut + 1:].lstrip(" ")
+                continue
+            # No usable space: break after a JSON delimiter so compact
+            # JSON wraps between tokens, never inside one.
+            dcut = max(line.rfind(d, 0, n) for d in ",:[{")
+            if dcut > len(hang):
+                out.append(line[:dcut + 1])
+                line = hang + line[dcut + 1:].lstrip(" ")
+                continue
+            out.append(line[:n])
+            line = hang + line[n:]
         out.append(line)
     return out
 
@@ -357,7 +366,7 @@ def generate_secrets(repo_root, work_dir, frames_dir):
 
 PUSHQ_FRAMES = [
     ("q1-enqueue",
-     "1/4 — file the summons: one durable journal append"),
+     "1/4 — enqueue the summons: one durable journal append"),
     ("q2-fail",
      "2/4 — the endpoint is down (500): the worker reschedules, "
      "nothing is lost"),
@@ -434,6 +443,10 @@ def generate_push_queue(repo_root, work_dir, frames_dir):
 
     os.makedirs(work_dir, exist_ok=True)
     os.makedirs(frames_dir, exist_ok=True)
+    # Absolute: the enqueue subprocess runs with cwd=confirm (so the
+    # import needs no sys.path plumbing), and a relative CONFIRM_DIR
+    # would then resolve against the wrong directory.
+    work_dir = os.path.abspath(work_dir)
     push_py = os.path.join(repo_root, "confirm", "push.py")
     vapid_path = os.path.join(work_dir, "vapid.json")
     subs_path = os.path.join(work_dir, "push-subscriptions.json")
@@ -475,28 +488,28 @@ def generate_push_queue(repo_root, work_dir, frames_dir):
             _json.dump(subs_doc, f)
 
         transcripts = {}
-        # Frame 1: throwaway VAPID keys, then the enqueue. The enqueue
-        # runs the real PushQueue.enqueue() (durable fsync'd append).
-        # Commands run (and shown) with repo-root-relative paths, matching
-        # the other assets' readable transcripts; env carries the absolute
-        # scratch paths (env is not part of the frames).
-        rel_vapid = os.path.join(os.path.relpath(work_dir, repo_root),
-                                 "vapid.json")
-        gen_cmd = "python3 confirm/push.py --gen-keys %s" % rel_vapid
+        # Frame 1: the enqueue only. The throwaway VAPID keypair is
+        # generated silently first — a demo key is visual noise, not the
+        # story (disclosed in assets/README.md). The enqueue runs the
+        # real PushQueue.enqueue() (durable fsync'd append) from the
+        # confirm/ dir so the import needs no sys.path plumbing; the
+        # displayed command is exactly what runs.
+        gen_out = _sh("python3 confirm/push.py --gen-keys %s"
+                      % os.path.join(work_dir, "vapid.json"),
+                      repo_root, env)
+        assert gen_out.startswith("wrote "), \
+            "gen-keys failed: %r" % gen_out
         enqueue_py = (
-            "import sys; sys.path.insert(0, 'confirm'); "
             "from push import PushQueue; "
             "print(PushQueue.default().enqueue("
             "{'id': %r, 'summary': %r}))"
             % (_PUSHQ_DEMO_ID, _PUSHQ_DEMO_SUMMARY))
-        enqueue_cmd = "python3 -c %s" % _shell_quote(enqueue_py)
-        out_keys = _sh(gen_cmd, repo_root, env)
+        enqueue_cmd = ("cd confirm && python3 -c %s"
+                       % _shell_quote(enqueue_py))
         out_enq = _sh(enqueue_cmd, repo_root, env)
         assert out_enq.strip().splitlines()[-1] == "queued", \
             "enqueue failed: %r" % out_enq
         transcripts["q1-enqueue"] = [
-            ("cmd", gen_cmd),
-            ("out", out_keys),
             ("cmd", enqueue_cmd),
             ("out", out_enq),
         ]

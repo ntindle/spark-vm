@@ -68,8 +68,8 @@ my Unraid server), then add:
 - a **human-approval loop** (`confirmd`) so sensitive actions wait for
   your two taps — served over the tailnet, never through the agent,
 - a **push-notification queue** so your phone buzzes when the approval
-  loop needs those two taps — durable enqueue with exponential-backoff
-  retry, portable like everything else,
+  loop needs those two taps — it queues the summons and keeps retrying
+  until your phone gets it, portable like everything else,
 - a **job runner** (`muse-job`) so it can run long tasks with lifecycle
   hooks instead of you babysitting a terminal,
 - a **real desktop** it can drive with the official CUA driver —
@@ -119,19 +119,19 @@ shows names and state only. Values are never shown back.</sub>
 </tr>
 <tr>
 <td valign="top" colspan="2">
-<img src="assets/demo-persistence-pair.gif" width="420" alt="Animated GIF — two terminal frames: Xvfb's birth record showing 4 days elapsed, then the same pid, days old, re-verified alive with its job sessions intact.">
-<br>
-<sub><b>Real desktop</b> — one session, four days old: Xvfb's birth record,
-then the same pid re-verified alive with its job sessions intact.</sub>
-</td>
-</tr>
-<tr>
-<td valign="top" colspan="2">
 <img src="assets/demo-push-queue.gif" width="420" alt="Animated GIF — terminal transcript: enqueue the summons, the worker's first delivery attempt hits a dead endpoint (500) and reschedules, the journal keeps the pending entry, and the retry delivers after the endpoint recovers (201).">
 <br>
 <sub><b>Push queue</b> — the summons survives an outage. The worker's first
 delivery attempt hits a dead endpoint (500); the durable journal keeps
 the approval and the retry delivers (201).</sub>
+</td>
+</tr>
+<tr>
+<td valign="top" colspan="2">
+<img src="assets/demo-persistence-pair.gif" width="420" alt="Animated GIF — two terminal frames: Xvfb's birth record showing 4 days elapsed, then the same pid, days old, re-verified alive with its job sessions intact.">
+<br>
+<sub><b>Real desktop</b> — one session, four days old: Xvfb's birth record,
+then the same pid re-verified alive with its job sessions intact.</sub>
 </td>
 </tr>
 </table>
