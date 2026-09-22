@@ -242,6 +242,9 @@ This changelog only works if entries land with the change, not after it:
   applying is an owner decision (#174)
 
 ### Fixed
+- README repo-layout table: the `harness/` and `site/` rows now describe
+  the current tooling — the provision-time injector and the waitlist
+  invite operator tools. (#246)
 - First-ten-minutes spec conformance audit (gap turn): the new
   conformance-gap doc checks every spec clause against the repo — four
   clauses still unmet (the onboarding status poll with the spec's machine
