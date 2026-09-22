@@ -449,9 +449,16 @@ class ConfirmdPushEndpointTests(unittest.TestCase):
         self._orig = (cd._PUSH, cd.PUSH_ENABLED)
         cd._PUSH = self.sender
         cd.PUSH_ENABLED = True
+        # The pending-page tests render via load_pending()/pending_dir(), which
+        # would otherwise touch the real CONFIRM_DIR (/home/swapd/approvals) —
+        # uncreatable for the unprivileged CI user. Point it at the tmp dir.
+        self._approvals_patch = mock.patch.object(
+            cd, "APPROVALS", str(Path(self.tmp.name) / "approvals"))
+        self._approvals_patch.start()
 
     def tearDown(self):
         cd._PUSH, cd.PUSH_ENABLED = self._orig
+        self._approvals_patch.stop()
         self.tmp.cleanup()
 
     def _sub_body(self, endpoint="https://push.example.com/p/abc"):
