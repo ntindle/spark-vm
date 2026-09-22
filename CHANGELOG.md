@@ -47,7 +47,7 @@ This changelog only works if entries land with the change, not after it:
   the operator's explicit decision. The old "flushed table silently
   voids the isolation guarantees until someone restarts the unit" hole
   becomes bounded downtime instead of unbounded unenforced running.
-  (PR TBD)
+  #260
 - Morning competitor watch (2026-09-22): DigitalOcean launched Managed
   Agents in public preview — microVM-per-session Harness Runtime, Action
   Gateway (16,000+ tools via one MCP endpoint, credentials brokered at
@@ -62,7 +62,7 @@ This changelog only works if entries land with the change, not after it:
   a dead proxy means no egress rather than open egress — like Brig's
   policy-bound refusal, the workload never runs where its restriction
   cannot be enforced. The one residual the contract originally stated —
-  no runtime re-apply — is closed by the firewall watchdog (PR TBD), which
+  no runtime re-apply — is closed by the firewall watchdog #260, which
   narrows the residual boundary to the 5-minute verify window. The contract
   mechanics are test-pinned. (#255)
 - Deny-style billing guard committed for sandbox credential forwarding:
