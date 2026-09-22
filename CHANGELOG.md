@@ -42,7 +42,7 @@ This changelog only works if entries land with the change, not after it:
   service with "credentials brokered at execution time" that "never reach
   the model or the sandbox" — press-release source, no mechanism detail
   scored), and the org-policy vendor set gains DO's Action Gateway
-  (governed tool access via one managed MCP endpoint) as a candidate. (PR TBD)
+  (governed tool access via one managed MCP endpoint) as a candidate. (#263)
 - Morning competitor watch (2026-09-22): DigitalOcean launched Managed
   Agents in public preview — microVM-per-session Harness Runtime, Action
   Gateway (16,000+ tools via one MCP endpoint, credentials brokered at
