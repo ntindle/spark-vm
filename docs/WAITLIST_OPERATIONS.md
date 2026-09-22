@@ -316,6 +316,25 @@ page (FAQ Q6 or how-it-works step 1; §10 gate) — a reader promised "we'll
 email you the moment your box is ready" must know the box doesn't wait
 forever.
 
+**Commit → emit crash window:** the wave commits the invited row BEFORE
+emitting the `invite_sent` funnel event (the `FUNNEL_MEASUREMENT.md` §3.4
+taxonomy); a crash in that
+window leaves an invited row whose invite email is spooled but whose event
+never fired. The funnel reads conservatively until repaired —
+invite→claim ratios under-report rather than claim what rows.jsonl
+doesn't show. The operator repairs it with:
+
+    WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \
+        waitlist_invites.py --reconcile   # idempotent; --dry-run to preview
+
+The pass re-derives only the missing events from rows.jsonl (append-only
+posture — the event trail is never hand-edited), marks each with
+`reconciled: true` + `via: reconcile_invite_events` in its attrs, and
+skips rows whose invite is no longer live (expired, consumed, or rolled
+back to confirmed): a dead invite can't convert, and the next wave's
+fresh invite carries its own event. Run it after any suspected crash;
+re-running when nothing is missing is a no-op.
+
 *Compliance:* pricing lines are filled at send time from decided pricing —
 the template never contains numbers; no "free tier" wording (Billing
 decision); no launch-date promises (the invite *is* the launch for that

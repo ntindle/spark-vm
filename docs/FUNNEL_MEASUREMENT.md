@@ -175,8 +175,17 @@ day-bucket and `attrs` is a small key-value map:
 | `dropped` | 14d drop job fires on an unconfirmed row (`WAITLIST_OPERATIONS.md` §4) | row id | — |
 | `purged` | 30d post-drop purge deletes a dropped row (`WAITLIST_OPERATIONS.md` §5); the row's PII is gone, the event keeps the counts | row id | — |
 | `forgot` | signed footer-link deletion deletes a row on the reader's request (`WAITLIST_OPERATIONS.md` §5); the row's PII is gone, the event keeps the counts | row id | — |
-| `invite_sent` | wave invite leaves | row id | — |
+| `invite_sent` | wave invite leaves | row id | `reconciled` = `true` + `via` = `reconcile_invite_events` when re-derived by the operator's `waitlist_invites.py --reconcile` pass after the commit → emit crash window (`WAITLIST_OPERATIONS.md` §7); `funnel_metrics.py` counts the last emission per ref, so a re-derived event is read as the same emission, never a double-count |
 | `claimed` | invite claim completes | row id | — |
+
+**Known divergence:** a crash between the invited-row commit and the
+`invite_sent` emit (`WAITLIST_OPERATIONS.md` §7) leaves an invited row
+with no event — the funnel under-reports invite_sent until the operator
+runs `waitlist_invites.py --reconcile`, which re-derives the missing
+event from rows.jsonl in the append-only posture. Rows whose invite
+expired or rolled back before repair stay unrepaired by design: a dead
+invite can't convert, and the next wave's fresh invite carries its own
+event.
 
 The §7 metrics are pure queries over this table plus the daily page
 rollups — no other instrumentation is permitted. The day-1 operator query

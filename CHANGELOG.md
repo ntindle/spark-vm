@@ -37,6 +37,12 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Waitlist operator tooling: `site/waitlist_invites.py --reconcile`
+  repairs missing `invite_sent` funnel events after the commit → emit
+  crash window (issue #234) — it re-derives exactly the missing events
+  from the waitlist store in the append-only posture (each re-derived
+  event carries `reconciled: true` in its attrs; `--dry-run` previews),
+  is idempotent, and skips rows whose invite is no longer live. (PR TBD)
 - Secrets-posture corpus: h-sandbox's Credential Vault (open-source,
   self-hosted sandbox control plane) becomes the fourth convergent data
   point for the placeholder-swap pattern — its docs describe fake-env

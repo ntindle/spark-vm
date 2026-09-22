@@ -23,6 +23,18 @@ waitlistd.WaitlistService:
         rejoins `confirmed` at the back of the queue (confirmed_at reset
         to the expiry time, §5 — no re-confirmation, no new funnel event).
 
+    waitlist_invites.py --reconcile [--dry-run]
+        Issue #234: re-derive `invite_sent` funnel events lost to the
+        commit -> emit crash window. `_queue_invite_email` commits the
+        invited row BEFORE emitting `invite_sent`; a crash in that window
+        leaves an invited row whose email is spooled but whose event
+        never fired, and the funnel reads conservatively until repaired.
+        This pass re-derives exactly those missing events from rows.jsonl
+        (append-only posture — no hand-edits to funnel_events.jsonl) and
+        marks each with attrs reconciled=True + via=reconcile_invite_events.
+        Idempotent: re-running emits nothing new. Sends no email, so no
+        WAITLIST_CLAIM_LIVE gate.
+
 Pricing and trial terms arrive as FILES (not argv): the pricing lines are
 operator data that must be byte-stable across the wave and stay out of
 shell history / process tables. pricing-file holds one plan/price line
@@ -42,6 +54,8 @@ Operator cron shape (same env as the other waitlist tooling):
         --pricing-file ./pricing.txt --trial-terms-file ./terms.txt
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
         waitlist_invites.py --rollover   # daily
+    WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
+        waitlist_invites.py --reconcile  # after any suspected crash; idempotent
 
 Config (env — same fail-loud contract as waitlistd/waitlist_jobs):
     WAITLIST_HMAC_KEY    operator HMAC key — REQUIRED, fail loud if unset.
@@ -127,10 +141,11 @@ def read_text_file(path, label):
 def main(argv):
     want_wave = "--send-wave" in argv
     want_rollover = "--rollover" in argv
-    if sum((want_wave, want_rollover)) != 1:
+    want_reconcile = "--reconcile" in argv
+    if sum((want_wave, want_rollover, want_reconcile)) != 1:
         sys.stderr.write(
             "waitlist_invites: pass exactly one of --send-wave, "
-            "--rollover\n")
+            "--rollover, --reconcile\n")
         raise SystemExit(2)
     dry_run = "--dry-run" in argv
     key, data_dir, host = load_config(argv)
@@ -195,6 +210,15 @@ def main(argv):
             sys.stdout.write(
                 f"waitlist_invites: wave {wave!r} invited "
                 f"{len(invited)} row(s)\n")
+        elif want_reconcile:
+            reconciled = service.reconcile_invite_events(dry_run=dry_run)
+            verb = "would reconcile" if dry_run else "reconciled"
+            sys.stdout.write(
+                f"waitlist_invites: {verb} "
+                f"{len(reconciled)} missing invite_sent event(s)"
+                + (f": {', '.join(reconciled)}" if reconciled else "")
+                + "\n")
+            return 0
         else:
             if dry_run:
                 due = [r["entry_id"] for r in service.rows.values()
