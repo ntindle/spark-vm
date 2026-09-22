@@ -20,6 +20,11 @@ SCRIPTS = sorted(
     if f.endswith(".sh")
 )
 
+# One probe, not one per parametrized script.
+_HAS_SHELLCHECK = subprocess.run(
+    ["bash", "-c", "command -v shellcheck"],
+    capture_output=True, text=True, timeout=60).returncode == 0
+
 
 def run_bash(*argv):
     return subprocess.run(
@@ -40,7 +45,7 @@ def test_shell_syntax(script):
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: os.path.basename(p))
 def test_shellcheck_no_warnings(script):
-    if run_bash("-c", "command -v shellcheck").returncode != 0:
+    if not _HAS_SHELLCHECK:
         pytest.skip("shellcheck not installed; syntax-only gate applied")
     r = subprocess.run(
         ["shellcheck", "-S", "warning", script],

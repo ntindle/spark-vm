@@ -26,12 +26,21 @@ GUEST_IP=10.99.0.2
 CIDR=30
 JAIL_SSH_PORT=2222          # on the tailnet interface only (single source for the nftables DNAT rule below)
 REBUILD_ROOTFS=0
+SHOW_HELP=0
 for a in "$@"; do [ "$a" = "--rebuild-rootfs" ] && REBUILD_ROOTFS=1; done
+# --help/-h is detected across ALL of "$@" (not just $1): usage documents
+# `build.sh [--rebuild-rootfs] [--help]`, so `build.sh --rebuild-rootfs
+# --help` must still exit before the privileged build, not start it.
+for a in "$@"; do [ "$a" = "--help" ] || [ "$a" = "-h" ] && SHOW_HELP=1; done
 # Help/usage path: render the header doc and exit BEFORE any side
 # effect. Nothing below this point is safe on a dev box (sudo,
 # /var/lib/machines, veth, nftables), so --help is also the script's
 # CI smoke test (see jail/test_build_smoke.py).
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+# NOTE (kept in sync with test_build_smoke.py::TestHelp): ONLY
+# side-effect-free statements (comments, `set`, plain assignments, the
+# flag-scan loops above) may appear between the shebang and this
+# branch. Anything else fails the test suite.
+if [ "$SHOW_HELP" = 1 ]; then
     awk 'NR>1 && /^#/ {print} NR>1 && !/^#/ {exit}' "$0"
     echo ""
     echo "usage: build.sh [--rebuild-rootfs] [--help]"

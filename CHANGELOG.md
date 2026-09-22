@@ -47,16 +47,19 @@ This changelog only works if entries land with the change, not after it:
   egress posture refined to a stronger negative (real product with real
   pricing, still no stated egress policy). (#216)
 - `jail/build.sh` is safer to inspect and harder to drift: `--help` / `-h`
-  renders the script's header doc and exits before any side effect (also
-  the script's smoke test), and the tailnet→jail SSH port is now
-  single-sourced from `$JAIL_SSH_PORT` into the nftables DNAT rule via a
-  quoted heredoc + placeholder substitution — the applied conf always
-  carries the variable's value, with render-verified tests pinning it.
+  renders the script's header doc and exits before any side effect in ANY
+  flag position (`build.sh --rebuild-rootfs --help` can't accidentally
+  start the privileged build — the usage line documents that order), and
+  the tailnet→jail SSH port is now single-sourced from `$JAIL_SSH_PORT`
+  into the nftables DNAT rule via a quoted heredoc + placeholder
+  substitution — the applied conf always carries the variable's value,
+  with tests that render through the real sed pipeline.
 - The single-command test story now actually covers every component:
-  `pytest.ini` discovers the `cua/` and `jail/` suites too — including a
-  new `cua/test_shell_scripts.py` gate (`bash -n` + shellcheck warnings
-  for the four host-side `cua/bin` scripts that can't run in CI, with an
-  explicit skip when shellcheck is absent) — and
+  `pytest.ini` discovers the `cua/`, `jail/`, AND `credlib/` suites too —
+  including a new `cua/test_shell_scripts.py` gate (`bash -n` +
+  shellcheck warnings for the four host-side `cua/bin` scripts that
+  can't run in CI, with an explicit skip when shellcheck is absent,
+  now also wired into `ci.yml` so the gate actually executes) — and
   `confirm/test_push.py` skips explicitly (instead of erroring
   collection) on boxes without the `cryptography` package, so
   `python3 -m pytest` degrades gracefully.

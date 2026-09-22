@@ -100,11 +100,23 @@ class TestHelp:
                            capture_output=True, text=True, cwd="/tmp")
         assert p.returncode == 0, p.stderr
 
+    def test_help_honored_in_any_position(self):
+        # Usage documents `build.sh [--rebuild-rootfs] [--help]`; --help
+        # after the rebuild flag must still exit before the privileged
+        # build instead of starting it (B1). Safe: help exits pre-side-effect.
+        p = subprocess.run(["bash", BUILD_SH, "--rebuild-rootfs", "--help"],
+                           capture_output=True, text=True, cwd="/tmp")
+        assert p.returncode == 0, f"build.sh --rebuild-rootfs --help failed:\n{p.stderr}"
+        assert "usage: build.sh [--rebuild-rootfs] [--help]" in p.stdout
+
     def test_help_branch_precedes_all_side_effects(self, src):
         lines = src.splitlines()
+        # Strip comments before searching: a comment above the branch
+        # containing the help-check text would otherwise shrink the
+        # scanned region (QA review).
         idx = next(
             i for i, ln in enumerate(lines)
-            if re.search(r'\[\s*"\$\{1:-\}"\s*=\s*"--help"', ln))
+            if re.search(r'\[\s*"\$SHOW_HELP"\s*=\s*1\s*\]', ln.split("#", 1)[0]))
         for n, ln in enumerate(lines[1:idx], start=2):  # [1:] drops the shebang
             code = ln.split("#", 1)[0].rstrip()
             if not code.strip():
@@ -148,6 +160,7 @@ def _assert_side_effect_free(ln, lineno):
     "touch /tmp/pw6",                             # bare command
     "set -euo pipefail; touch /tmp/pw7",          # chained after an allowed prefix
     "X=1 Y=$(touch /tmp/pw8)",                    # substitution in a later assignment
+    "X=`touch /tmp/pw9`",                        # backtick substitution
 ])
 def test_help_tripwire_rejects_side_effects(mutant):
     with pytest.raises(AssertionError):
@@ -189,9 +202,14 @@ class TestSshPortSingleSourced:
 
     def test_rendered_conf_carries_port(self, src):
         # Prove the mechanism end to end: render the heredoc exactly the
-        # way build.sh does and check the applied line.
+        # way build.sh does — through the real sed pipeline, not a
+        # reimplementation — and check the applied line.
         port = self._port(src)
-        rendered = self._heredoc_body(src).replace("@@JAIL_SSH_PORT@@", port)
+        p = subprocess.run(
+            ["sed", f"s/@@JAIL_SSH_PORT@@/{port}/g"],
+            input=self._heredoc_body(src), capture_output=True, text=True)
+        assert p.returncode == 0, f"sed render failed:\n{p.stderr}"
+        rendered = p.stdout
         assert "@@" not in rendered
         assert (f'iifname "tailscale0" tcp dport {port} '
                 'dnat ip to 10.99.0.2:22') in rendered
