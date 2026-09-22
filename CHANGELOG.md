@@ -52,6 +52,12 @@ This changelog only works if entries land with the change, not after it:
   then proves the injected key with the provision-mode probe — a probe
   failure maps to provisioning-failed and box-live must not flip.
   Ships one JSON inject report on stdout and 55 hermetic tests. (#238)
+- Waitlist operator tooling: `waitlist_invites.py --reconcile` repairs
+  missing `invite_sent` funnel events after the commit → emit crash
+  window — it re-derives the missing events for still-live invites from
+  the waitlist store in the append-only posture (each re-derived event
+  carries `reconciled: true` in its attrs; `--dry-run` previews), is
+  idempotent, and skips rows whose invite is no longer live. (#237)
 - Secrets-posture corpus: h-sandbox's Credential Vault (open-source,
   self-hosted sandbox control plane) becomes the fourth convergent data
   point for the placeholder-swap pattern — its docs describe fake-env
