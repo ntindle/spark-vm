@@ -713,39 +713,29 @@ class ConfirmdTests(unittest.TestCase):
 
     def test_233_load_pending_reap_loses_race_gracefully(self):
         """The answer path may consume the item while the reap waits on
-        the lock; the reap must then skip the remove (not raise) and
-        still evict the lock entry."""
-        aid = "reap-lock-2"
+        the lock; the reap must then swallow the failed remove (not
+        raise) and still evict the lock entry. Deterministic: the only
+        os.remove call in load_pending() is the reap's, so forcing it to
+        raise FileNotFoundError models the lost race without threads
+        (the lock-waiting half is covered by the holds-lock test)."""
+        aid = "reap-remove-race-1"
         p = self.approvals / "pending" / (aid + ".json")
         p.write_text(json.dumps(
             {"id": aid, "expires": "2020-01-01T00:00:00+00:00"}))
-        lock = cd._aid_lock(aid)
-        lock.acquire()
-        done = []
-        errors = []
-
-        def worker():
-            try:
-                with mock.patch.object(cd, "APPROVALS",
-                                       str(self.approvals)):
-                    cd.load_pending()
-                done.append(True)
-            except Exception as e:  # noqa: BLE001 — asserted empty
-                errors.append(e)
-
-        t = threading.Thread(target=worker)
-        t.start()
-        time.sleep(0.2)
-        p.unlink()  # simulate the answer path consuming the item
-        lock.release()
-        t.join(timeout=5)
-        self.assertTrue(done)
-        self.assertFalse(errors, "reap raised: %r" % (errors,))
+        cd._aid_lock(aid)  # ensure the entry exists pre-reap
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch("os.remove",
+                        side_effect=FileNotFoundError(2, "gone")):
+            cd.load_pending()  # must swallow, not raise
         self.assertNotIn(aid, cd._aid_locks)
 
     def test_233_get_does_not_resurrect_reaped_item(self):
         """An item reaped by load_pending() must stay gone: GET must
-        404, not mint a nonce into a resurrected file."""
+        404, not mint a nonce into a resurrected file. Sequential by
+        design — it guards the 404/no-resurrection invariant; the
+        concurrent interleaving it names is closed by the lock
+        serialization (covered by the holds-lock test) plus the
+        write-back sitting under the lock (verified by inspection)."""
         aid = "reap-noresurrect-1"
         p = self.approvals / "pending" / (aid + ".json")
         p.write_text(json.dumps(
@@ -753,17 +743,7 @@ class ConfirmdTests(unittest.TestCase):
         with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
             cd.load_pending()
         self.assertFalse(p.exists())
-        h = cd.Handler.__new__(cd.Handler)
-        h.path = "/approval/" + aid
-        h.client_address = ("100.99.0.1", 1234)
-        got = {}
-        with mock.patch.object(cd.Handler, "_auth",
-                               return_value="ntindle@github"), \
-             mock.patch.object(cd.Handler, "_err",
-                               side_effect=lambda m, c: got.update(
-                                   msg=m, code=c)), \
-             mock.patch.object(cd, "APPROVALS", str(self.approvals)):
-            h.do_GET()
+        got = self._do_get_harness(aid)
         self.assertEqual(got["code"], 404)
         self.assertFalse(p.exists(), "GET resurrected the reaped file")
 
@@ -798,6 +778,7 @@ class ConfirmdTests(unittest.TestCase):
         h.client_address = ("100.99.0.1", 1234)
         got = {}
         events = []
+        cd._aid_lock(aid)  # ensure the entry exists pre-answer
         with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
              mock.patch.object(cd, "file_owner_name",
                                return_value="swapd"), \
@@ -816,6 +797,9 @@ class ConfirmdTests(unittest.TestCase):
             (self.approvals / "answered" / (aid + ".json")).exists())
         self.assertFalse(
             (self.approvals / "consumed" / (aid + ".json")).exists())
+        # The file is gone and no future path reaps it: this terminal
+        # path must evict too (issue #231's boundedness goal).
+        self.assertNotIn(aid, cd._aid_locks)
 
     def test_233_sweep_answered_moves_old_files(self):
         """answered/ strays older than the grace period move to
@@ -837,6 +821,25 @@ class ConfirmdTests(unittest.TestCase):
         self.assertFalse(
             (self.approvals / "consumed" / "fresh-1.json").exists())
         self.assertTrue(stray_txt.exists())
+
+    def test_233_sweep_answered_default_grace(self):
+        """The default-grace path (grace=None → CONFIRM_ANSWERED_SWEEP_GRACE_S)
+        sweeps a 3-day-old stray and leaves a 1-hour-old file alone."""
+        old = self.approvals / "answered" / "old-default-1.json"
+        young = self.approvals / "answered" / "young-default-1.json"
+        old.write_text("{}")
+        young.write_text("{}")
+        now = time.time()
+        os.utime(old, (now - 3 * 86400, now - 3 * 86400))
+        os.utime(young, (now - 3600, now - 3600))
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._sweep_answered()  # grace=None → module default
+        self.assertFalse(old.exists())
+        self.assertTrue(
+            (self.approvals / "consumed" / "old-default-1.json").exists())
+        self.assertTrue(young.exists())
+        self.assertFalse(
+            (self.approvals / "consumed" / "young-default-1.json").exists())
 
     # --- Issue #231: evict on the 404/corrupt negative paths ---
 

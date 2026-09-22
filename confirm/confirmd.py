@@ -397,12 +397,15 @@ def load_pending():
                     except OSError:
                         # Lost the race with the answer path, which
                         # consumed the item while we waited on the lock —
-                        # the file is already gone.
+                        # the expected case is FileNotFoundError. Any
+                        # other OSError is fail-safe here too: the item is
+                        # skipped from this render and the remove is
+                        # retried on the next one.
                         pass
                     # Arch 2026-09-21: keep the per-aid lock registry
                     # bounded — the item left pending here too. Evicting
                     # unconditionally is safe: aids are never reused and
-                    # expiry is monotonic.
+                    # an expired item stays expired.
                     _evict_aid_lock(aid)
                 continue
             items.append(it)
