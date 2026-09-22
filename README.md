@@ -67,6 +67,10 @@ my Unraid server), then add:
   never seen by the agent,
 - a **human-approval loop** (`confirmd`) so sensitive actions wait for
   your two taps — served over the tailnet, never through the agent,
+- a **push-notification queue** so your phone buzzes when the approval
+  loop needs those two taps — it queues the summons and retries it
+  through an outage instead of dropping it on the first failure,
+  portable like everything else,
 - a **job runner** (`muse-job`) so it can run long tasks with lifecycle
   hooks instead of you babysitting a terminal,
 - a **real desktop** it can drive with the official CUA driver —
@@ -112,6 +116,15 @@ session stays up — status, 20+ minutes later, still healthy.</sub>
 <br>
 <sub><b>Credential web UI</b> — the add/update form at phone width; the list
 shows names and state only. Values are never shown back.</sub>
+</td>
+</tr>
+<tr>
+<td valign="top" colspan="2">
+<img src="assets/demo-push-queue.gif" width="420" alt="Animated GIF — terminal transcript: enqueue the summons, the worker's first delivery attempt hits a dead endpoint (500) and reschedules, the journal keeps the pending entry, and the retry delivers after the endpoint recovers (201).">
+<br>
+<sub><b>Push queue</b> — the summons survives an outage. The worker's first
+delivery attempt hits a dead endpoint (500); the durable journal keeps
+the approval and the retry delivers (201).</sub>
 </td>
 </tr>
 <tr>
