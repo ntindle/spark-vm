@@ -4,8 +4,8 @@
 contributors touching the swap path (`proxy/`). For the primary research with
 vendor-quoted citations, see [the vendor-quoted research](SECRETS_POSTURE_RESEARCH.md) — this page is
 the repositioned summary: what the pattern is, why swapd exists, and exactly
-where it differs from the five vendors we read (plus the watch-list data point
-below).
+where it differs from the five vendors we read (plus the watch-list data
+points below).
 
 **The one honest framing, up front:** the secret-injection posture is
 *independently re-derived*, not a proven lead. Daytona — a major incumbent —
@@ -16,7 +16,14 @@ opencomputer.dev: their docs describe a secret-store egress proxy where the
 runtime runs with an opaque placeholder and the real key is swapped
 in-flight, only on the outbound HTTPS call to the model provider, under an
 egress allowlist ([credentials.mdx](https://github.com/diggerhq/opencomputer/blob/HEAD/docs/agent-sessions/credentials.mdx),
-verbatim quote in the research doc, verified 2026-09-21). This document shows
+verbatim quote in the research doc, verified 2026-09-21). A fourth —
+spotted the same day in the competitor watch — is h-sandbox's Credential
+Vault (open-source, self-hosted control plane): their own docs say "the
+sandbox sees only fake environment variables or no variables at all" while
+"the provider injects the real auth material only for outbound requests
+that match the binding" — a fake env placeholder in the sandbox, real value
+substituted at the egress sidecar onto host/scheme/method/path-bound
+requests (verbatim quote in the research doc, verified 2026-09-21). This document shows
 the pattern is convergent: every
 serious sandbox vendor has shipped some version of "the
 proxy holds the secret, the sandbox doesn't". We make no first-mover claim.
@@ -86,13 +93,14 @@ Vendor documentation: [E2B internet access](https://e2b.dev/docs/network/interne
   only; swapd substitutes into request bodies too. Against Daytona — the
   incumbent with the fullest version of the pattern — the comparison is narrow
   and honest, not a posture win.
-- **Response scrubbing** (vs E2B and Microsandbox; *parity* with Daytona):
+- **Response scrubbing** (vs E2B, Microsandbox, and h-sandbox; *parity* with Daytona):
   Daytona's proxy rewrites echoed real values back to the placeholder just
   like swapd's; E2B does not document scrubbing; Microsandbox explicitly does
-  not. The cleanest mechanical contrast is against Microsandbox, the only
-  other open-source entry.
-- **Audited per decision** (vs all five): none of the five vendors document
-  per-injection audit lines, and swapd goes one step further — the audit write
+  not; h-sandbox does not document it (their threat model admits a reflecting
+  endpoint as a residual risk). The cleanest mechanical contrasts are against
+  the open-source entries — Microsandbox, which explicitly does not scrub,
+  and h-sandbox, which documents no scrubbing.
+- **Audited per decision** (vs all five, and both watch-list data points): none of the five vendors, OpenComputer, or h-sandbox documents per-injection audit lines, and swapd goes one step further — the audit write
   is part of the authorization check, not a post-hoc best effort.
 - **Credential-brokering availability** (parity with Vercel): Vercel's own KB
   states transformation rules are "available on all plans, including Hobby"
@@ -160,6 +168,7 @@ docs as of 2026-09-19 (see [the vendor-quoted research](SECRETS_POSTURE_RESEARCH
 verbatim citations; the Vercel plan-availability item was re-verified
 2026-09-21 against the vendor's KB); OpenComputer's egress-proxy note is
 verified against its own docs as of 2026-09-21 (verbatim quote in the
-research doc). Vendor behavior moves, and this page
+research doc), and h-sandbox's Credential Vault note is verified against its
+own docs as of 2026-09-21 (verbatim quote in the research doc). Vendor behavior moves, and this page
 tracks the release it ships with. When the vendor docs change, update the research doc
 first and re-derive this page from it.

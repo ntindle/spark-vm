@@ -202,6 +202,49 @@ the five-vendor deep set above.
   the mechanism, not the derivation history — convergence is substantiated by
   the quote, independence of derivation is not claimed here.
 
+### h-sandbox / Harakiri (OSS self-hosted control plane) — VENDOR-VERIFIED
+
+Repo: https://github.com/nabilblk/h-sandbox (Apache-2.0), public source
+launch 2026-09-09; docs current to 2026-09-14. Read 2026-09-21 ~21:00 CDT
+(commit `79d1151`). Spotted in the 2026-09-21 competitor watch (C18) as a
+docs-verified data point — outside the five-vendor deep set above.
+
+- Their own security model ("The trusted path is",
+  `docs/credential-vault.md`): "The sandbox sees only fake environment
+  variables or no variables at all. The provider injects the real auth
+  material only for outbound requests that match the binding." The binding is
+  host + scheme + method + path, validated before the value is applied to the
+  provider-side vault.
+- Their term ("fake env") is the vendor's own, and the mechanics match
+  swapd's shape: placeholder in the sandbox (an explicitly *fake* env value),
+  real value substituted at the egress boundary (the OpenSandbox egress
+  sidecar / Credential Proxy, `credentialProxy.enabled`) onto
+  binding-matched requests only. Fake env is merged into the sandbox launch
+  environment; the real value goes to the sidecar, never the workload env or
+  filesystem.
+- Scope note: injection surface is auth material only (bearer / API-key
+  header / basic) — no request-body substitution claim found, so narrower
+  than swapd's headers+bodies+query+path surface. No HTTPS MITM on
+  Harakiri's side; the substitution point is the sidecar on the request path.
+- Response scrubbing: **not documented** — their threat model
+  (`docs/security/credential-vault-threat-model.md`) admits the residual
+  openly: "A malicious allowed destination can reflect received credentials
+  in its response." Same class as Microsandbox's explicit non-scrub; swapd
+  and Daytona remain the only scrubbers in the corpus.
+- Fail-closed enforcement: Credential Vault requires the strict `dns+nft`
+  egress profile with `credentialVaultReady: true` attestation; a DNS-only
+  sidecar is rejected. Binding hosts are composed into restricted egress
+  policy before injection. "Harakiri does not fall back to open outbound
+  access, real environment variables, mounted Secrets, or Kubernetes exec
+  when enforcement is unavailable."
+- Audit: lifecycle audit events, metadata-only, central redaction before
+  persistence. Per-injection audit is not documented (swapd's
+  per-decision-audit claim stands).
+- The convergence verdict: a fourth convergent data point for the
+  placeholder-swap pattern — and the first from an open-source self-hosted
+  control plane. As with OpenComputer, convergence is substantiated by the
+  quote; independence of derivation is not claimed here.
+
 ## What this means for R6 (the docs repositioning)
 
 The honest, sourced edges swapd can claim — each one vendor-quoted above:
