@@ -16,6 +16,17 @@ Covers docs/WAITLIST_OPERATIONS.md §5/§7 for the invite sender:
   is consumed.
 - Token shape: `invite.`-prefixed, HMAC-signed, single-use, 14-day TTL;
   cross-kind tokens never validate (confirm/forget ↔ invite).
+- Fault-injection crash windows (deferred m2 follow-ups from the
+  spool-then-single-commit reorder): a crash after `_consume_token(old)`
+  but before the row commit in the re-invite path recovers by re-running
+  against the confirmed row — fresh token, the stray email's link never
+  validates (the flip is manual today, issue #235); in the §7 expiry
+  rollover the same window retries cleanly with the retired token
+  staying consumed and no new email; a crash between the commit and
+  the `invite_sent` event leaves the metrics conservatively
+  under-reporting (never claiming what rows.jsonl doesn't show) and
+  never re-invites or double-spools (no automated reconciliation of
+  the missing event today, issue #234).
 
 stdlib only, no network.
 """
@@ -710,3 +721,213 @@ def test_invite_expiry_boundary_exact_14d():
     assert status == "expired"
     assert service.rollover_expired_invites() == [row["entry_id"]]
     assert service.rows[row["entry_id"]]["status"] == "confirmed"
+
+
+# ---------------------------------------------------------------------------
+# Fault injection: the remaining crash windows (deferred m2 follow-ups from
+# the spool-then-single-commit reorder, PR #220)
+# ---------------------------------------------------------------------------
+
+
+def test_reinvite_crash_between_consume_and_commit(monkeypatch):
+    # Fault injection for the `_consume_token(old)` -> commit window in
+    # the re-invite path: the old token's consume lands on disk, then the
+    # wave dies before the single row commit. On-disk state must be "old
+    # token consumed, row still invited with the old token" — the
+    # operator recovers by re-running the wave against the confirmed row,
+    # which mints a fresh token; the stray email's link never validates.
+    # (The flip-to-confirmed step is manual today; see issue #235 for
+    # the operator-tooling gap.)
+    service, tmp, clock = make_service()
+    row = confirm_row(service, "a@example.com", clock)
+    wave(service, count=1, wave="wave1")
+    old_token = service.rows[row["entry_id"]]["active_invite_token"]
+    lines_before = len(rows_lines_for(tmp, row["entry_id"]))
+
+    # Operator error, like test_reinvite_consumes_old_token: the invited
+    # row is flipped back to confirmed and a second wave re-invites it.
+    service.rows[row["entry_id"]]["status"] = "confirmed"
+
+    crash = {"armed": True}
+    real_save = wd.WaitlistService._save_row
+
+    def crashing_save(self, r):
+        if crash["armed"]:
+            crash["armed"] = False
+            raise RuntimeError("simulated kill -9")
+        return real_save(self, r)
+
+    monkeypatch.setattr(wd.WaitlistService, "_save_row", crashing_save)
+
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        wave(service, count=1, wave="wave2")
+
+    # The consume landed on disk (append-only file); the row commit did
+    # not: rows.jsonl grew by zero lines, the on-disk row is still
+    # invited with the old token, and the crashed wave's email is a
+    # stray — the old token validates as consumed, the stray as dead.
+    with open(os.path.join(tmp, "consumed_tokens.txt"),
+              encoding="utf-8") as fh:
+        assert old_token in fh.read().split()
+    assert len(rows_lines_for(tmp, row["entry_id"])) == lines_before
+    disk_row = rows_lines_for(tmp, row["entry_id"])[-1]
+    assert disk_row["status"] == "invited"
+    assert disk_row["active_invite_token"] == old_token
+
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    _, status = fresh.lookup_invite_token(old_token)
+    assert status == "consumed"
+    stray_docs = [d for d in spool_docs(tmp)
+                  if d.get("kind") == "invite"]
+    assert len(stray_docs) == 2  # wave1's email + the stray
+    stray_tokens = {d["body"].split("token=")[1].split()[0]
+                    for d in stray_docs}
+    stray_token = (stray_tokens - {old_token}).pop()
+    _, status = fresh.lookup_invite_token(stray_token)
+    # Never recorded as the live token: fails the active-token check.
+    assert status == "consumed"
+
+    # Operator recovery (manual today — see issue #235 for the
+    # operator-tooling gap): flip back to confirmed, re-run the wave.
+    # The re-consume is a no-op, the new token mints and commits, and
+    # the metrics stay conservative — exactly one invite_sent per
+    # committed row. The crashed wave's stray email counts against the
+    # §4 3/24h cap (it went out), so the recovery runs once the window
+    # rolls.
+    fresh.rows[row["entry_id"]]["status"] = "confirmed"
+    clock.advance(hours=25)
+    monkeypatch.setattr(wd.WaitlistService, "_save_row", real_save)
+    invited = fresh.send_invite_wave(pricing_lines=PRICING,
+                                     trial_terms=TERMS, wave="wave3",
+                                     count=1)
+    assert invited == [row["entry_id"]]
+    frow = fresh.rows[row["entry_id"]]
+    assert frow["status"] == "invited"
+    new_token = frow["active_invite_token"]
+    assert new_token not in (old_token, stray_token)
+    assert len(rows_lines_for(tmp, row["entry_id"])) == lines_before + 1
+    _, status = fresh.lookup_invite_token(new_token)
+    assert status == "ok"
+    _, status = fresh.lookup_invite_token(old_token)
+    assert status == "consumed"
+    sent = [e for e in funnel_events(tmp) if e["event"] == "invite_sent"]
+    assert len(sent) == 2
+    assert all(e["ref"] == row["entry_id"] for e in sent)
+
+
+def test_wave_crash_between_commit_and_emit(monkeypatch):
+    # Fault injection for the commit -> `invite_sent` emit window: the
+    # row commit lands, then the process dies before the funnel event.
+    # On-disk state must be "invited row committed, email spooled, no
+    # invite_sent event" — the metrics read conservatively and never
+    # claim what rows.jsonl doesn't show. The retry must not re-invite
+    # or double-spool.
+    service, tmp, clock = make_service()
+    row = confirm_row(service, "a@example.com", clock)
+    lines_before = len(rows_lines_for(tmp, row["entry_id"]))
+
+    crash = {"armed": True}
+    real_emit = wd.WaitlistService._emit
+
+    def crashing_emit(self, event, ref, attrs=None):
+        if event == "invite_sent" and crash["armed"]:
+            crash["armed"] = False
+            raise RuntimeError("simulated kill -9")
+        return real_emit(self, event, ref, attrs)
+
+    monkeypatch.setattr(wd.WaitlistService, "_emit", crashing_emit)
+
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        wave(service, count=1, wave="wave1")
+
+    # The commit landed but the event did not: the row is invited on
+    # disk, exactly one invite email is spooled, and funnel_events has
+    # no invite_sent.
+    assert len(rows_lines_for(tmp, row["entry_id"])) == lines_before + 1
+    disk_row = rows_lines_for(tmp, row["entry_id"])[-1]
+    assert disk_row["status"] == "invited"
+    token = disk_row["active_invite_token"]
+    invites = [d for d in spool_docs(tmp) if d.get("kind") == "invite"]
+    assert len(invites) == 1
+    assert token in invites[0]["body"]
+    assert "invite_sent" not in [e["event"] for e in funnel_events(tmp)]
+
+    # Fresh view: the token is live; a retry waves nothing (invited
+    # rows are not eligible) — no duplicate email, no synthesized event.
+    # The missing event has no automated reconciliation today; see
+    # issue #234 for the reconciliation/runbook gap.
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    frow, status = fresh.lookup_invite_token(token)
+    assert status == "ok" and frow["entry_id"] == row["entry_id"]
+    monkeypatch.setattr(wd.WaitlistService, "_emit", real_emit)
+    assert fresh.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                  wave="wave2", count=1) == []
+    assert len(rows_lines_for(tmp, row["entry_id"])) == lines_before + 1
+    assert len([d for d in spool_docs(tmp)
+                if d.get("kind") == "invite"]) == 1
+    assert "invite_sent" not in [e["event"] for e in funnel_events(tmp)]
+
+
+def test_rollover_crash_between_consume_and_commit(monkeypatch):
+    # Fault injection for the `_consume_token` -> commit window in the
+    # §7 expiry rollover: the invite token is consumed on disk, then the
+    # crash hits before the row's return-to-confirmed commit. The retry
+    # must finish the rollover cleanly — re-consume is a no-op, no
+    # re-confirmation, no new funnel event.
+    service, tmp, clock = make_service()
+    row = confirm_row(service, "a@example.com", clock)
+    invited_at = clock()
+    wave(service, count=1, wave="wave1")
+    token = service.rows[row["entry_id"]]["active_invite_token"]
+    clock.advance(days=15)
+    lines_before = len(rows_lines_for(tmp, row["entry_id"]))
+
+    crash = {"armed": True}
+    real_save = wd.WaitlistService._save_row
+
+    def crashing_save(self, r):
+        if crash["armed"]:
+            crash["armed"] = False
+            raise RuntimeError("simulated kill -9")
+        return real_save(self, r)
+
+    monkeypatch.setattr(wd.WaitlistService, "_save_row", crashing_save)
+
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        service.rollover_expired_invites()
+
+    # Consumed on disk, row untouched: still invited with the old
+    # active token, rows.jsonl grew by zero lines.
+    with open(os.path.join(tmp, "consumed_tokens.txt"),
+              encoding="utf-8") as fh:
+        assert token in fh.read().split()
+    assert len(rows_lines_for(tmp, row["entry_id"])) == lines_before
+    disk_row = rows_lines_for(tmp, row["entry_id"])[-1]
+    assert disk_row["status"] == "invited"
+    assert disk_row["active_invite_token"] == token
+
+    # Fresh view: the token reads consumed, the rollover is idempotent
+    # — the retry completes it: back to confirmed at the EXPIRY time,
+    # token fields popped, no funnel event.
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    _, status = fresh.lookup_invite_token(token)
+    assert status == "consumed"
+    monkeypatch.setattr(wd.WaitlistService, "_save_row", real_save)
+    rolled = fresh.rollover_expired_invites()
+    assert rolled == [row["entry_id"]]
+    frow = fresh.rows[row["entry_id"]]
+    assert frow["status"] == "confirmed"
+    expiry = invited_at + timedelta(seconds=wd.INVITE_TTL_SECONDS)
+    assert frow["confirmed_at"] == wd.iso_z(expiry)
+    for key in ("invited_at", "invite_expires_at", "invite_wave",
+                "active_invite_token"):
+        assert key not in frow
+    _, status = fresh.lookup_invite_token(token)
+    assert status == "consumed"
+    kinds = [e["event"] for e in funnel_events(tmp)]
+    assert kinds.count("invite_sent") == 1
+    assert "invite_expired" not in kinds
+    assert len(rows_lines_for(tmp, row["entry_id"])) == lines_before + 1

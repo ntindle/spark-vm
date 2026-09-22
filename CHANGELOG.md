@@ -218,6 +218,15 @@ This changelog only works if entries land with the change, not after it:
   invited with no email on the way: each invited row commits in a single step
   after its email is queued, so a crash degrades to a duplicate email on
   retry instead of a lost invite (#220).
+- Waitlist invite crash recovery is now pinned by fault-injection tests
+  (deferred follow-ups from #220): the remaining crash windows — after an
+  old invite token is retired but before the row commits (re-invite and
+  expiry rollover), and between the commit and the `invite_sent` metric
+  event — are exercised against the documented behavior: in the re-invite
+  window, recovery mints a fresh token (the stray email's claim link
+  validates as consumed at the service layer); in the rollover window the
+  retired token stays consumed with no new email; and the metrics never
+  claim what the on-disk rows don't show (#236).
 - README, ONBOARDING, and the pre-seeded-harness research doc now point at
   the real `cua/bin/cua-desktop.sh` path (the script moved into `cua/bin/`
   and the old `./cua/cua-desktop.sh` reference broke the desktop step of
