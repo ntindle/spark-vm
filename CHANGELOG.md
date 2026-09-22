@@ -342,6 +342,13 @@ This changelog only works if entries land with the change, not after it:
   fail-closed deny-name entries. The trailing dot is stripped after the
   port now, on both sides of the shared matcher, and the case is pinned
   in the test corpus so it cannot regress again. (#265)
+- Provision-time credential teardown now recognizes every IPv4 spelling of
+  loopback (e.g. `127.1`, `127.0.0.2`, `0x7f.0.0.1`, `2130706433`,
+  `0177.0.0.1`) as the live echo exemptions they are: these forms match
+  exactly at the proxy and resolve to loopback on the machine, but the
+  teardown previously saw only the canonical `127.0.0.1`/`localhost`
+  spellings, so a binding or allowlist line written in a non-canonical
+  spelling would have survived teardown undetected. (#267)
 - Provision-time credential teardown now treats leading-dot entries (e.g.
   `.localhost`) as the live loopback exemptions they are: previously only
   bare loopback names were unbound or refused, so a `.localhost` binding

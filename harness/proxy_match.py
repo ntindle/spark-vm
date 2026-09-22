@@ -28,11 +28,15 @@ again; the injector's echo layer needs no special case and this module
 documents the resolution, not the divergence.
 
 LOAD-BEARING ASSUMPTION: the echo set is exactly 127.0.0.1 / localhost /
-::1 plus the .localhost subtree. Other loopback forms (127.0.0.2,
-::ffff:127.0.0.1) are NOT flagged on the hosts side (the ssrf side does
-cover 127.0.0.0/8); this is safe only because the gate fixture's echo
-server binds the aliases, never those forms -- a fixture that binds one
-would need the set extended here.
+::1 plus the .localhost subtree, PLUS every IPv4 spelling that normalizes
+to 127.0.0.0/8 (127.1, 127.0.0.2, 0x7f.0.0.1, 2130706433, 0177.0.0.1,
+0x7f000001 -- issue #259). These spellings exact-match at enforcement and
+resolve to loopback on the box, so an echo detector that misses them
+leaves live exemptions the teardown never flags. IPv4-mapped IPv6
+(::ffff:127.0.0.1) exact-matches at enforcement since issue #257 but is
+deliberately not flagged here yet -- a known residual, tracked as issue
+#269 (needs on-box verification of the fixture's mapped-form routing
+before the echo set is extended).
 
 Stdlib only. Deployed next to inject-provision-state.sh on the tenant box;
 the injector calls it as ``python3 "$HERE/proxy_match.py" <subcommand>``.
@@ -41,6 +45,7 @@ the injector calls it as ``python3 "$HERE/proxy_match.py" <subcommand>``.
 import ipaddress
 import json
 import os
+import socket
 import sys
 
 # --- Mirrors of proxy/swap_addon.py (kept byte-faithful; the tripwire pins) --
@@ -129,6 +134,37 @@ ECHO_NETS = (ipaddress.ip_network("127.0.0.0/8"),
              ipaddress.ip_network("::1/128"))
 
 
+def _is_loopback_ipv4(text):
+    """True when text normalizes to an address in 127.0.0.0/8 (issue #259).
+
+    socket.inet_aton accepts the non-canonical IPv4 spellings ipaddress
+    rejects -- short forms (127.1), octal (0177.0.0.1), hex (0x7f.0.0.1,
+    0x7f000001), decimal (2130706433) -- and all of them exact-match at
+    enforcement AND resolve to loopback on the box, so each is a live echo
+    exemption the teardown must flag. ipaddress covers the canonical forms
+    (and any canonical form inet_aton also accepts). Anything that is not
+    an IP literal at all rejects cleanly down both paths -- including
+    embedded null bytes (inet_aton raises ValueError there, so the except
+    covers both OSError and ValueError)."""
+    if not text:
+        return False
+    try:
+        addr = ipaddress.IPv4Address(
+            int.from_bytes(socket.inet_aton(text), "big"))
+    except (OSError, ValueError):
+        # ValueError: inet_aton raises it (not OSError) on embedded null
+        # bytes -- a crash here would turn a weird registry/allowlist entry
+        # into a provisioning refusal, so fall through to the ipaddress
+        # path, which rejects the same inputs cleanly.
+        try:
+            addr = ipaddress.ip_address(text)
+        except ValueError:
+            return False
+        if not isinstance(addr, ipaddress.IPv4Address):
+            return False
+    return addr in ECHO_NETS[0]
+
+
 def is_echo_entry(entry, aliases=ECHO_ALIASES):
     """True when a single host-list entry (registry allowed_hosts item or
     hosts.allow line, already stripped) is an effective echo exemption
@@ -143,13 +179,31 @@ def is_echo_entry(entry, aliases=ECHO_ALIASES):
     Fail-closed superset: no legitimate provider binding ends in
     .localhost. Without this, such a binding would survive the fixture
     teardown as "clean" while the proxy still swapped toward loopback
-    names."""
+    names.
+
+    Non-canonical IPv4 loopback spellings (issue #259: 127.1, 127.0.0.2,
+    0x7f.0.0.1, 2130706433, 0177.0.0.1, 0x7f000001) are likewise treated
+    as echo: they exact-match at enforcement and resolve to loopback on
+    the box. This normalization runs unconditionally: a narrowed
+    ECHO_ALIASES override can only shrink the exact-alias/leading-dot
+    checks, never the 127/8, ::1, or .localhost sets (fail-closed).
+    Entry-side ports stay inert (test pins): a registry entry
+    carrying a port never matches at enforcement, so nothing strips the
+    port before normalization."""
     s = str(entry).strip()
     if any(host_in_list(a, [s]) for a in aliases):
         return True
     # ("::1" needs no literal special case anymore: host_in_list matches
     # IP literals as normalized addresses since issue #257, so the alias
     # loop above already covers it.)
+    # Issue #259: non-canonical IPv4 loopback spellings exact-match at
+    # enforcement and resolve to loopback on the box. Normalize on the
+    # dot-stripped form, mirroring host_in_list's trailing-dot rule; ports
+    # are deliberately NOT stripped (entry-side ports are inert at
+    # enforcement -- the mirror check above already covers canonical
+    # spellings, so this path only ever widens the fail-closed set).
+    if _is_loopback_ipv4(s.lower().rstrip(".")):
+        return True
     low = s.lower().rstrip(".")
     if low.startswith(".") and low[1:] in tuple(a.lower() for a in aliases):
         return True

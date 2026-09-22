@@ -201,9 +201,47 @@ class TestEchoLayer(unittest.TestCase):
         self.assertFalse(pm.is_echo_entry("notlocalhost"))
         self.assertFalse(pm.is_echo_entry("localhost.evil.com"))
 
+    def test_is_echo_entry_noncanonical_loopback_spellings(self):
+        # Issue #259: non-canonical IPv4 spellings exact-match at
+        # enforcement and resolve to loopback on the box, so a binding or
+        # allowlist line using one is a live echo exemption the teardown
+        # must flag. inet_aton accepts the short/octal/hex/decimal forms
+        # ipaddress rejects.
+        for h in ("127.1", "127.0.0.2", "0x7f.0.0.1", "2130706433",
+                  "0177.0.0.1", "0x7f000001", "0X7F.0.0.1", "0x7f.0.0.01",
+                  "127.1.", "  0x7f.0.0.1  "):
+            self.assertTrue(pm.is_echo_entry(h), h)
+        # Non-loopback spellings of the same classes stay clean, and the
+        # entry-side-port rule still holds (ports are inert at enforcement,
+        # pinned by test_is_echo_entry_entry_side_ports_are_inert): an
+        # entry carrying a port is never a live exemption, loopback or not.
+        # Null bytes must reject cleanly, not crash the gate (Security
+        # round-1 blocker: inet_aton raises ValueError on embedded NUL).
+        for h in ("8.8.8.8", "0x8.8.8.8", "134744072", "0x80000001",
+                  "0200.0.0.1", "0.0.0.0", "127.1:8080", "127.1.evil.com",
+                  "\x00127.0.0.1", "127.0.0.1\x00"):
+            self.assertFalse(pm.is_echo_entry(h), h)
+        # Known residual (module docstring, issue #269): IPv4-mapped IPv6
+        # exact-matches at enforcement since #257 but is deliberately not
+        # flagged on the hosts side yet.
+        self.assertFalse(pm.is_echo_entry("::ffff:127.0.0.1"))
+        # The ssrf path inherits the fix for bare-IP spellings via the
+        # is_echo_entry fallback (hostname treatment of non-ipaddress
+        # lines): "0x7f.0.0.1/8" is a different story -- the real
+        # _parse_ssrf_allow treats it as an (inert) hostname too, so the
+        # tripwire side and this side stay in agreement.
+        self.assertTrue(pm.ssrf_line_is_echo("0x7f.0.0.1"))
+        self.assertTrue(pm.ssrf_line_is_echo("127.1"))
+        self.assertFalse(pm.ssrf_line_is_echo("0x8.8.8.8"))
+        # A CIDR-shaped non-canonical spelling is dead on both sides: the
+        # real _parse_ssrf_allow treats it as an (inert) hostname too.
+        self.assertFalse(pm.ssrf_line_is_echo("0x7f.0.0.1/8"))
+
     def test_is_echo_entry_non_echo(self):
+        # NB: "127.0.0.2" is NOT here -- since issue #259 it normalizes to
+        # 127.0.0.0/8 and is flagged as echo (pinned above).
         for h in ("api.anthropic.com", "10.0.0.1", "example.com",
-                  "127.0.0.2", "localhos", "1.2.3.4"):
+                  "localhos", "1.2.3.4"):
             self.assertFalse(pm.is_echo_entry(h), h)
 
     def test_ssrf_line_is_echo_cidr(self):
