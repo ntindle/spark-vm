@@ -42,7 +42,7 @@ This changelog only works if entries land with the change, not after it:
   what-happens-next steps as the invite email), and clicking through
   records the claim idempotently and logs it in the funnel trail. Dead
   or expired links land on an honest "no longer live" page, never an
-  error dump. (PR TBD)
+  error dump. (#250)
 - Provision-time injector (`harness/inject-provision-state.sh`): runs at
   first boot of the hosted agent VM and owns the provision-time half of
   the gate-fixture contract — preflights the golden-image manifest
