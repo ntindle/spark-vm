@@ -215,6 +215,13 @@ machine status):
 | `stuck` | "Your Muse's first session stalled. We're looking into it." |
 | `provisioning-failed` | "Box setup failed — we're retrying." |
 
+*Operator-only codes — instrumented, no human rendering:* `policy-misfire`
+(the §6.7 golden-image gate measured a filing-count defect: zero or 2+
+filings for the first task) and `no-gated-action` (the Muse never attempted
+the gated action) never surface on the signup page. Per §7, conflating them
+would misattribute the funnel's predicted drop-offs; they belong to the
+operator's gate and pilot analysis only.
+
 ## 5. Harness pre-seed contract (R2's interface)
 
 The golden image (or provision-time injection — R2's implementation

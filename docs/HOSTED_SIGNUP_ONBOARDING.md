@@ -135,7 +135,8 @@ copy-paste is required after the first link.
 ```
 human ──▶ landing page ──▶ create account (email + magic link)
    │
-   ├─▶ pick plan (free tier first; paid later — operator decision)
+   ├─▶ pick plan (paid tiers; card-required trial possible, trial terms TBD
+   │       — operator decision: no free tier at launch)
    ├─▶ name the box ("nick's dev box")
    ├─▶ copy the enrollment token (shown once) to their Muse
    │       │
@@ -172,8 +173,8 @@ the signup page says so plainly so nobody stares at a spinner.
   computer).
 - The two paths: "I have a server" → repo + ONBOARDING.md (today's flow);
   "I don't" → hosted signup.
-- Plan/pricing summary (operator decision; free tier recommended for
-  adoption).
+- Plan/pricing summary (paid tiers; card-required trial possible, terms TBD —
+  operator decision; no free tier at launch).
 - The enrollment token handoff + pending-key approval UI (show once, with
   "copy for your Muse").
 - Link to status/docs; nothing else. It is a funnel, not a dashboard.
