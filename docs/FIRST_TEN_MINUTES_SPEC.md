@@ -215,6 +215,13 @@ machine status):
 | `stuck` | "Your Muse's first session stalled. We're looking into it." |
 | `provisioning-failed` | "Box setup failed — we're retrying." |
 
+*Operator-only codes — instrumented, no human rendering:* `policy-misfire`
+(the §6.7 golden-image gate measured a filing-count defect: zero or 2+
+filings for the first task) and `no-gated-action` (the Muse never attempted
+the gated action) never surface on the signup page. Per §7, conflating them
+would misattribute the funnel's predicted drop-offs; they belong to the
+operator's gate and pilot analysis only.
+
 ## 5. Harness pre-seed contract (R2's interface)
 
 The golden image (or provision-time injection — R2's implementation
@@ -372,11 +379,11 @@ From `docs/POSITIONING.md` anti-claims plus the operator decisions
   all. This spec's trust story is approvals + audit lines, which exist.
 - Claims stay on the self-hosted reality until the hosted product
   exists: this spec is design thinking, not a ship announcement.
-- The signup doc §5 still says "pick plan (free tier first; paid
-  later — operator decision)" — that line is **stale** against the
-  decided Billing item and needs updating where the signup doc lands
-  (flagged as a follow-up; this spec follows the decision, not the
-  stale line).
+- The signup doc §5's "free tier first" plan-picker lines were **stale**
+  against the decided Billing item; corrected 2026-09-22 (paid tiers;
+  card-required trial possible, trial terms TBD —
+  `docs/HOSTED_SIGNUP_ONBOARDING.md` §5). This spec follows the decision,
+  not the stale line.
 
 ## 10. Follow-ups
 

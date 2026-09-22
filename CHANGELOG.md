@@ -37,13 +37,6 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
-- Competitor analysis now covers Brig (local microVM coding-agent
-  containment) and Epho (agents-as-API with multi-provider fallback),
-  closing the two remaining night-watch competitor items — Brig scored
-  on the substrate axis, Epho's fallback scored against the H4
-  provider-agnostic interface criterion, with four follow-up backlog
-  items (failover-router design, fail-closed enforcement downgrade,
-  metered-billing-key guard, BYOK pricing note) (#244)
 - Provision-time injector (`harness/inject-provision-state.sh`): runs at
   first boot of the hosted agent VM and owns the provision-time half of
   the gate-fixture contract — preflights the golden-image manifest
@@ -249,6 +242,16 @@ This changelog only works if entries land with the change, not after it:
   applying is an owner decision (#174)
 
 ### Fixed
+- First-ten-minutes spec conformance audit (gap turn): the new
+  conformance-gap doc checks every spec clause against the repo — four
+  clauses still unmet (the onboarding status poll with the spec's machine
+  vocabulary, the first-approval summons channel, the golden-image
+  round-trip gate procedure, the §3a smoke echo endpoint and dummy
+  credential) are filed as build items G3–G6; the signup onboarding doc's
+  stale "free tier first" plan-picker lines are corrected to the decided
+  no-free-tier / card-required-trial-possible position, and the
+  operator-only `policy-misfire` / `no-gated-action` note the spec's
+  §10 follow-up asked for is in the rendering table. (#245)
 - An invite wave interrupted mid-send can no longer strand a waitlist row as
   invited with no email on the way: each invited row commits in a single step
   after its email is queued, so a crash degrades to a duplicate email on
