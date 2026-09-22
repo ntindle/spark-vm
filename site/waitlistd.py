@@ -1622,11 +1622,14 @@ class WaitlistService:
         spool write failed — the row is then untouched (still confirmed,
         no token consumed), so the next wave retries it cleanly.
 
-        Spool-then-single-commit: once the spool write succeeds, EVERY
-        row mutation happens in memory first (old token consumed, new
-        token recorded, send ledgers, the invited mark) and commits with
-        ONE _save_row append. There is no intermediate on-disk row state.
-        Failure modes, in order:
+        Spool-then-single-commit: once the spool write succeeds, every
+        ROW mutation happens in memory first (new token recorded, send
+        ledgers, the invited mark) and commits with ONE _save_row
+        append — no intermediate on-disk row state. The old-token
+        consume and path-A ledger event are idempotent file appends
+        that land before the commit; their extra state is benign on
+        retry (re-consume is a no-op, the ledger counts delivered
+        emails). Failure modes, in order:
         - spool write fails or the §4 cap suppresses → nothing committed;
           the row stays confirmed and the next wave retries it cleanly
           (same as before).

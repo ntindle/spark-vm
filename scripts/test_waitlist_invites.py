@@ -654,6 +654,8 @@ def test_wave_crash_between_spool_and_commit(monkeypatch):
     # Retry: the row is invited with a FRESH token; the user gets a
     # second email (duplicate on retry), the first email's link stays
     # dead, and exactly one invite_sent event exists per committed row.
+    spool = os.path.join(tmp, "spool")
+    before_retry = set(os.listdir(spool))
     invited = fresh.send_invite_wave(pricing_lines=PRICING,
                                      trial_terms=TERMS, wave="wave2",
                                      count=2)
@@ -665,7 +667,16 @@ def test_wave_crash_between_spool_and_commit(monkeypatch):
     assert len(rows_lines_for(tmp, a["entry_id"])) == lines_before + 1
     invites = [d for d in spool_docs(tmp) if d.get("kind") == "invite"]
     assert len(invites) == 2
-    new_token = invites[1]["body"].split("token=")[1].split()[0]
+    # Both invite filenames share the frozen-clock prefix and differ
+    # only in their random suffix, so sorted order is a coin flip —
+    # identify the retry's doc by set difference instead.
+    new_files = set(os.listdir(spool)) - before_retry
+    assert len(new_files) == 1, \
+        f"expected exactly one new spool doc, got {new_files}"
+    new_doc = json.load(
+        open(os.path.join(spool, new_files.pop()), encoding="utf-8"))
+    assert new_doc.get("kind") == "invite"
+    new_token = new_doc["body"].split("token=")[1].split()[0]
     assert new_token != stray_token
     assert frow["active_invite_token"] == new_token
     row_after_retry, outcome = fresh.lookup_invite_token(stray_token)
