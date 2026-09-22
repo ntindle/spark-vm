@@ -441,4 +441,6 @@ The run takes ~75 seconds (it waits out the real 60s retry backoff so the
 second delivery is genuinely due, not faked). Regeneration overwrites the
 GIF in place — the file in the repo is the current final. The generator is
 self-contained: it never reads the ambient `CONFIRM_DIR` and only ever
-talks to 127.0.0.1.
+talks to 127.0.0.1. The scratch dirs' contents are git-ignored, safe to
+delete (`demo-push-work/` also holds the throwaway VAPID private key —
+never commit it).

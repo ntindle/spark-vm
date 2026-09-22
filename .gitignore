@@ -1,8 +1,11 @@
 __pycache__/
 *.pyc
 # demo-asset intermediates (regenerable; keep out of git)
+# demo-push-work/ also holds a throwaway VAPID private key: never commit.
 /demo-frames/
 /demo-asset2-work/
 /demo-asset4-captures/
 /demo-asset4-work/
 /demo-asset5-work/
+/demo-push-work/
+/demo-push-frames/
