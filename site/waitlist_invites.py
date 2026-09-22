@@ -35,6 +35,29 @@ waitlistd.WaitlistService:
         Idempotent: re-running emits nothing new. Sends no email, so no
         WAITLIST_CLAIM_LIVE gate.
 
+    waitlist_invites.py --reinstate-confirmed --entry-id EID [--entry-id ...] --reason TEXT [--dry-run] [--force]
+        Issue #235: flip stranded invited rows back to confirmed in the
+        append-only posture — the repair the fault-injection tests
+        perform by hand. Covers the `_consume_token(old)` -> row-commit
+        crash window (on-disk row still invited with a consumed token)
+        and operator-initiated re-waves (bounced/lost invite email).
+        One new rows.jsonl revision per row: status -> confirmed, the
+        invite keys popped, confirmed_at KEPT (crash repair, not expiry:
+        the entry keeps its original queue position), the revision
+        stamped with `reinstate_at` + `reinstate_reason`. The next wave
+        re-invites with a fresh token. A row whose invite token is still
+        LIVE is refused unless --force (reinstating kills the claim
+        link); --force consumes the live token so the trail reads
+        "consumed". --reason is required — it is the audit trail.
+        Sends no email, so no WAITLIST_CLAIM_LIVE gate.
+
+    waitlist_invites.py --diagnose
+        Issue #235 item 3: read-only listing of every invited row with
+        its token state (ok / expired / consumed / invalid / missing)
+        and the recommended action — healthy rows, --rollover-due rows,
+        crash-suspect reinstate candidates, and hand-damaged rows the
+        operator inspects manually. Sends nothing, mutates nothing.
+
 Pricing and trial terms arrive as FILES (not argv): the pricing lines are
 operator data that must be byte-stable across the wave and stay out of
 shell history / process tables. pricing-file holds one plan/price line
@@ -59,6 +82,11 @@ On demand (no claim-live gate — sends nothing; idempotent):
 
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
         waitlist_invites.py --reconcile [--dry-run]  # after any suspected crash
+    WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
+        waitlist_invites.py --diagnose  # which stranded state each invited row is in
+    WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
+        waitlist_invites.py --reinstate-confirmed --entry-id EID \\
+            --reason "re-invite crashed before row commit; stray email dead" [--dry-run] [--force]
 
 Config (env — same fail-loud contract as waitlistd/waitlist_jobs):
     WAITLIST_HMAC_KEY    operator HMAC key — REQUIRED, fail loud if unset.
@@ -145,13 +173,27 @@ def main(argv):
     want_wave = "--send-wave" in argv
     want_rollover = "--rollover" in argv
     want_reconcile = "--reconcile" in argv
-    if sum((want_wave, want_rollover, want_reconcile)) != 1:
+    want_reinstate = "--reinstate-confirmed" in argv
+    want_diagnose = "--diagnose" in argv
+    actions = (want_wave, want_rollover, want_reconcile,
+               want_reinstate, want_diagnose)
+    if sum(actions) != 1:
         sys.stderr.write(
             "waitlist_invites: pass exactly one of --send-wave, "
-            "--rollover, --reconcile\n")
+            "--rollover, --reconcile, --reinstate-confirmed, --diagnose\n")
         raise SystemExit(2)
     dry_run = "--dry-run" in argv
     key, data_dir, host = load_config(argv)
+
+    def flag(name):
+        for i, a in enumerate(argv):
+            if a == name and i + 1 < len(argv):
+                return argv[i + 1]
+        return None
+
+    def flags_all(name):
+        return [argv[i + 1] for i, a in enumerate(argv)
+                if a == name and i + 1 < len(argv)]
 
     if want_wave and not dry_run and \
             os.environ.get("WAITLIST_CLAIM_LIVE") != "1":
@@ -167,11 +209,6 @@ def main(argv):
 
     wave = count = pricing = terms = None
     if want_wave:
-        def flag(name):
-            for i, a in enumerate(argv):
-                if a == name and i + 1 < len(argv):
-                    return argv[i + 1]
-            return None
         wave = flag("--wave")
         count_raw = flag("--count")
         pricing_path = flag("--pricing-file")
@@ -193,9 +230,39 @@ def main(argv):
         pricing = read_text_file(pricing_path, "pricing-file")
         terms = read_text_file(terms_path, "trial-terms-file")
 
+    reinstate_ids = reason = None
+    reinstate_force = False
+    if want_reinstate:
+        reinstate_ids = flags_all("--entry-id")
+        reason = flag("--reason")
+        if not reinstate_ids:
+            sys.stderr.write(
+                "waitlist_invites: --reinstate-confirmed needs at least "
+                "one --entry-id EID\n")
+            raise SystemExit(2)
+        if not reason or not reason.strip():
+            sys.stderr.write(
+                "waitlist_invites: --reinstate-confirmed needs --reason "
+                "TEXT — it is recorded on the row as the audit trail\n")
+            raise SystemExit(2)
+        reinstate_force = "--force" in argv
+
     with data_lock(data_dir):
         service = WaitlistService(data_dir, key, host)
         service.reload()  # never scan from a pre-daemon view
+        if want_diagnose:
+            rows = service.diagnose_invites()
+            if not rows:
+                sys.stdout.write(
+                    "waitlist_invites: no invited rows — nothing to "
+                    "diagnose\n")
+                return 0
+            for r in rows:
+                sys.stdout.write(
+                    f"waitlist_invites: {r['entry_id']} "
+                    f"({r['owner']}) token={r['token_state']}: "
+                    f"{r['recommendation']}\n")
+            return 0
         if want_wave:
             if dry_run:
                 eligible = [r for r in service.rows.values()
@@ -222,6 +289,28 @@ def main(argv):
                 + (f": {', '.join(reconciled)}" if reconciled else "")
                 + "\n")
             return 0
+        elif want_reinstate:
+            try:
+                if dry_run:
+                    plan = service.reinstate_confirmed(
+                        reinstate_ids, reason=reason,
+                        force=reinstate_force, dry_run=True)
+                    for p in plan:
+                        sys.stdout.write(
+                            f"waitlist_invites: dry-run — "
+                            f"{p['entry_id']} token={p['token_state']}: "
+                            f"would {p['would']}\n")
+                    return 0
+                reinstated = service.reinstate_confirmed(
+                    reinstate_ids, reason=reason, force=reinstate_force)
+            except ValueError as exc:
+                sys.stderr.write(f"waitlist_invites: {exc}\n")
+                raise SystemExit(2)
+            sys.stdout.write(
+                f"waitlist_invites: reinstated {len(reinstated)} row(s) "
+                f"to confirmed"
+                + (f": {', '.join(reinstated)}" if reinstated else "")
+                + " — re-wave to re-invite with a fresh token\n")
         else:
             if dry_run:
                 due = [r["entry_id"] for r in service.rows.values()

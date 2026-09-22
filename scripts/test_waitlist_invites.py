@@ -20,14 +20,15 @@ Covers docs/WAITLIST_OPERATIONS.md §5/§7 for the invite sender:
   spool-then-single-commit reorder): a crash after `_consume_token(old)`
   but before the row commit in the re-invite path recovers by re-running
   against the confirmed row — fresh token, the stray email's link never
-  validates (the flip is manual today, issue #235); in the §7 expiry
-  rollover the same window retries cleanly with the retired token
-  staying consumed and no new email; a crash between the commit and
-  the `invite_sent` event leaves the metrics conservatively
-  under-reporting (never claiming what rows.jsonl doesn't show) and
-  never re-invites or double-spools; the operator repairs the missing
-  event with `waitlist_invites.py --reconcile` (issue #234), which
-  re-derives it from rows.jsonl in the append-only posture.
+  validates (the flip was manual until issue #235's `--reinstate-confirmed`
+  / `--diagnose` operator tooling landed); in the §7 expiry rollover the
+  same window retries cleanly with the retired token staying consumed
+  and no new email; a crash between the commit and the `invite_sent`
+  event leaves the metrics conservatively under-reporting (never claiming
+  what rows.jsonl doesn't show) and never re-invites or double-spools;
+  the operator repairs the missing event with
+  `waitlist_invites.py --reconcile` (issue #234), which re-derives it
+  from rows.jsonl in the append-only posture.
 
 stdlib only, no network.
 """
@@ -1245,3 +1246,360 @@ def test_cli_reconcile_exactly_one_of(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         wi.main(["--send-wave", "--wave", "w1", "--reconcile"])
     assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        wi.main(["--reinstate-confirmed", "--rollover"])
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        wi.main(["--diagnose", "--send-wave"])
+    assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# --reinstate-confirmed / --diagnose (issue #235)
+# ---------------------------------------------------------------------------
+
+
+def _crash_reinvite(service, monkeypatch):
+    """Fault-inject the `_consume_token(old)` -> row-commit crash window
+    from test_reinvite_crash_between_consume_and_commit: the old token's
+    consume lands on disk, the row commit does not. Returns the row and
+    the on-disk state."""
+    tmp = service.data_dir
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    entry_id = row["entry_id"]
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="wave1", count=1)
+    old_token = service.rows[entry_id]["active_invite_token"]
+    lines_before = len(rows_lines_for(tmp, entry_id))
+
+    crash = {"armed": True}
+    real_save = wd.WaitlistService._save_row
+
+    def crashing_save(self, r):
+        if crash["armed"]:
+            crash["armed"] = False
+            raise RuntimeError("simulated kill -9")
+        return real_save(self, r)
+
+    monkeypatch.setattr(wd.WaitlistService, "_save_row", crashing_save)
+    # Operator error, as in the fault-injection test: the invited row is
+    # flipped back to confirmed (in-memory only) and a second wave
+    # re-invites it, dying between _consume_token(old) and the commit.
+    service.rows[entry_id]["status"] = "confirmed"
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                 wave="wave2", count=1)
+    monkeypatch.setattr(wd.WaitlistService, "_save_row", real_save)
+    disk_row = rows_lines_for(tmp, entry_id)[-1]
+    assert disk_row["status"] == "invited"
+    assert disk_row["active_invite_token"] == old_token
+    return tmp, entry_id, old_token, lines_before
+
+
+def test_reinstate_confirmed_crash_repair(monkeypatch):
+    """#235 acceptance: the test-1 fault-injection recovery (invited row,
+    token consumed, commit never landed) now runs through
+    reinstate_confirmed — no hand-editing rows.jsonl."""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    tmp, entry_id, old_token, lines_before = _crash_reinvite(service,
+                                                            monkeypatch)
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    assert fresh.lookup_invite_token(old_token)[1] == "consumed"
+    confirmed_at = [r for r in rows_lines_for(tmp, entry_id)
+                    if "confirmed_at" in r][-1]["confirmed_at"]
+    events_before = funnel_events(tmp)
+
+    reinstated = fresh.reinstate_confirmed(
+        [entry_id], reason="wave2 crashed between consume and commit; "
+                           "re-waving with a fresh token")
+    assert reinstated == [entry_id]
+    frow = fresh.rows[entry_id]
+    assert frow["status"] == "confirmed"
+    # Crash repair, not expiry: the entry keeps its original queue
+    # position; the invite keys are popped (rollover convention).
+    assert frow["confirmed_at"] == confirmed_at
+    for key in ("invited_at", "invite_expires_at", "invite_wave",
+                "active_invite_token"):
+        assert key not in frow
+    assert frow["reinstate_reason"].startswith("wave2 crashed")
+    assert "reinstate_at" in frow
+    # Exactly one new rows.jsonl revision for the flip.
+    assert len(rows_lines_for(tmp, entry_id)) == lines_before + 1
+    # No funnel event for the reinstatement (taxonomy has none): the
+    # event log is identical before and after the flip.
+    assert funnel_events(tmp) == events_before
+
+    # The re-wave mints a fresh token; the stray email's link never
+    # validates; exactly one invite_sent per committed row.
+    clock.advance(hours=25)  # the stray email counted against the §4 cap
+    invited = fresh.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                     wave="wave3", count=1)
+    assert invited == [entry_id]
+    new_token = fresh.rows[entry_id]["active_invite_token"]
+    assert new_token != old_token
+    assert fresh.lookup_invite_token(new_token)[1] == "ok"
+    assert fresh.lookup_invite_token(old_token)[1] == "consumed"
+    sent = [e for e in funnel_events(tmp) if e["event"] == "invite_sent"]
+    assert len(sent) == 2
+
+
+def test_reinstate_refuses_live_token(monkeypatch):
+    """A live invite is refused without --force: reinstating would kill
+    the claim link, so the operator must say so explicitly."""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    entry_id = row["entry_id"]
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="wave1", count=1)
+    token = service.rows[entry_id]["active_invite_token"]
+    lines_before = len(rows_lines_for(tmp, entry_id))
+
+    with pytest.raises(ValueError, match="still LIVE"):
+        service.reinstate_confirmed([entry_id], reason="bounced email")
+    # Nothing mutated: the row is still invited, no new revision.
+    assert len(rows_lines_for(tmp, entry_id)) == lines_before
+    assert service.rows[entry_id]["status"] == "invited"
+    assert service.lookup_invite_token(token)[1] == "ok"
+
+
+def test_reinstate_force_consumes_live_token(monkeypatch):
+    """--force retires a live invite honestly: the token is consumed at
+    reinstate time so the trail reads 'consumed', then the re-wave mints
+    fresh."""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    entry_id = row["entry_id"]
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="wave1", count=1)
+    token = service.rows[entry_id]["active_invite_token"]
+    clock.advance(hours=25)
+
+    reinstated = service.reinstate_confirmed(
+        [entry_id], reason="invite email bounced; re-waving", force=True)
+    assert reinstated == [entry_id]
+    frow = service.rows[entry_id]
+    assert frow["status"] == "confirmed"
+    assert frow["reinstate_consumed_live_token"] is True
+    assert service.lookup_invite_token(token)[1] == "consumed"
+
+    invited = service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                       wave="wave2", count=1)
+    assert invited == [entry_id]
+    assert service.lookup_invite_token(
+        service.rows[entry_id]["active_invite_token"])[1] == "ok"
+
+
+def test_reinstate_rejects_bad_entries(monkeypatch):
+    """Unknown entries, non-invited rows, and an empty reason all fail
+    loud — and validation runs before ANY row is mutated."""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    entry_id = row["entry_id"]
+    lines_before = len(rows_lines_for(tmp, entry_id))
+
+    with pytest.raises(ValueError, match="no such entry"):
+        service.reinstate_confirmed(["nope"], reason="x")
+    with pytest.raises(ValueError, match="not 'invited'"):
+        service.reinstate_confirmed([entry_id], reason="x")
+    with pytest.raises(ValueError, match="reason is required"):
+        service.reinstate_confirmed([entry_id], reason="   ")
+
+    # No partial application: a valid + invalid pair commits nothing.
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="wave1", count=1)
+    service._consume_token(service.rows[entry_id]["active_invite_token"])
+    with pytest.raises(ValueError, match="no such entry"):
+        service.reinstate_confirmed([entry_id, "nope"], reason="x")
+    assert len(rows_lines_for(tmp, entry_id)) == lines_before + 1  # wave only
+    assert service.rows[entry_id]["status"] == "invited"
+
+
+def test_reinstate_dry_run_changes_nothing(monkeypatch):
+    """dry_run returns the plan; rows.jsonl is untouched."""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    tmp, entry_id, old_token, lines_before = _crash_reinvite(service,
+                                                            monkeypatch)
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    plan = fresh.reinstate_confirmed([entry_id], reason="x", dry_run=True)
+    assert len(plan) == 1
+    assert plan[0]["entry_id"] == entry_id
+    assert plan[0]["token_state"] == "consumed"
+    assert "flip to confirmed" in plan[0]["would"]
+    assert len(rows_lines_for(tmp, entry_id)) == lines_before
+    assert fresh.rows[entry_id]["status"] == "invited"
+
+
+def test_reinstate_keeps_queue_position(monkeypatch):
+    """Two confirmed rows: the reinstated one rejoins at its original
+    confirmed_at — ahead of the entry that confirmed after it."""
+    service, tmp, clock = make_service()
+    first = confirm_row(service, "a@example.com", clock,
+                        at=NOW - timedelta(days=2))
+    second = confirm_row(service, "b@example.com", clock,
+                         at=NOW - timedelta(days=1))
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="wave1", count=1)
+    service._consume_token(service.rows[first["entry_id"]]
+                           ["active_invite_token"])
+    clock.advance(hours=25)
+    service.reinstate_confirmed([first["entry_id"]], reason="crash repair")
+    # FIFO: the reinstated entry (older confirmed_at) invites first.
+    invited = service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                       wave="wave2", count=2)
+    assert invited[0] == first["entry_id"]
+    assert invited[1] == second["entry_id"]
+
+
+def test_diagnose_invites(monkeypatch):
+    """Every invited row is bucketed: live, consumed (crash-suspect),
+    expired (rollover-due), and hand-damaged (missing token)."""
+    service, tmp, clock = make_service()
+    # Distinct confirmed_at values: FIFO order across the two waves is
+    # deterministic (same-second confirms tie-break on the random
+    # entry_id, which would make the wave membership nondeterministic).
+    emails = ["a@example.com", "b@example.com", "c@example.com",
+              "d@example.com"]
+    by_email = {}
+    for i, email in enumerate(emails):
+        row = confirm_row(service, email, clock,
+                          at=NOW - timedelta(days=20 - i))
+        by_email[email] = row["entry_id"]
+    # Two waves 15 days apart give per-row invite ages: a and b's
+    # invites go out first (expired by the second wave), c's and d's
+    # are live.
+    clock.advance(hours=25)  # clear of the §4 cap
+    assert service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                    wave="wave1", count=2) == \
+        [by_email["a@example.com"], by_email["b@example.com"]]
+    clock.advance(days=15)
+    assert service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                    wave="wave2", count=2) == \
+        [by_email["c@example.com"], by_email["d@example.com"]]
+    # b: the crash state (token consumed, row still invited).
+    service._consume_token(service.rows[by_email["b@example.com"]]
+                           ["active_invite_token"])
+    # d: hand-damaged — no invite token recorded.
+    drow = service.rows[by_email["d@example.com"]]
+    del drow["active_invite_token"]
+    service._save_row(drow)
+
+    diag = {d["entry_id"]: d for d in service.diagnose_invites()}
+    assert set(diag) == set(by_email.values())
+    assert diag[by_email["c@example.com"]]["token_state"] == "ok"
+    assert "nothing to do" in diag[by_email["c@example.com"]]\
+        ["recommendation"]
+    assert diag[by_email["b@example.com"]]["token_state"] == "consumed"
+    assert "--reinstate-confirmed" in diag[by_email["b@example.com"]]\
+        ["recommendation"]
+    assert diag[by_email["a@example.com"]]["token_state"] == "expired"
+    assert "--rollover" in diag[by_email["a@example.com"]]["recommendation"]
+    assert diag[by_email["d@example.com"]]["token_state"] == "missing"
+    assert "by hand" in diag[by_email["d@example.com"]]["recommendation"]
+    # Owner is masked, never the full address.
+    assert all("@" not in d["owner"] for d in diag.values())
+
+
+def _cli_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("WAITLIST_DATA", str(data))
+    monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
+                       "https://waitlist.example.invalid")
+    monkeypatch.delenv("WAITLIST_CLAIM_LIVE", raising=False)
+    return str(data)
+
+
+def test_cli_reinstate_and_diagnose(tmp_path, monkeypatch, capsys):
+    """The operator path end to end: diagnose the crash state, preview
+    with --dry-run, reinstate, re-wave. No WAITLIST_CLAIM_LIVE gate —
+    nothing here sends email."""
+    data = _cli_env(monkeypatch, tmp_path)
+    clock = MutClock()
+    service = wd.WaitlistService(data, KEY, "https://waitlist.example.invalid",
+                                 clock=clock)
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    service.confirm_post(service.rows[service.by_email["a@example.com"]]
+                         ["active_token"])
+    entry_id = service.rows[service.by_email["a@example.com"]]["entry_id"]
+    monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="wave1", count=1)
+    monkeypatch.delenv("WAITLIST_CLAIM_LIVE", raising=False)
+    # Simulate the #235 crash: token consumed, row never re-committed.
+    service._consume_token(service.rows[entry_id]["active_invite_token"])
+    del service  # the CLI re-reads from disk under data_lock
+
+    assert wi.main(["--diagnose"]) == 0
+    out = capsys.readouterr().out
+    assert entry_id in out and "consumed" in out
+    assert "--reinstate-confirmed" in out
+
+    assert wi.main(["--reinstate-confirmed", "--entry-id", entry_id,
+                    "--reason", "wave2 crash; re-waving", "--dry-run"]) == 0
+    assert "would" in capsys.readouterr().out
+
+    assert wi.main(["--reinstate-confirmed", "--entry-id", entry_id,
+                    "--reason", "wave2 crash; re-waving"]) == 0
+    out = capsys.readouterr().out
+    assert "reinstated 1 row(s)" in out and entry_id in out
+
+    fresh = wd.WaitlistService(data, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    frow = fresh.rows[entry_id]
+    assert frow["status"] == "confirmed"
+    assert frow["reinstate_reason"] == "wave2 crash; re-waving"
+
+    # --reason is required even in dry-run; --entry-id is required.
+    with pytest.raises(SystemExit) as exc:
+        wi.main(["--reinstate-confirmed", "--entry-id", entry_id,
+                 "--dry-run"])
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        wi.main(["--reinstate-confirmed", "--reason", "x"])
+    assert exc.value.code == 2
+    # Reinstating an already-confirmed row is refused (nothing to do).
+    with pytest.raises(SystemExit) as exc:
+        wi.main(["--reinstate-confirmed", "--entry-id", entry_id,
+                 "--reason", "x"])
+    assert exc.value.code == 2
+
+    # Live-token refusal through the CLI without --force; --force
+    # retires the live token and the row rejoins confirmed.
+    clock2 = MutClock()
+    clock2.advance(hours=25)  # the §4 cap is per 24h rolling window
+    svc2 = wd.WaitlistService(data, KEY, "https://waitlist.example.invalid",
+                              clock=clock2)
+    svc2.submit_form({"owner_email": "b@example.com"}, "127.0.0.1")
+    svc2.confirm_post(svc2.rows[svc2.by_email["b@example.com"]]
+                      ["active_token"])
+    eid2 = svc2.rows[svc2.by_email["b@example.com"]]["entry_id"]
+    monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
+    # count=2: the reinstated a@example.com (original, older
+    # confirmed_at) re-waves first, then b — both hold live tokens.
+    svc2.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                          wave="wave2", count=2)
+    monkeypatch.delenv("WAITLIST_CLAIM_LIVE", raising=False)
+    del svc2
+    with pytest.raises(SystemExit) as exc:
+        wi.main(["--reinstate-confirmed", "--entry-id", eid2,
+                 "--reason", "bounced"])
+    assert exc.value.code == 2
+    assert "LIVE" in capsys.readouterr().err
+    assert wi.main(["--reinstate-confirmed", "--entry-id", eid2,
+                    "--reason", "bounced", "--force"]) == 0
+    assert "reinstated 1 row(s)" in capsys.readouterr().out
+    svc3 = wd.WaitlistService(data, KEY, "https://waitlist.example.invalid",
+                              clock=clock2)
+    assert svc3.rows[eid2]["reinstate_consumed_live_token"] is True
