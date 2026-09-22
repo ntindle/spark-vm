@@ -307,6 +307,17 @@ This changelog only works if entries land with the change, not after it:
   becomes bounded downtime instead of unbounded unenforced running.
   (#260 — entry placed at the end of Unreleased/Added so the branch
   merges cleanly over #263's same-section entry)
+- Afternoon competitor watch (2026-09-22): the DigitalOcean Managed
+  Agents launch blog added the mechanism detail the morning pass lacked —
+  Firecracker microVMs per session, auto-pause defined precisely as "no
+  outgoing LLM or tool calls," a 99.3% intent-match claim for Action
+  Gateway tool search, a $0.060 vs $0.126 active-CPU worked pricing
+  example, live product docs with a prepaid-balance billing model, and a
+  self-published benchmark naming Fly.io Sprites as the comparator
+  (886 ms create→ready, 189 ms exec RTT, 305 ms resume); the rest of the
+  tracked set was quiet. Inputs filed for #47 (benchmark reference
+  numbers, edge-routing latency datapoint) and #179 (auto-pause idle
+  trigger). (PR TBD)
 
 ### Changed
 - Hosted pricing thinking refreshed: the internal pricing analysis now
