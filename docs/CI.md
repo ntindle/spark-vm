@@ -38,7 +38,8 @@ shellcheck --severity=error $(git ls-files '*.sh')
 # these hosts, open it in a real browser (they serve browsers fine) and
 # confirm the page loads and matches the headline you cite — a browser 404
 # means the link is genuinely broken: fix the link, don't extend the
-# exclusion. Last hand-verified 2026-09-19.
+# exclusion. Re-sweep procedure + verification log:
+# `docs/EXCLUDED_HOSTS_RESWEEP.md` (quarterly; last sweep 2026-09-22).
 lychee --no-progress --exclude-loopback --exclude 'https?://(www\.)?medium\.com/.*' --exclude 'https?://(www\.)?businesswire\.com/.*' --exclude 'https?://(www\.)?globenewswire\.com/.*' '**/*.md'
 
 # PNG smoke test (same scripts CI runs; --with-deps handles OS deps)
