@@ -98,9 +98,9 @@ model, prompt, provider key, and repos — that spins up a sandbox,
 configures the chosen harness (claude / codex / opencode), clones
 repos, wires MCP servers, and streams the agent's work back as
 server-sent events (async mode with webhooks too). By Bruin Data
-Limited, launched ~Sep 7 (**THIRD-PARTY**: Product Hunt launch post,
-https://www.producthunt.com/products/epho-claude-code-in-the-cloud;
-everydev.ai/tools/epho). This is the task-scoped, session-clocked
+Limited, launched ~Sep 7 (**THIRD-PARTY**: [Product Hunt launch
+post](https://www.producthunt.com/products/epho-claude-code-in-the-cloud);
+[everydev.ai/tools/epho](https://www.everydev.ai/tools/epho)). This is the task-scoped, session-clocked
 shape our hosted thesis explicitly rejects ("a real computer that
 stays yours") — which makes its *reliability* engineering, not its
 product shape, the thing to learn from.
