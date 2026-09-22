@@ -203,6 +203,16 @@ ExecStart=/usr/sbin/nft -f /etc/nftables-jail.conf
 [Install]
 WantedBy=multi-user.target
 EOF
+# Fail-closed edge (C22 contract): Before= is ordering-only — a failed
+# firewall apply would NOT stop the jail from starting. The Requires=
+# edge lives on the consumer side (systemd-nspawn@jail.service), so a
+# failed jail-firewall.service blocks the container from starting.
+$SUDO mkdir -p /etc/systemd/system/systemd-nspawn@$MACHINE.service.d
+$SUDO tee /etc/systemd/system/systemd-nspawn@$MACHINE.service.d/firewall-requires.conf >/dev/null <<EOF
+[Unit]
+Requires=jail-firewall.service
+After=jail-firewall.service
+EOF
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable --now jail-firewall.service
 say "firewall active:"

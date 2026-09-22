@@ -127,8 +127,9 @@ Vendor documentation: [E2B internet access](https://e2b.dev/docs/network/interne
 ## Committed, unbuilt: deny-style billing guard for sandbox cred-forwarding
 
 When spark-vm forwards operator credentials into a sandbox — the hosted
-tenant path, not yet built — known metered-billing keys (model-provider
-API keys and equivalents) are deny-by-default: the forwarding path refuses
+tenant path, not yet built — known metered-billing keys (model-provider API keys and equivalents;
+seed list e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` — finalized when the
+surface ships) are deny-by-default: the forwarding path refuses
 to make them available to the sandbox without an explicit per-credential
 operator override, and the refusal is audit-logged. The shape is Brig's
 `deny` guard, deliberately: Brig refuses to forward e.g.
