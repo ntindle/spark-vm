@@ -35,6 +35,10 @@ BACKLOG.md block points here.
   when a primary-source verification or a factual correction demands it
   (the #82 pattern — the five queued verifications, the CVE date
   corrections); otherwise pre-window items are not re-researched.
+- **Retry rule:** a vendor-page fetch that fails the two-retry rule on one
+  pass is re-attempted on the next pass rather than carried forward as
+  standing UNVERIFIABLE (the 2026-09-22 DO product page flipped from
+  UNVERIFIABLE to VERIFIED this way).
 - **Deep-scan cadence:** on-demand by review/meta runs, not by the hourly
   loop. The hourly pass stays delta-only.
 - **Consolidation queue:** this pass folds #64 (night) → #82 (morning) →

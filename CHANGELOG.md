@@ -45,9 +45,10 @@ This changelog only works if entries land with the change, not after it:
   lifecycle docs publish warm wake 100–500 ms and cold wake 1–2 s with
   dropped TCP state, bearing on the resume-latency target. New to the
   tracked set: Boxd ($2M pre-seed, KVM persistent-machine competitor,
-  fork-including-memory in <100 ms), the OpenAI Agents API sandbox
-  partner list (formalizes the harness-vs-compute split), and Upstash
-  "Box" (snapshot/restore sandbox); independent hands-on coverage of the
+  vendor-claimed fork-including-memory in <100 ms), the OpenAI Agents API sandbox
+  partner list (formalizes the harness-vs-compute split — INFERRED from
+  the partner list, not an OpenAI claim), and a new snapshot/restore
+  datapoint on the already-corpus-ed Upstash "Box" entry; independent hands-on coverage of the
   DO launch is still absent. (#TBD)
 - Secrets-posture corpus gains DigitalOcean Managed Agents as the fifth
   convergent data point (their launch release claims a separate secrets

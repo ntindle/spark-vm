@@ -35,7 +35,8 @@ the launch blog:
   so an idle agent's charge falls to zero instead of paying for allocated
   capacity."
 - Per-session access controls; subagent/map-reduce parallel sessions;
-  16,000+ tools / 500+ providers.
+  16,000+ tools / 500+ providers (per the launch blog — the corpus's
+  scored claim; the product page repeats the tally).
 
 **VERIFIED** (DO product docs, all read this pass; indexes "Generated on
 22 Sep 2026"):
@@ -68,7 +69,8 @@ milliseconds**." The vendor's own self-published benchmark (Sept 21,
 internal, p50) says create→ready **886 ms**, first response **3.3 s**,
 resume **305 ms**; the morning press release also claims 305 ms. Both
 are vendor claims; the marketing page is faster than the measured
-numbers. The corpus (C14's "305 ms bar", C27's filed benchmark input)
+numbers — and the gap is biggest on first response ("a couple of
+seconds" vs 3.3 s measured). The corpus (C14's "305 ms bar", C27's filed benchmark input)
 should carry the footnote: **~200 ms is the aspirational marketing
 figure; 305 ms is the measured p50.** Anyone citing the benchmark must
 cite the benchmark, not the landing page.
@@ -97,10 +99,10 @@ cold wake 1–2 s) — DO's 305 ms resume claim is competitive against
 Sprites' *warm* wake but the comparison is apples-to-oranges (DO resume
 preserves the session; Sprites' warm wake is a memory-resume with
 dropped TCP state); (b) a caveat for C27: the blog's "exec round trip
-189 ms vs Fly.io Sprites 79 ms" names a figure that **Sprites' own docs
-do not publish** — no exec-RTT figure exists on docs.sprites.dev — so
-the 79 ms leg is unexplained vendor methodology, not a Sprites vendor
-claim. Filed context, not a benchmark correction.
+189 ms vs Fly.io Sprites 79 ms" names a figure that **the Sprites
+concept docs read this pass do not publish** — no exec-RTT figure exists
+there — so the 79 ms leg is unexplained vendor methodology, not a
+Sprites vendor claim. Filed context, not a benchmark correction.
 
 ## 4. The tracked set — quiet (surveyor A, VERIFIED re-reads ~17:55–17:58 CDT)
 
@@ -158,7 +160,11 @@ No in-window change across the tracked set:
   Harness Runtime's pause/resume/fork and spark-vm's #179 lifecycle +
   #47 branching control plane — a funded, KVM-native competitor in the
   persistent-machine-for-agents lane. Watch, don't react: pre-seed, and
-  the speed claims are vendor numbers. Filed as **C29** (watch-level).
+  the speed claims are vendor numbers — note the tension with this
+  pass's vendor-verified Sprites figure ("Open TCP connections do not
+  survive a pause, warm or cold"), which makes a claimed fork of
+  *active connections* in <100 ms a mechanism claim worth a proof, not a
+  headline. Filed as **C29** (watch-level).
 - **OpenAI Agents API partner list names DigitalOcean + eight others.**
   THIRD-PARTY (archived OpenAI announcement, third-party repo:
   https://github.com/steel-experiments/internal-agents-map/blob/HEAD/archive/sources/openai-agents-api-post/content.md;
@@ -168,20 +174,22 @@ No in-window change across the tracked set:
   OpenAI-endorsed sandbox provider — first-party validation of DO's
   sandbox stack from the harness side, sharpens C26; (b) the architecture
   formalizes the **harness↔compute split** (OpenAI owns the agent loop;
-  sandbox is pluggable compute) — directly relevant to spark-vm's
+  sandbox is pluggable compute) — **INFERRED** from the partner list,
+  not an OpenAI claim — directly relevant to spark-vm's
   hosted-product design: the hosted product competes on the
   compute/execution layer while harness choice is BYO. Corroborates the
   "open alternative" positioning against both E2B/Daytona and DO. Filed
   as **C30**.
-- **Upstash "Box" — snapshot/restore sandbox entering the corpus's
-  vendor set.** Vendor docs (launch date not established — not a corpus
+- **Upstash "Box" — new snapshot/restore datapoint on an existing corpus
+  entry.** Vendor docs (launch date not established — not a corpus
   timing claim):
   https://github.com/upstash/docs/blob/HEAD/box/overall/how-it-works.mdx
   — snapshot/restore API for reusable prepared environments, branching
   from snapshots, full outbound networking by default, 22.5 Gbps hosts,
-  on AWS; pause/resume not available when keepAlive enabled. A
-  Redis-adjacent vendor now in the sandbox lane. Filed as **C31**
-  (watch-level).
+  on AWS; pause/resume not available when keepAlive enabled. The vendor
+  is already corpus-ed (`docs/ORG_POLICY_RESEARCH.md` §2, per-box policy
+  + Attach Headers); what is new this pass is the snapshot/restore
+  mechanics. Filed as **C31** (watch-level datapoint).
 - **Vercel Sandbox default storage 32 GB → 64 GB** — THIRD-PARTY
   (ai-cost-estimator cost-analysis blog, ~Sept 14): newly-created
   sandbox defaults doubled; the blog reads it as workspace-cost
@@ -198,8 +206,11 @@ No in-window change across the tracked set:
   the harness↔compute split with nine first-class sandbox partners —
   input to the hosted product's compute-layer positioning; DO's presence
   sharpens C26.
-- **C31 (NEW, competitor — watch):** Upstash "Box" snapshot/restore
-  sandbox joins the tracked set; vendor-docs-sourced, timing unverified.
+- **C31 (NEW datapoint on existing corpus entry — competitor — watch):**
+  Upstash "Box" snapshot/restore mechanics per vendor docs (timing
+  unverified); entity already corpus-ed in `docs/ORG_POLICY_RESEARCH.md`
+  §2, so no new vendor entry — this is a mechanics datapoint under the
+  existing one.
 - **C27 context (competitor → #47):** product-page tension filed in the
   C27 story (marketing ~200 ms vs measured 305 ms resume) and the
   Sprites-79-ms methodology caveat (no exec-RTT figure on
