@@ -1611,7 +1611,8 @@ class WaitlistService:
             return row, "expired"
         return row, "ok"
 
-    def _queue_invite_email(self, row, position, pricing_lines, trial_terms):
+    def _queue_invite_email(self, row, position, pricing_lines, trial_terms,
+                            wave, now):
         """Spool the §7 invite email: pricing + trial terms filled at send
         time from the decided pricing (the template never contains
         pricing numbers), the invitee's signed position line ("You held
@@ -1621,11 +1622,27 @@ class WaitlistService:
         spool write failed — the row is then untouched (still confirmed,
         no token consumed), so the next wave retries it cleanly.
 
-        Spool-then-commit: the old token is consumed and the new token
-        recorded only AFTER the spool write succeeds. Committing first
-        could strand the row as invited-without-email (slot burned until
-        rollover) or leave the user with a consumed old token and no
-        delivered email."""
+        Spool-then-single-commit: once the spool write succeeds, EVERY
+        row mutation happens in memory first (old token consumed, new
+        token recorded, send ledgers, the invited mark) and commits with
+        ONE _save_row append. There is no intermediate on-disk row state.
+        Failure modes, in order:
+        - spool write fails or the §4 cap suppresses → nothing committed;
+          the row stays confirmed and the next wave retries it cleanly
+          (same as before).
+        - crash after the spool write but before the single commit → the
+          row stays confirmed on disk with one stray email in the spool.
+          The retry mints a FRESH token; the stray email's claim link
+          never validates (its token was never recorded as the row's
+          active token), so the failure mode is "duplicate email on
+          retry" — never "invited row with no email" (m2 reorder).
+        - crash after the commit → perfect: invited row, email spooled.
+        The `invite_sent` funnel event follows the commit, not the
+        spool: a crash in that last window leaves an invited row the
+        operator can re-derive from rows.jsonl (status=invited) rather
+        than an event claiming an invite that never committed — the
+        metrics read conservatively and never claim what rows.jsonl
+        doesn't show."""
         if not self._unified_send_allowed(row):
             return False
         token = self.mint_invite_token(row["entry_id"], row["owner_email"])
@@ -1668,6 +1685,13 @@ class WaitlistService:
         ]
         # Union half #2 (see _unified_send_allowed).
         self._record_patha_event(row["owner_email"], "email")
+        # The invited mark lands in the SAME commit as the token record:
+        # one _save_row append, no intermediate on-disk row state.
+        row["status"] = "invited"
+        row["invited_at"] = iso_z(now)
+        row["invite_expires_at"] = iso_z(
+            now + timedelta(seconds=INVITE_TTL_SECONDS))
+        row["invite_wave"] = wave
         self._save_row(row)
         self._emit("invite_sent", row["entry_id"])
         return True
@@ -1678,12 +1702,15 @@ class WaitlistService:
         Invites up to `count` confirmed rows, FIFO by confirmed_at,
         scanning past cap-suppressed rows so a capped head-of-line
         row never eats a wave slot. The §7 invite email goes out with
-        the pricing/trial terms filled at send time, and each mailed
-        row is THEN marked invited (status, invited_at,
-        invite_expires_at = now + 14d, invite_wave = wave) —
-        spool-then-mark, so no crash window can strand a row as
-        invited-without-email. Emits `invite_sent`
-        (FUNNEL_MEASUREMENT.md §3.4) per mailed row.
+        the pricing/trial terms filled at send time, and each mailed row
+        commits with ONE rows.jsonl append AFTER the spool write succeeds
+        — token record + invited mark (status, invited_at,
+        invite_expires_at = now + 14d, invite_wave = wave) land together,
+        so no crash window can strand a row as invited-without-email.
+        The residual crash window (spool written, commit not yet) fails
+        as "duplicate email on retry": the retry mints a fresh token and
+        the stray email's claim link never validates. Emits `invite_sent`
+        (FUNNEL_MEASUREMENT.md §3.4) per mailed row, after the commit.
 
         Rows past the 3/24h email cap are NOT invited this wave — they
         stay confirmed for a later wave (their slot is not consumed).
@@ -1716,21 +1743,15 @@ class WaitlistService:
             if len(invited) >= count:
                 break
             position = rank[row["entry_id"]]
-            # The cap check and the spool write both happen inside
-            # _queue_invite_email BEFORE anything is marked: a capped
-            # row — or a row whose spool write failed — stays confirmed
-            # and keeps its slot for the next wave. (The old
-            # mark-then-unmark dance is gone: nothing is marked before
-            # the email exists.)
+            # The cap check, the spool write, and the invited commit all
+            # happen inside _queue_invite_email in spool-then-single-commit
+            # order: a capped row — or a row whose spool write failed —
+            # stays confirmed and keeps its slot for the next wave. (The
+            # old mark-then-unmark dance is gone: nothing is marked before
+            # the email exists, and nothing is committed twice.)
             if not self._queue_invite_email(row, position, pricing_lines,
-                                            trial_terms):
+                                            trial_terms, wave, now):
                 continue
-            row["status"] = "invited"
-            row["invited_at"] = iso_z(now)
-            row["invite_expires_at"] = iso_z(
-                now + timedelta(seconds=INVITE_TTL_SECONDS))
-            row["invite_wave"] = wave
-            self._save_row(row)
             invited.append(row["entry_id"])
         return invited
 

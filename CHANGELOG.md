@@ -206,6 +206,10 @@ This changelog only works if entries land with the change, not after it:
   applying is an owner decision (#174)
 
 ### Fixed
+- An invite wave interrupted mid-send can no longer strand a waitlist row as
+  invited with no email on the way: each invited row commits in a single step
+  after its email is queued, so a crash degrades to a duplicate email on
+  retry instead of a lost invite (PR TBD).
 - README, ONBOARDING, and the pre-seeded-harness research doc now point at
   the real `cua/bin/cua-desktop.sh` path (the script moved into `cua/bin/`
   and the old `./cua/cua-desktop.sh` reference broke the desktop step of

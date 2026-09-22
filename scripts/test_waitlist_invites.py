@@ -566,6 +566,118 @@ def test_wave_spool_failure_leaves_row_confirmed(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Spool-then-single-commit (m2 reorder): the wave must never commit an
+# intermediate row state — one rows.jsonl append per invited row, and a
+# crash between the spool write and that append degrades to
+# "duplicate email on retry", never "invited row with no email".
+# ---------------------------------------------------------------------------
+
+
+def rows_lines_for(tmp, entry_id):
+    path = os.path.join(tmp, "rows.jsonl")
+    out = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            obj = json.loads(line)
+            if obj.get("entry_id") == entry_id:
+                out.append(obj)
+    return out
+
+
+def test_wave_invite_single_commit_per_row():
+    # Each invited row lands in rows.jsonl with ONE append carrying
+    # status=invited + the token + the wave fields — no intermediate
+    # confirmed-with-invite-token line that a crash could freeze in.
+    service, tmp, clock = make_service()
+    a = confirm_row(service, "a@example.com", clock,
+                    at=NOW - timedelta(days=2))
+    b = confirm_row(service, "b@example.com", clock,
+                    at=NOW - timedelta(days=1))
+    before = {r["entry_id"]: len(rows_lines_for(tmp, r["entry_id"]))
+              for r in (a, b)}
+
+    invited = wave(service, count=2)
+    assert invited == [a["entry_id"], b["entry_id"]]
+    for row in (a, b):
+        lines = rows_lines_for(tmp, row["entry_id"])
+        assert len(lines) == before[row["entry_id"]] + 1, \
+            f"expected exactly one commit line for {row['entry_id']}"
+        line = lines[-1]
+        assert line["status"] == "invited"
+        assert line["invite_wave"] == "wave1"
+        assert line["active_invite_token"].startswith("invite.")
+        assert "invite_expires_at" in line
+
+
+def test_wave_crash_between_spool_and_commit(monkeypatch):
+    # Fault injection: kill the wave after the spool write succeeded
+    # but before the single row commit. On-disk state must be
+    # "confirmed row + stray spooled email" — never invited-without-
+    # email — and the retry must degrade to duplicate-mail with a
+    # fresh token, the stray email's link never validating.
+    service, tmp, clock = make_service()
+    a = confirm_row(service, "a@example.com", clock,
+                    at=NOW - timedelta(days=2))
+    lines_before = len(rows_lines_for(tmp, a["entry_id"]))
+
+    real_save = wd.WaitlistService._save_row
+    calls = {"n": 0}
+
+    def crashing_save(self, row):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated kill -9")
+        return real_save(self, row)
+
+    monkeypatch.setattr(wd.WaitlistService, "_save_row", crashing_save)
+
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        wave(service, count=2, wave="wave1")
+
+    # The spool write landed (the failure mode is duplicate-mail), but
+    # the row was never committed: rows.jsonl grew by zero lines.
+    assert len(rows_lines_for(tmp, a["entry_id"])) == lines_before
+    invites = [d for d in spool_docs(tmp) if d.get("kind") == "invite"]
+    assert len(invites) == 1
+    stray_token = invites[0]["body"].split("token=")[1].split()[0]
+
+    # A fresh process view (post-restart): the row is confirmed, the
+    # stray token was never recorded, its link validates as dead.
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    frow = fresh.rows[a["entry_id"]]
+    assert frow["status"] == "confirmed"
+    assert "active_invite_token" not in frow
+    _, outcome = fresh.lookup_invite_token(stray_token)
+    assert outcome != "ok"
+
+    # Retry: the row is invited with a FRESH token; the user gets a
+    # second email (duplicate on retry), the first email's link stays
+    # dead, and exactly one invite_sent event exists per committed row.
+    invited = fresh.send_invite_wave(pricing_lines=PRICING,
+                                     trial_terms=TERMS, wave="wave2",
+                                     count=2)
+    assert invited == [a["entry_id"]]
+    frow = fresh.rows[a["entry_id"]]
+    assert frow["status"] == "invited"
+    assert frow["invite_wave"] == "wave2"
+    # The retry's commit was a single append too.
+    assert len(rows_lines_for(tmp, a["entry_id"])) == lines_before + 1
+    invites = [d for d in spool_docs(tmp) if d.get("kind") == "invite"]
+    assert len(invites) == 2
+    new_token = invites[1]["body"].split("token=")[1].split()[0]
+    assert new_token != stray_token
+    assert frow["active_invite_token"] == new_token
+    row_after_retry, outcome = fresh.lookup_invite_token(stray_token)
+    assert row_after_retry is None and outcome == "consumed"
+    row_new, outcome = fresh.lookup_invite_token(new_token)
+    assert row_new is not None and outcome == "ok"
+    sent = [e for e in funnel_events(tmp) if e["event"] == "invite_sent"]
+    assert len(sent) == 1
+    assert sent[0]["ref"] == a["entry_id"]
+
+
+# ---------------------------------------------------------------------------
 # Exact 14-day expiry boundary (QA B4): lookup and rollover agree
 # ---------------------------------------------------------------------------
 
