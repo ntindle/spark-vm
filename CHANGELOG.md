@@ -37,6 +37,21 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Enforcement-downgrade contract for the agent jail (fail-closed, stated
+  explicitly): a firewall-apply failure aborts the build before the jail
+  starts, a boot-time apply failure blocks the container from starting, and
+  a dead proxy means no egress rather than open egress — like Brig's
+  policy-bound refusal, the workload never runs where its restriction
+  cannot be enforced. The one stated residual: no runtime re-apply, so a
+  flushed firewall table silently voids the guarantees until the unit is
+  restarted (tracked as #254). The contract mechanics are test-pinned.
+  (PR TBD)
+- Deny-style billing guard committed for sandbox credential forwarding:
+  when the hosted path forwards operator credentials into a sandbox,
+  known metered-billing keys are deny-by-default without an explicit
+  per-credential override (Brig's `deny` shape, including its documented
+  environment-channel-only limit). Committed design, not yet shipped —
+  no forwarding surface exists yet. (PR TBD)
 - Demo gallery, sixth asset: the push queue surviving an outage — the new
   "See it in action" row shows the standalone push worker's first delivery
   attempt hitting a dead endpoint (500) and rescheduling instead of losing

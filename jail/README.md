@@ -75,6 +75,47 @@ confirmation page live on the host.
   repo — a corrupted jail is a rebuild, not a mystery. Rebuilds get a
   fresh `/etc/machine-id`; guest sshd host keys live in the rootfs.
 
+## Enforcement-downgrade contract (fail-closed)
+
+The jail is a restricted workload: proxy-only egress, no DNS, no host
+mounts, no host services. The contract below states what happens when any
+layer of that restriction cannot be enforced — the answer is always "the
+workload does not run unenforced", stated with the same explicitness as
+Brig's policy-bound refusal (Brig refuses a policy-bound run on any backend
+that cannot enforce the policy rather than running it unenforced;
+`docs/COMPETITOR_C19_C20_BRIG_EPHO.md` §2). Every clause is test-pinned in
+`test_build_smoke.py` (`TestFailClosedOrdering`).
+
+- **Build time: fail closed.** `build.sh` runs under `set -euo pipefail`
+  and applies the firewall (`systemctl enable --now jail-firewall.service`)
+  *before* the machine is ever started. If `nft -f` fails — nftables
+  unavailable, bad rule, anything — the build aborts with no jail running.
+  The firewall section structurally precedes the machine-start section.
+- **Boot time: fail closed.** `jail-firewall.service` is a oneshot unit
+  with `Before=systemd-nspawn@jail.service`. If the firewall apply fails at
+  boot, systemd never starts the jail: no table, no container.
+- **Proxy down: fail closed.** The jail's only permitted egress is the
+  DNAT to the host proxy (`10.99.0.1:18080/18081` → `127.0.0.1`). If swapd
+  is not listening, the DNAT'd connect is refused — the jail gets *no*
+  egress, never direct egress. There is no fallback path by construction:
+  the forward chain drops everything else.
+- **Not fail-closed (stated residual): runtime firewall removal.** The
+  firewall is applied at build and at boot; nothing re-applies it while
+  the jail runs. If `table inet jail` is flushed or deleted at runtime
+  (operator `nft flush ruleset`, a conflicting firewall tool), the drops
+  vanish silently and the jail *keeps running* — the "cannot reach host
+  services" guarantee above is void until `systemctl restart
+  jail-firewall.service` or a reboot. This is tracked as GitHub issue #254
+  (firewall re-apply watchdog) rather than left as a silent hole.
+  Detection: the "Verify list" below, plus the drop counters logging with
+  `jail-fwd-drop:` / `jail-input-drop:` / `jail-fwd-indrop:` prefixes while
+  the table exists — silence from those prefixes on a running jail is a
+  signal, not peace of mind.
+
+The proxy's own downgrade behavior is stated in
+`docs/SECRETS_POSTURE.md`: a missing allow file is itself treated as deny,
+and a swap whose audit line cannot be durably recorded is refused.
+
 ## Build
 
 On the host, as ntindle:

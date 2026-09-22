@@ -218,6 +218,43 @@ class TestSshPortSingleSourced:
         assert 'ssh -p $JAIL_SSH_PORT $JAIL_USER@<tailnet-ip>' in active
 
 
+class TestFailClosedOrdering:
+    """C22: the enforcement-downgrade contract. The jail must never run
+    where its firewall cannot be enforced. These tests pin the mechanism
+    the README's contract section states: firewall-before-machine at
+    build time, firewall-before-nspawn at boot time."""
+
+    def test_firewall_unit_ordered_before_nspawn(self, src):
+        m = re.search(
+            r"tee /etc/systemd/system/jail-firewall\.service.*?\nEOF",
+            src, re.S)
+        assert m, "jail-firewall.service unit block not found"
+        unit = m.group(0)
+        assert "Before=systemd-nspawn@jail.service" in unit, (
+            "firewall unit must be ordered before the jail so a failed "
+            "apply blocks the container from starting")
+        assert "Type=oneshot" in unit
+        assert "nft -f /etc/nftables-jail.conf" in unit
+
+    def test_firewall_applied_before_machine_start(self, src, active):
+        # set -e aborts the build if the firewall apply fails, so no jail
+        # ever starts without its table. Pin the structural ordering:
+        # the enable --now must precede any machinectl start.
+        fw = active.index("systemctl enable --now jail-firewall.service")
+        start = active.index("machinectl start $MACHINE")
+        assert fw < start, (
+            "firewall apply must precede the machine start")
+
+    def test_no_firewall_reapply_mechanism(self, src):
+        # Stated residual, not an accident: no timer/path re-apply exists,
+        # so the README must (and does) disclose the runtime-flush hole.
+        # If someone adds a watchdog, this test names the place to update
+        # the contract text alongside it.
+        for pat in ("jail-firewall.timer", "jail-firewall.path",
+                    "OnUnitActiveSec"):
+            assert pat not in src, pat
+
+
 class TestIsolation:
     def test_no_host_bind_mounts(self, src, active):
         for pat in ("--bind", "Bind=", "--bind-ro", "bindfs"):
