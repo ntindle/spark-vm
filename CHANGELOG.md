@@ -242,13 +242,9 @@ This changelog only works if entries land with the change, not after it:
   applying is an owner decision (#174)
 
 ### Fixed
-- README layout table refreshed after the last freshness pass: `harness/`
-  now names the provision-time injector (fails closed on golden-image
-  drift before box-live) alongside the manifest tooling, gate fixture,
-  and auth probe; `site/` now names the invite operator tooling
-  (`--reconcile`, `--reinstate-confirmed`, `--diagnose`); the contributor
-  "Staying fresh" bullet points at the changelog's `Unreleased` section
-  as the what's-new list. (PR TBD)
+- README repo-layout table: the `harness/` and `site/` rows now describe
+  the current tooling — the provision-time injector and the waitlist
+  invite operator tools. (PR TBD)
 - First-ten-minutes spec conformance audit (gap turn): the new
   conformance-gap doc checks every spec clause against the repo — four
   clauses still unmet (the onboarding status poll with the spec's machine
