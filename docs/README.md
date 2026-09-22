@@ -55,7 +55,10 @@ follow-up tickets before treating anything as current intent.
 | [REMOTE_DESKTOP_TRANSPORT_RESEARCH.md](REMOTE_DESKTOP_TRANSPORT_RESEARCH.md) | **(start here)** Remote-desktop transport options for live machine control (#47). |
 | [CODEC_LICENSING_RESEARCH.md](CODEC_LICENSING_RESEARCH.md) | Codec licensing for the live-machine-control surface. |
 | [GPU_PATH_RESEARCH.md](GPU_PATH_RESEARCH.md) | GPU options for the box. |
+| [FLY_DRIVER_RESEARCH.md](FLY_DRIVER_RESEARCH.md) | Fly.io driver research (H4): the provider-agnostic driver interface grounded against the real Machines API — cloud-init does not map, golden-image path recommended. |
+| [SUSPEND_WAKE_RESEARCH.md](SUSPEND_WAKE_RESEARCH.md) | Suspend/wake mechanics research: how agent-sandbox and VM providers do idle suspend and wake, and the provider-agnostic `suspended`/`waking` contract for H4. |
 | [SECRETS_POSTURE_RESEARCH.md](SECRETS_POSTURE_RESEARCH.md) | How agent-sandbox vendors handle credentials — what to copy, what to avoid. |
+| [SECRETS_POSTURE.md](SECRETS_POSTURE.md) | The secrets posture repositioned: the placeholder-swap pattern every sandbox vendor re-derived — why swapd exists, what was independently re-derived, and where spark-vm differs. |
 | [ORG_POLICY_RESEARCH.md](ORG_POLICY_RESEARCH.md) | Org-policy research (H16). |
 | [RESEARCH_AGENT_SANDBOX_ADOPTION.md](RESEARCH_AGENT_SANDBOX_ADOPTION.md) | How hosted agent-sandbox products actually get used. |
 | [RESEARCH_BROWSER_CONTROL_MODELS.md](RESEARCH_BROWSER_CONTROL_MODELS.md) | BrowserSkill (Tencent) Agent Window + tab-borrow vs spark-vm browser-driver (R17). |
@@ -70,9 +73,13 @@ as historical.
 
 | Doc | What it is |
 | --- | ---------- |
+| [COMPETITOR_WATCH_2026-09-21_EVENING.md](COMPETITOR_WATCH_2026-09-21_EVENING.md) | Competitor watch, 2026-09-21 evening — quiet window (~14:54→~17:54 CDT), zero in-window deltas; files C18 (h-sandbox: host-bound-egress credential vault + OpenSandbox adapter). |
+| [COMPETITOR_WATCH_2026-09-21_AFTERNOON.md](COMPETITOR_WATCH_2026-09-21_AFTERNOON.md) | Competitor watch, 2026-09-21 afternoon — quiet window; resolves the C17 xlarge capacity-allocation caveat. |
+| [COMPETITOR_WATCH_2026-09-21_C17.md](COMPETITOR_WATCH_2026-09-21_C17.md) | C17 resolution (2026-09-21): the boat.dev xlarge capacity-allocation caveat is the pricing page's current policy, not new — 16-vCPU stays capacity-gated by operator allocation. |
+| [COMPETITOR_WATCH_2026-09-21.md](COMPETITOR_WATCH_2026-09-21.md) | Competitor watch, 2026-09-21 — quiet window; boat.dev pricing re-read matches baseline, xlarge caveat flagged for the C17 check. |
 | [LIFECYCLE_PARITY_AUDIT_2026-09-20.md](LIFECYCLE_PARITY_AUDIT_2026-09-20.md) | C16 audit: #47's control-plane lifecycle scope vs the live-control scorecard — pause/resume acceptance gap, stream ownership, idle policy model, stopped-state/file-browsing scope; files #177–#180. |
 | [COMPETITOR_LIVE_CONTROL_DEEP_SCAN_2026-09-20.md](COMPETITOR_LIVE_CONTROL_DEEP_SCAN_2026-09-20.md) | **(start here)** Six-provider deep-scan of live machine control vs #47 (AgentComputer, TermSquad, Fly.io Sprites, E2B, Daytona, Docker Sandboxes). |
-| [COMPETITOR_WATCH_2026-09-20.md](COMPETITOR_WATCH_2026-09-20.md) | Latest morning competitor watch. |
+| [COMPETITOR_WATCH_2026-09-20.md](COMPETITOR_WATCH_2026-09-20.md) | Competitor watch, 2026-09-20 morning. |
 | [COMPETITOR_WATCH_2026-09-19_EVENING.md](COMPETITOR_WATCH_2026-09-19_EVENING.md) | Competitor watch, 2026-09-19 evening. |
 | [COMPETITOR_WATCH_2026-09-18.md](COMPETITOR_WATCH_2026-09-18.md) | Competitor watch, 2026-09-18 evening. |
 | [COMPETITOR_ANALYSIS.md](COMPETITOR_ANALYSIS.md) | The September 2026 baseline competitor analysis. |
