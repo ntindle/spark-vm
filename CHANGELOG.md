@@ -37,6 +37,13 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Jail firewall runtime watchdog (closes #254): a 5-minute systemd verify
+  timer re-applies the jail's nftables table if it is flushed or deleted at
+  runtime — the old "flushed table silently voids the isolation guarantees
+  until someone restarts the unit" hole is now detected and repaired within
+  the timer window, with the repair logged loudly and a failed re-apply
+  failing the verify unit visibly. The re-apply touches only the jail
+  table, never other tables. (PR TBD)
 - Morning competitor watch (2026-09-22): DigitalOcean launched Managed
   Agents in public preview — microVM-per-session Harness Runtime, Action
   Gateway (16,000+ tools via one MCP endpoint, credentials brokered at
@@ -50,10 +57,10 @@ This changelog only works if entries land with the change, not after it:
   starts, a boot-time apply failure blocks the container from starting, and
   a dead proxy means no egress rather than open egress — like Brig's
   policy-bound refusal, the workload never runs where its restriction
-  cannot be enforced. The one stated residual: no runtime re-apply, so a
-  flushed firewall table silently voids the guarantees until the unit is
-  restarted (tracked as #254). The contract mechanics are test-pinned.
-  (#255)
+  cannot be enforced. The one residual the contract originally stated —
+  no runtime re-apply — is closed by the firewall watchdog (PR TBD), which
+  narrows the residual boundary to the 5-minute verify window. The contract
+  mechanics are test-pinned. (#255)
 - Deny-style billing guard committed for sandbox credential forwarding:
   when the hosted path forwards operator credentials into a sandbox,
   known metered-billing keys are deny-by-default without an explicit

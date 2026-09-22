@@ -219,6 +219,70 @@ say "firewall active:"
 # (|| true: head closes the pipe early; pipefail would SIGPIPE the script.)
 $SUDO nft list table inet jail | head -8 || true
 
+# ---------------------------------------------------------------- firewall watchdog (C25 / issue #254)
+say "jail firewall watchdog"
+# The stated residual the contract used to carry: nothing re-applied the
+# table at runtime, so a flushed `table inet jail` silently voided the
+# drop isolation while the jail kept running. The watchdog closes that
+# hole: a systemd timer runs the verify service every 5 minutes; the
+# service checks the table + all three chains and re-applies the conf
+# (destroy-then-apply, same as the oneshot unit) only when damaged.
+# The re-apply touches ONLY table inet jail — never destructive to other
+# tables — and any re-apply (or a failed one) is logged loudly via
+# logger(1) + the service's exit status (a failed re-apply fails the
+# unit, visible in `systemctl --failed`). Detection/repair window is the
+# timer interval; this is the README contract's new residual boundary.
+$SUDO tee /usr/local/sbin/jail-firewall-verify.sh >/dev/null <<'EOF'
+#!/bin/bash
+# jail-firewall-verify.sh — runtime watchdog for `table inet jail`.
+# Verify-then-repair: if the table or any of its three chains is missing,
+# re-apply /etc/nftables-jail.conf (destroy-then-apply, scoped to the
+# jail table only). Loud on any repair; exits nonzero if the re-apply
+# fails (the service unit goes red, the operator sees it).
+set -uo pipefail
+TABLE_OK=0
+if /usr/sbin/nft list table inet jail 2>/dev/null | grep -q 'chain prerouting' \
+&& /usr/sbin/nft list table inet jail 2>/dev/null | grep -q 'chain input' \
+&& /usr/sbin/nft list table inet jail 2>/dev/null | grep -q 'chain forward'; then
+    TABLE_OK=1
+fi
+if [ "$TABLE_OK" = 1 ]; then
+    exit 0
+fi
+logger -t jail-firewall-verify "ALERT: table inet jail missing or damaged — re-applying /etc/nftables-jail.conf"
+/usr/sbin/nft destroy table inet jail
+if /usr/sbin/nft -f /etc/nftables-jail.conf; then
+    logger -t jail-firewall-verify "REPAIRED: table inet jail re-applied (counters reset by re-apply; this was a runtime table loss)"
+    exit 0
+fi
+logger -t jail-firewall-verify "CRITICAL: re-apply of table inet jail FAILED — jail may be running unenforced"
+exit 1
+EOF
+$SUDO chmod 755 /usr/local/sbin/jail-firewall-verify.sh
+$SUDO tee /etc/systemd/system/jail-firewall-verify.service >/dev/null <<'EOF'
+[Unit]
+Description=Jail firewall runtime watchdog (re-apply table inet jail if lost)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/jail-firewall-verify.sh
+EOF
+$SUDO tee /etc/systemd/system/jail-firewall-verify.timer >/dev/null <<'EOF'
+[Unit]
+Description=Run the jail firewall watchdog every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable --now jail-firewall-verify.timer
+say "watchdog active (next run):"
+$SUDO systemctl list-timers jail-firewall-verify.timer --no-pager 2>/dev/null | head -3 || true
+
 # ---------------------------------------------------------------- start the machine
 say "enable + start $MACHINE"
 $SUDO machinectl enable $MACHINE >/dev/null 2>&1 || true

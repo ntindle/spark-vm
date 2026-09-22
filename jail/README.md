@@ -108,20 +108,31 @@ states the construction, not a static pin.
   is not listening, the DNAT'd connect is refused — the jail gets *no*
   egress, never direct egress. There is no fallback path by construction:
   the forward chain drops everything else.
-- **Not fail-closed (stated residual): runtime firewall removal.** The
-  firewall is applied at build and at boot; nothing re-applies it while
-  the jail runs. If `table inet jail` is flushed or deleted at runtime
-  (operator `nft flush ruleset`, a conflicting firewall tool), the drops
-  vanish silently and the jail *keeps running*. Note the consequence is
-  specifically the drop-based isolation: the flush also deletes the DNAT
-  rule, so the *permitted* proxy path dies with the table — what is voided
-  is the "cannot reach host services / cannot egress directly" guarantee,
-  not "the jail gets open internet". This is tracked as GitHub issue #254
-  (firewall re-apply watchdog) rather than left as a silent hole.
+- **Not fail-closed (stated residual): runtime firewall removal, now
+  guarded by a watchdog.** The firewall is applied at build and at boot;
+  `jail-firewall-verify.service` + `.timer` (installed by build.sh) re-check
+  `table inet jail` and its three chains every 5 minutes and re-apply
+  `/etc/nftables-jail.conf` (destroy-then-apply, scoped to the jail table
+  only) when the table is missing or damaged. The old hole — a flushed
+  table silently voiding the drops while the jail kept running — is now
+  detected and repaired within the timer window instead of persisting to
+  the next reboot. The new residual is that window: a table loss can exist
+  for up to ~5 minutes before the watchdog repairs it, and the re-apply
+  resets the drop counters (silence on the `jail-*-drop:` prefixes right
+  after a re-apply is expected, not peace of mind). Any repair is logged
+  loudly (`logger -t jail-firewall-verify`), and a failed re-apply fails
+  the verify unit — the operator sees a red unit in `systemctl --failed`,
+  not a silent absence. Note the consequence remains specifically the
+  drop-based isolation: a flush also deletes the DNAT rule, so the
+  *permitted* proxy path dies with the table — what is voided in the
+  window is the "cannot reach host services / cannot egress directly"
+  guarantee, not "the jail gets open internet". The pre-watchdog form of
+  this residual was tracked as GitHub issue #254; the watchdog resolves
+  it, and #254 is closed by the PR that landed it.
   Detection: the "Verify list" below, plus the drop counters logging with
   `jail-fwd-drop:` / `jail-input-drop:` / `jail-fwd-indrop:` prefixes while
-  the table exists — silence from those prefixes on a running jail is a
-  signal, not peace of mind.
+  the table exists — silence from those prefixes on a running jail (outside
+  a fresh watchdog re-apply) is a signal, not peace of mind.
 
 The proxy's own downgrade behavior is stated in
 `docs/SECRETS_POSTURE.md`: a missing allow file is itself treated as deny,
@@ -190,6 +201,9 @@ through the proxy, and Chromium uses its NSS database.
 ## Files
 
 - `build.sh` — the reproducible build (run on the host).
+- `jail-firewall-verify.sh` (installed to `/usr/local/sbin/` by build.sh)
+  — the runtime firewall watchdog: verifies `table inet jail` every
+  5 minutes via its systemd timer, re-applies when damaged, logs loudly.
 - `cell-mirror.md` — how the agent's own cell works; the properties
   the jail mirrors.
 - `confirm-page.md` — confirmation page design; the answer→grant
@@ -207,6 +221,10 @@ After (re)building, confirm the isolation properties hold:
   is denied (finding 47: the proxy hard-denies the page).
 - `sysctl net.ipv4.conf.ve-jail.route_localnet` is 1;
   `net.ipv4.conf.all.route_localnet` and `default` are 0 (finding 51).
+- `systemctl list-timers jail-firewall-verify.timer` shows the watchdog
+  scheduled every 5 minutes; after a simulated table loss
+  (`sudo nft delete table inet jail`) the table is back within one timer
+  interval and `journalctl -t jail-firewall-verify` shows the repair.
 - Finding 52: the agent's key is NOT in `/home/ntindle/.ssh/authorized_keys`
   (only the owner's Termius key remains); no ControlMaster socket to the
   host exists for the agent. The jail is the only door.

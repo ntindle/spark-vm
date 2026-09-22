@@ -390,3 +390,81 @@ class TestSecretHygiene:
     def test_no_curl_pipe_bash(self, active):
         assert not re.search(r"curl[^\n]*\|\s*(ba)?sh", active)
         assert not re.search(r"wget[^\n]*\|\s*(ba)?sh", active)
+
+
+class TestFirewallWatchdog:
+    """C25 / issue #254: runtime watchdog for `table inet jail`.
+
+    The C22 contract used to disclose a runtime-removal residual with no
+    repair path. These tests pin the watchdog that closes it: verify
+    (table + all three chains), scoped repair (destroy-then-apply on the
+    jail table only), loud logging, nonzero exit on failed re-apply, and
+    the 5-minute timer wiring. All assertions run against the `active`
+    fixture: a commented-out watchdog must fail, not pass.
+    """
+
+    def _verify_script(self, active):
+        m = re.search(
+            r"tee /usr/local/sbin/jail-firewall-verify\.sh.*?\nEOF",
+            active, re.S)
+        assert m, "jail-firewall-verify.sh install block not found"
+        return m.group(0)
+
+    def _verify_service(self, active):
+        m = re.search(
+            r"tee /etc/systemd/system/jail-firewall-verify\.service"
+            r".*?\nEOF",
+            active, re.S)
+        assert m, "jail-firewall-verify.service unit block not found"
+        return m.group(0)
+
+    def _verify_timer(self, active):
+        m = re.search(
+            r"tee /etc/systemd/system/jail-firewall-verify\.timer"
+            r".*?\nEOF",
+            active, re.S)
+        assert m, "jail-firewall-verify.timer unit block not found"
+        return m.group(0)
+
+    def test_verify_script_checks_table_and_all_chains(self, active):
+        script = self._verify_script(active)
+        assert "nft list table inet jail" in script
+        for chain in ("chain prerouting", "chain input", "chain forward"):
+            assert chain in script, "watchdog does not check %s" % chain
+
+    def test_repair_scoped_to_jail_table(self, active):
+        script = self._verify_script(active)
+        # destroy-then-apply, same as the oneshot unit: scoped to the
+        # jail table, never destructive to other tables.
+        assert "nft destroy table inet jail" in script
+        assert "nft -f /etc/nftables-jail.conf" in script
+
+    def test_no_unscoped_nft_destruction(self, src):
+        # The watchdog must never fight the operator's other tables: no
+        # full-ruleset flush, no destroy outside `inet jail`.
+        for line in src.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            assert "nft flush ruleset" not in line, \
+                "watchdog must not flush the whole ruleset: %r" % line
+            for m in re.finditer(r"nft destroy table (\S+(?: \S+)?)", line):
+                assert m.group(1) == "inet jail", \
+                    "unscoped table destroy in watchdog: %r" % line
+
+    def test_loud_on_repair_and_failure(self, active):
+        script = self._verify_script(active)
+        assert "logger -t jail-firewall-verify" in script
+        # A failed re-apply must fail the unit, not exit quiet.
+        assert "exit 1" in script
+
+    def test_verify_service_runs_the_script(self, active):
+        unit = self._verify_service(active)
+        assert "Type=oneshot" in unit
+        assert "ExecStart=/usr/local/sbin/jail-firewall-verify.sh" in unit
+
+    def test_timer_cadence_and_wiring(self, active):
+        timer = self._verify_timer(active)
+        assert "OnCalendar=*:0/5" in timer
+        assert "WantedBy=timers.target" in timer
+        # build.sh actually installs and starts the timer, not just writes it.
+        assert "systemctl enable --now jail-firewall-verify.timer" in active
