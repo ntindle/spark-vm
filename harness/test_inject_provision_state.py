@@ -173,6 +173,11 @@ elif args[0] == "remove-host":
         hosts = entry.get("allowed_hosts")
         if isinstance(hosts, list) and host in hosts:
             hosts.remove(host)
+            # The real writer prints to STDOUT on success; the fake
+            # mirrors it so the suite guards the injector's one-JSON-
+            # document stdout contract (any stdout leak breaks
+            # json.loads on the report).
+            print("unbound '%s' from host '%s'" % (name, host))
 else:
     sys.stderr.write("fake-registry-writer: unsupported verb %r\\n" % (args[0],))
     sys.exit(2)
@@ -687,11 +692,72 @@ def test_tenant_record(stack):
     assert record["injector"] == "harness/inject-provision-state.sh"
 
 
+def test_identity_refuses_symlinked_ssh_dir(stack):
+    # A planted ~/.ssh symlink would redirect validated tenant keys
+    # into an attacker-chosen directory (e.g. /root/.ssh): refuse,
+    # fail-closed, install nothing.
+    env, paths = stack
+    _seed_real_key(paths)
+    identity_dir = paths["secrets_dir"] / "identity"
+    identity_dir.mkdir()
+    (identity_dir / "authorized_keys").write_text(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkeymaterial tenant@muse\n")
+    (paths["agent_home"] / ".ssh").symlink_to("/tmp/evil-target")
+    env = dict(env)
+    env["INJECT_IDENTITY_DIR"] = str(identity_dir)
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"is a symlink" in proc.stderr
+    assert not os.path.exists("/tmp/evil-target")
+
+
+def test_identity_refuses_symlinked_authorized_keys(stack):
+    env, paths = stack
+    _seed_real_key(paths)
+    identity_dir = paths["secrets_dir"] / "identity"
+    identity_dir.mkdir()
+    (identity_dir / "authorized_keys").write_text(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkeymaterial tenant@muse\n")
+    ssh_dir = paths["agent_home"] / ".ssh"
+    ssh_dir.mkdir()
+    (ssh_dir / "authorized_keys").symlink_to("/tmp/evil-keys")
+    env = dict(env)
+    env["INJECT_IDENTITY_DIR"] = str(identity_dir)
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"is a symlink" in proc.stderr
+    assert not os.path.lexists("/tmp/evil-keys")
+
+
+def test_tenant_record_refuses_symlink(stack):
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["tenant_record"].symlink_to("/tmp/evil-record")
+    env = dict(env)
+    env["INJECT_TENANT_ID"] = "tenant-42"
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"is a symlink" in proc.stderr
+    assert not os.path.lexists("/tmp/evil-record")
+
+
 def test_tenant_id_validation(stack):
     env, paths = stack
     _seed_real_key(paths)
     env = dict(env)
     env["INJECT_TENANT_ID"] = "../evil"
+    proc = _run_injector(env)
+    assert proc.returncode == 2
+    assert b"INJECT_TENANT_ID must match" in proc.stderr
+    assert not paths["tenant_record"].exists()
+
+
+def test_tenant_id_rejects_embedded_newline(stack):
+    # grep is line-oriented: "ok\nEVIL" would pass a naive -x match.
+    env, paths = stack
+    _seed_real_key(paths)
+    env = dict(env)
+    env["INJECT_TENANT_ID"] = "tenant-42\ninjected-line"
     proc = _run_injector(env)
     assert proc.returncode == 2
     assert b"INJECT_TENANT_ID must match" in proc.stderr

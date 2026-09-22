@@ -27,7 +27,10 @@
 #      by the OPERATOR through the existing human-only grant-writer path
 #      (SETUP.md "Inference-model recipe") BEFORE this runs. The injector
 #      asserts, never handles: the registry must bind llm-api (with
-#      bearer_header placement) to at least one non-loopback host, and a
+#      bearer_header placement) to at least one host that is not one of
+#      the fixture echo aliases (127.0.0.1, ::1, localhost -- the provision
+#      probe backstops this: a wrong-host binding means no swap match for
+#      the real provider host, so the probe fails closed), and a
 #      BLIND compare (proxy/cred-store-verify-inference) must confirm the
 #      stored value is NOT the public fixture dummy. The real value is
 #      never read, logged, or persisted by this script -- only the
@@ -229,7 +232,9 @@ fi
 TEARDOWN="absent"
 if registry_bound_to_echo; then
     echo "inject-provision-state: unbinding $KEY_NAME from echo host $ECHO_HOST" >&2
-    run_priv "$REGISTRY_WRITER" remove-host "$KEY_NAME" "$ECHO_HOST"
+    # The real writer prints "unbound ..." to stdout on success; keep it
+    # on the log stream so stdout carries exactly the JSON report.
+    run_priv "$REGISTRY_WRITER" remove-host "$KEY_NAME" "$ECHO_HOST" >&2
     TEARDOWN="removed"
 fi
 if registry_bound_to_echo; then
@@ -254,7 +259,8 @@ echo "inject-provision-state: fixture teardown $TEARDOWN (no echo binding, no ec
 # --- Step 3: real-key assertion --------------------------------------------
 # The operator installs the real tenant key through the human-only
 # grant-writer path BEFORE this runs. Assert, never handle: the registry
-# must bind llm-api (bearer_header) to at least one non-loopback host,
+# must bind llm-api (bearer_header) to at least one host outside the
+# fixture echo aliases (127.0.0.1, ::1, localhost),
 # and the blind compare must prove the stored value is NOT the public
 # fixture dummy. The real value is never read.
 if ! run_priv cat "$REGISTRY_FILE" 2>/dev/null | KEY_NAME="$KEY_NAME" ECHO_ALIASES="$ECHO_ALIASES" python3 -c '
@@ -343,6 +349,15 @@ with open(os.environ["IDENTITY_SRC"], encoding="utf-8") as f:
         exit 1
     fi
     ssh_dir="$AGENT_HOME/.ssh"
+    # Symlink guard: cp/chmod follow links, so a planted $ssh_dir (or
+    # authorized_keys) symlink would redirect validated tenant keys
+    # into an attacker-chosen directory (e.g. /root/.ssh). A symlinked
+    # .ssh in a fresh agent home is a box-integrity failure: refuse,
+    # fail-closed, never install through it.
+    if [ -L "$ssh_dir" ] || [ -L "$ssh_dir/authorized_keys" ]; then
+        echo "inject-provision-state: refusing: $ssh_dir or $ssh_dir/authorized_keys is a symlink -- refusing to install tenant identity through a link" >&2
+        exit 1
+    fi
     mkdir -p "$ssh_dir"
     chmod 0700 "$ssh_dir"
     cp "$IDENTITY_SRC" "$ssh_dir/authorized_keys"
@@ -370,9 +385,16 @@ fi
 # --- Step 6: confirmd tenant attribution (H10 interface) ----------------------
 ATTRIBUTION="deferred (H10)"
 if [ -n "${INJECT_TENANT_ID:-}" ]; then
-    if ! printf '%s' "$INJECT_TENANT_ID" | grep -qE '^[A-Za-z0-9_-]{1,64}$'; then
-        echo "inject-provision-state: refusing: INJECT_TENANT_ID must match ^[A-Za-z0-9_-]{1,64}\$" >&2
+    # grep is line-oriented: an embedded newline would let a second line
+    # slip past -x, so reject newlines explicitly before matching.
+    if [[ "$INJECT_TENANT_ID" == *$'\n'* ]] \
+        || ! printf '%s' "$INJECT_TENANT_ID" | grep -qxE '^[A-Za-z0-9_-]{1,64}$'; then
+        echo "inject-provision-state: refusing: INJECT_TENANT_ID must match ^[A-Za-z0-9_-]{1,64}\$ (single line)" >&2
         exit 2
+    fi
+    if [ -L "$TENANT_RECORD" ]; then
+        echo "inject-provision-state: refusing: $TENANT_RECORD is a symlink -- refusing to write the tenant record through a link" >&2
+        exit 1
     fi
     mkdir -p "$(dirname "$TENANT_RECORD")"
     INJECT_TENANT_ID="$INJECT_TENANT_ID" IMAGE_VERSION="$IMAGE_VERSION" TENANT_RECORD="$TENANT_RECORD" python3 -c '
