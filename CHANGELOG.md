@@ -317,7 +317,7 @@ This changelog only works if entries land with the change, not after it:
   (886 ms create→ready, 189 ms exec RTT, 305 ms resume); the rest of the
   tracked set was quiet. Inputs filed for #47 (benchmark reference
   numbers, edge-routing latency datapoint) and #179 (auto-pause idle
-  trigger). (PR TBD)
+  trigger). (#268)
 
 ### Changed
 - Hosted pricing thinking refreshed: the internal pricing analysis now
