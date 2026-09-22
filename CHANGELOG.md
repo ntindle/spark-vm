@@ -222,9 +222,11 @@ This changelog only works if entries land with the change, not after it:
   (deferred follow-ups from #220): the remaining crash windows — after an
   old invite token is retired but before the row commits (re-invite and
   expiry rollover), and between the commit and the `invite_sent` metric
-  event — are exercised against the documented behavior: crash recovery
-  mints a fresh token so stray email links never validate, and the metrics
-  never claim what the on-disk rows don't show (PR TBD).
+  event — are exercised against the documented behavior: in the re-invite
+  window, recovery mints a fresh token (the stray email's claim link
+  validates as consumed at the service layer); in the rollover window the
+  retired token stays consumed with no new email; and the metrics never
+  claim what the on-disk rows don't show (PR TBD).
 - README, ONBOARDING, and the pre-seeded-harness research doc now point at
   the real `cua/bin/cua-desktop.sh` path (the script moved into `cua/bin/`
   and the old `./cua/cua-desktop.sh` reference broke the desktop step of

@@ -17,13 +17,16 @@ Covers docs/WAITLIST_OPERATIONS.md §5/§7 for the invite sender:
 - Token shape: `invite.`-prefixed, HMAC-signed, single-use, 14-day TTL;
   cross-kind tokens never validate (confirm/forget ↔ invite).
 - Fault-injection crash windows (deferred m2 follow-ups from the
-  spool-then-single-commit reorder): crash after `_consume_token(old)`
-  but before the row commit (re-invite path and §7 expiry rollover)
-  recovers by re-running against the confirmed row — fresh token, the
-  stray email's link never validates; crash between the commit and the
-  `invite_sent` event leaves the metrics conservatively under-reporting
-  (never claiming what rows.jsonl doesn't show) and never re-invites
-  or double-spools.
+  spool-then-single-commit reorder): a crash after `_consume_token(old)`
+  but before the row commit in the re-invite path recovers by re-running
+  against the confirmed row — fresh token, the stray email's link never
+  validates (the flip is manual today, issue #235); in the §7 expiry
+  rollover the same window retries cleanly with the retired token
+  staying consumed and no new email; a crash between the commit and
+  the `invite_sent` event leaves the metrics conservatively
+  under-reporting (never claiming what rows.jsonl doesn't show) and
+  never re-invites or double-spools (no automated reconciliation of
+  the missing event today, issue #234).
 
 stdlib only, no network.
 """
@@ -733,6 +736,8 @@ def test_reinvite_crash_between_consume_and_commit(monkeypatch):
     # token consumed, row still invited with the old token" — the
     # operator recovers by re-running the wave against the confirmed row,
     # which mints a fresh token; the stray email's link never validates.
+    # (The flip-to-confirmed step is manual today; see issue #235 for
+    # the operator-tooling gap.)
     service, tmp, clock = make_service()
     row = confirm_row(service, "a@example.com", clock)
     wave(service, count=1, wave="wave1")
@@ -783,11 +788,13 @@ def test_reinvite_crash_between_consume_and_commit(monkeypatch):
     # Never recorded as the live token: fails the active-token check.
     assert status == "consumed"
 
-    # Operator recovery: flip back to confirmed, re-run the wave. The
-    # re-consume is a no-op, the new token mints and commits, and the
-    # metrics stay conservative — exactly one invite_sent per committed
-    # row. The crashed wave's stray email counts against the §4 3/24h
-    # cap (it went out), so the recovery runs once the window rolls.
+    # Operator recovery (manual today — see issue #235 for the
+    # operator-tooling gap): flip back to confirmed, re-run the wave.
+    # The re-consume is a no-op, the new token mints and commits, and
+    # the metrics stay conservative — exactly one invite_sent per
+    # committed row. The crashed wave's stray email counts against the
+    # §4 3/24h cap (it went out), so the recovery runs once the window
+    # rolls.
     fresh.rows[row["entry_id"]]["status"] = "confirmed"
     clock.advance(hours=25)
     monkeypatch.setattr(wd.WaitlistService, "_save_row", real_save)
@@ -847,8 +854,9 @@ def test_wave_crash_between_commit_and_emit(monkeypatch):
     assert "invite_sent" not in [e["event"] for e in funnel_events(tmp)]
 
     # Fresh view: the token is live; a retry waves nothing (invited
-    # rows are not eligible) — no duplicate email, no new event, the
-    # operator re-derives the missing event from rows.jsonl instead.
+    # rows are not eligible) — no duplicate email, no synthesized event.
+    # The missing event has no automated reconciliation today; see
+    # issue #234 for the reconciliation/runbook gap.
     fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
                                clock=clock)
     frow, status = fresh.lookup_invite_token(token)
