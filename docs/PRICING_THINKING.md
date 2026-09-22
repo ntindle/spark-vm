@@ -97,10 +97,11 @@ Business Wire 2026-09-22): active-CPU metering — $0.044/vCPU-hour billed per
 second of actual use, $0.0095/GB-hour memory, $0.005/GiB-month snapshots;
 auto-pause stops CPU+memory charges while state is preserved. This is the
 fine-grained answer to idle waste: you pay only for cycles consumed, never
-for waiting on the model. It attacks the same problem our
-flat-$20/mo-with-suspend-on-idle attacks, from the opposite side — theirs is
-cheaper for bursty agents, ours is more predictable. Their published 305 ms
-pause→resume is the latency number our resume story (C14) has to beat or
+for waiting on the model. It attacks the same problem our flat-monthly Tier
+1 thinking addresses, from the opposite side — theirs is cheaper for bursty
+agents, ours is more predictable (flat $9–$19 band, TermSquad-pegged;
+design thinking, not committed pricing). Their published 305 ms
+pause→resume is the latency number our resume story has to beat or
 match. Recorded as a pricing-shape data point, not a decision.
 
 GPU is priced separately everywhere (Daytona H100 $2.27/hr; Modal GPU inside

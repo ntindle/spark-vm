@@ -62,8 +62,9 @@ full-stack managed agent-computer product with published sandbox pricing —
 squarely in the #47 hosted-product lane. Four competitive inputs:
 
 1. **Metering shape** — active-CPU billing (pay only for cycles consumed)
-   vs spark-vm's flat-$20/mo-with-suspend-on-idle. Both attack idle waste
-   from opposite sides: DO's is finer-grained, ours is more predictable.
+   vs spark-vm's flat-monthly Tier 1 thinking ($9–$19 band, TermSquad-pegged;
+   design thinking, not committed pricing). Both attack idle waste from
+   opposite sides: DO's is finer-grained, ours is more predictable.
    Filed as a pricing-shape data point (C26) in `docs/PRICING_THINKING.md`.
 2. **Resume latency** — 305 ms pause→resume is the number to beat for the
    #47 resume-latency target (C14, still open).
