@@ -671,120 +671,30 @@ def test_refuses_registry_ipv6_loopback_literal(stack):
     assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
 
 
-def _injector_mirror_sources():
-    """Extract the injector's proxy-semantics mirrors from the script.
-
-    Returns (host_in_list_fn, allowlist_echo_entries_python_source).
-    Fails if the three host_in_list copies drifted from each other
-    inside the script.
-    """
+def test_proxy_match_single_mirror_invariant():
+    # ARCHITECTURE INVARIANT: the injector must not hand-mirror the
+    # proxy's matching semantics inline. All three echo-detection call
+    # sites (registry teardown, allowlist scan, key assertion) shell out
+    # to harness/proxy_match.py -- the single shared mirror of
+    # proxy/swap_addon.py::_host_in_list and _parse_ssrf_allow. The
+    # behavioral agreement with the real proxy functions is pinned by
+    # harness/test_proxy_match.py's drift tripwire; this test pins the
+    # delegation itself, so a future edit cannot silently reintroduce a
+    # second copy.
     src = open(INJECTOR, encoding="utf-8").read()
-    bodies = re.findall(
-        r"def host_in_list\(host, entries\):\n((?:    .*(?:\n|$))+)", src)
-    assert len(bodies) == 3, \
-        "expected 3 host_in_list copies, found %d" % len(bodies)
-    # Compare code only: comment lines may differ between copies.
-    code = ["".join(l for l in b.splitlines(keepends=True)
-                    if not l.strip().startswith("#")) for b in bodies]
-    assert len(set(code)) == 1, \
-        "host_in_list copies drifted inside inject-provision-state.sh"
-    ns = {}
-    exec("def host_in_list(host, entries):\n" + bodies[0], ns)
-    m = re.search(r"<<'PYEOF'\n(.*?)\nPYEOF", src, re.S)
-    assert m, "allowlist_echo_entries python body not found"
-    return ns["host_in_list"], m.group(1)
-
-
-def _real_proxy_module():
-    import importlib.util
-    path = os.path.join(HERE, "..", "proxy", "swap_addon.py")
-    spec = importlib.util.spec_from_file_location(
-        "sparkvm_swap_addon_canary", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _expected_echo_flags(proxy, aliases, echo_nets, kind, line):
-    # The verdict the REAL proxy semantics produce for one allow-file
-    # line, plus the one documented fail-closed superset (the "::1"
-    # literal the proxy's split(":") fumbles). The injector must agree
-    # exactly: any other divergence is drift, in either direction.
-    s = line.strip()
-    if not s or s.startswith("#"):
-        return []
-    if kind == "ssrf":
-        hosts, nets = proxy._parse_ssrf_allow(s)
-    else:
-        hosts, nets = [s.lower()], []
-    for h in hosts:
-        if any(proxy._host_in_list(a, [h]) for a in aliases):
-            return [line]
-    for n in nets:
-        if any(n.overlaps(e) for e in echo_nets):
-            return [line]
-    if s.lower().rstrip(".") == "::1":
-        return [line]
-    return []
-
-
-def test_proxy_semantics_drift_canary(tmp_path):
-    # The injector's teardown checks mirror proxy/swap_addon.py's
-    # _host_in_list / _parse_ssrf_allow. A proxy-side change (or an
-    # injector-side edit) that narrows the injector's view below the
-    # enforcement point would silently let a real key coexist with a
-    # live echo exemption. This canary fails on any behavioral drift
-    # in either direction.
-    inj_host_in_list, allow_py = _injector_mirror_sources()
-    proxy = _real_proxy_module()
-    aliases = ["127.0.0.1", "localhost", "::1"]
-    echo_nets = [ipaddress.ip_network("127.0.0.0/8"),
-                 ipaddress.ip_network("::1/128")]
-    # Part A: the host_in_list primitive agrees with the real one,
-    # exactly. (The "::1" literal fail-closed special-case lives one
-    # layer up, in the callers -- echo_bound_hosts and
-    # is_echo_hostname -- and is pinned by Part B below and by the
-    # end-to-end tests.)
-    for host, entries in [
-        ("127.0.0.1", ["127.0.0.1"]),
-        ("127.0.0.1", ["LOCALHOST"]),
-        ("localhost", ["localhost."]),
-        ("127.0.0.1", [".0.0.1"]),
-        ("127.0.0.1", [".localhost"]),
-        ("127.0.0.1", ["127.0.0.1:8080"]),
-        ("127.0.0.1", [" 127.0.0.1 "]),
-        ("127.0.0.1", ["api.example.com"]),
-        ("127.0.0.1", []),
-        ("::1", ["::1"]),
-        ("127.0.0.1", ["::1"]),
-    ]:
-        expected = proxy._host_in_list(host, entries)
-        got = inj_host_in_list(host, entries)
-        assert got == expected, (host, entries, got, expected)
-    # Part B: the allowlist checker agrees with the real parse+match
-    # pipeline on every corpus line, per file kind.
-    corpus = {
-        "hosts": ["127.0.0.1", "  127.0.0.1  ", "LOCALHOST",
-                  "localhost.", ".0.0.1", "::1", "  ::1  ",
-                  "127.0.0.1:8080", "api.example.com", "# 127.0.0.1",
-                  "", "10.0.0.0/8"],
-        "ssrf": ["127.0.0.1", "127.0.0.0/8", "127.0.0.1/32", "LOCALHOST",
-                 "  ::1  ", "::1/128", "0.0.0.0/0", "10.0.0.0/8",
-                 "128.0.0.0/1", "api.example.com", "# 127.0.0.1", "",
-                 "999.999.0.0/16"],
-    }
-    for kind, lines in corpus.items():
-        for line in lines:
-            f = tmp_path / "allow"
-            f.write_text(line + "\n", encoding="utf-8")
-            proc = subprocess.run(
-                [sys.executable, "-c", allow_py, kind, str(f)],
-                capture_output=True, text=True, timeout=30)
-            assert proc.returncode == 0, (kind, line, proc.stderr)
-            flagged = proc.stdout.splitlines()
-            expected = _expected_echo_flags(
-                proxy, aliases, echo_nets, kind, line)
-            assert flagged == expected, (kind, line, flagged, expected)
+    assert "def host_in_list(" not in src, \
+        "injector reintroduced an inline _host_in_list mirror"
+    assert "def _parse_ssrf_allow(" not in src, \
+        "injector reintroduced an inline _parse_ssrf_allow mirror"
+    helper = os.path.join(HERE, "proxy_match.py")
+    assert os.path.exists(helper), "harness/proxy_match.py missing"
+    for subcommand in ("echo-bound-hosts",
+                       "allowlist-echo-entries",
+                       "assert-key-binding"):
+        assert ("proxy_match.py\" " + subcommand) in src or \
+               ("proxy_match.py' " + subcommand) in src or \
+               ("proxy_match.py " + subcommand) in src, \
+            "injector no longer delegates to proxy_match.py %s" % subcommand
 
 
 def test_refuses_ssrf_allowlist_residue(stack):
@@ -980,6 +890,26 @@ def test_tenant_record(stack):
     assert record["injector"] == "harness/inject-provision-state.sh"
 
 
+def test_tenant_record_preserves_existing_mode(stack):
+    # Security B1: the atomic write must preserve the old open("w")
+    # semantics -- truncating an EXISTING file leaves its mode alone.
+    # A pre-hardened 0600 tenant record must not be widened to 0644.
+    import os
+    import stat
+    env, paths = stack
+    _seed_real_key(paths)
+    tenant_record = paths["tenant_record"]
+    tenant_record.write_text("{}\n")
+    os.chmod(tenant_record, 0o600)
+    env = dict(env)
+    env["INJECT_TENANT_ID"] = "tenant-42"
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    record = json.loads(tenant_record.read_text())
+    assert record["tenant_id"] == "tenant-42"
+    assert stat.S_IMODE(os.stat(tenant_record).st_mode) == 0o600
+
+
 def test_identity_refuses_symlinked_ssh_dir(stack):
     # A planted ~/.ssh symlink would redirect validated tenant keys
     # into an attacker-chosen directory (e.g. /root/.ssh): refuse,
@@ -1151,3 +1081,119 @@ def test_never_writes_through_privilege(stack):
     assert proc.returncode == 0, proc.stderr.decode()
     assert b"fake-sudo: denied" not in proc.stderr
     assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+
+
+def test_teardown_subdomain_echo_binding(stack):
+    # The leading-dot gap: a ".localhost" binding matches *.localhost
+    # (loopback) at enforcement, so it is a live echo exemption -- but
+    # the old inline logic only matched bare aliases and would have let
+    # it survive teardown as "clean". The shared mirror flags it, the
+    # narrow writer removes it, the run proceeds.
+    env, paths = stack
+    (paths["secrets_dir"] / KEY_NAME).write_text(REAL_KEY)
+    paths["registry_file"].write_text(json.dumps({
+        KEY_NAME: {
+            "access_token": {"placement": "bearer_header"},
+            "allowed_hosts": [".localhost", PROVIDER_HOST],
+        }
+    }))
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    report = _report(proc)
+    assert report["fixture_teardown_detail"] == "removed"
+    reg = _registry(paths["registry_file"])
+    assert reg[KEY_NAME]["allowed_hosts"] == [PROVIDER_HOST]
+
+
+def test_refuses_allowlist_subdomain_residue(stack):
+    # Same gap on the allowlist side: ".localhost" in
+    # inference-hosts.allow is a live exemption the injector cannot
+    # remove through any narrow path -- fail closed, name the
+    # image-build gate.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["allow_file"].write_text(".localhost\n")
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"echo exemption(s) still present in" in proc.stderr
+    assert b".localhost" in proc.stderr
+    assert b"image-build gate" in proc.stderr
+
+
+def test_teardown_deep_subdomain_echo_binding(stack):
+    # The blocker's regression test at suite level: ".sub.localhost"
+    # matches x.sub.localhost at enforcement and bare "sub.localhost"
+    # matches that exact (loopback) name -- both are live echo
+    # exemptions the first version of the shared mirror still missed.
+    env, paths = stack
+    (paths["secrets_dir"] / KEY_NAME).write_text(REAL_KEY)
+    paths["registry_file"].write_text(json.dumps({
+        KEY_NAME: {
+            "access_token": {"placement": "bearer_header"},
+            "allowed_hosts": [".sub.localhost", "sub.localhost",
+                              PROVIDER_HOST],
+        }
+    }))
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    report = _report(proc)
+    assert report["fixture_teardown_detail"] == "removed"
+    reg = _registry(paths["registry_file"])
+    assert reg[KEY_NAME]["allowed_hosts"] == [PROVIDER_HOST]
+
+
+def test_proxy_match_helper_is_load_bearing(stack):
+    # Mutation probe: the injector must actually USE
+    # harness/proxy_match.py. With the helper moved aside, the happy
+    # path must fail (refuse), never silently pass with the checks
+    # skipped. Restored in `finally` so the suite stays green.
+    helper = os.path.join(HERE, "proxy_match.py")
+    parked = helper + ".parked-by-test"
+    os.rename(helper, parked)
+    try:
+        env, paths = stack
+        _seed_real_key(paths)
+        proc = _run_injector(env)
+        assert proc.returncode != 0, \
+            "injector passed with proxy_match.py missing"
+        assert b"proxy_match.py" in proc.stderr or \
+            b"No such file" in proc.stderr, proc.stderr.decode()
+    finally:
+        os.rename(parked, helper)
+
+
+def test_tenant_record_atomic_no_temp_litter(stack):
+    # The record write is atomic (temp file + fsync + os.replace): a
+    # successful run leaves the complete record and no temp litter.
+    env, paths = stack
+    _seed_real_key(paths)
+    env = dict(env)
+    env["INJECT_TENANT_ID"] = "tenant-42"
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    record = json.loads(paths["tenant_record"].read_text())
+    assert record["tenant_id"] == "tenant-42"
+    litter = [p for p in paths["tenant_record"].parent.iterdir()
+              if p.name.startswith(".tenant.json.")]
+    assert litter == [], litter
+
+
+def test_tenant_record_write_failure_leaves_no_torn_record(stack):
+    # Forcing the rename to fail (record path is a directory) proves
+    # the atomic-write contract from the outside: the run refuses, the
+    # pre-existing content at the path is untouched, no partial record
+    # is left behind, and the temp file is cleaned up.
+    env, paths = stack
+    _seed_real_key(paths)
+    record_dir = paths["tenant_record"]
+    record_dir.mkdir()
+    (record_dir / "sentinel").write_text("pre-existing\n")
+    env = dict(env)
+    env["INJECT_TENANT_ID"] = "tenant-42"
+    proc = _run_injector(env)
+    assert proc.returncode != 0
+    assert record_dir.is_dir()
+    assert (record_dir / "sentinel").read_text() == "pre-existing\n"
+    litter = [p for p in record_dir.parent.iterdir()
+              if p.name.startswith(".tenant.json.")]
+    assert litter == [], litter

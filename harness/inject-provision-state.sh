@@ -17,16 +17,18 @@
 #      then VERIFIES no effective echo binding remains AND that no echo
 #      exemption survives in inference-hosts.allow or the inference
 #      proxy's own inference-ssrf.allow. "Effective" uses the inference
-#      proxy's own matching semantics (mirrors of
-#      proxy/swap_addon.py::_host_in_list and _parse_ssrf_allow:
-#      case-insensitive, whitespace-stripped, trailing dots stripped,
-#      CIDR-aware) -- a check narrower than the enforcement point would
-#      let a real key coexist with a live exemption. Fail-closed: the
-#      to remove allowlist lines (production sudoers is append-only by
-#      design), so a surviving echo entry is REFUSED -- loudly, naming the
-#      image-build gate (which runs as root on the build box, pre-publish)
-#      as the owner of allowlist teardown. The binding removal alone is
-#      what stops a swap toward the echo host; the refusal is what keeps a
+#      proxy's own matching semantics via harness/proxy_match.py -- the
+#      single shared mirror of proxy/swap_addon.py::_host_in_list and
+#      _parse_ssrf_allow, pinned against the real functions by
+#      harness/test_proxy_match.py's drift tripwire (case-insensitive,
+#      whitespace-stripped, trailing dots stripped, CIDR-aware) -- a
+#      check narrower than the enforcement point would let a real key
+#      coexist with a live exemption. Fail-closed: the injector has no
+#      narrow path to remove allowlist lines (production sudoers is
+#      append-only by design), so a surviving echo entry is REFUSED --
+#      loudly, naming the image-build gate (which runs as root on the
+#      build box, pre-publish) as the owner of allowlist teardown. The
+#      binding removal alone is what stops a swap toward the echo host; the refusal is what keeps a
 #      half-torn-down fixture from ever coexisting with a real key.
 #   3. Real-key assertion: the tenant's inference credential is installed
 #      by the OPERATOR through the existing human-only grant-writer path
@@ -156,7 +158,7 @@ REGISTRY_FILE="${INFERENCE_REGISTRY_FILE:-/home/swapd/inference-registry.json}"
 # A bare `-` (not `:-`) preserves an explicitly empty SUDO_PREFIX --
 # the test seam; unset keeps the production default.
 SUDO_PREFIX="${SUDO_PREFIX-sudo -u swapd}"
-HERE="$(dirname "$0")"
+HERE="$(cd "$(dirname "$0")" && pwd)"  # canonical: a bare-PATH invocation must still find proxy_match.py
 MANIFEST_CHECK="${INJECT_MANIFEST_CHECK:-$HERE/check-image-manifest.sh}"
 MANIFEST="${INJECT_MANIFEST:-/etc/sparkvm/image-manifest.json}"
 HARNESS_PROBE_BIN="${HARNESS_PROBE_BIN:-$HERE/harness-auth-probe}"
@@ -203,108 +205,40 @@ sys.exit(0 if os.access(p, os.R_OK) else 1)
 EOF
 }
 
+# require_proxy_match: the three matcher call sites depend on
+# harness/proxy_match.py; a missing helper must refuse with a named error,
+# not a misleading "cannot read the registry" diagnostic.
+require_proxy_match() {
+    if [ ! -f "$HERE/proxy_match.py" ]; then
+        echo "inject-provision-state: refusing: $HERE/proxy_match.py is missing -- the shared proxy-match mirror must ship next to this script" >&2
+        exit 1
+    fi
+}
+
 # echo_bound_hosts: print the llm-api allowed_hosts entries that are
 # effective echo exemptions, one per line, under the inference proxy's
-# own matching semantics (a mirror of proxy/swap_addon.py::_host_in_list:
-# both sides lowercased, ports and trailing dots stripped, leading-dot
-# subdomain entries honored). Exits 2 when the registry cannot be read
-# -- an unverifiable teardown is not a clean teardown (fail-closed).
+# own matching semantics. Implemented in harness/proxy_match.py -- the
+# single shared mirror of proxy/swap_addon.py::_host_in_list (pinned by
+# harness/test_proxy_match.py's drift tripwire). Exits 2 when the
+# registry cannot be read -- an unverifiable teardown is not a clean
+# teardown (fail-closed).
 echo_bound_hosts() {
-    run_priv cat "$REGISTRY_FILE" 2>/dev/null | KEY_NAME="$KEY_NAME" ECHO_ALIASES="$ECHO_ALIASES" python3 -c '
-import json, os, sys
-
-def host_in_list(host, entries):
-    # Mirror of proxy/swap_addon.py::_host_in_list.
-    h = (host or "").lower().split(":")[0].rstrip(".")
-    for entry in entries or []:
-        e = str(entry).lower().rstrip(".")
-        if h == e or (e.startswith(".") and h.endswith(e)):
-            return True
-    return False
-
-aliases = os.environ["ECHO_ALIASES"].split()
-try:
-    reg = json.load(sys.stdin)
-except Exception as e:
-    print("registry unreadable or invalid JSON: %s" % (e,), file=sys.stderr)
-    sys.exit(2)
-entry = reg.get(os.environ["KEY_NAME"])
-hosts = entry.get("allowed_hosts") if isinstance(entry, dict) else None
-if not isinstance(hosts, list):
-    hosts = []
-strs = [str(h) for h in hosts]
-bad = [s for s in strs if any(host_in_list(a, [s]) for a in aliases)]
-# The proxy matcher fumbles the "::1" literal (splitting on ":" yields
-# ""), so match it literally too: fail-closed superset, never a pass.
-bad += [s for s in strs
-        if s.strip().lower().rstrip(".") == "::1" and s not in bad]
-for s in bad:
-    print(s)
-'
+    require_proxy_match
+    run_priv cat "$REGISTRY_FILE" 2>/dev/null \
+        | KEY_NAME="$KEY_NAME" ECHO_ALIASES="$ECHO_ALIASES" \
+            python3 "$HERE/proxy_match.py" echo-bound-hosts
 }
 
 # allowlist_echo_entries <kind> <file>: print the file's effective echo
-# exemptions, one per line, mirroring proxy/swap_addon.py's parsing --
-# strip, skip blanks/comments, lowercase hostnames at load; the ssrf
-# file (mirror of _parse_ssrf_allow) additionally honors CIDR literals
-# and promotes bare IPs to /32 or /128 nets, which are exemptions when
-# they cover 127.0.0.0/8 or ::1/128.
+# exemptions, one per line. Implemented in harness/proxy_match.py (mirror
+# of _host_in_list for "hosts", of _parse_ssrf_allow for "ssrf" -- the
+# ssrf file additionally honors CIDR literals and promotes bare IPs to
+# /32 or /128 nets, which are exemptions when they cover 127.0.0.0/8 or
+# ::1/128). The proxy_match module is the single mirror; the tripwire
+# test pins it against the real proxy functions.
 allowlist_echo_entries() {
-    python3 - "$1" "$2" <<'PYEOF'
-import ipaddress, sys
-
-def host_in_list(host, entries):
-    # Mirror of proxy/swap_addon.py::_host_in_list.
-    h = (host or "").lower().split(":")[0].rstrip(".")
-    for entry in entries or []:
-        e = str(entry).lower().rstrip(".")
-        if h == e or (e.startswith(".") and h.endswith(e)):
-            return True
-    return False
-
-ALIASES = ["127.0.0.1", "localhost", "::1"]
-ECHO_NETS = [ipaddress.ip_network("127.0.0.0/8"),
-             ipaddress.ip_network("::1/128")]
-
-def is_echo_hostname(line):
-    if any(host_in_list(a, [line]) for a in ALIASES):
-        return True
-    return line.strip().lower().rstrip(".") == "::1"
-
-kind, path = sys.argv[1], sys.argv[2]
-bad = []
-with open(path, encoding="utf-8") as f:
-    for raw in f:
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        entry = raw.rstrip("\n")
-        if kind == "ssrf":
-            # Mirror of proxy/swap_addon.py::_parse_ssrf_allow.
-            net = None
-            if "/" in line:
-                try:
-                    net = ipaddress.ip_network(line, strict=False)
-                except ValueError:
-                    pass  # falls through to hostname treatment
-            if net is None:
-                try:
-                    ipaddress.ip_address(line)
-                    net = ipaddress.ip_network(
-                        "%s/%s" % (line, "128" if ":" in line else "32"))
-                except ValueError:
-                    pass
-            if net is not None:
-                if any(net.overlaps(e) for e in ECHO_NETS):
-                    bad.append(entry)
-                continue
-            if is_echo_hostname(line):
-                bad.append(entry)
-        elif is_echo_hostname(line):
-            bad.append(entry)
-for b in bad:
-    print(b)
-PYEOF
+    require_proxy_match
+    python3 "$HERE/proxy_match.py" allowlist-echo-entries "$1" "$2"
 }
 
 # --- Step 1: manifest preflight -------------------------------------------
@@ -322,10 +256,10 @@ fi
 # sudoers is append-only by design); a surviving echo entry fails closed
 # here, naming the image-build gate -- which runs as root on the build
 # box pre-publish -- as the teardown owner. Every match below uses the
-# inference proxy's own semantics (mirrors of
-# proxy/swap_addon.py::_host_in_list and _parse_ssrf_allow): a check
-# narrower than the enforcement point would let a real key coexist with
-# a live exemption.
+# inference proxy's own semantics via harness/proxy_match.py (the single
+# shared mirror, pinned by the drift tripwire): a check narrower than
+# the enforcement point would let a real key coexist with a live
+# exemption.
 TEARDOWN="absent"
 if ! bound="$(echo_bound_hosts)"; then
     echo "inject-provision-state: refusing: cannot read the inference registry -- will not verify the echo-host teardown blindly" >&2
@@ -377,46 +311,12 @@ echo "inject-provision-state: fixture teardown $TEARDOWN (no echo binding, no ec
 # must bind llm-api (bearer_header) to at least one host outside the
 # fixture echo aliases (127.0.0.1, ::1, localhost),
 # and the blind compare must prove the stored value is NOT the public
-# fixture dummy. The real value is never read.
-if ! run_priv cat "$REGISTRY_FILE" 2>/dev/null | KEY_NAME="$KEY_NAME" ECHO_ALIASES="$ECHO_ALIASES" python3 -c '
-import json, os, sys
-
-def host_in_list(host, entries):
-    # Mirror of proxy/swap_addon.py::_host_in_list: the proxy enforces
-    # the binding with these semantics, so the injector must too.
-    h = (host or "").lower().split(":")[0].rstrip(".")
-    for entry in entries or []:
-        e = str(entry).lower().rstrip(".")
-        if h == e or (e.startswith(".") and h.endswith(e)):
-            return True
-    return False
-
-aliases = os.environ["ECHO_ALIASES"].split()
-try:
-    reg = json.load(sys.stdin)
-except Exception:
-    print("registry unreadable or invalid JSON", file=sys.stderr)
-    sys.exit(1)
-entry = reg.get(os.environ["KEY_NAME"])
-if not isinstance(entry, dict):
-    print("llm-api has no registry entry", file=sys.stderr)
-    sys.exit(1)
-if entry.get("access_token", {}).get("placement") != "bearer_header":
-    print("llm-api placement is not bearer_header", file=sys.stderr)
-    sys.exit(1)
-hosts = entry.get("allowed_hosts")
-if not isinstance(hosts, list) or not hosts:
-    print("llm-api is bound to no hosts", file=sys.stderr)
-    sys.exit(1)
-strs = [str(h) for h in hosts]
-bad = [s for s in strs if any(host_in_list(a, [s]) for a in aliases)]
-bad += [s for s in strs
-        if s.strip().lower().rstrip(".") == "::1" and s not in bad]
-if bad:
-    print("llm-api still bound to echo host(s): %s" % ",".join(bad), file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-' >&2; then
+# fixture dummy. The real value is never read. The assertion lives in
+# harness/proxy_match.py (assert-key-binding) -- the same shared mirror
+# as the teardown checks, pinned by the drift tripwire.
+if ! run_priv cat "$REGISTRY_FILE" 2>/dev/null \
+    | { require_proxy_match; KEY_NAME="$KEY_NAME" ECHO_ALIASES="$ECHO_ALIASES" \
+        python3 "$HERE/proxy_match.py" assert-key-binding; } >&2; then
     echo "inject-provision-state: refusing: no usable real inference credential in the registry (see above)" >&2
     exit 1
 fi
@@ -529,7 +429,19 @@ if [ -n "${INJECT_TENANT_ID:-}" ]; then
     fi
     mkdir -p "$(dirname "$TENANT_RECORD")"
     INJECT_TENANT_ID="$INJECT_TENANT_ID" IMAGE_VERSION="$IMAGE_VERSION" TENANT_RECORD="$TENANT_RECORD" python3 -c '
-import json, os, time
+import json, os, stat, tempfile, time
+path = os.environ["TENANT_RECORD"]
+# open(path, "w") mode semantics: a CREATED file gets 0666 masked by the
+# process umask (022 at first boot -> 0644, as before); truncating an
+# EXISTING file leaves its mode untouched. The atomic rename always lands
+# a fresh inode, so replicate both branches explicitly -- hardcoding 0644
+# would silently widen a pre-hardened (e.g. 0600) tenant record.
+_umask = os.umask(0)
+os.umask(_umask)
+if os.path.lexists(path):
+    _mode = stat.S_IMODE(os.stat(path).st_mode)  # existing file: keep mode
+else:
+    _mode = 0o666 & ~_umask                       # new file: 0666 & ~umask
 record = {
     "tenant_id": os.environ["INJECT_TENANT_ID"],
     "image_version": os.environ["IMAGE_VERSION"],
@@ -537,9 +449,25 @@ record = {
     "injector": "harness/inject-provision-state.sh",
     "confirmd_attribution": "pending (H10: per-tenant approvals URL wiring consumes this record)",
 }
-with open(os.environ["TENANT_RECORD"], "w", encoding="utf-8") as f:
-    json.dump(record, f, indent=2, sort_keys=True)
-    f.write("\n")
+# Atomic write: a direct open("w") truncates in place, so a concurrent
+# reader (the future H10 confirmd wiring reads this record) could see a
+# torn file. Write to a temp file in the same directory and rename over.
+d = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(dir=d, prefix=".tenant.json.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2, sort_keys=True)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, _mode)  # same effective mode as open("w")
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
 '
     if ! INJECT_TENANT_ID="$INJECT_TENANT_ID" TENANT_RECORD="$TENANT_RECORD" python3 -c '
 import json, os, sys
