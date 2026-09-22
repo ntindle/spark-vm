@@ -339,6 +339,52 @@ daily `--rollover` first so they rejoin confirmed. Reviving dead invites
 is the #235 operator tooling, not this pass. Run it after any suspected
 crash; re-running when nothing is missing is a no-op.
 
+**Invite-wave recovery (issue #235):** a second crash window lives in the
+re-invite path — a crash after `_consume_token(old)` but before the row
+commit leaves the on-disk row `invited` with a consumed token. The same
+tooling covers operator-initiated re-waves (invite email bounced or lost).
+Recover it append-only — never hand-edit `rows.jsonl`:
+
+    WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \
+        waitlist_invites.py --diagnose   # which stranded state each invited row is in
+
+`--diagnose` is read-only and lists every invited row with its token
+state: `ok` (live — nothing to do), `expired` (run the daily `--rollover`
+first), `consumed` (crash-suspect — reinstate candidate), `invalid` /
+`missing` (hand-damaged — inspect by hand, never auto-repaired). Then:
+
+    WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \
+        waitlist_invites.py --reinstate-confirmed --entry-id EID \
+            --reason "wave2 crashed between consume and commit; re-waving" \
+            [--dry-run] [--force]
+
+`--reinstate-confirmed` appends one new rows.jsonl revision per row:
+status flips to `confirmed`, the invite keys are popped (the prior
+invited revisions and the `invite_sent` funnel event keep the audit
+trail), `confirmed_at` is **kept** — this is a crash repair, not an
+expiry, so the entry rejoins at its original queue position — and the
+revision is stamped with `reinstate_at` + `reinstate_reason`. No email
+is sent and no funnel event is emitted (the §3.4 taxonomy has none for
+this); the next ordinary `--send-wave` re-invites the row with a fresh
+token. `--reason` is required — it is the audit trail. A row whose
+invite token is still **live** is refused unless `--force` (reinstating
+kills the claim link, so the operator must say so explicitly); `--force`
+consumes the live token first so the trail reads `consumed`. An
+**expired** invite is refused outright — don't reinstate expired rows,
+that's what `--rollover` is for; reinstate keeps the original queue
+position, which would silently skip the disclosed 14-day expiry →
+back-of-queue rule. `--dry-run` previews the plan (and refuses the same
+way the real run does — no preview/reality divergence). Duplicate
+`--entry-id` values are collapsed to one revision per row.
+
+If the command itself dies mid-run across multiple `--entry-id`s, the
+rows already flipped are `confirmed` and a re-run fails loud on them —
+re-run `--diagnose`, drop the already-`confirmed` entries from the list,
+and re-run `--reinstate-confirmed` for the remainder. Note the crashed
+wave's stray email counted against the §4 3/24h cap when it went out —
+if the cap is still full, the re-wave leaves the row confirmed for a
+later wave.
+
 *Compliance:* pricing lines are filled at send time from decided pricing —
 the template never contains numbers; no "free tier" wording (Billing
 decision); no launch-date promises (the invite *is* the launch for that

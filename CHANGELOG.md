@@ -37,6 +37,14 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Waitlist invite-wave recovery tooling: `waitlist_invites.py
+  --reinstate-confirmed` flips stranded invited rows (consume-token →
+  row-commit crash window, or operator-initiated re-waves) back to
+  confirmed in the append-only posture — one new row revision, original
+  queue position kept, the reason stamped as the audit trail — and
+  `--diagnose` lists every invited row's token state with the recommended
+  action, so operators no longer hand-edit `rows.jsonl` to recover
+  (#242).
 - Provision-time injector (`harness/inject-provision-state.sh`): runs at
   first boot of the hosted agent VM and owns the provision-time half of
   the gate-fixture contract — preflights the golden-image manifest

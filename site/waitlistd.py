@@ -1796,6 +1796,171 @@ class WaitlistService:
             rolled.append(row["entry_id"])
         return rolled
 
+    def _invite_token_state(self, row):
+        """Token state for an invited row: one of "ok" (live), "expired",
+        "consumed", "invalid", or "missing" (no invite token recorded —
+        hand-damaged or pre-feature row). Same lookup semantics as
+        lookup_invite_token, except a cross-wired token (one whose
+        embedded entry_id resolves to a DIFFERENT row — a hand-damaged
+        row carrying another entry's token) reads "invalid", never that
+        other entry's state: force-repairing this row must never retire
+        someone else's live claim link."""
+        token = row.get("active_invite_token")
+        if not token:
+            return "missing"
+        found, status = self.lookup_invite_token(token)
+        if found is not None and found.get("entry_id") != row.get("entry_id"):
+            return "invalid"
+        return status
+
+    def reinstate_confirmed(self, entry_ids, *, reason, force=False,
+                            dry_run=False):
+        """Issue #235: flip stranded invited rows back to confirmed, in
+        the append-only posture — the repair the fault-injection tests
+        perform by hand (test_reinvite_crash_between_consume_and_commit
+        calls it "manual today").
+
+        Stranded states this repairs:
+        - the `_consume_token(old)` -> row-commit crash window: the old
+          token's consume landed on disk but the row commit did not, so
+          the on-disk row is still invited with a consumed token;
+        - an operator-initiated re-wave (invite email bounced/lost,
+          operator error): the row is invited but the invite should die
+          and the entry rejoin the confirmed queue.
+
+        For each entry_id, exactly one new rows.jsonl revision is
+        appended: status flips to confirmed, the four invite keys are
+        popped (same convention as rollover_expired_invites — the prior
+        invited revisions and the `invite_sent` funnel event keep the
+        full audit trail), confirmed_at is KEPT (this is a crash repair,
+        not an expiry: the entry rejoins at its original queue position;
+        expiry still goes to the back via --rollover), and the revision
+        records `reinstate_at` + `reinstate_reason`. No funnel event —
+        the §3.4 taxonomy has none for this (same as rollover).
+
+        Gates, all fail-loud before ANY row is mutated (validate, then
+        commit — no partial application):
+        - every entry_id must exist and have status == "invited";
+        - duplicate entry_ids are collapsed (one revision per row);
+        - `reason` must be non-empty (it is the audit trail);
+        - an EXPIRED invite is refused outright: reinstating would keep
+          the original queue position and silently skip the disclosed
+          14-day expiry → back-of-queue rule — run --rollover instead
+          (not foldable into --force: force means "retire a live claim
+          link explicitly", and no legitimate expired-reinstate exists);
+        - a row whose invite token is still LIVE ("ok") is refused
+          unless force=True: reinstating kills the claim link, so the
+          operator must say so explicitly. With force, the live token is
+          consumed at reinstate time so the trail reads "consumed", not
+          "invalid".
+
+        The next wave re-invites the reinstated row with a FRESH token
+        (re-consume of the old token is a no-op; `_queue_invite_email`
+        mints anew). Note the crashed wave's stray email counted against
+        the §4 3/24h cap when it went out — if the cap is still full the
+        re-wave leaves the row confirmed for a later wave.
+
+        Returns the reinstated entry_ids (or, with dry_run=True, the
+        per-entry plan with no mutation). Caller must hold data_lock
+        (the operator CLI does) — same convention as send_invite_wave
+        and rollover_expired_invites.
+        """
+        if not reason or not str(reason).strip():
+            raise ValueError(
+                "reinstate_confirmed: reason is required — it is recorded "
+                "on the row as the audit trail")
+        entry_ids = list(dict.fromkeys(entry_ids))  # E1: one revision/row
+        plans = []
+        for entry_id in entry_ids:
+            row = self.rows.get(entry_id)
+            if row is None:
+                raise ValueError(
+                    f"reinstate_confirmed: no such entry {entry_id!r}")
+            if row.get("status") != "invited":
+                raise ValueError(
+                    f"reinstate_confirmed: entry {entry_id!r} has status "
+                    f"{row.get('status')!r}, not 'invited' — nothing to "
+                    "reinstate")
+            token_state = self._invite_token_state(row)
+            if token_state == "expired":
+                raise ValueError(
+                    f"reinstate_confirmed: entry {entry_id!r}'s invite "
+                    "has EXPIRED — reinstating would keep its original "
+                    "queue position and silently skip the disclosed "
+                    "14-day expiry -> back-of-queue rule; run --rollover "
+                    "instead")
+            if token_state == "ok" and not force:
+                raise ValueError(
+                    f"reinstate_confirmed: entry {entry_id!r}'s invite "
+                    "token is still LIVE — reinstating would kill the "
+                    "claim link; re-run with --force to retire it "
+                    "explicitly")
+            plans.append((row, row.get("active_invite_token"), token_state))
+        if dry_run:
+            return [{"entry_id": row["entry_id"],
+                     "token_state": token_state,
+                     "would": ("consume the live invite token, then flip "
+                               "to confirmed (forced)" if token_state == "ok"
+                               else "flip to confirmed, keeping "
+                               "confirmed_at (original queue position)")}
+                    for row, _, token_state in plans]
+        reinstated = []
+        for row, token, token_state in plans:
+            consumed_live = False
+            if token_state == "ok" and force:
+                self._consume_token(token)
+                consumed_live = True
+            row["status"] = "confirmed"
+            for key in ("invited_at", "invite_expires_at",
+                        "invite_wave", "active_invite_token"):
+                row.pop(key, None)
+            row["reinstate_at"] = iso_z(self.clock())
+            row["reinstate_reason"] = reason
+            if consumed_live:
+                row["reinstate_consumed_live_token"] = True
+            self._save_row(row)
+            reinstated.append(row["entry_id"])
+        return reinstated
+
+    def diagnose_invites(self):
+        """Issue #235 item 3: read-only diagnosis of every invited row's
+        token state, so the operator can tell which stranded state each
+        row is in without grepping rows.jsonl by hand.
+
+        Buckets:
+        - "ok"       — live invite, healthy; nothing to do.
+        - "expired"  — past the 14d TTL; run --rollover (idempotent).
+        - "consumed" — crash-suspect: the token died but the row never
+                       rolled back; --reinstate-confirmed candidate.
+        - "invalid"/"missing" — hand-damaged row; inspect by hand
+                       before any repair (an explicit --reinstate-confirmed
+                       --reason ... is the inspection + decision).
+        Returns a list of dicts (entry_id, masked owner, token_state,
+        recommendation). No mutation; no lock needed beyond the caller's
+        read consistency.
+        """
+        recommendations = {
+            "ok": "healthy — nothing to do",
+            "expired": "expired — run --rollover",
+            "consumed": ("crash-suspect — reinstate candidate "
+                         "(--reinstate-confirmed --reason ...)"),
+            "invalid": "hand-damaged — inspect rows.jsonl by hand",
+            "missing": ("hand-damaged — no invite token recorded; "
+                        "inspect rows.jsonl by hand"),
+        }
+        out = []
+        for row in self.rows.values():
+            if row.get("status") != "invited":
+                continue
+            state = self._invite_token_state(row)
+            out.append({
+                "entry_id": row["entry_id"],
+                "owner": masked_owner(row["owner_email"]),
+                "token_state": state,
+                "recommendation": recommendations[state],
+            })
+        return out
+
     def _terminate_partial_tail(self, path):
         """Quarantine a kill -9-torn tail before appending.
 
