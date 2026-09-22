@@ -267,6 +267,15 @@ This changelog only works if entries land with the change, not after it:
   `--check` drift compare, `--execute --yes` idempotent apply) applies them;
   applying is an owner decision (#174)
 
+### Changed
+- Hosted pricing thinking refreshed: the internal pricing analysis now
+  reflects the decided Fly.io provider (boat.dev under evaluation as a
+  cheaper alternative), records Epho's bring-your-own-keys infra-only
+  metering as a candidate shape for model-token billing (zero margin risk),
+  and drops the stale merge-order note — all cited strategy docs are on
+  main and price inputs re-verified through the 2026-09-21 competitor
+  reads. (PR #253)
+
 ### Fixed
 - Test hermeticity and coverage hardening (dx turn): the push-endpoint
   tests no longer touch `/home/swapd` (approvals dir redirected at tmp),
