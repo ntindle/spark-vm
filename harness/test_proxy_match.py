@@ -209,7 +209,7 @@ class TestEchoLayer(unittest.TestCase):
         # ipaddress rejects.
         for h in ("127.1", "127.0.0.2", "0x7f.0.0.1", "2130706433",
                   "0177.0.0.1", "0x7f000001", "0X7F.0.0.1", "0x7f.0.0.01",
-                  "127.1.", "  0x7f.0.0.1  "):
+                  "127.1.", "  0x7f.0.0.1  ", "2130706432", "0x7f000000"):
             self.assertTrue(pm.is_echo_entry(h), h)
         # Non-loopback spellings of the same classes stay clean, and the
         # entry-side-port rule still holds (ports are inert at enforcement,
@@ -219,7 +219,7 @@ class TestEchoLayer(unittest.TestCase):
         # round-1 blocker: inet_aton raises ValueError on embedded NUL).
         for h in ("8.8.8.8", "0x8.8.8.8", "134744072", "0x80000001",
                   "0200.0.0.1", "0.0.0.0", "127.1:8080", "127.1.evil.com",
-                  "\x00127.0.0.1", "127.0.0.1\x00"):
+                  "\x00127.0.0.1", "127.0.0.1\x00", "126.1", "128.0.0.1"):
             self.assertFalse(pm.is_echo_entry(h), h)
         # Known residual (module docstring, issue #269): IPv4-mapped IPv6
         # exact-matches at enforcement since #257 but is deliberately not

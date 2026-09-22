@@ -145,19 +145,25 @@ def _is_loopback_ipv4(text):
     (and any canonical form inet_aton also accepts). Anything that is not
     an IP literal at all rejects cleanly down both paths -- including
     embedded null bytes (inet_aton raises ValueError there, so the except
-    covers both OSError and ValueError)."""
+    covers both OSError and ValueError). The trailing-dot/case
+    normalization mirrors host_in_list's own rules and is applied here so
+    the helper is self-sufficient for any direct caller (idempotent for
+    the is_echo_entry call site, which normalizes already)."""
     if not text:
+        return False
+    t = text.lower().rstrip(".")
+    if not t:
         return False
     try:
         addr = ipaddress.IPv4Address(
-            int.from_bytes(socket.inet_aton(text), "big"))
+            int.from_bytes(socket.inet_aton(t), "big"))
     except (OSError, ValueError):
         # ValueError: inet_aton raises it (not OSError) on embedded null
         # bytes -- a crash here would turn a weird registry/allowlist entry
         # into a provisioning refusal, so fall through to the ipaddress
         # path, which rejects the same inputs cleanly.
         try:
-            addr = ipaddress.ip_address(text)
+            addr = ipaddress.ip_address(t)
         except ValueError:
             return False
         if not isinstance(addr, ipaddress.IPv4Address):
@@ -185,8 +191,10 @@ def is_echo_entry(entry, aliases=ECHO_ALIASES):
     0x7f.0.0.1, 2130706433, 0177.0.0.1, 0x7f000001) are likewise treated
     as echo: they exact-match at enforcement and resolve to loopback on
     the box. This normalization runs unconditionally: a narrowed
-    ECHO_ALIASES override can only shrink the exact-alias/leading-dot
-    checks, never the 127/8, ::1, or .localhost sets (fail-closed).
+    ECHO_ALIASES override can only shrink the exact-alias and leading-dot
+    checks -- the 127/8 and .localhost sets are always covered
+    (fail-closed). (::1 and localhost themselves ride the alias set, so
+    narrowing ECHO_ALIASES unflags them too.)
     Entry-side ports stay inert (test pins): a registry entry
     carrying a port never matches at enforcement, so nothing strips the
     port before normalization."""

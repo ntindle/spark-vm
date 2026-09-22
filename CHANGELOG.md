@@ -348,7 +348,7 @@ This changelog only works if entries land with the change, not after it:
   exactly at the proxy and resolve to loopback on the machine, but the
   teardown previously saw only the canonical `127.0.0.1`/`localhost`
   spellings, so a binding or allowlist line written in a non-canonical
-  spelling would have survived teardown undetected. (#267)
+  spelling would have survived teardown undetected. (#259)
 - Provision-time credential teardown now treats leading-dot entries (e.g.
   `.localhost`) as the live loopback exemptions they are: previously only
   bare loopback names were unbound or refused, so a `.localhost` binding
