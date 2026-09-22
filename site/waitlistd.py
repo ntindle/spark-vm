@@ -202,10 +202,9 @@ COPY_CLAIM_EXPIRY = (
 )
 COPY_CLAIM_INACTIVE = (
     "This invite link is no longer live \u2014 invite links expire 14 days "
-    "after the wave, and a superseded or already-claimed link lands here "
-    "too. After expiry the slot rolls to the next entry, you rejoin the "
-    "line at the back, and you\u2019ll be invited again in a later wave, "
-    "when one runs."
+    "after the wave, and a superseded link lands here too. After expiry "
+    "the slot rolls to the next entry, you rejoin the line at the back, "
+    "and you\u2019ll be invited again in a later wave, when one runs."
 )
 CONFIRM_SUBJECT = "Confirm your spark-vm waitlist spot"
 REMINDER_SUBJECT = "Reminder: your spark-vm waitlist spot is waiting on one click"
@@ -1645,18 +1644,16 @@ class WaitlistService:
 
     # -- claim ------------------------------------------------------------
 
-    def _claimed_row_for_retired_token(self, token):
+    def _claimed_row_for_retired_token(self, entry_id):
         """Row for a retired (consumed/superseded) invite token.
 
-        lookup_invite_token returns (None, "consumed") — the row is
-        dropped. The token's HMAC already verified by that point, so its
-        wire-format entry_id is trustworthy; it is used only for a store
-        lookup plus a status check, never for authorization.
+        The caller must pass the entry_id of a token whose HMAC has
+        already been verified — in practice, a token that
+        lookup_invite_token returned ("consumed") for. The wire-format
+        entry_id is inside the HMAC payload, so it cannot be swapped
+        without invalidating the signature; the value is used only for
+        a store lookup plus a status check, never for authorization.
         """
-        try:
-            entry_id = token.split(".", 4)[1]
-        except Exception:
-            return None
         return self.rows.get(entry_id)
 
     def claim_get(self, token):
@@ -1675,18 +1672,22 @@ class WaitlistService:
         with data_lock(self.data_dir), self._lock:
             self._refresh_under_lock()
             row, status = self.lookup_invite_token(token or "")
-        if status == "invalid" or status == "expired":
-            return 200, page_claim_inactive()
-        if status == "consumed":
-            retired = self._claimed_row_for_retired_token(token)
-            if retired is not None and retired.get("status") == "signed_up":
-                # Idempotent re-click after the single-use token ran:
-                # the claim is recorded — say so, never an error.
-                return 200, page_claimed(
-                    masked_owner(retired["owner_email"]))
-            return 200, page_claim_inactive()
-        return 200, page_claim_button(
-            token, masked_owner(row["owner_email"]))
+            if status == "invalid" or status == "expired":
+                return 200, page_claim_inactive()
+            if status == "consumed":
+                # The HMAC verified (a forged token lands on "invalid"),
+                # so the wire-format entry_id is trustworthy for lookup.
+                retired = self._claimed_row_for_retired_token(
+                    token.split(".", 4)[1])
+                if (retired is not None
+                        and retired.get("status") == "signed_up"):
+                    # Idempotent re-click after the single-use token ran:
+                    # the claim is recorded — say so, never an error.
+                    return 200, page_claimed(
+                        masked_owner(retired["owner_email"]))
+                return 200, page_claim_inactive()
+            return 200, page_claim_button(
+                token, masked_owner(row["owner_email"]))
 
     def claim_post(self, token):
         """POST /waitlist/claim — invite token as form field. Records the
@@ -1708,8 +1709,12 @@ class WaitlistService:
             if status == "invalid" or status == "expired":
                 return 200, page_claim_inactive()
             if status == "consumed":
-                retired = self._claimed_row_for_retired_token(token)
-                if retired is not None and retired.get("status") == "signed_up":
+                # The HMAC verified (a forged token lands on "invalid"),
+                # so the wire-format entry_id is trustworthy for lookup.
+                retired = self._claimed_row_for_retired_token(
+                    token.split(".", 4)[1])
+                if (retired is not None
+                        and retired.get("status") == "signed_up"):
                     # Idempotent re-POST: same rendering as a fresh claim,
                     # verbatim — never an error, never a second event.
                     return 200, page_claimed(

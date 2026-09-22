@@ -979,6 +979,7 @@ def test_claim_post_records_claim_and_emits_event():
     claimed = [e for e in events if e["event"] == "claimed"]
     assert len(claimed) == 1
     assert claimed[0]["ref"] == row["entry_id"]
+    assert claimed[0]["attrs"] == {}
     # POST-success renders exactly like already-claimed, verbatim.
     status2, body2 = svc.claim_post(token)
     assert status2 == 200 and body2 == body
@@ -994,11 +995,20 @@ def test_claim_expired_token_is_inactive_on_get_and_post():
     clock = MutableClock(NOW)
     svc, tmp = make_service(clock=clock)
     row, token = _invite(svc, tmp, "claim3@example.com")
-    clock.t = NOW + timedelta(days=15)
+    # The boundary itself is expired — lookup treats issued >= TTL as
+    # expired, matching the rollover cron's rule. One second before the
+    # boundary the token still claims.
+    clock.t = NOW + timedelta(seconds=wd.INVITE_TTL_SECONDS - 1)
+    status, body = svc.claim_get(token)
+    assert status == 200 and "Claim my box" in body
+    clock.t = NOW + timedelta(seconds=wd.INVITE_TTL_SECONDS)
     for fn in (svc.claim_get, svc.claim_post):
         status, body = fn(token)
         assert status == 200
         assert "no longer live" in body
+    clock.t = NOW + timedelta(days=15)
+    status, body = svc.claim_post(token)
+    assert status == 200 and "no longer live" in body
     assert svc.rows[row["entry_id"]]["status"] == "invited"  # untouched
 
 
@@ -1099,12 +1109,30 @@ def test_http_claim_round_trip(live_server):
 
 def test_http_claim_oversized_body_is_413(live_server):
     port, tmp = live_server
+    svc = wd._Handler.service
+    # A live invite row stands by: the 413 must leave it untouched.
+    status, _ = _post(port, "/waitlist/form", {
+        "owner_email": "live-claim413@example.com", "muse_email": "",
+        "website": "", "rendered_at": str(time.time() - 10)})
+    assert status == 200
+    token, _ = extract_token_from_spool(tmp)
+    status, _ = _get(port, "/waitlist/confirm?token=" +
+                     urllib.parse.quote(token))
+    status, _ = _post(port, "/waitlist/confirm", {"token": token})
+    invited = svc.send_invite_wave(
+        pricing_lines=PRICING, trial_terms=TERMS, wave="w413", count=10)
+    assert len(invited) == 1
+    itoken = svc.rows[invited[0]]["active_invite_token"]
     conn = HTTPConnection("127.0.0.1", port, timeout=5)
-    big = "token=" + urllib.parse.quote("x" * 70000)
+    big = "token=" + urllib.parse.quote(itoken + "x" * 70000)
     conn.request("POST", "/waitlist/claim", big,
                  {"Content-Type": "application/x-www-form-urlencoded"})
     resp = conn.getresponse()
     assert resp.status == 413
     resp.read()
-    # Rejected before the service layer: no claim recorded.
-    assert not read_events(tmp)
+    # Rejected before the service layer: the row is untouched.
+    row = svc.rows[invited[0]]
+    assert row["status"] == "invited"
+    _, tok_status = svc.lookup_invite_token(itoken)
+    assert tok_status == "ok"
+    assert not [e for e in read_events(tmp) if e["event"] == "claimed"]
