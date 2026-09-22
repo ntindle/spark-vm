@@ -174,8 +174,8 @@ _CSRF_RING_TTL = _env_int("CONFIRM_CSRF_RING_TTL", 15 * 60, 60)  # seconds
 # would need the atomicity story redone (flock on the item file) — tracked
 # as a #69 child issue.
 # Lifecycle: the entry is evicted whenever the item leaves pending —
-# answered, expired-reaped under the per-aid lock (GET/POST paths), or
-# expired-reaped by load_pending()'s Finding-58 render reap. Without
+# answered, expired-reaped under the per-aid lock (GET/POST paths and —
+# since issue #233 — load_pending()'s Finding-58 render reap). Without
 # eviction the dict would grow by one entry per approval for the
 # daemon's whole lifetime.
 _aid_locks = defaultdict(threading.Lock)
@@ -190,8 +190,11 @@ def _evict_aid_lock(aid):
     while holding the lock: a thread that grabbed the object before
     eviction still serializes on it and then sees the file gone (404);
     threads arriving later get a fresh lock. Assumes an aid's item never
-    comes back — aids are random hex in practice, so an evicted entry
-    cannot alias a live item's lock."""
+    comes back — aids are 64-bit random (`uuid.uuid4().hex[:16]` in
+    confirm/confirm-request), so reuse is a 2^-64 event. If it ever
+    happened, an evicted entry could alias a live item's lock, and
+    `_sweep_answered`'s `os.replace` could clobber `consumed/<aid>.json`
+    history — the invariant has teeth, stated once here."""
     _aid_locks.pop(aid, None)
 
 
@@ -321,7 +324,10 @@ def audit_log(event, peer, login, detail=""):
     Event policy: malformed/missing CSRF nonces are logged as violations
     ("csrf: bad nonce"); well-formed but stale/unknown nonces are logged
     under the separable "csrf:stale-nonce" event (issue #75) so reviewer
-    signal stays clean without dropping the trail."""
+    signal stays clean without dropping the trail. Issue #233: a pending
+    file that vanishes between grant mint and consumption is logged as
+    the distinct "answer-raced-expiry" event — never as "answer/approve"
+    — so the trail cannot self-contradict."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         with open(AUDIT, "a", encoding="utf-8") as f:
@@ -371,13 +377,36 @@ def load_pending():
                 it = json.load(f)
             exp = _parse_expiry(it.get("expires"))
             if exp is not None and now >= exp:
-                os.remove(p)
-                # Arch 2026-09-21: keep the per-aid lock registry bounded —
-                # the item left pending here too. Safe without the lock:
-                # a thread holding the old object still serializes on it
-                # and then sees the file gone; later threads get a fresh
-                # lock and 404 on the exists check.
-                _evict_aid_lock(fn[:-len(".json")])
+                # Issue #233: the render reap mutates pending/ while the
+                # answer critical section holds this same per-aid lock
+                # for the whole check->mint->consume window (grant
+                # subprocess included). Reaping outside the lock let the
+                # reap remove the file mid-mint, leaving _answer_locked's
+                # bare os.remove(src) to raise an uncaught
+                # FileNotFoundError into the owner's connection — and let
+                # GET's nonce write-back recreate a file the reap had
+                # just removed (os.replace resurrects it). Serializing
+                # the reap on the per-aid lock closes both. Deadlock
+                # audit: the reap holds at most this one aid lock and
+                # never nests; GET/POST each hold exactly one; the grant
+                # subprocess acquires no locks — no lock-ordering hazard.
+                aid = fn[:-len(".json")]
+                with _aid_lock(aid):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        # Lost the race with the answer path, which
+                        # consumed the item while we waited on the lock —
+                        # the expected case is FileNotFoundError. Any
+                        # other OSError is fail-safe here too: the item is
+                        # skipped from this render and the remove is
+                        # retried on the next one.
+                        pass
+                    # Arch 2026-09-21: keep the per-aid lock registry
+                    # bounded — the item left pending here too. Evicting
+                    # unconditionally is safe: aids are never reused and
+                    # an expired item stays expired.
+                    _evict_aid_lock(aid)
                 continue
             items.append(it)
         except Exception:
@@ -789,6 +818,41 @@ _ANSWERED_FEED_LIMIT = 100
 _CONSUMED_KEEP = _env_int("CONFIRM_CONSUMED_KEEP", 1000, 100)
 
 
+# Issue #233 hygiene: answered/*.json files stranded by a failed
+# answered->consumed move (the OSError path journals a warning and moves
+# on, with no retry — or a crash between the two) never enter consumed/,
+# so _load_answered() never sees them and they grow unbounded. Sweep
+# files older than the grace period into consumed/. The grace period
+# keeps an in-flight answer (seconds) far away from the sweep (a day by
+# default), and an aid's answered file is written exactly once, so no
+# concurrent answer can collide on the same name.
+_ANSWERED_SWEEP_GRACE_S = _env_int("CONFIRM_ANSWERED_SWEEP_GRACE_S",
+                                   86400, 3600)
+
+
+def _sweep_answered(grace=None):
+    """Move answered/ strays older than `grace` seconds to consumed/."""
+    if grace is None:
+        grace = _ANSWERED_SWEEP_GRACE_S
+    cutoff = time.time() - grace
+    src_d = answered_dir()
+    dst_d = consumed_dir()
+    try:
+        names = os.listdir(src_d)
+    except OSError:
+        return
+    for fn in names:
+        if not fn.endswith(".json"):
+            continue
+        p = os.path.join(src_d, fn)
+        try:
+            if os.path.getmtime(p) > cutoff:
+                continue
+            os.replace(p, os.path.join(dst_d, fn))
+        except OSError:
+            continue
+
+
 def _prune_consumed(limit=None):
     """Delete consumed/ history beyond the newest `limit` files (by mtime).
 
@@ -1061,6 +1125,10 @@ class Handler(BaseHTTPRequestHandler):
             with _aid_lock(aid):
                 p = os.path.join(pending_dir(), aid + ".json")
                 if not os.path.exists(p):
+                    # Issue #231: the item left pending (or never
+                    # existed) — don't let the lock registry grow on the
+                    # negative path either.
+                    _evict_aid_lock(aid)
                     self._err("not found or already answered", 404)
                     return
                 try:
@@ -1069,6 +1137,8 @@ class Handler(BaseHTTPRequestHandler):
                 except (OSError, ValueError):
                     # Issue #77 (L5): a corrupt/torn pending file must not
                     # raise an uncaught exception into the page.
+                    # Issue #231: evict here too.
+                    _evict_aid_lock(aid)
                     self._err("not found or already answered", 404)
                     return
                 if is_expired(it):
@@ -1222,7 +1292,11 @@ class Handler(BaseHTTPRequestHandler):
         # nonces must not both enter the grant path (#71); the loser of
         # the race now sees a clean 404 ("not found or already
         # answered") instead of an uncaught FileNotFoundError from
-        # os.remove(src).
+        # os.remove(src). Issue #233: the protection domain covers the
+        # Finding-58 render reap too — load_pending()'s expiry sweep
+        # serializes on this same lock, so a mid-mint reap can no longer
+        # delete the pending file out from under _answer_locked, and
+        # GET's nonce write-back can no longer resurrect a reaped file.
         with _aid_lock(aid):
             return self._answer_locked(login, aid, csrf, decision)
 
@@ -1231,6 +1305,8 @@ class Handler(BaseHTTPRequestHandler):
         early return inside is a normal handler response."""
         src = os.path.join(pending_dir(), aid + ".json")
         if not os.path.exists(src):
+            # Issue #231: same evict-on-negative-path as the GET side.
+            _evict_aid_lock(aid)
             self._err("not found or already answered", 404)
             return
         try:
@@ -1239,6 +1315,8 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             # Issue #77 (L5): a corrupt/torn pending file must not raise
             # an uncaught exception into the POST path either.
+            # Issue #231: evict here too.
+            _evict_aid_lock(aid)
             self._err("not found or already answered", 404)
             return
         # Finding 48 + issue #75: the nonce must be well-formed, unexpired,
@@ -1314,6 +1392,24 @@ class Handler(BaseHTTPRequestHandler):
                           "id=%s err=%s" % (aid, e))
                 self._err("Grant minting failed.", 500)
                 return
+        # Issue #233 (belt and braces): the render reap now serializes
+        # on the same per-aid lock, so it cannot have reaped the file
+        # mid-mint — but an operator or another process could still have
+        # removed it. If the pending file is gone here, say so honestly:
+        # audit the distinct event and refuse, instead of writing an
+        # answered/ record for a file we never consumed (which would
+        # emit a self-contradictory expired-reaped + answer pair on the
+        # credential-grant trust anchor).
+        if not os.path.exists(src):
+            audit_log("answer-raced-expiry", self.client_address[0],
+                      login, "id=%s decision=%s" % (aid, decision))
+            # Security review nit: this branch is a terminal path like
+            # all the others — evict, don't leak one registry entry per
+            # occurrence.
+            _evict_aid_lock(aid)
+            self._err("This approval was removed before it could be "
+                      "recorded.", 410)
+            return
         # Finding 56: one-way. Write to answered/, then move to consumed/.
         # The proxy never re-derives grants from these files.
         # (answered_dir() re-creates the dir if it was deleted at
@@ -1337,6 +1433,15 @@ class Handler(BaseHTTPRequestHandler):
                   "%s: %s" % (aid, e), flush=True)
         # Arch 2026-09-21: bound the answered-history directory (see
         # _prune_consumed); the audit log stays the durable trail.
+        # Issue #233: also sweep answered/ strays into consumed/ so a
+        # failed move doesn't leave them invisible forever. No lock
+        # needed here: answered files are write-once, and concurrent
+        # sweeps race benignly (os.replace + OSError caught). Effective
+        # semantics: this sweeps yesterday's strays — a same-run failed
+        # move waits out the grace period (journaled loudly via the
+        # stdout WARNING), biased toward never sweeping an in-flight
+        # file.
+        _sweep_answered()
         _prune_consumed()
         audit_log("answer", self.client_address[0], login,
                   "id=%s decision=%s requester=%s"
@@ -1412,6 +1517,9 @@ def main():
     print("confirmd version=%s" % SPARKVM_VERSION, flush=True)
     for d in (pending_dir(), answered_dir(), consumed_dir()):
         os.makedirs(d, exist_ok=True)
+    # Issue #233: sweep any answered/ strays left by a previous run's
+    # failed answered->consumed move before serving.
+    _sweep_answered()
     import ssl
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT, KEY)

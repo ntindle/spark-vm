@@ -285,6 +285,19 @@ This changelog only works if entries land with the change, not after it:
   (root:root 0644) — a swapd-level attacker can no longer get the next
   unattended deploy to leak a root-readable file into the world-readable
   bundle (#144, #207).
+- The approvals page daemon no longer lets its expiry sweep collide with an
+  in-flight approval answer: the sweep now waits its turn behind the same
+  per-approval serialization as the answer path, so an approval expiring
+  mid-approval can no longer drop the owner's connection with an unhandled
+  error after the grant was already minted, and an expired approval can no
+  longer briefly reappear after being swept. The audit trail also gains a
+  distinct event when an approval vanishes between grant minting and
+  consumption, instead of logging a contradictory expired-plus-approved pair
+  (#233). Dead approval files that never reached the answered list are now
+  swept into it after a day, so they no longer pile up unseen (#233).
+  Missing or unreadable approval files also release their per-approval
+  lock entries now, instead of leaking one registry entry per miss (#231).
+  (#241)
 - The swap proxy's audit log is now bounded: deploy installs a logrotate
   policy covering every `*swap*.log` under the proxy home (including
   `SWAP_LOG_FILE` overrides like the inference proxy's log) —
