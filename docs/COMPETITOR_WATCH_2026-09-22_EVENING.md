@@ -203,7 +203,8 @@ No in-window change across the tracked set:
   persistent-machine competitor, fork semantics overlap #179/#47. Watch,
   no reaction; revisit when there is a measurable product.
 - **C30 (NEW, competitor → hosted design):** OpenAI Agents API formalizes
-  the harness↔compute split with nine first-class sandbox partners —
+  the harness↔compute split (INFERRED from the partner list — see §6) with
+  nine first-class sandbox partners —
   input to the hosted product's compute-layer positioning; DO's presence
   sharpens C26.
 - **C31 (NEW datapoint on existing corpus entry — competitor — watch):**
