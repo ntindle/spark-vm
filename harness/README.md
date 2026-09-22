@@ -75,11 +75,14 @@ The fixture binds `llm-api` to the loopback echo host, allowlists
 `127.0.0.1` in `inference-hosts.allow`, **and** exempts it in the
 inference proxy's own `inference-ssrf.allow`. That binding must NEVER
 coexist with a real credential: after the gate passes, the echo host MUST
-be removed from `inference-hosts.allow` AND from `inference-ssrf.allow`,
-and the `llm-api`→echo-host binding MUST be unbound — by the image-build
-gate before the image is published, or by the provision-time injector
-before it installs the real tenant key. Whichever stage runs last owns
-the teardown. The gate is only safe because the fixture dummy is public
+be removed from `inference-hosts.allow` AND from `inference-ssrf.allow`
+(by the image-build gate before the image is published — the injector
+cannot remove allowlist lines; production sudoers is append-only by
+design), and the `llm-api`→echo-host binding MUST be unbound — by the
+image-build gate pre-publish, or by the provision-time injector before
+it asserts/probes the real tenant key. The operator installs the real
+key through the human-only grant-writer path BEFORE the injector runs;
+the injector asserts and probes, never installs. The gate is only safe because the fixture dummy is public
 (`GATE-FIXTURE-DUMMY-NOT-A-SECRET`, baked into this repo on purpose);
 the teardown is what keeps it safe once a real key exists. **Never run
 `install-gate-fixture.sh` on a box holding a real credential** (it
@@ -119,7 +122,9 @@ lifecycle above:
 5. Installs tenant identity when `INJECT_IDENTITY_DIR` is set (H9
    input contract): an `authorized_keys` file only, strict public-key
    shape validation — private-key material is refused, fail-closed.
-   Deferred and loudly reported when absent.
+   Deferred and loudly reported when absent. (Research §4 scopes H9
+   identity as "keys/certs"; this v1 seam is authorized_keys-only — the
+   H9 slice must grow the contract if it needs TLS/SSH certs.)
 6. Records tenant attribution when `INJECT_TENANT_ID` is set (H10
    input contract): a validated tenant id plus the pinned image
    version, for the per-tenant approvals slice. Deferred and loudly

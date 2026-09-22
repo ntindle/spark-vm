@@ -61,7 +61,10 @@
 # plane requires the manifest, fixture_teardown, inference_key,
 # swapd_ca, and probe steps to read "ok"; identity and
 # confirmd_attribution may read "ok" or "deferred (H9)"/"deferred (H10)"
-# (then named in deferred[]).
+# (then named in deferred[]). Note: a narrow writer crashing under
+# `set -e` exits with the writer's code rather than 1/2 -- still
+# fail-closed, but the H4 driver must treat ANY non-zero exit as
+# provisioning-failed, not just 1.
 #
 # The injector never writes a credential value: the only store writer it
 # touches is the blind compare. A test asserting the real key file is
@@ -72,7 +75,9 @@
 #   INJECT_IMAGE_VERSION   REQUIRED: the control plane's pinned image SHA.
 #   INJECT_MANIFEST        image manifest path (default
 #                          /etc/sparkvm/image-manifest.json -- baked into
-#                          the image by the image-build gate)
+#                          the image by the image-build gate; until that
+#                          slice lands the H4 driver must pass
+#                          INJECT_MANIFEST explicitly)
 #   INJECT_MANIFEST_CHECK  manifest preflight script (default alongside
 #                          this script)
 #   CRED_STORE_VERIFY_INFERENCE
