@@ -482,6 +482,9 @@ def test_refuses_allowlist_residue(stack):
     paths["allow_file"].write_text(ECHO_HOST + "\n")
     proc = _run_injector(env)
     assert proc.returncode == 1
+    # The refusal names the ACTUAL residue, not some other alias: the
+    # inverted-grep mutation refuses on '::1' here and must not pass.
+    assert b"echo host '127.0.0.1' still present" in proc.stderr
     assert b"image-build gate" in proc.stderr
     # The binding teardown still happened (defense in depth); the key
     # is byte-identical; nothing was appended anywhere.
@@ -499,6 +502,7 @@ def test_refuses_ssrf_allowlist_residue(stack):
     paths["ssrf_allow_file"].write_text(ECHO_HOST + "\n")
     proc = _run_injector(env)
     assert proc.returncode == 1
+    assert b"echo host '127.0.0.1' still present" in proc.stderr
     assert b"image-build gate" in proc.stderr
     assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
 
