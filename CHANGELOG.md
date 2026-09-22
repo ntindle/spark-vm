@@ -43,7 +43,7 @@ This changelog only works if entries land with the change, not after it:
   the approval, the durable journal holding the summons, and the retry
   delivering once the endpoint answers (201). The generator replays the
   real enqueue/worker code paths against a local mock push service
-  (throwaway keys, nothing leaves the machine). (PR TBD)
+  (throwaway keys, nothing leaves the machine). (#252)
 - Push notifications now survive a dead push service: swapd enqueues every
   filed approval and a standalone push worker (`push-worker.service`)
   delivers with exponential-backoff retry, dead-lettering only after 8
