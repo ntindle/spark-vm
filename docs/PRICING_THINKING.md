@@ -12,18 +12,20 @@ abuse control; see §3). The pricing *page* lands after the operator decides
 the remaining NEEDS_USER.md items (Billing: trial terms + provider, Abuse
 controls); this doc is what informs those decisions.
 
-Strategy input feeding: R1 (first-10-minutes spec, backlog item),
+Strategy input feeding: R1 (first-10-minutes spec, done 2026-09-18),
 R4 ("works immediately" onboarding shape), C2 (competitor pricing inputs),
 C5 (idle economics), C8 (buyer-vs-user packaging),
 signup design §11 open questions. Sources for every number:
 `docs/COMPETITOR_ANALYSIS.md` (surveyed 2026-09-18; AgentComputer and DIY
-figures are third-party claims, flagged where used).
+figures are third-party claims, flagged where used), re-verified against
+the competitor watch corpus (latest full re-read 2026-09-21; watch docs
+under `docs/COMPETITOR_WATCH_*.md` plus the C19/C20 Brig+Epho consolidation).
 
-**Merge-order note:** the cited strategy docs are open PRs, not on `main` —
-`docs/COMPETITOR_ANALYSIS.md` (PR #26), `docs/RESEARCH_AGENT_SANDBOX_ADOPTION.md`
-(PR #25), `docs/POSITIONING.md` (PR #28), `docs/HOSTED_SIGNUP_ONBOARDING.md`
-(PR #24). Cross-references in this doc point at their PR versions until those
-merge; this PR should merge after (or alongside) them.
+**Freshness (2026-09-22):** all cited strategy docs are merged to `main`;
+cross-references point at the main versions. Price inputs re-checked
+through the 2026-09-21 watch reads — TermSquad tiers unchanged, boat.dev
+rate card unchanged, Epho added as a pricing-shape data point (C24). None
+of the in-window deltas move the tier anchors below.
 
 ## 1. Who actually pays (C8: buyer ≠ user)
 
@@ -70,12 +72,22 @@ What the market charges for persistent computers (Sep 2026):
 | E2B Pro | $150/mo floor + usage | Task-scoped; one continuous 2vCPU box ≈ $78/mo usage — a task-scoped unit price for an always-on box |
 | DIY floor (third-party guide) | $5.70/mo droplet + human labor | The "human does everything" alternative |
 | Fly Sprites | $0.07/CPU-hr active | Hibernates when idle — closest to our trial/idle-economics shape |
+| boat.dev | $20/mo plan = 555 h of `default` (4 vCPU / 8 GB / 50 GB, $0.036/h); stopped = $0 | Task-scoped, per-second; cheapest viable provider candidate (C17, verified 2026-09-21) |
 
 Reading the floor: a hosted persistent box cannot price below its wall-clock
 provider cost plus operations margin. TermSquad's $9 starter (2vCPU/4GB/40GB)
 sets the visible floor for "always-on computer for your agent." The DIY $5.70
 is the anchor the OSS self-host story already wins against — hosted has to
 earn its premium with *zero* setup, not with raw compute.
+
+Shape note (C20/C24 — Epho, verified https://epho.io 2026-09-21):
+bring-your-own-keys infra-only metering — model tokens are billed by the
+user's provider, never by Epho — carries zero model-token margin risk for the
+operator. The hosted box needs the agent's model access; billing tokens
+through us would put unbounded model spend inside a flat tier. BYOK is a
+candidate shape for that answer: it keeps model spend out of our margin
+entirely. Undecided — recorded here as a pricing-shape data point, not a
+decision.
 
 GPU is priced separately everywhere (Daytona H100 $2.27/hr; Modal GPU inside
 sandbox at 3x rate). We have no GPU story today (C6 = the competitor-pass item
@@ -310,22 +322,30 @@ in order:
   limits + verification level beyond the card remain open (signup doc §11.7:
   email + magic link baseline). The trial shape proposed in §3 (card up
   front, idle/suspend TBD, wake path TBD) is the input to that decision.
-- **Neo provider (feeds cost floor):** provider recommendation landed
-  2026-09-18 — Fly.io (Machines API + Sprites), user confirmation pending.
-  The tier anchors above assume a provider cost basis near TermSquad's
-  visible floor. The H4 driver choice (H4 = provisioning automation against
-  the provider-agnostic interface) should carry a GPU-price criterion (C6)
-  so a future GPU add-on is provider-agnostic — Fly has no GPU path, so
-  this is mandatory, not optional.
+- **Provider (feeds cost floor):** Fly.io DECIDED 2026-09-18 (Machines API +
+  Sprites; `custom.flyio` token connected and verified). boat.dev is under
+  evaluation as a cheaper alternative — cheapest viable provider candidate
+  per C17 (verified 2026-09-21: $20/mo plan = 555 h of the 4vCPU/8GB
+  `default`, stopped sandboxes cost nothing; caveats: EU-only regions,
+  young company). New operator decision owed (2026-09-19): a per-run spend
+  cap before H4 provisioning touches the live API (dry-run only until
+  then). The tier anchors above assume a provider cost basis near
+  TermSquad's visible floor; boat.dev would lower that basis if chosen.
+  The H4 driver choice should carry a GPU-price criterion (C6) so a future
+  GPU add-on is provider-agnostic — Fly has no GPU path, so this is
+  mandatory, not optional.
 
 ## Limitations
 
 - All competitor prices are September-2026 survey snapshots; the watch
-  (R3/C1: the TermSquad competitive watch from the competitor pass)
-  re-confirms periodically. TermSquad is three days old — its pricing
-  is the least battle-tested anchor here.
+  re-confirms them periodically (latest full re-read 2026-09-21: TermSquad
+  tiers unchanged, boat.dev rate card unchanged, no launches or
+  acquisitions in window). TermSquad launched ~Sep 15 — its pricing is the
+  least battle-tested anchor here.
 - AgentComputer's $20 is a third-party directory claim, unconfirmed against
   the vendor.
-- Cost-basis math against the actual Neo provider is blocked on the user
-  picking the provider — the tier anchors above are market-relative, not
-  costed.
+- Cost-basis math against the actual provider is Fly.io-relative once H4
+  provisions against the live API (gated on the operator's per-run spend
+  cap — NEEDS_USER.md); until then the tier anchors above are
+  market-relative, not costed. boat.dev under evaluation would re-base the
+  math if chosen.
