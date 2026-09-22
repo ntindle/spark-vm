@@ -5,7 +5,7 @@ contributors touching the swap path (`proxy/`). For the primary research with
 vendor-quoted citations, see [the vendor-quoted research](SECRETS_POSTURE_RESEARCH.md) — this page is
 the repositioned summary: what the pattern is, why swapd exists, and exactly
 where it differs from the five vendors we read (plus the watch-list data point
-above).
+below).
 
 **The one honest framing, up front:** the secret-injection posture is
 *independently re-derived*, not a proven lead. Daytona — a major incumbent —
