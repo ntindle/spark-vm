@@ -44,7 +44,7 @@ This changelog only works if entries land with the change, not after it:
   pause→resume claim) — filed as a new tracked competitor, with follow-up
   notes for the hosted product's pricing thinking, resume-latency target,
   secrets posture, and org-policy layer; Daytona shipped a routine v0.215.0
-  SDK/CLI patch; the rest of the tracked set was quiet. (PR TBD)
+  SDK/CLI patch; the rest of the tracked set was quiet. (#256)
 - Enforcement-downgrade contract for the agent jail (fail-closed, stated
   explicitly): a firewall-apply failure aborts the build before the jail
   starts, a boot-time apply failure blocks the container from starting, and
