@@ -370,6 +370,117 @@ def test_restore_absent_branch_removes_dangling_symlink(tmp_path):
     assert "removing" in r.stdout + r.stderr
 
 
+def test_sudo_stat_path_tristate(tmp_path):
+    """sudo_stat_path returns 0/1/2 for present/absent/check-errored.
+
+    Regression (#107): the old inline `sudo_run test -e/-L` collapsed
+    "the check itself errored" into "absent". A fake sudo_run simulates
+    the three outcomes.
+    """
+    f = tmp_path / "present"
+    f.write_text("x")
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "no-such-target")
+    r = source_and(r'''
+chk() { if sudo_stat_path "$1"; then echo "rc=0"; else echo "rc=$?"; fi; }
+chk "%s"
+chk "%s"
+chk "%s/no-such"
+sudo_run() { echo "sudo: a password is required" >&2; return 1; }
+chk "%s"
+sudo_run() { return 2; }
+chk "%s"
+''' % (f, dangling, tmp_path, f, f), env_extra={"SKIP_SUDO": "1",
+                                               "AUTO_DEPLOY_NO_MAIN": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    lines = [l for l in r.stdout.splitlines() if l.startswith("rc=")]
+    assert lines == ["rc=0", "rc=0", "rc=1", "rc=2", "rc=2"], r.stdout
+
+
+def test_restore_absent_empty_path_fails(tmp_path):
+    """An `ABSENT ` line with an empty path is corrupt — fail loud (#103).
+
+    The old code silently skipped it (both tests fail on "") and reported
+    success. Matches the CHECKOUT-ABSENT guard's behavior.
+    """
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "MANIFEST").write_text("ABSENT \n")
+    r = source_and("restore_snapshot %s" % snap,
+                   env_extra={"UPDATER_STATE_DIR": str(tmp_path),
+                              "SKIP_SUDO": "1",
+                              "AUTO_DEPLOY_NO_MAIN": "1"})
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "corrupt MANIFEST ABSENT line" in r.stdout + r.stderr
+
+
+def test_snapshot_broken_sudo_fails_loud(tmp_path):
+    """snapshot_component must not record ABSENT when sudo itself errors (#107).
+
+    A broken-sudo production box makes every existence check fail; the old
+    code recorded live files ABSENT (a corrupt manifest) and kept going.
+    The snapshot is a pre-deploy gate — abort, don't write a lie.
+    """
+    state = tmp_path / "state"
+    swapd = tmp_path / "swapd"
+    for d in (state, swapd):
+        d.mkdir(parents=True)
+    (swapd / "swap_addon.py").write_text("LIVE")
+    env = {
+        "UPDATER_STATE_DIR": str(state),
+        "SWAPD_HOME": str(swapd),
+        "BIN_DIR": str(tmp_path / "bin"),
+        "SYSTEMD_DIR": str(tmp_path / "systemd"),
+        "SKIP_SYSTEMCTL": "1",
+        "SKIP_SUDO": "1",
+        "AUTO_DEPLOY_NO_MAIN": "1",
+    }
+    snap = tmp_path / "snap"
+    r = source_and(r'''
+set -e
+sudo_run() { echo "sudo: cannot execute" >&2; return 1; }
+if snapshot_component proxy "%s"; then echo SNAPSHOT_OK; else echo SNAPSHOT_FAILED; fi
+''' % snap, env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "SNAPSHOT_FAILED" in r.stdout, r.stdout + r.stderr
+    assert "errored" in r.stdout + r.stderr
+    # the snapshot died on the privilege check before any MANIFEST write,
+    # so no live file may be recorded as ABSENT
+    assert not (snap / "MANIFEST").exists()
+
+
+def test_restore_broken_sudo_marks_failed(tmp_path):
+    """restore_snapshot refuses to silently skip removal on a broken check (#107).
+
+    With sudo failing, the old code skipped the rm and reported success.
+    The rollback must report failure instead and keep restoring the rest:
+    the manifest carries two ABSENT lines, and the loop must reach both.
+    """
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    live = tmp_path / "live"
+    live.mkdir()
+    doomed = live / "doomed"
+    doomed.write_text("x")
+    doomed2 = live / "doomed2"
+    doomed2.write_text("y")
+    (snap / "MANIFEST").write_text("ABSENT %s\nABSENT %s\n" % (doomed, doomed2))
+    r = source_and(r'''
+set -e
+sudo_run() { echo "sudo: cannot execute" >&2; return 1; }
+if restore_snapshot "%s"; then echo RESTORE_OK; else echo RESTORE_FAILED; fi
+''' % snap, env_extra={"UPDATER_STATE_DIR": str(tmp_path),
+                       "SKIP_SUDO": "1",
+                       "AUTO_DEPLOY_NO_MAIN": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "RESTORE_FAILED" in r.stdout, r.stdout + r.stderr
+    # the loop continued past the first errored entry to the second
+    assert (r.stdout + r.stderr).count("refusing to skip removal silently") == 2
+    # nothing was removed under a broken privilege check
+    assert doomed.exists()
+    assert doomed2.exists()
+
+
 # --- health checks -------------------------------------------------------------
 
 def test_tcp_ok_detects_listener():
