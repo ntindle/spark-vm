@@ -331,9 +331,13 @@ The pass re-derives only the missing events from rows.jsonl (append-only
 posture — the event trail is never hand-edited), marks each with
 `reconciled: true` + `via: reconcile_invite_events` in its attrs, and
 skips rows whose invite is no longer live (expired, consumed, or rolled
-back to confirmed): a dead invite can't convert, and the next wave's
-fresh invite carries its own event. Run it after any suspected crash;
-re-running when nothing is missing is a no-op.
+back to confirmed): a dead invite can't convert. Rows already rolled
+back to confirmed rejoin the queue — the next wave's fresh invite
+carries its own event. Rows whose invite expired *without* a rollover
+(e.g. the rollover cron was down) stay unrepaired by design: run the
+daily `--rollover` first so they rejoin confirmed. Reviving dead invites
+is the #235 operator tooling, not this pass. Run it after any suspected
+crash; re-running when nothing is missing is a no-op.
 
 *Compliance:* pricing lines are filled at send time from decided pricing —
 the template never contains numbers; no "free tier" wording (Billing

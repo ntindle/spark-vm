@@ -182,10 +182,19 @@ day-bucket and `attrs` is a small key-value map:
 `invite_sent` emit (`WAITLIST_OPERATIONS.md` §7) leaves an invited row
 with no event — the funnel under-reports invite_sent until the operator
 runs `waitlist_invites.py --reconcile`, which re-derives the missing
-event from rows.jsonl in the append-only posture. Rows whose invite
-expired or rolled back before repair stay unrepaired by design: a dead
-invite can't convert, and the next wave's fresh invite carries its own
-event.
+event from rows.jsonl in the append-only posture. Rows already rolled
+back to confirmed stay unrepaired by design: the next wave's fresh
+invite carries its own event. Rows whose invite expired *without* a
+rollover (e.g. the rollover cron was down) also stay unrepaired: run the
+daily `--rollover` first so they rejoin confirmed; reviving dead invites
+is the #235 operator tooling, not this pass.
+
+**Cohort note:** the re-derived event is stamped at repair time, and the
+invite→claim cohort is scoped on the `invite_sent` date — so repair
+promptly, or a late repair buckets those invites on the repair day
+rather than the wave day (their `wave` attr still names the wave they
+belong to). Claims that landed *before* the repair are excluded by the
+invite→claim latency gate (`claim_at >= invite_sent_at`).
 
 The §7 metrics are pure queries over this table plus the daily page
 rollups — no other instrumentation is permitted. The day-1 operator query
