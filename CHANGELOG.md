@@ -284,7 +284,7 @@ This changelog only works if entries land with the change, not after it:
   the restore loudly instead of silently recording live files as absent
   or silently skipping their removal, and a corrupted snapshot manifest
   line with an empty path fails the restore instead of being skipped.
-  (#103, #107; PR TBD)
+  (#103, #107; #243)
 - The with-proxy CA bundle and the jail's swapd-CA install no longer read the
   swapd-controlled CA through symlink-following `cat`/`cp` as root: a new
   `proxy/build_ca_bundle.py` refuses a planted symlink (or FIFO/directory) at
