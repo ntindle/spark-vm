@@ -279,10 +279,11 @@ competitor watch (C26) — outside the five-vendor deep set above.
   verified mechanism read — the convergence verdict below rests on the
   verbatim quote, not on an independent read of their docs or code.
 - The convergence verdict: a fifth convergent data point for the
-  placeholder-swap pattern — and the first from a major cloud's managed
-  agent-computer product. As with OpenComputer and h-sandbox, convergence
-  is substantiated by the quote; independence of derivation is not claimed
-  here.
+  brokered-secrets posture ("the proxy holds the secret, the sandbox
+  doesn't") — and the first from a major cloud's managed agent-computer
+  product. Convergence here is substantiated by the quote's brokering claim
+  only: no placeholder form is published, so this verdict does not name
+  placeholder-swap; independence of derivation is not claimed here.
 
 ## What this means for R6 (the docs repositioning)
 
