@@ -89,13 +89,49 @@ SETUP.md "Inference-model recipe").
 
 ## Still to come (next feature slices)
 
-- **Provision-time injector** — implements the research §4 inject list
-  (tenant identity, inference credential by-name reference, fresh swapd
-  CA, confirmd tenant attribution, first-task slot) against the H4
-  provider interface (`provider_iface.py`), with the manifest preflight
-  above.
 - **Image gate** — refuses to publish the image when the gate-mode probe
   fails (the PuppyOne rule).
+
+## Provision-time injector (`inject-provision-state.sh`)
+
+Runs at first boot of the hosted agent VM (invoked by the H4
+provisioning driver) and owns the provision-time half of the fixture
+lifecycle above:
+
+1. Preflights the golden-image manifest against the operator-pinned
+   `INJECT_IMAGE_VERSION` (via `check-image-manifest.sh`) and fails
+   closed on any drift, before box-live.
+2. Tears down the gate fixture: unbinds `llm-api`→echo-host through the
+   narrow registry writer, then fails closed on any echo-host residue in
+   `inference-hosts.allow` or `inference-ssrf.allow`. The injector cannot
+   remove allowlist lines (production sudoers is append-only by
+   design), so the image-build gate owns that teardown pre-publish —
+   whichever stage runs last owns it.
+3. Asserts a real inference credential: registry binding of `llm-api`
+   (`bearer_header`) to a non-loopback host, plus a blind
+   `cred-store-verify-inference` compare proving the stored value is
+   NOT the public fixture dummy. The stored value is never read,
+   never written, never printed — assert, never handle.
+4. Requires a fresh per-tenant swapd CA (`mitmproxy-ca.pem`).
+5. Installs tenant identity when `INJECT_IDENTITY_DIR` is set (H9
+   input contract): an `authorized_keys` file only, strict public-key
+   shape validation — private-key material is refused, fail-closed.
+   Deferred and loudly reported when absent.
+6. Records tenant attribution when `INJECT_TENANT_ID` is set (H10
+   input contract): a validated tenant id plus the pinned image
+   version, for the per-tenant approvals slice. Deferred and loudly
+   reported when absent.
+7. Runs `harness-auth-probe` in `provision` mode so the injected key
+   is proved against the real provider; a probe failure maps to
+   `provisioning-failed` (box-live must not flip).
+
+Prints exactly one JSON inject report on stdout; all progress and
+refusal diagnostics go to stderr. Covered by 25 hermetic tests
+(`test_inject_provision_state.py`) mirroring the install-gate-fixture
+hermetic contract: fake writers, a fake sudo that asserts `-u swapd`
+and denies `tee`/`ls`, a fake swap proxy resolving `hsurr:`
+placeholders, a provider stub recording `Authorization` headers, and a
+stub confirmd.
 
 ## Known validation points
 
