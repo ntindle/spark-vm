@@ -48,7 +48,7 @@ This changelog only works if entries land with the change, not after it:
   provider outage — which failures trigger a move to another provider
   (and which recover in place), the order of operations for the move,
   how session data is restored when VM snapshots can't cross providers,
-  and how provider capabilities pick the fallback target. (PR TBD)
+  and how provider capabilities pick the fallback target. (#251)
 - Provision-time injector (`harness/inject-provision-state.sh`): runs at
   first boot of the hosted agent VM and owns the provision-time half of
   the gate-fixture contract — preflights the golden-image manifest
