@@ -27,16 +27,16 @@ path is"):
 >    value.
 
 That is the pattern exactly: **opaque placeholder in the sandbox, real value
-substituted at the egress boundary, destination-scoped** — independently
-derived in the open (Apache-2.0) for a product that is a self-hosted control
-plane rather than a hosted SaaS.
+substituted at the egress boundary, destination-scoped** — a convergent data
+point from an Apache-2.0 open-source self-hosted control plane rather than a
+hosted SaaS.
 
 ## Mechanism by mechanism vs the corpus axes
 
 | Axis | h-sandbox (Harakiri) | Notes for the corpus |
 |---|---|---|
 | Substitution point | OpenSandbox egress sidecar / Credential Proxy (`credentialProxy.enabled`), provider-side | Like swapd's proxy shape, but the substitute is the sidecar on the request path, not a TLS-intercepting proxy — "Harakiri does not implement ... HTTPS MITM in the MVP" |
-| Placeholder in sandbox | Fake env value (e.g. `OPENAI_API_KEY=fake-openai-key`), or no variables at all | Closest to swapd's `hsurr:<name>` of all six vendors: an explicitly *fake* value |
+| Placeholder in sandbox | Fake env value (e.g. `OPENAI_API_KEY=fake-openai-key`), or no variables at all | Closest to swapd's `hsurr:<name>` of all the corpus vendors: an explicitly *fake* value |
 | Injection surface | Auth material only (bearer / API-key header / basic) for requests matching the binding (hosts, schemes, methods, paths) | Narrower than swapd (which also does bodies/query/path); no body-substitution claim found |
 | Response scrubbing | **Not documented** — their threat model admits the residual: "A malicious allowed destination can reflect received credentials in its response" | Same class as Microsandbox's explicit non-scrub; swapd and Daytona stand alone on scrubbing |
 | Destination scoping | Exact host (custom profiles) or preset hosts; binding hosts composed into restricted egress policy *before* injection; strict `dns+nft` attestation required (`credentialVaultReady: true`) | Fail-closed posture on enforcement: "Harakiri does not fall back to open outbound access, real environment variables, mounted Secrets, or Kubernetes exec when enforcement is unavailable" — reports unsupported rather than pretending |
