@@ -8,8 +8,10 @@ writes).
 
 Summary: **quiet window — zero in-window deltas** across the full
 tracked set (no launches, acquisitions, pricing changes, releases, or
-partner moves). One piece of adjacent color: a fresh third-party deep
-dive on Meta's Muse per-user secure-VM ("Sentinel") security
+partner moves). Two pre-window competitors were newly surfaced by this
+pass's targeted searches and are filed as watch items **C19** (Brig)
+and **C20** (Epho). One piece of adjacent color: a fresh third-party
+deep dive on Meta's Muse per-user secure-VM ("Sentinel") security
 architecture — about a pre-window launch (Sep 8–9), not a new move —
 noted in §2 without a backlog item.
 
@@ -77,11 +79,14 @@ No in-window change detected across the full tracked set:
   and syndications).
 - **New entrants** — none in the last ~24h across targeted searches
   (general web, HN-angled, Product Hunt-angled, since 2026-09-20).
-  Nearby-but-known: **Brig** (Apache 2.0 microVM sandbox for coding
-  agents, launched Sep 15; third-party note that Cursor has no
-  published profile among its 6 named profiles) and **Epho** (Product
-  Hunt ~Sep 7, cloud sandboxes with multi-provider fallback) — both
-  pre-window, both already in the corpus.
+  Two pre-window competitors newly surfaced by this pass's searches,
+  filed as watch items **C19** (Brig) and **C20** (Epho) in BACKLOG.md:
+  **Brig** (Apache 2.0 microVM sandbox for coding agents, launched
+  Sep 15; third-party note that Cursor has no published profile among
+  its 6 named profiles) and **Epho** (Product Hunt ~Sep 7, Claude
+  Code/Codex/OpenCode cloud sandboxes with multi-provider fallback) —
+  both **THIRD-PARTY**, both pre-window launches with no in-window
+  move, both flagged for the next corpus consolidation pass.
 
 ## 2. Adjacent color — Meta Muse "Sentinel" per-user VM deep dive
 

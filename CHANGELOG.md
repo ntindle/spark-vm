@@ -40,8 +40,10 @@ This changelog only works if entries land with the change, not after it:
 - Night competitor watch (2026-09-22): quiet survey window — no launches,
   acquisitions, pricing changes, releases, or partner moves across the
   tracked set; boat.dev rate card and comparison table re-verified
-  unchanged; adjacent color on Meta Muse's Sentinel per-user VM
-  architecture (third-party deep dive of the pre-window launch). (PR TBD)
+  unchanged; two pre-window competitors newly surfaced and filed as
+  watchlist items (Brig, Epho); adjacent color on Meta Muse's Sentinel
+  per-user VM architecture (third-party deep dive of the pre-window
+  launch). (PR TBD)
 - Waitlist operator tooling: `waitlist_invites.py --reconcile` repairs
   missing `invite_sent` funnel events after the commit → emit crash
   window — it re-derives the missing events for still-live invites from
