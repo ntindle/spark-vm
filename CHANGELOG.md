@@ -45,13 +45,13 @@ This changelog only works if entries land with the change, not after it:
   cannot be enforced. The one stated residual: no runtime re-apply, so a
   flushed firewall table silently voids the guarantees until the unit is
   restarted (tracked as #254). The contract mechanics are test-pinned.
-  (PR TBD)
+  (#255)
 - Deny-style billing guard committed for sandbox credential forwarding:
   when the hosted path forwards operator credentials into a sandbox,
   known metered-billing keys are deny-by-default without an explicit
   per-credential override (Brig's `deny` shape, including its documented
   environment-channel-only limit). Committed design, not yet shipped —
-  no forwarding surface exists yet. (PR TBD)
+  no forwarding surface exists yet. (#255)
 - Demo gallery, sixth asset: the push queue surviving an outage — the new
   "See it in action" row shows the standalone push worker's first delivery
   attempt hitting a dead endpoint (500) and rescheduling instead of losing
