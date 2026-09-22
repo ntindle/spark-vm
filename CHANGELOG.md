@@ -37,6 +37,21 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Provision-time injector (`harness/inject-provision-state.sh`): runs at
+  first boot of the hosted agent VM and owns the provision-time half of
+  the gate-fixture contract — preflights the golden-image manifest
+  against the operator-pinned image SHA and fails closed on drift
+  before box-live; tears down the gate fixture's `llm-api`→echo-host
+  binding, failing closed on echo-host residue in the allowlists (which
+  only the image-build gate can remove); asserts a real inference
+  credential through the registry plus a blind compare against the
+  public fixture dummy (the stored value is never read, never written,
+  never printed); requires a fresh per-tenant swapd CA; installs tenant
+  identity and records tenant attribution when their inputs are
+  provided (both reported as deferred when absent, never fabricated);
+  then proves the injected key with the provision-mode probe — a probe
+  failure maps to provisioning-failed and box-live must not flip.
+  Ships one JSON inject report on stdout and 55 hermetic tests. (#238)
 - Waitlist operator tooling: `waitlist_invites.py --reconcile` repairs
   missing `invite_sent` funnel events after the commit → emit crash
   window — it re-derives the missing events for still-live invites from
