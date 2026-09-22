@@ -51,7 +51,7 @@ This changelog only works if entries land with the change, not after it:
   provided (both reported as deferred when absent, never fabricated);
   then proves the injected key with the provision-mode probe — a probe
   failure maps to provisioning-failed and box-live must not flip.
-  Ships one JSON inject report on stdout and 55 hermetic tests.
+  Ships one JSON inject report on stdout and 55 hermetic tests. (#238)
 - Secrets-posture corpus: h-sandbox's Credential Vault (open-source,
   self-hosted sandbox control plane) becomes the fourth convergent data
   point for the placeholder-swap pattern — its docs describe fake-env
