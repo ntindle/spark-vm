@@ -44,7 +44,7 @@ This changelog only works if entries land with the change, not after it:
   egress sidecar only for host/scheme/method/path-bound requests (verified
   against their own docs 2026-09-21, verbatim quote in the research doc);
   the watch pass also records its OpenSandbox-adapter contract discipline as
-  input to the hosted provider-adapter design. (PR TBD)
+  input to the hosted provider-adapter design. (#229)
 - Secrets-posture corpus: opencomputer.dev's secret-store egress proxy
   (opaque placeholder in the sandbox, real key swapped in-flight on the
   outbound HTTPS call to the model provider, under an egress allowlist —
