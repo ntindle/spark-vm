@@ -37,14 +37,6 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
-- Waitlist invite-wave recovery tooling: `waitlist_invites.py
-  --reinstate-confirmed` flips stranded invited rows (consume-token →
-  row-commit crash window, or operator-initiated re-waves) back to
-  confirmed in the append-only posture — one new row revision, original
-  queue position kept, the reason stamped as the audit trail — and
-  `--diagnose` lists every invited row's token state with the recommended
-  action, so operators no longer hand-edit `rows.jsonl` to recover
-  (#242).
 - Provision-time injector (`harness/inject-provision-state.sh`): runs at
   first boot of the hosted agent VM and owns the provision-time half of
   the gate-fixture contract — preflights the golden-image manifest
@@ -286,6 +278,13 @@ This changelog only works if entries land with the change, not after it:
   (#218)
 
 ### Security
+- The unattended deployer's rollback snapshot and restore steps now
+  distinguish "this file is absent" from "the privilege check itself
+  failed" (broken sudo, exotic filesystem): a broken check aborts the
+  snapshot and fails the restore loudly instead of silently recording
+  live files as absent or silently skipping their removal, and a
+  corrupted snapshot manifest line with an empty path fails the restore
+  instead of being skipped. (#103, #107; PR TBD)
 - The with-proxy CA bundle and the jail's swapd-CA install no longer read the
   swapd-controlled CA through symlink-following `cat`/`cp` as root: a new
   `proxy/build_ca_bundle.py` refuses a planted symlink (or FIFO/directory) at
