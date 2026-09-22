@@ -56,10 +56,10 @@ This changelog only works if entries land with the change, not after it:
   starts, a boot-time apply failure blocks the container from starting, and
   a dead proxy means no egress rather than open egress — like Brig's
   policy-bound refusal, the workload never runs where its restriction
-  cannot be enforced. The one stated residual: no runtime re-apply, so a
-  flushed firewall table silently voids the guarantees until the unit is
-  restarted (tracked as #254). The contract mechanics are test-pinned.
-  (#255)
+  cannot be enforced. The one residual the contract originally stated —
+  no runtime re-apply — is closed by the firewall watchdog #260, which
+  narrows the residual boundary to the 5-minute verify window. The contract
+  mechanics are test-pinned. (#255)
 - Deny-style billing guard committed for sandbox credential forwarding:
   when the hosted path forwards operator credentials into a sandbox,
   known metered-billing keys are deny-by-default without an explicit
@@ -295,6 +295,18 @@ This changelog only works if entries land with the change, not after it:
   self-merging). An auditable `scripts/apply-rulesets.sh` (dry-run default,
   `--check` drift compare, `--execute --yes` idempotent apply) applies them;
   applying is an owner decision (#174)
+- Jail firewall runtime watchdog (closes #254): a 5-minute systemd verify
+  timer pins the jail's nftables enforcement rules themselves (drop-rule
+  markers + proxy DNAT — the chains are policy accept, so chain shells
+  alone prove nothing). On confirmed damage it is fail-closed: the jail
+  is stopped first (a table re-apply doesn't flush conntrack, so
+  hole-era flows would otherwise survive), then the table is re-applied
+  (scoped to the jail table only), and the unit goes red — restart is
+  the operator's explicit decision. The old "flushed table silently
+  voids the isolation guarantees until someone restarts the unit" hole
+  becomes bounded downtime instead of unbounded unenforced running.
+  (#260 — entry placed at the end of Unreleased/Added so the branch
+  merges cleanly over #263's same-section entry)
 
 ### Changed
 - Hosted pricing thinking refreshed: the internal pricing analysis now

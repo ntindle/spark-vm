@@ -272,25 +272,18 @@ class TestFailClosedOrdering:
         assert fw < start, (
             "firewall apply must precede the machine start")
 
-    def test_no_firewall_reapply_mechanism(self, src):
-        # Stated residual, not an accident: no timer/path re-apply exists,
-        # so the README must (and does) disclose the runtime-flush hole.
-        # If someone adds a watchdog, this test names the place to update
-        # the contract text alongside it. Scans the whole jail/ dir, not
-        # just build.sh, so a separately-added unit file trips it too.
-        for fname in os.listdir(JAIL_DIR):
-            fpath = os.path.join(JAIL_DIR, fname)
-            if not os.path.isfile(fpath):
-                continue
-            if fname.startswith("test_"):
-                continue  # this file names the shapes it scans for
-            with open(fpath, encoding="utf-8") as f:
-                content = f.read()
-            for pat in ("jail-firewall.timer", "jail-firewall.path",
-                        "OnUnitActiveSec", "OnBootSec"):
-                assert pat not in content, (
-                    f"{fname}: re-apply mechanism shape {pat!r} — update "
-                    f"the README residual disclosure alongside it")
+    def test_firewall_watchdog_mechanism_documented(self, active):
+        # C25 closed the "no runtime re-apply" residual fail-closed: the
+        # verify timer exists, the README documents it, and the residual
+        # is bounded downtime. (This replaced
+        # test_no_firewall_reapply_mechanism — the C22 residual no longer
+        # exists, so asserting its absence would be a falsehood that
+        # passed vacuously on the new unit names.)
+        assert "jail-firewall-verify.timer" in active
+        readme = open(os.path.join(JAIL_DIR, "README.md"),
+                      encoding="utf-8").read()
+        assert "jail-firewall-verify" in readme
+        assert "bounded downtime" in readme
 
 
 class TestIsolation:
@@ -390,3 +383,303 @@ class TestSecretHygiene:
     def test_no_curl_pipe_bash(self, active):
         assert not re.search(r"curl[^\n]*\|\s*(ba)?sh", active)
         assert not re.search(r"wget[^\n]*\|\s*(ba)?sh", active)
+
+
+VERIFY_SCRIPT = os.path.join(JAIL_DIR, "jail-firewall-verify.sh")
+
+
+@pytest.fixture()
+def verify_src():
+    with open(VERIFY_SCRIPT, encoding="utf-8") as f:
+        return f.read()
+
+
+class TestFirewallWatchdogStatic:
+    """C25 / issue #254: runtime watchdog for `table inet jail`.
+
+    Fail-closed design (round-2 review, Security + Architecture): the
+    watchdog pins the enforcement RULES, not the chain shells (all chains
+    are policy accept, so an emptied chain is open egress); on confirmed
+    damage it stops the jail before repairing (a re-apply does not flush
+    conntrack); every fail-closed event exits nonzero so the unit goes
+    red. Static pins live here; the detection semantics are exercised
+    functionally in TestFirewallWatchdogFunctional with a stubbed nft.
+    """
+
+    def test_script_installed_from_repo_file(self, active):
+        # The script is a first-class repo file, not a build.sh heredoc:
+        # directly testable, shellcheckable, reviewable.
+        assert 'VERIFY_SCRIPT="$(dirname "$0")/jail-firewall-verify.sh"' \
+            in active
+        assert 'install -m 755 "$VERIFY_SCRIPT" ' \
+            '/usr/local/sbin/jail-firewall-verify.sh' in active
+
+    def test_script_install_guarded(self, active):
+        assert '[[ -f "$VERIFY_SCRIPT" ]]' in active
+
+    def test_pins_enforcement_markers_not_chain_shells(self, verify_src):
+        # Security blocker (round 1): `nft flush chain` empties rules but
+        # leaves chain definitions; grepping 'chain forward' would report
+        # healthy on an open-egress chain. The markers are the drop-rule
+        # log prefixes and the proxy DNAT.
+        for marker in ("jail-fwd-drop", "jail-fwd-indrop",
+                       "jail-input-drop", "dnat to 127.0.0.1"):
+            assert marker in verify_src, "marker missing: %s" % marker
+        # ...and the check must not be satisfiable by chain shells alone.
+        assert "grep -q 'chain forward'" not in verify_src
+
+    def test_single_nft_list_call(self, verify_src):
+        # One listing parsed repeatedly: no triple invocation, no TOCTOU
+        # between checks.
+        assert verify_src.count("list table") == 1
+
+    def test_validates_before_destroy(self, verify_src):
+        # A corrupt conf must not widen the hole: `nft -c -f` precedes any
+        # destroy. Order pinned by position.
+        check = verify_src.index("-c -f")
+        destroy = verify_src.index("destroy table")
+        assert check < destroy, "validation must precede destroy"
+
+    def test_fail_closed_stop_before_repair(self, verify_src):
+        # Architecture blocker (round 1): conntrack survives a re-apply, so
+        # hole-era flows would pass established,related after repair. The
+        # jail stops FIRST; restart is the operator's explicit decision.
+        stop = verify_src.index("systemctl stop systemd-nspawn@jail")
+        destroy = verify_src.index("destroy table")
+        assert stop < destroy, "jail stop must precede table repair"
+
+    def test_red_unit_on_every_fail_closed_event(self, verify_src):
+        # Structural, not string-presence (Engineering round-1 blocker 3:
+        # asserting '"exit 1" in script' is theater — a flipped failure
+        # branch would still pass). Both CRITICAL failure paths must be
+        # immediately followed by exit 1, and the repaired-and-stopped
+        # path must end exit 1 — the operator has to see that the jail
+        # was stopped, even when the repair succeeded.
+        crit_exits = re.findall(r'CRITICAL[^\n]*\n\s*exit 1', verify_src)
+        assert len(crit_exits) == 2, \
+            "each CRITICAL failure path must exit nonzero: %r" % crit_exits
+        non_empty = [l for l in verify_src.splitlines()
+                     if l.strip() and not l.lstrip().startswith("#")]
+        assert non_empty[-1].strip() == "exit 1", \
+            "script must end exit 1 (red unit on repair)"
+
+    def test_repair_scoped_to_jail_table(self, verify_src):
+        assert 'destroy table "$TABLE"' in verify_src
+        assert 'TABLE="inet jail"' in verify_src
+
+    def test_no_unscoped_nft_destruction(self, verify_src):
+        for line in verify_src.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            assert "flush ruleset" not in line, \
+                "watchdog must not flush the whole ruleset: %r" % line
+            assert "flush chain" not in line, \
+                "watchdog must not flush chains either: %r" % line
+
+    def test_transient_recheck(self, verify_src):
+        # The oneshot service's own destroy-then-apply is a
+        # millisecond-scale hole; one re-check before treating it as
+        # damage avoids fail-closed false positives.
+        assert "sleep 10" in verify_src
+
+    def test_service_runs_the_script(self, active):
+        m = re.search(
+            r"tee /etc/systemd/system/jail-firewall-verify\.service"
+            r".*?\nEOF",
+            active, re.S)
+        assert m, "jail-firewall-verify.service unit block not found"
+        unit = m.group(0)
+        assert "Type=oneshot" in unit
+        assert "ExecStart=/usr/local/sbin/jail-firewall-verify.sh" in unit
+        # Boot-ordering edge (Architecture round 2): the Persistent timer
+        # can fire at timers.target, before the oneshot applies the table
+        # at multi-user.target. Without an ordering edge the watchdog
+        # would observe a legitimately-absent table and raise a spurious
+        # fail-closed red unit at boot, training the operator to ignore
+        # the signal.
+        assert "Wants=jail-firewall.service" in unit
+        assert "After=jail-firewall.service" in unit
+        # Wants, never Requires: if the oneshot failed at boot, the
+        # watchdog must still run and fail-close on the missing table.
+        assert "Requires=jail-firewall.service" not in unit
+
+    def test_timer_cadence_and_wiring(self, active):
+        m = re.search(
+            r"tee /etc/systemd/system/jail-firewall-verify\.timer"
+            r".*?\nEOF",
+            active, re.S)
+        assert m, "jail-firewall-verify.timer unit block not found"
+        timer = m.group(0)
+        assert "OnCalendar=*:0/5" in timer
+        assert "WantedBy=timers.target" in timer
+        assert "systemctl enable --now jail-firewall-verify.timer" in active
+
+
+# ---------------------------------------------------------------- functional
+# The detection semantics the round-1 review proved were missing: stub nft /
+# systemctl / logger / sleep via PATH (+ the NFT env override) and run the
+# real script against canned rulesets.
+
+HEALTHY_RULESET = """\
+table inet jail {
+\tchain prerouting {
+\t\ttype nat hook prerouting priority dstnat; policy accept;
+\t\tiifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat to 127.0.0.1
+\t}
+\tchain input {
+\t\ttype filter hook input priority -10; policy accept;
+\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept
+\t\tiifname "ve-jail" ct state established,related accept
+\t\tiifname "ve-jail" log prefix "jail-input-drop: " drop
+\t}
+\tchain forward {
+\t\ttype filter hook forward priority -10; policy accept;
+\t\tiifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state new,established accept
+\t\tiifname "ve-jail" ct state established,related accept
+\t\toifname "ve-jail" ct state established,related accept
+\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop
+\t\toifname "ve-jail" log prefix "jail-fwd-indrop: " drop
+\t}
+}
+"""
+
+# The Security round-1 case: `nft flush chain inet jail forward` — chains
+# intact, rules gone, policy accept. Old code reported healthy; the new
+# code must not.
+FLUSHED_CHAIN_RULESET = """\
+table inet jail {
+\tchain prerouting {
+\t\ttype nat hook prerouting priority dstnat; policy accept;
+\t}
+\tchain input {
+\t\ttype filter hook input priority -10; policy accept;
+\t}
+\tchain forward {
+\t\ttype filter hook forward priority -10; policy accept;
+\t}
+}
+"""
+
+
+@pytest.fixture()
+def watchdog_stubs(tmp_path, monkeypatch):
+    """PATH stub dir: nft (canned ruleset via $NFT_FIXTURE_FILE, rc via
+    $NFT_LIST_RC / $NFT_CHECK_RC, invocation log at $NFT_LOG), systemctl,
+    logger, sleep (no-op). Returns (stubdir, logpath)."""
+    bindir = tmp_path / "stubs"
+    bindir.mkdir()
+    log = tmp_path / "calls.log"
+    (bindir / "nft").write_text("""\
+#!/bin/bash
+echo "nft $*" >> "$CALLS_LOG"
+if [ "$1 $2" = "list table" ]; then
+    cat "$NFT_FIXTURE_FILE"; exit "${NFT_LIST_RC:-0}"
+fi
+if [ "$1 $2" = "-c -f" ]; then exit "${NFT_CHECK_RC:-0}"; fi
+exit 0
+""")
+    (bindir / "systemctl").write_text("""\
+#!/bin/bash
+echo "systemctl $*" >> "$CALLS_LOG"
+exit 0
+""")
+    (bindir / "logger").write_text("""\
+#!/bin/bash
+echo "logger $*" >> "$CALLS_LOG"
+exit 0
+""")
+    (bindir / "sleep").write_text("#!/bin/bash\nexit 0\n")
+    for f in ("nft", "systemctl", "logger", "sleep"):
+        (bindir / f).chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir) + ":/usr/bin:/bin")
+    monkeypatch.setenv("NFT", str(bindir / "nft"))
+    monkeypatch.setenv("CALLS_LOG", str(log))
+    monkeypatch.delenv("NFT_FIXTURE_FILE", raising=False)
+    return log
+
+
+def _run_watchdog(fixture_text=None, list_rc="0", check_rc="0",
+                  tmp_path=None, monkeypatch=None):
+    fix = tmp_path / "ruleset.txt"
+    fix.write_text(fixture_text or "")
+    monkeypatch.setenv("NFT_FIXTURE_FILE", str(fix))
+    monkeypatch.setenv("NFT_LIST_RC", list_rc)
+    monkeypatch.setenv("NFT_CHECK_RC", check_rc)
+    return subprocess.run(
+        ["bash", VERIFY_SCRIPT], capture_output=True, text=True)
+
+
+class TestFirewallWatchdogFunctional:
+    def test_healthy_table_exits_quiet(self, watchdog_stubs, tmp_path,
+                                       monkeypatch):
+        r = _run_watchdog(HEALTHY_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 0
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop" not in calls
+        assert "destroy table" not in calls
+
+    def test_flushed_chain_triggers_fail_closed(self, watchdog_stubs,
+                                                tmp_path, monkeypatch):
+        # The round-1 Security hole: chain shells intact, rules gone.
+        r = _run_watchdog(FLUSHED_CHAIN_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        # Fail-closed: jail stopped BEFORE the table is repaired.
+        assert calls.index("systemctl stop systemd-nspawn@jail") < \
+            calls.index("nft destroy table")
+        assert "nft -f /etc/nftables-jail.conf" in calls
+        assert "ALERT" in calls
+
+    def test_missing_table_triggers_fail_closed(self, watchdog_stubs,
+                                                tmp_path, monkeypatch):
+        r = _run_watchdog("", list_rc="1", tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_transient_gap_heals_without_drama(self, watchdog_stubs,
+                                               tmp_path, monkeypatch):
+        # First listing damaged (the oneshot's own destroy-then-apply
+        # window), second listing healthy: no stop, no repair, exit 0.
+        fix = tmp_path / "ruleset.txt"
+        fix.write_text(FLUSHED_CHAIN_RULESET)
+        monkeypatch.setenv("NFT_FIXTURE_FILE", str(fix))
+        counter = tmp_path / "n"
+        counter.write_text("0")
+        stub = tmp_path / "stubs" / "nft"
+        stub.write_text("""\
+#!/bin/bash
+echo "nft $*" >> "$CALLS_LOG"
+if [ "$1 $2" = "list table" ]; then
+    c=$(cat "$NFT_COUNT"); echo $((c+1)) > "$NFT_COUNT"
+    if [ "$c" = "0" ]; then cat "$NFT_FIXTURE_FILE"; else cat "$NFT_HEALTHY"; fi
+    exit 0
+fi
+exit 0
+""")
+        stub.chmod(0o755)
+        healthy = tmp_path / "healthy.txt"
+        healthy.write_text(HEALTHY_RULESET)
+        monkeypatch.setenv("NFT_COUNT", str(counter))
+        monkeypatch.setenv("NFT_HEALTHY", str(healthy))
+        r = subprocess.run(["bash", VERIFY_SCRIPT],
+                           capture_output=True, text=True)
+        assert r.returncode == 0
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop" not in calls
+        assert "destroy table" not in calls
+
+    def test_corrupt_conf_never_destroys(self, watchdog_stubs, tmp_path,
+                                         monkeypatch):
+        r = _run_watchdog(FLUSHED_CHAIN_RULESET, check_rc="1",
+                          tmp_path=tmp_path, monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        # Fail-closed stop still happens, but the table is never widened.
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "destroy table" not in calls
+        assert "CRITICAL" in calls
