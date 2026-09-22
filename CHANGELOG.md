@@ -44,7 +44,7 @@ This changelog only works if entries land with the change, not after it:
   queue position kept, the reason stamped as the audit trail — and
   `--diagnose` lists every invited row's token state with the recommended
   action, so operators no longer hand-edit `rows.jsonl` to recover
-  (PR TBD).
+  (#242).
 - Provision-time injector (`harness/inject-provision-state.sh`): runs at
   first boot of the hosted agent VM and owns the provision-time half of
   the gate-fixture contract — preflights the golden-image manifest
