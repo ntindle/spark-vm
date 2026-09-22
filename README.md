@@ -269,8 +269,8 @@ put it to work.
 | `confirm/` | Human-confirmation flow for sensitive agent actions |
 | `jail/` | Sandboxing bits |
 | `deploy/` | Release automation: unattended redeploys + branch/tag protection rulesets-as-code |
-| `harness/` | Pre-seeded harness contract: golden-image manifest + harness auth probe ([research](docs/PRE_SEEDED_HARNESS_RESEARCH.md)) |
-| `site/` | Waitlist web surface: landing page + waitlist signup backend |
+| `harness/` | Pre-seeded harness tooling (R2): golden-image manifest generation + verification, gate fixture, harness auth probe, and the provision-time injector — fails closed on image drift before box-live ([research](docs/PRE_SEEDED_HARNESS_RESEARCH.md)) |
+| `site/` | Waitlist web surface: landing page + waitlist signup backend + invite operator tooling (`--reconcile`, `--reinstate-confirmed`, `--diagnose`) |
 | `assets/` | Demo assets + hero art (marketing visuals, regenerated in place) |
 | `VERSION` / `CHANGELOG.md` / `CONTRIBUTING.md` | Versioning, the changelog ritual, and the contributor process |
 | `scripts/` | Assorted helpers |
@@ -295,6 +295,8 @@ branch naming, how to run the tests, and the PR/review flow.
 - **Components** — small, composable tools in the spirit of `cred` and
   `muse-job`: localhost-only, auditable, boring in the right ways.
 - **Staying fresh** — pull the repo every few days and look at what's new.
+  The [CHANGELOG.md](CHANGELOG.md) `Unreleased` section is the what's-new
+  list: every user- or operator-visible change, with its PR.
   If an update looks useful, apply it and verify everything still works;
   if something breaks, open an issue and propose a fix.
 
