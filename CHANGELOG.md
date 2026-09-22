@@ -318,6 +318,13 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
+- The inference proxy's host allowlist matcher now recognizes IPv6
+  literals: a `::1` entry previously never matched (the address was
+  mangled before comparison), so an operator allowlisting the IPv6
+  loopback had dead config while the enforcement checks stayed blind to
+  it. Literals now compare as normalized addresses (`[::1]`,
+  `[::1]:8080`, and trailing-dot spellings included); a hostname entry
+  never matches a literal host. (#257)
 - Provision-time credential teardown now treats leading-dot entries (e.g.
   `.localhost`) as the live loopback exemptions they are: previously only
   bare loopback names were unbound or refused, so a `.localhost` binding
@@ -386,6 +393,14 @@ This changelog only works if entries land with the change, not after it:
   (#218)
 
 ### Security
+- The provision-time injector's tenant-identity install and
+  tenant-attribution write no longer resolve their destination paths
+  twice: both pin the destination directory with no-follow semantics
+  and create/write through the open file descriptor, so a symlink (or
+  other non-regular file) swapped in between the check and the write is
+  refused -- or, for the attribution record, atomically replaced rather
+  than followed. The attribution write also reports its digest lifecycle
+  (initialized/updated) for the operator log. (#258)
 - The unattended deployer's rollback snapshot and restore steps now
   distinguish "this file is absent" from "the privilege check itself
   failed" (broken sudo): a broken check aborts the snapshot and fails

@@ -18,13 +18,14 @@ healthy images). harness/test_proxy_match.py is the drift tripwire: it
 asserts this module agrees with the real swap_addon functions on a fixed
 corpus, so either side can only change deliberately.
 
-FAIL-CLOSED DIVERGENCE (documented, pinned by test):
-sa._host_in_list fumbles the "::1" literal -- "::1".split(":")[0] is "" --
-so a "::1" binding or hosts.allow entry never matches at enforcement. The
-injector's echo detection treats "::1" as a live echo alias anyway: a strict
-superset, so teardown can only over-refuse, never under-refuse. The
-enforcement-side question (fix the matcher vs declare ::1 bindings inert) is
-filed separately; this module documents which side it is on.
+RESOLVED DIVERGENCE (2026-09-22, issue #257): sa._host_in_list used to
+fumble the "::1" literal ("::1".split(":")[0] is ""), so a "::1" binding
+or hosts.allow entry never matched at enforcement while the injector's
+echo detection treated "::1" as a live echo alias anyway -- a documented
+fail-closed superset. The proxy matcher now compares IP literals as
+normalized addresses (issue #257), so the two sides agree on "::1"
+again; the injector's echo layer needs no special case and this module
+documents the resolution, not the divergence.
 
 LOAD-BEARING ASSUMPTION: the echo set is exactly 127.0.0.1 / localhost /
 ::1 plus the .localhost subtree. Other loopback forms (127.0.0.2,
@@ -47,10 +48,45 @@ import sys
 def host_in_list(host, entries):
     """Mirror of proxy/swap_addon.py::_host_in_list: match host against exact
     names or leading-dot subdomain entries. Trailing dots are stripped on
-    both sides."""
-    h = (host or "").lower().split(":")[0].rstrip(".")
+    both sides. IP literals (v4 and v6) are compared as normalized addresses
+    (issue #257): a single bracket pair is stripped first, hostname entries
+    never match an IP-literal host, and CIDR entries never match here."""
+    h = (host or "").lower()
+    if h.startswith("["):
+        end = h.find("]")
+        if end != -1:
+            h = h[1:end]
+    h = h.rstrip(".")
+    if h.count(":") == 1:
+        # Single-colon host: a :port suffix, never an IPv6 literal.
+        # Strip it BEFORE the literal parse so "127.0.0.1:8080" takes
+        # the IP path like "127.0.0.1" does (multi-colon strings such
+        # as "::1:8080" are parsed as addresses, not host:port).
+        h = h.split(":")[0]
+    try:
+        h_ip = ipaddress.ip_address(h)
+    except ValueError:
+        h_ip = None
+    if h_ip is None:
+        # Hostname path: an IPv6 literal that failed parsing has no
+        # port to strip and simply falls through to a (non-)match
+        # below. (Single-colon hosts were already stripped above.)
+        h = h.split(":")[0]
     for entry in entries or []:
-        e = str(entry).lower().rstrip(".")
+        e = str(entry).lower()
+        if e.startswith("["):
+            end = e.find("]")
+            if end != -1:
+                e = e[1:end]
+        e = e.rstrip(".")
+        if h_ip is not None:
+            try:
+                e_ip = ipaddress.ip_address(e)
+            except ValueError:
+                continue
+            if h_ip == e_ip:
+                return True
+            continue
         if h == e or (e.startswith(".") and h.endswith(e)):
             return True
     return False
@@ -108,10 +144,9 @@ def is_echo_entry(entry, aliases=ECHO_ALIASES):
     s = str(entry).strip()
     if any(host_in_list(a, [s]) for a in aliases):
         return True
-    # The proxy matcher fumbles the "::1" literal (splitting on ":" yields
-    # ""), so match it literally too: fail-closed superset, never a pass.
-    if s.lower().rstrip(".") == "::1":
-        return True
+    # ("::1" needs no literal special case anymore: host_in_list matches
+    # IP literals as normalized addresses since issue #257, so the alias
+    # loop above already covers it.)
     low = s.lower().rstrip(".")
     if low.startswith(".") and low[1:] in tuple(a.lower() for a in aliases):
         return True
