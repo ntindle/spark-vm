@@ -52,6 +52,13 @@ This changelog only works if entries land with the change, not after it:
   then proves the injected key with the provision-mode probe — a probe
   failure maps to provisioning-failed and box-live must not flip.
   Ships one JSON inject report on stdout and 55 hermetic tests. (#238)
+- Night competitor watch (2026-09-22): quiet survey window — no launches,
+  acquisitions, pricing changes, releases, or partner moves across the
+  tracked set; boat.dev rate card and comparison table re-verified
+  unchanged; two pre-window competitors newly surfaced and filed as
+  watchlist items (Brig, Epho); adjacent color on Meta Muse's Sentinel
+  per-user VM architecture (third-party deep dive of the pre-window
+  launch). (#239)
 - Waitlist operator tooling: `waitlist_invites.py --reconcile` repairs
   missing `invite_sent` funnel events after the commit → emit crash
   window — it re-derives the missing events for still-live invites from

@@ -73,6 +73,7 @@ as historical.
 
 | Doc | What it is |
 | --- | ---------- |
+| [COMPETITOR_WATCH_2026-09-22_NIGHT.md](COMPETITOR_WATCH_2026-09-22_NIGHT.md) | Competitor watch, 2026-09-22 night — quiet window (~17:54→~01:05 CDT), zero in-window deltas; files C19/C20 (Brig + Epho watchlist adds, pre-window launches newly surfaced); adjacent color on Meta Muse's Sentinel per-user VM security architecture (third-party deep dive of the pre-window launch). |
 | [COMPETITOR_WATCH_2026-09-21_EVENING.md](COMPETITOR_WATCH_2026-09-21_EVENING.md) | Competitor watch, 2026-09-21 evening — quiet window (~14:54→~17:54 CDT), zero in-window deltas; files C18 (h-sandbox: host-bound-egress credential vault + OpenSandbox adapter). |
 | [COMPETITOR_WATCH_2026-09-21_AFTERNOON.md](COMPETITOR_WATCH_2026-09-21_AFTERNOON.md) | Competitor watch, 2026-09-21 afternoon — quiet window; resolves the C17 xlarge capacity-allocation caveat. |
 | [COMPETITOR_WATCH_2026-09-21_C17.md](COMPETITOR_WATCH_2026-09-21_C17.md) | C17 resolution (2026-09-21): the boat.dev xlarge capacity-allocation caveat is the pricing page's current policy, not new — 16-vCPU stays capacity-gated by operator allocation. |
