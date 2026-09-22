@@ -330,7 +330,7 @@ This changelog only works if entries land with the change, not after it:
   `example.com`, which would have let a trailing-dot host:port slip past
   fail-closed deny-name entries. The trailing dot is stripped after the
   port now, on both sides of the shared matcher, and the case is pinned
-  in the test corpus so it cannot regress again. (PR TBD)
+  in the test corpus so it cannot regress again. (#265)
 - Provision-time credential teardown now treats leading-dot entries (e.g.
   `.localhost`) as the live loopback exemptions they are: previously only
   bare loopback names were unbound or refused, so a `.localhost` binding
