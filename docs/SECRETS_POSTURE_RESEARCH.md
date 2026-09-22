@@ -14,7 +14,10 @@ pattern is convergent — every serious sandbox vendor has shipped some version 
 swapd's mechanics differ. It is not a "we were first" claim; we make no such claim.
 
 **Verification tags:** `VENDOR-VERIFIED` = exact quote from the vendor's own docs;
-`THIRD-PARTY` = claimed only by a non-vendor source; `UNVERIFIED` = not found in
+`VENDOR-VERIFIED (press-release source)` = verbatim quote from vendor-issued
+launch copy (not engineering docs); convergence is claimed on the quote alone
+— no mechanism axes are scored from it. `THIRD-PARTY` = claimed only by a
+non-vendor source; `UNVERIFIED` = not found in
 vendor docs. Where a prior claim was only third-party-sourced, this document
 records the current status; links are inline per vendor section.
 
@@ -248,6 +251,40 @@ docs-verified data point — outside the five-vendor deep set above.
   control plane. As with OpenComputer, convergence is substantiated by the
   quote; independence of derivation is not claimed here.
 
+### DigitalOcean Managed Agents — VENDOR-VERIFIED (press-release source)
+
+Source: DigitalOcean's Managed Agents public-preview launch release,
+2026-09-22, distributed via Business Wire (a paid wire). This is the
+vendor's own launch copy, not engineering documentation — the quotes are
+verbatim from the release, but the release publishes no mechanism detail
+beyond the sentences quoted here. Read 2026-09-22 (release-day text,
+recorded in the morning watch,
+`docs/COMPETITOR_WATCH_2026-09-22_MORNING.md`). Spotted in the 2026-09-22
+competitor watch (C26) — outside the five-vendor deep set above.
+
+- The Harness Runtime ships "a separate secrets management service"; the
+  Action Gateway promises that "credentials are brokered at execution time
+  and never reach the model or the sandbox." The mechanics match swapd's
+  shape at the level the release describes them: the real value is held
+  outside the sandbox and applied on the execution path at call time, so
+  the sandbox never contains the credential.
+- Their terms ("separate secrets management service", "brokered at
+  execution time") are the vendor's own. What the release does NOT
+  publish: the placeholder form inside the sandbox (no placeholder
+  representation is described), the injection surface (headers / bodies /
+  query), whether the sandbox holds opaque tokens, response scrubbing,
+  destination binding, or per-injection audit. None of those axes can be
+  scored from the release, and this section scores none of them.
+- Scope note: as a launch release, this is a product claim, not a
+  verified mechanism read — the convergence verdict below rests on the
+  verbatim quote, not on an independent read of their docs or code.
+- The convergence verdict: a fifth convergent data point for the
+  brokered-secrets posture ("the proxy holds the secret, the sandbox
+  doesn't") — and the first from a major cloud's managed agent-computer
+  product. Convergence here is substantiated by the quote's brokering claim
+  only: no placeholder form is published, so this verdict does not name
+  placeholder-swap; independence of derivation is not claimed here.
+
 ## What this means for R6 (the docs repositioning)
 
 The honest, sourced edges swapd can claim — each one vendor-quoted above:
@@ -266,9 +303,12 @@ The honest, sourced edges swapd can claim — each one vendor-quoted above:
    response). The cleanest mechanical contrasts are against the open-source
    entries — Microsandbox, which explicitly does not scrub, and h-sandbox,
    which documents no scrubbing. OpenComputer's scrub status is not documented
-   in the corpus.
-3. **Audited per decision** (vs all five, and both watch-list data points): none
-   of the five vendors, OpenComputer, or h-sandbox documents per-injection
+   in the corpus. DigitalOcean's launch release claims brokering that keeps
+   credentials from reaching the sandbox, but publishes no placeholder form,
+   swap surface, scrubbing, or audit — so no mechanism *values* are attributed
+   to it on those axes.
+3. **Audited per decision** (vs all five, and the three watch-list data points): none
+   of the five vendors, OpenComputer, h-sandbox, or DigitalOcean's release documents per-injection
    audit lines; swapd's audit write is part of authorization.
 4. **DNS pin + authority alignment** (vs swapd, conceded): Microsandbox's
    destination gate is stronger than swapd's per-host allowlists — the docs
@@ -293,5 +333,7 @@ the placeholder variant in the open).
   here (Runloop "Credential Gateway" is not a name Runloop uses publicly;
   Modal documents `secrets=` env-var injection, not egress-time brokering).
   The R6 docs should cite only the five vendors deep-read in this document,
-  plus lighter docs-verified watch-list data points that are explicitly marked
-  as outside the deep set (cf. the OpenComputer section above).
+  plus lighter watch-list data points that are explicitly marked as outside
+  the deep set and carry their source class (docs-verified for OpenComputer
+  and h-sandbox; `VENDOR-VERIFIED (press-release source)` for DigitalOcean —
+  cf. the sections above).

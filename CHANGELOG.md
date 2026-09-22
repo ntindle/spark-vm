@@ -48,6 +48,12 @@ This changelog only works if entries land with the change, not after it:
   voids the isolation guarantees until someone restarts the unit" hole
   becomes bounded downtime instead of unbounded unenforced running.
   #260
+- Secrets-posture corpus gains DigitalOcean Managed Agents as the fifth
+  convergent data point (their launch release claims a separate secrets
+  service with "credentials brokered at execution time" that "never reach
+  the model or the sandbox" — press-release source, no mechanism detail
+  scored), and the org-policy vendor set gains DO's Action Gateway
+  (governed tool access via one managed MCP endpoint) as a candidate. (#263)
 - Morning competitor watch (2026-09-22): DigitalOcean launched Managed
   Agents in public preview — microVM-per-session Harness Runtime, Action
   Gateway (16,000+ tools via one MCP endpoint, credentials brokered at
@@ -311,6 +317,17 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
+- Provision-time credential teardown now treats leading-dot entries (e.g.
+  `.localhost`) as the live loopback exemptions they are: previously only
+  bare loopback names were unbound or refused, so a `.localhost` binding
+  or allowlist line would have survived teardown while the proxy still
+  swapped credentials toward loopback names. The three echo-detection
+  checks are now one shared implementation pinned against the proxy's own
+  matching semantics by a drift tripwire, instead of three hand-mirrored
+  copies that could drift apart unnoticed.
+- The provision-time tenant attribution record is now written atomically
+  (temp file plus rename): a crash mid-write can no longer leave a
+  truncated record for the per-tenant approvals wiring to consume.
 - Test hermeticity and coverage hardening (dx turn): the push-endpoint
   tests no longer touch `/home/swapd` (approvals dir redirected at tmp),
   the deploy rollback suite redirects the literal system paths

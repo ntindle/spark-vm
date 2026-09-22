@@ -118,6 +118,27 @@ at the endpoint, with detection + enforcement diagnostics.
   concurrent, 5 CPU-hrs/mo, $1 LLM budget). Active-CPU pricing is the
   emerging price anchor (Vercel: $0.128/vCPU-hr active).
 
+### DigitalOcean Managed Agents — Action Gateway [V press release, 2026-09-22]
+
+[DigitalOcean Managed Agents launch release](https://www.businesswire.com/news/home/20260922295615/en/DigitalOcean-Launches-Managed-Agents-Bringing-Agent-Execution-Tool-Access-and-Inference-Together-on-One-Cloud)
+(public preview announced 2026-09-22, distributed via Business Wire — a paid
+wire; the claims below are vendor launch copy, not a controls-level read
+like the GitHub Copilot/Runloop entries above, and no public API/controls
+documentation was available at read time):
+
+- Governed tool access through one managed MCP endpoint: 16,000+ tools from
+  500+ providers (GitHub, Jira, Stripe, PagerDuty, Supabase, web
+  search/fetch, browser automation, a team's own MCP servers).
+- "Credentials are brokered at execution time and never reach the model or
+  the sandbox" — brokering at the policy boundary rather than at the
+  workload, the same posture class as Vercel's transform rules and
+  Upstash's Attach Headers.
+- Centralized permissions, human-in-the-loop approval for sensitive
+  actions, audit logs.
+- Status: vendor candidate for the H16 org-policy layer design (C26,
+  2026-09-22 competitor watch). Promote to a full entry when controls-level
+  documentation exists.
+
 ### OSS structural analogs
 
 - **mattolson/agent-sandbox** ([OSS](https://github.com/mattolson/agent-sandbox);
