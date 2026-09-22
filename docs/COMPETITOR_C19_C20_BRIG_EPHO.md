@@ -109,22 +109,34 @@ product shape, the thing to learn from.
 own words: "Sandbox providers are not very reliable, which means you
 need to figure out a multi-provider strategy to avoid failures" —
 and Epho "takes care of automatic fallbacks across different
-providers" (**THIRD-PARTY**: their Product Hunt post). Durable chats
-restore session snapshots on replacement boxes when the underlying
-box is gone (**THIRD-PARTY**: everydev.ai). The identities of the
+providers" (**THIRD-PARTY**: their Product Hunt post). The primary
+source corroborates fallback existence in weaker wording: epho.io
+documents that "the run re-queues on a fallback sandbox backend" and
+that a durable chat's "conversation outlives the machine it ran on"
+via session-snapshot restore (**VERIFIED**). Durable chats restoring
+session snapshots on replacement boxes when the underlying box is
+gone (**THIRD-PARTY**: everydev.ai). The identities of the
 underlying providers are **UNVERIFIABLE** publicly (not named).
 
 Scored against H4's provider-agnostic interface criterion: H4's
-`provider_iface` (six verbs — provision/status/dial/ssh_info/destroy
-+ fail-closed `public_ingress`) with per-shape capability axes
-(`supports_suspend`, `memory_resume`, `wake_reprovisions`) is a
-*single-provider pluggable adapter*. Epho validates the market need
+`provider_iface` (eight methods — `provision`, `status`, `suspend`,
+`dial`, `ssh_info`, `destroy`, `attest_network_isolation`, `snapshot` —
+plus the fail-closed `public_ingress` policy flag) with per-shape
+capability axes (`supports_suspend`, `memory_resume`,
+`wake_reprovisions`) is a *single-provider pluggable adapter*. Epho validates the market need
 for the layer **above** the adapter: a failover router that keeps a
 session alive across provider failures and restores session
 snapshots on replacement boxes. Our interface already gives such a
 router its inputs (the capability axes are exactly what a router
 needs to pick a fallback target); the router itself is not designed.
-That is a real H4 follow-up — filed below.
+Note the honest boundary: `provider_iface` already ships a
+`snapshot()` verb, so the missing design is not "snapshots" — it is
+the **cross-provider session-state restore contract**: which of the
+shipped verbs (`snapshot`/`suspend`/`dial`/`provision`) the router
+drives, how a session survives a provider failure when VM-snapshot
+restore across providers is not portable, and how the capability
+axes pick the fallback target. That is a real H4 follow-up — filed
+below.
 
 **Pricing (VERIFIED: https://epho.io).** Per-second, meter runs from
 boot to teardown — "nothing idles, nothing is stored, nothing keeps
@@ -156,11 +168,14 @@ model is better than credential-in-the-sandbox; ours is better than
 theirs. Say both.
 
 **Operational shape worth stealing.** Per-second meter with instant
-stop; 402-at-zero balance refusal; durable chats with snapshot
-restore on replacement boxes; five active turns with free queueing;
-a plain-HTTP API (no SDK) that drops straight into GitHub Actions,
-cron, and chatbots. The queue-and-refuse economics are the honest
-version of "no session clock" for a task-scoped product.
+stop — "nothing idles, nothing is stored, nothing keeps billing"
+(**VERIFIED**: epho.io); 402-at-zero balance refusal (**VERIFIED**:
+epho.io); durable chats with snapshot restore on replacement boxes
+(**THIRD-PARTY**: everydev.ai); five active turns with free queueing
+(**THIRD-PARTY**: everydev.ai); a plain-HTTP API (no SDK) that drops
+straight into GitHub Actions, cron, and chatbots (**THIRD-PARTY**:
+everydev.ai). The queue-and-refuse economics are the honest version
+of "no session clock" for a task-scoped product (**INFERRED**).
 
 **Where spark-vm wins.** Epho rents task-scoped sandboxes on a
 session clock; our thesis is a persistent computer with no clock at
@@ -178,12 +193,18 @@ their product shape.
   against the H4 provider-agnostic interface criterion, BYOK
   infra-only pricing, operational shape.
 - **New backlog items** (in BACKLOG.md): (a) H4 failover-router
-  follow-up — design the provider-failover router + session-snapshot
-  restore contract on top of `provider_iface` (Epho's lesson; the
-  capability axes are the router's inputs); (b) jail/proxy docs state
-  the enforcement-downgrade behavior explicitly, fail-closed like
-  Brig's policy-bound refusal; (c) `deny`-style billing guard for our
-  cred forwarding — refuse to forward known metered-billing keys into
-  a sandbox without an explicit override; (d) PRICING_THINKING.md
+  follow-up — design the provider-failover router + cross-provider
+  session-state restore contract on top of `provider_iface`: which of
+  the shipped verbs (`snapshot`/`suspend`/`dial`/`provision`) the router
+  drives, how a session survives a provider failure when VM-snapshot
+  restore across providers is not portable, and how the capability axes
+  pick the fallback target (Epho's lesson; the axes are the router's
+  inputs); (b) jail/proxy docs state the enforcement-downgrade behavior
+  explicitly, fail-closed like Brig's policy-bound refusal; (c)
+  `deny`-style billing guard for our cred forwarding — refuse to make
+  known metered-billing keys available to a sandbox without an explicit
+  override (note Brig's own limit: `deny` guards the environment
+  channel only; a `files:` binding can deliver a metered key unchecked,
+  deliberately — per docs/profiles.md); (d) PRICING_THINKING.md
   one-liner next touch: Epho's BYOK infra-only metering as a
   pricing-shape data point.
