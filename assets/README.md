@@ -13,6 +13,7 @@ PR (ntindle/spark-vm#36). Finals live here; the pipeline that made them is
 | `demo-persistence-pair.gif` | "The same desktop, days apart": the persistence pair — frame 1 is Xvfb :98's birth record (`ps -o pid,etime,lstart,cmd`, showing 4d+ elapsed in-frame), frame 2 re-verifies the same pid/start alive moments later, with the Sep-16 tmux job sessions still there. 480px-wide terminal frames, 12s loop, ~20KB. | ✅ shipped |
 | `demo-musejob-watch.gif` | "Long-lived jobs stay alive": real `muse-job` spawn → status → status 20+ minutes later on a demo job (480px terminal frames, 7.2s loop, ~29KB). | ✅ shipped |
 | `demo-cred-ui-phone.gif` | cred-ui on a phone viewport: the add/update form full-width, stored credentials as stacked cards. 390px phone viewport (410px-wide frames), 4.8s loop, ~55KB. | ✅ shipped |
+| `demo-push-queue.gif` | "The push queue survives an outage": the real `confirm/push.py` H14 durable enqueue/retry against a local mock push service — first delivery attempt 500s and reschedules, the journal keeps the summons, the retry delivers on 201. 480px-wide terminal frames, 26s loop, ~53KB. | ✅ shipped |
 
 ## Provenance of `demo-approval-loop.gif`
 
@@ -385,3 +386,53 @@ python3 scripts/generate_demo_assets.py \
 
 Regeneration overwrites the GIF in place — the file in the repo is the
 current final. Never point the generator at the live cred-ui deployment.
+
+## Provenance of `demo-push-queue.gif`
+
+Recorded 2026-09-22 by `scripts/generate_demo_assets.py --asset push-queue`,
+which runs the REAL `confirm/push.py` code paths (H14 durable enqueue/retry)
+against a scratch world that never leaves the machine:
+
+- scratch `CONFIRM_DIR` (a `./demo-push-work` directory — the generator sets
+  `CONFIRM_DIR`, `CONFIRM_VAPID_KEYS`, `CONFIRM_PUSH_SUBS`, and
+  `CONFIRM_VAPID_SUB` itself, so the ambient environment is untouched),
+- a throwaway VAPID keypair (`push.py --gen-keys`; the public key shown in
+  frame 1 was generated for the demo and never used anywhere else),
+- one demo subscription whose endpoint is a local mock push service on
+  127.0.0.1 (ephemeral port) that answers the first POST with 500 and every
+  later POST with 201 — a stand-in for a dead-then-recovered push service.
+  The subscription keys are a throwaway P-256 pair + random auth secret;
+  the payload is really VAPID-signed and aes128gcm-encrypted by the real
+  code, the mock just never decrypts it.
+
+The four frames are the verbatim transcripts of the displayed commands:
+`--gen-keys`, the real `PushQueue.enqueue()` call, `push.py --worker-once`
+(500 → rescheduled, attempt 1/8, next try in 60s), `cat push-queue.jsonl`
+(the pending entry), a second `--worker-once` after the real 60-second
+backoff elapsed (201 → sent), and `wc -c push-queue.jsonl` (0 — the journal
+drained). Long lines are wrapped by the generator, never edited; the
+window chrome and caption strips are drawn by the generator, as with the
+other terminal assets.
+
+What the asset claims — the summons survives a dead endpoint in the
+durable journal and the retry delivers — is exactly what the frames show.
+It does not claim a real browser received a notification (the mock is not
+a browser); the end-to-end phone notification is the approval-loop asset's
+companion story, not this one's.
+
+## Regenerating `demo-push-queue.gif`
+
+Needs Pillow + the `cryptography` package (already in
+`requirements-test.txt`):
+
+```sh
+python3 scripts/generate_demo_assets.py \
+  --asset push-queue --work-dir ./demo-push-work \
+  --frames-dir ./demo-push-frames --out assets/demo-push-queue.gif
+```
+
+The run takes ~75 seconds (it waits out the real 60s retry backoff so the
+second delivery is genuinely due, not faked). Regeneration overwrites the
+GIF in place — the file in the repo is the current final. The generator is
+self-contained: it never reads the ambient `CONFIRM_DIR` and only ever
+talks to 127.0.0.1.

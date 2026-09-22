@@ -50,6 +50,16 @@ minutes later), then:
         --asset musejob-watch --capture-dir ./demo-asset4-captures \
         --out assets/demo-musejob-watch.gif
 The frames show real command output; long lines are wrapped, never edited.
+
+Asset 6 (the push queue survives an outage) renders terminal frames from
+a live demo run of the REAL confirm/push.py code paths (H14 durable
+enqueue/retry) against a local mock push service — scratch CONFIRM_DIR,
+throwaway VAPID keypair, demo subscription, mock 500s then 201s:
+    python3 scripts/generate_demo_assets.py \
+        --asset push-queue --work-dir ./demo-push-work \
+        --out assets/demo-push-queue.gif
+Nothing leaves the machine; the generator sets CONFIRM_DIR (and friends)
+to the scratch work dir itself, so the ambient environment is untouched.
 """
 import argparse
 import json
@@ -57,6 +67,8 @@ import os
 import subprocess
 import sys
 from datetime import datetime
+import http.server as _http_server
+import threading as _threading
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -327,6 +339,228 @@ def generate_secrets(repo_root, work_dir, frames_dir):
         shots.append(path)
         print("frame:", path, im.size)
     return shots, journal_line
+
+
+# --- Asset 6: "the push queue survives an outage" (push-queue) ---
+#
+# Renders genuine terminal transcripts of the REAL confirm/push.py code
+# paths (H14 durable enqueue/retry): a scratch CONFIRM_DIR, a throwaway
+# VAPID keypair (--gen-keys), and a demo subscription whose endpoint is a
+# local mock push service on 127.0.0.1 that answers the first delivery
+# attempt with 500 and the retry with 201. The four frames show: enqueue,
+# the failed first attempt (the approval is NOT lost), the journal holding
+# the pending summons, and the retry delivering once the endpoint is back.
+# Nothing leaves the machine; no real keys, subscriptions, or approvals.
+# This generator sets CONFIRM_DIR (and friends) itself to the scratch
+# work dir for every subprocess, so the ambient environment — including
+# any production CONFIRM_DIR — is never touched.
+
+PUSHQ_FRAMES = [
+    ("q1-enqueue",
+     "1/4 — file the summons: one durable journal append"),
+    ("q2-fail",
+     "2/4 — the endpoint is down (500): the worker reschedules, "
+     "nothing is lost"),
+    ("q3-journal",
+     "3/4 — the journal keeps the summons: attempt 1, due again in "
+     "a minute"),
+    ("q4-delivered",
+     "4/4 — endpoint back (201): the retry delivers, the journal "
+     "drains"),
+]
+PUSHQ_HOLDS = {"q1-enqueue": 6.0, "q2-fail": 7.0,
+              "q3-journal": 6.0, "q4-delivered": 7.0}
+
+_PUSHQ_DEMO_ID = "demo-summons-1"
+_PUSHQ_DEMO_SUMMARY = "demo: your approval needs two taps"
+_PUSHQ_TITLE = "demo — the push queue survives an outage"
+
+
+def _sh_merge(cmd, cwd, env=None):
+    # Like _sh but with stderr merged into stdout, so the worker's log
+    # lines (logging defaults to stderr) appear in the transcript too.
+    r = subprocess.run(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True, env=env,
+                       timeout=120)
+    return r.stdout.rstrip("\n")
+
+
+def _pushq_demo_keys():
+    # Throwaway VAPID-subscription keypair for the demo store (never a
+    # real subscriber): P-256 public point + 16-byte auth secret, both
+    # base64url, matching encrypt_message()'s expected formats.
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, PublicFormat)
+    import base64 as _b64
+    priv = ec.generate_private_key(ec.SECP256R1())
+    raw = priv.public_key().public_bytes(Encoding.X962,
+                                         PublicFormat.UncompressedPoint)
+    assert len(raw) == 65 and raw[0] == 0x04
+    p256dh = _b64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    auth = _b64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode("ascii")
+    return p256dh, auth
+
+
+class _PushqMockHandler(_http_server.BaseHTTPRequestHandler):
+    # Local stand-in for a push service: fails the first POST with 500,
+    # answers every later POST with 201. The worker's retry path can't
+    # tell the difference between this and a real outage.
+    failures_left = 1
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n:
+            self.rfile.read(n)
+        if type(self).failures_left > 0:
+            type(self).failures_left -= 1
+            code = 500
+        else:
+            code = 201
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *args):
+        pass
+
+
+def generate_push_queue(repo_root, work_dir, frames_dir):
+    """Build the asset-6 transcript from the real push.py code paths."""
+    import json as _json
+    import time as _time
+    from http.server import HTTPServer
+
+    os.makedirs(work_dir, exist_ok=True)
+    os.makedirs(frames_dir, exist_ok=True)
+    push_py = os.path.join(repo_root, "confirm", "push.py")
+    vapid_path = os.path.join(work_dir, "vapid.json")
+    subs_path = os.path.join(work_dir, "push-subscriptions.json")
+    journal_path = os.path.join(work_dir, "push-queue.jsonl")
+    # Idempotent: a previous (failed) run's scratch state must not leak
+    # into this capture. Only files this generator itself writes are
+    # removed, and only inside the scratch work dir.
+    for stale in ("push-queue.jsonl", "push-queue-dead.jsonl",
+                  "push-subscriptions.json.notified.json", "vapid.json",
+                  "push-subscriptions.json"):
+        try:
+            os.unlink(os.path.join(work_dir, stale))
+        except OSError:
+            pass
+    env = dict(os.environ,
+               CONFIRM_DIR=work_dir,
+               CONFIRM_VAPID_KEYS=vapid_path,
+               CONFIRM_PUSH_SUBS=subs_path,
+               CONFIRM_VAPID_SUB="mailto:demo@localhost")
+
+    # The mock push service, bound before the subscription is written so
+    # the endpoint (with its real ephemeral port) is the verbatim one.
+    server = HTTPServer(("127.0.0.1", 0), _PushqMockHandler)
+    port = server.server_address[1]
+    server_thread = _threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.05},
+        daemon=True)
+    server_thread.start()
+    try:
+        p256dh, auth = _pushq_demo_keys()
+        subs_doc = {"version": 1, "subscriptions": [{
+            "endpoint": "http://127.0.0.1:%d/push" % port,
+            "keys": {"p256dh": p256dh, "auth": auth},
+            "created": _time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                      _time.gmtime())}]}
+        fd = os.open(subs_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                     0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            _json.dump(subs_doc, f)
+
+        transcripts = {}
+        # Frame 1: throwaway VAPID keys, then the enqueue. The enqueue
+        # runs the real PushQueue.enqueue() (durable fsync'd append).
+        # Commands run (and shown) with repo-root-relative paths, matching
+        # the other assets' readable transcripts; env carries the absolute
+        # scratch paths (env is not part of the frames).
+        rel_vapid = os.path.join(os.path.relpath(work_dir, repo_root),
+                                 "vapid.json")
+        gen_cmd = "python3 confirm/push.py --gen-keys %s" % rel_vapid
+        enqueue_py = (
+            "import sys; sys.path.insert(0, 'confirm'); "
+            "from push import PushQueue; "
+            "print(PushQueue.default().enqueue("
+            "{'id': %r, 'summary': %r}))"
+            % (_PUSHQ_DEMO_ID, _PUSHQ_DEMO_SUMMARY))
+        enqueue_cmd = "python3 -c %s" % _shell_quote(enqueue_py)
+        out_keys = _sh(gen_cmd, repo_root, env)
+        out_enq = _sh(enqueue_cmd, repo_root, env)
+        assert out_enq.strip().splitlines()[-1] == "queued", \
+            "enqueue failed: %r" % out_enq
+        transcripts["q1-enqueue"] = [
+            ("cmd", gen_cmd),
+            ("out", out_keys),
+            ("cmd", enqueue_cmd),
+            ("out", out_enq),
+        ]
+        # Frame 2: one worker pass while the mock 500s. The summons is
+        # rescheduled, not dropped.
+        worker_cmd = "python3 confirm/push.py --worker-once"
+        out_pass1 = _sh_merge(worker_cmd, repo_root, env)
+        assert "'sent': 0" in out_pass1 and "'rescheduled': 1" in out_pass1, \
+            "pass 1 did not reschedule: %r" % out_pass1
+        transcripts["q2-fail"] = [
+            ("cmd", worker_cmd),
+            ("out", out_pass1),
+        ]
+        # Frame 3: the journal keeps the pending summons (verbatim).
+        with open(journal_path, encoding="utf-8") as f:
+            journal_line = f.read().strip()
+        entry = _json.loads(journal_line)
+        assert entry["aid"] == _PUSHQ_DEMO_ID and entry["attempts"] == 1, \
+            "unexpected journal entry: %r" % journal_line
+        transcripts["q3-journal"] = [
+            ("cmd", "cat push-queue.jsonl"),
+            ("out", journal_line),
+        ]
+        # Wait out the 60s backoff so the retry is genuinely due (the
+        # demo shows real time passing, not a faked clock).
+        deadline = entry["next_at"] + 2.0
+        while _time.time() < deadline:
+            _time.sleep(5)
+        # Frame 4: the mock is back (201s now); the retry delivers and the
+        # journal drains to zero bytes.
+        out_pass2 = _sh_merge(worker_cmd, repo_root, env)
+        assert "'sent': 1" in out_pass2, \
+            "pass 2 did not deliver: %r" % out_pass2
+        out_drained = _sh("wc -c push-queue.jsonl", work_dir, env)
+        assert out_drained.split()[0] == "0", \
+            "journal did not drain: %r" % out_drained
+        transcripts["q4-delivered"] = [
+            ("cmd", worker_cmd),
+            ("out", out_pass2),
+            ("cmd", "wc -c push-queue.jsonl"),
+            ("out", out_drained),
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    shots = []
+    font_probe = _mono_font(_TERM_FONT)
+    cw = max(font_probe.getlength("0123456789abcdef"), 1) / 16
+    ncols = int((_TERM_W - 2 * _TERM_PAD) / cw)
+    specs = {}
+    for stem, caption in PUSHQ_FRAMES:
+        specs[stem] = (caption, _flatten_transcript(transcripts[stem], ncols))
+    lh = _TERM_FONT + 6
+    max_body = max(_TERM_PAD + len(s) * lh + 8 for _, s in specs.values())
+    for stem, caption in PUSHQ_FRAMES:
+        caption_, segs = specs[stem]
+        im = _render_terminal_segs(caption_, segs, max_body,
+                                   title=_PUSHQ_TITLE)
+        path = os.path.join(frames_dir, stem + ".png")
+        im.save(path)
+        shots.append(path)
+        print("frame:", path, im.size)
+    return shots
 
 
 def _render_terminal_segs(caption, segs, body_h, title=None,
@@ -727,7 +961,7 @@ def _ensure_out_dir(out_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--asset", choices=("approval-loop", "secrets",
-                                       "persistence",
+                                       "persistence", "push-queue",
                                        "credui-phone", "musejob-watch"),
                     default="approval-loop")
     ap.add_argument("--url", help="demo confirmd base URL (approval-loop only); "
@@ -737,7 +971,9 @@ def main():
     # doesn't pass --frames-dir, so it just lands there instead of /tmp).
     ap.add_argument("--frames-dir", default="./demo-frames")
     ap.add_argument("--work-dir", default="./demo-asset2-work",
-                    help="scratch dir for --asset secrets (fixture + journal)")
+                    help="scratch dir for --asset secrets (fixture + journal) "
+                         "or --asset push-queue (scratch CONFIRM_DIR, keys, "
+                         "subscription, queue journal)")
     ap.add_argument("--capture-dir", default="./demo-asset4-captures",
                     help="dir of verbatim box captures for --asset "
                          "musejob-watch (w1-spawn.txt, w2-status.txt, "
@@ -772,6 +1008,16 @@ def main():
             sys.exit("expected 3 frames, got %d" % len(shots))
         _ensure_out_dir(args.out)
         assemble(shots, args.out, max_width=_TERM_W, holds=WATCHJ_HOLDS)
+        return
+    if args.asset == "push-queue":
+        repo_root = os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))
+        shots = generate_push_queue(repo_root, args.work_dir,
+                                    args.frames_dir)
+        if len(shots) != 4:
+            sys.exit("expected 4 frames, got %d" % len(shots))
+        _ensure_out_dir(args.out)
+        assemble(shots, args.out, max_width=_TERM_W, holds=PUSHQ_HOLDS)
         return
     if args.asset == "credui-phone":
         if not args.url:

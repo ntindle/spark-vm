@@ -37,6 +37,13 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Demo gallery, sixth asset: the push queue surviving an outage — the new
+  "See it in action" row shows the standalone push worker's first delivery
+  attempt hitting a dead endpoint (500) and rescheduling instead of losing
+  the approval, the durable journal holding the summons, and the retry
+  delivering once the endpoint answers (201). The generator replays the
+  real enqueue/worker code paths against a local mock push service
+  (throwaway keys, nothing leaves the machine). (PR TBD)
 - Push notifications now survive a dead push service: swapd enqueues every
   filed approval and a standalone push worker (`push-worker.service`)
   delivers with exponential-backoff retry, dead-lettering only after 8

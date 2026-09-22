@@ -67,6 +67,9 @@ my Unraid server), then add:
   never seen by the agent,
 - a **human-approval loop** (`confirmd`) so sensitive actions wait for
   your two taps — served over the tailnet, never through the agent,
+- a **push-notification queue** so your phone buzzes when the approval
+  loop needs those two taps — durable enqueue with exponential-backoff
+  retry, portable like everything else,
 - a **job runner** (`muse-job`) so it can run long tasks with lifecycle
   hooks instead of you babysitting a terminal,
 - a **real desktop** it can drive with the official CUA driver —
@@ -120,6 +123,15 @@ shows names and state only. Values are never shown back.</sub>
 <br>
 <sub><b>Real desktop</b> — one session, four days old: Xvfb's birth record,
 then the same pid re-verified alive with its job sessions intact.</sub>
+</td>
+</tr>
+<tr>
+<td valign="top" colspan="2">
+<img src="assets/demo-push-queue.gif" width="420" alt="Animated GIF — terminal transcript: enqueue the summons, the worker's first delivery attempt hits a dead endpoint (500) and reschedules, the journal keeps the pending entry, and the retry delivers after the endpoint recovers (201).">
+<br>
+<sub><b>Push queue</b> — the summons survives an outage. The worker's first
+delivery attempt hits a dead endpoint (500); the durable journal keeps
+the approval and the retry delivers (201).</sub>
 </td>
 </tr>
 </table>
