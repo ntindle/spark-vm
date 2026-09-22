@@ -43,8 +43,8 @@ No in-window change detected across the full tracked set:
   one-time credit, Pro $150/mo, per-second billing (**VERIFIED**:
   https://e2b.dev/pricing, ~00:57). Third-party ecosystem notes still
   describe pause/resume as first-class with billing stopped while
-  paused — no reported in-window semantic change (C9-era posture
-  stands).
+  paused — no reported in-window semantic change (corpus posture
+  stands — cf. the 2026-09-21 baseline's E2B read) (**THIRD-PARTY**).
 - **boat.dev** — rate card re-verified unchanged (**VERIFIED**:
   https://docs.boat.dev/pricing, ~00:57): small **$0.018/h**, default
   **$0.036/h**, large **$0.072/h**, xlarge **$0.200/h** ($100+ plan +
@@ -67,9 +67,9 @@ No in-window change detected across the full tracked set:
 - **OpenAI Agents API sandbox partners** — still nine (Blaxel,
   Cloudflare, Daytona, DigitalOcean, E2B, Modal, Oracle, Runloop,
   Vercel) per third-party writeups verified against the Agents API
-  docs as of Sep 11; one blog's 7-item list is that post's own
-  omission, not a roster change (**THIRD-PARTY**: official docs not
-  re-pulled this pass; C9 stands).
+  docs as of Sep 11; one blog's 7-item list reads as that post's own
+  subset selection, not a roster change (**INFERRED**; **THIRD-PARTY**:
+  official docs not re-pulled this pass; C9 stands).
 - **FastGPT** — no in-window release or E2B-removal follow-up beyond
   the Sep 14 consolidated guidance (E2B env vars deprecated, mandatory
   migration scripts, cross-origin sandbox deployment recommended)
@@ -95,23 +95,28 @@ agent launch (Sep 8–9, pre-window) goes deep on the per-user secure-VM
 "Sentinel" security architecture
 (**THIRD-PARTY**: explainx.ai deep dive). This is analysis of a known
 launch, not a new product move — no backlog item filed. Its relevance
-is adjacent, not actionable: a second vendor (after E2B's pause/billing
-posture) building the "one secure VM per agent user" shape that the
-hosted product's sentinel half (H5) is designed around. Worth one read
+is adjacent, not actionable (**INFERRED**): a per-user secure-VM
+security architecture in the wild, the shape the hosted product's
+sentinel half (H5) is designed around. Worth one read
 before the next hosted-gap consolidation; not worth a corpus edit on
 third-party evidence alone.
 
 ## 3. Standing items
 
-- **C18** (h-sandbox watchlist add): **OPEN** — the next corpus
-  consolidation pass should evaluate its credential vault +
-  host-bound-egress design against the secrets-posture corpus and the
-  H4 provider-adapter question.
-- **C12** (AgentComputer egress): stands — read this pass, the
-  homepage is usage-based pricing + Firecracker on bare metal with no
-  public pricing table and no stated network-egress policy; the
-  "real product, unverifiable egress posture" negative result is
-  unchanged (**UNVERIFIABLE**, and a negative result is a result).
+- **C18** (h-sandbox watchlist add): **CLOSED** as an item (evaluated in
+  PR #230, merged 2026-09-21) — carry-forward for the next corpus
+  consolidation pass: evaluate its credential vault + host-bound-egress
+  design against the secrets-posture corpus and the H4 provider-adapter
+  question.
+- **C12** (AgentComputer egress): stands — read this pass
+  (**VERIFIED**: https://agentcomputer.ai, ~01:00), the homepage states
+  usage-based pricing with Firecracker on bare metal; the evening
+  baseline's third-party read confirmed pay-as-you-go CPU/memory/hot/cold
+  storage pricing at https://www.agentcomputer.ai/pricing. Still no
+  stated network-egress policy anywhere — that negative result is
+  **UNVERIFIABLE** (no public egress-policy source to check against),
+  and is now a stronger "real product, unstated posture" result rather
+  than a mystery-company one.
 - **C14** (#47 resume-latency target): still **OPEN** — needs a
   measured boat.dev/provider resume baseline; live-API measurement
   awaits the operator per-run spend-cap decision (no movement;
