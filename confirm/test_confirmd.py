@@ -793,6 +793,10 @@ class ConfirmdTests(unittest.TestCase):
         self.assertTrue(
             any(e[0] == "answer-raced-expiry" for e in events),
             "no answer-raced-expiry audit; events: %r" % (events,))
+        # And no contradictory answer/approve event was logged.
+        self.assertFalse(
+            any(e[0] == "answer" for e in events),
+            "contradictory answer event; events: %r" % (events,))
         self.assertFalse(
             (self.approvals / "answered" / (aid + ".json")).exists())
         self.assertFalse(
@@ -841,6 +845,34 @@ class ConfirmdTests(unittest.TestCase):
         self.assertFalse(
             (self.approvals / "consumed" / "young-default-1.json").exists())
 
+    def test_233_answer_sweeps_stale_answered_strays(self):
+        """The after-answer _sweep_answered() call site: a stale
+        answered/ stray is moved to consumed/ when an answer is
+        consumed (deleting the call site must fail this)."""
+        stray = self.approvals / "answered" / "stray-sweep-1.json"
+        stray.write_text("{}")
+        ancient = time.time() - 2 * 86400
+        os.utime(stray, (ancient, ancient))
+        aid = "sweep-callsite-1"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00"}
+        nonce = cd._mint_csrf_nonce(it)
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            json.dumps(it))
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        h.send_response = lambda code: None
+        h.send_header = lambda k, v: None
+        h.end_headers = lambda: None
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"):
+            h._answer_locked("ntindle@github", aid, nonce, "deny")
+        self.assertFalse(stray.exists())
+        self.assertTrue(
+            (self.approvals / "consumed" / "stray-sweep-1.json").exists())
+
     # --- Issue #231: evict on the 404/corrupt negative paths ---
 
     def _do_get_harness(self, aid):
@@ -881,6 +913,26 @@ class ConfirmdTests(unittest.TestCase):
         """POST for a nonexistent aid must drop the per-aid lock entry."""
         aid = "evict-404-post-1"
         cd._aid_lock(aid)
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._answer_locked("ntindle@github", aid, "x" * 32, "deny")
+        self.assertEqual(got["code"], 404)
+        self.assertNotIn(aid, cd._aid_locks)
+
+
+    def test_231_answer_locked_corrupt_evicts_aid_lock(self):
+        """POST for a corrupt pending file: 404 and the lock entry is
+        dropped (the fourth #231 negative path — deleting this evict
+        must fail this test)."""
+        aid = "evict-corrupt-post-1"
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            "{not json")
+        cd._aid_lock(aid)  # ensure the entry exists
         h = cd.Handler.__new__(cd.Handler)
         h.client_address = ("100.99.0.1", 1234)
         got = {}
