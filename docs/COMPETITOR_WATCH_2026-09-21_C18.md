@@ -35,7 +35,7 @@ hosted SaaS.
 
 | Axis | h-sandbox (Harakiri) | Notes for the corpus |
 |---|---|---|
-| Substitution point | OpenSandbox egress sidecar / Credential Proxy (`credentialProxy.enabled`), provider-side | Like swapd's proxy shape, but the substitute is the sidecar on the request path, not a TLS-intercepting proxy — "Harakiri does not implement ... HTTPS MITM in the MVP" |
+| Substitution point | OpenSandbox egress sidecar / Credential Proxy (`credentialProxy.enabled`), provider-side | Like swapd's proxy shape, but the substitute is the provider-side sidecar on the request path. Harakiri's product layer disclaims MITM implementation ("Harakiri does not implement ... HTTPS MITM in the MVP"), but upstream OpenSandbox docs describe the sidecar's Credential Vault injection as experimental transparent mitmproxy — so the contrast with swapd is a *layering* difference (swapd owns and operates its intercepting proxy; Harakiri delegates substitution to the runtime provider), not a no-interception claim |
 | Placeholder in sandbox | Fake env value (e.g. `OPENAI_API_KEY=fake-openai-key`), or no variables at all | Closest to swapd's `hsurr:<name>` of all the corpus vendors: an explicitly *fake* value |
 | Injection surface | Auth material only (bearer / API-key header / basic) for requests matching the binding (hosts, schemes, methods, paths) | Narrower than swapd (which also does bodies/query/path); no body-substitution claim found |
 | Response scrubbing | **Not documented** — their threat model admits the residual: "A malicious allowed destination can reflect received credentials in its response" | Same class as Microsandbox's explicit non-scrub; swapd and Daytona stand alone on scrubbing |
@@ -44,10 +44,13 @@ hosted SaaS.
 | Custody | Envelope-encrypted workspace custody (per-record DEK, operator-wrapped); ephemeral values never persisted; GitHub App dynamic issuers short-lived, tokens never persisted | Comparable to swapd's `cred` store; the ephemeral-source `requires_reinjection` on resume is the same lifecycle honesty swapd's audit trail aims at |
 
 **INFERRED** — why this matters for the corpus: with h-sandbox the convergent
-set now spans hosted SaaS (Daytona), hosted microVM (E2B/Vercel/Cloudflare),
-OSS library (Microsandbox), OSS self-hosted SaaS (opencomputer.dev), and OSS
-self-hosted control plane (h-sandbox). Every serious shape of "agent
-sandbox" re-derived the same pattern. The R6 anti-overclaim voice still holds:
+set now spans hosted SaaS (Daytona), OSS library (Microsandbox), OSS
+self-hosted agent computer (opencomputer.dev), and OSS self-hosted control
+plane (h-sandbox). Four distinct shapes of "agent sandbox" converged on the
+same placeholder-swap pattern (the numbered data points count the
+placeholder-swap variant specifically; E2B, Vercel, and Cloudflare were
+deep-read for the corpus but are not counted in the convergent set — see the
+research doc's mechanism table). The R6 anti-overclaim voice still holds:
 convergence is substantiated by the quote; independence of derivation is not
 claimed.
 
@@ -64,7 +67,8 @@ claimed.
   placements share the philosophy; the corpus should name the behavior.
 - **Fake-env-is-placeholder explicitness.** Their docs call the placeholder
   what it is ("fake env") and reject "fake env equal to real material" at
-  attach time — a cheap guard against placeholder/value collision that
+  credential validation (documented in `credential-vault-internals.md`) —
+  a cheap guard against placeholder/value collision that
   swapd's placeholder namespace could adopt.
 
 ## H4 provider-adapter data

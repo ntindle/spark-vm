@@ -140,7 +140,7 @@ Docs: https://github.com/superradcompany/microsandbox/blob/HEAD/docs/security/se
   out." Injection runs through intercepted TLS: "the host-side proxy decrypts
   the intercepted TLS, verifies the request is really going where it claims,
   substitutes the real value, and forwards it upstream."
-- The destination gate is the strongest of the six vendors: allowed-host match
+- The destination gate is the strongest of the five-vendor deep set: allowed-host match
   (TLS SNI vs secret host patterns) **plus DNS pin** ("The destination IP was
   actually resolved for that host through the interceptor, so a hard-coded IP
   with a forged SNI doesn't qualify") **plus TLS identity** (never substituted
@@ -226,6 +226,9 @@ docs-verified data point — outside the five-vendor deep set above.
   header / basic) — no request-body substitution claim found, so narrower
   than swapd's headers+bodies+query+path surface. No HTTPS MITM on
   Harakiri's side; the substitution point is the sidecar on the request path.
+  (Upstream OpenSandbox docs describe the sidecar's Credential Vault injection
+  as experimental transparent mitmproxy — the no-MITM statement is Harakiri's
+  product-layer boundary, not a runtime-mechanism claim.)
 - Response scrubbing: **not documented** — their threat model
   (`docs/security/credential-vault-threat-model.md`) admits the residual
   openly: "A malicious allowed destination can reflect received credentials
@@ -249,17 +252,24 @@ docs-verified data point — outside the five-vendor deep set above.
 
 The honest, sourced edges swapd can claim — each one vendor-quoted above:
 
-1. **Request-body scope** (vs E2B and Daytona): both substitute HTTPS headers only;
-   swapd substitutes into request bodies too. Daytona is the incumbent with the
+1. **Request-body scope** (vs E2B, Daytona, and h-sandbox): E2B and Daytona
+   substitute HTTPS headers only; h-sandbox's surface is auth material only
+   with no request-body substitution claim found; swapd substitutes into
+   request bodies too. Daytona is the incumbent with the
    fullest version of the pattern — the comparison there is narrow and honest,
    not a posture win.
-2. **Response scrubbing** (vs E2B and Microsandbox; **parity** with Daytona):
+2. **Response scrubbing** (vs E2B, Microsandbox, and h-sandbox; **parity** with Daytona):
    Daytona's proxy rewrites echoed real values back to the placeholder just
    like swapd's; E2B does not document scrubbing; Microsandbox explicitly does
-   not. The cleanest mechanical contrast here is against Microsandbox, the
-   only other OSS entry.
-3. **Audited per decision** (vs all five): none of the five vendors document
-   per-injection audit lines; swapd's audit write is part of authorization.
+   not; h-sandbox documents no scrubbing and admits the residual openly (a
+   malicious allowed destination can reflect received credentials in its
+   response). The cleanest mechanical contrasts are against the open-source
+   entries — Microsandbox, which explicitly does not scrub, and h-sandbox,
+   which documents no scrubbing. OpenComputer's scrub status is not documented
+   in the corpus.
+3. **Audited per decision** (vs all five, and both watch-list data points): none
+   of the five vendors, OpenComputer, or h-sandbox documents per-injection
+   audit lines; swapd's audit write is part of authorization.
 4. **DNS pin + authority alignment** (vs swapd, conceded): Microsandbox's
    destination gate is stronger than swapd's per-host allowlists — the docs
    should say so rather than invite the comparison to find it.
