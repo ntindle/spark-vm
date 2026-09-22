@@ -88,6 +88,10 @@ HOST_CORPUS = [
     # must not flag it as an echo exemption either (False, both sides)
     ("127.0.0.1:8080", [".0.0.1"]),  # port strips before the literal
     # parse: a port-suffixed literal takes the IP path too (False)
+    ("example.com.:8080", ["example.com"]),  # Security: the dot-strip
+    # runs AFTER the port strip -- a trailing-dot host:port must still
+    # match (fail-closed ssrf.deny name entries); regressed once in
+    # e9ff2c7 and pinned here (True)
 ]
 
 SSRF_CORPUS = [
@@ -169,6 +173,11 @@ class TestEchoLayer(unittest.TestCase):
         self.assertFalse(pm.is_echo_entry("127.0.0.1:8080"))
         # ...while a port on the request side still matches a bare entry.
         self.assertTrue(pm.host_in_list("127.0.0.1:8080", ["127.0.0.1"]))
+        # ...and a trailing-dot host:port still matches a bare entry:
+        # the dot-strip runs AFTER the port strip (Security blocker
+        # fix -- this regressed to False once; pinned against relapse).
+        self.assertTrue(pm.host_in_list("example.com.:8080", ["example.com"]))
+        self.assertTrue(sa._host_in_list("example.com.:8080", ["example.com"]))
 
     def test_is_echo_entry_leading_dot_subdomains(self):
         # Leading-dot entries match *.alias (loopback) at enforcement, so

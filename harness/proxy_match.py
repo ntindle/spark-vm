@@ -54,15 +54,18 @@ def host_in_list(host, entries):
     h = (host or "").lower()
     if h.startswith("["):
         end = h.find("]")
-        if end != -1:
+        if end != -1 and (end == len(h) - 1 or h[end + 1] == ":"):
             h = h[1:end]
-    h = h.rstrip(".")
     if h.count(":") == 1:
         # Single-colon host: a :port suffix, never an IPv6 literal.
         # Strip it BEFORE the literal parse so "127.0.0.1:8080" takes
         # the IP path like "127.0.0.1" does (multi-colon strings such
         # as "::1:8080" are parsed as addresses, not host:port).
         h = h.split(":")[0]
+    # Dot-strip AFTER the port strip: "example.com.:8080" -> "example.com"
+    # (before, it reintroduced a trailing-dot bypass of ssrf.deny name
+    # entries for the host:port form).
+    h = h.rstrip(".")
     try:
         h_ip = ipaddress.ip_address(h)
     except ValueError:
@@ -76,7 +79,7 @@ def host_in_list(host, entries):
         e = str(entry).lower()
         if e.startswith("["):
             end = e.find("]")
-            if end != -1:
+            if end != -1 and (end == len(e) - 1 or e[end + 1] == ":"):
                 e = e[1:end]
         e = e.rstrip(".")
         if h_ip is not None:

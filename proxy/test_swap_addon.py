@@ -1667,6 +1667,10 @@ class SecuritySweepTests(unittest.TestCase):
         # port strips BEFORE the literal parse, so a port-suffixed
         # literal takes the IP path and never the hostname rules
         self.assertFalse(sa._host_in_list("127.0.0.1:8080", [".0.0.1"]))
+        # the dot-strip runs AFTER the port strip: a trailing-dot
+        # host:port must still match (fail-closed ssrf.deny name
+        # entries; finding-47 self-peer guard)
+        self.assertTrue(sa._host_in_list("example.com.:8080", ["example.com"]))
         # a different literal does not match; hostname entries never
         # match an IP-literal host (and vice versa); CIDR entries are
         # _parse_ssrf_allow's business, not this function's

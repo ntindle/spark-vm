@@ -470,6 +470,9 @@ try:
     if st.st_uid not in (0, agent_uid):
         refuse("ssh dir owned by uid %d, expected root or %s"
                % (st.st_uid, os.environ["AGENT_USER"]))
+    # Nit: pin the 0700 guarantee on the fd too (the shell mkdir/chmod
+    # above is still path-based; this closes the residual window).
+    os.fchmod(ssh_fd, 0o700)
     try:
         dst_fd = os.open("authorized_keys",
                          os.O_RDWR | os.O_CREAT | os.O_TRUNC
@@ -635,7 +638,16 @@ try:
         raise
     else:
         os.close(tmp_fd)
-    os.rename(tmp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    try:
+        os.rename(tmp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    except BaseException:
+        # Nit: no stale temp on rename failure (non-secret payload, but
+        # tidy -- the write-path litter pattern should not spread).
+        try:
+            os.unlink(tmp_name, dir_fd=parent_fd)
+        except OSError:
+            pass
+        raise
     # Verify: read the record back through the pinned dir and confirm
     # the tenant id survived the round trip.
     vfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
