@@ -251,7 +251,7 @@ This changelog only works if entries land with the change, not after it:
   stale "free tier first" plan-picker lines are corrected to the decided
   no-free-tier / card-required-trial-possible position, and the
   operator-only `policy-misfire` / `no-gated-action` note the spec's
-  §10 follow-up asked for is in the rendering table. (PR TBD)
+  §10 follow-up asked for is in the rendering table. (#245)
 - An invite wave interrupted mid-send can no longer strand a waitlist row as
   invited with no email on the way: each invited row commits in a single step
   after its email is queued, so a crash degrades to a duplicate email on
