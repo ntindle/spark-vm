@@ -447,7 +447,6 @@ def generate_push_queue(repo_root, work_dir, frames_dir):
     # import needs no sys.path plumbing), and a relative CONFIRM_DIR
     # would then resolve against the wrong directory.
     work_dir = os.path.abspath(work_dir)
-    push_py = os.path.join(repo_root, "confirm", "push.py")
     vapid_path = os.path.join(work_dir, "vapid.json")
     subs_path = os.path.join(work_dir, "push-subscriptions.json")
     journal_path = os.path.join(work_dir, "push-queue.jsonl")
@@ -465,6 +464,13 @@ def generate_push_queue(repo_root, work_dir, frames_dir):
                CONFIRM_DIR=work_dir,
                CONFIRM_VAPID_KEYS=vapid_path,
                CONFIRM_PUSH_SUBS=subs_path,
+               # Pin the queue + dead-letter paths too: push.py falls back
+               # to CONFIRM_DIR-derived paths only when these are unset,
+               # so an ambient export would otherwise route the demo at
+               # the real journal.
+               CONFIRM_PUSH_QUEUE=journal_path,
+               CONFIRM_PUSH_DEAD=os.path.join(work_dir,
+                                              "push-queue-dead.jsonl"),
                CONFIRM_VAPID_SUB="mailto:demo@localhost")
 
     # The mock push service, bound before the subscription is written so
@@ -523,9 +529,9 @@ def generate_push_queue(repo_root, work_dir, frames_dir):
             ("cmd", worker_cmd),
             ("out", out_pass1),
         ]
-        # Frame 3: the journal keeps the pending summons (verbatim).
-        with open(journal_path, encoding="utf-8") as f:
-            journal_line = f.read().strip()
+        # Frame 3: the journal keeps the pending summons (verbatim —
+        # the transcript runs the displayed `cat` for real).
+        journal_line = _sh("cat push-queue.jsonl", work_dir, env).strip()
         entry = _json.loads(journal_line)
         assert entry["aid"] == _PUSHQ_DEMO_ID and entry["attempts"] == 1, \
             "unexpected journal entry: %r" % journal_line

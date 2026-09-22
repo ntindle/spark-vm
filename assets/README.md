@@ -393,9 +393,11 @@ Recorded 2026-09-22 by `scripts/generate_demo_assets.py --asset push-queue`,
 which runs the REAL `confirm/push.py` code paths (H14 durable enqueue/retry)
 against a scratch world that never leaves the machine:
 
-- scratch `CONFIRM_DIR` (a `./demo-push-work` directory — the generator sets
-  `CONFIRM_DIR`, `CONFIRM_VAPID_KEYS`, `CONFIRM_PUSH_SUBS`, and
-  `CONFIRM_VAPID_SUB` itself, so the ambient environment is untouched),
+- scratch `CONFIRM_DIR` (a `./demo-push-work` directory — the generator
+  pins `CONFIRM_DIR`, `CONFIRM_VAPID_KEYS`, `CONFIRM_PUSH_SUBS`,
+  `CONFIRM_PUSH_QUEUE`, `CONFIRM_PUSH_DEAD`, and `CONFIRM_VAPID_SUB`
+  itself, so the ambient environment is untouched even if it exports
+  any of them),
 - a throwaway VAPID keypair, generated silently before frame 1
   (`push.py --gen-keys`; its output is omitted from the frames — a demo
   key is visual noise, not the story). It never leaves the scratch dir
