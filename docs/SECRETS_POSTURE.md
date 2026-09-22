@@ -29,7 +29,7 @@ Agents launch: their release claims a "separate secrets management service"
 with "credentials brokered at execution time" that "never reach the model
 or the sandbox" (vendor launch release via Business Wire, 2026-09-22 —
 release copy, not engineering docs; verbatim quotes in the research doc,
-which scores no mechanism detail beyond them). This document shows
+which scores no mechanism detail beyond those quotes). This document shows
 the pattern is convergent: every
 serious sandbox vendor has shipped some version of "the
 proxy holds the secret, the sandbox doesn't". We make no first-mover claim.

@@ -123,7 +123,7 @@ at the endpoint, with detection + enforcement diagnostics.
 [DigitalOcean Managed Agents launch release](https://www.businesswire.com/news/home/20260922295615/en/DigitalOcean-Launches-Managed-Agents-Bringing-Agent-Execution-Tool-Access-and-Inference-Together-on-One-Cloud)
 (public preview announced 2026-09-22, distributed via Business Wire — a paid
 wire; the claims below are vendor launch copy, not a controls-level read
-like the GitHub/Runloop entries above, and no public API/controls
+like the GitHub Copilot/Runloop entries above, and no public API/controls
 documentation was available at read time):
 
 - Governed tool access through one managed MCP endpoint: 16,000+ tools from
