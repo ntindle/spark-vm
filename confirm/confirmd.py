@@ -1394,7 +1394,12 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.exists(src):
             audit_log("answer-raced-expiry", self.client_address[0],
                       login, "id=%s decision=%s" % (aid, decision))
-            self._err("This approval expired and was removed.", 410)
+            # Security review nit: this branch is a terminal path like
+            # all the others — evict, don't leak one registry entry per
+            # occurrence.
+            _evict_aid_lock(aid)
+            self._err("This approval was removed before it could be "
+                      "recorded.", 410)
             return
         # Finding 56: one-way. Write to answered/, then move to consumed/.
         # The proxy never re-derives grants from these files.
