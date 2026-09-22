@@ -369,10 +369,21 @@ this); the next ordinary `--send-wave` re-invites the row with a fresh
 token. `--reason` is required — it is the audit trail. A row whose
 invite token is still **live** is refused unless `--force` (reinstating
 kills the claim link, so the operator must say so explicitly); `--force`
-consumes the live token first so the trail reads `consumed`. `--dry-run`
-previews the plan. Note the crashed wave's stray email counted against
-the §4 3/24h cap when it went out — if the cap is still full, the re-wave
-leaves the row confirmed for a later wave.
+consumes the live token first so the trail reads `consumed`. An
+**expired** invite is refused outright — don't reinstate expired rows,
+that's what `--rollover` is for; reinstate keeps the original queue
+position, which would silently skip the disclosed 14-day expiry →
+back-of-queue rule. `--dry-run` previews the plan (and refuses the same
+way the real run does — no preview/reality divergence). Duplicate
+`--entry-id` values are collapsed to one revision per row.
+
+If the command itself dies mid-run across multiple `--entry-id`s, the
+rows already flipped are `confirmed` and a re-run fails loud on them —
+re-run `--diagnose`, drop the already-`confirmed` entries from the list,
+and re-run `--reinstate-confirmed` for the remainder. Note the crashed
+wave's stray email counted against the §4 3/24h cap when it went out —
+if the cap is still full, the re-wave leaves the row confirmed for a
+later wave.
 
 *Compliance:* pricing lines are filled at send time from decided pricing —
 the template never contains numbers; no "free tier" wording (Billing

@@ -1800,11 +1800,17 @@ class WaitlistService:
         """Token state for an invited row: one of "ok" (live), "expired",
         "consumed", "invalid", or "missing" (no invite token recorded —
         hand-damaged or pre-feature row). Same lookup semantics as
-        lookup_invite_token."""
+        lookup_invite_token, except a cross-wired token (one whose
+        embedded entry_id resolves to a DIFFERENT row — a hand-damaged
+        row carrying another entry's token) reads "invalid", never that
+        other entry's state: force-repairing this row must never retire
+        someone else's live claim link."""
         token = row.get("active_invite_token")
         if not token:
             return "missing"
-        _, status = self.lookup_invite_token(token)
+        found, status = self.lookup_invite_token(token)
+        if found is not None and found.get("entry_id") != row.get("entry_id"):
+            return "invalid"
         return status
 
     def reinstate_confirmed(self, entry_ids, *, reason, force=False,
@@ -1835,7 +1841,13 @@ class WaitlistService:
         Gates, all fail-loud before ANY row is mutated (validate, then
         commit — no partial application):
         - every entry_id must exist and have status == "invited";
+        - duplicate entry_ids are collapsed (one revision per row);
         - `reason` must be non-empty (it is the audit trail);
+        - an EXPIRED invite is refused outright: reinstating would keep
+          the original queue position and silently skip the disclosed
+          14-day expiry → back-of-queue rule — run --rollover instead
+          (not foldable into --force: force means "retire a live claim
+          link explicitly", and no legitimate expired-reinstate exists);
         - a row whose invite token is still LIVE ("ok") is refused
           unless force=True: reinstating kills the claim link, so the
           operator must say so explicitly. With force, the live token is
@@ -1857,6 +1869,7 @@ class WaitlistService:
             raise ValueError(
                 "reinstate_confirmed: reason is required — it is recorded "
                 "on the row as the audit trail")
+        entry_ids = list(dict.fromkeys(entry_ids))  # E1: one revision/row
         plans = []
         for entry_id in entry_ids:
             row = self.rows.get(entry_id)
@@ -1869,6 +1882,13 @@ class WaitlistService:
                     f"{row.get('status')!r}, not 'invited' — nothing to "
                     "reinstate")
             token_state = self._invite_token_state(row)
+            if token_state == "expired":
+                raise ValueError(
+                    f"reinstate_confirmed: entry {entry_id!r}'s invite "
+                    "has EXPIRED — reinstating would keep its original "
+                    "queue position and silently skip the disclosed "
+                    "14-day expiry -> back-of-queue rule; run --rollover "
+                    "instead")
             if token_state == "ok" and not force:
                 raise ValueError(
                     f"reinstate_confirmed: entry {entry_id!r}'s invite "
@@ -1912,8 +1932,9 @@ class WaitlistService:
         - "expired"  — past the 14d TTL; run --rollover (idempotent).
         - "consumed" — crash-suspect: the token died but the row never
                        rolled back; --reinstate-confirmed candidate.
-        - "invalid"/"missing" — hand-damaged row; inspect by hand, never
-                       auto-repaired.
+        - "invalid"/"missing" — hand-damaged row; inspect by hand
+                       before any repair (an explicit --reinstate-confirmed
+                       --reason ... is the inspection + decision).
         Returns a list of dicts (entry_id, masked owner, token_state,
         recommendation). No mutation; no lock needed beyond the caller's
         read consistency.

@@ -48,8 +48,9 @@ waitlistd.WaitlistService:
         re-invites with a fresh token. A row whose invite token is still
         LIVE is refused unless --force (reinstating kills the claim
         link); --force consumes the live token so the trail reads
-        "consumed". --reason is required — it is the audit trail.
-        Sends no email, so no WAITLIST_CLAIM_LIVE gate.
+        "consumed". An EXPIRED invite is refused outright — reinstating it would silently skip the
+        disclosed 14-day expiry -> back-of-queue rule; run --rollover instead. --reason is required —
+        it is the audit trail. Sends no email, so no WAITLIST_CLAIM_LIVE gate.
 
     waitlist_invites.py --diagnose
         Issue #235 item 3: read-only listing of every invited row with

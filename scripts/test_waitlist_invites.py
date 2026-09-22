@@ -1297,6 +1297,84 @@ def _crash_reinvite(service, monkeypatch):
     return tmp, entry_id, old_token, lines_before
 
 
+def test_reinstate_refuses_expired(monkeypatch):
+    """B1: an expired-but-unconsumed invite is refused fail-loud —
+    reinstating would keep the original queue position and silently
+    skip the disclosed 14-day expiry -> back-of-queue rule. --rollover
+    is the only path; --force does not override this."""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    entry_id = row["entry_id"]
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="wave1", count=1)
+    clock.advance(days=15)
+    assert service.lookup_invite_token(
+        service.rows[entry_id]["active_invite_token"])[1] == "expired"
+    lines_before = len(rows_lines_for(tmp, entry_id))
+
+    with pytest.raises(ValueError, match="--rollover"):
+        service.reinstate_confirmed([entry_id], reason="stale invite")
+    # The dry run refuses identically — no preview/reality divergence.
+    with pytest.raises(ValueError, match="--rollover"):
+        service.reinstate_confirmed([entry_id], reason="stale invite",
+                                    dry_run=True)
+    # --force is for retiring LIVE claim links, not for overriding
+    # the disclosed expiry.
+    with pytest.raises(ValueError, match="--rollover"):
+        service.reinstate_confirmed([entry_id], reason="stale invite",
+                                    force=True)
+    assert len(rows_lines_for(tmp, entry_id)) == lines_before
+    assert service.rows[entry_id]["status"] == "invited"
+
+
+def test_reinstate_dedupes_entry_ids(monkeypatch):
+    """E1: the same --entry-id twice appends exactly one revision."""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    tmp, entry_id, old_token, lines_before = _crash_reinvite(service,
+                                                            monkeypatch)
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    reinstated = fresh.reinstate_confirmed(
+        [entry_id, entry_id], reason="double-flagged by the operator")
+    assert reinstated == [entry_id]
+    assert len(rows_lines_for(tmp, entry_id)) == lines_before + 1
+
+
+def test_reinstate_cross_wired_token(monkeypatch):
+    """E2: a hand-damaged row carrying ANOTHER entry's live token
+    diagnoses as "invalid" — never that entry's state — and repairing it
+    (even with --force) never retires the other entry's claim link."""
+    service, tmp, clock = make_service()
+    ra = confirm_row(service, "a@example.com", clock,
+                     at=NOW - timedelta(days=2))
+    rb = confirm_row(service, "b@example.com", clock,
+                     at=NOW - timedelta(days=1))
+    clock.advance(hours=25)
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="wave1", count=2)
+    ea, eb = ra["entry_id"], rb["entry_id"]
+    b_token = service.rows[eb]["active_invite_token"]
+    assert service.lookup_invite_token(b_token)[1] == "ok"
+    # Hand-damage: A's row now carries B's live token.
+    arow = service.rows[ea]
+    arow["active_invite_token"] = b_token
+    service._save_row(arow)
+
+    diag = {d["entry_id"]: d for d in service.diagnose_invites()}
+    assert diag[ea]["token_state"] == "invalid"
+    assert "by hand" in diag[ea]["recommendation"]
+
+    # Repairing A retires nothing of B's: the cross-wired token reads
+    # "invalid", never "ok", so the force path never consumes it.
+    service.reinstate_confirmed([ea], reason="cross-wired token")
+    assert service.rows[ea]["status"] == "confirmed"
+    assert service.lookup_invite_token(b_token)[1] == "ok"
+    assert service.rows[eb]["status"] == "invited"
+
+
 def test_reinstate_confirmed_crash_repair(monkeypatch):
     """#235 acceptance: the test-1 fault-injection recovery (invited row,
     token consumed, commit never landed) now runs through
@@ -1311,6 +1389,7 @@ def test_reinstate_confirmed_crash_repair(monkeypatch):
     confirmed_at = [r for r in rows_lines_for(tmp, entry_id)
                     if "confirmed_at" in r][-1]["confirmed_at"]
     events_before = funnel_events(tmp)
+    spool_before = spool_docs(tmp)
 
     reinstated = fresh.reinstate_confirmed(
         [entry_id], reason="wave2 crashed between consume and commit; "
@@ -1331,6 +1410,9 @@ def test_reinstate_confirmed_crash_repair(monkeypatch):
     # No funnel event for the reinstatement (taxonomy has none): the
     # event log is identical before and after the flip.
     assert funnel_events(tmp) == events_before
+    # The reinstate itself spools nothing (no email): the documented
+    # "sends no email" guarantee the §4 cap accounting depends on.
+    assert spool_docs(tmp) == spool_before
 
     # The re-wave mints a fresh token; the stray email's link never
     # validates; exactly one invite_sent per committed row.
@@ -1381,9 +1463,11 @@ def test_reinstate_force_consumes_live_token(monkeypatch):
     token = service.rows[entry_id]["active_invite_token"]
     clock.advance(hours=25)
 
+    spool_before = spool_docs(tmp)
     reinstated = service.reinstate_confirmed(
         [entry_id], reason="invite email bounced; re-waving", force=True)
     assert reinstated == [entry_id]
+    assert spool_docs(tmp) == spool_before  # no email from the reinstate
     frow = service.rows[entry_id]
     assert frow["status"] == "confirmed"
     assert frow["reinstate_consumed_live_token"] is True
