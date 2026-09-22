@@ -274,7 +274,7 @@ This changelog only works if entries land with the change, not after it:
   metering as a candidate shape for model-token billing (zero margin risk),
   and drops the stale merge-order note — all cited strategy docs are on
   main and price inputs re-verified through the 2026-09-21 competitor
-  reads. (PR TBD)
+  reads. (PR #253)
 
 ### Fixed
 - Test hermeticity and coverage hardening (dx turn): the push-endpoint
