@@ -458,8 +458,9 @@ This changelog only works if entries land with the change, not after it:
   gpu_class routing, destroy-deletes-volumes) against the real Machines API
   ([#140](https://github.com/ntindle/spark-vm/pull/140))
 - Documented the quarterly manual re-sweep ritual for the three link hosts
-  CI's link checker skips (bot-blocked) with a verification log — all 12
-  links confirmed live on 2026-09-22 (closes #106) (#PR)
+  CI's link checker skips as bot-blocked (medium.com, businesswire.com,
+  globenewswire.com) with a verification log — all 11 links (7 unique
+  URLs) confirmed live on 2026-09-22 (closes #106) (#PR)
 
 ### Changed
 - Identity cleanup: deployment docs use the `ntindle` login account
