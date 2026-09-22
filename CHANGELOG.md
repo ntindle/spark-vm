@@ -249,7 +249,7 @@ This changelog only works if entries land with the change, not after it:
   `components.conf` env overrides so it never touches the host on a
   deployed box, and the CRLF-only refusal case, the live-symlink-target
   removal case, and the dangling-symlink snapshot round-trip are now
-  pinned. (PR TBD)
+  pinned. (#247)
 - README repo-layout table: the `harness/` and `site/` rows now describe
   the current tooling — the provision-time injector and the waitlist
   invite operator tools. (#246)
