@@ -111,8 +111,7 @@ lifecycle above:
    narrow registry writer, then fails closed on any echo-host residue in
    `inference-hosts.allow` or `inference-ssrf.allow`. The injector cannot
    remove allowlist lines (production sudoers is append-only by
-   design), so the image-build gate owns that teardown pre-publish —
-   whichever stage runs last owns it.
+   design), so the image-build gate owns that teardown pre-publish.
 3. Asserts a real inference credential: registry binding of `llm-api`
    (`bearer_header`) to a non-loopback host, plus a blind
    `cred-store-verify-inference` compare proving the stored value is
@@ -141,7 +140,7 @@ confirmd attribution read `"deferred (H9)"` / `"deferred (H10)"` and
 are named in the `deferred` list when their inputs are absent. The
 control plane gates box-live on the manifest, fixture_teardown,
 inference_key, swapd_ca, and probe steps reading `"ok"`. Covered by
-25 hermetic tests
+55 hermetic tests
 (`test_inject_provision_state.py`) mirroring the install-gate-fixture
 hermetic contract: fake writers, a fake sudo that asserts `-u swapd`
 and denies `tee`/`ls`, a fake swap proxy resolving `hsurr:`

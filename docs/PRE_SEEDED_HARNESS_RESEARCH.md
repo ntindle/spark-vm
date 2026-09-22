@@ -35,7 +35,7 @@ tenant attribution when `INJECT_TENANT_ID` is set, then runs
 against the real provider (a probe failure maps to
 `provisioning-failed`; box-live must not flip). Prints exactly one
 JSON inject report on stdout; all progress and refusal diagnostics go
-to stderr. 25 hermetic injector tests (fake writers, fake sudo
+to stderr. 55 hermetic injector tests (fake writers, fake sudo
 asserting `-u swapd` and denying `tee`/`ls`, fake swap proxy, provider
 stub recording `Authorization` headers, stub confirmd). The §4 inject
 list's remaining item — the first-task slot properties — is explicitly

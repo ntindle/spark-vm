@@ -54,9 +54,12 @@ files, CA dir, or agent home.
 """
 
 import getpass
+import ipaddress
 import json
 import os
+import re
 import subprocess
+import sys
 import threading
 import urllib.parse
 import urllib.request
@@ -521,6 +524,8 @@ def test_refuses_allowlist_residue(stack):
     "LOCALHOST\n",       # case variant
     "127.0.0.1.\n",      # trailing dot
     ".0.0.1\n",          # leading-dot subdomain entry (proxy semantics)
+    "::1\n",             # IPv6 loopback literal (proxy fumbles it; fail-closed)
+    "  ::1  \n",         # padded IPv6 loopback literal
 ])
 def test_refuses_allowlist_format_variants(stack, residue):
     # The proxy parses allowlist entries case-insensitively,
@@ -606,6 +611,180 @@ def test_refuses_registry_trailing_dot_variant(stack):
     proc = _run_injector(env)
     assert proc.returncode != 0
     assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+
+
+def test_refuses_unreadable_registry(stack):
+    # The registry cannot be read at all (absent file): the step-2
+    # teardown verification (pre- AND post-teardown reads, both through
+    # echo_bound_hosts) must fail closed, not verify blindly.
+    env, paths = stack
+    (paths["secrets_dir"] / KEY_NAME).write_text(REAL_KEY)
+    # registry_file intentionally never created
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"cannot read the inference registry" in proc.stderr
+    assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+
+
+def test_refuses_corrupt_registry(stack):
+    # Invalid JSON in the registry: the teardown is unverifiable, so
+    # the run fails closed instead of provisioning onto an unknown
+    # binding state.
+    env, paths = stack
+    (paths["secrets_dir"] / KEY_NAME).write_text(REAL_KEY)
+    paths["registry_file"].write_text("{not valid json")
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"cannot read the inference registry" in proc.stderr
+    assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+
+
+def test_refuses_unparseable_allowlist(stack):
+    # A non-UTF-8 allow file cannot be parsed for echo exemptions:
+    # fail closed rather than verifying the teardown blindly.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["allow_file"].write_bytes(b"\xff\xfe not utf-8 \x80\n")
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"cannot parse" in proc.stderr
+    assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+
+
+def test_refuses_registry_ipv6_loopback_literal(stack):
+    # "::1" in allowed_hosts: the proxy's _host_in_list fumbles the
+    # "::1" literal (split(":")[0] -> ""), so the injector flags it
+    # with a fail-closed literal special-case; the narrow writer's
+    # check_host rejects the ":" form, so remove-host fails and the
+    # run must fail closed either way. Without the special-case the
+    # run would proceed past teardown with the entry in place.
+    env, paths = stack
+    (paths["secrets_dir"] / KEY_NAME).write_text(REAL_KEY)
+    paths["registry_file"].write_text(json.dumps({
+        KEY_NAME: {
+            "access_token": {"placement": "bearer_header"},
+            "allowed_hosts": ["::1", PROVIDER_HOST],
+        }
+    }))
+    proc = _run_injector(env)
+    assert proc.returncode != 0
+    assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+
+
+def _injector_mirror_sources():
+    """Extract the injector's proxy-semantics mirrors from the script.
+
+    Returns (host_in_list_fn, allowlist_echo_entries_python_source).
+    Fails if the three host_in_list copies drifted from each other
+    inside the script.
+    """
+    src = open(INJECTOR, encoding="utf-8").read()
+    bodies = re.findall(
+        r"def host_in_list\(host, entries\):\n((?:    .*(?:\n|$))+)", src)
+    assert len(bodies) == 3, \
+        "expected 3 host_in_list copies, found %d" % len(bodies)
+    # Compare code only: comment lines may differ between copies.
+    code = ["".join(l for l in b.splitlines(keepends=True)
+                    if not l.strip().startswith("#")) for b in bodies]
+    assert len(set(code)) == 1, \
+        "host_in_list copies drifted inside inject-provision-state.sh"
+    ns = {}
+    exec("def host_in_list(host, entries):\n" + bodies[0], ns)
+    m = re.search(r"<<'PYEOF'\n(.*?)\nPYEOF", src, re.S)
+    assert m, "allowlist_echo_entries python body not found"
+    return ns["host_in_list"], m.group(1)
+
+
+def _real_proxy_module():
+    import importlib.util
+    path = os.path.join(HERE, "..", "proxy", "swap_addon.py")
+    spec = importlib.util.spec_from_file_location(
+        "sparkvm_swap_addon_canary", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _expected_echo_flags(proxy, aliases, echo_nets, kind, line):
+    # The verdict the REAL proxy semantics produce for one allow-file
+    # line, plus the one documented fail-closed superset (the "::1"
+    # literal the proxy's split(":") fumbles). The injector must agree
+    # exactly: any other divergence is drift, in either direction.
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return []
+    if kind == "ssrf":
+        hosts, nets = proxy._parse_ssrf_allow(s)
+    else:
+        hosts, nets = [s.lower()], []
+    for h in hosts:
+        if any(proxy._host_in_list(a, [h]) for a in aliases):
+            return [line]
+    for n in nets:
+        if any(n.overlaps(e) for e in echo_nets):
+            return [line]
+    if s.lower().rstrip(".") == "::1":
+        return [line]
+    return []
+
+
+def test_proxy_semantics_drift_canary(tmp_path):
+    # The injector's teardown checks mirror proxy/swap_addon.py's
+    # _host_in_list / _parse_ssrf_allow. A proxy-side change (or an
+    # injector-side edit) that narrows the injector's view below the
+    # enforcement point would silently let a real key coexist with a
+    # live echo exemption. This canary fails on any behavioral drift
+    # in either direction.
+    inj_host_in_list, allow_py = _injector_mirror_sources()
+    proxy = _real_proxy_module()
+    aliases = ["127.0.0.1", "localhost", "::1"]
+    echo_nets = [ipaddress.ip_network("127.0.0.0/8"),
+                 ipaddress.ip_network("::1/128")]
+    # Part A: the host_in_list primitive agrees with the real one,
+    # exactly. (The "::1" literal fail-closed special-case lives one
+    # layer up, in the callers -- echo_bound_hosts and
+    # is_echo_hostname -- and is pinned by Part B below and by the
+    # end-to-end tests.)
+    for host, entries in [
+        ("127.0.0.1", ["127.0.0.1"]),
+        ("127.0.0.1", ["LOCALHOST"]),
+        ("localhost", ["localhost."]),
+        ("127.0.0.1", [".0.0.1"]),
+        ("127.0.0.1", [".localhost"]),
+        ("127.0.0.1", ["127.0.0.1:8080"]),
+        ("127.0.0.1", [" 127.0.0.1 "]),
+        ("127.0.0.1", ["api.example.com"]),
+        ("127.0.0.1", []),
+        ("::1", ["::1"]),
+        ("127.0.0.1", ["::1"]),
+    ]:
+        expected = proxy._host_in_list(host, entries)
+        got = inj_host_in_list(host, entries)
+        assert got == expected, (host, entries, got, expected)
+    # Part B: the allowlist checker agrees with the real parse+match
+    # pipeline on every corpus line, per file kind.
+    corpus = {
+        "hosts": ["127.0.0.1", "  127.0.0.1  ", "LOCALHOST",
+                  "localhost.", ".0.0.1", "::1", "  ::1  ",
+                  "127.0.0.1:8080", "api.example.com", "# 127.0.0.1",
+                  "", "10.0.0.0/8"],
+        "ssrf": ["127.0.0.1", "127.0.0.0/8", "127.0.0.1/32", "LOCALHOST",
+                 "  ::1  ", "::1/128", "0.0.0.0/0", "10.0.0.0/8",
+                 "128.0.0.0/1", "api.example.com", "# 127.0.0.1", "",
+                 "999.999.0.0/16"],
+    }
+    for kind, lines in corpus.items():
+        for line in lines:
+            f = tmp_path / "allow"
+            f.write_text(line + "\n", encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, "-c", allow_py, kind, str(f)],
+                capture_output=True, text=True, timeout=30)
+            assert proc.returncode == 0, (kind, line, proc.stderr)
+            flagged = proc.stdout.splitlines()
+            expected = _expected_echo_flags(
+                proxy, aliases, echo_nets, kind, line)
+            assert flagged == expected, (kind, line, flagged, expected)
 
 
 def test_refuses_ssrf_allowlist_residue(stack):
