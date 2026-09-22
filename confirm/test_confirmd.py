@@ -10,6 +10,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -673,6 +675,219 @@ class ConfirmdTests(unittest.TestCase):
         self.assertNotIn(aid, cd._aid_locks)
         self.assertFalse(
             (self.approvals / "pending" / (aid + ".json")).exists())
+
+
+    # --- Issue #233: render reap races the answer critical section ---
+
+    def test_233_load_pending_reap_holds_aid_lock(self):
+        """The render reap must serialize on the per-aid lock: while
+        another thread holds the lock, load_pending() must not remove
+        the expired file. Removing the lock from the reap must fail
+        this (the file would be gone within the sleep)."""
+        aid = "reap-lock-1"
+        p = self.approvals / "pending" / (aid + ".json")
+        p.write_text(json.dumps(
+            {"id": aid, "expires": "2020-01-01T00:00:00+00:00"}))
+        lock = cd._aid_lock(aid)
+        lock.acquire()
+        done = []
+
+        def worker():
+            with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+                cd.load_pending()
+            done.append(True)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        try:
+            time.sleep(0.5)
+            self.assertTrue(p.exists(),
+                            "reap removed the file without holding the lock")
+            self.assertFalse(done)
+        finally:
+            lock.release()
+        t.join(timeout=5)
+        self.assertTrue(done, "reap did not finish after the lock released")
+        self.assertFalse(p.exists())
+        self.assertNotIn(aid, cd._aid_locks)
+
+    def test_233_load_pending_reap_loses_race_gracefully(self):
+        """The answer path may consume the item while the reap waits on
+        the lock; the reap must then skip the remove (not raise) and
+        still evict the lock entry."""
+        aid = "reap-lock-2"
+        p = self.approvals / "pending" / (aid + ".json")
+        p.write_text(json.dumps(
+            {"id": aid, "expires": "2020-01-01T00:00:00+00:00"}))
+        lock = cd._aid_lock(aid)
+        lock.acquire()
+        done = []
+        errors = []
+
+        def worker():
+            try:
+                with mock.patch.object(cd, "APPROVALS",
+                                       str(self.approvals)):
+                    cd.load_pending()
+                done.append(True)
+            except Exception as e:  # noqa: BLE001 — asserted empty
+                errors.append(e)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        time.sleep(0.2)
+        p.unlink()  # simulate the answer path consuming the item
+        lock.release()
+        t.join(timeout=5)
+        self.assertTrue(done)
+        self.assertFalse(errors, "reap raised: %r" % (errors,))
+        self.assertNotIn(aid, cd._aid_locks)
+
+    def test_233_get_does_not_resurrect_reaped_item(self):
+        """An item reaped by load_pending() must stay gone: GET must
+        404, not mint a nonce into a resurrected file."""
+        aid = "reap-noresurrect-1"
+        p = self.approvals / "pending" / (aid + ".json")
+        p.write_text(json.dumps(
+            {"id": aid, "expires": "2020-01-01T00:00:00+00:00"}))
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd.load_pending()
+        self.assertFalse(p.exists())
+        h = cd.Handler.__new__(cd.Handler)
+        h.path = "/approval/" + aid
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        with mock.patch.object(cd.Handler, "_auth",
+                               return_value="ntindle@github"), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)), \
+             mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            h.do_GET()
+        self.assertEqual(got["code"], 404)
+        self.assertFalse(p.exists(), "GET resurrected the reaped file")
+
+    def test_233_answer_raced_expiry_audits_and_refuses(self):
+        """If the pending file disappears between the grant mint and the
+        consume (only an out-of-process remover can do this now that the
+        reap is in-lock), the handler must audit the distinct
+        'answer-raced-expiry' event and refuse with 410 — never write an
+        answered/consumed record that contradicts the reap."""
+        aid = "raced-expiry-1"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00",
+              "credential": "c", "host": "h", "method": "GET"}
+        nonce = cd._mint_csrf_nonce(it)
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                # Simulate the out-of-process remover striking mid-mint.
+                src.unlink()
+
+                class R:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        events = []
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch("subprocess.run", side_effect=fake_run), \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda *a: events.append(a)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._answer_locked("ntindle@github", aid, nonce, "approve")
+        self.assertEqual(got["code"], 410)
+        self.assertTrue(
+            any(e[0] == "answer-raced-expiry" for e in events),
+            "no answer-raced-expiry audit; events: %r" % (events,))
+        self.assertFalse(
+            (self.approvals / "answered" / (aid + ".json")).exists())
+        self.assertFalse(
+            (self.approvals / "consumed" / (aid + ".json")).exists())
+
+    def test_233_sweep_answered_moves_old_files(self):
+        """answered/ strays older than the grace period move to
+        consumed/; fresh files and non-.json names are untouched."""
+        old = self.approvals / "answered" / "old-1.json"
+        fresh = self.approvals / "answered" / "fresh-1.json"
+        stray_txt = self.approvals / "answered" / "note.txt"
+        old.write_text("{}")
+        fresh.write_text("{}")
+        stray_txt.write_text("x")
+        ancient = time.time() - 2 * 86400
+        os.utime(old, (ancient, ancient))
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._sweep_answered(grace=3600)
+        self.assertFalse(old.exists())
+        self.assertTrue(
+            (self.approvals / "consumed" / "old-1.json").exists())
+        self.assertTrue(fresh.exists())
+        self.assertFalse(
+            (self.approvals / "consumed" / "fresh-1.json").exists())
+        self.assertTrue(stray_txt.exists())
+
+    # --- Issue #231: evict on the 404/corrupt negative paths ---
+
+    def _do_get_harness(self, aid):
+        h = cd.Handler.__new__(cd.Handler)
+        h.path = "/approval/" + aid
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        with mock.patch.object(cd.Handler, "_auth",
+                               return_value="ntindle@github"), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)), \
+             mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            h.do_GET()
+        return got
+
+    def test_231_get_404_evicts_aid_lock(self):
+        """GET for a nonexistent aid must drop the per-aid lock entry —
+        the registry must not grow on the negative path."""
+        aid = "evict-404-get-1"
+        cd._aid_lock(aid)  # ensure the entry exists
+        got = self._do_get_harness(aid)
+        self.assertEqual(got["code"], 404)
+        self.assertNotIn(aid, cd._aid_locks)
+
+    def test_231_get_corrupt_evicts_aid_lock(self):
+        """GET for a corrupt pending file: 404 and the lock entry is
+        dropped."""
+        aid = "evict-corrupt-get-1"
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            "{not json")
+        cd._aid_lock(aid)
+        got = self._do_get_harness(aid)
+        self.assertEqual(got["code"], 404)
+        self.assertNotIn(aid, cd._aid_locks)
+
+    def test_231_answer_locked_404_evicts_aid_lock(self):
+        """POST for a nonexistent aid must drop the per-aid lock entry."""
+        aid = "evict-404-post-1"
+        cd._aid_lock(aid)
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._answer_locked("ntindle@github", aid, "x" * 32, "deny")
+        self.assertEqual(got["code"], 404)
+        self.assertNotIn(aid, cd._aid_locks)
 
 
 if __name__ == "__main__":
