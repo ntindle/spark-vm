@@ -1580,7 +1580,9 @@ class ProxyHardeningRoundTests(unittest.TestCase):
 
 class PushNotifyHookTests(unittest.TestCase):
     """H2 / QA B4: the _file_approval push hook fires, passes the filed
-    item through, and never raises — even when push.py is absent."""
+    item through, and never raises — even when push.py is absent.
+    H14: the hook enqueues for the standalone worker (PushQueue.enqueue),
+    no longer sends inline."""
 
     def _drain(self, seen, want=1, timeout=5):
         deadline = time.time() + timeout
@@ -1590,16 +1592,16 @@ class PushNotifyHookTests(unittest.TestCase):
     def test_push_notify_delivers_item_off_thread(self):
         seen = []
 
-        class _Sender:
-            def notify_approval(self, item):
+        class _Queue:
+            def enqueue(self, item):
                 seen.append(item)
-                return 1
+                return "queued"
 
         class FakeMod:
-            class PushSender:
+            class PushQueue:
                 @staticmethod
                 def default():
-                    return _Sender()
+                    return _Queue()
 
         with mock.patch.object(sa, "_load_push_module",
                                return_value=FakeMod):
@@ -1614,15 +1616,15 @@ class PushNotifyHookTests(unittest.TestCase):
             sa._push_notify({"id": "abc123"})
 
     def test_push_notify_sender_failure_never_raises(self):
-        class _Sender:
-            def notify_approval(self, item):
-                raise OSError("push service down")
+        class _Queue:
+            def enqueue(self, item):
+                raise OSError("queue unwritable")
 
         class FakeMod:
-            class PushSender:
+            class PushQueue:
                 @staticmethod
                 def default():
-                    return _Sender()
+                    return _Queue()
 
         with mock.patch.object(sa, "_load_push_module",
                                return_value=FakeMod):

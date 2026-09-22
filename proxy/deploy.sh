@@ -64,13 +64,14 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/build_ca_bundle.py \
          proxy/swap-proxy.service proxy/swap-inference.service \
          confirm/confirmd.py confirm/confirm-request confirm/confirmd.service \
+         confirm/push-worker.service confirm/push.py \
          VERSION scripts/sparkvm_version.py; do
     if [ ! -f "$f" ]; then
         echo "ERROR: required repo file missing: $f — aborting before any mutation"
         exit 1
     fi
 done
-python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py \
+python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py confirm/push.py \
     proxy/safe_install.py proxy/build_ca_bundle.py scripts/sparkvm_version.py \
     || { echo "ERROR: python syntax check failed — aborting"; exit 1; }
 # VERSION feeds audit JSON via the updater: a non-semver VERSION must fail
@@ -229,6 +230,7 @@ echo "[5/7] Installing systemd units..."
 sudo install -o root -g root -m 0644 proxy/swap-proxy.service /etc/systemd/system/swap-proxy.service
 sudo install -o root -g root -m 0644 proxy/swap-inference.service /etc/systemd/system/swap-inference.service
 sudo install -o root -g root -m 0644 confirm/confirmd.service /etc/systemd/system/confirmd.service
+sudo install -o root -g root -m 0644 confirm/push-worker.service /etc/systemd/system/push-worker.service
 
 # --- 6. sudoers -------------------------------------------------------------
 echo "[6/7] Installing sudoers..."
@@ -256,10 +258,11 @@ if [ "$NO_RESTART" = "1" ]; then
 fi
 echo "[7/7] Reloading systemd and restarting services..."
 sudo systemctl daemon-reload
-sudo systemctl enable swap-proxy.service swap-inference.service confirmd.service
+sudo systemctl enable swap-proxy.service swap-inference.service confirmd.service push-worker.service
 sudo systemctl restart swap-proxy.service
 sudo systemctl restart swap-inference.service
 sudo systemctl restart confirmd.service
+sudo systemctl restart push-worker.service
 
 echo ""
 echo "=== verifying ==="
@@ -273,7 +276,7 @@ done
 if [ "$proxy_ready" != "1" ]; then
     echo "  WARNING: proxy port 18080 not listening after $attempt tries"
 fi
-for svc in swap-proxy swap-inference confirmd; do
+for svc in swap-proxy swap-inference confirmd push-worker; do
     if sudo systemctl is-active --quiet "$svc.service"; then
         echo "  $svc: active"
     else

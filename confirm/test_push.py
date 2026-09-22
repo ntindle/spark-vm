@@ -471,7 +471,6 @@ class ConfirmdPushEndpointTests(unittest.TestCase):
         self._orig = (cd._PUSH, cd.PUSH_ENABLED)
         cd._PUSH = self.sender
         cd.PUSH_ENABLED = True
-
     def tearDown(self):
         cd._PUSH, cd.PUSH_ENABLED = self._orig
         self.tmp.cleanup()

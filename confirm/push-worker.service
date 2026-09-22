@@ -1,0 +1,27 @@
+[Unit]
+Description=Standalone Web Push worker with enqueue/retry (swapd push queue)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=swapd
+Group=swapd
+# H14 (part a): delivers queued push notifications with
+# exponential-backoff retry. Portable like confirmd — runs wherever the
+# deployment lives (self-hosted box or hosted service), not hosted-only.
+# Reads the VAPID keypair + subscription store; journal carries approval
+# ids + summaries only, never secrets.
+# Runs as swapd (same owner decision as confirmd). The worker never calls
+# sudo (no tailscale whois), so NoNewPrivileges stays on — unlike
+# confirmd.service, which must keep it off for its narrow sudoers rule.
+Environment=CONFIRM_DIR=/home/swapd/approvals
+ExecStart=/usr/bin/python3 /home/swapd/push.py --worker
+Restart=on-failure
+RestartSec=10
+PrivateTmp=yes
+ProtectSystem=full
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

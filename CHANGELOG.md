@@ -37,6 +37,13 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Push notifications now survive a dead push service: swapd enqueues every
+  filed approval and a standalone push worker (`push-worker.service`)
+  delivers with exponential-backoff retry, dead-lettering only after 8
+  failed attempts with a loud log line. On the healthy path delivery
+  waits for the next worker pass (up to 30s, tunable via
+  `--worker-interval`). Runs wherever the deployment lives (self-hosted
+  or hosted), like confirmd. (PR #204)
 - Waitlist claim route: the invite email's claim link is now served —
   opening it shows the claim screen (masked owner email, the same
   what-happens-next steps as the invite email), and clicking through

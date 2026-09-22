@@ -33,6 +33,7 @@ def test_generate_emits_valid_manifest(tmp_path):
         assert m["registry_paths"][key].startswith("/home/swapd/"), key
     assert "swap-inference.service" in m["units"]
     assert "confirmd.service" in m["units"]
+    assert "push-worker.service" in m["units"]
     assert m["injector_expect"]["probe_path"] == "harness/harness-auth-probe"
     assert m["injector_expect"]["probe_modes"] == ["gate", "provision"]
     # No secret material may ever appear in a manifest.
