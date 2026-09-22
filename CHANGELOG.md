@@ -37,6 +37,18 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Evening competitor watch (2026-09-22): DigitalOcean's Managed Agents
+  product page is readable again — Tool Playground (pre-production policy
+  testing), scheduled/webhook triggers, and org-policy concepts
+  (actors, toolbelts) — plus a flag that DO's marketing claims (~200 ms
+  resume) outrun its own measured benchmark (305 ms); Fly.io Sprites'
+  lifecycle docs publish warm wake 100–500 ms and cold wake 1–2 s with
+  dropped TCP state, bearing on the resume-latency target. New to the
+  tracked set: Boxd ($2M pre-seed, KVM persistent-machine competitor,
+  fork-including-memory in <100 ms), the OpenAI Agents API sandbox
+  partner list (formalizes the harness-vs-compute split), and Upstash
+  "Box" (snapshot/restore sandbox); independent hands-on coverage of the
+  DO launch is still absent. (#TBD)
 - Secrets-posture corpus gains DigitalOcean Managed Agents as the fifth
   convergent data point (their launch release claims a separate secrets
   service with "credentials brokered at execution time" that "never reach

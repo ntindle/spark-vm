@@ -133,6 +133,16 @@ documentation was available at read time):
   the sandbox" — brokering at the policy boundary rather than at the
   workload, the same posture class as Vercel's transform rules and
   Upstash's Attach Headers.
+
+Vendor-sourced follow-up (2026-09-22 evening watch): DO's own docs and
+product page name three org-policy-relevant concepts the release copy did
+not — **actors** (authorization actor model, per the action-gateway
+concept index), **toolbelts** (curated tool packages — likely the
+packaging name for the "session-management APIs packaged as skills per
+supported harness" the launch blog described), and **runs** as a distinct
+entity alongside sessions (agent-harness-runtime concept index also names
+**adapters**/harness adapters). Watch-level: promote to a full entry when
+controls-level docs on actors/toolbelts are public.
 - Centralized permissions, human-in-the-loop approval for sensitive
   actions, audit logs.
 - Status: vendor candidate for the H16 org-policy layer design (C26,
