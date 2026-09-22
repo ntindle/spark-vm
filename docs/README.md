@@ -58,7 +58,7 @@ follow-up tickets before treating anything as current intent.
 | [FLY_DRIVER_RESEARCH.md](FLY_DRIVER_RESEARCH.md) | Fly.io driver research (H4): the provider-agnostic driver interface grounded against the real Machines API — cloud-init does not map, golden-image path recommended. |
 | [SUSPEND_WAKE_RESEARCH.md](SUSPEND_WAKE_RESEARCH.md) | Suspend/wake mechanics research: how agent-sandbox and VM providers do idle suspend and wake, and the provider-agnostic `suspended`/`waking` contract for H4. |
 | [SECRETS_POSTURE_RESEARCH.md](SECRETS_POSTURE_RESEARCH.md) | How agent-sandbox vendors handle credentials — what to copy, what to avoid. |
-| [SECRETS_POSTURE.md](SECRETS_POSTURE.md) | The secrets posture repositioned: the placeholder-swap pattern every sandbox vendor re-derived — why swapd exists, what was independently re-derived, and where spark-vm differs. |
+| [SECRETS_POSTURE.md](SECRETS_POSTURE.md) | The secrets posture repositioned: the placeholder-swap pattern sandbox vendors keep re-deriving — why swapd exists, and where spark-vm differs from the five vendors we read. |
 | [ORG_POLICY_RESEARCH.md](ORG_POLICY_RESEARCH.md) | Org-policy research (H16). |
 | [RESEARCH_AGENT_SANDBOX_ADOPTION.md](RESEARCH_AGENT_SANDBOX_ADOPTION.md) | How hosted agent-sandbox products actually get used. |
 | [RESEARCH_BROWSER_CONTROL_MODELS.md](RESEARCH_BROWSER_CONTROL_MODELS.md) | BrowserSkill (Tencent) Agent Window + tab-borrow vs spark-vm browser-driver (R17). |
@@ -92,7 +92,7 @@ interest if you're working *on* the loop itself.
 
 | Doc | What it is |
 | --- | ---------- |
-| [LOOP_ROTATION_AUDIT_2026-09-20.md](LOOP_ROTATION_AUDIT_2026-09-20.md) | **(start here)** Latest rotation audit (2026-09-20). |
+| [LOOP_ROTATION_AUDIT_2026-09-20.md](LOOP_ROTATION_AUDIT_2026-09-20.md) | **(start here)** Rotation audit, 2026-09-20. |
 | [LOOP_ROTATION_AUDIT_2026-09-19_AFTERNOON.md](LOOP_ROTATION_AUDIT_2026-09-19_AFTERNOON.md) | Rotation audit, 2026-09-19 afternoon. |
 | [LOOP_ROTATION_AUDIT_2026-09-19.md](LOOP_ROTATION_AUDIT_2026-09-19.md) | Rotation audit, 2026-09-19. |
 | [LOOP_ROTATION_AUDIT.md](LOOP_ROTATION_AUDIT.md) | Rotation audit, 2026-09-18 (first). |

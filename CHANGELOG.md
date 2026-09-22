@@ -201,8 +201,9 @@ This changelog only works if entries land with the change, not after it:
 - Docs index catches up with the week's new docs: the four 2026-09-21
   competitor watches (evening, afternoon, C17 resolution, morning), the
   secrets-posture repositioning doc, and the Fly-driver and suspend/wake
-  research docs are now listed, and the 2026-09-20 watch's "latest" label
-  is corrected. (PR TBD)
+  research docs are now listed, and the stale "latest" labels in the
+  competitor and loop-governance tables are corrected to dated style.
+  (PR TBD)
 
 ### Security
 - The with-proxy CA bundle and the jail's swapd-CA install no longer read the
