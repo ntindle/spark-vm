@@ -108,22 +108,32 @@ states the construction, not a static pin.
   is not listening, the DNAT'd connect is refused — the jail gets *no*
   egress, never direct egress. There is no fallback path by construction:
   the forward chain drops everything else.
-- **Not fail-closed (stated residual): runtime firewall removal, now
-  guarded by a watchdog.** The firewall is applied at build and at boot;
-  `jail-firewall-verify.service` + `.timer` (installed by build.sh) re-check
-  `table inet jail` and its three chains every 5 minutes and re-apply
-  `/etc/nftables-jail.conf` (destroy-then-apply, scoped to the jail table
-  only) when the table is missing or damaged. The old hole — a flushed
-  table silently voiding the drops while the jail kept running — is now
-  detected and repaired within the timer window instead of persisting to
-  the next reboot. The new residual is that window: a table loss can exist
-  for up to ~5 minutes before the watchdog repairs it, and the re-apply
-  resets the drop counters (silence on the `jail-*-drop:` prefixes right
-  after a re-apply is expected, not peace of mind). Any repair is logged
-  loudly (`logger -t jail-firewall-verify`), and a failed re-apply fails
-  the verify unit — the operator sees a red unit in `systemctl --failed`,
-  not a silent absence. Note the consequence remains specifically the
-  drop-based isolation: a flush also deletes the DNAT rule, so the
+- **Not fail-closed (stated residual): runtime firewall damage, now
+  guarded by a fail-closed watchdog.** The firewall is applied at build
+  and at boot; `jail-firewall-verify.service` + `.timer` (installed by
+  build.sh from `jail-firewall-verify.sh`) re-check the table every
+  5 minutes. The checked invariant is the enforcement rules themselves,
+  not the chain shells: all three chains are `policy accept`, so the
+  watchdog pins the drop-rule markers (`jail-fwd-drop:`,
+  `jail-fwd-indrop:`, `jail-input-drop:`) and the proxy DNAT rule — an
+  emptied chain (`nft flush chain`) is detected just like a deleted
+  table. On confirmed damage (a 10-second re-check filters the
+  oneshot unit's own transient destroy-then-apply window), the watchdog
+  is fail-closed: it **stops the jail first**, then re-applies
+  `/etc/nftables-jail.conf` (destroy-then-apply, scoped to the jail
+  table only). The stop is not optional theater — a table re-apply does
+  not flush conntrack, so any flow the jail opened while unenforced
+  would survive repair via the `established,related` accept rule;
+  stopping the container tears down its veth and its flows with it.
+  Every fail-closed event exits nonzero, so the unit goes red — the
+  operator sees it in `systemctl --failed` and in the
+  `jail-firewall-verify` journal tag; restart is the operator's explicit
+  decision, never automatic. The residual is bounded downtime, not
+  unbounded unenforced running: a table/ruleset loss can exist for up to
+  ~5 minutes before detection, and the re-apply resets the drop counters
+  (silence on the `jail-*-drop:` prefixes right after a re-apply is
+  expected, not peace of mind). Note the consequence remains specifically
+  the drop-based isolation: a flush also deletes the DNAT rule, so the
   *permitted* proxy path dies with the table — what is voided in the
   window is the "cannot reach host services / cannot egress directly"
   guarantee, not "the jail gets open internet". The pre-watchdog form of
@@ -202,8 +212,10 @@ through the proxy, and Chromium uses its NSS database.
 
 - `build.sh` — the reproducible build (run on the host).
 - `jail-firewall-verify.sh` (installed to `/usr/local/sbin/` by build.sh)
-  — the runtime firewall watchdog: verifies `table inet jail` every
-  5 minutes via its systemd timer, re-applies when damaged, logs loudly.
+  — the runtime firewall watchdog: pins the enforcement rules every
+  5 minutes via its systemd timer; on damage it stops the jail
+  fail-closed, re-applies the table, and exits nonzero so the unit goes
+  red — restart is the operator's explicit decision.
 - `cell-mirror.md` — how the agent's own cell works; the properties
   the jail mirrors.
 - `confirm-page.md` — confirmation page design; the answer→grant
@@ -223,8 +235,9 @@ After (re)building, confirm the isolation properties hold:
   `net.ipv4.conf.all.route_localnet` and `default` are 0 (finding 51).
 - `systemctl list-timers jail-firewall-verify.timer` shows the watchdog
   scheduled every 5 minutes; after a simulated table loss
-  (`sudo nft delete table inet jail`) the table is back within one timer
-  interval and `journalctl -t jail-firewall-verify` shows the repair.
+  (`sudo nft delete table inet jail`) the jail is stopped and the table
+  is back within one timer interval, and `journalctl -t
+  jail-firewall-verify` shows the fail-closed event (restart is manual).
 - Finding 52: the agent's key is NOT in `/home/ntindle/.ssh/authorized_keys`
   (only the owner's Termius key remains); no ControlMaster socket to the
   host exists for the agent. The jail is the only door.

@@ -38,12 +38,16 @@ This changelog only works if entries land with the change, not after it:
 
 ### Added
 - Jail firewall runtime watchdog (closes #254): a 5-minute systemd verify
-  timer re-applies the jail's nftables table if it is flushed or deleted at
-  runtime — the old "flushed table silently voids the isolation guarantees
-  until someone restarts the unit" hole is now detected and repaired within
-  the timer window, with the repair logged loudly and a failed re-apply
-  failing the verify unit visibly. The re-apply touches only the jail
-  table, never other tables. (PR TBD)
+  timer pins the jail's nftables enforcement rules themselves (drop-rule
+  markers + proxy DNAT — the chains are policy accept, so chain shells
+  alone prove nothing). On confirmed damage it is fail-closed: the jail
+  is stopped first (a table re-apply doesn't flush conntrack, so
+  hole-era flows would otherwise survive), then the table is re-applied
+  (scoped to the jail table only), and the unit goes red — restart is
+  the operator's explicit decision. The old "flushed table silently
+  voids the isolation guarantees until someone restarts the unit" hole
+  becomes bounded downtime instead of unbounded unenforced running.
+  (PR TBD)
 - Morning competitor watch (2026-09-22): DigitalOcean launched Managed
   Agents in public preview — microVM-per-session Harness Runtime, Action
   Gateway (16,000+ tools via one MCP endpoint, credentials brokered at

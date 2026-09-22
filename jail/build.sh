@@ -221,47 +221,23 @@ $SUDO nft list table inet jail | head -8 || true
 
 # ---------------------------------------------------------------- firewall watchdog (C25 / issue #254)
 say "jail firewall watchdog"
-# The stated residual the contract used to carry: nothing re-applied the
-# table at runtime, so a flushed `table inet jail` silently voided the
-# drop isolation while the jail kept running. The watchdog closes that
-# hole: a systemd timer runs the verify service every 5 minutes; the
-# service checks the table + all three chains and re-applies the conf
-# (destroy-then-apply, same as the oneshot unit) only when damaged.
-# The re-apply touches ONLY table inet jail — never destructive to other
-# tables — and any re-apply (or a failed one) is logged loudly via
-# logger(1) + the service's exit status (a failed re-apply fails the
-# unit, visible in `systemctl --failed`). Detection/repair window is the
-# timer interval; this is the README contract's new residual boundary.
-$SUDO tee /usr/local/sbin/jail-firewall-verify.sh >/dev/null <<'EOF'
-#!/bin/bash
-# jail-firewall-verify.sh — runtime watchdog for `table inet jail`.
-# Verify-then-repair: if the table or any of its three chains is missing,
-# re-apply /etc/nftables-jail.conf (destroy-then-apply, scoped to the
-# jail table only). Loud on any repair; exits nonzero if the re-apply
-# fails (the service unit goes red, the operator sees it).
-set -uo pipefail
-TABLE_OK=0
-if /usr/sbin/nft list table inet jail 2>/dev/null | grep -q 'chain prerouting' \
-&& /usr/sbin/nft list table inet jail 2>/dev/null | grep -q 'chain input' \
-&& /usr/sbin/nft list table inet jail 2>/dev/null | grep -q 'chain forward'; then
-    TABLE_OK=1
-fi
-if [ "$TABLE_OK" = 1 ]; then
-    exit 0
-fi
-logger -t jail-firewall-verify "ALERT: table inet jail missing or damaged — re-applying /etc/nftables-jail.conf"
-/usr/sbin/nft destroy table inet jail
-if /usr/sbin/nft -f /etc/nftables-jail.conf; then
-    logger -t jail-firewall-verify "REPAIRED: table inet jail re-applied (counters reset by re-apply; this was a runtime table loss)"
-    exit 0
-fi
-logger -t jail-firewall-verify "CRITICAL: re-apply of table inet jail FAILED — jail may be running unenforced"
-exit 1
-EOF
-$SUDO chmod 755 /usr/local/sbin/jail-firewall-verify.sh
+# The residual the contract used to carry: nothing re-applied the table at
+# runtime, so a flushed `table inet jail` silently voided the drop isolation
+# while the jail kept running. The watchdog closes it fail-closed: a systemd
+# timer runs the verify service every 5 minutes; the service checks the
+# enforcement rules themselves (drop-rule markers + proxy DNAT — all chains
+# are policy accept, so chain shells alone prove nothing) and, on confirmed
+# damage, stops the jail BEFORE repairing the table (a re-apply does not
+# flush conntrack, so hole-era flows would otherwise survive via
+# established,related). Every fail-closed event exits nonzero so the unit
+# goes red; restart is the operator's explicit decision. The re-apply
+# touches ONLY table inet jail — never destructive to other tables.
+VERIFY_SCRIPT="$(dirname "$0")/jail-firewall-verify.sh"
+[[ -f "$VERIFY_SCRIPT" ]] || { echo "ERROR: $VERIFY_SCRIPT missing (jail requires it alongside build.sh)"; exit 1; }
+$SUDO install -m 755 "$VERIFY_SCRIPT" /usr/local/sbin/jail-firewall-verify.sh
 $SUDO tee /etc/systemd/system/jail-firewall-verify.service >/dev/null <<'EOF'
 [Unit]
-Description=Jail firewall runtime watchdog (re-apply table inet jail if lost)
+Description=Jail firewall runtime watchdog (fail-closed: stop jail, re-apply table inet jail)
 
 [Service]
 Type=oneshot
