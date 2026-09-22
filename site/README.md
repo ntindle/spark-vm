@@ -30,13 +30,14 @@ redirect shim (`site/go/selfhost/index.html`, no-JS meta refresh for Pages)
 and the dynamic control-plane route (`GET /go/selfhost` → 302 + `cta_click`
 event with canonical `src` validation).
 
-**Not yet (H15 §8's remaining "§7 waitlist-era endpoint surface"):** the
-claim route the invite email links to — `GET /waitlist/claim` is the
-signup-era surface (H15 stage 2), not yet served by `waitlistd.py`.
-The page is still NOT deployable — the dead-form rule holds until every
-§10 checklist item is live (including the deployed endpoint, the
-reminder/drop cron, and the inbox — plus the signup-era claim route,
-tracked separately from §10).
+**Shipped (claim slice):** the claim route the invite email links to —
+`GET /waitlist/claim` renders the claim screen (renders-only, scanner-safe)
+and `POST /waitlist/claim` records the claim (row → `signed_up`, single-use
+token consumed, `claimed` funnel event emitted). Waitlist-era scope:
+tenant-shell provisioning after the claim is the signup-era surface
+(H15 stage 2). The page is still NOT deployable — the dead-form rule
+holds until every §10 checklist item is live (including the deployed
+endpoint, the reminder/drop cron, and the inbox).
 
 ## The dead-form rule (read before deploying anything)
 
@@ -117,8 +118,10 @@ plus markup):** the path-A email parser and the invite sender — shipped
 in this slice as `site/waitlist_patha.py` (tested by
 `scripts/test_waitlist_patha.py`) and `site/waitlist_invites.py` (tested
 by `scripts/test_waitlist_invites.py`); the invite email's claim link
-points at the signup-era claim route (H15 stage 2, not yet served), so
-the page remains non-deployable under the dead-form rule.
+points at `GET /waitlist/claim` (served by `waitlistd.py` since the claim
+slice — renders-only GET, claim-recording POST, `claimed` funnel event),
+so the page remains non-deployable under the dead-form rule only until
+the §10 operator checklist goes live.
 Slices 2–3c already ship: `POST /waitlist/form` endpoint, the §4.3 confirm
 flow (`GET` renders-only / `POST` confirms), the HMAC token signer, the +7d
 reminder and 14d drop jobs (cross-process data lock, fixed drop deadline,
