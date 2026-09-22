@@ -183,6 +183,25 @@ Doc: https://www.daytona.io/docs/en/secrets/.
 - Org-scoped, encrypted at rest, values never returned after creation;
   rotation keeps the placeholder stable with the new value live within ~15s.
 
+### OpenComputer (diggerhq/opencomputer) — VENDOR-VERIFIED
+
+Doc: https://github.com/diggerhq/opencomputer/blob/HEAD/docs/agent-sessions/credentials.mdx
+("How your keys are protected"), verified 2026-09-21. Spotted in the
+2026-09-21 competitor watch as a lighter docs-verified data point — outside
+the five-vendor deep set above.
+
+- "The real key never enters the sandbox. The runtime runs with an opaque
+  placeholder, and OpenComputer's **secret-store egress proxy** swaps in the
+  real value **in flight** — only on the outbound HTTPS call to the model
+  provider (`api.anthropic.com` / `api.openai.com`), enforced by an egress
+  allowlist, and nowhere else."
+- Their term ("secret-store egress proxy") is the vendor's own, and the
+  mechanics match swapd's shape: placeholder in the sandbox, real value
+  swapped at the egress boundary onto allowlisted hosts.
+- Scope note: documented for model-provider calls; the vendor doc verifies
+  the mechanism, not the derivation history — convergence is substantiated by
+  the quote, independence of derivation is not claimed here.
+
 ## What this means for R6 (the docs repositioning)
 
 The honest, sourced edges swapd can claim — each one vendor-quoted above:

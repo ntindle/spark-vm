@@ -37,12 +37,12 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
-- Secrets-posture corpus: opencomputer.dev's independently-derived
-  secret-store egress proxy (opaque placeholder in the sandbox, real key
-  swapped in-flight on the outbound HTTPS call to the model provider, under
-  an egress allowlist — verified against their own docs 2026-09-21) joins
-  Daytona and Microsandbox as a third convergent data point for the
-  placeholder-swap pattern. (PR TBD)
+- Secrets-posture corpus: opencomputer.dev's secret-store egress proxy
+  (opaque placeholder in the sandbox, real key swapped in-flight on the
+  outbound HTTPS call to the model provider, under an egress allowlist —
+  verified against their own docs 2026-09-21, verbatim quote in the research
+  doc) joins Daytona and Microsandbox as a third convergent data point for
+  the placeholder-swap pattern. (PR TBD)
 - Competitor watch 2026-09-21 evening (docs/COMPETITOR_WATCH_2026-09-21_EVENING.md):
   quiet window — zero in-window deltas across the tracked set since the
   afternoon pass; one pre-window miss filed as watch item C18

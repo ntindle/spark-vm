@@ -4,17 +4,20 @@
 contributors touching the swap path (`proxy/`). For the primary research with
 vendor-quoted citations, see [the vendor-quoted research](SECRETS_POSTURE_RESEARCH.md) — this page is
 the repositioned summary: what the pattern is, why swapd exists, and exactly
-where it differs from the five vendors we read.
+where it differs from the five vendors we read (plus the watch-list data point
+above).
 
 **The one honest framing, up front:** the secret-injection posture is
 *independently re-derived*, not a proven lead. Daytona — a major incumbent —
 ships the full pattern, and Microsandbox independently derived the
-placeholder variant in the open. A third independent derivation is
+placeholder variant in the open. A third convergent data point — spotted in
+the competitor watch, outside the five-vendor research set below — is
 opencomputer.dev: their docs describe a secret-store egress proxy where the
 runtime runs with an opaque placeholder and the real key is swapped
 in-flight, only on the outbound HTTPS call to the model provider, under an
 egress allowlist ([credentials.mdx](https://github.com/diggerhq/opencomputer/blob/HEAD/docs/agent-sessions/credentials.mdx),
-verified 2026-09-21). This document shows the pattern is convergent: every
+verbatim quote in the research doc, verified 2026-09-21). This document shows
+the pattern is convergent: every
 serious sandbox vendor has shipped some version of "the
 proxy holds the secret, the sandbox doesn't". We make no first-mover claim.
 
@@ -155,6 +158,8 @@ Not a security certification, not a guarantee of equivalence, and not a
 migration guide. The five vendor behaviors above are quoted from their own
 docs as of 2026-09-19 (see [the vendor-quoted research](SECRETS_POSTURE_RESEARCH.md) for the
 verbatim citations; the Vercel plan-availability item was re-verified
-2026-09-21 against the vendor's KB); vendor behavior moves, and this page
+2026-09-21 against the vendor's KB); OpenComputer's egress-proxy note is
+verified against its own docs as of 2026-09-21 (verbatim quote in the
+research doc). Vendor behavior moves, and this page
 tracks the release it ships with. When the vendor docs change, update the research doc
 first and re-derive this page from it.
