@@ -67,8 +67,9 @@ Both are REQUIRED and must be non-empty — an invite without real pricing
 is the honesty violation §11 exists to prevent.
 
 The claim link in the invite email points at
-{public_host}/waitlist/claim?token=… — the signup-era claim route (H15
-stage 2), not yet served by waitlistd. The page is still NOT deployable
+{public_host}/waitlist/claim?token=… — served by waitlistd (the claim
+slice: renders-only GET, records the claim on POST, emits the `claimed`
+funnel event). The page is still NOT deployable
 until every WAITLIST_OPERATIONS.md §10 item is live (site/README.md).
 
 Operator cron shape (same env as the other waitlist tooling):
@@ -96,7 +97,10 @@ Config (env — same fail-loud contract as waitlistd/waitlist_jobs):
     WAITLIST_PUBLIC_HOST public origin for links in queued email
                          (default https://waitlist.example.invalid).
     WAITLIST_CLAIM_LIVE  set to exactly "1" only when GET
-                         /waitlist/claim actually serves invite tokens.
+                         /waitlist/claim actually serves invite tokens —
+                         the route ships in waitlistd (claim slice), and
+                         this attestation is the operator's confirmation
+                         that the deployed control plane carries it.
                          REQUIRED for a real --send-wave (not for
                          --dry-run or --rollover): the invite email's
                          single prominent action is the claim link, and

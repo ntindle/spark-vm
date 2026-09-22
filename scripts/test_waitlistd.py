@@ -923,3 +923,216 @@ def test_http_selfhost_redirect(live_server):
     events = read_events(tmp)
     assert [e for e in events if e["event"] == "cta_click"
             and e["attrs"].get("src") == "selfhost"]
+
+
+# ---------------------------------------------------------------------------
+# The claim route (claim slice): GET /waitlist/claim renders only,
+# POST /waitlist/claim records the claim (waitlist-era scope).
+# ---------------------------------------------------------------------------
+
+PRICING = "Starter — 2 vCPU / 8 GB — $24/mo"
+TERMS = "14-day trial, card required up front per the Billing decision."
+
+
+def _invite(svc, tmp, email, clock=None):
+    """Submit → confirm → one invite wave. Returns (row, invite_token)."""
+    row = _submit(svc, email)
+    token, _ = extract_token_from_spool(tmp)
+    status, _ = svc.confirm_post(token)
+    assert status == 200
+    invited = svc.send_invite_wave(
+        pricing_lines=PRICING, trial_terms=TERMS, wave="w1", count=10)
+    assert row["entry_id"] in invited
+    row = svc.rows[row["entry_id"]]
+    assert row["status"] == "invited"
+    return row, row["active_invite_token"]
+
+
+def test_claim_get_renders_screen_and_changes_nothing():
+    svc, tmp = make_service()
+    row, token = _invite(svc, tmp, "claim1@example.com")
+    status, body = svc.claim_get(token)
+    assert status == 200
+    assert "Claim my box" in body
+    assert 'action="/waitlist/claim"' in body
+    assert "claim1@example.com" not in body  # masked, never verbatim
+    assert wd.masked_owner("claim1@example.com") in body
+    assert "token" in body  # hidden form field carries it to the POST
+    # Renders-only: the token is still live, the row untouched.
+    assert svc.lookup_invite_token(token) == (svc.rows[row["entry_id"]], "ok")
+    assert svc.rows[row["entry_id"]]["status"] == "invited"
+
+
+def test_claim_post_records_claim_and_emits_event():
+    svc, tmp = make_service()
+    row, token = _invite(svc, tmp, "claim2@example.com")
+    status, body = svc.claim_post(token)
+    assert status == 200
+    assert "Claim recorded" in body
+    row = svc.rows[row["entry_id"]]
+    assert row["status"] == "signed_up"
+    assert row.get("signed_up_at")
+    # Single-use: the token is consumed — the link dies with the claim.
+    _, tok_status = svc.lookup_invite_token(token)
+    assert tok_status == "consumed"
+    events = read_events(tmp)
+    claimed = [e for e in events if e["event"] == "claimed"]
+    assert len(claimed) == 1
+    assert claimed[0]["ref"] == row["entry_id"]
+    assert claimed[0]["attrs"] == {}
+    # POST-success renders exactly like already-claimed, verbatim.
+    status2, body2 = svc.claim_post(token)
+    assert status2 == 200 and body2 == body
+    # ...and re-clicking the email link says so too, never an error.
+    status3, body3 = svc.claim_get(token)
+    assert status3 == 200 and body3 == body
+    # No second event on the idempotent re-POST.
+    assert len([e for e in read_events(tmp)
+                if e["event"] == "claimed"]) == 1
+
+
+def test_claim_expired_token_is_inactive_on_get_and_post():
+    clock = MutableClock(NOW)
+    svc, tmp = make_service(clock=clock)
+    row, token = _invite(svc, tmp, "claim3@example.com")
+    # The boundary itself is expired — lookup treats issued >= TTL as
+    # expired, matching the rollover cron's rule. One second before the
+    # boundary the token still claims.
+    clock.t = NOW + timedelta(seconds=wd.INVITE_TTL_SECONDS - 1)
+    status, body = svc.claim_get(token)
+    assert status == 200 and "Claim my box" in body
+    clock.t = NOW + timedelta(seconds=wd.INVITE_TTL_SECONDS)
+    for fn in (svc.claim_get, svc.claim_post):
+        status, body = fn(token)
+        assert status == 200
+        assert "no longer live" in body
+    clock.t = NOW + timedelta(days=15)
+    status, body = svc.claim_post(token)
+    assert status == 200 and "no longer live" in body
+    assert svc.rows[row["entry_id"]]["status"] == "invited"  # untouched
+
+
+def test_claim_superseded_token_is_inactive():
+    svc, tmp = make_service()
+    row, token = _invite(svc, tmp, "claim4@example.com")
+    # A re-wave mints a fresh token and swaps it in (old one retired).
+    fresh = svc.mint_invite_token(row["entry_id"], row["owner_email"])
+    row["active_invite_token"] = fresh
+    svc._save_row(row)
+    status, body = svc.claim_post(token)
+    assert status == 200 and "no longer live" in body
+    status, body = svc.claim_get(token)
+    assert status == 200 and "no longer live" in body
+    assert svc.rows[row["entry_id"]]["status"] == "invited"
+    # The fresh token still claims.
+    status, _ = svc.claim_post(fresh)
+    assert status == 200
+    assert svc.rows[row["entry_id"]]["status"] == "signed_up"
+
+
+def test_claim_rejects_cross_kind_tokens():
+    svc, tmp = make_service()
+    row = _submit(svc, "claim5@example.com")
+    confirm_token, _ = extract_token_from_spool(tmp)
+    # A confirm token is structurally an invite token — must not claim.
+    for fn in (svc.claim_get, svc.claim_post):
+        status, body = fn(confirm_token)
+        assert status == 200 and "no longer live" in body
+    # Garbage is inactive too.
+    for fn in (svc.claim_get, svc.claim_post):
+        status, body = fn("not-a-token")
+        assert status == 200 and "no longer live" in body
+    assert svc.rows[row["entry_id"]]["status"] == "pending"
+
+
+def test_claim_copy_matches_invite_email_what_happens_next():
+    # The claim screen's what-happens-next must never diverge from the
+    # invite email's — both draw on the same §7 sentences.
+    svc, tmp = make_service()
+    row, token = _invite(svc, tmp, "claim6@example.com")
+    docs = spool_docs_newest_first(tmp)
+    invite_doc = next(d for d in docs if "claim your box" in d["subject"])
+    flat = lambda s: " ".join(s.split())
+    for sentence in ("proves itself with a key", "Tailscale", "card on file"):
+        assert sentence in flat(invite_doc["body"])
+    _, body = svc.claim_get(token)
+    for sentence in ("proves itself with a key", "Tailscale", "card on file"):
+        assert sentence in flat(body)
+    # No pricing numbers on the claim screen — they were in the email.
+    assert "$" not in body.replace("&#", "")
+
+
+def test_claimed_event_parses_in_funnel_metrics():
+    # scripts/funnel_metrics.py raises ValueError on unknown events — the
+    # `claimed` addition must keep the emitted trail parseable.
+    svc, tmp = make_service()
+    row, token = _invite(svc, tmp, "claim7@example.com")
+    svc.claim_post(token)
+    fm = load_funnel_metrics()
+    rows = fm.load_events(os.path.join(tmp, "funnel_events.jsonl"))
+    assert {r["event"] for r in rows} >= {
+        "waitlist_submitted", "confirm_sent", "confirmed",
+        "invite_sent", "claimed"}
+
+
+def test_http_claim_round_trip(live_server):
+    port, tmp = live_server
+    svc = wd._Handler.service
+    status, body = _post(port, "/waitlist/form", {
+        "owner_email": "live-claim@example.com", "muse_email": "",
+        "website": "", "rendered_at": str(time.time() - 10)})
+    assert status == 200
+    token, _ = extract_token_from_spool(tmp)
+    status, _ = _get(port, "/waitlist/confirm?token=" +
+                     urllib.parse.quote(token))
+    assert status == 200
+    status, _ = _post(port, "/waitlist/confirm", {"token": token})
+    assert status == 200
+    invited = svc.send_invite_wave(
+        pricing_lines=PRICING, trial_terms=TERMS, wave="wlive", count=10)
+    assert len(invited) == 1
+    row = svc.rows[invited[0]]
+    itoken = row["active_invite_token"]
+    # GET renders the claim screen; the token is in a form field.
+    status, body = _get(port, "/waitlist/claim?token=" +
+                        urllib.parse.quote(itoken))
+    assert status == 200 and "Claim my box" in body
+    # Query-string token must not claim on POST.
+    status, body = _post(port, "/waitlist/claim?token=" +
+                         urllib.parse.quote(itoken), {})
+    assert status == 200 and "no longer live" in body
+    # Token as a FORM FIELD claims.
+    status, body = _post(port, "/waitlist/claim", {"token": itoken})
+    assert status == 200 and "Claim recorded" in body
+    assert svc.rows[invited[0]]["status"] == "signed_up"
+
+
+def test_http_claim_oversized_body_is_413(live_server):
+    port, tmp = live_server
+    svc = wd._Handler.service
+    # A live invite row stands by: the 413 must leave it untouched.
+    status, _ = _post(port, "/waitlist/form", {
+        "owner_email": "live-claim413@example.com", "muse_email": "",
+        "website": "", "rendered_at": str(time.time() - 10)})
+    assert status == 200
+    token, _ = extract_token_from_spool(tmp)
+    status, _ = _get(port, "/waitlist/confirm?token=" +
+                     urllib.parse.quote(token))
+    status, _ = _post(port, "/waitlist/confirm", {"token": token})
+    invited = svc.send_invite_wave(
+        pricing_lines=PRICING, trial_terms=TERMS, wave="w413", count=10)
+    assert len(invited) == 1
+    itoken = svc.rows[invited[0]]["active_invite_token"]
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    big = "token=" + urllib.parse.quote(itoken + "x" * 70000)
+    conn.request("POST", "/waitlist/claim", big,
+                 {"Content-Type": "application/x-www-form-urlencoded"})
+    resp = conn.getresponse()
+    assert resp.status == 413
+    resp.read()
+    # Rejected before the service layer: the row is untouched.
+    row = svc.rows[invited[0]]
+    assert row["status"] == "invited"
+    _, tok_status = svc.lookup_invite_token(itoken)
+    assert tok_status == "ok"
+    assert not [e for e in read_events(tmp) if e["event"] == "claimed"]

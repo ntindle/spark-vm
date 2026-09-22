@@ -10,6 +10,9 @@ endpoint surface:
     GET  /waitlist/forget    renders only — never changes state (slice 3c)
     POST /waitlist/forget    token as form field; deletes the row (slice 3c)
     GET  /go/selfhost        logs cta_click, 302s to the self-host docs (slice 3c)
+    GET  /waitlist/claim     renders only — never changes state (claim slice)
+    POST /waitlist/claim     invite token as form field; records the claim,
+                             emits the `claimed` funnel event (claim slice)
 
 The path-A email parser (WAITLIST_OPERATIONS.md §2) and the invite
 sender (§7) landed in a later slice — they extend this module (submit_email,
@@ -17,8 +20,11 @@ mint_invite_token, send_invite_wave, rollover_expired_invites) plus the
 operator CLIs site/waitlist_patha.py and site/waitlist_invites.py. Per
 docs/WAITLIST_OPERATIONS.md §10 + site/README.md, the page is still NOT
 deployable — the dead-form rule holds until every §10 item is live
-(the claim route the invite email links to, GET /waitlist/claim, is not
-yet served by this daemon — it belongs to the signup-era surface).
+(deployed endpoint, reminder/drop cron, inbox). The claim route the
+invite email links to IS served by this daemon (the claim slice:
+waitlist-era scope — token validation, the claim screen, the recorded
+claim, the `claimed` funnel event; tenant-shell provisioning after the
+claim belongs to the signup-era surface — WAITLIST_OPERATIONS.md §8).
 
 Design decisions (all per the cited specs, no improvisation):
 
@@ -176,6 +182,30 @@ COPY_CONFIRMED = (
 )
 COPY_EXPIRED = "This link expired — waitlist links last 14 days."
 COPY_REJOIN = "Join the waitlist again"
+
+# Claim-page copy. Verbatim from docs/WAITLIST_OPERATIONS.md §7's invite
+# "What happens next" block (identity linking, tailnet, card on file) —
+# the what-happens-next the claim page shows is the invite email's, so
+# the two never diverge. The page makes no pricing promise (the exact
+# numbers were in the invite email) and no box-provisioning promise
+# (tenant-shell provisioning is the signup-era surface — §8).
+COPY_CLAIM_NEXT = (
+    "What happens next: you\u2019ll link your agent\u2019s identity (it proves "
+    "itself with a key, you approve the fingerprint), bring your Tailscale "
+    "tailnet, and put a card on file. Your box is a real computer \u2014 files, "
+    "jobs, and the desktop persist. The exact pricing was in your invite "
+    "email."
+)
+COPY_CLAIM_EXPIRY = (
+    "This invite expires 14 days after it was sent \u2014 after that the slot "
+    "rolls to the next entry. Nothing happens until you click the button."
+)
+COPY_CLAIM_INACTIVE = (
+    "This invite link is no longer live \u2014 invite links expire 14 days "
+    "after the wave, and a superseded link lands here too. After expiry "
+    "the slot rolls to the next entry, you rejoin the line at the back, "
+    "and you\u2019ll be invited again in a later wave, when one runs."
+)
 CONFIRM_SUBJECT = "Confirm your spark-vm waitlist spot"
 REMINDER_SUBJECT = "Reminder: your spark-vm waitlist spot is waiting on one click"
 
@@ -328,11 +358,12 @@ unless you click the link.
 # appears exactly once before any card ask — here, in the invite email;
 # no "free tier" wording; no launch-date promises). {position} is the
 # invitee's signed position line ("You held #N in line"). The claim link
-# points at the signup-era claim route — GET /waitlist/claim is not yet
-# served by waitlistd (signup-era surface, H15 stage 2); the email's
-# honesty posture holds because the route exists in the plan the invite
-# references, and the claim expiry clock is real: the invite expires in
-# 14 days and the slot rolls to the next entry in line.
+# points at the claim route — GET /waitlist/claim is served by waitlistd
+# (the claim slice: renders-only GET, claim-recording POST, `claimed`
+# funnel event); the email's honesty posture holds because the route
+# exists in the deployed daemon this email is sent from, and the claim
+# expiry clock is real: the invite expires in 14 days and the slot rolls
+# to the next entry in line.
 INVITE_SUBJECT = "You're off the waitlist — claim your box"
 
 INVITE_BODY = """\
@@ -1611,6 +1642,92 @@ class WaitlistService:
             return row, "expired"
         return row, "ok"
 
+    # -- claim ------------------------------------------------------------
+
+    def _claimed_row_for_retired_token(self, entry_id):
+        """Row for a retired (consumed/superseded) invite token.
+
+        The caller must pass the entry_id of a token whose HMAC has
+        already been verified — in practice, a token that
+        lookup_invite_token returned ("consumed") for. The wire-format
+        entry_id is inside the HMAC payload, so it cannot be swapped
+        without invalidating the signature; the value is used only for
+        a store lookup plus a status check, never for authorization.
+        """
+        return self.rows.get(entry_id)
+
+    def claim_get(self, token):
+        """GET /waitlist/claim — renders only. Never changes state.
+
+        The invite email's claim link is fetched by mail scanners and
+        unfurlers before the human clicks (the §4.3 scanner threat model
+        applies verbatim to claim links). A live invite renders the
+        claim screen; an already-claimed row (consumed token, status
+        signed_up) renders the claimed page idempotently — never an
+        error; a dead link (expired, superseded, invalid, or a rolled-back
+        row) renders the inactive page. Read under the data lock with a
+        fresh view: a wave, the rollover cron, or a racing POST may have
+        retired this token since the daemon's view was loaded.
+        """
+        with data_lock(self.data_dir), self._lock:
+            self._refresh_under_lock()
+            row, status = self.lookup_invite_token(token or "")
+            if status == "invalid" or status == "expired":
+                return 200, page_claim_inactive()
+            if status == "consumed":
+                # The HMAC verified (a forged token lands on "invalid"),
+                # so the wire-format entry_id is trustworthy for lookup.
+                retired = self._claimed_row_for_retired_token(
+                    token.split(".", 4)[1])
+                if (retired is not None
+                        and retired.get("status") == "signed_up"):
+                    # Idempotent re-click after the single-use token ran:
+                    # the claim is recorded — say so, never an error.
+                    return 200, page_claimed(
+                        masked_owner(retired["owner_email"]))
+                return 200, page_claim_inactive()
+            return 200, page_claim_button(
+                token, masked_owner(row["owner_email"]))
+
+    def claim_post(self, token):
+        """POST /waitlist/claim — invite token as form field. Records the
+        claim (waitlist-era scope: marks the row signed_up, emits the
+        `claimed` funnel event with ref = the waitlist row id; tenant-shell
+        provisioning belongs to the signup-era surface —
+        WAITLIST_OPERATIONS.md §8).
+
+        The lookup-then-consume is check-then-act — serialized so two
+        racing POSTs of one fresh token can't double-emit `claimed`.
+        (Thread lock inside the data lock — same order as confirm_post.)
+        """
+        with data_lock(self.data_dir), self._lock:
+            # Same staleness concern as confirm_post: a wave, the rollover
+            # cron, or a racing POST may have retired this token since the
+            # daemon's view was loaded.
+            self._refresh_under_lock()
+            row, status = self.lookup_invite_token(token or "")
+            if status == "invalid" or status == "expired":
+                return 200, page_claim_inactive()
+            if status == "consumed":
+                # The HMAC verified (a forged token lands on "invalid"),
+                # so the wire-format entry_id is trustworthy for lookup.
+                retired = self._claimed_row_for_retired_token(
+                    token.split(".", 4)[1])
+                if (retired is not None
+                        and retired.get("status") == "signed_up"):
+                    # Idempotent re-POST: same rendering as a fresh claim,
+                    # verbatim — never an error, never a second event.
+                    return 200, page_claimed(
+                        masked_owner(retired["owner_email"]))
+                return 200, page_claim_inactive()
+            row["status"] = "signed_up"
+            row["signed_up_at"] = iso_z(self.clock())
+            self._save_row(row)
+            self._consume_token(token)  # single-use: this token can never claim again
+            self._emit("claimed", row["entry_id"])
+            # POST-success renders exactly like already-claimed, verbatim.
+            return 200, page_claimed(masked_owner(row["owner_email"]))
+
     def _queue_invite_email(self, row, position, pricing_lines, trial_terms,
                             wave, now):
         """Spool the §7 invite email: pricing + trial terms filled at send
@@ -2322,6 +2439,58 @@ def page_already_deleted():
     )
 
 
+def page_claim_button(token, masked):
+    tok = html.escape(token, quote=True)
+    who = html.escape(masked, quote=True)
+    return PAGE_SHELL.format(
+        title="Claim your box",
+        body=(
+            # One button, plain form POST — claiming needs no JavaScript,
+            # and the §4.3 GET-never-changes-state rule holds for claim
+            # links too: this page only renders. The what-happens-next
+            # lines are COPY_CLAIM_NEXT verbatim, so the claim screen never
+            # diverges from the invite email.
+            "<h1>You\u2019re off the waitlist \u2014 claim your box</h1>"
+            f"<p>You\u2019re claiming as <strong>{who}</strong>.</p>"
+            "<p>" + html.escape(COPY_CLAIM_NEXT) + "</p>"
+            '<form action="/waitlist/claim" method="post">'
+            f'<input type="hidden" name="token" value="{tok}">'
+            '<button type="submit">Claim my box</button>'
+            "</form>"
+            '<p class="muted">' + html.escape(COPY_CLAIM_EXPIRY) + "</p>"
+        ),
+    )
+
+
+def page_claimed(masked):
+    # The one rendering for "claimed": POST-success and already-claimed
+    # are verbatim identical (the confirm/forget idempotency contract,
+    # applied to claim).
+    who = html.escape(masked, quote=True)
+    return PAGE_SHELL.format(
+        title="Claim recorded",
+        body=(
+            "<h1>Claim recorded</h1>"
+            f"<p>Your invite is claimed for <strong>{who}</strong>. "
+            + html.escape(COPY_CLAIM_NEXT)
+            + "</p>"
+        ),
+    )
+
+
+def page_claim_inactive():
+    # A token past its 14d life, superseded by a newer wave, structurally
+    # invalid, or retired by the rollover cron — never an error dump.
+    return PAGE_SHELL.format(
+        title="Invite no longer live",
+        body=(
+            "<h1>This invite link is no longer live</h1>"
+            "<p>" + html.escape(COPY_CLAIM_INACTIVE) + "</p>"
+            '<p><a href="/waitlist">' + html.escape(COPY_REJOIN) + "</a></p>"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # HTTP wiring
 # ---------------------------------------------------------------------------
@@ -2385,7 +2554,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         path = urllib.parse.urlsplit(self.path).path
         fields = self._fields() if path in (
-            "/waitlist/form", "/waitlist/confirm", "/waitlist/forget") else {}
+            "/waitlist/form", "/waitlist/confirm", "/waitlist/forget",
+            "/waitlist/claim") else {}
         if fields is _OVERSIZED:
             # Engineering deferred blocker (PR #165): on keep-alive
             # connections the unread remainder of an oversized body would
@@ -2411,6 +2581,11 @@ class _Handler(BaseHTTPRequestHandler):
                 fields.get("token")
             )
             self._send(status, body)
+        elif path == "/waitlist/claim":
+            status, body = self.service.claim_post(
+                fields.get("token")
+            )
+            self._send(status, body)
         else:
             self._send(404, PAGE_SHELL.format(
                 title="Not found",
@@ -2426,6 +2601,10 @@ class _Handler(BaseHTTPRequestHandler):
         elif parts.path == "/waitlist/forget":
             token = urllib.parse.parse_qs(parts.query).get("token", [None])[0]
             status, body = self.service.forget_get(token)
+            self._send(status, body)
+        elif parts.path == "/waitlist/claim":
+            token = urllib.parse.parse_qs(parts.query).get("token", [None])[0]
+            status, body = self.service.claim_get(token)
             self._send(status, body)
         elif parts.path == "/go/selfhost":
             src = urllib.parse.parse_qs(parts.query).get("src", [None])[0]
