@@ -453,7 +453,7 @@ class ConfirmdPushEndpointTests(unittest.TestCase):
         # machines where /home/swapd is not writable (e.g. spark-vm).
         self._appr = tempfile.TemporaryDirectory()
         self._appr_patch = mock.patch.object(
-            cd, "APPROVALS", str(Path(self._appr.name)))
+            cd, "APPROVALS", self._appr.name)
         self._appr_patch.start()
         self.addCleanup(self._appr_patch.stop)
         self.addCleanup(self._appr.cleanup)

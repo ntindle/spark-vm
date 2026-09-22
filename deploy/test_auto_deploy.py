@@ -330,6 +330,7 @@ def test_snapshot_and_rollback(tmp_path):
     (swapd / "swap_addon.py").write_text("NEW ADDON")
     (bindir / "with-proxy").write_text("NEW PROXY")
     sudoers.write_text("NEW SUDOERS")
+    ca.write_text("NEW CA")
     r = source_and("restore_snapshot %s" % snap, env_extra=env)
     assert r.returncode == 0, r.stderr + r.stdout
     assert (swapd / "swap_addon.py").read_text() == "OLD ADDON"
