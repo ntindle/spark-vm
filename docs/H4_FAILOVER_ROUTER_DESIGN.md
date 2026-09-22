@@ -86,7 +86,7 @@ shipped `provider_iface` verbs, in this order for a failover:
    tenant on an un-attested box (H3 §6). If attestation fails, the
    target is scored out and the router proceeds to the next
    candidate — this is Brig's policy-downgrade refusal applied to
-   failover (see C22).
+   failover (docs/COMPETITOR_C19_C20_BRIG_EPHO.md §1).
 5. **Restore** — §4's cross-provider session-state restore
    contract (not a verb: the contract below).
 6. **`dial()`** (target driver) — bounded-blocking wake-wait;
@@ -158,9 +158,10 @@ Instead:
   format: a plain disk-image or file tree, encrypted at rest —
   the encryption and key story is H5/H9's, not this doc's).
 - Backup cadence is H13's idle-economics decision (continuous for
-  running boxes is expensive; the floor is "every suspend writes
-  one"), but the *format and location* are fixed here: backups
-  live outside every provider, keyed by `session_id`.
+  running boxes is expensive; the proposed floor for H13 to confirm
+  is "every suspend writes one"), but the *format and location* are
+  fixed here: backups live outside every provider, keyed by
+  `session_id`.
 - Failover restore = `provision(target)` → import the latest
   portable backup into the new box's data volume → re-run tenant
   bootstrap → `dial()` to verify.
@@ -194,9 +195,10 @@ failover adds orchestration, not new per-box mechanics.
 - **Approvals**: pending approval requests survive via the
   control-plane record; the tenant's Muse sees the same pending
   set after failover, bound to the new `vm_id`.
-- **Sentinel** (H5): watches the `session_id`, never the `vm_id`.
-  A failover is a sentinel-visible event (box changed under a live
-  session), not an anomaly to alert on.
+- **Sentinel** (H5, open): the failover design *requires* the H5
+  sentinel to key on `session_id`, not `vm_id` — a box changing
+  under a live session must read as a failover event, not an
+  anomaly to alert on. How H5 implements this is H5's to decide.
 - **Billing**: the old box bills (per its `RetentionInfo`) until
   `destroy()` lands; the new box bills from provision. The
   control plane, not the router, owns the invoice math — but the
@@ -227,8 +229,10 @@ registered drivers' per-shape capabilities:
    suspend-based (H13), prefer targets that support it. A
    non-suspend target is *allowed* with a documented downgrade:
    the session's idle story becomes park-on-demand, and the
-   tenant is told so. Fail-closed would strand the tenant; the
-   downgrade is explicit, like Brig's (C22).
+   downgrade is surfaced in the session record (the #47 UX
+   surfaces pick up the notification from there). Fail-closed
+   would strand the tenant; the downgrade is explicit, like
+   Brig's (docs/COMPETITOR_C19_C20_BRIG_EPHO.md §1).
 2. `wake_reprovisions` — park-style targets score lower but are
    valid; the router already runs the bootstrap+requery sequence
    for every restore (§4.3), so a park target costs nothing extra
@@ -279,7 +283,13 @@ the hosted control plane to be useful.
 - **H19**: bootstrap idempotency is the restore precondition; the
   injector's contract must state it explicitly.
 - **H5/H9**: backup encryption keys and the tenant-identity story
-  for the session record.
+  for the session record. H5 must also decide how the sentinel keys
+  on `session_id` rather than `vm_id` for failover events — the
+  failover design requires it (§4.4), H5 owns the implementation.
+- **Portable backup format spec**: §4.2 fixes the backup's
+  properties (provider-neutral, keyed by `session_id`, encrypted at
+  rest) but not its format — the disk-image-vs-file-tree choice and
+  the encryption/key envelope are a follow-up design slice.
 - **#47 sub-items** (#177–#180): the pause/resume, stream-ownership,
   idle-policy, and stopped-state semantics being defined there are
   the surfaces failover must preserve; this doc assumes their
