@@ -280,11 +280,11 @@ This changelog only works if entries land with the change, not after it:
 ### Security
 - The unattended deployer's rollback snapshot and restore steps now
   distinguish "this file is absent" from "the privilege check itself
-  failed" (broken sudo, exotic filesystem): a broken check aborts the
-  snapshot and fails the restore loudly instead of silently recording
-  live files as absent or silently skipping their removal, and a
-  corrupted snapshot manifest line with an empty path fails the restore
-  instead of being skipped. (#103, #107; PR TBD)
+  failed" (broken sudo): a broken check aborts the snapshot and fails
+  the restore loudly instead of silently recording live files as absent
+  or silently skipping their removal, and a corrupted snapshot manifest
+  line with an empty path fails the restore instead of being skipped.
+  (#103, #107; PR TBD)
 - The with-proxy CA bundle and the jail's swapd-CA install no longer read the
   swapd-controlled CA through symlink-following `cat`/`cp` as root: a new
   `proxy/build_ca_bundle.py` refuses a planted symlink (or FIFO/directory) at

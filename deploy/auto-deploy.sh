@@ -145,18 +145,24 @@ sudo_stat_path() {
     # sudo_stat_path <path> — privileged existence check, tri-state:
     #   0  path exists (file/dir/symlink; dangling symlinks included)
     #   1  path is absent
-    #   2  the check itself errored (broken sudo, bad args) — NOT "absent"
+    #   2  the check itself errored (broken sudo / check infrastructure) — NOT "absent"
     #
-    # The 1-vs-2 distinction is the rollback-safety fix (issues #103/#107):
-    # on an exotic filesystem (NFS root_squash, FUSE without allow_root)
-    # root's stat can fail on an *existing* file, and a broken sudo in
-    # production makes every check fail. Recording such a path ABSENT
-    # (snapshot) or silently skipping its removal (restore) corrupts the
-    # snapshot/rollback contract — callers must fail loud on rc=2.
-    # Distinguishing signal: `test` prints nothing and never exits >1 on a
-    # well-formed call, so stderr content or rc>1 means the check errored,
-    # not "absent". (Narrow caveat: a sudo lecture printed to stderr on a
-    # failing check reads as "errored" — fail-closed, the safe side here.)
+    # The 1-vs-2 distinction is the rollback-safety fix (issue #107):
+    # a broken sudo in production makes every check fail, and recording
+    # such a path ABSENT (snapshot) or silently skipping its removal
+    # (restore) corrupts the snapshot/rollback contract — callers must
+    # fail loud on rc=2. Distinguishing signal: `test` prints nothing and
+    # never exits >1 on a well-formed call, so stderr content or rc>1
+    # means the check infrastructure errored, not "absent". Scoped
+    # honestly: a silent-EACCES path (unprivileged box, e.g. literal
+    # /etc/sudoers.d/swapd) still reads as absent — that is the existing
+    # unprivileged-box contract (same privilege the copy/removal uses),
+    # not a new gap. stderr on a *succeeding* check is ignored (noisy-but-
+    # working sudo can't false-positive). Note for future callers: only
+    # wrap commands whose stderr cannot carry secret material here —
+    # sudo's own diagnostics ("a password is required") carry none.
+    # (Narrow caveat: a sudo lecture printed to stderr on a failing check
+    # reads as "errored" — fail-closed, the safe side here.)
     local p="$1" out rc
     if out="$(sudo_run test -e "$p" 2>&1)"; then
         return 0
@@ -381,10 +387,10 @@ snapshot_component() {
         # /etc/sudoers.d/swapd) may not even be stat-able, and must be
         # recorded ABSENT rather than failing the snapshot. The `test -L`
         # disjunct keeps dangling symlinks snapshot-covered (`test -e` is
-        # false for them; `cp -a` preserves the link itself). rc=2 (the check
-        # itself errored — broken sudo, exotic filesystem) fails the snapshot
-        # LOUD (#107): recording such a path ABSENT would silently drop a
-        # live file from the rollback manifest.
+        # false for them; `cp -a` preserves the link itself). rc=2 (the
+        # privilege check itself errored — e.g. broken sudo) fails the
+        # snapshot LOUD (#107): recording such a path ABSENT would
+        # silently drop a live file from the rollback manifest.
         if sudo_stat_path "$p"; then st=0; else st=$?; fi
         if [ "$st" -eq 2 ]; then
             log "ERROR: cannot snapshot $p — privilege check errored"
@@ -456,9 +462,14 @@ restore_snapshot() {
                 # failing the whole rollback. In production the timer runs
                 # privileged, so the check sees exactly what the removal
                 # would touch: no behavior change there. #107: rc=2 means the
-                # check itself errored (broken sudo, exotic filesystem) —
+                # privilege check itself errored (e.g. broken sudo) —
                 # silently skipping removal could strand a deploy-installed
                 # file, so mark the rollback failed and keep restoring.
+                # The helper's `test -L` disjunct covers dangling symlinks
+                # (`test -e` is false for them): a deploy-created dangling
+                # symlink at an ABSENT path must still be unlinked on
+                # rollback, exactly as the old unconditional `rm -f` did.
+                # `rm -f` unlinks only the symlink, never its target.
                 if sudo_stat_path "$p"; then st=0; else st=$?; fi
                 if [ "$st" -eq 0 ]; then
                     log "  removing $p (was absent at snapshot)"
@@ -469,11 +480,6 @@ restore_snapshot() {
                 else
                     log "  $p still absent (or not visible) — nothing to remove"
                 fi
-                # The `test -L` disjunct covers dangling symlinks (`test -e`
-                # is false for them): a deploy-created dangling symlink at an
-                # ABSENT path must still be unlinked on rollback, exactly as
-                # the old unconditional `rm -f` did. `rm -f` unlinks only the
-                # symlink, never its target.
                 ;;
             CHECKOUT\ *)
                 local c="${line#CHECKOUT }"; c="${c%% *}"
