@@ -129,7 +129,9 @@ G3.
 later)" and its landing-page copy recommended "free tier … for adoption" —
 contradicting the decided Billing item (no free tier at launch;
 card-required trial possible, not promised). Both lines corrected to
-paid-tiers-plus-possible-trial, with trial terms TBD.
+paid-tiers-plus-possible-trial, with trial terms TBD — and the spec's own
+§9 self-referencing staleness flag (which still pointed at the signup doc
+as stale) was updated to past tense in the same pass.
 
 ## §10 — follow-ups, status
 

@@ -379,11 +379,11 @@ From `docs/POSITIONING.md` anti-claims plus the operator decisions
   all. This spec's trust story is approvals + audit lines, which exist.
 - Claims stay on the self-hosted reality until the hosted product
   exists: this spec is design thinking, not a ship announcement.
-- The signup doc §5 still says "pick plan (free tier first; paid
-  later — operator decision)" — that line is **stale** against the
-  decided Billing item and needs updating where the signup doc lands
-  (flagged as a follow-up; this spec follows the decision, not the
-  stale line).
+- The signup doc §5's "free tier first" plan-picker lines were **stale**
+  against the decided Billing item; corrected 2026-09-22 (paid tiers;
+  card-required trial possible, trial terms TBD —
+  `docs/HOSTED_SIGNUP_ONBOARDING.md` §5). This spec follows the decision,
+  not the stale line.
 
 ## 10. Follow-ups
 
