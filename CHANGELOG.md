@@ -37,6 +37,14 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Morning competitor watch (2026-09-22): DigitalOcean launched Managed
+  Agents in public preview — microVM-per-session Harness Runtime, Action
+  Gateway (16,000+ tools via one MCP endpoint, credentials brokered at
+  execution time), and active-CPU pricing ($0.044/vCPU-hour, 305 ms
+  pause→resume claim) — filed as competitor item C26, with pricing-shape,
+  resume-latency (C14), secrets-posture (H5), and org-policy (H16) inputs;
+  Daytona shipped a routine v0.215.0 SDK/CLI patch; the rest of the tracked
+  set was quiet. (PR TBD)
 - Enforcement-downgrade contract for the agent jail (fail-closed, stated
   explicitly): a firewall-apply failure aborts the build before the jail
   starts, a boot-time apply failure blocks the container from starting, and

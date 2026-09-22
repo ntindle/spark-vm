@@ -73,6 +73,7 @@ as historical.
 
 | Doc | What it is |
 | --- | ---------- |
+| [COMPETITOR_WATCH_2026-09-22_MORNING.md](COMPETITOR_WATCH_2026-09-22_MORNING.md) | Competitor watch, 2026-09-22 morning — DigitalOcean Managed Agents public preview (the move of the morning; filed C26, with pricing-shape, C14 resume-bar, H5 secrets-posture, and H16 org-policy inputs); Daytona v0.215.0 routine patch; tracked set otherwise quiet; adjacent color on Baselayer's "Know Your Agent" agentic-identity launch. |
 | [COMPETITOR_WATCH_2026-09-22_NIGHT.md](COMPETITOR_WATCH_2026-09-22_NIGHT.md) | Competitor watch, 2026-09-22 night — quiet window (~17:54→~01:05 CDT), zero in-window deltas; files C19/C20 (Brig + Epho watchlist adds, pre-window launches newly surfaced); adjacent color on Meta Muse's Sentinel per-user VM security architecture (third-party deep dive of the pre-window launch). |
 | [COMPETITOR_WATCH_2026-09-21_EVENING.md](COMPETITOR_WATCH_2026-09-21_EVENING.md) | Competitor watch, 2026-09-21 evening — quiet window (~14:54→~17:54 CDT), zero in-window deltas; files C18 (h-sandbox: host-bound-egress credential vault + OpenSandbox adapter). |
 | [COMPETITOR_WATCH_2026-09-21_AFTERNOON.md](COMPETITOR_WATCH_2026-09-21_AFTERNOON.md) | Competitor watch, 2026-09-21 afternoon — quiet window; resolves the C17 xlarge capacity-allocation caveat. |
