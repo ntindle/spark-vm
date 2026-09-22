@@ -14,7 +14,10 @@ pattern is convergent — every serious sandbox vendor has shipped some version 
 swapd's mechanics differ. It is not a "we were first" claim; we make no such claim.
 
 **Verification tags:** `VENDOR-VERIFIED` = exact quote from the vendor's own docs;
-`THIRD-PARTY` = claimed only by a non-vendor source; `UNVERIFIED` = not found in
+`VENDOR-VERIFIED (press-release source)` = verbatim quote from vendor-issued
+launch copy (not engineering docs); convergence is claimed on the quote alone
+— no mechanism axes are scored from it. `THIRD-PARTY` = claimed only by a
+non-vendor source; `UNVERIFIED` = not found in
 vendor docs. Where a prior claim was only third-party-sourced, this document
 records the current status; links are inline per vendor section.
 
@@ -301,8 +304,8 @@ The honest, sourced edges swapd can claim — each one vendor-quoted above:
    which documents no scrubbing. OpenComputer's scrub status is not documented
    in the corpus. DigitalOcean's launch release claims brokering that keeps
    credentials from reaching the sandbox, but publishes no placeholder form,
-   swap surface, scrubbing, or audit — so none of those axes are scored for
-   it above.
+   swap surface, scrubbing, or audit — so no mechanism *values* are attributed
+   to it on those axes.
 3. **Audited per decision** (vs all five, and the three watch-list data points): none
    of the five vendors, OpenComputer, h-sandbox, or DigitalOcean's release documents per-injection
    audit lines; swapd's audit write is part of authorization.
@@ -331,5 +334,5 @@ the placeholder variant in the open).
   The R6 docs should cite only the five vendors deep-read in this document,
   plus lighter watch-list data points that are explicitly marked as outside
   the deep set and carry their source class (docs-verified for OpenComputer
-  and h-sandbox; press-release-verified for DigitalOcean — cf. the sections
-  above).
+  and h-sandbox; `VENDOR-VERIFIED (press-release source)` for DigitalOcean —
+  cf. the sections above).
