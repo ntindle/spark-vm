@@ -50,6 +50,12 @@ This changelog only works if entries land with the change, not after it:
   records the claim idempotently and logs it in the funnel trail. Dead
   or expired links land on an honest "no longer live" page, never an
   error dump. (#250)
+- Provider failover-router design: the new design doc describes how the
+  hosted control plane would keep a tenant session alive across a
+  provider outage — which failures trigger a move to another provider
+  (and which recover in place), the order of operations for the move,
+  how session data is restored when VM snapshots can't cross providers,
+  and how provider capabilities pick the fallback target. (#251)
 - Provision-time injector (`harness/inject-provision-state.sh`): runs at
   first boot of the hosted agent VM and owns the provision-time half of
   the gate-fixture contract — preflights the golden-image manifest
