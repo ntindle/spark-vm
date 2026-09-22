@@ -523,16 +523,22 @@ def test_refuses_allowlist_residue(stack):
     "  127.0.0.1  \n",   # leading/trailing whitespace
     "LOCALHOST\n",       # case variant
     "127.0.0.1.\n",      # trailing dot
-    ".0.0.1\n",          # leading-dot subdomain entry (proxy semantics)
-    "::1\n",             # IPv6 loopback literal (proxy fumbles it; fail-closed)
+    "::1\n",             # IPv6 loopback literal (matched as a normalized
+                         # address since issue #257; still an echo alias)
     "  ::1  \n",         # padded IPv6 loopback literal
+    # NOTE (issue #257): ".0.0.1" used to be refused here via the old
+    # string-suffix accident ("127.0.0.1".endswith(".0.0.1")). IP
+    # literals no longer take the leading-dot subdomain rule, so that
+    # entry matches nothing at enforcement -- it is dead config, not an
+    # echo exemption. test_ignores_dead_leading_dot_partial_ip pins it.
 ])
 def test_refuses_allowlist_format_variants(stack, residue):
     # The proxy parses allowlist entries case-insensitively,
     # whitespace-stripped, trailing-dot-stripped, with leading-dot
-    # subdomain matching (proxy/swap_addon.py::_host_in_list). The
-    # injector must enforce the proxy's semantics, not exact lines --
-    # each of these is a live echo exemption the old grep -qxF missed.
+    # subdomain matching for hostnames (proxy/swap_addon.py::_host_in_list;
+    # IP literals compare as addresses since issue #257). The injector
+    # must enforce the proxy's semantics, not exact lines -- each of
+    # these is a live echo exemption the old grep -qxF missed.
     env, paths = stack
     _seed_real_key(paths)
     paths["allow_file"].write_text(residue)
@@ -541,6 +547,21 @@ def test_refuses_allowlist_format_variants(stack, residue):
     assert b"echo exemption(s) still present in" in proc.stderr
     assert residue.strip().encode() in proc.stderr
     assert b"image-build gate" in proc.stderr
+
+
+def test_ignores_dead_leading_dot_partial_ip(stack):
+    # Issue #257: a leading-dot entry holding a partial IP (".0.0.1")
+    # matches nothing under the fixed matcher -- the leading-dot rule is
+    # a hostname rule and IP literals compare as addresses. It is dead
+    # config, not an echo exemption, so the injector must not refuse
+    # on it (over-refusal would be a divergence from proxy semantics,
+    # the exact failure mode harness/test_proxy_match.py guards).
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["allow_file"].write_text(".0.0.1\n")
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert _report(proc)["steps"]["fixture_teardown"] == "ok"
 
 
 @pytest.mark.parametrize("residue", [
@@ -652,12 +673,12 @@ def test_refuses_unparseable_allowlist(stack):
 
 
 def test_refuses_registry_ipv6_loopback_literal(stack):
-    # "::1" in allowed_hosts: the proxy's _host_in_list fumbles the
-    # "::1" literal (split(":")[0] -> ""), so the injector flags it
-    # with a fail-closed literal special-case; the narrow writer's
-    # check_host rejects the ":" form, so remove-host fails and the
-    # run must fail closed either way. Without the special-case the
-    # run would proceed past teardown with the entry in place.
+    # "::1" in allowed_hosts: since issue #257 the proxy's _host_in_list
+    # matches the "::1" literal as a normalized address, and the
+    # injector's echo detection agrees through the shared matcher (the
+    # old fail-closed literal special-case is gone); the narrow writer's
+    # check_host rejects the ":" form, so remove-host fails and the run
+    # must fail closed either way.
     env, paths = stack
     (paths["secrets_dir"] / KEY_NAME).write_text(REAL_KEY)
     paths["registry_file"].write_text(json.dumps({
@@ -947,6 +968,50 @@ def test_identity_refuses_symlinked_authorized_keys(stack):
     assert not os.path.lexists("/tmp/evil-keys")
 
 
+def test_identity_install_is_no_follow_regular_file(stack):
+    # Issue #258: the install pins the destination directory by fd and
+    # creates authorized_keys O_NOFOLLOW through it. The installed file
+    # must be a regular file (lstat, not stat -- a symlink would pass
+    # a stat-based check), 0600, byte-identical.
+    import stat as statmod
+    env, paths = stack
+    _seed_real_key(paths)
+    identity_dir = paths["secrets_dir"] / "identity"
+    identity_dir.mkdir()
+    pubkey = ("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkeymaterial "
+              "tenant@muse\n")
+    (identity_dir / "authorized_keys").write_text(pubkey)
+    env = dict(env)
+    env["INJECT_IDENTITY_DIR"] = str(identity_dir)
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    installed = paths["agent_home"] / ".ssh" / "authorized_keys"
+    assert statmod.S_ISREG(os.lstat(installed).st_mode)
+    assert not os.path.islink(installed)
+    assert (installed.stat().st_mode & 0o777) == 0o600
+    assert installed.read_text() == pubkey
+
+
+def test_identity_refuses_fifo_destination(stack):
+    # Issue #258: a FIFO planted at the destination must refuse
+    # fail-closed, not hang the install open. The no-follow open uses
+    # O_NONBLOCK plus an S_ISREG re-check, so the run exits 1 quickly.
+    env, paths = stack
+    _seed_real_key(paths)
+    identity_dir = paths["secrets_dir"] / "identity"
+    identity_dir.mkdir()
+    (identity_dir / "authorized_keys").write_text(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkeymaterial tenant@muse\n")
+    ssh_dir = paths["agent_home"] / ".ssh"
+    ssh_dir.mkdir()
+    os.mkfifo(ssh_dir / "authorized_keys")
+    env = dict(env)
+    env["INJECT_IDENTITY_DIR"] = str(identity_dir)
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"not a regular file" in proc.stderr
+
+
 def test_tenant_record_refuses_symlink(stack):
     env, paths = stack
     _seed_real_key(paths)
@@ -1197,3 +1262,26 @@ def test_tenant_record_write_failure_leaves_no_torn_record(stack):
     litter = [p for p in record_dir.parent.iterdir()
               if p.name.startswith(".tenant.json.")]
     assert litter == [], litter
+
+
+def test_tenant_record_reports_digest_lifecycle(stack):
+    # Issue #258: the fd-pinned write verifies by reading the record
+    # back through the pinned dir and reports the digest lifecycle on
+    # stderr: "initialized" on first write, "updated" (old -> new) on a
+    # rewrite. A changed tenant id guarantees a changed payload, so the
+    # updated branch is deterministic (injected_at alone could collide
+    # within one second).
+    env, paths = stack
+    _seed_real_key(paths)
+    env = dict(env)
+    env["INJECT_TENANT_ID"] = "tenant-42"
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert b"tenant record initialized (sha256 " in proc.stderr
+    env["INJECT_TENANT_ID"] = "tenant-43"
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert b"tenant record updated (sha256 " in proc.stderr
+    assert b" -> " in proc.stderr
+    record = json.loads(paths["tenant_record"].read_text())
+    assert record["tenant_id"] == "tenant-43"

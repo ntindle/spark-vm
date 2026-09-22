@@ -389,18 +389,119 @@ with open(os.environ["IDENTITY_SRC"], encoding="utf-8") as f:
     fi
     mkdir -p "$ssh_dir"
     chmod 0700 "$ssh_dir"
-    # install(1) creates the destination at 0600 directly: no transient
-    # world-readable window between cp and chmod.
-    install -m 0600 "$IDENTITY_SRC" "$ssh_dir/authorized_keys"
-    # chown only when crossing users: as root in production the agent
-    # user differs; in tests the invoker IS the agent user and a chown
-    # would need privilege for no reason. Non-recursive: with the
-    # symlink guards above there is nothing else under $ssh_dir to own.
-    if [ "$(id -u)" != "$(id -u "$AGENT_USER")" ]; then
-        chown "$AGENT_USER" "$ssh_dir" "$ssh_dir/authorized_keys"
-    fi
-    if ! cmp -s "$IDENTITY_SRC" "$ssh_dir/authorized_keys"; then
-        echo "inject-provision-state: refusing: installed authorized_keys is not byte-identical to the tenant material" >&2
+    # Issue #258 (TOCTOU): the [ -L ] guard above and this install are
+    # separated by mkdir/chmod, so a concurrent privileged process could
+    # still swap $ssh_dir/authorized_keys for a symlink (or FIFO) between
+    # the check and the use -- install(1)/cp/chmod all resolve by path.
+    # This block pins both ends by file descriptor instead: the source is
+    # opened O_NOFOLLOW and re-validated (same shape regex as the
+    # pre-check above -- the validated bytes are exactly the installed
+    # bytes), the destination directory is opened O_DIRECTORY|O_NOFOLLOW
+    # and the target is created through it with O_NOFOLLOW|O_CREAT|O_TRUNC
+    # plus an S_ISREG re-check (a planted FIFO would otherwise hang the
+    # open). Modes are set by fchmod/fchown on the open fds, and the
+    # byte-identity check reads back through the same fd -- no path is
+    # resolved twice, so there is no check/use window left.
+    if ! SSH_DIR="$ssh_dir" IDENTITY_SRC="$IDENTITY_SRC" \
+         AGENT_USER="$AGENT_USER" python3 -c '
+import fcntl, os, pwd, re, stat, sys
+
+def refuse(msg, code=1):
+    print("inject-provision-state: refusing: %s" % msg, file=sys.stderr)
+    sys.exit(code)
+
+def read_all(fd):
+    chunks = []
+    while True:
+        b = os.read(fd, 65536)
+        if not b:
+            break
+        chunks.append(b)
+    return b"".join(chunks)
+
+def unblock(fd):
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+
+agent_uid = pwd.getpwnam(os.environ["AGENT_USER"]).pw_uid
+
+# Pin the tenant material: no-follow, must be a regular file (a FIFO
+# swapped in here would hang a plain open, hence O_NONBLOCK + re-check).
+try:
+    src_fd = os.open(os.environ["IDENTITY_SRC"],
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    refuse("tenant identity material cannot be opened without following links")
+try:
+    if not stat.S_ISREG(os.fstat(src_fd).st_mode):
+        refuse("tenant identity material is not a regular file")
+    unblock(src_fd)
+    data = read_all(src_fd)
+finally:
+    os.close(src_fd)
+try:
+    text = data.decode("utf-8")
+except UnicodeDecodeError:
+    refuse("tenant identity material is not valid UTF-8", 2)
+# Same shape rules as the pre-check above, applied to the exact bytes
+# being installed (keep the two regexes in sync).
+pub = re.compile(r"^(ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-[a-z0-9-]+|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com|cert-authority)( |$)")
+for i, line in enumerate(text.splitlines(), 1):
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    if "PRIVATE KEY" in line:
+        refuse("line %d looks like private-key material" % i, 2)
+    if not pub.match(line):
+        refuse("line %d is not a recognized public-key shape" % i, 2)
+
+# Pin the destination directory: no-follow, must be a directory owned
+# by root or the agent user (a foreign-owned .ssh in a fresh agent
+# home is the same box-integrity failure the symlink guard refuses).
+try:
+    ssh_fd = os.open(os.environ["SSH_DIR"],
+                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
+    refuse("ssh dir cannot be opened without following links")
+try:
+    st = os.fstat(ssh_fd)
+    if not stat.S_ISDIR(st.st_mode):
+        refuse("ssh dir is not a directory")
+    if st.st_uid not in (0, agent_uid):
+        refuse("ssh dir owned by uid %d, expected root or %s"
+               % (st.st_uid, os.environ["AGENT_USER"]))
+    try:
+        dst_fd = os.open("authorized_keys",
+                         os.O_RDWR | os.O_CREAT | os.O_TRUNC
+                         | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600, dir_fd=ssh_fd)
+    except OSError:
+        refuse("authorized_keys cannot be created without following links")
+    try:
+        if not stat.S_ISREG(os.fstat(dst_fd).st_mode):
+            refuse("authorized_keys exists and is not a regular file")
+        unblock(dst_fd)
+        os.fchmod(dst_fd, 0o600)  # explicit: not masked by umask, no
+        # transient world-readable window (the old install -m 0600 rule)
+        if os.geteuid() != agent_uid:
+            # chown only when crossing users (same rule as before)
+            os.fchown(dst_fd, agent_uid, -1)
+        n = 0
+        while n < len(data):
+            n += os.write(dst_fd, data[n:])
+        os.fsync(dst_fd)
+        os.lseek(dst_fd, 0, os.SEEK_SET)
+        if read_all(dst_fd) != data:
+            refuse("installed authorized_keys is not byte-identical "
+                   "to the tenant material")
+    finally:
+        os.close(dst_fd)
+    if os.geteuid() != agent_uid:
+        os.fchown(ssh_fd, agent_uid, -1)
+finally:
+    os.close(ssh_fd)
+' >&2; then
+        echo "inject-provision-state: refusing: tenant identity install failed (see above)" >&2
         exit 1
     fi
     IDENTITY="ok"
@@ -428,54 +529,145 @@ if [ -n "${INJECT_TENANT_ID:-}" ]; then
         exit 1
     fi
     mkdir -p "$(dirname "$TENANT_RECORD")"
-    INJECT_TENANT_ID="$INJECT_TENANT_ID" IMAGE_VERSION="$IMAGE_VERSION" TENANT_RECORD="$TENANT_RECORD" python3 -c '
-import json, os, stat, tempfile, time
+    # Issue #258 (TOCTOU): the [ -L ] guard above and the write below are
+    # separated by arbitrary shell, so a concurrent privileged process
+    # could swap the tenant record for a symlink (or another non-regular
+    # file) between the check and the use. This block pins the parent
+    # directory with O_DIRECTORY|O_NOFOLLOW and does everything through
+    # that fd: the existing record is re-checked by lstat (symlink and
+    # non-regular files refuse, fail-closed), the temp file is created
+    # O_EXCL|O_NOFOLLOW inside the pinned dir, and the atomic rename is
+    # renameat2-style via src/dst dirfds -- even a symlink swapped in
+    # between the lstat and the rename would be *replaced*, never
+    # followed, so the worst case is the attacker's link being unlinked.
+    # The verify read-back also goes through the pinned dir.
+    if ! INJECT_TENANT_ID="$INJECT_TENANT_ID" IMAGE_VERSION="$IMAGE_VERSION" \
+         TENANT_RECORD="$TENANT_RECORD" python3 -c '
+import fcntl, hashlib, json, os, stat, sys, time
+
+def refuse(msg):
+    print("inject-provision-state: refusing: %s" % msg, file=sys.stderr)
+    sys.exit(1)
+
+def read_all(fd):
+    chunks = []
+    while True:
+        b = os.read(fd, 65536)
+        if not b:
+            break
+        chunks.append(b)
+    return b"".join(chunks)
+
 path = os.environ["TENANT_RECORD"]
-# open(path, "w") mode semantics: a CREATED file gets 0666 masked by the
-# process umask (022 at first boot -> 0644, as before); truncating an
-# EXISTING file leaves its mode untouched. The atomic rename always lands
-# a fresh inode, so replicate both branches explicitly -- hardcoding 0644
-# would silently widen a pre-hardened (e.g. 0600) tenant record.
+parent = os.path.dirname(path) or "."
+name = os.path.basename(path)
+
+# open(path, "w") mode semantics, preserved: a CREATED file gets 0666
+# masked by the process umask (022 at first boot -> 0644, as before);
+# truncating an EXISTING file leaves its mode untouched. The atomic
+# rename always lands a fresh inode, so replicate both branches
+# explicitly -- hardcoding 0644 would silently widen a pre-hardened
+# (e.g. 0600) tenant record.
 _umask = os.umask(0)
 os.umask(_umask)
-if os.path.lexists(path):
-    _mode = stat.S_IMODE(os.stat(path).st_mode)  # existing file: keep mode
-else:
-    _mode = 0o666 & ~_umask                       # new file: 0666 & ~umask
-record = {
-    "tenant_id": os.environ["INJECT_TENANT_ID"],
-    "image_version": os.environ["IMAGE_VERSION"],
-    "injected_at": int(time.time()),
-    "injector": "harness/inject-provision-state.sh",
-    "confirmd_attribution": "pending (H10: per-tenant approvals URL wiring consumes this record)",
-}
-# Atomic write: a direct open("w") truncates in place, so a concurrent
-# reader (the future H10 confirmd wiring reads this record) could see a
-# torn file. Write to a temp file in the same directory and rename over.
-d = os.path.dirname(path) or "."
-fd, tmp = tempfile.mkstemp(dir=d, prefix=".tenant.json.")
+
 try:
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(record, f, indent=2, sort_keys=True)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(tmp, _mode)  # same effective mode as open("w")
-    os.replace(tmp, path)
-except BaseException:
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError:
+    refuse("tenant record parent cannot be opened without following links")
+try:
+    if not stat.S_ISDIR(os.fstat(parent_fd).st_mode):
+        refuse("tenant record parent is not a directory")
     try:
-        os.unlink(tmp)
+        st = os.lstat(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        st = None
+    if st is not None:
+        if stat.S_ISLNK(st.st_mode):
+            refuse("tenant record is a symlink -- refusing to write the "
+                   "tenant record through a link")
+        if not stat.S_ISREG(st.st_mode):
+            refuse("tenant record exists and is not a regular file")
+        _mode = stat.S_IMODE(st.st_mode)  # existing file: keep mode
+        old_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=parent_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(old_fd).st_mode):
+                refuse("tenant record changed under us -- not a regular file")
+            flags = fcntl.fcntl(old_fd, fcntl.F_GETFL)
+            fcntl.fcntl(old_fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+            old_digest = hashlib.sha256(read_all(old_fd)).hexdigest()
+        finally:
+            os.close(old_fd)
+    else:
+        _mode = 0o666 & ~_umask           # new file: 0666 & ~umask
+        old_digest = None
+    record = {
+        "tenant_id": os.environ["INJECT_TENANT_ID"],
+        "image_version": os.environ["IMAGE_VERSION"],
+        "injected_at": int(time.time()),
+        "injector": "harness/inject-provision-state.sh",
+        "confirmd_attribution": "pending (H10: per-tenant approvals URL wiring consumes this record)",
+    }
+    payload = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    # Atomic write: a direct open("w") truncates in place, so a
+    # concurrent reader (the future H10 confirmd wiring reads this
+    # record) could see a torn file. Write to a temp file in the pinned
+    # directory, fsync, and rename over via dirfds.
+    tmp_name = ".tenant.json.%d.%d" % (os.getpid(), time.time_ns())
+    try:
+        tmp_fd = os.open(tmp_name,
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=parent_fd)
     except OSError:
-        pass
-    raise
-'
-    if ! INJECT_TENANT_ID="$INJECT_TENANT_ID" TENANT_RECORD="$TENANT_RECORD" python3 -c '
-import json, os, sys
-with open(os.environ["TENANT_RECORD"], encoding="utf-8") as f:
-    record = json.load(f)
-sys.exit(0 if record.get("tenant_id") == os.environ["INJECT_TENANT_ID"] else 1)
-'; then
-        echo "inject-provision-state: refusing: tenant record did not verify" >&2
+        refuse("tenant record temp file cannot be created without following links")
+    try:
+        os.fchmod(tmp_fd, _mode)  # same effective mode as open("w")
+        n = 0
+        while n < len(payload):
+            n += os.write(tmp_fd, payload[n:])
+        os.fsync(tmp_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp_name, dir_fd=parent_fd)
+        except OSError:
+            pass
+        raise
+    else:
+        os.close(tmp_fd)
+    os.rename(tmp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    # Verify: read the record back through the pinned dir and confirm
+    # the tenant id survived the round trip.
+    vfd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                  dir_fd=parent_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(vfd).st_mode):
+            refuse("tenant record did not verify (not a regular file)")
+        flags = fcntl.fcntl(vfd, fcntl.F_GETFL)
+        fcntl.fcntl(vfd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+        back = read_all(vfd)
+    finally:
+        os.close(vfd)
+    try:
+        seen = json.loads(back.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        refuse("tenant record did not verify (unreadable)")
+    if seen.get("tenant_id") != os.environ["INJECT_TENANT_ID"]:
+        refuse("tenant record did not verify")
+    new_digest = hashlib.sha256(back).hexdigest()
+    if old_digest is None:
+        print("inject-provision-state: tenant record initialized "
+              "(sha256 %s)" % new_digest, file=sys.stderr)
+    elif old_digest == new_digest:
+        print("inject-provision-state: tenant record unchanged "
+              "(sha256 %s)" % new_digest, file=sys.stderr)
+    else:
+        print("inject-provision-state: tenant record updated "
+              "(sha256 %s -> %s)" % (old_digest, new_digest), file=sys.stderr)
+finally:
+    os.close(parent_fd)
+' >&2; then
+        echo "inject-provision-state: refusing: tenant record write failed (see above)" >&2
         exit 1
     fi
     ATTRIBUTION="ok"
