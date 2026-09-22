@@ -75,11 +75,14 @@ The fixture binds `llm-api` to the loopback echo host, allowlists
 `127.0.0.1` in `inference-hosts.allow`, **and** exempts it in the
 inference proxy's own `inference-ssrf.allow`. That binding must NEVER
 coexist with a real credential: after the gate passes, the echo host MUST
-be removed from `inference-hosts.allow` AND from `inference-ssrf.allow`,
-and the `llm-api`→echo-host binding MUST be unbound — by the image-build
-gate before the image is published, or by the provision-time injector
-before it installs the real tenant key. Whichever stage runs last owns
-the teardown. The gate is only safe because the fixture dummy is public
+be removed from `inference-hosts.allow` AND from `inference-ssrf.allow`
+(by the image-build gate before the image is published — the injector
+cannot remove allowlist lines; production sudoers is append-only by
+design), and the `llm-api`→echo-host binding MUST be unbound — by the
+image-build gate pre-publish, or by the provision-time injector before
+it asserts/probes the real tenant key. The operator installs the real
+key through the human-only grant-writer path BEFORE the injector runs;
+the injector asserts and probes, never installs. The gate is only safe because the fixture dummy is public
 (`GATE-FIXTURE-DUMMY-NOT-A-SECRET`, baked into this repo on purpose);
 the teardown is what keeps it safe once a real key exists. **Never run
 `install-gate-fixture.sh` on a box holding a real credential** (it
@@ -89,13 +92,60 @@ SETUP.md "Inference-model recipe").
 
 ## Still to come (next feature slices)
 
-- **Provision-time injector** — implements the research §4 inject list
-  (tenant identity, inference credential by-name reference, fresh swapd
-  CA, confirmd tenant attribution, first-task slot) against the H4
-  provider interface (`provider_iface.py`), with the manifest preflight
-  above.
+- **First-task slot properties** — the §4 inject list's remaining
+  item, deferred to the R1 first-run slice (it belongs to what the box
+  does first, not to credential injection).
 - **Image gate** — refuses to publish the image when the gate-mode probe
   fails (the PuppyOne rule).
+
+## Provision-time injector (`inject-provision-state.sh`)
+
+Runs at first boot of the hosted agent VM (invoked by the H4
+provisioning driver) and owns the provision-time half of the fixture
+lifecycle above:
+
+1. Preflights the golden-image manifest against the operator-pinned
+   `INJECT_IMAGE_VERSION` (via `check-image-manifest.sh`) and fails
+   closed on any drift, before box-live.
+2. Tears down the gate fixture: unbinds `llm-api`→echo-host through the
+   narrow registry writer, then fails closed on any echo-host residue in
+   `inference-hosts.allow` or `inference-ssrf.allow`. The injector cannot
+   remove allowlist lines (production sudoers is append-only by
+   design), so the image-build gate owns that teardown pre-publish.
+3. Asserts a real inference credential: registry binding of `llm-api`
+   (`bearer_header`) to a non-loopback host, plus a blind
+   `cred-store-verify-inference` compare proving the stored value is
+   NOT the public fixture dummy. The stored value is never read,
+   never written, never printed — assert, never handle.
+4. Requires a fresh per-tenant swapd CA (`mitmproxy-ca.pem`).
+5. Installs tenant identity when `INJECT_IDENTITY_DIR` is set (H9
+   input contract): an `authorized_keys` file only, strict public-key
+   shape validation — private-key material is refused, fail-closed.
+   Deferred and loudly reported when absent. (Research §4 scopes H9
+   identity as "keys/certs"; this v1 seam is authorized_keys-only — the
+   H9 slice must grow the contract if it needs TLS/SSH certs.)
+6. Records tenant attribution when `INJECT_TENANT_ID` is set (H10
+   input contract): a validated tenant id plus the pinned image
+   version, for the per-tenant approvals slice. Deferred and loudly
+   reported when absent.
+7. Runs `harness-auth-probe` in `provision` mode so the injected key
+   is proved against the real provider; a probe failure maps to
+   `provisioning-failed` (box-live must not flip).
+
+Prints exactly one JSON inject report on stdout; all progress and
+refusal diagnostics go to stderr. The report's `steps` map reads
+`"ok"` per completed step (`fixture_teardown` reads `"ok"` with the
+absent/removed detail in `fixture_teardown_detail`); identity and
+confirmd attribution read `"deferred (H9)"` / `"deferred (H10)"` and
+are named in the `deferred` list when their inputs are absent. The
+control plane gates box-live on the manifest, fixture_teardown,
+inference_key, swapd_ca, and probe steps reading `"ok"`. Covered by
+55 hermetic tests
+(`test_inject_provision_state.py`) mirroring the install-gate-fixture
+hermetic contract: fake writers, a fake sudo that asserts `-u swapd`
+and denies `tee`/`ls`, a fake swap proxy resolving `hsurr:`
+placeholders, a provider stub recording `Authorization` headers, and a
+stub confirmd.
 
 ## Known validation points
 
