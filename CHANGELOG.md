@@ -37,17 +37,6 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
-- Jail firewall runtime watchdog (closes #254): a 5-minute systemd verify
-  timer pins the jail's nftables enforcement rules themselves (drop-rule
-  markers + proxy DNAT — the chains are policy accept, so chain shells
-  alone prove nothing). On confirmed damage it is fail-closed: the jail
-  is stopped first (a table re-apply doesn't flush conntrack, so
-  hole-era flows would otherwise survive), then the table is re-applied
-  (scoped to the jail table only), and the unit goes red — restart is
-  the operator's explicit decision. The old "flushed table silently
-  voids the isolation guarantees until someone restarts the unit" hole
-  becomes bounded downtime instead of unbounded unenforced running.
-  #260
 - Secrets-posture corpus gains DigitalOcean Managed Agents as the fifth
   convergent data point (their launch release claims a separate secrets
   service with "credentials brokered at execution time" that "never reach
@@ -306,6 +295,18 @@ This changelog only works if entries land with the change, not after it:
   self-merging). An auditable `scripts/apply-rulesets.sh` (dry-run default,
   `--check` drift compare, `--execute --yes` idempotent apply) applies them;
   applying is an owner decision (#174)
+- Jail firewall runtime watchdog (closes #254): a 5-minute systemd verify
+  timer pins the jail's nftables enforcement rules themselves (drop-rule
+  markers + proxy DNAT — the chains are policy accept, so chain shells
+  alone prove nothing). On confirmed damage it is fail-closed: the jail
+  is stopped first (a table re-apply doesn't flush conntrack, so
+  hole-era flows would otherwise survive), then the table is re-applied
+  (scoped to the jail table only), and the unit goes red — restart is
+  the operator's explicit decision. The old "flushed table silently
+  voids the isolation guarantees until someone restarts the unit" hole
+  becomes bounded downtime instead of unbounded unenforced running.
+  (#260 — entry placed at the end of Unreleased/Added so the branch
+  merges cleanly over #263's same-section entry)
 
 ### Changed
 - Hosted pricing thinking refreshed: the internal pricing analysis now
