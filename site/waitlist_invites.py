@@ -25,8 +25,8 @@ waitlistd.WaitlistService:
 
     waitlist_invites.py --reconcile [--dry-run]
         Issue #234: re-derive `invite_sent` funnel events lost to the
-        commit -> emit crash window. `_queue_invite_email` commits the
-        invited row BEFORE emitting `invite_sent`; a crash in that window
+        commit -> emit crash window. The wave commits the invited row
+        BEFORE emitting `invite_sent`; a crash in that window
         leaves an invited row whose email is spooled but whose event
         never fired, and the funnel reads conservatively until repaired.
         This pass re-derives exactly those missing events from rows.jsonl
@@ -54,8 +54,11 @@ Operator cron shape (same env as the other waitlist tooling):
         --pricing-file ./pricing.txt --trial-terms-file ./terms.txt
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
         waitlist_invites.py --rollover   # daily
+
+On demand (no claim-live gate — sends nothing; idempotent):
+
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
-        waitlist_invites.py --reconcile  # after any suspected crash; idempotent
+        waitlist_invites.py --reconcile [--dry-run]  # after any suspected crash
 
 Config (env — same fail-loud contract as waitlistd/waitlist_jobs):
     WAITLIST_HMAC_KEY    operator HMAC key — REQUIRED, fail loud if unset.

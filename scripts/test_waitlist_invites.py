@@ -27,7 +27,7 @@ Covers docs/WAITLIST_OPERATIONS.md §5/§7 for the invite sender:
   under-reporting (never claiming what rows.jsonl doesn't show) and
   never re-invites or double-spools; the operator repairs the missing
   event with `waitlist_invites.py --reconcile` (issue #234), which
-  re-derives it from rows.jsonl in the append-only audit posture.
+  re-derives it from rows.jsonl in the append-only posture.
 
 stdlib only, no network.
 """
