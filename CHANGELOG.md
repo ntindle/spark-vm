@@ -37,6 +37,13 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor analysis now covers Brig (local microVM coding-agent
+  containment) and Epho (agents-as-API with multi-provider fallback),
+  closing the two remaining night-watch competitor items — Brig scored
+  on the substrate axis, Epho's fallback scored against the H4
+  provider-agnostic interface criterion, with four follow-up backlog
+  items (failover-router design, fail-closed enforcement downgrade,
+  metered-billing-key guard, BYOK pricing note) (#PR TBD)
 - Provision-time injector (`harness/inject-provision-state.sh`): runs at
   first boot of the hosted agent VM and owns the provision-time half of
   the gate-fixture contract — preflights the golden-image manifest
