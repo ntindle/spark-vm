@@ -25,8 +25,9 @@ Covers docs/WAITLIST_OPERATIONS.md §5/§7 for the invite sender:
   staying consumed and no new email; a crash between the commit and
   the `invite_sent` event leaves the metrics conservatively
   under-reporting (never claiming what rows.jsonl doesn't show) and
-  never re-invites or double-spools (no automated reconciliation of
-  the missing event today, issue #234).
+  never re-invites or double-spools; the operator repairs the missing
+  event with `waitlist_invites.py --reconcile` (issue #234), which
+  re-derives it from rows.jsonl in the append-only posture.
 
 stdlib only, no network.
 """
@@ -855,8 +856,8 @@ def test_wave_crash_between_commit_and_emit(monkeypatch):
 
     # Fresh view: the token is live; a retry waves nothing (invited
     # rows are not eligible) — no duplicate email, no synthesized event.
-    # The missing event has no automated reconciliation today; see
-    # issue #234 for the reconciliation/runbook gap.
+    # The missing event is repaired by the operator's --reconcile pass
+    # (issue #234; covered by the test_reconcile_* tests below).
     fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
                                clock=clock)
     frow, status = fresh.lookup_invite_token(token)
@@ -931,3 +932,316 @@ def test_rollover_crash_between_consume_and_commit(monkeypatch):
     assert kinds.count("invite_sent") == 1
     assert "invite_expired" not in kinds
     assert len(rows_lines_for(tmp, row["entry_id"])) == lines_before + 1
+
+
+# ---------------------------------------------------------------------------
+# invite_sent reconciliation (issue #234)
+
+
+def _crash_emit_once(monkeypatch, crash):
+    """Fault-inject the commit -> invite_sent emit crash window."""
+    real_emit = wd.WaitlistService._emit
+
+    def crashing_emit(self, event, ref, attrs=None):
+        if event == "invite_sent" and crash["armed"]:
+            crash["armed"] = False
+            raise RuntimeError("simulated kill -9")
+        return real_emit(self, event, ref, attrs)
+
+    monkeypatch.setattr(wd.WaitlistService, "_emit", crashing_emit)
+    return real_emit
+
+
+def _torn_append_once(monkeypatch, flag):
+    """Fault-inject a kill -9 mid-append: write the first half of the
+    payload, then raise — leaving a torn partial line with NO trailing
+    newline at EOF, the way a real kill -9 tears the last append."""
+    real_append = wd.WaitlistService._append
+
+    def torn_append(self, name, obj):
+        if flag["armed"] and name == "funnel_events.jsonl":
+            flag["armed"] = False
+            line = json.dumps(obj, sort_keys=True)
+            path = os.path.join(self.data_dir, name)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line[:len(line) // 2])  # torn: no newline
+            raise RuntimeError("simulated kill -9 mid-append")
+        return real_append(self, name, obj)
+
+    monkeypatch.setattr(wd.WaitlistService, "_append", torn_append)
+    return real_append
+
+
+def _crashed_invite_state(monkeypatch, clock=None):
+    """Drive a wave into the commit -> emit crash window and return
+    (tmp, clock, entry_id, live_token): an invited row committed on
+    disk, exactly one invite email spooled, no invite_sent event."""
+    service, tmp, clock = make_service(clock)
+    row = confirm_row(service, "a@example.com", clock)
+    crash = {"armed": True}
+    _crash_emit_once(monkeypatch, crash)
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        wave(service, count=1, wave="wave1")
+    token = rows_lines_for(tmp, row["entry_id"])[-1]["active_invite_token"]
+    assert "invite_sent" not in [e["event"] for e in funnel_events(tmp)]
+    return tmp, clock, row["entry_id"], token
+
+
+def test_reconcile_repairs_commit_crash_window(monkeypatch):
+    tmp, clock, entry_id, token = _crashed_invite_state(monkeypatch)
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    # The invite is live — the event is the only thing missing.
+    _, status = fresh.lookup_invite_token(token)
+    assert status == "ok"
+
+    reconciled = fresh.reconcile_invite_events()
+    assert reconciled == [entry_id]
+
+    events = [e for e in funnel_events(tmp) if e["event"] == "invite_sent"]
+    assert len(events) == 1
+    event = events[0]
+    assert event["ref"] == entry_id
+    assert event["attrs"]["reconciled"] is True
+    assert event["attrs"]["via"] == "reconcile_invite_events"
+    assert event["attrs"]["wave"] == "wave1"
+    assert "reason" in event["attrs"]
+    # The 4-tuple shape the funnel taxonomy prescribes is preserved.
+    assert set(event) == {"event", "at", "ref", "attrs"}
+
+    # Idempotent: a second pass emits nothing new.
+    assert fresh.reconcile_invite_events() == []
+    assert len([e for e in funnel_events(tmp)
+                if e["event"] == "invite_sent"]) == 1
+
+
+def test_reconcile_skips_healthy_invite():
+    service, tmp, clock = make_service()
+    confirm_row(service, "a@example.com", clock)
+    wave(service, count=1, wave="wave1")
+    assert service.reconcile_invite_events() == []
+
+
+def test_reconcile_skips_rolled_back_invite(monkeypatch):
+    # Crash window, then the invite expires and rolls back to confirmed:
+    # the dead invite can't convert, so there is no event to claim —
+    # the next wave's fresh invite carries its own.
+    tmp, clock, entry_id, token = _crashed_invite_state(monkeypatch)
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    clock.advance(days=15)
+    assert fresh.rollover_expired_invites() == [entry_id]
+    assert fresh.rows[entry_id]["status"] == "confirmed"
+    assert fresh.reconcile_invite_events() == []
+    assert "invite_sent" not in [e["event"] for e in funnel_events(tmp)]
+
+    # The next wave re-invites cleanly with its own event; reconcile
+    # then has nothing to repair either.
+    assert fresh.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                  wave="wave2", count=1) == [entry_id]
+    events = [e for e in funnel_events(tmp) if e["event"] == "invite_sent"]
+    assert len(events) == 1
+    assert events[0]["ref"] == entry_id
+    assert "reconciled" not in events[0]["attrs"]
+    assert fresh.reconcile_invite_events() == []
+
+
+def test_reconcile_skips_expired_live_invite(monkeypatch):
+    # Crash window, then the invite expires with no rollover run (cron
+    # down): the token is dead, the claim can never happen. Reconcile
+    # stays conservative and emits nothing — recovery is the #235
+    # operator tooling, not this pass.
+    tmp, clock, entry_id, token = _crashed_invite_state(monkeypatch)
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    clock.advance(days=15)
+    _, status = fresh.lookup_invite_token(token)
+    assert status == "expired"
+    assert fresh.reconcile_invite_events() == []
+    assert "invite_sent" not in [e["event"] for e in funnel_events(tmp)]
+
+
+def test_reconcile_uses_current_invite_window(monkeypatch):
+    # A re-invited row legitimately has an OLD invite_sent for its
+    # previous invite; the at >= invited_at check means only the
+    # current invite's event counts as covering.
+    service, tmp, clock = make_service()
+    row = confirm_row(service, "a@example.com", clock)
+    entry_id = row["entry_id"]
+    wave(service, count=1, wave="wave1")
+    old_token = rows_lines_for(tmp, entry_id)[-1]["active_invite_token"]
+    assert len([e for e in funnel_events(tmp)
+                if e["event"] == "invite_sent"]) == 1
+
+    # Expire + roll over, then crash the reinvite's emit window.
+    clock.advance(days=15)
+    assert service.rollover_expired_invites() == [entry_id]
+    crash = {"armed": True}
+    _crash_emit_once(monkeypatch, crash)
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        wave(service, count=1, wave="wave2")
+    new_token = rows_lines_for(tmp, entry_id)[-1]["active_invite_token"]
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    _, status = fresh.lookup_invite_token(old_token)
+    assert status == "consumed"
+    _, status = fresh.lookup_invite_token(new_token)
+    assert status == "ok"
+
+    # The old event does NOT cover the new invite: one reconciled event
+    # is emitted for the current window, and re-running emits nothing.
+    assert fresh.reconcile_invite_events() == [entry_id]
+    events = [e for e in funnel_events(tmp) if e["event"] == "invite_sent"]
+    assert len(events) == 2
+    assert events[-1]["attrs"]["reconciled"] is True
+    assert events[-1]["attrs"]["wave"] == "wave2"
+    assert fresh.reconcile_invite_events() == []
+
+
+def test_reconcile_dry_run(monkeypatch):
+    tmp, clock, entry_id, _ = _crashed_invite_state(monkeypatch)
+    fresh = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid",
+                               clock=clock)
+    assert fresh.reconcile_invite_events(dry_run=True) == [entry_id]
+    # Dry run appends nothing.
+    assert "invite_sent" not in [e["event"] for e in funnel_events(tmp)]
+    assert fresh.reconcile_invite_events() == [entry_id]
+    assert len([e for e in funnel_events(tmp)
+                if e["event"] == "invite_sent"]) == 1
+
+
+def test_reconcile_skips_torn_events_line(monkeypatch, capsys):
+    service, tmp, clock = make_service()
+    confirm_row(service, "a@example.com", clock)
+    wave(service, count=1, wave="wave1")
+    # A kill -9 can tear the last append mid-line; the pass must skip
+    # the torn line loudly and still work — and the real event covers.
+    with open(os.path.join(tmp, "funnel_events.jsonl"), "a",
+              encoding="utf-8") as fh:
+        fh.write("this is not json\n")
+    assert service.reconcile_invite_events() == []
+    assert "torn" in capsys.readouterr().err
+
+
+def test_cli_reconcile(tmp_path, monkeypatch, capsys):
+    # The operator path: crashed on disk, repaired through wi.main with
+    # no WAITLIST_CLAIM_LIVE gate (reconcile sends no email).
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("WAITLIST_DATA", str(data))
+    monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
+                       "https://waitlist.example.invalid")
+    monkeypatch.delenv("WAITLIST_CLAIM_LIVE", raising=False)
+    service = wd.WaitlistService(str(data), KEY,
+                                 "https://waitlist.example.invalid",
+                                 clock=MutClock())
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    entry_id = row["entry_id"]
+    crash = {"armed": True}
+    _crash_emit_once(monkeypatch, crash)
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                 wave="wave1", count=1)
+    del service  # the CLI re-reads from disk under data_lock
+
+    assert wi.main(["--reconcile", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would reconcile 1 missing invite_sent event(s)" in out
+    assert entry_id in out
+
+    assert wi.main(["--reconcile"]) == 0
+    out = capsys.readouterr().out
+    assert "reconciled 1 missing invite_sent event(s)" in out
+    assert entry_id in out
+
+    # Idempotent through the CLI as well.
+    assert wi.main(["--reconcile"]) == 0
+    assert "reconciled 0 missing invite_sent event(s)" in \
+        capsys.readouterr().out
+
+
+def test_reconcile_quarantines_torn_tail(monkeypatch):
+    """A kill -9-torn invite_sent line must not glue the re-derived event
+    onto the torn partial: the event occupies its own parseable physical
+    line, exactly one invite_sent exists, and a second pass is a no-op.
+
+    (Deliberate deviation from one reviewer-suggested assertion: the
+    torn partial itself stays unparseable by design — the quarantine
+    terminates it, never repairs it — so this pins "exactly one
+    unparseable line, the torn partial" rather than "every line
+    parses". Reconcile never amplifies the damage; its own emissions
+    are always parseable and covering.)"""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    entry_id = row["entry_id"]
+    torn = {"armed": True}
+    _torn_append_once(monkeypatch, torn)
+    with pytest.raises(RuntimeError, match="simulated kill -9"):
+        service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                 wave="wave1", count=1)
+
+    reconciled = service.reconcile_invite_events()
+    assert reconciled == [entry_id]
+
+    with open(os.path.join(tmp, "funnel_events.jsonl"),
+              encoding="utf-8") as fh:
+        raw = fh.read()
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    parsed, unparseable = [], []
+    for ln in lines:
+        try:
+            parsed.append(json.loads(ln))
+        except json.JSONDecodeError:
+            unparseable.append(ln)
+    # The only unparseable line is the kill -9-torn partial itself.
+    assert len(unparseable) == 1
+    sent = [e for e in parsed if e["event"] == "invite_sent"]
+    assert len(sent) == 1
+    assert sent[0]["attrs"]["reconciled"] is True
+    # The re-derived event sits on its OWN physical line (no gluing):
+    # re-serializing it must recover exactly one line of the file.
+    assert json.dumps(sent[0], sort_keys=True) in lines
+
+    # The event now covers: a second pass is a clean no-op.
+    assert service.reconcile_invite_events() == []
+
+
+def test_reconcile_skips_consumed_active_token():
+    """Reinvite crash between _consume_token and the re-commit
+    (issue #235): the row is still invited but its active token reads
+    'consumed' — reconcile must not emit; recovery is #235 tooling."""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="wave1", count=1)
+    entry_id = row["entry_id"]
+    row = service.rows[entry_id]  # re-fetch: the wave re-saved the row
+    assert service.lookup_invite_token(row["active_invite_token"])[1] == "ok"
+    # Simulate the #235 crash: token consumed, row never re-committed.
+    service._consume_token(row["active_invite_token"])
+    assert service.lookup_invite_token(
+        row["active_invite_token"])[1] == "consumed"
+
+    assert service.reconcile_invite_events() == []
+    sent = [e for e in funnel_events(tmp)
+            if e["event"] == "invite_sent" and e["ref"] == entry_id]
+    assert len(sent) == 1  # the original wave event only
+
+
+def test_cli_reconcile_exactly_one_of(monkeypatch):
+    """--reconcile combined with --send-wave exits 2 before any work."""
+    service, tmp, clock = make_service()
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY)
+    monkeypatch.setenv("WAITLIST_DATA", tmp)
+    monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
+                       "https://waitlist.example.invalid")
+    with pytest.raises(SystemExit) as exc:
+        wi.main(["--send-wave", "--wave", "w1", "--reconcile"])
+    assert exc.value.code == 2

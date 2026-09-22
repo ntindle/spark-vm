@@ -1796,6 +1796,143 @@ class WaitlistService:
             rolled.append(row["entry_id"])
         return rolled
 
+    def _terminate_partial_tail(self, path):
+        """Quarantine a kill -9-torn tail before appending.
+
+        A kill -9 mid-append leaves a partial line with no trailing
+        newline at EOF; appending directly after it would glue the next
+        event onto the torn bytes, producing one physical line no
+        line-oriented reader can parse (and a second reconcile pass
+        would then re-emit, since the glued line never counts as
+        covering). If the file doesn't end with a newline, terminate
+        the partial line first so the next append starts on its own
+        parseable line. The torn line itself stays unparseable and is
+        skipped loudly, never trusted as covering.
+        """
+        with open(path, "ab+") as fh:  # "ab+" creates if missing
+            fh.seek(0, os.SEEK_END)
+            if fh.tell():
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) != b"\n":
+                    fh.seek(0, os.SEEK_END)
+                    fh.write(b"\n")
+
+    def reconcile_invite_events(self, dry_run=False):
+        """Issue #234: re-derive `invite_sent` events lost to the
+        commit -> emit crash window, in the append-only posture.
+
+        `_queue_invite_email` spools the email, then commits the invited
+        row, then emits `invite_sent` — a crash in that last window
+        leaves an invited row whose invite email went out but whose
+        funnel event never fired (the funnel reads conservatively, so
+        invite_sent/claim ratios under-report until repaired). Rows are
+        the source of truth here: hand-editing funnel_events.jsonl is
+        off-posture, so this pass re-derives the missing events from
+        rows.jsonl instead of rewriting history.
+
+        For every row that is (a) status == "invited", (b) carrying a
+        LIVE invite token (lookup validates "ok" — not consumed, not
+        expired), and (c) has no invite_sent event with at >= its
+        invited_at, it appends one `invite_sent` (ref = entry_id) with
+        attrs marking the reconciliation:
+
+            {"reconciled": True, "via": "reconcile_invite_events",
+             "wave": <invite_wave>, "reason": "commit-crash window: the
+             invited-row commit landed but the emit did not; the invite
+             email is spooled and the claim token is live"}
+
+        Guard notes, each deliberate:
+        - A row whose invite already rolled back to confirmed is skipped:
+          its (dead) invite can't convert, and the next wave's fresh
+          invite carries its own event. Backfilling for a dead invite
+          would claim what the funnel can never see claimed — the same
+          conservatism that skips the emit in the first place. Recovery
+          of such rows is operator tooling (issue #235), not this pass.
+        - A row whose token was consumed (superseded by a reinvite) is
+          skipped: either its current invite already emitted (check (c)
+          with the fresh invited_at), or it rolled back (previous rule).
+        - Check (c) compares at >= invited_at rather than mere event
+          presence: a re-invited row legitimately has an older
+          invite_sent for a previous invite; only the current invite's
+          event counts. invited_at is reset on every invite, and
+          funnel_metrics counts the last emission per ref — a reconciled
+          event appended after the real one is read as the same
+          emission, never a double-count.
+        - Torn funnel_events lines (kill -9 can tear the last append)
+          are skipped loudly like _load does; they never count as
+          covering, so a torn emit line is re-derived, not trusted.
+          Before each append the torn tail is terminated
+          (_terminate_partial_tail) so the re-derived event starts on
+          its own parseable line instead of gluing onto the torn
+          partial — without this, one physical line would be
+          unparseable and a second pass would re-emit.
+        - Idempotent and crash-safe: check-then-append with no other
+          mutation; re-running (or dying mid-pass) emits each missing
+          event exactly once. Deterministic order (entry_id).
+
+        Returns the entry_ids whose events were re-derived (or would
+        be, under dry_run).
+
+        Caller must hold data_lock (the operator CLI does) — same
+        convention as send_invite_wave. No WAITLIST_CLAIM_LIVE gate:
+        this pass sends nothing; it repairs funnel events for emails
+        the wave already sent.
+        """
+        covered = set()  # (ref, at) pairs of invite_sent events
+        events_path = os.path.join(self.data_dir, "funnel_events.jsonl")
+        if os.path.exists(events_path):
+            with open(events_path, encoding="utf-8") as fh:
+                for lineno, line in enumerate(fh, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        sys.stderr.write(
+                            "waitlistd: reconcile skipping torn "
+                            f"funnel_events.jsonl line {lineno}\n")
+                        continue
+                    if (isinstance(obj, dict) and
+                            obj.get("event") == "invite_sent"):
+                        covered.add((obj.get("ref"), obj.get("at")))
+        reconciled = []
+        for entry_id in sorted(self.rows):
+            row = self.rows[entry_id]
+            if row.get("status") != "invited":
+                continue
+            token = row.get("active_invite_token")
+            if not token:
+                continue
+            _, status = self.lookup_invite_token(token)
+            if status != "ok":
+                # Consumed/superseded or expired — the current invite is
+                # not live, so there is no event this pass may claim.
+                continue
+            invited_at = row.get("invited_at") or ""
+            if any(ref == entry_id and (at or "") >= invited_at
+                   for ref, at in covered):
+                continue
+            if not dry_run:
+                # Quarantine a kill -9-torn tail FIRST: without this,
+                # the append below would glue the re-derived event onto
+                # the torn partial line, producing one unparseable
+                # physical line (and a second pass would re-emit, since
+                # the glued line never counts as covering).
+                self._terminate_partial_tail(events_path)
+                self._emit("invite_sent", entry_id, {
+                    "reconciled": True,
+                    "via": "reconcile_invite_events",
+                    "wave": row.get("invite_wave"),
+                    "reason": ("commit-crash window: the invited-row "
+                               "commit landed but the invite_sent emit "
+                               "did not; the invite email is spooled "
+                               "and the claim token is live"),
+                })
+                covered.add((entry_id, row.get("invited_at")))
+            reconciled.append(entry_id)
+        return reconciled
+
     # -- self-host CTA -----------------------------------------------------
 
     def cta_selfhost(self, src):
