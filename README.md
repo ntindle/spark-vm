@@ -68,8 +68,9 @@ my Unraid server), then add:
 - a **human-approval loop** (`confirmd`) so sensitive actions wait for
   your two taps — served over the tailnet, never through the agent,
 - a **push-notification queue** so your phone buzzes when the approval
-  loop needs those two taps — it queues the summons and keeps retrying
-  until your phone gets it, portable like everything else,
+  loop needs those two taps — it queues the summons and retries it
+  through an outage instead of dropping it on the first failure,
+  portable like everything else,
 - a **job runner** (`muse-job`) so it can run long tasks with lifecycle
   hooks instead of you babysitting a terminal,
 - a **real desktop** it can drive with the official CUA driver —
