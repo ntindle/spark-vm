@@ -447,6 +447,16 @@ class _StubHandler:
 class ConfirmdPushEndpointTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # Issue #80: GET / drives do_GET() -> _render_pending_list() ->
+        # pending_dir() -> os.makedirs(APPROVALS/pending); point APPROVALS
+        # at tmp like test_confirmd.py does, so the suite is hermetic on
+        # machines where /home/swapd is not writable (e.g. spark-vm).
+        self._appr = tempfile.TemporaryDirectory()
+        self._appr_patch = mock.patch.object(
+            cd, "APPROVALS", str(Path(self._appr.name)))
+        self._appr_patch.start()
+        self.addCleanup(self._appr_patch.stop)
+        self.addCleanup(self._appr.cleanup)
         self.keys = str(Path(self.tmp.name) / "vapid.json")
         self.subs = str(Path(self.tmp.name) / "subs.json")
         priv, pub = push.gen_keypair()

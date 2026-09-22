@@ -78,6 +78,11 @@ and never leave `sys.path` / `sys.modules` mutations behind in a test —
 an order-dependent failure in the full run is a bug in the test, not in
 pytest.
 
+Run from the repo root: a bare `pytest` inside a subdirectory (e.g.
+`cd proxy && pytest`) silently runs only that subtree, because pytest does
+not walk up to the root `pytest.ini` when given no args there. Always run
+the suite from the root so `pytest.ini`'s `testpaths` apply.
+
 ## Secrets: the one hard rule
 
 **Never commit real secrets, tokens, credentials, or private keys.**

@@ -137,6 +137,15 @@ def test_proxy_install_paths_cover_deploy_sh_writes():
         body = f.read()
     for t in required:
         assert t in body, "deploy.sh no longer writes %s (test is stale)" % t
+    # Issue #108: the literal system paths are env-redirectable so the
+    # test suite can point them at tmp instead of the host. Pin that the
+    # override actually takes effect on the expanded array.
+    r = source_and('get_arr proxy install_paths',
+                   env_extra={"SUDOERS_D_SWAPD": "/tmp/fake-sudoers"})
+    assert r.returncode == 0, r.stderr
+    lines = [line.strip() for line in r.stdout.splitlines() if line.strip()]
+    assert "/tmp/fake-sudoers" in lines
+    assert "/etc/sudoers.d/swapd" not in lines
 
 
 # --- change mapping ----------------------------------------------------------
@@ -270,16 +279,36 @@ def test_snapshot_and_rollback(tmp_path):
     swapd = tmp_path / "swapd"
     bindir = tmp_path / "bin"
     sysd = tmp_path / "systemd"
-    for d in (swapd, bindir, sysd):
+    literals = tmp_path / "literals"
+    for d in (swapd, bindir, sysd, literals):
         d.mkdir(parents=True)
     (swapd / "swap_addon.py").write_text("OLD ADDON")
     (bindir / "with-proxy").write_text("OLD PROXY")
     (sysd / "swap-proxy.service").write_text("OLD UNIT")
+    # Issue #108: proxy_install_paths carries literal system paths
+    # (/etc/sudoers.d/swapd, ...). On a deployed box the sudoers file
+    # exists but is unreadable by the test user, so the real-path
+    # snapshot dies in `cp -a` with Permission denied. Redirect the
+    # literals at tmp via the components.conf env overrides — exactly
+    # like SWAPD_HOME/BIN_DIR/SYSTEMD_DIR — so the suite never touches
+    # the host. The redirected files double as snapshot/restore coverage
+    # for the literal-path entries themselves.
+    sudoers = literals / "sudoers.d" / "swapd"
+    sudoers.parent.mkdir(parents=True)
+    sudoers.write_text("OLD SUDOERS")
+    ca = literals / "ca-bundle.crt"
+    ca.write_text("OLD CA")
+    logrotate = literals / "logrotate.d" / "swap-proxy"
+    logrotate.parent.mkdir(parents=True)
+    logrotate.write_text("OLD LOGROTATE")
     env = {
         "UPDATER_STATE_DIR": str(state),
         "SWAPD_HOME": str(swapd),
         "BIN_DIR": str(bindir),
         "SYSTEMD_DIR": str(sysd),
+        "SUDOERS_D_SWAPD": str(sudoers),
+        "WITH_PROXY_CA_BUNDLE": str(ca),
+        "LOGROTATE_SWAP_PROXY": str(logrotate),
         "SKIP_SYSTEMCTL": "1",
         "SKIP_SUDO": "1",
         "AUTO_DEPLOY_NO_MAIN": "1",
@@ -290,17 +319,25 @@ def test_snapshot_and_rollback(tmp_path):
     assert r.returncode == 0, r.stderr + r.stdout
     manifest = (snap / "MANIFEST").read_text()
     assert str(swapd / "swap_addon.py") in manifest
+    # the redirected literal paths must be snapshot-covered, not ABSENT
+    assert str(sudoers) in manifest
+    assert str(ca) in manifest
+    assert str(logrotate) in manifest
     # a file that did not exist is recorded as ABSENT
     assert re.search(r"^ABSENT .*grant-writer$", manifest, re.M)
 
     # mutate the installed files, then roll back
     (swapd / "swap_addon.py").write_text("NEW ADDON")
     (bindir / "with-proxy").write_text("NEW PROXY")
+    sudoers.write_text("NEW SUDOERS")
     r = source_and("restore_snapshot %s" % snap, env_extra=env)
     assert r.returncode == 0, r.stderr + r.stdout
     assert (swapd / "swap_addon.py").read_text() == "OLD ADDON"
     assert (bindir / "with-proxy").read_text() == "OLD PROXY"
     assert (sysd / "swap-proxy.service").read_text() == "OLD UNIT"
+    assert sudoers.read_text() == "OLD SUDOERS"
+    assert ca.read_text() == "OLD CA"
+    assert logrotate.read_text() == "OLD LOGROTATE"
 
 
 def test_restore_absent_branch_skips_unstatable_paths(tmp_path):
@@ -368,6 +405,80 @@ def test_restore_absent_branch_removes_dangling_symlink(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert not os.path.islink(link), "dangling symlink must be unlinked"
     assert "removing" in r.stdout + r.stderr
+
+
+def test_restore_absent_branch_preserves_live_symlink_target(tmp_path):
+    """#104: `rm -f` unlinks only the symlink, never its target.
+
+    `test_restore_absent_branch_removes_dangling_symlink` pins the
+    `test -L` disjunct but deletes the target before restore, so the
+    "removal never touches the target" claim rests on code reading
+    alone. With a LIVE target behind the link at an ABSENT path: the
+    link must be unlinked and the target must still hold its content.
+    """
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    live = tmp_path / "live"
+    live.mkdir()
+    target = live / "real-target"
+    target.write_text("x")
+    link = live / "link"
+    link.symlink_to(target)
+    assert link.exists() and os.path.islink(link)  # live, not dangling
+    (snap / "MANIFEST").write_text("ABSENT %s\n" % link)
+    r = source_and("restore_snapshot %s" % snap,
+                   env_extra={"UPDATER_STATE_DIR": str(tmp_path),
+                              "SKIP_SUDO": "1",
+                              "AUTO_DEPLOY_NO_MAIN": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not os.path.islink(link), "symlink must be unlinked"
+    assert target.read_text() == "x", "live target must be untouched"
+
+
+def test_snapshot_restores_dangling_symlink(tmp_path):
+    """#105: the snapshot-side existence hunk covers dangling symlinks.
+
+    The snapshot writer's `test -L` disjunct (existence goes through
+    sudo_stat_path) has no dedicated test — only the restore side was
+    pinned. Round trip: snapshot a dangling symlink, replace it with a
+    regular file (as a deploy would), restore, assert the dangling link
+    comes back — not a file, not recorded ABSENT.
+    """
+    state = tmp_path / "state"
+    swapd = tmp_path / "swapd"
+    swapd.mkdir(parents=True)
+    link = swapd / "swap_addon.py"
+    link.symlink_to(swapd / "missing-target")
+    assert os.path.islink(link) and not link.exists()
+    literals = tmp_path / "literals"  # #108: never touch host literals
+    env = {
+        "UPDATER_STATE_DIR": str(state),
+        "SWAPD_HOME": str(swapd),
+        "BIN_DIR": str(tmp_path / "bin"),
+        "SYSTEMD_DIR": str(tmp_path / "systemd"),
+        "SUDOERS_D_SWAPD": str(literals / "sudoers.d" / "swapd"),
+        "WITH_PROXY_CA_BUNDLE": str(literals / "ca-bundle.crt"),
+        "LOGROTATE_SWAP_PROXY": str(literals / "logrotate.d" / "swap-proxy"),
+        "SKIP_SYSTEMCTL": "1",
+        "SKIP_SUDO": "1",
+        "AUTO_DEPLOY_NO_MAIN": "1",
+    }
+    snap = tmp_path / "snap"
+    r = source_and("snapshot_component proxy %s" % snap, env_extra=env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    manifest = (snap / "MANIFEST").read_text()
+    # not recorded ABSENT: the `test -L` disjunct keeps dangling symlinks
+    # snapshot-covered (`test -e` is false for them)
+    assert not re.search(r"^ABSENT .*swap_addon\.py$", manifest, re.M)
+    assert str(link) in manifest
+    # mutate: a deploy replaces the link with a real file
+    link.unlink()
+    link.write_text("NEW FILE")
+    r = source_and("restore_snapshot %s" % snap, env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert os.path.islink(link) and not link.exists(), \
+        "dangling symlink must be restored as a link"
+    assert os.readlink(link) == str(swapd / "missing-target")
 
 
 def test_sudo_stat_path_tristate(tmp_path):
