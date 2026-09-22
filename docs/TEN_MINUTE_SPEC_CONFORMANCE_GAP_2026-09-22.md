@@ -152,15 +152,22 @@ as stale) was updated to past tense in the same pass.
   Distinct layer from `harness/provider_iface.py`'s provider states.
 - **G4** — First-approval summons channel: the first summons has no mechanism
   (VAPID needs a pre-existing browser subscription; no email sender on the
-  filing path). Wire a fail-open email summons into `_file_approval` (AgentMail
-  identity per the spec), or redesign the summons around a contact collected
-  at signup.
+  filing path). Deliverable: the *control plane* — not the tenant box's swap
+  path — observes the filing event and sends a fail-open email via the
+  operational AgentMail identity per the spec's §4; the AgentMail credential
+  must never be installed on the tenant box (cf. the R2 placeholders rule).
+  Alternative: redesign the summons around a contact collected at signup.
+  Sequencing note: the summons body needs the approval URL, which per the
+  spec must be carried in the tenant record — i.e. G3's carrier scope.
 - **G5** — Golden-image round-trip gate procedure (§6.7): file → answer →
   grant → verify with the filing-count determinism check, reusing the gate
   fixture scripts.
 - **G6** — Smoke-check provision assets (§3a): `smoke.<domain>/echo` allowlist
   entry, provision-time `smoke-test` dummy install, scoped sudoers for the
-  tenant agent user.
+  tenant agent user. Surface note: this is the **swap** proxy's `hosts.allow` —
+  `harness/inject-provision-state.sh` step 2 refuses surviving echo entries in
+  the **inference** allowlists; the two are different surfaces and must not
+  be confused by the builder.
 
 Fixed in this run (no new items): signup-doc free-tier staleness (§9),
 `policy-misfire`/`no-gated-action` operator-only note (§4).
