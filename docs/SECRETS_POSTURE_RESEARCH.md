@@ -239,4 +239,6 @@ the placeholder variant in the open).
 - Runloop / Modal: named in the competitor doc's axis table but not deep-read
   here (Runloop "Credential Gateway" is not a name Runloop uses publicly;
   Modal documents `secrets=` env-var injection, not egress-time brokering).
-  The R6 docs should cite only the five vendors deep-read in this document.
+  The R6 docs should cite only the five vendors deep-read in this document,
+  plus lighter docs-verified watch-list data points that are explicitly marked
+  as outside the deep set (cf. the OpenComputer section above).
