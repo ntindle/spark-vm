@@ -238,6 +238,17 @@ $SUDO install -m 755 "$VERIFY_SCRIPT" /usr/local/sbin/jail-firewall-verify.sh
 $SUDO tee /etc/systemd/system/jail-firewall-verify.service >/dev/null <<'EOF'
 [Unit]
 Description=Jail firewall runtime watchdog (fail-closed: stop jail, re-apply table inet jail)
+# Boot ordering (Architecture round 2): the Persistent timer can fire at
+# timers.target, before multi-user.target's oneshot applies the table —
+# without this edge the watchdog would observe a legitimately-absent
+# table and raise a spurious fail-closed red unit at boot, training the
+# operator to ignore the signal. Wants (NOT Requires) pulls the oneshot
+# into the transaction without gating on its success; After orders it
+# first. On periodic runs this is a no-op (oneshot is
+# RemainAfterExit-active). If the oneshot itself failed, the verify unit
+# still runs after it and fail-closes on the missing table.
+Wants=jail-firewall.service
+After=jail-firewall.service
 
 [Service]
 Type=oneshot

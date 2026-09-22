@@ -128,7 +128,10 @@ states the construction, not a static pin.
   Every fail-closed event exits nonzero, so the unit goes red — the
   operator sees it in `systemctl --failed` and in the
   `jail-firewall-verify` journal tag; restart is the operator's explicit
-  decision, never automatic. The residual is bounded downtime, not
+  decision, never automatic. (If the jail stop itself fails, the script
+  logs CRITICAL and still performs the repair — the table drops are
+  restored for new flows and the red unit alerts the operator; only
+  hole-era established flows could theoretically survive a failed stop.) The residual is bounded downtime, not
   unbounded unenforced running: a table/ruleset loss can exist for up to
   ~5 minutes before detection, and the re-apply resets the drop counters
   (silence on the `jail-*-drop:` prefixes right after a re-apply is

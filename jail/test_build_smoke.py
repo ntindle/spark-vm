@@ -272,25 +272,18 @@ class TestFailClosedOrdering:
         assert fw < start, (
             "firewall apply must precede the machine start")
 
-    def test_no_firewall_reapply_mechanism(self, src):
-        # Stated residual, not an accident: no timer/path re-apply exists,
-        # so the README must (and does) disclose the runtime-flush hole.
-        # If someone adds a watchdog, this test names the place to update
-        # the contract text alongside it. Scans the whole jail/ dir, not
-        # just build.sh, so a separately-added unit file trips it too.
-        for fname in os.listdir(JAIL_DIR):
-            fpath = os.path.join(JAIL_DIR, fname)
-            if not os.path.isfile(fpath):
-                continue
-            if fname.startswith("test_"):
-                continue  # this file names the shapes it scans for
-            with open(fpath, encoding="utf-8") as f:
-                content = f.read()
-            for pat in ("jail-firewall.timer", "jail-firewall.path",
-                        "OnUnitActiveSec", "OnBootSec"):
-                assert pat not in content, (
-                    f"{fname}: re-apply mechanism shape {pat!r} — update "
-                    f"the README residual disclosure alongside it")
+    def test_firewall_watchdog_mechanism_documented(self, active):
+        # C25 closed the "no runtime re-apply" residual fail-closed: the
+        # verify timer exists, the README documents it, and the residual
+        # is bounded downtime. (This replaced
+        # test_no_firewall_reapply_mechanism — the C22 residual no longer
+        # exists, so asserting its absence would be a falsehood that
+        # passed vacuously on the new unit names.)
+        assert "jail-firewall-verify.timer" in active
+        readme = open(os.path.join(JAIL_DIR, "README.md"),
+                      encoding="utf-8").read()
+        assert "jail-firewall-verify" in readme
+        assert "bounded downtime" in readme
 
 
 class TestIsolation:
@@ -498,6 +491,17 @@ class TestFirewallWatchdogStatic:
         unit = m.group(0)
         assert "Type=oneshot" in unit
         assert "ExecStart=/usr/local/sbin/jail-firewall-verify.sh" in unit
+        # Boot-ordering edge (Architecture round 2): the Persistent timer
+        # can fire at timers.target, before the oneshot applies the table
+        # at multi-user.target. Without an ordering edge the watchdog
+        # would observe a legitimately-absent table and raise a spurious
+        # fail-closed red unit at boot, training the operator to ignore
+        # the signal.
+        assert "Wants=jail-firewall.service" in unit
+        assert "After=jail-firewall.service" in unit
+        # Wants, never Requires: if the oneshot failed at boot, the
+        # watchdog must still run and fail-close on the missing table.
+        assert "Requires=jail-firewall.service" not in unit
 
     def test_timer_cadence_and_wiring(self, active):
         m = re.search(
