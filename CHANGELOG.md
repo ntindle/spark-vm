@@ -43,7 +43,7 @@ This changelog only works if entries land with the change, not after it:
   unchanged; two pre-window competitors newly surfaced and filed as
   watchlist items (Brig, Epho); adjacent color on Meta Muse's Sentinel
   per-user VM architecture (third-party deep dive of the pre-window
-  launch). (PR TBD)
+  launch). (#239)
 - Waitlist operator tooling: `waitlist_invites.py --reconcile` repairs
   missing `invite_sent` funnel events after the commit → emit crash
   window — it re-derives the missing events for still-live invites from
