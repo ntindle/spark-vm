@@ -16,12 +16,33 @@ only to the echo host AND a blind compare
 (`proxy/cred-store-verify-inference`, which never reveals the stored
 value) to confirm the stored value is the public dummy — with the
 gate-fixture cleanup contract, 20 hermetic installer
-tests. Remaining for later feature slices: provision-time injector
-(which owns the gate-fixture teardown — unbind the llm-api→echo-host
-binding and remove the echo host from inference-hosts.allow and
-inference-ssrf.allow — before the real key lands), image gate, R1
-script green.
-The remaining implementation (provision-time injector, image gate) is
+tests. **Slice 3 SHIPPED 2026-09-21** (`harness/`):
+`inject-provision-state.sh` — the provision-time injector: preflights the
+golden-image manifest against the operator-pinned image SHA (fails
+closed on drift, before box-live), owns the gate-fixture teardown
+(unbinds the `llm-api`→echo-host binding through the narrow registry
+writer; fails closed on echo-host residue in `inference-hosts.allow` or
+`inference-ssrf.allow`, which the injector cannot remove — production
+sudoers is append-only by design, so the image-build gate owns that
+teardown pre-publish), asserts a real inference credential (registry
+binding + blind `cred-store-verify-inference` compare proving the
+stored value is NOT the public fixture dummy; the value is never read,
+never written, never printed), requires a fresh per-tenant swapd CA,
+installs tenant identity when `INJECT_IDENTITY_DIR` is set (strict
+public-key shape validation; private-key material refused), records
+tenant attribution when `INJECT_TENANT_ID` is set, then runs
+`harness-auth-probe` in provision mode so the injected key is proved
+against the real provider (a probe failure maps to
+`provisioning-failed`; box-live must not flip). Prints exactly one
+JSON inject report on stdout; all progress and refusal diagnostics go
+to stderr. 55 hermetic injector tests (fake writers, fake sudo
+asserting `-u swapd` and denying `tee`/`ls`, fake swap proxy, provider
+stub recording `Authorization` headers, stub confirmd). The §4 inject
+list's remaining item — the first-task slot properties — is explicitly
+deferred to the R1 first-run slice (it belongs to what the box does
+first, not to credential injection). Remaining for later feature
+slices: first-task slot properties, image gate, R1 script green.
+The remaining implementation (first-task slot, image gate) is
 build-loop `feature` work; this doc remains the spec input for it.
 **Feeds:** `docs/FIRST_TEN_MINUTES_SPEC.md` §5 (the harness pre-seed contract
 is R2's interface — this doc fills it in; the spec is unmerged, PR #49 @

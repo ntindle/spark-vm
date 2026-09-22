@@ -20,6 +20,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import push
 from push import b64url_decode
 
+import pytest
+# The VAPID round-trip tests below need the cryptography package. Skip
+# explicitly instead of erroring collection on boxes without it, so the
+# single-command `python3 -m pytest` degrades gracefully.
+pytest.importorskip("cryptography",
+                    reason="cryptography not installed — push-notification tests need it")
+
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import (
@@ -440,6 +447,21 @@ class _StubHandler:
 class ConfirmdPushEndpointTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # Issue #80: GET / drives do_GET() -> _render_pending_list() ->
+        # pending_dir() -> os.makedirs(APPROVALS/pending); point APPROVALS
+        # at tmp like test_confirmd.py does, so the suite is hermetic on
+        # machines where /home/swapd is not writable (e.g. spark-vm).
+        self._appr = tempfile.TemporaryDirectory()
+        self._appr_patch = mock.patch.object(
+            cd, "APPROVALS", self._appr.name)
+        self._appr_patch.start()
+        # QA follow-up: a tripwire — if a future edit breaks the #80
+        # patch above, fail loudly instead of silently re-polluting the
+        # host /home/swapd (on root runners tests still pass while the
+        # literal dir gets created).
+        assert cd.APPROVALS == self._appr.name
+        self.addCleanup(self._appr.cleanup)
+        self.addCleanup(self._appr_patch.stop)
         self.keys = str(Path(self.tmp.name) / "vapid.json")
         self.subs = str(Path(self.tmp.name) / "subs.json")
         priv, pub = push.gen_keypair()
@@ -449,16 +471,8 @@ class ConfirmdPushEndpointTests(unittest.TestCase):
         self._orig = (cd._PUSH, cd.PUSH_ENABLED)
         cd._PUSH = self.sender
         cd.PUSH_ENABLED = True
-        # The pending-page tests render via load_pending()/pending_dir(), which
-        # would otherwise touch the real CONFIRM_DIR (/home/swapd/approvals) —
-        # uncreatable for the unprivileged CI user. Point it at the tmp dir.
-        self._approvals_patch = mock.patch.object(
-            cd, "APPROVALS", str(Path(self.tmp.name) / "approvals"))
-        self._approvals_patch.start()
-
     def tearDown(self):
         cd._PUSH, cd.PUSH_ENABLED = self._orig
-        self._approvals_patch.stop()
         self.tmp.cleanup()
 
     def _sub_body(self, endpoint="https://push.example.com/p/abc"):

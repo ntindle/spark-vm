@@ -51,9 +51,14 @@ scripts/apply-rulesets.sh --file deploy/rulesets/tag-protection-vstar.json --exe
 
 ## Drift notes
 
-- If the CI job names in `.github/workflows/ci.yml` change, the
-  `required_status_checks` contexts in `main-branch-protection.json` must be
-  updated to match, then re-applied.
+- The `required_status_checks` contexts in `main-branch-protection.json` are
+  guarded bidirectionally by `scripts/test_apply_rulesets.py`: the test
+  parses the job check names out of `.github/workflows/ci.yml` (job `name:`
+  if set, else the job id) and requires exact set-equality with the
+  declared contexts, plus a known-good anchor on the four current check
+  names. Renaming, adding, or removing a CI job fails the suite until the
+  ruleset JSON is updated deliberately, under review, alongside it. No
+  manual cross-checking needed.
 - The `bypass_actors` entry in the strict tag file pins
   `github-actions[bot]` by its well-known actor id (`41898282`); confirm it
   against the workflow run actor before applying.

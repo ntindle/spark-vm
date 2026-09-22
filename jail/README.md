@@ -116,9 +116,9 @@ Owner decision 5: trust the CA system-wide inside the jail only.
    the system store today):
    ```bash
    sudo mkdir -p /usr/local/share/with-proxy-ca
-   sudo sh -c 'cat /etc/ssl/certs/ca-certificates.crt \
-       /home/swapd/.mitmproxy/mitmproxy-ca-cert.pem \
-       > /usr/local/share/with-proxy-ca/ca-bundle.crt'
+   # Read the CA source through build_ca_bundle.py — it refuses a planted
+   # symlink at the source (issue #144) instead of following it like `cat`.
+   sudo python3 ~/spark-vm/proxy/build_ca_bundle.py
    ```
    then point `CA_BUNDLE` in `/usr/local/bin/with-proxy` at
    `/usr/local/share/with-proxy-ca/ca-bundle.crt`.

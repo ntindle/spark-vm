@@ -39,7 +39,7 @@ refused). The agent never sees, and the guest VM never contains, real values.
 | Does the secret ever enter the sandbox? | No | No ("outside the sandbox when it forwards") | No (env holds placeholder, not value) | Docs imply yes it does not (interception at the boundary); not stated verbatim | No ("secret lives in the Worker's environment and is never passed into the sandbox") | No ("The real value stays in host memory") |
 | Injection surface | Request bodies + headers; response scrub | HTTPS **headers only** | HTTPS **headers only** | Request headers/transforms matched by path/method/query/headers | Whatever the handler code does (full programmability) | Headers + Basic-auth decode/substitute/re-encode by default; query/body opt-in; plain-HTTP opt-in |
 | Response scrubbing | Yes — real value rewritten to placeholder | Not documented | Yes — "rewrites it back to the placeholder" | Not documented | Not documented (custom handler code could) | Explicitly NOT — "An allowed endpoint that echoes a credential in its response can expose it to the guest" |
-| Destination scoping | Per-host allowlists (`hosts.allow` / `ssrf.allow`) | Rule per exact domain or `*.` wildcard; rule alone does NOT grant egress — host must also be in `allowOut` | Per-secret `hosts` (exact + `*.` wildcards; **omitted = unrestricted**) | NetworkPolicy allow/deny | Handler logic + `ctx.containerId` per-instance keys | Allowed-host match + DNS pin + TLS identity + authority alignment (strongest gate of the six) |
+| Destination scoping | Per-host allowlists (`hosts.allow` / `ssrf.allow`) | Rule per exact domain or `*.` wildcard; rule alone does NOT grant egress — host must also be in `allowOut` | Per-secret `hosts` (exact + `*.` wildcards; **omitted = unrestricted**) | NetworkPolicy allow/deny | Handler logic + `ctx.containerId` per-instance keys | Allowed-host match + DNS pin + TLS identity + authority alignment (strongest gate of the five-vendor deep set) |
 | Value storage | Operator-held (swapd users hold their own) | E2B secrets store | Org-scoped, encrypted at rest, never returned by API after creation | Vercel env/secrets | Worker env / Wrangler secrets | Host process memory (+ persisted in host-side sandbox config unless env-referenced) |
 | Audit of each injection | Per-decision audit line (durable) | Not documented | Not documented | Not documented | Not documented | Placeholder-block events logged |
 | Short-lived / rotated creds | Per-decision; grant TTL clamps | Identity tokens minted fresh per request | Placeholder stable across rotation; new value live within ~15s | Not documented | Handler code's choice | Not documented |
@@ -140,7 +140,7 @@ Docs: https://github.com/superradcompany/microsandbox/blob/HEAD/docs/security/se
   out." Injection runs through intercepted TLS: "the host-side proxy decrypts
   the intercepted TLS, verifies the request is really going where it claims,
   substitutes the real value, and forwards it upstream."
-- The destination gate is the strongest of the six vendors: allowed-host match
+- The destination gate is the strongest of the five-vendor deep set: allowed-host match
   (TLS SNI vs secret host patterns) **plus DNS pin** ("The destination IP was
   actually resolved for that host through the interceptor, so a hard-coded IP
   with a forged SNI doesn't qualify") **plus TLS identity** (never substituted
@@ -183,21 +183,93 @@ Doc: https://www.daytona.io/docs/en/secrets/.
 - Org-scoped, encrypted at rest, values never returned after creation;
   rotation keeps the placeholder stable with the new value live within ~15s.
 
+### OpenComputer (diggerhq/opencomputer) — VENDOR-VERIFIED
+
+Doc: https://github.com/diggerhq/opencomputer/blob/HEAD/docs/agent-sessions/credentials.mdx
+("How your keys are protected"), verified 2026-09-21. Spotted in the
+2026-09-21 competitor watch as a lighter docs-verified data point — outside
+the five-vendor deep set above.
+
+- "The real key never enters the sandbox. The runtime runs with an opaque
+  placeholder, and OpenComputer's **secret-store egress proxy** swaps in the
+  real value **in flight** — only on the outbound HTTPS call to the model
+  provider (`api.anthropic.com` / `api.openai.com`), enforced by an egress
+  allowlist, and nowhere else."
+- Their term ("secret-store egress proxy") is the vendor's own, and the
+  mechanics match swapd's shape: placeholder in the sandbox, real value
+  swapped at the egress boundary onto allowlisted hosts.
+- Scope note: documented for model-provider calls; the vendor doc verifies
+  the mechanism, not the derivation history — convergence is substantiated by
+  the quote, independence of derivation is not claimed here.
+
+### h-sandbox / Harakiri (OSS self-hosted control plane) — VENDOR-VERIFIED
+
+Repo: https://github.com/nabilblk/h-sandbox (Apache-2.0), public source
+launch 2026-09-09; docs current to 2026-09-14. Read 2026-09-21 ~21:00 CDT
+(commit `79d1151`). Spotted in the 2026-09-21 competitor watch (C18) as a
+docs-verified data point — outside the five-vendor deep set above.
+
+- Their own security model ("The trusted path is",
+  `docs/credential-vault.md`): "The sandbox sees only fake environment
+  variables or no variables at all. The provider injects the real auth
+  material only for outbound requests that match the binding." The binding is
+  host + scheme + method + path, validated before the value is applied to the
+  provider-side vault.
+- Their term ("fake env") is the vendor's own, and the mechanics match
+  swapd's shape: placeholder in the sandbox (an explicitly *fake* env value),
+  real value substituted at the egress boundary (the OpenSandbox egress
+  sidecar / Credential Proxy, `credentialProxy.enabled`) onto
+  binding-matched requests only. Fake env is merged into the sandbox launch
+  environment; the real value goes to the sidecar, never the workload env or
+  filesystem.
+- Scope note: injection surface is auth material only (bearer / API-key
+  header / basic) — no request-body substitution claim found, so narrower
+  than swapd's headers+bodies+query+path surface. No HTTPS MITM on
+  Harakiri's side; the substitution point is the sidecar on the request path.
+  (Upstream OpenSandbox docs describe the sidecar's Credential Vault injection
+  as experimental transparent mitmproxy — the no-MITM statement is Harakiri's
+  product-layer boundary, not a runtime-mechanism claim.)
+- Response scrubbing: **not documented** — their threat model
+  (`docs/security/credential-vault-threat-model.md`) admits the residual
+  openly: "A malicious allowed destination can reflect received credentials
+  in its response." Same class as Microsandbox's explicit non-scrub; swapd
+  and Daytona remain the only scrubbers in the corpus.
+- Fail-closed enforcement: Credential Vault requires the strict `dns+nft`
+  egress profile with `credentialVaultReady: true` attestation; a DNS-only
+  sidecar is rejected. Binding hosts are composed into restricted egress
+  policy before injection. "Harakiri does not fall back to open outbound
+  access, real environment variables, mounted Secrets, or Kubernetes exec
+  when enforcement is unavailable."
+- Audit: lifecycle audit events, metadata-only, central redaction before
+  persistence. Per-injection audit is not documented (swapd's
+  per-decision-audit claim stands).
+- The convergence verdict: a fourth convergent data point for the
+  placeholder-swap pattern — and the first from an open-source self-hosted
+  control plane. As with OpenComputer, convergence is substantiated by the
+  quote; independence of derivation is not claimed here.
+
 ## What this means for R6 (the docs repositioning)
 
 The honest, sourced edges swapd can claim — each one vendor-quoted above:
 
-1. **Request-body scope** (vs E2B and Daytona): both substitute HTTPS headers only;
-   swapd substitutes into request bodies too. Daytona is the incumbent with the
+1. **Request-body scope** (vs E2B, Daytona, and h-sandbox): E2B and Daytona
+   substitute HTTPS headers only; h-sandbox's surface is auth material only
+   with no request-body substitution claim found; swapd substitutes into
+   request bodies too. Daytona is the incumbent with the
    fullest version of the pattern — the comparison there is narrow and honest,
    not a posture win.
-2. **Response scrubbing** (vs E2B and Microsandbox; **parity** with Daytona):
+2. **Response scrubbing** (vs E2B, Microsandbox, and h-sandbox; **parity** with Daytona):
    Daytona's proxy rewrites echoed real values back to the placeholder just
    like swapd's; E2B does not document scrubbing; Microsandbox explicitly does
-   not. The cleanest mechanical contrast here is against Microsandbox, the
-   only other OSS entry.
-3. **Audited per decision** (vs all five): none of the five vendors document
-   per-injection audit lines; swapd's audit write is part of authorization.
+   not; h-sandbox documents no scrubbing and admits the residual openly (a
+   malicious allowed destination can reflect received credentials in its
+   response). The cleanest mechanical contrasts are against the open-source
+   entries — Microsandbox, which explicitly does not scrub, and h-sandbox,
+   which documents no scrubbing. OpenComputer's scrub status is not documented
+   in the corpus.
+3. **Audited per decision** (vs all five, and both watch-list data points): none
+   of the five vendors, OpenComputer, or h-sandbox documents per-injection
+   audit lines; swapd's audit write is part of authorization.
 4. **DNS pin + authority alignment** (vs swapd, conceded): Microsandbox's
    destination gate is stronger than swapd's per-host allowlists — the docs
    should say so rather than invite the comparison to find it.
@@ -220,4 +292,6 @@ the placeholder variant in the open).
 - Runloop / Modal: named in the competitor doc's axis table but not deep-read
   here (Runloop "Credential Gateway" is not a name Runloop uses publicly;
   Modal documents `secrets=` env-var injection, not egress-time brokering).
-  The R6 docs should cite only the five vendors deep-read in this document.
+  The R6 docs should cite only the five vendors deep-read in this document,
+  plus lighter docs-verified watch-list data points that are explicitly marked
+  as outside the deep set (cf. the OpenComputer section above).

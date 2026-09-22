@@ -1,6 +1,6 @@
 # site/ — the waitlist-era web surface (H15, surface 1)
 
-**Status: build slices 1–3c of H15 PR 1.** Slice 1 shipped the static
+**Status: build slices 1–3c + slice 3 remainder of H15 PR 1.** Slice 1 shipped the static
 markup (PR #163); slice 2 shipped the backend half of the endpoint surface
 (`site/waitlistd.py` + `scripts/test_waitlistd.py`, 25 tests): `POST
 /waitlist/form`, the §4.3 confirm flow (`GET` renders-only / `POST`
@@ -30,10 +30,14 @@ redirect shim (`site/go/selfhost/index.html`, no-JS meta refresh for Pages)
 and the dynamic control-plane route (`GET /go/selfhost` → 302 + `cta_click`
 event with canonical `src` validation).
 
-**Not yet (slice 3 remainder = H15 §8's remaining "§7 waitlist-era endpoint
-surface"):** the path-A email parser and the invite sender. The
-page is still NOT deployable — the dead-form rule holds until every §10
-checklist item is live.
+**Shipped (claim slice):** the claim route the invite email links to —
+`GET /waitlist/claim` renders the claim screen (renders-only, scanner-safe)
+and `POST /waitlist/claim` records the claim (row → `signed_up`, single-use
+token consumed, `claimed` funnel event emitted). Waitlist-era scope:
+tenant-shell provisioning after the claim is the signup-era surface
+(H15 stage 2). The page is still NOT deployable — the dead-form rule
+holds until every §10 checklist item is live (including the deployed
+endpoint, the reminder/drop cron, and the inbox).
 
 ## The dead-form rule (read before deploying anything)
 
@@ -110,7 +114,14 @@ cohort before waitlist-order general invites (no dates), so the page never
 promises what the operator plan doesn't deliver.
 
 **Not yet (H15 PR 1 remainder = H15 §8's "§7 waitlist-era endpoint surface"
-plus markup):** the path-A email parser and the invite sender.
+plus markup):** the path-A email parser and the invite sender — shipped
+in this slice as `site/waitlist_patha.py` (tested by
+`scripts/test_waitlist_patha.py`) and `site/waitlist_invites.py` (tested
+by `scripts/test_waitlist_invites.py`); the invite email's claim link
+points at `GET /waitlist/claim` (served by `waitlistd.py` since the claim
+slice — renders-only GET, claim-recording POST, `claimed` funnel event),
+so the page remains non-deployable under the dead-form rule only until
+the §10 operator checklist goes live.
 Slices 2–3c already ship: `POST /waitlist/form` endpoint, the §4.3 confirm
 flow (`GET` renders-only / `POST` confirms), the HMAC token signer, the +7d
 reminder and 14d drop jobs (cross-process data lock, fixed drop deadline,

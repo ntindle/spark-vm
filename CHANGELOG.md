@@ -44,6 +44,110 @@ This changelog only works if entries land with the change, not after it:
   waits for the next worker pass (up to 30s, tunable via
   `--worker-interval`). Runs wherever the deployment lives (self-hosted
   or hosted), like confirmd. (PR #204)
+- Waitlist claim route: the invite email's claim link is now served —
+  opening it shows the claim screen (masked owner email, the same
+  what-happens-next steps as the invite email), and clicking through
+  records the claim idempotently and logs it in the funnel trail. Dead
+  or expired links land on an honest "no longer live" page, never an
+  error dump. (#250)
+- Provision-time injector (`harness/inject-provision-state.sh`): runs at
+  first boot of the hosted agent VM and owns the provision-time half of
+  the gate-fixture contract — preflights the golden-image manifest
+  against the operator-pinned image SHA and fails closed on drift
+  before box-live; tears down the gate fixture's `llm-api`→echo-host
+  binding, failing closed on echo-host residue in the allowlists (which
+  only the image-build gate can remove); asserts a real inference
+  credential through the registry plus a blind compare against the
+  public fixture dummy (the stored value is never read, never written,
+  never printed); requires a fresh per-tenant swapd CA; installs tenant
+  identity and records tenant attribution when their inputs are
+  provided (both reported as deferred when absent, never fabricated);
+  then proves the injected key with the provision-mode probe — a probe
+  failure maps to provisioning-failed and box-live must not flip.
+  Ships one JSON inject report on stdout and 55 hermetic tests. (#238)
+- Night competitor watch (2026-09-22): quiet survey window — no launches,
+  acquisitions, pricing changes, releases, or partner moves across the
+  tracked set; boat.dev rate card and comparison table re-verified
+  unchanged; two pre-window competitors newly surfaced and filed as
+  watchlist items (Brig, Epho); adjacent color on Meta Muse's Sentinel
+  per-user VM architecture (third-party deep dive of the pre-window
+  launch). (#239)
+- Waitlist operator tooling: `waitlist_invites.py --reconcile` repairs
+  missing `invite_sent` funnel events after the commit → emit crash
+  window — it re-derives the missing events for still-live invites from
+  the waitlist store in the append-only posture (each re-derived event
+  carries `reconciled: true` in its attrs; `--dry-run` previews), is
+  idempotent, and skips rows whose invite is no longer live. (#237)
+- Secrets-posture corpus: h-sandbox's Credential Vault (open-source,
+  self-hosted sandbox control plane) becomes the fourth convergent data
+  point for the placeholder-swap pattern — its docs describe fake-env
+  placeholders in the sandbox with the real auth material injected at the
+  egress sidecar only for host/scheme/method/path-bound requests (verified
+  against their own docs 2026-09-21, verbatim quote in the research doc);
+  the watch pass also records its OpenSandbox-adapter contract discipline as
+  input to the hosted provider-adapter design. (#230)
+- Secrets-posture corpus: opencomputer.dev's secret-store egress proxy
+  (opaque placeholder in the sandbox, real key swapped in-flight on the
+  outbound HTTPS call to the model provider, under an egress allowlist —
+  verified against their own docs 2026-09-21, verbatim quote in the research
+  doc) joins Daytona and Microsandbox as a third convergent data point for
+  the placeholder-swap pattern. (#219)
+- Competitor watch 2026-09-21 evening (docs/COMPETITOR_WATCH_2026-09-21_EVENING.md):
+  quiet window — zero in-window deltas across the tracked set since the
+  afternoon pass; one pre-window miss filed as watch item C18
+  (h-sandbox/"Harakiri Sandbox" — open-source self-hosted sandbox
+  control plane launched 2026-09-09, with a host-bound-egress credential
+  vault and an OpenSandbox execution adapter, the closest open-source
+  shape to spark-vm's secrets posture); AgentComputer's "unverifiable"
+  egress posture refined to a stronger negative (real product with real
+  pricing, still no stated egress policy). (#216)
+- `jail/build.sh` is safer to inspect and harder to drift: `--help` / `-h`
+  renders the script's header doc and exits before any side effect in ANY
+  flag position (`build.sh --rebuild-rootfs --help` can't accidentally
+  start the privileged build — the usage line documents that order), and
+  the tailnet→jail SSH port is now single-sourced from `$JAIL_SSH_PORT`
+  into the nftables DNAT rule via a quoted heredoc + placeholder
+  substitution — the applied conf always carries the variable's value,
+  with tests that render through the real sed pipeline.
+- The single-command test story now actually covers every component:
+  `pytest.ini` discovers the `cua/`, `jail/`, AND `credlib/` suites too —
+  including a new `cua/test_shell_scripts.py` gate (`bash -n` +
+  shellcheck warnings for the four host-side `cua/bin` scripts that
+  can't run in CI, with an explicit skip when shellcheck is absent,
+  now also wired into `ci.yml` so the gate actually executes) — and
+  `confirm/test_push.py` skips explicitly (instead of erroring
+  collection) on boxes without the `cryptography` package, so
+  `python3 -m pytest` degrades gracefully.
+- Approvals-plane gap analysis: a new doc walks the full path from a gated
+  action to a human answer and back (refusal → filing → pending → human
+  answer UX → push summons → terminal decision delivery → audit trail),
+  against the code as it stands today. Headline finding: the plane is a dead
+  end for the agent — refusals carry no approval id, answers deliver no
+  decision, and expiry is a silent third outcome — and files two new issues
+  (expiry's silent terminal outcome; answered-feed per-poll parse cost).
+  (#215)
+- Release-protection drift guard: the declared `main` branch ruleset's
+  required CI checks are now verified bidirectionally against
+  `.github/workflows/ci.yml` — renaming, adding, or removing a CI job fails
+  the test suite until the declared ruleset is updated deliberately, so the
+  release-tag/branch protection can no longer silently lag behind CI.
+  (#208)
+- Waitlist slice 3 remainder (H15 — path-A email parser + invite sender):
+  `site/waitlist_patha.py` implements the email intake path
+  (WAITLIST_OPERATIONS.md §2) — exclusion list (From, inbox,
+  @agentmail.to) applied before counting, `Owner:` line override, the
+  optional ed25519 pubkey + ≤280-char use-case line, exactly-one-candidate
+  proceeds to a validated row with the path-A confirm opener, zero/≥2
+  candidates get the §2 clarification reply only on DMARC-aligned mail
+  (unauthenticated mail is silently triaged — no backscatter), a reply
+  saying "forget me" triggers the §5 confirmation email with the signed
+  forget link (never direct deletion), and the §6 per-sender 3/day intake
+  limit; `site/waitlist_invites.py` drives §7 invite waves (top-N
+  confirmed FIFO by confirmed_at, pricing + trial terms filled at send
+  time from operator files, signed position line, 14-day `invite.`-prefixed
+  HMAC claim tokens, `invite_sent` funnel events) plus the expiry
+  rollover (unclaimed invites return to `confirmed` with confirmed_at
+  reset to the expiry time, no re-confirmation). (#203)
 - Competitor watch 2026-09-21 (docs/COMPETITOR_WATCH_2026-09-21.md): quiet
   window — no launches, pricing changes, partner moves, or version bumps
   across the tracked set since the 2026-09-20 pass; boat.dev's rate card
@@ -65,6 +169,23 @@ This changelog only works if entries land with the change, not after it:
   control-plane origin via a deploy-time placeholder the operator fills
   at launch (a relative action would post to the static host, which has
   no serving layer). (#190)
+- boat.dev 16-vCPU caveat confirmed as current vendor policy
+  (docs/COMPETITOR_WATCH_2026-09-21_C17.md): the pricing page still
+  footnotes xlarge as needing a $100+/mo plan plus operator capacity
+  allocation, so any 16-vCPU hosted sizing must confirm capacity with the
+  provider first; the baseline rate card is unchanged ($0.036/h default,
+  stopped sandboxes free, $26 for one default running the whole month).
+  (C17; #206)
+- Competitor watch 2026-09-21 afternoon
+  (docs/COMPETITOR_WATCH_2026-09-21_AFTERNOON.md): quiet window — no
+  launches, pricing changes, releases, or partner moves across the
+  tracked set since the morning pass; boat.dev's pricing page re-read
+  and unchanged, and its twelve-provider comparison table verified as
+  the page's current state (the earlier read was simply partial);
+  Microsandbox still at v0.7.1, Docker Sandboxes still at 0.43.0, Daytona
+  changelog still topped at v0.214.0 (Sep 15), TermSquad tiers
+  re-verified unchanged; WSO2 reception broadens slightly ahead of the
+  Sep 29 webinar. No corpus changes. (#209)
 - Secrets posture page (#189): frames the placeholder-swap design as
   independently re-derived — the pattern is convergent across the industry —
   and compares swapd mechanism-by-mechanism against E2B, Daytona, Vercel,
@@ -134,6 +255,40 @@ This changelog only works if entries land with the change, not after it:
   applying is an owner decision (#174)
 
 ### Fixed
+- Test hermeticity and coverage hardening (dx turn): the push-endpoint
+  tests no longer touch `/home/swapd` (approvals dir redirected at tmp),
+  the deploy rollback suite redirects the literal system paths
+  (`/etc/sudoers.d/swapd`, the CA bundle, logrotate) at tmp via new
+  `components.conf` env overrides so it never touches the host on a
+  deployed box, and the CRLF-only refusal case, the live-symlink-target
+  removal case, and the dangling-symlink snapshot round-trip are now
+  pinned. (#247)
+- README repo-layout table: the `harness/` and `site/` rows now describe
+  the current tooling — the provision-time injector and the waitlist
+  invite operator tools. (#246)
+- First-ten-minutes spec conformance audit (gap turn): the new
+  conformance-gap doc checks every spec clause against the repo — four
+  clauses still unmet (the onboarding status poll with the spec's machine
+  vocabulary, the first-approval summons channel, the golden-image
+  round-trip gate procedure, the §3a smoke echo endpoint and dummy
+  credential) are filed as build items G3–G6; the signup onboarding doc's
+  stale "free tier first" plan-picker lines are corrected to the decided
+  no-free-tier / card-required-trial-possible position, and the
+  operator-only `policy-misfire` / `no-gated-action` note the spec's
+  §10 follow-up asked for is in the rendering table. (#245)
+- An invite wave interrupted mid-send can no longer strand a waitlist row as
+  invited with no email on the way: each invited row commits in a single step
+  after its email is queued, so a crash degrades to a duplicate email on
+  retry instead of a lost invite (#220).
+- Waitlist invite crash recovery is now pinned by fault-injection tests
+  (deferred follow-ups from #220): the remaining crash windows — after an
+  old invite token is retired but before the row commits (re-invite and
+  expiry rollover), and between the commit and the `invite_sent` metric
+  event — are exercised against the documented behavior: in the re-invite
+  window, recovery mints a fresh token (the stray email's claim link
+  validates as consumed at the service layer); in the rollover window the
+  retired token stays consumed with no new email; and the metrics never
+  claim what the on-disk rows don't show (#236).
 - README, ONBOARDING, and the pre-seeded-harness research doc now point at
   the real `cua/bin/cua-desktop.sh` path (the script moved into `cua/bin/`
   and the old `./cua/cua-desktop.sh` reference broke the desktop step of
@@ -149,8 +304,41 @@ This changelog only works if entries land with the change, not after it:
   drops a redundant word, `harness` links the pre-seeded-harness research
   doc instead of assuming its jargon, and `site` drops the time-stamped
   "Waitlist-era" label. (#201)
+- Docs index catches up with the week's new docs: the four 2026-09-21
+  competitor watches (evening, afternoon, C17 resolution, morning), the
+  secrets-posture repositioning doc, and the Fly-driver and suspend/wake
+  research docs are now listed, and the stale "latest" labels in the
+  competitor and loop-governance tables are corrected to dated style.
+  (#218)
 
 ### Security
+- The unattended deployer's rollback snapshot and restore steps now
+  distinguish "this file is absent" from "the privilege check itself
+  failed" (broken sudo): a broken check aborts the snapshot and fails
+  the restore loudly instead of silently recording live files as absent
+  or silently skipping their removal, and a corrupted snapshot manifest
+  line with an empty path fails the restore instead of being skipped.
+  (#103, #107; #243)
+- The with-proxy CA bundle and the jail's swapd-CA install no longer read the
+  swapd-controlled CA through symlink-following `cat`/`cp` as root: a new
+  `proxy/build_ca_bundle.py` refuses a planted symlink (or FIFO/directory) at
+  the CA source and writes the bundle through the existing safe installer
+  (root:root 0644) — a swapd-level attacker can no longer get the next
+  unattended deploy to leak a root-readable file into the world-readable
+  bundle (#144, #207).
+- The approvals page daemon no longer lets its expiry sweep collide with an
+  in-flight approval answer: the sweep now waits its turn behind the same
+  per-approval serialization as the answer path, so an approval expiring
+  mid-approval can no longer drop the owner's connection with an unhandled
+  error after the grant was already minted, and an expired approval can no
+  longer briefly reappear after being swept. The audit trail also gains a
+  distinct event when an approval vanishes between grant minting and
+  consumption, instead of logging a contradictory expired-plus-approved pair
+  (#233). Dead approval files that never reached the answered list are now
+  swept into it after a day, so they no longer pile up unseen (#233).
+  Missing or unreadable approval files also release their per-approval
+  lock entries now, instead of leaking one registry entry per miss (#231).
+  (#241)
 - The swap proxy's audit log is now bounded: deploy installs a logrotate
   policy covering every `*swap*.log` under the proxy home (including
   `SWAP_LOG_FILE` overrides like the inference proxy's log) —
@@ -282,6 +470,10 @@ This changelog only works if entries land with the change, not after it:
   interface and planned contract extensions (suspend/wake, async dial,
   gpu_class routing, destroy-deletes-volumes) against the real Machines API
   ([#140](https://github.com/ntindle/spark-vm/pull/140))
+- Documented the quarterly manual re-sweep ritual for the three link hosts
+  CI's link checker skips as bot-blocked (medium.com, businesswire.com,
+  globenewswire.com) with a verification log — all 11 links (7 unique
+  URLs) confirmed live on 2026-09-22 (closes #106) (#249)
 
 ### Changed
 - Identity cleanup: deployment docs use the `ntindle` login account

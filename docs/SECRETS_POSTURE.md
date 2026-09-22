@@ -4,13 +4,28 @@
 contributors touching the swap path (`proxy/`). For the primary research with
 vendor-quoted citations, see [the vendor-quoted research](SECRETS_POSTURE_RESEARCH.md) — this page is
 the repositioned summary: what the pattern is, why swapd exists, and exactly
-where it differs from the five vendors we read.
+where it differs from the five vendors we read (plus the watch-list data
+points below).
 
 **The one honest framing, up front:** the secret-injection posture is
 *independently re-derived*, not a proven lead. Daytona — a major incumbent —
 ships the full pattern, and Microsandbox independently derived the
-placeholder variant in the open. This document shows the pattern is
-convergent: every serious sandbox vendor has shipped some version of "the
+placeholder variant in the open. A third convergent data point — spotted in
+the competitor watch, outside the five-vendor research set below — is
+opencomputer.dev: their docs describe a secret-store egress proxy where the
+runtime runs with an opaque placeholder and the real key is swapped
+in-flight, only on the outbound HTTPS call to the model provider, under an
+egress allowlist ([credentials.mdx](https://github.com/diggerhq/opencomputer/blob/HEAD/docs/agent-sessions/credentials.mdx),
+verbatim quote in the research doc, verified 2026-09-21). A fourth —
+spotted the same day in the competitor watch — is h-sandbox's Credential
+Vault (open-source, self-hosted control plane): their own docs say "the
+sandbox sees only fake environment variables or no variables at all" while
+"the provider injects the real auth material only for outbound requests
+that match the binding" — a fake env placeholder in the sandbox, real value
+substituted at the egress sidecar onto host/scheme/method/path-bound
+requests (verbatim quote in the research doc, verified 2026-09-21). This document shows
+the pattern is convergent: every
+serious sandbox vendor has shipped some version of "the
 proxy holds the secret, the sandbox doesn't". We make no first-mover claim.
 
 ## The pattern
@@ -62,7 +77,7 @@ values; the operator holds their own via `cred set`.
 | Placeholder in sandbox | `hsurr:<name>` | `${e2b.identity.tokens.<name>}` (minted fresh per request) / `Secret.fill` reference | `dtn_secret_<random>` mounted in env var | No placeholder — the handler injects into the request itself | None by default — the sandbox makes a plain request, the handler attaches the credential | `$MSB_<env_var>` (customizable) |
 | Injection surface | Request headers, bodies, query, and URL path; response scrub | HTTPS **headers only** | HTTPS **headers only** | Request headers via transforms matched by path/method/query/headers | Whatever the handler code does (fully programmable) | Headers + Basic-auth decode/substitute/re-encode by default; query/body opt-in |
 | Response scrubbing | Yes — real values rewritten to placeholders | Not documented | Yes — echoed real values rewritten back to the placeholder | Not documented | Not documented (handler code could) | Explicitly **not** — "an allowed endpoint that echoes a credential in its response can expose it to the guest" |
-| Destination scoping | Per-host allowlists (`hosts.allow` / `ssrf.allow`); deny list beats allow | Rule per exact domain or `*.` wildcard; rule alone does **not** grant egress — the host must also be in `allowOut` | Per-secret `hosts` allowlist; **omitted = unrestricted** (theirs is opt-out, ours is opt-in) | NetworkPolicy allow/deny; **deny wins** | Handler logic + `ctx.containerId` per-instance keys | Allowed-host match **plus DNS pin** (destination IP must have been resolved for that host through the interceptor) **plus TLS identity plus authority alignment** — the strongest destination gate of the six |
+| Destination scoping | Per-host allowlists (`hosts.allow` / `ssrf.allow`); deny list beats allow | Rule per exact domain or `*.` wildcard; rule alone does **not** grant egress — the host must also be in `allowOut` | Per-secret `hosts` allowlist; **omitted = unrestricted** (theirs is opt-out, ours is opt-in) | NetworkPolicy allow/deny; **deny wins** | Handler logic + `ctx.containerId` per-instance keys | Allowed-host match **plus DNS pin** (destination IP must have been resolved for that host through the interceptor) **plus TLS identity plus authority alignment** — the strongest destination gate of the five-vendor deep set |
 | Per-decision audit | Every swap and refusal appended to a durable log; the audit write is part of authorization | Not documented | Not documented | Not documented | Not documented | Placeholder-block events logged |
 
 Vendor documentation: [E2B internet access](https://e2b.dev/docs/network/internet-access),
@@ -78,13 +93,14 @@ Vendor documentation: [E2B internet access](https://e2b.dev/docs/network/interne
   only; swapd substitutes into request bodies too. Against Daytona — the
   incumbent with the fullest version of the pattern — the comparison is narrow
   and honest, not a posture win.
-- **Response scrubbing** (vs E2B and Microsandbox; *parity* with Daytona):
+- **Response scrubbing** (vs E2B, Microsandbox, and h-sandbox; *parity* with Daytona):
   Daytona's proxy rewrites echoed real values back to the placeholder just
   like swapd's; E2B does not document scrubbing; Microsandbox explicitly does
-  not. The cleanest mechanical contrast is against Microsandbox, the only
-  other open-source entry.
-- **Audited per decision** (vs all five): none of the five vendors document
-  per-injection audit lines, and swapd goes one step further — the audit write
+  not; h-sandbox does not document it (their threat model admits a reflecting
+  endpoint as a residual risk). The cleanest mechanical contrasts are against
+  the open-source entries — Microsandbox, which explicitly does not scrub,
+  and h-sandbox, which documents no scrubbing.
+- **Audited per decision** (vs all five, and both watch-list data points): none of the five vendors, OpenComputer, or h-sandbox documents per-injection audit lines, and swapd goes one step further — the audit write
   is part of the authorization check, not a post-hoc best effort.
 - **Credential-brokering availability** (parity with Vercel): Vercel's own KB
   states transformation rules are "available on all plans, including Hobby"
@@ -150,6 +166,9 @@ Not a security certification, not a guarantee of equivalence, and not a
 migration guide. The five vendor behaviors above are quoted from their own
 docs as of 2026-09-19 (see [the vendor-quoted research](SECRETS_POSTURE_RESEARCH.md) for the
 verbatim citations; the Vercel plan-availability item was re-verified
-2026-09-21 against the vendor's KB); vendor behavior moves, and this page
+2026-09-21 against the vendor's KB); OpenComputer's egress-proxy note is
+verified against its own docs as of 2026-09-21 (verbatim quote in the
+research doc), and h-sandbox's Credential Vault note is verified against its
+own docs as of 2026-09-21 (verbatim quote in the research doc). Vendor behavior moves, and this page
 tracks the release it ships with. When the vendor docs change, update the research doc
 first and re-derive this page from it.

@@ -1130,15 +1130,19 @@ class SwapAddonTests(unittest.TestCase):
 
     def test_issue88_inference_writer_refuses_newline_only_input(self):
         """#88: a single newline chomps to empty — refused like any empty
-        secret, never stored as a zero-byte key."""
+        secret, never stored as a zero-byte key. #122: the symmetric
+        CRLF-only case — a lone ``\\r\\n`` chomps to empty identically and
+        must be refused, not stored."""
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "cred-store-set-inference")
         with tempfile.TemporaryDirectory() as d:
-            env = dict(os.environ, INFERENCE_SECRETS_DIR=d)
-            r = subprocess.run([script], input=b"\n",
-                               capture_output=True, env=env)
-            self.assertNotEqual(r.returncode, 0)
-            self.assertFalse((Path(d) / "llm-api").exists())
+            for stdin_bytes in (b"\n", b"\r\n"):
+                env = dict(os.environ, INFERENCE_SECRETS_DIR=d)
+                r = subprocess.run([script], input=stdin_bytes,
+                                   capture_output=True, env=env)
+                self.assertNotEqual(r.returncode, 0, stdin_bytes)
+                self.assertFalse((Path(d) / "llm-api").exists(),
+                                 stdin_bytes)
 
     def test_issue88_inference_writer_chomp_never_masks_truncation(self):
         """#88 (QA round 2): the capture cap is max_bytes+2 and a capture

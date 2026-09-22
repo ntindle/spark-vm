@@ -6,7 +6,7 @@
 #   cd deploy  && python3 -m pytest test_auto_deploy.py
 #   cd muse-job && python3 -m pytest tests/test_event_trust.py
 #   python3 -m pytest cred-ui/tests/ -q
-#   cd cua     && python3 -m pytest test_cua_bridge.py -q
+#   cd cua     && python3 -m pytest test_cua_bridge.py test_shell_scripts.py -q
 #   cd jail    && python3 -m pytest test_build_smoke.py -q
 
 name: ci
@@ -66,7 +66,7 @@ jobs:
         run: python3 -m pytest cred-ui/tests/ -q
       - name: cua bridge tests
         if: always()
-        run: python3 -m pytest test_cua_bridge.py -q
+        run: python3 -m pytest test_cua_bridge.py test_shell_scripts.py -q
         working-directory: cua
       - name: jail build smoke tests
         if: always()
@@ -112,6 +112,10 @@ jobs:
         # hand-verified live 2026-09-21 via real browser — rate card,
         # xlarge capacity-allocation caveat, and the E2B/Daytona $0.331/h
         # comparison table all match the competitor-watch citation).
+        # producthunt.com 403s automated fetchers (bot-block; launch post
+        # hand-verified live 2026-09-22 via real browser — page loads,
+        # "automatic fallbacks across different providers" and the
+        # multi-provider-strategy motivation match the C20 citation).
         # Excluded at host level (not per-URL): new links
         # from these hosts trip the same bot blocks, so the exclusion must
         # cover the whole host. When adding a link from one of these hosts,
@@ -136,7 +140,7 @@ jobs:
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

@@ -175,8 +175,26 @@ day-bucket and `attrs` is a small key-value map:
 | `dropped` | 14d drop job fires on an unconfirmed row (`WAITLIST_OPERATIONS.md` §4) | row id | — |
 | `purged` | 30d post-drop purge deletes a dropped row (`WAITLIST_OPERATIONS.md` §5); the row's PII is gone, the event keeps the counts | row id | — |
 | `forgot` | signed footer-link deletion deletes a row on the reader's request (`WAITLIST_OPERATIONS.md` §5); the row's PII is gone, the event keeps the counts | row id | — |
-| `invite_sent` | wave invite leaves | row id | — |
+| `invite_sent` | wave invite leaves | row id | `reconciled` = `true` + `via` = `reconcile_invite_events` when re-derived by the operator's `waitlist_invites.py --reconcile` pass after the commit → emit crash window (`WAITLIST_OPERATIONS.md` §7); `funnel_metrics.py` counts the last emission per ref, so a re-derived event is read as the same emission, never a double-count |
 | `claimed` | invite claim completes | row id | — |
+
+**Known divergence:** a crash between the invited-row commit and the
+`invite_sent` emit (`WAITLIST_OPERATIONS.md` §7) leaves an invited row
+with no event — the funnel under-reports invite_sent until the operator
+runs `waitlist_invites.py --reconcile`, which re-derives the missing
+event from rows.jsonl in the append-only posture. Rows already rolled
+back to confirmed stay unrepaired by design: the next wave's fresh
+invite carries its own event. Rows whose invite expired *without* a
+rollover (e.g. the rollover cron was down) also stay unrepaired: run the
+daily `--rollover` first so they rejoin confirmed; reviving dead invites
+is the #235 operator tooling, not this pass.
+
+**Cohort note:** the re-derived event is stamped at repair time, and the
+invite→claim cohort is scoped on the `invite_sent` date — so repair
+promptly, or a late repair buckets those invites on the repair day
+rather than the wave day (their `wave` attr still names the wave they
+belong to). Claims that landed *before* the repair are excluded by the
+invite→claim latency gate (`claim_at >= invite_sent_at`).
 
 The §7 metrics are pure queries over this table plus the daily page
 rollups — no other instrumentation is permitted. The day-1 operator query
