@@ -226,7 +226,7 @@ This changelog only works if entries land with the change, not after it:
   window, recovery mints a fresh token (the stray email's claim link
   validates as consumed at the service layer); in the rollover window the
   retired token stays consumed with no new email; and the metrics never
-  claim what the on-disk rows don't show (PR TBD).
+  claim what the on-disk rows don't show (#236).
 - README, ONBOARDING, and the pre-seeded-harness research doc now point at
   the real `cua/bin/cua-desktop.sh` path (the script moved into `cua/bin/`
   and the old `./cua/cua-desktop.sh` reference broke the desktop step of
