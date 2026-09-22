@@ -86,6 +86,8 @@ HOST_CORPUS = [
     # leading-dot subdomain rule (the old string-suffix accident) -- a
     # partial-IP entry matches nothing at enforcement, so the injector
     # must not flag it as an echo exemption either (False, both sides)
+    ("127.0.0.1:8080", [".0.0.1"]),  # port strips before the literal
+    # parse: a port-suffixed literal takes the IP path too (False)
 ]
 
 SSRF_CORPUS = [

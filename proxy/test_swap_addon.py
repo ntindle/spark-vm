@@ -1663,6 +1663,10 @@ class SecuritySweepTests(unittest.TestCase):
         self.assertTrue(sa._host_in_list("0:0:0:0:0:0:0:1", ["::1"]))
         self.assertTrue(sa._host_in_list("127.0.0.1", ["127.0.0.1"]))
         self.assertTrue(sa._host_in_list("127.0.0.1:8080", ["127.0.0.1"]))
+        # a single-colon host is host:port, never an IPv6 literal: the
+        # port strips BEFORE the literal parse, so a port-suffixed
+        # literal takes the IP path and never the hostname rules
+        self.assertFalse(sa._host_in_list("127.0.0.1:8080", [".0.0.1"]))
         # a different literal does not match; hostname entries never
         # match an IP-literal host (and vice versa); CIDR entries are
         # _parse_ssrf_allow's business, not this function's

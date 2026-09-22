@@ -57,11 +57,20 @@ def host_in_list(host, entries):
         if end != -1:
             h = h[1:end]
     h = h.rstrip(".")
+    if h.count(":") == 1:
+        # Single-colon host: a :port suffix, never an IPv6 literal.
+        # Strip it BEFORE the literal parse so "127.0.0.1:8080" takes
+        # the IP path like "127.0.0.1" does (multi-colon strings such
+        # as "::1:8080" are parsed as addresses, not host:port).
+        h = h.split(":")[0]
     try:
         h_ip = ipaddress.ip_address(h)
     except ValueError:
         h_ip = None
     if h_ip is None:
+        # Hostname path: an IPv6 literal that failed parsing has no
+        # port to strip and simply falls through to a (non-)match
+        # below. (Single-colon hosts were already stripped above.)
         h = h.split(":")[0]
     for entry in entries or []:
         e = str(entry).lower()
