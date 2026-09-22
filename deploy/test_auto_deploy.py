@@ -129,6 +129,8 @@ def test_proxy_install_paths_cover_deploy_sh_writes():
         "/home/swapd/grants.json",
         "/etc/sudoers.d/swapd",
         "/usr/local/share/with-proxy-ca/ca-bundle.crt",
+        "/etc/logrotate.d/swap-proxy",  # QA follow-up: deploy.sh writes
+        # it (line 177) but the required set never checked it
     }
     missing = required - listed
     assert not missing, "missing from proxy_install_paths: %s" % sorted(missing)
@@ -146,6 +148,22 @@ def test_proxy_install_paths_cover_deploy_sh_writes():
     lines = [line.strip() for line in r.stdout.splitlines() if line.strip()]
     assert "/tmp/fake-sudoers" in lines
     assert "/etc/sudoers.d/swapd" not in lines
+    # Issue #108 (QA follow-up): no literal system path may sneak back
+    # into proxy_install_paths without an env redirect — under full
+    # redirection every expanded entry must live under the redirected
+    # roots, so a future literal addition fails loudly instead of
+    # touching the host on a deployed box (silently on root CI).
+    roots = ("/tmp/t/swapd", "/tmp/t/bin", "/tmp/t/sysd",
+             "/tmp/t/sudoers", "/tmp/t/ca", "/tmp/t/logrotate")
+    r = source_and('get_arr proxy install_paths', env_extra={
+        "SWAPD_HOME": roots[0], "BIN_DIR": roots[1], "SYSTEMD_DIR": roots[2],
+        "SUDOERS_D_SWAPD": roots[3], "WITH_PROXY_CA_BUNDLE": roots[4],
+        "LOGROTATE_SWAP_PROXY": roots[5]})
+    assert r.returncode == 0, r.stderr
+    lines = [line.strip() for line in r.stdout.splitlines() if line.strip()]
+    unredirected = [p for p in lines if not p.startswith(("/tmp/t/",))]
+    assert not unredirected, \
+        "unredirected literal system paths: %s" % unredirected
 
 
 # --- change mapping ----------------------------------------------------------
