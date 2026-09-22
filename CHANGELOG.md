@@ -295,6 +295,8 @@ This changelog only works if entries land with the change, not after it:
   consumption, instead of logging a contradictory expired-plus-approved pair
   (#233). Dead approval files that never reached the answered list are now
   swept into it after a day, so they no longer pile up unseen (#233).
+  Missing or unreadable approval files also release their per-approval
+  lock entries now, instead of leaking one registry entry per miss (#231).
   (PR TBD)
 - The swap proxy's audit log is now bounded: deploy installs a logrotate
   policy covering every `*swap*.log` under the proxy home (including

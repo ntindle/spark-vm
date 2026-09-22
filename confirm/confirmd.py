@@ -190,8 +190,11 @@ def _evict_aid_lock(aid):
     while holding the lock: a thread that grabbed the object before
     eviction still serializes on it and then sees the file gone (404);
     threads arriving later get a fresh lock. Assumes an aid's item never
-    comes back — aids are random hex in practice, so an evicted entry
-    cannot alias a live item's lock."""
+    comes back — aids are 64-bit random (`uuid.uuid4().hex[:16]` in
+    confirm/confirm-request), so reuse is a 2^-64 event. If it ever
+    happened, an evicted entry could alias a live item's lock, and
+    `_sweep_answered`'s `os.replace` could clobber `consumed/<aid>.json`
+    history — the invariant has teeth, stated once here."""
     _aid_locks.pop(aid, None)
 
 
@@ -321,7 +324,10 @@ def audit_log(event, peer, login, detail=""):
     Event policy: malformed/missing CSRF nonces are logged as violations
     ("csrf: bad nonce"); well-formed but stale/unknown nonces are logged
     under the separable "csrf:stale-nonce" event (issue #75) so reviewer
-    signal stays clean without dropping the trail."""
+    signal stays clean without dropping the trail. Issue #233: a pending
+    file that vanishes between grant mint and consumption is logged as
+    the distinct "answer-raced-expiry" event — never as "answer/approve"
+    — so the trail cannot self-contradict."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         with open(AUDIT, "a", encoding="utf-8") as f:
@@ -1425,7 +1431,13 @@ class Handler(BaseHTTPRequestHandler):
         # Arch 2026-09-21: bound the answered-history directory (see
         # _prune_consumed); the audit log stays the durable trail.
         # Issue #233: also sweep answered/ strays into consumed/ so a
-        # failed move doesn't leave them invisible forever.
+        # failed move doesn't leave them invisible forever. No lock
+        # needed here: answered files are write-once, and concurrent
+        # sweeps race benignly (os.replace + OSError caught). Effective
+        # semantics: this sweeps yesterday's strays — a same-run failed
+        # move waits out the grace period (journaled loudly via the
+        # stdout WARNING), biased toward never sweeping an in-flight
+        # file.
         _sweep_answered()
         _prune_consumed()
         audit_log("answer", self.client_address[0], login,
