@@ -300,6 +300,17 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
+- Provision-time credential teardown now treats leading-dot entries (e.g.
+  `.localhost`) as the live loopback exemptions they are: previously only
+  bare loopback names were unbound or refused, so a `.localhost` binding
+  or allowlist line would have survived teardown while the proxy still
+  swapped credentials toward loopback names. The three echo-detection
+  checks are now one shared implementation pinned against the proxy's own
+  matching semantics by a drift tripwire, instead of three hand-mirrored
+  copies that could drift apart unnoticed.
+- The provision-time tenant attribution record is now written atomically
+  (temp file plus rename): a crash mid-write can no longer leave a
+  truncated record for the per-tenant approvals wiring to consume.
 - Test hermeticity and coverage hardening (dx turn): the push-endpoint
   tests no longer touch `/home/swapd` (approvals dir redirected at tmp),
   the deploy rollback suite redirects the literal system paths

@@ -132,6 +132,13 @@ lifecycle above:
    is proved against the real provider; a probe failure maps to
    `provisioning-failed` (box-live must not flip).
 
+Dependency: `harness/proxy_match.py` must travel with the injector
+(same directory). It is the single shared mirror of the proxy's
+`_host_in_list` / `_parse_ssrf_allow` used by the teardown,
+allowlist, and key-assertion checks; `harness/test_proxy_match.py`
+pins it against the real proxy functions with a drift tripwire. The
+injector fails closed if the helper is absent.
+
 Prints exactly one JSON inject report on stdout; all progress and
 refusal diagnostics go to stderr. The report's `steps` map reads
 `"ok"` per completed step (`fixture_teardown` reads `"ok"` with the

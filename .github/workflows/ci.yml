@@ -8,6 +8,7 @@
 #   python3 -m pytest cred-ui/tests/ -q
 #   cd cua     && python3 -m pytest test_cua_bridge.py test_shell_scripts.py -q
 #   cd jail    && python3 -m pytest test_build_smoke.py -q
+#   cd harness && python3 -m pytest test_proxy_match.py test_inject_provision_state.py -q
 
 name: ci
 
@@ -72,6 +73,14 @@ jobs:
         if: always()
         run: python3 -m pytest test_build_smoke.py -q
         working-directory: jail
+      - name: harness tests (provision injector, proxy-match mirror)
+        # The proxy-match mirror's drift tripwire must run on every push:
+        # it pins harness/proxy_match.py against proxy/swap_addon.py, so a
+        # matcher change without a mirror update fails CI loudly instead of
+        # silently voiding the injector's fail-closed teardown model.
+        if: always()
+        run: python3 -m pytest test_proxy_match.py test_inject_provision_state.py -q
+        working-directory: harness
 
   shellcheck:
     name: shellcheck
