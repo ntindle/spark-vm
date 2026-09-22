@@ -325,6 +325,12 @@ This changelog only works if entries land with the change, not after it:
   it. Literals now compare as normalized addresses (`[::1]`,
   `[::1]:8080`, and trailing-dot spellings included); a hostname entry
   never matches a literal host. (#257)
+- Fixed a normalization-order regression in the same matcher (found in
+  adversarial review of #264): `example.com.:8080` no longer matched
+  `example.com`, which would have let a trailing-dot host:port slip past
+  fail-closed deny-name entries. The trailing dot is stripped after the
+  port now, on both sides of the shared matcher, and the case is pinned
+  in the test corpus so it cannot regress again. (#265)
 - Provision-time credential teardown now treats leading-dot entries (e.g.
   `.localhost`) as the live loopback exemptions they are: previously only
   bare loopback names were unbound or refused, so a `.localhost` binding
