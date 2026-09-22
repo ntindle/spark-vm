@@ -75,6 +75,58 @@ confirmation page live on the host.
   repo — a corrupted jail is a rebuild, not a mystery. Rebuilds get a
   fresh `/etc/machine-id`; guest sshd host keys live in the rootfs.
 
+## Enforcement-downgrade contract (fail-closed)
+
+The jail is a restricted workload: proxy-only egress, no DNS, no host
+mounts, no host services. The contract below states what happens when any
+layer of that restriction cannot be enforced — the answer is "the
+workload does not run unenforced", with the one stated residual below —
+stated with the same explicitness as Brig's policy-bound refusal (Brig
+refuses a policy-bound run on any backend that cannot enforce the policy
+rather than running it unenforced; `docs/COMPETITOR_C19_C20_BRIG_EPHO.md`
+§2). The build/boot ordering and the dependency edge are pinned by
+`test_build_smoke.py` (`TestFailClosedOrdering`); the drop rules they
+rest on are pinned by the nftables drop-rule tests; the proxy-down clause
+states the construction, not a static pin.
+
+- **Build time: fail closed.** `build.sh` runs under `set -euo pipefail`
+  and applies the firewall (`systemctl enable --now jail-firewall.service`)
+  *before* the machine is ever started. If `nft -f` fails — nftables
+  unavailable, bad rule, anything — the build aborts with no jail running.
+  The firewall section structurally precedes the machine-start section.
+- **Boot time: fail closed.** `jail-firewall.service` is an oneshot unit
+  with `Before=systemd-nspawn@jail.service` — and, because `Before=` is
+  ordering-only, build.sh also installs a consumer-side drop-in
+  (`systemd-nspawn@jail.service.d/firewall-requires.conf`) carrying
+  `Requires=jail-firewall.service` + `After=jail-firewall.service`. If the
+  firewall apply fails at boot, the dependency edge blocks the jail from
+  starting: no table, no container. A failed apply surfaces in
+  `systemctl status jail-firewall.service` and the journal — the operator
+  notices a failed unit, not a silent absence.
+- **Proxy down: fail closed.** The jail's only permitted egress is the
+  DNAT to the host proxy (`10.99.0.1:18080/18081` → `127.0.0.1`). If swapd
+  is not listening, the DNAT'd connect is refused — the jail gets *no*
+  egress, never direct egress. There is no fallback path by construction:
+  the forward chain drops everything else.
+- **Not fail-closed (stated residual): runtime firewall removal.** The
+  firewall is applied at build and at boot; nothing re-applies it while
+  the jail runs. If `table inet jail` is flushed or deleted at runtime
+  (operator `nft flush ruleset`, a conflicting firewall tool), the drops
+  vanish silently and the jail *keeps running*. Note the consequence is
+  specifically the drop-based isolation: the flush also deletes the DNAT
+  rule, so the *permitted* proxy path dies with the table — what is voided
+  is the "cannot reach host services / cannot egress directly" guarantee,
+  not "the jail gets open internet". This is tracked as GitHub issue #254
+  (firewall re-apply watchdog) rather than left as a silent hole.
+  Detection: the "Verify list" below, plus the drop counters logging with
+  `jail-fwd-drop:` / `jail-input-drop:` / `jail-fwd-indrop:` prefixes while
+  the table exists — silence from those prefixes on a running jail is a
+  signal, not peace of mind.
+
+The proxy's own downgrade behavior is stated in
+`docs/SECRETS_POSTURE.md`: a missing allow file is itself treated as deny,
+and a swap whose audit line cannot be durably recorded is refused.
+
 ## Build
 
 On the host, as ntindle:

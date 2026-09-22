@@ -124,6 +124,29 @@ Vendor documentation: [E2B internet access](https://e2b.dev/docs/network/interne
   transit by design; that is the trade the pattern demands, and the operator
   should understand it.
 
+## Committed, unbuilt: deny-style billing guard for sandbox cred-forwarding
+
+When spark-vm forwards operator credentials into a sandbox — the hosted
+tenant path, not yet built — known metered-billing keys (model-provider API keys and equivalents;
+seed list e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` — finalized when the
+surface ships) are deny-by-default: the forwarding path refuses
+to make them available to the sandbox without an explicit per-credential
+operator override, and the refusal is audit-logged. The shape is Brig's
+`deny` guard, deliberately: Brig refuses to forward e.g.
+`ANTHROPIC_API_KEY` when doing so would silently move the sandbox off a
+subscription onto metered API billing, with `BRIG_ALLOW_DENIED=1` as the
+deliberate override (docs/profiles.md). We adopt Brig's documented limit
+honestly too: their `deny` guards the environment channel only — a
+`files:` binding can deliver a metered key unchecked, deliberately. Our
+guard will state its own channel coverage the same way when the surface
+ships.
+
+Status is stated plainly: this is a committed design rule, not shipped
+behavior. No sandbox cred-forwarding surface exists in the repo yet — the
+self-hosted jail boots with zero credentials and receives values only via
+swapd's egress-time substitution, where the operator's own allowlists
+already govern. The guard lands with the hosted forwarding path.
+
 ## The conflict-resolution lesson
 
 E2B and Vercel resolve allow/deny conflicts in *opposite* directions —

@@ -12,6 +12,9 @@ run in CI, so this pins what a smoke check CAN verify without executing it:
   - idempotency guards (re-runs must not re-bootstrap a good rootfs)
   - the jail's documented isolation properties (no bind mounts, no DNS,
     proxy-only nftables egress, explicit UID range, sshd hardening)
+  - the fail-closed enforcement-downgrade contract (TestFailClosedOrdering:
+    firewall applied before the machine starts; the jail Requires= the
+    firewall at boot; no runtime re-apply — the stated residual)
   - secret hygiene (the swapd CA is installed via the symlink-safe
     build_ca_bundle.py helper, never plain cp; no embedded key material)
 
@@ -216,6 +219,78 @@ class TestSshPortSingleSourced:
 
     def test_verify_line_uses_variable(self, active):
         assert 'ssh -p $JAIL_SSH_PORT $JAIL_USER@<tailnet-ip>' in active
+
+
+class TestFailClosedOrdering:
+    """C22: the enforcement-downgrade contract. The jail must never run
+    where its firewall cannot be enforced. These tests pin the mechanism
+    the README's contract section states: firewall-before-machine at
+    build time, firewall-required-by-nspawn at boot time.
+
+    All assertions run against the `active` fixture (full-line comments
+    stripped): a commented-out ordering/dependency line must fail, not
+    pass on a substring match."""
+
+    def _firewall_unit(self, active):
+        m = re.search(
+            r"tee /etc/systemd/system/jail-firewall\.service.*?\nEOF",
+            active, re.S)
+        assert m, "jail-firewall.service unit block not found"
+        return m.group(0)
+
+    def _requires_dropin(self, active):
+        m = re.search(
+            r"systemd-nspawn@\$MACHINE\.service\.d/firewall-requires\.conf"
+            r".*?\nEOF",
+            active, re.S)
+        assert m, ("consumer-side firewall-requires.conf drop-in not "
+                   "found")
+        return m.group(0)
+
+    def test_firewall_unit_applies_table(self, active):
+        unit = self._firewall_unit(active)
+        assert "Type=oneshot" in unit
+        assert "nft -f /etc/nftables-jail.conf" in unit
+
+    def test_jail_requires_firewall(self, active):
+        # Before= is ordering-only: a failed firewall apply would NOT
+        # stop the jail. The fail-closed edge is Requires= on the
+        # consumer side (the nspawn unit), so a failed apply blocks the
+        # container from starting.
+        dropin = self._requires_dropin(active)
+        assert "Requires=jail-firewall.service" in dropin
+        assert "After=jail-firewall.service" in dropin
+        # The producer unit keeps its ordering declaration too.
+        assert "Before=systemd-nspawn@jail.service" in self._firewall_unit(active)
+
+    def test_firewall_applied_before_machine_start(self, active):
+        # set -e aborts the build if the firewall apply fails, so no jail
+        # ever starts without its table. Pin the structural ordering:
+        # the enable --now must precede any machinectl start.
+        fw = active.index("systemctl enable --now jail-firewall.service")
+        start = active.index("machinectl start $MACHINE")
+        assert fw < start, (
+            "firewall apply must precede the machine start")
+
+    def test_no_firewall_reapply_mechanism(self, src):
+        # Stated residual, not an accident: no timer/path re-apply exists,
+        # so the README must (and does) disclose the runtime-flush hole.
+        # If someone adds a watchdog, this test names the place to update
+        # the contract text alongside it. Scans the whole jail/ dir, not
+        # just build.sh, so a separately-added unit file trips it too.
+        for fname in os.listdir(JAIL_DIR):
+            fpath = os.path.join(JAIL_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if fname.startswith("test_"):
+                continue  # this file names the shapes it scans for
+            with open(fpath, encoding="utf-8") as f:
+                content = f.read()
+            for pat in ("jail-firewall.timer", "jail-firewall.path",
+                        "OnUnitActiveSec", "OnBootSec"):
+                assert pat not in content, (
+                    f"{fname}: re-apply mechanism shape {pat!r} — update "
+                    f"the README residual disclosure alongside it")
 
 
 class TestIsolation:
