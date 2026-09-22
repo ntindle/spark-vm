@@ -53,17 +53,32 @@ taxonomy already names the recoverable ones:
 |---|---|---|
 | `WAKE_TIMEOUT` (wake accepted, still in flight) | Poll and retry in place | rec 2: the wake is still in flight, not failed |
 | `WAKE_FAILED` (attempt ended, box back in `SUSPENDED`) | Retry `dial()` in place | rec 2: the box is *back in SUSPENDED* — the failure is diagnosed, not a provider outage |
-| `ErrorKind.FAILED` where the driver **accepts** retry (`FAILED → PROVISIONING` is legal) | Re-provision on the same driver | The transition table permits it; the driver believes recovery is possible |
-| `ErrorKind.FAILED` where the driver **declines** retry | **Fail over** | The driver's verdict that its own recovery is impossible is the cleanest failover trigger we have |
+| `status()` reports `FAILED` and a `dial()` probe does **not**
+  raise `ErrorKind.TERMINAL` | Leave recovery to the driver | The
+  driver still accepts recovery: its own `FAILED → PROVISIONING`
+  self-retry is driver-internal (the transition table's
+  `FAILED → PROVISIONING` is a *driver-reported* move, not a
+  router-driven action). The router does not drive it; if the
+  driver's self-retry fails, the next probe raises `TERMINAL`. |
+| A `dial()` probe on a `FAILED` box raises
+  `ErrorKind.TERMINAL` ("verb refused: … failed where the driver
+  declines retry") | **Fail over** | `TERMINAL` is the
+  machine-readable declined-retry verdict — the contract-level
+  equivalent of Epho's "provider is not very reliable", no
+  heuristics needed. |
 | `PROVISION_FAILED` after the driver's own retries | **Fail over** to the next provider | Provision is per-provider; nothing on this box ever existed |
 | `Health.DEGRADED` | No action (monitoring only) | Degraded is orthogonal to lifecycle; a degraded box is still the tenant's box |
 | Provider-level outage (mgmt endpoint down, region-wide failure — detected at the control plane, not via `status()`) | **Fail over** | `status()` itself is unreachable; in-place recovery is undefined |
 | `STOPPED` / unexpected `STOPPING` | Wake via `dial()` in place | rec 1: `dial()` on a stopped box starts it through the wake path — never an error |
 
 The rule of thumb: **fail over only when the driver cannot or will
-not recover the box itself.** A `FAILED` driver that declines
-retry is the contract-level equivalent of Epho's "provider is not
-very reliable" — and it's machine-readable, no heuristics needed.
+not recover the box itself.** The `TERMINAL` probe verdict on a
+`FAILED` box is the cleanest failover trigger we have —
+machine-readable, no heuristics. (Interface-prose note: `dial()`'s
+docstring reserves `TERMINAL` for declined-retry `FAILED`
+specifically while `dial_action()` maps all of `FAILED` to
+`REFUSE`; this design follows the docstring's declined-retry
+semantics.)
 
 ## 3. Which verbs the router drives
 
@@ -74,8 +89,14 @@ shipped `provider_iface` verbs, in this order for a failover:
    (declined retry) or detect the outage.
 2. **`snapshot()`** (source driver, best effort) — if the source
    box is reachable at all, capture a fresh provider-native
-   snapshot. If unreachable, skip: the session restores from the
-   control-plane backup (§4), never blocks on a dead box.
+   snapshot and record its label on the session record as a
+   **manual-recovery artifact**: if the failover exhausts its
+   targets and parks in the diagnosed failure state, the operator
+   has the freshest provider-native snapshot to work from
+   (driver-internal use — the router itself never restores from
+   it; see §4.2). If the source is unreachable, skip: the session
+   restores from the control-plane backup, never blocks on a dead
+   box.
 3. **`provision()`** (target driver, new `vm_id`) — with the
    session's stored `ProvisionSpec`. The target's `ProvisionResult`
    carries its own `capabilities` — the router records, does not
@@ -166,10 +187,17 @@ Instead:
   portable backup into the new box's data volume → re-run tenant
   bootstrap → `dial()` to verify.
 
-Provider-native `snapshot()` keeps its job: **same-provider**
-recovery (wake retry, same-driver re-provision after a declined
-retry). The portable backup is the cross-provider path. Both are
-disk-data mechanisms; neither carries memory.
+Provider-native `snapshot()` is **capture-only** in the shipped
+interface: it returns a label, and `ProvisionSpec` has no
+snapshot/source field — so the router cannot boot a new box from a
+provider-native snapshot. Same-driver recovery that uses one is
+**driver-internal**: the driver's own `FAILED → PROVISIONING`
+self-retry, where the snapshot is implementation detail the router
+never sees. Until the interface gains a provision-from-snapshot
+verb (open question, §7), **every router-driven re-provision —
+same-driver or cross-provider — is cold-from-portable-backup.**
+The portable backup is the only restore path the router drives.
+Both mechanisms are disk-data only; neither carries memory.
 
 ### 4.3 The bootstrap precondition (H19)
 
@@ -240,9 +268,11 @@ registered drivers' per-shape capabilities:
 3. Same region as the source, then same provider family — latency
    and data-sovereignty tiebreakers, operator-configurable.
 4. `max_suspend_memory_gb` / `memory_resume` — informational for
-   cross-provider (memory never survives); decisive only for the
-   same-provider re-provision branch, where a `FULL` target can
-   attempt a warm path.
+   target selection (memory never survives a router-driven
+   re-provision: the shipped interface has no provision-from-snapshot
+   verb, so even a `FULL` target restores cold; warm paths stay
+   driver-internal until the interface grows one — open question,
+   §7).
 
 **Failover loops are bounded.** The router attempts at most N
 targets (operator-set, default 3), then parks the session in a
@@ -290,6 +320,13 @@ the hosted control plane to be useful.
   properties (provider-neutral, keyed by `session_id`, encrypted at
   rest) but not its format — the disk-image-vs-file-tree choice and
   the encryption/key envelope are a follow-up design slice.
+- **Provision-from-snapshot verb**: the shipped interface has no
+  way to boot a new box from a provider-native snapshot label, so
+  router-driven re-provision is always cold-from-portable-backup
+  and warm restore stays driver-internal. If a future H4 slice
+  wants router-driven warm restore on `FULL` targets, the
+  interface needs a provision-from-label verb (with the
+  loud-`UNSUPPORTED` default the evolution policy requires).
 - **#47 sub-items** (#177–#180): the pause/resume, stream-ownership,
   idle-policy, and stopped-state semantics being defined there are
   the surfaces failover must preserve; this doc assumes their
