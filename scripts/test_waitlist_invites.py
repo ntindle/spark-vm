@@ -952,6 +952,26 @@ def _crash_emit_once(monkeypatch, crash):
     return real_emit
 
 
+def _torn_append_once(monkeypatch, flag):
+    """Fault-inject a kill -9 mid-append: write the first half of the
+    payload, then raise — leaving a torn partial line with NO trailing
+    newline at EOF, the way a real kill -9 tears the last append."""
+    real_append = wd.WaitlistService._append
+
+    def torn_append(self, name, obj):
+        if flag["armed"] and name == "funnel_events.jsonl":
+            flag["armed"] = False
+            line = json.dumps(obj, sort_keys=True)
+            path = os.path.join(self.data_dir, name)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line[:len(line) // 2])  # torn: no newline
+            raise RuntimeError("simulated kill -9 mid-append")
+        return real_append(self, name, obj)
+
+    monkeypatch.setattr(wd.WaitlistService, "_append", torn_append)
+    return real_append
+
+
 def _crashed_invite_state(monkeypatch, clock=None):
     """Drive a wave into the commit -> emit crash window and return
     (tmp, clock, entry_id, live_token): an invited row committed on
@@ -1141,3 +1161,87 @@ def test_cli_reconcile(tmp_path, monkeypatch, capsys):
     assert wi.main(["--reconcile"]) == 0
     assert "reconciled 0 missing invite_sent event(s)" in \
         capsys.readouterr().out
+
+
+def test_reconcile_quarantines_torn_tail(monkeypatch):
+    """A kill -9-torn invite_sent line must not glue the re-derived event
+    onto the torn partial: the event occupies its own parseable physical
+    line, exactly one invite_sent exists, and a second pass is a no-op.
+
+    (Deliberate deviation from one reviewer-suggested assertion: the
+    torn partial itself stays unparseable by design — the quarantine
+    terminates it, never repairs it — so this pins "exactly one
+    unparseable line, the torn partial" rather than "every line
+    parses". Reconcile never amplifies the damage; its own emissions
+    are always parseable and covering.)"""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    entry_id = row["entry_id"]
+    torn = {"armed": True}
+    _torn_append_once(monkeypatch, torn)
+    with pytest.raises(RuntimeError, match="simulated kill -9"):
+        service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                                 wave="wave1", count=1)
+
+    reconciled = service.reconcile_invite_events()
+    assert reconciled == [entry_id]
+
+    with open(os.path.join(tmp, "funnel_events.jsonl"),
+              encoding="utf-8") as fh:
+        raw = fh.read()
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    parsed, unparseable = [], []
+    for ln in lines:
+        try:
+            parsed.append(json.loads(ln))
+        except json.JSONDecodeError:
+            unparseable.append(ln)
+    # The only unparseable line is the kill -9-torn partial itself.
+    assert len(unparseable) == 1
+    sent = [e for e in parsed if e["event"] == "invite_sent"]
+    assert len(sent) == 1
+    assert sent[0]["attrs"]["reconciled"] is True
+    # The re-derived event sits on its OWN physical line (no gluing):
+    # re-serializing it must recover exactly one line of the file.
+    assert json.dumps(sent[0], sort_keys=True) in lines
+
+    # The event now covers: a second pass is a clean no-op.
+    assert service.reconcile_invite_events() == []
+
+
+def test_reconcile_skips_consumed_active_token():
+    """Reinvite crash between _consume_token and the re-commit
+    (issue #235): the row is still invited but its active token reads
+    'consumed' — reconcile must not emit; recovery is #235 tooling."""
+    service, tmp, clock = make_service()
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    service.send_invite_wave(pricing_lines=PRICING, trial_terms=TERMS,
+                             wave="wave1", count=1)
+    entry_id = row["entry_id"]
+    row = service.rows[entry_id]  # re-fetch: the wave re-saved the row
+    assert service.lookup_invite_token(row["active_invite_token"])[1] == "ok"
+    # Simulate the #235 crash: token consumed, row never re-committed.
+    service._consume_token(row["active_invite_token"])
+    assert service.lookup_invite_token(
+        row["active_invite_token"])[1] == "consumed"
+
+    assert service.reconcile_invite_events() == []
+    sent = [e for e in funnel_events(tmp)
+            if e["event"] == "invite_sent" and e["ref"] == entry_id]
+    assert len(sent) == 1  # the original wave event only
+
+
+def test_cli_reconcile_exactly_one_of(monkeypatch):
+    """--reconcile combined with --send-wave exits 2 before any work."""
+    service, tmp, clock = make_service()
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY)
+    monkeypatch.setenv("WAITLIST_DATA", tmp)
+    monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
+                       "https://waitlist.example.invalid")
+    with pytest.raises(SystemExit) as exc:
+        wi.main(["--send-wave", "--wave", "w1", "--reconcile"])
+    assert exc.value.code == 2

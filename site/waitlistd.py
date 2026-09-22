@@ -1796,9 +1796,30 @@ class WaitlistService:
             rolled.append(row["entry_id"])
         return rolled
 
+    def _terminate_partial_tail(self, path):
+        """Quarantine a kill -9-torn tail before appending.
+
+        A kill -9 mid-append leaves a partial line with no trailing
+        newline at EOF; appending directly after it would glue the next
+        event onto the torn bytes, producing one physical line no
+        line-oriented reader can parse (and a second reconcile pass
+        would then re-emit, since the glued line never counts as
+        covering). If the file doesn't end with a newline, terminate
+        the partial line first so the next append starts on its own
+        parseable line. The torn line itself stays unparseable and is
+        skipped loudly, never trusted as covering.
+        """
+        with open(path, "ab+") as fh:  # "ab+" creates if missing
+            fh.seek(0, os.SEEK_END)
+            if fh.tell():
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) != b"\n":
+                    fh.seek(0, os.SEEK_END)
+                    fh.write(b"\n")
+
     def reconcile_invite_events(self, dry_run=False):
         """Issue #234: re-derive `invite_sent` events lost to the
-        commit -> emit crash window, in the append-only audit posture.
+        commit -> emit crash window, in the append-only posture.
 
         `_queue_invite_email` spools the email, then commits the invited
         row, then emits `invite_sent` — a crash in that last window
@@ -1840,6 +1861,11 @@ class WaitlistService:
         - Torn funnel_events lines (kill -9 can tear the last append)
           are skipped loudly like _load does; they never count as
           covering, so a torn emit line is re-derived, not trusted.
+          Before each append the torn tail is terminated
+          (_terminate_partial_tail) so the re-derived event starts on
+          its own parseable line instead of gluing onto the torn
+          partial — without this, one physical line would be
+          unparseable and a second pass would re-emit.
         - Idempotent and crash-safe: check-then-append with no other
           mutation; re-running (or dying mid-pass) emits each missing
           event exactly once. Deterministic order (entry_id).
@@ -1888,6 +1914,12 @@ class WaitlistService:
                    for ref, at in covered):
                 continue
             if not dry_run:
+                # Quarantine a kill -9-torn tail FIRST: without this,
+                # the append below would glue the re-derived event onto
+                # the torn partial line, producing one unparseable
+                # physical line (and a second pass would re-emit, since
+                # the glued line never counts as covering).
+                self._terminate_partial_tail(events_path)
                 self._emit("invite_sent", entry_id, {
                     "reconciled": True,
                     "via": "reconcile_invite_events",
