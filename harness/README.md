@@ -89,6 +89,9 @@ SETUP.md "Inference-model recipe").
 
 ## Still to come (next feature slices)
 
+- **First-task slot properties** — the §4 inject list's remaining
+  item, deferred to the R1 first-run slice (it belongs to what the box
+  does first, not to credential injection).
 - **Image gate** — refuses to publish the image when the gate-mode probe
   fails (the PuppyOne rule).
 
@@ -126,7 +129,14 @@ lifecycle above:
    `provisioning-failed` (box-live must not flip).
 
 Prints exactly one JSON inject report on stdout; all progress and
-refusal diagnostics go to stderr. Covered by 25 hermetic tests
+refusal diagnostics go to stderr. The report's `steps` map reads
+`"ok"` per completed step (`fixture_teardown` reads `"ok"` with the
+absent/removed detail in `fixture_teardown_detail`); identity and
+confirmd attribution read `"deferred (H9)"` / `"deferred (H10)"` and
+are named in the `deferred` list when their inputs are absent. The
+control plane gates box-live on the manifest, fixture_teardown,
+inference_key, swapd_ca, and probe steps reading `"ok"`. Covered by
+25 hermetic tests
 (`test_inject_provision_state.py`) mirroring the install-gate-fixture
 hermetic contract: fake writers, a fake sudo that asserts `-u swapd`
 and denies `tee`/`ls`, a fake swap proxy resolving `hsurr:`

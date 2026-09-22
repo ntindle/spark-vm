@@ -404,7 +404,8 @@ def test_happy_path_no_fixture(stack):
     report = _report(proc)
     assert report["image_version"] == IMAGE_SHA
     assert report["steps"]["manifest"] == "ok"
-    assert report["steps"]["fixture_teardown"] == "absent"
+    assert report["steps"]["fixture_teardown"] == "ok"
+    assert report["fixture_teardown_detail"] == "absent"
     assert report["steps"]["inference_key"] == "ok"
     assert report["steps"]["swapd_ca"] == "ok"
     assert report["steps"]["probe"] == "ok"
@@ -439,7 +440,8 @@ def test_teardown_stale_fixture_binding(stack):
     proc = _run_injector(env)
     assert proc.returncode == 0, proc.stderr.decode()
     report = _report(proc)
-    assert report["steps"]["fixture_teardown"] == "removed"
+    assert report["steps"]["fixture_teardown"] == "ok"
+    assert report["fixture_teardown_detail"] == "removed"
     reg = _registry(paths["registry_file"])
     assert reg[KEY_NAME]["allowed_hosts"] == [PROVIDER_HOST]
     assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
@@ -635,6 +637,36 @@ def test_identity_refuses_bad_shape(stack):
     proc = _run_injector(env)
     assert proc.returncode == 2
     assert b"not a recognized public-key shape" in proc.stderr
+
+
+@pytest.mark.parametrize("keytype", [
+    "ssh-rsa",
+    "ssh-dss",
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+    "cert-authority",
+])
+def test_identity_accepts_each_key_shape(stack, keytype):
+    # Every alternative in the injector's public-key shape regex must be
+    # accepted: a committed regex that silently rejected a legitimate
+    # tenant key type would ship uncaught otherwise (the display layer
+    # redacts sk-*-looking tokens in tool output, so assert behavior,
+    # not bytes).
+    env, paths = stack
+    _seed_real_key(paths)
+    identity_dir = paths["secrets_dir"] / "identity"
+    identity_dir.mkdir()
+    (identity_dir / "authorized_keys").write_text(
+        "%s AAAAC3NzaC1lZDI1NTE5AAAAItestkeymaterial tenant@muse\n"
+        % keytype)
+    env = dict(env)
+    env["INJECT_IDENTITY_DIR"] = str(identity_dir)
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert _report(proc)["steps"]["identity"] == "ok"
 
 
 def test_tenant_record(stack):

@@ -57,8 +57,11 @@
 # failed; the control plane must not flip box-live) - 2 usage/config
 # error (fail-closed prechecks). On success the script prints ONE JSON
 # report on stdout; the `deferred` list names the interface points still
-# owned by unlanded mechanics (H9/H10) -- the control plane gates
-# box-live on every step reading "ok".
+# owned by unlanded mechanics (H9/H10). Box-live gating: the control
+# plane requires the manifest, fixture_teardown, inference_key,
+# swapd_ca, and probe steps to read "ok"; identity and
+# confirmd_attribution may read "ok" or "deferred (H9)"/"deferred (H10)"
+# (then named in deferred[]).
 #
 # The injector never writes a credential value: the only store writer it
 # touches is the blind compare. A test asserting the real key file is
@@ -352,7 +355,11 @@ with open(os.environ["IDENTITY_SRC"], encoding="utf-8") as f:
     IDENTITY="ok"
     echo "inject-provision-state: tenant identity installed for $AGENT_USER" >&2
 else
-    echo "inject-provision-state: tenant identity deferred (H9 -- no INJECT_IDENTITY_DIR/authorized_keys provided)" >&2
+    if [ -n "${INJECT_IDENTITY_DIR:-}" ]; then
+        echo "inject-provision-state: tenant identity deferred (H9 -- INJECT_IDENTITY_DIR is set but $IDENTITY_SRC is not a file)" >&2
+    else
+        echo "inject-provision-state: tenant identity deferred (H9 -- no INJECT_IDENTITY_DIR provided)" >&2
+    fi
 fi
 
 # --- Step 6: confirmd tenant attribution (H10 interface) ----------------------
@@ -402,16 +409,18 @@ if ! PROBE_MODE=provision timeout 15 "$HARNESS_PROBE_BIN" </dev/null >&2; then
 fi
 
 # --- Report --------------------------------------------------------------------
-# One JSON document on stdout, like the probe's contract. The control
-# plane gates box-live on every step reading "ok"; the `deferred` list
-# names the interface points still owned by unlanded mechanics.
+# One JSON document on stdout, like the probe's contract. The
+# fixture_teardown step reads "ok" with the absent/removed detail in
+# fixture_teardown_detail, so the documented box-live gating rule (every
+# gated step reads "ok") holds for the machine consumer; the `deferred`
+# list names the interface points still owned by unlanded mechanics.
 TEARDOWN="$TEARDOWN" IDENTITY="$IDENTITY" ATTRIBUTION="$ATTRIBUTION" \
 IMAGE_VERSION="$IMAGE_VERSION" python3 -c '
 import json, os
 deferred = []
 steps = {
     "manifest": "ok",
-    "fixture_teardown": os.environ["TEARDOWN"],
+    "fixture_teardown": "ok",
     "inference_key": "ok",
     "swapd_ca": "ok",
     "identity": os.environ["IDENTITY"],
@@ -426,6 +435,7 @@ print(json.dumps({
     "injector": "harness/inject-provision-state.sh",
     "image_version": os.environ["IMAGE_VERSION"],
     "steps": steps,
+    "fixture_teardown_detail": os.environ["TEARDOWN"],
     "deferred": deferred,
 }, indent=2, sort_keys=True))
 '

@@ -37,9 +37,12 @@ against the real provider (a probe failure maps to
 JSON inject report on stdout; all progress and refusal diagnostics go
 to stderr. 25 hermetic injector tests (fake writers, fake sudo
 asserting `-u swapd` and denying `tee`/`ls`, fake swap proxy, provider
-stub recording `Authorization` headers, stub confirmd). Remaining for
-later feature slices: image gate, R1 script green.
-The remaining implementation (image gate) is
+stub recording `Authorization` headers, stub confirmd). The §4 inject
+list's remaining item — the first-task slot properties — is explicitly
+deferred to the R1 first-run slice (it belongs to what the box does
+first, not to credential injection). Remaining for later feature
+slices: first-task slot properties, image gate, R1 script green.
+The remaining implementation (first-task slot, image gate) is
 build-loop `feature` work; this doc remains the spec input for it.
 **Feeds:** `docs/FIRST_TEN_MINUTES_SPEC.md` §5 (the harness pre-seed contract
 is R2's interface — this doc fills it in; the spec is unmerged, PR #49 @
