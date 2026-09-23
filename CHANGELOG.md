@@ -37,6 +37,18 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 late midday): tracked set fully quiet —
+  all 8 providers re-read vendor-verified with no change, zero fetch
+  failures; Vercel Drives still public beta with no GA move (eighth
+  consecutive no-change pass; changelog sitemap re-dated the beta entry
+  09-22→09-23 — a re-publish, not a GA move); no new in-lane launches
+  since the DigitalOcean Managed Agents public preview (already filed);
+  C35 closed — the Docker Sandboxes 0.42.0 CVE pair vendor-verified on
+  Docker's own security announcements, matching the corpus's standing
+  characterization with no drift (no corpus fold); C26 refined (vendor
+  docs now load but dollar pricing still third-party-only — Details
+  sub-page is the next ask); Automaid adjacent "AI hub for agents that
+  keep working" color, own page still missing. (#TBD)
 - Competitor watch (2026-09-23 midday): tracked set fully quiet — all
   8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (seventh
