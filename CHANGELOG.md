@@ -37,6 +37,33 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 mid-evening) (#316): **C26 discrepancy
+  resolved on the primary source** — DigitalOcean's pricing docs sub-page
+  fetched this pass (page stamped "Last verified 22 Sep 2026") and bills
+  snapshots/checkpoints at $0.05/GiB-month, retiring the corpus's
+  $0.005/GiB-month syndicated-release figure; re-verified CPU-billing
+  footnote ("active CPU billing is coming soon, until then 25% of the vCPUs
+  allocated to your sandbox; paused sessions incur no compute charges"),
+  qualifying the per-entry paragraph's "zero while waiting" read;
+  mid-afternoon fold's storage/BYOT/egress/prepaid figures re-verified
+  live. Otherwise quiet: 7 of 8 tracked providers re-read vendor-verified
+  with no change; Vercel Drives still public beta (twelfth consecutive
+  no-change pass; no changelog entries dated 2026-09-23); Boxd rate
+  card unchanged (one tool-side fetch failure on the docs pricing URL,
+  reported UNVERIFIED); no new C36 datapoints since the afternoon
+  vendor-confirm fold; no in-lane launches.
+- Competitor watch (2026-09-23 early evening) (#314): tracked set quiet — 7 of
+  8 providers re-read vendor-verified with no change (7/7 attempted
+  vendor fetches succeeded; DigitalOcean's pricing sub-page URL was
+  not extractable this pass — reported UNVERIFIED, not no-change);
+  the $0.044/$0.0095 figures stand at the third-party layer, and the
+  flagged $0.05-vs-$0.005 snapshot-rate discrepancy is now the
+  standing C26 watch item; Vercel Drives still public beta with no GA
+  move (eleventh consecutive no-change pass; the beta entry's date
+  field flipped 09-23→09-22 — re-publish, not a GA move); same-lane
+  third-party pricing color on Google's Filestore agent volumes for AI
+  (pay-per-use capacity + lifecycle tiering, folded under C36 at the
+  THIRD-PARTY layer); no in-lane launches.
 - Competitor watch (2026-09-23 late afternoon): C36-focused verification
   pass (no full tracked-set re-read — 8/8 last vendor-verified ~15:12 CDT,
   no change). **C36 VENDOR-CONFIRMED** — Google's own Cloud-blog

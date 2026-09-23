@@ -132,6 +132,14 @@ jobs:
         # introducing the Agents API in public beta," plus the nine named
         # sandbox partners; documented in issue #311), matching the C30
         # citation).
+        # itbrief.com.au 403s automated fetchers on GitHub Actions runner
+        # egress (bot-block; the Filestore agent volumes launch piece
+        # hand-verified live 2026-09-23 ~17:06 CDT via real browser — full
+        # article loads, launch framing, non-production-now/production-via-
+        # allowlist, and the pay-per-use capacity + lifecycle-tiering
+        # pricing all match the C36 THIRD-PARTY citation in the early-evening
+        # watch pass). The author's own curls return 200 — the block is
+        # runner-egress IP reputation, not a broken link.
         # Excluded at host level (not per-URL): new links
         # from these hosts trip the same bot blocks, so the exclusion must
         # cover the whole host. When adding a link from one of these hosts,
@@ -156,7 +164,7 @@ jobs:
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
