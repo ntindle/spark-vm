@@ -154,27 +154,66 @@ Neither code ever surfaces on the signup page.
 
 ## Step 5 — fixture teardown (pre-publish, mandatory)
 
-The gate fixture must **never coexist with a real credential**. Before
-the image is published, remove the fixture through the narrow writers
-(the provision-time injector's step 2 owns the same teardown before it
-installs the real tenant key — the two must never race):
+The gate fixture must **never coexist with a real credential**.
 
-1. Unbind every `llm-api` → echo-host registry binding through the
-   narrow registry writer (idempotent per entry).
-2. Remove the echo host from `inference-hosts.allow` **and** from the
-   inference proxy's own `inference-ssrf.allow`.
+**Ownership split — read before touching anything.** This procedure
+(running as root on the build box, pre-publish) is the *sole* owner of
+allowlist-line removal. The provision-time injector's step 2 is not a
+second teardowner: it unbinds registry entries through the narrow writer
+and then **refuses loudly** on any surviving echo exemption in the allow
+files — it has no narrow path to remove allowlist lines (production
+sudoers is append-only by design; see
+`harness/inject-provision-state.sh` step 2). Skipping the image-build
+teardown is not recoverable at provision time; it is a hard provision
+refusal. A real tenant key landing on an image whose fixture was never
+torn down is refused loudly by the installer — treat that refusal as the
+safety net firing, then fix the image; never override it.
+
+1. Unbind every `llm-api` → echo-host registry binding **through the
+   narrow registry writer** (idempotent per entry — this is the one part
+   of teardown that has a narrow path):
+
+   ```bash
+   sudo -u swapd cred-registry-set-inference remove-host llm-api <host>
+   ```
+
+   (same invocation the injector performs in
+   `inject-provision-state.sh` step 2; the writer removes only exact
+   lowercase host matches — if a binding survives the unbind, the image
+   is pathological: rebuild it).
+
+2. Remove the echo host from `inference-hosts.allow`
+   (`/home/swapd/inference-hosts.allow`) **and** from the inference
+   proxy's own `inference-ssrf.allow`
+   (`/home/swapd/inference-ssrf.allow`). There is **no narrow path for
+   this by design** — production sudoers grants only `tee -a`
+   (append-only) on the allow files. Edit both files as root (this
+   procedure's Prerequisites grant root on the image-build environment;
+   the narrow writers are for tenant-scope operations, not for undoing
+   the fixture). The injector cannot do this step for you — see the
+   ownership split above.
+
 3. Verify with the proxy's own matching semantics
    (`harness/proxy_match.py`, pinned to the real functions by
-   `harness/test_proxy_match.py`) that **no effective echo binding
-   remains** — loopback aliases included (`127.0.0.1`, `localhost`,
-   `::1`; the fixture used `127.0.0.1` but a surviving alias is the same
-   defect).
+   `harness/test_proxy_match.py`'s drift tripwire) that **no effective
+   echo binding remains** — loopback aliases included (`127.0.0.1`,
+   `localhost`, `::1`; the fixture used `127.0.0.1` but a surviving
+   alias is the same defect). This is the reference implementation from
+   `inject-provision-state.sh` step 2 (`echo_bound_hosts` /
+   `allowlist_echo_entries`); all three commands must return empty
+   output with exit 0:
 
-A surviving echo binding or exemption **fails the gate**: the image does
-not publish until the teardown is complete. A real tenant key landing on
-an image whose fixture was never torn down is refused loudly by the
-installer — treat that refusal as the safety net firing, then fix the
-image, don't override it.
+   ```bash
+   cat /home/swapd/inference-registry.json \
+     | KEY_NAME=llm-api python3 harness/proxy_match.py echo-bound-hosts
+   python3 harness/proxy_match.py allowlist-echo-entries hosts /home/swapd/inference-hosts.allow
+   python3 harness/proxy_match.py allowlist-echo-entries ssrf  /home/swapd/inference-ssrf.allow
+   ```
+
+   Non-empty output is a gate failure. So is an unverifiable teardown:
+   an unreadable registry (exit 2) or an unparsable allow file (exit 1)
+   must never read as "entry absent" — treat them as refusals and fail
+   the gate. The image does not publish until all three read empty.
 
 ## Step 6 — record the gate outcome
 
