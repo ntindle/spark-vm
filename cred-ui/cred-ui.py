@@ -143,7 +143,12 @@ def list_secret_names():
     rc, out, _ = run(SECRETS_LS)
     if rc != 0:
         return set()
-    return {n for n in out.split() if NAME_RE.match(n)}
+    # Legacy-tolerant filter (charset only): a pre-#150 long name still has
+    # a real value on disk, and the /api/creds `has_value` flag must say
+    # so. The canonical NAME_RE filter here used to drop such names, so a
+    # credential `cred get` could read showed has_value=false in the UI
+    # (2026-09-23 arch deep-read finding).
+    return {n for n in out.split() if NAME_LEGACY_RE.match(n)}
 
 
 def snapshot():

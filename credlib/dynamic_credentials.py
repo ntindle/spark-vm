@@ -29,10 +29,16 @@ class DynamicCredentialError(Exception):
 # Credential and entry names are interpolated into filesystem paths by
 # some consumers (credlib/fill_secret.py reads
 # /home/swapd/secrets/<name>), so they must be validated before use:
-# no slashes, no dots, no shell. Same character class the swapd-side
-# writers enforce (proxy/cred-store-set), plus a 64-char length cap the
-# writers don't have (no legitimate name in the repo is near it).
-NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# no slashes, no dots, no shell. The swapd-side writers enforce
+# charset-only (proxy/cred-store-set: ^[A-Za-z0-9_-]+$, no length cap),
+# and the management/read verbs everywhere else are legacy-tolerant the
+# same way (cred's check_name_legacy, cred-ui's NAME_LEGACY_RE,
+# proxy/cred-registry-set's check_legacy) so credentials created before
+# the #150 64-char cap stay usable. This choke point matches them:
+# charset-only, no cap. A 64-char cap here would reject names the
+# writers and the swapping proxy still serve (finding, 2026-09-23 arch
+# deep-read: surrogate building is a read path, not creation).
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _validate_name(value, what):
@@ -40,7 +46,8 @@ def _validate_name(value, what):
 
     Shared with credlib/fill_secret.py (imported there): both the
     surrogate builders and the filesystem consumer validate through
-    this one function so the choke point cannot drift.
+    this one function so the choke point cannot drift. Legacy-tolerant
+    (charset only): names predate the #150 cap and must stay resolvable.
 
     Raises DynamicCredentialError. The old check here (the surrogate
     "starts with hsurr:") was vacuous — the surrogate is constructed
@@ -48,7 +55,7 @@ def _validate_name(value, what):
     """
     if not isinstance(value, str) or not NAME_RE.match(value):
         raise DynamicCredentialError(
-            "invalid %s name %r (use only [A-Za-z0-9_-], max 64 chars)"
+            "invalid %s name %r (use only [A-Za-z0-9_-])"
             % (what, value))
     return value
 
