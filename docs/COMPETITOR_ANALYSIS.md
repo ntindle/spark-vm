@@ -78,7 +78,7 @@ isolation), because those are where the trust story lives.
 | **E2B** | Task-scoped sandbox | Firecracker microVM per sandbox, SDK-first, templates-as-code | Hobby $0 + $100 one-time credit (1h sessions, 20 concurrent); Pro **$150/mo** + usage (24h sessions); ~$78/mo usage for one continuous 2vCPU/512MB box |
 | **Daytona** | Task-scoped sandbox | Containers (+VM/Windows classes), stateful, stop/archive/pause/fork, GPU (ephemeral) | $200 free compute, no plan floor; $0.0504/vCPU-hr + $0.0162/GiB-hr; GPU on request (H100 listed $2.27/hr) |
 | **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team |
-| **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
+| **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots; **64 GB ephemeral NVMe default** (SDK ≥3.0.0/custom image; 32 GB on deprecated runtimes — C32 resolved, see "Watch update — 2026-09-23"); Drives public beta (persistent, ≤16 TiB/drive, usage-based pricing) | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
 | **Cloudflare Sandbox** | Task-scoped sandbox | Containers on Workers, sleeps at 10 min idle, disk resets on sleep | Active-CPU billing ($0.072/vCPU-hr); $5/mo Workers Paid floor |
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
 | **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation ("fast, isolated, persistent sandboxes and storage where developers can run their own agentic workflows and tool execution") | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
@@ -862,6 +862,35 @@ API for reusable prepared environments, branching from snapshots, full
 outbound networking by default, 22.5 Gbps hosts, on AWS; pause/resume not
 available when keepAlive enabled. Pricing not published in the surveyed
 docs.
+
+## Watch update — 2026-09-23: C32 resolution + Vercel storage pricing
+
+Two primary-source VERIFIED items this pass (both read on
+[vercel.com/docs/sandbox/pricing](https://vercel.com/docs/sandbox/pricing),
+page metadata `last_updated: 2026-09-10`, read 2026-09-23 ~02:05–02:15 CDT
+by two independent surveyors; watch doc
+`docs/COMPETITOR_WATCH_2026-09-23.md`).
+
+**C32 resolved — 64 GB default confirmed.** The overnight pass's carried
+ask (whether the THIRD-PARTY blog claim of default storage moving 32→64 GB
+had any vendor confirmation) is answered: *"Each sandbox created with
+Sandbox SDK 3.0.0 or above, or from a custom image, is automatically
+provisioned **64 GB of ephemeral NVMe storage**. Sandboxes created with
+**runtimes (deprecated) receive 32 GB**."* Per-plan quota table: Disk
+size **64 GB** on Hobby/Pro/Enterprise. The claim was real; 32 GB survives
+only on the deprecated runtime path. The UNVERIFIABLE qualifier is retired.
+
+**Drives pricing datapoint (completes the Sept 22 public-beta entry).**
+Drive Storage $0.05/GB-month (Pro/Enterprise; Hobby 15 GB lifetime);
+Drive Reads $0.0015/GB (Hobby 30 GB/mo); Drive Writes $0.004/GB (Hobby
+30 GB/mo); max 4 drives per run; default drive 1 TiB (1 GiB Hobby);
+16 TiB max per drive; sandbox downloads free (outbound + exposed-port
+traffic billable); Pro sandbox usage charges against the $20/month
+credit; session caps 45 min Hobby / 24 h Pro+Ent; concurrency 10 /
+10,000. Persistent disk as a metered first-class sandbox feature is now
+price-anchored — the same direction as Boxd's persistent-machine thesis
+and spark-vm's persistent-VM positioning; feed the "where spark-vm
+wins/lags" framing on the next full consolidation.
 
 ## Implications → backlog
 
