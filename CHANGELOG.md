@@ -39,12 +39,12 @@ This changelog only works if entries land with the change, not after it:
 ### Added
 - Competitor watch (2026-09-23 afternoon): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change; Vercel Drives
-  still public beta with no GA move (third consecutive no-change pass);
-  one in-window third-party delta filed as investor color only
-  (Firecrawl $75M Series B, Smash Capital-led); borderline pre-window
+  still public beta with no GA move (second consecutive no-change pass);
+  one in-window third-party corroboration filed as investor color only
+  (Firecrawl $75M Series B — no new facts beyond the §2c filing); borderline pre-window
   color on Boxd's $2M pre-seed and Alibaba FC Agent Sandbox pricing;
   still no always-on persistent-agent-machine announcements from any
-  competitor.
+  competitor. (#TBD)
 - Competitor watch (2026-09-23 morning): 2 of 8 tracked providers moved —
   Daytona v0.216.0 hardens the SDK build context (Dockerfile COPY confined
   to the build context, filed C33) and Docker Sandboxes' 2026-09-21 release

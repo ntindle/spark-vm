@@ -61,7 +61,7 @@ the vendor's own page, reads ~05:56–06:00 CDT:
 ## 2. Vercel Drives GA watch — NO-CHANGE
 
 The standing follow-up ask (does Drives move toward GA?) is answered in
-the negative for the third consecutive pass: `vercel.com/docs/sandbox/pricing`
+the negative for the second consecutive pass: `vercel.com/docs/sandbox/pricing`
 still shows `last_updated: 2026-09-10`, every baseline term verifies
 identical (Drive Storage 15 GB lifetime Hobby / $0.05/GB-month
 Pro+Enterprise; Reads 30 GB/mo then $0.0015/GB; Writes 30 GB/mo then
@@ -77,16 +77,16 @@ re-read ~05:56–06:10).
 
 ### 3a. Firecrawl $75M Series B (2026-09-22) — THIRD-PARTY investor color
 
-A VC roundup (techstartups.com, citing Axios, ~3h old) reports
-Firecrawl's **$75M Series B**, led by **Smash Capital**, participating:
-Altos Ventures, Nexus Venture Partners, Y Combinator, Freestyle,
-Offline (**THIRD-PARTY**:
-https://techstartups.com/2026/09/22/venture-capital-startup-funding-roundup-september-22-2026-general-catalyst-goldman-sachs-greylock-m13-y-combinator-more/).
-Sector: web-data layer for AI agents (crawl/extract/structure open-web
-data) — adjacent infrastructure, not sandbox compute per se. This is the
-same raise the 2026-09-23 watch already filed as investor color under
-C32 (with the $82M SEC Form D anomaly flagged); this pass adds the
-lead/participant detail. Filed as context only — NOT a corpus entry
+The 2026-09-23 (~02:54) pass already filed the full raise detail in
+§2c (led by Smash Capital, participating Altos Ventures / Nexus
+Venture Partners / Y Combinator / Freestyle / Offline, the Alexandria
+launch, and the $82M SEC Form D anomaly — watch-doc-only, no C-number).
+This pass adds a fresh in-window THIRD-PARTY corroboration
+(techstartups.com VC roundup, citing Axios, ~3h old) with no new facts:
+**THIRD-PARTY**:
+https://techstartups.com/2026/09/22/venture-capital-startup-funding-roundup-september-22-2026-general-catalyst-goldman-sachs-greylock-m13-y-combinator-more/
+Sector: web-data layer for AI agents — adjacent infrastructure, not
+sandbox compute per se. Filed as context only — NOT a corpus entry
 (not vendor-verified, not sandbox-compute positioning).
 
 The broader read stands (INFERRED): agent-infrastructure capital raising
@@ -105,10 +105,10 @@ always-on-hosted-VM lane this window.
 - **Alibaba Cloud FC Agent Sandbox pricing launch** (~5 days old) —
   THIRD-PARTY (aliyun-fc/fc-docs repo): E2B-SDK-compatible agent
   sandbox with new tiered pricing (Pro/Eco/Std) and "Shallow
-  Hibernation" (suspend/resume-style persistence). Lane-adjacent,
+  Hibernation" (suspend/resume-style persistence — INFERRED). Lane-adjacent,
   China-region; noted, not analyzed this pass.
-- **E2B js-sdk 2.40.0** (~5 days old) — routine changelog (removed
-  deprecated accessToken auth); no product/pricing move.
+- **E2B js-sdk 2.40.0** (~5 days old) — routine vendor changelog
+  (removed deprecated accessToken auth); no product/pricing move.
 
 ### 3c. Quiet in-window
 
@@ -119,7 +119,7 @@ announced anything resembling always-on persistent agent machines —
 the always-on hosted-VM niche (the spark-vm lane) had no new entrants
 or pricing pressure this run.** Adjacent Vercel AI-Gateway model adds
 (GPT-6 Sol + Luna, Claude Opus 5.5, Grok 4.7, MiMo V2.6) are model
-routing, not compute, moves (VERIFIED, vendor changelog).
+routing, not compute, moves (THIRD-PARTY, search-snippet).
 
 ## 4. Standing items / carry-forwards
 
@@ -134,7 +134,7 @@ routing, not compute, moves (VERIFIED, vendor changelog).
 - **Cloudflare Sandbox:** no new signal; deprioritized retained.
 - **Next pass's ask:** routine tracked-set re-reads; Vercel Drives GA
   watch continues (still public beta, page last_updated 2026-09-10;
-  three consecutive no-change passes).
+  two consecutive no-change passes).
 
 ---
 
