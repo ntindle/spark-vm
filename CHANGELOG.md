@@ -37,7 +37,7 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
-- Competitor watch (2026-09-23 early evening): tracked set quiet — 7 of
+- Competitor watch (2026-09-23 early evening) (#314): tracked set quiet — 7 of
   8 providers re-read vendor-verified with no change (7/7 attempted
   vendor fetches succeeded; DigitalOcean's pricing sub-page URL was
   not extractable this pass — reported UNVERIFIED, not no-change);
