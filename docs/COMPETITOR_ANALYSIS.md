@@ -1177,8 +1177,10 @@ docs price snapshots/checkpoints at **$0.05/GiB-month** while the launch
 press release (syndicated Business Wire) says **$0.005/GiB-month** — 10×
 apart, one of the two is wrong. CPU ($0.044) and memory ($0.0095) agree
 across both sources. Next watch ask: re-check the snapshot rate if the
-docs page is re-dated. Competitive read: DO is the first hyperscaler
-managed-agent stack with per-second active-CPU metered sandbox pricing —
+docs page is re-dated. Competitive read (INFERRED): DO is the first
+cloud managed-agent stack in the corpus to *announce* per-second
+active-CPU metered sandbox pricing (interim rate 25%-of-allocated
+until active billing ships) —
 the active-CPU metering leg vs spark-vm's flat-monthly Tier 1 thinking
 (see `docs/PRICING_THINKING.md` §2) now has real numbers on both sides of
 the ledger.

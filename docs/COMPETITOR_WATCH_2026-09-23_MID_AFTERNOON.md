@@ -7,7 +7,9 @@ fetches and searches; no logins, no writes): (A) vendor-page re-reads
 of the tracked set (reads ~13:56–13:59 CDT), (B) Vercel Drives GA watch
 plus open-web market-news scan (~13:56–14:03 CDT). Surveyor captures
 live in the loop's `agent_notes/` workspace
-(`surveyor-a/b-20260923-1354.md`), not the repo.
+(`surveyor-a/b-20260923-1354.md`), not the repo. The C26 docs-pricing
+read and the C30 vendor-post read were performed by the authoring turn
+via live browser ~14:05–14:15 CDT, after the surveyor window.
 
 Conventions: **VERIFIED** = read on a vendor's own page, doc, or repo
 this run (link inline). **VENDOR-ATTESTED** = confirmed against the
@@ -145,9 +147,9 @@ gVisor; <500 ms resume; 500+ suspend/resume activations/sec; 1,000+
 dormant agents/host; network gateway) is now offered to GKE customers
 for non-production workloads, with production GA support via
 allowlist; early design partner Nous Research (Hermes). The
-open-source runtime itself was previously evaluated as a sandbox
-reference design (the sandbox product's reference set, not
-spark-vm's) — the GKE packaging is the new competitive angle.
+open-source runtime predates this filing (a prior operator-side
+evaluation; record outside this corpus) — the GKE packaging is the new
+competitive angle.
 **THIRD-PARTY** (itbrief.co.uk); vendor verification owed. Filed as
 corpus-adjacent new-to-watch, not a tracked-provider row (hyperscaler
 offering a sandbox runtime on its own substrate, not a standalone
@@ -182,14 +184,14 @@ event and was already filed; nothing new has launched since. The
 ## 4. Corpus folds this pass
 
 - **C26 CLOSED + folded**: DigitalOcean Managed Agents pricing is now
-  vendor-verified on the docs pricing page — the first hyperscaler
-  managed-agent stack with per-second active-CPU metered sandbox
-  pricing ($0.044 active-CPU vCPU-hour per-second once active billing
-  ships; until then a 25%-of-allocated interim rate; $0.0095/GB-hour memory; shape table; pause semantics).
+  vendor-verified on the docs pricing page ($0.044 active-CPU vCPU-hour
+  per-second once active billing ships; until then a 25%-of-allocated
+  interim rate; $0.0095/GB-hour memory; shape table; pause semantics).
   The 10× snapshot-rate discrepancy ($0.05 docs vs $0.005 release)
   is carried as an explicit caveat, not folded as fact. The corpus
-  C26 section gains a "Watch update — 2026-09-23 (mid-afternoon)"
-  subsection; the "OPEN — watch continues" qualifier is retired.
+  fold is the new bottom "Watch update — 2026-09-23 (mid-afternoon)"
+  section plus the retired "OPEN — watch continues" qualifier on the
+  C26 section header.
 - **C30 folded (layer upgrade)**: OpenAI Agents API public beta is now
   vendor-confirmed (OpenAI's own blog) — the corpus C30 section's
   provenance moves from third-party-archive to vendor-confirmed; the
