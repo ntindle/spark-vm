@@ -791,14 +791,36 @@ _MAX_DT = datetime.max.replace(tzinfo=timezone.utc)
 
 def _load_answered():
     """Newest answered first (issue #1), by answered_at — filenames are
-    random hex, so filename order is NOT chronological (engineering)."""
-    items = []
+    random hex, so filename order is NOT chronological (engineering).
+
+    Perf (issue #214 / G2): the 5 s /api/answered poll used to list,
+    parse, and sort EVERY consumed/ file (up to _CONSUMED_KEEP = 1000),
+    so per-poll parse cost was O(consumed-dir). Directory entries are
+    now ordered by mtime and only the 2x-feed-cap newest candidates are
+    parsed and re-sorted by answered_at — answered_at is stamped in
+    memory just before the answered file is written (up to ~15 s of
+    grant minting may intervene) and rename(2) preserves mtime, so
+    mtime lags answer time by seconds at most. The listdir + getmtime
+    stat pass is still O(dir) but cheap (<=1000 stats); only file
+    reads and JSON parses are constant-bounded. A pathological
+    mtime/answered_at skew spanning the whole 200-file candidate pool
+    could push a live feed item out — in practice the two orders
+    coincide."""
     d = consumed_dir()
+    entries = []
     for fn in os.listdir(d):
         if not fn.endswith(".json"):
             continue
+        p = os.path.join(d, fn)
         try:
-            with open(os.path.join(d, fn)) as f:
+            entries.append((os.path.getmtime(p), p))
+        except OSError:
+            continue
+    entries.sort(key=lambda t: t[0], reverse=True)
+    items = []
+    for _, p in entries[:_ANSWERED_CANDIDATE_LIMIT]:
+        try:
+            with open(p) as f:
                 items.append(json.load(f))
         except Exception:
             continue
@@ -810,6 +832,13 @@ def _load_answered():
 # Product review (blocker 2): the answered feed is re-polled every 5 s,
 # so it is capped — history on disk stays complete.
 _ANSWERED_FEED_LIMIT = 100
+
+
+# Gap G2 (issue #214): _load_answered() parses only this many mtime-newest
+# candidates instead of every consumed/ file. 2x the feed cap so an
+# mtime/answered_at ordering skew would have to span the whole pool to
+# change what the feed shows; the feed still truncates to the cap.
+_ANSWERED_CANDIDATE_LIMIT = 2 * _ANSWERED_FEED_LIMIT
 
 
 # Arch 2026-09-21: the answered feed shows the 100 most recent, but

@@ -346,6 +346,48 @@ class ConfirmdTests(unittest.TestCase):
             got = cd._load_answered()
         self.assertEqual([it["id"] for it in got], ["id1", "id2", "id0"])
 
+    # --- G2 (issue #214): answered-feed per-poll cost ---------------------
+
+    def test_214_load_answered_parses_bounded_candidates(self):
+        """_load_answered() parses only the 2x-feed-cap mtime-newest
+        candidates — per-poll cost is O(feed), not O(consumed-dir) —
+        while the feed still shows the answered_at-newest items,
+        tolerant of mtime/answered_at skew inside the candidate pool."""
+        n = 250  # > _ANSWERED_CANDIDATE_LIMIT (200)
+        base = time.time()
+        real_load = json.load
+        for i in range(n):
+            fn = "skew%04d.json" % i
+            p = self.approvals / "consumed" / fn
+            # One file (mtime rank 150, inside the 200-candidate pool but
+            # outside the 100-item feed cap by mtime alone) claims the
+            # newest answered_at — the answered_at re-sort must rescue it.
+            if i == 150:
+                ts = "2026-09-23T12:00:00+00:00"  # strictly newest
+            else:
+                ts = "2026-09-23T%02d:%02d:00+00:00" % (11 - i // 60,
+                                                        59 - i % 60)
+            p.write_text(json.dumps({
+                "id": "id%d" % i, "answered_at": ts, "decision": "approve"}))
+            os.utime(p, (base - i, base - i))  # mtime rank == id
+        calls = {"n": 0}
+
+        def counting_load(f):
+            calls["n"] += 1
+            return real_load(f)
+
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+                mock.patch("json.load", counting_load):
+            got = cd._load_answered()[:cd._ANSWERED_FEED_LIMIT]
+        # Bounded parse count: 200 candidates max, not 250 files.
+        self.assertLessEqual(calls["n"], cd._ANSWERED_CANDIDATE_LIMIT)
+        # Skewed newest item is at the top, then the rest in
+        # answered_at order.
+        self.assertEqual(got[0]["id"], "id150")
+        self.assertEqual([it["id"] for it in got[1:]],
+                         ["id%d" % i for i in range(99)])
+        self.assertEqual(len(got), cd._ANSWERED_FEED_LIMIT)
+
     # --- #1: rendering ---------------------------------------------------
 
     def test_1_render_pending_escapes(self):

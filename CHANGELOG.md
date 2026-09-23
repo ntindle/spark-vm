@@ -563,6 +563,11 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
+- The answered-approval history feed no longer re-parses every approval
+  file in the on-disk archive on each 5-second poll — it reads only the
+  200 most recent, so poll cost stays flat as the archive grows to its
+  1000-file bound (the visible feed still shows the 100 newest
+  approvals). (#315)
 - Approvals whose expiry instant crosses during grant minting are now
   refused with a distinct audit event instead of being recorded as
   approved — the trust anchor "expired items are refused, not silently
