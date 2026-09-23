@@ -533,13 +533,16 @@ class TestFirewallWatchdogStatic:
         rendered = m.group(1).replace("@@JAIL_SSH_PORT@@", port)
 
         def norm_lines(text):
+            # Mirrors the production norm_rule_line (quotes INTACT —
+            # Architecture final review: stripping quotes here would let a
+            # quote-confined conf change pass while the fixture goes stale).
             out = []
             for line in text.splitlines():
                 t = line.lstrip()
                 if not t or t.startswith("#") or \
                         t.startswith(("chain", "type", "table", "}")):
                     continue
-                out.append(re.sub(r'"[^"]*"', "", t))
+                out.append(t)
             return out
 
         assert norm_lines(rendered) == norm_lines(HEALTHY_CONF), \
