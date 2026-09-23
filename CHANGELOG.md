@@ -37,6 +37,14 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 morning): 2 of 8 tracked providers moved —
+  Daytona v0.216.0 hardens the SDK build context (Dockerfile COPY confined
+  to the build context, filed C33) and Docker Sandboxes' 2026-09-21 release
+  ships v3 kits (OCI-based packages bundling an agent workload with
+  reusable mixins for tools, config, credentials, network access, and
+  agent instructions — filed C34, folded into the competitor corpus);
+  Vercel Drives still public beta with no GA move; market-news window
+  quiet with no always-on persistent-agent-machine announcements.
 - Competitor watch (2026-09-23): tracked set quiet (8/8 vendor re-reads,
   no in-window deltas); the standing Vercel 64 GB default-storage ask is
   CONFIRMED on the vendor's own pricing docs — sandboxes get 64 GB of
