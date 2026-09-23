@@ -388,7 +388,7 @@ This changelog only works if entries land with the change, not after it:
   in the web UI, and the full management verb set (remove, host
   bind/unbind, method/path limits, scrub flags) in the registry writer.
   Creating new entries (set/register) — or minting a credential through a
-  management verb — always requires a within-cap name. (PR TBD)
+  management verb — always requires a within-cap name. (#276)
 - The inference proxy's host allowlist matcher now recognizes IPv6
   literals: a `::1` entry previously never matched (the address was
   mangled before comparison), so an operator allowlisting the IPv6
