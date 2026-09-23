@@ -37,6 +37,18 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 late afternoon): C36-focused verification
+  pass (no full tracked-set re-read — 8/8 last vendor-verified ~15:12 CDT,
+  no change). **C36 VENDOR-CONFIRMED** — Google's own Cloud-blog
+  announcement read live corroborates all nine filed Agent Substrate-on-GKE
+  claims (five verbatim, the rest confirmed as filed or
+  stronger) (<500 ms resume, 500+/sec suspend/resume activations,
+  1,000+ dormant agents/host, Cloud Hypervisor-or-gVisor choice, integrated
+  gateway, non-production for all GKE customers with production GA via
+  allowlist, Nous Research/Hermes early design partner with named quote);
+  new vendor facts folded into the corpus (10× density headline, open-core
+  portability, harness-agnostic design, control/data-plane split, Filestore
+  agent volumes, native Axion).
 - Competitor watch (2026-09-23 mid-afternoon): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (tenth

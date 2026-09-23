@@ -1197,7 +1197,11 @@ No new C-number: the filing existed, only the provenance layer moved. The
 rumored "Managed Agents" unveil at DevDay 2026 (Sep 29) remains
 press/rumor with no OpenAI vendor confirmation; AWS Bedrock "Managed
 Agents, powered by OpenAI" is an April 28 limited preview — separate and
-older.
+older. Competitive read for spark-vm: the hyperscaler sandbox is not yet
+purchasable for production (non-production for all GKE customers,
+production GA via allowlist) — potential pressure, not live production
+competition; the zero-idle economics and the K8s-machines /
+data-plane-activations split are the shapes to watch.
 
 **C36 new — Google Agent Substrate on GKE (corpus-adjacent new-to-watch).**
 Previously unfiled, ~Sep 17: Google's open-source agent-sandbox runtime
@@ -1207,5 +1211,40 @@ offered to GKE customers for non-production workloads, with production GA
 support via allowlist; early design partner Nous Research (Hermes). Filed
 as corpus-adjacent new-to-watch, not a tracked-provider row — a
 hyperscaler offering a sandbox runtime on its own substrate is a different
-shape than a standalone agent-VM product. **THIRD-PARTY** (itbrief.co.uk);
-vendor verification owed.
+shape than a standalone agent-VM product. **Vendor-confirmed 2026-09-23
+(late-afternoon pass)** — the late-afternoon watch read Google's own
+announcement on the Cloud blog and corroborated all nine filed claims
+(five verbatim, the rest confirmed as filed or stronger) (<500 ms resume,
+500+/sec activations, 1,000+ dormant agents/host,
+Cloud Hypervisor-or-gVisor choice, integrated gateway, non-production for
+all GKE customers with production GA via allowlist, Nous Research (Hermes)
+as early design partner with named quote); see "Watch update — 2026-09-23
+(late-afternoon)" at the bottom. New vendor facts not in the filing: 10×
+density headline, open-core portability ("runs on any Kubernetes
+infrastructure and is optimized for GKE"), harness-agnostic by design
+(Claude Code, OpenClaw, Hermes — another harness↔compute-split datapoint),
+K8s-machines / data-plane-activations control split, optional Filestore
+agent volumes (NFS, RWX, POSIX locking, ms attach), native Axion (claimed
+30% better price-performance for sandbox workloads).
+
+## Watch update — 2026-09-23 (late-afternoon): C36 vendor-confirmed
+
+One corpus action this pass (primary-source-verification fold per the C32
+precedent; full pass record in
+`docs/COMPETITOR_WATCH_2026-09-23_LATE_AFTERNOON.md` §1).
+
+**C36 VENDOR-CONFIRMED.** Google's own Cloud-blog announcement
+("Agent Substrate available on GKE",
+https://cloud.google.com/blog/products/containers-kubernetes/agent-substrate-available-on-gke,
+read live ~16:00 CDT 2026-09-23; post dated ~Sep 15, 2026 — two days before
+the itbrief.co.uk piece that filed C36) corroborates every filed claim:
+open-source secure-by-default agent execution runtime on GKE; sub-500 ms
+resume at over 500 suspend/resume activations/sec; "over 1,000 dormant
+agents per host" via the zero-idle suspend model; Cloud Hypervisor
+microVMs-or-gVisor choice; integrated gateway managing egress/ingress with
+granular policies plus egress proxies injecting credentials outside agents'
+reach; available to all GKE customers for non-production workloads with
+production GA support via allowlist; Nous Research (Hermes) as early design
+partner with a named CBO quote. The itbrief.co.uk piece stands as the
+discovery source; no new C-number (the filing existed, only the provenance
+layer moved — C30 precedent).
