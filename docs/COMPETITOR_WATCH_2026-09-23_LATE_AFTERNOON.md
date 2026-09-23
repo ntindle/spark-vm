@@ -16,8 +16,8 @@ be noise, not signal. Tracked-set state: last fully verified 2026-09-23
 **Source read live this run** (~16:00 CDT, 2026-09-23):
 <https://cloud.google.com/blog/products/containers-kubernetes/agent-substrate-available-on-gke>
 — Google Cloud's own announcement post, "Agent Substrate available on GKE"
-(search metadata dates the post ~Sep 15, 2026 — two days *before* the
-itbrief.co.uk piece (~Sep 17) that filed C36).
+(search metadata dates the post ~Sep 15, 2026 — a couple of days *before*
+the itbrief.co.uk piece (~Sep 17) that filed C36).
 
 **Verdict: VENDOR-CONFIRMED.** Every claim the itbrief piece carried is
 corroborated on Google's own page:
@@ -46,7 +46,7 @@ corroborated on Google's own page:
 - **Control/data-plane split:** Kubernetes manages the machines (self-healing
   nodes, autoscaling); a purpose-built data plane does the high-frequency
   suspend/resume directly on local workers — the same execution/machine
-  separation shape spark-vm targets with the hosted product.
+  separation shape spark-vm targets with the hosted product (INFERRED).
 - **Storage story:** optional Filestore agent volumes (NFS, RWX, POSIX file
   locking) attach/detach in milliseconds — corroborates the itbrief.au
   Filestore-agent-volumes launch (~Sep 19), which names Agent Substrate as a

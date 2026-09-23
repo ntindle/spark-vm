@@ -1214,7 +1214,8 @@ hyperscaler offering a sandbox runtime on its own substrate is a different
 shape than a standalone agent-VM product. **Vendor-confirmed 2026-09-23
 (late-afternoon pass)** — the late-afternoon watch read Google's own
 announcement on the Cloud blog and corroborated all nine filed claims
-verbatim (<500 ms resume, 500+/sec activations, 1,000+ dormant agents/host,
+(five verbatim, the rest confirmed as filed or stronger) (<500 ms resume,
+500+/sec activations, 1,000+ dormant agents/host,
 Cloud Hypervisor-or-gVisor choice, integrated gateway, non-production for
 all GKE customers with production GA via allowlist, Nous Research (Hermes)
 as early design partner with named quote); see "Watch update — 2026-09-23
