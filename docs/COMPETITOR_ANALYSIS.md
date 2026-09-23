@@ -1077,7 +1077,7 @@ Blaxel acquisition (announced 2026-09-10):
 [businesswire](https://www.businesswire.com/news/home/20260910783896/en/Baseten-Acquires-Blaxel-to-Build-the-Infrastructure-for-AI-Agents-in-Production),
 [baseten.co/blog](https://www.baseten.co/blog/blaxel-is-joining-baseten-to-build-the-future-of-agentic-cloud/),
 [blaxel.ai/pricing](https://blaxel.ai/pricing) (~5s scale-to-zero per FAQ,
-$250/mo BAA add-on); [modal.com/docs/reference/modal.Sandbox](https://modal.com/docs/reference/modal.Sandbox)
+$250/mo BAA add-on); [modal.com/docs/sdk/py/latest/Sandbox](https://modal.com/docs/sdk/py/latest/Sandbox)
 (`secrets=` injection, `Sandbox._experimental_set_outbound_network_policy`)
 + [modal.com/docs/guide/sandboxes](https://modal.com/docs/guide/sandboxes);
 Daytona's own network-limits skill docs
