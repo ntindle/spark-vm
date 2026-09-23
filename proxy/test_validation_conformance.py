@@ -415,6 +415,54 @@ class TestLegacyManagementUpgradePath:
         assert _writer(["set-scrub", LEGACY_NAME, LEGACY_ENTRY, "true"],
                        _legacy_registry(tmp_path))
 
+    # --- the method/path-limit verbs on a PRESENT legacy credential:
+    # genuinely new #150 behavior (these hunks moved from strict `check`
+    # to `check_legacy` plus the creation-gate for absent names), pinned
+    # here so a revert breaks loudly instead of silently stranding
+    # pre-cap credentials.
+
+    def test_add_method_on_legacy_credential(self, tmp_path):
+        env = _legacy_registry(tmp_path)
+        assert _writer(["add-method", LEGACY_NAME, "GET"], env)
+        reg = json.load(open(env["CRED_REGISTRY_FILE"], encoding="utf-8"))
+        assert reg[LEGACY_NAME]["allowed_methods"] == ["GET"]
+
+    def test_remove_method_on_legacy_credential(self, tmp_path):
+        env = _legacy_registry(tmp_path)
+        assert _writer(["add-method", LEGACY_NAME, "GET"], env)
+        assert _writer(["remove-method", LEGACY_NAME, "GET"], env)
+        reg = json.load(open(env["CRED_REGISTRY_FILE"], encoding="utf-8"))
+        # An emptied list is deny-all (the addon refuses every swap),
+        # not unrestricted — the writer's documented contract.
+        assert reg[LEGACY_NAME]["allowed_methods"] == []
+
+    def test_add_path_on_legacy_credential(self, tmp_path):
+        env = _legacy_registry(tmp_path)
+        assert _writer(["add-path", LEGACY_NAME, "/v1"], env)
+        reg = json.load(open(env["CRED_REGISTRY_FILE"], encoding="utf-8"))
+        assert reg[LEGACY_NAME]["allowed_paths"] == ["/v1"]
+
+    def test_remove_path_on_legacy_credential(self, tmp_path):
+        env = _legacy_registry(tmp_path)
+        assert _writer(["add-path", LEGACY_NAME, "/v1"], env)
+        assert _writer(["remove-path", LEGACY_NAME, "/v1"], env)
+        reg = json.load(open(env["CRED_REGISTRY_FILE"], encoding="utf-8"))
+        assert reg[LEGACY_NAME]["allowed_paths"] == []
+
+    def test_clear_method_limit_on_legacy_credential(self, tmp_path):
+        env = _legacy_registry(tmp_path)
+        assert _writer(["add-method", LEGACY_NAME, "GET"], env)
+        assert _writer(["clear-method-limit", LEGACY_NAME], env)
+        reg = json.load(open(env["CRED_REGISTRY_FILE"], encoding="utf-8"))
+        assert "allowed_methods" not in reg[LEGACY_NAME]
+
+    def test_clear_path_limit_on_legacy_credential(self, tmp_path):
+        env = _legacy_registry(tmp_path)
+        assert _writer(["add-path", LEGACY_NAME, "/v1"], env)
+        assert _writer(["clear-path-limit", LEGACY_NAME], env)
+        reg = json.load(open(env["CRED_REGISTRY_FILE"], encoding="utf-8"))
+        assert "allowed_paths" not in reg[LEGACY_NAME]
+
     # --- the creation invariant: management verbs on an ABSENT legacy
     # name must fail the canonical contract, not mint an over-long
     # credential through the legacy path (#150).
@@ -526,6 +574,25 @@ class TestFrontendManagementLegacyPath:
         # The legacy gate is charset-only, not anything-goes.
         with pytest.raises(cli.CredentialError):
             cli.cmd_get(["has/slash"])
+
+    def test_cli_delete_removes_legacy_credential(self, tmp_path,
+                                                 monkeypatch):
+        # cmd_delete is a management verb gated on check_name_legacy; the
+        # backend (cred-store-delete) is stubbed, so this pins that the
+        # frontend gate lets the legacy name through instead of raising
+        # on the 64-char cap — a re-tightening here would strand pre-cap
+        # credentials on exactly the delete verb.
+        seen = []
+
+        def fake(argv, input_bytes=None):
+            assert argv[0].endswith("cred-store-delete"), argv
+            assert argv[1] == LEGACY_NAME
+            seen.append(argv)
+            return subprocess.run(["true"], capture_output=True, timeout=30)
+
+        monkeypatch.setattr(cli, "run_as_swapd", fake)
+        cli.cmd_delete([LEGACY_NAME])   # must not raise
+        assert len(seen) == 1
 
     def _fake_ui_run(self, env):
         def fake(argv, inp=None):
