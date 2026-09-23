@@ -80,6 +80,18 @@ CSRF_HEADER = "X-Cred-UI"
 CSRF_VALUE = "1"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Legacy-tolerant name/host checks (charset/shape only, no caps) for
+# management verbs: credentials created before the #150 caps must stay
+# manageable. Creation (api_set) always uses the canonical NAME_RE /
+# host_ok. Mirrors proxy/cred-registry-set's check_legacy /
+# check_host_legacy.
+NAME_LEGACY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_HOST_SHAPE_RE = re.compile(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$")
+
+
+def host_ok_legacy(h):
+    return (isinstance(h, str) and bool(h)
+            and bool(_HOST_SHAPE_RE.match(h)))
 ENTRY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # Canonical host contract shared with the `cred` CLI's check_host() and
 # proxy/cred-registry-set's check_host() (#150): dotted-hostname shape
@@ -310,7 +322,8 @@ def api_set(data):
 
 def api_delete(data):
     name = data.get("name", "")
-    if not NAME_RE.match(name):
+    # Management path: legacy names stay deletable.
+    if not NAME_LEGACY_RE.match(name):
         raise ValueError("bad credential name")
     # Remove the stored value first (the wrapper ignores "no such file" --
     # the registry may exist alone). A real failure must surface: deleting
@@ -329,9 +342,12 @@ def api_delete(data):
 def api_host(data, add):
     name = data.get("name", "")
     host = data.get("host", "")
-    if not NAME_RE.match(name):
+    # Management path: legacy names stay manageable. New bindings are
+    # always canonical; removing a legacy over-long binding stays possible.
+    if not NAME_LEGACY_RE.match(name):
         raise ValueError("bad credential name")
-    if not host_ok(host):
+    host_okay = host_ok(host) if add else host_ok_legacy(host)
+    if not host_okay:
         raise ValueError("bad host (use a hostname: letters, digits, "
                          "hyphens, dots; no underscores, no ports)")
     rc, _, err = run(REGISTRY_SET + ["add-host" if add else "remove-host", name, host])

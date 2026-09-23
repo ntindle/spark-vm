@@ -31,9 +31,14 @@ Deliberate carve-out (upgrade path): the writer's pure-management verbs
 `set-scrub`) use a legacy-tolerant charset-only name/host check, so
 pre-existing over-long names/bindings stay manageable without
 hand-editing the registry as root. CREATION (`set`, new `add-host`
-bindings) always enforces the canonical contract. Legacy names remain
-servable; to fully re-register a legacy credential, `remove` it and
-re-create under a canonical name.
+bindings, and any management verb on an ABSENT name) always enforces the
+canonical contract. Legacy names remain servable; to fully re-register a
+legacy credential, `remove` it and re-create under a canonical name.
+The legacy path is reachable through the supported frontends: the `cred`
+CLI gates get/delete/unregister on its legacy-tolerant name check, and
+cred-ui gates delete on NAME_LEGACY_RE and host-remove on
+host_ok_legacy (host-add stays strict) — the reachability is pinned by
+TestFrontendManagementLegacyPath below.
 
 Each implementation is driven through its natural interface:
 - `cred` CLI: check_name / check_host / parse_placement
@@ -67,7 +72,7 @@ loudly in CI. #150's preferred end-state (a shared module) remains open;
 until then, this test is the thing that must stay green.
 
 Non-string inputs are out of scope for the corpus (cred-ui's host_ok
-fail-closes on them; the CLI/writer assume strings — #118 class).
+fail-closes on them; elsewhere non-strings are caller errors — #118 class).
 
 Run from the repo root:  python3 -m pytest proxy/test_validation_conformance.py -q
 """
@@ -303,6 +308,21 @@ def test_swap_addon_name_grammar_is_superset(name, expected):
             "swap_addon.NAME_RE no longer a superset: rejects %r" % (name,))
 
 
+# The superset relationship only matters ABOVE the 64-char cap (that is
+# where the read/write paths differ): pin it explicitly, so a future cap
+# on the addon's regex fails loudly instead of silently dropping
+# pre-cap secrets from the served map.
+OVER_CAP_ACCEPTS = ["n" * 70, "n" * 200]
+
+
+@pytest.mark.parametrize("name", OVER_CAP_ACCEPTS)
+def test_swap_addon_name_grammar_accepts_over_cap_names(name):
+    assert swap_addon.NAME_RE.match(name), (
+        "swap_addon.NAME_RE no longer a read-side superset: rejects "
+        "over-cap name %r — pre-cap secrets would stop being served"
+        % (name,))
+
+
 @pytest.mark.parametrize("host,expected", HOST_CASES)
 def test_host_grammar_conformance(host, expected, registry):
     results = {
@@ -392,3 +412,111 @@ class TestLegacyManagementUpgradePath:
     def test_set_scrub_works_on_legacy_entry(self, tmp_path):
         assert _writer(["set-scrub", LEGACY_NAME, LEGACY_ENTRY, "true"],
                        _legacy_registry(tmp_path))
+
+    # --- the creation invariant: management verbs on an ABSENT legacy
+    # name must fail the canonical contract, not mint an over-long
+    # credential through the legacy path (#150).
+
+    def test_add_host_on_absent_legacy_name_fails(self, registry):
+        assert not _writer(["add-host", LEGACY_NAME, "api.example.com"],
+                           registry)
+
+    def test_add_method_on_absent_legacy_name_fails(self, registry):
+        assert not _writer(["add-method", LEGACY_NAME, "GET"], registry)
+
+    def test_add_path_on_absent_legacy_name_fails(self, registry):
+        assert not _writer(["add-path", LEGACY_NAME, "/v1"], registry)
+
+    def test_set_scrub_on_absent_legacy_name_fails(self, registry):
+        assert not _writer(["set-scrub", LEGACY_NAME, LEGACY_ENTRY, "true"],
+                           registry)
+
+    def test_remove_host_on_absent_legacy_name_fails(self, registry):
+        assert not _writer(["remove-host", LEGACY_NAME, LEGACY_HOST],
+                           registry)
+
+    def test_add_host_on_absent_canonical_name_still_creates(self, registry):
+        # Pre-existing behavior preserved: add-host on an absent WITHIN-cap
+        # name creates the credential (this is how the file-only migration
+        # path binds hosts).
+        assert _writer(["add-host", "freshname", "api.example.com"],
+                       registry)
+
+
+# --- frontend reachability of the legacy path ----------------------------------
+#
+# The writer's legacy-tolerant management path is only real if the supported
+# frontends let legacy names/hosts through to it: the `cred` CLI gates
+# get/delete/unregister on check_name_legacy, and cred-ui gates api_delete
+# on NAME_LEGACY_RE and api_host on NAME_LEGACY_RE + host_ok_legacy (remove)
+# / host_ok (add). These tests drive the frontends against the REAL writer
+# with stubbed-out sudo, so a future re-tightening of a frontend gate fails
+# loudly instead of silently stranding pre-cap credentials.
+
+
+class TestFrontendManagementLegacyPath:
+    def _fake_run_as_swapd(self, env):
+        def fake(argv, input_bytes=None):
+            assert argv[0].endswith("cred-registry-set"), argv
+            return subprocess.run(["bash", WRITER_PATH] + argv[1:], env=env,
+                                  capture_output=True, timeout=30)
+        return fake
+
+    def test_cli_unregister_removes_legacy_credential(self, tmp_path,
+                                                      monkeypatch):
+        env = _legacy_registry(tmp_path)
+        monkeypatch.setattr(cli, "run_as_swapd",
+                            self._fake_run_as_swapd(env))
+        cli.cmd_unregister([LEGACY_NAME])
+        assert json.load(open(env["CRED_REGISTRY_FILE"], encoding="utf-8")) == {}
+
+    def test_cli_unregister_removes_legacy_entry(self, tmp_path,
+                                                 monkeypatch):
+        env = _legacy_registry(tmp_path)
+        monkeypatch.setattr(cli, "run_as_swapd",
+                            self._fake_run_as_swapd(env))
+        cli.cmd_unregister([LEGACY_NAME, "--entry", LEGACY_ENTRY])
+        reg = json.load(open(env["CRED_REGISTRY_FILE"], encoding="utf-8"))
+        assert LEGACY_ENTRY not in reg[LEGACY_NAME]
+
+    def test_cli_register_still_rejects_legacy_name(self):
+        # Creation stays canonical: the gate must pass for management but
+        # hold for registration.
+        with pytest.raises(cli.CredentialError):
+            cli.cmd_register([LEGACY_NAME])
+
+    def _fake_ui_run(self, env):
+        def fake(argv, inp=None):
+            if argv[4] == "/usr/local/bin/cred-registry-set":
+                p = subprocess.run(["bash", WRITER_PATH] + argv[5:], env=env,
+                                   capture_output=True, timeout=30)
+                return (p.returncode, p.stdout.decode("utf-8", "replace"),
+                        p.stderr.decode("utf-8", "replace"))
+            return (0, "", "")
+        return fake
+
+    def test_ui_delete_removes_legacy_credential(self, tmp_path,
+                                                 monkeypatch):
+        env = _legacy_registry(tmp_path)
+        monkeypatch.setattr(ui, "run", self._fake_ui_run(env))
+        assert ui.api_delete({"name": LEGACY_NAME}) == {
+            "ok": True, "name": LEGACY_NAME}
+        assert json.load(open(env["CRED_REGISTRY_FILE"], encoding="utf-8")) == {}
+
+    def test_ui_host_remove_unbinds_legacy_binding(self, tmp_path,
+                                                   monkeypatch):
+        env = _legacy_registry(tmp_path)
+        monkeypatch.setattr(ui, "run", self._fake_ui_run(env))
+        assert ui.api_host({"name": LEGACY_NAME, "host": LEGACY_HOST},
+                           add=False) == {"ok": True}
+        reg = json.load(open(env["CRED_REGISTRY_FILE"], encoding="utf-8"))
+        assert reg[LEGACY_NAME]["allowed_hosts"] == []
+
+    def test_ui_host_add_still_rejects_overlong_binding(self):
+        # No subprocess needed: the UI gate rejects before any run.
+        with pytest.raises(ValueError):
+            ui.api_host({"name": LEGACY_NAME, "host": LEGACY_HOST}, add=True)
+
+    def test_ui_set_still_rejects_legacy_name(self):
+        with pytest.raises(ValueError):
+            ui.api_set({"name": LEGACY_NAME, "value": "s3cret"})

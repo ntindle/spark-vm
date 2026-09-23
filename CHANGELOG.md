@@ -382,10 +382,12 @@ This changelog only works if entries land with the change, not after it:
   characters, host bindings at valid DNS shapes (253 total / 63 per label),
   and header/query placement names at 64 characters, with a shared
   conformance test keeping the copies in lockstep. Two deliberate
-  carve-outs: the swap proxy keeps serving credentials registered before
-  the cap, and management operations (remove, host bind/unbind,
-  method/path limits, scrub flags) still work on those legacy names
-  (creating new entries requires a within-cap name). (PR TBD)
+  carve-outs for credentials registered before the cap: the swap proxy
+  keeps serving them, and management/read operations (get, delete,
+  unregister/remove, host bind/unbind, method/path limits, scrub flags)
+  still work on those legacy names in the CLI, the web UI, and the writer.
+  Creating new entries (set/register) — or minting a credential through a
+  management verb — always requires a within-cap name. (PR TBD)
 - The inference proxy's host allowlist matcher now recognizes IPv6
   literals: a `::1` entry previously never matched (the address was
   mangled before comparison), so an operator allowlisting the IPv6

@@ -43,6 +43,11 @@ import subprocess
 import sys
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Legacy-tolerant name check (charset only, no 64-char cap) for
+# management/read verbs (get, delete, unregister): credentials created
+# before the #150 caps must stay manageable. Creation verbs (set,
+# register) always use the canonical check_name above.
+NAME_LEGACY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 BACKEND_ENV = "SPARK_CRED_BACKEND"
 STORE = "/home/swapd/secrets"
 SUDO = ["sudo", "-n", "-u", "swapd"]
@@ -58,6 +63,16 @@ class CredentialNotFound(CredentialError):
     def __init__(self, name):
         super().__init__(MISSING_MSG.format(name=name))
         self.name = name
+
+
+def check_name_legacy(name):
+    # Management/read path: accept any pre-#150-cap name the writer's
+    # check_legacy accepts (charset only). Creation verbs must NOT use
+    # this — they gate on check_name's canonical 64-char form.
+    if not NAME_LEGACY_RE.match(name or ""):
+        raise CredentialError(
+            "invalid credential name %r — use only [A-Za-z0-9_-]" % (name,))
+    return name
 
 
 def check_name(name):
@@ -185,7 +200,9 @@ def cmd_get(args):
     args = _strip_dashdash(args)
     if len(args) != 1:
         raise CredentialError("usage: cred get <name>")
-    name = check_name(args[0])
+    # Read path: legacy names stay readable (their secret files predate
+    # the #150 caps and swap_addon still serves them).
+    name = check_name_legacy(args[0])
     p = run_as_swapd(["/usr/local/bin/cred-store-get", name])
     if p.returncode != 0:
         raise CredentialNotFound(name)
@@ -205,7 +222,8 @@ def cmd_delete(args):
     args = _strip_dashdash(args)
     if len(args) != 1:
         raise CredentialError("usage: cred delete <name>")
-    name = check_name(args[0])
+    # Management path: legacy names stay deletable.
+    name = check_name_legacy(args[0])
     p = run_as_swapd(["/usr/local/bin/cred-store-delete", name])
     if p.returncode != 0:
         raise CredentialError("delete failed: %s" % p.stderr.decode().strip()[-200:])
@@ -241,7 +259,7 @@ def cmd_register(args):
     i = 0
     while i < len(rest):
         if rest[i] == "--entry" and i + 1 < len(rest):
-            entry = check_name(rest[i + 1])
+            entry = check_name_legacy(rest[i + 1])
             i += 2
         elif rest[i] == "--placement" and i + 1 < len(rest):
             placement = parse_placement(rest[i + 1])
@@ -272,13 +290,14 @@ def cmd_unregister(args):
     args = _strip_dashdash(args)
     if not args:
         raise CredentialError("usage: cred unregister <name> [--entry <entry>]")
-    name = check_name(args[0])
+    # Management path: legacy names/entries stay unregisterable.
+    name = check_name_legacy(args[0])
     rest = args[1:]
     entry = None
     i = 0
     while i < len(rest):
         if rest[i] == "--entry" and i + 1 < len(rest):
-            entry = check_name(rest[i + 1])
+            entry = check_name_legacy(rest[i + 1])
             i += 2
         else:
             raise CredentialError("usage: cred unregister <name> [--entry <entry>]")

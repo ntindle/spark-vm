@@ -180,6 +180,14 @@ def check_host(h):
         sys.stderr.write("invalid host %r\\n" % (h,))
         sys.exit(1)
     return lowered
+def check_name(s):
+    # Mirror of proxy/cred-registry-set::check (canonical #150 name
+    # contract: [A-Za-z0-9_-], 1-64 chars). add-host on an ABSENT name is
+    # creation, so it enforces the canonical contract like the real writer.
+    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", s or ""):
+        sys.stderr.write("invalid name %r\\n" % (s,))
+        sys.exit(1)
+    return s
 def check_host_legacy(h):
     # Mirror of proxy/cred-registry-set::check_host_legacy: shape only.
     # Used by remove-host so over-long legacy bindings stay removable.
@@ -196,7 +204,13 @@ if args[0] == "set":
 elif args[0] == "add-host":
     _, name, host = args
     host = check_host(host)
-    hosts = reg.setdefault(name, {}).setdefault("allowed_hosts", [])
+    # Mirror of the real writer's creation gate: add-host on an absent
+    # name is creation, so the canonical name contract applies.
+    entry = reg.get(name)
+    if entry is None:
+        check_name(name)
+        entry = reg.setdefault(name, {})
+    hosts = entry.setdefault("allowed_hosts", [])
     if host not in hosts:
         hosts.append(host)
 elif args[0] == "remove-host":

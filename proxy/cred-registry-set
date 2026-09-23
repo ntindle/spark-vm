@@ -53,8 +53,10 @@ def check(s, what):
 def check_legacy(s, what):
     # Legacy-tolerant name check for management verbs (remove, add-host,
     # remove-host, method/path limit verbs, set-scrub): charset-only, no
-    # length cap. No new hole: on these paths the name is only ever a dict
-    # key and print output — this script runs as `python3 - "$@"`, argv
+    # length cap. It never authorizes CREATION: every verb that can create
+    # a registry entry calls the strict check(name, "name") first when the
+    # credential is absent (see below), and set-scrub refuses absent
+    # credentials outright. This script runs as `python3 - "$@"`, argv
     # only, no shell — and entries keep the RESERVED_ENTRIES guard via
     # check_entry_legacy (finding 34b).
     if not re.match(r"^[A-Za-z0-9_-]+$", s or ""):
@@ -207,7 +209,14 @@ elif action in ("add-host", "remove-host"):
     # over-long binding must stay possible.
     host = (check_host(args[2]) if action == "add-host"
             else check_host_legacy(args[2]))
-    entry = reg.setdefault(name, {})
+    # Management verbs may touch legacy credentials, but creating a NEW
+    # credential always enforces the canonical contract (#150): add-host
+    # on an absent name must not mint an over-long credential through the
+    # legacy path.
+    entry = reg.get(name)
+    if entry is None:
+        check(name, "name")
+        entry = reg.setdefault(name, {})
     if not isinstance(entry, dict):
         fail("registry entry for '%s' is not an object" % (name,))
     hosts = entry.setdefault("allowed_hosts", [])
@@ -232,7 +241,12 @@ elif action in ("add-method", "remove-method"):
     if not re.match(r"^[A-Za-z]+$", method or ""):
         fail("invalid method %r" % (method,))
     method = method.upper()
-    entry = reg.setdefault(name, {})
+    # Creating a NEW credential always enforces the canonical contract
+    # (#150) — see the add-host branch above.
+    entry = reg.get(name)
+    if entry is None:
+        check(name, "name")
+        entry = reg.setdefault(name, {})
     if not isinstance(entry, dict):
         fail("registry entry for '%s' is not an object" % (name,))
     methods = entry.setdefault("allowed_methods", [])
@@ -277,7 +291,12 @@ elif action in ("add-path", "remove-path"):
     if not prefix.startswith("/") or re.search(r"\s", prefix):
         fail("invalid path prefix %r (must start with /, no whitespace)"
              % (prefix,))
-    entry = reg.setdefault(name, {})
+    # Creating a NEW credential always enforces the canonical contract
+    # (#150) — see the add-host branch above.
+    entry = reg.get(name)
+    if entry is None:
+        check(name, "name")
+        entry = reg.setdefault(name, {})
     if not isinstance(entry, dict):
         fail("registry entry for '%s' is not an object" % (name,))
     prefixes = entry.setdefault("allowed_paths", [])
@@ -319,9 +338,16 @@ elif action == "set-scrub":
     _, name, entry, flag = args
     check_legacy(name, "name")
     check_entry_legacy(entry)
-    entry_spec = reg.setdefault(name, {}).setdefault(entry, {})
+    # set-scrub never creates: a scrub flag on a nonexistent credential or
+    # entry is meaningless, and creating one here used to mint a
+    # placement-less entry (the addon's "no declared placement → swaps
+    # anywhere" migration path at swap_addon.py:1050-1052).
+    spec = reg.get(name)
+    if not isinstance(spec, dict):
+        fail("no such credential '%s'" % (name,))
+    entry_spec = spec.get(entry)
     if not isinstance(entry_spec, dict):
-        fail("entry '%s' for '%s' is not an object" % (entry, name))
+        fail("no such entry '%s' for credential '%s'" % (entry, name))
     entry_spec["scrub"] = (flag == "true")
     save()
     print("set scrub=%s for '%s' entry '%s'" % (flag, name, entry))
