@@ -86,7 +86,7 @@ isolation), because those are where the trust story lives.
 | **Docker Sandboxes** (morning pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, **v3 kits** (OCI-based packages: agent workload + reusable mixins for tools/config/credentials/network/instructions — C34), skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
 | **boat.dev** (2026-09-22 consolidation) | Task-scoped sandbox | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement) | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time |
-| **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second, zero while waiting), $0.0095/GB-hour memory, $0.005/GiB-month snapshots; $5 new-user credit |
+| **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, $0.05/GiB-month snapshots (vendor docs, re-read 2026-09-23 — the 10× discrepancy resolved in favor of the primary source); $5 new-user credit |
 | **Boxd** (2026-09-22 consolidation) | Persistent computer | "Composable computers" — KVM VMs with live memory forking in under 200 ms (vendor claim), snapshots/checkpoints, real SSH, per-machine HTTPS subdomain; self-hosted option ("run the whole platform on your own hardware") | Credit-based: €0.049/vCPU-hour running, €0.015/GiB-hour resident RAM, €0.0001/GiB-hour disk written; €30 free credits |
 | **Upstash Box** (2026-09-22 consolidation) | Task-scoped sandbox | Snapshot/restore API for reusable prepared environments, branching from snapshots, full outbound networking by default, 22.5 Gbps hosts on AWS; pause/resume unavailable with keepAlive enabled | Pricing not published in the surveyed docs |
 | **h-sandbox / Harakiri** (2026-09-22 consolidation) | Task-scoped sandbox (OSS control plane) | Open-source self-hosted sandbox control plane (Apache 2.0); HTTP API / TS SDK / CLI / dashboard; Credential Vault with host-bound egress bindings and fake-env injection (fourth convergent placeholder-swap data point for the secrets-posture corpus) | Free, self-hosted |
@@ -781,9 +781,29 @@ router. Runs unmodified Claude Code / Codex CLI / OpenCode / Hermes /
 LangGraph; custom agents as OCI images; customers quoted: OpenHands
 (Agent Canvas), Qencode, Amplitude (Wave); $5 new-user credit.
 
-Pricing (in the release): **$0.044/vCPU-hour active CPU** (per-second, zero
-charge while waiting on model/tool responses), $0.0095/GB-hour memory,
-$0.005/GiB-month snapshots; auto-pause stops CPU+memory charges. Claims
+Pricing: **$0.044/vCPU-hour active CPU** (per-second on actual CPU
+consumed — docs footnote: "Active CPU billing is coming soon. Until then,
+you will be billed at 25% of the vCPUs allocated to your sandbox"),
+$0.0095/GB-hour peak memory, **$0.05/GiB-month snapshots** — all VERIFIED
+on the vendor docs page (re-read 2026-09-23 mid-evening; page stamped
+"Last verified 22 Sep 2026"). The corpus's earlier $0.005/GiB-month
+figure came from the syndicated release, not the docs; the 10×
+snapshot-rate discrepancy (C26 watch item, carried as caveat in the
+mid-afternoon fold) is RETIRED in favor of the primary source. So the
+"zero while waiting" read of the headline rate is qualified: it holds
+only for paused sessions; a waiting-but-live sandbox costs 25% of
+allocation until active-CPU metering ships. Sandbox shapes
+(full-allocation hourly): XSmall `mars-1vcpu-1gb` $0.0535/hr; Small
+`mars-2vcpu-2gb` $0.107/hr; Medium (default) `mars-2vcpu-4gb` $0.126/hr;
+Large `mars-4vcpu-8gb` $0.252/hr; XLarge `mars-16vcpu-32gb` $1.008/hr.
+Also VERIFIED on the docs page: session storage (volumes) $0.05/GiB-month
+(peak storage consumed), custom sandbox templates (BYOT) $0.05/GiB-month,
+public internet egress $0.01/GiB; paused sessions incur no compute
+charges; retained checkpoints keep accruing storage charges while paused
+(including at $0 prepaid balance); the runtime requires a positive
+prepaid balance with no per-product spend limit. Auto-pause stops
+CPU+memory charges (paused = no compute charges; the 25% interim figure
+applies to waiting-but-live sandboxes).
 (vendor, not measured): **305 ms resume-from-pause** ("46% faster than
 other leading offerings" — also their own measured p50; the product page
 says "about 200 milliseconds" — treat both as vendor claims, C14 input
@@ -1272,3 +1292,34 @@ color is new, and only at the THIRD-PARTY layer. Competitive read:
 Google is pricing the storage leg of the agent stack against idle
 waste — the same axis spark-vm's persistence story must win on
 (total-cost-of-always-on, not just resume latency).
+## Watch update — 2026-09-23 (mid-evening): C26 discrepancy resolved on vendor docs
+
+One corpus action this pass (primary-source-verification fold, C32
+precedent; full pass record in
+`docs/COMPETITOR_WATCH_2026-09-23_MID_EVENING.md` §1b).
+
+**C26 — DigitalOcean Managed Agents pricing, discrepancy retired.**
+The docs pricing page (unfetchable last pass) was re-read live this pass
+(VENDOR layer: the vendor's own docs). The standing 10× snapshot-rate
+discrepancy (docs $0.05/GiB-month vs syndicated release $0.005/GiB-month)
+resolves against the primary source: **$0.05/GiB-month is the docs
+figure**; the $0.005 figure belonged to the syndicated release copy and
+is retired from the corpus. The C26 field-table row and the C26 entry's
+pricing paragraph above now carry the docs figure with provenance.
+
+**CPU-billing footnote re-verified** (already folded at mid-afternoon):
+"Active CPU billing is coming soon. Until then, you will be billed at 25%
+of the vCPUs allocated to your sandbox. Paused sessions incur no compute
+charges." The per-entry paragraph's "zero while waiting" read of DO's
+$0.044/vCPU-hour rate is now explicitly qualified there: it holds only
+for paused sessions; a waiting-but-live sandbox costs 25% of its
+allocation until active-CPU metering ships. C14 input discipline: DO's
+headline active-CPU rate is aspirational until the metering arrives —
+it is not today's measured cost to beat.
+
+**Re-verified live this pass** (already folded at mid-afternoon; confirmed
+again on the page): session storage (volumes) $0.05/GiB-month (peak
+storage consumed), custom sandbox templates (BYOT) $0.05/GiB-month,
+public internet egress $0.01/GiB, sandbox shapes mars-1vcpu-1gb …
+mars-16vcpu-32gb, positive prepaid balance required, no per-product
+spend limit.
