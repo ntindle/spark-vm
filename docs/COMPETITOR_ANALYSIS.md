@@ -45,7 +45,11 @@ BACKLOG.md block points here.
   #102 (midday) → this doc (#54's evening-pass consolidation merged
   separately as 1c244be). Consolidated watch docs are archived under
   `docs/archive/competitor-watch/` (verbatim content, archival banner
-  prepended) and superseded.
+  prepended) and superseded. 2026-09-22 night pass: partial fold — the
+  deferred C-entries (C17/C18/C19/C20/C26/C29/C30/C31) fold into the field
+  table + a "Watch update — 2026-09-22 (night)" section; the 2026-09-22
+  watch docs (MORNING/AFTERNOON/EVENING/LATE_EVENING/NIGHT) are NOT
+  archived — their other deltas stay live against this baseline.
 - **Compaction:** after each consolidation, superseded dated watch-update
   sections in this doc are candidates for summarization by a review/meta
   run — the baseline stays skimmable; the archived watch docs preserve the
@@ -81,6 +85,13 @@ isolation), because those are where the trust story lives.
 | **Microsandbox** | Task-scoped sandbox (OSS) | libkrun microVM, network-layer secret injection | Free, self-hosted (YC F26) |
 | **Docker Sandboxes** (evening pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, kits, skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
+| **boat.dev** (2026-09-22 consolidation) | Task-scoped sandbox | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement) | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time |
+| **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second, zero while waiting), $0.0095/GB-hour memory, $0.005/GiB-month snapshots; $5 new-user credit |
+| **Boxd** (2026-09-22 consolidation) | Persistent computer | "Composable computers" — KVM VMs with live memory forking in under 200 ms (vendor claim), snapshots/checkpoints, real SSH, per-machine HTTPS subdomain; self-hosted option ("run the whole platform on your own hardware") | Credit-based: €0.049/vCPU-hour running, €0.015/GiB-hour resident RAM, €0.0001/GiB-hour disk written; €30 free credits |
+| **Upstash Box** (2026-09-22 consolidation) | Task-scoped sandbox | Snapshot/restore API for reusable prepared environments, branching from snapshots, full outbound networking by default, 22.5 Gbps hosts on AWS; pause/resume unavailable with keepAlive enabled | Pricing not published in the surveyed docs |
+| **h-sandbox / Harakiri** (2026-09-22 consolidation) | Task-scoped sandbox (OSS control plane) | Open-source self-hosted sandbox control plane (Apache 2.0); HTTP API / TS SDK / CLI / dashboard; Credential Vault with host-bound egress bindings and fake-env injection (fourth convergent placeholder-swap data point for the secrets-posture corpus) | Free, self-hosted |
+| **Brig** (2026-09-22 consolidation) | Local containment (OSS tool) | Local microVM CLI for coding agents — no hosted service; dedicated kernel per sandbox, host-vs-agent trust model, boot-empty credentials with names-only reporting, fail-closed egress-downgrade refusal | Free, local (Apache 2.0) |
+| **Epho** (2026-09-22 consolidation) | Task-scoped sandbox | Agents-as-API (claude / codex / opencode harnesses) with automatic multi-provider fallback — the session outlives the machine via session-snapshot restore on replacement boxes | ≈$0.158/h for 2 vCPU / 2 GiB / 10 GiB (computed from per-second rates); $10 starting credit; BYO model keys |
 | **DIY floor** | Persistent computer | $4/mo droplet + the human does everything | $4/mo + labor |
 | **spark-vm (this project)** | Persistent computer (OSS + hosted-in-design) | Real VM, per-action human approvals (confirmd), credential proxy (swapd), tailnet-first networking | OSS: provider cost + operator time; hosted: TBD (pricing thinking is an open backlog item) |
 
@@ -601,6 +612,253 @@ on a vendor's own page, doc, repo, or security announcement in a watch pass
   Code and Codex patched, Gemini CLI deprecated, Copilot unpatched —
   third-party) — an agent-ecosystem security signal for any trust doc, but
   pre-window.
+
+## Watch update — 2026-09-22 (night): deferred-entry consolidation
+
+This pass folds the deferred C-entries (C17/C18/C19/C20/C26/C29/C30/C31) —
+watch items whose "canonical competitor-entry fold" was explicitly deferred
+to the next corpus consolidation — into the field table above. No new
+vendor-page reads this pass: every figure below carries the verification
+provenance of the pass that produced it (see the linked watch docs). The
+2026-09-22 watch docs' other deltas are not folded and stay live — this
+includes the NIGHT pass's (Sentinel deep-dive and standing items), which
+is why it appears in the not-archived list below.
+
+### boat.dev — first corpus entry (C17, RESOLVED)
+
+Task-scoped sandboxes for coding agents.
+**VERIFIED** (vendor pricing page [docs.boat.dev/pricing](https://docs.boat.dev/pricing),
+read 2026-09-21 ~13:00 CDT; resolves C17 — see
+`docs/COMPETITOR_WATCH_2026-09-21_C17.md`): default 4 vCPU / 8 GB / 50 GB at
+**$0.036/h**, per-second billing, "a stopped sandbox costs nothing"; $20/mo
+plan = $20 of time (≈555 h of `default`); concurrency 100/300/1,000/2,000
+across the $20–$2000 plans; 25 free-hour trial (`small`/`default` only).
+
+The xlarge caveat (16 vCPU / 32 GB / 251 GB, $0.200/h): needs a $100+/mo
+plan *and an operator to allocate the capacity* (vendor's own footnote,
+"ask us" on X). Two reads ~9h apart cannot date the note against the
+~Sept-19 page refresh, so the temporal question is settled at "current
+policy" — but 16-vCPU is **capacity-gated today** by vendor statement.
+Any Fly-vs-boat sizing math must carry the capacity-allocation
+contingency. Their comparison table still lists E2B/Daytona at $0.331/h
+default ($0.166/h small) — boat.dev remains the cheapest viable provider
+candidate on the published rate card.
+
+### h-sandbox / "Harakiri Sandbox" — first corpus entry (C18, RESOLVED)
+
+Open-source self-hosted sandbox control plane (Apache 2.0,
+[github.com/nabilblk/h-sandbox](https://github.com/nabilblk/h-sandbox) @
+`79d1151`, docs current to 2026-09-14; **VERIFIED** against the project's
+own docs 2026-09-21 ~21:00 CDT — see
+`docs/COMPETITOR_WATCH_2026-09-21_C18.md`). HTTP API, TS SDK, CLI,
+dashboard; environments/templates/workspaces; Credential Vault with
+host-bound egress bindings and fake-env injection; OpenSandbox as the
+execution adapter. Public source launch 2026-09-09 (pre-window).
+
+Credential Vault = the **fourth convergent data point for the
+placeholder-swap pattern** (after Daytona, Microsandbox, opencomputer.dev —
+joined 2026-09-22 by DigitalOcean Managed Agents as the fifth, C26):
+opaque placeholder in the sandbox, real value substituted at the
+provider-side egress boundary, destination-scoped. Their own trust-model
+words: "The sandbox sees only fake environment variables or no variables
+at all. The provider injects the real auth material only for outbound
+requests that match the binding." Mechanistic notes for the corpus: the
+substitute is the provider-side egress sidecar (experimental transparent
+mitmproxy, per upstream OpenSandbox docs) — a *layering* difference from
+swapd, which owns and operates its intercepting proxy; the injection
+surface is narrower (auth material only — no body/query/path substitution
+claim found); **no response scrubbing documented** (the threat model
+admits the residual: "a malicious allowed destination can reflect received
+credentials in its response"); fail-closed enforcement ("Harakiri does not
+fall back to open outbound access … when enforcement is unavailable").
+Feeds R6 (vault comparand) and H4 (OpenSandbox-adapter data).
+
+### Brig — first corpus entry (C19, CLOSED by the C19/C20 consolidation)
+
+Local microVM containment CLI for coding agents, by NOFire AI, Apache 2.0,
+prerelease `0.1.0-rc` (**VERIFIED**: [github.com/brig-sh/brig](https://github.com/brig-sh/brig),
+surveyed 2026-09-22 ~02:55–03:10 CDT — see
+`docs/COMPETITOR_C19_C20_BRIG_EPHO.md` §1). No hosted service, no pricing
+page, no multi-tenant story: Brig is a single-user local containment tool.
+Its comparable surface is the self-hosted / jail track.
+
+Substrate: dedicated kernel per sandbox (macOS 15+ uses the `hvi` backend
+of the `hull` runtime; macOS 14 uses `vz`; Linux x86-64/arm64 uses the
+`urunc` shim over KVM via nerdctl/containerd; Intel Macs unsupported) —
+same isolation tier as E2B's Firecracker microVMs, but the trust model is
+**host-vs-agent containment**, not tenant-vs-tenant. It does not belong in
+the multi-tenant scorecard rows; it is a new entry in the local-containment
+column alongside our jail.
+
+Credential handling (bars for our own surfaces): the guest boots with
+**zero credentials** — credentials reach it only by per-exec delivery
+through profile bindings; `brig info` reports binding *names* only (a test
+fails their build if a value ever reaches the output); a `deny` billing
+guard refuses to forward e.g. `ANTHROPIC_API_KEY` when doing so would
+silently move the sandbox off a subscription onto metered billing.
+
+Egress: policy enforced **only** on hull's `hvi` backend — and Brig
+**refuses a policy-bound run on any other backend rather than run it
+unenforced** (the fail-closed downgrade pattern: never silently run a
+restricted workload on a substrate that cannot enforce the restriction).
+`shell`/`gui` profiles cannot carry a policy at all (parse-time refusal).
+Image verification, by contrast, defaults to `warn` (boots unverifiable
+images unless `BRIG_VERIFY=require`) — a documented tradeoff ours should
+answer explicitly rather than imply parity.
+
+Profiles: eight built in — six `kind: agent` (`claude-code`, `codex`,
+`cursor`, `gemini`, `grok`, `opencode`), one `kind: gui`
+(`claude-desktop`), one `kind: shell` (`ubuntu`). Precision point:
+`cursor` declares `unpublished: true` (so `brig run` refuses it before the
+registry), but the profile's own `desc:` labels it an "example profile" —
+a launch-list vs shipped-state mismatch documented in-repo, minor
+severity, not a broken launch promise.
+
+Competitive read: Brig answers none of the hosted questions (no
+provisioning, no multi-tenant boundary, no approvals plane, no outside
+observer, no provider abstraction). A complement to the self-hosted track,
+not a substitute for the hosted vision.
+
+### Epho — first corpus entry (C20, CLOSED by the C19/C20 consolidation)
+
+Agents-as-API by Bruin Data Limited, launched ~Sep 7
+(**THIRD-PARTY**: Product Hunt launch post; epho.io VERIFIED for the
+mechanics below — see `docs/COMPETITOR_C19_C20_BRIG_EPHO.md` §2).
+`POST /api/v1/chat` with a harness, model, prompt, provider key, and repos
+spins up a sandbox, configures the chosen harness (claude / codex /
+opencode), clones repos, wires MCP servers, and streams the agent's work
+back as server-sent events. Task-scoped, session-clocked — the shape the
+hosted thesis rejects ("a real computer that stays yours"). Its
+*reliability* engineering is the thing to learn from, not its product
+shape.
+
+Multi-provider fallback (VERIFIED): "the run re-queues on a fallback
+sandbox backend," and a durable chat's "conversation outlives the machine
+it ran on" via session-snapshot restore — automatic fallbacks across
+providers when one fails (underlying provider identities are
+UNVERIFIABLE publicly — not named). This validates the layer **above**
+H4's provider-agnostic interface: a failover router that keeps a session
+alive across provider failures. H4's capability axes are exactly what such
+a router needs to pick a fallback target; the router itself is not
+designed. The honest boundary: `provider_iface` already ships `snapshot()`,
+so the missing design is the **cross-provider session-state restore
+contract** (which verbs the router drives, how a session survives a
+provider failure when VM-snapshot restore is not portable across
+providers) — an open H4 follow-up.
+
+Pricing (VERIFIED: epho.io): per-second meter, boot to teardown — "nothing
+idles, nothing is stored, nothing keeps billing." $0.0000164/vCPU-s,
+$0.0000053/GiB-s, $0.000000036/GiB-s; the default 2 vCPU / 2 GiB / 10 GiB
+instance is ≈ **$0.158/h** (computed) — within ~5% of E2B's first tier
+(**INFERRED**, with a shape caveat; the E2B figure is from boat.dev's
+published comparison table) — so Epho's differentiator is reliability,
+not price. BYOK: model tokens billed
+by your provider, never by Epho; $10 starting credit; a turn is refused
+with 402 at zero balance.
+
+### DigitalOcean Managed Agents — first corpus entry (C26, OPEN — watch continues)
+
+Public preview launched 2026-09-22 (**VERIFIED**: vendor press release,
+Business Wire 2026-09-22 — paid wire = the vendor's own claims; product
+page read VERIFIED in the 2026-09-22 evening pass — see
+`docs/COMPETITOR_WATCH_2026-09-22_MORNING.md` §1 and
+`docs/COMPETITOR_WATCH_2026-09-22_EVENING.md` §§1–2). The first
+major-cloud, full-stack managed agent-computer product with published
+sandbox pricing (INFERRED — the morning watch's characterization) —
+squarely in the #47 hosted-product lane.
+
+Two vertically integrated services plus inference, one security model, one
+billing model: **Harness Runtime** — microVM per session, hardware-layer
+isolation, separate secrets service, Chromium + coding sandbox,
+pause/resume/fork, conversational-history persistence; **Action Gateway** —
+governed access to 16,000+ tools from 500+ providers through one managed
+MCP endpoint, "credentials are brokered at execution time and never reach
+the model or the sandbox" (the **fifth convergent placeholder-swap data
+point** for the secrets-posture corpus), centralized permissions,
+human-in-the-loop approval for sensitive actions; **Inference Engine** —
+serverless inference on open + proprietary models, intent/cost/latency
+router. Runs unmodified Claude Code / Codex CLI / OpenCode / Hermes /
+LangGraph; custom agents as OCI images; customers quoted: OpenHands
+(Agent Canvas), Qencode, Amplitude (Wave); $5 new-user credit.
+
+Pricing (in the release): **$0.044/vCPU-hour active CPU** (per-second, zero
+charge while waiting on model/tool responses), $0.0095/GB-hour memory,
+$0.005/GiB-month snapshots; auto-pause stops CPU+memory charges. Claims
+(vendor, not measured): **305 ms resume-from-pause** ("46% faster than
+other leading offerings" — also their own measured p50; the product page
+says "about 200 milliseconds" — treat both as vendor claims, C14 input
+discipline), 37% lower TCO vs an unnamed "leading independent sandbox
+provider" (INFERRED: E2B).
+
+Competitive inputs: active-CPU metering vs spark-vm's flat-monthly Tier 1
+thinking (filed in `docs/PRICING_THINKING.md` §2); 305 ms as the number to
+beat for C14; Action Gateway as an H16 org-policy vendor candidate; DO's
+OpenAI partner status (C30 below) sharpens C26.
+
+### Boxd — first corpus entry (C29, VENDOR-VERIFIED — watch continues)
+
+$2M pre-seed (~Sept 16, **THIRD-PARTY**: BlueYard Capital lead; OVNI,
+Antler, S20, Script Capital + angels — runtimewire.com, 6ic.com,
+todaysstartupnews). Product: "Composable computers" — persistent KVM VMs
+(default 2 vCPU / 8 GB RAM / 100 GB disk, Ubuntu 24.04), real SSH
+(scp/rsync/Remote-SSH), each machine gets an HTTPS subdomain
+(`<name>.boxd.sh`), MCP server for Claude Code / Codex / opencode, CLI +
+TypeScript/Python SDKs + API (**VERIFIED**: boxd.sh +
+docs.boxd.sh/quickstart read 2026-09-22 ~20:03–20:06 CDT — see
+`docs/COMPETITOR_WATCH_2026-09-22_LATE_EVENING.md` §2; the SDK install URL
+`boxd.sh/downloads/install.sh` is seen third-party only, NOT VERIFIED).
+
+Fork: "Live memory forking of machines, **in under 200 ms**" — disk +
+memory + every running process (vendor's own pages); the press's <100 ms
+headline stays THIRD-PARTY/UNVERIFIED. **Active-network-connections forking
+is NOT vendor-attested** — the vendor says fork carries "every running
+process"; process-state preservation and TCP-connection preservation are
+orthogonal (Sprites' own docs exhibit exactly this split: processes "pick
+up mid-thought" while "open TCP connections do not survive a pause"). No
+vendor claims connection-preserving fork — treat the mechanism as
+unproven, not contradictory.
+
+Snapshots freeze and restore a machine "down to the running processes";
+checkpoints are in-place rollback of the same machine. Pricing (vendor
+FAQ): credit-based — **€0.049/vCPU-hour** while running, **€0.015/GiB-hour**
+resident RAM (running or standby), **€0.0001/GiB-hour** of disk actually
+written; hibernated machines pay disk only; **€30 free credits**. Idle
+machines "suspend to disk, resume in under a millisecond on next
+connection" — marketing-page figure, no methodology published; NOT a C14
+benchmark input. Self-hosted: "Run the whole platform on your own
+hardware." (VERIFIED).
+
+Competitive read: funded, KVM-native persistent-machine competitor whose
+fork/resume semantics overlap #179's lifecycle and #47's branching
+control plane. The measured figures stay vendor-published only (Sprites
+warm 100–500 ms, DO 305 ms p50); Boxd's are marketing with no methodology —
+directionally interesting, not citable. Watch, don't react.
+
+### OpenAI Agents API — harness↔compute split (C30, datapoint on the existing C9 tracked item)
+
+The Sept-10 public beta's nine first-class sandbox partners (Blaxel,
+Cloudflare, Daytona, **DigitalOcean**, E2B, Modal, Oracle, Runloop, Vercel —
+third-party archive of the launch post) formalize the **harness↔compute
+split** (INFERRED from the partner list, not an OpenAI claim): model
+providers ship harness code while compute platforms own isolation.
+
+Design implication for the hosted product: spark-vm competes on the
+compute/execution layer while harness choice is BYO — per-harness adapters
+(OpenSandbox-style contract) keep the hosted product portable across
+harnesses rather than building compute around one harness. Feeds H4's
+provider-adapter discussions. DigitalOcean's partner presence sharpens
+C26 above.
+
+### Upstash Box — first corpus entry (C31, mechanics datapoint)
+
+First competitor-corpus entry for Upstash (previously corpus-ed only as a
+per-box-policy datapoint in `docs/ORG_POLICY_RESEARCH.md` §2). Mechanics
+from the vendor's own docs ([how-it-works.mdx](https://github.com/upstash/docs/blob/HEAD/box/overall/how-it-works.mdx),
+launch date not established — not a corpus timing claim): snapshot/restore
+API for reusable prepared environments, branching from snapshots, full
+outbound networking by default, 22.5 Gbps hosts, on AWS; pause/resume not
+available when keepAlive enabled. Pricing not published in the surveyed
+docs.
 
 ## Implications → backlog
 
