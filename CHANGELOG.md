@@ -348,7 +348,7 @@ This changelog only works if entries land with the change, not after it:
   €0.0001/GiB-hour disk, €30 free credits) and a confirmed self-hosted
   offering; Boxd's "under a millisecond" idle-resume is a marketing-page
   figure with no published methodology and is not treated as a
-  benchmark. (PR TBD)
+  benchmark. (#272)
 
 ### Changed
 - Hosted pricing thinking refreshed: the internal pricing analysis now
