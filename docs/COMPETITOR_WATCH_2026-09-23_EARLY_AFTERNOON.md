@@ -69,13 +69,13 @@ drive; downloads free; session caps 45min/24h; concurrency 10/10,000).
 The changelog entry still reads "now available in public beta" — **no
 GA movement**.
 
-Sitemap-date caution (INFERRED, method note): the changelog sitemap's
-date for the public-beta entry now reads 2026-09-23 again, matching
-the late-midday pass — but a crawl ~6h earlier dated it 09-22, so the
-date is flip-flopping between reads. The prior pass's "09-22→09-23
-re-publish" reading was plausible but the date is evidently not
-authoritative; treat it as sitemap churn, not evidence of anything.
-The no-change streak stands at nine consecutive passes.
+Sitemap-date caution (INFERRED, method note): the changelog sitemap
+re-dated the beta entry 09-22 → 09-23 sometime before the late-midday
+pass and has read 2026-09-23 on both passes since — the field's
+authoritativeness is unproven (the only pre-09-23 datapoint is a
+search-snippet crawl read), so don't lean on it either way. The prior
+pass's "09-22→09-23 re-publish" reading remains plausible but
+unconfirmed. The no-change streak stands at nine consecutive passes.
 
 ## 3. Market news (48h window)
 
@@ -90,13 +90,17 @@ The no-change streak stands at nine consecutive passes.
   The vendor docs "Details" tile (features/pricing/availability/
   limits) exists on the docs landing page (**VERIFIED** this run,
   generated 23 Sep 2026), but its target sub-page could not be reached
-  read-only. Next ask unchanged: locate the vendor docs'
+  read-only. What changed this pass: the full launch-release text
+  (not just figures) was read, on syndicated copies — completeness at
+  the same THIRD-PARTY layer, not a layer upgrade.
+  Next ask unchanged: locate the vendor docs'
   Details/pricing sub-page.
 - **OpenAI "Managed Agents"** — still rumor: all coverage traces to
   TestingCatalog's Sep 7 report; no vendor confirmation this run.
 - **Automaid own page** — still missing: their domain automaid.it.com
-  was found via snippet from their own Medium account, but no
-  own-page launch announcement surfaced. Third-party coverage only
+  was found via snippet from their own Medium account
+  (snippet-only/THIRD-PARTY), but no own-page launch announcement
+  surfaced. Third-party coverage only
   (itbrief.asia, afritechbizhub) for the "AI hub for agents that keep
   working" pitch — classified adjacent, not in-lane.
 
@@ -112,8 +116,7 @@ The no-change streak stands at nine consecutive passes.
 Agents public preview (2026-09-22) remains the newest in-lane event
 and was already filed; nothing new has launched since. This pass
 resumes the explicit no-new-launch reading against that filed
-baseline — fifth consecutive pass with that verdict counting the
-afternoon/evening/late-evening/night cadence through today.
+baseline.
 
 ## 4. No corpus fold this pass
 
