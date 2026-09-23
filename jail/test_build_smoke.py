@@ -512,11 +512,12 @@ class TestFirewallWatchdogStatic:
         assert "conf_rule_lines" in verify_src
         assert "norm_rule_line" in verify_src
         assert 'CONF="${CONF:-/etc/nftables-jail.conf}"' in verify_src
-        # Quoted strings are stripped before comparison (no fingerprint
-        # smuggling inside log prefixes), and comparison is exact
-        # full-line matching (a DNAT port suffix cannot hide).
-        assert 'sed \'s/"[^"]*"//g\'' in verify_src
+        # Full-line exact matching with quotes INTACT (grep -qxF): a DNAT
+        # port suffix cannot hide, and quoted interface names keep their
+        # identity — stripping quotes made iifname "ve-jail" and
+        # iifname "tailscale0" indistinguishable (Security round 2).
         assert "grep -qxF" in verify_src
+        assert 's/"[^"]*"//g' not in verify_src
         # An unreadable conf must fail closed, not bless the table.
         assert '[ -n "$expected" ] || return 1' in verify_src
 
@@ -564,6 +565,10 @@ class TestFirewallWatchdogStatic:
         # Wants, never Requires: if the oneshot failed at boot, the
         # watchdog must still run and fail-close on the missing table.
         assert "Requires=jail-firewall.service" not in unit
+        # Security round 2: pin the comparison source in the unit so the
+        # pin compares against the conf it repairs from, not whatever
+        # $CONF the environment happens to carry.
+        assert "Environment=CONF=/etc/nftables-jail.conf" in unit
 
     def test_timer_cadence_and_wiring(self, active):
         m = re.search(
@@ -727,6 +732,15 @@ BROADENED_DNAT_RULESET = HEALTHY_RULESET.replace(
 BROADENED_PROXY_ACCEPT_RULESET = HEALTHY_RULESET.replace(
     '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept',
     '\t\ttcp dport { 18080, 18081 } accept',
+)
+
+# The 2026-09-23 review case (Security round 2): an interface-name
+# swap — the proxy accept with "ve-jail" replaced by "tailscale0".
+# Quote-stripping made these indistinguishable; with quotes intact the
+# line is not the conf's line and must fail closed.
+IFACE_SWAP_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept',
+    '\t\tiifname "tailscale0" tcp dport { 18080, 18081 } accept',
 )
 
 # A benign duplicate of a legit narrow rule: the pin must not false-positive
@@ -928,6 +942,19 @@ exit 0
         calls = watchdog_stubs.read_text()
         assert "systemctl stop systemd-nspawn@jail" in calls
         assert "nft destroy table" in calls
+
+    def test_iface_swap_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Review case (Security round 2): "ve-jail" swapped for
+        # "tailscale0" on the proxy accept. Quoted identifiers are part
+        # of the rule's identity; this must fail closed.
+        r = _run_watchdog(IFACE_SWAP_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert calls.index("systemctl stop systemd-nspawn@jail") < \
+            calls.index("nft destroy table")
+        assert "ALERT" in calls
 
     def test_rogue_ssh_dnat_triggers_fail_closed(
             self, watchdog_stubs, tmp_path, monkeypatch):

@@ -252,6 +252,9 @@ After=jail-firewall.service
 
 [Service]
 Type=oneshot
+# Pin the comparison source: the unit must compare against the conf it
+# repairs from, not whatever $CONF happens to be in the environment.
+Environment=CONF=/etc/nftables-jail.conf
 ExecStart=/usr/local/sbin/jail-firewall-verify.sh
 EOF
 $SUDO tee /etc/systemd/system/jail-firewall-verify.timer >/dev/null <<'EOF'

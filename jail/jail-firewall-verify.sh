@@ -43,15 +43,18 @@ healthy() {
 
 # Normalize one ruleset line for comparison: left-trim, then drop headers
 # (table/chain/type/closing brace), comments and blank lines — those carry
-# no rule. Quoted strings are stripped (log prefixes, comments) so
-# expected text cannot hide inside attacker-controlled quotes. Prints the
-# normalized line; returns nonzero for lines that carry no rule.
+# no rule. Lines are compared with quotes INTACT: quoted identifiers
+# (interface names, log prefixes) are part of the rule's identity —
+# stripping them would make iifname "ve-jail" and iifname "tailscale0"
+# indistinguishable. Full-line exact matching leaves nowhere for a
+# smuggled fingerprint to hide. Prints the normalized line; returns
+# nonzero for lines that carry no rule.
 norm_rule_line() {
     local t="${1#"${1%%[![:space:]]*}"}"   # ltrim
     case "$t" in
         ""|"#"*|chain*|type*|table*|"}"*) return 1 ;;
     esac
-    printf '%s' "$t" | sed 's/"[^"]*"//g'
+    printf '%s\n' "$t"
 }
 
 # The expected rule lines: every rule in the installed conf, normalized.
