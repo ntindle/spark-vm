@@ -117,7 +117,14 @@ states the construction, not a static pin.
   watchdog pins the drop-rule markers (`jail-fwd-drop:`,
   `jail-fwd-indrop:`, `jail-input-drop:`) and the proxy DNAT rule — an
   emptied chain (`nft flush chain`) is detected just like a deleted
-  table. On confirmed damage (a 10-second re-check filters the
+  table — and it pins the allow head: every rule line in the live table
+  must be one of the installed conf's rule lines, matched on the full
+  rule text (match expression plus verdict), so a widened ruleset (an
+  added broad accept above the drops, or a broadened match with a
+  dropped qualifier) fails closed the same as a missing one. The conf
+  is the single source of truth — the pin hardcodes nothing, so it
+  cannot drift from the table it guards. On confirmed damage (a
+  10-second re-check filters the
   oneshot unit's own transient destroy-then-apply window), the watchdog
   is fail-closed: it **stops the jail first**, then re-applies
   `/etc/nftables-jail.conf` (destroy-then-apply, scoped to the jail
@@ -135,7 +142,14 @@ states the construction, not a static pin.
   unbounded unenforced running: a table/ruleset loss can exist for up to
   ~5 minutes before detection, and the re-apply resets the drop counters
   (silence on the `jail-*-drop:` prefixes right after a re-apply is
-  expected, not peace of mind). Note the consequence remains specifically
+  expected, not peace of mind). Operational rule: the live table is not
+  a debugging surface. Any rule the conf does not contain — including a
+  temporary accept added while debugging — trips the pin: the watchdog
+  stops the jail, destroys and re-applies the table, and goes red. Make
+  table changes through `build.sh` (which regenerates the conf the pin
+  compares against), or stop `jail-firewall-verify.timer` first and
+  accept that the watchdog will repair your edits away on the next run.
+  Note the consequence remains specifically
   the drop-based isolation: a flush also deletes the DNAT rule, so the
   *permitted* proxy path dies with the table — what is voided in the
   window is the "cannot reach host services / cannot egress directly"

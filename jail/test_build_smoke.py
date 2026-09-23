@@ -23,6 +23,7 @@ A future edit that silently drops one of these properties fails the suite.
 import os
 import re
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -195,7 +196,7 @@ class TestSshPortSingleSourced:
         # No literal port anywhere: a second hardcoded copy would drift.
         assert f"dport {port} dnat" not in active
         # The jail-side accept stays the jail's own port 22 (unrelated).
-        assert "tcp dport 22 ct state new,established accept" in active
+        assert "tcp dport 22 ct state established,new accept" in active
 
     def test_substitution_mechanism_pinned(self, src):
         # Quoted heredoc (no expansion) piped through the placeholder
@@ -315,21 +316,33 @@ class TestIsolation:
         assert 'iifname "ve-jail" tcp dport { 18080, 18081 } accept' in active
         assert 'iifname "ve-jail" ct state established,related accept' in active
         assert ('iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 '
-                'tcp dport 22 ct state new,established accept') in active
+                'tcp dport 22 ct state established,new accept') in active
         assert 'oifname "ve-jail" ct state established,related accept' in active
         assert ('iifname "ve-jail" ip daddr 10.99.0.1 '
-                'tcp dport { 18080, 18081 } dnat to 127.0.0.1') in active
+                'tcp dport { 18080, 18081 } dnat ip to 127.0.0.1') in active
         assert ('iifname "tailscale0" tcp dport @@JAIL_SSH_PORT@@ '
                 'dnat ip to 10.99.0.2:22') in active
         # No broader jail-side accept: every `iifname "ve-jail" … accept`
         # line must be one of the pinned narrow rules above.
+        pinned = {
+            'iifname "ve-jail" tcp dport { 18080, 18081 } accept',
+            'iifname "ve-jail" ct state established,related accept',
+            ('iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 '
+             'tcp dport 22 ct state established,new accept'),
+            'oifname "ve-jail" ct state established,related accept',
+            ('iifname "ve-jail" ip daddr 10.99.0.1 '
+             'tcp dport { 18080, 18081 } dnat ip to 127.0.0.1'),
+            ('iifname "tailscale0" tcp dport @@JAIL_SSH_PORT@@ '
+             'dnat ip to 10.99.0.2:22'),
+        }
+        # (A5 hardening) No extra verdicts anywhere: every accept or dnat
+        # line in the generated table must be one of the pinned rules — a
+        # widened ssh-forward or oifname accept added to build.sh fails
+        # here, not just in the runtime watchdog.
         for line in active.splitlines():
             line = line.strip()
-            if line.startswith('iifname "ve-jail"') and line.endswith("accept"):
-                assert line in (
-                    'iifname "ve-jail" tcp dport { 18080, 18081 } accept',
-                    'iifname "ve-jail" ct state established,related accept',
-                ), line
+            if line.endswith("accept") or "dnat" in line:
+                assert line in pinned, line
 
     def test_route_localnet_scoped_to_veth(self, active):
         assert "net.ipv4.conf.ve-$MACHINE.route_localnet=1" in active
@@ -423,7 +436,7 @@ class TestFirewallWatchdogStatic:
         # healthy on an open-egress chain. The markers are the drop-rule
         # log prefixes and the proxy DNAT.
         for marker in ("jail-fwd-drop", "jail-fwd-indrop",
-                       "jail-input-drop", "dnat to 127.0.0.1"):
+                       "jail-input-drop", "dnat ip to 127.0.0.1"):
             assert marker in verify_src, "marker missing: %s" % marker
         # ...and the check must not be satisfiable by chain shells alone.
         assert "grep -q 'chain forward'" not in verify_src
@@ -482,6 +495,67 @@ class TestFirewallWatchdogStatic:
         # damage avoids fail-closed false positives.
         assert "sleep 10" in verify_src
 
+    def test_allow_head_pin(self, verify_src):
+        # Arch finding (2026-09-23): the marker presence checks cannot see
+        # a WIDENED ruleset — with policy-accept chains, an added broad
+        # accept above the drops voids the isolation exactly like a
+        # deleted drop. healthy() must also pin the allow head: every rule
+        # line in the live table must be one of the installed conf's rule
+        # lines, matched on the FULL rule text (match expression plus
+        # verdict) — a broadened match (dropped qualifier) is not the
+        # expected line and fails closed.
+        assert "allow_head_intact" in verify_src
+        assert '&& allow_head_intact "$rules"' in verify_src
+        # The pin derives its expected lines from the installed conf —
+        # nothing about the allow head is hardcoded in the script, so it
+        # cannot drift from the table it guards (Architecture blocker 2).
+        assert "conf_rule_lines" in verify_src
+        assert "norm_rule_line" in verify_src
+        assert 'CONF="${CONF:-/etc/nftables-jail.conf}"' in verify_src
+        # Full-line exact matching with quotes INTACT (grep -qxF): a DNAT
+        # port suffix cannot hide, and quoted interface names keep their
+        # identity — stripping quotes made iifname "ve-jail" and
+        # iifname "tailscale0" indistinguishable (Security round 2).
+        assert "grep -qxF" in verify_src
+        assert 's/"[^"]*"//g' not in verify_src
+        # An unreadable conf must fail closed, not bless the table.
+        assert '[ -n "$expected" ] || return 1' in verify_src
+
+    def test_conf_fixture_matches_build_sh(self):
+        # Drift test (Architecture blocker 2): the HEALTHY_CONF fixture
+        # the functional tests stub must be exactly what build.sh renders
+        # (@@JAIL_SSH_PORT@@ substituted). Extract the heredoc from
+        # build.sh, apply the same sed, and compare normalized rule lines.
+        build_sh = (Path(JAIL_DIR) / "build.sh").read_text()
+        m = re.search(r"<<'NFT_EOF'.*?\n(.*?)\nNFT_EOF\n", build_sh, re.S)
+        assert m, "nftables heredoc not found in build.sh"
+        port = re.search(r"^JAIL_SSH_PORT=(\d+)", build_sh, re.M).group(1)
+        rendered = m.group(1).replace("@@JAIL_SSH_PORT@@", port)
+
+        def norm_lines(text):
+            # Mirrors the production norm_rule_line (quotes INTACT —
+            # Architecture final review: stripping quotes here would let a
+            # quote-confined conf change pass while the fixture goes stale).
+            out = []
+            for line in text.splitlines():
+                t = line.lstrip()
+                if not t or t.startswith("#") or \
+                        t.startswith(("chain", "type", "table", "}")):
+                    continue
+                out.append(t)
+            return out
+
+        assert norm_lines(rendered) == norm_lines(HEALTHY_CONF), \
+            "HEALTHY_CONF drifted from build.sh's nftables heredoc"
+        # Guard (Architecture round 2): an inline `#` comment on a conf
+        # rule line would fail closed as a false positive (only full-line
+        # comments are skipped by the pin). Keep comments on their own
+        # lines so a future editor doesn't trip the watchdog.
+        for line in rendered.splitlines():
+            t = line.strip()
+            if t and not t.startswith(("#", "table", "chain", "type", "}")):
+                assert " #" not in t, "inline comment on conf rule: %r" % t
+
     def test_service_runs_the_script(self, active):
         m = re.search(
             r"tee /etc/systemd/system/jail-firewall-verify\.service"
@@ -502,6 +576,10 @@ class TestFirewallWatchdogStatic:
         # Wants, never Requires: if the oneshot failed at boot, the
         # watchdog must still run and fail-close on the missing table.
         assert "Requires=jail-firewall.service" not in unit
+        # Security round 2: pin the comparison source in the unit so the
+        # pin compares against the conf it repairs from, not whatever
+        # $CONF the environment happens to carry.
+        assert "Environment=CONF=/etc/nftables-jail.conf" in unit
 
     def test_timer_cadence_and_wiring(self, active):
         m = re.search(
@@ -520,11 +598,40 @@ class TestFirewallWatchdogStatic:
 # systemctl / logger / sleep via PATH (+ the NFT env override) and run the
 # real script against canned rulesets.
 
+# The conf build.sh installs (JAIL_SSH_PORT=2222 substituted) — the
+# watchdog's single source of truth for the allow-head pin. The drift
+# test below pins this fixture to build.sh's actual heredoc.
+HEALTHY_CONF = """\
+# Proxy-only egress for the jail's veth (ve-jail).
+table inet jail {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        iifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat ip to 127.0.0.1
+        iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22
+    }
+    chain input {
+        type filter hook input priority -10; policy accept;
+        iifname "ve-jail" tcp dport { 18080, 18081 } accept
+        iifname "ve-jail" ct state established,related accept
+        iifname "ve-jail" log prefix "jail-input-drop: " drop
+    }
+    chain forward {
+        type filter hook forward priority -10; policy accept;
+        iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
+        iifname "ve-jail" ct state established,related accept
+        oifname "ve-jail" ct state established,related accept
+        iifname "ve-jail" log prefix "jail-fwd-drop: " drop
+        oifname "ve-jail" log prefix "jail-fwd-indrop: " drop
+    }
+}
+"""
+
 HEALTHY_RULESET = """\
 table inet jail {
 \tchain prerouting {
 \t\ttype nat hook prerouting priority dstnat; policy accept;
-\t\tiifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat to 127.0.0.1
+\t\tiifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat ip to 127.0.0.1
+\t\tiifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22
 \t}
 \tchain input {
 \t\ttype filter hook input priority -10; policy accept;
@@ -534,7 +641,7 @@ table inet jail {
 \t}
 \tchain forward {
 \t\ttype filter hook forward priority -10; policy accept;
-\t\tiifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state new,established accept
+\t\tiifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
 \t\tiifname "ve-jail" ct state established,related accept
 \t\toifname "ve-jail" ct state established,related accept
 \t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop
@@ -559,6 +666,101 @@ table inet jail {
 \t}
 }
 """
+
+# The 2026-09-23 arch case: a WIDENED ruleset — every drop marker and the
+# proxy DNAT are present, but an injected broad accept sits above the
+# drops. Marker presence alone reported healthy on this; the allow-head
+# pin must not.
+WIDENED_ACCEPT_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" accept\n'
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+)
+
+# The 2026-09-23 arch case: a rogue DNAT variant — the proxy DNAT's target
+# gains a port. The old substring grep 'dnat to 127.0.0.1' still matched
+# this; the end-anchored pin must not.
+ROGUE_DNAT_RULESET = HEALTHY_RULESET.replace(
+    'dnat ip to 127.0.0.1\n',
+    'dnat ip to 127.0.0.1:9999\n',
+)
+
+# The 2026-09-23 review case (Security): a re-addressed DNAT variant —
+# the target is a different host that still contains the 'dnat to
+# 127.0.0.1' substring. The end-anchored pin must reject it.
+ROGUE_DNAT_READDR_RULESET = HEALTHY_RULESET.replace(
+    'dnat ip to 127.0.0.1\n',
+    'dnat ip to 127.0.0.10\n',
+)
+
+# The 2026-09-23 review case (Security): a quoted-string smuggle — the
+# broad accept carries a full accept fingerprint inside its log prefix.
+# Unanchored fingerprint matching alone passes this; the pin must strip
+# quoted strings before matching and fail closed.
+SMUGGLER_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" log prefix "ct state established,related accept" accept\n'
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+)
+
+# The 2026-09-23 review case (Security): a DNAT-family verdict spelled
+# differently — 'redirect' moves packets without the 'dnat' or 'accept'
+# substrings. The pin must deny all packet-moving verdicts it does not
+# know, not just dnat/accept spellings.
+REDIRECT_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" tcp dport 9999 redirect to :9999\n'
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+)
+
+# The 2026-09-23 review case (Engineering A1): a rogue sshd-DNAT
+# variant — the target address is changed while the match stays narrow.
+ROGUE_SSH_DNAT_RULESET = HEALTHY_RULESET.replace(
+    'iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22',
+    'iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.99:22',
+)
+
+# The 2026-09-23 review case (Architecture, blocker 1): broadened-match
+# variants — the realistic way a ruleset gets widened (an admin copying a
+# rule and loosening it). Each keeps the verdict but drops narrowing
+# qualifiers, so verdict-substring pins are blind to them; the full-rule
+# pin must fail closed on all three.
+# 1. Forward chain: jail sshd accept reachable from anywhere, not just the
+#    tailnet (dropped iifname/oifname/daddr qualifiers).
+BROADENED_SSH_ACCEPT_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" tcp dport 22 ct state established,new accept\n'
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+)
+# 2. Prerouting: the jail's sshd DNATed from any interface (dropped the
+#    tailscale0 iifname).
+BROADENED_DNAT_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22',
+    '\t\ttcp dport 9999 dnat ip to 10.99.0.2:22',
+)
+# 3. Input chain: proxy ports accepted off every interface (dropped the
+#    ve-jail iifname).
+BROADENED_PROXY_ACCEPT_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept',
+    '\t\ttcp dport { 18080, 18081 } accept',
+)
+
+# The 2026-09-23 review case (Security round 2): an interface-name
+# swap — the proxy accept with "ve-jail" replaced by "tailscale0".
+# Quote-stripping made these indistinguishable; with quotes intact the
+# line is not the conf's line and must fail closed.
+IFACE_SWAP_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept',
+    '\t\tiifname "tailscale0" tcp dport { 18080, 18081 } accept',
+)
+
+# A benign duplicate of a legit narrow rule: the pin must not false-positive
+# on rule duplication (e.g. a re-applied table that kept a stale copy).
+DUPLICATE_ACCEPT_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept\n',
+    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept\n'
+    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept\n',
+)
 
 
 @pytest.fixture()
@@ -599,10 +801,13 @@ exit 0
 
 
 def _run_watchdog(fixture_text=None, list_rc="0", check_rc="0",
-                  tmp_path=None, monkeypatch=None):
+                  tmp_path=None, monkeypatch=None, conf_text=HEALTHY_CONF):
     fix = tmp_path / "ruleset.txt"
     fix.write_text(fixture_text or "")
+    conf = tmp_path / "nftables-jail.conf"
+    conf.write_text(conf_text)
     monkeypatch.setenv("NFT_FIXTURE_FILE", str(fix))
+    monkeypatch.setenv("CONF", str(conf))
     monkeypatch.setenv("NFT_LIST_RC", list_rc)
     monkeypatch.setenv("NFT_CHECK_RC", check_rc)
     return subprocess.run(
@@ -629,7 +834,7 @@ class TestFirewallWatchdogFunctional:
         # Fail-closed: jail stopped BEFORE the table is repaired.
         assert calls.index("systemctl stop systemd-nspawn@jail") < \
             calls.index("nft destroy table")
-        assert "nft -f /etc/nftables-jail.conf" in calls
+        assert "nft -f %s" % (tmp_path / "nftables-jail.conf") in calls
         assert "ALERT" in calls
 
     def test_missing_table_triggers_fail_closed(self, watchdog_stubs,
@@ -664,6 +869,9 @@ exit 0
         stub.chmod(0o755)
         healthy = tmp_path / "healthy.txt"
         healthy.write_text(HEALTHY_RULESET)
+        conf = tmp_path / "nftables-jail.conf"
+        conf.write_text(HEALTHY_CONF)
+        monkeypatch.setenv("CONF", str(conf))
         monkeypatch.setenv("NFT_COUNT", str(counter))
         monkeypatch.setenv("NFT_HEALTHY", str(healthy))
         r = subprocess.run(["bash", VERIFY_SCRIPT],
@@ -683,3 +891,134 @@ exit 0
         assert "systemctl stop systemd-nspawn@jail" in calls
         assert "destroy table" not in calls
         assert "CRITICAL" in calls
+
+    def test_widened_accept_triggers_fail_closed(self, watchdog_stubs,
+                                                 tmp_path, monkeypatch):
+        # The 2026-09-23 arch case: every marker is present but an
+        # injected broad accept sits above the drops — policy-accept
+        # chains make this open egress. The old presence-only check
+        # reported healthy; the allow-head pin must fail closed.
+        r = _run_watchdog(WIDENED_ACCEPT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert calls.index("systemctl stop systemd-nspawn@jail") < \
+            calls.index("nft destroy table")
+        assert "ALERT" in calls
+
+    def test_rogue_dnat_variant_triggers_fail_closed(self, watchdog_stubs,
+                                                     tmp_path, monkeypatch):
+        # The old substring grep 'dnat to 127.0.0.1' matched the rogue
+        # 'dnat to 127.0.0.1:9999' variant; the end-anchored pin must not.
+        r = _run_watchdog(ROGUE_DNAT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_rogue_dnat_readdressed_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Review case: 'dnat ip to 127.0.0.10' is not the conf's
+        # 'dnat ip to 127.0.0.1' line; the full-line pin must reject it.
+        r = _run_watchdog(ROGUE_DNAT_READDR_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_smuggled_fingerprint_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Review case (Security): a broad accept smuggling a full accept
+        # fingerprint inside its log prefix. Unanchored matching alone
+        # passes this; the pin strips quoted strings first, so this must
+        # fail closed — with stop-before-destroy ordering.
+        r = _run_watchdog(SMUGGLER_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert calls.index("systemctl stop systemd-nspawn@jail") < \
+            calls.index("nft destroy table")
+        assert "ALERT" in calls
+
+    def test_redirect_verdict_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Review case (Security): 'redirect' moves packets without the
+        # 'dnat' or 'accept' substrings. The pin denies packet-moving
+        # verdicts it does not know; this must fail closed.
+        r = _run_watchdog(REDIRECT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_iface_swap_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Review case (Security round 2): "ve-jail" swapped for
+        # "tailscale0" on the proxy accept. Quoted identifiers are part
+        # of the rule's identity; this must fail closed.
+        r = _run_watchdog(IFACE_SWAP_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert calls.index("systemctl stop systemd-nspawn@jail") < \
+            calls.index("nft destroy table")
+        assert "ALERT" in calls
+
+    def test_rogue_ssh_dnat_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Review case (Engineering A1): the sshd DNAT's target is
+        # re-addressed while the match stays narrow — not the conf's line.
+        r = _run_watchdog(ROGUE_SSH_DNAT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_broadened_ssh_accept_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Review case (Architecture blocker 1): the SSH accept with its
+        # narrowing qualifiers dropped — direct outbound SSH for the jail.
+        # A verdict-substring pin is blind to this; the full-rule pin
+        # must fail closed.
+        r = _run_watchdog(BROADENED_SSH_ACCEPT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_broadened_dnat_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Review case (Architecture blocker 1): the sshd DNAT without the
+        # tailscale0 iifname — reachable from any interface.
+        r = _run_watchdog(BROADENED_DNAT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_broadened_proxy_accept_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Review case (Architecture blocker 1): the proxy-port accept
+        # without the ve-jail iifname — accepted off every interface.
+        r = _run_watchdog(BROADENED_PROXY_ACCEPT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_benign_duplicate_accept_stays_healthy(self, watchdog_stubs,
+                                                   tmp_path, monkeypatch):
+        # A duplicated legit narrow rule is not damage: no false positive.
+        r = _run_watchdog(DUPLICATE_ACCEPT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 0
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop" not in calls
+        assert "destroy table" not in calls

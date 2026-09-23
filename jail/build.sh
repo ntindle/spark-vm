@@ -159,7 +159,7 @@ table inet jail {
         # Jail -> proxy. mitmdump listens on 127.0.0.1:18080/18081 on the
         # host; DNAT the jail's gateway address there so the proxy's own
         # config never changes and is never exposed on a real interface.
-        iifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat to 127.0.0.1
+        iifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat ip to 127.0.0.1
         # Tailnet -> jail sshd (the agent login). Tailnet interface only.
         # (dnat ip: inet-family tables need the address family explicit.)
         iifname "tailscale0" tcp dport @@JAIL_SSH_PORT@@ dnat ip to 10.99.0.2:22
@@ -175,7 +175,7 @@ table inet jail {
     chain forward {
         type filter hook forward priority -10; policy accept;
         # Tailnet -> jail sshd, after DNAT.
-        iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state new,established accept
+        iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
         iifname "ve-jail" ct state established,related accept
         oifname "ve-jail" ct state established,related accept
         # No other egress for the jail: no direct internet, no tailnet,
@@ -252,6 +252,9 @@ After=jail-firewall.service
 
 [Service]
 Type=oneshot
+# Pin the comparison source: the unit must compare against the conf it
+# repairs from, not whatever $CONF happens to be in the environment.
+Environment=CONF=/etc/nftables-jail.conf
 ExecStart=/usr/local/sbin/jail-firewall-verify.sh
 EOF
 $SUDO tee /etc/systemd/system/jail-firewall-verify.timer >/dev/null <<'EOF'
