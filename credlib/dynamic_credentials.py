@@ -35,10 +35,14 @@ class DynamicCredentialError(Exception):
 # same way (cred's check_name_legacy, cred-ui's NAME_LEGACY_RE,
 # proxy/cred-registry-set's check_legacy) so credentials created before
 # the #150 64-char cap stay usable. This choke point matches them:
-# charset-only, no cap. A 64-char cap here would reject names the
-# writers and the swapping proxy still serve (finding, 2026-09-23 arch
-# deep-read: surrogate building is a read path, not creation).
-NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# charset-only, no cap — and carries the NAME_LEGACY_RE identifier so
+# the name states the semantics (per the arch review: NAME_RE means
+# canonical "charset + 64-char cap" in cred and cred-ui; reusing it here
+# for legacy semantics would be identifier drift on a security
+# boundary). A 64-char cap here would reject names the writers and the
+# swapping proxy still serve (finding, 2026-09-23 arch deep-read:
+# surrogate building is a read path, not creation).
+NAME_LEGACY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _validate_name(value, what):
@@ -53,7 +57,7 @@ def _validate_name(value, what):
     "starts with hsurr:") was vacuous — the surrogate is constructed
     with that prefix — and validated nothing.
     """
-    if not isinstance(value, str) or not NAME_RE.match(value):
+    if not isinstance(value, str) or not NAME_LEGACY_RE.match(value):
         raise DynamicCredentialError(
             "invalid %s name %r (use only [A-Za-z0-9_-])"
             % (what, value))

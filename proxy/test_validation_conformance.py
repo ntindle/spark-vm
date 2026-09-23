@@ -1,8 +1,8 @@
 """Conformance test for the credential-validation grammars (#150).
 
 The credential-name, allowed-host, and placement grammars are replicated
-in four WRITE-path places: the `cred` CLI, `cred-ui/cred-ui.py`,
-`proxy/cred-registry-set`, and `credlib` (NAME_RE). They must
+in three WRITE-path places: the `cred` CLI, `cred-ui/cred-ui.py`, and
+`proxy/cred-registry-set`. They must
 accept/reject the same corpus — drift here is a security-relevant
 inconsistency (the frontend accepting what the writer rejects, or vice
 versa), and drift had already happened: the CLI and writer accepted
@@ -10,13 +10,14 @@ unbounded names and hosts and unbounded placement args while cred-ui capped
 them, and the CLI/writer accepted `_`/`.` in custom header names while
 cred-ui rejected them.
 
-A fifth copy lives in `proxy/swap_addon.py` (NAME_RE): the proxy's READ
-side, which filters which on-disk secret files get loaded into the
-served-secrets map. It is intentionally a SUPERSET of the contract
-(unbounded `[A-Za-z0-9_-]+`) — strict-on-write / liberal-on-read, so
-secrets written before the 64-char cap keep being served after upgrade.
-This test asserts the superset relationship for accepts and deliberately
-does NOT assert it for rejects.
+Two copies live on the READ side: `proxy/swap_addon.py` (NAME_RE), which
+filters which on-disk secret files get loaded into the served-secrets map,
+and `credlib` (NAME_LEGACY_RE), whose `_validate_name` gates surrogate
+building and `fill_secret`'s store read. Both are intentionally a SUPERSET
+of the contract (unbounded `[A-Za-z0-9_-]+`) — strict-on-write /
+liberal-on-read, so secrets written before the 64-char cap keep being
+served after upgrade. This test asserts the superset relationship for
+accepts and deliberately does NOT assert it for rejects.
 
 Canonical contract (every write-path implementation below agrees on it):
 - name / entry:  ^[A-Za-z0-9_-]{1,64}$
@@ -49,7 +50,9 @@ Each implementation is driven through its natural interface:
   registry file (CRED_REGISTRY_FILE/CRED_REGISTRY_LOCK overrides);
   non-zero exit = reject. The corpus uses the `set`/`add-host` creation
   paths, which enforce the canonical contract.
-- credlib: NAME_RE (name grammar only; it is the fourth copy the issue names)
+- credlib: NAME_LEGACY_RE (name grammar only; the read side — surrogate
+  building and fill_secret's store read are reads, not creation, so this
+  copy asserts the read-side superset relationship, not the write corpus)
 - swap_addon: NAME_RE (read-side superset, accepts-only assertion)
 
 Known boundary (documented, not a divergence): the writer also accepts the
@@ -173,7 +176,7 @@ def _ui_name(name):
 
 
 def _credlib_name(name):
-    return bool(credlib.NAME_RE.match(name))
+    return bool(credlib.NAME_LEGACY_RE.match(name))
 
 
 def _writer_name(name, env):
@@ -291,7 +294,6 @@ def test_name_grammar_conformance(name, expected, registry):
         "cred CLI": _cli_name(name),
         "cred-ui": _ui_name(name),
         "cred-registry-set": _writer_name(name, registry),
-        "credlib": _credlib_name(name),
     }
     assert set(results.values()) == {expected}, (
         "name grammar diverged for %r: %s (expected all %s)"
@@ -322,6 +324,30 @@ def test_swap_addon_name_grammar_accepts_over_cap_names(name):
     assert swap_addon.NAME_RE.match(name), (
         "swap_addon.NAME_RE no longer a read-side superset: rejects "
         "over-cap name %r — pre-cap secrets would stop being served"
+        % (name,))
+
+
+@pytest.mark.parametrize("name,expected", NAME_CASES)
+def test_credlib_name_grammar_is_superset(name, expected):
+    # credlib's _validate_name gates surrogate building and fill_secret's
+    # store read — pure reads, not creation — so it asserts the same
+    # read-side superset relationship as the addon: every name the
+    # canonical contract accepts must validate; rejects are deliberately
+    # not asserted (strict-on-write / liberal-on-read).
+    if expected:
+        assert _credlib_name(name), (
+            "credlib.NAME_LEGACY_RE no longer a superset: rejects %r" % (name,))
+
+
+@pytest.mark.parametrize("name", OVER_CAP_ACCEPTS)
+def test_credlib_name_grammar_accepts_over_cap_names(name):
+    # The superset relationship only matters ABOVE the 64-char cap: pin it
+    # explicitly, so a future cap on credlib's regex fails loudly instead
+    # of silently refusing surrogates for pre-cap secrets the proxy still
+    # serves.
+    assert _credlib_name(name), (
+        "credlib.NAME_LEGACY_RE no longer a read-side superset: rejects "
+        "over-cap name %r — pre-cap secrets would stop resolving"
         % (name,))
 
 

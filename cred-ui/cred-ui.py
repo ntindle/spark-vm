@@ -293,7 +293,7 @@ def api_set(data):
     hosts = data.get("hosts", []) or []
 
     if not NAME_RE.match(name):
-        raise ValueError("bad credential name (use [A-Za-z0-9_-])")
+        raise ValueError("bad credential name (use [A-Za-z0-9_-], max 64 chars)")
     if not ENTRY_RE.match(entry) or entry == "allowed_hosts":
         raise ValueError("bad entry name")
     if not isinstance(value, str) or not value:
