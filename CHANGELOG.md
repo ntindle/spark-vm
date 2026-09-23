@@ -46,7 +46,7 @@ This changelog only works if entries land with the change, not after it:
   pricing ask at third-party level, vendor verification owed) — the
   first in-lane launch verdict of the recent streak (public preview, not
   GA); Docker Sandboxes 0.42.0 CVE pair (CVE-2026-77179, CVE-2026-79994)
-  filed C35 (third-party only, vendor verification owed). (PR TBD)
+  filed C35 (third-party only, vendor verification owed). (#292)
 - Competitor watch (2026-09-23 night): tracked set fully quiet — all
   8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (fifth
