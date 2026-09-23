@@ -82,9 +82,8 @@ the gate record.
   and `image_version` matches the baked commit.
 - **Exit 1** is a **gate refusal**: the image is not what the manifest
   claims. Do not proceed; rebuild from a clean tree.
-- **Exit 2** is an **invocation error** (bad arguments, unreadable
-  manifest): fix the command and re-run — it is not a verdict on the
-  image.
+- **Exit 2** is an **invocation error** (bad arguments, bad flags):
+  fix the command and re-run — it is not a verdict on the image.
 
 ## Step 1 — install the gate fixture
 
@@ -158,6 +157,13 @@ task's out-of-scope request takes.
    ```bash
    ECHO_FIXTURE_LOG=/tmp/gate-roundtrip-echo.log ECHO_FIXTURE_PORT=18099 \
      harness/echo-fixture.py > /tmp/gate-roundtrip-port 2>&1 &
+   # Wait for the readiness signal (same 10s deadline pattern as the
+   # installer's fixture start — a bare grep here races the bind):
+   deadline=$((SECONDS + 10))
+   while [ $SECONDS -lt "$deadline" ]; do
+     grep -q '^PORT=18099' /tmp/gate-roundtrip-port 2>/dev/null && break
+     sleep 0.2
+   done
    grep -q '^PORT=18099' /tmp/gate-roundtrip-port   # readiness
    ```
 
@@ -228,7 +234,7 @@ Count the gate's filings in `pending/` (time-ordered; the newest
 
 ```bash
 count=0
-for f in $(ls -t /home/swapd/approvals/pending/*.json); do
+for f in $(ls -t /home/swapd/approvals/pending/*.json 2>/dev/null); do
   jq -e 'select(.credential=="gate-test")' "$f" >/dev/null 2>&1 \
     && count=$((count+1))
 done
@@ -238,7 +244,7 @@ echo "$count"
 - **Exactly 1 filing** — pass. Record its id:
 
   ```bash
-  for f in $(ls -t /home/swapd/approvals/pending/*.json); do
+  for f in $(ls -t /home/swapd/approvals/pending/*.json 2>/dev/null); do
     AID=$(jq -r 'select(.credential=="gate-test") | .id' "$f")
     [ -n "$AID" ] && break
   done
@@ -339,7 +345,7 @@ safety net firing, then fix the image; never override it.
    of teardown that has a narrow path):
 
    ```bash
-   sudo -u swapd cred-registry-set-inference remove-host llm-api <host>
+   sudo -u swapd cred-registry-set-inference remove-host llm-api 127.0.0.1
    ```
 
    (same invocation the injector performs in
