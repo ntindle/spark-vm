@@ -52,7 +52,7 @@ class GrantChannelTests(unittest.TestCase):
             "job": "",
         }]
         a = make_addon_with_grants(grants)
-        ok, reason = a._credential_allows_request(
+        ok, reason, grant = a._credential_allows_request(
             "openai", "github.com", "POST", "/gists")
         self.assertFalse(ok)
         self.assertEqual(reason, "unbound-host")
@@ -78,7 +78,7 @@ class GrantChannelTests(unittest.TestCase):
         a._grants_mtime = "test"
         a._mtime = lambda p: "test"
         # POST is not in allowed_methods, but the grant widens it.
-        ok, reason = a._credential_allows_request(
+        ok, reason, grant = a._credential_allows_request(
             "github", "github.com", "POST", "/gists")
         self.assertTrue(ok)
 
