@@ -82,14 +82,19 @@ and feeds *into* this endpoint; it is never exposed raw, per
 
 ### Transition rules (no skips, no surprises)
 
-1. `provisioning` → `live` | `provisioning-failed`. Never backwards;
-   a dead box after `live` is `box-unhealthy`, not a return to
-   `provisioning` — reprovisioning creates a new onboarding session, not
-   a rewound one (see rule 7). Entry-time relay/cert failure (relay path
-   unreachable at provision, no bundle ever handed out) holds at
+1. `provisioning` → `live` | `box-unhealthy` | `provisioning-failed`.
+   Never backwards; a dead box after `live` is `box-unhealthy`, not a
+   return to `provisioning` — reprovisioning creates a new onboarding
+   session, not a rewound one (see rule 7). Two entry-time failure modes,
+   distinguished by *what* failed: (a) **reachability** — relay/cert path
+   unreachable at provision, no bundle ever handed out — holds at
    `provisioning` until the H4 driver reports a terminal failure →
-   `provisioning-failed`; the relay/cert path is control-plane deploy
-   instrumentation, not a Muse smoke check.
+   `provisioning-failed`; (b) **stack-deploy** — the driver succeeded but
+   the control plane's stack install (swap-proxy/confirmd) failed on the
+   box, no bundle ever handed out → `box-unhealthy` with `detail:
+   stack-deploy:<stage>`, from which the operator reprovisions per rule 7.
+   The criterion is crisp: a failure *reaching or verifying* the box
+   holds; a failure *in the box's own stack* is `box-unhealthy`.
 2. `live` → `waiting-on-approval` | `box-unhealthy` | `no-gated-action`
    | `stuck`. The spec's §2 script binds these to minutes 1–8; the
    endpoint records *which* minute-bound check produced the code — minute
