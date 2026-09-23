@@ -31,7 +31,8 @@ Deliberate carve-out (upgrade path): the writer's pure-management verbs
 `set-scrub`) use a legacy-tolerant charset-only name/host check, so
 pre-existing over-long names/bindings stay manageable without
 hand-editing the registry as root. CREATION (`set`, new `add-host`
-bindings, and any management verb on an ABSENT name) always enforces the
+bindings, and any management verb that would CREATE state for an ABSENT
+name) always enforces the
 canonical contract. Legacy names remain servable; to fully re-register a
 legacy credential, `remove` it and re-create under a canonical name.
 The legacy path is reachable through the supported frontends: the `cred`
@@ -81,6 +82,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from importlib.machinery import SourceFileLoader
 
 import pytest
@@ -484,6 +486,46 @@ class TestFrontendManagementLegacyPath:
         # hold for registration.
         with pytest.raises(cli.CredentialError):
             cli.cmd_register([LEGACY_NAME])
+
+    def test_cli_register_entry_still_rejects_legacy_entry(self):
+        # cmd_register --entry is a creation verb: no legacy gate, so the
+        # frontend and the writer agree up front (#150 drift class). No
+        # subprocess stub needed — the entry gate raises before any run.
+        with pytest.raises(cli.CredentialError):
+            cli.cmd_register(["goodname", "--entry", "e" * 70])
+
+    def test_cli_get_reads_legacy_credential(self, tmp_path, monkeypatch):
+        # The read path is legacy-tolerant too; closes the one frontend
+        # gate otherwise left unpinned. The fake only stubs the sudo
+        # layer: the legacy gate (argv[1] == LEGACY_NAME) runs first.
+        secret = b"legacy-secret-value"
+        secret_file = tmp_path / ("secret-" + LEGACY_NAME)
+        secret_file.write_bytes(secret)
+
+        def fake(argv, input_bytes=None):
+            assert argv[0].endswith("cred-store-get"), argv
+            assert argv[1] == LEGACY_NAME
+            return subprocess.run(["cat", str(secret_file)],
+                                  capture_output=True, timeout=30)
+
+        monkeypatch.setattr(cli, "run_as_swapd", fake)
+        captured = []
+
+        class FakeBuffer:
+            def write(self, b):
+                captured.append(b)
+
+        class FakeStdout:
+            buffer = FakeBuffer()
+
+        monkeypatch.setattr(cli.sys, "stdout", FakeStdout())
+        cli.cmd_get([LEGACY_NAME])
+        assert b"".join(captured) == secret
+
+    def test_cli_get_rejects_non_charset_name(self):
+        # The legacy gate is charset-only, not anything-goes.
+        with pytest.raises(cli.CredentialError):
+            cli.cmd_get(["has/slash"])
 
     def _fake_ui_run(self, env):
         def fake(argv, inp=None):

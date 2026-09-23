@@ -383,9 +383,10 @@ This changelog only works if entries land with the change, not after it:
   and header/query placement names at 64 characters, with a shared
   conformance test keeping the copies in lockstep. Two deliberate
   carve-outs for credentials registered before the cap: the swap proxy
-  keeps serving them, and management/read operations (get, delete,
-  unregister/remove, host bind/unbind, method/path limits, scrub flags)
-  still work on those legacy names in the CLI, the web UI, and the writer.
+  keeps serving them, and management/read operations still work on those
+  legacy names — get/delete/unregister in the CLI, delete and host-unbind
+  in the web UI, and the full management verb set (remove, host
+  bind/unbind, method/path limits, scrub flags) in the registry writer.
   Creating new entries (set/register) — or minting a credential through a
   management verb — always requires a within-cap name. (PR TBD)
 - The inference proxy's host allowlist matcher now recognizes IPv6

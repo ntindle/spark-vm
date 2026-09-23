@@ -259,7 +259,11 @@ def cmd_register(args):
     i = 0
     while i < len(rest):
         if rest[i] == "--entry" and i + 1 < len(rest):
-            entry = check_name_legacy(rest[i + 1])
+            # Creation verb: entries are always canonical. check_name (not
+            # the legacy gate) — the writer's `set` re-enforces check_entry,
+            # but the CLI must reject up front so frontend and writer agree
+            # (#150: no frontend-accepts / writer-rejects drift on creation).
+            entry = check_name(rest[i + 1])
             i += 2
         elif rest[i] == "--placement" and i + 1 < len(rest):
             placement = parse_placement(rest[i + 1])

@@ -217,6 +217,11 @@ elif args[0] == "remove-host":
     _, name, host = args
     host = check_host_legacy(host)
     entry = reg.get(name)
+    if entry is None:
+        # Mirror the real writer's creation gate: remove-host on an
+        # absent name enforces the canonical contract (absent legacy
+        # names fail closed); absent canonical names are a no-op.
+        check_name(name)
     if isinstance(entry, dict):
         hosts = entry.get("allowed_hosts")
         if isinstance(hosts, list) and host in hosts:
