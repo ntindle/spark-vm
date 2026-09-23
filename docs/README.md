@@ -44,6 +44,7 @@ working.
 | [MULTI_AGENT_ORCHESTRATION.md](MULTI_AGENT_ORCHESTRATION.md) | Multi-agent orchestration design. |
 | [MULTITENANT_ISOLATION_RESEARCH.md](MULTITENANT_ISOLATION_RESEARCH.md) | Isolation research for shared tenancy. |
 | [GOLDEN_IMAGE_GATE_PROCEDURE.md](GOLDEN_IMAGE_GATE_PROCEDURE.md) | Operator procedure for the spec §6.7 golden-image round-trip gate: manifest preflight, fixture install, gate-mode probe, file → answer → grant-mint → verify, filing-count determinism check, mandatory fixture teardown pre-publish. |
+| [TENANT_STATUS_ENDPOINT.md](TENANT_STATUS_ENDPOINT.md) | Design for the `GET /tenant/status` poll the first-ten-minutes spec, signup flow, and signup UI assume: 12 machine codes + transition rules, `approvals_url` carrier, two-sided auth, provider-layer vs tenant-layer separation (G3). |
 
 ## Product research corpus
 
