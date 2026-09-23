@@ -37,6 +37,14 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 evening): tracked set fully quiet —
+  all 8 providers re-read vendor-verified with no change; Vercel Drives
+  still public beta with no GA move (third consecutive no-change pass,
+  changelog confirms no entries dated 2026-09-23); DigitalOcean Managed
+  Agents preview detail (Firecracker per-session pause/resume harness,
+  active-CPU billing — anti-always-on positioning, filed as C26 lane
+  color, not a corpus entry); still no always-on
+  persistent-agent-machine announcements from any competitor. (#288)
 - Competitor watch (2026-09-23 afternoon): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change; Vercel Drives
   still public beta with no GA move (second consecutive no-change pass);
