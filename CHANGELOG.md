@@ -40,10 +40,10 @@ This changelog only works if entries land with the change, not after it:
 - The excluded-host link re-sweep now covers all eight bot-blocked hosts:
   a live-browser sweep hand-verified the five later-excluded hosts (all 11
   pages load; 10/11 citations match), and the ritual's enumeration now
-  filters URL false positives before counting. One citation fixed along
-  the way — Daytona's retired security-exhibit page now redirects to their
-  Trust Center, so the isolation quote's citation is annotated and a
-  re-sourcing issue is open. (PR TBD)
+  filters URL false positives before counting. One citation annotated
+  along the way — Daytona's retired security-exhibit page now redirects to
+  their Trust Center, so the isolation quote's citation is annotated and
+  re-sourcing issue #277 is open. (PR TBD)
 - Overnight competitor watch (2026-09-22): tracked set quiet (8/8 vendor
   re-reads, no in-window deltas); Boxd's SDK install URL is now
   vendor-attested — boxd.sh serves the genuine installer (canonical path

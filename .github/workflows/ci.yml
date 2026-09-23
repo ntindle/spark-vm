@@ -137,7 +137,7 @@ jobs:
         # through literally), so lychee finally sees `\.` (regex: literal
         # dot). Do NOT "fix" these to `\\\\` — that
         # makes the regex demand a literal backslash and silently disables
-        # all three excludes. (Backslash counts are easy to misread through
+        # all eight excludes. (Backslash counts are easy to misread through
         # tool display escaping — verify with `od -c`, not by eye.)
         # Ritual compare links (github.com/ntindle/spark-vm/compare/...) are
         # excluded: the release ritual (docs/VERSIONING.md) writes them at

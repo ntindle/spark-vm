@@ -22,7 +22,7 @@ whenever the log table's last-sweep date below is older than ~90 days.
 
 ## Excluded hosts (this ritual)
 
-| Host | Why CI skips it | `*.md` occurrences (2026-09-23) |
+| Host | Why CI skips it | `*.md` occurrences, raw (2026-09-23) |
 |---|---|---|
 | `medium.com` | Medium 403s all bots | 4 |
 | `businesswire.com` | Rejects lychee's HTTP client | 8 |
@@ -64,9 +64,16 @@ the exclusion.
    it is lychee-checked as its real host. Trailing prose punctuation (`,`,
    `.`) glued onto a URL by the same greedy match also inflates the
    unique count. Verify the actual host of each candidate URL (the part
-   between `https://` and the first `/`) is one of the eight excluded
-   hosts, and strip trailing punctuation before deduplicating. The "unique
-   URLs checked" number in the log is post-filter.
+   between the scheme and the first `/`): keep it iff it is one of the
+   eight excluded hosts **or a subdomain of one** — i.e. the host must
+   match the host-level `--exclude` regexes in `.github/workflows/ci.yml`
+   (`(www\.)?` / `([a-z0-9-]+\.)?` forms), so `www.daytona.io` and
+   `docs.boat.dev` are kept but `github.com` is not. Drop candidates whose
+   host is elsewhere — those are lychee-checked as their real host. Strip
+   any trailing prose punctuation (`.,!?:;` and `>` from angle-bracket
+   autolinks) before deduplicating. The "unique URLs checked" number in
+   the log is post-filter (occurrence columns stay raw/pre-filter, marked
+   `(raw)` where the header doesn't already date them).
 4. Open each unique URL in a real browser (not a bot fetcher — they will be
    403/bot-blocked). Automated fetchers are not an acceptable substitute;
    the whole point is that these hosts serve browsers fine.
@@ -80,8 +87,8 @@ the exclusion.
 
 ## Re-sweep log
 
-| Date | Unique URLs checked | Total occurrences | Result | Verifier | Notes |
+| Date | Unique URLs checked | Total occurrences (raw) | Result | Verifier | Notes |
 |---|---|---|---|---|---|
-| 2026-09-23 | 11 | 30 | 10/11 citations match | spark-vm hourly build loop (docs turn) | First sweep of the five #248 hosts (live browser; no anti-bot blocks hit). `daytona.io/docs/en/security-exhibit/` is retired — it now redirects to the vendor Trust Center (trust.daytona.io), where the isolation quote is not visible: citation in MULTITENANT_ISOLATION_RESEARCH.md annotated per the doc's dead-source convention, re-sourcing issue filed for the quote. `docs.boat.dev/pricing` fully matches its boat.dev citation (C17: default 4 vCPU / 8 GB / 50 GB at $0.036/h, per-second billing, 25 free-hour trial); a `github.com` mirror-path false positive and three trailing-punctuation variants were dropped per the new step-3 filter. |
+| 2026-09-23 | 11 | 30 | 10/11 citations match | spark-vm hourly build loop (docs turn) | First sweep of the five #248 hosts (live browser; no anti-bot blocks hit). `daytona.io/docs/en/security-exhibit/` is retired — it now redirects to the vendor Trust Center (trust.daytona.io), where the isolation quote is not visible: citation in MULTITENANT_ISOLATION_RESEARCH.md annotated per the doc's dead-source convention, re-sourcing issue #277 filed for the quote. Reproduction context 2026-09-23: `curl -I` with both default and Chromium UAs returns `301 -> https://trust.daytona.io/`; the real browser likewise lands on the Trust Center, whose page text and on-page search contain no isolation quote. One review-time fetcher reported `200` with the quote at ~01:50 CDT — not reproduced by the browser or curl; treated as transient. `docs.boat.dev/pricing` fully matches its boat.dev citation (C17: default 4 vCPU / 8 GB / 50 GB at $0.036/h, per-second billing, 25 free-hour trial); a `github.com` mirror-path false positive was dropped and three trailing-punctuation variants were stripped before dedup (two collapsed, one — `www.daytona.io/changelog` — became unique). |
 | 2026-09-22 | 7 | 11 | all live, headlines match citations | spark-vm hourly build loop (docs turn) | First logged sweep; closed #106. |
 | 2026-09-19 | 4 | 4 | all live | hourly build loop (docs turn) | Reconstructed from repo state at 33950e2; the PR #39 hand-verification was never logged in-repo. |
