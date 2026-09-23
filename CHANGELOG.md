@@ -362,7 +362,7 @@ This changelog only works if entries land with the change, not after it:
   Upstash Box (snapshot/restore mechanics), h-sandbox (OSS credential-vault
   comparand), Brig (local microVM containment), and Epho (agents-as-API with
   multi-provider fallback), plus the OpenAI Agents API harness↔compute split
-  as a design input for the hosted product's per-harness adapters. (PR TBD)
+  as a design input for the hosted product's per-harness adapters. (#274)
 
 ### Changed
 - Hosted pricing thinking refreshed: the internal pricing analysis now
