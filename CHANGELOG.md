@@ -46,7 +46,7 @@ This changelog only works if entries land with the change, not after it:
   failed again (browser-service error) and C35 stays third-party-only
   despite stronger corroboration (0.43.0 latest per mirror, CISA
   assesses exploitation as "none", neither CVE in KEV as of Sep 16).
-  (#TBD)
+  (#295)
 - Competitor watch (2026-09-23 late morning): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change; Vercel Drives
   still public beta with no GA move (sixth consecutive no-change pass,
