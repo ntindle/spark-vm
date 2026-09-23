@@ -83,7 +83,7 @@ isolation), because those are where the trust story lives.
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
 | **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation ("fast, isolated, persistent sandboxes and storage where developers can run their own agentic workflows and tool execution") | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
 | **Microsandbox** | Task-scoped sandbox (OSS) | libkrun microVM, network-layer secret injection | Free, self-hosted (YC F26) |
-| **Docker Sandboxes** (evening pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, kits, skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
+| **Docker Sandboxes** (morning pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, **v3 kits** (OCI-based packages: agent workload + reusable mixins for tools/config/credentials/network/instructions — C34), skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
 | **boat.dev** (2026-09-22 consolidation) | Task-scoped sandbox | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement) | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time |
 | **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second, zero while waiting), $0.0095/GB-hour memory, $0.005/GiB-month snapshots; $5 new-user credit |
@@ -891,6 +891,32 @@ credit; session caps 45 min Hobby / 24 h Pro+Ent; concurrency 10 /
 price-anchored — the same direction as Boxd's persistent-machine thesis
 and spark-vm's persistent-VM positioning; feed the "where spark-vm
 wins/lags" framing on the next full consolidation.
+
+## Watch update — 2026-09-23 (morning): Daytona v0.216.0, Docker v3 kits
+
+Two primary-source VERIFIED items this pass (vendor pages re-read
+2026-09-23 ~04:56–04:58 CDT by independent surveyors; watch doc
+`docs/COMPETITOR_WATCH_2026-09-23_MORNING.md`). Tracked set otherwise
+quiet (6/8 NO-CHANGE); Vercel Drives still public beta
+(`last_updated: 2026-09-10`, no GA move); market news window quiet.
+
+**C33 — Daytona v0.216.0 (watch-doc color only).** The changelog top
+entry (SEP 23) hardens the SDK build context: *"Daytona 0.216.0
+restricts Dockerfile COPY sources to the build context in the Python,
+Ruby, and TypeScript SDKs"* — incident-driven trust-boundary
+hardening of a classic breakout vector (INFERRED). Filed as routine watch color;
+no corpus fold, no positioning change.
+
+**C34 — Docker Sandboxes v3 kits: OCI-packaged agent kits with mixins.**
+Release notes (2026-09-21): *"Docker Sandboxes now supports v3 kits:
+OCI-based packages that combine an agent workload with reusable mixins
+for tools, configuration, credentials, network access, and agent
+instructions."* The corpus's sandbox thesis has been moving toward
+per-harness adapter packaging (H4's OpenSandbox-style adapter contract:
+harness code + compute isolation as a deployable unit); Docker has now
+shipped a packaged implementation of that idea (INFERRED), as an OCI
+artifact. Keep
+OCI-shaped packaging on the table in H4's adapter-design discussions.
 
 ## Implications → backlog
 
