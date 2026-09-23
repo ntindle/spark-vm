@@ -199,6 +199,19 @@ def placement_json(kind, arg):
 class Handler(BaseHTTPRequestHandler):
     server_version = "cred-ui/1.0"
 
+    # Issue #282: per-connection socket timeout. StreamRequestHandler
+    # applies this to the connection socket in setup(), so a client
+    # that stalls mid-headers or mid-body (a read with no bytes for
+    # 10 s) releases its handler thread instead of pinning it forever.
+    # This is a per-read idle bound, not a total deadline: a client
+    # that dribbles just under the timeout per read can still hold a
+    # thread (accepted residual — the UI binds 127.0.0.1 only, so only
+    # a local attacker could exploit it, and such an attacker has
+    # cheaper DoS paths). 10 s is generous for localhost traffic and
+    # mirrors the timeout discipline of the subprocess (15 s) and
+    # credlib registry (10 s) paths.
+    timeout = 10
+
     def log_message(self, fmt, *args):  # quieter logs; never log bodies
         pass
 
@@ -220,7 +233,11 @@ class Handler(BaseHTTPRequestHandler):
             return None
         try:
             return json.loads(self.rfile.read(n).decode("utf-8"))
-        except ValueError:
+        except (OSError, ValueError):
+            # OSError covers socket.timeout from the Handler.timeout
+            # bound above (socket.timeout IS TimeoutError): a stalled
+            # body read degrades to a 400 via the None contract instead
+            # of pinning the handler thread.
             return None
 
     def _csrf_ok(self):

@@ -239,3 +239,71 @@ def test_creds_read_failure_is_generic(server, monkeypatch):
     body = json.loads(payload)
     assert body == {"error": "read failed"}
     assert "swapd" not in payload.decode()
+
+
+# --- issue #282: request/read timeout -------------------------------------
+
+
+def test_282_handler_carries_connection_timeout():
+    """Issue #282: the Handler must bound per-connection socket time so a
+    stalled client cannot pin a handler thread forever. A positive
+    timeout class attribute is the mechanism StreamRequestHandler
+    applies to the connection socket in setup()."""
+    assert isinstance(cred_ui.Handler.timeout, (int, float))
+    assert cred_ui.Handler.timeout > 0
+
+
+def test_282_stalled_body_releases_handler_thread(server, monkeypatch):
+    """Issue #282: a client that declares a 1 MiB body and then stalls
+    must be dropped at the Handler.timeout bound — the connection must
+    close and the handler thread count must return to baseline, instead
+    of holding a thread forever.
+
+    The raw request carries valid Host + CSRF headers so the stall
+    happens in the body read (the read path the issue names), and the
+    server-side timeout is shortened to 1 s so the bound itself — not
+    just "eventually closes" — is what the test proves: the drop must
+    take at least ~1 s (the timeout firing) and well under 8 s."""
+    import socket
+    import time
+
+    monkeypatch.setattr(cred_ui.Handler, "timeout", 1)
+    baseline = threading.active_count()
+
+    s = socket.create_connection(("127.0.0.1", server), timeout=10)
+    try:
+        s.sendall(
+            ("POST /api/set HTTP/1.1\r\n"
+             "Host: 127.0.0.1:%d\r\n"
+             "X-Cred-UI: 1\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: 1000000\r\n"
+             "\r\n" % server).encode()
+        )
+        # Stall: send no body bytes at all.
+        s.settimeout(10)
+        start = time.monotonic()
+        data = b""
+        try:
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        except (socket.timeout, ConnectionResetError):
+            pass
+        elapsed = time.monotonic() - start
+    finally:
+        s.close()
+
+    # The drop took the timeout to fire (proves the bound is the
+    # mechanism), but stayed far under an unbounded hold.
+    assert elapsed >= 0.9, "closed before the timeout could fire: %.2fs" % elapsed
+    assert elapsed < 8, "stalled client held the connection: %.2fs" % elapsed
+
+    # And the handler thread did not leak: it must exit once the
+    # connection is gone.
+    deadline = time.monotonic() + 10
+    while threading.active_count() > baseline and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert threading.active_count() <= baseline, "handler thread leaked"

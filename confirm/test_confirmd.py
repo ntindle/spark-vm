@@ -805,6 +805,105 @@ class ConfirmdTests(unittest.TestCase):
         # path must evict too (issue #231's boundedness goal).
         self.assertNotIn(aid, cd._aid_locks)
 
+    def test_240_expiry_crossing_mid_mint_audits_and_refuses(self):
+        """Issue #240: if the expiry instant crosses DURING the grant-mint
+        subprocess (up to 15 s), the post-mint os.path.exists check (#233)
+        does not catch it — the in-memory item must be re-evaluated and
+        the handler must audit the distinct 'answer-expired-mid-mint'
+        event and refuse with 410, never writing an answered/consumed
+        record for an already-expired approval. Deterministic: a
+        controlled clock advances past expiry inside the fake mint."""
+        from datetime import datetime as real_datetime, timezone as real_tz, \
+            timedelta
+        aid = "mid-mint-expiry-1"
+        t0 = real_datetime.now(real_tz.utc)
+        exp = t0 + timedelta(seconds=60)
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": exp.isoformat(),
+              "credential": "c", "host": "h", "method": "GET"}
+        nonce = cd._mint_csrf_nonce(it)
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+
+        class _Clock:
+            instant = t0
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.instant
+
+            fromisoformat = staticmethod(real_datetime.fromisoformat)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                # The expiry instant crosses while the mint runs.
+                _Clock.instant = t0 + timedelta(seconds=120)
+
+                class R:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        events = []
+        cd._aid_lock(aid)  # ensure the entry exists pre-answer
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch.object(cd, "datetime", _Clock), \
+             mock.patch("subprocess.run", side_effect=fake_run), \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda *a: events.append(a)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._answer_locked("ntindle@github", aid, nonce, "approve")
+        self.assertEqual(got["code"], 410)
+        self.assertTrue(
+            any(e[0] == "answer-expired-mid-mint" for e in events),
+            "no answer-expired-mid-mint audit; events: %r" % (events,))
+        # And no contradictory answer/approve event was logged.
+        self.assertFalse(
+            any(e[0] == "answer" for e in events),
+            "contradictory answer event; events: %r" % (events,))
+        self.assertFalse(
+            (self.approvals / "answered" / (aid + ".json")).exists())
+        self.assertFalse(
+            (self.approvals / "consumed" / (aid + ".json")).exists())
+        # Terminal path: the aid-lock entry must be evicted too
+        # (issue #231's boundedness goal).
+        self.assertNotIn(aid, cd._aid_locks)
+
+    def test_240_is_expired_boundary_matches_reap(self):
+        """Issue #240 trivia: load_pending()'s Finding-58 reap uses
+        `now >= exp`; is_expired() must use the same boundary so an item
+        is expired exactly at its instant everywhere."""
+        from datetime import datetime as real_datetime, timezone as real_tz
+        t = real_datetime(2026, 9, 23, 12, 0, 0, tzinfo=real_tz.utc)
+
+        class _Clock:
+            @classmethod
+            def now(cls, tz=None):
+                return t
+
+            fromisoformat = staticmethod(real_datetime.fromisoformat)
+
+        with mock.patch.object(cd, "datetime", _Clock):
+            # Exactly at the instant: expired (the >= unification).
+            self.assertTrue(cd.is_expired({"expires": t.isoformat()}),
+                            "expires == now must read expired (>=)")
+            # One tick in the future: not expired.
+            future = t + real_datetime.resolution
+            self.assertFalse(cd.is_expired({"expires": future.isoformat()}))
+            # One tick in the past: expired.
+            past = t - real_datetime.resolution
+            self.assertTrue(cd.is_expired({"expires": past.isoformat()}))
+
     def test_233_sweep_answered_moves_old_files(self):
         """answered/ strays older than the grace period move to
         consumed/; fresh files and non-.json names are untouched."""

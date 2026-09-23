@@ -428,8 +428,11 @@ def _parse_expiry(exp):
 
 
 def is_expired(item):
+    # Issue #240 trivia: load_pending()'s Finding-58 reap uses
+    # `now >= exp`; the `>` here is unified to the same boundary so an
+    # item is expired exactly at its instant everywhere.
     exp = _parse_expiry(item.get("expires"))
-    return exp is not None and datetime.now(timezone.utc) > exp
+    return exp is not None and datetime.now(timezone.utc) >= exp
 
 
 def file_owner_name(path):
@@ -1392,6 +1395,23 @@ class Handler(BaseHTTPRequestHandler):
                           "id=%s err=%s" % (aid, e))
                 self._err("Grant minting failed.", 500)
                 return
+        # Issue #240: the expiry instant may have crossed DURING the grant
+        # subprocess above (up to 15 s). The #233 os.path.exists check
+        # catches removal, not the passage of the expiry instant — so
+        # re-evaluate on the in-memory item and refuse honestly rather
+        # than recording an answered/ record for an already-expired
+        # approval (which would show answer/approve for an item whose
+        # expiry had passed at mint time). The grant itself cannot be
+        # un-minted (no revoke path in the grant-writer interface), so
+        # the fix is the refusal + the distinct trail event, not
+        # retroactive revocation.
+        if is_expired(it):
+            audit_log("answer-expired-mid-mint", self.client_address[0],
+                      login, "id=%s decision=%s" % (aid, decision))
+            _evict_aid_lock(aid)
+            self._err("This approval expired before the grant was "
+                      "recorded.", 410)
+            return
         # Issue #233 (belt and braces): the render reap now serializes
         # on the same per-aid lock, so it cannot have reaped the file
         # mid-mint — but an operator or another process could still have
