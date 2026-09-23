@@ -51,7 +51,7 @@ This changelog only works if entries land with the change, not after it:
   partners including Daytona, DigitalOcean, E2B, Modal, Vercel);
   new-to-watch C36 — Google Agent Substrate on GKE (~Sep 17,
   third-party-only); no new in-lane launches in the 48h window;
-  Automaid, Andon Pion, Huawei baselines hold. (#TBD)
+  Automaid, Andon Pion, Huawei baselines hold. (#311)
 - Competitor watch (2026-09-23 early afternoon): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (ninth
