@@ -45,7 +45,7 @@ This changelog only works if entries land with the change, not after it:
   users, pricing terms still unverified on vendor docs, C26 color);
   same-lane color — AWS Lambda MicroVMs self-hosted agent-sandbox
   reference architecture and the Herdr × Vercel Sandbox
-  one-agent-one-machine plugin; no in-lane launches. (PR TBD)
+  one-agent-one-machine plugin; no in-lane launches. (#289)
 - Competitor watch (2026-09-23 evening): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change; Vercel Drives
   still public beta with no GA move (third consecutive no-change pass,
