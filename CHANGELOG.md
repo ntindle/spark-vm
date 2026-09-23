@@ -41,7 +41,7 @@ This changelog only works if entries land with the change, not after it:
   contract the first-ten-minutes spec, signup flow, and signup UI all
   assume — the 12 machine codes with transition rules, the `approvals_url`
   carrier, two-sided auth (magic-link cookie + linked-key), and the
-  provider-layer vs tenant-layer separation (PR TBD).
+  provider-layer vs tenant-layer separation (#273).
 - Evening competitor watch (2026-09-22): DigitalOcean's Managed Agents
   product page is readable again — Tool Playground (pre-production policy
   testing), scheduled/webhook triggers, and org-policy concepts
