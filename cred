@@ -42,7 +42,7 @@ import re
 import subprocess
 import sys
 
-NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 BACKEND_ENV = "SPARK_CRED_BACKEND"
 STORE = "/home/swapd/secrets"
 SUDO = ["sudo", "-n", "-u", "swapd"]
@@ -69,13 +69,21 @@ def check_name(name):
 
 
 HOST_RE = re.compile(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$")
+HOST_MAX_LEN = 253
+HOST_LABEL_MAX_LEN = 63
 
 
 def check_host(host):
     """Validate an allowed-host binding: exact hostname or a leading-dot
-    subdomain entry (".example.com"), the same shape hosts.allow takes."""
+    subdomain entry (".example.com"), the same shape hosts.allow takes.
+
+    Canonical contract shared with cred-ui's host_ok() and
+    proxy/cred-registry-set's check_host() (see #150): the dotted shape
+    above, total length <= 253, each dot-separated label <= 63 chars."""
     h = (host or "").lower()
-    if not HOST_RE.match(h):
+    if (len(h) > HOST_MAX_LEN or not HOST_RE.match(h)
+            or any(len(label) > HOST_LABEL_MAX_LEN
+                   for label in h.lstrip(".").split("."))):
         raise CredentialError("invalid host %r" % (host,))
     return h
 
@@ -213,7 +221,7 @@ def parse_placement(spec):
     if ":" in spec:
         kind, _, value = spec.partition(":")
         if kind in ("custom_header", "query_param") and re.match(
-                r"^[A-Za-z0-9_.-]+$", value or ""):
+                r"^[A-Za-z0-9_.-]{1,64}$", value or ""):
             return {kind: value}
     raise CredentialError(("invalid placement %r \u2014 " + PLACEMENT_USAGE) % (spec,))
 

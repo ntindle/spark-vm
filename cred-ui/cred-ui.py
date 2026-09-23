@@ -81,14 +81,14 @@ CSRF_VALUE = "1"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 ENTRY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-# The narrow writer's check_host() (proxy/cred-registry-set) accepts exactly
-# ^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$ -- no underscores, no ports. The swap
-# addon strips ports when matching request hosts, so a port in the registry
-# would be dead config anyway. The UI must never accept what the writer
-# rejects: it previously did (ports, underscores), producing a confusing
-# post-store "add-host failed" after the secret was already written.
-# Labels are capped at 63 chars (DNS) and the whole name at 253; the writer
-# is looser, so this is a strict subset of what it accepts.
+# Canonical host contract shared with the `cred` CLI's check_host() and
+# proxy/cred-registry-set's check_host() (#150): dotted-hostname shape
+# ^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$ -- no underscores, no ports -- with
+# labels capped at 63 chars (DNS) and the whole name at 253. The swap addon
+# strips ports when matching request hosts, so a port in the registry would
+# be dead config anyway. The UI must never accept what the writer rejects:
+# it previously did (ports, underscores), producing a confusing post-store
+# "add-host failed" after the secret was already written.
 _HOST_LABEL = r"[A-Za-z0-9-]{1,63}"
 _HOST_RE = re.compile(r"^\.?%s(\.%s)*$" % (_HOST_LABEL, _HOST_LABEL))
 
@@ -99,7 +99,7 @@ def host_ok(h):
     # escapes the handler and drops the connection.
     return (isinstance(h, str) and bool(h) and len(h) <= 253
             and bool(_HOST_RE.match(h)))
-HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+HEADER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 PARAM_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 # -n everywhere: the sudoers entries are NOPASSWD, and a request thread
@@ -159,10 +159,15 @@ def snapshot():
 
 
 def placement_json(kind, arg):
-    if kind == "bearer_header":
-        return json.dumps("bearer_header")
-    if kind == "url_path_segment":
-        return json.dumps("url_path_segment")
+    # The bare kinds take no argument: the UI hides the arg field for them,
+    # so a non-empty arg here is a hand-built request, not a UI flow — reject
+    # it loudly rather than silently dropping the user's input. (Canonical
+    # placement contract shared with the `cred` CLI and
+    # proxy/cred-registry-set, #150.)
+    if kind in ("bearer_header", "url_path_segment"):
+        if arg:
+            raise ValueError("placement takes no argument")
+        return json.dumps(kind)
     if kind == "custom_header":
         if not HEADER_RE.match(arg or ""):
             raise ValueError("bad header name")

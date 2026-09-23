@@ -42,13 +42,21 @@ if not args or args[0] not in ACTIONS:
 action = args[0]
 
 def check(s, what):
-    if not re.match(r"^[A-Za-z0-9_-]+$", s or ""):
+    # Canonical contract shared with the `cred` CLI and cred-ui (#150):
+    # credential/entry names are [A-Za-z0-9_-], 1-64 chars.
+    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", s or ""):
         fail("invalid %s %r" % (what, s))
 
 def check_host(h):
-    if not re.match(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$", h or ""):
+    # Canonical contract shared with the `cred` CLI's check_host() and
+    # cred-ui's host_ok() (#150): dotted-hostname shape, total length
+    # <= 253, each dot-separated label <= 63 chars.
+    lowered = (h or "").lower()
+    if (len(lowered) > 253
+            or not re.match(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$", lowered)
+            or any(len(label) > 63 for label in lowered.lstrip(".").split("."))):
         fail("invalid host %r" % (h,))
-    return h.lower()
+    return lowered
 
 reg_path = os.environ.get("CRED_REGISTRY_FILE",
                            "/home/swapd/credentials.json")
@@ -129,7 +137,7 @@ if action == "set":
             and len(placement) == 1
             and list(placement)[0] in ("custom_header", "query_param", "url_path_segment")
             and isinstance(list(placement.values())[0], str)
-            and re.match(r"^[A-Za-z0-9_.-]+$", list(placement.values())[0])
+            and re.match(r"^[A-Za-z0-9_.-]{1,64}$", list(placement.values())[0])
         )
     )
     if not ok:
