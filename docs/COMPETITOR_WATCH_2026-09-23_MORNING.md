@@ -30,7 +30,8 @@ second.
 This is a security-hardening patch, not a feature: COPY escaping the
 build context is a classic sandbox-breakout vector (reading host files
 into the image at build time), so a provider locking it down in the
-SDKs reads as incident-driven hardening of the trust boundary. Filed
+SDKs reads as incident-driven hardening of the trust boundary (INFERRED).
+Filed
 here as routine watch color (filed C33); no corpus-fold — it doesn't
 move competitive positioning. Worth the contrast note for the corpus's
 trust-signals discussion: Daytona is closing trust-boundary gaps in
@@ -52,7 +53,7 @@ Why this matters for spark-vm (filed C34): the corpus's sandbox
 product thesis is moving toward per-harness adapter packaging — the
 same idea as H4's OpenSandbox-style adapter contract (harness code +
 compute isolation packaged as a deployable unit). Docker has now
-shipped the packaged version of that idea first: an OCI artifact that
+shipped a packaged implementation of that idea (INFERRED): an OCI artifact that
 bundles workload + tools + config + credentials + network policy +
 agent instructions as one portable unit. The corpus's Docker
 Sandboxes field-table row already lists "kits"; this pass upgrades
@@ -60,8 +61,8 @@ the entry to v3 semantics (OCI-packaged, mixin composition) and notes
 the competitive pressure on the adapter thesis: portability via
 standard artifact formats (OCI) beats per-provider custom packaging.
 Color for H4's design discussions — the OpenSandbox adapter contract
-should keep OCI-shaped packaging on the table. No pricing or
-positioning change; this is capability news.
+should keep OCI-shaped packaging on the table. No pricing change and no
+change in Docker's own market positioning; this is capability news.
 
 ## 2. The tracked set — quiet elsewhere (6/8 NO-CHANGE, all VERIFIED)
 
@@ -138,8 +139,8 @@ spark-vm lane) had no new entrants or pricing pressure this run.**
 *Corpus note:* per the delta-only convention, watch docs record deltas
 against the previous pass and the corpus changes only via
 consolidation or primary-source verification. This pass carries one
-primary-source VERIFIED item that changes competitive positioning
-(Docker Sandboxes v3 kits — filed C34, corpus-folded in this same PR
+primary-source VERIFIED item that shifts the competitive context for the
+adapter thesis (Docker Sandboxes v3 kits — filed C34, corpus-folded in this same PR
 into the Docker Sandboxes entry + new "Watch update — 2026-09-23
 (morning)" corpus section, provenance-labeled). The Daytona v0.216.0
 patch (filed C33) is watch-doc color only — no corpus fold. The two

@@ -904,7 +904,7 @@ quiet (6/8 NO-CHANGE); Vercel Drives still public beta
 entry (SEP 23) hardens the SDK build context: *"Daytona 0.216.0
 restricts Dockerfile COPY sources to the build context in the Python,
 Ruby, and TypeScript SDKs"* — incident-driven trust-boundary
-hardening of a classic breakout vector. Filed as routine watch color;
+hardening of a classic breakout vector (INFERRED). Filed as routine watch color;
 no corpus fold, no positioning change.
 
 **C34 — Docker Sandboxes v3 kits: OCI-packaged agent kits with mixins.**
@@ -914,8 +914,8 @@ for tools, configuration, credentials, network access, and agent
 instructions."* The corpus's sandbox thesis has been moving toward
 per-harness adapter packaging (H4's OpenSandbox-style adapter contract:
 harness code + compute isolation as a deployable unit); Docker has now
-shipped the packaged version of that idea first, as an OCI artifact —
-the portable, standard-format way to bundle workload + policy. Keep
+shipped a packaged implementation of that idea (INFERRED), as an OCI
+artifact. Keep
 OCI-shaped packaging on the table in H4's adapter-design discussions.
 
 ## Implications → backlog
