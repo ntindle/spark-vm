@@ -2,11 +2,13 @@
 
 The injector ships test seams for exactly this purpose
 (CRED_STORE_VERIFY_INFERENCE, CRED_REGISTRY_SET_INFERENCE,
+CRED_STORE_SET_WRITER, MAIN_HOSTS_ALLOW, SMOKE_SUDOERS_PATH, VISUDO_BIN,
 INFERENCE_HOSTS_ALLOW, INFERENCE_SSRF_ALLOW, INFERENCE_SECRETS_DIR,
 INFERENCE_REGISTRY_FILE, SUDO_PREFIX, INJECT_MANIFEST,
 INJECT_MANIFEST_CHECK, INJECT_IMAGE_VERSION, SWAPD_CA_DIR,
 INJECT_IDENTITY_DIR, INJECT_AGENT_USER, INJECT_AGENT_HOME,
-INJECT_TENANT_ID, INJECT_TENANT_RECORD, HARNESS_PROBE_BIN).
+INJECT_TENANT_ID, INJECT_TENANT_RECORD, INJECT_SMOKE_HOST,
+HARNESS_PROBE_BIN).
 
 The fakes replicate the production contracts they stand in for:
 
@@ -21,14 +23,21 @@ The fakes replicate the production contracts they stand in for:
   like the real one). The injector's teardown calls ``remove-host``;
   the tests assert the binding is gone afterwards.
 - Fake sudo: asserts the production privilege argv (-u swapd), then
-  enforces the injector's sudoers surface -- the two narrow writers and
-  ``cat`` on the inference registry ONLY. The injector never appends to
-  an allowlist and never lists the secrets dir, so ``tee`` and ``ls``
-  are denied here (exit 98): a regressed injector that reached for
-  them would fail loudly instead of being masked by a permissive fake.
-  Notably there is NO store writer anywhere in the fake bin dir -- the
-  injector must never write a credential value, and any attempt to do
-  so has no binary to call (the fake sudo would deny it anyway).
+  enforces the injector's sudoers surface -- the two narrow writers,
+  the main-store set writer (smoke step only), and ``cat`` on the
+  inference registry ONLY. The injector never appends to an allowlist
+  and never lists the secrets dir, so ``tee`` and ``ls`` are denied
+  here (exit 98): a regressed injector that reached for them would
+  fail loudly instead of being masked by a permissive fake.
+  Notably the fake bin dir holds exactly ONE value-writing store
+  writer -- the smoke dummy's -- and the fake sudo allows it only for
+  the fixed smoke credential name; any attempt to write any other
+  credential value has no binary to call and is denied anyway.
+  ``test_only_writes_smoke_dummy`` is the structural proof.
+- Fake main-store set writer: mirrors proxy/cred-store-set's contract
+  for the smoke step only -- name arg validated like the real one
+  (``[A-Za-z0-9_-]+``), stdin stored verbatim under the name. Writes
+  to a fake secrets dir, never the live store.
 - Fake muse CLI vehicle + fake swap proxy: same contract as the
   install-gate-fixture tests -- the vehicle sends one GET through the
   proxy carrying the placeholder Bearer header; the proxy resolves
@@ -80,6 +89,9 @@ PLACEHOLDER = "hsurr:" + KEY_NAME
 ECHO_HOST = "127.0.0.1"
 PROVIDER_HOST = "api.provider.example"
 IMAGE_SHA = "0123456789abcdef" * 4  # 64 hex chars, a pinned image SHA
+SMOKE_HOST = "smoke.example.com"  # the operator's §3a echo host (G6)
+SMOKE_CRED = "smoke-test"  # §3a smoke credential name (public dummy)
+SMOKE_DUMMY = "smoke-ok"  # §3a pass phrase -- public by design, never a secret
 
 # Fake muse CLI vehicle: honors the canonical probe's child-env contract
 # (META_API_KEY placeholder, forced proxy env) and sends one GET through
@@ -119,6 +131,17 @@ fi
 shift 2
 case "$1" in
   "$CRED_STORE_VERIFY_INFERENCE"|"$CRED_REGISTRY_SET_INFERENCE") ;;
+  "$CRED_STORE_SET_WRITER")
+    # The smoke step's one sanctioned write: the fixed public dummy
+    # name only. Any other name is denied (exit 98) -- a regressed
+    # injector must not write any other credential value.
+    [ "$2" = "smoke-test" ] || \
+      { echo "fake-sudo: denied store-set for $2" >&2; exit 98; } ;;
+  "$CRED_REGISTRY_SET_WRITER")
+    # The §3a registry binding: exactly `add-host smoke-test
+    # <smoke-host>` -- nothing else may touch the main registry.
+    [ "$2" = "add-host" ] && [ "$3" = "smoke-test" ] || \
+      { echo "fake-sudo: denied registry-set for $2 $3" >&2; exit 98; } ;;
   cat|/bin/cat|/usr/bin/cat)
     [ "$2" = "$INFERENCE_REGISTRY_FILE" ] || \
       { echo "fake-sudo: cat denied for $2" >&2; exit 98; } ;;
@@ -149,7 +172,22 @@ rm -f "$tmp"
 exit 1
 """
 
-# Fake registry writer: mirrors proxy/cred-registry-set's JSON schema
+# Fake main-store set writer: mirrors proxy/cred-store-set's narrow
+# contract for the smoke step only -- the name argument is validated
+# like the real writer's ([A-Za-z0-9_-]+, non-empty), stdin is stored
+# verbatim (no newline chomping) under the name. The smoke step is the
+# injector's one sanctioned value-writing step; this fake exists so
+# that step is exercised, and the fake sudo gates it to the fixed
+# "smoke-test" name.
+FAKE_STORE_SET = """#!/bin/sh
+case "$1" in
+  ''|*[!a-zA-Z0-9_-]*) echo "fake-store-set: invalid name" >&2; exit 2 ;;
+esac
+tmp="$(mktemp "$FAKE_SMOKE_SECRETS_DIR/.tmp.XXXXXX")"
+cat > "$tmp"
+if [ ! -s "$tmp" ]; then rm -f "$tmp"; echo "fake-store-set: empty value" >&2; exit 2; fi
+mv -f "$tmp" "$FAKE_SMOKE_SECRETS_DIR/$1"
+"""
 # and semantics for the verbs the injector uses. Like the real writer,
 # the host argument is validated by check_host (the canonical #150
 # contract: shape + 253/63 length caps) then lowercased on add-host,
@@ -237,6 +275,44 @@ else:
 with open(reg_path, "w", encoding="utf-8") as f:
     json.dump(reg, f, indent=2, sort_keys=True)
     f.write("\\n")
+"""
+
+
+# Fake MAIN registry writer: mirrors proxy/cred-registry-set's add-host
+# contract only -- the one verb the injector's §3a step uses. Maintains
+# MAIN_REGISTRY_FILE as a JSON object; add-host is idempotent and
+# creates the entry when absent, enforcing the canonical name/host
+# contract like the real writer.
+FAKE_MAIN_REGISTRY_WRITER = """#!/usr/bin/env python3
+import json, os, re, sys
+reg_path = os.environ["MAIN_REGISTRY_FILE"]
+reg = {}
+if os.path.exists(reg_path):
+    with open(reg_path, encoding="utf-8") as f:
+        reg = json.load(f)
+args = sys.argv[1:]
+if len(args) != 3 or args[0] != "add-host":
+    sys.stderr.write("fake-main-registry-writer: only add-host <name> <host>\\n")
+    sys.exit(2)
+_, name, host = args
+if not re.match(r"^[A-Za-z0-9_-]{1,64}$", name or ""):
+    sys.stderr.write("invalid name %r\\n" % (name,))
+    sys.exit(1)
+lowered = (host or "").lower()
+if (len(lowered) > 253
+        or not re.match(r"^\\.?[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$", lowered)
+        or any(len(label) > 63
+               for label in lowered.lstrip(".").split("."))):
+    sys.stderr.write("invalid host %r\\n" % (host,))
+    sys.exit(1)
+entry = reg.setdefault(name, {})
+hosts = entry.setdefault("allowed_hosts", [])
+if lowered not in hosts:
+    hosts.append(lowered)
+with open(reg_path, "w", encoding="utf-8") as f:
+    json.dump(reg, f, indent=2, sort_keys=True)
+    f.write("\\n")
+print("bound '%s' to host '%s'" % (name, lowered))
 """
 
 
@@ -350,9 +426,15 @@ def stack(tmp_path):
     bin_dir.mkdir()
     secrets_dir = tmp_path / "inference-secrets"
     secrets_dir.mkdir()
+    smoke_secrets_dir = tmp_path / "smoke-secrets"
+    smoke_secrets_dir.mkdir()
     registry_file = tmp_path / "inference-registry.json"
     allow_file = tmp_path / "inference-hosts.allow"
     ssrf_allow_file = tmp_path / "inference-ssrf.allow"
+    main_allow_file = tmp_path / "hosts.allow"
+    smoke_hosts_file = tmp_path / "smoke-hosts"
+    sudoers_file = tmp_path / "swapd-smoke"
+    main_registry_file = tmp_path / "main-registry.json"
     ca_dir = tmp_path / "mitmproxy"
     ca_dir.mkdir()
     (ca_dir / "mitmproxy-ca.pem").write_text("FAKE-CA-CERT-NOT-A-KEY\n")
@@ -365,10 +447,14 @@ def stack(tmp_path):
 
     (bin_dir / "fake-store-verify").write_text(FAKE_STORE_VERIFY)
     (bin_dir / "fake-registry-writer").write_text(FAKE_REGISTRY_WRITER)
+    (bin_dir / "fake-main-registry-writer").write_text(
+        FAKE_MAIN_REGISTRY_WRITER)
+    (bin_dir / "fake-store-set").write_text(FAKE_STORE_SET)
     (bin_dir / "fake-muse").write_text(FAKE_MUSE)
     (bin_dir / "sudo").write_text(FAKE_SUDO)
-    for f in ("fake-store-verify", "fake-registry-writer", "fake-muse",
-              "sudo"):
+    for f in ("fake-store-verify", "fake-registry-writer",
+              "fake-main-registry-writer", "fake-store-set",
+              "fake-muse", "sudo"):
         os.chmod(bin_dir / f, 0o755)
 
     proxy = _serve(_SwapProxyHandler, secrets_dir=str(secrets_dir))
@@ -379,6 +465,15 @@ def stack(tmp_path):
     env.update({
         "CRED_STORE_VERIFY_INFERENCE": str(bin_dir / "fake-store-verify"),
         "CRED_REGISTRY_SET_INFERENCE": str(bin_dir / "fake-registry-writer"),
+        "CRED_STORE_SET_WRITER": str(bin_dir / "fake-store-set"),
+        "CRED_REGISTRY_SET_WRITER": str(bin_dir / "fake-main-registry-writer"),
+        "MAIN_REGISTRY_FILE": str(main_registry_file),
+        "FAKE_SMOKE_SECRETS_DIR": str(smoke_secrets_dir),
+        "MAIN_HOSTS_ALLOW": str(main_allow_file),
+        "SMOKE_HOSTS_PATH": str(smoke_hosts_file),
+        "SMOKE_SUDOERS_PATH": str(sudoers_file),
+        "VISUDO_BIN": "/usr/sbin/visudo",
+        "INJECT_SMOKE_HOST": SMOKE_HOST,
         "INFERENCE_HOSTS_ALLOW": str(allow_file),
         "INFERENCE_SSRF_ALLOW": str(ssrf_allow_file),
         "INFERENCE_SECRETS_DIR": str(secrets_dir),
@@ -406,6 +501,10 @@ def stack(tmp_path):
     paths = {
         "secrets_dir": secrets_dir, "registry_file": registry_file,
         "allow_file": allow_file, "ssrf_allow_file": ssrf_allow_file,
+        "main_allow_file": main_allow_file, "sudoers_file": sudoers_file,
+        "smoke_hosts_file": smoke_hosts_file,
+        "main_registry_file": main_registry_file,
+        "smoke_secrets_dir": smoke_secrets_dir,
         "ca_dir": ca_dir, "manifest_file": manifest_file,
         "agent_home": agent_home, "tenant_record": tenant_record,
         "bin_dir": bin_dir, "provider_auth": provider_auth,
@@ -1119,7 +1218,8 @@ def test_privilege_prefix(stack):
     # swapd}` default branch. The SUDO_CALL_LOG proves the default was
     # USED, not bypassed: a regressed empty default would leave it empty.
     # Notably the log must show NO tee/ls: the injector never appends to
-    # an allowlist and never lists the secrets dir.
+    # an allowlist through a privilege surface and never lists the
+    # secrets dir.
     env, paths = stack
     # Seed a stale fixture binding so the remove-host teardown is
     # exercised through the privilege path too (the happy path with no
@@ -1144,6 +1244,9 @@ def test_privilege_prefix(stack):
     assert "cat" in calls
     assert "tee" not in calls
     assert " ls " not in calls
+    # The smoke step's store write goes through the real production
+    # prefix (sudo -u swapd) too, so the fake sudo sees it.
+    assert env["CRED_STORE_SET_WRITER"] in calls
 
 
 def test_missing_image_version(stack):
@@ -1157,6 +1260,9 @@ def test_missing_image_version(stack):
 
 @pytest.mark.parametrize("var", ["CRED_STORE_VERIFY_INFERENCE",
                                  "CRED_REGISTRY_SET_INFERENCE",
+                                 "CRED_STORE_SET_WRITER",
+                                 "CRED_REGISTRY_SET_WRITER",
+                                 "VISUDO_BIN",
                                  "INJECT_MANIFEST_CHECK",
                                  "HARNESS_PROBE_BIN"])
 def test_missing_binary_fails(stack, var):
@@ -1169,12 +1275,12 @@ def test_missing_binary_fails(stack, var):
     assert var.encode() in proc.stderr
 
 
-def test_never_writes_through_privilege(stack):
-    # Structural proof the injector cannot write a credential value:
-    # the fake bin dir contains NO store writer at all, and the fake
-    # sudo denies every command outside the writer+cat surface (exit
-    # 98). Any regressed store-write attempt -- privileged or not --
-    # fails loudly instead of landing in the secrets dir.
+def test_only_writes_smoke_dummy(stack):
+    # Structural proof the injector writes exactly one credential
+    # value: the §3a smoke-test dummy (public by design). The fake bin
+    # dir holds no OTHER store writer, the fake sudo denies the smoke
+    # writer for any other name (exit 98), and the real tenant key file
+    # must be byte-identical after a run.
     env, paths = stack
     _seed_real_key(paths)
     assert not (paths["bin_dir"] / "fake-store-writer").exists()
@@ -1182,6 +1288,8 @@ def test_never_writes_through_privilege(stack):
     assert proc.returncode == 0, proc.stderr.decode()
     assert b"fake-sudo: denied" not in proc.stderr
     assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+    assert (paths["smoke_secrets_dir"] / SMOKE_CRED).read_bytes() == \
+        SMOKE_DUMMY.encode()
 
 
 def test_teardown_subdomain_echo_binding(stack):
@@ -1321,3 +1429,349 @@ def test_tenant_record_reports_digest_lifecycle(stack):
     assert b" -> " in proc.stderr
     record = json.loads(paths["tenant_record"].read_text())
     assert record["tenant_id"] == "tenant-43"
+
+# ---------------------------------------------------------------------------
+# §3a smoke assets (G6)
+# ---------------------------------------------------------------------------
+
+def _smoke_sudoers_lines(paths):
+    return paths["sudoers_file"].read_text().splitlines()
+
+
+def test_smoke_assets_happy_path(stack):
+    # The §3a provision assets land together: the public dummy
+    # credential (exact public bytes, no newline), the operator's echo
+    # host in the MAIN hosts.allow AND in the proxy's smoke-only
+    # scoping list, and a visudo-valid scoped sudoers fragment for the
+    # tenant agent user whose granted argv is pinned to the smoke-test
+    # dummy install. The report's smoke_assets step reads "ok".
+    env, paths = stack
+    _seed_real_key(paths)
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+
+    assert (paths["smoke_secrets_dir"] / SMOKE_CRED).read_bytes() == \
+        SMOKE_DUMMY.encode()
+    allow_lines = paths["main_allow_file"].read_text().splitlines()
+    assert SMOKE_HOST in allow_lines
+    # The proxy's smoke-only list holds the same host: enforcement
+    # swaps only the smoke-test credential for it (never a real
+    # secret), so the echo endpoint cannot become a read oracle.
+    assert paths["smoke_hosts_file"].read_text().splitlines() == \
+        [SMOKE_HOST]
+
+    lines = _smoke_sudoers_lines(paths)
+    agent_user = env["INJECT_AGENT_USER"]
+    # S1: the granted argv is pinned -- the tenant agent user may run
+    # exactly `cred-store-set smoke-test`, never any other name.
+    expected = ("%s ALL=(swapd) NOPASSWD: "
+                "/usr/local/bin/cred-store-set smoke-test") % agent_user
+    assert expected in lines
+    assert not any(ln == ("%s ALL=(swapd) NOPASSWD: "
+                          "/usr/local/bin/cred-store-set") % agent_user
+                   for ln in lines), \
+        "the smoke fragment must pin the smoke-test argv, not the bare writer"
+    assert not any("*" in ln for ln in lines), \
+        "the smoke fragment must carry no wildcards"
+    # The installed fragment re-validates under the REAL visudo (the
+    # injector already validated pre-install; this proves the file on
+    # disk is good, not just the temp copy).
+    vis = subprocess.run(["/usr/sbin/visudo", "-c", "-f",
+                          str(paths["sudoers_file"])],
+                         capture_output=True, timeout=30)
+    assert vis.returncode == 0, vis.stderr.decode()
+
+    report = _report(proc)
+    assert report["steps"]["smoke_assets"] == "ok"
+    assert "smoke_assets" not in report["deferred"]
+
+
+def test_smoke_registry_binding(stack):
+    # 8d: the proxy's grant scoping refuses unbound credentials, so
+    # the §3a swap needs smoke-test bound to the echo host in the MAIN
+    # registry -- otherwise the placeholder would pass through
+    # unchanged and the check could never pass.
+    env, paths = stack
+    _seed_real_key(paths)
+    assert _run_injector(env).returncode == 0
+    reg = json.loads(paths["main_registry_file"].read_text())
+    assert SMOKE_HOST in reg[SMOKE_CRED]["allowed_hosts"]
+    # Idempotent: a second run adds no duplicate binding.
+    assert _run_injector(env).returncode == 0
+    reg = json.loads(paths["main_registry_file"].read_text())
+    assert reg[SMOKE_CRED]["allowed_hosts"].count(SMOKE_HOST) == 1
+
+
+def test_smoke_registry_binding_failure_fails_closed(stack):
+    # A failing registry writer fails the provision (exit 1) -- the
+    # §3a assets are all-or-nothing for box-live gating.
+    env, paths = stack
+    _seed_real_key(paths)
+    env = dict(env)
+    env["CRED_REGISTRY_SET_WRITER"] = "/bin/false"
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"smoke registry binding failed" in proc.stderr
+
+
+def test_smoke_credential_install_failure_fails_closed(stack):
+    # The 8a store-set failure is the highest-sensitivity new branch:
+    # the injector's ONE sanctioned credential-value write must fail
+    # the provision (exit 1), never half-install the §3a assets.
+    env, paths = stack
+    _seed_real_key(paths)
+    env = dict(env)
+    env["CRED_STORE_SET_WRITER"] = "/bin/false"
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"smoke credential install failed" in proc.stderr
+
+
+def test_single_sanctioned_value_write_invariant():
+    # ARCHITECTURE INVARIANT: the injector's never-write-a-credential-
+    # value rule has exactly ONE sanctioned exception -- the §3a
+    # smoke-test dummy. This tripwire pins it mechanically: the narrow
+    # store writer may be invoked exactly once, and its credential-name
+    # argument must be the SMOKE_CRED_NAME constant. A future step that
+    # widens the exception fails CI loudly instead of sliding through
+    # review. The name literal must also agree with the proxy's
+    # hardcoded smoke-test knowledge (swap_addon.py's _resolve gate and
+    # the response-scrub exemption), so a rename breaks loudly too.
+    src = open(INJECTOR, encoding="utf-8").read()
+    invocations = [
+        (i, line) for i, line in enumerate(src.splitlines(), 1)
+        if not line.strip().startswith("#")
+        and "$STORE_SET_WRITER" in line and "run_priv" in line
+    ]
+    assert len(invocations) == 1, \
+        "expected exactly one sanctioned store-set invocation, found: %r" \
+        % (invocations,)
+    i, line = invocations[0]
+    assert re.search(r'run_priv[ \t]+"\$STORE_SET_WRITER"'
+                     r'[ \t]+"\$SMOKE_CRED_NAME"', line), \
+        "line %d: store-set invocation not pinned to SMOKE_CRED_NAME: %r" \
+        % (i, line)
+    name_m = re.search(r'^SMOKE_CRED_NAME="([^"]+)"', src, re.M)
+    assert name_m, "SMOKE_CRED_NAME constant missing from injector"
+    addon = open(os.path.join(HERE, "..", "proxy", "swap_addon.py"),
+                 encoding="utf-8").read()
+    assert '"%s"' % name_m.group(1) in addon, \
+        "proxy no longer hardcodes the smoke credential name %r " \
+        "(literal agreement broken)" % name_m.group(1)
+
+
+def test_smoke_assets_idempotent(stack):
+    # A second run changes nothing: no duplicate allowlist line, the
+    # sudoers fragment is byte-identical, the dummy is unchanged, and
+    # the smoke-only list is untouched.
+    env, paths = stack
+    _seed_real_key(paths)
+    assert _run_injector(env).returncode == 0
+    allow_before = paths["main_allow_file"].read_bytes()
+    sudoers_before = paths["sudoers_file"].read_bytes()
+    smoke_hosts_before = paths["smoke_hosts_file"].read_bytes()
+    assert _run_injector(env).returncode == 0
+    assert paths["main_allow_file"].read_bytes() == allow_before
+    assert paths["main_allow_file"].read_text().splitlines().count(
+        SMOKE_HOST) == 1
+    assert paths["sudoers_file"].read_bytes() == sudoers_before
+    assert paths["smoke_hosts_file"].read_bytes() == smoke_hosts_before
+
+
+def test_smoke_host_missing_refuses(stack):
+    env, paths = stack
+    env = dict(env)
+    env.pop("INJECT_SMOKE_HOST", None)
+    proc = _run_injector(env)
+    assert proc.returncode == 2
+    assert b"INJECT_SMOKE_HOST is required" in proc.stderr
+
+
+@pytest.mark.parametrize("bad", [
+    "smoke host",            # whitespace
+    "smoke..example.com",    # empty label
+    ".smoke.example.com",    # leading dot
+    "smoke.example.com.",    # trailing dot (canonical form has none)
+    "-smoke.example.com",    # leading hyphen
+    "localhost",             # bare name -- no dot, matches nothing useful
+    "smoke_example.com",     # underscore is not a hostname char
+    "x" * 64 + ".example.com",  # over-long label
+    "x" * 63 + "." + "x" * 63 + "." + "x" * 63 + "." + "x" * 62,
+    # 254 chars overall: every label is legal, only the total is over
+    "smoke.EXAMPLE.com\nevil",  # embedded newline
+])
+def test_smoke_host_invalid_refuses(stack, bad):
+    env, paths = stack
+    env = dict(env)
+    env["INJECT_SMOKE_HOST"] = bad
+    proc = _run_injector(env)
+    assert proc.returncode == 2
+    assert b"invalid host shape" in proc.stderr
+
+
+def test_smoke_host_uppercase_normalized(stack):
+    # The proxy's host matching is case-insensitive; the injector
+    # stores the canonical lowercase form.
+    env, paths = stack
+    env = dict(env)
+    env["INJECT_SMOKE_HOST"] = "Smoke.Example.COM"
+    _seed_real_key(paths)
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert paths["main_allow_file"].read_text().splitlines() == \
+        [SMOKE_HOST]
+
+
+@pytest.mark.parametrize("hostile", [
+    "agent; rm -rf /",          # shell metacharacters
+    "agent\nALL ALL=(ALL) NOPASSWD: ALL",  # embedded newline: grep is
+    # line-oriented, so the second line would pass a naive anchored
+    # match and smuggle a sudoers rule past the check.
+])
+def test_smoke_agent_user_unsafe_refuses(stack, hostile):
+    # The agent user is interpolated into a sudoers line -- a hostile
+    # value must refuse before any fragment is written.
+    env, paths = stack
+    env = dict(env)
+    env["INJECT_AGENT_USER"] = hostile
+    _seed_real_key(paths)
+    proc = _run_injector(env)
+    assert proc.returncode == 2
+    assert b"not a safe sudoers username" in proc.stderr
+    assert not paths["sudoers_file"].exists()
+
+
+def test_smoke_fragment_mode(stack):
+    # The fragment installs mode 0440 like deploy.sh's sudoers install.
+    env, paths = stack
+    _seed_real_key(paths)
+    assert _run_injector(env).returncode == 0
+    import stat
+    mode = stat.S_IMODE(os.stat(paths["sudoers_file"]).st_mode)
+    assert mode == 0o440, oct(mode)
+
+
+def test_smoke_allow_append_no_trailing_newline(stack):
+    # E1: the allow file is image-built, not injector-owned -- it may
+    # not end in a newline. A blind append would glue the smoke host
+    # onto the last line, corrupting that entry AND failing to add
+    # ours, while still reporting ok. Run twice: lines must be exactly
+    # [old, SMOKE_HOST] both times.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["main_allow_file"].write_bytes(b"github.example.com")
+    assert _run_injector(env).returncode == 0
+    assert paths["main_allow_file"].read_text().splitlines() == \
+        ["github.example.com", SMOKE_HOST]
+    assert _run_injector(env).returncode == 0
+    assert paths["main_allow_file"].read_text().splitlines() == \
+        ["github.example.com", SMOKE_HOST]
+
+
+def test_smoke_allow_append_trailing_newline(stack):
+    # The mirror of the no-trailing-newline case: a well-formed allow
+    # file already ending in a newline takes the direct-append branch
+    # (no gluing, no separator correction needed).
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["main_allow_file"].write_bytes(b"github.example.com\n")
+    assert _run_injector(env).returncode == 0
+    assert paths["main_allow_file"].read_bytes() == \
+        b"github.example.com\n" + SMOKE_HOST.encode() + b"\n"
+
+
+def test_smoke_hosts_union_preserves_prior_entries(stack):
+    # UNION, never replace: a re-provision with a new echo host keeps
+    # the previous entry. hosts.allow is append-only, so the rotated-
+    # out host lingers there; dropping it from this durable list
+    # (e.g. across a proxy restart) would silently un-restrict it and
+    # reopen the echo read oracle. Comments and blank lines are not
+    # carried over; duplicates collapse to one entry.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["smoke_hosts_file"].write_text(
+        "# stale comment\n\nold.example.com\n", encoding="utf-8")
+    assert _run_injector(env).returncode == 0
+    assert paths["smoke_hosts_file"].read_text().splitlines() == \
+        ["old.example.com", SMOKE_HOST]
+    # Idempotent: a second run with the same host changes nothing.
+    assert _run_injector(env).returncode == 0
+    assert paths["smoke_hosts_file"].read_text().splitlines() == \
+        ["old.example.com", SMOKE_HOST]
+
+
+def test_smoke_fragment_differing_preexisting_replaced(stack):
+    # The un-owned fragment path: a pre-existing fragment with DIFFERENT
+    # content is replaced by the pinned expected fragment (per-step
+    # drift repair), not merged or left in place.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["sudoers_file"].write_text(
+        "swapd ALL=(ALL) NOPASSWD: ALL\n", encoding="utf-8")
+    assert _run_injector(env).returncode == 0
+    lines = _smoke_sudoers_lines(paths)
+    agent_user = env["INJECT_AGENT_USER"]
+    expected = [
+        "# spark-vm §3a smoke check (G6): the tenant agent user may",
+        "# re-install ONLY the public smoke-test dummy credential via",
+        "# the narrow writer, value on stdin. The argv is pinned: any",
+        "# other credential name is refused by sudo itself.",
+        "# Literal paths, no wildcards.",
+        ("%s ALL=(swapd) NOPASSWD: "
+         "/usr/local/bin/cred-store-set smoke-test") % agent_user,
+    ]
+    assert lines == expected, lines
+
+
+def test_smoke_sudoers_path_is_directory(stack):
+    # Q1: mv into a directory "succeeds" while installing nothing where
+    # the gate looks -- the injector must fail closed instead of
+    # reporting ok.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["sudoers_file"].mkdir()
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"is a directory" in proc.stderr
+    assert list(paths["sudoers_file"].iterdir()) == []
+
+
+def test_smoke_hosts_path_is_directory(stack):
+    # Same fail-closed shape for the smoke-only host list: a directory
+    # at SMOKE_HOSTS_PATH must not silently mis-install.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["smoke_hosts_file"].mkdir()
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"is a directory" in proc.stderr
+    assert list(paths["smoke_hosts_file"].iterdir()) == []
+
+
+def test_smoke_hosts_stale_entry_preserved(stack):
+    # The smoke-only list is a UNION, not a replacement: a host from
+    # an earlier run is preserved, because hosts.allow is append-only
+    # and dropping it here would silently un-restrict the retired
+    # host (e.g. across a proxy restart), reopening the echo read
+    # oracle.
+    env, paths = stack
+    _seed_real_key(paths)
+    paths["smoke_hosts_file"].write_text("old-smoke.example.com\n")
+    assert _run_injector(env).returncode == 0
+    assert paths["smoke_hosts_file"].read_text().splitlines() == \
+        ["old-smoke.example.com", SMOKE_HOST]
+
+
+def test_smoke_visudo_failure_fails_closed(stack):
+    # A failing VISUDO_BIN must fail the provision with nothing
+    # installed and the temp fragment cleaned up -- the pre-install
+    # gate is real, not decorative.
+    env, paths = stack
+    _seed_real_key(paths)
+    env = dict(env)
+    env["VISUDO_BIN"] = "/bin/false"
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"visudo validation" in proc.stderr
+    assert not paths["sudoers_file"].exists()
+    assert list(paths["sudoers_file"].parent.glob(".swapd-smoke.*")) == []

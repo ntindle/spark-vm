@@ -172,6 +172,15 @@ def _env_int(name, default):
 # hosts file, registry, and audit log.
 SECRETS_DIR = _env_path("SWAP_SECRETS_DIR", "/home/swapd/secrets")
 HOSTS_FILE = _env_path("SWAP_HOSTS_FILE", "/home/swapd/hosts.allow")
+# §3a smoke echo hosts (G6): requests to these hosts may swap ONLY the
+# public smoke-test credential. The smoke echo endpoint returns the
+# post-substitution request body, so without this scoping any proxy
+# user could post hsurr:<any-name> to the echo host and read the real
+# secret back -- a chosen-plaintext oracle over the whole main store.
+# One hostname per line, same format as hosts.allow; the provision-time
+# injector owns the file (see harness/inject-provision-state.sh step 8).
+SMOKE_HOSTS_FILE = _env_path("SWAP_SMOKE_HOSTS_FILE",
+                             "/home/swapd/smoke-hosts")
 REGISTRY_FILE = _env_path("SWAP_REGISTRY_FILE", "/home/swapd/credentials.json")
 LOG_FILE = _env_path("SWAP_LOG_FILE", "/home/swapd/swap.log")
 # Finding 49/50: swapd files structured approvals here when it
@@ -614,6 +623,25 @@ class SwapAddon:
         self.inference_mode = INFERENCE_MODE
         self.secrets = {}
         self.hosts = []
+        self.smoke_hosts = []
+        # §3a (G6): monotonic set of every host EVER seen in the
+        # smoke-only list. A host that drops out of a later successful
+        # load (rotation) stays restricted -- silently un-restricting it
+        # would reopen the echo read oracle. Only the poison flag below
+        # (unreadable-after-seen) escalates to refusing all swaps.
+        self.smoke_hosts_seen = set()
+        # Fail-closed: set when the smoke-hosts file is missing or
+        # unreadable after hosts were seen. While set, _resolve refuses
+        # every swap. Cleared by the next successful load (a successful
+        # load is trustworthy by definition; the seen-set keeps retired
+        # hosts restricted, so clearing never silently un-restricts).
+        self._smoke_hosts_poisoned = False
+        # The startup heuristic in _load_smoke_hosts may only fire on
+        # the process's FIRST load: smoke-test in the store but no
+        # valid smoke-hosts file means the scoping state was lost
+        # (deleted file + restart). Later reloads are governed by the
+        # monotonic seen-set instead.
+        self._smoke_startup_checked = False
         self.registry = {}
         self.ssrf_hosts = []
         self.ssrf_nets = []
@@ -621,6 +649,7 @@ class SwapAddon:
         self.deny_nets = []
         self._store_mtime = None
         self._hosts_mtime = None
+        self._smoke_hosts_mtime = None
         self._registry_mtime = None
         self._ssrf_mtime = None
         self._deny_mtime = None
@@ -796,6 +825,13 @@ class SwapAddon:
                         hosts.append(line.lower())
         except OSError as e:
             log.warning("swap: cannot read hosts.allow: %s", e)
+        # §3a smoke echo hosts: same line format as hosts.allow.
+        # ORDERED CONTRACT with the injector (harness/
+        # inject-provision-state.sh step 8): the injector writes this
+        # file strictly BEFORE appending the echo host to hosts.allow,
+        # so a crash between the two leaves at most an inert list --
+        # never a live allowlisted-but-unrestricted echo host.
+        smoke_hosts = self._load_smoke_hosts(secrets)
         ssrf_hosts, ssrf_nets = [], []
         try:
             if SSRF_ALLOW_FILE.is_file():
@@ -821,12 +857,14 @@ class SwapAddon:
             log.warning("swap: cannot read ssrf.deny: %s", e)
         self.secrets = secrets
         self.hosts = hosts
+        self.smoke_hosts = smoke_hosts
         self.ssrf_hosts = ssrf_hosts
         self.ssrf_nets = ssrf_nets
         self.deny_hosts = deny_hosts
         self.deny_nets = deny_nets
         self._store_mtime = self._mtime(SECRETS_DIR)
         self._hosts_mtime = self._mtime(HOSTS_FILE)
+        self._smoke_hosts_mtime = self._mtime(SMOKE_HOSTS_FILE)
         self._registry_mtime = self._mtime(REGISTRY_FILE)
         self._ssrf_mtime = self._mtime(SSRF_ALLOW_FILE)
         self._deny_mtime = self._mtime(SSRF_DENY_FILE)
@@ -847,14 +885,81 @@ class SwapAddon:
         # Finding 59's mtime gate lives in _grants().
         if (self._mtime(SECRETS_DIR) != self._store_mtime
                 or self._mtime(HOSTS_FILE) != self._hosts_mtime
+                or self._mtime(SMOKE_HOSTS_FILE) != self._smoke_hosts_mtime
                 or self._mtime(REGISTRY_FILE) != self._registry_mtime
                 or self._mtime(SSRF_ALLOW_FILE) != self._ssrf_mtime
                 or self._mtime(SSRF_DENY_FILE) != self._deny_mtime):
             self._load()
 
+    def _load_smoke_hosts(self, secrets=None):
+        """Load the §3a smoke-only host list; return the loaded hosts.
+
+        Fail-closed posture: (a) a host once seen stays restricted for
+        the process lifetime -- a later successful load that drops it
+        (rotation) removes it from the file but NOT from the seen-set,
+        because silently un-restricting it would reopen the echo read
+        oracle; (b) if the file is missing or unreadable after hosts
+        were seen, poison the gate so _resolve refuses ALL swaps until
+        a clean load returns; (c) STARTUP-ONLY: on the process's first
+        load, smoke-test in the store but no valid smoke-hosts file
+        means the scoping state was lost (deleted file + restart) --
+        poison immediately. A file never before seen may legitimately
+        start absent/empty (pre-provision): no restriction, no poison.
+        """
+        if secrets is None:
+            secrets = self.secrets
+        smoke_hosts = []
+        smoke_load_ok = False
+        try:
+            if SMOKE_HOSTS_FILE.is_file():
+                for line in SMOKE_HOSTS_FILE.read_text(
+                        encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        smoke_hosts.append(line.lower())
+                smoke_load_ok = True
+        except OSError as e:
+            log.warning("swap: cannot read smoke-hosts: %s", e)
+        # A readable-but-empty file is not a valid scoping list (the
+        # injector always writes at least one entry); treat it like a
+        # missing one.
+        smoke_valid = smoke_load_ok and bool(smoke_hosts)
+        if smoke_valid:
+            for h in smoke_hosts:
+                self.smoke_hosts_seen.add(h)
+            if self._smoke_hosts_poisoned:
+                log.warning("swap: smoke-hosts loaded cleanly -- "
+                            "clearing fail-closed poison")
+            self._smoke_hosts_poisoned = False
+        elif self.smoke_hosts_seen and not self._smoke_hosts_poisoned:
+            log.error("swap: smoke-hosts MISSING/UNREADABLE/EMPTY after "
+                      "hosts were seen -- refusing ALL swaps until it "
+                      "reloads cleanly (fail-closed)")
+            self._smoke_hosts_poisoned = True
+        elif (not smoke_valid and not self.smoke_hosts_seen
+              and not self._smoke_startup_checked
+              and "smoke-test" in secrets):
+            log.error("swap: STARTUP with smoke-test in the store but no "
+                      "valid smoke-hosts file -- scoping state was lost; "
+                      "refusing ALL swaps until it reloads cleanly "
+                      "(fail-closed)")
+            self._smoke_hosts_poisoned = True
+        self._smoke_startup_checked = True
+        return smoke_hosts
+
     # ------------------------------------------------------------------
     def _host_allowed(self, host):
         return _host_in_list(host, self.hosts)
+
+    def _host_is_smoke_only(self, host):
+        """True when the host is a §3a smoke echo host: only the public
+        smoke-test credential may be swapped for it. The echo endpoint
+        returns the post-substitution body, so any other credential
+        would be a read oracle over the main store. Checked against the
+        monotonic seen-set: a host once restricted stays restricted
+        even if a later load drops it (rotation)."""
+        return bool(self.smoke_hosts_seen) and _host_in_list(
+            host, self.smoke_hosts_seen)
 
     def _grants(self):
         """Finding 60: return grants from grants.json. Proxies only
@@ -1253,6 +1358,28 @@ class SwapAddon:
                  location=None):
         """Return the secret value for name/entry on this request, or None
         to leave the placeholder untouched."""
+        # §3a fail-closed: the smoke-hosts list was missing/unreadable
+        # after hosts had been seen -- the scoping gate cannot be
+        # evaluated, so refuse every swap rather than risk an
+        # unrestricted echo host. Audited, loud, recovers on the next
+        # clean load.
+        if self._smoke_hosts_poisoned:
+            log.error("swap: refusing swap of %r for %s %s: "
+                      "smoke-hosts-unreadable (fail-closed)",
+                      name, method or "?", host)
+            self._audit_refused(host, name, "smoke-hosts-unreadable")
+            return None
+        # §3a smoke echo hosts are substitution-scoped to the public
+        # smoke-test credential: the echo endpoint returns whatever the
+        # proxy substituted, so resolving any other name here would hand
+        # the caller a read oracle over the main secret store. The
+        # placeholder is left untouched and the refusal is audited, the
+        # same fail-closed shape as every other _resolve refusal.
+        if name != "smoke-test" and self._host_is_smoke_only(host):
+            log.warning("swap: refusing swap of %r for %s %s: "
+                        "smoke-host-restricted", name, method or "?", host)
+            self._audit_refused(host, name, "smoke-host-restricted")
+            return None
         val = self.secrets.get(name)
         if val is None:
             self._audit_refused(host, name, "unknown-credential")
@@ -1913,6 +2040,14 @@ class SwapAddon:
         triples = []
         now = time.time()
         for name, val in (self.secrets or {}).items():
+            if name == "smoke-test":
+                # §3a (G6): the smoke-test value is public by design --
+                # the spec's §3a pass criterion is that the echo
+                # response body CONTAINS it, so scrubbing it back out
+                # would make the gate fail, and scrubbing a public
+                # value buys no confidentiality. Mirrors the
+                # hardcoded smoke-test knowledge in _resolve.
+                continue
             if isinstance(val, dict):
                 for entry, v in val.items():
                     if entry == "totp":

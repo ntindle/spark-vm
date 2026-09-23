@@ -62,6 +62,19 @@
 #      injected key is accepted by the provider through the inference
 #      proxy, then confirmd liveness. A probe failure maps to R1's
 #      provisioning-failed -- box-live must not flip.
+#   8. §3a smoke assets (G6): installs the public smoke-test dummy
+#      credential (the injector's ONE sanctioned value-writing step --
+#      the value is the spec's public pass phrase, never a secret),
+#      writes the proxy's smoke-only scoping list (so the echo host can
+#      swap only the smoke-test credential, never a real secret) and
+#      THEN appends the operator's smoke echo host (INJECT_SMOKE_HOST)
+#      to the MAIN proxy's hosts.allow (ordering is load-bearing: the
+#      restriction must land before the host becomes reachable),
+#      installs a scoped sudoers fragment whose granted argv is pinned
+#      to `cred-store-set smoke-test`, and binds smoke-test to the echo
+#      host in the main registry (the proxy's grant scoping refuses
+#      unbound credentials -- without the binding the §3a swap could
+#      never happen).
 #
 # Exit codes: 0 ok (report on stdout) - 1 a step failed (provisioning-
 # failed; the control plane must not flip box-live) - 2 usage/config
@@ -69,17 +82,18 @@
 # report on stdout; the `deferred` list names the interface points still
 # owned by unlanded mechanics (H9/H10). Box-live gating: the control
 # plane requires the manifest, fixture_teardown, inference_key,
-# swapd_ca, and probe steps to read "ok"; identity and
+# swapd_ca, probe, and smoke_assets steps to read "ok"; identity and
 # confirmd_attribution may read "ok" or "deferred (H9)"/"deferred (H10)"
 # (then named in deferred[]). Note: a narrow writer crashing under
 # `set -e` exits with the writer's code rather than 1/2 -- still
 # fail-closed, but the H4 driver must treat ANY non-zero exit as
 # provisioning-failed, not just 1.
 #
-# The injector never writes a credential value: the only store writer it
-# touches is the blind compare. A test asserting the real key file is
-# byte-identical after a run is the standing proof (see
-# harness/test_inject_provision_state.py).
+# The injector writes exactly one credential value: the §3a smoke-test
+# dummy, whose value is public by design (see SMOKE_DUMMY_VALUE below).
+# Every other store writer it touches is the blind compare. A test
+# asserting the real key file is byte-identical after a run is the
+# standing proof (see harness/test_inject_provision_state.py).
 #
 # Env overrides (tests / nonstandard layouts):
 #   INJECT_IMAGE_VERSION   REQUIRED: the control plane's pinned image SHA.
@@ -118,6 +132,29 @@
 #   INJECT_TENANT_RECORD   tenant record path (default
 #                          /etc/sparkvm/tenant.json)
 #   HARNESS_PROBE_BIN      probe path (default alongside this script)
+#   INJECT_SMOKE_HOST      REQUIRED: the operator's §3a smoke echo host
+#                          (e.g. smoke.<domain>); appended to the main
+#                          proxy's hosts.allow. Lowercase-normalized and
+#                          shape-validated; fail-closed when missing or
+#                          malformed.
+#   CRED_STORE_SET_WRITER  main-store narrow writer (default
+#                          /usr/local/bin/cred-store-set); installs the
+#                          public smoke-test dummy only.
+#   CRED_REGISTRY_SET_WRITER
+#                          main registry narrow writer (default
+#                          /usr/local/bin/cred-registry-set); binds the
+#                          smoke-test credential to the smoke echo host.
+#   MAIN_HOSTS_ALLOW       main proxy hosts.allow path (default
+#                          /home/swapd/hosts.allow)
+#   SMOKE_HOSTS_PATH       §3a smoke-only host list for the main proxy
+#                          (default /home/swapd/smoke-hosts); the proxy
+#                          swaps ONLY the smoke-test credential for
+#                          hosts listed here, so the echo endpoint can
+#                          never become a read oracle for real secrets.
+#   SMOKE_SUDOERS_PATH     scoped sudoers fragment path (default
+#                          /etc/sudoers.d/swapd-smoke)
+#   VISUDO_BIN             visudo binary for fragment validation
+#                          (default /usr/sbin/visudo)
 # The probe reads its own env (PROBE_MODE=provision is forced here;
 # PROBE_PROXY, PROBE_MUSE_BIN, PROBE_BASE_URL, PROBE_CONFIRMD_URL come
 # from the caller) directly.
@@ -143,6 +180,13 @@ ECHO_HOST="127.0.0.1"
 # proxy's own semantics (see echo_bound_hosts / allowlist_echo_entries),
 # not exact string comparison.
 ECHO_ALIASES="127.0.0.1 localhost ::1"
+# The §3a smoke check (G6). The smoke credential's value is public by
+# design -- FIRST_TEN_MINUTES_SPEC.md §3a's pass phrase -- so this is the
+# injector's ONE sanctioned exception to the never-write-a-credential-value
+# invariant. The name and value are both fixed constants: no caller input
+# can redirect this step at a real credential.
+SMOKE_CRED_NAME="smoke-test"
+SMOKE_DUMMY_VALUE="smoke-ok"
 
 if [ -z "${INJECT_IMAGE_VERSION:-}" ]; then
     echo "inject-provision-state: refusing: INJECT_IMAGE_VERSION is required (the control plane's pinned image SHA)" >&2
@@ -166,6 +210,42 @@ SWAPD_CA_DIR="${SWAPD_CA_DIR:-/home/swapd/.mitmproxy}"
 TENANT_RECORD="${INJECT_TENANT_RECORD:-/etc/sparkvm/tenant.json}"
 AGENT_USER="${INJECT_AGENT_USER:-agent}"
 AGENT_HOME="${INJECT_AGENT_HOME:-/home/agent}"
+STORE_SET_WRITER="${CRED_STORE_SET_WRITER:-/usr/local/bin/cred-store-set}"
+MAIN_REGISTRY_WRITER="${CRED_REGISTRY_SET_WRITER:-/usr/local/bin/cred-registry-set}"
+MAIN_HOSTS_ALLOW="${MAIN_HOSTS_ALLOW:-/home/swapd/hosts.allow}"
+SMOKE_HOSTS_PATH="${SMOKE_HOSTS_PATH:-/home/swapd/smoke-hosts}"
+SMOKE_SUDOERS_PATH="${SMOKE_SUDOERS_PATH:-/etc/sudoers.d/swapd-smoke}"
+VISUDO_BIN="${VISUDO_BIN:-/usr/sbin/visudo}"
+if [ -z "${INJECT_SMOKE_HOST:-}" ]; then
+    echo "inject-provision-state: refusing: INJECT_SMOKE_HOST is required (the operator's §3a smoke echo host, e.g. smoke.<domain>)" >&2
+    exit 2
+fi
+# Lowercase-normalized: the proxy's host matching is case-insensitive
+# (proxy_match.py's host_in_list mirror), and the allow file stores the
+# canonical form.
+SMOKE_HOST="$(printf '%s' "$INJECT_SMOKE_HOST" | tr '[:upper:]' '[:lower:]')"
+if ! SMOKE_HOST="$SMOKE_HOST" python3 - <<'EOF'; then
+import os, re, sys
+h = os.environ["SMOKE_HOST"]
+ok = (len(h) <= 253 and bool(re.fullmatch(
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",
+    h)))
+sys.exit(0 if ok else 1)
+EOF
+    echo "inject-provision-state: refusing: INJECT_SMOKE_HOST has an invalid host shape: '$INJECT_SMOKE_HOST'" >&2
+    exit 2
+fi
+# The agent user is interpolated into the sudoers fragment below -- it
+# must be a safe sudoers username (the control plane sets it, but the
+# fragment is a privilege artifact and gets the strict check anyway).
+# The newline check comes first: grep is line-oriented, so "agent\nEVIL"
+# would pass a naive anchored match (same shape as the INJECT_TENANT_ID
+# check below).
+if [[ "$AGENT_USER" == *$'\n'* ]] \
+    || ! printf '%s' "$AGENT_USER" | grep -qxE '^[a-z_][a-z0-9_-]{0,31}$'; then
+    echo "inject-provision-state: refusing: INJECT_AGENT_USER is not a safe sudoers username (single line): '${AGENT_USER//$'\n'/<NL>}'" >&2
+    exit 2
+fi
 
 if [ ! -x "$STORE_VERIFY_WRITER" ]; then
     echo "inject-provision-state: store verify writer not executable: $STORE_VERIFY_WRITER (CRED_STORE_VERIFY_INFERENCE)" >&2
@@ -181,6 +261,18 @@ if [ ! -x "$MANIFEST_CHECK" ]; then
 fi
 if [ ! -x "$HARNESS_PROBE_BIN" ]; then
     echo "inject-provision-state: probe not executable: $HARNESS_PROBE_BIN (HARNESS_PROBE_BIN)" >&2
+    exit 2
+fi
+if [ ! -x "$STORE_SET_WRITER" ]; then
+    echo "inject-provision-state: store set writer not executable: $STORE_SET_WRITER (CRED_STORE_SET_WRITER)" >&2
+    exit 2
+fi
+if [ ! -x "$MAIN_REGISTRY_WRITER" ]; then
+    echo "inject-provision-state: main registry writer not executable: $MAIN_REGISTRY_WRITER (CRED_REGISTRY_SET_WRITER)" >&2
+    exit 2
+fi
+if [ ! -x "$VISUDO_BIN" ]; then
+    echo "inject-provision-state: visudo not executable: $VISUDO_BIN (VISUDO_BIN)" >&2
     exit 2
 fi
 
@@ -698,6 +790,165 @@ if ! PROBE_MODE=provision timeout 15 "$HARNESS_PROBE_BIN" </dev/null >&2; then
     exit 1
 fi
 
+# --- Step 8: §3a smoke assets (G6) ------------------------------------------------
+echo "inject-provision-state: installing §3a smoke-check assets" >&2
+# 8a. The smoke credential: the injector's one sanctioned value-writing
+# step. The value is the spec's public pass phrase -- never a secret --
+# and the name is the fixed SMOKE_CRED_NAME constant, so no caller can
+# redirect this step at a real credential. printf '%s': the store keeps
+# stdin verbatim, so no trailing newline.
+if ! printf '%s' "$SMOKE_DUMMY_VALUE" | run_priv "$STORE_SET_WRITER" "$SMOKE_CRED_NAME"; then
+    echo "inject-provision-state: provisioning-failed: smoke credential install failed -- box-live must not flip" >&2
+    exit 1
+fi
+echo "inject-provision-state: smoke credential '$SMOKE_CRED_NAME' installed (public dummy, never a secret)" >&2
+# 8b. The proxy's smoke-only scoping list (SMOKE_HOSTS_PATH). The main
+# proxy swaps ONLY the smoke-test credential for hosts listed here
+# (proxy/swap_addon.py's _resolve): without this scoping, the echo
+# endpoint -- which returns the post-substitution request body -- would
+# be a read oracle over the whole main secret store for any proxy
+# user. Injector-owned provision-time state, like the fragment below:
+# the durable restriction set -- the union of every provision's
+# normalized hostname, written idempotently and atomically
+# (mktemp + mv -- the live proxy re-reads this file per request, so a
+# torn write would be observable). Union, never replace: hosts.allow
+# is append-only, so a rotated-out echo host lingers there; dropping
+# it here would silently un-restrict it (e.g. across a proxy
+# restart) and reopen the oracle.
+# ORDERING (fail-closed, load-bearing): this list is written BEFORE the
+# hosts.allow append in 8b2. A crash between the two leaves at most an
+# inert scoping list (no hosts.allow entry yet, so no echo traffic
+# exists to protect); the reverse order would leave a live
+# allowlisted-but-unrestricted echo host -- exactly the oracle this
+# step exists to close.
+if [ -d "$SMOKE_HOSTS_PATH" ]; then
+    echo "inject-provision-state: provisioning-failed: $SMOKE_HOSTS_PATH is a directory, not a host-list path -- box-live must not flip" >&2
+    exit 1
+fi
+if [ -f "$SMOKE_HOSTS_PATH" ] && grep -qxF "$SMOKE_HOST" "$SMOKE_HOSTS_PATH" 2>/dev/null; then
+    echo "inject-provision-state: smoke host '$SMOKE_HOST' already listed in $SMOKE_HOSTS_PATH" >&2
+else
+    # UNION, never replace: a previous provision's entries are
+    # preserved. hosts.allow is append-only, so a rotated-out echo
+    # host lingers there; dropping it from this list (e.g. across a
+    # proxy restart) would silently un-restrict it and reopen the
+    # echo read oracle. This file is the durable restriction set.
+    SMOKE_HOSTS_TMP="$(mktemp "$(dirname "$SMOKE_HOSTS_PATH")/.smoke-hosts.XXXXXX")"
+    {
+        if [ -f "$SMOKE_HOSTS_PATH" ]; then
+            grep -v '^[[:space:]]*#' "$SMOKE_HOSTS_PATH" 2>/dev/null | \
+                sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                    2>/dev/null | \
+                grep -v '^$' 2>/dev/null | \
+                tr '[:upper:]' '[:lower:]' || true
+        fi
+        printf '%s\n' "$SMOKE_HOST"
+    } | awk '!seen[$0]++' > "$SMOKE_HOSTS_TMP"
+    chmod 0644 "$SMOKE_HOSTS_TMP"
+    mv -f "$SMOKE_HOSTS_TMP" "$SMOKE_HOSTS_PATH"
+    echo "inject-provision-state: smoke host '$SMOKE_HOST' written to $SMOKE_HOSTS_PATH" >&2
+fi
+# 8b2. The operator's smoke echo host in the MAIN proxy's hosts.allow.
+# Runs AFTER 8b (see the ordering note there): the smoke-only scoping
+# list is always in place before the echo host becomes reachable.
+# Presence is checked with the proxy's own matching semantics
+# (proxy_match.py's host_in_list, the tripwire-pinned mirror); the
+# append is idempotent. The injector runs as root at provision time, so
+# the append is a direct O_APPEND write (no sudoers surface needed).
+require_proxy_match
+if [ -r "$MAIN_HOSTS_ALLOW" ] && SMOKE_HOST="$SMOKE_HOST" ALLOW_FILE="$MAIN_HOSTS_ALLOW" IMPORT_DIR="$HERE" python3 - <<'EOF'; then
+import os, sys
+sys.path.insert(0, os.environ["IMPORT_DIR"])
+import proxy_match
+p = os.environ["ALLOW_FILE"]
+try:
+    with open(p, encoding="utf-8") as f:
+        entries = [ln.strip() for ln in f if ln.strip()]
+except FileNotFoundError:
+    entries = []
+sys.exit(0 if proxy_match.host_in_list(os.environ["SMOKE_HOST"], entries) else 1)
+EOF
+    echo "inject-provision-state: smoke echo host '$SMOKE_HOST' already present in $MAIN_HOSTS_ALLOW" >&2
+else
+    # The allow file is image-built, not injector-owned: it may not end
+    # in a newline, and a blind append would glue our entry onto the
+    # last line -- corrupting that entry AND failing to add ours. (The
+    # $(...) strips trailing newlines, so -n is true exactly when the
+    # last byte is not a newline; -s guards the empty-file case.)
+    if [ -s "$MAIN_HOSTS_ALLOW" ] && [ -n "$(tail -c 1 "$MAIN_HOSTS_ALLOW")" ]; then
+        printf '\n' >> "$MAIN_HOSTS_ALLOW"
+    fi
+    printf '%s\n' "$SMOKE_HOST" >> "$MAIN_HOSTS_ALLOW"
+    echo "inject-provision-state: smoke echo host '$SMOKE_HOST' appended to $MAIN_HOSTS_ALLOW" >&2
+fi
+# 8c. Scoped sudoers fragment for the tenant agent user (§3a: the shipped
+# proxy/sudoers-swapd grants the writers only to ntindle, so the
+# golden-image gate's `sudo -u swapd cred-store-set smoke-test` needs
+# this extension). Written by the injector (root) with visudo
+# validation BEFORE install, like proxy/deploy.sh's step 6. The granted
+# argv is pinned to the literal `smoke-test` argument -- sudoers matches
+# the command line exactly, so the tenant agent user can re-install the
+# public dummy and nothing else; any other credential name is refused
+# at the privilege layer, not just in the injector. Literal paths, no
+# wildcards -- sudoers-swapd's one-wildcard invariant is untouched. The
+# fragment names the production writer path even when the injector's
+# CRED_STORE_SET_WRITER override points at a test double. The fragment
+# is injector-owned by name; a differing existing fragment is replaced
+# (the injector is the authority for it).
+# The fragment path must be a file path, never a directory: mv into a
+# directory would "succeed" while installing nothing where the gate
+# looks, yet still report ok.
+if [ -d "$SMOKE_SUDOERS_PATH" ]; then
+    echo "inject-provision-state: provisioning-failed: $SMOKE_SUDOERS_PATH is a directory, not a fragment path -- box-live must not flip" >&2
+    exit 1
+fi
+SMOKE_SUDOERS_TMP="$(mktemp "$(dirname "$SMOKE_SUDOERS_PATH")/.swapd-smoke.XXXXXX")"
+# No secret content in the tmp, but leave no litter on any exit path
+# (the visudo-failure branch below also removes it explicitly).
+trap 'rm -f "$SMOKE_SUDOERS_TMP"' EXIT
+{
+    printf '# spark-vm §3a smoke check (G6): the tenant agent user may\n'
+    printf '# re-install ONLY the public smoke-test dummy credential via\n'
+    printf '# the narrow writer, value on stdin. The argv is pinned: any\n'
+    printf '# other credential name is refused by sudo itself.\n'
+    printf '# Literal paths, no wildcards.\n'
+    printf '%s ALL=(swapd) NOPASSWD: /usr/local/bin/cred-store-set smoke-test\n' "$AGENT_USER"
+} > "$SMOKE_SUDOERS_TMP"
+chmod 0440 "$SMOKE_SUDOERS_TMP"
+if ! "$VISUDO_BIN" -c -f "$SMOKE_SUDOERS_TMP" >/dev/null 2>&1; then
+    rm -f "$SMOKE_SUDOERS_TMP"
+    echo "inject-provision-state: provisioning-failed: generated smoke sudoers fragment failed visudo validation -- box-live must not flip" >&2
+    exit 1
+fi
+if [ -f "$SMOKE_SUDOERS_PATH" ] && cmp -s "$SMOKE_SUDOERS_TMP" "$SMOKE_SUDOERS_PATH"; then
+    echo "inject-provision-state: smoke sudoers fragment already installed (unchanged)" >&2
+    rm -f "$SMOKE_SUDOERS_TMP"
+else
+    # Root-owned like deploy.sh's `install -o root -g root`; the test
+    # seam runs as the invoking user, so chown only happens as root.
+    if [ "$(id -u)" -eq 0 ]; then
+        chown root:root "$SMOKE_SUDOERS_TMP"
+    fi
+    mv -f "$SMOKE_SUDOERS_TMP" "$SMOKE_SUDOERS_PATH"
+    echo "inject-provision-state: smoke sudoers fragment installed for user '$AGENT_USER'" >&2
+fi
+# 8d. Bind the smoke-test credential to the smoke echo host in the MAIN
+# registry. The proxy's grant scoping (finding 55) refuses every swap
+# for a credential with no host binding ("unbound-host"): without this
+# binding the §3a check's hsurr:smoke-test placeholder would pass
+# through the proxy unchanged and the check could never pass. add-host
+# is idempotent and creates the entry when absent; the writer itself
+# enforces the canonical name/host contract. No placement is declared,
+# so the migration default (swaps anywhere) covers the §3a form-body
+# POST -- and the smoke-only scoping in 8b still bounds the host to
+# this one credential. The writer's stdout goes to stderr: the report
+# is the one JSON document on stdout.
+if ! run_priv "$MAIN_REGISTRY_WRITER" add-host "$SMOKE_CRED_NAME" "$SMOKE_HOST" >&2; then
+    echo "inject-provision-state: provisioning-failed: smoke registry binding failed -- box-live must not flip" >&2
+    exit 1
+fi
+echo "inject-provision-state: smoke-test bound to '$SMOKE_HOST' in the main registry" >&2
+
 # --- Report --------------------------------------------------------------------
 # One JSON document on stdout, like the probe's contract. The
 # fixture_teardown step reads "ok" with the absent/removed detail in
@@ -716,6 +967,7 @@ steps = {
     "identity": os.environ["IDENTITY"],
     "confirmd_attribution": os.environ["ATTRIBUTION"],
     "probe": "ok",
+    "smoke_assets": "ok",
 }
 for step, owner in (("identity", "H9: tenant identity mechanics"),
                     ("confirmd_attribution", "H10: per-tenant approvals URL wiring")):

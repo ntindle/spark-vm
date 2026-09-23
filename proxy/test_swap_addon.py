@@ -181,10 +181,19 @@ REGISTRY = {
 }
 
 
-def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY):
+def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY,
+               smoke_hosts=()):
     a = sa.SwapAddon.__new__(sa.SwapAddon)
     a.secrets = dict(secrets)
     a.hosts = list(hosts)
+    a.smoke_hosts = list(smoke_hosts)
+    # §3a fail-closed state mirrors the loader: the seen-set is what
+    # _host_is_smoke_only enforces (monotonic), poison starts clear.
+    a.smoke_hosts_seen = set(smoke_hosts)
+    a._smoke_hosts_poisoned = False
+    # Injected addons skip the startup heuristic (their secrets are
+    # synthetic); tests that want it set the flag back to False.
+    a._smoke_startup_checked = True
     a.registry = {k: (dict(v) if isinstance(v, dict) else v)
                   for k, v in registry.items()}
     a.inference_mode = False
@@ -1248,6 +1257,259 @@ class SwapAddonTests(unittest.TestCase):
                 sa.log.removeHandler(handler)
         self.assertNotIn("shorter than 8 chars",
                          "\n".join(r.getMessage() for r in records))
+
+
+class SmokeHostRestrictionTests(unittest.TestCase):
+    """§3a smoke echo hosts (G6): the proxy swaps ONLY the public
+    smoke-test credential for them. The echo endpoint returns the
+    post-substitution body, so any other credential would be a
+    chosen-plaintext read oracle over the main store."""
+
+    SMOKE_HOST = "smoke.example.com"
+
+    def _smoke_addon(self, smoke_hosts=(SMOKE_HOST,)):
+        secrets = dict(SECRETS)
+        secrets["smoke-test"] = "smoke-ok"
+        registry = {k: (dict(v) if isinstance(v, dict) else v)
+                    for k, v in REGISTRY.items()}
+        # smoke-test is bound ONLY to the echo host; github is bound to
+        # the echo host too, so the only reason its swap is refused is
+        # the smoke-only restriction (not grant scoping).
+        registry["smoke-test"] = {"allowed_hosts": [self.SMOKE_HOST]}
+        registry["github"] = {"allowed_hosts": ["github.com",
+                                                self.SMOKE_HOST]}
+        hosts = HOSTS + [self.SMOKE_HOST]
+        return make_addon(secrets=secrets, hosts=hosts, registry=registry,
+                          smoke_hosts=smoke_hosts)
+
+    def test_smoke_host_swaps_smoke_test(self):
+        # The §3a check itself: form-body POST of hsurr:smoke-test to
+        # the echo host swaps to the public dummy.
+        a = self._smoke_addon()
+        req = Request(self.SMOKE_HOST, "/echo",
+                      [("Content-Type",
+                        "application/x-www-form-urlencoded")],
+                      b"key=hsurr:smoke-test", method="POST")
+        a.request(Flow(req))
+        fields = urllib.parse.parse_qs(req.content.decode())
+        self.assertEqual(fields["key"], ["smoke-ok"])
+        self.assertEqual(a.refused, [])
+
+    def test_smoke_echo_round_trip_response_not_scrubbed(self):
+        # §3a's pass criterion is literally "the response body contains
+        # smoke-ok". The request swaps the placeholder in; the response
+        # scrubber must NOT swap the public dummy back out (its value
+        # is public by design -- scrubbing it would fail the gate and
+        # buy no confidentiality).
+        a = self._smoke_addon()
+        req = Request(self.SMOKE_HOST, "/echo",
+                      [("Content-Type",
+                        "application/x-www-form-urlencoded")],
+                      b"key=hsurr:smoke-test", method="POST")
+        flow = Flow(req)
+        a.request(flow)
+        self.assertEqual(flow.request.content, b"key=smoke-ok")
+        # The echo endpoint returns the post-substitution body:
+        resp = FakeResponse(flow.request.content, "text/plain")
+        flow.response = resp
+        a.response(flow)
+        self.assertIn(b"smoke-ok", resp.content)
+        self.assertNotIn(b"hsurr:smoke-test", resp.content)
+
+    def test_smoke_host_refuses_other_credential(self):
+        # The oracle is closed: hsurr:github is left untouched even
+        # though github is registry-bound to this host, and the refusal
+        # is audited.
+        a = self._smoke_addon()
+        req = Request(self.SMOKE_HOST, "/echo",
+                      [("Content-Type",
+                        "application/x-www-form-urlencoded")],
+                      b"key=hsurr:github", method="POST")
+        a.request(Flow(req))
+        fields = urllib.parse.parse_qs(req.content.decode())
+        self.assertEqual(fields["key"], ["hsurr:github"])
+        # The form path tries _swap_text then falls back to
+        # _swap_urlencoded, so a refusal audits more than once -- every
+        # audit line must name the smoke-only restriction.
+        self.assertTrue(a.refused)
+        self.assertTrue(all(r == (self.SMOKE_HOST, "github",
+                                  "smoke-host-restricted")
+                            for r in a.refused))
+
+    def test_smoke_host_restriction_covers_headers_and_query(self):
+        # _resolve is the single choke point: headers and query get the
+        # same refusal.
+        a = self._smoke_addon()
+        req = Request(self.SMOKE_HOST, "/echo?t=hsurr:github",
+                      [("X-T", "hsurr:github")], b"", method="GET")
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("X-T"), "hsurr:github")
+        self.assertIn("t=hsurr:github", req.path)
+        self.assertEqual(
+            [r for r in a.refused if r[1] == "github"],
+            [(self.SMOKE_HOST, "github", "smoke-host-restricted"),
+             (self.SMOKE_HOST, "github", "smoke-host-restricted")])
+
+    def test_non_smoke_host_unaffected(self):
+        # The restriction is per-host: normal allowlisted hosts swap
+        # every bound credential as before.
+        a = self._smoke_addon()
+        req = Request("github.com", "/x", [("X-T", "hsurr:github")],
+                      b"", method="GET")
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("X-T"), "ghp_TOKEN")
+        self.assertEqual(a.refused, [])
+
+    def test_no_smoke_hosts_no_restriction(self):
+        # A never-before-seen empty list (pre-provision: the injector
+        # hasn't run yet) means no restriction -- but once a host has
+        # been seen, the restriction is monotonic and an unreadable
+        # file poisons the gate (see the loader tests below).
+        secrets = dict(SECRETS)
+        secrets["smoke-test"] = "smoke-ok"
+        registry = {k: (dict(v) if isinstance(v, dict) else v)
+                    for k, v in REGISTRY.items()}
+        registry["github"] = {"allowed_hosts": ["github.com",
+                                                self.SMOKE_HOST]}
+        a = make_addon(secrets=secrets, hosts=HOSTS + [self.SMOKE_HOST],
+                       registry=registry, smoke_hosts=[])
+        req = Request(self.SMOKE_HOST, "/echo", [("X-T", "hsurr:github")],
+                      b"", method="GET")
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("X-T"), "ghp_TOKEN")
+
+    def test_smoke_only_leading_dot_entry_covers_subdomain(self):
+        # The scoping uses the same _host_in_list semantics as
+        # hosts.allow: a leading-dot entry restricts the whole subtree.
+        a = self._smoke_addon(smoke_hosts=(".example.com",))
+        req = Request(self.SMOKE_HOST, "/echo", [("X-T", "hsurr:github")],
+                      b"", method="GET")
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("X-T"), "hsurr:github")
+        self.assertEqual(a.refused, [(self.SMOKE_HOST, "github",
+                                     "smoke-host-restricted")])
+
+    # --- fail-closed loader (the _load_smoke_hosts gate) ---------------
+
+    def _loader_addon(self):
+        # An addon whose smoke-hosts list comes from a real file, so the
+        # loader (not the injection seam) is under test. Callers
+        # mock.patch sa.SMOKE_HOSTS_FILE around it; _maybe_reload is
+        # neutered so request() never re-reads the other real files.
+        a = self._smoke_addon()
+        a._maybe_reload = lambda: None
+        return a
+
+    def test_smoke_loader_parses_comments_blanks_and_case(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "smoke-hosts"
+            p.write_text("# a comment\n\n  SMOKE.Example.COM  \n",
+                         encoding="utf-8")
+            with mock.patch.object(sa, "SMOKE_HOSTS_FILE", p):
+                a = self._loader_addon()
+                loaded = a._load_smoke_hosts()
+        self.assertEqual(loaded, ["smoke.example.com"])
+        self.assertEqual(a.smoke_hosts_seen, {"smoke.example.com"})
+        self.assertFalse(a._smoke_hosts_poisoned)
+
+    def test_smoke_loader_missing_never_seen_no_poison(self):
+        # Pre-provision: the file was never seen, so its absence is
+        # legitimate -- no restriction, no poison.
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "smoke-hosts"
+            with mock.patch.object(sa, "SMOKE_HOSTS_FILE", p):
+                # A genuinely pre-provision addon: nothing ever seen.
+                a = self._smoke_addon(smoke_hosts=())
+                loaded = a._load_smoke_hosts()
+        self.assertEqual(loaded, [])
+        self.assertFalse(a._smoke_hosts_poisoned)
+        self.assertFalse(a._host_is_smoke_only(self.SMOKE_HOST))
+
+    def test_smoke_loader_delete_after_seen_poisons_all_swaps(self):
+        # The fail-closed core: a list that existed and then became
+        # unreadable poisons the gate -- _resolve refuses EVERY swap,
+        # not just smoke-host ones -- until a clean load returns.
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "smoke-hosts"
+            p.write_text(self.SMOKE_HOST + "\n", encoding="utf-8")
+            with mock.patch.object(sa, "SMOKE_HOSTS_FILE", p):
+                a = self._loader_addon()
+                a._load_smoke_hosts()
+                self.assertFalse(a._smoke_hosts_poisoned)
+                p.unlink()
+                a._load_smoke_hosts()
+                self.assertTrue(a._smoke_hosts_poisoned)
+                # Even a non-smoke host swap is refused while poisoned.
+                req = Request("github.com", "/x",
+                              [("X-T", "hsurr:github")], b"", method="GET")
+                a.request(Flow(req))
+                self.assertEqual(req.headers.get("X-T"), "hsurr:github")
+                self.assertIn(
+                    ("github.com", "github", "smoke-hosts-unreadable"),
+                    a.refused)
+                # Recovery: the injector rewrites the file, the next
+                # load clears the poison and the restriction is back.
+                p.write_text(self.SMOKE_HOST + "\n", encoding="utf-8")
+                a._load_smoke_hosts()
+                self.assertFalse(a._smoke_hosts_poisoned)
+                self.assertTrue(a._host_is_smoke_only(self.SMOKE_HOST))
+
+    def test_smoke_loader_rotation_keeps_old_host_restricted(self):
+        # The injector now unions (never replaces), but the proxy must
+        # not depend on that: if a later load drops a previously-seen
+        # host for any reason, the dropped host stays restricted
+        # (monotonic seen-set) -- no oracle, and no poison (a
+        # successful load is trustworthy).
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "smoke-hosts"
+            p.write_text("old.example.com\n", encoding="utf-8")
+            with mock.patch.object(sa, "SMOKE_HOSTS_FILE", p):
+                a = self._loader_addon()
+                a._load_smoke_hosts()
+                p.write_text("new.example.com\n", encoding="utf-8")
+                loaded = a._load_smoke_hosts()
+        self.assertEqual(loaded, ["new.example.com"])
+        self.assertFalse(a._smoke_hosts_poisoned)
+        self.assertTrue(a._host_is_smoke_only("old.example.com"))
+        self.assertTrue(a._host_is_smoke_only("new.example.com"))
+
+    def test_smoke_loader_startup_poison_without_scoping_state(self):
+        # The delete-file + restart variant: a FRESH process (startup
+        # heuristic not yet consumed) with smoke-test in the store but
+        # no valid smoke-hosts file poisons immediately -- the scoping
+        # state was lost, and the seen-set is empty by construction.
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "smoke-hosts"  # absent
+            with mock.patch.object(sa, "SMOKE_HOSTS_FILE", p):
+                a = self._smoke_addon(smoke_hosts=())
+                a._smoke_startup_checked = False  # simulate fresh process
+                a._load_smoke_hosts(a.secrets)
+                self.assertTrue(a._smoke_hosts_poisoned)
+                # All swaps refused while poisoned.
+                req = Request("github.com", "/x",
+                              [("X-T", "hsurr:github")], b"", method="GET")
+                a.request(Flow(req))
+                self.assertEqual(req.headers.get("X-T"), "hsurr:github")
+                self.assertIn(
+                    ("github.com", "github", "smoke-hosts-unreadable"),
+                    a.refused)
+                # A clean load from the injector clears it.
+                p.write_text("old.example.com\n", encoding="utf-8")
+                a._load_smoke_hosts(a.secrets)
+                self.assertFalse(a._smoke_hosts_poisoned)
+                self.assertTrue(a._host_is_smoke_only("old.example.com"))
+
+    def test_smoke_loader_startup_no_poison_pre_provision(self):
+        # The legitimate fresh-process case: no smoke-test in the
+        # store (the injector never ran) and no file -- no poison.
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "smoke-hosts"  # absent
+            with mock.patch.object(sa, "SMOKE_HOSTS_FILE", p):
+                a = self._smoke_addon(smoke_hosts=())
+                del a.secrets["smoke-test"]
+                a._smoke_startup_checked = False  # simulate fresh process
+                a._load_smoke_hosts(a.secrets)
+        self.assertFalse(a._smoke_hosts_poisoned)
 
 
 class AuthorityAndPlacementTests(unittest.TestCase):
