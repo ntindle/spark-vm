@@ -37,6 +37,13 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23): tracked set quiet (8/8 vendor re-reads,
+  no in-window deltas); the standing Vercel 64 GB default-storage ask is
+  CONFIRMED on the vendor's own pricing docs — sandboxes get 64 GB of
+  ephemeral NVMe by default (32 GB only on deprecated runtimes), closing
+  C32; Vercel Drives public beta completes with real pricing (storage,
+  reads, writes, caps, concurrency); adjacent investor color on Firecrawl's
+  $75M Series B. (#279)
 - The excluded-host link re-sweep now covers all eight bot-blocked hosts:
   a live-browser sweep hand-verified the five later-excluded hosts (all 11
   pages load; 10/11 citations match), and the ritual's enumeration now
