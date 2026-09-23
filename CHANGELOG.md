@@ -48,7 +48,7 @@ This changelog only works if entries land with the change, not after it:
   launch-release text read in full on syndicated copies (completeness
   at the same THIRD-PARTY layer; the docs Details/pricing sub-page is
   still unreached); OpenAI "Managed Agents" still
-  rumor; Automaid own page still missing. (#TBD)
+  rumor; Automaid own page still missing. (#298)
 - Competitor watch (2026-09-23 late midday): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (eighth
