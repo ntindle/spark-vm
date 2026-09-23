@@ -43,7 +43,7 @@ This changelog only works if entries land with the change, not after it:
   ephemeral NVMe by default (32 GB only on deprecated runtimes), closing
   C32; Vercel Drives public beta completes with real pricing (storage,
   reads, writes, caps, concurrency); adjacent investor color on Firecrawl's
-  $75M Series B. (PR TBD)
+  $75M Series B. (#279)
 - The excluded-host link re-sweep now covers all eight bot-blocked hosts:
   a live-browser sweep hand-verified the five later-excluded hosts (all 11
   pages load; 10/11 citations match), and the ritual's enumeration now
