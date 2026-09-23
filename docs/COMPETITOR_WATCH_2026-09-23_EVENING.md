@@ -12,10 +12,16 @@ this run (link inline). **VENDOR-ATTESTED** = confirmed against the
 vendor's own *served infrastructure* (fetched artifact/installer/API
 response) rather than a vendor doc-page assertion — a stricter
 claim than VERIFIED, used only when we fetched the thing itself.
-**THIRD-PARTY** = reported by press/third-party sources.
+**THIRD-PARTY** = reported by press/third-party sources, including
+vendor-announcement text read on a syndicated copy (e.g. a Business
+Wire release) rather than the vendor's own page.
+**snippet-only** = a THIRD-PARTY sub-state: seen only via search
+snippet or aggregator digest this run, not fetched and read — no
+stronger claim than its source's blurb.
 **INFERRED** = my characterization, labeled as such.
-**UNVERIFIED** = a page could not be fetched this run (never reported
-as NO-CHANGE).
+**UNVERIFIABLE** = no public source exists to check against.
+**UNVERIFIED** = a public page exists but could not be fetched this
+run (never reported as NO-CHANGE).
 
 ## 1. The tracked set — fully quiet (8/8 NO-CHANGE, all VERIFIED)
 
@@ -82,8 +88,9 @@ no new release this window.
 ### 3a. DigitalOcean Managed Agents public preview (announced 2026-09-22) — THIRD-PARTY vendor-announcement color
 
 Fresh in-window **THIRD-PARTY** detail (DigitalOcean's own
-announcement, syndicated via Business Wire, read as a syndicated copy —
-not vendor-fetched):
+announcement, syndicated via Business Wire — read in full from the
+syndicated copy ~07:45 CDT; the same release text is what vendor-owned
+channels carry):
 https://www.businesswire.com/news/home/20260922295615/en/DigitalOcean-Launches-Managed-Agents-Bringing-Agent-Execution-Tool-Access-and-Inference-Together-on-One-Cloud
 
 - Per-session architecture: "Every Managed Agents session runs in its
@@ -91,24 +98,33 @@ https://www.businesswire.com/news/home/20260922295615/en/DigitalOcean-Launches-M
   pause/resume/checkpoint/fork; bring-your-own harness (Claude Code,
   Codex CLI, OpenCode, Hermes, LangGraph, custom OCI images); governed
   tool access via Action Gateway (16,000+ tools, credentials brokered at
-  execution time); Serverless Inference across 75+ models.
-- Pricing detail via **THIRD-PARTY** summary
-  (https://subagentic.ai/posts/digitalocean-managed-agents-preview/):
-  "$0.044 per vCPU-hour and $0.0095 per GB-hour", CPU billed by actual
-  consumption per second; DigitalOcean's own social copy
-  (**THIRD-PARTY**, vendor social, ~17h old) illustrates: "An hour of
-  agent work that bills $0.126 fully allocated costs about $0.0310 with
-  us for a typical agent run (25% active). While the agent waits, you pay
-  zero." New DigitalOcean users receive a $5 credit.
+  execution time); Serverless Inference across 75+ models. The release
+  claims resume-from-pause in **305 ms** ("46% faster than other
+  leading offerings") — vendor-claimed, not an independent benchmark.
+- Pricing detail from the release's own "Active CPU billing" section:
+  "CPU is billed per second of actual use at **$0.044 per vCPU-hour**
+  and memory at **$0.0095 per GB-hour**, with snapshots at **$0.005 per
+  GiB-month**"; auto-pause stops both CPU and memory charges while
+  preserving state. DigitalOcean's own social copy (~17h old) restates
+  the pitch: "An hour of agent work that bills $0.126 fully allocated
+  costs about $0.0310 with us for a typical agent run (25% active).
+  While the agent waits, you pay zero." New DigitalOcean users receive
+  a $5 credit. **THIRD-PARTY** (vendor-announcement text read on a
+  syndicated copy, not the vendor's own page).
 - **INFERRED assessment:** this is per-session pause/resume agent
   compute with active-CPU billing — adjacent to spark-vm's lane, not the
-  same product. DigitalOcean positions itself explicitly as the
-  "AI-native cloud" versus the provisioned VM: the press framing is
-  "no more provisioning VMs", i.e. anti-always-on as a value
-  proposition. It is competitive pressure on hosted agent-infrastructure
-  *pricing*, not an always-on persistent-machine announcement. Filed as
-  lane color against C26 (DO watch) — not a corpus entry (vendor-facts
-  third-party-carried, and it does not shift spark-vm's positioning).
+  same product. The release frames itself explicitly against the
+  provisioned VM: "Customers rented a virtual machine and assembled
+  everything else around it" (the first-generation cloud), and argues
+  agent environments "must start and resume in milliseconds, not the
+  minutes a VM takes" — positioning that treats the VM as the thing to
+  retire (INFERRED anti-always-on framing). It is competitive pressure
+  on hosted agent-infrastructure *pricing*, not an always-on
+  persistent-machine announcement. Filed as lane color against C26 (DO
+  watch) — not a corpus entry (vendor-facts carried third-party, and it
+  does not shift spark-vm's positioning).
+- Ecosystem color: OpenHands, Qencode, and Amplitude are building on it
+  (per the release) — THIRD-PARTY.
 - OpenHands, Qencode, Amplitude are building on it (per the release) —
   third-party ecosystem color.
 
