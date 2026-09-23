@@ -45,16 +45,20 @@ def check(s, what):
     # Canonical contract shared with the `cred` CLI and cred-ui (#150):
     # credential/entry names are [A-Za-z0-9_-], 1-64 chars.
     if not re.match(r"^[A-Za-z0-9_-]{1,64}$", s or ""):
-        fail("invalid %s %r" % (what, s))
+        fail("invalid %s %r (use only [A-Za-z0-9_-], max 64 chars)" % (what, s))
+
+HOST_MAX_LEN = 253
+HOST_LABEL_MAX_LEN = 63
 
 def check_host(h):
     # Canonical contract shared with the `cred` CLI's check_host() and
     # cred-ui's host_ok() (#150): dotted-hostname shape, total length
-    # <= 253, each dot-separated label <= 63 chars.
+    # <= HOST_MAX_LEN, each dot-separated label <= HOST_LABEL_MAX_LEN.
     lowered = (h or "").lower()
-    if (len(lowered) > 253
+    if (len(lowered) > HOST_MAX_LEN
             or not re.match(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$", lowered)
-            or any(len(label) > 63 for label in lowered.lstrip(".").split("."))):
+            or any(len(label) > HOST_LABEL_MAX_LEN
+                   for label in lowered.lstrip(".").split("."))):
         fail("invalid host %r" % (h,))
     return lowered
 

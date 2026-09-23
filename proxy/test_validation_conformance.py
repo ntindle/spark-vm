@@ -32,6 +32,13 @@ dict form {"url_path_segment": <name>}, which the swap addon honors
 (area == "path", target ignored) but neither the CLI nor cred-ui can
 produce. It is outside the shared user-facing corpus by construction.
 
+Second known boundary: at the raw-function level, ("bearer_header", "")
+diverges — cred-ui's placement_json treats "" as absent (accepts), while
+the CLI ("bearer_header:" spec) and the writer ({"bearer_header": ""})
+reject. End-to-end this is unreachable: the UI serializes bare kinds
+without an arg (and clears the arg field when a bare kind is selected),
+so the writer never sees the divergent form.
+
 Non-string inputs are out of scope for the corpus (cred-ui's host_ok
 fail-closes on them; the CLI/writer assume strings — #118 class).
 

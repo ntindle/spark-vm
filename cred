@@ -63,7 +63,8 @@ class CredentialNotFound(CredentialError):
 def check_name(name):
     if not NAME_RE.match(name or ""):
         raise CredentialError(
-            "invalid credential name %r \u2014 use only [A-Za-z0-9_-]" % (name,)
+            "invalid credential name %r \u2014 use only [A-Za-z0-9_-], max 64 chars"
+            % (name,)
         )
     return name
 

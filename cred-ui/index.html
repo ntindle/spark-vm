@@ -98,7 +98,12 @@ const placementSel = $('f-placement'), argWrap = $('arg-wrap');
 
 function syncArg() {
   const v = placementSel.value;
-  argWrap.classList.toggle('hidden', v === 'bearer_header' || v === 'url_path_segment');
+  const bare = v === 'bearer_header' || v === 'url_path_segment';
+  argWrap.classList.toggle('hidden', bare);
+  // A stale arg value must not ride along with a bare kind: placement_json
+  // rejects non-empty args for bare kinds loudly, so clear the field here to
+  // keep that rejection meaningful (hand-built requests only).
+  if (bare) $('f-arg').value = '';
   $('f-arg-label').textContent = v === 'custom_header' ? 'Header name' : 'Parameter name';
   $('f-arg').placeholder = v === 'custom_header' ? 'X-Api-Key' : 'api_key';
 }
