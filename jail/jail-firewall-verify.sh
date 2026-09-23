@@ -6,7 +6,11 @@
 # service. The checked invariant is the enforcement rules themselves, not
 # the chain shells: all three chains are `policy accept`, so an emptied
 # chain (e.g. `nft flush chain inet jail forward`) is open egress — the
-# watchdog pins the drop-rule markers and the proxy DNAT rule.
+# watchdog pins the drop-rule markers and the proxy DNAT rule — and pins the
+# allow head too: every accept/dnat verdict in the live table must be one
+# of the expected narrow rules, because with policy-accept chains a WIDENED
+# ruleset (an added broad accept above the drops) voids the isolation
+# exactly like a deleted drop, and marker presence alone cannot see it.
 #
 # On confirmed damage: stop the jail FIRST (a table re-apply does not flush
 # conntrack, so hole-era flows would survive repair via the
@@ -32,7 +36,47 @@ healthy() {
     printf '%s' "$rules" | grep -q 'jail-fwd-drop' \
     && printf '%s' "$rules" | grep -q 'jail-fwd-indrop' \
     && printf '%s' "$rules" | grep -q 'jail-input-drop' \
-    && printf '%s' "$rules" | grep -q 'dnat to 127.0.0.1'
+    && printf '%s' "$rules" | grep -q 'dnat to 127.0.0.1' \
+    && allow_head_intact "$rules"
+}
+
+# Allow-head pin: with policy-accept chains, an ADDED broad accept (or an
+# added/altered DNAT) above the drop rules voids the isolation exactly like
+# a deleted drop — but the marker presence checks above cannot see a
+# WIDENED ruleset. Every verdict-bearing rule in the live table must
+# therefore be one of the expected lines: the two DNATs and the four narrow
+# accepts. Anything else fails closed. (The build-time twin of this pin is
+# test_build_smoke.py::TestIsolation::test_nftables_accept_head_is_proxy_and_ssh_only.)
+allow_head_intact() {
+    local rules="$1" line t
+    while IFS= read -r line; do
+        t="${line#"${line%%[![:space:]]*}"}"   # ltrim
+        case "$t" in
+            chain*|type*|table*|"}"*|"") continue ;;
+        esac
+        # DNAT verdicts: the proxy DNAT must end at 127.0.0.1 exactly —
+        # a port-suffixed (dnat to 127.0.0.1:9999) or re-addressed
+        # (dnat to 127.0.0.10) variant still contains the marker
+        # substring, so only the end-anchored form passes.
+        case "$t" in
+            *"dnat to 127.0.0.1") ;;
+            *"dnat ip to 10.99.0.2:22") ;;
+            *dnat*) return 1 ;;
+        esac
+        # Accept verdicts: each must contain one of the narrow allow
+        # fingerprints (full match expression included, so a broader rule
+        # cannot smuggle the fingerprint along). Trailing statements after
+        # the terminal accept verdict cannot widen, so these stay
+        # unanchored; the DNAT forms above stay end-anchored where
+        # trailing text changes the meaning.
+        case "$t" in
+            *"tcp dport { 18080, 18081 } accept"*|\
+            *"ct state established,related accept"*|\
+            *"tcp dport 22 ct state new,established accept"*) ;;
+            *accept*) return 1 ;;
+        esac
+    done <<< "$rules"
+    return 0
 }
 
 rules="$(list_rules)" || rules=""

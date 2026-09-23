@@ -482,6 +482,27 @@ class TestFirewallWatchdogStatic:
         # damage avoids fail-closed false positives.
         assert "sleep 10" in verify_src
 
+    def test_allow_head_pin(self, verify_src):
+        # Arch finding (2026-09-23): the marker presence checks cannot see
+        # a WIDENED ruleset — with policy-accept chains, an added broad
+        # accept above the drops voids the isolation exactly like a
+        # deleted drop. healthy() must also pin the allow head: every
+        # accept/dnat verdict in the live table is one of the expected
+        # narrow rules.
+        assert "allow_head_intact" in verify_src
+        assert '&& allow_head_intact "$rules"' in verify_src
+        for fp in ("tcp dport { 18080, 18081 } accept",
+                   "ct state established,related accept",
+                   "tcp dport 22 ct state new,established accept",
+                   '*"dnat to 127.0.0.1"',
+                   '*"dnat ip to 10.99.0.2:22"'):
+            assert fp in verify_src, "allow-head fingerprint missing: %s" % fp
+        # The proxy-DNAT pin must be end-anchored: the old substring grep
+        # 'dnat to 127.0.0.1' also matches a rogue 'dnat to 127.0.0.1:9999'
+        # or 'dnat to 127.0.0.10' variant.
+        assert "*dnat*) return 1" in verify_src
+        assert "*accept*) return 1" in verify_src
+
     def test_service_runs_the_script(self, active):
         m = re.search(
             r"tee /etc/systemd/system/jail-firewall-verify\.service"
@@ -559,6 +580,32 @@ table inet jail {
 \t}
 }
 """
+
+# The 2026-09-23 arch case: a WIDENED ruleset — every drop marker and the
+# proxy DNAT are present, but an injected broad accept sits above the
+# drops. Marker presence alone reported healthy on this; the allow-head
+# pin must not.
+WIDENED_ACCEPT_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" accept\n'
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+)
+
+# The 2026-09-23 arch case: a rogue DNAT variant — the proxy DNAT's target
+# gains a port. The old substring grep 'dnat to 127.0.0.1' still matched
+# this; the end-anchored pin must not.
+ROGUE_DNAT_RULESET = HEALTHY_RULESET.replace(
+    'dnat to 127.0.0.1\n',
+    'dnat to 127.0.0.1:9999\n',
+)
+
+# A benign duplicate of a legit narrow rule: the pin must not false-positive
+# on rule duplication (e.g. a re-applied table that kept a stale copy).
+DUPLICATE_ACCEPT_RULESET = HEALTHY_RULESET.replace(
+    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept\n',
+    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept\n'
+    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept\n',
+)
 
 
 @pytest.fixture()
@@ -683,3 +730,38 @@ exit 0
         assert "systemctl stop systemd-nspawn@jail" in calls
         assert "destroy table" not in calls
         assert "CRITICAL" in calls
+
+    def test_widened_accept_triggers_fail_closed(self, watchdog_stubs,
+                                                 tmp_path, monkeypatch):
+        # The 2026-09-23 arch case: every marker is present but an
+        # injected broad accept sits above the drops — policy-accept
+        # chains make this open egress. The old presence-only check
+        # reported healthy; the allow-head pin must fail closed.
+        r = _run_watchdog(WIDENED_ACCEPT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert calls.index("systemctl stop systemd-nspawn@jail") < \
+            calls.index("nft destroy table")
+        assert "ALERT" in calls
+
+    def test_rogue_dnat_variant_triggers_fail_closed(self, watchdog_stubs,
+                                                     tmp_path, monkeypatch):
+        # The old substring grep 'dnat to 127.0.0.1' matched the rogue
+        # 'dnat to 127.0.0.1:9999' variant; the end-anchored pin must not.
+        r = _run_watchdog(ROGUE_DNAT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_benign_duplicate_accept_stays_healthy(self, watchdog_stubs,
+                                                   tmp_path, monkeypatch):
+        # A duplicated legit narrow rule is not damage: no false positive.
+        r = _run_watchdog(DUPLICATE_ACCEPT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 0
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop" not in calls
+        assert "destroy table" not in calls

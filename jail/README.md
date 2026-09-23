@@ -117,7 +117,10 @@ states the construction, not a static pin.
   watchdog pins the drop-rule markers (`jail-fwd-drop:`,
   `jail-fwd-indrop:`, `jail-input-drop:`) and the proxy DNAT rule — an
   emptied chain (`nft flush chain`) is detected just like a deleted
-  table. On confirmed damage (a 10-second re-check filters the
+  table — and it pins the allow head: every `accept`/`dnat` verdict in
+  the live table must be one of the expected narrow rules, so a widened
+  ruleset (an added broad accept above the drops) fails closed the same
+  as a missing one. On confirmed damage (a 10-second re-check filters the
   oneshot unit's own transient destroy-then-apply window), the watchdog
   is fail-closed: it **stops the jail first**, then re-applies
   `/etc/nftables-jail.conf` (destroy-then-apply, scoped to the jail
