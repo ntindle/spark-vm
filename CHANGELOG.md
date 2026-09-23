@@ -52,8 +52,12 @@ This changelog only works if entries land with the change, not after it:
   DO launch is still absent. (#270)
 - Golden-image round-trip gate operator procedure (spec §6.7): the
   file → answer → grant-mint → verify sequence with the filing-count
-  determinism check and mandatory fixture teardown pre-publish, wired to
-  the existing gate-fixture tooling. (#271)
+  determinism check and mandatory fixture teardown pre-publish. The
+  round trip exercises the proxy's real filing path (a gate-only
+  credential bound with narrow static limits files one approval through
+  the main proxy; the operator answers through confirmd; the grant mints
+  through the grant writer; the re-run proves the swap took effect),
+  wired to the existing gate-fixture tooling. (#271)
 - Secrets-posture corpus gains DigitalOcean Managed Agents as the fifth
   convergent data point (their launch release claims a separate secrets
   service with "credentials brokered at execution time" that "never reach
