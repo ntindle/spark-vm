@@ -64,6 +64,19 @@ This changelog only works if entries land with the change, not after it:
   new-to-watch C36 — Google Agent Substrate on GKE (~Sep 17,
   third-party-only); no new in-lane launches in the 48h window;
   Automaid, Andon Pion, Huawei baselines hold. (#311)
+- §3a smoke-check provision assets (G6): the provision-time injector now
+  installs the public `smoke-test` dummy credential (spec's pass phrase,
+  never a secret), appends the operator's `smoke.<domain>` echo host to
+  the main proxy's `hosts.allow` (newline-safe, proxy-matching semantics)
+  AND to the proxy's smoke-only scoping list (`SWAP_SMOKE_HOSTS_FILE`,
+  default `/home/swapd/smoke-hosts`): the echo host swaps ONLY the
+  `smoke-test` credential (refusal `smoke-host-restricted` is audited),
+  closing the chosen-plaintext read oracle. Also installs a
+  visudo-validated scoped sudoers fragment whose granted argv is pinned
+  to `cred-store-set smoke-test` for the tenant agent user, and binds
+  `smoke-test` to the echo host in the main registry (the proxy's grant
+  scoping refuses unbound credentials, so the §3a swap needs the
+  binding). (#313)
 - Competitor watch (2026-09-23 early afternoon): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (ninth

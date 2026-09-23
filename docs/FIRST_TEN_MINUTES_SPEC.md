@@ -396,6 +396,21 @@ From `docs/POSITIONING.md` anti-claims plus the operator decisions
   installed at provision time (never committed), and the scoped
   sudoers extension for the tenant agent user. Small build; file it
   for the provisioning track (H4) or a `distribution` turn.
+  **SHIPPED 2026-09-23 (G6, distribution turn):** the provision-time
+  injector (`harness/inject-provision-state.sh`, step 8) installs all
+  four — the public `smoke-test` dummy via the narrow store writer
+  (the injector's one sanctioned value-writing step), the
+  `INJECT_SMOKE_HOST` entry in the main proxy's `hosts.allow`
+  (idempotent, proxy-matching semantics, newline-safe) AND in the
+  proxy's smoke-only scoping list (`proxy/swap_addon.py`
+  `_host_is_smoke_only`, `SWAP_SMOKE_HOSTS_FILE`: the echo host swaps
+  ONLY the `smoke-test` credential, closing the chosen-plaintext read
+  oracle), a visudo-validated scoped sudoers fragment for the tenant
+  agent user (argv pinned to `cred-store-set smoke-test`), and the
+  `smoke-test` → echo-host binding in the main registry (the proxy's
+  grant scoping refuses unbound credentials, so the §3a swap needs the
+  binding). The echo *server* itself stays operator-run, per this
+  spec.
 - **Client-visible pending signal:** §6.6's machine-readable
   pending/terminal-decision signal — SHIPPED (proxy/confirmd track,
   #133): `docs/APPROVAL_CLIENT_SIGNAL.md` specifies the protocol the
