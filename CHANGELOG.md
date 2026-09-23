@@ -45,7 +45,7 @@ This changelog only works if entries land with the change, not after it:
   pricing (C26 open); adjacent re-checks — Automaid still THIRD-PARTY
   only, Andon Pion no new facts, Huawei Open Agentic Cloud still
   THIRD-PARTY; fourth consecutive pass with an explicit in-lane
-  no-launch verdict (afternoon, evening, late evening, night). (#TBD)
+  no-launch verdict (afternoon, evening, late evening, night). (#291)
 - Competitor watch (2026-09-23 late evening): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change; Vercel Drives
   still public beta with no GA move (fourth consecutive no-change pass,
