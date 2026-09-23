@@ -41,7 +41,8 @@ This changelog only works if entries land with the change, not after it:
   pass (no full tracked-set re-read — 8/8 last vendor-verified ~15:12 CDT,
   no change). **C36 VENDOR-CONFIRMED** — Google's own Cloud-blog
   announcement read live corroborates all nine filed Agent Substrate-on-GKE
-  claims verbatim (<500 ms resume, 500+/sec suspend/resume activations,
+  claims verbatim — five verbatim, the rest confirmed as filed or
+  stronger (<500 ms resume, 500+/sec suspend/resume activations,
   1,000+ dormant agents/host, Cloud Hypervisor-or-gVisor choice, integrated
   gateway, non-production for all GKE customers with production GA via
   allowlist, Nous Research/Hermes early design partner with named quote);

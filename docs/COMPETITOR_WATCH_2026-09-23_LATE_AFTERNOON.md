@@ -50,7 +50,7 @@ corroborated on Google's own page:
 - **Storage story:** optional Filestore agent volumes (NFS, RWX, POSIX file
   locking) attach/detach in milliseconds — corroborates the itbrief.au
   Filestore-agent-volumes launch (~Sep 19), which names Agent Substrate as a
-  supported platform.
+  supported platform (THIRD-PARTY cross-filing, not vendor confirmation).
 - **Price-performance claim:** native Axion support, "up to 30% better
   price-performance for sandbox workloads compared to competitive cloud
   offerings."

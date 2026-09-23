@@ -1197,7 +1197,11 @@ No new C-number: the filing existed, only the provenance layer moved. The
 rumored "Managed Agents" unveil at DevDay 2026 (Sep 29) remains
 press/rumor with no OpenAI vendor confirmation; AWS Bedrock "Managed
 Agents, powered by OpenAI" is an April 28 limited preview — separate and
-older.
+older. Competitive read for spark-vm: the hyperscaler sandbox is not yet
+purchasable for production (non-production for all GKE customers,
+production GA via allowlist) — potential pressure, not live production
+competition; the zero-idle economics and the K8s-machines /
+data-plane-activations split are the shapes to watch.
 
 **C36 new — Google Agent Substrate on GKE (corpus-adjacent new-to-watch).**
 Previously unfiled, ~Sep 17: Google's open-source agent-sandbox runtime
