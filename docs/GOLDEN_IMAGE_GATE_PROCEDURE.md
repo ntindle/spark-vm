@@ -198,7 +198,20 @@ task's out-of-scope request takes.
 4. **Clear stale gate filings.** If `/home/swapd/approvals/pending/`
    holds any `gate-test` item from an aborted run, resolve or remove it
    first — a stale item coalesces with the new filing and the count
-   check (step 3.2) cannot distinguish them.
+   check (step 3.2) cannot distinguish them:
+
+   ```bash
+   rm /home/swapd/approvals/pending/<stale-aid>.json   # as root
+   ```
+
+   **Rate-limit wait:** the proxy files at most one approval per
+   credential per 60 seconds (finding 58; coalesced by
+   credential/host/method). If you just cleared a stale `gate-test`
+   filing — or if any `gate-test` filing attempt happened in the last
+   60 seconds — wait until 60 seconds have passed since that filing
+   before running step 3.1, or no new filing will appear and the
+   0-filings verdict in step 3.2 will misdiagnose the rate limiter as a
+   filing-path defect.
 
 ## Step 3 — the round trip (file → answer → grant mints → verify)
 
@@ -244,6 +257,7 @@ echo "$count"
 - **Exactly 1 filing** — pass. Record its id:
 
   ```bash
+  AID=
   for f in $(ls -t /home/swapd/approvals/pending/*.json 2>/dev/null); do
     AID=$(jq -r 'select(.credential=="gate-test") | .id' "$f")
     [ -n "$AID" ] && break
@@ -254,10 +268,15 @@ echo "$count"
 - **0 filings** — operator code `policy-misfire`. Gate fails. The task
   took the gated action (the curl reached the proxy) and the proxy
   filed nothing: the filing path is defective. File a proxy/confirmd
-  defect; do not waive it. (`no-gated-action` is reserved for a task
-  variant that never sent the request at all — with this canonical
-  task it cannot occur; if the curl never ran, that is an environment
-  failure, step 3.1.)
+  defect; do not waive it. **Exception:** if the 3.1 run happened
+  within 60 seconds of a previous `gate-test` filing (including one
+  just cleared in step 2.4), the rate limiter — not the filing path —
+  suppressed it: wait out the 60-second window and re-run 3.1. Only
+  route to `policy-misfire` after a filing attempt outside the
+  rate-limit window produced nothing. (`no-gated-action` is reserved
+  for a task variant that never sent the request at all — with this
+  canonical task it cannot occur; if the curl never ran, that is an
+  environment failure, step 3.1.)
 - **2+ filings** — operator code `policy-misfire`. Gate fails. Either
   the task's request pattern double-files or the filing/coalescing path
   is defective. File a proxy/confirmd defect; do not waive it: the gate
@@ -358,11 +377,18 @@ safety net firing, then fix the image; never override it.
    proxy's own `inference-ssrf.allow`
    (`/home/swapd/inference-ssrf.allow`). There is **no narrow path for
    this by design** — production sudoers grants only `tee -a`
-   (append-only) on the allow files. Edit both files as root (this
-   procedure's Prerequisites grant root on the image-build environment;
-   the narrow writers are for tenant-scope operations, not for undoing
-   the fixture). The injector cannot do this step for you — see the
-   ownership split above.
+   (append-only) on the allow files. Delete the gate-added lines as root
+   (this procedure's Prerequisites grant root on the image-build
+   environment; the narrow writers are for tenant-scope operations, not
+   for undoing the fixture):
+
+   ```bash
+   sed -i '/^127\.0\.0\.1$/d' /home/swapd/inference-hosts.allow
+   sed -i '/^127\.0\.0\.1$/d' /home/swapd/inference-ssrf.allow
+   ```
+
+   The injector cannot do this step for you — see the ownership split
+   above. The verification commands below confirm the removal.
 
 3. Delete the inference dummy credential file itself
    (`/home/swapd/inference-secrets/llm-api`) as root — there is no
@@ -381,9 +407,20 @@ safety net firing, then fix the image; never override it.
    sudo -u swapd cred-store-delete gate-test
    ```
 
+   (`remove` errors with "credential not registered" if the entry is
+   already gone — that is fine, proceed. `cred-store-delete` is `rm -f`
+   and idempotent.)
+
 5. Remove the `127.0.0.1` gate lines from the main proxy's
    `/home/swapd/hosts.allow` **and** `/home/swapd/ssrf.allow` as root
-   (no narrow path exists; same ownership split as above).
+   (no narrow path exists; same ownership split as above):
+
+   ```bash
+   sed -i '/^127\.0\.0\.1$/d' /home/swapd/hosts.allow
+   sed -i '/^127\.0\.0\.1$/d' /home/swapd/ssrf.allow
+   ```
+
+   The verification commands below confirm the removal.
 
 6. Kill the round-trip echo fixture (gate-scratch, never a service) and
    remove its log:
