@@ -45,7 +45,7 @@ This changelog only works if entries land with the change, not after it:
   beta (up to 16 TiB, usage-based) — a separate feature from the
   still-unverified default-storage claim; third-party follow-up analysis
   of DigitalOcean's Managed Agents launch adds no new mechanism detail.
-  (PR TBD)
+  (#275)
 - Design for the hosted tenant status endpoint: the `GET /tenant/status`
   contract the first-ten-minutes spec, signup flow, and signup UI all
   assume — the 12 machine codes with transition rules, the `approvals_url`
