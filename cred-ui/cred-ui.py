@@ -80,15 +80,27 @@ CSRF_HEADER = "X-Cred-UI"
 CSRF_VALUE = "1"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Legacy-tolerant name/host checks (charset/shape only, no caps) for
+# management verbs: credentials created before the #150 caps must stay
+# manageable. Creation (api_set) always uses the canonical NAME_RE /
+# host_ok. Mirrors proxy/cred-registry-set's check_legacy /
+# check_host_legacy.
+NAME_LEGACY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_HOST_SHAPE_RE = re.compile(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$")
+
+
+def host_ok_legacy(h):
+    return (isinstance(h, str) and bool(h)
+            and bool(_HOST_SHAPE_RE.match(h)))
 ENTRY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-# The narrow writer's check_host() (proxy/cred-registry-set) accepts exactly
-# ^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$ -- no underscores, no ports. The swap
-# addon strips ports when matching request hosts, so a port in the registry
-# would be dead config anyway. The UI must never accept what the writer
-# rejects: it previously did (ports, underscores), producing a confusing
-# post-store "add-host failed" after the secret was already written.
-# Labels are capped at 63 chars (DNS) and the whole name at 253; the writer
-# is looser, so this is a strict subset of what it accepts.
+# Canonical host contract shared with the `cred` CLI's check_host() and
+# proxy/cred-registry-set's check_host() (#150): dotted-hostname shape
+# ^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$ -- no underscores, no ports -- with
+# labels capped at 63 chars (DNS) and the whole name at 253. The swap addon
+# strips ports when matching request hosts, so a port in the registry would
+# be dead config anyway. The UI must never accept what the writer rejects:
+# it previously did (ports, underscores), producing a confusing post-store
+# "add-host failed" after the secret was already written.
 _HOST_LABEL = r"[A-Za-z0-9-]{1,63}"
 _HOST_RE = re.compile(r"^\.?%s(\.%s)*$" % (_HOST_LABEL, _HOST_LABEL))
 
@@ -99,7 +111,7 @@ def host_ok(h):
     # escapes the handler and drops the connection.
     return (isinstance(h, str) and bool(h) and len(h) <= 253
             and bool(_HOST_RE.match(h)))
-HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+HEADER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 PARAM_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 # -n everywhere: the sudoers entries are NOPASSWD, and a request thread
@@ -159,10 +171,15 @@ def snapshot():
 
 
 def placement_json(kind, arg):
-    if kind == "bearer_header":
-        return json.dumps("bearer_header")
-    if kind == "url_path_segment":
-        return json.dumps("url_path_segment")
+    # The bare kinds take no argument: the UI hides the arg field for them,
+    # so a non-empty arg here is a hand-built request, not a UI flow — reject
+    # it loudly rather than silently dropping the user's input. (Canonical
+    # placement contract shared with the `cred` CLI and
+    # proxy/cred-registry-set, #150.)
+    if kind in ("bearer_header", "url_path_segment"):
+        if arg:
+            raise ValueError("placement takes no argument")
+        return json.dumps(kind)
     if kind == "custom_header":
         if not HEADER_RE.match(arg or ""):
             raise ValueError("bad header name")
@@ -305,7 +322,8 @@ def api_set(data):
 
 def api_delete(data):
     name = data.get("name", "")
-    if not NAME_RE.match(name):
+    # Management path: legacy names stay deletable.
+    if not NAME_LEGACY_RE.match(name):
         raise ValueError("bad credential name")
     # Remove the stored value first (the wrapper ignores "no such file" --
     # the registry may exist alone). A real failure must surface: deleting
@@ -324,9 +342,12 @@ def api_delete(data):
 def api_host(data, add):
     name = data.get("name", "")
     host = data.get("host", "")
-    if not NAME_RE.match(name):
+    # Management path: legacy names stay manageable. New bindings are
+    # always canonical; removing a legacy over-long binding stays possible.
+    if not NAME_LEGACY_RE.match(name):
         raise ValueError("bad credential name")
-    if not host_ok(host):
+    host_okay = host_ok(host) if add else host_ok_legacy(host)
+    if not host_okay:
         raise ValueError("bad host (use a hostname: letters, digits, "
                          "hyphens, dots; no underscores, no ports)")
     rc, _, err = run(REGISTRY_SET + ["add-host" if add else "remove-host", name, host])

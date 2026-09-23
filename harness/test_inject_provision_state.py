@@ -151,13 +151,15 @@ exit 1
 
 # Fake registry writer: mirrors proxy/cred-registry-set's JSON schema
 # and semantics for the verbs the injector uses. Like the real writer,
-# the host argument is validated by check_host (same regex) then
-# lowercased, and remove-host only removes exact (lowercased) matches --
-# so a non-lowercase variant in the registry (only reachable by
-# hand-editing the JSON as root, since add-host lowercases) survives
-# remove-host and must fail the injector closed, while a trailing-dot
-# variant makes the writer itself fail. remove-host is idempotent like
-# the real one.
+# the host argument is validated by check_host (the canonical #150
+# contract: shape + 253/63 length caps) then lowercased on add-host,
+# while remove-host uses check_host_legacy (shape only) so over-long
+# legacy bindings stay removable. Remove-host only removes exact
+# (lowercased) matches -- so a non-lowercase variant in the registry
+# (only reachable by hand-editing the JSON as root, since add-host
+# lowercases) survives remove-host and must fail the injector closed,
+# while a trailing-dot variant makes the writer itself fail.
+# Remove-host is idempotent like the real one.
 FAKE_REGISTRY_WRITER = """#!/usr/bin/env python3
 import json, os, re, sys
 reg_path = os.environ["FAKE_REGISTRY_FILE"]
@@ -166,11 +168,34 @@ if os.path.exists(reg_path):
     with open(reg_path, encoding="utf-8") as f:
         reg = json.load(f)
 def check_host(h):
-    # Mirror of proxy/cred-registry-set::check_host.
-    if not re.match(r"^\\.?[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$", h or ""):
+    # Mirror of proxy/cred-registry-set::check_host (canonical #150
+    # contract: dotted-hostname shape, total length <= 253, each
+    # dot-separated label <= 63 chars). Used by add-host: new bindings
+    # must be canonical.
+    lowered = (h or "").lower()
+    if (len(lowered) > 253
+            or not re.match(r"^\\.?[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$", lowered)
+            or any(len(label) > 63
+                   for label in lowered.lstrip(".").split("."))):
         sys.stderr.write("invalid host %r\\n" % (h,))
         sys.exit(1)
-    return h.lower()
+    return lowered
+def check_name(s):
+    # Mirror of proxy/cred-registry-set::check (canonical #150 name
+    # contract: [A-Za-z0-9_-], 1-64 chars). add-host on an ABSENT name is
+    # creation, so it enforces the canonical contract like the real writer.
+    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", s or ""):
+        sys.stderr.write("invalid name %r\\n" % (s,))
+        sys.exit(1)
+    return s
+def check_host_legacy(h):
+    # Mirror of proxy/cred-registry-set::check_host_legacy: shape only.
+    # Used by remove-host so over-long legacy bindings stay removable.
+    lowered = (h or "").lower()
+    if not re.match(r"^\\.?[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*$", lowered):
+        sys.stderr.write("invalid host %r\\n" % (h,))
+        sys.exit(1)
+    return lowered
 args = sys.argv[1:]
 if args[0] == "set":
     _, name, entry, pjson = args
@@ -179,13 +204,24 @@ if args[0] == "set":
 elif args[0] == "add-host":
     _, name, host = args
     host = check_host(host)
-    hosts = reg.setdefault(name, {}).setdefault("allowed_hosts", [])
+    # Mirror of the real writer's creation gate: add-host on an absent
+    # name is creation, so the canonical name contract applies.
+    entry = reg.get(name)
+    if entry is None:
+        check_name(name)
+        entry = reg.setdefault(name, {})
+    hosts = entry.setdefault("allowed_hosts", [])
     if host not in hosts:
         hosts.append(host)
 elif args[0] == "remove-host":
     _, name, host = args
-    host = check_host(host)
+    host = check_host_legacy(host)
     entry = reg.get(name)
+    if entry is None:
+        # Mirror the real writer's creation gate: remove-host on an
+        # absent name enforces the canonical contract (absent legacy
+        # names fail closed); absent canonical names are a no-op.
+        check_name(name)
     if isinstance(entry, dict):
         hosts = entry.get("allowed_hosts")
         if isinstance(hosts, list) and host in hosts:

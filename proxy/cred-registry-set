@@ -42,13 +42,49 @@ if not args or args[0] not in ACTIONS:
 action = args[0]
 
 def check(s, what):
+    # Canonical contract shared with the `cred` CLI and cred-ui (#150):
+    # credential/entry names are [A-Za-z0-9_-], 1-64 chars. This strict form
+    # gates CREATION (the `set` verb). Pure-management verbs use
+    # check_legacy/check_entry_legacy below so credentials created before
+    # the cap stay manageable without hand-editing the registry as root.
+    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", s or ""):
+        fail("invalid %s %r (use only [A-Za-z0-9_-], max 64 chars)" % (what, s))
+
+def check_legacy(s, what):
+    # Legacy-tolerant name check for management verbs (remove, add-host,
+    # remove-host, method/path limit verbs, set-scrub): charset-only, no
+    # length cap. It never authorizes CREATION: every verb that can create
+    # a registry entry calls the strict check(name, "name") first when the
+    # credential is absent (see below), and set-scrub refuses absent
+    # credentials outright. This script runs as `python3 - "$@"`, argv
+    # only, no shell — and entries keep the RESERVED_ENTRIES guard via
+    # check_entry_legacy (finding 34b).
     if not re.match(r"^[A-Za-z0-9_-]+$", s or ""):
-        fail("invalid %s %r" % (what, s))
+        fail("invalid %s %r (use only [A-Za-z0-9_-])" % (what, s))
+
+HOST_MAX_LEN = 253
+HOST_LABEL_MAX_LEN = 63
 
 def check_host(h):
-    if not re.match(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$", h or ""):
+    # Canonical contract shared with the `cred` CLI's check_host() and
+    # cred-ui's host_ok() (#150): dotted-hostname shape, total length
+    # <= HOST_MAX_LEN, each dot-separated label <= HOST_LABEL_MAX_LEN.
+    lowered = (h or "").lower()
+    if (len(lowered) > HOST_MAX_LEN
+            or not re.match(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$", lowered)
+            or any(len(label) > HOST_LABEL_MAX_LEN
+                   for label in lowered.lstrip(".").split("."))):
         fail("invalid host %r" % (h,))
-    return h.lower()
+    return lowered
+
+def check_host_legacy(h):
+    # Shape-only host check for remove-host: an over-long legacy host
+    # binding must stay removable. New bindings (add-host) always go
+    # through the canonical check_host above.
+    lowered = (h or "").lower()
+    if not re.match(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$", lowered):
+        fail("invalid host %r" % (h,))
+    return lowered
 
 reg_path = os.environ.get("CRED_REGISTRY_FILE",
                            "/home/swapd/credentials.json")
@@ -85,6 +121,15 @@ RESERVED_ENTRIES = ("allowed_hosts", "allowed_methods", "allowed_paths",
 
 def check_entry(s):
     check(s, "entry")
+    if s in RESERVED_ENTRIES:
+        fail("entry name %r is reserved" % (s,))
+
+def check_entry_legacy(s):
+    # Legacy-tolerant entry check for management verbs (remove, set-scrub):
+    # charset-only like check_legacy, but the RESERVED_ENTRIES guard stays —
+    # an entry named "allowed_hosts" would clobber the host binding
+    # (finding 34b), legacy or not.
+    check_legacy(s, "entry")
     if s in RESERVED_ENTRIES:
         fail("entry name %r is reserved" % (s,))
 
@@ -129,7 +174,7 @@ if action == "set":
             and len(placement) == 1
             and list(placement)[0] in ("custom_header", "query_param", "url_path_segment")
             and isinstance(list(placement.values())[0], str)
-            and re.match(r"^[A-Za-z0-9_.-]+$", list(placement.values())[0])
+            and re.match(r"^[A-Za-z0-9_.-]{1,64}$", list(placement.values())[0])
         )
     )
     if not ok:
@@ -141,12 +186,12 @@ elif action == "remove":
     if len(args) not in (2, 3):
         fail("usage: cred-registry-set remove <name> [entry]")
     name = args[1]
-    check(name, "name")
+    check_legacy(name, "name")
     if name not in reg:
         fail("credential '%s' not registered" % (name,))
     if len(args) == 3:
         entry = args[2]
-        check_entry(entry)
+        check_entry_legacy(entry)
         reg[name].pop(entry, None)
         if not reg[name]:
             del reg[name]
@@ -159,9 +204,19 @@ elif action in ("add-host", "remove-host"):
     if len(args) != 3:
         fail("usage: cred-registry-set %s <name> <host>" % action)
     name = args[1]
-    check(name, "name")
-    host = check_host(args[2])
-    entry = reg.setdefault(name, {})
+    check_legacy(name, "name")
+    # New bindings must satisfy the canonical contract; removing a legacy
+    # over-long binding must stay possible.
+    host = (check_host(args[2]) if action == "add-host"
+            else check_host_legacy(args[2]))
+    # Management verbs may touch legacy credentials, but creating a NEW
+    # credential always enforces the canonical contract (#150): add-host
+    # on an absent name must not mint an over-long credential through the
+    # legacy path.
+    entry = reg.get(name)
+    if entry is None:
+        check(name, "name")
+        entry = reg.setdefault(name, {})
     if not isinstance(entry, dict):
         fail("registry entry for '%s' is not an object" % (name,))
     hosts = entry.setdefault("allowed_hosts", [])
@@ -182,11 +237,16 @@ elif action in ("add-method", "remove-method"):
     if len(args) != 3:
         fail("usage: cred-registry-set %s <name> <METHOD>" % action)
     name, method = args[1], args[2]
-    check(name, "name")
+    check_legacy(name, "name")
     if not re.match(r"^[A-Za-z]+$", method or ""):
         fail("invalid method %r" % (method,))
     method = method.upper()
-    entry = reg.setdefault(name, {})
+    # Creating a NEW credential always enforces the canonical contract
+    # (#150) — see the add-host branch above.
+    entry = reg.get(name)
+    if entry is None:
+        check(name, "name")
+        entry = reg.setdefault(name, {})
     if not isinstance(entry, dict):
         fail("registry entry for '%s' is not an object" % (name,))
     methods = entry.setdefault("allowed_methods", [])
@@ -213,7 +273,7 @@ elif action == "clear-method-limit":
     if len(args) != 2:
         fail("usage: cred-registry-set clear-method-limit <name>")
     name = args[1]
-    check(name, "name")
+    check_legacy(name, "name")
     entry = reg.get(name)
     if not isinstance(entry, dict):
         fail("no such credential '%s'" % (name,))
@@ -227,11 +287,16 @@ elif action in ("add-path", "remove-path"):
     if len(args) != 3:
         fail("usage: cred-registry-set %s <name> <prefix>" % action)
     name, prefix = args[1], args[2]
-    check(name, "name")
+    check_legacy(name, "name")
     if not prefix.startswith("/") or re.search(r"\s", prefix):
         fail("invalid path prefix %r (must start with /, no whitespace)"
              % (prefix,))
-    entry = reg.setdefault(name, {})
+    # Creating a NEW credential always enforces the canonical contract
+    # (#150) — see the add-host branch above.
+    entry = reg.get(name)
+    if entry is None:
+        check(name, "name")
+        entry = reg.setdefault(name, {})
     if not isinstance(entry, dict):
         fail("registry entry for '%s' is not an object" % (name,))
     prefixes = entry.setdefault("allowed_paths", [])
@@ -258,7 +323,7 @@ elif action == "clear-path-limit":
     if len(args) != 2:
         fail("usage: cred-registry-set clear-path-limit <name>")
     name = args[1]
-    check(name, "name")
+    check_legacy(name, "name")
     entry = reg.get(name)
     if not isinstance(entry, dict):
         fail("no such credential '%s'" % (name,))
@@ -271,11 +336,18 @@ elif action == "set-scrub":
     if len(args) != 4 or args[3] not in ("true", "false"):
         fail("usage: cred-registry-set set-scrub <name> <entry> <true|false>")
     _, name, entry, flag = args
-    check(name, "name")
-    check_entry(entry)
-    entry_spec = reg.setdefault(name, {}).setdefault(entry, {})
+    check_legacy(name, "name")
+    check_entry_legacy(entry)
+    # set-scrub never creates: a scrub flag on a nonexistent credential or
+    # entry is meaningless, and creating one here used to mint a
+    # placement-less entry (the addon's "no declared placement → swaps
+    # anywhere" migration path at swap_addon.py:1050-1052).
+    spec = reg.get(name)
+    if not isinstance(spec, dict):
+        fail("no such credential '%s'" % (name,))
+    entry_spec = spec.get(entry)
     if not isinstance(entry_spec, dict):
-        fail("entry '%s' for '%s' is not an object" % (entry, name))
+        fail("no such entry '%s' for credential '%s'" % (entry, name))
     entry_spec["scrub"] = (flag == "true")
     save()
     print("set scrub=%s for '%s' entry '%s'" % (flag, name, entry))

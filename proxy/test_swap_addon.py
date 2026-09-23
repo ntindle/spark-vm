@@ -1025,18 +1025,36 @@ class SwapAddonTests(unittest.TestCase):
         flow.response = resp
         a.response(flow)
         self.assertIn(b"averylongsinglevaluetoken", resp.content)
-        # and the helper writes exactly that shape
+        # and the helper writes exactly that shape — on an EXISTING entry.
+        # set-scrub must not create registry entries: a placement-less entry
+        # ({"scrub": false} with no "placement") would put the credential on
+        # the addon's "no declared placement -> swaps anywhere" migration
+        # path, silently widening swap scope (#150 legacy-creation invariant).
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "cred-registry-set")
         with tempfile.TemporaryDirectory() as d:
             regfile = os.path.join(d, "credentials.json")
             env = dict(os.environ, CRED_REGISTRY_FILE=regfile)
             r = subprocess.run(
+                [script, "set", "web", "access_token", '"bearer_header"'],
+                capture_output=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            r = subprocess.run(
                 [script, "set-scrub", "web", "access_token", "false"],
                 capture_output=True, env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
             saved = json.loads(Path(regfile).read_text())
             self.assertIs(saved["web"]["access_token"]["scrub"], False)
+            self.assertEqual(saved["web"]["access_token"]["placement"],
+                             "bearer_header")
+            # set-scrub on an absent credential fails instead of minting a
+            # placement-less entry.
+            env2 = dict(os.environ,
+                        CRED_REGISTRY_FILE=os.path.join(d, "empty.json"))
+            r = subprocess.run(
+                [script, "set-scrub", "ghost", "access_token", "false"],
+                capture_output=True, env=env2)
+            self.assertNotEqual(r.returncode, 0)
 
     def test_bug_grants_key_reserved(self):
         """REVIEW item 44: 'grants' is structural — hsurr:api:grants must
