@@ -1077,7 +1077,7 @@ Blaxel acquisition (announced 2026-09-10):
 [businesswire](https://www.businesswire.com/news/home/20260910783896/en/Baseten-Acquires-Blaxel-to-Build-the-Infrastructure-for-AI-Agents-in-Production),
 [baseten.co/blog](https://www.baseten.co/blog/blaxel-is-joining-baseten-to-build-the-future-of-agentic-cloud/),
 [blaxel.ai/pricing](https://blaxel.ai/pricing) (~5s scale-to-zero per FAQ,
-$250/mo BAA add-on); [modal.com/docs/reference/modal.Sandbox](https://modal.com/docs/reference/modal.Sandbox)
+$250/mo BAA add-on); [modal.com/docs/sdk/py/latest/Sandbox](https://modal.com/docs/sdk/py/latest/Sandbox)
 (`secrets=` injection, `Sandbox._experimental_set_outbound_network_policy`)
 + [modal.com/docs/guide/sandboxes](https://modal.com/docs/guide/sandboxes);
 Daytona's own network-limits skill docs
@@ -1248,3 +1248,27 @@ production GA support via allowlist; Nous Research (Hermes) as early design
 partner with a named CBO quote. The itbrief.co.uk piece stands as the
 discovery source; no new C-number (the filing existed, only the provenance
 layer moved — C30 precedent).
+
+## Watch update — 2026-09-23 (early-evening): C36 THIRD-PARTY pricing color
+
+One corpus action this pass (THIRD-PARTY-layer fold; full pass record
+in `docs/COMPETITOR_WATCH_2026-09-23_EARLY_EVENING.md` §3a).
+
+**C36 — Filestore agent volumes pricing model (THIRD-PARTY).**
+Google's Filestore agent volumes for AI (per-agent persistent
+workspaces auto-allocated/attached in milliseconds at GKE sandbox
+start; works with Agent Substrate on GKE and GKE Agent Sandbox;
+RW-many + POSIX locking; non-production now, production via
+allowlist) carries a **pay-per-use pricing model based on storage
+capacity consumed, with automatic lifecycle tiering for inactive
+workspace data** — framed in the launch coverage as an
+idle-capacity-economics play for short-lived/intermittent agent
+sessions. Source: itbrief.com.au (~Sep 19),
+https://itbrief.com.au/story/google-cloud-launches-filestore-agent-volumes-for-ai
+(THIRD-PARTY — press account; no vendor dollar figure exists). The
+mechanics were already VENDOR-CONFIRMED at the vendor layer from
+Google's own Cloud-blog announcement (above); only the pricing-model
+color is new, and only at the THIRD-PARTY layer. Competitive read:
+Google is pricing the storage leg of the agent stack against idle
+waste — the same axis spark-vm's persistence story must win on
+(total-cost-of-always-on, not just resume latency).

@@ -103,7 +103,7 @@ Snapshot needs its own survey pass (flagged under C16 below).
 
 - **VERIFIED** — `sprite console` is a full interactive TTY; `sprite exec
   --tty` and detachable/reattachable sessions are supported
-  ([working-with-sprites docs](https://github.com/superfly/sprites-docs/blob/HEAD/src/content/docs/working-with-sprites.mdx)).
+  ([working-with-sprites docs](https://github.com/superfly/sprites-docs/blob/main/working-with-sprites.mdx)).
 - **No vendor evidence found** for browser GUI desktop, VNC, WebRTC, or
   browser terminal; third-party sources say exec/console run over WebSockets
   (**THIRD-PARTY** — community design doc) but primary vendor docs read today
@@ -111,12 +111,14 @@ Snapshot needs its own survey pass (flagged under C16 below).
 - **VERIFIED** — Auto-pauses after ~30s idle; warm wake 100–500 ms with
   processes/memory retained; cold wake 1–2 s with processes/memory dropped;
   filesystem persists through both
-  ([lifecycle docs](https://github.com/superfly/sprites-docs/blob/HEAD/src/content/docs/concepts/lifecycle.mdx)).
+  ([lifecycle docs](https://github.com/superfly/sprites-docs/blob/main/concepts/lifecycle.mdx)).
   Per-second compute billing stops while hibernated; two-tier storage (hot
   NVMe billed only while running, object storage 24/7); PAYG allows 3
   concurrent Sprites; subscription "Level 10" $20/mo
-  ([billing docs](https://github.com/superfly/sprites-docs/blob/HEAD/src/content/docs/reference/billing.mdx)
-  — vendor-authored but flagged `draft: true` in the repo).
+  ([billing docs (archived draft)](https://github.com/superfly/sprites-docs/blob/a02bc9704033a37e49e89da7c416c9ef711265f5/src/content/docs/reference/billing.mdx)
+  — vendor-authored but flagged `draft: true` in the repo; the vendor removed
+  the page in its Mintlify docs restructure, so the link is pinned to the last
+  commit containing it).
 - **VERIFIED** — User cannot choose or observe the warm→cold transition; open
   TCP connections do not survive either pause; fixed 100 GB ceiling; `/tmp`
   is not to be treated as persistent.
