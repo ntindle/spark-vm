@@ -43,6 +43,7 @@ working.
 | [HOSTED_UNBLOCK_PASS.md](HOSTED_UNBLOCK_PASS.md) | One pass over everything blocking the hosted launch (2026-09-19). |
 | [MULTI_AGENT_ORCHESTRATION.md](MULTI_AGENT_ORCHESTRATION.md) | Multi-agent orchestration design. |
 | [MULTITENANT_ISOLATION_RESEARCH.md](MULTITENANT_ISOLATION_RESEARCH.md) | Isolation research for shared tenancy. |
+| [GOLDEN_IMAGE_GATE_PROCEDURE.md](GOLDEN_IMAGE_GATE_PROCEDURE.md) | Operator procedure for the spec §6.7 golden-image round-trip gate: manifest preflight, fixture install, gate-mode probe, file → answer → grant-mint → verify, filing-count determinism check, mandatory fixture teardown pre-publish. |
 
 ## Product research corpus
 
