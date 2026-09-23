@@ -63,11 +63,11 @@ and feeds *into* this endpoint; it is never exposed raw, per
 | Machine code | Meaning | Set by / derived from |
 |---|---|---|
 | `provisioning` | VM requested, not yet box-ready | Provider layer: H4 driver's `BoxStatus` maps provisioning-ish provider states here |
-| `live` | Box ready; the 10-minute clock starts (§8; also H3 §5) | Provider reports running + the stack's smoke gates pass (control plane AND-combines: a running VM with a dead proxy is `box-unhealthy`, not `live`) |
+| `live` | Box ready; the 10-minute clock starts (§8; also H3 §5) | Provider reports running + relay/cert path reachable (the spec §2 minute-0 criterion: `ssh` connects, cert accepted). The stack's §3 smoke gates are a *persistence* guard, not an entry gate: a box that was `live` and then fails a smoke check *becomes* `box-unhealthy` on the Muse's report (transition rule 2) — it is never held at `provisioning` waiting for smoke. |
 | `waiting-on-approval` | First task filed; parked on the human's answer (§6) | The approval filing event (proxy/confirmd) — see G4's summons design |
 | `approved` | Human approved; Muse finishing its first task | The grant-mint event |
 | `box-unhealthy` | Smoke checks failed (§2 table: `box-unhealthy: <check>`) | The Muse's §2 smoke report; operator-side reprovision path owns recovery |
-| `connection-unreachable` | Relay/cert path failed while the poll says otherwise (§2) | Control-plane/relay defect instrumentation — never reported as a Muse failure |
+| `connection-unreachable` | Relay/cert path failed while the poll says otherwise (§2; spec §8: "box live per the status poll, tenant SSH via the relay fails") | Control-plane/relay defect instrumentation — non-terminal suspension: entered from any post-`live` code on relay/cert failure, returns to the prior code on recovery; never advances or resets the onboarding arc, never attributed to the Muse |
 | `policy-misfire` | First task produced zero or 2+ filings (§6.7 gate) | Golden-image gate fixture; operator-only (no human rendering) |
 | `no-gated-action` | Muse never attempted the gated action | Pilot analysis; operator-only (no human rendering) |
 | `human-denied` | Human tapped Deny | The denial event |
