@@ -37,6 +37,16 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 midday): tracked set fully quiet — all
+  8 providers re-read vendor-verified with no change, zero fetch
+  failures; Vercel Drives still public beta with no GA move (seventh
+  consecutive no-change pass, changelog confirms no entries dated
+  2026-09-23); no new in-lane launches since the DigitalOcean Managed
+  Agents public preview (already filed); C26 vendor verification
+  failed again (browser-service error) and C35 stays third-party-only
+  despite stronger corroboration (0.43.0 latest per mirror, CISA
+  assesses exploitation as "none", neither CVE in KEV as of Sep 16).
+  (#295)
 - Competitor watch (2026-09-23 late morning): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change; Vercel Drives
   still public beta with no GA move (sixth consecutive no-change pass,
