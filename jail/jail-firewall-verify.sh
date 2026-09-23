@@ -6,9 +6,10 @@
 # service. The checked invariant is the enforcement rules themselves, not
 # the chain shells: all three chains are `policy accept`, so an emptied
 # chain (e.g. `nft flush chain inet jail forward`) is open egress — the
-# watchdog pins the drop-rule markers and the proxy DNAT rule — and pins the
-# allow head too: every accept/dnat verdict in the live table must be one
-# of the expected narrow rules, because with policy-accept chains a WIDENED
+# watchdog pins the drop-rule markers and the proxy DNAT rule — and pins
+# the allow head too: every rule line in the live table must be one of the
+# installed conf's rule lines, matched on the FULL rule text (match
+# expression and verdict), because with policy-accept chains a WIDENED
 # ruleset (an added broad accept above the drops) voids the isolation
 # exactly like a deleted drop, and marker presence alone cannot see it.
 #
@@ -21,9 +22,9 @@
 set -uo pipefail
 
 # Overridable for tests (functional tests stub `nft` via this variable and
-# `systemctl`/`logger`/`sleep` via PATH).
+# `systemctl`/`logger`/`sleep` via PATH; CONF is stubbed the same way).
 NFT="${NFT:-/usr/sbin/nft}"
-CONF=/etc/nftables-jail.conf
+CONF="${CONF:-/etc/nftables-jail.conf}"
 TABLE="inet jail"
 
 list_rules() { "$NFT" list table "$TABLE" 2>/dev/null; }
@@ -40,41 +41,54 @@ healthy() {
     && allow_head_intact "$rules"
 }
 
-# Allow-head pin: with policy-accept chains, an ADDED broad accept (or an
-# added/altered DNAT) above the drop rules voids the isolation exactly like
-# a deleted drop — but the marker presence checks above cannot see a
-# WIDENED ruleset. Every verdict-bearing rule in the live table must
-# therefore be one of the expected lines: the two DNATs and the four narrow
-# accepts. Anything else fails closed. (The build-time twin of this pin is
+# Normalize one ruleset line for comparison: left-trim, then drop headers
+# (table/chain/type/closing brace), comments and blank lines — those carry
+# no rule. Quoted strings are stripped (log prefixes, comments) so
+# expected text cannot hide inside attacker-controlled quotes. Prints the
+# normalized line; returns nonzero for lines that carry no rule.
+norm_rule_line() {
+    local t="${1#"${1%%[![:space:]]*}"}"   # ltrim
+    case "$t" in
+        ""|"#"*|chain*|type*|table*|"}"*) return 1 ;;
+    esac
+    printf '%s' "$t" | sed 's/"[^"]*"//g'
+}
+
+# The expected rule lines: every rule in the installed conf, normalized.
+# The conf is the single source of truth (build.sh renders it with the
+# real JAIL_SSH_PORT); nothing about the allow head is hardcoded here, so
+# the pin cannot drift from the table it guards.
+conf_rule_lines() {
+    local line n
+    while IFS= read -r line; do
+        if n="$(norm_rule_line "$line")"; then
+            [ -n "$n" ] && printf '%s\n' "$n"
+        fi
+    done < "$CONF"
+}
+
+# Allow-head pin: with policy-accept chains, an ADDED broad rule (or an
+# added/altered DNAT) above the drop rules voids the isolation exactly
+# like a deleted drop — but the marker presence checks above cannot see a
+# WIDENED ruleset. Every rule line in the live table must therefore be one
+# of the conf's rule lines, matched on the FULL rule text (match
+# expression plus verdict). A broadened match (a dropped iifname, daddr or
+# dport qualifier) or an altered DNAT target ('dnat to 127.0.0.1:9999',
+# 'dnat to 127.0.0.10') is not the expected line and fails closed — and a
+# verdict the conf never uses ('redirect', 'fwd', 'masquerade', ...) fails
+# closed the same way. Exact matching is safe because any conf change IS
+# the new truth. An unreadable conf fails closed too: the watchdog must
+# not bless a table it cannot compare.
+# (The build-time twin of this pin is
 # test_build_smoke.py::TestIsolation::test_nftables_accept_head_is_proxy_and_ssh_only.)
 allow_head_intact() {
-    local rules="$1" line t
+    local rules="$1" line t expected
+    expected="$(conf_rule_lines)" || expected=""
+    [ -n "$expected" ] || return 1
     while IFS= read -r line; do
-        t="${line#"${line%%[![:space:]]*}"}"   # ltrim
-        case "$t" in
-            chain*|type*|table*|"}"*|"") continue ;;
-        esac
-        # DNAT verdicts: the proxy DNAT must end at 127.0.0.1 exactly —
-        # a port-suffixed (dnat to 127.0.0.1:9999) or re-addressed
-        # (dnat to 127.0.0.10) variant still contains the marker
-        # substring, so only the end-anchored form passes.
-        case "$t" in
-            *"dnat to 127.0.0.1") ;;
-            *"dnat ip to 10.99.0.2:22") ;;
-            *dnat*) return 1 ;;
-        esac
-        # Accept verdicts: each must contain one of the narrow allow
-        # fingerprints (full match expression included, so a broader rule
-        # cannot smuggle the fingerprint along). Trailing statements after
-        # the terminal accept verdict cannot widen, so these stay
-        # unanchored; the DNAT forms above stay end-anchored where
-        # trailing text changes the meaning.
-        case "$t" in
-            *"tcp dport { 18080, 18081 } accept"*|\
-            *"ct state established,related accept"*|\
-            *"tcp dport 22 ct state new,established accept"*) ;;
-            *accept*) return 1 ;;
-        esac
+        t="$(norm_rule_line "$line")" || continue
+        [ -n "$t" ] || continue
+        printf '%s\n' "$expected" | grep -qxF -- "$t" || return 1
     done <<< "$rules"
     return 0
 }
