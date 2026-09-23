@@ -449,6 +449,13 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
+- Approvals whose expiry instant crosses during grant minting are now
+  refused with a distinct audit event instead of being recorded as
+  approved — the trust anchor "expired items are refused, not silently
+  denied" holds even across the up-to-15-second mint window (#240).
+- The credential web UI's HTTP server now drops stalled connections at a
+  10-second bound: a client that declares a request body and then stalls
+  can no longer pin a server thread forever (#282).
 - Credential validation rules are now canonical everywhere they are
   checked — the credential CLI, the credential web UI, and the registry
   writer previously disagreed on edge cases (over-64-character names,
