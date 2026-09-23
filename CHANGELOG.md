@@ -50,6 +50,10 @@ This changelog only works if entries land with the change, not after it:
   the partner list, not an OpenAI claim), and a new snapshot/restore
   datapoint on the already-corpus-ed Upstash "Box" entry; independent hands-on coverage of the
   DO launch is still absent. (#270)
+- Golden-image round-trip gate operator procedure (spec §6.7): the
+  file → answer → grant-mint → verify sequence with the filing-count
+  determinism check and mandatory fixture teardown pre-publish, wired to
+  the existing gate-fixture tooling. (PR TBD)
 - Secrets-posture corpus gains DigitalOcean Managed Agents as the fifth
   convergent data point (their launch release claims a separate secrets
   service with "credentials brokered at execution time" that "never reach
