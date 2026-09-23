@@ -44,7 +44,7 @@ This changelog only works if entries land with the change, not after it:
   (Firecrawl $75M Series B — no new facts beyond the §2c filing); borderline pre-window
   color on Boxd's $2M pre-seed and Alibaba FC Agent Sandbox pricing;
   still no always-on persistent-agent-machine announcements from any
-  competitor. (#TBD)
+  competitor. (#286)
 - Competitor watch (2026-09-23 morning): 2 of 8 tracked providers moved —
   Daytona v0.216.0 hardens the SDK build context (Dockerfile COPY confined
   to the build context, filed C33) and Docker Sandboxes' 2026-09-21 release
