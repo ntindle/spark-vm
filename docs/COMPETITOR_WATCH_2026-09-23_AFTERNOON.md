@@ -78,7 +78,8 @@ re-read ~05:56–06:10).
 ### 3a. Firecrawl $75M Series B (2026-09-22) — THIRD-PARTY investor color
 
 The 2026-09-23 (~02:54) pass already filed the full raise detail in
-§2c (led by Smash Capital, participating Altos Ventures / Nexus
+§2c of that pass's watch doc
+(`docs/COMPETITOR_WATCH_2026-09-23.md`) (led by Smash Capital, participating Altos Ventures / Nexus
 Venture Partners / Y Combinator / Freestyle / Offline, the Alexandria
 launch, and the $82M SEC Form D anomaly — watch-doc-only, no C-number).
 This pass adds a fresh in-window THIRD-PARTY corroboration
