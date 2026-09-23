@@ -620,7 +620,9 @@ watch items whose "canonical competitor-entry fold" was explicitly deferred
 to the next corpus consolidation — into the field table above. No new
 vendor-page reads this pass: every figure below carries the verification
 provenance of the pass that produced it (see the linked watch docs). The
-2026-09-22 watch docs' other deltas are not folded and stay live.
+2026-09-22 watch docs' other deltas are not folded and stay live — this
+includes the NIGHT pass's (Sentinel deep-dive and standing items), which
+is why it appears in the not-archived list below.
 
 ### boat.dev — first corpus entry (C17, RESOLVED)
 
@@ -832,7 +834,7 @@ control plane. The measured figures stay vendor-published only (Sprites
 warm 100–500 ms, DO 305 ms p50); Boxd's are marketing with no methodology —
 directionally interesting, not citable. Watch, don't react.
 
-### OpenAI Agents API — harness↔compute split (C30, datapoint on the existing C9 entry)
+### OpenAI Agents API — harness↔compute split (C30, datapoint on the existing C9 tracked item)
 
 The Sept-10 public beta's nine first-class sandbox partners (Blaxel,
 Cloudflare, Daytona, **DigitalOcean**, E2B, Modal, Oracle, Runloop, Vercel —
