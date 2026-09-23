@@ -32,12 +32,39 @@ class NameValidationTests(unittest.TestCase):
                     ".",
                     "name;rm",
                     "name\ninjected",
-                    "",
-                    "x" * 65):
+                    ""):
             with self.assertRaises(DynamicCredentialError, msg=bad):
                 dynamic_credential_entry(bad)
             with self.assertRaises(DynamicCredentialError, msg=bad):
                 dynamic_credential_entry("ok-name", entry_name=bad)
+
+    def test_legacy_long_names_accepted(self):
+        """Read path is legacy-tolerant: the swapd writers enforce
+        charset-only (no 64-char cap), and swap_addon still serves
+        pre-#150 long names — so surrogate building must accept them.
+        (2026-09-23 arch deep-read finding.)"""
+        long_name = "x" * 100
+        e = dynamic_credential_entry(long_name, entry_name="y" * 100)
+        self.assertEqual(e["surrogate"],
+                         "hsurr:%s:%s" % (long_name, "y" * 100))
+        # fill_secret's filesystem read validates through the same choke
+        # point: a legacy name must reach the (stubbed) store read, not
+        # raise at validation.
+        class Proc:
+            returncode = 0
+            stdout = b"tok"
+        real_run = fill_secret.subprocess.run
+        seen = []
+        def fake_run(argv, **kwargs):
+            seen.append(argv)
+            return Proc()
+        fill_secret.subprocess.run = fake_run
+        try:
+            self.assertEqual(fill_secret._read_value(long_name, "access_token"),
+                             "tok")
+        finally:
+            fill_secret.subprocess.run = real_run
+        self.assertTrue(any(a[-1].endswith("/" + long_name) for a in seen))
 
     def test_valid_names_still_resolve(self):
         """Legitimate names are unaffected; surrogate format unchanged."""

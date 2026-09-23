@@ -195,6 +195,22 @@ def test_api_delete_ok_path(monkeypatch):
 # --- /api/creds placement allowlist ---------------------------------------
 
 
+def test_list_secret_names_legacy_long_name_has_value(monkeypatch):
+    """A pre-#150 long-named secret file must be listed and reported
+    has_value=true: `cred get` can read it, so the UI must not claim the
+    value is missing (2026-09-23 arch deep-read finding)."""
+    long_name = "x" * 100
+    monkeypatch.setattr(
+        cred_ui, "run",
+        lambda argv, inp=None: (0, "gh\n%s\n" % long_name, ""))
+    names = cred_ui.list_secret_names()
+    assert names == {"gh", long_name}
+    monkeypatch.setattr(cred_ui, "read_registry", lambda: {})
+    (cred,) = [c for c in cred_ui.snapshot()["creds"] if c["name"] == long_name]
+    assert cred["has_value"] is True
+    assert cred["registered"] is False
+
+
 def test_snapshot_renders_placement_only(monkeypatch):
     monkeypatch.setattr(
         cred_ui, "read_registry",
