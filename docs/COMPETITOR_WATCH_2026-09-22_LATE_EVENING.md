@@ -56,6 +56,12 @@ same nine partners (Blaxel, Cloudflare, Daytona, DigitalOcean, E2B,
 Modal, Oracle, Runloop, Vercel — pre-window; tencentcloud/cubesandbox
 docs show E2B-compatible API emulation, THIRD-PARTY, pre-window color).
 
+Coverage note: the evening pass re-read two more items this pass did
+not — Vercel Sandbox and Cloudflare Sandbox. The Vercel
+default-storage 32→64 GB claim (THIRD-PARTY blog, never vendor-checked)
+is carried as the next-pass ask (§3); Cloudflare Sandbox had no new
+signal in the evening pass and was deprioritized for the ~2 h window.
+
 ## 2. Boxd — C29 promoted from third-party-only to vendor-verified (the one real delta)
 
 Boxd has a vendor-owned presence (found via the press site list, read
@@ -99,11 +105,14 @@ sources):**
 - **Active-network-connections forking is NOT vendor-attested** — the
   vendor pages say fork carries "every running process"; the press
   claim of forking active connections in <100 ms is not repeated by
-  the vendor. The Sprites tension noted in the evening doc
-  ("Open TCP connections do not survive a pause") stands as the
-  documented behavior on the other side; Boxd's actual claim is
-  smaller than the press headline, which weakens the claimed
-  contradiction without resolving it.
+  the vendor. The sharper architectural reading: process-state
+  preservation (what the vendor actually claims) and TCP-connection
+  preservation are orthogonal — Sprites' own vendor docs exhibit
+  exactly this split (processes "pick up mid-thought"; "open TCP
+  connections do not survive a pause"). So the vendor-vs-vendor tension
+  dissolves: no vendor claims connection-preserving fork; whether
+  Boxd's mechanism preserves connections is unknown (vendor silent) —
+  treat the mechanism as unproven, not contradictory.
 
 **Corpus effects:** C29 changes status from "watch, third-party-only"
 to **vendor-verified competitor**. The fork-resume mechanism detail
@@ -136,9 +145,11 @@ not citable. No spark-vm design change: watch, don't react.
 
 ---
 
-*Corpus note:* per the reach-back policy this pass is delta-only; no
-corpus record changed except C29's status promotion above (the C29
-vendor-verified detail lives here; the canonical competitor entry, if
-any, gets it on the next consolidation pass). The two surveyor captures
+*Corpus note:* per the corpus's delta-only convention for watch docs
+(a watch doc records deltas against the previous pass; corpus records
+change only via consolidation or primary-source verification), this
+pass changes no prior corpus record except C29's status promotion
+above (the C29 vendor-verified detail lives here; the canonical
+competitor entry, if any, gets it on the next consolidation pass). The two surveyor captures
 are archived verbatim in the loop's `agent_notes/` (workspace-only),
 not the repo.
