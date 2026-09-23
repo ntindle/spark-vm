@@ -324,13 +324,25 @@ class TestIsolation:
                 'dnat ip to 10.99.0.2:22') in active
         # No broader jail-side accept: every `iifname "ve-jail" … accept`
         # line must be one of the pinned narrow rules above.
+        pinned = {
+            'iifname "ve-jail" tcp dport { 18080, 18081 } accept',
+            'iifname "ve-jail" ct state established,related accept',
+            ('iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 '
+             'tcp dport 22 ct state new,established accept'),
+            'oifname "ve-jail" ct state established,related accept',
+            ('iifname "ve-jail" ip daddr 10.99.0.1 '
+             'tcp dport { 18080, 18081 } dnat to 127.0.0.1'),
+            ('iifname "tailscale0" tcp dport @@JAIL_SSH_PORT@@ '
+             'dnat ip to 10.99.0.2:22'),
+        }
+        # (A5 hardening) No extra verdicts anywhere: every accept or dnat
+        # line in the generated table must be one of the pinned rules — a
+        # widened ssh-forward or oifname accept added to build.sh fails
+        # here, not just in the runtime watchdog.
         for line in active.splitlines():
             line = line.strip()
-            if line.startswith('iifname "ve-jail"') and line.endswith("accept"):
-                assert line in (
-                    'iifname "ve-jail" tcp dport { 18080, 18081 } accept',
-                    'iifname "ve-jail" ct state established,related accept',
-                ), line
+            if line.endswith("accept") or "dnat" in line:
+                assert line in pinned, line
 
     def test_route_localnet_scoped_to_veth(self, active):
         assert "net.ipv4.conf.ve-$MACHINE.route_localnet=1" in active
@@ -685,6 +697,13 @@ REDIRECT_RULESET = HEALTHY_RULESET.replace(
     '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
 )
 
+# The 2026-09-23 review case (Engineering A1): a rogue sshd-DNAT
+# variant — the target address is changed while the match stays narrow.
+ROGUE_SSH_DNAT_RULESET = HEALTHY_RULESET.replace(
+    'iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22',
+    'iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.99:22',
+)
+
 # The 2026-09-23 review case (Architecture, blocker 1): broadened-match
 # variants — the realistic way a ruleset gets widened (an admin copying a
 # rule and loosening it). Each keeps the verdict but drops narrowing
@@ -904,6 +923,17 @@ exit 0
         # 'dnat' or 'accept' substrings. The pin denies packet-moving
         # verdicts it does not know; this must fail closed.
         r = _run_watchdog(REDIRECT_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_rogue_ssh_dnat_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # Review case (Engineering A1): the sshd DNAT's target is
+        # re-addressed while the match stays narrow — not the conf's line.
+        r = _run_watchdog(ROGUE_SSH_DNAT_RULESET, tmp_path=tmp_path,
                           monkeypatch=monkeypatch)
         assert r.returncode == 1
         calls = watchdog_stubs.read_text()
