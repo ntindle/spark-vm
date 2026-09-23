@@ -806,7 +806,10 @@ todaysstartupnews). Product: "Composable computers" — persistent KVM VMs
 TypeScript/Python SDKs + API (**VERIFIED**: boxd.sh +
 docs.boxd.sh/quickstart read 2026-09-22 ~20:03–20:06 CDT — see
 `docs/COMPETITOR_WATCH_2026-09-22_LATE_EVENING.md` §2; the SDK install URL
-`boxd.sh/downloads/install.sh` is seen third-party only, NOT VERIFIED).
+is VENDOR-ATTESTED as of the 2026-09-22 overnight pass
+(`docs/COMPETITOR_WATCH_2026-09-22_OVERNIGHT.md` §2a: boxd.sh serves the
+genuine 532-line installer; canonical path `boxd.sh/downloads/cli/install.sh`,
+byte-identical content).
 
 Fork: "Live memory forking of machines, **in under 200 ms**" — disk +
 memory + every running process (vendor's own pages); the press's <100 ms
