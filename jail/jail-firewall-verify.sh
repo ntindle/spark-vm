@@ -37,7 +37,7 @@ healthy() {
     printf '%s' "$rules" | grep -q 'jail-fwd-drop' \
     && printf '%s' "$rules" | grep -q 'jail-fwd-indrop' \
     && printf '%s' "$rules" | grep -q 'jail-input-drop' \
-    && printf '%s' "$rules" | grep -q 'dnat to 127.0.0.1' \
+    && printf '%s' "$rules" | grep -q 'dnat ip to 127.0.0.1' \
     && allow_head_intact "$rules"
 }
 
@@ -76,8 +76,8 @@ conf_rule_lines() {
 # WIDENED ruleset. Every rule line in the live table must therefore be one
 # of the conf's rule lines, matched on the FULL rule text (match
 # expression plus verdict). A broadened match (a dropped iifname, daddr or
-# dport qualifier) or an altered DNAT target ('dnat to 127.0.0.1:9999',
-# 'dnat to 127.0.0.10') is not the expected line and fails closed — and a
+# dport qualifier) or an altered DNAT target ('dnat ip to 127.0.0.1:9999',
+# 'dnat ip to 127.0.0.10') is not the expected line and fails closed — and a
 # verdict the conf never uses ('redirect', 'fwd', 'masquerade', ...) fails
 # closed the same way. Exact matching is safe because any conf change IS
 # the new truth. An unreadable conf fails closed too: the watchdog must

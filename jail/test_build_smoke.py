@@ -196,7 +196,7 @@ class TestSshPortSingleSourced:
         # No literal port anywhere: a second hardcoded copy would drift.
         assert f"dport {port} dnat" not in active
         # The jail-side accept stays the jail's own port 22 (unrelated).
-        assert "tcp dport 22 ct state new,established accept" in active
+        assert "tcp dport 22 ct state established,new accept" in active
 
     def test_substitution_mechanism_pinned(self, src):
         # Quoted heredoc (no expansion) piped through the placeholder
@@ -316,10 +316,10 @@ class TestIsolation:
         assert 'iifname "ve-jail" tcp dport { 18080, 18081 } accept' in active
         assert 'iifname "ve-jail" ct state established,related accept' in active
         assert ('iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 '
-                'tcp dport 22 ct state new,established accept') in active
+                'tcp dport 22 ct state established,new accept') in active
         assert 'oifname "ve-jail" ct state established,related accept' in active
         assert ('iifname "ve-jail" ip daddr 10.99.0.1 '
-                'tcp dport { 18080, 18081 } dnat to 127.0.0.1') in active
+                'tcp dport { 18080, 18081 } dnat ip to 127.0.0.1') in active
         assert ('iifname "tailscale0" tcp dport @@JAIL_SSH_PORT@@ '
                 'dnat ip to 10.99.0.2:22') in active
         # No broader jail-side accept: every `iifname "ve-jail" … accept`
@@ -328,10 +328,10 @@ class TestIsolation:
             'iifname "ve-jail" tcp dport { 18080, 18081 } accept',
             'iifname "ve-jail" ct state established,related accept',
             ('iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 '
-             'tcp dport 22 ct state new,established accept'),
+             'tcp dport 22 ct state established,new accept'),
             'oifname "ve-jail" ct state established,related accept',
             ('iifname "ve-jail" ip daddr 10.99.0.1 '
-             'tcp dport { 18080, 18081 } dnat to 127.0.0.1'),
+             'tcp dport { 18080, 18081 } dnat ip to 127.0.0.1'),
             ('iifname "tailscale0" tcp dport @@JAIL_SSH_PORT@@ '
              'dnat ip to 10.99.0.2:22'),
         }
@@ -436,7 +436,7 @@ class TestFirewallWatchdogStatic:
         # healthy on an open-egress chain. The markers are the drop-rule
         # log prefixes and the proxy DNAT.
         for marker in ("jail-fwd-drop", "jail-fwd-indrop",
-                       "jail-input-drop", "dnat to 127.0.0.1"):
+                       "jail-input-drop", "dnat ip to 127.0.0.1"):
             assert marker in verify_src, "marker missing: %s" % marker
         # ...and the check must not be satisfiable by chain shells alone.
         assert "grep -q 'chain forward'" not in verify_src
@@ -544,6 +544,14 @@ class TestFirewallWatchdogStatic:
 
         assert norm_lines(rendered) == norm_lines(HEALTHY_CONF), \
             "HEALTHY_CONF drifted from build.sh's nftables heredoc"
+        # Guard (Architecture round 2): an inline `#` comment on a conf
+        # rule line would fail closed as a false positive (only full-line
+        # comments are skipped by the pin). Keep comments on their own
+        # lines so a future editor doesn't trip the watchdog.
+        for line in rendered.splitlines():
+            t = line.strip()
+            if t and not t.startswith(("#", "table", "chain", "type", "}")):
+                assert " #" not in t, "inline comment on conf rule: %r" % t
 
     def test_service_runs_the_script(self, active):
         m = re.search(
@@ -595,7 +603,7 @@ HEALTHY_CONF = """\
 table inet jail {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
-        iifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat to 127.0.0.1
+        iifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat ip to 127.0.0.1
         iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22
     }
     chain input {
@@ -606,7 +614,7 @@ table inet jail {
     }
     chain forward {
         type filter hook forward priority -10; policy accept;
-        iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state new,established accept
+        iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
         iifname "ve-jail" ct state established,related accept
         oifname "ve-jail" ct state established,related accept
         iifname "ve-jail" log prefix "jail-fwd-drop: " drop
@@ -619,7 +627,7 @@ HEALTHY_RULESET = """\
 table inet jail {
 \tchain prerouting {
 \t\ttype nat hook prerouting priority dstnat; policy accept;
-\t\tiifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat to 127.0.0.1
+\t\tiifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat ip to 127.0.0.1
 \t\tiifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22
 \t}
 \tchain input {
@@ -630,7 +638,7 @@ table inet jail {
 \t}
 \tchain forward {
 \t\ttype filter hook forward priority -10; policy accept;
-\t\tiifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state new,established accept
+\t\tiifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
 \t\tiifname "ve-jail" ct state established,related accept
 \t\toifname "ve-jail" ct state established,related accept
 \t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop
@@ -670,16 +678,16 @@ WIDENED_ACCEPT_RULESET = HEALTHY_RULESET.replace(
 # gains a port. The old substring grep 'dnat to 127.0.0.1' still matched
 # this; the end-anchored pin must not.
 ROGUE_DNAT_RULESET = HEALTHY_RULESET.replace(
-    'dnat to 127.0.0.1\n',
-    'dnat to 127.0.0.1:9999\n',
+    'dnat ip to 127.0.0.1\n',
+    'dnat ip to 127.0.0.1:9999\n',
 )
 
 # The 2026-09-23 review case (Security): a re-addressed DNAT variant —
 # the target is a different host that still contains the 'dnat to
 # 127.0.0.1' substring. The end-anchored pin must reject it.
 ROGUE_DNAT_READDR_RULESET = HEALTHY_RULESET.replace(
-    'dnat to 127.0.0.1\n',
-    'dnat to 127.0.0.10\n',
+    'dnat ip to 127.0.0.1\n',
+    'dnat ip to 127.0.0.10\n',
 )
 
 # The 2026-09-23 review case (Security): a quoted-string smuggle — the
@@ -718,7 +726,7 @@ ROGUE_SSH_DNAT_RULESET = HEALTHY_RULESET.replace(
 #    tailnet (dropped iifname/oifname/daddr qualifiers).
 BROADENED_SSH_ACCEPT_RULESET = HEALTHY_RULESET.replace(
     '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
-    '\t\tiifname "ve-jail" tcp dport 22 ct state new,established accept\n'
+    '\t\tiifname "ve-jail" tcp dport 22 ct state established,new accept\n'
     '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
 )
 # 2. Prerouting: the jail's sshd DNATed from any interface (dropped the
@@ -908,8 +916,8 @@ exit 0
 
     def test_rogue_dnat_readdressed_triggers_fail_closed(
             self, watchdog_stubs, tmp_path, monkeypatch):
-        # Review case: 'dnat to 127.0.0.10' still contains the 'dnat to
-        # 127.0.0.1' substring; the end-anchored pin must reject it.
+        # Review case: 'dnat ip to 127.0.0.10' is not the conf's
+        # 'dnat ip to 127.0.0.1' line; the full-line pin must reject it.
         r = _run_watchdog(ROGUE_DNAT_READDR_RULESET, tmp_path=tmp_path,
                           monkeypatch=monkeypatch)
         assert r.returncode == 1
