@@ -37,6 +37,17 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 early afternoon): tracked set fully quiet —
+  all 8 providers re-read vendor-verified with no change, zero fetch
+  failures; Vercel Drives still public beta with no GA move (ninth
+  consecutive no-change pass; the changelog sitemap's beta-entry date
+  flip-flops between reads — treated as sitemap churn, not evidence); no
+  new in-lane launches since the DigitalOcean Managed Agents public
+  preview (already filed); C26 refined — DigitalOcean's own
+  launch-release text read in full on syndicated copies confirms the
+  pricing figures, but pricing stays THIRD-PARTY until the docs
+  Details/pricing sub-page is reached; OpenAI "Managed Agents" still
+  rumor; Automaid own page still missing. (#TBD)
 - Competitor watch (2026-09-23 late midday): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (eighth
