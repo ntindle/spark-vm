@@ -39,9 +39,9 @@ This changelog only works if entries land with the change, not after it:
 ### Added
 - Overnight competitor watch (2026-09-22): tracked set quiet (8/8 vendor
   re-reads, no in-window deltas); Boxd's SDK install URL is now
-  vendor-verified — boxd.sh serves the genuine installer (canonical path
+  vendor-attested — boxd.sh serves the genuine installer (canonical path
   boxd.sh/downloads/cli/install.sh), closing the last unverified item on
-  the Boxd entry; Vercel Sandbox shipped persistent "Drives" in public
+  the Boxd entry; Vercel Sandbox announced persistent "Drives" in public
   beta (up to 16 TiB, usage-based) — a separate feature from the
   still-unverified default-storage claim; third-party follow-up analysis
   of DigitalOcean's Managed Agents launch adds no new mechanism detail.

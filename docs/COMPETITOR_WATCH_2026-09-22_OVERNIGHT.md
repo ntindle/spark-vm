@@ -8,8 +8,12 @@ re-reads of the tracked set (reads ~00:00–00:10 CDT), (B) open-web
 market-news scan (~23:55–00:10 CDT) plus the C29 SDK-URL verification job.
 
 Conventions: **VERIFIED** = read on a vendor's own page, doc, or repo
-this run (link inline). **THIRD-PARTY** = reported by press/third-party
-sources. **INFERRED** = my characterization, labeled as such.
+this run (link inline). **VENDOR-ATTESTED** = confirmed against the
+vendor's own *served infrastructure* (fetched artifact/installer/API
+response) rather than a vendor doc-page assertion — a stricter
+claim than VERIFIED, used only when we fetched the thing itself.
+**THIRD-PARTY** = reported by press/third-party sources.
+**INFERRED** = my characterization, labeled as such.
 **UNVERIFIABLE** = no public source exists to check against.
 
 ## 1. The tracked set — quiet since the late-evening baseline (8/8 NO-CHANGE, all VERIFIED)
@@ -81,11 +85,12 @@ thesis and spark-vm's own persistent-VM positioning — color for the
 corpus's "where spark-vm wins/lags" framing on the next consolidation,
 not a design change.)
 
-### 2c. DigitalOcean Managed Agents: third-party follow-up analysis (borderline in-window)
+### 2c. DigitalOcean Managed Agents: third-party follow-up analysis (pre-window publication, read in-window)
 
 subagentic.ai published independent analysis of the Sept 22
 public-preview launch (THIRD-PARTY, read ~00:06 CDT) — timing is
-borderline (published ~19:00–20:00 CDT, just at the window start). It
+pre-window (published ~19:00–20:00 CDT, just before the window opened;
+the read was in-window). It
 corroborates the known facts (idle-pausing Firecracker microVMs, pause
 stops CPU/memory charges with storage still billed, $5 new-user
 credit, vendor's Sept 21 benchmark 886 ms session-ready / 305 ms
