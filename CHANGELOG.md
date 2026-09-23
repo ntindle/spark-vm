@@ -339,6 +339,16 @@ This changelog only works if entries land with the change, not after it:
   tracked set was quiet. Inputs filed for #47 (benchmark reference
   numbers, edge-routing latency datapoint) and #179 (auto-pause idle
   trigger). (#268)
+- Late-evening competitor watch (2026-09-22): the tracked set was quiet
+  across all eight vendor re-reads; the Boxd entry is upgraded from
+  third-party-only to vendor-verified (their own site and docs read this
+  pass) — fork of a live machine lands in under 200 ms (correcting the
+  <100 ms press claim), the active-connections-fork claim is NOT
+  vendor-attested, plus pricing (€0.049/vCPU-hour, €0.015/GiB-hour RAM,
+  €0.0001/GiB-hour disk, €30 free credits) and a confirmed self-hosted
+  offering; Boxd's "under a millisecond" idle-resume is a marketing-page
+  figure with no published methodology and is not treated as a
+  benchmark. (#TBD)
 
 ### Changed
 - Hosted pricing thinking refreshed: the internal pricing analysis now
