@@ -747,8 +747,10 @@ providers) — an open H4 follow-up.
 Pricing (VERIFIED: epho.io): per-second meter, boot to teardown — "nothing
 idles, nothing is stored, nothing keeps billing." $0.0000164/vCPU-s,
 $0.0000053/GiB-s, $0.000000036/GiB-s; the default 2 vCPU / 2 GiB / 10 GiB
-instance is ≈ **$0.158/h** (computed) — within ~5% of E2B's first tier, so
-Epho's differentiator is reliability, not price. BYOK: model tokens billed
+instance is ≈ **$0.158/h** (computed) — within ~5% of E2B's first tier
+(**INFERRED**, with a shape caveat; the E2B figure is from boat.dev's
+published comparison table) — so Epho's differentiator is reliability,
+not price. BYOK: model tokens billed
 by your provider, never by Epho; $10 starting credit; a turn is refused
 with 402 at zero balance.
 
@@ -760,7 +762,8 @@ page read VERIFIED in the 2026-09-22 evening pass — see
 `docs/COMPETITOR_WATCH_2026-09-22_MORNING.md` §1 and
 `docs/COMPETITOR_WATCH_2026-09-22_EVENING.md` §§1–2). The first
 major-cloud, full-stack managed agent-computer product with published
-sandbox pricing — squarely in the #47 hosted-product lane.
+sandbox pricing (INFERRED — the morning watch's characterization) —
+squarely in the #47 hosted-product lane.
 
 Two vertically integrated services plus inference, one security model, one
 billing model: **Harness Runtime** — microVM per session, hardware-layer

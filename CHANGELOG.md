@@ -355,9 +355,10 @@ This changelog only works if entries land with the change, not after it:
   figure with no published methodology and is not treated as a
   benchmark. (#272)
 - Competitor corpus consolidation (2026-09-22): the deferred watch entries
-  are folded into the competitive map — first entries for boat.dev
-  ($0.036/h default; xlarge capacity-gated), DigitalOcean Managed Agents
-  ($0.044/vCPU-hour active-CPU metering), Boxd (vendor-verified fork/pricing),
+  Deferred competitor entries folded into the competitive map — first
+  entries for boat.dev ($0.036/h default; xlarge capacity-gated),
+  DigitalOcean Managed Agents ($0.044/vCPU-hour active-CPU metering),
+  Boxd (vendor-page-verified fork claims and pricing),
   Upstash Box (snapshot/restore mechanics), h-sandbox (OSS credential-vault
   comparand), Brig (local microVM containment), and Epho (agents-as-API with
   multi-provider fallback), plus the OpenAI Agents API harness↔compute split
