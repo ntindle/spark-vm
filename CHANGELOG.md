@@ -374,14 +374,18 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
-- Credential validation rules are now identical everywhere they are
+- Credential validation rules are now canonical everywhere they are
   checked — the credential CLI, the credential web UI, and the registry
   writer previously disagreed on edge cases (over-64-character names,
   over-long host bindings, and `_`/`.` in custom header names were accepted
   in some places and rejected in others). Names are now capped at 64
   characters, host bindings at valid DNS shapes (253 total / 63 per label),
-  and header/query placement names at 64 characters everywhere, with a
-  shared conformance test keeping the three in lockstep. (PR TBD)
+  and header/query placement names at 64 characters, with a shared
+  conformance test keeping the copies in lockstep. Two deliberate
+  carve-outs: the swap proxy keeps serving credentials registered before
+  the cap, and management operations (remove, host bind/unbind,
+  method/path limits, scrub flags) still work on those legacy names
+  (creating new entries requires a within-cap name). (PR TBD)
 - The inference proxy's host allowlist matcher now recognizes IPv6
   literals: a `::1` entry previously never matched (the address was
   mangled before comparison), so an operator allowlisting the IPv6
