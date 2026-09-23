@@ -37,6 +37,21 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 mid-afternoon): tracked set fully quiet —
+  all 8 providers re-read vendor-verified with no change, zero fetch
+  failures; Vercel Drives still public beta with no GA move (tenth
+  consecutive no-change pass; changelog sitemap beta-entry date flip-flop
+  continues — the date field is unproven as evidence either way);
+  **C26 CLOSED** — DigitalOcean Managed Agents pricing now vendor-verified
+  on the docs pricing page ($0.044/vCPU-hour active CPU, $0.0095/GB-hour
+  memory, sandbox shape table, pause semantics) with an explicit caveat:
+  the docs price snapshots/checkpoints at $0.05/GiB-month vs the launch
+  release's $0.005 — 10× apart, one source is wrong; C30 vendor-confirmed
+  (OpenAI's own blog on the Agents API public beta; nine named sandbox
+  partners including Daytona, DigitalOcean, E2B, Modal, Vercel);
+  new-to-watch C36 — Google Agent Substrate on GKE (~Sep 17,
+  third-party-only); no new in-lane launches in the 48h window;
+  Automaid, Andon Pion, Huawei baselines hold. (#311)
 - Competitor watch (2026-09-23 early afternoon): tracked set fully quiet —
   all 8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (ninth

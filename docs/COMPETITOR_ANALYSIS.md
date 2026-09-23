@@ -756,7 +756,7 @@ not price. BYOK: model tokens billed
 by your provider, never by Epho; $10 starting credit; a turn is refused
 with 402 at zero balance.
 
-### DigitalOcean Managed Agents — first corpus entry (C26, OPEN — watch continues)
+### DigitalOcean Managed Agents — first corpus entry (C26, CLOSED 2026-09-23 — vendor-docs pricing verified)
 
 Public preview launched 2026-09-22 (**VERIFIED**: vendor press release,
 Business Wire 2026-09-22 — paid wire = the vendor's own claims; product
@@ -841,7 +841,8 @@ directionally interesting, not citable. Watch, don't react.
 
 The Sept-10 public beta's nine first-class sandbox partners (Blaxel,
 Cloudflare, Daytona, **DigitalOcean**, E2B, Modal, Oracle, Runloop, Vercel —
-third-party archive of the launch post) formalize the **harness↔compute
+the vendor's own launch post, VERIFIED on openai.com this run — see the
+2026-09-23 mid-afternoon watch update below) formalize the **harness↔compute
 split** (INFERRED from the partner list, not an OpenAI claim): model
 providers ship harness code while compute platforms own isolation.
 
@@ -1146,3 +1147,65 @@ aicraftjournal on Agents API terms (+ OpenAI-hosted sandbox $0.03/20min per
 aicraftjournal/OpenRouter third-party roundup on `$0.0001/active-second`
 ephemeral pricing; morningstar PR Newswire on FastGPT v4.16.0; itsfoss Local
 AI Weekly on BrowserSkill (Sep 18).
+
+## Watch update — 2026-09-23 (mid-afternoon): C26 closed, C30 vendor-confirmed, C36 new-to-watch
+
+Three corpus actions this pass (primary-source-verification folds per the
+C32 precedent; full pass record in
+`docs/COMPETITOR_WATCH_2026-09-23_MID_AFTERNOON.md` §§3a–3c).
+
+**C26 CLOSED.** DigitalOcean Managed Agents pricing is now vendor-verified
+on the vendor's own docs pricing page
+(https://docs.digitalocean.com/products/managed-agents/agent-harness-runtime/details/pricing/,
+read live this run, "Last verified 22 Sep 2026"): **$0.044/vCPU-hour**
+(per-second on actual CPU consumed — footnote: "Active CPU billing is
+coming soon. Until then, you will be billed at 25% of the vCPUs allocated
+to your sandbox"), **$0.0095/GB-hour** on peak memory, session-storage
+volumes $0.05/GiB-month (peak), public internet egress $0.01/GiB,
+snapshots/checkpoints $0.05/GiB-month, custom sandbox templates (BYOT)
+$0.05/GiB-month. Sandbox shapes (full-allocation hourly): XSmall
+`mars-1vcpu-1gb` $0.0535/hr; Small `mars-2vcpu-2gb` $0.107/hr; Medium
+(default) `mars-2vcpu-4gb` $0.126/hr; Large `mars-4vcpu-8gb` $0.252/hr;
+XLarge `mars-16vcpu-32gb` $1.008/hr. Paused sessions incur no compute
+charges; retained checkpoints keep accruing storage charges while paused
+(including at $0 prepaid balance). Positive prepaid balance required; no
+per-session spend limit. Action Gateway tool calls (incl. Exa web
+search/fetch) need prepayment and draw the shared balance.
+
+Material caveat, carried as a caveat (not folded as fact): the vendor
+docs price snapshots/checkpoints at **$0.05/GiB-month** while the launch
+press release (syndicated Business Wire) says **$0.005/GiB-month** — 10×
+apart, one of the two is wrong. CPU ($0.044) and memory ($0.0095) agree
+across both sources. Next watch ask: re-check the snapshot rate if the
+docs page is re-dated. Competitive read (INFERRED): DO is the first
+cloud managed-agent stack in the corpus to *announce* per-second
+active-CPU metered sandbox pricing (interim rate 25%-of-allocated
+until active billing ships) —
+the active-CPU metering leg vs spark-vm's flat-monthly Tier 1 thinking
+(see `docs/PRICING_THINKING.md` §2) now has real numbers on both sides of
+the ledger.
+
+**C30 vendor-confirmation upgrade.** The OpenAI Agents API public beta is
+now confirmed on OpenAI's own launch post — **VERIFIED** read on the
+vendor's own blog this run (https://openai.com/index/introducing-the-agents-api/,
+~14:15 CDT): "Today, we're introducing the Agents API in public beta,"
+naming nine partners with first-class integrations: "Blaxel, Cloudflare,
+Daytona, DigitalOcean, E2B, Modal, Oracle, Runloop, and Vercel." (Launch
+date 2026-09-10 per third-party coverage of the vendor launch — the post
+body carries no visible date; the standing corpus "Sept-10" date is kept.)
+No new C-number: the filing existed, only the provenance layer moved. The
+rumored "Managed Agents" unveil at DevDay 2026 (Sep 29) remains
+press/rumor with no OpenAI vendor confirmation; AWS Bedrock "Managed
+Agents, powered by OpenAI" is an April 28 limited preview — separate and
+older.
+
+**C36 new — Google Agent Substrate on GKE (corpus-adjacent new-to-watch).**
+Previously unfiled, ~Sep 17: Google's open-source agent-sandbox runtime
+(Cloud Hypervisor microVMs or gVisor; <500 ms resume; 500+ suspend/resume
+activations/sec; 1,000+ dormant agents/host; network gateway) is now
+offered to GKE customers for non-production workloads, with production GA
+support via allowlist; early design partner Nous Research (Hermes). Filed
+as corpus-adjacent new-to-watch, not a tracked-provider row — a
+hyperscaler offering a sandbox runtime on its own substrate is a different
+shape than a standalone agent-VM product. **THIRD-PARTY** (itbrief.co.uk);
+vendor verification owed.
