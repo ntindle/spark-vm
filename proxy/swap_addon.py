@@ -191,6 +191,31 @@ GRANTS_FILE = _env_path("SWAP_GRANTS_FILE", "/home/swapd/grants.json")
 # It reads grants but never files or consumes approvals.
 APPROVALS_ENABLED = os.environ.get("SWAP_ENABLE_APPROVALS", "1") == "1"
 
+# H18 (GitHub #133): client-visible approval signal. When a swap is
+# refused and an approval is pending (or terminally decided) for the
+# request's (credential, host, method) tuple, the proxy delivers the
+# signal back to the agent on the proxied response as headers — the
+# only channel the proxy has to its client. Denial suppression is
+# additionally scoped to the normalized request path (a denial for one
+# path cannot suppress filings for another). Vocabulary:
+#   X-Spark-Approval-Pending: <aid>[, <aid>...]
+#       a grant request is filed (or already pending); poll by re-issuing
+#       the gated request and reading X-Spark-Approval-Decision.
+#   X-Spark-Approval-Decision: <state>:<aid>[, <state>:<aid>...]
+#       terminal decision, state in {approved, denied, expired}.
+# Header values carry only the approval id (random hex) and the state
+# word — never credential names, hosts, or secret material.
+APPROVAL_PENDING_HEADER = "X-Spark-Approval-Pending"
+APPROVAL_DECISION_HEADER = "X-Spark-Approval-Decision"
+# A terminal decision stays deliverable for the same window an approval
+# would have lived (1h). After that a fresh refusal may file again.
+APPROVAL_SIGNAL_TTL = timedelta(hours=1)
+# Approval ids are random hex; anything else in a consumed/ item's id
+# field is not ours to echo into a header. \A…\Z anchoring (not ^…$):
+# $ also matches before a trailing newline, which would let a
+# newline-bearing planted id into a response header.
+_AID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+
 
 def _load_push_module():
     """Load confirm/push.py from this addon's directory.
@@ -602,6 +627,15 @@ class SwapAddon:
         self._dns_cache = {}
         self._current_egress_ip = None  # pinned egress IP of the request
         # currently being swapped (for audit lines); reset per request.
+        # H18 (#133): client-visible approval signals recorded while
+        # swapping this request, as a list of (aid, state) pairs; moved
+        # onto flow.metadata at the end of request(), reset per request.
+        # NOTE (atomicity): plain sync mitmproxy hooks run atomically on
+        # the event loop (no awaits, no @concurrent), so one request()'s
+        # reset…stash sequence cannot interleave with another's. Do not
+        # make request()/responseheaders() async or @concurrent without
+        # reworking this per-addon state.
+        self._approval_signal = None
         self._load()
         log.warning("swap_addon: spark-vm version %s", SPARKVM_VERSION)
 
@@ -842,17 +876,117 @@ class SwapAddon:
         except Exception:
             return []
 
+    def _record_approval_signal(self, aid, state):
+        """H18 (#133): record one client-visible approval signal for the
+        request currently being swapped. `state` is "pending", "expired",
+        "denied", or "approved". The request() hook moves the collected
+        signals onto flow.metadata; responseheaders() renders them as
+        response headers. Aids are validated — a malformed id (never
+        ours) is dropped rather than echoed into a header."""
+        if self._approval_signal is None:
+            self._approval_signal = []
+        assert state in ("pending", "expired", "denied", "approved"), \
+            "H18: unknown approval signal state %r" % (state,)
+        if aid and _AID_RE.match(str(aid)):
+            pair = (str(aid), state)
+            if pair not in self._approval_signal:
+                self._approval_signal.append(pair)
+
+    def _terminal_denial(self, name, host, method, path):
+        """H18 (#133): newest consumed/ denial for this (credential, host,
+        method) tuple *and this normalized path*, answered within
+        APPROVAL_SIGNAL_TTL. A denial is terminal — the owner's answer is
+        delivered instead of filing a fresh approval (which would
+        re-push the owner). Path-scoped so one planted denial cannot
+        suppress filings for other paths on the same tuple (fail closed:
+        a consumed item without a matching path_prefix is ignored).
+        Returns the approval id, or None."""
+        try:
+            d = os.path.join(APPROVALS_DIR, "consumed")
+            method_up = (method or "").upper()
+            norm = _normalize_path(path or "/")
+            now = datetime.now(timezone.utc)
+            best = None  # (answered_at, aid)
+            for fn in os.listdir(d):
+                if not fn.endswith(".json"):
+                    continue
+                p = os.path.join(d, fn)
+                try:
+                    # mtime pre-filter: consumed/ files are written via
+                    # os.replace at decision time, with answered_at
+                    # stamped just before the write — so mtime >=
+                    # answered_at always, and a file older than the
+                    # signal TTL cannot hold a qualifying denial. Skip
+                    # the open + JSON parse for those: this scan runs
+                    # synchronously on the proxy event loop per refusal,
+                    # and consumed/ keeps up to 1000 items.
+                    if (now.timestamp() - os.stat(p).st_mtime
+                            > APPROVAL_SIGNAL_TTL.total_seconds()):
+                        continue
+                    with open(p) as f:
+                        it = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                if it.get("credential") != name:
+                    continue
+                if it.get("host") != host:
+                    continue
+                if (it.get("method") or "").upper() != method_up:
+                    continue
+                if it.get("path_prefix") != norm:
+                    continue
+                if it.get("decision") != "deny":
+                    continue
+                try:
+                    answered = datetime.fromisoformat(it.get("answered_at"))
+                    if answered.tzinfo is None:
+                        answered = answered.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    continue
+                if now - answered > APPROVAL_SIGNAL_TTL:
+                    continue
+                aid = it.get("id") or fn[:-len(".json")]
+                if not _AID_RE.match(str(aid)):
+                    continue
+                if best is None or answered > best[0]:
+                    best = (answered, str(aid))
+            return best[1] if best else None
+        except OSError:
+            return None
+
+    def _approval_signal_for_refusal(self, name, host, method, path,
+                                     reason):
+        """H18 (#133): the single decision point for "a swap was refused
+        for this tuple". Returns a list of (aid, state) signals for the
+        client-visible channel: a terminal denial is delivered (and no
+        fresh approval is filed or pushed); otherwise the pending
+        signal, whether the approval was just filed, already pending, or
+        an expired one is being replaced."""
+        if not APPROVALS_ENABLED:
+            return []
+        denied = self._terminal_denial(name, host, method, path)
+        if denied is not None:
+            return [(denied, "denied")]
+        return self._file_approval(name, host, method, path, reason)
+
     def _file_approval(self, name, host, method, path, reason):
         # Finding 60: the inference proxy has no approvals directory.
         if not APPROVALS_ENABLED:
-            return
+            return []
         """Finding 49: when a swap is refused for lack of a grant, swapd
         files a structured approval itself. The tuple comes from the
         real request - no model-authored text.
         Finding 58 (anti-flooding): coalesced by (credential, host,
         method) rather than full path, capped at 5 pending per
         credential, and rate-limited to one filing per credential per
-        60 seconds."""
+        60 seconds.
+
+        H18 (#133): returns the client-visible signals for this refusal
+        as a list of (aid, state) pairs. "pending" covers a freshly
+        filed approval and a coalesced-on existing one; when the
+        existing pending item had expired, the old aid is reported as
+        "expired" alongside the replacement's "pending"."""
+        signals = []
         try:
             pending = os.path.join(APPROVALS_DIR, "pending")
             os.makedirs(pending, exist_ok=True)
@@ -862,18 +996,31 @@ class SwapAddon:
             # credential for the cap; track newest filing for rate limit.
             per_cred = 0
             newest = None
+            tuple_aid = None  # live pending approval for this exact tuple
             for fn in os.listdir(pending):
                 if not fn.endswith(".json"):
                     continue
                 try:
                     with open(os.path.join(pending, fn)) as f:
                         it = json.load(f)
-                    # Reap expired while scanning (finding 58).
+                    # Reap expired while scanning (finding 58). A tuple
+                    # match that expired is a terminal "expired" signal
+                    # for the client holding the old aid (H18) — the
+                    # fresh filing below carries the replacement.
                     try:
                         exp = datetime.fromisoformat(it.get("expires"))
                         if exp.tzinfo is None:
                             exp = exp.replace(tzinfo=timezone.utc)
                         if now >= exp:
+                            if (it.get("credential") == name
+                                    and it.get("host") == host
+                                    and (it.get("method") or "").upper()
+                                    == method_up):
+                                old_aid = (it.get("id")
+                                           or fn[:-len(".json")])
+                                if _AID_RE.match(str(old_aid)):
+                                    signals.append((str(old_aid),
+                                                    "expired"))
                             os.remove(os.path.join(pending, fn))
                             continue
                     except (ValueError, TypeError):
@@ -893,15 +1040,29 @@ class SwapAddon:
                     if (it.get("host") == host
                             and (it.get("method") or "").upper()
                             == method_up):
-                        return  # already pending
+                        if tuple_aid is None:
+                            tuple_aid = (it.get("id")
+                                         or fn[:-len(".json")])
                 except (OSError, ValueError):
                     continue
-            # Finding 58: cap and rate limit.
+            # Already pending for this tuple: the client's signal is the
+            # existing approval, not a new filing. Any expired signals
+            # collected above are preserved alongside it.
+            if tuple_aid is not None and _AID_RE.match(str(tuple_aid)):
+                return signals + [(str(tuple_aid), "pending")]
+            # Finding 58: cap and rate limit. A capped or rate-limited
+            # refusal carries no pending signal: the newest filing may
+            # belong to a different (host, method) tuple, and naming its
+            # aid would park the client on an approval that can never
+            # authorize its request (worse, a later denial of that other
+            # tuple would read as a false terminal signal for this one).
+            # No signal beats a wrong one — the client retries, and after
+            # the window a fresh approval files for the correct tuple.
             if per_cred >= 5:
                 log.warning("swap: approval flood cap hit for %r", name)
-                return
+                return signals
             if newest is not None and (now - newest).total_seconds() < 60:
-                return  # rate-limited
+                return signals
             norm_path = _normalize_path(path or "/")
             aid = uuid.uuid4().hex[:16]
             item = {
@@ -929,8 +1090,11 @@ class SwapAddon:
             self._audit(None, "approval-filed:%s" % aid)
             # H2 (GitHub #2): VAPID push to the owner's devices.
             _push_notify(item)
+            signals.append((aid, "pending"))
+            return signals
         except OSError as e:
             log.warning("swap: cannot file approval: %s", e)
+            return signals
 
     def _credential_allows_request(self, name, host, method, path):
         """Registry binding check for one request (grant scoping, approved
@@ -938,7 +1102,11 @@ class SwapAddon:
         override it. Grants only widen methods and paths within already-
         bound hosts. allowed_methods and allowed_paths are static limits:
         absent means unrestricted (for migration), but an explicit empty
-        list fails closed (finding 41). Returns (ok, reason).
+        list fails closed (finding 41). Returns (ok, reason, grant): on
+        success `grant` is the matched grant dict (None when the registry
+        allowed the request with no grant — H18 (#133) reads the grant's
+        approval_id for the client-visible "approved" signal); on refusal
+        it is None.
 
         Grants are host-wide, not job-scoped: a grant's `job` field is
         deliberately NOT checked here. An HTTP request carries no
@@ -948,10 +1116,10 @@ class SwapAddon:
         reg = getattr(self, "registry", None) or {}
         spec = reg.get(name)
         if not isinstance(spec, dict):
-            return False, "unbound-host"
+            return False, "unbound-host", None
         # Host binding first: never overridable by a grant (finding 55).
         if not _host_in_list(host, spec.get("allowed_hosts")):
-            return False, "unbound-host"
+            return False, "unbound-host", None
         # Grants widen methods/paths within the bound host.
         now = datetime.now(timezone.utc)
         for g in self._grants():
@@ -981,30 +1149,30 @@ class SwapAddon:
                 # decode residue, path parameters, backslash
                 # separators). An evasive path matches no grant — hard
                 # refuse rather than trying the next grant.
-                return False, "path-not-allowed"
+                return False, "path-not-allowed", None
             if not _path_allowed(norm, [prefix]):
                 continue
-            return True, ""
+            return True, "", g
         methods = spec.get("allowed_methods")
         if methods is not None:
             allowed = {str(m).upper() for m in methods}
             if (method or "").upper() not in allowed:
-                return False, "method-not-allowed"
+                return False, "method-not-allowed", None
         prefixes = spec.get("allowed_paths")
         if prefixes is not None:
             if (method or "").upper() == "CONNECT":
                 # the proxy cannot see inside the tunnel, so a
                 # path-bound credential never swaps on a CONNECT
-                return False, "path-not-verifiable"
+                return False, "path-not-verifiable", None
             norm = _normalize_path(path or "/")
             if "%" in norm or ";" in norm or "\\" in norm:
                 # Finding 42: after fixpoint decoding these can only be
                 # smuggling tricks for lenient servers (double-decode
                 # residue, path parameters, backslash separators).
-                return False, "path-not-allowed"
+                return False, "path-not-allowed", None
             if not _path_allowed(norm, prefixes):
-                return False, "path-not-allowed"
-        return True, ""
+                return False, "path-not-allowed", None
+        return True, "", None
 
     def _cookie_swap_names(self):
         """Credential names whose registry placement explicitly targets the
@@ -1089,8 +1257,8 @@ class SwapAddon:
         if val is None:
             self._audit_refused(host, name, "unknown-credential")
             return None
-        ok, reason = self._credential_allows_request(name, host, method,
-                                                     path)
+        ok, reason, grant = self._credential_allows_request(name, host, method,
+                                                          path)
         if not ok:
             log.warning("swap: refusing swap of %r for %s %s: %s", name,
                         method or "?", host, reason)
@@ -1099,38 +1267,58 @@ class SwapAddon:
             # is bound and the refusal is about method or path. A grant
             # can never widen a credential beyond its bound hosts, so an
             # unbound-host refusal must not produce an approval item.
+            # H18 (#133): the refusal's client-visible signal (pending /
+            # terminal decision) is recorded for the response headers.
             if reason in ("method-not-allowed", "path-not-allowed"):
-                self._file_approval(name, host, method, path, reason)
+                for aid, state in self._approval_signal_for_refusal(
+                        name, host, method, path, reason):
+                    self._record_approval_signal(aid, state)
             return None
+        # H18 (#133): capture the grant's approval id. The "approved"
+        # signal means the request was swapped under the grant — it is
+        # recorded only when a swap value is actually returned below,
+        # and only when the approvals subsystem is enabled (an
+        # approvals-disabled proxy emits no approval signals at all).
+        # Placement-mismatch / unknown-entry / bad-totp refusals release
+        # nothing and must emit no signal (a false "approved" would tell
+        # the agent its credential was swapped when it wasn't).
+        approved_aid = (grant.get("approval_id")
+                        if grant is not None and APPROVALS_ENABLED
+                        else None)
         if not self._placement_allows(name, entry, location):
             log.warning("swap: refusing swap of %r for %s %s: "
                         "placement-mismatch (location %r)", name,
                         method or "?", host, location)
             self._audit_refused(host, name, "placement-mismatch")
             return None
+        value = None
         if isinstance(val, dict):
             e = entry or "access_token"
             if e == "totp":
                 seed = val.get("totp")
-                if seed is None:
-                    return None
-                try:
-                    return _totp_code(seed)
-                except (ValueError, binascii.Error) as ex:
-                    log.warning("swap: bad totp seed for %r: %s", name, ex)
-                    return None
-            return val.get(e)
+                if seed is not None:
+                    try:
+                        value = _totp_code(seed)
+                    except (ValueError, binascii.Error) as ex:
+                        log.warning("swap: bad totp seed for %r: %s",
+                                    name, ex)
+            else:
+                value = val.get(e)
         # single-value secret (finding 35): the whole file is the value.
         # An entry suffix matches when absent, when "access_token"
         # (hsurr:github:8080 must keep its :8080), or when it is the one
         # entry the registry declares for this credential.
-        if entry is None or entry == "access_token":
-            return val
-        declared = self._declared_entries(name)
-        if len(declared) == 1 and declared[0] == entry:
-            return val
-        self._audit_refused(host, name, "unknown-entry")
-        return None
+        elif entry is None or entry == "access_token":
+            value = val
+        else:
+            declared = self._declared_entries(name)
+            if len(declared) == 1 and declared[0] == entry:
+                value = val
+            else:
+                self._audit_refused(host, name, "unknown-entry")
+        if value is not None and approved_aid:
+            self._record_approval_signal(approved_aid, "approved")
+        return value
 
     def _audit(self, host, matched):
         """Append a swap line to the audit log. Returns True when the
@@ -1530,6 +1718,9 @@ class SwapAddon:
     def request(self, flow):
         self._maybe_reload()
         self._current_egress_ip = None
+        # H18 (#133): client-visible approval signals recorded while
+        # swapping this request; stashed onto flow.metadata below.
+        self._approval_signal = []
         req = flow.request
         host = req.pretty_host
         # Egress is guarded in server_connect (before the TCP connect);
@@ -1545,6 +1736,7 @@ class SwapAddon:
         path = getattr(req, "path", "/")
         if self.inference_mode:
             self._request_inference(req, host, method, path)
+            self._stash_approval_signal(flow)
             return
         self._swap_headers(req, host, method, path)
         # query string (percent-decoded values; re-encoded on assignment)
@@ -1588,10 +1780,12 @@ class SwapAddon:
                             "for %s; passing through unswapped",
                             len(req.content), host)
                 self._audit_note(host, "request-body", "over-swap-cap")
+                self._stash_approval_signal(flow)
                 return
             try:
                 text = req.content.decode("utf-8")
             except UnicodeDecodeError:
+                self._stash_approval_signal(flow)
                 return  # binary body: headers/query/path already handled
             ctype = req.headers.get("content-type", "")
             if "application/json" in ctype:
@@ -1603,10 +1797,32 @@ class SwapAddon:
                                            location=("body", None))
             if new_text != text:
                 req.content = new_text.encode("utf-8")
+        self._stash_approval_signal(flow)
+
+    def _stash_approval_signal(self, flow):
+        """H18 (#133): move the signals recorded while swapping this
+        request onto flow.metadata, where responseheaders() renders them
+        as response headers. Deduped, order-preserved. mitmproxy flows
+        carry a `metadata` dict; the test fake is given one too."""
+        signals = self._approval_signal or []
+        self._approval_signal = None
+        seen = list(dict.fromkeys(signals))
+        if seen:
+            try:
+                flow.metadata["spark_approval_signal"] = seen
+            except (AttributeError, TypeError):
+                # A flow without a metadata mapping cannot carry the
+                # signal — the approval itself is still filed.
+                log.warning("swap: flow has no metadata mapping; dropping "
+                            "client-visible approval signal")
 
     def websocket_message(self, flow):
         self._maybe_reload()
         self._current_egress_ip = None
+        # H18: no header channel exists on websocket messages, so any
+        # approval signal recorded here is discarded (the approval is
+        # still filed). Reset per message like _current_egress_ip.
+        self._approval_signal = None
         host = flow.request.pretty_host if flow.request else ""
         if not self._host_allowed(host):
             return
@@ -1772,6 +1988,31 @@ class SwapAddon:
             new_vals = [self._scrub_text_value(v, triples) for v in vals]
             if new_vals != vals:
                 resp.headers.set_all(key, new_vals)
+        # H18 (#133): client-visible approval signal. The agent that made
+        # the refused request learns the approval id ("pending") or the
+        # terminal decision ("approved"/"denied"/"expired") from these
+        # headers on the proxied response. The hook runs before the body
+        # finishes, so the signal also rides streaming responses. Values
+        # carry only the approval id and the state word — never
+        # credential names, hosts, or secret material — and aids were
+        # validated at record time.
+        # The agent treats these headers as the proxy's word, so a
+        # hostile origin must not be able to forge them: strip any
+        # upstream values first, then set our own when we have signals.
+        for _h in (APPROVAL_PENDING_HEADER, APPROVAL_DECISION_HEADER):
+            try:
+                del resp.headers[_h]
+            except KeyError:
+                pass
+        signals = ((getattr(flow, "metadata", None) or {})
+                   .get("spark_approval_signal") or [])
+        pending = [aid for aid, state in signals if state == "pending"]
+        decisions = ["%s:%s" % (state, aid) for aid, state in signals
+                     if state != "pending"]
+        if pending:
+            resp.headers[APPROVAL_PENDING_HEADER] = ", ".join(pending)
+        if decisions:
+            resp.headers[APPROVAL_DECISION_HEADER] = ", ".join(decisions)
 
     def response(self, flow):
         """Scrub known secret values out of text response bodies from

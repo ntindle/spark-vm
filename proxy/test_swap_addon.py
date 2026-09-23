@@ -74,6 +74,12 @@ class Headers:
     def __setitem__(self, key, value):
         self.set_all(key, [value])
 
+    def __delitem__(self, key):
+        if not any(k.lower() == key.lower() for k, _ in self._items):
+            raise KeyError(key)
+        self._items = [(k, v) for k, v in self._items
+                       if k.lower() != key.lower()]
+
 
 class Query:
     def __init__(self, path):
@@ -104,6 +110,7 @@ class Flow:
         self.response = None
         self.websocket = None
         self.server_conn = None  # set by mitmproxy once connected
+        self.metadata = {}  # mitmproxy flows carry a metadata dict
 
 
 class FakeServerConn:
@@ -196,6 +203,7 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY):
     # they are not (tested separately)
     a._audit = lambda host, matched: True
     a._current_egress_ip = None
+    a._approval_signal = None  # reset per request by request()
     a.refused = []
     a._audit_refused = lambda host, name, reason: a.refused.append(
         (host, name, reason))
@@ -1709,23 +1717,23 @@ class SecuritySweepTests(unittest.TestCase):
                        secrets={"api": "API-TOKEN"},
                        registry={"api": {"allowed_hosts": ["api.example.com"],
                                          "allowed_paths": ["/other"]}})
-        grant = {"credential": "api", "host": "api.example.com",
+        seed_grant = {"credential": "api", "host": "api.example.com",
                  "method": "POST", "path_prefix": "/v1",
                  "expires": "2999-01-01T00:00:00+00:00"}
-        a._grants = lambda: [grant]
-        ok, reason = a._credential_allows_request(
+        a._grants = lambda: [seed_grant]
+        ok, reason, g = a._credential_allows_request(
             "api", "api.example.com", "POST", "/v1/\\../admin")
         self.assertEqual((ok, reason), (False, "path-not-allowed"))
         # the refusal is hard, not per-grant: an evasive path is not
         # retried against a wider second grant
-        a._grants = lambda: [dict(grant, path_prefix="/")]
-        ok, reason = a._credential_allows_request(
+        a._grants = lambda: [dict(seed_grant, path_prefix="/")]
+        ok, reason, g = a._credential_allows_request(
             "api", "api.example.com", "POST", "/v1/;x/admin")
         self.assertEqual((ok, reason), (False, "path-not-allowed"))
         # a clean in-prefix path still swaps through the grant
         req = Request("api.example.com", "/v1/repos", method="POST",
                       headers=[("Authorization", "Bearer hsurr:api")])
-        a._grants = lambda: [grant]
+        a._grants = lambda: [seed_grant]
         a.request(Flow(req))
         self.assertEqual(req.headers.get("Authorization"), "Bearer API-TOKEN")
 
@@ -1913,6 +1921,460 @@ class AuditLogDiskGuardTests(unittest.TestCase):
                          (100, 100))
         self.assertEqual(sa._normalize_guard_thresholds(300, 100),
                          (300, 100))
+
+
+class ApprovalSignalTests(unittest.TestCase):
+    """H18 (GitHub #133): client-visible approval pending/terminal-decision
+    signal. All approvals state lives in a tmp dir; nothing touches
+    /home/swapd."""
+
+    def _addon(self, tmp):
+        registry = {"github": {"allowed_hosts": ["github.com"],
+                               "allowed_methods": ["GET"]}}
+        a = make_addon(secrets={"github": "ghp_TOKEN"},
+                       hosts=["github.com"], registry=registry)
+        a._approval_signal = None
+        return a
+
+    def _ctx(self, tmp):
+        return (mock.patch.object(sa, "APPROVALS_DIR", Path(tmp)),
+                mock.patch.object(sa, "APPROVALS_ENABLED", True))
+
+    def _refused_flow(self, a):
+        req = Request("github.com", "/gists", method="POST",
+                      headers=[("Authorization", "Bearer hsurr:github")])
+        flow = Flow(req)
+        a.request(flow)
+        return flow
+
+    def _headers_of(self, a, flow):
+        flow.response = FakeResponse(b"unauthorized", "text/plain")
+        a.responseheaders(flow)
+        return flow.response.headers
+
+    def test_h18_pending_signal_carries_filed_aid(self):
+        """A method-refused swap files an approval and the proxied
+        response carries X-Spark-Approval-Pending with the filed id;
+        the placeholder stays unswapped."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = self._addon(tmp)
+                flow = self._refused_flow(a)
+                # placeholder left in place (the refusal itself)
+                auth = flow.request.headers.get("Authorization")
+                self.assertEqual(auth, "Bearer hsurr:github")
+                files = list((Path(tmp) / "pending").glob("*.json"))
+                self.assertEqual(len(files), 1)
+                aid = json.loads(files[0].read_text())["id"]
+                hdrs = self._headers_of(a, flow)
+                self.assertEqual(hdrs.get(sa.APPROVAL_PENDING_HEADER), aid)
+
+    def test_h18_repeat_request_coalesces_same_aid(self):
+        """A second refusal for the same tuple reports the existing
+        pending approval instead of filing (and pushing) again. The
+        filed item's `created` is backdated past the 60s rate window
+        before the second request, so the rate limiter cannot mask a
+        missing/broken tuple-coalesce branch."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = self._addon(tmp)
+                h1 = self._headers_of(a, self._refused_flow(a))
+                aid1 = h1.get(sa.APPROVAL_PENDING_HEADER)
+                self.assertTrue(aid1)
+                files = list((Path(tmp) / "pending").glob("*.json"))
+                self.assertEqual(len(files), 1)
+                item = json.loads(files[0].read_text())
+                item["created"] = (dt.datetime.now(dt.timezone.utc)
+                                   - dt.timedelta(seconds=61)).isoformat()
+                files[0].write_text(json.dumps(item))
+                h2 = self._headers_of(a, self._refused_flow(a))
+                self.assertEqual(h2.get(sa.APPROVAL_PENDING_HEADER), aid1)
+                self.assertEqual(
+                    len(list((Path(tmp) / "pending").glob("*.json"))), 1)
+
+    def test_h18_denied_is_terminal_no_refile(self):
+        """An owner denial delivers 'denied:<aid>' and files nothing —
+        the owner is not re-pushed for an answered request."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                now = dt.datetime.now(dt.timezone.utc)
+                (cdir / "a1b2c3d4.json").write_text(json.dumps({
+                    "id": "a1b2c3d4", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "deny",
+                    "answered_at": now.isoformat()}))
+                a = self._addon(tmp)
+                hdrs = self._headers_of(a, self._refused_flow(a))
+                self.assertFalse(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+                self.assertEqual(
+                    hdrs.get(sa.APPROVAL_DECISION_HEADER), "denied:a1b2c3d4")
+                self.assertFalse((Path(tmp) / "pending").exists()
+                                 and list((Path(tmp) / "pending")
+                                          .glob("*.json")))
+
+    def test_h18_denial_different_path_files_fresh(self):
+        """A denial for a different normalized path does NOT suppress a
+        fresh filing for this path — denial suppression is path-scoped
+        (Security B1: one planted denial must not black out approvals
+        for other paths on the same tuple)."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                now = dt.datetime.now(dt.timezone.utc)
+                (cdir / "a1b2c3d4.json").write_text(json.dumps({
+                    "id": "a1b2c3d4", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/other", "decision": "deny",
+                    "answered_at": now.isoformat()}))
+                a = self._addon(tmp)
+                hdrs = self._headers_of(a, self._refused_flow(a))
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+                self.assertTrue(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+                # a fresh approval was actually filed for this path's tuple
+                files = list((Path(tmp) / "pending").glob("*.json"))
+                self.assertEqual(len(files), 1)
+
+    def test_h18_denied_ttl_expired_refiles(self):
+        """A denial older than the signal TTL is no longer terminal —
+        a fresh refusal files a new approval."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                old = (dt.datetime.now(dt.timezone.utc)
+                       - dt.timedelta(hours=2))
+                (cdir / "a1b2c3d4.json").write_text(json.dumps({
+                    "id": "a1b2c3d4", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "deny",
+                    "answered_at": old.isoformat()}))
+                a = self._addon(tmp)
+                hdrs = self._headers_of(a, self._refused_flow(a))
+                self.assertTrue(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+                # a fresh approval was actually filed for this tuple
+                files = list((Path(tmp) / "pending").glob("*.json"))
+                self.assertEqual(len(files), 1)
+                self.assertNotEqual(
+                    json.loads(files[0].read_text())["id"], "a1b2c3d4")
+
+    def test_h18_expired_pending_delivers_expired_and_refiles(self):
+        """An expired pending item reports 'expired:<old-aid>' alongside
+        the replacement's pending signal; the stale file is reaped."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                pdir_ = Path(tmp) / "pending"
+                pdir_.mkdir()
+                past = (dt.datetime.now(dt.timezone.utc)
+                        - dt.timedelta(minutes=5))
+                (pdir_ / "expired01.json").write_text(json.dumps({
+                    "id": "expired01", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "created": (past - dt.timedelta(hours=2)).isoformat(),
+                    "expires": past.isoformat()}))
+                a = self._addon(tmp)
+                hdrs = self._headers_of(a, self._refused_flow(a))
+                self.assertEqual(
+                    hdrs.get(sa.APPROVAL_DECISION_HEADER),
+                    "expired:expired01")
+                new_aid = hdrs.get(sa.APPROVAL_PENDING_HEADER)
+                self.assertIsNotNone(new_aid)
+                self.assertNotEqual(new_aid, "expired01")
+                self.assertFalse((pdir_ / "expired01.json").exists())
+                self.assertTrue((pdir_ / (new_aid + ".json")).exists())
+
+    def test_h18_approved_grant_delivers_approved(self):
+        """A swap authorized by an owner-minted grant delivers
+        'approved:<aid>' on the (successful) response."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = self._addon(tmp)
+                a._grants = lambda: [{
+                    "credential": "github", "host": "github.com",
+                    "method": "POST", "path_prefix": "/",
+                    "expires": (dt.datetime.now(dt.timezone.utc)
+                                + dt.timedelta(hours=1)).isoformat(),
+                    "approval_id": "grantaid1"}]
+                flow = self._refused_flow(a)
+                # the swap succeeded this time
+                self.assertEqual(flow.request.headers.get("Authorization"),
+                                 "Bearer ghp_TOKEN")
+                hdrs = self._headers_of(a, flow)
+                self.assertEqual(
+                    hdrs.get(sa.APPROVAL_DECISION_HEADER),
+                    "approved:grantaid1")
+                self.assertFalse(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+
+    def test_h18_placement_mismatch_no_approved_signal(self):
+        """A grant-authorized request refused for placement mismatch must
+        NOT emit 'approved:<aid>' — the swap did not happen, so a false
+        terminal signal would lie to the client (Engineering B1)."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                registry = {"github": {
+                    "allowed_hosts": ["github.com"],
+                    "allowed_methods": ["POST"],
+                    "access_token": {"placement": "bearer_header"}}}
+                a = make_addon(secrets={"github": "ghp_TOKEN"},
+                               hosts=["github.com"], registry=registry)
+                a._approval_signal = None
+                a._grants = lambda: [{
+                    "credential": "github", "host": "github.com",
+                    "method": "POST", "path_prefix": "/",
+                    "expires": (dt.datetime.now(dt.timezone.utc)
+                                + dt.timedelta(hours=1)).isoformat(),
+                    "approval_id": "grantaid1"}]
+                req = Request("github.com", "/?token=hsurr:github",
+                              method="POST")
+                flow = Flow(req)
+                a.request(flow)
+                # refused at the placement gate: placeholder intact
+                self.assertEqual(req.path, "/?token=hsurr:github")
+                hdrs = self._headers_of(a, flow)
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+                self.assertFalse(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+
+    def test_h18_rate_limit_cross_tuple_no_wrong_pending(self):
+        """A rate-limited refusal must not name another tuple's approval
+        id as pending — no signal beats a wrong one (Engineering B2):
+        the client would park on an aid that can never authorize its
+        request, and a later denial of that other tuple would read as a
+        false terminal signal for this one."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = self._addon(tmp)
+                now = dt.datetime.now(dt.timezone.utc)
+                pend = Path(tmp) / "pending"
+                pend.mkdir()
+                (pend / "getaid0001.json").write_text(json.dumps({
+                    "id": "getaid0001", "credential": "github",
+                    "host": "github.com", "method": "GET",
+                    "path_prefix": "/", "created": now.isoformat(),
+                    "expires": (now + dt.timedelta(hours=1)).isoformat()}))
+                # POST /gists is a different tuple — and inside the 60s
+                # rate window of the GET filing.
+                hdrs = self._headers_of(a, self._refused_flow(a))
+                pending = hdrs.get(sa.APPROVAL_PENDING_HEADER)
+                self.assertFalse(pending and "getaid0001" in pending)
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+                # and nothing new was filed for tuple 2
+                self.assertEqual(len(list(pend.glob("*.json"))), 1)
+
+    def test_h18_grant_without_aid_emits_no_signal(self):
+        """Pre-approval-era grants (no approval_id) swap without a
+        decision header — no signal is better than a malformed one."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = self._addon(tmp)
+                a._grants = lambda: [{
+                    "credential": "github", "host": "github.com",
+                    "method": "POST", "path_prefix": "/",
+                    "expires": (dt.datetime.now(dt.timezone.utc)
+                                + dt.timedelta(hours=1)).isoformat()}]
+                hdrs = self._headers_of(a, self._refused_flow(a))
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+                self.assertFalse(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+
+    def test_h18_malformed_aid_never_echoed(self):
+        """A consumed/ denial with a malformed id is ignored, not echoed
+        into a header — a fresh approval is filed instead."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                now = dt.datetime.now(dt.timezone.utc)
+                (cdir / "weird.json").write_text(json.dumps({
+                    "id": "not an aid!!", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "deny",
+                    "answered_at": now.isoformat()}))
+                a = self._addon(tmp)
+                hdrs = self._headers_of(a, self._refused_flow(a))
+                self.assertTrue(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+                # the malformed id was never echoed: the filed approval
+                # carries a fresh, well-formed id
+                files = list((Path(tmp) / "pending").glob("*.json"))
+                self.assertEqual(len(files), 1)
+                self.assertTrue(sa._AID_RE.match(
+                    json.loads(files[0].read_text())["id"]))
+
+    def test_h18_unbound_host_refusal_has_no_signal(self):
+        """Refusals that must not file approvals (unbound host) also
+        emit no signal."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = make_addon(secrets={"github": "ghp_TOKEN"},
+                               hosts=["github.com"],
+                               registry={"github": {
+                                   "allowed_hosts": ["other.example"]}})
+                a._approval_signal = None
+                req = Request("github.com", "/gists", method="POST",
+                              headers=[("Authorization",
+                                        "Bearer hsurr:github")])
+                flow = Flow(req)
+                a.request(flow)
+                hdrs = self._headers_of(a, flow)
+                self.assertFalse(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+
+    def test_h18_approvals_disabled_refusal_silent(self):
+        """With APPROVALS_ENABLED=0 a grantable refusal files nothing
+        and emits no signal (QA B4)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = mock.patch.object(sa, "APPROVALS_DIR", Path(tmp))
+            with pdir, mock.patch.object(sa, "APPROVALS_ENABLED", False):
+                a = self._addon(tmp)
+                hdrs = self._headers_of(a, self._refused_flow(a))
+                self.assertFalse(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+                self.assertFalse(
+                    (Path(tmp) / "pending").exists()
+                    and list((Path(tmp) / "pending").glob("*.json")))
+
+    def test_h18_approvals_disabled_no_approved_signal(self):
+        """With APPROVALS_ENABLED=0 a grant-authorized swap still swaps
+        but emits no 'approved' signal (QA B4)."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = mock.patch.object(sa, "APPROVALS_DIR", Path(tmp))
+            with pdir, mock.patch.object(sa, "APPROVALS_ENABLED", False):
+                a = self._addon(tmp)
+                a._grants = lambda: [{
+                    "credential": "github", "host": "github.com",
+                    "method": "POST", "path_prefix": "/",
+                    "expires": (dt.datetime.now(dt.timezone.utc)
+                                + dt.timedelta(hours=1)).isoformat(),
+                    "approval_id": "grantaid1"}]
+                flow = self._refused_flow(a)
+                # the swap itself still succeeded
+                self.assertEqual(flow.request.headers.get("Authorization"),
+                                 "Bearer ghp_TOKEN")
+                hdrs = self._headers_of(a, flow)
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+                self.assertFalse(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+
+    def test_h18_terminal_denial_rejects_malformed_aid(self):
+        """_terminal_denial never returns a malformed approval id — the
+        aid-validation layer holds on its own, not just via the
+        downstream record-time check (QA B5). The regex must be anchored
+        with \\A..\\Z, not ^..$: a trailing newline slips past ^..$ (which
+        also matches before a final newline) and would ride into the
+        response header as an injected line (QA B3)."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                now = dt.datetime.now(dt.timezone.utc)
+                for fname, evil_id in (
+                        ("evil.json", "ok\ninjected: x"),   # middle newline
+                        ("trailing.json", "a1b2c3d4\n")):   # trailing newline
+                    (cdir / fname).write_text(json.dumps({
+                        "id": evil_id, "credential": "github",
+                        "host": "github.com", "method": "POST",
+                        "path_prefix": "/gists", "decision": "deny",
+                        "answered_at": now.isoformat()}))
+                a = self._addon(tmp)
+                self.assertIsNone(
+                    a._terminal_denial("github", "github.com", "POST",
+                                       "/gists"))
+
+    def test_h18_unknown_entry_grant_no_approved_signal(self):
+        """QA B4: a grant carrying approval_id that authorizes the request,
+        but whose swap then fails DOWNSTREAM of the approved-signal gate
+        (unknown entry suffix → value is None), must NOT emit
+        'approved:<aid>'. The placeholder stays unswapped, so a false
+        terminal approval would tell the agent its credential was swapped
+        when it wasn't."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = self._addon(tmp)
+                a._grants = lambda: [{
+                    "credential": "github", "host": "github.com",
+                    "method": "POST", "path_prefix": "/",
+                    "expires": (dt.datetime.now(dt.timezone.utc)
+                                + dt.timedelta(hours=1)).isoformat(),
+                    "approval_id": "grantaid1"}]
+                req = Request("github.com", "/gists", method="POST",
+                              headers=[("Authorization",
+                                        "Bearer hsurr:github:bogusentry")])
+                flow = Flow(req)
+                a.request(flow)
+                # unknown entry: placeholder intact, nothing swapped
+                self.assertIn("hsurr:github:bogusentry",
+                              flow.request.headers.get("Authorization"))
+                hdrs = self._headers_of(a, flow)
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+                self.assertFalse(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+
+    def test_h18_upstream_cannot_forge_signal_headers(self):
+        """Security B1: an upstream origin must not be able to forge the
+        client-visible signal. Forged X-Spark-Approval-* headers on the
+        proxied response are stripped before ours are rendered — both
+        when the proxy has no signal (the forgery must not pass through)
+        and when it has one (only the proxy's value must remain)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = self._addon(tmp)
+                # No signal: an allowlisted host's plain request records
+                # nothing, but the forged headers must still be stripped.
+                req = Request("github.com", "/gists", method="GET",
+                              headers=[("Authorization",
+                                        "Bearer <redacted>:github")])
+                flow = Flow(req)
+                a.request(flow)
+                flow.metadata = {}
+                flow.response = FakeResponse(b"ok", "text/plain")
+                flow.response.headers["X-Spark-Approval-Pending"] = "fake1"
+                flow.response.headers["X-Spark-Approval-Decision"] = \
+                    "denied:fake2"
+                a.responseheaders(flow)
+                keys = {k.lower() for k in flow.response.headers.keys()}
+                self.assertNotIn("x-spark-approval-pending", keys)
+                self.assertNotIn("x-spark-approval-decision", keys)
+                # Real signal: the forgery is replaced by the proxy's
+                # own value, never merged with it.
+                flow2 = self._refused_flow(a)
+                flow2.response = FakeResponse(b"unauthorized", "text/plain")
+                flow2.response.headers["X-Spark-Approval-Pending"] = "fake"
+                a.responseheaders(flow2)
+                hdrs = flow2.response.headers
+                self.assertTrue(
+                    sa._AID_RE.match(hdrs.get(sa.APPROVAL_PENDING_HEADER)))
+                self.assertNotEqual(
+                    hdrs.get(sa.APPROVAL_PENDING_HEADER), "fake")
+
 
 
 if __name__ == "__main__":

@@ -49,6 +49,19 @@ This changelog only works if entries land with the change, not after it:
   docs now load but dollar pricing still third-party-only — Details
   sub-page is the next ask); Automaid adjacent "AI hub for agents that
   keep working" color, own page still missing. (#296)
+- Client-visible approval signal (#133): when the swap proxy refuses a
+  request for lack of a grant, the proxied response now carries the
+  approval id and terminal decisions in response headers —
+  `X-Spark-Approval-Pending: <aid>` while a grant request is pending
+  (filed or coalesced; a replaced expired item is reported as
+  `expired:<old-aid>` alongside the new pending id), and
+  `X-Spark-Approval-Decision: approved|denied:<aid>` once decided —
+  so the requesting agent can park and re-issue instead of failing on
+  a remote auth error. Denial is terminal: within the 1-hour decision
+  window a denied tuple suppresses fresh filings (no owner re-push);
+  denial suppression is path-scoped. Header values carry only the
+  approval id and the state word — never credential names, hosts, or
+  secret material. Spec: `docs/APPROVAL_CLIENT_SIGNAL.md`. (#133)
 - Competitor watch (2026-09-23 midday): tracked set fully quiet — all
   8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (seventh

@@ -397,9 +397,13 @@ From `docs/POSITIONING.md` anti-claims plus the operator decisions
   sudoers extension for the tenant agent user. Small build; file it
   for the provisioning track (H4) or a `distribution` turn.
 - **Client-visible pending signal:** §6.6's machine-readable
-  pending/terminal-decision signal does not exist in the proxy or
-  confirmd today — pre-launch build item for the proxy/confirmd
-  track, or the minute 5–8 script stays unexecutable.
+  pending/terminal-decision signal — SHIPPED (proxy/confirmd track,
+  #133): `docs/APPROVAL_CLIENT_SIGNAL.md` specifies the protocol the
+  proxy now implements (`X-Spark-Approval-Pending` /
+  `X-Spark-Approval-Decision` response headers, deny-is-terminal, 1h
+  decision window, expired-replacement). The minute 5–8 script's
+  park-on-signal leg is now executable; remaining work is the script
+  itself, not the signal.
 - **`<harness-auth-probe>`:** R2 defines the concrete probe per
   harness; this spec's §5 is the interface it must satisfy.
 - **First-task text:** gated on the R7 decision gates (§6). When Phase
