@@ -48,7 +48,7 @@ This changelog only works if entries land with the change, not after it:
   characterization with no drift (no corpus fold); C26 refined (vendor
   docs now load but dollar pricing still third-party-only — Details
   sub-page is the next ask); Automaid adjacent "AI hub for agents that
-  keep working" color, own page still missing. (#TBD)
+  keep working" color, own page still missing. (#296)
 - Competitor watch (2026-09-23 midday): tracked set fully quiet — all
   8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (seventh
