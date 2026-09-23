@@ -37,6 +37,16 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 late morning): tracked set fully quiet —
+  all 8 providers re-read vendor-verified with no change; Vercel Drives
+  still public beta with no GA move (sixth consecutive no-change pass,
+  changelog confirms no entries dated 2026-09-23); DigitalOcean Managed
+  Agents public preview now carries published pricing ($0.044/vCPU-hour
+  active, $0.0095/GB-hour, $0.005/GiB-month snapshots — resolves C26's
+  pricing ask at third-party level, vendor verification owed) — the
+  first in-lane launch verdict of the recent streak (public preview, not
+  GA); Docker Sandboxes 0.42.0 CVE pair (CVE-2026-77179, CVE-2026-79994)
+  filed C35 (third-party only, vendor verification owed). (PR TBD)
 - Competitor watch (2026-09-23 night): tracked set fully quiet — all
   8 providers re-read vendor-verified with no change, zero fetch
   failures; Vercel Drives still public beta with no GA move (fifth
