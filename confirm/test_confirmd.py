@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -1084,6 +1085,397 @@ class ConfirmdTests(unittest.TestCase):
             h._answer_locked("ntindle@github", aid, "x" * 32, "deny")
         self.assertEqual(got["code"], 404)
         self.assertNotIn(aid, cd._aid_locks)
+
+
+class ReopenTests(unittest.TestCase):
+    """H20: POST /reopen — re-file a denied approval as a new pending item.
+
+    Run with:
+        python3 -m unittest confirm.test_confirmd -v
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.approvals = Path(self.tmp.name) / "approvals"
+        self.approvals.mkdir()
+        for sub in ("pending", "answered", "consumed"):
+            (self.approvals / sub).mkdir()
+        cd._reopen_nonces.clear()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        cd._reopen_nonces.clear()
+
+    def _denied_record(self, aid="deny-old-1", **kw):
+        it = {"id": aid, "summary": "credential spend", "kind": "first-use",
+              "credential": "openai", "host": "api.openai.com",
+              "method": "POST", "path_prefix": "/v1", "scope": "chat",
+              "amount": None, "job": "mjob-x",
+              "detail": "run the report", "created": "2026-09-24T00:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00",
+              "decision": "deny", "answered_by": "ntindle@github",
+              "answered_at": "2026-09-24T00:05:00+00:00",
+              "requester": "bdrive",
+              # Terminal-state must never leak into a re-filed item even
+              # if a record carries it (the copy is allowlist-based, but
+              # pin the guarantee with the fields present).
+              "_csrf_nonces": ["deadbeef" * 8], "_csrf": "deadbeef" * 8}
+        it.update(kw)
+        return it
+
+    def _denied_item(self, aid="deny-old-1", subdir="consumed", **kw):
+        it = self._denied_record(aid, **kw)
+        (self.approvals / subdir / (aid + ".json")).write_text(
+            json.dumps(it))
+        return it
+
+    def _handler(self):
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        calls = {}
+        headers = {}
+        h.send_response = lambda code: calls.update(code=code)
+        h.send_header = lambda k, v: headers.__setitem__(k, v)
+        h.end_headers = lambda: None
+        return h, calls, headers
+
+    def _reopen(self, h, aid, csrf):
+        got = {}
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._reopen_locked("ntindle@github", aid, csrf)
+        return got
+
+    def test_reopen_denied_refiles_as_new_pending(self):
+        """Happy path: a deny item is re-filed with a NEW aid, the request
+        fields carried over, terminal state dropped, lineage recorded, the
+        owner re-pushed, and the 303 points at the new approval page."""
+        aid = "deny-old-1"
+        old = self._denied_item(aid)
+        nonce = cd._mint_reopen_nonce(aid)
+        enqueued = []
+
+        class _SyncThread:
+            def __init__(self, target=None, name=None, daemon=None):
+                self._t = target
+            def start(self):
+                self._t()
+
+        class _Q:
+            @staticmethod
+            def default():
+                return _Q()
+            def enqueue(self, item):
+                enqueued.append(item)
+                return "queued"
+        fakepush = mock.Mock()
+        fakepush.PushQueue = _Q
+
+        h, calls, headers = self._handler()
+        with mock.patch.object(cd, "_push_mod", fakepush), \
+             mock.patch.object(cd.threading, "Thread", _SyncThread):
+            got = self._reopen(h, aid, nonce)
+
+        self.assertEqual(calls.get("code"), 303, got)
+        new_aid = headers["Location"].rsplit("/", 1)[-1]
+        self.assertRegex(new_aid, r"^[0-9a-f]{16}$")
+        self.assertNotEqual(new_aid, aid)
+        self.assertEqual(headers["Location"], "/approval/" + new_aid)
+        # The re-filed item carries the request, not the answer.
+        new = json.loads((self.approvals / "pending"
+                          / (new_aid + ".json")).read_text())
+        for key in ("credential", "host", "method", "path_prefix",
+                    "scope", "job", "detail", "summary", "kind"):
+            self.assertEqual(new[key], old[key], key)
+        self.assertNotIn("decision", new)
+        self.assertNotIn("answered_at", new)
+        self.assertNotIn("answered_by", new)
+        self.assertNotIn("_csrf_nonces", new)
+        self.assertNotIn("_csrf", new)
+        self.assertEqual(new["reopened_from"], aid)
+        self.assertEqual(new["original_requester"], "bdrive")
+        # Expiry preserves the requester's original deadline, verbatim.
+        self.assertEqual(new["expires"], old["expires"])
+        # And created is fresh (the re-filed item is new, not backdated).
+        self.assertLess(abs((cd._parse_expiry(new["created"])
+                             - datetime.now(timezone.utc))
+                            .total_seconds()), 60)
+        # The denied record is history and stays untouched.
+        kept = json.loads((self.approvals / "consumed"
+                           / (aid + ".json")).read_text())
+        self.assertEqual(kept["decision"], "deny")
+        # The nonce is one-shot and the re-open idempotent: a second
+        # POST with the same (now-evicted) nonce 303s to the SAME new
+        # approval — no 403, no duplicate filing.
+        h2, calls2, headers2 = self._handler()
+        got2 = self._reopen(h2, aid, nonce)
+        self.assertEqual(calls2.get("code"), 303, got2)
+        self.assertEqual(headers2["Location"], headers["Location"])
+        self.assertEqual(len(list((self.approvals / "pending").glob(
+            "*.json"))), 1)
+        # The owner was re-pushed for the NEW aid.
+        self.assertEqual([e["id"] for e in enqueued], [new_aid])
+        # Per-aid lock + nonce registry hygiene.
+        self.assertNotIn(aid, cd._aid_locks)
+        self.assertNotIn(aid, cd._reopen_nonces)
+
+    def test_reopen_approve_item_refused(self):
+        """An approved item cannot be re-opened: 400, nothing filed."""
+        aid = "approve-old-1"
+        self._denied_item(aid, decision="approve")
+        nonce = cd._mint_reopen_nonce(aid)
+        h, calls, _ = self._handler()
+        with mock.patch.object(cd, "_push_mod", None):
+            got = self._reopen(h, aid, nonce)
+        self.assertEqual(got["code"], 400)
+        self.assertEqual(list((self.approvals / "pending").glob("*.json")),
+                         [])
+
+    def test_reopen_missing_item_404(self):
+        h, calls, _ = self._handler()
+        nonce = cd._mint_reopen_nonce("deny-ghost-1")
+        got = self._reopen(h, "deny-ghost-1", nonce)
+        self.assertEqual(got["code"], 404)
+
+    def test_reopen_malformed_nonce_is_violation(self):
+        """Malformed nonce: 403 via the _deny path (audit: csrf: bad
+        nonce), nothing filed."""
+        aid = "deny-old-2"
+        self._denied_item(aid)
+        h, calls, _ = self._handler()
+        denied = {}
+        with mock.patch.object(cd.Handler, "_deny",
+                               side_effect=lambda p, l, r: denied.update(
+                                   reason=r)):
+            self._reopen(h, aid, "not-a-nonce")
+        self.assertIn("csrf: bad nonce", denied["reason"])
+        self.assertEqual(list((self.approvals / "pending").glob("*.json")),
+                         [])
+
+    def test_reopen_unknown_nonce_is_stale(self):
+        """Well-formed but unknown nonce for a REAL deny item: 403
+        stale-nonce, nothing filed. (For a missing item the load fails
+        first with 404 — the nonce gate only runs once there is a deny
+        record to re-open.)"""
+        aid = "deny-old-3"
+        self._denied_item(aid)
+        h, calls, _ = self._handler()
+        got = self._reopen(h, aid, "x" * 32)
+        self.assertEqual(got["code"], 403)
+        self.assertIn("stale", got["msg"])
+        self.assertEqual(list((self.approvals / "pending").glob("*.json")),
+                         [])
+
+    def test_reopen_expired_window_410(self):
+        """The original TTL already closed: 410, nothing filed, distinct
+        audit event (the request itself has expired)."""
+        aid = "deny-old-4"
+        self._denied_item(aid, created="2026-09-20T00:00:00+00:00",
+                          expires="2026-09-20T01:00:00+00:00")
+        nonce = cd._mint_reopen_nonce(aid)
+        h, calls, _ = self._handler()
+        got = self._reopen(h, aid, nonce)
+        self.assertEqual(got["code"], 410)
+        self.assertEqual(list((self.approvals / "pending").glob("*.json")),
+                         [])
+
+    def test_reopen_nonce_stable_across_renders(self):
+        """The nonce survives re-renders: the 5 s poller must not
+        invalidate a form it already built."""
+        aid = "deny-old-5"
+        self.assertEqual(cd._mint_reopen_nonce(aid),
+                         cd._mint_reopen_nonce(aid))
+
+    def test_reopen_push_fail_open(self):
+        """A failed push import must not lose the re-open: the page is the
+        fallback, exactly the H2 filing guarantee."""
+        aid = "deny-old-6"
+        self._denied_item(aid)
+        nonce = cd._mint_reopen_nonce(aid)
+        h, calls, headers = self._handler()
+        with mock.patch.object(cd, "_push_mod", None):
+            got = self._reopen(h, aid, nonce)
+        self.assertEqual(calls.get("code"), 303, got)
+        self.assertTrue(headers["Location"].startswith("/approval/"))
+
+    def test_reopen_expired_nonce_is_stale(self):
+        """An expired-but-once-live nonce: 403 stale-nonce, nothing filed."""
+        aid = "deny-old-7"
+        self._denied_item(aid)
+        nonce = cd._mint_reopen_nonce(aid)
+        cd._reopen_nonces[aid]["ts"] -= (cd._REOPEN_NONCE_TTL + 1)
+        h, calls, _ = self._handler()
+        got = self._reopen(h, aid, nonce)
+        self.assertEqual(got["code"], 403)
+
+    def test_answered_api_item_denied_carries_nonce(self):
+        """The /api/answered JSON carries reopen_csrf for deny items only —
+        the poller needs it for the re-open form."""
+        aid = "deny-old-8"
+        old = self._denied_item(aid)
+        out = cd._answered_api_item(old)
+        self.assertTrue(cd._reopen_nonce_ok(aid, out["reopen_csrf"]))
+        out2 = cd._answered_api_item(dict(old, decision="approve"))
+        self.assertNotIn("reopen_csrf", out2)
+
+    def test_reopen_concurrent_is_idempotent(self):
+        """Two threads re-opening the same deny item: both 303, both to
+        the SAME new approval, exactly one pending file. The loser's POST
+        carries the now-evicted nonce, so it takes the idempotent path —
+        never a 403, never a duplicate."""
+        aid = "deny-old-9"
+        self._denied_item(aid)
+        nonce = cd._mint_reopen_nonce(aid)
+        codes = {}
+        locations = {}
+        barrier = threading.Barrier(2)
+
+        def worker():
+            h, calls, headers = self._handler()
+            barrier.wait()
+            with cd._aid_lock(aid):
+                h._reopen_locked("ntindle@github", aid, nonce)
+            codes[threading.get_ident()] = calls.get("code")
+            locations[threading.get_ident()] = headers.get("Location")
+
+        def fake_err(handler_self, msg, code):
+            codes[threading.get_ident()] = code
+
+        # NOTE: the patches live in the MAIN thread for the whole join —
+        # mock.patch is process-global, not thread-scoped, so per-thread
+        # patch contexts would unpatch each other mid-race.
+        with mock.patch.object(cd, "APPROVALS",
+                               str(self.approvals)), \
+             mock.patch.object(cd.Handler, "_err", fake_err), \
+             mock.patch.object(cd, "_push_mod", None):
+            ts = [threading.Thread(target=worker) for _ in range(2)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+        self.assertEqual(sorted(codes.values()), [303, 303])
+        self.assertEqual(len(set(locations.values())), 1)
+        self.assertTrue(
+            list(locations.values())[0].startswith("/approval/"))
+        self.assertEqual(len(list((self.approvals / "pending").glob(
+            "*.json"))), 1)
+
+    def test_reopen_double_tap_same_nonce_is_idempotent(self):
+        """The mobile double-tap: two POSTs with the SAME nonce. The
+        first files; the second (nonce now evicted) takes the idempotent
+        path and 303s to the same new approval — never a 403, never a
+        duplicate."""
+        aid = "deny-old-10"
+        self._denied_item(aid)
+        nonce = cd._mint_reopen_nonce(aid)
+        h1, calls1, headers1 = self._handler()
+        with mock.patch.object(cd, "_push_mod", None):
+            got1 = self._reopen(h1, aid, nonce)
+        self.assertEqual(calls1.get("code"), 303, got1)
+        h2, calls2, headers2 = self._handler()
+        with mock.patch.object(cd, "_push_mod", None):
+            got2 = self._reopen(h2, aid, nonce)
+        self.assertEqual(calls2.get("code"), 303, got2)
+        self.assertEqual(headers2["Location"], headers1["Location"])
+        self.assertEqual(len(list((self.approvals / "pending").glob(
+            "*.json"))), 1)
+
+    def test_reopen_repeat_with_fresh_nonce_redirects(self):
+        """Deliberate second re-open: the card re-rendered with a fresh
+        one-shot nonce. Still exactly one pending file; the second 303
+        points at the FIRST new approval."""
+        aid = "deny-old-11"
+        self._denied_item(aid)
+        h1, calls1, headers1 = self._handler()
+        with mock.patch.object(cd, "_push_mod", None):
+            self._reopen(h1, aid, cd._mint_reopen_nonce(aid))
+        first = headers1["Location"]
+        self.assertEqual(calls1.get("code"), 303)
+        self.assertTrue(first.startswith("/approval/"))
+        # The card re-rendered: a fresh one-shot nonce for the same deny.
+        fresh = cd._mint_reopen_nonce(aid)
+        h2, calls2, headers2 = self._handler()
+        with mock.patch.object(cd, "_push_mod", None):
+            got2 = self._reopen(h2, aid, fresh)
+        self.assertEqual(calls2.get("code"), 303, got2)
+        self.assertEqual(headers2["Location"], first)
+        self.assertEqual(len(list((self.approvals / "pending").glob(
+            "*.json"))), 1)
+
+    def test_reopen_corrupt_history_404(self):
+        """A torn consumed file: 404, nothing filed (the #231 negative
+        path for /reopen)."""
+        aid = "deny-old-12"
+        (self.approvals / "consumed" / (aid + ".json")).write_text(
+            "{not json")
+        nonce = cd._mint_reopen_nonce(aid)
+        h, calls, _ = self._handler()
+        got = self._reopen(h, aid, nonce)
+        self.assertEqual(got["code"], 404)
+        self.assertEqual(list((self.approvals / "pending").glob("*.json")),
+                         [])
+
+    def test_reopen_pending_item_404(self):
+        """An aid that is still pending (never answered): 404 — only
+        consumed/answered history may re-open."""
+        aid = "deny-old-13"
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            json.dumps({"id": aid, "summary": "x"}))
+        before = sorted(
+            p.name for p in (self.approvals / "pending").glob("*.json"))
+        nonce = cd._mint_reopen_nonce(aid)
+        h, calls, _ = self._handler()
+        got = self._reopen(h, aid, nonce)
+        self.assertEqual(got["code"], 404)
+        self.assertEqual(sorted(
+            p.name for p in (self.approvals / "pending").glob("*.json")),
+            before)
+
+    def test_reopen_id_mismatch_404(self):
+        """Defense in depth: the history record's id disagrees with its
+        filename — refuse rather than re-file the wrong record."""
+        aid = "deny-old-14"
+        self._denied_item(aid, id="some-other-aid")
+        nonce = cd._mint_reopen_nonce(aid)
+        h, calls, _ = self._handler()
+        got = self._reopen(h, aid, nonce)
+        self.assertEqual(got["code"], 404)
+        self.assertEqual(list((self.approvals / "pending").glob("*.json")),
+                         [])
+
+    def test_reopen_answered_fallback(self):
+        """A previous run's failed sweep left the deny record in
+        answered/ instead of consumed/ — re-open still works."""
+        aid = "deny-old-15"
+        self._denied_item(aid, subdir="answered")
+        nonce = cd._mint_reopen_nonce(aid)
+        h, calls, headers = self._handler()
+        with mock.patch.object(cd, "_push_mod", None):
+            got = self._reopen(h, aid, nonce)
+        self.assertEqual(calls.get("code"), 303, got)
+        self.assertTrue(headers["Location"].startswith("/approval/"))
+
+    def test_poller_js_builds_reopen_form(self):
+        """The 5 s answered poller replaces the server-rendered cards, so
+        its re-open branch is load-bearing — pin its presence (repo
+        precedent: POLL_JS string assertions)."""
+        self.assertIn("Re-open this request", cd.POLL_JS)
+        self.assertIn("reopen_csrf", cd.POLL_JS)
+
+    def test_render_item_shows_reopen_provenance(self):
+        """The re-opened approval page surfaces the lineage at decision
+        time (Design B1 / Product B2) — and only then."""
+        h = cd.Handler.__new__(cd.Handler)
+        html_out = h._render_item({"id": "abc123def4567890",
+                                   "credential": "openai",
+                                   "reopened_from": "deny-old-1"})
+        self.assertIn("Re-opened from a denied request", html_out)
+        self.assertIn("deny-old-1", html_out)
+        plain = h._render_item({"id": "abc123def4567890",
+                                "credential": "openai"})
+        self.assertNotIn("Re-opened from a denied request", plain)
 
 
 if __name__ == "__main__":

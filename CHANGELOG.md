@@ -38,6 +38,14 @@ This changelog only works if entries land with the change, not after it:
 
 ### Added
 
+- Re-open a denied approval from its answered-history card (H20): a
+  mis-tapped Deny no longer needs the operator CLI to recover — the card
+  offers "Re-open this request", which re-files it as a new pending
+  approval (new id, the original request, the requester's original
+  deadline kept verbatim, expired requests refused honestly) and re-pushes
+  the owner. Single-tenant for now, designed for the multi-tenant future.
+  (#331)
+
 - Competitor watch (2026-09-24 midnight): tracked set 8/8 quiet, Vercel Drives
   still public beta; corpus grows a new in-lane entry — C39 Simular "Sai"
   computer-use agent GA (fleet of cloud VMs up to 100 machines); Freestyle

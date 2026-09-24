@@ -28,9 +28,14 @@ responses):
   decision for the tuple, `state` in:
   - `approved:<aid>` — the owner approved; the request that carries this
     header was swapped under the grant minted from `<aid>`.
-  - `denied:<aid>` — the owner denied within the decision window; **no
-    fresh approval is filed and the owner is not re-pushed**. A denial
-    is terminal. Surface as `human-denied`.
+  - `denied:<aid>` — the owner denied within the decision window. A
+    denial is terminal *for the parked task*: the agent must not expect
+    a fresh approval on its own. Escape hatch: the owner can re-open the
+    denied request from its answered-history card, which files a NEW
+    pending approval (new aid) and re-pushes the owner — but the agent
+    is never told about it. After the owner approves the re-opened
+    request, re-issue the gated request; it then succeeds with
+    `approved:<new-aid>`. Surface as `human-denied`.
   - `expired:<aid>` — the pending approval the client was waiting on
     expired unanswered. The same response normally carries a fresh
     `X-Spark-Approval-Pending: <new-aid>`: the proxy reaped the stale

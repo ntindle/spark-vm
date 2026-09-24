@@ -27,6 +27,18 @@ Config (env):
                       $CONFIRM_DIR/push-subscriptions.json)
   CONFIRM_VAPID_SUB   VAPID subject contact, e.g. mailto:owner@example.com
                       (default mailto:confirmd@localhost)
+
+Re-open (H20): a denied approval can be re-filed from its answered-history
+card (POST /reopen) — the recovery story for a mis-tapped Deny. The
+re-filed item gets a NEW approval id (aids never come back — see
+_evict_aid_lock), the original request fields, the requester's original
+deadline kept verbatim (expired requests are refused with 410), and
+`reopened_from`/`original_requester` lineage; the owner is re-pushed
+through the H14 queue. Re-open is idempotent per denied item: a repeat
+POST while the re-filed item is still pending redirects to it instead
+of filing a duplicate. Pre-H10 this is
+single-tenant by confirmd's design; the lineage fields make tenant
+scoping additive later.
 """
 
 import grp
@@ -86,6 +98,7 @@ try:
     if not PUSH_ENABLED:
         _PUSH = None
 except Exception as _push_import_err:
+    _push_mod = None
     _PUSH = None
     PUSH_ENABLED = False
     PUSH_DISABLED_REASON = "import-failed: %s" % _push_import_err
@@ -196,6 +209,114 @@ def _evict_aid_lock(aid):
     `_sweep_answered`'s `os.replace` could clobber `consumed/<aid>.json`
     history — the invariant has teeth, stated once here."""
     _aid_locks.pop(aid, None)
+
+
+# H20: re-open nonces. A denied approval's answered-history card carries a
+# "Re-open" form; its POST to /reopen needs the same per-item CSRF
+# discipline as /answer (finding 48). The nonce cannot live in the item
+# file: the item is consumed history, and mutating history files for live
+# nonces would corrupt the audit trail. So it lives in this in-memory
+# ring keyed by the ORIGINAL (denied) aid — minted when a deny item's
+# card renders, evicted on successful re-open (one-shot). Single-instance
+# scope is honest here: the same caveat as _aid_locks (a multi-replica
+# confirmd would need a shared store — tracked under #69).
+_reopen_nonces = {}
+_REOPEN_NONCE_TTL = 15 * 60
+_REOPEN_NONCE_CAP = 4096
+
+
+def _mint_reopen_nonce(aid):
+    """Mint (or re-issue the live) re-open nonce for a denied aid. The
+    nonce is stable across renders until it expires or is used, so the
+    5 s answered-feed poller never invalidates a form it already built.
+    One-shot: a successful re-open evicts it (_evict_reopen_nonce).
+    Concurrent renders can last-writer-wins the slot (same shape as
+    _mint_csrf_nonce) — the stranded form 403s and self-heals on the
+    next poll; single-tenant, rare, benign."""
+    now = time.time()
+    e = _reopen_nonces.get(aid)
+    if e and now - e["ts"] <= _REOPEN_NONCE_TTL:
+        return e["nonce"]
+    nonce = secrets.token_urlsafe(24)
+    _reopen_nonces[aid] = {"nonce": nonce, "ts": now}
+    # Issue #77 (L10) hygiene: keep the ring bounded like the whois cache.
+    while len(_reopen_nonces) > _REOPEN_NONCE_CAP:
+        _reopen_nonces.pop(next(iter(_reopen_nonces)))
+    return nonce
+
+
+def _reopen_nonce_ok(aid, csrf):
+    """True if csrf is the live re-open nonce for aid. Well-formed but
+    unknown/expired nonces are False — the caller audits them under the
+    same separable "csrf:stale-nonce" event as /answer (issue #75)."""
+    if not NONCE_RE.match(csrf or ""):
+        return False
+    e = _reopen_nonces.get(aid)
+    return bool(e and time.time() - e["ts"] <= _REOPEN_NONCE_TTL
+                and secrets.compare_digest(e["nonce"], csrf))
+
+
+def _evict_reopen_nonce(aid):
+    """Drop the re-open nonce once its item is re-filed. One-shot: the
+    loser of a re-open race must see stale-nonce, not a second filing."""
+    _reopen_nonces.pop(aid, None)
+
+
+def _pending_reopened_aid(aid):
+    """H20: idempotent re-open. If this denied aid was already re-filed
+    and the new item is still pending (and unexpired), return its aid so
+    a repeat POST redirects to it instead of filing a duplicate. The
+    deny card re-mints a fresh nonce on every render, so a second POST
+    for the same deny is normal (double-tap, deliberate repeat) — not
+    an attack. Returns None when no live re-opened item exists."""
+    try:
+        names = os.listdir(pending_dir())
+    except OSError:
+        return None
+    now = datetime.now(timezone.utc)
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(pending_dir(), name)) as f:
+                it = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(it, dict) or it.get("reopened_from") != aid:
+            continue
+        exp = _parse_expiry(it.get("expires"))
+        if exp is not None and now >= exp:
+            # The earlier re-open already expired; a repeat now is a new
+            # request, not a duplicate.
+            continue
+        new_aid = it.get("id") or name[:-5]
+        if isinstance(new_aid, str) and new_aid:
+            return new_aid
+    return None
+
+
+def _push_enqueue_reopen(new_aid, summary):
+    """H20: re-push the owner when a denied approval is re-opened, via
+    the H14 push queue. Fail-open and off the hot path — exactly the H2
+    filing guarantee: a queue failure must never lose the re-opened
+    approval (the page itself is the fallback; the queue only
+    accelerates the summons)."""
+    mod = _push_mod  # None when the push import failed; page still works
+    if mod is None:
+        return
+
+    def _run():
+        try:
+            res = mod.PushQueue.default().enqueue(
+                {"id": new_aid, "summary": summary})
+            if res not in ("queued", "duplicate", "notified"):
+                print("confirmd WARNING: push enqueue returned %s for "
+                      "re-opened %s" % (res, new_aid), flush=True)
+        except Exception:
+            print("confirmd WARNING: push enqueue failed for re-opened %s"
+                  % new_aid, flush=True)
+    threading.Thread(target=_run, name="confirmd-reopen-push",
+                     daemon=True).start()
 
 
 def _mint_csrf_nonce(it):
@@ -491,6 +612,14 @@ font-family:inherit}
 @media(prefers-color-scheme:dark){
 .btn-deny{color:#f2a9a2;border-color:#f2a9a2}
 .btn-deny:active{background:#3a1f1f}}
+/* H20: the re-open action is a neutral secondary button — neither an
+approval (green) nor a denial (red). */
+.btn-neutral{background:transparent;color:#1a73e8;border-color:#1a73e8}
+.btn-neutral:active{background:#e8f0fe}
+@media(prefers-color-scheme:dark){
+.btn-neutral{color:#8ab4f8;border-color:#8ab4f8}
+.btn-neutral:active{background:#1f2a3a}}
+.reopen{margin:10px 0 2px}
 /* Design review #4: armed confirm state for the approve button. */
 .btn-approve.armed{background:#8a5200}
 /* Design review: visible keyboard focus; language-appropriate link. */
@@ -623,9 +752,28 @@ function answeredCard(it){
   metaLine(c,[it.answered_by?("by "+String(it.answered_by)):"",
     it.answered_at?fmtTime(it.answered_at):"",
     String(it.kind||"")]);
+  // H20: re-open form for denied items (mirrors the server-rendered card).
+  if(dec==="deny"&&validId(id)&&it.reopen_csrf){
+    var f=document.createElement("form");
+    f.method="post";f.action="/reopen";f.className="reopen";
+    [["id",id],["csrf",String(it.reopen_csrf)]].forEach(function(p){
+      var inp=document.createElement("input");
+      inp.type="hidden";inp.name=p[0];inp.value=p[1];f.appendChild(inp);
+    });
+    var b=document.createElement("button");
+    b.type="submit";b.className="btn btn-neutral";
+    b.setAttribute("aria-label","Re-open this request "+id);
+    b.textContent="Re-open this request";f.appendChild(b);
+    c.appendChild(f);
+  }
   return c;
 }
 function renderAnswered(list,items){
+  // H20: don't rebuild while the owner is mid-click on a re-open form —
+  // a DOM swap between mousedown and mouseup would swallow the submit.
+  // The next 5 s poll picks up the change instead.
+  if(list.querySelector("form.reopen:hover,form.reopen:focus-within"))
+    return;
   keyedUpdate(list,items,answeredCard,function(it){return String(it.id||"?");},
     "No answered approvals yet.");
 }
@@ -917,8 +1065,10 @@ def _prune_consumed(limit=None):
 
 def _answered_api_item(it):
     """Issue #1: JSON surface for the answered-history poller.
-    Allowlisted fields only."""
-    return {
+    Allowlisted fields only. H20: a denied item additionally carries its
+    re-open CSRF nonce so the answered card can offer the re-open form —
+    non-deny items carry no nonce."""
+    out = {
         "id": str(it.get("id", "")),
         "summary": str(it.get("summary", "")),
         "kind": str(it.get("kind", "")),
@@ -926,6 +1076,9 @@ def _answered_api_item(it):
         "answered_by": str(it.get("answered_by", "")),
         "answered_at": str(it.get("answered_at", "")),
     }
+    if out["decision"] == "deny" and ID_RE.match(out["id"]):
+        out["reopen_csrf"] = _mint_reopen_nonce(out["id"])
+    return out
 
 
 def _meta_line_html(parts):
@@ -992,11 +1145,26 @@ def _render_answered_list(items):
             ("by %s" % it.get("answered_by")) if it.get("answered_by") else "",
             it.get("answered_at") or "",
             it.get("kind") or ""])
+        # H20: a denied approval can be re-filed from its card (the
+        # mis-tapped-Deny recovery). The nonce is minted per deny item
+        # and verified one-shot on POST /reopen.
+        reopen = ""
+        aid = str(it.get("id", ""))
+        if dec == "deny" and ID_RE.match(aid):
+            reopen = ('<form method="post" action="/reopen" class="reopen">'
+                      '<input type="hidden" name="id" value="%s">'
+                      '<input type="hidden" name="csrf" value="%s">'
+                      '<button class="btn btn-neutral" type="submit" '
+                      'aria-label="Re-open this request %s">'
+                      'Re-open this request</button></form>' % (
+                          html.escape(aid),
+                          html.escape(_mint_reopen_nonce(aid)),
+                          html.escape(aid)))
         cards.append(
             '<div class="card"><h2>%s%s</h2>'
-            '<div class="summary">%s</div>%s</div>' % (
+            '<div class="summary">%s</div>%s%s</div>' % (
                 html.escape(str(it.get("id", "?"))), badge,
-                html.escape(str(it.get("summary", ""))), meta))
+                html.escape(str(it.get("summary", ""))), meta, reopen))
     return "".join(cards)
 
 
@@ -1076,7 +1244,18 @@ class Handler(BaseHTTPRequestHandler):
             filed.append("filed %s" % _fmt_time(it["created"]))
         if it.get("expires"):
             filed.append("expires %s" % _fmt_time(it["expires"]))
-        return _meta_line_html(filed) + table + untrusted
+        reopened = ""
+        if it.get("reopened_from"):
+            # H20: provenance at decision time — the owner must see that
+            # this pending item is a re-filed denial, not a fresh
+            # request. Reuses the callout style; the lineage itself is
+            # system-recorded, not requester-supplied.
+            reopened = ('<div class="untrusted"><b>Re-opened from a denied '
+                        'request:</b> this is a new pending approval for '
+                        'the same request (denied approval '
+                        '<code>%s</code>).</div>'
+                        % html.escape(str(it["reopened_from"])))
+        return reopened + _meta_line_html(filed) + table + untrusted
 
     def do_GET(self):
         login = self._auth()
@@ -1139,6 +1318,10 @@ class Handler(BaseHTTPRequestHandler):
             body = ('<h1>Answered approvals</h1>'
                     '<p class="sub" role="status">showing the 100 most recent'
                     ' · <span id="updated">live — checking every 5 s</span></p>'
+                    '<p class="sub">A request denied by mistake can be '
+                    're-opened from its card — it is re-filed as a new '
+                    'pending approval. After re-opening, approve the new '
+                    'request, then tell the agent to retry.</p>'
                     '<div id="items">%s</div>'
                     '<p class="nav"><a href="/">back to pending</a></p>'
                     % _render_answered_list(
@@ -1275,7 +1458,7 @@ class Handler(BaseHTTPRequestHandler):
         login = self._auth()
         if login is None:
             return
-        if self.path not in ("/answer", "/api/push/subscribe",
+        if self.path not in ("/answer", "/reopen", "/api/push/subscribe",
                              "/api/push/unsubscribe"):
             self.send_response(404)
             self.end_headers()
@@ -1315,6 +1498,18 @@ class Handler(BaseHTTPRequestHandler):
             self.rfile.read(length).decode(errors="replace"))
         aid = form.get("id", [""])[0]
         csrf = form.get("csrf", [""])[0]
+        # H20: re-opening a denied approval re-files it as a new pending
+        # item — there is no decision to validate, and the nonce lives in
+        # the re-open ring (the item is consumed history, not pending).
+        # The per-aid lock on the ORIGINAL aid serializes concurrent
+        # re-opens of the same denied item (one-shot nonce; the loser
+        # sees stale-nonce).
+        if self.path == "/reopen":
+            if not ID_RE.match(aid):
+                self._err("bad request", 400)
+                return
+            with _aid_lock(aid):
+                return self._reopen_locked(login, aid, csrf)
         decision = form.get("decision", [""])[0]
         if not ID_RE.match(aid) or decision not in ("approve", "deny"):
             self._err("bad request", 400)
@@ -1497,6 +1692,142 @@ class Handler(BaseHTTPRequestHandler):
                   % (aid, decision, requester))
         self.send_response(303)
         self.send_header("Location", "/")
+        self.end_headers()
+
+    def _reopen_locked(self, login, aid, csrf):
+        """H20: POST /reopen — re-file a denied approval as a new pending
+        item and re-push the owner. The caller holds _aid_lock(aid) on the
+        ORIGINAL aid, so two concurrent re-opens of the same denied item
+        serialize; re-open is idempotent (a repeat POST while the re-filed
+        item is still pending 303-redirects to it).
+
+        Design notes:
+        - The re-filed item gets a NEW aid. The per-aid lock registry (and
+          the push notified-log) assume an aid never comes back — reusing
+          the old aid would alias a live item to dead history.
+        - The new pending file is written by confirmd itself (owner
+          swapd), so Finding 50 sees requester=swapd — a legitimate
+          filer. The original requester is preserved in
+          `original_requester`, and `reopened_from` carries the lineage;
+          the audit log ties old aid to new.
+        - Expiry preserves the requester's original deadline, verbatim.
+          If that deadline has already passed, the re-open is refused
+          (410) — silently granting a fresh window would lie about the
+          requester's intent. The owner re-files through the agent for a
+          genuinely new request.
+        - The denied record is history and stays untouched: the answered
+          feed keeps showing the deny honestly, alongside the new pending
+          item.
+        """
+        peer = self.client_address[0]
+        # Nonce discipline mirrors /answer (finding 48 + issue #75):
+        # malformed is a CSRF violation; well-formed but unknown is the
+        # separable stale-nonce event.
+        if not csrf or not NONCE_RE.match(csrf):
+            self._deny(peer, login, "csrf: bad nonce")
+            _evict_aid_lock(aid)
+            return
+        # The denied record lives in consumed/ (the answer path moves it
+        # there immediately) or, for a previous run's failed move, still
+        # in answered/ until _sweep_answered() collects it.
+        src = os.path.join(consumed_dir(), aid + ".json")
+        if not os.path.exists(src):
+            src = os.path.join(answered_dir(), aid + ".json")
+        try:
+            with open(src) as f:
+                old = json.load(f)
+        except (OSError, ValueError):
+            _evict_aid_lock(aid)
+            self._err("not found or already answered", 404)
+            return
+        if not isinstance(old, dict) or ("id" in old
+                                         and old["id"] != aid):
+            # Defense in depth: a history file whose record disagrees
+            # with its filename (or isn't a record at all) must not be
+            # re-filed — treat it as corrupt.
+            _evict_aid_lock(aid)
+            self._err("not found or already answered", 404)
+            return
+        if old.get("decision") != "deny":
+            # An approval, an expiry, or anything else that is not a
+            # denial.
+            _evict_aid_lock(aid)
+            self._err("Only denied approvals can be re-opened.", 400)
+            return
+        # NOTE: the nonce is deliberately NOT evicted on the 404/400/410
+        # paths above — those are terminal for this aid (or the record
+        # was never there), so a live nonce is harmless and a retry
+        # after a failed sweep still works.
+        #
+        # Idempotent re-open (Product/QA review): the deny card re-mints
+        # a fresh nonce on every render, so a second POST for the same
+        # deny is normal — double-tap, or a deliberate repeat. If the
+        # earlier re-open is still pending, redirect to it instead of
+        # filing a duplicate. This runs before nonce validation on
+        # purpose: the double-tap's second POST carries the now-evicted
+        # nonce, and this path changes no state, so there is nothing to
+        # forge.
+        existing = _pending_reopened_aid(aid)
+        if existing is not None:
+            _evict_reopen_nonce(aid)
+            _evict_aid_lock(aid)
+            audit_log("reopen-idempotent", peer, login,
+                      "id=%s new_id=%s" % (aid, existing))
+            self.send_response(303)
+            self.send_header("Location", "/approval/" + existing)
+            self.end_headers()
+            return
+        if not _reopen_nonce_ok(aid, csrf):
+            audit_log("csrf:stale-nonce", peer, login, "id=%s" % aid)
+            _evict_aid_lock(aid)
+            self._err("This form is stale — reload the page and try "
+                      "again.", 403)
+            return
+        # Build the re-filed item: the requester's fields, fresh timing,
+        # none of the answer's terminal state (_csrf rings, decision,
+        # answered_at/by are dropped by omission).
+        now = datetime.now(timezone.utc)
+        new_aid = secrets.token_hex(8)
+        new = {"id": new_aid}
+        for key in ("credential", "host", "method", "path_prefix",
+                    "scope", "amount", "job", "detail", "summary",
+                    "kind"):
+            if old.get(key) is not None:
+                new[key] = old[key]
+        new["created"] = now.isoformat()
+        # Expiry preserves the requester's original deadline, verbatim:
+        # re-opening must not silently extend a window the requester set.
+        # If that deadline has already passed, the request itself has
+        # expired — refuse honestly (410).
+        old_exp = _parse_expiry(old.get("expires"))
+        if old_exp is not None:
+            if now >= old_exp:
+                _evict_aid_lock(aid)
+                audit_log("reopen-expired", peer, login, "id=%s" % aid)
+                self._err("The original decision window has already "
+                          "passed — this request has expired. Ask the agent "
+                          "to file a fresh request.", 410)
+                return
+            new["expires"] = old["expires"]
+        new["reopened_from"] = aid
+        new["original_requester"] = old.get("requester") or "unknown"
+        dst = os.path.join(pending_dir(), new_aid + ".json")
+        tmp = dst + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(new, f, indent=2)
+        os.replace(tmp, dst)
+        # One-shot nonce: the loser of a re-open race sees stale-nonce.
+        # Evict the per-aid lock entry too (issue #231 hygiene — the old
+        # aid's item never comes back, so the lock must not linger).
+        _evict_reopen_nonce(aid)
+        _evict_aid_lock(aid)
+        audit_log("reopen", peer, login,
+                  "id=%s new_id=%s requester=%s"
+                  % (aid, new_aid, new["original_requester"]))
+        # Fail-open, off the hot path: the page itself is the fallback.
+        _push_enqueue_reopen(new_aid, str(new.get("summary") or ""))
+        self.send_response(303)
+        self.send_header("Location", "/approval/" + new_aid)
         self.end_headers()
 
     def _push_endpoint(self, login, length):
