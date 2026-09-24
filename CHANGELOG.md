@@ -48,6 +48,15 @@ This changelog only works if entries land with the change, not after it:
 
 ### Added
 
+- Midday competitor watch (tenth full quiet pass): tracked-set vendors
+  8/8 VERIFIED no-change, Vercel Drives still public beta (21st
+  consecutive pass), C36 and C41 re-verified unchanged; closed three
+  owed follow-ups — the YC slug rename for Boat is now backed by a
+  VERIFIED 301 (`/companies/ascii` → `/companies/boat`), folded into
+  the C40 provenance, and Boat's EU-only geography re-verified on the
+  vendor FAQ (Germany, Finland, France). A sunset convention for
+  deprecated corpus rows is proposed in the watch doc but not codified.
+  (#344)
 - H11 multi-tenancy audit: every localhost-only, no-auth, and single-owner
   assumption in the repo inventoried and ranked by blast radius; adopts the
   isolation research's findings and answers the four design questions —
