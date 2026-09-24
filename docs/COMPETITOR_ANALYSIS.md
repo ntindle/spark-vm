@@ -28,7 +28,7 @@ BACKLOG.md block points here.
   this pass). Watch docs are delta-only against the *previous watch doc*,
   which chains back to this baseline.
 - **Watch-doc naming:** watch passes land as
-  `docs/COMPETITOR_WATCH_YYYY-MM-DD.md`, with `_EVENING`/`_NIGHT`/`_MORNING`/`_MIDDAY`
+  `docs/COMPETITOR_WATCH_YYYY-MM-DD.md`, with `_EVENING`/`_NIGHT`/`_MORNING`/`_MIDDAY`/`_NOON`
   suffixes for same-day repeats; each is delta-only against the previous
   watch doc.
 - **Reach-back policy:** a watch pass backfills a pre-window item only
@@ -96,7 +96,7 @@ isolation), because those are where the trust story lives.
 | **Alibaba Cloud FC Agent Sandbox** (2026-09-24 morning, C41) | Task-scoped sandbox (billing corpus) | New pay-as-you-go sandbox billing rolling out from 2026-07-31 (UTC+8), still invite-only preview: per-second billing, hourly settlement; formula = unit price × run duration. Three editions: Eco (cheapest, occasional perf fluctuation, no hibernation — startups/tool-use validation), Std (+hibernation — enterprise copilots), Pro (+deep and shallow hibernation, millions of concurrent requests — RL sampling/high-concurrency agents). Hibernation: active = vCPU+mem+disk (15 GiB disk free); light (Pro only) = mem+disk, vCPU free; deep = vCPU+mem free, billed on (memory×2 + disk) GiB; FAQ: call `kill()` when the task is complete. **Scope (VERIFIED):** applies ONLY to E2B-SDK integration — existing E2B instances auto-upgrade to Pro; Sandbox Functions/AgentRun Sandbox customers must migrate. Lane characterization (INFERRED): task-scoped compute, **not** agent-VM-shaped — no SSH/Desktop surface in the Features index; closer to E2B/Daytona pause semantics than a persistent dev VM. | Eco **0.00936/vCPU-h + 0.004608/GiB-h** (2 vCPU / 4 GiB / 15 GiB ≈ **$0.037/h**); Std 0.01224 / 0.006012; Pro 0.01872 / 0.009360; disk 0.00031896/GiB-h (0.00025308 ex-mainland). All VERIFIED on aliyun-fc/fc-docs |
 | **Namespace Devboxes** (2026-09-24 late midday, C42; **adjacent → in-lane**) | Persistent computer / ephemeral devboxes | *"Devboxes for Coding Agents"*: Linux and macOS machines where a coding agent clones a repository, installs dependencies, runs commands, and returns the result (ephemeral Devboxes); Pool API (`devbox acquire`); `devbox exec` / `logs` / `upload`; egress filtering via `network_policy.egress_domains`; secrets through the Namespace vault; native integrations — **Claude Managed Agents, Cursor Cloud Agents, and Devin all run on Namespace Devboxes**. All VERIFIED on the [vendor's own docs](https://namespace.so/docs/devbox/agents) (read 2026-09-24) — reverses the midnight pass's adjacent verdict. Sizes S→XL (burst 4 vCPU/8 GB → 32 vCPU/64 GB) at the THIRD-PARTY snippet layer | No published pricing in the surveyed docs |
 | **Google Gemini Agent Environment** (2026-09-24 afternoon, C43) | Managed agent sandbox (task-scoped compute) | *"Environments are managed Linux sandboxes that give agents an isolated place to execute code and persist files"* — reusable via `environment_id`; sources (git repo mount); network allowlists; env vars / credential references; pre-installed Ubuntu toolchains; current examples use agent string `antigravity-preview-09-2026`. All VERIFIED on the [vendor's own docs](https://ai.google.dev/gemini-api/docs/agent-environment) (read 2026-09-24). Sept-17 detail at the THIRD-PARTY layer: Files API (persistent file upload/list/download into the sandbox); Credentials API (secrets injected as env vars/MCP headers so the model never sees the raw secret — a sixth convergent placeholder-swap datapoint, noted for the secrets turns); vendor-claimed ~40% fewer output tokens on file edits, +8% task completion; preview compute not billed. Sibling of Agent Substrate (C36) — this is the Gemini-API-side managed sandbox surface, not the GKE-side one. | Preview compute not billed; no published pay-as-you-go pricing in the surveyed docs |
-| **Google Gemini Enterprise Agent Platform sandboxes** (2026-09-24 late evening, C44) | Managed agent sandboxes (task-scoped compute, GA) | *VENDOR-VERIFIED on Google's own release notes (read 2026-09-24): "Computer Use and Shell sandboxes in Gemini Enterprise Agent Platform are now generally available (GA)." (Sept 9, 2026)* — Shell sandboxes run untrusted shell commands, install packages, and manipulate files in an isolated Linux container via direct `/exec` API calls (Shell sandbox quickstart linked from the release notes); the same release ships VPC Service Controls & Private Service Connect, CMEK (Cloud KMS, disk + snapshot checkpoints), and **pause/resume for sandboxes** (deschedule compute for idle sandboxes while preserving filesystem state and connection identity; resume in seconds (idle-suspend economics datapoint — INFERRED read, convergent with C36 Agent Substrate's zero-idle posture and DO's 305 ms resume claim). A third Google agent-sandbox surface alongside C36 (GKE-side open-source runtime) and C43 (Gemini-API-side Environments); the GA is pre-window (Sept 9) but filed now — reach-back per the #82 pattern, explicit queued candidate verified on a primary source. | No published pay-as-you-go pricing in the surveyed release notes |
+| **Google Gemini Enterprise Agent Platform sandboxes** (2026-09-24 late evening, C44) | Managed agent sandboxes (task-scoped compute, GA) | *VENDOR-VERIFIED on Google's own release notes (read 2026-09-24): "Computer Use and Shell sandboxes in Gemini Enterprise Agent Platform are now generally available (GA)." (Sept 9, 2026)* — Shell sandboxes run untrusted shell commands, install packages, and manipulate files in an isolated Linux container via direct `/exec` API calls (Shell sandbox quickstart linked from the release notes); the same release ships VPC Service Controls & Private Service Connect, CMEK (Cloud KMS, disk + snapshot checkpoints), and **pause/resume for sandboxes** (deschedule compute for idle sandboxes while preserving filesystem state and connection identity; resume in seconds (idle-suspend economics datapoint — INFERRED read, convergent with C36 Agent Substrate's zero-idle posture and DO's 305 ms resume claim)). A third Google agent-sandbox surface alongside C36 (GKE-side open-source runtime) and C43 (Gemini-API-side Environments); the GA is pre-window (Sept 9) but filed now — reach-back per the #82 pattern, explicit queued candidate verified on a primary source. | No published pay-as-you-go pricing in the surveyed release notes |
 | **h-sandbox / Harakiri** (2026-09-22 consolidation) | Task-scoped sandbox (OSS control plane) | Open-source self-hosted sandbox control plane (Apache 2.0); HTTP API / TS SDK / CLI / dashboard; Credential Vault with host-bound egress bindings and fake-env injection (fourth convergent placeholder-swap data point for the secrets-posture corpus) | Free, self-hosted |
 | **Brig** (2026-09-22 consolidation) | Local containment (OSS tool) | Local microVM CLI for coding agents — no hosted service; dedicated kernel per sandbox, host-vs-agent trust model, boot-empty credentials with names-only reporting, fail-closed egress-downgrade refusal | Free, local (Apache 2.0) |
 | **Epho** (2026-09-22 consolidation) | Task-scoped sandbox | Agents-as-API (claude / codex / opencode harnesses) with automatic multi-provider fallback — the session outlives the machine via session-snapshot restore on replacement boxes | ≈$0.158/h for 2 vCPU / 2 GiB / 10 GiB (computed from per-second rates); $10 starting credit; BYO model keys |
@@ -1218,9 +1218,8 @@ now confirmed on OpenAI's own launch post — **VERIFIED** read on the
 vendor's own blog this run (https://openai.com/index/introducing-the-agents-api/,
 ~14:15 CDT): "Today, we're introducing the Agents API in public beta,"
 naming nine partners with first-class integrations: "Blaxel, Cloudflare,
-Daytona, DigitalOcean, E2B, Modal, Oracle, Runloop, and Vercel." (Launch
-date 2026-09-10 per third-party coverage of the vendor launch — the post
-body carries no visible date; the standing corpus "Sept-10" date is kept.)
+Daytona, DigitalOcean, E2B, Modal, Oracle, Runloop, and Vercel." (Launch date 2026-09-10 — confirmed on OpenAI's own changelog by the
+2026-09-24 noon pass; the launch-post body carries no visible date.)
 No new C-number: the filing existed, only the provenance layer moved. The
 rumored "Managed Agents" unveil at DevDay 2026 (Sep 29) remains
 press/rumor with no OpenAI vendor confirmation; AWS Bedrock "Managed
@@ -1732,14 +1731,14 @@ changelog, so no row update per the fold convention. This ends the
 eleven-pass full-quiet 8/8 tracked-set streak (this pass: 7/8
 VERIFIED NO-CHANGE).
 
-**OpenAI Agents API — availability verdict stays THIRD-PARTY.**
-The API is live and documented on OpenAI's own docs (VERIFIED), but
-the canonical announcement page could not be fetched this run and the
-public-beta dating lives only on a community mirror of the developers
-changelog — so per the evidence rules the "public beta opened to all
-API developers on Sept 10, 2026" verdict stays THIRD-PARTY. It is an
-LLM/agent platform surface (out-of-lane) and not new in-window:
-watch color only.
+**OpenAI Agents API — availability verdict upgraded to VENDOR-VERIFIED (sourcing only; no GA move).**
+2026-09-24 noon pass: the public-beta dating is now confirmed on
+OpenAI's own changelog ([developers.openai.com/api/docs/changelog](https://developers.openai.com/api/docs/changelog),
+read 2026-09-24): *"Sep 10 — Feature — Released the Agents API in public
+beta"* (managed Codex harness; run agents in OpenAI-hosted sandboxes or
+connect your own). Still public beta — **no GA move.** It remains an
+LLM/agent platform surface (out-of-lane) and not new in-window: watch
+color only. Supersedes the midday pass's THIRD-PARTY dating verdict.
 
 **Tencent Cloud DataBuddy (Sept 22 launch) — adjacent watch color;
 lane tension recorded, not resolved.** PRNewswire syndication mirrors
