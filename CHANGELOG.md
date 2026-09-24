@@ -619,6 +619,19 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
+- The deploy health check no longer mis-parses TCP endpoints: it now reads
+  the port as the trailing `:digits` field and treats everything between
+  `tcp:` and that field as the host, instead of splitting on a middle
+  colon — an IPv6-style entry like `tcp:fe80::1:8080` used to be mangled
+  into a nonsense host. Malformed entries (missing or non-numeric port,
+  empty host) now fail the health check closed with a clear log line
+  instead of probing a garbage endpoint. (fixes #323, PR #TBD)
+- A failed swap audit no longer emits a false approval signal: the
+  credential proxy records the grant's `approved:<id>` terminal signal
+  only after the audit write succeeds and the substituted credential is
+  actually returned. Previously the signal was recorded during resolution,
+  so a swap vetoed by the audit gate still told the requesting agent its
+  credential had been approved and swapped. (fixes #305, PR #TBD)
 - The auto-deploy pre-deploy gates now cover every test module in each
   component: four proxy test suites (install safety, CA bundle, secrets-dir
   enforcement, credential-validation grammars), confirmd's push-queue tests,
