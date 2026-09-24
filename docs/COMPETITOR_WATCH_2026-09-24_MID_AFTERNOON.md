@@ -99,11 +99,11 @@ not claimed as no-change.
   show latest entry September 22, 2026; the September 09, 2026 GA entry
   stands verbatim. No Sept 23–24 entries.
 - **OpenAI Agents API — still public beta, no GA (VERIFIED absent).**
-  This pass read **OpenAI's own changelog** and confirmed the Sept 10
-  entry still reads *"Released the Agents API in public beta"* — the
-  earlier passes' third-party-mirror sourcing is upgraded to
-  VENDOR-VERIFIED dating (still no GA move). Latest entry Sept 22
-  (GPT-6 Sol / GPT-6 Luna); no GA announcement.
+  This run read **OpenAI's own changelog** and confirmed the Sept 10
+  entry still reads *"Released the Agents API in public beta"* — a
+  fresh first-party read that re-confirms the noon pass's
+  VENDOR-VERIFIED dating (the early-afternoon pass read a
+  third-party mirror); still no GA move.
 - **C45 Docker Cloud Sandboxes — no new moves since the fold.** The
   GlobeNewswire wire adds the launch venue *"WeAreDevelopers North
   America"* (THIRD-PARTY); docs.docker.com frames local + cloud
@@ -116,7 +116,10 @@ not claimed as no-change.
   approval.
 - **Vercel Drives GA watch — out of this pass's scope.** Per the P49
   decision it moved to once-daily (morning pass). Next check: tomorrow
-  morning.
+  morning. (Surveyor B opportunistically re-read the pricing page and
+  changelog this pass anyway: `last_updated: 2026-09-10` not moved;
+  Drives still public beta, VENDOR-VERIFIED; no 9/23–24 sandbox
+  changelog entries.)
 
 ## 3. Queued trends — all hold, none move in-lane
 
@@ -185,8 +188,9 @@ Surveyed 2026-09-24 ~14:56–15:15 CDT. Tracked set: 7/8 VERIFIED
 NO-CHANGE, one UNVERIFIED (DigitalOcean docs — no-move not claimed;
 stamp re-check owed next pass). **Resolved asks:** Boat EU geography
 re-VERIFIED verbatim on the vendor FAQ (three-pass retry closed);
-OpenAI Agents API Sep-10 beta dating upgraded THIRD-PARTY →
-VENDOR-VERIFIED on OpenAI's own changelog (still public beta, no GA).
+OpenAI Agents API Sep-10 public-beta dating re-confirmed
+VENDOR-VERIFIED with a fresh read of OpenAI's own changelog (the noon
+pass's upgrade already stood; still public beta, no GA).
 C36/C41/C43/C44 unchanged; C45 no new moves. **Corpus folds:** C41
 Snapshot-pricing line (fully specified this run) + C45
 WeAreDevelopers-venue garnish (THIRD-PARTY); `_MID_AFTERNOON`
