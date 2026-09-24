@@ -156,9 +156,10 @@ class OkHandler(BaseHTTPRequestHandler):
 
 class DenyHandler(BaseHTTPRequestHandler):
     """Mimics confirmd's own _deny contract (confirm/confirmd.py): HTTP 403,
-    body "forbidden: <reason>", Server header starting with "confirmd/1".
-    The probe asserts exactly this shape (GitHub #160) — keep this fixture
-    in lockstep with confirmd's _deny if that contract ever changes."""
+    body "forbidden: <reason>", Server header whose first token is exactly
+    "confirmd/1". The probe asserts exactly this shape (GitHub #160) — keep
+    this fixture in lockstep with confirmd's _deny if that contract ever
+    changes."""
     server_version = "confirmd/1"
     reason = "self-peer"
 
@@ -566,7 +567,7 @@ def test_confirmd_403_wrong_body_fails(fixtures, tmp_path):
 def test_confirmd_right_body_wrong_server_header_fails(fixtures, tmp_path):
     # The Server header assertion is non-vacuous: the right denial body
     # under a foreign Server header must fail.
-    class NoIdentityDeny(BaseHTTPRequestHandler):
+    class WrongServerHeaderDeny(BaseHTTPRequestHandler):
         # default server_version ("BaseHTTP/0.6"), no confirmd/1 marker
         def do_GET(self):
             body = b"forbidden: self-peer\n"
@@ -578,7 +579,7 @@ def test_confirmd_right_body_wrong_server_header_fails(fixtures, tmp_path):
         def log_message(self, *a):
             pass
 
-    srv = _tls_confirmd_server(tmp_path, handler=NoIdentityDeny)
+    srv = _tls_confirmd_server(tmp_path, handler=WrongServerHeaderDeny)
     try:
         url = f"https://127.0.0.1:{srv.server_port}"
         proc, _ = run_probe(fixtures, tmp_path,
