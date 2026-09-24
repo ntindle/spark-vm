@@ -38,6 +38,7 @@ This changelog only works if entries land with the change, not after it:
 
 ### Added
 
+- Competitor watch, 2026-09-24 noon: tracked set 8/8 quiet (full-quiet streak advances to three), C36/C41/C43/C44 all re-verified unchanged, **OpenAI Agents API Sep-10 public-beta dating upgraded THIRD-PARTY → VENDOR-VERIFIED** (sourcing only — OpenAI's own changelog; still public beta, no GA move), agentic-cloud framing and Tencent DataBuddy stay queued/adjacent, C44 paren-balance nit adopted, no new corpus entries, no in-lane launches/pricing/funding dated 9/24 (#359).
 - Competitor watch, 2026-09-24 late evening: tracked set 8/8 quiet, Vercel Drives still public beta (25th pass, GA watch now once-daily per the P49 cadence decision), **new in-lane corpus entry C44 — Google Gemini Enterprise Agent Platform sandboxes (Computer Use + Shell) GA** (VENDOR-VERIFIED on Google's own release notes), Docker CVE pair confirmed already-closed, watch-review nits adopted (#352).
 - Evening competitor watch (full quiet pass): tracked-set vendors 8/8
   VERIFIED no-change with zero fetch failures (full-quiet streak re-opens
