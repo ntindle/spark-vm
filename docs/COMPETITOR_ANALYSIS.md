@@ -95,6 +95,7 @@ isolation), because those are where the trust story lives.
 | **Boat** (C40, **DEPRECATED ROW — deduped** 2026-09-24 morning) | Persistent computer | ASCII renamed to Boat ~2026-09-17 (same product: three legacy domains box.ascii.dev/boat.dev/ascii.dev serve byte-identical pages; YC F26 company page now ycombinator.com/companies/boat — THIRD-PARTY, YC is the accelerator not the vendor; the old YC slug ycombinator.com/companies/ascii serves a 301 → /companies/boat, VERIFIED 2026-09-24 midday; the vendor's own API docs at docs.ascii.dev/box/api/v1 render as "Boat Public API v1", VERIFIED 2026-09-24 late midday). **All Boat data lives in the tracked-set Boat row above** — this row retained for provenance. Pricing VERIFIED on own page pre-dedup: $20/mo plan = $20 sandbox time, $0.036/h for 4 vCPU / 8 GB / 50 GB, billed per second, only while running; 100–2,000 sandboxes by plan; $20 auto-refill packs; EU-only DE/FI/FR (FAQ). | See tracked-set Boat row |
 | **Alibaba Cloud FC Agent Sandbox** (2026-09-24 morning, C41) | Task-scoped sandbox (billing corpus) | New pay-as-you-go sandbox billing rolling out from 2026-07-31 (UTC+8), still invite-only preview: per-second billing, hourly settlement; formula = unit price × run duration. Three editions: Eco (cheapest, occasional perf fluctuation, no hibernation — startups/tool-use validation), Std (+hibernation — enterprise copilots), Pro (+deep and shallow hibernation, millions of concurrent requests — RL sampling/high-concurrency agents). Hibernation: active = vCPU+mem+disk (15 GiB disk free); light (Pro only) = mem+disk, vCPU free; deep = vCPU+mem free, billed on (memory×2 + disk) GiB; FAQ: call `kill()` when the task is complete. **Scope (VERIFIED):** applies ONLY to E2B-SDK integration — existing E2B instances auto-upgrade to Pro; Sandbox Functions/AgentRun Sandbox customers must migrate. Lane characterization (INFERRED): task-scoped compute, **not** agent-VM-shaped — no SSH/Desktop surface in the Features index; closer to E2B/Daytona pause semantics than a persistent dev VM. | Eco **0.00936/vCPU-h + 0.004608/GiB-h** (2 vCPU / 4 GiB / 15 GiB ≈ **$0.037/h**); Std 0.01224 / 0.006012; Pro 0.01872 / 0.009360; disk 0.00031896/GiB-h (0.00025308 ex-mainland). All VERIFIED on aliyun-fc/fc-docs |
 | **Namespace Devboxes** (2026-09-24 late midday, C42; **adjacent → in-lane**) | Persistent computer / ephemeral devboxes | *"Devboxes for Coding Agents"*: Linux and macOS machines where a coding agent clones a repository, installs dependencies, runs commands, and returns the result (ephemeral Devboxes); Pool API (`devbox acquire`); `devbox exec` / `logs` / `upload`; egress filtering via `network_policy.egress_domains`; secrets through the Namespace vault; native integrations — **Claude Managed Agents, Cursor Cloud Agents, and Devin all run on Namespace Devboxes**. All VERIFIED on the [vendor's own docs](https://namespace.so/docs/devbox/agents) (read 2026-09-24) — reverses the midnight pass's adjacent verdict. Sizes S→XL (burst 4 vCPU/8 GB → 32 vCPU/64 GB) at the THIRD-PARTY snippet layer | No published pricing in the surveyed docs |
+| **Google Gemini Agent Environment** (2026-09-24 afternoon, C43) | Managed agent sandbox (task-scoped compute) | *"Environments are managed Linux sandboxes that give agents an isolated place to execute code and persist files"* — reusable via `environment_id`; sources (git repo mount); network allowlists; env vars / credential references; pre-installed Ubuntu toolchains; current examples use agent string `antigravity-preview-09-2026`. All VERIFIED on the [vendor's own docs](https://ai.google.dev/gemini-api/docs/agent-environment) (read 2026-09-24). Sept-17 detail at the THIRD-PARTY layer: Files API (persistent file upload/list/download into the sandbox); Credentials API (secrets injected as env vars/MCP headers so the model never sees the raw secret — a sixth convergent placeholder-swap datapoint, noted for the secrets turns); vendor-claimed ~40% fewer output tokens on file edits, +8% task completion; preview compute not billed. Sibling of Agent Substrate (C36) — this is the Gemini-API-side managed sandbox surface, not the GKE-side one. | Preview compute not billed; no published pay-as-you-go pricing in the surveyed docs |
 | **h-sandbox / Harakiri** (2026-09-22 consolidation) | Task-scoped sandbox (OSS control plane) | Open-source self-hosted sandbox control plane (Apache 2.0); HTTP API / TS SDK / CLI / dashboard; Credential Vault with host-bound egress bindings and fake-env injection (fourth convergent placeholder-swap data point for the secrets-posture corpus) | Free, self-hosted |
 | **Brig** (2026-09-22 consolidation) | Local containment (OSS tool) | Local microVM CLI for coding agents — no hosted service; dedicated kernel per sandbox, host-vs-agent trust model, boot-empty credentials with names-only reporting, fail-closed egress-downgrade refusal | Free, local (Apache 2.0) |
 | **Epho** (2026-09-22 consolidation) | Task-scoped sandbox | Agents-as-API (claude / codex / opencode harnesses) with automatic multi-provider fallback — the session outlives the machine via session-snapshot restore on replacement boxes | ≈$0.158/h for 2 vCPU / 2 GiB / 10 GiB (computed from per-second rates); $10 starting credit; BYO model keys |
@@ -1698,3 +1699,72 @@ says public beta, so the verdict stands with the snippet recorded as
 availability color). The deprecated-row sunset convention stays
 proposed-not-codified (C40, ~3–4 passes into the proposed 14-pass
 retention — no removal either way).
+
+## Watch update — 2026-09-24 (afternoon): C43 Google Gemini Agent Environment, Daytona changelog move
+
+New-entry fold per the C32/C37/C38/C39/C40/C41/C42 precedents; full
+pass record in `docs/COMPETITOR_WATCH_2026-09-24_AFTERNOON.md`.
+
+**C43 new — Google Gemini Agent Environment (in-lane, VERIFIED).**
+Google's own Gemini API docs
+([ai.google.dev/gemini-api/docs/agent-environment](https://ai.google.dev/gemini-api/docs/agent-environment),
+read 2026-09-24): *"Environments are managed Linux sandboxes that give
+agents an isolated place to execute code and persist files"* —
+reusable via `environment_id`; sources (git repo mount); network
+allowlists; env vars / credential references; pre-installed Ubuntu
+toolchains; current examples use agent string
+`antigravity-preview-09-2026`. Sept-17 detail at the THIRD-PARTY
+layer: Files API (persistent file upload/list/download); Credentials
+API (secrets injected as env vars/MCP headers, model never sees the
+raw secret — a sixth convergent placeholder-swap datapoint, noted
+for the secrets turns); vendor-claimed ~40% fewer output tokens on
+file edits, +8% task completion; preview compute not billed. Sibling
+of Agent Substrate (C36): C36 is the GKE-side surface; C43 is the
+Gemini-API-side managed sandbox. Filed as **C43** with a field-table
+row.
+
+**Daytona tracked-set move — SEP 24 changelog entries, no field-table
+change.** V0.216.1 + V0.216.2 (VERIFIED on daytona.io/changelog): CLI
+login through WorkOS; API-key organization context; outdated-version
+warning fix. CLI/API polish — no pricing move, no sandbox-feature
+move. The field table carries Daytona's positioning/pricing, not its
+changelog, so no row update per the fold convention. This ends the
+eleven-pass full-quiet 8/8 tracked-set streak (this pass: 7/8
+VERIFIED NO-CHANGE).
+
+**OpenAI Agents API — availability verdict stays THIRD-PARTY.**
+The API is live and documented on OpenAI's own docs (VERIFIED), but
+the canonical announcement page could not be fetched this run and the
+public-beta dating lives only on a community mirror of the developers
+changelog — so per the evidence rules the "public beta opened to all
+API developers on Sept 10, 2026" verdict stays THIRD-PARTY. It is an
+LLM/agent platform surface (out-of-lane) and not new in-window:
+watch color only.
+
+**Tencent Cloud DataBuddy (Sept 22 launch) — adjacent watch color;
+lane tension recorded, not resolved.** PRNewswire syndication mirrors
+(vendor press release not fetched on tencentcloud.com): agent-native
+Data + AI workbench after CodeBuddy/WorkBuddy, built on an "Agent
+Runtime layer" (governance, auditability, data controls); China /
+Thailand / South Korea / Indonesia, EU/NA/SA rollouts ongoing. The
+midnight pass recorded DataBuddy as adjacent; this pass's surveyor
+characterized it as in-lane. The vendor's own page was not read —
+kept as adjacent watch color, tension recorded here rather than the
+lane being unilaterally recoded.
+
+Adjacent color, no fold: Alibaba Cloud's agentic-cloud strategy +
+AgentCore (Sept 22, Hangzhou Cloud Summit; THIRD-PARTY — managed
+agent platform) and GitHub Copilot app opt-in local sandboxing in
+public preview (Sept 23, snippet-only — agent product, out-of-lane).
+Dropped as stale/out-of-window: Daytona's 2024 PRNewswire
+recirculation; Boxd $2M (C29, closed 9/21); Alibaba FC snapshot
+billing (Aug 25); Cursor Rollouts + Security Reviewer (Sept 24, agent
+product); Darktrace Signal Labs (Sept 24); Zoho Catalyst agentic PaaS
+(Sept 24); Modal $355M (2026-05-21).
+
+C36 re-verified unchanged (allowlist-only production GA terms
+verbatim). C41 billing re-verified unchanged (HEAD `39b6c3a`). Vercel
+Drives still public beta (23rd consecutive no-change pass; pricing
+page `last_updated` 2026-09-10). The deprecated-row sunset convention
+stays proposed-not-codified (C40, ~4–5 passes into the proposed
+14-pass retention — no removal either way).
