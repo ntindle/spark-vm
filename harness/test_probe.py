@@ -476,7 +476,7 @@ def test_confirmd_https_self_signed_passes(fixtures, tmp_path):
     # The production confirmd path: HTTPS with a self-signed cert, answering
     # with confirmd's own 403 denial shape. This is the only test exercising
     # the probe's HTTPSHandler(context) + CERT_NONE wiring against the
-    # identity assertion — without it, "hardening" the context would break
+    # deny-shape assertion — without it, "hardening" the context would break
     # production while the suite stays green.
     srv = _tls_confirmd_server(tmp_path)
     try:
@@ -540,7 +540,7 @@ def test_confirmd_port_grabber_200_fails(fixtures, tmp_path):
 
 
 def test_confirmd_403_wrong_body_fails(fixtures, tmp_path):
-    # A 403 alone is not the identity: the denial body must be confirmd's
+    # A 403 alone is not confirmd's denial: the denial body must be confirmd's
     # own "forbidden: <reason>" shape.
     class WrongBodyDeny(DenyHandler):
         def do_GET(self):

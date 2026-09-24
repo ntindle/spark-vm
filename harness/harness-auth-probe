@@ -225,7 +225,9 @@ def check_provision(muse_bin, base_url, proxy, key_name):
 # itself — and the probe always connects from the box — so a live confirmd
 # answers the probe's GET with HTTP 403 and a body of exactly
 # "forbidden: <reason>\n" for one of the known deny reasons, plus a Server
-# header starting with "confirmd/1" (confirmd's Handler.server_version).
+# header whose first token is exactly "confirmd/1" (confirmd's
+# Handler.server_version; BaseHTTPRequestHandler appends " Python/x.y",
+# so the check compares only the first whitespace-delimited token).
 # A port grabber or a stale service answering 200 (or a 403 with a different
 # shape) fails closed here.
 #
@@ -269,10 +271,10 @@ def check_confirmd(confirmd_url):
     always connects from the tenant box itself, which confirmd's auth gate
     refuses, so the expected answer is confirmd's own 403 denial: status
     403, body "forbidden: <reason>" for a known deny reason, Server header
-    starting with "confirmd/1". Anything else — a 200 from a port grabber,
-    a 403 from another service, a 3xx redirect, a connection failure —
-    fails the check. This catches accidental misbinding, not an adversary
-    who controls the port (see the scope note above).
+    whose first token is exactly "confirmd/1". Anything else — a 200 from a
+    port grabber, a 403 from another service, a 3xx redirect, a connection
+    failure — fails the check. This catches accidental misbinding, not an
+    adversary who controls the port (see the scope note above).
     """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -307,7 +309,7 @@ def check_confirmd(confirmd_url):
               f"confirmd/1 denied this box ({text}).", file=sys.stderr)
         return EXIT_OK
     return die(EXIT_CHECK_FAILED,
-               f"the process answering at {confirmd_url} does not behave "
+               f"the process answering at {confirmd_url!r} does not behave "
                f"like confirmd (want: HTTP 403 + confirmd denial body + "
                f"Server 'confirmd/1'; got: HTTP {status}, "
                f"body={text[:80]!r}, Server={server[:40]!r}). A port "
