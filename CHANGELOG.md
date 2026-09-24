@@ -55,6 +55,15 @@ This changelog only works if entries land with the change, not after it:
   deadline kept verbatim, expired requests refused honestly) and re-pushes
   the owner. Single-tenant for now, designed for the multi-tenant future.
   (#331)
+- Competitor watch (2026-09-24 morning): tracked set 8/8 quiet (ninth
+  consecutive pass), Vercel Drives still public beta; corpus dedups a
+  phantom provider — ASCII renamed to Boat ~2026-09-17, so C40 folds into
+  the tracked-set Boat row (same product, canonical domain boat.dev); new
+  in-lane entry C41 — Alibaba Cloud FC Agent Sandbox billing verified
+  from aliyun-fc/fc-docs (Eco/Std/Pro pay-as-you-go from ~$0.037/h for a
+  2vCPU/4GiB box, task-scoped and E2B-SDK-only, not a persistent VM);
+  wowza.com owed re-verification closed; no new in-lane launches 9/23–24.
+  (#337)
 - Competitor watch (2026-09-24 predawn): tracked set 8/8 quiet, Vercel
   Drives still public beta; corpus grows a new in-lane entry — C40 ASCII
   "boat" (persistent Ubuntu VMs for agents with verified own-page
