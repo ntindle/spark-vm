@@ -81,7 +81,7 @@ This changelog only works if entries land with the change, not after it:
   liveness, so a port grabber, stale service, or misbound server answering
   on the confirmd port can no longer certify the approvals path as up before
   box-live. This catches accidental misbinding at the gate, not an adversary
-  who controls the port (#160, #PR).
+  who controls the port (#160, #367).
 - `scripts/cut-release.sh` no longer aborts with "not a git repo" when run
   from a git linked worktree (where `.git` is a `gitdir:` pointer file, not
   a directory) — the repo gate now checks `git rev-parse --git-dir`
