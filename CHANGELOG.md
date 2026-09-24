@@ -59,7 +59,7 @@ This changelog only works if entries land with the change, not after it:
   inside their guest while the operator owns only the layer below.
   Files #339 (tenant-bound swap auth) and #340 (open verifications);
   releases the H5, H12, and H13 design gates and confirms H10's
-  provisional tenant-identity assumption. (#TBD)
+  provisional tenant-identity assumption. (#341)
 - Re-open a denied approval from its answered-history card (H20): a
   mis-tapped Deny no longer needs the operator CLI to recover — the card
   offers "Re-open this request", which re-files it as a new pending
