@@ -87,8 +87,10 @@ isolation), because those are where the trust story lives.
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
 | **boat.dev** (2026-09-22 consolidation) | Task-scoped sandbox | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement) | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time |
 | **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, $0.05/GiB-month snapshots (vendor docs, re-read 2026-09-23 — the 10× discrepancy resolved in favor of the primary source); $5 new-user credit |
-| **Boxd** (2026-09-22 consolidation) | Persistent computer | "Composable computers" — KVM VMs with live memory forking in under 200 ms (vendor claim), snapshots/checkpoints, real SSH, per-machine HTTPS subdomain; self-hosted option ("run the whole platform on your own hardware") | Credit-based: €0.049/vCPU-hour running, €0.015/GiB-hour resident RAM, €0.0001/GiB-hour disk written; €30 free credits |
+| **Boxd** (2026-09-22 consolidation) | Persistent computer | "Composable computers" — KVM VMs with live memory forking in under 200 ms (vendor claim), snapshots/checkpoints, real SSH, per-machine HTTPS subdomain; self-hosted option ("run the whole platform on your own hardware") | Credit-based: €0.049/vCPU-hour running, €0.015/GiB-hour resident RAM, €0.0001/GiB-hour disk written; €30 free credits (**rate card VERIFIED 2026-09-23** — first own-page fetch, C29) |
 | **Upstash Box** (2026-09-22 consolidation) | Task-scoped sandbox | Snapshot/restore API for reusable prepared environments, branching from snapshots, full outbound networking by default, 22.5 Gbps hosts on AWS; pause/resume unavailable with keepAlive enabled | Pricing not published in the surveyed docs |
+| **Freestyle** (2026-09-23 overnight, C37) | Persistent computer | "VMs for AI Agents" — hardware-virtualized Linux microVMs with live cloning, pause/resume, nested virtualization (Docker inside), custom domains, WireGuard tunnels, FUSE/eBPF; vendor claims 65 ms boot (marketing) and "run forever" with idle-timeout disabled (the anti-suspend-on-idle posture) | **THIRD-PARTY only:** ~$0.04032/vCPU-h, $0.0129/GiB-h per-second; free tier 200 vCPU-h + 400 GiB-h/mo (own pricing page not read — UNVERIFIED) |
+| **Tensorlake** (2026-09-23 overnight, C38) | Task-scoped sandbox | "Sandboxes for AI Agents" — Firecracker microVMs + versioned POSIX filesystem (`tl fs`: autosave, snapshot/time-travel, restore to any point), live fork/clone, OCI import, ~1 s suspend/resume with meter-stops-on-suspend, auto-suspend idle, SOC 2 Type II + HIPAA | Pricing not observed on homepage this run |
 | **h-sandbox / Harakiri** (2026-09-22 consolidation) | Task-scoped sandbox (OSS control plane) | Open-source self-hosted sandbox control plane (Apache 2.0); HTTP API / TS SDK / CLI / dashboard; Credential Vault with host-bound egress bindings and fake-env injection (fourth convergent placeholder-swap data point for the secrets-posture corpus) | Free, self-hosted |
 | **Brig** (2026-09-22 consolidation) | Local containment (OSS tool) | Local microVM CLI for coding agents — no hosted service; dedicated kernel per sandbox, host-vs-agent trust model, boot-empty credentials with names-only reporting, fail-closed egress-downgrade refusal | Free, local (Apache 2.0) |
 | **Epho** (2026-09-22 consolidation) | Task-scoped sandbox | Agents-as-API (claude / codex / opencode harnesses) with automatic multi-provider fallback — the session outlives the machine via session-snapshot restore on replacement boxes | ≈$0.158/h for 2 vCPU / 2 GiB / 10 GiB (computed from per-second rates); $10 starting credit; BYO model keys |
@@ -815,7 +817,7 @@ thinking (filed in `docs/PRICING_THINKING.md` §2); 305 ms as the number to
 beat for C14; Action Gateway as an H16 org-policy vendor candidate; DO's
 OpenAI partner status (C30 below) sharpens C26.
 
-### Boxd — first corpus entry (C29, VENDOR-VERIFIED — watch continues)
+### Boxd — first corpus entry (C29, VERIFIED — watch continues)
 
 $2M pre-seed (~Sept 16, **THIRD-PARTY**: BlueYard Capital lead; OVNI,
 Antler, S20, Script Capital + angels — runtimewire.com, 6ic.com,
@@ -1323,3 +1325,85 @@ storage consumed), custom sandbox templates (BYOT) $0.05/GiB-month,
 public internet egress $0.01/GiB, sandbox shapes mars-1vcpu-1gb …
 mars-16vcpu-32gb, positive prepaid balance required, no per-product
 spend limit.
+
+## Watch update — 2026-09-23 (overnight): C29 rate card VERIFIED, C37/C38 new in-lane entries, Automaid lane-drift confirmed
+
+Three corpus actions this pass (primary-source-verification and
+new-entry folds per the C32/C31 precedents; full pass record in
+`docs/COMPETITOR_WATCH_2026-09-23_OVERNIGHT.md` §§1–5).
+
+**C29 upgrade — Boxd rate card moves UNVERIFIED → VERIFIED.** The
+https://boxd.sh pricing FAQ was fetched and read on the vendor's own
+page this pass (first successful own-page fetch — the two prior passes
+were UNVERIFIED debt): **€0.049/vCPU-hour** while running,
+**€0.015/GiB-hour** resident RAM (running or standby),
+**€0.0001/GiB-hour** of disk actually written (never provisioned size),
+**€30 free credits** for every new account; no idle-compute charge;
+hibernated machines pay disk only. The figures stand as quoted since
+the 2026-09-22 filing — this pass upgrades only the provenance layer.
+Also VERIFIED on the same page: real KVM VMs (own kernel, not
+containers); Ubuntu 24.04 defaults 2 vCPU / 8 GB / 100 GB; sub-200 ms
+live memory forks; suspend-to-disk with instant resume; checkpoints,
+snapshots; self-host option; per-machine HTTPS subdomains; org-level
+secrets/domains; MCP server for Claude Code / Codex / opencode. The
+"resume in under a millisecond" marketing figure stays
+vendor-published-only, no methodology — NOT a C14 benchmark input.
+Competitive read (INFERRED): Boxd is now the most fully vendor-verified
+persistent-machine row in the corpus — the pricing is settled, and the
+"hibernated machines pay disk only" posture matches spark-vm's
+suspend-on-idle thesis (see `docs/PRICING_THINKING.md`) from a
+pay-per-use angle.
+
+**C37 new — Freestyle ("VMs for AI Agents", in-lane).** VERIFIED on the
+vendor's own page this run (https://freestyle.sh): instant,
+hardware-virtualized Linux microVMs for AI agents with live cloning,
+pause/resume, nested virtualization (Docker inside), custom domains,
+WireGuard tunnels, full-kernel features (FUSE, eBPF); vendor claims 65
+ms boot and "run forever" with idle-timeout disabled; SSH / VS Code /
+Cursor access. Pricing stays **THIRD-PARTY only** (own pricing page not
+read this run; the Upstash 15-provider comparison gives wall-clock
+per-second billing, $0.04032/vCPU-h, $0.0129/GiB-h, free tier 200
+vCPU-h + 400 GiB-h/month, with a docs-vs-pricing discrepancy on
+whether persistent VMs are free — all UNVERIFIED until the own page is
+read). Competitive read (INFERRED): the 65 ms boot claim, if honest, is
+the fastest boot figure in the corpus (Sprites warm 100–500 ms and DO 305
+ms p50 are both vendor-published figures, neither independently measured
+— see the §C26 and §C29 sections; Boxd's sub-200 ms fork is a different
+mechanic);
+treat it as vendor marketing until someone measures it (C14
+discipline). The "run forever with idle-timeout disabled" line is the
+anti-suspend-on-idle posture — the direct opposite of spark-vm's
+suspend-on-idle thesis; both are cost-floor arguments, and the corpus
+now holds both.
+
+**C38 new — Tensorlake ("Sandboxes for AI Agents", in-lane).**
+VERIFIED on the vendor's own page this run (https://tensorlake.ai):
+Firecracker microVM sandboxes for AI agents paired with a versioned
+POSIX filesystem (`tl fs`, autosave, snapshot/time-travel),
+hosted/mountable Git, and a sandbox-native orchestration runtime.
+VERIFIED mechanics (own page): suspend/resume preserving memory +
+processes + filesystem (~1 s wake, meter stops on suspend); live VM
+fork/clone (memory + filesystem copied whole); `tl fs` autosaves
+settled writes to durable storage, snapshot = permanent checkpoint,
+restore to any point in time, read-only shared mounts; OCI image import
+with high-fidelity ext4 conversion; auto-suspend on idle with
+wake-on-request; SSH / VS Code / Cursor / PTY-over-WebSocket remote
+dev; Harbor eval integration; SOC 2 Type II + HIPAA; own SQLite
+benchmark vs Vercel/E2B/Daytona/Modal (own marketing — take as
+marketing). Pricing: not observed on the homepage this run — no
+pricing claim made. Competitive read (INFERRED): Tensorlake's
+versioned-POSIX-fs-plus-snapshot story is the closest corpus analog to
+spark-vm's own snapshot/branch thinking for #47's branching control
+plane — and the "meter stops on suspend" line is another suspend-on-idle
+data point, this time at per-second granularity. The HIPAA + SOC 2 Type
+II badge is the compliance floor spark-vm's hosted product will have to
+match to sell into the same customers.
+
+**Automaid — lane-drift CONFIRMED, watch slot closed.** The own-page
+fetch succeeded for the first time this pass (https://automaid.it.com):
+a recurring-workflow automation SaaS ("AI agents for recurring work",
+Zapier-style: WhatsApp scheduler, Stripe invoice follow-ups, form
+triage, content-calendar sync, payment review workspaces, 3,000+ app
+integrations). Not VM-for-agents infrastructure; not a lane
+competitor. It was never a corpus entry — this note closes the
+watch-list slot so later passes stop re-attempting it.
