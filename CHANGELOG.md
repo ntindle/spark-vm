@@ -54,7 +54,7 @@ This changelog only works if entries land with the change, not after it:
   scan: adjacent color only (Island $400M Series F on rogue-agent
   framing, Alibaba AgentCore, Darktrace Signal Labs) — no in-lane
   launches, pricing moves, or funding dated 2026-09-24. Full pass in
-  `docs/COMPETITOR_WATCH_2026-09-24_EVENING.md` (#TBD).
+  `docs/COMPETITOR_WATCH_2026-09-24_EVENING.md` (#351).
 
 ## [0.3.0] - 2026-09-24
 
