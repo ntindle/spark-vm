@@ -37,6 +37,16 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 late overnight) (#327): tracked set quiet —
+  all 8 providers re-read vendor-verified with no change (sixth full quiet
+  pass since the mid-afternoon fold); Vercel Drives still public beta
+  (seventeenth consecutive no-change pass; pricing page last_updated
+  2026-09-10; the 2026-09-23 changelog entry is the beta announcement
+  re-dated, not a GA move); Boxd rate card re-verified on boxd.sh (the
+  overnight pass's C29 fold stands — no new fold); new in-window
+  third-party item: Simular "Sai" computer-use agent GA on cloud VMs
+  (vendor verification owed); no other in-window launches, GA moves, funding, or
+  pricing moves dated today.
 - Competitor watch (2026-09-23 overnight) (#322): tracked set quiet —
   all 8 providers re-read vendor-verified with no change (fifth full
   quiet pass since the mid-afternoon fold); Boxd rate card now
