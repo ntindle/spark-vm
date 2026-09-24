@@ -48,7 +48,9 @@ The fakes replicate the production contracts they stand in for:
   test wants a credential-acceptance failure). The happy-path assertion
   that the stub saw ``Bearer <real-key>`` -- and never the placeholder
   -- is the end-to-end proof the injected key was swapped in.
-- Stub confirmd: answers 200 to the probe's liveness check.
+- Stub confirmd: answers confirmd's own 403 deny shape (the probe's
+  misbinding check, GitHub #160) -- in lockstep with
+  confirm/confirmd.py _auth/_deny.
 
 The manifest preflight runs the REAL harness/check-image-manifest.sh
 against a hand-written manifest with the real schema
@@ -375,9 +377,16 @@ class _ProviderHandler(BaseHTTPRequestHandler):
 
 
 class _ConfirmdHandler(BaseHTTPRequestHandler):
+    """Mimics confirmd's own _deny contract (confirm/confirmd.py): the probe
+    always connects from the box itself, which confirmd's auth gate refuses,
+    so the expected answer is HTTP 403 + "forbidden: self-peer" body +
+    "confirmd/1" Server header (GitHub #160 -- misbinding detection, not
+    identity)."""
+    server_version = "confirmd/1"
+
     def do_GET(self):
-        body = b"ok"
-        self.send_response(200)
+        body = b"forbidden: self-peer\n"
+        self.send_response(403)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
