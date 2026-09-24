@@ -289,6 +289,71 @@ class TestSafeInstall(unittest.TestCase):
                  if p.name.startswith(".safe_install.")],
                 [])
 
+    def test_staging_dir_names_are_random(self):
+        # Issue #333: the old ".safe_install.<pid>.<n>.d" names were
+        # predictable, so a parent-dir attacker could pre-create colliding
+        # dirs and force the fail-closed EEXIST abort on every deploy
+        # (deploy DoS). Staging names must carry 128 random bits and differ
+        # across installs.
+        seen = []
+        real_mkdir = si.os.mkdir
+
+        def spy(path, mode=0o777, *, dir_fd=None):
+            if isinstance(path, str) and path.startswith(".safe_install."):
+                seen.append(path)
+            return real_mkdir(path, mode, dir_fd=dir_fd)
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(si.os, "mkdir", spy):
+                self._run(str(Path(d) / "a.txt"), content=b"a\n", mode=0o600)
+                self._run(str(Path(d) / "b.txt"), content=b"b\n", mode=0o600)
+        self.assertEqual(len(seen), 2, "expected two staging dirs: %r" % seen)
+        for name in seen:
+            self.assertRegex(
+                name, r"^\.safe_install\.[0-9a-f]{32}\.d$",
+                "staging name is not 128-bit random: %r" % name)
+        self.assertNotEqual(seen[0], seen[1],
+                            "staging names must not repeat")
+
+    def test_staging_collision_retries_then_fails_closed(self):
+        # Issue #333: a colliding staging name is retried with a fresh
+        # random name (bounded retries); only sustained collisions --
+        # an attack indicator -- fail closed.
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "f.txt"
+            colliding = si._random_stage_name()
+            os.mkdir(Path(d) / colliding, 0o700)
+            names = [colliding, colliding] + [
+                si._random_stage_name() for _ in range(3)]
+            with mock.patch.object(si, "_random_stage_name",
+                                   side_effect=names):
+                self._run(str(dest), content=b"x\n", mode=0o600)
+            self.assertEqual(dest.read_bytes(), b"x\n")
+            # All-sustained collisions: every retry collides.
+            with mock.patch.object(si, "_random_stage_name",
+                                   return_value=colliding):
+                with self.assertRaises(SystemExit) as cm:
+                    self._run(str(dest), content=b"y\n", mode=0o600)
+                self.assertEqual(cm.exception.code, 2)
+            self.assertEqual(dest.read_bytes(), b"x\n")
+
+    def test_stage_failure_leaves_no_staging_debris(self):
+        # Issue #335: a failure during staging (write/enforce) must not
+        # leave ".safe_install.*" litter -- the old except path skipped
+        # unlinking the staged temp, so the rmdir died with ENOTEMPTY
+        # (silently ignored).
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "f.txt"
+            with mock.patch.object(si, "_write_all",
+                                   side_effect=OSError("boom")):
+                with self.assertRaises(OSError):
+                    self._run(str(dest), content=b"x\n", mode=0o600)
+            self.assertFalse(dest.exists())
+            self.assertEqual(
+                [p.name for p in Path(d).iterdir()
+                 if p.name.startswith(".safe_install.")],
+                [], "staging debris left behind")
+
     def test_install_addresses_temp_by_dirfd_not_path(self):
         # Contract test for the #301 substitution fix: the install must
         # address the staged temp as (dirfd, name), never by re-resolving a
