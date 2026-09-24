@@ -58,7 +58,7 @@ This changelog only works if entries land with the change, not after it:
   the eleven-pass full-quiet streak ends on Daytona's SEP 24 changelog entries
   (V0.216.1/V0.216.2, CLI/API polish, no sandbox moves); Vercel Drives still
   public beta; new in-lane corpus entry C43 — Google Gemini Agent Environment
-  (managed Linux sandboxes for agents, VERIFIED on Google's own docs). (#TBD)
+  (managed Linux sandboxes for agents, VERIFIED on Google's own docs). (#348)
 
 - Late-midday competitor watch (eleventh full quiet pass): tracked-set vendors
   8/8 VERIFIED no-change, Vercel Drives still public beta (22nd consecutive
