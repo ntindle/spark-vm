@@ -223,8 +223,9 @@ def check_provision(muse_bin, base_url, proxy, key_name):
 # confirmd port instead of counting any HTTP response as confirmd liveness.
 # confirmd's auth gate (confirm/confirmd.py: _auth/_deny) refuses the box
 # itself — and the probe always connects from the box — so a live confirmd
-# answers the probe's GET with HTTP 403 and a body of exactly
-# "forbidden: <reason>\n" for one of the known deny reasons, plus a Server
+# answers the probe's GET with HTTP 403 and a body of "forbidden: <reason>"
+# for one of the known deny reasons (compared after stripping surrounding
+# whitespace), plus a Server
 # header whose first token is exactly "confirmd/1" (confirmd's
 # Handler.server_version; BaseHTTPRequestHandler appends " Python/x.y",
 # so the check compares only the first whitespace-delimited token).

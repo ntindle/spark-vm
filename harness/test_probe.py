@@ -10,8 +10,10 @@ muse CLI:
   - swap proxy: minimal forward HTTP proxy; in "swap" mode rewrites
     "Bearer hsurr:gate-dummy" -> "Bearer <swapped>" (the proxy's job), in
     "passthrough" mode forwards untouched.
-  - confirmd stub: plain HTTP 200 (PROBE_CONFIRMD_URL is scheme-agnostic in
-    tests; production uses https).
+  - confirmd stub: DenyHandler answers over TLS with confirmd's own 403
+    denial shape (HTTP 403 + "forbidden: <reason>" body + "confirmd/1"
+    Server header), in lockstep with confirm/confirmd.py _auth/_deny;
+    PROBE_CONFIRMD_URL is scheme-agnostic in tests (production uses https).
 """
 
 import http.client
