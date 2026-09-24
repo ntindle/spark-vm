@@ -851,7 +851,11 @@ def test_install_component_syncs_version_with_checkout(tmp_path):
     cred-ui reporting the old release (QA regression)."""
     updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
     checkout = tmp_path / "checkout"
-    checkout.mkdir()
+    # A real git clone: install_component re-runs the checkout-sync
+    # preconditions before the destructive sync (issue #324), and those fail
+    # closed on a non-git directory.
+    subprocess.run(["git", "clone", "-q", str(tmp_path / "origin"), str(checkout)],
+                   check=True, capture_output=True)
     (updater / "cred-ui" / "cred-ui.py").write_text("# ui v2")
     (updater / "VERSION").write_text("9.9.9\n")
     new = _commit_all(updater, "cred-ui + VERSION")
@@ -864,6 +868,71 @@ def test_install_component_syncs_version_with_checkout(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert (checkout / "cred-ui" / "cred-ui.py").read_text() == "# ui v2"
     assert (checkout / "VERSION").read_text() == "9.9.9\n"
+
+
+def test_install_component_rechecks_checkout_before_clobber(tmp_path):
+    """Issue #324: an operator edit to the working checkout between the
+    pre-deploy gate and the install must fail closed, not be silently
+    clobbered. The gate check passes on the clean tree; the operator edit
+    lands; the install must refuse and leave the operator's file untouched.
+    Non-vacuous: the pre-fix install_component had no re-check, so the edit
+    would be clobbered and the sync would succeed (returncode 0)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "clone", "-q", str(tmp_path / "origin"), str(checkout)],
+                   check=True, capture_output=True)
+    (updater / "cred-ui" / "cred-ui.py").write_text("# ui v2")
+    (updater / "VERSION").write_text("9.9.9\n")
+    new = _commit_all(updater, "cred-ui + VERSION")
+    env2 = {"UPDATER_STATE_DIR": str(state),
+            "UPDATER_REPO": str(updater),
+            "WORKING_CHECKOUT": str(checkout),
+            "SKIP_SUDO": "1",
+            "AUTO_DEPLOY_NO_MAIN": "1"}
+    # the gate phase passes on the clean tree
+    r = source_and("check_checkout_sync_ready cred-ui cred-ui %s" % new,
+                   env_extra=env2)
+    assert r.returncode == 0, r.stdout + r.stderr
+    # the operator edits the working checkout in the gate->install window
+    (checkout / "cred-ui" / "cred-ui.py").write_text("# OPERATOR EDIT")
+    r = source_and("install_component cred-ui %s" % new, env_extra=env2)
+    assert r.returncode == 2, \
+        "must fail closed with the pre-destruction code (2), not install-failure (1): " \
+        + r.stdout + r.stderr
+    # the operator's edit is NOT clobbered; the new commit is NOT installed
+    assert (checkout / "cred-ui" / "cred-ui.py").read_text() == "# OPERATOR EDIT"
+
+
+def test_install_component_rechecks_version_before_clobber(tmp_path):
+    """Issue #324, VERSION branch of the same re-check: an uncommitted edit
+    to the working checkout's root VERSION (which travels with every sync)
+    must also fail the install closed before the VERSION sync step."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "clone", "-q", str(tmp_path / "origin"), str(checkout)],
+                   check=True, capture_output=True)
+    (checkout / "VERSION").write_text("1.2.3\n")
+    subprocess.run(["git", "-C", str(checkout), "add", "VERSION"], check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(checkout), "-c", "user.email=t@t",
+                    "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                    "commit", "-qm", "operator VERSION"], check=True,
+                   capture_output=True)
+    (updater / "cred-ui" / "cred-ui.py").write_text("# ui v2")
+    (updater / "VERSION").write_text("9.9.9\n")
+    new = _commit_all(updater, "cred-ui + VERSION")
+    env2 = {"UPDATER_STATE_DIR": str(state),
+            "UPDATER_REPO": str(updater),
+            "WORKING_CHECKOUT": str(checkout),
+            "SKIP_SUDO": "1",
+            "AUTO_DEPLOY_NO_MAIN": "1"}
+    # operator edits VERSION in the gate->install window
+    (checkout / "VERSION").write_text("0.0.0-operator\n")
+    r = source_and("install_component cred-ui %s" % new, env_extra=env2)
+    assert r.returncode == 2, \
+        "must fail closed with the pre-destruction code (2): " \
+        + r.stdout + r.stderr
+    assert (checkout / "VERSION").read_text() == "0.0.0-operator\n"
 
 
 def test_snapshot_restores_checkout_version(tmp_path):

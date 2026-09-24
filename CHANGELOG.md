@@ -652,6 +652,12 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
+- The auto-deploy updater re-verifies the working checkout is clean
+  immediately before syncing a component subtree into it, not just at the
+  pre-deploy gate: a manual edit made between the gate and the install no
+  longer gets silently clobbered — the deploy aborts with an alert and
+  retries on the next tick, without marking the commit blocked. (fixes
+  #324, PR #TBD)
 - The deploy health check now reads the port as the trailing `:digits`
   field and treats everything between `tcp:` and that field as the host.
   Malformed entries (missing or non-numeric port, empty host) fail the

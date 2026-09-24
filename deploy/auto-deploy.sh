@@ -515,6 +515,10 @@ restore_snapshot() {
 install_component() {
     # install_component <component> <new-sha> — run the component's install
     # step (from the updater mirror) and/or sync its checkout subtree.
+    # Return contract: 0 = installed; 1 = install failed (caller rolls back);
+    # 2 = the pre-destruction checkout re-check failed (issue #324) — nothing
+    # was installed, so the caller must fail closed WITHOUT marking the
+    # commit blocked (the commit is not bad; the checkout is dirty).
     local c="$1" new="$2"
     local inst; inst="$(get_str "$c" install)"
     if [ -n "$inst" ]; then
@@ -530,6 +534,20 @@ install_component() {
     local sub; sub="$(get_str "$c" checkout_sync)"
     if [ -n "$sub" ]; then
         log "  $c: syncing subtree $sub from mirror@$new into $WORKING_CHECKOUT"
+        # Issue #324: re-run the checkout-sync preconditions at the moment of
+        # destruction, not just at gate time. The single-flight lock
+        # serializes auto-deploy runs against each other, not against
+        # operators: a manual edit (or another agent job) to the working
+        # checkout in the gate→install window (snapshots run between them)
+        # would otherwise be silently clobbered by the rm -rf below — or land
+        # mid-tar and leave a half-synced subtree under a health-checked
+        # service. The check is two `git status --porcelain` calls plus two
+        # `cat-file -e` lookups — cheap enough to close the window without a
+        # lock protocol operators would also have to learn and take.
+        # Distinct return code 2 (see the docstring contract): the deploy has
+        # not mutated anything yet, so this is a gate-style abort, not an
+        # install failure.
+        check_checkout_sync_ready "$c" "$sub" "$new" || return 2
         rm -rf "${WORKING_CHECKOUT:?}/${sub:?}" || return 1
         if ! git -C "$UPDATER_REPO" archive "$new" "$sub" | tar -x -C "$WORKING_CHECKOUT"; then
             log "  $c: subtree sync FAILED"
@@ -919,9 +937,26 @@ cmd_deploy() {
     ROLLBACK_COMPS=("${COMPS[@]}")
 
     # 3. install; on any failure roll everything back
+    local irc
     for c in "${COMPS[@]}"; do
         log "deploying component: $c"
-        install_component "$c" "$new" || { do_rollback "$snapdir" "$old" "$new" "$c" "install"; return 1; }
+        # NOTE: plain `install_component ...; irc=$?` is dead code under
+        # set -e — the shell exits before irc=$? runs (see cmd_check). The
+        # `if` condition suppresses errexit so irc is captured.
+        if install_component "$c" "$new"; then irc=0; else irc=$?; fi
+        if [ "$irc" -eq 2 ]; then
+            # Issue #324: the working checkout gained uncommitted changes (or
+            # stopped being a usable git checkout) between the gate phase and
+            # the install phase. Nothing has been installed yet, so this fails
+            # closed like the gate phase (alert + audit, watermark untouched)
+            # rather than like an install failure: the commit is not bad, so
+            # it is NOT marked blocked — the next tick retries once the
+            # operator commits or stashes.
+            alert "checkout changed during deploy for component $c ($old -> $new) — refusing to overwrite (commit or stash first)"
+            audit 'deploy' ',\"result\":\"checkout-dirty\",\"from\":\"'\"$old\"'\",\"to\":\"'\"$new\"'\",\"component\":\"'\"$c\"'\"'\'
+            return 1
+        fi
+        [ "$irc" -eq 0 ] || { do_rollback "$snapdir" "$old" "$new" "$c" "install"; return 1; }
     done
 
     # 4. daemon-reload + enable BEFORE restarting (else restarts use the stale
