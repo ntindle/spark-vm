@@ -93,10 +93,23 @@ H11's ruling on `MULTITENANT_ISOLATION_RESEARCH.md`'s findings:
    an open verification (filed this turn as #340). Until verified, no lockout
    semantics may assume outage-time revocation propagation; the designed
    failure mode is *stale authorization*, never *bypassed identity*.
-4. **Root: tenant holds root inside their unit; the operator exclusively
-   owns the layer below; never let the human's and the agent's privilege
-   domains collapse into one.** — **ADOPTED**, with the sign-off
-   question in §3 Q4.
+4. **Root: the operator holds root on the outer enforcement layer; the
+   tenant gets contained root-equivalent inside their unit; never let the
+   human's and the agent's privilege domains collapse into one.** —
+   **DECIDED 2026-09-24 (operator sign-off, superseding the
+   recommendation):** for the hosted shape, the operator holds root on
+   the outer enforcement layer (egress fencing, secret swapping,
+   metering, updater enforcement). The tenant (their agent) gets
+   contained root-equivalent inside their jail/box — never host root.
+   The trust story is explicit: **no claim of operator blindness** (the
+   operator can technically inspect the environment); support access is
+   tenant-visible, explicitly granted, logged, break-glass only. Users
+   wanting provider-blind infrastructure self-host. For the self-hosted
+   shape, the human owns the host/hypervisor and keeps full root; their
+   agent runs as a workload beneath that control; secret installation
+   stays human-only via `cred set`. For the separate sandbox-product
+   shape (coding-agent harness workloads): cooperative-jail /
+   contained-root.
 5. **nsjail/bubblewrap sandbox individual tool executions inside the
    tenant boundary — not the tenant boundary itself.** — **ADOPTED as
    advisory.** No turn may cite nsjail as the multi-tenancy answer.
@@ -141,24 +154,31 @@ outage-time behavior must be verified before any lockout semantics rely
 on it (open verification, §7). Never assume an outage degrades into
 bypassed identity checks.
 
-**Q4 — Who holds root on a tenant box? (recommendation → operator
+**Q4 — Who holds root on a tenant box? (DECIDED 2026-09-24 — operator
 sign-off)**
 
-Adopted from research finding 4, sharpened: on the per-tenant-box
-shape, the **tenant (human owner) holds root inside their guest; the
-operator owns the hypervisor/provider layer exclusively and has no login
-inside the tenant guest**. The current shared `ntindle`-with-sudo
-domain on the swapd host matches no vendor precedent and must be
-retired for the hosted shape: operator tooling reaches the host through
-a dedicated, audited operator plane (the H5 sentinel design rides on
-this), never as a passwordless-sudo human co-resident with tenant
-secrets. For the jail-per-tenant cooperative tier: operator holds host
-root; tenants get contained guest-root-equivalent; secrets for the
-cooperative tenants stay in swapd on the host under the operator's
-exclusive domain. **The layer-boundary choice (hypervisor-only vs
-operator login inside tenant guests) goes back to the operator for
-sign-off — recorded with the operator in the loop's NEEDS_USER.md
-(loop bookkeeping outside this repo).**
+DECIDED, superseding the audit's earlier recommendation (tenant holds
+guest root, operator strictly below the hypervisor): on the hosted
+per-tenant-box shape, the **operator holds root on the outer
+enforcement layer** — egress fencing, secret swapping, metering,
+updater enforcement. The **tenant (their agent) gets contained
+root-equivalent inside their jail/box — never host root**. The
+trust story is explicit: **no claim of operator blindness** — the
+operator can technically inspect the environment. Support access is
+tenant-visible, explicitly granted, logged, and break-glass only.
+Users wanting provider-blind infrastructure self-host (the self-hosted
+shape: the human owns the host/hypervisor and keeps full root; their
+agent runs as a workload beneath that control; secret installation
+stays human-only via `cred set`).
+
+The current shared `ntindle`-with-sudo domain on the swapd host matches
+no vendor precedent and must be retired for the hosted shape: operator
+tooling reaches the host through a dedicated, audited operator plane
+(the H5 sentinel design rides on this), never as a passwordless-sudo
+human co-resident with tenant secrets. For the jail-per-tenant
+cooperative tier: operator holds host root; tenants get contained
+guest-root-equivalent; secrets for the cooperative tenants stay in
+swapd on the host under the operator's exclusive domain.
 
 ## 4. Gate release
 
@@ -167,10 +187,10 @@ H10 was never gated — it proceeds in parallel on a provisional
 assumption this audit confirms; H9 carries no operator gate and is
 noted here for consistency only.
 
-- **H5 (sentinel):** the sentinel runs on the operator plane (§3 Q4),
-  authenticates tenants by tailnet identity, and never shares a host
-  with tenant workloads on the per-tenant-box shape. H5's design may
-  proceed on that substrate.
+- **H5 (sentinel):** the sentinel runs on the operator plane (§3 Q4,
+  decided 2026-09-24), authenticates tenants by tailnet identity, and
+  never shares a host with tenant workloads on the per-tenant-box shape.
+  H5's design may proceed on that substrate.
 - **H10 (multi-tenant approvals) + H12 (usage metering):** the tenant
   key is the **BYO per-tenant tailnet identity** — H10's provisional
   assumption ("attribution keys on tailnet identity") is consistent with
