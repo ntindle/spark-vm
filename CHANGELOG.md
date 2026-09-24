@@ -37,6 +37,14 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 overnight) (#322): tracked set quiet —
+  all 8 providers re-read vendor-verified with no change (fifth full
+  quiet pass since the mid-afternoon fold); Boxd rate card now
+  vendor-verified on boxd.sh (C29 debt resolved); new in-lane corpus
+  entries C37 (Freestyle, "VMs for AI Agents") and C38 (Tensorlake,
+  "Sandboxes for AI Agents"); Automaid lane-drift confirmed on its own
+  page (workflow-automation SaaS) and dropped from the watch list; no
+  in-lane launches, GA moves, funding, or pricing moves dated today.
 - Competitor watch (2026-09-23 late night) (#320): tracked set quiet —
   all 8 providers re-read vendor-verified with no change (DO Managed
   Agents C26 figures read live a fourth consecutive pass, stamp "Last
