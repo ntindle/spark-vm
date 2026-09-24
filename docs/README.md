@@ -38,6 +38,7 @@ working.
 | [LANDING_PAGE_COPY.md](LANDING_PAGE_COPY.md) | Hosted landing page copy + conversion flow (design thinking, not published copy). |
 | [LAUNCH_POST.md](LAUNCH_POST.md) | The public launch announcement copy (self-hosted framed). |
 | [PRICING_THINKING.md](PRICING_THINKING.md) | Pricing design thinking, explicitly not a commitment. |
+| [ICP.md](ICP.md) | Ideal customer profiles for the three segments (self-hosters, hosted signups, sandbox harness builders) and the trust split between them — design thinking, not a commitment. |
 | [WAITLIST_OPERATIONS.md](WAITLIST_OPERATIONS.md) | Waitlist ops spec: confirm flows, reminder/drop jobs, funnel events. |
 | [PUSH_NOTIFICATIONS.md](PUSH_NOTIFICATIONS.md) | Push notifications for confirmd approvals (H2 / GitHub #2). |
 | [HOSTED_UNBLOCK_PASS.md](HOSTED_UNBLOCK_PASS.md) | One pass over everything blocking the hosted launch (2026-09-19). |
