@@ -7,6 +7,7 @@ Tailscale calls are mocked; no network or /home/swapd is touched.
 """
 import io
 import json
+import contextlib
 import os
 import sys
 import tempfile
@@ -1476,6 +1477,32 @@ class ReopenTests(unittest.TestCase):
         plain = h._render_item({"id": "abc123def4567890",
                                 "credential": "openai"})
         self.assertNotIn("Re-opened from a denied request", plain)
+
+    def test_audit_log_writes_line(self):
+        """The happy path still appends the logfmt line (no stderr)."""
+        path = os.path.join(self.tmp.name, "audit.log")
+        with mock.patch.object(cd, "AUDIT", path):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                cd.audit_log("403", "100.99.0.1", "ntindle@github",
+                             "reason=bad-nonce")
+        self.assertEqual(err.getvalue(), "")
+        with open(path, encoding="utf-8") as f:
+            line = f.read()
+        self.assertIn("event=403", line)
+        self.assertIn("peer=100.99.0.1", line)
+        self.assertIn("login=ntindle@github", line)
+        self.assertIn("reason=bad-nonce", line)
+
+    def test_audit_log_write_failure_signals_stderr(self):
+        """Arch finding A5 (sentinel deep-read): a lost audit line must
+        not be silent. Pointing AUDIT at a directory makes the append
+        raise OSError — the except path must emit to stderr, not pass."""
+        with mock.patch.object(cd, "AUDIT", self.tmp.name):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                cd.audit_log("403", "100.99.0.1", "ntindle@github", "")
+        self.assertIn("confirmd: cannot write audit log", err.getvalue())
 
 
 if __name__ == "__main__":

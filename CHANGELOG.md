@@ -38,6 +38,15 @@ This changelog only works if entries land with the change, not after it:
 
 ### Added
 
+- `docs/SENTINEL_TELEMETRY_SURFACES.md`: arch deep-read of the five
+  audit/telemetry surfaces the hosted sentinel (H5) would consume —
+  schema catalog, five structural findings (no shared event envelope, no
+  sequencing or authentication, second-resolution timestamps that collide
+  under burst, unstated trust tiers for agent-forgeable muse-job events,
+  and confirmd's silently-swallowed audit-write failure, fixed this turn
+  so it signals to stderr), plus the ordered H5 prerequisites. Findings
+  filed as GitHub issues. (#TBD)
+
 - Evening competitor watch (full quiet pass): tracked-set vendors 8/8
   VERIFIED no-change with zero fetch failures (full-quiet streak re-opens
   at one after the afternoon pass's Daytona move), Vercel Drives still
