@@ -1208,6 +1208,12 @@ class Handler(BaseHTTPRequestHandler):
         data = _page(title, body, script).encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        # Issue #77 (L3): hardening headers on HTML responses — nosniff
+        # so a content-type confusion cannot turn an approval page into
+        # an executed script; same-origin referrer so pending-approval
+        # URLs never leak to third parties via the Referer header.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "same-origin")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -1300,6 +1306,10 @@ class Handler(BaseHTTPRequestHandler):
             data = _SW_JS.encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/javascript")
+            # Issue #77 (L3): same hardening headers as the HTML pages —
+            # nosniff for the fetched worker, same-origin referrer.
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "same-origin")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()

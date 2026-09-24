@@ -70,6 +70,18 @@ This changelog only works if entries land with the change, not after it:
   launches, pricing moves, or funding dated 2026-09-24. Full pass in
   `docs/COMPETITOR_WATCH_2026-09-24_EVENING.md` (#351).
 
+### Fixed
+
+- `scripts/cut-release.sh` no longer aborts with "not a git repo" when run
+  from a git linked worktree (where `.git` is a `gitdir:` pointer file, not
+  a directory) — the repo gate now checks `git rev-parse --git-dir`
+  instead, so operator dry-runs from worktrees pass (#349, #362).
+- confirmd's approval pages and the `/sw.js` service worker now send
+  `X-Content-Type-Options: nosniff` and `Referrer-Policy: same-origin`,
+  so a content-type confusion can't turn an approval page into an executed
+  script and approval URLs never leak to third parties via Referer (#77,
+  #362).
+
 ## [0.3.0] - 2026-09-24
 
 ### Added
