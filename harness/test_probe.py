@@ -486,7 +486,43 @@ def test_confirmd_https_self_signed_passes(fixtures, tmp_path):
     finally:
         srv.shutdown()
     assert proc.returncode == 0, proc.stderr
-    assert "identity ok" in proc.stderr
+    assert "misbinding check ok" in proc.stderr
+
+
+def test_confirmd_redirect_fails_closed(fixtures, tmp_path):
+    # The check is always same-host: a 3xx from the answering process must
+    # fail closed, not be followed to an arbitrary Location. The redirect
+    # target serves the exact confirmd deny shape — without the no-redirect
+    # handler the probe would follow the redirect and PASS, so this test
+    # fails on any code that drops the handler (non-vacuous).
+    deny_srv = _tls_confirmd_server(tmp_path, handler=DenyHandler)
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        target = None
+
+        def do_GET(self):
+            body = b"moved"
+            self.send_response(302)
+            self.send_header("Location",
+                             f"https://127.0.0.1:{self.target}/")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    RedirectHandler.target = deny_srv.server_port
+    redir_srv = _tls_confirmd_server(tmp_path, handler=RedirectHandler)
+    try:
+        url = f"https://127.0.0.1:{redir_srv.server_port}"
+        proc, _ = run_probe(fixtures, tmp_path,
+                            extra_env={"PROBE_CONFIRMD_URL": url})
+    finally:
+        redir_srv.shutdown()
+        deny_srv.shutdown()
+    assert proc.returncode == 1
+    assert "does not behave like confirmd" in proc.stderr
 
 
 def test_confirmd_port_grabber_200_fails(fixtures, tmp_path):
@@ -500,7 +536,7 @@ def test_confirmd_port_grabber_200_fails(fixtures, tmp_path):
     finally:
         srv.shutdown()
     assert proc.returncode == 1
-    assert "is not confirmd" in proc.stderr
+    assert "does not behave like confirmd" in proc.stderr
 
 
 def test_confirmd_403_wrong_body_fails(fixtures, tmp_path):
@@ -522,7 +558,7 @@ def test_confirmd_403_wrong_body_fails(fixtures, tmp_path):
     finally:
         srv.shutdown()
     assert proc.returncode == 1
-    assert "is not confirmd" in proc.stderr
+    assert "does not behave like confirmd" in proc.stderr
 
 
 def test_confirmd_right_body_wrong_server_header_fails(fixtures, tmp_path):
@@ -548,7 +584,7 @@ def test_confirmd_right_body_wrong_server_header_fails(fixtures, tmp_path):
     finally:
         srv.shutdown()
     assert proc.returncode == 1
-    assert "is not confirmd" in proc.stderr
+    assert "does not behave like confirmd" in proc.stderr
 
 
 def test_confirmd_deny_reason_vocabulary_passes(fixtures, tmp_path):
@@ -565,4 +601,4 @@ def test_confirmd_deny_reason_vocabulary_passes(fixtures, tmp_path):
     finally:
         srv.shutdown()
     assert proc.returncode == 0, proc.stderr
-    assert "identity ok" in proc.stderr
+    assert "misbinding check ok" in proc.stderr

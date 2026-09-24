@@ -10,9 +10,10 @@ Exit 0, zero prompts, stdin closed, 10-second external cap. Verifies, in
 order:
   (a) the tenant runtime's model calls route through the inference proxy
       (:18081) and the proxy swaps in a valid credential;
-  (b) confirmd answers with its own identity — the approvals path the first
-      task needs is up AND is confirmd, not a port grabber or a misbound
-      service answering on the confirmd port (GitHub #160).
+  (b) confirmd answers like confirmd — the approvals path the first task
+      needs is up and the process on the confirmd port is not a port
+      grabber or a misbound service (GitHub #160; misbinding detection,
+      not identity — see the scope note on check_confirmd).
 
 Modes:
   gate      — image-build gate. The CLI is pointed at the gate fixture's
@@ -218,38 +219,69 @@ def check_provision(muse_bin, base_url, proxy, key_name):
     return EXIT_OK
 
 
-# GitHub #160 (H26): the probe must assert the answering process IS confirmd,
-# not merely that a socket is open on the confirmd port. confirmd's auth gate
-# (confirm/confirmd.py: _auth/_deny) refuses the box itself — and the probe
-# always connects from the box — so a live confirmd answers the probe's GET
-# with HTTP 403 and a body of exactly "forbidden: <reason>\n" for one of the
-# known deny reasons, plus a Server header starting with "confirmd/1"
-# (confirmd's Handler.server_version). A port grabber or a stale service
-# answering 200 (or a 403 with a different shape) fails closed here. The deny
-# shape is confirmd's own in-repo contract (both ship in the same image), so
-# the assertion is version-locked to this tree, not a guess at a remote
-# service. If confirmd's deny contract ever changes, this check and its
-# DenyHandler test fixture must change with it.
+# GitHub #160 (H26): the probe must detect a misbound process on the
+# confirmd port instead of counting any HTTP response as confirmd liveness.
+# confirmd's auth gate (confirm/confirmd.py: _auth/_deny) refuses the box
+# itself — and the probe always connects from the box — so a live confirmd
+# answers the probe's GET with HTTP 403 and a body of exactly
+# "forbidden: <reason>\n" for one of the known deny reasons, plus a Server
+# header starting with "confirmd/1" (confirmd's Handler.server_version).
+# A port grabber or a stale service answering 200 (or a 403 with a different
+# shape) fails closed here.
+#
+# HONEST SCOPE OF THIS CHECK: this is *misbinding detection*, not identity.
+# The asserted signal is a self-reported, in-band string; with CERT_NONE
+# (no TLS authentication) a malicious local process that binds :8443 can
+# forge the deny shape trivially. The check moves *accidental* misbinding
+# (stale service, port grabber, misbound server — the threat in #160) to
+# gate time, where it belongs; it provides NO assurance against an
+# adversary who controls the port. Do not call it identity.
+#
+# The deny shape is confirmd's own in-repo contract (both ship in the same
+# image), so the assertion is version-locked to this tree, not a guess at a
+# remote service. If confirmd's deny contract ever changes, this check and
+# its DenyHandler test fixture must change with it.
 _CONFIRMD_DENY_REASONS = ("self-peer", "not-a-tailnet-node", "unknown-identity")
 
 
-def check_confirmd(confirmd_url):
-    """Identity + liveness of the approvals path (GitHub #160).
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The check is always same-host: never follow a 3xx off the probe URL.
 
-    Asserts the answering process is confirmd — not merely that a socket is
-    open on the port. The probe always connects from the tenant box itself,
-    which confirmd's auth gate refuses, so the expected answer is confirmd's
-    own 403 denial: status 403, body "forbidden: <reason>" for a known deny
-    reason, Server header starting with "confirmd/1". Anything else — a 200
-    from a port grabber, a 403 from another service, a connection failure —
-    fails the check.
+    Without this, the opener's default HTTPRedirectHandler would silently
+    follow a responder's Location to an arbitrary host, and the shape
+    assertion would then apply to the redirect target — not the process on
+    the confirmd port. Returning None makes the redirect raise HTTPError,
+    which the check handles as fail-closed.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never follow a redirect: None makes http_error_30x return None,
+        # so the opener's default error handling raises HTTPError (302),
+        # which the check treats as fail-closed.
+        return None
+
+
+def check_confirmd(confirmd_url):
+    """Misbinding detection + liveness of the approvals path (GitHub #160).
+
+    Asserts the process answering on the confirmd port behaves like
+    confirmd — not merely that a socket is open on the port. The probe
+    always connects from the tenant box itself, which confirmd's auth gate
+    refuses, so the expected answer is confirmd's own 403 denial: status
+    403, body "forbidden: <reason>" for a known deny reason, Server header
+    starting with "confirmd/1". Anything else — a 200 from a port grabber,
+    a 403 from another service, a 3xx redirect, a connection failure —
+    fails the check. This catches accidental misbinding, not an adversary
+    who controls the port (see the scope note above).
     """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE  # self-signed cert; identity is the deny shape
-    # Bypass any ambient proxy env: this check is always same-host.
+    ctx.verify_mode = ssl.CERT_NONE  # self-signed cert; shape is the signal
+    # Bypass any ambient proxy env AND any redirect: this check is always
+    # same-host — a 3xx must fail closed, not be followed off the port.
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
+        _NoRedirect(),
         urllib.request.HTTPSHandler(context=ctx),
     )
     req = urllib.request.Request(confirmd_url.rstrip("/") + "/", method="GET")
@@ -271,15 +303,16 @@ def check_confirmd(confirmd_url):
     want = {"forbidden: %s" % r for r in _CONFIRMD_DENY_REASONS}
     if (status == 403 and text in want
             and server.split(" ")[0] == "confirmd/1"):
-        print(f"[confirmd] identity ok at {confirmd_url}: confirmd/1 "
-              f"denied this box ({text}).", file=sys.stderr)
+        print(f"[confirmd] misbinding check ok at {confirmd_url}: "
+              f"confirmd/1 denied this box ({text}).", file=sys.stderr)
         return EXIT_OK
     return die(EXIT_CHECK_FAILED,
-               f"the process answering at {confirmd_url} is not confirmd "
-               f"(want: HTTP 403 + confirmd denial body + Server "
-               f"'confirmd/1'; got: HTTP {status}, body={text[:80]!r}, "
-               f"Server={server[:40]!r}). A port grabber, stale service, or "
-               "misbound server on the confirmd port must not certify the "
+               f"the process answering at {confirmd_url} does not behave "
+               f"like confirmd (want: HTTP 403 + confirmd denial body + "
+               f"Server 'confirmd/1'; got: HTTP {status}, "
+               f"body={text[:80]!r}, Server={server[:40]!r}). A port "
+               "grabber, stale service, misbound server — or a redirect off "
+               "the port — on the confirmd port must not certify the "
                "approvals path.")
 
 
