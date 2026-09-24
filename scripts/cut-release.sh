@@ -99,7 +99,7 @@ done
 
 REPO_DIR="${CUT_RELEASE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$REPO_DIR"
-[[ -d .git ]] || die "not a git repo: $REPO_DIR"
+git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo: $REPO_DIR"
 
 # Fail fast on a missing confirmation, before any network I/O.
 if [[ "$MODE" == "execute" && "$CI" != "1" && "$CONFIRM" != "1" ]]; then

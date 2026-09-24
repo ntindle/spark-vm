@@ -500,6 +500,20 @@ class ConfirmdTests(unittest.TestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(json.loads(h.wfile.getvalue()), [{"id": "a"}])
 
+    def test_1_send_html_hardening_headers(self):
+        """Issue #77 (L3): every HTML response carries nosniff and a
+        same-origin referrer policy. Deleting either header must fail."""
+        import io
+        h = cd.Handler.__new__(cd.Handler)
+        headers = {}
+        h.send_response = lambda code: headers.setdefault("code", code)
+        h.send_header = lambda k, v: headers.__setitem__(k, v)
+        h.end_headers = lambda: None
+        h.wfile = io.BytesIO()
+        h._send_html("<p>x</p>")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(headers["Referrer-Policy"], "same-origin")
+
     def test_1_routes_carry_poller(self):
         """/ and /answered wire the live poller (engineering #3)."""
         for path, fn in (("/", "renderPending"), ("/answered", "renderAnswered")):

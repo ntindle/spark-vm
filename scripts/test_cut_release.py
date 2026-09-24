@@ -296,6 +296,19 @@ def test_release_workflow_pins_checkout_and_sets_identity():
 
 # --- refusals ---
 
+def test_runs_from_linked_worktree(workrepo, tmp_path):
+    """Issue #349: in a git linked worktree, `.git` is a file (a `gitdir:`
+    pointer), not a directory — the repo gate must use `git rev-parse
+    --git-dir` so a worktree run gets past it instead of aborting with
+    "not a git repo". (The worktree sits on a helper branch, so the next
+    preflight — the main-branch check — is the expected stop.)"""
+    wt = tmp_path / "worktree"
+    git("worktree", "add", str(wt), cwd=workrepo)
+    r = run_script(wt, "--dry-run")
+    assert "not a git repo" not in r.stderr
+    assert "must run on main" in r.stderr
+
+
 def test_refuses_dirty_tree(workrepo):
     (workrepo / "VERSION").write_text("0.2.1\n")
     r = run_script(workrepo, "--dry-run")
