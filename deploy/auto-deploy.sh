@@ -612,8 +612,11 @@ health_check() {
         [ -n "$h" ] || continue
         # #323: parse port as the trailing :digits field; host is everything
         # between tcp: and that field. The naive middle/last-colon split
-        # mangled IPv6-ish entries (tcp:::8080 -> host ":"), and silently
-        # accepted non-numeric "ports" into tcp_ok. Fail closed instead.
+        # silently accepted non-numeric "ports" into tcp_ok (e.g.
+        # tcp:host:abc — bash /dev/tcp resolves service names, so a
+        # typo'd "port" could dial an unintended service) and let
+        # missing-port entries (tcp:host) through unparsed. Malformed
+        # entries now fail closed instead of probing garbage endpoints.
         if [[ "$h" =~ ^tcp:(.*):([0-9]+)$ ]]; then
             host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[2]}"
         else

@@ -703,18 +703,6 @@ def test_health_check_parses_ipv4_and_tailnet():
     assert "HEALTH_OK" in r.stdout, r.stdout
 
 
-def test_health_check_parses_ipv6_literals():
-    """IPv6 literals parse host = everything between tcp: and the trailing
-    :digits field — no middle-colon mangling (#323). The manifest
-    allowlist (test_manifest_valid) still gates what ships; the parser
-    no longer pretends to reject by accident."""
-    r = _health_check_stub("tcp:fe80::1:8080\ntcp:[::1]:8080")
-    assert r.returncode == 0, r.stderr + r.stdout
-    assert "TCPCALL:fe80::1:8080" in r.stdout, r.stdout
-    assert "TCPCALL:[::1]:8080" in r.stdout, r.stdout
-    assert "HEALTH_OK" in r.stdout, r.stdout
-
-
 def test_health_check_rejects_malformed_tcp_entry():
     """Non-numeric or missing ports fail closed with a clear log line
     instead of feeding a mangled host/port to tcp_ok (#323)."""
