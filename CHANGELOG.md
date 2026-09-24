@@ -56,7 +56,7 @@ This changelog only works if entries land with the change, not after it:
   the C40 provenance, and Boat's EU-only geography re-verified on the
   vendor FAQ (Germany, Finland, France). A sunset convention for
   deprecated corpus rows is proposed in the watch doc but not codified.
-  (#TBD)
+  (#344)
 - H11 multi-tenancy audit: every localhost-only, no-auth, and single-owner
   assumption in the repo inventoried and ranked by blast radius; adopts the
   isolation research's findings and answers the four design questions —
