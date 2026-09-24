@@ -37,6 +37,22 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 late night) (#TBD): tracked set quiet —
+  all 8 providers re-read vendor-verified with no change (DO Managed
+  Agents C26 figures read live a fourth consecutive pass, stamp "Last
+  verified 22 Sep 2026", snapshots/checkpoints $0.05/GiB-month);
+  Vercel Drives still public beta (fifteenth consecutive no-change
+  pass; pricing page last_updated 2026-09-10); Boxd quickstart now
+  VERIFIED (rate card UNVERIFIED this pass — surveyor fetch gate —
+  honestly labeled, not carried); C36 no new vendor datapoints
+  (no GA move, allowlist-only production stands); Automaid own-page
+  fetch failed again (UNVERIFIED) but third-party evidence hardened
+  against it — every result names cleaning-business booking SaaS,
+  moving it to lane-drift pending one successful own-page fetch;
+  Tencent Cloud DataBuddy stays lane-drift; THIRD-PARTY Upstash
+  15-provider comparison names newcomers (Upstash Box, Freestyle,
+  Ascii Box, Namespace, Beam, Tensorlake) as future-vetting
+  candidates; no corpus fold; no in-lane launches today.
 - Competitor watch (2026-09-23 early night) (#318): tracked set
   quiet — all 8 providers re-read vendor-verified with no change
   (DO Managed Agents C26 figures read live a third consecutive pass,
