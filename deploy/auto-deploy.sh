@@ -516,9 +516,12 @@ install_component() {
     # install_component <component> <new-sha> — run the component's install
     # step (from the updater mirror) and/or sync its checkout subtree.
     # Return contract: 0 = installed; 1 = install failed (caller rolls back);
-    # 2 = the pre-destruction checkout re-check failed (issue #324) — nothing
-    # was installed, so the caller must fail closed WITHOUT marking the
-    # commit blocked (the commit is not bad; the checkout is dirty).
+    # 2 = the pre-destruction checkout re-check failed (issue #324). The
+    # caller must fail closed WITHOUT marking the commit blocked (the commit
+    # is not bad; the checkout is dirty) — but anything already installed in
+    # this run, including this component's own install step (which runs
+    # before the re-check below), must still be rolled back; the caller owns
+    # that (see cmd_deploy's no_block rollback).
     local c="$1" new="$2"
     local inst; inst="$(get_str "$c" install)"
     if [ -n "$inst" ]; then
@@ -544,9 +547,9 @@ install_component() {
         # service. The check is two `git status --porcelain` calls plus two
         # `cat-file -e` lookups — cheap enough to close the window without a
         # lock protocol operators would also have to learn and take.
-        # Distinct return code 2 (see the docstring contract): the deploy has
-        # not mutated anything yet, so this is a gate-style abort, not an
-        # install failure.
+        # Distinct return code 2 (see the docstring contract): the subtree
+        # sync itself has not run, but this component's install step (above)
+        # may already have mutated the box — the caller rolls back on 2.
         check_checkout_sync_ready "$c" "$sub" "$new" || return 2
         rm -rf "${WORKING_CHECKOUT:?}/${sub:?}" || return 1
         if ! git -C "$UPDATER_REPO" archive "$new" "$sub" | tar -x -C "$WORKING_CHECKOUT"; then
@@ -682,17 +685,28 @@ sync_version_from_deployed() {
 }
 
 do_rollback() {
-    # do_rollback <snapdir> <old> <new> <failed-component> <phase>
-    # Restore the snapshot, restart + health-check, mark the commit blocked
-    # so the next tick does not retry-loop it. Always returns 1 (deploy failed).
-    local snapdir="$1" old="$2" new="$3" failed_c="$4" phase="$5"
+    # do_rollback <snapdir> <old> <new> <failed-component> <phase> [no_block]
+    # Restore the snapshot, restart + health-check. Unless no_block is set,
+    # mark the commit blocked so the next tick does not retry-loop it.
+    # no_block is for aborts where the commit itself is fine (issue #324's
+    # checkout-dirty abort): the audit entries still fire, but BLOCKED_COMMIT
+    # is never written — not even if the rollback itself fails (the alert
+    # already screams for operator intervention; a good commit must not be
+    # blocked). Always returns 1 (deploy failed).
+    local snapdir="$1" old="$2" new="$3" failed_c="$4" phase="$5" no_block="${6:-}"
     local c
-    alert "deploy $phase failed for component $failed_c ($old -> $new) — rolling back"
+    if [ -n "$no_block" ]; then
+        alert "checkout-dirty abort for component $failed_c ($old -> $new) — rolling back already-installed components (commit or stash first)"
+    else
+        alert "deploy $phase failed for component $failed_c ($old -> $new) — rolling back"
+    fi
     audit 'deploy' ',"result":"deploy-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$failed_c"'","phase":"'"$phase"'"'
     if ! restore_snapshot "$snapdir"; then
         alert "ROLLBACK FAILED for $new — box may be half-deployed, operator intervention required"
         audit 'deploy' ',"result":"rollback-failed","from":"'"$old"'","to":"'"$new"'"'
-        printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
+        if [ -z "$no_block" ]; then
+            printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
+        fi
         return 1
     fi
     # A failed daemon-reload here must not abort the rollback: the blocked
@@ -709,7 +723,9 @@ do_rollback() {
     if [ "$unhealthy" -eq 1 ]; then
         alert "rolled back to $old but a component is unhealthy — operator intervention required"
     fi
-    printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
+    if [ -z "$no_block" ]; then
+        printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
+    fi
     # The restored snapshot reverted the deployed standalone files, so the
     # deployed version is whatever the restored VERSION file says.
     local rbv; rbv="$(sync_version_from_deployed)"
@@ -937,7 +953,7 @@ cmd_deploy() {
     ROLLBACK_COMPS=("${COMPS[@]}")
 
     # 3. install; on any failure roll everything back
-    local irc
+    local irc installed_any=0
     for c in "${COMPS[@]}"; do
         log "deploying component: $c"
         # NOTE: plain `install_component ...; irc=$?` is dead code under
@@ -947,16 +963,23 @@ cmd_deploy() {
         if [ "$irc" -eq 2 ]; then
             # Issue #324: the working checkout gained uncommitted changes (or
             # stopped being a usable git checkout) between the gate phase and
-            # the install phase. Nothing has been installed yet, so this fails
-            # closed like the gate phase (alert + audit, watermark untouched)
-            # rather than like an install failure: the commit is not bad, so
-            # it is NOT marked blocked — the next tick retries once the
-            # operator commits or stashes.
+            # the install phase. The commit is not bad, so it is NEVER marked
+            # blocked — the next tick retries once the operator commits or
+            # stashes. But components already installed in this run (or this
+            # component's own install step, which runs BEFORE the re-check
+            # inside install_component) may have mutated the box, so roll
+            # those back first — otherwise the box drifts half-deployed until
+            # the next tick. do_rollback's no_block mode restores the snapshot
+            # without writing BLOCKED_COMMIT; the watermark stays untouched.
             alert "checkout changed during deploy for component $c ($old -> $new) — refusing to overwrite (commit or stash first)"
-            audit 'deploy' ',\"result\":\"checkout-dirty\",\"from\":\"'\"$old\"'\",\"to\":\"'\"$new\"'\",\"component\":\"'\"$c\"'\"'\'
+            audit 'deploy' ',"result":"checkout-dirty","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'
+            if [ "$installed_any" -eq 1 ] || [ -n "$(get_str "$c" install)" ]; then
+                do_rollback "$snapdir" "$old" "$new" "$c" "checkout-dirty" "no_block"
+            fi
             return 1
         fi
         [ "$irc" -eq 0 ] || { do_rollback "$snapdir" "$old" "$new" "$c" "install"; return 1; }
+        installed_any=1
     done
 
     # 4. daemon-reload + enable BEFORE restarting (else restarts use the stale

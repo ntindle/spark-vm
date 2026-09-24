@@ -83,7 +83,9 @@ manually — using that user's existing sudo rights. No new privilege is granted
    checkout-sync preconditions are re-verified immediately before the
    destructive `rm -rf` (issue #324): an operator edit to the working
    checkout in the gate→install window fails the deploy closed instead of
-   being silently clobbered — no blocked commit, the next tick retries.
+   being silently clobbered — no blocked commit (the commit is not bad), the
+   next tick retries; components already installed in the same run are
+   rolled back first via the no-block rollback path.
 6. **daemon-reload + enable**, then **restart** only the affected services
    (system + user units). The reload matters: restarting without it runs the
    stale in-memory unit definition after a unit-file change.

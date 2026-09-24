@@ -903,6 +903,116 @@ def test_install_component_rechecks_checkout_before_clobber(tmp_path):
     assert (checkout / "cred-ui" / "cred-ui.py").read_text() == "# OPERATOR EDIT"
 
 
+def test_cmd_deploy_checkout_dirty_rolls_back_without_blocking(tmp_path):
+    """Issue #324, caller branch (QA review blockers 1+2): cmd_deploy with
+    two components. compa installs first — its install step mutates its
+    deployed file AND dirties compb's working subtree, simulating another
+    job editing the checkout in the gate->install window. compb's
+    pre-destruction re-check then fails. The deploy must fail, roll compa's
+    file back from snapshot, NOT write blocked-commit, and audit both
+    checkout-dirty and rolled-back. The box (including the checkout subtree)
+    returns to its exact pre-deploy state.
+    """
+    import json
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "init", "-q", "--bare"], cwd=origin, check=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, check=True,
+                                   capture_output=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    run("git", "config", "commit.gpgsign", "false")
+    (repo / "compa").mkdir()
+    (repo / "compb").mkdir()
+    (repo / "compa" / "f.py").write_text("a1")
+    (repo / "compb" / "f.py").write_text("b1")
+    (repo / "VERSION").write_text("1.0.0\n")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "base")
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                          capture_output=True, text=True).stdout.strip()
+    run("git", "remote", "add", "origin", str(origin))
+    run("git", "push", "-q", "origin", "HEAD:main")
+    subprocess.run(["git", "--git-dir", str(origin), "symbolic-ref",
+                    "HEAD", "refs/heads/main"], check=True)
+    updater = tmp_path / "updater"
+    subprocess.run(["git", "clone", "-q", str(origin), str(updater)],
+                   check=True)
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "clone", "-q", str(origin), str(checkout)],
+                   check=True)
+    (repo / "compa" / "f.py").write_text("a2")
+    (repo / "compb" / "f.py").write_text("b2")
+    (repo / "VERSION").write_text("1.0.1\n")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "touch compa+compb")
+    run("git", "push", "-q", "origin", "HEAD:main")
+
+    tconf = tmp_path / "t.conf"
+    tconf.write_text(
+        'COMPONENTS=(compa compb)\n'
+        'compa_paths=("compa/")\n'
+        'compa_services=()\n'
+        'compa_user_services=()\n'
+        'compa_tests="true"\n'
+        'compa_health=()\n'
+        "compa_install='printf \"NEW\" > \"$COMPA_FILE\"; printf \"dirty\" > \"$WORKING_CHECKOUT/compb/f.py\"'\n"
+        'compa_install_unit=""\n'
+        'compa_checkout_sync=""\n'
+        'compa_install_paths=("$COMPA_FILE")\n'
+        'compb_paths=("compb/")\n'
+        'compb_services=()\n'
+        'compb_user_services=()\n'
+        'compb_tests="true"\n'
+        'compb_health=()\n'
+        'compb_install=""\n'
+        'compb_install_unit=""\n'
+        'compb_checkout_sync="compb"\n'
+        'compb_install_paths=()\n'
+    )
+
+    compa_file = tmp_path / "compa.dat"
+    compa_file.write_text("OLD")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "deployed-commit").write_text(base + "\n")
+
+    env = {
+        "AUTO_DEPLOY_NO_MAIN": "1",
+        "UPDATER_REPO": str(updater),
+        "UPDATER_STATE_DIR": str(state),
+        "UPDATER_COMPONENTS_CONF": str(tconf),
+        "WORKING_CHECKOUT": str(checkout),
+        "COMPA_FILE": str(compa_file),
+        "PINNED_UPSTREAM": str(origin),
+        "SKIP_SYSTEMCTL": "1",
+        "SKIP_SUDO": "1",
+    }
+    r = source_and("cmd_deploy", env_extra=env)
+    assert r.returncode == 1, r.stdout + r.stderr
+
+    # the commit is not blocked, the watermark is untouched ...
+    assert not (state / "blocked-commit").exists()
+    assert (state / "deployed-commit").read_text().strip() == base
+    # ... both audit signals fired, as valid JSON ...
+    audit_lines = (state / "audit.log").read_text().strip().splitlines()
+    assert audit_lines, "audit log must not be empty"
+    events = [json.loads(line) for line in audit_lines]
+    results = [e.get("result") for e in events]
+    assert "checkout-dirty" in results, results
+    assert "rolled-back" in results, results
+    # ... the earlier component's file was restored from snapshot ...
+    assert compa_file.read_text() == "OLD"
+    # ... and the checkout subtree is back to its pre-deploy state
+    # (the rollback restores the snapshot, which predates the mid-window
+    # edit — the box must be exactly pre-deploy so the next tick retries
+    # cleanly).
+    assert (checkout / "compb" / "f.py").read_text() == "b1"
+
+
 def test_install_component_rechecks_version_before_clobber(tmp_path):
     """Issue #324, VERSION branch of the same re-check: an uncommitted edit
     to the working checkout's root VERSION (which travels with every sync)
