@@ -15,13 +15,16 @@ pricing posture, onboarding shape, security work) derives from it.
 
 | Segments | Trust model | Why |
 |----------|-------------|-----|
-| 1 Self-hosters, 2 Hosted signups | **Tenant holds root in the guest; the provider is strictly below the hypervisor** | The tenant is mutually untrusted with the provider (segment 2) or is its own provider (segment 1). Per-tenant boxes, not per-tenant processes, for mutually-untrusted tenants — see `docs/MULTI_TENANCY_AUDIT.md` (H11) A1: no per-tenant-processes shape is honest until the swap proxy gains per-tenant request auth (#339). |
-| 3 Sandbox harness builders | **Cooperative-jail tier** | The harness's tenants are its own coding agents — cooperative, not adversarial. Here per-harness adapters and jail-level isolation are the honest shape. |
+| 1 Self-hosters | **The human owns the host/hypervisor and keeps full root; their agent runs as a workload beneath that control; secret installation is human-only via `cred set`** | Single-owner: they *are* the provider. Per-tenant boxes are the vendor-consensus shape for mutually-untrusted tenants — not needed here, but nothing about the shape is dishonest since tenant count is one (see `docs/MULTI_TENANCY_AUDIT.md` (H11) self-hosted verdict). |
+| 2 Hosted signups | **The operator holds root on the outer enforcement layer (egress fencing, secret swapping, metering, updater enforcement); the tenant/agent gets contained root-equivalent inside their jail/box — never host root** | Mutual untrust with the provider, but the enforcement layer needs an operator: egress fencing, secret swaps, metering, and updater enforcement all require host-side control. The trust story is explicit — **no operator-blindness claim** (the operator can technically inspect the environment); support access is tenant-visible, explicitly granted, logged, break-glass only. Users wanting provider-blind infra self-host. Per-tenant boxes, not per-tenant processes — H11 A1: no per-tenant-processes shape is honest until the swap proxy gains per-tenant request auth (#339). |
+| 3 Sandbox harness builders | **Cooperative-jail / contained-root tier** | The harness's tenants are its own coding agents — cooperative, not adversarial. Here per-harness adapters and jail-level isolation are the honest shape; the harness, not the substrate, owns the tenant trust story. |
 
-Segments 1 and 2 get the full isolation story (per-tenant boxes); segment 3
-gets the cheaper jail tier. Never sell the jail tier to segment 2 as
-"hosted-grade" — the audit's blast-radius inventory exists precisely to
-stop that.
+Segment 1 is its own provider (full host root, agent beneath that
+control). Segment 2 gets per-tenant boxes under the operator's
+enforcement layer with the trust story stated explicitly. Segment 3
+gets the cheaper cooperative-jail tier. Never sell the jail tier to
+segment 2 as "hosted-grade" — the audit's blast-radius inventory exists
+precisely to stop that.
 
 ## Segment 1 — Self-hosters (Unraid / Proxmox / Hetzner homelab folks)
 
@@ -41,8 +44,10 @@ operator, and the human who taps the approval button.
 3. Run long-lived agent workloads (the repo's proof point: ntindle's own
    Muse, "Spark," lives on a spark-vm box and ships with it).
 
-**Trust model:** single-owner. They own the hypervisor layer *and* the
-guest, so the current localhost-only / Tailscale-only posture
+**Trust model:** single-owner. They own the host/hypervisor and keep full
+root; their agent runs as a workload beneath that control; secret
+installation stays human-only via `cred set`. So the current
+localhost-only / Tailscale-only posture
 (`docs/TRUST_TRANSPARENCY.md`) is already the right shape — no
 multi-tenancy work needed, just hardening that keeps their own box safe
 from their own agent.
@@ -87,10 +92,16 @@ a kill switch.
 3. (Both) First-run activation that lands in one tiny task, not a feature
    tour (`docs/RESEARCH_AGENT_SANDBOX_ADOPTION.md` finding 1).
 
-**Trust model:** tenant holds root in the guest; the provider is strictly
-below the hypervisor. The H11 audit's open items are the trust roadmap for
-this segment: swap-proxy per-tenant request auth (#339), credential-stack
-tenant dimension (#280), per-tenant approval routing (#69), tenant-attributed
+**Trust model:** operator-held root on the outer enforcement layer
+(egress fencing, secret swapping, metering, updater enforcement); the
+tenant/agent gets contained root-equivalent inside their jail/box —
+never host root. The trust story is explicit: **no operator-blindness
+claim** — the operator can technically inspect the environment; support
+access is tenant-visible, explicitly granted, logged, break-glass only.
+Users wanting provider-blind infrastructure self-host (segment 1). The
+H11 audit's open items are the trust roadmap for this segment:
+swap-proxy per-tenant request auth (#339), credential-stack tenant
+dimension (#280), per-tenant approval routing (#69), tenant-attributed
 audit lines (#14), confirmd multi-replica story (#194). Ship the segment
 only as the audit closes those rows.
 
@@ -137,11 +148,11 @@ conflated with the hosted product's trust story.
    behind an OpenSandbox-style contract, so the substrate stays portable
    across harnesses.
 
-**Trust model:** cooperative-jail tier. The tenants are the harness's own
-coding agents — the harness trusts its agents the way a CI system trusts
-its jobs. Here the jail is the honest isolation boundary and per-tenant
-boxes would be over-engineering; the harness, not the substrate, owns the
-tenant trust story.
+**Trust model:** cooperative-jail / contained-root tier. The tenants are
+the harness's own coding agents — the harness trusts its agents the way
+a CI system trusts its jobs. Here the jail is the honest isolation
+boundary and per-tenant boxes would be over-engineering; the harness,
+not the substrate, owns the tenant trust story.
 
 **Must-haves:**
 
@@ -151,9 +162,10 @@ tenant trust story.
 - Explicit non-goal boundary: task-scoped sandboxes are this product's
   job; persistent colleague-computers are spark-vm's.
 
-**Anti-needs:** do not import spark-vm's tenant-root-in-guest promise or
-its buyer-grade audit story — this segment buys *substrate speed*, and
-selling them hosted-product isolation tiers wastes their evaluation time.
+**Anti-needs:** do not import spark-vm's buyer-grade audit story or its
+operator-held-enforcement model — this segment buys *substrate speed*,
+and selling them hosted-product isolation tiers wastes their evaluation
+time.
 
 ## Who is NOT an ICP
 
