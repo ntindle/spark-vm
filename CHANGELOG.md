@@ -36,6 +36,26 @@ This changelog only works if entries land with the change, not after it:
 
 ## [Unreleased]
 
+### Added
+
+- Evening competitor watch (full quiet pass): tracked-set vendors 8/8
+  VERIFIED no-change with zero fetch failures (full-quiet streak re-opens
+  at one after the afternoon pass's Daytona move), Vercel Drives still
+  public beta (24th consecutive pass; VERIFIED on the vendor changelog
+  page this run; pricing last_updated 2026-09-10), C36, C41, and C43
+  re-verified unchanged. No corpus fold this pass — three fold candidates
+  queued for primary-source verification (Google Shell/Computer Use
+  sandboxes GA Sept 9; Docker Sandboxes CVEs CVE-2026-77179/CVE-2026-79994
+  Sept 15; the Alibaba/Huawei "agentic cloud" framing trend), plus a
+  namesake-collision warning that Guava's "Daytona" voice model is
+  unrelated to Daytona sandboxes. Afternoon vetting holds (OpenAI Agents
+  API stays third-party; Tencent DataBuddy stays adjacent-watch;
+  deprecated-row sunset convention stays proposed-not-codified). News
+  scan: adjacent color only (Island $400M Series F on rogue-agent
+  framing, Alibaba AgentCore, Darktrace Signal Labs) — no in-lane
+  launches, pricing moves, or funding dated 2026-09-24. Full pass in
+  `docs/COMPETITOR_WATCH_2026-09-24_EVENING.md` (#351).
+
 ## [0.3.0] - 2026-09-24
 
 ### Added
@@ -46,6 +66,7 @@ This changelog only works if entries land with the change, not after it:
   sandbox product, cooperative-jail tier) — plus the trust-boundary split
   between them and who is NOT an ICP. Design thinking, not a commitment; the
   validation checklist lives in #343. (#347)
+
 - Competitor watch (2026-09-24 afternoon): tracked set 7/8 VERIFIED NO-CHANGE —
   the eleven-pass full-quiet streak ends on Daytona's SEP 24 changelog entries
   (V0.216.1/V0.216.2, CLI/API polish, no sandbox moves); Vercel Drives still
