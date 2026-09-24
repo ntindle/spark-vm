@@ -75,9 +75,9 @@ isolation), because those are where the trust story lives.
 | **AgentComputer** | Persistent computer | Persistent Ubuntu VMs for coding agents, SSH/API access, configurable storage (up to 250 GiB); **own open-source Firecracker-based VM manager on bare metal** ([computer-host](https://github.com/AgentComputerAI/computer-host) — tap devices, nftables networking, SSH keygen, guest identity injection, disk snapshots, <200ms boots; [computer-guest](https://github.com/AgentComputerAI/computer-guest) thin guest images — both public repos, 2 stars each, last updated 2026-04-30, no declared license on GitHub, so the repos corroborate existence, not production deployment) | **Pure PAYG, no flat plan:** $0.07/CPU-hr, $0.04375/GB-hr memory, $0.000683/GB-hr hot storage, **$0.000027/GB-hr cold (stopped)** — no published deletion window for stopped machines; **new Enterprise tier** (custom capacity policies, team billing, private infra, priority support); the rate-card parity with Fly Sprites stays **unexplained, not claimed reselling** (vendor claims its own stack; earlier $20/mo directory claim refuted against the pricing page) |
 | **Fly.io Sprites** | Persistent computer | Firecracker microVM per user, 100 GB root persists indefinitely, hibernates when idle | PAYG ($0.07/CPU-hr; up to 3 concurrent sprites) plus exactly one subscription plan — Level 10, $20/mo (10 concurrent, 450 CPU-hrs, 1,800 GB-hrs RAM, 50 GB storage); hibernates after ~30s idle (warm wake 100–500ms, cold 1–2s); storage persists at cold-storage rates; still named Sprites (billing docs still draft, docs.sprites.dev) |
 | **Northflank** | Both | microVM/Kata/gVisor, stateful or ephemeral, self-serve BYOC | Lowest published rate: $0.01667/vCPU-hr; free sandbox tier |
-| **E2B** | Task-scoped sandbox | Firecracker microVM per sandbox, SDK-first, templates-as-code | Hobby $0 + $100 one-time credit (1h sessions, 20 concurrent); Pro **$150/mo** + usage (24h sessions); ~$78/mo usage for one continuous 2vCPU/512MB box |
+| **E2B** | Task-scoped sandbox | Firecracker microVM per sandbox, SDK-first, templates-as-code | Hobby $0 + $100 one-time credit (1h sessions, 20 concurrent); Pro **$150/mo** + usage (24h sessions); ~$78/mo usage for one continuous 2vCPU/512MB box; $21M Series A **2025-07-28** (Insight Partners lead; dated sources: PRNewswire wire + SiliconANGLE URL) |
 | **Daytona** | Task-scoped sandbox | Containers (+VM/Windows classes), stateful, stop/archive/pause/fork, GPU (ephemeral) | $200 free compute, no plan floor; $0.0504/vCPU-hr + $0.0162/GiB-hr; GPU on request (H100 listed $2.27/hr) |
-| **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team |
+| **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team; in talks to raise at ~$15B valuation (2026-09-23, Bloomberg/Reuters THIRD-PARTY; $355M May raise at $4.65B) |
 | **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots; **64 GB ephemeral NVMe default** (SDK ≥3.0.0/custom image; 32 GB on deprecated runtimes — C32 resolved, see "Watch update — 2026-09-23"); Drives public beta (persistent, ≤16 TiB/drive, usage-based pricing) | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
 | **Cloudflare Sandbox** | Task-scoped sandbox | Containers on Workers, sleeps at 10 min idle, disk resets on sleep | Active-CPU billing ($0.072/vCPU-hr); $5/mo Workers Paid floor |
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
@@ -89,8 +89,9 @@ isolation), because those are where the trust story lives.
 | **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, $0.05/GiB-month snapshots (vendor docs, re-read 2026-09-23 — the 10× discrepancy resolved in favor of the primary source); $5 new-user credit |
 | **Boxd** (2026-09-22 consolidation) | Persistent computer | "Composable computers" — KVM VMs with live memory forking in under 200 ms (vendor claim), snapshots/checkpoints, real SSH, per-machine HTTPS subdomain; self-hosted option ("run the whole platform on your own hardware") | Credit-based: €0.049/vCPU-hour running, €0.015/GiB-hour resident RAM, €0.0001/GiB-hour disk written; €30 free credits (**rate card VERIFIED 2026-09-23** — first own-page fetch, C29) |
 | **Upstash Box** (2026-09-22 consolidation) | Task-scoped sandbox | Snapshot/restore API for reusable prepared environments, branching from snapshots, full outbound networking by default, 22.5 Gbps hosts on AWS; pause/resume unavailable with keepAlive enabled | Pricing not published in the surveyed docs |
-| **Freestyle** (2026-09-23 overnight, C37) | Persistent computer | "VMs for AI Agents" — hardware-virtualized Linux microVMs with live cloning, pause/resume, nested virtualization (Docker inside), custom domains, WireGuard tunnels, FUSE/eBPF; vendor claims 65 ms boot (marketing) and "run forever" with idle-timeout disabled (the anti-suspend-on-idle posture) | **THIRD-PARTY only:** ~$0.04032/vCPU-h, $0.0129/GiB-h per-second; free tier 200 vCPU-h + 400 GiB-h/mo (own pricing page not read — UNVERIFIED) |
+| **Freestyle** (2026-09-23 overnight, C37) | Persistent computer | "VMs for AI Agents" — hardware-virtualized Linux microVMs with live cloning, pause/resume, nested virtualization (Docker inside), custom domains, WireGuard tunnels, FUSE/eBPF; boot claim qualified 2026-09-24: vendor headline "65 ms" is marketing, docs give the honest number — **p99 under 400ms** (both VERIFIED on vendor's own pages); "run forever" with idle-timeout disabled (the anti-suspend-on-idle posture) | **THIRD-PARTY only:** ~$0.04032/vCPU-h, $0.0129/GiB-h per-second; free tier 200 vCPU-h + 400 GiB-h/mo (own pricing page not read — UNVERIFIED) |
 | **Tensorlake** (2026-09-23 overnight, C38) | Task-scoped sandbox | "Sandboxes for AI Agents" — Firecracker microVMs + versioned POSIX filesystem (`tl fs`: autosave, snapshot/time-travel, restore to any point), live fork/clone, OCI import, ~1 s suspend/resume with meter-stops-on-suspend, auto-suspend idle, SOC 2 Type II + HIPAA | Pricing not observed on homepage this run |
+| **Simular Sai** (2026-09-24 midnight, C39) | Persistent computer (computer-use fleet) | "Sai turns any computer — a private cloud VM or your own device — into a self-operating machine": persistent Simular-provisioned cloud VMs (Windows/Linux) or BYOD (Mac/Windows/Linux); computer-use agent clicks/types through real interfaces; approval-gated critical actions, encrypted password input, skills + schedulable workflows, live visibility + takeover; fleet up to 100 machines ("less than $1" per run, vendor claim); Agent S framework, OSWorld-first claim | Pricing UNVERIFIED against sai.work's own page: Simular's own comparison page quotes $50/mo pay-as-you-go + $500/mo Sai Unlimited + Enterprise; dume.ai THIRD-PARTY attributes $20/$200/$500 tiers to sai.work — conflict unresolved |
 | **h-sandbox / Harakiri** (2026-09-22 consolidation) | Task-scoped sandbox (OSS control plane) | Open-source self-hosted sandbox control plane (Apache 2.0); HTTP API / TS SDK / CLI / dashboard; Credential Vault with host-bound egress bindings and fake-env injection (fourth convergent placeholder-swap data point for the secrets-posture corpus) | Free, self-hosted |
 | **Brig** (2026-09-22 consolidation) | Local containment (OSS tool) | Local microVM CLI for coding agents — no hosted service; dedicated kernel per sandbox, host-vs-agent trust model, boot-empty credentials with names-only reporting, fail-closed egress-downgrade refusal | Free, local (Apache 2.0) |
 | **Epho** (2026-09-22 consolidation) | Task-scoped sandbox | Agents-as-API (claude / codex / opencode harnesses) with automatic multi-provider fallback — the session outlives the machine via session-snapshot restore on replacement boxes | ≈$0.158/h for 2 vCPU / 2 GiB / 10 GiB (computed from per-second rates); $10 starting credit; BYO model keys |
@@ -1407,3 +1408,65 @@ triage, content-calendar sync, payment review workspaces, 3,000+ app
 integrations). Not VM-for-agents infrastructure; not a lane
 competitor. It was never a corpus entry — this note closes the
 watch-list slot so later passes stop re-attempting it.
+
+## Watch update — 2026-09-24 (midnight): C39 Simular Sai GA, Freestyle boot-claim qualification, E2B Series A dated, Modal valuation color
+
+Four corpus actions this pass (primary-source-verification and
+new-entry folds per the C32/C37/C38 precedents; full pass record in
+`docs/COMPETITOR_WATCH_2026-09-24_MIDNIGHT.md` §§1–5).
+
+**C39 new — Simular "Sai" ("Your First Robosecretary", in-lane,
+computer-use fleet).** The 2026-09-23-late-overnight pass's owed
+vendor-verification is closed: sai.work fetched and read this run
+(VERIFIED); the company press release datelined "Palo Alto,
+September 23, 2026" confirms GA from invite-only (VENDOR-ATTESTED
+via company-issued release, wire-syndicated). Sai turns "any
+computer — a private cloud VM or your own device — into a
+self-operating machine": persistent Simular-provisioned cloud VMs
+(Windows/Linux) or BYOD (Mac/Windows/Linux); the computer-use agent
+reasons and acts inside real interfaces (browsers, desktop apps);
+approval-gated critical actions, encrypted password/verification-code
+input, skills and schedulable saved workflows, live visibility +
+takeover, results via iMessage/SMS/Telegram. Fleet model: up to 100
+machines in parallel for "less than $1" (vendor claim); Minecraft
+demo ran autonomously 14 hours; neuro-symbolic compile-and-replay
+cuts token consumption ≥90% on repeated long-horizon office tasks
+(all vendor claims); Agent S framework claims first to outperform
+human performance on OSWorld. **Pricing conflict unresolved:**
+simular.ai's own SEO comparison page quotes Free (daily credits) /
+$50/month pay-as-you-go / $500/month Sai Unlimited / Enterprise,
+while dume.ai's THIRD-PARTY comparison attributes $20/$200/$500 tiers
+to sai.work — sai.work's fetched pages carry no pricing table, so
+all Sai pricing stays UNVERIFIED against the vendor's own pricing
+page (corpus field-table row records the conflict explicitly).
+Competitive read (INFERRED): Sai is the first in-lane entrant on the
+computer-use-fleet archetype — Simular provisions the cloud VMs and
+the agent operates them, which overlaps spark-vm's remote-desktop
+and 24-7 persistent-machine work (consumer flavor, not dev-sandbox,
+so it sits beside the task-scoped rows rather than replacing them).
+
+**C37 qualification — Freestyle boot claim.** The homepage headline
+"A full Linux machine, ready in **65 ms**" is the marketing number
+(VERIFIED on freestyle.sh); the honest vendor number is in the docs:
+"provision in milliseconds, with **p99s under 400ms**" (VERIFIED on
+freestyle.sh/docs). Field-table row updated to carry both. Pricing
+stays THIRD-PARTY — no own pricing page found (likely behind the
+dashboard / talk-to-us flow; dashboard probe is a standing ask).
+
+**E2B row — Series A dated.** The standing owed item is closed:
+**2025-07-28**, $21M Series A led by Insight Partners (PRNewswire
+wire copy + SiliconANGLE's dated URL; Decibel, Sunflower Capital,
+Kaya, Scott Johnston among followers; total $32M per vestbee,
+THIRD-PARTY). The date now lives in the corpus E2B row.
+
+**Modal row — valuation color.** In talks to raise at ~$15B
+valuation (2026-09-23, Bloomberg via Reuters, THIRD-PARTY; May
+raised $355M at $4.65B). Recorded as in-lane-adjacent color for the
+sandbox pricing race, not a product move.
+
+Not folded: Ascii Box stays an in-lane *candidate* (persistent
+Ubuntu VM for agents, THIRD-PARTY only — own-site verification owed,
+EU-only DE/FI/FR caveat); Namespace and Beam vetted as *adjacent*
+(dev-compute and serverless-GPU respectively, not VM-for-agents-first);
+C38 Tensorlake pricing watch remains open (no published pricing page);
+C36 terms re-verified unchanged (allowlist-only production GA).
