@@ -45,6 +45,7 @@ working.
 | [MULTITENANT_ISOLATION_RESEARCH.md](MULTITENANT_ISOLATION_RESEARCH.md) | Isolation research for shared tenancy. |
 | [GOLDEN_IMAGE_GATE_PROCEDURE.md](GOLDEN_IMAGE_GATE_PROCEDURE.md) | Operator procedure for the spec §6.7 golden-image round-trip gate: manifest preflight, fixture install, gate-mode probe, file → answer → grant-mint → verify, filing-count determinism check, mandatory fixture teardown pre-publish. |
 | [TENANT_STATUS_ENDPOINT.md](TENANT_STATUS_ENDPOINT.md) | Design for the `GET /tenant/status` poll the first-ten-minutes spec, signup flow, and signup UI assume: 12 machine codes + transition rules, `approvals_url` carrier, two-sided auth, provider-layer vs tenant-layer separation (G3). |
+| [MULTI_TENANCY_AUDIT.md](MULTI_TENANCY_AUDIT.md) | The H11 multi-tenancy audit: every localhost-only / no-auth / single-owner assumption inventoried and ranked by blast radius; adopts/rejects the isolation research's findings; answers the four design questions (isolation story, swap-proxy trust boundary, tailnet fail-open/fail-closed, who holds root); releases the H5/H10/H12/H13 gates. |
 
 ## Product research corpus
 
