@@ -124,7 +124,7 @@ after the afternoon pass's Daytona move, advances to **two** this pass.
   keep-alive flat $8/$16/$32; paused $0 compute + $0.10/GB-mo storage.
   All match folded datapoints.
 - **Deprecated-row sunset convention — still proposed-not-codified.**
-  No new evidence this pass (C40 is ~5–6 passes into the proposed
+  No new evidence this pass (C40 is ~4–5 passes into the proposed
   14-pass retention). Not codified unilaterally — pending
   corpus-owner approval (see §5).
 
@@ -156,7 +156,7 @@ after the afternoon pass's Daytona move, advances to **two** this pass.
    CVE-2026-79994" — fixed September 7 in 0.42.0; CVE-2026-77179
    Critical (macOS virtio-fs symlink follow, 0.28.0 ≤ v < 0.42.0);
    CVE-2026-79994 High (unix-socket-relay TOCTOU, 0.37.0 ≤ v < 0.42.0);
-   workaround: clone mode, avoid read-write host mounts. Sameship
+   workaround: clone mode, avoid read-write host mounts. Deduplication
    check against the corpus (watch-update 2026-09-23 midday, §3a):
    CVE numbers, severities, fix version, dates all match — **not a
    distinct or newer pair; no new corpus entry.** The corpus already
@@ -216,7 +216,7 @@ Guava's "Daytona" voice model is unrelated to Daytona sandboxes.
    - (d) **Adopted**: the EU-only DE/FI/FR geography datapoint
      (Germany, Finland, France — FAQ verbatim, midday pass) is folded
      from the deprecated C40 pointer row into the tracked-set Boat
-     row's feature cell.
+     row's pricing cell.
    - (e) Deprecated-row sunset convention — **deliberately not
      adopted**: codifying it would be a unilateral rule adoption;
      it stays proposed-not-codified pending corpus-owner approval
