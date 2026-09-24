@@ -85,14 +85,15 @@ isolation), because those are where the trust story lives.
 | **Microsandbox** | Task-scoped sandbox (OSS) | libkrun microVM, network-layer secret injection | Free, self-hosted (YC F26) |
 | **Docker Sandboxes** (morning pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, **v3 kits** (OCI-based packages: agent workload + reusable mixins for tools/config/credentials/network/instructions — C34), skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
-| **boat.dev** (2026-09-22 consolidation) | Task-scoped sandbox | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement) | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time |
+| **Boat** (tracked set; 2026-09-22 consolidation; **renamed from ASCII ~2026-09-17** — C40 deduped into this row) | Task-scoped sandbox / persistent computer | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement). Rename VERIFIED this run: `box.ascii.dev`, `boat.dev`, `ascii.dev` serve byte-identical product pages; YC's company page now `ycombinator.com/companies/boat` (YC F26); yc-oss mirror dates the rename 2026-09-17 (`former_names`: ["Ascii box","Ascii"]). Canonical domain now boat.dev. | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time |
 | **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, $0.05/GiB-month snapshots (vendor docs, re-read 2026-09-23 — the 10× discrepancy resolved in favor of the primary source); $5 new-user credit |
 | **Boxd** (2026-09-22 consolidation) | Persistent computer | "Composable computers" — KVM VMs with live memory forking in under 200 ms (vendor claim), snapshots/checkpoints, real SSH, per-machine HTTPS subdomain; self-hosted option ("run the whole platform on your own hardware") | Credit-based: €0.049/vCPU-hour running, €0.015/GiB-hour resident RAM, €0.0001/GiB-hour disk written; €30 free credits (**rate card VERIFIED 2026-09-23** — first own-page fetch, C29) |
 | **Upstash Box** (2026-09-22 consolidation) | Task-scoped sandbox | Snapshot/restore API for reusable prepared environments, branching from snapshots, full outbound networking by default, 22.5 Gbps hosts on AWS; pause/resume unavailable with keepAlive enabled | Pricing not published in the surveyed docs |
 | **Freestyle** (2026-09-23 overnight, C37) | Persistent computer | "VMs for AI Agents" — hardware-virtualized Linux microVMs with live cloning, pause/resume, nested virtualization (Docker inside), custom domains, WireGuard tunnels, FUSE/eBPF; boot claim qualified 2026-09-24: vendor headline "65 ms" is marketing, docs give the honest number — **p99 under 400ms** (both VERIFIED on vendor's own pages); "run forever" with idle-timeout disabled (the anti-suspend-on-idle posture) | **THIRD-PARTY only:** ~$0.04032/vCPU-h, $0.0129/GiB-h per-second; free tier 200 vCPU-h + 400 GiB-h/mo (own pricing page not read — UNVERIFIED) |
 | **Tensorlake** (2026-09-23 overnight, C38) | Task-scoped sandbox | "Sandboxes for AI Agents" — Firecracker microVMs + versioned POSIX filesystem (`tl fs`: autosave, snapshot/time-travel, restore to any point), live fork/clone, OCI import, ~1 s suspend/resume with meter-stops-on-suspend, auto-suspend idle, SOC 2 Type II + HIPAA | No published pricing page (watch 2026-09-24); own benchmark blog quotes **$10 per 1k pages** ($0.01/page) (VERIFIED); lane-review flagged (document-ingestion API, marginal in-lane relevance) |
 | **Simular Sai** (2026-09-24 midnight, C39) | Persistent computer (computer-use fleet) | "Sai turns any computer — a private cloud VM or your own device — into a self-operating machine": persistent Simular-provisioned cloud VMs (Windows/Linux) or BYOD (Mac/Windows/Linux); computer-use agent clicks/types through real interfaces; approval-gated critical actions, encrypted password input, skills + schedulable workflows, live visibility + takeover; fleet up to 100 machines ("less than $1" per run, vendor claim); Agent S framework, OSWorld-first claim | sai.work publishes **NO pricing (VERIFIED absent, 2026-09-24)**; vendor-owned **simular.ai** quotes $50/mo pay-as-you-go + $500/mo Sai Unlimited (VERIFIED on the company domain); $20/$200/$500 tiers attributed to sai.work by dume.ai/TechInAsia (THIRD-PARTY only) — conflict unresolved |
-| **ASCII "boat"** (2026-09-24 predawn, C40) | Persistent computer | "boat: Cheapest, Most Powerful Sandboxes for Agents" (box.ascii.dev) — persistent Ubuntu VMs for agents: full VMs (Docker, systemd, databases, cron), 60fps integrated desktop + browser, `boat` CLI (new/ssh/scp/exec/prompt/host/desktop/stop/resume), API + SDKs, named snapshots, disk-level forking, port forwarding, secrets, teams, auto-stop; EU-only (DE/FI/FR per FAQ, VERIFIED) | **$20/mo plan = $20 of sandbox time** (VERIFIED on own page); **$0.036/h** for 4 vCPU / 8 GB / 50 GB, billed per second, only while running; 100–2,000 sandboxes by plan; $20 auto-refill packs. Possible rebrand link to tracked-set boat.dev (INFERRED, flagged for verification) |
+| **Boat** (C40, **DEPRECATED ROW — deduped** 2026-09-24 morning) | Persistent computer | ASCII renamed to Boat ~2026-09-17 (same product: three legacy domains box.ascii.dev/boat.dev/ascii.dev serve byte-identical pages; YC F26 company page now ycombinator.com/companies/boat — THIRD-PARTY, YC is the accelerator not the vendor). **All Boat data lives in the tracked-set Boat row above** — this row retained for provenance. Pricing VERIFIED on own page pre-dedup: $20/mo plan = $20 sandbox time, $0.036/h for 4 vCPU / 8 GB / 50 GB, billed per second, only while running; 100–2,000 sandboxes by plan; $20 auto-refill packs; EU-only DE/FI/FR (FAQ). | See tracked-set Boat row |
+| **Alibaba Cloud FC Agent Sandbox** (2026-09-24 morning, C41) | Task-scoped sandbox (billing corpus) | New pay-as-you-go sandbox billing rolling out from 2026-07-31 (UTC+8), still invite-only preview: per-second billing, hourly settlement; formula = unit price × run duration. Three editions: Eco (cheapest, occasional perf fluctuation, no hibernation — startups/tool-use validation), Std (+hibernation — enterprise copilots), Pro (+deep and shallow hibernation, millions of concurrent requests — RL sampling/high-concurrency agents). Hibernation: active = vCPU+mem+disk (15 GiB disk free); light (Pro only) = mem+disk, vCPU free; deep = vCPU+mem free, billed on (memory×2 + disk) GiB; FAQ: call `kill()` when the task is complete. **Scope (VERIFIED):** applies ONLY to E2B-SDK integration — existing E2B instances auto-upgrade to Pro; Sandbox Functions/AgentRun Sandbox customers must migrate. Lane characterization (INFERRED): task-scoped compute, **not** agent-VM-shaped — no SSH/Desktop surface in the Features index; closer to E2B/Daytona pause semantics than a persistent dev VM. | Eco **0.00936/vCPU-h + 0.004608/GiB-h** (2 vCPU / 4 GiB / 15 GiB ≈ **$0.037/h**); Std 0.01224 / 0.006012; Pro 0.01872 / 0.009360; disk 0.00031896/GiB-h (0.00025308 ex-mainland). All VERIFIED on aliyun-fc/fc-docs |
 | **h-sandbox / Harakiri** (2026-09-22 consolidation) | Task-scoped sandbox (OSS control plane) | Open-source self-hosted sandbox control plane (Apache 2.0); HTTP API / TS SDK / CLI / dashboard; Credential Vault with host-bound egress bindings and fake-env injection (fourth convergent placeholder-swap data point for the secrets-posture corpus) | Free, self-hosted |
 | **Brig** (2026-09-22 consolidation) | Local containment (OSS tool) | Local microVM CLI for coding agents — no hosted service; dedicated kernel per sandbox, host-vs-agent trust model, boot-empty credentials with names-only reporting, fail-closed egress-downgrade refusal | Free, local (Apache 2.0) |
 | **Epho** (2026-09-22 consolidation) | Task-scoped sandbox | Agents-as-API (claude / codex / opencode harnesses) with automatic multi-provider fallback — the session outlives the machine via session-snapshot restore on replacement boxes | ≈$0.158/h for 2 vCPU / 2 GiB / 10 GiB (computed from per-second rates); $10 starting credit; BYO model keys |
@@ -1544,3 +1545,69 @@ flagged in-lane-adjacent for the next pass (no corpus row yet). C36
 terms re-verified unchanged (allowlist-only production GA). wowza.com
 returned full homepage content from the runner's fetch path this run —
 the interactive-browser confirmation stays owed.
+
+## Watch update — 2026-09-24 (morning): C41 Alibaba FC billing, C40 deduped (ASCII → Boat rename resolved)
+
+Two corpus actions this pass (primary-source-verification and
+new-entry folds per the C32/C37/C38/C39/C40 precedents; full pass record in
+`docs/COMPETITOR_WATCH_2026-09-24_MORNING.md` §§1–6).
+
+**C40 update — dedup: ASCII "boat" IS Boat; the rename is resolved.**
+The predawn pass's INFERRED possible rebrand/link between ASCII's
+"boat" (C40) and the tracked-set boat.dev is closed: **ASCII renamed
+to Boat on ~2026-09-17.** VERIFIED this run: `box.ascii.dev`,
+`boat.dev`, and `ascii.dev` serve byte-identical product pages (same
+title, same $0.036/h for 4 vCPU / 8 GB / 50 GB, same plans-from-$20/mo,
+same FAQ, all linking to `docs.boat.dev`); THIRD-PARTY: YC's own
+company page is now `ycombinator.com/companies/boat` (YC F26; the
+`ycombinator.com/companies/ascii` slug existed ~2 weeks ago —
+YC is the accelerator, not the vendor);
+THIRD-PARTY (yc-oss community mirror changelog, 2026-09-17):
+`name`: Ascii → Boat, `slug`: ascii → boat, `website`:
+box.ascii.dev → boat.dev, `former_names`: ["Ascii box","Ascii"].
+Caveat: no company-published rename announcement found — the date rests
+on the third-party mirror (high confidence on "same product",
+medium-high on the date). **Consequence: C40 is NOT a second provider —
+the C40 field-table row is renamed to the canonical Boat and collapsed
+to a pointer at the tracked-set boat.dev entry, which now carries the
+rename provenance.** The corpus sheds a phantom provider rather than
+gaining one. Competitive read (INFERRED): Boat remains the sharpest
+direct price competitor at this tier ($0.036/h all-in for 4 vCPU ·
+8 GB · 50 GB vs E2B's CPU-only 4-vCPU $0.2016/h VERIFIED, RAM billed
+separately).
+
+**C41 new — Alibaba Cloud FC Agent Sandbox billing (in-lane,
+task-scoped compute).** VERIFIED from aliyun-fc/fc-docs this run: new
+pay-as-you-go billing rolling out from 2026-07-31 (UTC+8), still
+invite-only preview — unit price × run duration, per-second billing,
+hourly settlement. Three editions: **Eco** (cheapest, occasional perf
+fluctuation, no hibernation — startups/tool-use validation), **Std**
+(+hibernation — enterprise copilots), **Pro** (+deep and shallow
+hibernation, millions of concurrent requests — RL sampling/high-concurrency
+agents). International-site unit prices (USD): Eco vCPU
+**0.00936**/vCPU-h, mem **0.004608**/GiB-h; Std 0.01224 / 0.006012;
+Pro 0.01872 / 0.009360; disk 0.00031896/GiB-h (0.00025308 outside
+mainland China); worked example — 2 vCPU / 4 GiB / 15 GiB Eco active 1h =
+**$0.037152**. Hibernation math (VERIFIED): active = vCPU+mem+disk (15 GiB
+disk free); light hibernation (Pro only) = mem+disk, vCPU free; deep
+hibernation = vCPU+mem free, disk billed on (memory×2 + disk) GiB with no
+free allowance; FAQ: "call `kill()` when the task is complete." **Scope
+caveat (VERIFIED):** applies ONLY to E2B-SDK integration — existing E2B
+instances auto-upgrade to Pro; "Sandbox Functions"/"AgentRun Sandbox"
+customers must migrate. Lane characterization (INFERRED): task-scoped
+compute, **not** agent-VM-shaped — no SSH or Desktop surface in the
+Features index; closer to E2B/Daytona pause semantics than to a persistent
+dev VM. A hyperscaler pricing datapoint (~$0.037/h for a 2vCPU/4GiB box
+at Eco rates), not a shape competitor.
+
+**wowza.com owed re-verification — closed.** Homepage loads cleanly this
+run (full content, no resets). The host-level link-check exclusion stays
+per the in-file rule (runner-egress path condition, not site health);
+the interactive-browser confirmation stands as a standing nuance. No
+corpus action.
+
+Not folded: news scan found no new in-lane sandbox-infra items for
+9/23–24 (adjacent funding color only: Ema $77M Series B, Chamelio $26M
+Series A, Snorkel AI $350M at $3.5B — THIRD-PARTY, snippet-only). C36
+terms re-verified unchanged (allowlist-only production GA). Vercel
+Drives still public beta (20th consecutive no-change pass).
