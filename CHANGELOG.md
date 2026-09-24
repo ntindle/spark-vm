@@ -48,7 +48,7 @@ This changelog only works if entries land with the change, not after it:
   confirmd's silently-swallowed audit-write failure (fixed this turn so
   it signals to stderr), and confirmd's audit.log having no rotation
   bound), plus the ordered H5 prerequisites. Findings filed as GitHub
-  issues. (#353–#357, #360)
+  issues. (#353–#357, #360, PR #361)
 
 - Evening competitor watch (full quiet pass): tracked-set vendors 8/8
   VERIFIED no-change with zero fetch failures (full-quiet streak re-opens
