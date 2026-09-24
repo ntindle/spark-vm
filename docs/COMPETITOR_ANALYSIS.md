@@ -1845,7 +1845,7 @@ window ~12:56–13:08 CDT).
 **C45 new — Docker Cloud Sandboxes, in-lane, VENDOR-VERIFIED.** Docker's own
 blog
 ([docker.com/blog/introducing-cloud-sandboxes-start-on-your-laptop-finish-in-the-cloud](https://www.docker.com/blog/introducing-cloud-sandboxes-start-on-your-laptop-finish-in-the-cloud),
-read in full 2026-09-24): *"Today, we're introducing Cloud Sandboxes: the
+read in full 2026-09-24 — survey-window snippets first, full read in the repair turn): *"Today, we're introducing Cloud Sandboxes: the
 same microVM-based sandbox, running on Docker-managed compute, with one
 command to move between them."* The isolation model is identical to local
 Docker Sandboxes (own kernel, own Docker daemon); the substrate changes.

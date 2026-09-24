@@ -132,7 +132,7 @@ precedents.
 
 Docker's own blog
 (https://www.docker.com/blog/introducing-cloud-sandboxes-start-on-your-laptop-finish-in-the-cloud/,
-read in full this run — **VENDOR-VERIFIED**): *"Today, we're introducing
+identified via search snippets in the survey window, read in full 2026-09-24 in the repair turn — **VENDOR-VERIFIED**): *"Today, we're introducing
 Cloud Sandboxes: the same microVM-based sandbox, running on
 Docker-managed compute, with one command to move between them."* The
 offering:
