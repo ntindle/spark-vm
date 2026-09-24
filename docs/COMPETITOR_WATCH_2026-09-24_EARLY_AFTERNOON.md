@@ -177,8 +177,9 @@ price point. spark-vm's self-hosted story still wins on cost-at-idle
 (zero when idle on own hardware); the hosted product's edge has to be
 continuity + MCP/secret plumbing, where Docker's kit/secrets-proxy
 story is converging from above. The per-agent secrets proxy-injection
-is a fifth placeholder-swap datapoint for the secrets turns
-(after Daytona, Microsandbox, opencomputer.dev, C34).
+is the **seventh** placeholder-swap datapoint for the secrets turns
+(after Daytona, Microsandbox, opencomputer.dev, h-sandbox, DigitalOcean
+Managed Agents (C26), and the C43 Credentials API).
 
 ## 4. Queued trends — all hold, none move in-lane
 

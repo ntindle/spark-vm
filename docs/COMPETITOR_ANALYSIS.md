@@ -1853,8 +1853,9 @@ Docker Sandboxes (own kernel, own Docker daemon); the substrate changes.
 24-hour sessions; kits for Claude Code, Codex, Copilot, Antigravity, Open
 Code, Hermes; MCP gateway; per-agent network policies; and **secrets
 proxy-injected per request** (agents never see the actual secret — the
-fifth placeholder-swap datapoint for the secrets turns, after Daytona,
-Microsandbox, opencomputer.dev, and C34). Pricing is PAYG per-second:
+**seventh convergent placeholder-swap datapoint** for the secrets turns,
+after Daytona, Microsandbox, opencomputer.dev, h-sandbox, DigitalOcean
+Managed Agents (C26), and the C43 Credentials API). Pricing is PAYG per-second:
 Micro 1 vCPU/2 GiB $0.07/h, Small (default) 2/4 $0.14/h, Medium 4/8
 $0.28/h, Large 8/16 $0.56/h, XL 16/32 $1.12/h; *"A paused sandbox costs
 nothing"*; volumes, egress, and hosting public images/kits free;
