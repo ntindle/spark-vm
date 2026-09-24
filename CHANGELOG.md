@@ -45,6 +45,13 @@ This changelog only works if entries land with the change, not after it:
   deadline kept verbatim, expired requests refused honestly) and re-pushes
   the owner. Single-tenant for now, designed for the multi-tenant future.
   (#331)
+- Competitor watch (2026-09-24 predawn): tracked set 8/8 quiet, Vercel
+  Drives still public beta; corpus grows a new in-lane entry — C40 ASCII
+  "boat" (persistent Ubuntu VMs for agents with verified own-page
+  pricing: $20/mo plan = $20 sandbox time, $0.036/h for 4vCPU/8GB/50GB,
+  EU-only); C39 Simular Sai pricing refined (vendor-published $50/$500
+  on simular.ai, sai.work carries no pricing). Full pass in
+  `docs/COMPETITOR_WATCH_2026-09-24_PREDAWN.md` (#330).
 
 - Competitor watch (2026-09-24 midnight): tracked set 8/8 quiet, Vercel Drives
   still public beta; corpus grows a new in-lane entry — C39 Simular "Sai"
