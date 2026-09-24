@@ -48,6 +48,20 @@ This changelog only works if entries land with the change, not after it:
 
 ### Added
 
+- Late-midday competitor watch (eleventh full quiet pass): tracked-set vendors
+  8/8 VERIFIED no-change, Vercel Drives still public beta (22nd consecutive
+  pass; a third-party snippet says "private beta" — recorded as availability
+  color only, verdict stays public beta per the vendor changelog), C36 and
+  C41 re-verified unchanged. Vetting upgrades, not launches: new corpus
+  entry C42 Namespace Devboxes (VERIFIED in-lane on the vendor's own docs —
+  Linux/macOS devboxes for coding agents with native Claude, Cursor, and
+  Devin integrations; reverses the midnight pass's adjacent verdict),
+  Upstash Box verified on its own docs (row update; pricing still
+  third-party), and the Ascii Box candidate retired — the vendor's own API
+  docs brand the product Boat (hardest rename evidence yet), revealing
+  built-in coding-agent harnesses on the `prompt` endpoint. No launches,
+  pricing moves, or funding dated 2026-09-24. (#346)
+
 - Midday competitor watch (tenth full quiet pass): tracked-set vendors
   8/8 VERIFIED no-change, Vercel Drives still public beta (21st
   consecutive pass), C36 and C41 re-verified unchanged; closed three
