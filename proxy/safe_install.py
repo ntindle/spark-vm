@@ -13,26 +13,35 @@ Empirically verified on this box's coreutils:
     so deploy.sh steps 1/2 (install) and 6 (sudoers mv) are already safe;
   - ``cp src dst``, ``tee [-a] dst``, ``chown`` and ``chmod`` FOLLOW it.
 
-This helper covers the rest. It is race-free: ``os.lstat`` refuses an
-existing symlink loudly (fail closed -- a symlink at a root-write destination
-is an attack indicator), then the file is opened with ``O_NOFOLLOW`` so a
-symlink planted between the check and the open fails with ELOOP instead of
-being written through, and ``fchown``/``fchmod`` act on the open fd, never
-the path.
+This helper covers the rest. It is race-free and substitution-proof:
+
+- ``os.lstat`` refuses an existing symlink at DEST loudly (fail closed --
+  a symlink at a root-write destination is an attack indicator);
+- the parent directory is then pinned with an ``O_DIRECTORY | O_NOFOLLOW``
+  dirfd, and from that point nothing is re-addressed by bare path;
+- content stages into a fresh 0700 staging directory inside the pinned
+  parent (``O_CREAT | O_EXCL`` temp, ``fchown``/``fchmod`` on the open fd);
+- a single ``renameat`` (write) or ``linkat`` (create-only) installs it.
+
+A swapd-level attacker with write on the parent directory cannot substitute
+the staged temp: it is never visible in the parent-dir path namespace, and
+the install addresses it by (dirfd, name) (issue #301). A racing reader sees
+the old file or the new file, never a truncated one.
+
+Deliberate, documented tradeoff: a symlink planted at DEST between the lstat
+pre-check and the install is atomically *replaced* by the rename rather than
+failing loudly -- the rename never writes *through* a symlink, so the unsafe
+outcome is impossible; only the loudness differs from the old ELOOP path.
 
 Usage:
     safe_install.py [--src PATH | --stdin] [--create-only]
                     [--owner NAME] [--group NAME] [--mode OCTAL] DEST
 
-  --src PATH     copy these bytes into DEST (DEST is truncated first)
-  --stdin        copy stdin into DEST (DEST is truncated first)
-  --create-only  create DEST with the content only if absent (O_EXCL); when
-                 DEST already exists the content is left alone but owner/mode
-                 are still enforced. The check-and-create is one privileged
-                 step, so it does not depend on the caller's traverse rights
-                 over the parent dir (deploy.sh's old ``[ -f ]`` guard ran
-                 unprivileged and misfired when /home/swapd was not
-                 traversable).
+  --src PATH     copy these bytes into DEST (DEST is replaced atomically)
+  --stdin        copy stdin into DEST (DEST is replaced atomically)
+  --create-only  create DEST with the content only if absent (atomic link);
+                 when DEST already exists the content is left alone but
+                 owner/mode are still enforced.
   (no content flags)  open the existing DEST and enforce owner/mode only.
 """
 import argparse
@@ -42,11 +51,136 @@ import pwd
 import grp
 import stat
 import sys
+import threading
 
 
 def _fail(msg):
     sys.stderr.write("safe_install: refusing: %s\n" % msg)
     raise SystemExit(2)
+
+
+# Install sequence: disambiguates same-pid repeated installs. Lock-guarded
+# so threaded callers cannot compute the same staging name (a collision
+# would be a fail-closed SystemExit(2), never corruption).
+_tmp_lock = threading.Lock()
+_tmp_seq = 0
+
+
+def _next_tmp_seq():
+    global _tmp_seq
+    with _tmp_lock:
+        _tmp_seq += 1
+        return _tmp_seq
+
+
+# Name of the staged temp *inside* the staging dir. The staging dir is
+# private per install, so a fixed name is safe; it is still addressed by
+# (dirfd, name), never by path.
+_TMP_NAME = ".tmp"
+
+
+def _lstat_name(parent_fd, name):
+    try:
+        return os.lstat(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return None
+
+
+def _stage(parent_fd, content, owner, group, mode, dest):
+    """Stage content into a fresh 0700 staging dir; return (stage_fd, name).
+
+    The staging dir is created ``O_EXCL``-style (``mkdir`` fails EEXIST on
+    collision -- fail closed), and the temp inside is ``O_CREAT | O_EXCL |
+    O_NOFOLLOW``. Both are addressed by dirfd from here on.
+    """
+    stage = ".safe_install.%d.%d.d" % (os.getpid(), _next_tmp_seq())
+    try:
+        os.mkdir(stage, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        _fail("staging dir %s already exists -- refusing (collision)" % stage)
+    stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                       dir_fd=parent_fd)
+    try:
+        # Identity check: mkdir -> open resolves the staging dir BY NAME
+        # through the (possibly attacker-writable) parent. An attacker who
+        # won that microsecond race (rename the real dir away, mkdir their
+        # own) would own stage_fd's dir and could substitute the temp
+        # downstream. Fail closed unless the opened dir is ours: owned by
+        # us and mode 0700 (an attacker's replacement can never be
+        # euid-owned). (Security round-2 review, PR #332.)
+        st = os.fstat(stage_fd)
+        if st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) != 0o700:
+            _fail("staging dir %s failed identity check -- refusing" % stage)
+        try:
+            fd = os.open(_TMP_NAME,
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=stage_fd)
+        except FileExistsError:
+            _fail("staged temp already exists -- refusing (collision)")
+        try:
+            _write_all(fd, content)
+            _enforce(fd, dest, owner, group, mode)
+        finally:
+            os.close(fd)
+    except BaseException:
+        os.close(stage_fd)
+        try:
+            os.rmdir(stage, dir_fd=parent_fd)
+        except OSError:
+            pass
+        raise
+    return stage_fd, stage
+
+
+def _install_staged(stage_fd, parent_fd, name, create_only):
+    """Install the staged temp at (parent_fd, name). Return True if installed.
+
+    The source is addressed as (stage_fd, _TMP_NAME): even an attacker with
+    write on the parent directory cannot substitute it, because it is never
+    re-resolved through the path namespace.
+    """
+    if create_only:
+        # os.link fails EEXIST when the destination already exists: atomic
+        # create-only semantics, matching the old O_EXCL path.
+        try:
+            os.link(_TMP_NAME, name, src_dir_fd=stage_fd,
+                    dst_dir_fd=parent_fd)
+        except FileExistsError:
+            return False  # someone else installed it; caller enforces
+        return True
+    # renameat(2) is atomic and never follows the destination: readers see
+    # old or new bytes, never partial.
+    os.rename(_TMP_NAME, name, src_dir_fd=stage_fd, dst_dir_fd=parent_fd)
+    return True
+
+
+def _teardown_stage(parent_fd, stage_fd, stage):
+    """Remove the staging dir; never fail the install over cleanup."""
+    try:
+        try:
+            os.unlink(_TMP_NAME, dir_fd=stage_fd)
+        except FileNotFoundError:
+            pass
+    finally:
+        os.close(stage_fd)
+        try:
+            os.rmdir(stage, dir_fd=parent_fd)
+        except OSError:
+            pass
+
+
+def _enforce_at(parent_fd, name, dest, owner, group, mode):
+    try:
+        fd = os.open(name, os.O_WRONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            _fail("%s became a symlink between check and open" % dest)
+        raise
+    try:
+        _enforce(fd, dest, owner, group, mode)
+    finally:
+        os.close(fd)
+    return "enforced"
 
 
 def _resolve_owner(owner, group):
@@ -63,53 +197,29 @@ def _resolve_owner(owner, group):
 def safe_install(dest, content=None, create_only=False, owner=None,
                  group=None, mode=None):
     """Write content to dest (bytes or None) without following symlinks."""
+    parent, name = os.path.split(os.path.abspath(dest))
+    # Pin the parent dir by fd (O_NOFOLLOW: the parent itself must not be a
+    # symlink). A renamed-away parent cannot redirect anything below.
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        st = os.lstat(dest)
-    except FileNotFoundError:
-        st = None
-    if st is not None and stat.S_ISLNK(st.st_mode):
-        _fail("%s is a symlink -- refusing to write through it" % dest)
-
-    flags = os.O_WRONLY | os.O_NOFOLLOW
-    if content is not None:
-        if create_only:
-            # Atomic check-and-create: O_EXCL makes the create fail if DEST
-            # appeared between the lstat and the open; EEXIST falls through
-            # to the enforce-only path below.
+        st = _lstat_name(parent_fd, name)
+        if st is not None and stat.S_ISLNK(st.st_mode):
+            _fail("%s is a symlink -- refusing to write through it" % dest)
+        if content is not None:
+            stage_fd, stage = _stage(parent_fd, content, owner, group, mode,
+                                     dest)
             try:
-                fd = os.open(dest, flags | os.O_CREAT | os.O_EXCL, 0o600)
-            except OSError as e:
-                if e.errno != errno.EEXIST:
-                    raise
-                fd = None
-            if fd is not None:
-                try:
-                    _write_all(fd, content)
-                    _enforce(fd, dest, owner, group, mode)
-                finally:
-                    os.close(fd)
-                return "created"
-            # else: someone else created it; enforce on the existing file.
-        else:
-            fd = os.open(dest, flags | os.O_CREAT | os.O_TRUNC, 0o600)
-            try:
-                _write_all(fd, content)
-                _enforce(fd, dest, owner, group, mode)
+                installed = _install_staged(stage_fd, parent_fd, name,
+                                            create_only)
             finally:
-                os.close(fd)
-            return "written"
-    # Enforce-only (or create-only when the file already existed).
-    try:
-        fd = os.open(dest, flags)
-    except OSError as e:
-        if e.errno == errno.ELOOP:
-            _fail("%s became a symlink between check and open" % dest)
-        raise
-    try:
-        _enforce(fd, dest, owner, group, mode)
+                _teardown_stage(parent_fd, stage_fd, stage)
+            if installed:
+                return "created" if create_only else "written"
+            # create_only lost the atomic race: someone else installed dest;
+            # enforce on what landed.
+        return _enforce_at(parent_fd, name, dest, owner, group, mode)
     finally:
-        os.close(fd)
-    return "enforced"
+        os.close(parent_fd)
 
 
 def _write_all(fd, content):
@@ -139,7 +249,7 @@ def main(argv):
     src.add_argument("--stdin", action="store_true",
                      help="read the bytes from stdin")
     ap.add_argument("--create-only", action="store_true",
-                    help="only write content when DEST does not exist")
+                     help="only write content when DEST does not exist")
     ap.add_argument("--owner", help="owner user name to enforce")
     ap.add_argument("--group", help="group name to enforce (default: owner's)")
     ap.add_argument("--mode", help="octal mode to enforce, e.g. 0600")

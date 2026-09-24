@@ -36,6 +36,16 @@ This changelog only works if entries land with the change, not after it:
 
 ## [Unreleased]
 
+### Security
+
+- Hardened the deploy-time CA bundle build and install against three
+  remaining local-attacker primitives: the CA source now refuses hardlinks
+  (a hardlink is a regular file, so the earlier symlink refusal didn't
+  stop it), refuses files over 1 MiB before the privileged read (no more
+  unbounded RAM/disk fill from a planted file), and installs bundles with
+  an atomic rename — a racing reader now sees the old or the new bundle,
+  never a truncated one. (#299, #300, #301)
+
 ### Added
 
 - Re-open a denied approval from its answered-history card (H20): a

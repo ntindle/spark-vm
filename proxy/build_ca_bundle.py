@@ -33,8 +33,8 @@ Usage:
     build_ca_bundle.py [--dest PATH] [--ca-only] [--ca PATH] [--sys PATH]
                        [--owner NAME] [--group NAME] [--mode OCTAL]
 
-Exit codes: 0 ok (or loud first-deploy skip), 2 symlink / non-regular /
-missing-source refusal (fail closed), 1 other error.
+Exit codes: 0 ok (or loud first-deploy skip), 2 symlink / hardlink /
+non-regular / oversize / missing-source refusal (fail closed), 1 other error.
 """
 import argparse
 import errno
@@ -49,6 +49,14 @@ from safe_install import safe_install
 DEFAULT_SYS_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 DEFAULT_CA = "/home/swapd/.mitmproxy/mitmproxy-ca-cert.pem"
 DEFAULT_DEST = "/usr/local/share/with-proxy-ca/ca-bundle.crt"
+
+# A real mitmproxy CA cert is ~1-2 KiB. Cap the privileged read at 1 MiB:
+# the CA path is swapd-writable, and an uncapped read lets a swapd-level
+# attacker park a multi-GB (or sparse) regular file there for the root
+# deploy to swallow whole into RAM (OOM) and into the world-readable
+# bundle (disk-fill). The read is capped, so growth after the stat check
+# cannot exceed it either (issue #300).
+_MAX_CA_BYTES = 1 << 20
 
 
 def _fail(msg):
@@ -70,17 +78,22 @@ def _missing_ca(ca_path, ca_only):
 
 
 def read_ca_bytes(ca_path, ca_only=False):
-    """Read the swapd-controlled CA cert, refusing symlinks atomically.
+    """Read the swapd-controlled CA cert, refusing hostile inputs atomically.
 
-    ``O_NOFOLLOW`` makes the refusal part of the open itself: a symlink
-    planted at *ca_path* (by swapd, or by anyone racing the deploy) fails
-    with ELOOP instead of being read through. A dangling symlink also
+    ``O_NOFOLLOW`` makes the symlink refusal part of the open itself: a
+    symlink planted at *ca_path* (by swapd, or by anyone racing the deploy)
+    fails with ELOOP instead of being read through. A dangling symlink also
     fails here — that is a broken/attacked deploy, not a first deploy,
     so it fails closed rather than skipping silently. Non-regular files
     (FIFO, directory, ...) are refused too: a planted FIFO would otherwise
     block the privileged read forever, so the open is ``O_NONBLOCK`` and
     the fd is fstat-checked before the first read (non-blocking is a
-    no-op for regular files).
+    no-op for regular files). Hardlinks are refused via ``st_nlink > 1``
+    (a hardlink IS a regular file, so the symlink checks do not stop it;
+    issue #299), independent of the ``fs.protected_hardlinks`` sysctl. The
+    read itself is capped at 1 MiB (issue #300): a real CA cert is ~1-2 KiB,
+    and the cap is enforced on the read, so post-stat growth cannot exceed
+    it either.
     """
     try:
         fd = os.open(ca_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -93,12 +106,26 @@ def read_ca_bytes(ca_path, ca_only=False):
         raise
     # fstat the raw fd before fdopen: fdopen on a directory raises
     # IsADirectoryError, and a FIFO open would block without O_NONBLOCK.
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
         os.close(fd)
         _fail("%s is not a regular file -- refusing to read it "
               "(issue #144)" % ca_path)
+    if st.st_nlink > 1:
+        # A hardlink IS a regular file, so O_NOFOLLOW + S_ISREG do not stop
+        # it: a swapd-level attacker could hardlink a root-readable file
+        # into the CA path. Refuse independent of the fs.protected_hardlinks
+        # sysctl (issue #299).
+        os.close(fd)
+        _fail("%s is a hardlink (nlink=%d) -- refusing to read it "
+              "(issue #299)" % (ca_path, st.st_nlink))
     with os.fdopen(fd, "rb") as f:
-        return f.read()
+        data = f.read(_MAX_CA_BYTES + 1)
+    if len(data) > _MAX_CA_BYTES:
+        _fail("%s is %d bytes (cap %d) -- refusing to read it into the "
+              "privileged bundle (issue #300)"
+              % (ca_path, len(data), _MAX_CA_BYTES))
+    return data
 
 
 def build_bundle(sys_path, ca_path):
