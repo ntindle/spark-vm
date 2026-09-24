@@ -1356,8 +1356,16 @@ class SwapAddon:
 
     def _resolve(self, name, entry, host, method=None, path=None,
                  location=None):
-        """Return the secret value for name/entry on this request, or None
-        to leave the placeholder untouched."""
+        """Resolve the secret value for name/entry on this request.
+
+        Returns (value, approved_aid): the substituted value (or None to
+        leave the placeholder untouched) and, when the request was
+        authorized by an owner-minted grant, the grant's approval id.
+        The "approved" client-visible signal is recorded by the CALLER
+        (the repl closures), only after the audit write succeeds and the
+        substituted value is actually returned — recording it here would
+        emit a false "approved" when the caller's audit-gate veto leaves
+        the placeholder in place (#305)."""
         # §3a fail-closed: the smoke-hosts list was missing/unreadable
         # after hosts had been seen -- the scoping gate cannot be
         # evaluated, so refuse every swap rather than risk an
@@ -1368,7 +1376,7 @@ class SwapAddon:
                       "smoke-hosts-unreadable (fail-closed)",
                       name, method or "?", host)
             self._audit_refused(host, name, "smoke-hosts-unreadable")
-            return None
+            return None, None
         # §3a smoke echo hosts are substitution-scoped to the public
         # smoke-test credential: the echo endpoint returns whatever the
         # proxy substituted, so resolving any other name here would hand
@@ -1379,11 +1387,11 @@ class SwapAddon:
             log.warning("swap: refusing swap of %r for %s %s: "
                         "smoke-host-restricted", name, method or "?", host)
             self._audit_refused(host, name, "smoke-host-restricted")
-            return None
+            return None, None
         val = self.secrets.get(name)
         if val is None:
             self._audit_refused(host, name, "unknown-credential")
-            return None
+            return None, None
         ok, reason, grant = self._credential_allows_request(name, host, method,
                                                           path)
         if not ok:
@@ -1400,11 +1408,13 @@ class SwapAddon:
                 for aid, state in self._approval_signal_for_refusal(
                         name, host, method, path, reason):
                     self._record_approval_signal(aid, state)
-            return None
-        # H18 (#133): capture the grant's approval id. The "approved"
-        # signal means the request was swapped under the grant — it is
-        # recorded only when a swap value is actually returned below,
-        # and only when the approvals subsystem is enabled (an
+            return None, None
+        # H18 (#133): capture the grant's approval id. The caller records
+        # the "approved" signal only after the audit write succeeds and
+        # the substituted value is actually returned — "approved" means
+        # the request was swapped under the grant, and _resolve cannot
+        # know yet whether the caller's audit-gate will veto the swap
+        # (#305). Only when the approvals subsystem is enabled (an
         # approvals-disabled proxy emits no approval signals at all).
         # Placement-mismatch / unknown-entry / bad-totp refusals release
         # nothing and must emit no signal (a false "approved" would tell
@@ -1417,7 +1427,7 @@ class SwapAddon:
                         "placement-mismatch (location %r)", name,
                         method or "?", host, location)
             self._audit_refused(host, name, "placement-mismatch")
-            return None
+            return None, None
         value = None
         if isinstance(val, dict):
             e = entry or "access_token"
@@ -1443,9 +1453,7 @@ class SwapAddon:
                 value = val
             else:
                 self._audit_refused(host, name, "unknown-entry")
-        if value is not None and approved_aid:
-            self._record_approval_signal(approved_aid, "approved")
-        return value
+        return value, approved_aid
 
     def _audit(self, host, matched):
         """Append a swap line to the audit log. Returns True when the
@@ -1556,7 +1564,8 @@ class SwapAddon:
             name, entry = m.group(1), m.group(2) or "access_token"
             if allow is not None and name not in allow:
                 return m.group(0)
-            v = self._resolve(name, entry, host, method, path, location)
+            v, approved_aid = self._resolve(name, entry, host, method,
+                                           path, location)
             if v is None:
                 return m.group(0)  # unknown name/entry or refused request
             if not self._audit(host, m.group(0)):
@@ -1565,6 +1574,13 @@ class SwapAddon:
                 log.warning("swap: audit failed; refusing swap of %r "
                             "for %s", name, host)
                 return m.group(0)
+            # #305: the "approved" signal means the swap actually went
+            # through — record it only now, with the audit durable and
+            # the substituted value about to be returned. Recording it
+            # inside _resolve emitted a false approved:<aid> whenever
+            # the audit-gate above vetoed the swap.
+            if approved_aid:
+                self._record_approval_signal(approved_aid, "approved")
             return encode(v) if encode else v
         return PLACEHOLDER_RE.sub(repl, text)
 
@@ -1585,7 +1601,8 @@ class SwapAddon:
         is _swap_form_body."""
         def repl(m):
             name, entry = m.group(1), m.group(2) or "access_token"
-            v = self._resolve(name, entry, host, method, path, location)
+            v, approved_aid = self._resolve(name, entry, host, method,
+                                           path, location)
             if v is None:
                 return m.group(0)  # unknown name/entry: leave untouched
             if not self._audit(host, "hsurr:%s%s"
@@ -1593,6 +1610,11 @@ class SwapAddon:
                 log.warning("swap: audit failed; refusing swap of %r "
                             "for %s", name, host)
                 return m.group(0)
+            # #305: record "approved" only after the audit write succeeded
+            # and the substituted value is actually returned (see the
+            # _swap_text repl for why recording inside _resolve was wrong).
+            if approved_aid:
+                self._record_approval_signal(approved_aid, "approved")
             return urllib.parse.quote(v, safe="")
         return ENCODED_PLACEHOLDER_RE.sub(repl, text)
 

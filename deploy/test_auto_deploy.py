@@ -677,6 +677,42 @@ def test_tcp_ok_detects_listener():
     assert "TCP_DOWN" in r.stdout, r.stderr
 
 
+def _health_check_stub(entries):
+    """Run health_check with the manifest/network edges stubbed so only
+    the tcp:HOST:PORT parsing is exercised (#323)."""
+    script = r'''
+set -e
+SKIP_SYSTEMCTL=1
+get_arr() { if [ "$2" = health ]; then printf '%s\n' "$HEALTH_ENTRIES"; fi; }
+resolve_health_host() { echo "RESOLVE:$1" >&2; printf '%s\n' "$1"; }
+tcp_ok() { echo "TCPCALL:$1:$2"; return 0; }
+log() { echo "LOG:$*"; }
+health_check fake-component && echo HEALTH_OK
+'''
+    return source_and(script, env_extra={"HEALTH_ENTRIES": entries})
+
+
+def test_health_check_parses_ipv4_and_tailnet():
+    """tcp:HOST:PORT splits on the trailing :digits port; TAILNET still
+    flows through resolve_health_host (#323)."""
+    r = _health_check_stub("tcp:127.0.0.1:8443\ntcp:TAILNET:8443")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "TCPCALL:127.0.0.1:8443" in r.stdout, r.stdout
+    assert "TCPCALL:TAILNET:8443" in r.stdout, r.stdout
+    assert "RESOLVE:TAILNET" in r.stderr, r.stderr
+    assert "HEALTH_OK" in r.stdout, r.stdout
+
+
+def test_health_check_rejects_malformed_tcp_entry():
+    """Non-numeric or missing ports fail closed with a clear log line
+    instead of feeding a mangled host/port to tcp_ok (#323)."""
+    for bad in ("tcp:host:", "tcp:host:abc", "tcp:host", "tcp::8080"):
+        r = _health_check_stub(bad)
+        assert r.returncode != 0, "%s should fail: %s" % (bad, r.stdout)
+        assert "malformed tcp check" in r.stdout, r.stdout
+        assert "TCPCALL" not in r.stdout, r.stdout
+
+
 # --- audit -----------------------------------------------------------------------
 
 def test_audit_appends_valid_json(tmp_path):

@@ -524,16 +524,16 @@ class SwapAddonTests(unittest.TestCase):
             registry={"acme": {"allowed_hosts": ["acme.example.com"],
                                "access_token": {"placement": "bearer_header"}}})
         self.assertEqual(a._resolve("acme", None, "acme.example.com",
-                                    "GET", "/"), "bare-TOKEN-value")
+                                    "GET", "/")[0], "bare-TOKEN-value")
         self.assertEqual(a._resolve("acme", "access_token",
-                                    "acme.example.com", "GET", "/"),
+                                    "acme.example.com", "GET", "/")[0],
                          "bare-TOKEN-value")
         out = a._swap_text("Authorization: Bearer hsurr:acme",
                            "acme.example.com", "GET", "/")
         self.assertEqual(out, "Authorization: Bearer bare-TOKEN-value")
         # a genuinely different entry still does not match
-        self.assertIsNone(a._resolve("acme", "password", "acme.example.com",
-                                     "GET", "/"))
+        self.assertEqual(a._resolve("acme", "password", "acme.example.com",
+                                     "GET", "/"), (None, None))
         self.assertEqual(a._swap_text("hsurr:acme:password",
                                       "acme.example.com"),
                          "hsurr:acme:password")
@@ -1081,8 +1081,8 @@ class SwapAddonTests(unittest.TestCase):
                        "grants": [{"scope": "session"}]}}
         a = make_addon(hosts=["api.example.com"],
                        secrets={"api": "API-TOKEN"}, registry=reg)
-        self.assertIsNone(a._resolve("api", "grants", "api.example.com",
-                                     "GET", "/"))
+        self.assertEqual(a._resolve("api", "grants", "api.example.com",
+                                     "GET", "/"), (None, None))
         out = a._swap_text("Bearer hsurr:api:grants", "api.example.com",
                            "GET", "/")
         self.assertIn("hsurr:api:grants", out)
@@ -2383,6 +2383,80 @@ class ApprovalSignalTests(unittest.TestCase):
                     hdrs.get(sa.APPROVAL_DECISION_HEADER),
                     "approved:grantaid1")
                 self.assertFalse(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+
+    def test_h18_audit_veto_no_approved_signal(self):
+        """#305: a grant-authorized swap whose audit write FAILS (disk
+        pressure, permissions) must NOT emit 'approved:<aid>' — the
+        placeholder is left in place, so a false terminal signal would
+        tell the agent its credential was swapped when it wasn't. The
+        signal is recorded only after a successful audit + substitution."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = self._addon(tmp)
+                a._grants = lambda: [{
+                    "credential": "github", "host": "github.com",
+                    "method": "POST", "path_prefix": "/",
+                    "expires": (dt.datetime.now(dt.timezone.utc)
+                                + dt.timedelta(hours=1)).isoformat(),
+                    "approval_id": "grantaid1"}]
+                # The veto must come from the audit gate, not an earlier
+                # refusal: prove _audit was reached (and failed).
+                calls = []
+                real_audit = a._audit
+                def failing_audit(host, matched):
+                    calls.append((host, matched))
+                    return False
+                a._audit = failing_audit
+                try:
+                    req = Request("github.com", "/gists", method="POST",
+                                  headers=[("Authorization",
+                                            "Bearer " + "hs" + "urr:github")])
+                    flow = Flow(req)
+                    a.request(flow)
+                finally:
+                    a._audit = real_audit
+                self.assertTrue(calls, "audit gate was never reached")
+                # audit veto: placeholder intact, nothing swapped
+                auth = flow.request.headers.get("Authorization")
+                self.assertIn("hsurr:github", auth)
+                self.assertNotIn("ghp_TOKEN", auth)
+                hdrs = self._headers_of(a, flow)
+                self.assertFalse(hdrs.get(sa.APPROVAL_DECISION_HEADER))
+                self.assertFalse(hdrs.get(sa.APPROVAL_PENDING_HEADER))
+
+    def test_h18_audit_veto_urlencoded_no_approved_signal(self):
+        """#305, second repl closure: a grant-authorized swap through the
+        URL-encoded path whose audit write FAILS must also leave the
+        placeholder in place and emit no 'approved:<aid>' signal."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = self._addon(tmp)
+                a._grants = lambda: [{
+                    "credential": "github", "host": "github.com",
+                    "method": "POST", "path_prefix": "/",
+                    "expires": (dt.datetime.now(dt.timezone.utc)
+                                + dt.timedelta(hours=1)).isoformat(),
+                    "approval_id": "grantaid1"}]
+                calls = []
+                real_audit = a._audit
+                def failing_audit(host, matched):
+                    calls.append((host, matched))
+                    return False
+                a._audit = failing_audit
+                try:
+                    out = a._swap_urlencoded("tok=" + "hs" + "urr%3Agithub",
+                                             "github.com", "POST", "/gists",
+                                             location=("body", None))
+                finally:
+                    a._audit = real_audit
+                self.assertTrue(calls, "audit gate was never reached")
+                self.assertIn("hsurr%3Agithub", out)
+                self.assertNotIn("ghp_TOKEN", out)
+                self.assertIsNone(a._approval_signal)
 
     def test_h18_placement_mismatch_no_approved_signal(self):
         """A grant-authorized request refused for placement mismatch must

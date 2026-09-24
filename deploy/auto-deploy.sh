@@ -610,7 +610,26 @@ health_check() {
 
     while IFS= read -r h; do
         [ -n "$h" ] || continue
-        host="${h#tcp:}"; host="${host%:*}"; port="${h##*:}"
+        # #323: parse port as the trailing :digits field; host is everything
+        # between tcp: and that field. The naive middle/last-colon split
+        # silently accepted non-numeric "ports" into tcp_ok (e.g.
+        # tcp:host:abc — bash /dev/tcp resolves service names, so a
+        # typo'd "port" could dial an unintended service) and let
+        # missing-port entries (tcp:host) through unparsed. Malformed
+        # entries now fail closed instead of probing garbage endpoints.
+        if [[ "$h" =~ ^tcp:(.*):([0-9]+)$ ]]; then
+            host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[2]}"
+        else
+            log "  health: malformed tcp check '$h' — expected tcp:HOST:PORT"
+            return 1
+        fi
+        # #323: an empty host (tcp::8080) passes the regex but is not a
+        # real endpoint — reject it at parse time rather than letting it
+        # masquerade as a tailnet resolution failure below.
+        if [ -z "$host" ]; then
+            log "  health: malformed tcp check '$h' — empty host"
+            return 1
+        fi
         host="$(resolve_health_host "$host")"
         if [ -z "$host" ]; then
             log "  health: could not resolve tailnet IP for $h"
