@@ -49,7 +49,6 @@ This changelog only works if entries land with the change, not after it:
   so it signals to stderr), plus the ordered H5 prerequisites. Findings
   filed as GitHub issues. (#358)
 
->>>>>>> 24cb88e (review fixes (Engineering round 1): correct doc census + changelog fill + test placement)
 - Evening competitor watch (full quiet pass): tracked-set vendors 8/8
   VERIFIED no-change with zero fetch failures (full-quiet streak re-opens
   at one after the afternoon pass's Daytona move), Vercel Drives still
