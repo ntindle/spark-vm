@@ -107,7 +107,7 @@ mid-afternoon fold**; values match the overnight pass exactly.
   since the 16:00 CDT vendor-confirm fold; allowlist-only production
   GA stands.**
 - **Automaid — own-page read re-confirmed VERIFIED this pass**
-  (https://automaid.it.com: "AI agents for recurring work",
+  (https://automaid.it.com — "AI agents for recurring work",
   workflow-automation SaaS — NOT an "AI hub"). The overnight pass's
   lane-drift closure stands; off the watch list, no further attempts.
 
