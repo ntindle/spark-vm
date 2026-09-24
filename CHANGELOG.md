@@ -37,7 +37,7 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
-- Competitor watch (2026-09-23 early night) (PR TBD): tracked set
+- Competitor watch (2026-09-23 early night) (#318): tracked set
   quiet — all 8 providers re-read vendor-verified with no change
   (DO Managed Agents C26 figures read live a third consecutive pass,
   stamp "Last verified 22 Sep 2026", snapshots/checkpoints
