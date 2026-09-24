@@ -2,6 +2,8 @@
 #
 # Run locally with:
 #   cd proxy   && python3 -m pytest test_swap_addon.py test_grant_writer.py test_round6.py test_safe_install.py test_build_ca_bundle.py test_enforce_secrets_dir.py test_validation_conformance.py
+#   # the two seteuid install-safety tests self-skip as non-root; CI runs them under sudo:
+#   cd proxy   && sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest test_safe_install.py -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
 #   cd confirm && python3 -m pytest test_confirmd.py test_push.py test_push_queue.py
 #   cd deploy  && python3 -m pytest test_auto_deploy.py
 #   cd muse-job && python3 -m pytest tests/test_event_trust.py
@@ -49,6 +51,23 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - name: proxy tests (swap addon, grant writer, install safety, CA bundle, secrets-dir, validation grammars)
         run: python3 -m pytest test_swap_addon.py test_grant_writer.py test_round6.py test_safe_install.py test_build_ca_bundle.py test_enforce_secrets_dir.py test_validation_conformance.py -q
+        working-directory: proxy
+      - name: proxy install-safety root tests (substitution regression)
+        # test_staged_temp_unreachable_by_parent_dir_attacker and
+        # test_staging_dir_swap_fails_closed self-skip as non-root, so the
+        # plain proxy suite above never executes the staged-temp
+        # substitution TOCTOU guard (issue #336). Run them under sudo so the
+        # merge gate proves the guard; SAFE_INSTALL_ROOT_TESTS=require turns
+        # a self-skip into a failure, so a skipped test can never read as a
+        # green build. (Pytest exits 5 if the -k selection ever matches
+        # nothing, e.g. after a rename -- also a failure.)
+        if: always()
+        # NB: sudo resets PATH to secure_path, so bare `python3` would resolve
+        # to /usr/bin/python3 (no pytest) -- that failed the CI step with
+        # "No module named pytest". Resolve the setup-python interpreter OUTSIDE
+        # sudo (setup-python puts it first on PATH) and pass it as an absolute
+        # path; sudo's VAR=value form still carries SAFE_INSTALL_ROOT_TESTS.
+        run: sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest test_safe_install.py -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
         working-directory: proxy
       - name: confirmd tests
         if: always()
