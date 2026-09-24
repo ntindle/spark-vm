@@ -161,6 +161,51 @@ class TestBuildCaBundle(unittest.TestCase):
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertFalse(dest.exists())
 
+    def test_hardlink_ca_is_refused(self):
+        # Issue #299: a hardlink IS a regular file, so O_NOFOLLOW + S_ISREG
+        # do not stop it; the nlink check must refuse it, exit 2, no bundle.
+        with tempfile.TemporaryDirectory() as d:
+            sys_bundle, ca = self._files(d)
+            secret = Path(d) / "shadow"
+            secret.write_bytes(b"root:$6$SECRET-HASH\n")
+            ca.unlink()
+            os.link(secret, ca)  # hardlink at the swapd-controlled path
+            dest = Path(d) / "ca-bundle.crt"
+            r = self._run("--sys", str(sys_bundle), "--ca", str(ca),
+                          "--dest", str(dest))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("hardlink", r.stderr)
+            self.assertFalse(dest.exists(), "no bundle on refusal")
+            self.assertNotIn("SECRET-HASH", r.stderr + r.stdout)
+
+    def test_hardlink_ca_refused_in_ca_only_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            secret = Path(d) / "shadow"
+            secret.write_bytes(b"root:$6$SECRET-HASH\n")
+            ca = Path(d) / "mitmproxy-ca-cert.pem"
+            os.link(secret, ca)
+            dest = Path(d) / "swapd-mitmproxy.crt"
+            r = self._run("--ca-only", "--ca", str(ca), "--dest", str(dest))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("hardlink", r.stderr)
+            self.assertFalse(dest.exists())
+
+    def test_oversized_ca_is_refused(self):
+        # Issue #300: an attacker-planted file over the 1 MiB cap at the CA
+        # path must be refused (exit 2) before the privileged read swallows
+        # it whole.
+        with tempfile.TemporaryDirectory() as d:
+            sys_bundle, ca = self._files(d)
+            big = Path(d) / "big.pem"
+            with open(big, "wb") as f:
+                f.write(b"A" * ((1 << 20) + 1))  # 1 MiB + 1
+            dest = Path(d) / "ca-bundle.crt"
+            r = self._run("--sys", str(sys_bundle), "--ca", str(big),
+                          "--dest", str(dest))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("cap", r.stderr)
+            self.assertFalse(dest.exists(), "no bundle on refusal")
+
 
 if __name__ == "__main__":
     unittest.main()
