@@ -1,0 +1,95 @@
+# Sentinel telemetry surfaces — arch deep-read
+
+Status: input to H5 (hosted sentinel integration design), not the H5 design
+itself. Deep-read 2026-09-24 of every audit/telemetry surface the sentinel
+would consume, from the Architecture lens. Verdict: the trail exists and is
+structurally rich, but it is **four bespoke schemas with no shared envelope,
+no sequencing, and no authentication** — the H5
+design cannot treat these as a uniform event stream until the issues below
+are resolved.
+
+## The four surfaces
+
+| # | Surface | Writer | Format | Schema |
+|---|---------|--------|--------|--------|
+| S1 | `confirm/confirmd.py::audit_log` → `audit.log` | confirmd (single process) | logfmt | `ts=<iso-sec> event=<name> peer=<ip> login=<login\|-> <detail>` — detail is free-form `k=v` (`id=`, `host=`, `reason=`) |
+| S2 | `proxy/swap_addon.py::_audit*` → `swap.log` | mitmdump addon | logfmt | `ts=<iso-sec> host=<h> swapped=<matched-token> ip=<ip>` (token: `approval-filed:<aid>`, `hsurr:<name>`, or the matched host string) / `ts=<iso-sec> host=<h> refused=<token\|hsurr:name> reason=<r> ip=<ip>` / authority-mismatch variant: `ts=<iso-sec> host=<h> refused=authority-mismatch authority=<a> ip=<ip>` (no `reason=` field) — event type encoded in *which field is present*, not in a name |
+| S3 | `muse-job` hooks → `~/.local/share/muse-job/events/<uuid>.jsonl` | Python hooks (agent-adjacent) | JSONL | per-session; **cooperative** — the code's own comments name forged event lines that bypass the hooks as a live threat model |
+| S4 | `deploy/auto-deploy.sh` audit | auto-deploy | JSONL | per-run deploy records; write failure is *explicitly* best-effort ("never fails the run") — not a silent-failure gap like A5, a stated tradeoff |
+
+(`harness/` was initially cataloged as a fifth surface; there is no harness
+JSONL event stream — `echo-fixture.py` writes a JSONL *request* log for the
+install-gate fixture and `inject-provision-state.sh` writes plain
+provision-state files, neither a telemetry surface. Census corrected
+2026-09-24 per Engineering review.)
+
+## Findings (filed as GitHub issues this turn: #353–#357, #360)
+
+- **A1 — no shared event envelope.** Four schemas, two formats (logfmt vs
+  JSONL), different field names for the same concepts (`peer` vs `ip` vs
+  hook fields), and S2 encodes the event *type* in field presence while S1
+  gives it a name. A sentinel shipper must hand-parse each surface; every
+  new surface multiplies the consumer. Fix direction: a canonical envelope
+  (`v`, `seq`, `ts_ns`, `source`, `event`, `attrs`) defined in the H5
+  design, with per-surface mappers — not a rewrite of each writer.
+- **A2 — no sequencing, no authentication.** No surface emits a sequence
+  number or MAC. Log rotation, disk-full windows, and silent drops are
+  indistinguishable from "nothing happened" to a downstream shipper. The
+  signup doc promises *signed/sequenced* audit-log shipping (see
+  `docs/APPROVALS_PLANE_GAP_ANALYSIS.md` §8) — the local primitives for
+  that promise do not exist yet. This is the H5 design's prerequisite #1.
+- **A3 — second-resolution timestamps collide under burst.** S1 and S2
+  stamp `timespec="seconds"`. Under a swap burst or a confirm-flood
+  (cf. #76), multiple events share a timestamp and their true order is
+  unrecoverable without a sequence number. A2's sequence numbers subsume
+  this; until then, order-by-timestamp is unreliable.
+- **A4 — trust tiers are not explicit.** S3 is cooperative telemetry (the
+  agent can forge lines — `muse-job` says so itself); S1/S2 are written by
+  the trusted daemons; S4 sits in between. The H5 design must label each
+  surface with a trust tier (evidence vs claim) or the sentinel will treat
+  agent-forgeable events as ground truth. Sentinel rule: S3 informs
+  *liveness* dashboards, never *authorization* decisions.
+- **A5 — confirmd's audit write can fail silently.** S2's `_open_audit_log`
+  refuses the swap fail-closed when the audit log cannot be written
+  (finding 198, #202); S1's `audit_log` caught `OSError` and did
+  `pass` — a full disk silently ate the approvals trail while the
+  proxy next door failed closed. Fixed this turn: the except path now
+  emits to stderr (lands in the journal under systemd) so the trail gap
+  is operator-visible. The residual question — whether confirmd should
+  *fail the request* closed like swap does — is a product/security
+  tradeoff and stays open as an issue.
+- **A6 — confirmd's audit.log has no rotation bound.** S1's `AUDIT`
+  path is append-only and unbounded, with no writer-side cap and no
+  logrotate stanza anywhere in the tree: `proxy/deploy.sh` installs
+  only the `swap-proxy` stanza covering `*swap*.log`, and
+  `proxy/swap-logrotate.conf`'s own comment requires a non-matching
+  path to get its own stanza. S2 has logrotate (finding 198), S4 caps
+  at 10k lines — S1 is the only surface with no rotation/cap policy.
+  The unbounded S1 trail itself accelerates the exact disk-full
+  condition A5's stderr signal handles; the signal and its cause share
+  one root. Fix direction: a logrotate stanza for
+  `confirmd/audit.log` installed alongside the existing swap stanza
+  (or a writer-side cap), leaving the A5 stderr signal as the
+  secondary line of defense, not the only one. Filed as #360.
+
+## H5 prerequisites (ordered)
+
+1. Canonical event envelope + per-surface mappers (A1).
+2. Per-surface sequence numbers (A2) — process-local monotonic counters
+   with restart epochs are sufficient; cross-surface global ordering is
+   not required.
+3. Trust-tier labels on every surface (A4) before any sentinel rule
+   consumes S3.
+4. Tenant attribution (H10's work) — until then the trail answers "what
+   happened" but not "for whom" (already noted in APPROVALS_PLANE §8).
+
+## Non-findings (checked, not issues)
+
+- swap.log's disk-space guard (warn band + fail-closed refusal) is the
+  correct posture for the highest-risk surface; confirmd intentionally
+  differs and the difference is now documented (A5).
+- S3's forgeability is already the code's stated threat model, not a
+  surprise — the gap was that no *consumer* contract exists (A4 covers it).
+- S4's silent-on-failure audit write is explicit design ("best-effort:
+  never fails the run"), not a census miss — only confirmd's was an
+  undisclosed gap (A5).

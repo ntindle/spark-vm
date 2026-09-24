@@ -27,6 +27,7 @@ working.
 
 | Doc | What it is |
 | --- | ---------- |
+| [SENTINEL_TELEMETRY_SURFACES.md](SENTINEL_TELEMETRY_SURFACES.md) | Arch deep-read of the four audit/telemetry surfaces the hosted sentinel (H5) would consume: schema catalog, six structural findings (no shared envelope, no sequencing/auth, second-resolution timestamps, unstated trust tiers, one silent audit failure — fixed, no rotation bound on confirmd's audit.log), and the ordered H5 prerequisites. |
 | [HOSTED_GAP_ANALYSIS.md](HOSTED_GAP_ANALYSIS.md) | **(start here)** Vision vs repo state: the master gap list for the hosted product. |
 | [DAY_ONE_GAP_ANALYSIS.md](DAY_ONE_GAP_ANALYSIS.md) | What a tenant Muse needs on day one vs what the repo has. |
 | [APPROVALS_PLANE_GAP_ANALYSIS.md](APPROVALS_PLANE_GAP_ANALYSIS.md) | The approvals plane (refusal → filing → pending → human answer → push → decision delivery → audit) vs the hosted vision: the return leg is missing. |
