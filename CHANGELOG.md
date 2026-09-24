@@ -37,6 +37,17 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
+- Competitor watch (2026-09-23 post-mid-evening) (#317): tracked set
+  quiet — all 8 providers re-read vendor-verified with no change
+  (mid-evening's C26 resolution stands: DO pricing docs sub-page
+  re-verified live, "Last verified 22 Sep 2026", snapshots/checkpoints
+  $0.05/GiB-month); Vercel Drives still public beta (thirteenth
+  consecutive no-change pass; pricing page last_updated 2026-09-10, no
+  changelog entries dated 2026-09-23); Boxd rate card unchanged; C36 no
+  new datapoints since the 16:00 CDT vendor-confirm fold; Automaid
+  own-page verification still owed (site fetchable this run, no launch
+  announcement — third-party claim stays UNVERIFIED); no in-lane
+  launches.
 - Competitor watch (2026-09-23 mid-evening) (#316): **C26 discrepancy
   resolved on the primary source** — DigitalOcean's pricing docs sub-page
   fetched this pass (page stamped "Last verified 22 Sep 2026") and bills
