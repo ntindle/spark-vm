@@ -175,7 +175,7 @@ C40 precedent).
 ## 6. Corpus actions carried forward
 
 - Next passes: routine tracked-set re-reads; C36/C41/C43/C44
-  re-verifies; **DigitalOcean "Last verified 22 Sep 2026" stamp
+  re-verify; **DigitalOcean "Last verified 22 Sep 2026" stamp
   re-check** (vendor docs could not be fetched this pass — owed, not
   carried on a streak); the "agentic cloud" framing trend stays
   queued; Tencent DataBuddy stays adjacent-watch; deprecated-row
