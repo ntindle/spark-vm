@@ -152,6 +152,26 @@ class OkHandler(BaseHTTPRequestHandler):
         pass
 
 
+class DenyHandler(BaseHTTPRequestHandler):
+    """Mimics confirmd's own _deny contract (confirm/confirmd.py): HTTP 403,
+    body "forbidden: <reason>", Server header starting with "confirmd/1".
+    The probe asserts exactly this shape (GitHub #160) — keep this fixture
+    in lockstep with confirmd's _deny if that contract ever changes."""
+    server_version = "confirmd/1"
+    reason = "self-peer"
+
+    def do_GET(self):
+        body = ("forbidden: %s\n" % self.reason).encode()
+        self.send_response(403)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
 def serve(handler_cls, **attrs):
     for k, v in attrs.items():
         setattr(handler_cls, k, v)
@@ -175,7 +195,7 @@ def fixtures(tmp_path):
     open(echo_log, "w").close()
     echo = serve(EchoHandler, log_path=echo_log)
     swap = serve(SwapHandler)
-    confirmd = serve(OkHandler)
+    confirmd = serve(DenyHandler)
     muse = tmp_path / "muse"
     muse.write_text(FAKE_MUSE)
     muse.chmod(0o755)
@@ -436,7 +456,7 @@ def test_gate_corrupt_echo_log_fails_closed(fixtures, tmp_path):
     assert "non-JSON" in proc.stderr
 
 
-def _tls_confirmd_server(tmp_path):
+def _tls_confirmd_server(tmp_path, handler=DenyHandler):
     if shutil.which("openssl") is None:
         pytest.skip("openssl not available for the self-signed test cert")
     key, cert = str(tmp_path / "c.key"), str(tmp_path / "c.crt")
@@ -444,7 +464,7 @@ def _tls_confirmd_server(tmp_path):
                     "-keyout", key, "-out", cert, "-days", "1", "-nodes",
                     "-subj", "/CN=127.0.0.1"],
                    check=True, capture_output=True, timeout=60)
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), OkHandler)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert, key)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
@@ -453,10 +473,11 @@ def _tls_confirmd_server(tmp_path):
 
 
 def test_confirmd_https_self_signed_passes(fixtures, tmp_path):
-    # The production confirmd path: HTTPS with a self-signed cert. This is
-    # the only test exercising the probe's HTTPSHandler(context) + CERT_NONE
-    # wiring — without it, "hardening" the context would break production
-    # while the suite stays green.
+    # The production confirmd path: HTTPS with a self-signed cert, answering
+    # with confirmd's own 403 denial shape. This is the only test exercising
+    # the probe's HTTPSHandler(context) + CERT_NONE wiring against the
+    # identity assertion — without it, "hardening" the context would break
+    # production while the suite stays green.
     srv = _tls_confirmd_server(tmp_path)
     try:
         url = f"https://127.0.0.1:{srv.server_port}"
@@ -465,4 +486,83 @@ def test_confirmd_https_self_signed_passes(fixtures, tmp_path):
     finally:
         srv.shutdown()
     assert proc.returncode == 0, proc.stderr
-    assert "confirmd] answers" in proc.stderr
+    assert "identity ok" in proc.stderr
+
+
+def test_confirmd_port_grabber_200_fails(fixtures, tmp_path):
+    # GitHub #160: a process merely listening on the confirmd port and
+    # answering 200 must NOT certify the approvals path.
+    srv = _tls_confirmd_server(tmp_path, handler=OkHandler)
+    try:
+        url = f"https://127.0.0.1:{srv.server_port}"
+        proc, _ = run_probe(fixtures, tmp_path,
+                            extra_env={"PROBE_CONFIRMD_URL": url})
+    finally:
+        srv.shutdown()
+    assert proc.returncode == 1
+    assert "is not confirmd" in proc.stderr
+
+
+def test_confirmd_403_wrong_body_fails(fixtures, tmp_path):
+    # A 403 alone is not the identity: the denial body must be confirmd's
+    # own "forbidden: <reason>" shape.
+    class WrongBodyDeny(DenyHandler):
+        def do_GET(self):
+            body = b"access denied\n"
+            self.send_response(403)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = _tls_confirmd_server(tmp_path, handler=WrongBodyDeny)
+    try:
+        url = f"https://127.0.0.1:{srv.server_port}"
+        proc, _ = run_probe(fixtures, tmp_path,
+                            extra_env={"PROBE_CONFIRMD_URL": url})
+    finally:
+        srv.shutdown()
+    assert proc.returncode == 1
+    assert "is not confirmd" in proc.stderr
+
+
+def test_confirmd_right_body_wrong_server_header_fails(fixtures, tmp_path):
+    # The Server header assertion is non-vacuous: the right denial body
+    # under a foreign Server header must fail.
+    class NoIdentityDeny(BaseHTTPRequestHandler):
+        # default server_version ("BaseHTTP/0.6"), no confirmd/1 marker
+        def do_GET(self):
+            body = b"forbidden: self-peer\n"
+            self.send_response(403)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = _tls_confirmd_server(tmp_path, handler=NoIdentityDeny)
+    try:
+        url = f"https://127.0.0.1:{srv.server_port}"
+        proc, _ = run_probe(fixtures, tmp_path,
+                            extra_env={"PROBE_CONFIRMD_URL": url})
+    finally:
+        srv.shutdown()
+    assert proc.returncode == 1
+    assert "is not confirmd" in proc.stderr
+
+
+def test_confirmd_deny_reason_vocabulary_passes(fixtures, tmp_path):
+    # The probe accepts confirmd's full known deny-reason vocabulary, not
+    # just the self-peer reason the box itself always sees.
+    class OtherReasonDeny(DenyHandler):
+        reason = "not-a-tailnet-node"
+
+    srv = _tls_confirmd_server(tmp_path, handler=OtherReasonDeny)
+    try:
+        url = f"https://127.0.0.1:{srv.server_port}"
+        proc, _ = run_probe(fixtures, tmp_path,
+                            extra_env={"PROBE_CONFIRMD_URL": url})
+    finally:
+        srv.shutdown()
+    assert proc.returncode == 0, proc.stderr
+    assert "identity ok" in proc.stderr

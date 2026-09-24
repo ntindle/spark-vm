@@ -10,7 +10,9 @@ Exit 0, zero prompts, stdin closed, 10-second external cap. Verifies, in
 order:
   (a) the tenant runtime's model calls route through the inference proxy
       (:18081) and the proxy swaps in a valid credential;
-  (b) confirmd answers (the approvals path the first task needs is up).
+  (b) confirmd answers with its own identity — the approvals path the first
+      task needs is up AND is confirmd, not a port grabber or a misbound
+      service answering on the confirmd port (GitHub #160).
 
 Modes:
   gate      — image-build gate. The CLI is pointed at the gate fixture's
@@ -63,6 +65,7 @@ import ssl
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 CLI_TIMEOUT_S = 6.0       # budget for the CLI vehicle call (gate + provision)
@@ -215,11 +218,35 @@ def check_provision(muse_bin, base_url, proxy, key_name):
     return EXIT_OK
 
 
+# GitHub #160 (H26): the probe must assert the answering process IS confirmd,
+# not merely that a socket is open on the confirmd port. confirmd's auth gate
+# (confirm/confirmd.py: _auth/_deny) refuses the box itself — and the probe
+# always connects from the box — so a live confirmd answers the probe's GET
+# with HTTP 403 and a body of exactly "forbidden: <reason>\n" for one of the
+# known deny reasons, plus a Server header starting with "confirmd/1"
+# (confirmd's Handler.server_version). A port grabber or a stale service
+# answering 200 (or a 403 with a different shape) fails closed here. The deny
+# shape is confirmd's own in-repo contract (both ship in the same image), so
+# the assertion is version-locked to this tree, not a guess at a remote
+# service. If confirmd's deny contract ever changes, this check and its
+# DenyHandler test fixture must change with it.
+_CONFIRMD_DENY_REASONS = ("self-peer", "not-a-tailnet-node", "unknown-identity")
+
+
 def check_confirmd(confirmd_url):
-    """Liveness of the approvals path: any HTTP response counts as answering."""
+    """Identity + liveness of the approvals path (GitHub #160).
+
+    Asserts the answering process is confirmd — not merely that a socket is
+    open on the port. The probe always connects from the tenant box itself,
+    which confirmd's auth gate refuses, so the expected answer is confirmd's
+    own 403 denial: status 403, body "forbidden: <reason>" for a known deny
+    reason, Server header starting with "confirmd/1". Anything else — a 200
+    from a port grabber, a 403 from another service, a connection failure —
+    fails the check.
+    """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE  # liveness, not identity (self-signed cert)
+    ctx.verify_mode = ssl.CERT_NONE  # self-signed cert; identity is the deny shape
     # Bypass any ambient proxy env: this check is always same-host.
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
@@ -229,11 +256,31 @@ def check_confirmd(confirmd_url):
     try:
         with opener.open(req, timeout=CONFIRMD_TIMEOUT_S) as resp:
             status = resp.status
+            body = resp.read(4096)
+            server = resp.headers.get("Server", "")
+    except urllib.error.HTTPError as e:
+        # urllib raises for 4xx/5xx; the fields we assert on live on the error.
+        status, body, server = e.code, e.read(4096), e.headers.get("Server", "")
     except Exception as e:  # noqa: BLE001 — any failure means "not answering"
         return die(EXIT_CHECK_FAILED, f"confirmd did not answer at "
                                       f"{confirmd_url}: {e!r}")
-    print(f"[confirmd] answers at {confirmd_url} (HTTP {status}).", file=sys.stderr)
-    return EXIT_OK
+    try:
+        text = body.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        text = ""
+    want = {"forbidden: %s" % r for r in _CONFIRMD_DENY_REASONS}
+    if (status == 403 and text in want
+            and server.split(" ")[0] == "confirmd/1"):
+        print(f"[confirmd] identity ok at {confirmd_url}: confirmd/1 "
+              f"denied this box ({text}).", file=sys.stderr)
+        return EXIT_OK
+    return die(EXIT_CHECK_FAILED,
+               f"the process answering at {confirmd_url} is not confirmd "
+               f"(want: HTTP 403 + confirmd denial body + Server "
+               f"'confirmd/1'; got: HTTP {status}, body={text[:80]!r}, "
+               f"Server={server[:40]!r}). A port grabber, stale service, or "
+               "misbound server on the confirmd port must not certify the "
+               "approvals path.")
 
 
 def main(argv=None):
