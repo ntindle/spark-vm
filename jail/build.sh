@@ -431,7 +431,11 @@ export NODE_EXTRA_CA_CERTS="\$CA_BUNDLE"
 if [ "\$#" -eq 0 ]; then echo "usage: with-proxy <cmd> [args...]" >&2; exit 2; fi
 exec "\$@"
 EOF
-chmod 755 /usr/local/bin/with-proxy'
+chmod 755 /usr/local/bin/with-proxy
+# A quoting slip in the nested heredoc above silently corrupts this script
+# (the guest shell expands an unescaped $VAR to empty at build time); fail
+# the build loudly when the generated artifact does not parse (#285).
+/bin/bash -n /usr/local/bin/with-proxy'
 
 say "done. Verify with:  ssh -p $JAIL_SSH_PORT $JAIL_USER@<tailnet-ip>"
 say "Then remove the swapd CA from the HOST trust store (see jail/README)."
