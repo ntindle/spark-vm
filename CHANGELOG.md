@@ -39,6 +39,17 @@ This changelog only works if entries land with the change, not after it:
 ### Added
 
 - Competitor watch, 2026-09-24 late evening: tracked set 8/8 quiet, Vercel Drives still public beta (25th pass, GA watch now once-daily per the P49 cadence decision), **new in-lane corpus entry C44 — Google Gemini Enterprise Agent Platform sandboxes (Computer Use + Shell) GA** (VENDOR-VERIFIED on Google's own release notes), Docker CVE pair confirmed already-closed, watch-review nits adopted (#352).
+
+- `docs/SENTINEL_TELEMETRY_SURFACES.md`: arch deep-read of the five
+  audit/telemetry surfaces the hosted sentinel (H5) would consume —
+  schema catalog, five structural findings (no shared event envelope, no
+  sequencing or authentication, second-resolution timestamps that collide
+  under burst, unstated trust tiers for agent-forgeable muse-job events,
+  and confirmd's silently-swallowed audit-write failure, fixed this turn
+  so it signals to stderr), plus the ordered H5 prerequisites. Findings
+  filed as GitHub issues. (#358)
+
+>>>>>>> 24cb88e (review fixes (Engineering round 1): correct doc census + changelog fill + test placement)
 - Evening competitor watch (full quiet pass): tracked-set vendors 8/8
   VERIFIED no-change with zero fetch failures (full-quiet streak re-opens
   at one after the afternoon pass's Daytona move), Vercel Drives still
