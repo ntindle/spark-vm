@@ -658,7 +658,7 @@ This changelog only works if entries land with the change, not after it:
   longer gets silently clobbered — the deploy aborts with an alert and
   retries on the next tick, without marking the commit blocked (components
   already installed in the same run are rolled back first). (fixes
-  #324, PR #TBD)
+  #324, PR #338)
 - The deploy health check now reads the port as the trailing `:digits`
   field and treats everything between `tcp:` and that field as the host.
   Malformed entries (missing or non-numeric port, empty host) fail the
