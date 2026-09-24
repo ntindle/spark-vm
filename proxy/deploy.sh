@@ -150,7 +150,8 @@ echo "[4/7] Ensuring grants.json exists..."
 # the old `[ -f ]` ran as the deploy user, so when /home/swapd was not
 # traversable the guard always took the create branch -- and the old
 # `sudo tee` (truncate, not append) then wiped grants.json on EVERY deploy.
-# --create-only does check-and-create atomically as root (O_EXCL), and the
+# --create-only does check-and-create atomically as root (os.link: EEXIST on an
+# existing dest gives the old O_EXCL atomicity), and the
 # owner/mode are enforced on the fd, never through a symlink (#128 class).
 printf '{"grants": []}\n' | sudo python3 proxy/safe_install.py --stdin \
     --create-only --owner swapd --group swapd --mode 0600 \

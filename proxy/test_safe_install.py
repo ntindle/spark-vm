@@ -1,8 +1,14 @@
 """Tests for proxy/safe_install.py (deploy.sh symlink-following writes).
 
-All hermetic: scratch tmpdirs only, no root, no /home/swapd. fchown to the
-*current* uid/gid is unprivileged-legal, so the owner is monkeypatched to
+Hermetic: scratch tmpdirs only, no /home/swapd. fchown to the *current*
+uid/gid is unprivileged-legal, so the owner is monkeypatched to
 the running user via pwd.getpwnam (same trick as test_enforce_secrets_dir.py).
+
+Two tests need root: test_staged_temp_unreachable_by_parent_dir_attacker and
+test_staging_dir_swap_fails_closed use seteuid privilege separation
+(attacker = uid nobody) and self-skip as non-root. CI runs them under sudo
+with SAFE_INSTALL_ROOT_TESTS=require, which turns a self-skip into a loud
+failure so a silently skipped guard can never read as a green gate.
 """
 import io
 import errno
@@ -29,6 +35,34 @@ def _self_user():
     fake.pw_uid = me.pw_uid
     fake.pw_gid = me.pw_gid
     return me.pw_name, fake
+
+
+# The two seteuid tests below self-skip when they cannot do privilege
+# separation. CI runs them under sudo with SAFE_INSTALL_ROOT_TESTS=require,
+# which turns the self-skip into a loud failure: a silently skipped guard
+# would otherwise read as a green merge gate (issue #336).
+_REQUIRE_ROOT_ENV = "SAFE_INSTALL_ROOT_TESTS"
+
+
+def _require_privsep(self):
+    """Check the seteuid privilege-separation preconditions for a test.
+
+    Non-root runs skip; when CI sets SAFE_INSTALL_ROOT_TESTS=require a
+    skip becomes self.fail() instead, so the gate proves the test ran.
+    """
+    missing = []
+    if os.geteuid() != 0:
+        missing.append("root for seteuid privilege separation")
+    try:
+        pwd.getpwnam("nobody")
+    except KeyError:
+        missing.append("a 'nobody' user for privilege separation")
+    if missing:
+        reason = "needs " + " and ".join(missing)
+        if os.environ.get(_REQUIRE_ROOT_ENV) == "require":
+            self.fail("%s=require but %s -- run it under sudo"
+                      % (_REQUIRE_ROOT_ENV, reason))
+        self.skipTest(reason)
 
 
 class TestSafeInstall(unittest.TestCase):
@@ -289,12 +323,8 @@ class TestSafeInstall(unittest.TestCase):
         # attacker try the substitution on the REAL stage path between
         # _stage and _install_staged: every attempt must fail, and the
         # install must land OUR bytes.
-        if os.geteuid() != 0:
-            self.skipTest("needs root for seteuid privilege separation")
-        try:
-            nobody = pwd.getpwnam("nobody").pw_uid
-        except KeyError:
-            self.skipTest("no 'nobody' user for privilege separation")
+        _require_privsep(self)
+        nobody = pwd.getpwnam("nobody").pw_uid
         with tempfile.TemporaryDirectory() as d:
             # The deploy parent mirrors /home/swapd: attacker-owned and
             # attacker-writable (this is the threat model — the round-2
@@ -354,12 +384,8 @@ class TestSafeInstall(unittest.TestCase):
         # 0777 dir at the name, as the attacker) and assert the install
         # fails closed (SystemExit 2) with dest untouched. Without the
         # fstat identity check this test fails (the install proceeds).
-        if os.geteuid() != 0:
-            self.skipTest("needs root for seteuid privilege separation")
-        try:
-            nobody = pwd.getpwnam("nobody").pw_uid
-        except KeyError:
-            self.skipTest("no 'nobody' user for privilege separation")
+        _require_privsep(self)
+        nobody = pwd.getpwnam("nobody").pw_uid
         with tempfile.TemporaryDirectory() as d:
             home = Path(d) / "swapd"
             home.mkdir()
