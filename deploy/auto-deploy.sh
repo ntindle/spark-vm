@@ -833,6 +833,10 @@ cmd_deploy() {
 
     if [ "${#COMPS[@]}" -eq 0 ]; then
         log "no deployable components changed — advancing watermark only"
+        # The timer only ever runs `deploy`, so this is where the stale-updater
+        # warning surfaces on the automated path (`check`/`status` warn too;
+        # the quiet up-to-date tick deliberately stays quiet).
+        check_updater_drift
         write_watermark "$new"
         local pnv pov; pnv="$(new_version)"; pov="$(deployed_version)"
         write_version "$pnv"
@@ -843,6 +847,10 @@ cmd_deploy() {
     # deploy.sh, which installs both unconditionally).
     expand_install_unit COMPS
     log "deploying $old -> $new; components: ${COMPS[*]}"
+    # The drift check belongs here, not on the quiet noop tick: a pending
+    # deploy is exactly when stale updater logic is most dangerous, and the
+    # timer never runs `check` or `status`.
+    check_updater_drift
 
     # 1. gates BEFORE any mutation (incl. checkout-sync preconditions)
     for c in "${COMPS[@]}"; do
