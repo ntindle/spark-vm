@@ -93,6 +93,20 @@ This changelog only works if entries land with the change, not after it:
   script and approval URLs never leak to third parties via Referer (#77,
   #362).
 
+### Security
+
+- The privileged deploy writer now stages into randomly-named directories
+  (128-bit entropy) instead of predictable per-process names, so a
+  lower-privileged local user can no longer pre-create colliding staging
+  directories to abort every deploy; sustained collisions still fail
+  closed as an attack indicator (#333, #371).
+- A failed deploy staging step now unlinks its staged temp file before
+  removing the staging directory, so interrupted installs leave no
+  orphaned staging directories behind (#335, #371).
+- The CA-bundle builder's system-bundle read is now capped at 1 MiB like
+  the swapd-CA read, so a crafted `--sys` path can't turn the privileged
+  helper into an unbounded root read (#334, #371).
+
 ## [0.3.0] - 2026-09-24
 
 ### Added

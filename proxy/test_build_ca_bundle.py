@@ -206,6 +206,23 @@ class TestBuildCaBundle(unittest.TestCase):
             self.assertIn("cap", r.stderr)
             self.assertFalse(dest.exists(), "no bundle on refusal")
 
+    def test_oversized_sys_bundle_is_refused(self):
+        # #334 audit: the --sys path is invoker-controlled, so its
+        # privileged read carries the same cap as the CA read (issue #300
+        # pattern). deploy.sh passes no --sys, but a crafted flag must not
+        # turn the helper into an unbounded root read.
+        with tempfile.TemporaryDirectory() as d:
+            _sys_bundle, ca = self._files(d)
+            big = Path(d) / "big-sys.pem"
+            with open(big, "wb") as f:
+                f.write(b"B" * ((1 << 20) + 1))  # 1 MiB + 1
+            dest = Path(d) / "ca-bundle.crt"
+            r = self._run("--sys", str(big), "--ca", str(ca),
+                          "--dest", str(dest))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("cap", r.stderr)
+            self.assertFalse(dest.exists(), "no bundle on refusal")
+
 
 if __name__ == "__main__":
     unittest.main()

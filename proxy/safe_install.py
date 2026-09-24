@@ -19,8 +19,10 @@ This helper covers the rest. It is race-free and substitution-proof:
   a symlink at a root-write destination is an attack indicator);
 - the parent directory is then pinned with an ``O_DIRECTORY | O_NOFOLLOW``
   dirfd, and from that point nothing is re-addressed by bare path;
-- content stages into a fresh 0700 staging directory inside the pinned
-  parent (``O_CREAT | O_EXCL`` temp, ``fchown``/``fchmod`` on the open fd);
+- content stages into a fresh 0700 staging directory with a 128-bit
+  random name inside the pinned parent (``O_CREAT | O_EXCL`` temp,
+  ``fchown``/``fchmod`` on the open fd) -- unpredictable names defeat the
+  #333 pre-creation deploy-DoS (a collision is retried, then fail closed);
 - a single ``renameat`` (write) or ``linkat`` (create-only) installs it.
 
 A swapd-level attacker with write on the parent directory cannot substitute
@@ -51,7 +53,6 @@ import pwd
 import grp
 import stat
 import sys
-import threading
 
 
 def _fail(msg):
@@ -59,18 +60,18 @@ def _fail(msg):
     raise SystemExit(2)
 
 
-# Install sequence: disambiguates same-pid repeated installs. Lock-guarded
-# so threaded callers cannot compute the same staging name (a collision
-# would be a fail-closed SystemExit(2), never corruption).
-_tmp_lock = threading.Lock()
-_tmp_seq = 0
+# Staging-dir name entropy: 128 random bits. The parent dir is attacker-
+# writable (the threat model -- /home/swapd), so a predictable
+# ".safe_install.<pid>.<n>.d" name let the attacker pre-create colliding
+# dirs and force the fail-closed EEXIST abort on every deploy (deploy DoS,
+# issue #333). Random names make pre-creation infeasible; the EEXIST
+# fail-closed path survives only as an attack indicator (issue #333) and
+# is retried a bounded number of times before refusing.
+_STAGE_CREATE_RETRIES = 5
 
 
-def _next_tmp_seq():
-    global _tmp_seq
-    with _tmp_lock:
-        _tmp_seq += 1
-        return _tmp_seq
+def _random_stage_name():
+    return ".safe_install.%s.d" % os.urandom(16).hex()
 
 
 # Name of the staged temp *inside* the staging dir. The staging dir is
@@ -89,15 +90,22 @@ def _lstat_name(parent_fd, name):
 def _stage(parent_fd, content, owner, group, mode, dest):
     """Stage content into a fresh 0700 staging dir; return (stage_fd, name).
 
-    The staging dir is created ``O_EXCL``-style (``mkdir`` fails EEXIST on
-    collision -- fail closed), and the temp inside is ``O_CREAT | O_EXCL |
-    O_NOFOLLOW``. Both are addressed by dirfd from here on.
+    The staging dir has a random name (128 bits, issue #333) and is
+    created ``O_EXCL``-style (``mkdir`` fails EEXIST on collision --
+    retried a bounded number of times, then fail closed), and the temp
+    inside is ``O_CREAT | O_EXCL | O_NOFOLLOW``. Both are addressed by
+    dirfd from here on.
     """
-    stage = ".safe_install.%d.%d.d" % (os.getpid(), _next_tmp_seq())
-    try:
-        os.mkdir(stage, 0o700, dir_fd=parent_fd)
-    except FileExistsError:
-        _fail("staging dir %s already exists -- refusing (collision)" % stage)
+    for _ in range(_STAGE_CREATE_RETRIES):
+        stage = _random_stage_name()
+        try:
+            os.mkdir(stage, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            continue  # astronomically unlikely; try a fresh random name
+        break
+    else:
+        _fail("staging dir collision after %d retries -- refusing"
+              % _STAGE_CREATE_RETRIES)
     stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                        dir_fd=parent_fd)
     try:
@@ -123,6 +131,15 @@ def _stage(parent_fd, content, owner, group, mode, dest):
         finally:
             os.close(fd)
     except BaseException:
+        # Unlink the staged temp BEFORE rmdir: without this, a failure in
+        # _write_all/_enforce left ".tmp" behind and the rmdir died with
+        # ENOTEMPTY (silently ignored), littering ".safe_install.*" staging
+        # dirs in the deploy parent (issue #335). With the temp gone the
+        # rmdir succeeds and the parent is left clean.
+        try:
+            os.unlink(_TMP_NAME, dir_fd=stage_fd)
+        except OSError:
+            pass
         os.close(stage_fd)
         try:
             os.rmdir(stage, dir_fd=parent_fd)

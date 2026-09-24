@@ -55,7 +55,9 @@ DEFAULT_DEST = "/usr/local/share/with-proxy-ca/ca-bundle.crt"
 # attacker park a multi-GB (or sparse) regular file there for the root
 # deploy to swallow whole into RAM (OOM) and into the world-readable
 # bundle (disk-fill). The read is capped, so growth after the stat check
-# cannot exceed it either (issue #300).
+# cannot exceed it either (issue #300). The same cap bounds the
+# invoker-controlled --sys read in build_bundle (issue #300 pattern,
+# #334 audit; the default system bundle is ~200 KiB).
 _MAX_CA_BYTES = 1 << 20
 
 
@@ -129,9 +131,18 @@ def read_ca_bytes(ca_path, ca_only=False):
 
 
 def build_bundle(sys_path, ca_path):
-    """System bundle bytes + swapd CA bytes."""
-    with open(sys_path, "rb") as f:  # root-controlled path; no follow risk
-        system = f.read()
+    """System bundle bytes + swapd CA bytes.
+
+    The ``--sys`` flag makes sys_path invoker-controlled, so the
+    privileged read is capped exactly like the CA read (issue #300
+    pattern, #334 audit): the default root-controlled system bundle is
+    ~200 KiB, well under the 1 MiB cap.
+    """
+    with open(sys_path, "rb") as f:
+        system = f.read(_MAX_CA_BYTES + 1)
+    if len(system) > _MAX_CA_BYTES:
+        _fail("%s is %d bytes (cap %d) -- refusing to read it into the "
+              "privileged bundle" % (sys_path, len(system), _MAX_CA_BYTES))
     return system + read_ca_bytes(ca_path)
 
 
