@@ -85,7 +85,7 @@ isolation), because those are where the trust story lives.
 | **Microsandbox** | Task-scoped sandbox (OSS) | libkrun microVM, network-layer secret injection | Free, self-hosted (YC F26) |
 | **Docker Sandboxes** (morning pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, **v3 kits** (OCI-based packages: agent workload + reusable mixins for tools/config/credentials/network/instructions — C34), skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
-| **Boat** (tracked set; 2026-09-22 consolidation; **renamed from ASCII ~2026-09-17** — C40 deduped into this row) | Task-scoped sandbox / persistent computer | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement). Rename VERIFIED this run: `box.ascii.dev`, `boat.dev`, `ascii.dev` serve byte-identical product pages; YC's company page now `ycombinator.com/companies/boat` (YC F26); yc-oss mirror dates the rename 2026-09-17 (`former_names`: ["Ascii box","Ascii"]); the old YC slug `ycombinator.com/companies/ascii` now serves a **301 → `/companies/boat`** (VERIFIED 2026-09-24 midday — harder rename evidence than the page copy). Hardest evidence yet (VERIFIED 2026-09-24 late midday): the vendor's own API docs at `docs.ascii.dev/box/api/v1` render as **"Boat Public API v1"** — the legacy ASCII domain's developer surface brands the product *Boat* (`/box` path and box.ascii.dev endpoints persist). The documented API covers sandbox lifecycle (provisioning → ready/idle → running → archiving → archived; stop/archive, resume, fork, delete; desktop streaming; Idempotency-Key; per-sandbox API keys; data-retention API) plus a `prompt` endpoint running work through built-in agent harnesses `codex`, `claude-code`, `pi`, `opencode`, `prime-agent`, `kimi` (INFERRED read: Boat bundles coding-agent harnesses as first-class providers). Canonical domain now boat.dev. | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time |
+| **Boat** (tracked set; 2026-09-22 consolidation; **renamed from ASCII ~2026-09-17** — C40 deduped into this row) | Task-scoped sandbox / persistent computer | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement). Rename VERIFIED this run: `box.ascii.dev`, `boat.dev`, `ascii.dev` serve byte-identical product pages; YC's company page now `ycombinator.com/companies/boat` (YC F26); yc-oss mirror dates the rename 2026-09-17 (`former_names`: ["Ascii box","Ascii"]); the old YC slug `ycombinator.com/companies/ascii` now serves a **301 → `/companies/boat`** (VERIFIED 2026-09-24 midday — harder rename evidence than the page copy). Hardest evidence yet (VERIFIED 2026-09-24 late midday): the vendor's own API docs at `docs.ascii.dev/box/api/v1` render as **"Boat Public API v1"** — the legacy ASCII domain's developer surface brands the product *Boat* (`/box` path and box.ascii.dev endpoints persist). The documented API covers sandbox lifecycle (provisioning → ready/idle → running → archiving → archived; stop/archive, resume, fork, delete; desktop streaming; Idempotency-Key; per-sandbox API keys; data-retention API) plus a `prompt` endpoint running work through built-in agent harnesses `codex`, `claude-code`, `pi`, `opencode`, `prime-agent`, `kimi` (INFERRED read: Boat bundles coding-agent harnesses as first-class providers). Canonical domain now boat.dev. | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time; EU-only DE/FI/FR (FAQ verbatim — Germany, Finland, France; VERIFIED 2026-09-24 midday; folded from the deprecated C40 pointer row). |
 | **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, $0.05/GiB-month snapshots (vendor docs, re-read 2026-09-23 — the 10× discrepancy resolved in favor of the primary source); $5 new-user credit |
 | **Boxd** (2026-09-22 consolidation) | Persistent computer | "Composable computers" — KVM VMs with live memory forking in under 200 ms (vendor claim), snapshots/checkpoints, real SSH, per-machine HTTPS subdomain; self-hosted option ("run the whole platform on your own hardware") | Credit-based: €0.049/vCPU-hour running, €0.015/GiB-hour resident RAM, €0.0001/GiB-hour disk written; €30 free credits (**rate card VERIFIED 2026-09-23** — first own-page fetch, C29) |
 | **Upstash Box** (2026-09-22 consolidation; **own-docs VERIFIED 2026-09-24**) | Task-scoped sandbox / persistent computer | **VERIFIED on the vendor's own docs** ([Box quickstart](https://upstash.com/docs/box/overall/quickstart), read 2026-09-24): *"Upstash Box lets you give your AI agents a computer. Every Upstash Box is a **secure, isolated cloud container with an AI Agent built in**. Spin up as many as you want in parallel. Each one includes a full environment with a filesystem, shell, git, and a runtime."* Runtimes default Debian (glibc); keep-alive boxes (`keepAlive: true`) stay on between sessions; SSH access with a Box API key; *"Freeze a box anytime, and continue days or even weeks later with perfect resumability."* Standing datapoints: snapshot/restore API for reusable prepared environments, branching from snapshots, full outbound networking by default, 22.5 Gbps hosts on AWS; pause/resume unavailable with keepAlive enabled | **THIRD-PARTY** (vendor's own comparison blog, snippet-only this run): $0.10/$0.20/$0.40 per active CPU-hour (small/medium/large); free tier 10 boxes, 5 CPU-h/mo, $1 LLM budget, no card required |
@@ -96,6 +96,7 @@ isolation), because those are where the trust story lives.
 | **Alibaba Cloud FC Agent Sandbox** (2026-09-24 morning, C41) | Task-scoped sandbox (billing corpus) | New pay-as-you-go sandbox billing rolling out from 2026-07-31 (UTC+8), still invite-only preview: per-second billing, hourly settlement; formula = unit price × run duration. Three editions: Eco (cheapest, occasional perf fluctuation, no hibernation — startups/tool-use validation), Std (+hibernation — enterprise copilots), Pro (+deep and shallow hibernation, millions of concurrent requests — RL sampling/high-concurrency agents). Hibernation: active = vCPU+mem+disk (15 GiB disk free); light (Pro only) = mem+disk, vCPU free; deep = vCPU+mem free, billed on (memory×2 + disk) GiB; FAQ: call `kill()` when the task is complete. **Scope (VERIFIED):** applies ONLY to E2B-SDK integration — existing E2B instances auto-upgrade to Pro; Sandbox Functions/AgentRun Sandbox customers must migrate. Lane characterization (INFERRED): task-scoped compute, **not** agent-VM-shaped — no SSH/Desktop surface in the Features index; closer to E2B/Daytona pause semantics than a persistent dev VM. | Eco **0.00936/vCPU-h + 0.004608/GiB-h** (2 vCPU / 4 GiB / 15 GiB ≈ **$0.037/h**); Std 0.01224 / 0.006012; Pro 0.01872 / 0.009360; disk 0.00031896/GiB-h (0.00025308 ex-mainland). All VERIFIED on aliyun-fc/fc-docs |
 | **Namespace Devboxes** (2026-09-24 late midday, C42; **adjacent → in-lane**) | Persistent computer / ephemeral devboxes | *"Devboxes for Coding Agents"*: Linux and macOS machines where a coding agent clones a repository, installs dependencies, runs commands, and returns the result (ephemeral Devboxes); Pool API (`devbox acquire`); `devbox exec` / `logs` / `upload`; egress filtering via `network_policy.egress_domains`; secrets through the Namespace vault; native integrations — **Claude Managed Agents, Cursor Cloud Agents, and Devin all run on Namespace Devboxes**. All VERIFIED on the [vendor's own docs](https://namespace.so/docs/devbox/agents) (read 2026-09-24) — reverses the midnight pass's adjacent verdict. Sizes S→XL (burst 4 vCPU/8 GB → 32 vCPU/64 GB) at the THIRD-PARTY snippet layer | No published pricing in the surveyed docs |
 | **Google Gemini Agent Environment** (2026-09-24 afternoon, C43) | Managed agent sandbox (task-scoped compute) | *"Environments are managed Linux sandboxes that give agents an isolated place to execute code and persist files"* — reusable via `environment_id`; sources (git repo mount); network allowlists; env vars / credential references; pre-installed Ubuntu toolchains; current examples use agent string `antigravity-preview-09-2026`. All VERIFIED on the [vendor's own docs](https://ai.google.dev/gemini-api/docs/agent-environment) (read 2026-09-24). Sept-17 detail at the THIRD-PARTY layer: Files API (persistent file upload/list/download into the sandbox); Credentials API (secrets injected as env vars/MCP headers so the model never sees the raw secret — a sixth convergent placeholder-swap datapoint, noted for the secrets turns); vendor-claimed ~40% fewer output tokens on file edits, +8% task completion; preview compute not billed. Sibling of Agent Substrate (C36) — this is the Gemini-API-side managed sandbox surface, not the GKE-side one. | Preview compute not billed; no published pay-as-you-go pricing in the surveyed docs |
+| **Google Gemini Enterprise Agent Platform sandboxes** (2026-09-24 late evening, C44) | Managed agent sandboxes (task-scoped compute, GA) | *VENDOR-VERIFIED on Google's own release notes (read 2026-09-24): "Computer Use and Shell sandboxes in Gemini Enterprise Agent Platform are now generally available (GA)." (Sept 9, 2026)* — Shell sandboxes run untrusted shell commands, install packages, and manipulate files in an isolated Linux container via direct `/exec` API calls (Shell sandbox quickstart linked); the same release ships VPC Service Controls & Private Service Connect, CMEK (Cloud KMS, disk + snapshot checkpoints), and **pause/resume for sandboxes** (deschedule compute for idle sandboxes while preserving filesystem state and connection identity; resume in seconds — idle-suspend economics datapoint, convergent with C36 Agent Substrate's zero-idle posture and DO's 305 ms resume claim). A third Google agent-sandbox surface alongside C36 (GKE-side open-source runtime) and C43 (Gemini-API-side Environments); the GA is pre-window (Sept 9) but filed now — reach-back per the #82 pattern, explicit queued candidate verified on a primary source. | No published pay-as-you-go pricing in the surveyed release notes |
 | **h-sandbox / Harakiri** (2026-09-22 consolidation) | Task-scoped sandbox (OSS control plane) | Open-source self-hosted sandbox control plane (Apache 2.0); HTTP API / TS SDK / CLI / dashboard; Credential Vault with host-bound egress bindings and fake-env injection (fourth convergent placeholder-swap data point for the secrets-posture corpus) | Free, self-hosted |
 | **Brig** (2026-09-22 consolidation) | Local containment (OSS tool) | Local microVM CLI for coding agents — no hosted service; dedicated kernel per sandbox, host-vs-agent trust model, boot-empty credentials with names-only reporting, fail-closed egress-downgrade refusal | Free, local (Apache 2.0) |
 | **Epho** (2026-09-22 consolidation) | Task-scoped sandbox | Agents-as-API (claude / codex / opencode harnesses) with automatic multi-provider fallback — the session outlives the machine via session-snapshot restore on replacement boxes | ≈$0.158/h for 2 vCPU / 2 GiB / 10 GiB (computed from per-second rates); $10 starting credit; BYO model keys |
@@ -1562,8 +1563,7 @@ to Boat on ~2026-09-17.** VERIFIED this run: `box.ascii.dev`,
 title, same $0.036/h for 4 vCPU / 8 GB / 50 GB, same plans-from-$20/mo,
 same FAQ, all linking to `docs.boat.dev`); THIRD-PARTY: YC's own
 company page is now `ycombinator.com/companies/boat` (YC F26; the
-`ycombinator.com/companies/ascii` slug existed ~2 weeks ago —
-YC is the accelerator, not the vendor);
+`ycombinator.com/companies/ascii` slug still live-resolves to the Boat page via **301 → `/companies/boat`** (VERIFIED 2026-09-24 midday — harder rename evidence than the page copy; YC is the accelerator, not the vendor);
 THIRD-PARTY (yc-oss community mirror changelog, 2026-09-17):
 `name`: Ascii → Boat, `slug`: ascii → boat, `website`:
 box.ascii.dev → boat.dev, `former_names`: ["Ascii box","Ascii"].
@@ -1768,3 +1768,68 @@ Drives still public beta (23rd consecutive no-change pass; pricing
 page `last_updated` 2026-09-10). The deprecated-row sunset convention
 stays proposed-not-codified (C40, ~4–5 passes into the proposed
 14-pass retention — no removal either way).
+
+## Watch update — 2026-09-24 (late evening): C44 Google Gemini Enterprise sandboxes GA, P49 cadence decision
+
+New-entry fold per the C32/C37/C38/C39/C40/C41/C42/C43 precedents; full
+pass record in `docs/COMPETITOR_WATCH_2026-09-24_LATE_EVENING.md` (survey
+window ~10:56–11:20 CDT).
+
+**C44 new — Google Gemini Enterprise Agent Platform sandboxes
+(Computer Use + Shell), GA, VENDOR-VERIFIED, in-lane.** Google's own
+release notes
+([docs.cloud.google.com/gemini-enterprise-agent-platform/release-notes](https://docs.cloud.google.com/gemini-enterprise-agent-platform/release-notes),
+read 2026-09-24), under "September 09, 2026": *"Computer Use and Shell
+sandboxes in Gemini Enterprise Agent Platform are now generally
+available (GA)."* Shell sandboxes run untrusted shell commands, install
+packages, and manipulate files in an isolated Linux container via direct
+`/exec` API calls; the same release ships VPC Service Controls &
+Private Service Connect, CMEK (Cloud KMS, disk + snapshot checkpoints),
+and **pause/resume for sandboxes** — deschedule compute for idle
+sandboxes while preserving filesystem state and connection identity,
+resume in seconds. The idle-suspend datapoint is filed at the vendor
+layer: convergent with C36 Agent Substrate's zero-idle posture and DO's
+305 ms resume claim (C26), and with the idle-economics read Google
+itself applies to Filestore agent volumes (C36 pricing color). Filed as
+**C44** with a field-table row. The GA is pre-window (Sept 9) — reach-back
+per the #82 pattern, an explicit queued candidate verified on a primary
+source. This is a third Google agent-sandbox surface alongside C36
+(GKE-side open-source runtime) and C43 (Gemini-API-side Environments);
+the three-surface Google picture now reads as: open-source runtime (C36),
+Gemini API surface (C43), enterprise platform with GA sandboxes (C44).
+
+**Evening-pass queue resolved:** the Docker Sandboxes CVEs
+CVE-2026-77179 / CVE-2026-79994 are the SAME pair the 2026-09-23 ~11:54
+pass closed (numbers, severities, fix 0.42.0 Sep 7, dates all match —
+VERIFIED on Docker's own security-announcements page this pass) — no
+fold, no new C-number; the corpus already records that the notes name
+both CVEs (2026-09-19 evening amendment), so no correction was owed.
+The Alibaba "Agent Native Cloud" + Huawei "Open Agentic Cloud"
+two-vendor framing trend stays queued and adjacent: Huawei is
+VENDOR-VERIFIED on huawei.com (Sept 18 keynote, "open agentic cloud"
+commitment), Alibaba remains THIRD-PARTY (Apsara Conference syndication
+only) — both are managed-agent-platform framings, neither announces
+sandbox execution infra.
+
+**P49 decision (long-quiet carried-ask cadence) — decided this turn:**
+the Vercel Drives GA watch (25th consecutive no-change pass, still
+public beta, pricing `last_updated` 2026-09-10) moves to **once-daily**
+(checked in the morning pass), effective immediately. Tracked-set
+re-reads and carried C-item re-verifications stay hourly. Rationale: a
+quarterly-cadence vendor lifecycle event re-read hourly is ritual; the
+hourly pass keeps its high-signal core. This pass's novel yield (one
+corpus move — C44) keeps the F64 advisory untriggered.
+
+**Watch-review nit adoptions (20:54 turn's deferred nits, this pass's
+convenience):** (a) checked — every C36 claim in shipped docs already
+carries a convention label, no unlabeled sentences found; (b) adopted —
+the 2026-09-23 late-night README watch-table row's Upstash Box
+"future-vetting candidate" cross-references that it is already filed as
+C31; (c) already adopted (YC 301 cited in both Boat rows); (d)
+adopted — EU-only DE/FI/FR geography folded from the deprecated C40
+pointer row into the tracked-set Boat row's feature cell; (e)
+deliberately NOT adopted — codifying the deprecated-row sunset
+convention would be a unilateral rule adoption, it stays
+proposed-not-codified pending corpus-owner approval; (f) adopted —
+the C40 rename section's YC-slug parenthetical now notes the slug
+still live-resolves to the Boat page via 301 (VERIFIED midday).
