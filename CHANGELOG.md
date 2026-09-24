@@ -37,7 +37,7 @@ This changelog only works if entries land with the change, not after it:
 ## [Unreleased]
 
 ### Added
-- Competitor watch (2026-09-23 late overnight) (#TBD): tracked set quiet —
+- Competitor watch (2026-09-23 late overnight) (#327): tracked set quiet —
   all 8 providers re-read vendor-verified with no change (sixth full quiet
   pass since the mid-afternoon fold); Vercel Drives still public beta
   (seventeenth consecutive no-change pass; pricing page last_updated
