@@ -87,7 +87,7 @@ isolation), because those are where the trust story lives.
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
 | **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation ("fast, isolated, persistent sandboxes and storage where developers can run their own agentic workflows and tool execution") | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
 | **Microsandbox** | Task-scoped sandbox (OSS) | libkrun microVM, network-layer secret injection | Free, self-hosted (YC F26) |
-| **Docker Cloud Sandboxes** (launch Sept 24, C45) | Task-scoped sandbox | Same microVM as local Docker Sandboxes, on Docker-managed compute; `sbx move --to cloud` (bidirectional filesystem migration); kits (Claude Code, Codex, Copilot, Antigravity, Open Code, Hermes), MCP gateway, per-agent network policies, secrets proxy-injected per request | **PAYG per-second:** Micro 1vCPU/2GiB $0.07/h → XL 16/32 $1.12/h; paused free; volumes/egress/images free; sessions ≤24h; limited-time $250 free credit |
+| **Docker Cloud Sandboxes** (launch Sept 24, C45) | Task-scoped sandbox | Same microVM as local Docker Sandboxes, on Docker-managed compute; `sbx move --to cloud` (bidirectional filesystem migration); kits (Claude Code, Codex, Copilot, Antigravity, Open Code, Hermes), MCP gateway, per-agent network policies, secrets proxy-injected per request | **PAYG per-second:** Micro 1vCPU/2GiB $0.07/h → XL 16/32 $1.12/h; paused free; volumes/egress/images free; sessions ≤24h; limited-time $250 free credit; GA-venue garnish 2026-09-24 — onstage launch at WeAreDevelopers North America (Docker president Mark Cavage, THIRD-PARTY), keynote blog "available today with pay-as-you-go pricing" (VENDOR-VERIFIED), Sandbox Kits → standard OCI images + CNCF submission commitment, Hermes first-class Kit demo onstage |
 | **Docker Sandboxes** (morning pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, **v3 kits** (OCI-based packages: agent workload + reusable mixins for tools/config/credentials/network/instructions — C34), skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
 | **Boat** (tracked set; 2026-09-22 consolidation; **renamed from ASCII ~2026-09-17** — C40 deduped into this row) | Task-scoped sandbox / persistent computer | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement). Rename VERIFIED this run: `box.ascii.dev`, `boat.dev`, `ascii.dev` serve byte-identical product pages; YC's company page now `ycombinator.com/companies/boat` (YC F26); yc-oss mirror dates the rename 2026-09-17 (`former_names`: ["Ascii box","Ascii"]); the old YC slug `ycombinator.com/companies/ascii` now serves a **301 → `/companies/boat`** (VERIFIED 2026-09-24 midday — harder rename evidence than the page copy). Hardest evidence yet (VERIFIED 2026-09-24 late midday): the vendor's own API docs at `docs.ascii.dev/box/api/v1` render as **"Boat Public API v1"** — the legacy ASCII domain's developer surface brands the product *Boat* (`/box` path and box.ascii.dev endpoints persist). The documented API covers sandbox lifecycle (provisioning → ready/idle → running → archiving → archived; stop/archive, resume, fork, delete; desktop streaming; Idempotency-Key; per-sandbox API keys; data-retention API) plus a `prompt` endpoint running work through built-in agent harnesses `codex`, `claude-code`, `pi`, `opencode`, `prime-agent`, `kimi` (INFERRED read: Boat bundles coding-agent harnesses as first-class providers). Canonical domain now boat.dev. | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time; EU-only DE/FI/FR (FAQ verbatim — Germany, Finland, France; VERIFIED 2026-09-24 midday; folded from the deprecated C40 pointer row). |
@@ -1984,3 +1984,67 @@ convention still proposed-not-codified.
 precedent — no convention admission needed.
 
 No in-lane launches, pricing moves, or funding dated 9/24.
+
+## Watch update — 2026-09-24 (mid evening): C45 GA-venue garnish, C26 pricing re-verified, stamp still carried
+
+Garnish fold per the C32/C37/C38/C39/C40/C41/C42/C43/C44/C45
+precedents; full pass record in
+`docs/COMPETITOR_WATCH_2026-09-24_MID_EVENING.md` (survey window
+~17:00–17:12 CDT).
+
+**C45 — GA-venue garnish (THIRD-PARTY venue + VENDOR-VERIFIED keynote
+blog).** The onstage announcement at WeAreDevelopers North America
+(Docker president Mark Cavage, GlobeNewswire wire 12:00 PM EDT;
+The Register / ADTmag same-day coverage) anchors the early-afternoon
+C45 fold as a launch event, not just a blog introduction. New vendor
+facts from Docker's own keynote blog (VENDOR-VERIFIED): *"Docker Cloud
+Sandboxes are available today with pay-as-you-go pricing"*; next-gen
+Sandbox Kits are now standard OCI images; Docker committed to
+submitting the Kits specification to the CNCF; Nous Research demoed
+Hermes running as a first-class Kit onstage. Pricing corroboration
+(The Register, THIRD-PARTY: Micro 1 vCPU/2 GB $0.07/hr → XL 16/32
+$1.12/hr) matches the filed table value-for-value — no row change to
+the pricing cells. Folded as a garnish in the C45 field-table row
+above. Read for spark-vm: Docker is now marketing the cloud tier
+through the developer-conference channel with the framing that *trust
+in your agent shouldn't depend on where it runs* — the in-lane bar for
+a hosted sandbox announcement just got set higher.
+
+**C26 — pricing re-verified, stamp still carried.** The carried ask
+(vendor pricing-page fetch, failed twice) closed via the vendor's own
+Sept 22 press release (Business Wire — paid wire, the vendor's own
+claims): $0.044/vCPU-hour active CPU (per-second), $0.0095/GB-hour
+memory, $5 new-user credit — all matching C26's closed pricing
+exactly; public preview opened Sept 22, 2026 (private preview before),
+still preview not GA. The $0.05/GiB-month docs snapshot figure stands
+against the release's own $0.005/GiB-month — a live 10x docs-vs-release
+discrepancy, resolved neither way this run; the carried pricing-subpage
+re-fetch must settle it. The pricing subpage's "Last
+verified 22 Sep 2026" stamp re-check stays carried one more pass —
+the THIRD-PARTY subagentic.ai "September 21, 2026" claim is not a
+contradiction (it matches the late-afternoon pass's own read on the
+vendor's *product doc*, which carries no pricing; the 22 Sep stamp
+belongs to the pricing subpage). C26 otherwise unchanged.
+
+**Tracked set:** 7/8 VERIFIED NO-CHANGE (Daytona, Docker Sandboxes
+release-notes page, Microsandbox v0.7.3, E2B, boat.dev pricing,
+TermSquad, AgentComputer); DigitalOcean pricing re-verified on the
+vendor release (product doc not re-fetched); boat.dev product-news
+surface UNVERIFIED (not located this run). The quiet streak continues —
+no pricing or feature deltas anywhere in the window.
+
+**Carried asks:** C36, C41, C43, C44 — no new moves (last re-verified
+late-afternoon ~16:20 CDT; nothing in the news scan touches them);
+OpenAI Agents API Sep-10 public-beta dating re-confirmed VENDOR-VERIFIED
+(still public beta — GA VERIFIED absent); Vercel Drives not re-checked
+(the P49 once-daily morning cadence stands).
+
+**In-lane dated 2026-09-24:** the Docker Cloud Sandboxes GA-venue
+announcement (above); Island $400M at $6.4B (rogue-AI-agent browser
+defense — adjacent lane); Modal Labs in ~$15B raise talks (adjacent
+lane, reported 2026-09-23); Darktrace Signal Labs launch (agentic-AI
+security research — adjacent lane). No in-lane sandbox pricing moves
+or new sandbox launches beyond the Docker GA venue.
+
+**Watch-doc naming:** `_MID_EVENING` carries the 2026-09-23 precedent
+— no convention admission needed.
