@@ -688,7 +688,7 @@ This changelog only works if entries land with the change, not after it:
   guard they prove — they now run under sudo on every PR, and a skip in
   that step fails the build instead of passing silently. The stale "no
   root" header on the test module and the "atomic via O_EXCL" comment in
-  the deploy script are corrected to match. ([#TBD])
+  the deploy script are corrected to match. ((#345)
 - The auto-deploy updater re-verifies the working checkout is clean
   immediately before syncing a component subtree into it, not just at the
   pre-deploy gate: a manual edit made between the gate and the install no
