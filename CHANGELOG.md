@@ -36,15 +36,7 @@ This changelog only works if entries land with the change, not after it:
 
 ## [Unreleased]
 
-### Security
-
-- Hardened the deploy-time CA bundle build and install against three
-  remaining local-attacker primitives: the CA source now refuses hardlinks
-  (a hardlink is a regular file, so the earlier symlink refusal didn't
-  stop it), refuses files over 1 MiB before the privileged read (no more
-  unbounded RAM/disk fill from a planted file), and installs bundles with
-  an atomic rename — a racing reader now sees the old or the new bundle,
-  never a truncated one. (#299, #300, #301)
+## [0.3.0] - 2026-09-24
 
 ### Added
 
@@ -699,6 +691,7 @@ This changelog only works if entries land with the change, not after it:
   as a design input for the hosted product's per-harness adapters. (#274)
 
 ### Changed
+
 - Hosted pricing thinking refreshed: the internal pricing analysis now
   reflects the decided Fly.io provider (boat.dev under evaluation as a
   cheaper alternative), records Epho's bring-your-own-keys infra-only
@@ -708,6 +701,7 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
+
 - The two privileged install-safety regression tests (staged-temp
   substitution and staging-dir swap) previously self-skipped in CI because
   runners are non-root, so the merge gate never actually exercised the
@@ -867,6 +861,7 @@ This changelog only works if entries land with the change, not after it:
   (#218)
 
 ### Security
+
 - `muse-job log` now sanitizes the job terminal it prints: the pane
   content an agent controls goes through the same ANSI/control-character
   sanitizer as every other operator-facing surface, so a crafted pane
@@ -925,6 +920,14 @@ This changelog only works if entries land with the change, not after it:
   such swaps are now refused with a loud warning instead of silently
   degrading the location restriction into swap-anywhere. Entries with no
   declared placement keep the migration behavior (#197, #200).
+
+- Hardened the deploy-time CA bundle build and install against three
+  remaining local-attacker primitives: the CA source now refuses hardlinks
+  (a hardlink is a regular file, so the earlier symlink refusal didn't
+  stop it), refuses files over 1 MiB before the privileged read (no more
+  unbounded RAM/disk fill from a planted file), and installs bundles with
+  an atomic rename — a racing reader now sees the old or the new bundle,
+  never a truncated one. (#299, #300, #301)
 
 ## [0.2.0] - 2026-09-20
 
@@ -1101,4 +1104,6 @@ This changelog only works if entries land with the change, not after it:
 - Fixed critical and high findings from the security code review
   ([`dd382af`](https://github.com/ntindle/spark-vm/commit/dd382af))
 
-[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ntindle/spark-vm/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/ntindle/spark-vm/releases/tag/v0.2.0
