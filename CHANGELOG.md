@@ -609,6 +609,15 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
+- The auto-deploy pre-deploy gates now cover every test module in each
+  component: four proxy test suites (install safety, CA bundle, secrets-dir
+  enforcement, credential-validation grammars), confirmd's push-queue tests,
+  and the full cred-ui HTTP/version suites had silently drifted out of the
+  gate, so a green gate said nothing about them. A new tripwire test pins
+  the gate commands against the test files on disk so the gap can't recur.
+  The stale-updater warning (a merged updater fix that nobody activated with
+  `init`) now also fires on the automated deploy path, not just
+  `check`/`status`, since the timer only ever runs `deploy`. (#TBD)
 - The Daytona isolation quote in the multi-tenant isolation research is
   re-sourced: the vendor's security-exhibit page was retired (it now
   redirects to their Trust Center, where the quoted claim no longer

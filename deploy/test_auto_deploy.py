@@ -116,6 +116,47 @@ def test_component_name_mapping():
     assert "cred-ui/" in r.stdout
 
 
+def test_gate_commands_cover_all_component_test_files():
+    """The pre-deploy gate is the last check before root-adjacent installs,
+    so every test module under a component's dir must be referenced by that
+    component's gate command. Arch review 2026-09-23 found four proxy test
+    files (test_safe_install, test_build_ca_bundle, test_enforce_secrets_dir,
+    test_validation_conformance), confirm's test_push_queue.py, and the whole
+    cred-ui/tests/ dir had silently drifted out of the gates: a green gate
+    said nothing about them. A file counts as covered when its repo-relative
+    path — or a parent dir that pytest would collect — appears in the gate.
+    """
+    component_dirs = {
+        "proxy": ["proxy"],
+        "confirm": ["confirm"],
+        "cred-ui": ["cred-ui"],
+    }
+    missing = []
+    for component, dirs in component_dirs.items():
+        r = source_and(f'get_str {component} tests')
+        assert r.returncode == 0, r.stderr
+        # Token-based matching, not substring: the bare word "proxy" appears
+        # in every proxy gate, so a substring check would vacuous-pass.
+        tokens = set(re.findall(r'[^\s"\'=;]+', r.stdout))
+        for d in dirs:
+            comp_dir = os.path.join(REPO, d)
+            for dirpath, _dirnames, filenames in os.walk(comp_dir):
+                for fn in sorted(filenames):
+                    if not (fn.startswith("test_") and fn.endswith(".py")):
+                        continue
+                    rel = os.path.relpath(os.path.join(dirpath, fn), REPO)
+                    # covered by exact path ("proxy/test_x.py") or by a parent
+                    # dir ("cred-ui/tests/") that pytest would collect.
+                    parts = rel.split(os.sep)
+                    covered = rel in tokens or any(
+                        "/".join(parts[:i]) + "/" in tokens
+                        for i in range(1, len(parts))
+                    )
+                    if not covered:
+                        missing.append(f"{component}: {rel} not in gate")
+    assert not missing, "gate-coverage drift:\n" + "\n".join(missing)
+
+
 def test_proxy_install_paths_cover_deploy_sh_writes():
     """Every file proxy/deploy.sh installs must be rollback-restorable.
     Security-review regression: /etc/sudoers.d/swapd, the CA bundle, and

@@ -135,9 +135,11 @@ so the installed copy picks it up.
 - **The updater does not self-update.** A merged fix to `auto-deploy.sh`
   itself, or a new `components.conf` entry, takes effect only after the
   operator re-runs `auto-deploy.sh init` from an updated checkout. `init`
-  records the checkout commit the installed copy came from; `status` and
-  `check` warn when `origin/main` carries newer `deploy/` changes, so the
-  staleness is visible instead of silent.
+  records the checkout commit the installed copy came from; `status`, `check`,
+  and any `deploy` that actually has work (pull-only or component deploys)
+  warn when `origin/main` carries newer `deploy/` changes, so the staleness
+  is visible instead of silent. The quiet up-to-date timer tick deliberately
+  stays quiet.
 - **cred-ui's runtime is the working checkout.** The updater owns the
   `cred-ui/` subtree once enabled (uncommitted changes there fail the deploy
   closed); don't hand-edit it on the box.
