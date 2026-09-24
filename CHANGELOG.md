@@ -53,7 +53,7 @@ This changelog only works if entries land with the change, not after it:
   buyer≠user packaging split), and sandbox harness builders (the separate
   sandbox product, cooperative-jail tier) — plus the trust-boundary split
   between them and who is NOT an ICP. Design thinking, not a commitment; the
-  validation checklist lives in #343. (#TBD)
+  validation checklist lives in #343. (#347)
 
 - Late-midday competitor watch (eleventh full quiet pass): tracked-set vendors
   8/8 VERIFIED no-change, Vercel Drives still public beta (22nd consecutive
