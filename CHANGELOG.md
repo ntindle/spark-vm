@@ -74,6 +74,14 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- The harness auth probe's confirmd check now verifies the answering process
+  behaves like confirmd — it requires confirmd's own 403 denial shape
+  (`forbidden: <reason>` body plus `confirmd/1` server header, and never
+  follows a 3xx off the port) instead of counting any HTTP response as
+  liveness, so a port grabber, stale service, or misbound server answering
+  on the confirmd port can no longer certify the approvals path as up before
+  box-live. This catches accidental misbinding at the gate, not an adversary
+  who controls the port (#160, #367).
 - `scripts/cut-release.sh` no longer aborts with "not a git repo" when run
   from a git linked worktree (where `.git` is a `gitdir:` pointer file, not
   a directory) — the repo gate now checks `git rev-parse --git-dir`

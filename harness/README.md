@@ -10,7 +10,12 @@ Implements the executable half of the R2 pre-seeded-harness contract
 - **`harness-auth-probe`** — the non-interactive harness auth check. Run as
   `</dev/null timeout 10 <harness-auth-probe>`; exit 0, zero prompts.
   Verifies (a) the tenant runtime's model calls route through the inference
-  proxy with the credential swapped in, then (b) confirmd liveness.
+  proxy with the credential swapped in, then (b) confirmd liveness with
+  misbinding detection: the probe requires confirmd's own 403 denial shape
+  (`forbidden: <reason>` body + `confirmd/1` Server header, GitHub #160),
+  not just any HTTP response — a port grabber or misbound service answering
+  on the confirmd port must not certify the approvals path. This catches
+  accidental misbinding at the gate, not an adversary who controls the port.
   Two modes: `gate` (image-build gate, against the public echo fixture —
   asserts the exact `Authorization: Bearer` wire shape and that the
   `hsurr:` placeholder never reaches the origin) and `provision`
