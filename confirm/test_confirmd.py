@@ -1477,9 +1477,6 @@ class ReopenTests(unittest.TestCase):
         plain = h._render_item({"id": "abc123def4567890",
                                 "credential": "openai"})
         self.assertNotIn("Re-opened from a denied request", plain)
-
-
-
 class AuditLogTests(unittest.TestCase):
     """confirmd.audit_log durability posture (arch finding A5, sentinel
     deep-read): the happy path appends the logfmt line silently; a write
@@ -1487,6 +1484,7 @@ class AuditLogTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
 
     def test_audit_log_writes_line(self):
         """The happy path still appends the logfmt line (no stderr)."""

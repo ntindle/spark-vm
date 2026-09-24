@@ -454,15 +454,16 @@ def audit_log(event, peer, login, detail=""):
     audit log cannot be written (finding 198) — a full disk ate the
     approvals trail without a signal. confirmd cannot fail the request
     the same way (the audit call happens after the decision), so the
-    except path emits to stderr, which lands in the journal under
-    systemd — the trail gap is operator-visible."""
+    except path emits to stderr (naming the lost event), which lands in
+    the journal under systemd — the trail gap is operator-visible."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         with open(AUDIT, "a", encoding="utf-8") as f:
             f.write("ts=%s event=%s peer=%s login=%s %s\n"
                     % (ts, event, peer, login or "-", detail))
     except OSError as e:
-        print("confirmd: cannot write audit log: %s" % e, file=sys.stderr)
+        print("confirmd: cannot write audit log: %s (lost event=%s peer=%s login=%s)"
+              % (e, event, peer, login or "-"), file=sys.stderr)
 
 
 def pending_dir():

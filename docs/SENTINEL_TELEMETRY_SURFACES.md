@@ -23,7 +23,7 @@ install-gate fixture and `inject-provision-state.sh` writes plain
 provision-state files, neither a telemetry surface. Census corrected
 2026-09-24 per Engineering review.)
 
-## Findings (filed as GitHub issues this turn)
+## Findings (filed as GitHub issues this turn: #353–#357, #360)
 
 - **A1 — no shared event envelope.** Four schemas, two formats (logfmt vs
   JSONL), different field names for the same concepts (`peer` vs `ip` vs
@@ -58,6 +58,19 @@ provision-state files, neither a telemetry surface. Census corrected
   is operator-visible. The residual question — whether confirmd should
   *fail the request* closed like swap does — is a product/security
   tradeoff and stays open as an issue.
+- **A6 — confirmd's audit.log has no rotation bound.** S1's `AUDIT`
+  path is append-only and unbounded, with no writer-side cap and no
+  logrotate stanza anywhere in the tree: `proxy/deploy.sh` installs
+  only the `swap-proxy` stanza covering `*swap*.log`, and
+  `proxy/swap-logrotate.conf`'s own comment requires a non-matching
+  path to get its own stanza. S2 has logrotate (finding 198), S4 caps
+  at 10k lines — S1 is the only surface with no rotation/cap policy.
+  The unbounded S1 trail itself accelerates the exact disk-full
+  condition A5's stderr signal handles; the signal and its cause share
+  one root. Fix direction: a logrotate stanza for
+  `confirmd/audit.log` installed alongside the existing swap stanza
+  (or a writer-side cap), leaving the A5 stderr signal as the
+  secondary line of defense, not the only one. Filed as #360.
 
 ## H5 prerequisites (ordered)
 
