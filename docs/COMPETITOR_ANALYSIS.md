@@ -28,9 +28,11 @@ BACKLOG.md block points here.
   this pass). Watch docs are delta-only against the *previous watch doc*,
   which chains back to this baseline.
 - **Watch-doc naming:** watch passes land as
-  `docs/COMPETITOR_WATCH_YYYY-MM-DD.md`, with `_EVENING`/`_NIGHT`/`_MORNING`/`_MIDDAY`/`_NOON`
+  `docs/COMPETITOR_WATCH_YYYY-MM-DD.md`, with `_EVENING`/`_NIGHT`/`_MORNING`/`_MIDDAY`/`_NOON`/`_EARLY_AFTERNOON`
   suffixes for same-day repeats; each is delta-only against the previous
-  watch doc.
+  watch doc. (`_NOON` admitted by the 2026-09-24 noon pass;
+  `_EARLY_AFTERNOON` by the 2026-09-24 early-afternoon pass — the
+  09:54 pass had already taken `_AFTERNOON`.)
 - **Reach-back policy:** a watch pass backfills a pre-window item only
   when a primary-source verification or a factual correction demands it
   (the #82 pattern — the five queued verifications, the CVE date
@@ -83,6 +85,7 @@ isolation), because those are where the trust story lives.
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
 | **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation ("fast, isolated, persistent sandboxes and storage where developers can run their own agentic workflows and tool execution") | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
 | **Microsandbox** | Task-scoped sandbox (OSS) | libkrun microVM, network-layer secret injection | Free, self-hosted (YC F26) |
+| **Docker Cloud Sandboxes** (launch Sept 24, C45) | Task-scoped sandbox | Same microVM as local Docker Sandboxes, on Docker-managed compute; `sbx move --to cloud` (bidirectional filesystem migration); kits (Claude Code, Codex, Copilot, Antigravity, Open Code, Hermes), MCP gateway, per-agent network policies, secrets proxy-injected per request | **PAYG per-second:** Micro 1vCPU/2GiB $0.07/h → XL 16/32 $1.12/h; paused free; volumes/egress/images free; sessions ≤24h; limited-time $250 free credit |
 | **Docker Sandboxes** (morning pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, **v3 kits** (OCI-based packages: agent workload + reusable mixins for tools/config/credentials/network/instructions — C34), skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
 | **Boat** (tracked set; 2026-09-22 consolidation; **renamed from ASCII ~2026-09-17** — C40 deduped into this row) | Task-scoped sandbox / persistent computer | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement). Rename VERIFIED this run: `box.ascii.dev`, `boat.dev`, `ascii.dev` serve byte-identical product pages; YC's company page now `ycombinator.com/companies/boat` (YC F26); yc-oss mirror dates the rename 2026-09-17 (`former_names`: ["Ascii box","Ascii"]); the old YC slug `ycombinator.com/companies/ascii` now serves a **301 → `/companies/boat`** (VERIFIED 2026-09-24 midday — harder rename evidence than the page copy). Hardest evidence yet (VERIFIED 2026-09-24 late midday): the vendor's own API docs at `docs.ascii.dev/box/api/v1` render as **"Boat Public API v1"** — the legacy ASCII domain's developer surface brands the product *Boat* (`/box` path and box.ascii.dev endpoints persist). The documented API covers sandbox lifecycle (provisioning → ready/idle → running → archiving → archived; stop/archive, resume, fork, delete; desktop streaming; Idempotency-Key; per-sandbox API keys; data-retention API) plus a `prompt` endpoint running work through built-in agent harnesses `codex`, `claude-code`, `pi`, `opencode`, `prime-agent`, `kimi` (INFERRED read: Boat bundles coding-agent harnesses as first-class providers). Canonical domain now boat.dev. | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time; EU-only DE/FI/FR (FAQ verbatim — Germany, Finland, France; VERIFIED 2026-09-24 midday; folded from the deprecated C40 pointer row). |
@@ -1832,3 +1835,71 @@ convention would be a unilateral rule adoption, it stays
 proposed-not-codified pending corpus-owner approval; (f) adopted —
 the C40 rename section's YC-slug parenthetical now notes the slug
 still live-resolves to the Boat page via 301 (VERIFIED midday).
+
+## Watch update — 2026-09-24 (early afternoon): C45 Docker Cloud Sandboxes, Microsandbox v0.7.2/v0.7.3
+
+New-entry fold per the C32/C37/C38/C39/C40/C41/C42/C43/C44 precedents; full
+pass record in `docs/COMPETITOR_WATCH_2026-09-24_EARLY_AFTERNOON.md` (survey
+window ~12:56–13:08 CDT).
+
+**C45 new — Docker Cloud Sandboxes, in-lane, VENDOR-VERIFIED.** Docker's own
+blog
+([docker.com/blog/introducing-cloud-sandboxes-start-on-your-laptop-finish-in-the-cloud](https://www.docker.com/blog/introducing-cloud-sandboxes-start-on-your-laptop-finish-in-the-cloud),
+read in full 2026-09-24 — survey-window snippets first, full read in the repair turn): *"Today, we're introducing Cloud Sandboxes: the
+same microVM-based sandbox, running on Docker-managed compute, with one
+command to move between them."* The isolation model is identical to local
+Docker Sandboxes (own kernel, own Docker daemon); the substrate changes.
+`sbx move <name> --to cloud` migrates the filesystem bidirectionally; up to
+24-hour sessions; kits for Claude Code, Codex, Copilot, Antigravity, Open
+Code, Hermes; MCP gateway; per-agent network policies; and **secrets
+proxy-injected per request** (agents never see the actual secret — the
+**seventh convergent placeholder-swap datapoint** for the secrets turns,
+after Daytona, Microsandbox, opencomputer.dev, h-sandbox, DigitalOcean
+Managed Agents (C26), and the C43 Credentials API). Pricing is PAYG per-second:
+Micro 1 vCPU/2 GiB $0.07/h, Small (default) 2/4 $0.14/h, Medium 4/8
+$0.28/h, Large 8/16 $0.56/h, XL 16/32 $1.12/h; *"A paused sandbox costs
+nothing"*; volumes, egress, and hosting public images/kits free;
+sessions 1h default, up to 24h; limited-time $250 free credit for new
+accounts. Sign-up: web console (agentic-platform.docker.com) or
+`sbx --cloud run`, sbx ≥ 0.45.1, PAYG plan on Personal/Pro accounts;
+local Sandboxes stay free and standalone. Dating caveat: Docker's page
+shows no publish date in the fetched text (screenshots 2026-09-23);
+surfaced 2026-09-24 via a GlobeNewswire wire dated that day — filed as a
+2026-09-24 move with the caveat stated. Filed as **C45** with a
+field-table row. Read for spark-vm: Docker closed its local-only gap, and
+its framing — *"how much you can trust your agent shouldn't depend on
+where it happens to be running"* ("one strong isolation model, two
+surfaces") — is the direct inverse of spark-vm's pitch (one persistent
+computer, mine everywhere). The pricing datum is the load-bearing one:
+**$0.07/CPU-hour lands exactly on Fly Sprites' and AgentComputer's
+$0.07/CPU-hour** — three vendors now share the entry price point.
+spark-vm's self-hosted story still wins on cost-at-idle; the hosted
+product's edge has to be continuity + MCP/secret plumbing, where Docker's
+kit/secrets-proxy story is converging from above.
+
+**Tracked-set move (not a fold):** Microsandbox releases now top out
+v0.7.3 ("chore: release v0.7.3 by @toksdotdev in #1646"), with v0.7.2 and
+v0.7.3 new beyond the v0.7.1 baseline — the full-quiet streak ends at
+three (7/8 VERIFIED NO-CHANGE otherwise). The corpus field-table row pins
+no version, so no row change; release titles were not verified this run,
+recorded as a tracked-set move.
+
+**Carried asks:** C36, C41, C43, C44 all re-verified unchanged
+(VENDOR-VERIFIED on vendors' own pages). OpenAI Agents API stays public
+beta — no GA (changelog's latest entry Sep 22; Sep 10 public-beta entry
+unchanged; vendor-issued GA not found). Boat EU-only DE/FI/FR geography
+datapoint not re-located for the third consecutive pass (targeted
+searches + docs-home scan, no FAQ found) — carried per the retry rule;
+the midday verbatim fold stands. **C41 awareness flag (fold candidate,
+not folded):** the Alibaba pay-as-you-go page now documents Snapshot
+pricing ("Snapshot Storage Usage = Memory Specification × 2 + Disk
+Specification") — seen only as a section note, queued for a full re-read
+next pass. Vercel Drives GA watch out of scope (P49: once-daily, morning
+pass). Deprecated-row sunset convention stays proposed-not-codified.
+Agentic-cloud framing stays queued-adjacent (Huawei VENDOR-VERIFIED
+unchanged; Alibaba THIRD-PARTY); Tencent DataBuddy stays adjacent-watch
+(its trial portal could not be fetched this run — UNVERIFIED).
+
+**Watch-review nit adoptions:** none pending. This pass's novel yield
+(one corpus move — C45 — plus one tracked-set move) keeps the F64
+advisory untriggered.
