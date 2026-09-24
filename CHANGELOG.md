@@ -585,6 +585,12 @@ This changelog only works if entries land with the change, not after it:
   reads. (PR #253)
 
 ### Fixed
+- The Daytona isolation quote in the multi-tenant isolation research is
+  re-sourced: the vendor's security-exhibit page was retired (it now
+  redirects to their Trust Center, where the quoted claim no longer
+  appears), so the citation points at the vendor's own docs source pinned
+  at the file's final revision before removal — the quoted claim is
+  byte-identical to the one surveyed earlier. (#319)
 - The answered-approval history feed no longer re-parses every approval
   file in the on-disk archive on each 5-second poll — it reads only the
   200 most recent, so poll cost stays flat as the archive grows to its
