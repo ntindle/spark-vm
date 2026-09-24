@@ -54,6 +54,11 @@ This changelog only works if entries land with the change, not after it:
   sandbox product, cooperative-jail tier) — plus the trust-boundary split
   between them and who is NOT an ICP. Design thinking, not a commitment; the
   validation checklist lives in #343. (#347)
+- Competitor watch (2026-09-24 afternoon): tracked set 7/8 VERIFIED NO-CHANGE —
+  the eleven-pass full-quiet streak ends on Daytona's SEP 24 changelog entries
+  (V0.216.1/V0.216.2, CLI/API polish, no sandbox moves); Vercel Drives still
+  public beta; new in-lane corpus entry C43 — Google Gemini Agent Environment
+  (managed Linux sandboxes for agents, VERIFIED on Google's own docs). (#348)
 
 - Late-midday competitor watch (eleventh full quiet pass): tracked-set vendors
   8/8 VERIFIED no-change, Vercel Drives still public beta (22nd consecutive
