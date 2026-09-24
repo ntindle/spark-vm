@@ -619,6 +619,10 @@ This changelog only works if entries land with the change, not after it:
 - The credential web UI's HTTP server now drops stalled connections at a
   10-second bound: a client that declares a request body and then stalls
   can no longer pin a server thread forever (#282).
+- The jail build now fails loudly if the proxy-helper script it generates
+  for the jail has a quoting slip: the generated script is syntax-checked
+  at build time, and the build smoke tests pin the generated script's
+  shape so an unescaped variable can't silently corrupt it. (#290)
 - Credential validation rules are now canonical everywhere they are
   checked — the credential CLI, the credential web UI, and the registry
   writer previously disagreed on edge cases (over-64-character names,
@@ -722,6 +726,14 @@ This changelog only works if entries land with the change, not after it:
   (#218)
 
 ### Security
+- `muse-job log` now sanitizes the job terminal it prints: the pane
+  content an agent controls goes through the same ANSI/control-character
+  sanitizer as every other operator-facing surface, so a crafted pane
+  can't inject escape sequences into the operator's terminal. (#290)
+- The dead-TUI steer refusal error now sanitizes the pane tail it prints:
+  the up-to-8-lines of agent-influenced terminal content in the refusal
+  are stripped of escape/control sequences before reaching the operator's
+  terminal. (#290)
 - The provision-time injector's tenant-identity install and
   tenant-attribution write no longer resolve their destination paths
   twice: both pin the destination directory with no-follow semantics

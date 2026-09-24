@@ -630,7 +630,10 @@ def _capture_pane_state(target):
 
 def _dead_tui_msg(target, pane):
     """Refusal error for a pane that does not show a live TUI (issue #4)."""
-    tail = "\n".join(pane.splitlines()[-8:]) if pane else "<no pane captured>"
+    # The pane tail is agent-influenced; sanitize like every other
+    # operator-facing surface (#12 L3 class) before it reaches stderr.
+    tail = _clean_text("\n".join(pane.splitlines()[-8:])) \
+        if pane else "<no pane captured>"
     return (f"pane of {target} does not show a live TUI input box -- refusing "
             f"to steer (issue #4; pane tail:\n{tail})")
 
@@ -1463,7 +1466,10 @@ def cmd_log(args):
     pane = run("tmux", "capture-pane", "-p", "-t", f"mjob-{args.slug}").stdout.decode(
         errors="replace")
     lines = pane.splitlines()
-    print("\n".join(lines[-n:]))
+    # #12 L3: capture-pane output is agent-influenced; print it through the
+    # same ANSI/control-character sanitizer as every other operator-facing
+    # surface so a crafted pane cannot inject terminal escape sequences.
+    print(_clean_text("\n".join(lines[-n:])))
     return 0
 
 
