@@ -1477,6 +1477,8 @@ class ReopenTests(unittest.TestCase):
         plain = h._render_item({"id": "abc123def4567890",
                                 "credential": "openai"})
         self.assertNotIn("Re-opened from a denied request", plain)
+
+
 class AuditLogTests(unittest.TestCase):
     """confirmd.audit_log durability posture (arch finding A5, sentinel
     deep-read): the happy path appends the logfmt line silently; a write
