@@ -617,7 +617,7 @@ This changelog only works if entries land with the change, not after it:
   the gate commands against the test files on disk so the gap can't recur.
   The stale-updater warning (a merged updater fix that nobody activated with
   `init`) now also fires on the automated deploy path, not just
-  `check`/`status`, since the timer only ever runs `deploy`. (#TBD)
+  `check`/`status`, since the timer only ever runs `deploy`. (#326)
 - The Daytona isolation quote in the multi-tenant isolation research is
   re-sourced: the vendor's security-exhibit page was retired (it now
   redirects to their Trust Center, where the quoted claim no longer
