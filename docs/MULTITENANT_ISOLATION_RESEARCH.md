@@ -82,7 +82,7 @@ marks non-vendor claims.
 | Vendor | Tenant boundary (vendor-quoted) | Secret broker placement | Egress default | Notes |
 |---|---|---|---|---|
 | E2B | "an **isolated Linux VM**" ([docs](https://e2b.dev/docs/sandbox), no date shown) | Egress proxy with `transform.headers` injected on matching requests ([docs](https://e2b.dev/docs/sandbox/internet-access), no date shown; verified live 2026-09-20 — the old `e2b-dev/docs` GitHub blob deep-link has gone 404 after E2B's docs migration, same content now served here) | Deny-capable: rules keyed by host, host must be referenced via `allowOut` | Public URL per sandbox (contrast with H3's `public_ingress: false`) |
-| Daytona | "**isolates each sandbox using container and/or microVM technology**, ensuring that one Customer's runtime environment cannot interact with another's" ([security exhibit](https://www.daytona.io/docs/en/security-exhibit/) — page retired 2026-09-23, now redirects to the vendor Trust Center (trust.daytona.io) where the quoted claim is not visible; re-sourcing filed (#277), no date shown) | — | Configurable allow-lists + network-level firewall | Deliberately hedges container vs microVM |
+| Daytona | "**isolates each sandbox using container and/or microVM technology**, ensuring that one Customer's runtime environment cannot interact with another's" ([security exhibit source, vendor's own repo — pinned at the file's final revision before its 2026-06-23 removal](https://github.com/daytonaio/daytona/blob/b5a5d9e78d76c8bcf351f2049620250e0f34eea4/apps/docs/src/content/docs/en/security-exhibit.mdx) — the rendered page `https://www.daytona.io/docs/en/security-exhibit/` was retired 2026-09-23 and now redirects to the vendor Trust Center (trust.daytona.io), where the quoted claim is not visible (verified 2026-09-23); the vendor no longer publishes this claim — treat it as historical evidence, not a live commitment; quote byte-verified as identical to the claim surveyed 2026-09-20; closes #277) | — | Configurable allow-lists + network-level firewall | Deliberately hedges container vs microVM |
 | Modal | "**Sandboxes are built on top of gVisor**… the blast radius of any malicious code will be limited to the **Sandbox container itself**" ([docs](https://modal.com/docs/guide/sandbox-networking), no date shown) | — | **Fail-open**: "By default, Sandboxes can make outbound connections to any public IP address" (closable) | The outlier: container, not hardware VM |
 | Vercel Sandbox | "**Each sandbox runs in a secure Firecracker microVM** with its own filesystem and network" ([docs](https://vercel.com/docs/sandbox), no date shown) | "**Credentials brokering injects secrets into outbound requests without exposing them inside the sandbox**… never enter the sandbox" ([sandbox page](https://vercel.com/sandbox)) | Modes: allow-all / deny-all / user-defined | Broker **outside** the guest |
 | Runloop | "**Isolated, ephemeral virtual machines**… created on demand, and deleted when they are no longer needed" ([docs](https://docs.runloop.ai/docs/devboxes/overview), no date shown) | "Connect agents to LLM APIs via Agent Gateways… **without exposing your real credentials to the devbox**" (same docs) | Network Policies, deny-capable | Broker **outside** the guest |
@@ -291,7 +291,10 @@ separate shape.
 ## Sources
 
 Vendor (fetched or search-verified 2026-09-20): E2B docs (sandbox,
-internet-access, public-url); Daytona security exhibit; Modal sandbox
+internet-access, public-url); Daytona security exhibit (rendered page retired
+2026-09-23 — now redirects to the vendor Trust Center; the isolation quote is
+cited from the vendor's own docs source, pinned at the file's final revision
+before its 2026-06-23 removal — see the Daytona row above); Modal sandbox
 networking guide; Vercel sandbox docs + sandbox page; Runloop devboxes
 overview; AgentComputer site + docs + computer-guest repo; TermSquad features
 pages; Cloudflare Sandbox SDK security + architecture + containers concepts;
