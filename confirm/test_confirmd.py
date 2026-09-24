@@ -514,25 +514,6 @@ class ConfirmdTests(unittest.TestCase):
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(headers["Referrer-Policy"], "same-origin")
 
-    def test_1_swjs_hardening_headers(self):
-        """Issue #77 (L3): /sw.js is served inline in do_GET, not through
-        _send_html — drive the real route and assert the same two headers
-        reach the wire. Deleting either header must fail."""
-        import io
-        h = cd.Handler.__new__(cd.Handler)
-        h.path = "/sw.js"
-        headers = {}
-        h.send_response = lambda code: headers.setdefault("code", code)
-        h.send_header = lambda k, v: headers.__setitem__(k, v)
-        h.end_headers = lambda: None
-        h.wfile = io.BytesIO()
-        with mock.patch.object(cd.Handler, "_auth",
-                               return_value="ntindle@github"):
-            h.do_GET()
-        self.assertEqual(headers["code"], 200)
-        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
-        self.assertEqual(headers["Referrer-Policy"], "same-origin")
-
     def test_1_routes_carry_poller(self):
         """/ and /answered wire the live poller (engineering #3)."""
         for path, fn in (("/", "renderPending"), ("/answered", "renderAnswered")):

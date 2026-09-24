@@ -300,9 +300,8 @@ def test_runs_from_linked_worktree(workrepo, tmp_path):
     """Issue #349: in a git linked worktree, `.git` is a file (a `gitdir:`
     pointer), not a directory — the repo gate must use `git rev-parse
     --git-dir` so a worktree run gets past it instead of aborting with
-    "not a git repo". (The worktree sits on a helper branch — `git worktree
-    add <path>` without -b names it after the path basename ("worktree") —
-    so the next preflight, the main-branch check, is the expected stop.)"""
+    "not a git repo". (The worktree sits on a helper branch, so the next
+    preflight — the main-branch check — is the expected stop.)"""
     wt = tmp_path / "worktree"
     git("worktree", "add", str(wt), cwd=workrepo)
     r = run_script(wt, "--dry-run")
