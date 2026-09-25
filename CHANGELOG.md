@@ -110,8 +110,12 @@ This changelog only works if entries land with the change, not after it:
   churn the deploy/rollback loop every tick), never mark a healthy HEAD
   blocked, and are audited with `"trigger":"extra-inputs"`. The hashed
   input is bounded (1 MiB prefix + file size) so a planted sparse file
-  cannot stall the tick; symlinks hash as unreadable rather than being
-  followed (#302). The deploy script also honors the `WITH_PROXY_CA_BUNDLE`
+  cannot stall the tick. The read runs at the deploy privilege through an
+  atomic O_NOFOLLOW|O_NONBLOCK open with no shell check-then-read window:
+  a symlink/FIFO swap race or a planted FIFO can no longer stall the tick
+  while it holds the single-flight lock, and symlinks, FIFOs, directories,
+  and hardlinks hash as non-regular rather than being followed or blocked
+  on (#302). The deploy script also honors the `WITH_PROXY_CA_BUNDLE`
   override it already advertised instead of writing a hardcoded path
   (#303), and the jail README now documents the jail build's dependency
   on the sibling `proxy/` tree (#304).

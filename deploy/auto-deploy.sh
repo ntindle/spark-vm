@@ -316,35 +316,43 @@ extra_inputs_hash() {
     # extra_inputs_hash <component> — deterministic digest of the
     # component's host-side (non-repo) inputs declared as <component>_extra_paths
     # in components.conf (issue #302). Missing file -> "missing" token,
-    # unreadable file -> "unreadable" token: both are legitimate digest
-    # inputs, so CA-generated, CA-rotated, and CA-deleted transitions all
-    # count as changes.
-    # Only regular files are hashed, and only through a real path (Security
-    # review): the input is swapd-writable, so sha256sum must not block on a
-    # planted FIFO while the tick holds the single-flight lock, and must not
-    # read unbounded bytes on a sparse multi-GB plant. A FIFO/dir/socket or
-    # a symlink hashes as "unreadable" instead — which still counts as a
-    # change vs a real CA. Symlinks are NOT followed on purpose: the deploy
-    # path (build_ca_bundle.py) fail-closes on symlinks, so a symlinked CA
-    # can never converge; following it would hand a swapd writer a 1-bit
-    # change oracle on any root-readable file the link points at.
-    # The hashed prefix is capped at EXTRA_INPUTS_HASH_MAX_BYTES with the
-    # file size folded in, so a sparse >1MiB plant neither stalls the tick
-    # nor goes undetected. The || h="" guards the bare assignment under
-    # set -e: a TOCTOU unlink between the -f/-r test and the read retries
-    # the tick instead of aborting it.
-    local c="$1" p h digest
+    # non-regular file -> "nonregular" token, read error -> "unreadable"
+    # token: all are legitimate digest inputs, so CA-generated, CA-rotated,
+    # and CA-deleted transitions all count as changes.
+    # The read runs at the deploy privilege through sudo_run, via the
+    # atomic open discipline in deploy/extra_inputs_hash_read.py
+    # (O_RDONLY | O_NOFOLLOW | O_NONBLOCK, fstat before read, regular-file
+    # gate, hardlink refusal, capped read — mirroring
+    # build_ca_bundle.py::_privileged_read). There is deliberately NO shell
+    # check-then-read: the old `[ -L ]`/`[ -f ]` test followed by `head`
+    # left a swap window a swapd-level writer could win — a symlink
+    # winning the race got followed, and a symlink→FIFO winning the race
+    # made `head` block forever on the open while the tick held the
+    # single-flight lock (permanent deploy-tick liveness DoS). The refusal
+    # is part of the open itself now, so there is no window to race.
+    # Reading privileged also matches every other consumer of the path:
+    # nothing documents the CA path as readable by the invoking user, and
+    # a chmod-toggle by swapd could previously flip the digest without
+    # changing a single byte the deploy path would read.
+    # The || mat="" guards the bare assignment under set -e: a helper that
+    # fails outright (missing python3, broken install) retries the tick
+    # instead of aborting it.
+    local c="$1" p h digest mat
+    # Fail loud on a stale install: if init has not been re-run since the
+    # helper was introduced, the installed copy has no reader — hashing
+    # everything as "unreadable" instead would silently disable rotation
+    # detection (#302's whole purpose). The deploy/check paths abort via
+    # set -e; cmd_status guards the call (diagnostic command).
+    if [ ! -r "$SCRIPT_DIR/extra_inputs_hash_read.py" ]; then
+        log "ERROR: extra_inputs_hash_read.py missing next to the installed auto-deploy.sh — re-run 'auto-deploy.sh init'"
+        return 1
+    fi
     digest=""
     while IFS= read -r p; do
         [ -n "$p" ] || continue
-        if [ ! -e "$p" ] && [ ! -L "$p" ]; then
-            h="missing"
-        elif [ ! -L "$p" ] && [ -f "$p" ] && [ -r "$p" ]; then
-            h="$( { stat -c '%s' "$p" 2>/dev/null; head -c "$EXTRA_INPUTS_HASH_MAX_BYTES" "$p" 2>/dev/null; } | sha256sum | cut -d' ' -f1 )" || h=""
-            [ -n "$h" ] || h="unreadable"
-        else
-            h="unreadable"
-        fi
+        mat="$(sudo_run python3 "$SCRIPT_DIR/extra_inputs_hash_read.py" "$p" "$EXTRA_INPUTS_HASH_MAX_BYTES")" || mat=""
+        [ -n "$mat" ] || mat="unreadable"
+        h="$(printf '%s' "$mat" | sha256sum | cut -d' ' -f1)"
         digest="${digest}${p}=${h}
 "
     done < <(get_arr "$c" extra_paths)
@@ -365,8 +373,11 @@ record_extra_inputs() {
     [ -n "$(get_arr "$c" extra_paths 2>/dev/null)" ] || return 0
     h="$(extra_inputs_hash "$c")"
     tmp="$EXTRA_INPUTS_STATE.tmp"
+    # grep rc=1 ("no lines selected") is the normal nothing-to-carry case;
+    # only that is tolerated — rc=2 is a real read error and fails closed
+    # under set -e rather than converging the digest on a corrupt state.
     if [ -f "$EXTRA_INPUTS_STATE" ]; then
-        grep -v -e "^${c}=" -e "^${c}_last_forced=" "$EXTRA_INPUTS_STATE" >"$tmp" 2>/dev/null || true
+        grep -v -e "^${c}=" -e "^${c}_last_forced=" "$EXTRA_INPUTS_STATE" >"$tmp" 2>/dev/null || [ $? -eq 1 ]
     else
         : >"$tmp"
     fi
@@ -392,8 +403,11 @@ note_forced_attempt() {
     [ -n "$(get_arr "$c" extra_paths 2>/dev/null)" ] || return 0
     now="$(date +%s)"
     tmp="$EXTRA_INPUTS_STATE.tmp"
+    # grep rc=1 ("no lines selected") is the normal nothing-to-carry case;
+    # only that is tolerated — rc=2 is a real read error and fails closed
+    # under set -e rather than stamping the dampening epoch on a corrupt state.
     if [ -f "$EXTRA_INPUTS_STATE" ]; then
-        grep -v -e "^${c}_last_forced=" "$EXTRA_INPUTS_STATE" >"$tmp" 2>/dev/null || true
+        grep -v -e "^${c}_last_forced=" "$EXTRA_INPUTS_STATE" >"$tmp" 2>/dev/null || [ $? -eq 1 ]
     else
         : >"$tmp"
     fi
@@ -884,6 +898,10 @@ cmd_init() {
         git clone "$PINNED_UPSTREAM" "$UPDATER_REPO"
     fi
     install -m 0755 "$SCRIPT_DIR/auto-deploy.sh" "$INSTALLED_BIN/auto-deploy.sh"
+    # extra_inputs_hash() reads host-side inputs through this helper at the
+    # deploy privilege (sudo_run); the installed copy must carry it, or the
+    # digest read fails outright and the tick retries without converging.
+    install -m 0644 "$SCRIPT_DIR/extra_inputs_hash_read.py" "$INSTALLED_BIN/extra_inputs_hash_read.py"
     install -m 0644 "$UPDATER_COMPONENTS_CONF" "$INSTALLED_BIN/components.conf"
     record_updater_source
     log "installed updater to $INSTALLED_BIN (timer ExecStart must point here)"
@@ -1337,7 +1355,11 @@ cmd_status() {
         # extra_inputs_changed's read. Reachable after init before the
         # first successful proxy deploy, or after any state-dir wipe.
         rec="$(sed -n "s/^${sc}=//p" "$EXTRA_INPUTS_STATE" 2>/dev/null | head -1 || true)"
-        cur="$(extra_inputs_hash "$sc")"
+        # status is diagnostic: a broken digest read must not abort it.
+        if ! cur="$(extra_inputs_hash "$sc")"; then
+            echo "extra-inputs($sc): ERROR — could not hash host-side inputs (see log)"
+            continue
+        fi
         if [ "$rec" = "$cur" ]; then
             echo "extra-inputs($sc): in sync (${cur:0:12}…)"
         else

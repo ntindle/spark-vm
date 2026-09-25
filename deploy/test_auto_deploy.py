@@ -1412,7 +1412,11 @@ def _extra_inputs_env(tmp_path):
     ca = ca_dir / "mitmproxy-ca-cert.pem"
     state = tmp_path / "state"
     state.mkdir()
-    env = {"SWAPD_HOME": str(swapd), "UPDATER_STATE_DIR": str(state)}
+    # SKIP_SUDO=1: the digest read routes through sudo_run (the deploy-
+    # privilege wrapper); unit tests must exercise the wrapper contract,
+    # never a real sudo.
+    env = {"SWAPD_HOME": str(swapd), "UPDATER_STATE_DIR": str(state),
+           "SKIP_SUDO": "1"}
     return env, ca, state
 
 
@@ -1669,9 +1673,10 @@ def test_extra_inputs_nonforced_record_drops_forced_timestamp(tmp_path):
 
 def test_extra_inputs_hash_never_blocks_on_fifo(tmp_path):
     """The CA path is swapd-writable; a planted FIFO must not hang the
-    deploy tick (sha256sum would block on open while the tick holds the
-    single-flight lock). Only regular files are hashed — anything else is
-    an 'unreadable' token, which still counts as a change vs a real CA."""
+    deploy tick (the old sha256sum-on-open would block while the tick held
+    the single-flight lock; the helper opens O_NONBLOCK and refuses
+    non-regular files at the open). A FIFO hashes as nonregular — which
+    still counts as a change vs a real CA."""
     env, ca, state = _extra_inputs_env(tmp_path)
     ca.write_bytes(b"real-ca")
     r = source_and("record_extra_inputs proxy", env_extra=env)
@@ -1687,6 +1692,136 @@ def test_extra_inputs_hash_never_blocks_on_fifo(tmp_path):
     out = r.stdout + r.stderr
     assert "CHANGED_RC=0" in r.stdout, \
         "FIFO at the CA path must count as a change without hanging: " + out
+
+
+# --- privileged atomic read (Security review: TOCTOU + wrong-privilege) -----
+
+def _hash_read(path, cap=1048576):
+    """Direct invocation of the digest-read helper
+    (deploy/extra_inputs_hash_read.py)."""
+    r = subprocess.run(
+        ["python3", os.path.join(REPO, "deploy", "extra_inputs_hash_read.py"),
+         str(path), str(cap)],
+        capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def test_extra_inputs_hash_read_helper_content_contract(tmp_path):
+    """The helper's content line is a deterministic 64-hex digest that is
+    content-sensitive: identical bytes hash identically, changed bytes
+    hash differently."""
+    f = tmp_path / "ca.pem"
+    f.write_bytes(b"fake-ca-bytes")
+    h1 = _hash_read(f)
+    assert re.fullmatch(r"[0-9a-f]{64}", h1), h1
+    assert _hash_read(f) == h1, "identical bytes must hash identically"
+    f.write_bytes(b"fake-ca-bytes-rotated")
+    assert _hash_read(f) != h1, "changed bytes must hash differently"
+
+
+def test_extra_inputs_hash_read_helper_refuses_nonregular(tmp_path):
+    """Symlink (live or dangling), FIFO, directory, and hardlink all hash
+    as nonregular — the refusal is part of the open itself (O_NOFOLLOW),
+    so there is no check-to-read window for a swapd-level writer to race,
+    and a planted FIFO can never block the read."""
+    real = tmp_path / "real.pem"
+    real.write_bytes(b"real")
+    link = tmp_path / "link.pem"
+    link.symlink_to(real)
+    assert _hash_read(link) == "nonregular", "live symlink must not be followed"
+    dangling = tmp_path / "dangling.pem"
+    dangling.symlink_to(tmp_path / "nope")
+    assert _hash_read(dangling) == "nonregular", "dangling symlink is nonregular"
+    fifo = tmp_path / "fifo.pem"
+    os.mkfifo(fifo)
+    assert _hash_read(fifo) == "nonregular", "FIFO must not be opened for read"
+    assert _hash_read(tmp_path) == "nonregular", "directory must not be read"
+    hard = tmp_path / "hard.pem"
+    os.link(real, hard)
+    assert _hash_read(hard) == "nonregular", \
+        "hardlink refused like the deploy path (issue #299 discipline)"
+    assert _hash_read(tmp_path / "absent.pem") == "missing"
+
+
+def test_extra_inputs_hash_read_helper_honors_cap(tmp_path):
+    """The cap is single-sourced from the shell's EXTRA_INPUTS_HASH_MAX_BYTES
+    via argv: only the first <cap> bytes are hashed, but the full file size
+    is folded in so growth past the cap still flips the digest."""
+    a = tmp_path / "a.bin"
+    a.write_bytes(b"x" * 10 + b"y" * 90)
+    b = tmp_path / "b.bin"
+    b.write_bytes(b"x" * 10 + b"z" * 90)
+    assert _hash_read(a, cap=10) == _hash_read(b, cap=10), \
+        "bytes past the cap must not affect the digest"
+    c = tmp_path / "c.bin"
+    c.write_bytes(b"x" * 10 + b"y" * 190)
+    assert _hash_read(c, cap=10) != _hash_read(a, cap=10), \
+        "growth past the cap must still flip the digest (size folded in)"
+
+
+def test_extra_inputs_hash_reads_through_sudo_run(tmp_path):
+    """Security BLOCKING 2: the digest read must go through sudo_run (the
+    deploy-privilege wrapper), not a bare shell read — every other consumer
+    of the path reads privileged, so the digest must too. Override sudo_run
+    with a marker-emitting passthrough (marker to stderr, so the digest
+    material on stdout stays clean) and assert the marker appears."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r = source_and(
+        "sudo_run() { echo SUDO_RUN_MARKER >&2; \"$@\"; }; "
+        "extra_inputs_hash proxy",
+        env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "SUDO_RUN_MARKER" in r.stderr, \
+        "extra_inputs_hash must route the read through sudo_run"
+    assert re.fullmatch(r"[0-9a-f]{64}", r.stdout.strip()), r.stdout
+
+
+def test_extra_inputs_symlink_never_followed_through_shell_path(tmp_path):
+    """Through the shell path: a symlink at the CA path hashes differently
+    from the content it points at — i.e. it is refused, not followed. The
+    deploy path fail-closes on symlinks, so following would hand a
+    swapd-level writer a 1-bit change oracle on any root-readable file the
+    link points at."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    target = tmp_path / "real-target.pem"
+    target.write_bytes(b"real-ca")
+    ca.symlink_to(target)
+    r1 = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r1.returncode == 0, r1.stderr
+    ca.unlink()
+    ca.write_bytes(b"real-ca")
+    r2 = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r2.returncode == 0, r2.stderr
+    assert r1.stdout.strip() != r2.stdout.strip(), \
+        "symlink must hash differently from the content it points at"
+
+
+def test_extra_inputs_hash_missing_helper_fails_loud(tmp_path):
+    """A stale installed copy (init not re-run since the helper was added)
+    must fail LOUD, not silently hash everything as a constant digest —
+    silent degradation would switch off rotation detection (#302's whole
+    purpose) with zero alerting."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r = source_and("SCRIPT_DIR=/nonexistent-dir; extra_inputs_hash proxy",
+                   env_extra=env)
+    assert r.returncode != 0, "missing helper must fail, not degrade"
+    assert "extra_inputs_hash_read.py" in r.stderr
+
+
+def test_cmd_status_tolerates_missing_helper(tmp_path):
+    """cmd_status is diagnostic: a broken digest read must degrade to an
+    ERROR line, not abort the whole status output."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set -e; "
+                 "SCRIPT_DIR=/nonexistent-dir; cmd_status; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=0" in r.stdout, out
+    assert "extra-inputs(proxy): ERROR" in out, out
 
 
 def test_cmd_deploy_forced_failure_never_blocks_head(tmp_path):
