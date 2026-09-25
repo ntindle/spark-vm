@@ -186,7 +186,9 @@ Sep 24 (no Sep-25 entry — VERIFIED absent); C26 conflicts unchanged
 (watched lines); C52 follow-up lead (Kits v2 mechanics read); C54
 primary-source read (Perplexity's own post); **C55 primary-source
 read** (blog.cloudflare.com disclosure — referenced but not opened
-this pass); Island company announcement read (Reuters wire as cited);
+this pass); Meta Muse Mac VM-filesystem-export — check Meta's own
+page next pass (watch-only per standing instruction); Island company
+announcement read (Reuters wire as cited);
 Vercel Drives not re-checked (P49 — next the 2026-09-26 morning
 pass). Next pass's ask: routine tracked-set re-reads; watch Docker
 docs release-notes for the C45 Cloud Sandboxes surfacing.
