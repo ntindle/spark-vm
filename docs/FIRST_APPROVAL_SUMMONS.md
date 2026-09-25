@@ -51,15 +51,17 @@ So the design has two halves:
 
 - **Box side (S1):** `_file_approval` appends a filing event to a durable
   local journal (`$APPROVALS_DIR/summons-outbox.jsonl`) **inline, adjacent
-  to the `os.replace` that files the pending record**, inside the same
-  `except OSError` block. The filing path is already synchronous on the
-  hot path (makedirs, a full `listdir` scan, `os.replace`), so the
-  "hot path" argument against one locked append collapses — the append
-  shares the filing's durability rather than a weaker one. The residual
-  loss window is a process crash between the two writes; a box-side
-  reconciliation sweep (S1, on the same schedule as the event shipper)
-  diffs `pending/` against the journal and re-ships anything the inline
-  append missed, so even that window closes. Event payload: `aid`,
+  to the `os.replace` that files the pending record** — inside the same
+  try block, guarded by the existing `except OSError` (an append failure
+  demotes the client to no-signal, the same failure class as the filing's
+  own writes). The filing path is already synchronous on the hot path
+  (makedirs, a full `listdir` scan, `os.replace`), so the "hot path"
+  argument against one locked append collapses — the append shares the
+  filing's durability rather than a weaker one. The residual loss window
+  is a process crash between the two writes *for a record still
+  pending*; a box-side reconciliation sweep (S1-owned cadence,
+  minutes-scale — see §7) diffs `pending/` against the journal and
+  re-ships anything the inline append missed. Event payload: `aid`,
   `filed_at`, `expires`, the plain-language action summary (credential
   name + host + method — the same text the page already shows; never
   model-authored free text, per the finding-49 discipline), and a tenant
@@ -91,13 +93,14 @@ email then never goes out); it cannot forge another tenant's events
 undetectably. Cross-tenant forgery degrades to self-spam or a re-check
 miss, never a misdirected summons.
 
-**Recipient:** the recipient is the magic-link email the human
-handed the signup flow (stage 1), read from the signup identity store
-(owner: the signup flow, H15). The control plane must be able to read
-that address at summons time — whether it is carried in the G3 tenant
-record (a record-extension question, named in S2's sequencing) or read
-from the identity store directly is S2's call; either way the field is
-named here so the dependency is visible.
+**Recipient:** the recipient is the magic-link account email collected
+at signup (funnel stage 2, `FIRST_RUN_ACTIVATION.md` §5), read from the
+signup account/identity records — owner: the H9 identity service (the
+account-creation UI itself is H15-era). The control plane must be able
+to read that address at summons time — whether it is carried in the G3
+tenant record (a record-extension question, named in S2's sequencing)
+or read from the identity records directly is S2's call; either way the
+field is named here so the dependency is visible.
 
 Fail-open throughout: observer, network, or API failure never loses the
 filed approval and never blocks the swap path. The observer retries with
@@ -233,10 +236,24 @@ event vocabulary):
 
 - **S1 — box-side journal:** `_file_approval` appends the filing event
   to `$APPROVALS_DIR/summons-outbox.jsonl` inline, adjacent to the
-  `os.replace` (same durability as the filing itself), plus a box-side
-  reconciliation sweep that diffs `pending/` against the journal and
-  re-ships anything the inline append missed. Unit-tested: journal row
-  shape, adjacency, the sweep's diff. Naming note: `$APPROVALS_DIR` is
+  `os.replace` — inside the same try block, guarded by the existing
+  `except OSError` (an append failure demotes the client to no-signal,
+  the same failure class as the filing's own writes, which already
+  return `[]` on `OSError`). The append shares the filing's durability
+  rather than a weaker one. A box-side reconciliation sweep (S1-owned
+  cadence, minutes-scale) diffs `pending/` against the journal and
+  re-ships anything the inline append missed. The sweep only recovers
+  misses for records still in `pending/` at sweep time: a record
+  answered or expiry-reaped before the sweep (`confirmd.py` consumes the
+  pending file on both) is moot — the human already engaged, or the
+  request expired into `human-drop-off`. No stray summons results: the
+  observer's pending-state mirror is fed by the box's
+  answered/expired lifecycle events over the same channel, so a
+  re-shipped event for an already-answered aid meets an answered
+  mirror entry and the summons (and its reminder) are suppressed. The
+  residual loss window is therefore a process crash between the two
+  writes *for a record still pending* — stated, not hand-waved. Unit-tested: journal row shape, adjacency,
+  the sweep's diff. Naming note: `$APPROVALS_DIR` is
   `_file_approval`'s tree (`SWAP_APPROVALS_DIR`, default
   `/home/swapd/approvals`); push.py's `CONFIRM_DIR` defaults to the same
   path — the journal lives in the approvals tree either way.
@@ -251,12 +268,12 @@ event vocabulary):
   the transport-authenticated box→tenant binding); idempotency via the
   tenant record's `first_summons_sent` flag; dead-letter journal.
   **Sequencing:** (a) the §10 event channel is unbuilt — say so, and
-  verify its file/batch-read capability at implementation; (b) G3's S1
+  verify its batch-write/ship capability at implementation; (b) G3's S1
   (the tenant-record store, carrying `first_summons_sent`,
   `approvals_url`, and possibly the recipient) is unbuilt; (c) G8's
-  `approvals_url` write-ownership (fallback licensed in §2 until then);
-  (d) the recipient's read path from the signup identity store
-  (record-extension question, §1).
+  `approvals_url` write-ownership — until it resolves, the email omits
+  the deep link per §2; (d) the recipient's read path from the H9
+  identity records (record-extension question, §1).
 - **S3 — retirement + funnel telemetry:** the §4 retirement rule (201
   accepted = retired; 410 = email fallback + re-registration), the §6
   funnel events, and the operator-dashboard surfacing of
@@ -267,11 +284,12 @@ event vocabulary):
 - **G8 (dependency):** which signup-flow step owns the `approvals_url`
   write, and re-entry rotation. Blocks the deep link's carrier, not the
   design.
-- **Magic-link email already exists?** `HOSTED_SIGNUP_ONBOARDING.md` §5
-  describes the magic-link flow, but in-tree there is only inbox
-  *reading* (`site/waitlist_patha.py`) — no sender. The S2 implementer
-  is likely building the first operator mail sender, not "verifying
-  reuse": verify the credential's *placement* (operator plane only,
+- **Operator mail path exists — reuse decision, not greenfield.**
+  `site/waitlistd.py` already spools outbound transactional mail
+  (`_spool_patha_email`: clarification replies, forget confirmations,
+  confirms/reminders/invites, with per-address send caps) under the
+  operator identity. S2 decides reuse vs. a second sender; either way,
+  verify the credential's *placement* (operator plane only,
   `hsurr:agentmail` via `cred set`), not just the API path.
 - **Dedicated vs shared inbox:** the free tier allows 3 inboxes
   (waitlist, spark-agent, +1). Whether the summons gets a dedicated
