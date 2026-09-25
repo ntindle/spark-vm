@@ -3422,3 +3422,61 @@ dennysentinel.com analysis, 2026-09-24 "The Kernel Held. The
 Allowlist Didn't."); C37 Pro fee still structurally omitted; C26
 conflicts unchanged; Vercel Drives not re-checked (P49 — next the
 2026-09-26 morning pass).
+
+## Watch update — 2026-09-25 (late night): carried leads re-verified live, delta scan dedupes 6-for-6
+
+Survey window ~17:54–18:30 CDT. Full tracked set was 9/9 VERIFIED NO-CHANGE ~35–50 min
+earlier, so this pass retired the carried leads (live re-verification) plus a delta-only
+news scan. **No new C-numbers.**
+
+**Carried leads, all re-verified live this run:**
+- **C37 CARRY** — `freestyle.sh/pricing` read live (full page): Pro monthly fee still NOT
+  printed (only dollar figure on page is the $50 Hobby reference); rate card verbatim
+  unchanged (vCPU $0.04032/h, GiB memory $0.0129/h, GiB storage $0.000086/h, transfer
+  $0.02/GB); page grew (full Free/Hobby/Pro limits table, expanded FAQ) but no Pro fee
+  added. Structurally omitted from public pricing — dashboard-signed-in check remains
+  the only unexercised path.
+- **C26(a) CARRY** — DO docs pricing page read live: still "Last verified 22 Sep 2026",
+  snapshots/checkpoints still **$0.05/GiB-month** verbatim; vendor launch blog (read live)
+  agrees at $0.05; syndicated BusinessWire copies still $0.005 — the intra-vendor 10×
+  discrepancy persists, neither side corrected. The $0.005 figure appears ONLY in the
+  press release.
+- **C26(b) CARRY** — same docs page read live: "Active CPU billing is coming soon …
+  billed at 25% of the vCPUs allocated" footnote still verbatim vs the present-tense
+  "billed per second of active compute … charge falls to zero" body copy; launch blog
+  (read live) still present-tense $0.044/vCPU-hour. Timing conflict unresolved.
+- **C54 CARRY** — primary article body still UNVERIFIED (blocked): direct URL 403s as
+  before; the web.archive.org snapshot (20260924213405) exists but is a 204 empty
+  capture; `r.jina.ai` blocked by policy; no full-text mirror. Never claimed as
+  NO-CHANGE. **Corpus enrichment (THIRD-PARTY):** the dennysentinel.com 2026-09-24
+  analysis ("The Kernel Held. The Allowlist Didn't.") read beyond the bare stats this
+  pass — models tested (Claude Opus 5.0, DeepSeek V4 Pro 0813, Gemini 3.1 Pro, GLM 5.2,
+  GPT-5.6 Cyber, GPT-5.6 Sol, Grok 4.20, Kimi K3, Qwen 3.8 27B; **Fable and GPT-6 Astra
+  refused outright**), DNS-spoof and IP-sharing/authority-switch bypass mechanisms
+  (fiddle.fastly.dev pivot, thum.io-screenshot-OCR via images.taboola.com), the
+  vendor-response table (E2B, Vercel Sandbox, microsandbox v0.6.18 fix, Modal, Daytona
+  authority-mismatch enforcement, Deno `allowNet` fix, Fly.io Sprites in progress;
+  Cloudflare Sandbox and NVIDIA OpenShell clean), the remediation (nftables prerouting
+  rule + per-request HTTP authority validation + gateway TLS termination requiring
+  SNI+hostname allowlisted AND DNS-attributed — "Closing the hole meant removing
+  capability"), and the key quotes ("relying only on the destination IP address at the
+  host … is insufficient", "the absence of an observed escape is not a proof of
+  isolation"). Threat-model note for spark-vm: both bypasses are authority-vs-identity
+  failures — the exact class the host-based egress allowlist must rule out; the
+  per-request authority-validation remediation is a concrete pattern worth tracking.
+
+**Delta news scan** (~18:05–18:25 CDT): six in-lane candidates surfaced, ALL dedupe to
+already-filed corpus — Docker Cloud Sandboxes Sept 24 launch (**C45**), Sandbox Kit
+spec → CNCF Apache 2.0 (**C52**), DO Managed Agents preview (**C26**), DeepSeek DSec
+scale paper (**C49/C56**), Google AX 25/56-settings analysis (corpus), Cognitora.dev
+Show HN (corpus). Strict 6-hour window: zero new launches, pricing changes, outages,
+or security disclosures from E2B, Modal, Vercel Sandbox, Fly.io, or Cloudflare Sandbox.
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_LATE_NIGHT.md`. Surveyor captures
+`agent_notes/surveyor-a/b-20260925-1754.md` (loop workspace, not repo).
+
+**Carried:** C54 full article-body read (still blocked); C37 Pro fee structurally
+omitted; C26 conflicts unchanged; Vercel Drives not re-checked (P49 — next the
+2026-09-26 morning pass).
+
+**In-lane, no new filings.** In-lane no-launch verdict dated 2026-09-25 stands.
