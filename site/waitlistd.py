@@ -600,6 +600,25 @@ class WaitlistService:
                 return row
         return None
 
+    def _claimed_row_by_email(self, owner):
+        """Find a claimed (signed_up) row for the normalized owner
+        address. signed_up is TERMINAL in the spec's state machine
+        (WAITLIST_OPERATIONS.md §3: pending → confirmed → invited →
+        signed_up — no transition back), so the submit paths must no-op
+        on it exactly like they do on invited rows: a re-submit after a
+        claim must not spawn a second pending row for the same address
+        (which a later wave would invite again — a duplicate
+        invite/claim cycle for one email, and double-counted funnel
+        events). Kept separate from _live_row_by_email on purpose:
+        the forget flow must NOT resolve claimed rows (the §5 forget
+        link validates only for pending/confirmed/invited — extending
+        that is a spec decision, not a code fix)."""
+        for row in self.rows.values():
+            if (row.get("owner_email") == owner and
+                    row.get("status") == "signed_up"):
+                return row
+        return None
+
     def _emit(self, event, ref, attrs=None):
         self._append(
             "funnel_events.jsonl",
@@ -1080,6 +1099,12 @@ class WaitlistService:
                 # honestly instead of "check your inbox" for a confirm
                 # link that would be dead on arrival.
                 return 200, page_already_invited(owner_raw)
+            if self._claimed_row_by_email(owner) is not None:
+                # Already claimed: signed_up is terminal — a re-submit
+                # must not spawn a second pending row (a later wave
+                # would invite the duplicate and double-count the
+                # funnel). No new row, no email, nothing refreshed.
+                return 200, page_already_claimed(owner_raw)
             return self._create_row(owner, owner_raw, muse_contact)
 
     def _resubmit_core(self, row, muse_contact):
@@ -1395,6 +1420,10 @@ class WaitlistService:
                              refreshed. The submission ledger event is
                              still recorded (the §6 budget counts
                              attempts).
+          "already_claimed"  — the owner already claimed the invite
+                             (signed_up is terminal — WAITLIST_OPERATIONS
+                             §3); no new row, no email, nothing refreshed.
+                             The submission ledger event is still recorded.
           "intake_limited" — per-sender 3/day tripped; nothing written
                              except the triage the caller performs.
 
@@ -1417,6 +1446,12 @@ class WaitlistService:
                 # must not duplicate the row, refresh anything, or queue
                 # a confirm email whose link would be dead on arrival.
                 return "already_invited", live
+            claimed = self._claimed_row_by_email(owner)
+            if claimed is not None:
+                # signed_up is terminal (see submit_form): no new row,
+                # no email, nothing refreshed — the duplicate would be
+                # invited again by a later wave.
+                return "already_claimed", claimed
             _, _page = self._create_row(
                 owner, owner, sender, path="email",
                 inbound_auth=inbound_auth, pubkey=pubkey, usecase=usecase)
@@ -2295,6 +2330,24 @@ def page_already_invited(owner_raw):
             "entry and you rejoin the line at the back, and you&#x2019;ll "
             "be invited again in a later wave, when one runs. Re-entering "
             "the address here won&#x2019;t speed that up.</p>"
+        ),
+    )
+
+
+def page_already_claimed(owner_raw):
+    """Honest rendering for a re-submit on an already-claimed address:
+    no new row, no new email — the invite was already claimed
+    (signed_up is terminal; re-entering the address must never open a
+    second invite/claim cycle for it)."""
+    addr = html.escape(owner_raw.strip(), quote=True)
+    return PAGE_SHELL.format(
+        title="Already claimed",
+        body=(
+            "<h1>Already claimed</h1>"
+            f"<p><strong>{addr}</strong> already claimed its invite — "
+            "the claim is recorded and there&#x2019;s nothing else to do.</p>"
+            '<p class="muted">Re-entering the address here won&#x2019;t '
+            "create a new spot — each address claims exactly once.</p>"
         ),
     )
 

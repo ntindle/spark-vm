@@ -235,6 +235,8 @@ def process_inbound(service, raw, *, auth, inbox_addr):
       "forget_request_sent"   §5 forget-confirmation email spooled
       "forget_request_capped" forget confirmation suppressed by the cap
       "already_invited"       owner already holds a claim email — no-op
+      "already_claimed"       owner already claimed the invite
+                              (signed_up is terminal) — no-op
       "intake_limited"        per-sender 3/day tripped — silent
       "triage"                silent triage (unauthenticated or garbage);
                               outcome["reason"] + ["triage_file"] say why
