@@ -1811,6 +1811,28 @@ def test_extra_inputs_hash_missing_helper_fails_loud(tmp_path):
     assert "extra_inputs_hash_read.py" in r.stderr
 
 
+def test_extra_inputs_changed_degrades_clean_on_missing_helper(tmp_path):
+    """Missing helper + recorded digest must NOT count as changed: h=""
+    would mismatch the recorded digest and force an hourly full redeploy
+    that can never converge (record_extra_inputs aborts under set -e on
+    the same missing helper). QA review: the tick invokes
+    extra_inputs_changed as an `if` condition (errexit off), so the test
+    reproduces that context — a top-level call under the sourced script's
+    `set -e` would just abort the shell instead of exercising the
+    h="" fall-through."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r = source_and("record_extra_inputs proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    r = source_and("SCRIPT_DIR=/nonexistent-dir; "
+                   "if extra_inputs_changed proxy; then echo CHANGED; "
+                   "else echo UNCHANGED; fi",
+                   env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "UNCHANGED" in r.stdout, \
+        "missing helper must degrade to not-changed: " + r.stdout + r.stderr
+
+
 def test_cmd_status_tolerates_missing_helper(tmp_path):
     """cmd_status is diagnostic: a broken digest read must degrade to an
     ERROR line, not abort the whole status output."""

@@ -432,7 +432,16 @@ extra_inputs_changed() {
     local c="$1"
     [ -n "$(get_arr "$c" extra_paths 2>/dev/null)" ] || return 1
     local h rec last now
-    h="$(extra_inputs_hash "$c")"
+    # A missing helper (stale install) must degrade to "not changed", not
+    # to h="" — an empty digest mismatches any recorded digest and would
+    # force an hourly full redeploy that can never converge
+    # (record_extra_inputs aborts under set -e on the same missing helper).
+    # The fail-loud ERROR gate in extra_inputs_hash already logged loudly.
+    # Every call site invokes this in an `if` condition (errexit off),
+    # so this must degrade explicitly here.
+    if ! h="$(extra_inputs_hash "$c")"; then
+        return 1
+    fi
     rec="$(sed -n "s/^${c}=//p" "$EXTRA_INPUTS_STATE" 2>/dev/null | head -1)" || true
     [ "$h" != "$rec" ] || return 1
     last="$(sed -n "s/^${c}_last_forced=//p" "$EXTRA_INPUTS_STATE" 2>/dev/null | head -1)" || true
