@@ -98,6 +98,22 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- Auto-deploy now notices when the mitmproxy CA certificate changes, even
+  with no code change in the same window: the deploy timer hashes the CA
+  cert alongside the repo diff and redeploys the proxy component so the
+  `with-proxy` CA bundle gets rebuilt (a rotation or first-run CA
+  generation previously sat unnoticed until the next code deploy). Forced
+  deploy attempts are dampened (at most one per hour per component —
+  including attempts that fail, so a persistently-failing input cannot
+  churn the deploy/rollback loop every tick), never mark a healthy HEAD
+  blocked, and are audited with `"trigger":"extra-inputs"`. The hashed
+  input is bounded (1 MiB prefix + file size) so a planted sparse file
+  cannot stall the tick; symlinks hash as unreadable rather than being
+  followed (#302). The deploy script also honors the `WITH_PROXY_CA_BUNDLE`
+  override it already advertised instead of writing a hardcoded path
+  (#303), and the jail README now documents the jail build's dependency
+  on the sibling `proxy/` tree (#304).
+
 - Waitlist re-submit after a claim no longer spawns a second pending row
   for the same address: `signed_up` is terminal in the waitlist state
   machine, and the old dedup check missed it, so a claimed owner
