@@ -98,10 +98,21 @@ isolation), because those are where the trust story lives.
 | **Tensorlake** (2026-09-23 overnight, C38; **2026-09-24 night, C46**) | Task-scoped sandbox | "Sandboxes for AI Agents" — Firecracker microVMs + versioned POSIX filesystem (`tl fs`: autosave, snapshot/time-travel, restore to any point), live fork/clone, OCI import, ~1 s suspend/resume with meter-stops-on-suspend, auto-suspend idle, SOC 2 Type II + HIPAA; own benchmark blog quotes **$10 per 1k pages** ($0.01/page) (VERIFIED, document-OCR line) | **Pricing page published 2026-09-24** ([tensorlake.ai/pricing](https://tensorlake.ai/pricing), "UPDATED Q3 2026", VERIFIED own-page) — prices the Firecracker-microVM sandbox product, not OCR: Free / Usage Credits ($5–20 packs, $0.01/CU) / **Pro $250/cycle** (25,000 CU) / Enterprise; Active CPU $0.07/core-hr (credits) / $0.042 (Pro); RAM $0.015/GB-hr / $0.009; Disk $0.0002/GB-hr / $0.0001; **snapshot storage $0.07/GB-month** (richest in the corpus); egress free; SOC 2 Type 2 all tiers, HIPAA Pro+ |
 | **Simular Sai** (2026-09-24 midnight, C39) | Persistent computer (computer-use fleet) | "Sai turns any computer — a private cloud VM or your own device — into a self-operating machine": persistent Simular-provisioned cloud VMs (Windows/Linux) or BYOD (Mac/Windows/Linux); computer-use agent clicks/types through real interfaces; approval-gated critical actions, encrypted password input, skills + schedulable workflows, live visibility + takeover; fleet up to 100 machines ("less than $1" per run, vendor claim); Agent S framework, OSWorld-first claim | **RESOLVED 2026-09-24 (night pass):** sai.work/pricing exists (structure VERIFIED on sai.work; tier numerals in stripped elements — figures from Simular's own-domain comparison pages, VERIFIED: **Free (Explore, daily credits) / $50/mo (Pay as you go) / $500/mo (Sai Unlimited) / Enterprise (custom)**); dume.ai's $20/$200/$500 = stale private-beta pricing (THIRD-PARTY, superseded) |
 | **Boat** (C40, **DEPRECATED ROW — deduped** 2026-09-24 morning) | Persistent computer | ASCII renamed to Boat ~2026-09-17 (same product: three legacy domains box.ascii.dev/boat.dev/ascii.dev serve byte-identical pages; YC F26 company page now ycombinator.com/companies/boat — THIRD-PARTY, YC is the accelerator not the vendor; the old YC slug ycombinator.com/companies/ascii serves a 301 → /companies/boat, VERIFIED 2026-09-24 midday; the vendor's own API docs at docs.ascii.dev/box/api/v1 render as "Boat Public API v1", VERIFIED 2026-09-24 late midday). **Canonical Boat data lives in the tracked-set Boat row above** — this row retained for provenance (historical FAQ datapoints, e.g. EU-only DE/FI/FR, retained here). Pricing VERIFIED on own page pre-dedup: $20/mo plan = $20 sandbox time, $0.036/h for 4 vCPU / 8 GB / 50 GB, billed per second, only while running; 100–2,000 sandboxes by plan; $20 auto-refill packs; EU-only DE/FI/FR (FAQ). | See tracked-set Boat row |
+in PrimeIntellect-ai's prime-agent repo: CPU $0.05/core-hr, mem
+$0.01/GB-hr, disk $0.001/GB-hr): CPU −60% ($0.05→$0.02/core-hr) and
+disk −80% ($0.001/GB-hr → $0.0002/GiB-hr) clear more than half, but
+memory rises ~16% on a GB basis ($0.01/GB-hr → $0.0125/GiB ≈
+$0.0116/GB-hr); the composite 1 vCPU/1 GiB/32 GiB example falls ~58%
+(~$0.092 → $0.0389/hr). First aggressive undercut among public
+large-provider task-scoped rates (below E2B/Modal/Daytona's active-CPU
+rates) — the corpus's absolute floor remains Alibaba FC Eco preview
+pricing at $0.00936/vCPU-h (C41, billing since 2026-07-31) |
 | **Alibaba Cloud FC Agent Sandbox** (2026-09-24 morning, C41) | Task-scoped sandbox (billing corpus) | New pay-as-you-go sandbox billing rolling out from 2026-07-31 (UTC+8), still invite-only preview: per-second billing, hourly settlement; formula = unit price × run duration. Three editions: Eco (cheapest, occasional perf fluctuation, no hibernation — startups/tool-use validation), Std (+hibernation — enterprise copilots), Pro (+deep and shallow hibernation, millions of concurrent requests — RL sampling/high-concurrency agents). Hibernation: active = vCPU+mem+disk (15 GiB disk free); light (Pro only) = mem+disk, vCPU free; deep = vCPU+mem free, billed on (memory×2 + disk) GiB; FAQ: call `kill()` when the task is complete. **Scope (VERIFIED):** applies ONLY to E2B-SDK integration — existing E2B instances auto-upgrade to Pro; Sandbox Functions/AgentRun Sandbox customers must migrate. Lane characterization (INFERRED): task-scoped compute, **not** agent-VM-shaped — no SSH/Desktop surface in the Features index; closer to E2B/Daytona pause semantics than a persistent dev VM. | Eco **0.00936/vCPU-h + 0.004608/GiB-h** (2 vCPU / 4 GiB / 15 GiB ≈ **$0.037/h**); Std 0.01224 / 0.006012; Pro 0.01872 / 0.009360; disk 0.00031896/GiB-h (0.00025308 ex-mainland). **Snapshot pricing:** Snapshot Storage Usage = Memory Specification × 2 + Disk Specification, charged at the Disk Unit Price × storage duration (all VERIFIED on aliyun-fc/fc-docs; the 15 GiB free disk allowance does not apply in deep hibernation, VERIFIED 2026-09-24 late-afternoon pass). Re-verified 2026-09-24 (post overnight): repo HEAD pin 96ff8a8 unchanged, all digits unchanged; the page's preview notice confirms invite-only, allowlisted-in-batches rollout. Re-verified 2026-09-25 (post midnight): repo HEAD pin **REVERTED** — short `39b6c3a2` is the same commit as the pre-overnight full SHA `39b6c3a20ec4597cceda497a4d8badf5384e2022` (2026-09-21), a revert from `96ff8a8`, not a second move (two real positions only; no phantom third). All pricing digits re-read live at HEAD and unchanged (Eco/Std/Pro vCPU+mem+disk), preview still invite-only, allowlisted-in-batches |
 | **Namespace Devboxes** (2026-09-24 late midday, C42; **adjacent → in-lane**) | Persistent computer / ephemeral devboxes | *"Devboxes for Coding Agents"*: Linux and macOS machines where a coding agent clones a repository, installs dependencies, runs commands, and returns the result (ephemeral Devboxes); Pool API (`devbox acquire`); `devbox exec` / `logs` / `upload`; egress filtering via `network_policy.egress_domains`; secrets through the Namespace vault; native integrations — **Claude Managed Agents, Cursor Cloud Agents, and Devin all run on Namespace Devboxes**. All VERIFIED on the [vendor's own docs](https://namespace.so/docs/devbox/agents) (read 2026-09-24) — reverses the midnight pass's adjacent verdict. Sizes S→XL (burst 4 vCPU/8 GB → 32 vCPU/64 GB) at the THIRD-PARTY snippet layer | No published pricing in the surveyed docs |
 | **Google Gemini Agent Environment** (2026-09-24 afternoon, C43) | Managed agent sandbox (task-scoped compute) | *"Environments are managed Linux sandboxes that give agents an isolated place to execute code and persist files"* — reusable via `environment_id`; sources (git repo mount); network allowlists; env vars / credential references; pre-installed Ubuntu toolchains; current examples use agent string `antigravity-preview-09-2026`. All VERIFIED on the [vendor's own docs](https://ai.google.dev/gemini-api/docs/agent-environment) (read 2026-09-24). Sept-17 detail at the THIRD-PARTY layer: Files API (persistent file upload/list/download into the sandbox); Credentials API (secrets injected as env vars/MCP headers so the model never sees the raw secret — a sixth convergent placeholder-swap datapoint, noted for the secrets turns); vendor-claimed ~40% fewer output tokens on file edits, +8% task completion; preview compute not billed. Sibling of Agent Substrate (C36) — this is the Gemini-API-side managed sandbox surface, not the GKE-side one. | "Environment compute (CPU, memory, sandbox execution) is **not billed** during the preview period" — verbatim VENDOR-VERIFIED 2026-09-24 (ai.google.dev/gemini-api/docs/agent-environment, page "Last updated 2026-09-24 UTC"); fixed allocations 4 CPU cores / 16 GB memory; no published pay-as-you-go pricing in the surveyed docs |
 | **Google Gemini Enterprise Agent Platform sandboxes** (2026-09-24 late evening, C44) | Managed agent sandboxes (task-scoped compute, GA) | *VENDOR-VERIFIED on Google's own release notes (read 2026-09-24): "Computer Use and Shell sandboxes in Gemini Enterprise Agent Platform are now generally available (GA)." (Sept 9, 2026)* — Shell sandboxes run untrusted shell commands, install packages, and manipulate files in an isolated Linux container via direct `/exec` API calls (Shell sandbox quickstart linked from the release notes); the same release ships VPC Service Controls & Private Service Connect, CMEK (Cloud KMS, disk + snapshot checkpoints), and **pause/resume for sandboxes** (deschedule compute for idle sandboxes while preserving filesystem state and connection identity; resume in seconds (idle-suspend economics datapoint — INFERRED read, convergent with C36 Agent Substrate's zero-idle posture and DO's 305 ms resume claim)). A third Google agent-sandbox surface alongside C36 (GKE-side open-source runtime) and C43 (Gemini-API-side Environments); the GA is pre-window (Sept 9) but filed now — reach-back per the #82 pattern, explicit queued candidate verified on a primary source. | No published pay-as-you-go pricing in the surveyed release notes |
+| **Google AX v0.3.0** (2026-09-25 pre-dawn, C47) | Orchestrator (OSS, harness lane) | **Google's open agentic orchestration runtime** ([google/ax](https://github.com/google/ax) — Apache-2.0, 10,853 stars, 527 forks) — *runs on top of [Agent Substrate](https://github.com/agent-substrate/substrate) for sandboxed execution* (repo moved from `google/agent-substrate` to the `agent-substrate` org — old URL 404s as of 2026-09-25); kubectl-shaped CLI (`ax apply/get/describe/watch` + `ax suspend` / `ax resume` / `ax ssh`); three primitives as `ax.io/v1alpha1` manifests: **Task** (run untrusted agent code in an isolated sandbox with CPU/memory limits), **Workspace** (pre-wired git repos, MCP servers, skill packages), **Model** (LLM config from a k8s secret); control plane deploys to `ax-system` namespace with Substrate in `ate-system` (prerequisite); pre-stable warning verbatim ("major breaking changes prior to a stable release"); AX is the reference ecosystem app on the Agent Substrate repo itself. v0.3.0 specifics THIRD-PARTY-convergent (released ~2026-09-20: three-service split, task state to Redis Streams, legacy harness removed; third-party teardowns flag ~25 of 56 manifest fields never reaching the sandbox — kept at third-party). Lane characterization (INFERRED): control-plane/harness layer over Substrate's sandbox-execution layer — the C30 harness↔compute split with a Google-built reference implementation | **Free, self-hosted** (Apache-2.0, open source) |
+| **Prime Intellect Prime Sandboxes** (launch ~2026-09-23, C48) | Task-scoped sandbox | **THIRD-PARTY** (AlphaSignal) — opened to run "30M AI agent environments" ("largest environment catalog available from a sandbox provider"); usage-based, **no subscription tiers or minimum commitments**; workload positioning: RL training rollouts, synthetic data generation, evals, persistent remote agents; CLI/SDK (`prime sandbox create/run/list/delete`, `docs.primeintellect.ai/sandboxes/`) | **Launch pricing (THIRD-PARTY):** vCPU **$0.02/hr**, memory **$0.0125/GiB-hr**, disk **$0.0002/GiB-hr** — Prime says ~**1/3 of other large sandbox providers**; promo runs through **Dec 22** (no post-promo rates published); 1 vCPU/1 GiB/32 GiB ≈ **$0.0389/hr**; currently **CPU-only** — GPU microVMs, state snapshots, sandbox forking, shared persistent workspaces on roadmap. Against the pre-launch documented rates (community SKILL.md
 | **h-sandbox / Harakiri** (2026-09-22 consolidation) | Task-scoped sandbox (OSS control plane) | Open-source self-hosted sandbox control plane (Apache 2.0); HTTP API / TS SDK / CLI / dashboard; Credential Vault with host-bound egress bindings and fake-env injection (fourth convergent placeholder-swap data point for the secrets-posture corpus) | Free, self-hosted |
 | **Brig** (2026-09-22 consolidation) | Local containment (OSS tool) | Local microVM CLI for coding agents — no hosted service; dedicated kernel per sandbox, host-vs-agent trust model, boot-empty credentials with names-only reporting, fail-closed egress-downgrade refusal | Free, local (Apache 2.0) |
 | **Epho** (2026-09-22 consolidation) | Task-scoped sandbox | Agents-as-API (claude / codex / opencode harnesses) with automatic multi-provider fallback — the session outlives the machine via session-snapshot restore on replacement boxes | ≈$0.158/h for 2 vCPU / 2 GiB / 10 GiB (computed from per-second rates); $10 starting credit; BYO model keys |
@@ -2530,3 +2541,75 @@ rounds in-window beyond the AX candidate and the Grunz flag.
 admitted per the 2026-09-23 `_LATE_NIGHT` / `_POST_MID_EVENING` /
 `_OVERNIGHT` precedent family (verified collision-free against
 origin/main's watch-doc list).
+
+## Watch update — 2026-09-25 (pre-dawn): C47 Google AX, C48 Prime Sandboxes
+
+**Tracked set:** 8/8 VERIFIED NO-CHANGE — zero deltas, zero fetch
+failures (all 8 surfaces opened directly on vendor-owned pages this
+run: Daytona still SEP 24 V0.216.1/V0.216.2 tops, Docker Sandboxes
+release-notes 2026-09-21, E2B/boat.dev pricing verbatim, Microsandbox
+v0.7.3, TermSquad $9–$49 verbatim, AgentComputer digit-for-digit,
+DigitalOcean Managed Agents still public preview on the vendor's own
+release-notes page).
+
+**C47 new — Google AX v0.3.0** (orchestrator, harness lane;
+primary-source VERIFIED). The post-midnight pass's hedged
+new-to-watch candidate has had its primary-source pass:
+[github.com/google/ax](https://github.com/google/ax) read this run —
+**Apache-2.0**; *"AX is a high-throughput, declarative orchestrator to
+run billions of autonomous agent workloads in a cluster. It runs on
+top of [Agent Substrate](https://github.com/agent-substrate/substrate)
+for sandboxed execution"* (Substrate repo moved from
+`google/agent-substrate` to the `agent-substrate` org — old URL 404s
+as of 2026-09-25, VERIFIED this run); kubectl-shaped CLI with `ax suspend` /
+`ax resume` / `ax ssh`; Task/Workspace/Model `ax.io/v1alpha1`
+manifests; pre-stable warning; 10,853 stars, 527 forks. v0.3.0
+specifics stay THIRD-PARTY-convergent (three-service split, Redis
+Streams task state, legacy harness removed). Lane read (INFERRED):
+control-plane/harness layer over Substrate's sandbox-execution layer —
+the C30 harness↔compute split with a Google-built reference
+implementation, and the strongest validation yet for the
+per-harness-adapter thesis the corpus already carries for H4.
+
+**C48 new — Prime Intellect "Prime Sandboxes" launch** (~2026-09-23;
+**THIRD-PARTY**, in-lane). AlphaSignal: "30M AI agent environments"
+("largest environment catalog available from a sandbox provider");
+usage-based, no subscription tiers or minimum commitments; vCPU
+**$0.02/hr**, memory **$0.0125/GiB-hr**, disk **$0.0002/GiB-hr** — ~**1/3 of
+other large sandbox providers**; promo through **Dec 22** (no
+post-promo rates); CPU-only at launch, GPU microVMs / snapshots /
+forking / shared persistent workspaces on roadmap. First aggressive
+undercut among public large-provider task-scoped rates (below
+E2B/Modal/Daytona's active-CPU rates) — the corpus's absolute floor
+remains Alibaba FC Eco preview pricing at $0.00936/vCPU-h (C41, billing
+since 2026-07-31). Against the pre-launch documented rates (community
+SKILL.md in PrimeIntellect-ai's prime-agent repo: CPU $0.05/core-hr,
+mem $0.01/GB-hr, disk $0.001/GB-hr): CPU −60% and disk −80%, but
+memory rises ~16% on a GB basis ($0.01/GB-hr → $0.0125/GiB ≈
+$0.0116/GB-hr); the composite 1 vCPU/1 GiB/32 GiB example falls ~58%
+(~$0.092 → $0.0389/hr).
+
+**C45 duplicate closed:** surveyor B surfaced the Docker Cloud
+Sandboxes 2026-09-24 launch as a fold candidate — it is the same
+event already filed as C45 (early-afternoon fold + five garnish
+layers). Nothing filed.
+
+**Carried:** C37 Pro fee still UNVERIFIED (freestyle.sh/pricing
+re-read, no Pro dollar line-item — VERIFIED absent; Hobby $50
+re-confirmed; signed-in dashboard check still owed); C26 docs pricing
+page 7th consecutive miss (Sep-22 launch-release rate set surfaced
+convergent, identical to standing figures — no corpus change);
+Tensorlake no Sep-24/25 news (C46 stands); C41 pin re-verified still
+`39b6c3a2` (GitHub API, no new commits since 2026-09-21; all digits
+re-read at HEAD, unchanged); **Grunz "$100 once" flag downgraded** —
+the maker's dev.to figure (THIRD-PARTY) appears nowhere on grunzai.com
+(VERIFIED): current pricing is pay-per-use credits, never expire, $0
+base fee, no subscription — the figure is stale-or-pivot UNVERIFIED,
+flag retires to light-watch only; C44/C36/C43 confirmed unchanged.
+Vercel Drives not re-checked (P49 morning cadence); boat.dev retry
+stays RETIRED. In-lane dated 9/25: no launches, pricing moves, or
+funding rounds in-window (C47/C48 are out-of-window folds — ~9/20
+and ~9/23 — newly filed this pass).
+
+New-entry fold per the C32/C37/C38/C39/C40/C41/C42 precedents; full
+provenance in `docs/COMPETITOR_WATCH_2026-09-25_PREDAWN.md`.
