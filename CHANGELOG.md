@@ -102,6 +102,10 @@ This changelog only works if entries land with the change, not after it:
   launches, pricing moves, or funding dated 2026-09-24. Full pass in
   `docs/COMPETITOR_WATCH_2026-09-24_EVENING.md` (#351).
 
+### Changed
+
+- Multi-tenancy trust model is now framed in runtime-cell vocabulary: a hosted tenant's agent owns everything inside its cell — its per-tenant box (its jail on the cooperative tier), contained root-equivalent, never host root — while the enforcement layer — egress fencing, secret swapping, metering, break-glass — stays operator-owned and invisible from inside, seen only through approvals, status, and audit. Unchanged: support access stays tenant-visible, granted, logged, break-glass-only; no operator-blindness claim. (#432)
+
 ### Fixed
 
 - Auto-deploy now notices when the mitmproxy CA certificate changes, even
