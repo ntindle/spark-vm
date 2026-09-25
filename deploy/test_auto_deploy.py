@@ -1126,6 +1126,17 @@ def test_pull_only_deploy_records_version(tmp_path):
     # Watermark at mid: the pending range (mid -> docs_only) is docs-only,
     # i.e. pull-only — no gates, installs, or health checks run.
     (state / "deployed-commit").write_text(mid + "\n")
+    # Issue #302: a box with no recorded extra-inputs digest (fresh state
+    # dir) forces one proxy deploy to converge it. This test pins the
+    # steady-state pull-only path, so pre-record the digest the way a prior
+    # successful proxy deploy would have. SWAPD_HOME points at tmp — no CA
+    # exists there, which is the steady-state digest for this fixture.
+    swapd = tmp_path / "swapd"
+    env = dict(env, SWAPD_HOME=str(swapd))
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; record_extra_inputs proxy",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
     r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
                  "source ./deploy/auto-deploy.sh; cmd_deploy; echo DEPLOY_OK",
                  env_extra=env, cwd=REPO)
@@ -1388,3 +1399,760 @@ def test_status_reports_how_to_clear_block(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "b" * 40 in r.stdout
     assert 'rm "%s"' % (state / "blocked-commit") in r.stdout
+
+
+# --- host-side extra inputs (issue #302) ------------------------------------
+
+def _extra_inputs_env(tmp_path):
+    """Temp SWAPD_HOME + state dir; CA cert written under it. Returns
+    (env_extra, ca_path, state_dir)."""
+    swapd = tmp_path / "swapd"
+    ca_dir = swapd / ".mitmproxy"
+    ca_dir.mkdir(parents=True)
+    ca = ca_dir / "mitmproxy-ca-cert.pem"
+    state = tmp_path / "state"
+    state.mkdir()
+    # SKIP_SUDO=1: the digest read routes through sudo_run (the deploy-
+    # privilege wrapper); unit tests must exercise the wrapper contract,
+    # never a real sudo.
+    env = {"SWAPD_HOME": str(swapd), "UPDATER_STATE_DIR": str(state),
+           "SKIP_SUDO": "1"}
+    return env, ca, state
+
+
+def test_extra_inputs_hash_deterministic_and_content_sensitive(tmp_path):
+    """The digest is stable for identical bytes and changes when they do."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r1 = source_and("extra_inputs_hash proxy", env_extra=env)
+    r2 = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r1.returncode == 0, r1.stderr
+    assert r1.stdout.strip() == r2.stdout.strip()
+    ca.write_bytes(b"fake-ca-bytes-rotated")
+    r3 = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r3.returncode == 0, r3.stderr
+    assert r3.stdout.strip() != r1.stdout.strip()
+
+
+def test_extra_inputs_changed_first_run_then_converges(tmp_path):
+    """No record yet -> changed (first tick redeploys once); after recording
+    the digest the same bytes are not changed."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r = source_and("extra_inputs_changed proxy", env_extra=env)
+    assert r.returncode == 0, "missing record must count as changed: " + r.stderr
+    r = source_and("record_extra_inputs proxy && extra_inputs_changed proxy",
+                   env_extra=env)
+    assert r.returncode == 1, "recorded digest must converge: " + r.stdout + r.stderr
+
+
+def test_extra_inputs_changed_detects_rotation(tmp_path):
+    """A CA rotation with no code change flips changed on the next tick."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r = source_and("record_extra_inputs proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    ca.write_bytes(b"fake-ca-bytes-rotated")
+    r = source_and("extra_inputs_changed proxy", env_extra=env)
+    assert r.returncode == 0, "rotated CA must force a proxy redeploy"
+    r = source_and("record_extra_inputs proxy && extra_inputs_changed proxy",
+                   env_extra=env)
+    assert r.returncode == 1, "post-deploy record must converge again"
+
+
+def test_extra_inputs_changed_detects_first_generation(tmp_path):
+    """Missing CA -> digest of 'missing'; the CA appearing later is a change."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    r = source_and("record_extra_inputs proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    r = source_and("extra_inputs_changed proxy", env_extra=env)
+    assert r.returncode == 1, "stable absence must not redeploy every tick"
+    ca.write_bytes(b"first-run-ca")
+    r = source_and("extra_inputs_changed proxy", env_extra=env)
+    assert r.returncode == 0, "first-run CA generation must force a proxy redeploy"
+
+
+def test_extra_inputs_changed_never_for_components_without_extra_paths(tmp_path):
+    """Components that declare no extra_paths never change on this path —
+    a missing state record must not cause spurious redeploys."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    for comp in ("confirm", "cred-ui"):
+        r = source_and("extra_inputs_changed %s" % comp, env_extra=env)
+        assert r.returncode == 1, "%s has no extra_paths: %s" % (comp, r.stderr)
+        assert "unknown component" not in r.stderr
+    # and recording is a no-op for them (no state file created)
+    r = source_and("record_extra_inputs confirm", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert not (state / "extra-inputs-hash").exists()
+
+
+def test_extra_inputs_record_writes_single_digest_line(tmp_path):
+    """record_extra_inputs writes one '<component>=<digest>' line without
+    tearing or clobbering (atomicity comes from the write-tmp + rename in
+    the implementation, which a single-threaded test cannot prove)."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r = source_and("record_extra_inputs proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    rec = state / "extra-inputs-hash"
+    assert rec.exists()
+    lines = rec.read_text().splitlines()
+    assert len(lines) == 1 and lines[0].startswith("proxy=")
+
+
+def test_extra_inputs_state_file_not_world_readable(tmp_path):
+    """umask 077 at the top of auto-deploy.sh keeps the state dir private —
+    the record lives next to the watermark and must inherit that."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r = source_and("record_extra_inputs proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    mode = (state / "extra-inputs-hash").stat().st_mode & 0o777
+    assert mode & 0o077 == 0, "world/group readable: %o" % mode
+
+
+def test_extra_paths_redirect_with_swapd_home(tmp_path):
+    """Issue #108: the extra path must honor $SWAPD_HOME redirection so the
+    suite never touches the live host."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    r = source_and("get_arr proxy extra_paths", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    got = r.stdout.strip().splitlines()
+    assert got == ["%s/.mitmproxy/mitmproxy-ca-cert.pem" % env["SWAPD_HOME"]], got
+
+
+def test_deploy_sh_honors_with_proxy_ca_bundle():
+    """Issue #303: deploy.sh must honor WITH_PROXY_CA_BUNDLE (components.conf
+    advertises it as env-overridable); the default keeps the old literal so
+    the install-paths coverage pin stays green."""
+    with open(os.path.join(REPO, "proxy", "deploy.sh")) as f:
+        body = f.read()
+    assert "${WITH_PROXY_CA_BUNDLE:-/usr/local/share/with-proxy-ca/ca-bundle.crt}" in body, \
+        "deploy.sh does not honor WITH_PROXY_CA_BUNDLE"
+    assert "/usr/local/share/with-proxy-ca/ca-bundle.crt" in body, \
+        "default literal missing — the install-paths pin would go stale"
+    assert "--dest /usr/local/share/with-proxy-ca/ca-bundle.crt" not in body, \
+        "hardcoded --dest literal still present alongside the env override"
+
+
+# --- synthesized zero-width range (issue #302, Security review B1) --------
+
+def _converged_ca_fixture(tmp_path, ca_bytes=b"fake-ca-bytes"):
+    """Pinned fixture at head (watermark == origin/main, no pending range)
+    with a recorded extra-inputs digest — the steady state. Returns
+    (updater, state, env, ca)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    (state / "deployed-commit").write_text(docs_only + "\n")
+    swapd = tmp_path / "swapd"
+    ca_dir = swapd / ".mitmproxy"
+    ca_dir.mkdir(parents=True)
+    ca = ca_dir / "mitmproxy-ca-cert.pem"
+    ca.write_bytes(ca_bytes)
+    env = dict(env, SWAPD_HOME=str(swapd))
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; record_extra_inputs proxy",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return updater, state, env, ca
+
+
+def test_cmd_deploy_forces_proxy_on_ca_rotation_with_no_new_commits(tmp_path):
+    """Issue #302's central case (Security review B1): watermark ==
+    origin/main (no pending commits) but the CA rotated. cmd_deploy must
+    NOT take the quiet noop path — it must synthesize a zero-width range
+    and attempt the proxy deploy. The fixture repo has no proxy test
+    files, so the proxy gate fails fast; the gate-fail audit line is the
+    observable proof the deploy path (not the noop path) ran. No install
+    step runs — gates come first."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes-rotated")  # rotation, zero new commits
+    # No set -e: the expected gate-fail rc must not abort before the echo.
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "host-side inputs changed with no new commits" in out, out
+    assert "CMD_RC=1" in r.stdout, out  # gate-fail, not a quiet 0
+    # proxy is in the attempted deploy set (confirm joins via the shared
+    # proxy-confirm install unit and its gate runs first alphabetically).
+    assert re.search(r"components: .*\bproxy\b", out), out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"noop"' not in audit, audit
+    assert '"result":"gate-fail"' in audit, audit
+
+
+def test_cmd_deploy_stays_quiet_when_ca_unchanged_and_no_new_commits(tmp_path):
+    """Contrast: no rotation and no new commits — the tick stays on the
+    quiet noop path (no synthesized deploy, no gate run)."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "host-side inputs changed with no new commits" not in out, out
+    assert "CMD_RC=0" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"noop"' in audit, audit
+    assert '"result":"gate-fail"' not in audit, audit
+
+
+def test_cmd_deploy_blocked_head_ignores_ca_rotation(tmp_path):
+    """A blocked head (post-rollback) stays quiet even when the CA rotates:
+    retrying the same rolled-back head would re-run the same failing
+    install, and the rollback already audited + alerted."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    head = subprocess.run(["git", "rev-parse", "origin/main"], cwd=updater,
+                          check=True, capture_output=True, text=True).stdout.strip()
+    (state / "blocked-commit").write_text(head + "\n")
+    ca.write_bytes(b"fake-ca-bytes-rotated")
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "host-side inputs changed with no new commits" not in out, out
+    assert "CMD_RC=0" in r.stdout, out
+    assert not (state / "audit.log").exists() or \
+        '"result":"gate-fail"' not in (state / "audit.log").read_text()
+
+
+# --- forced-deploy dampening (Security review B2) ----------------------------
+
+def test_extra_inputs_forced_deploy_dampens_repeated_churn(tmp_path):
+    """The CA path is swapd-writable: without dampening, rewriting CA bytes
+    would force a full gated redeploy on every 10-minute tick. The first
+    forced deploy records a timestamp; churn inside the window is damped
+    (and the digest is NOT converged on a damped tick, so the change is
+    still picked up once the window passes)."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"v1")
+    r = source_and("record_extra_inputs proxy 1 && extra_inputs_changed proxy",
+                   env_extra=env)
+    assert r.returncode == 1, "recorded digest must converge: " + r.stdout + r.stderr
+    assert "proxy_last_forced=" in (state / "extra-inputs-hash").read_text()
+    ca.write_bytes(b"v2")  # churn inside the dampening window
+    before = (state / "extra-inputs-hash").read_text()
+    r = source_and("extra_inputs_changed proxy", env_extra=env)
+    assert r.returncode == 1, "churn inside the window must be damped"
+    assert "skipping" in (r.stdout + r.stderr), r.stdout + r.stderr
+    after = (state / "extra-inputs-hash").read_text()
+    assert before == after, "damped tick must not converge the digest"
+
+
+def test_extra_inputs_forced_deploy_fires_again_after_window(tmp_path):
+    """After the dampening window passes, a changed digest forces a deploy
+    again. The timestamp is backdated instead of sleeping."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"v1")
+    r = source_and("record_extra_inputs proxy 1", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    rec = state / "extra-inputs-hash"
+    rec.write_text(re.sub(r"^proxy_last_forced=.*$",
+                          "proxy_last_forced=1", rec.read_text(),
+                          flags=re.M))
+    ca.write_bytes(b"v2")
+    r = source_and("extra_inputs_changed proxy", env_extra=env)
+    assert r.returncode == 0, \
+        "change after the window must force again: " + r.stdout + r.stderr
+
+
+def test_extra_inputs_nonforced_record_drops_forced_timestamp(tmp_path):
+    """A normal (non-forced) successful deploy re-baselines the record:
+    the forced timestamp is dropped, so a later rotation is judged on its
+    own merits instead of against a stale dampening window."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"v1")
+    r = source_and("record_extra_inputs proxy 1", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "proxy_last_forced=" in (state / "extra-inputs-hash").read_text()
+    r = source_and("record_extra_inputs proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "proxy_last_forced=" not in (state / "extra-inputs-hash").read_text()
+
+
+# --- FIFO guard (Security review B3) ------------------------------------------
+
+def test_extra_inputs_hash_never_blocks_on_fifo(tmp_path):
+    """The CA path is swapd-writable; a planted FIFO must not hang the
+    deploy tick (the old sha256sum-on-open would block while the tick held
+    the single-flight lock; the helper opens O_NONBLOCK and refuses
+    non-regular files at the open). A FIFO hashes as nonregular — which
+    still counts as a change vs a real CA."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"real-ca")
+    r = source_and("record_extra_inputs proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    ca.unlink()
+    os.mkfifo(ca)
+    r = run_bash(
+        "export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        "timeout 10 bash -c 'export AUTO_DEPLOY_NO_MAIN=1; "
+        "source ./deploy/auto-deploy.sh; "
+        "extra_inputs_changed proxy'; echo CHANGED_RC=$?",
+        env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CHANGED_RC=0" in r.stdout, \
+        "FIFO at the CA path must count as a change without hanging: " + out
+
+
+# --- privileged atomic read (Security review: TOCTOU + wrong-privilege) -----
+
+def _hash_read(path, cap=1048576):
+    """Direct invocation of the digest-read helper
+    (deploy/extra_inputs_hash_read.py)."""
+    r = subprocess.run(
+        ["python3", os.path.join(REPO, "deploy", "extra_inputs_hash_read.py"),
+         str(path), str(cap)],
+        capture_output=True, text=True, timeout=10)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def test_extra_inputs_hash_read_helper_content_contract(tmp_path):
+    """The helper's content line is a deterministic 64-hex digest that is
+    content-sensitive: identical bytes hash identically, changed bytes
+    hash differently."""
+    f = tmp_path / "ca.pem"
+    f.write_bytes(b"fake-ca-bytes")
+    h1 = _hash_read(f)
+    assert re.fullmatch(r"[0-9a-f]{64}", h1), h1
+    assert _hash_read(f) == h1, "identical bytes must hash identically"
+    f.write_bytes(b"fake-ca-bytes-rotated")
+    assert _hash_read(f) != h1, "changed bytes must hash differently"
+
+
+def test_extra_inputs_hash_read_helper_refuses_nonregular(tmp_path):
+    """Symlink (live or dangling), FIFO, directory, and hardlink all hash
+    as nonregular — the refusal is part of the open itself (O_NOFOLLOW),
+    so there is no check-to-read window for a swapd-level writer to race,
+    and a planted FIFO can never block the read."""
+    real = tmp_path / "real.pem"
+    real.write_bytes(b"real")
+    link = tmp_path / "link.pem"
+    link.symlink_to(real)
+    assert _hash_read(link) == "nonregular", "live symlink must not be followed"
+    dangling = tmp_path / "dangling.pem"
+    dangling.symlink_to(tmp_path / "nope")
+    assert _hash_read(dangling) == "nonregular", "dangling symlink is nonregular"
+    fifo = tmp_path / "fifo.pem"
+    os.mkfifo(fifo)
+    assert _hash_read(fifo) == "nonregular", "FIFO must not be opened for read"
+    assert _hash_read(tmp_path) == "nonregular", "directory must not be read"
+    hard = tmp_path / "hard.pem"
+    os.link(real, hard)
+    assert _hash_read(hard) == "nonregular", \
+        "hardlink refused like the deploy path (issue #299 discipline)"
+    assert _hash_read(tmp_path / "absent.pem") == "missing"
+
+
+def test_extra_inputs_hash_read_helper_honors_cap(tmp_path):
+    """The cap is single-sourced from the shell's EXTRA_INPUTS_HASH_MAX_BYTES
+    via argv: only the first <cap> bytes are hashed, but the full file size
+    is folded in so growth past the cap still flips the digest."""
+    a = tmp_path / "a.bin"
+    a.write_bytes(b"x" * 10 + b"y" * 90)
+    b = tmp_path / "b.bin"
+    b.write_bytes(b"x" * 10 + b"z" * 90)
+    assert _hash_read(a, cap=10) == _hash_read(b, cap=10), \
+        "bytes past the cap must not affect the digest"
+    c = tmp_path / "c.bin"
+    c.write_bytes(b"x" * 10 + b"y" * 190)
+    assert _hash_read(c, cap=10) != _hash_read(a, cap=10), \
+        "growth past the cap must still flip the digest (size folded in)"
+
+
+def test_extra_inputs_hash_reads_through_sudo_run(tmp_path):
+    """Security BLOCKING 2: the digest read must go through sudo_run (the
+    deploy-privilege wrapper), not a bare shell read — every other consumer
+    of the path reads privileged, so the digest must too. Override sudo_run
+    with a marker-emitting passthrough (marker to stderr, so the digest
+    material on stdout stays clean) and assert the marker appears."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r = source_and(
+        "sudo_run() { echo SUDO_RUN_MARKER >&2; \"$@\"; }; "
+        "extra_inputs_hash proxy",
+        env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "SUDO_RUN_MARKER" in r.stderr, \
+        "extra_inputs_hash must route the read through sudo_run"
+    assert re.fullmatch(r"[0-9a-f]{64}", r.stdout.strip()), r.stdout
+
+
+def test_extra_inputs_symlink_never_followed_through_shell_path(tmp_path):
+    """Through the shell path: a symlink at the CA path hashes differently
+    from the content it points at — i.e. it is refused, not followed. The
+    deploy path fail-closes on symlinks, so following would hand a
+    swapd-level writer a 1-bit change oracle on any root-readable file the
+    link points at."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    target = tmp_path / "real-target.pem"
+    target.write_bytes(b"real-ca")
+    ca.symlink_to(target)
+    r1 = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r1.returncode == 0, r1.stderr
+    ca.unlink()
+    ca.write_bytes(b"real-ca")
+    r2 = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r2.returncode == 0, r2.stderr
+    assert r1.stdout.strip() != r2.stdout.strip(), \
+        "symlink must hash differently from the content it points at"
+
+
+def test_extra_inputs_hash_missing_helper_fails_loud(tmp_path):
+    """A stale installed copy (init not re-run since the helper was added)
+    must fail LOUD, not silently hash everything as a constant digest —
+    silent degradation would switch off rotation detection (#302's whole
+    purpose) with zero alerting."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r = source_and("SCRIPT_DIR=/nonexistent-dir; extra_inputs_hash proxy",
+                   env_extra=env)
+    assert r.returncode != 0, "missing helper must fail, not degrade"
+    assert "extra_inputs_hash_read.py" in r.stderr
+
+
+def test_extra_inputs_changed_degrades_clean_on_missing_helper(tmp_path):
+    """Missing helper + recorded digest must NOT count as changed: h=""
+    would mismatch the recorded digest and force an hourly full redeploy
+    that can never converge (record_extra_inputs aborts under set -e on
+    the same missing helper). QA review: the tick invokes
+    extra_inputs_changed as an `if` condition (errexit off), so the test
+    reproduces that context — a top-level call under the sourced script's
+    `set -e` would just abort the shell instead of exercising the
+    h="" fall-through."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes")
+    r = source_and("record_extra_inputs proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    r = source_and("SCRIPT_DIR=/nonexistent-dir; "
+                   "if extra_inputs_changed proxy; then echo CHANGED; "
+                   "else echo UNCHANGED; fi",
+                   env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "UNCHANGED" in r.stdout, \
+        "missing helper must degrade to not-changed: " + r.stdout + r.stderr
+
+
+def test_cmd_status_tolerates_missing_helper(tmp_path):
+    """cmd_status is diagnostic: a broken digest read must degrade to an
+    ERROR line, not abort the whole status output."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set -e; "
+                 "SCRIPT_DIR=/nonexistent-dir; cmd_status; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=0" in r.stdout, out
+    assert "extra-inputs(proxy): ERROR" in out, out
+
+
+def test_cmd_deploy_forced_failure_never_blocks_head(tmp_path):
+    """Engineering review: a failed same-commit (extra-inputs-forced)
+    deploy must not mark HEAD blocked — the commit is fine, so the next
+    tick retries instead of wedging the box until the next code change.
+    Gates are stubbed to pass (a fake python3 first on PATH); the proxy
+    install then fails (no proxy/deploy.sh in the fixture repo),
+    exercising the do_rollback no_block path. The forced snapshot also
+    gets its own '-extra-inputs' dir instead of clobbering the commit's
+    own snapshot."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake_py = bindir / "python3"
+    fake_py.write_text("#!/bin/sh\nexit 0\n")
+    fake_py.chmod(0o755)
+    env = dict(env, PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+    ca.write_bytes(b"fake-ca-bytes-rotated")  # rotation, zero new commits
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=1" in r.stdout, out
+    assert not (state / "blocked-commit").exists(), \
+        "a failed forced deploy must not block HEAD: " + out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"deploy-fail"' in audit, audit
+    assert '"result":"rolled-back"' in audit, audit
+    assert '"trigger":"extra-inputs"' in audit, audit
+    snaps = [d for d in (state / "snapshots").iterdir() if d.is_dir()]
+    assert any(d.name.endswith("-extra-inputs") for d in snaps), \
+        "forced snapshot needs its own dir: %s" % [d.name for d in snaps]
+
+
+def test_cmd_deploy_forced_gate_fail_audit_has_trigger(tmp_path):
+    """The audit trail must not masquerade a same-commit forced deploy as
+    a version deploy: the gate-fail line carries trigger=extra-inputs."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes-rotated")
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=1" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"gate-fail"' in audit, audit
+    assert '"trigger":"extra-inputs"' in audit, audit
+    assert not (state / "blocked-commit").exists()
+
+
+def test_cmd_check_reports_extra_inputs_on_quiet_tick(tmp_path):
+    """cmd_check stays honest: on an up-to-date tick with a rotated CA it
+    reports that deploy would force-redeploy the proxy (Engineering
+    review: check must not claim 'nothing would deploy' when deploy
+    would)."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    ca.write_bytes(b"fake-ca-bytes-rotated")
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; cmd_check; echo CHECK_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CHECK_RC=0" in r.stdout, out
+    assert "deploy would force-redeploy it" in out, out
+
+
+def test_cmd_status_shows_extra_inputs_state(tmp_path):
+    """cmd_status surfaces the recorded vs current extra-inputs digests so
+    a proxy redeploy with an unchanged watermark is explainable (QA
+    review)."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; cmd_status",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "extra-inputs(proxy): in sync" in out, out
+    ca.write_bytes(b"fake-ca-bytes-rotated")
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; cmd_status",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "extra-inputs(proxy): CHANGED" in out, out
+
+
+def test_cmd_status_on_fresh_state_dir_without_extra_inputs_record(tmp_path):
+    """Engineering review B1: cmd_status must not abort (exit 2 under
+    set -euo pipefail) when the extra-inputs state file does not exist —
+    reachable after init before the first successful proxy deploy, or
+    after any state-dir wipe. The sed read in cmd_status is now guarded
+    like extra_inputs_changed's; assert exit 0 and the CHANGED line."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    (state / "extra-inputs-hash").unlink()
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set -e; cmd_status; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=0" in r.stdout, out
+    assert "extra-inputs(proxy): CHANGED" in out, out
+
+
+# --- Security-review round 2 (BLOCKING 1): failed forced deploys dampened ---
+
+def test_extra_inputs_failed_forced_deploy_dampens_retry(tmp_path):
+    """Security review BLOCKING 1: dampening must apply to failed forced
+    deploys too. A swapd-level writer plants a persistently-failing input
+    (e.g. a symlink at the CA path that build_ca_bundle.py fail-closes on);
+    without attempt-time dampening the deploy/rollback churns on every
+    10-minute tick forever. The fix records the attempt at decision time —
+    the digest stays unconverged, so the retry still happens after the
+    window passes. The gate-fail here stands in for the persistently-failing
+    input (fixture repo has no proxy test files)."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    rec = state / "extra-inputs-hash"
+    pre_rotation = rec.read_text()
+    ca.write_bytes(b"fake-ca-bytes-rotated")  # rotation, zero new commits
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=1" in r.stdout, out  # gate-fail, not a quiet noop
+    audit = (state / "audit.log").read_text()
+    gate_fails_before = audit.count('"result":"gate-fail"')
+    assert gate_fails_before >= 1, audit
+    post = rec.read_text()
+    assert "proxy_last_forced=" in post, \
+        "the attempt must be recorded even though the deploy failed: " + out
+    assert pre_rotation in post, \
+        "a failed deploy must NOT converge the digest: " + post
+    # The very next tick is damped — no new forced deploy, quiet rc=0.
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=0" in r.stdout, out
+    assert "skipping" in out, out
+    audit = (state / "audit.log").read_text()
+    assert audit.count('"result":"gate-fail"') == gate_fails_before, \
+        "damped tick must not attempt another forced deploy: " + audit
+    # ... but the retry is preserved: once the window passes, the still-
+    # unconverged digest forces the deploy again.
+    rec.write_text(re.sub(r"^proxy_last_forced=.*$", "proxy_last_forced=1",
+                          post, flags=re.M))
+    r = source_and("extra_inputs_changed proxy", env_extra=env)
+    assert r.returncode == 0, \
+        "unconverged digest must force again after the window: " + r.stdout + r.stderr
+
+
+def test_note_forced_attempt_records_timestamp_without_converging(tmp_path):
+    """note_forced_attempt (BLOCKING 1 fix) records the attempt epoch
+    without converging the digest, and is a no-op for components that
+    declare no extra_paths."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"v1")
+    r = source_and("note_forced_attempt proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    txt = (state / "extra-inputs-hash").read_text()
+    assert "proxy_last_forced=" in txt, txt
+    assert not re.search(r"^proxy=[0-9a-f]{64}$", txt, flags=re.M), \
+        "attempt must not converge the digest: " + txt
+    r = source_and("note_forced_attempt confirm", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "confirm_last_forced" not in (state / "extra-inputs-hash").read_text()
+
+
+# --- Security-review round 2 (BLOCKING 2): bounded hashing -------------------
+
+def test_extra_inputs_hash_caps_read_at_1mib(tmp_path):
+    """Security review BLOCKING 2: the CA path is swapd-writable; hashing
+    must be bounded or a sparse multi-GB plant stalls the tick while it
+    holds the single-flight lock. Only the first
+    EXTRA_INPUTS_HASH_MAX_BYTES are hashed, with the file size folded in —
+    so pure growth past the cap still flips the digest."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    cap = 1048576
+    ca.write_bytes(b"A" * cap + b"B" * 1024)
+    r = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    h1 = r.stdout.strip()
+    # Bytes past the cap are not hashed ...
+    ca.write_bytes(b"A" * cap + b"C" * 1024)
+    r = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == h1, "bytes past the cap must not flip the digest"
+    # ... but bytes inside the cap are ...
+    ca.write_bytes(b"Z" + b"A" * (cap - 1) + b"B" * 1024)
+    r = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() != h1, "bytes inside the cap must flip the digest"
+    # ... and pure growth (same prefix, larger size) is detected via the
+    # folded-in size.
+    ca.write_bytes(b"A" * cap + b"B" * 2048)
+    r = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() != h1, "size growth must flip the digest"
+
+
+def test_extra_inputs_hash_sparse_huge_file_completes(tmp_path):
+    """A 50 GiB sparse plant (truncate is instant) must hash in bounded
+    time — no multi-GB read while holding the tick lock."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    subprocess.run(["truncate", "-s", "50G", str(ca)], check=True)
+    r = source_and("extra_inputs_hash proxy; echo HASH_OK", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert "HASH_OK" in r.stdout, r.stdout + r.stderr
+
+
+def test_extra_inputs_hash_treats_symlink_as_unreadable(tmp_path):
+    """Security review: symlinks are not followed. build_ca_bundle.py
+    fail-closes on symlinks, so a symlinked CA can never converge — and
+    following it would hand a swapd writer a 1-bit/hour change oracle on
+    any root-readable file the link points at. A symlinked CA hashes as
+    'unreadable'; retargeting it does not flip the digest."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    ca.write_bytes(b"real-ca")
+    r = source_and("record_extra_inputs proxy", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    target = tmp_path / "target1"
+    target.write_bytes(b"target-one-bytes")
+    ca.unlink()
+    ca.symlink_to(target)
+    r = source_and("extra_inputs_changed proxy", env_extra=env)
+    assert r.returncode == 0, "symlinked CA must count as changed: " + r.stderr
+    r1 = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r1.returncode == 0, r1.stderr
+    target2 = tmp_path / "target2"
+    target2.write_bytes(b"completely-different-bytes")
+    ca.unlink()
+    ca.symlink_to(target2)
+    r2 = source_and("extra_inputs_hash proxy", env_extra=env)
+    assert r2.returncode == 0, r2.stderr
+    assert r1.stdout.strip() == r2.stdout.strip(), \
+        "symlink retarget must not flip the digest (no change oracle)"
+
+
+# --- Security-review round 2 (BLOCKING 3): export the override ---------------
+
+def test_components_conf_exports_with_proxy_ca_bundle(tmp_path):
+    """Issue #303 follow-up (Security review BLOCKING 3): components.conf
+    must export WITH_PROXY_CA_BUNDLE so a set-but-not-exported override
+    propagates into the child shell running proxy/deploy.sh. Otherwise
+    snapshot/rollback covers the override path while deploy.sh silently
+    writes the default — split-brain coverage of exactly the artifact
+    #303 exists to guarantee."""
+    env, ca, state = _extra_inputs_env(tmp_path)
+    # Default: the child sees the default literal.
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+                 "bash -c 'echo CHILD_VAL=$WITH_PROXY_CA_BUNDLE'",
+                 env_extra=env, cwd=REPO)
+    assert "CHILD_VAL=/usr/local/share/with-proxy-ca/ca-bundle.crt" in r.stdout, \
+        r.stdout + r.stderr
+    # Set-but-not-exported override: the child must still see it.
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+                 "WITH_PROXY_CA_BUNDLE=/tmp/custom-bundle.crt; "
+                 "bash -c 'echo CHILD_VAL=$WITH_PROXY_CA_BUNDLE'",
+                 env_extra=env, cwd=REPO)
+    assert "CHILD_VAL=/tmp/custom-bundle.crt" in r.stdout, \
+        r.stdout + r.stderr
+
+
+# --- Engineering-review nit 3: pin the successful forced-deploy wiring ------
+
+def test_cmd_deploy_successful_forced_deploy_wiring(tmp_path):
+    """Engineering review: pin the successful forced deploy's wiring end to
+    end (a stub component with passing gate/install via a custom manifest):
+    the synthesized zero-width deploy runs, the ok audit line carries
+    trigger=extra-inputs, the forced timestamp is recorded, the snapshot
+    uses the -extra-inputs dir, and the watermark is untouched."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    (state / "deployed-commit").write_text(docs_only + "\n")
+    swapd = tmp_path / "swapd"
+    ca_dir = swapd / ".mitmproxy"
+    ca_dir.mkdir(parents=True)
+    ca = ca_dir / "mitmproxy-ca-cert.pem"
+    ca.write_bytes(b"fake-ca")
+    env = dict(env, SWAPD_HOME=str(swapd))
+    tconf = tmp_path / "stub.conf"
+    tconf.write_text(
+        'COMPONENTS=(stub)\n'
+        'stub_paths=("docs/")\n'
+        'stub_services=()\n'
+        'stub_user_services=()\n'
+        'stub_tests="true"\n'
+        'stub_health=()\n'
+        'stub_install="true"\n'
+        'stub_install_unit=""\n'
+        'stub_checkout_sync=""\n'
+        'stub_install_paths=()\n'
+        'stub_extra_paths=("$SWAPD_HOME/.mitmproxy/mitmproxy-ca-cert.pem")\n'
+    )
+    env = dict(env, UPDATER_COMPONENTS_CONF=str(tconf))
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; record_extra_inputs stub",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
+    ca.write_bytes(b"fake-ca-rotated")  # rotation, zero new commits
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=0" in r.stdout, out
+    assert "host-side inputs changed with no new commits" in out, out
+    audit = (state / "audit.log").read_text()
+    assert re.search(r'"result":"ok".*"trigger":"extra-inputs"', audit), audit
+    rec = (state / "extra-inputs-hash").read_text()
+    assert "stub_last_forced=" in rec, rec
+    assert re.search(r"^stub=[0-9a-f]{64}$", rec, flags=re.M), \
+        "successful forced deploy must converge the digest: " + rec
+    snaps = [d for d in (state / "snapshots").iterdir() if d.is_dir()]
+    assert any(d.name.endswith("-extra-inputs") for d in snaps), \
+        "forced snapshot needs its own dir: %s" % [d.name for d in snaps]
+    assert (state / "deployed-commit").read_text().strip() == docs_only, \
+        "zero-width deploy must not advance the watermark"
