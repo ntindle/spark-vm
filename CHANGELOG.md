@@ -84,6 +84,14 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- Approval-signal contract doc fixes: the pending id is always a single
+  approval id (the list form was unreachable); the `expired` approval
+  notice is documented as best-effort — confirmd's render loop usually
+  reaps expired items first, so clients see the pending id change with no
+  `expired` leg and should keep waiting on the new id; and the
+  answered-history item schema shared by confirmd and the proxy is now a
+  named, versioned (v1) cross-component contract; its (pre-existing)
+  drift behavior is documented as fail-closed (#308, #309, #310, #383).
 - A manual `auto-deploy.sh rollback` now marks the rolled-back commit
   blocked (like automatic rollbacks always have), so the next timer tick
   no longer redeploys the same bad commit in a fail/roll-back loop — the
