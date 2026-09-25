@@ -1140,7 +1140,7 @@ def test_http_claim_oversized_body_is_413(live_server):
 
 # ---------------------------------------------------------------------------
 # Post-claim re-submit dedup (arch deep-read: signed_up is terminal —
-# WAITLIST_OPERATIONS.md §3 — so a re-submit after a claim must never
+# WAITLIST_OPERATIONS.md §5 — so a re-submit after a claim must never
 # spawn a second pending row, which a later wave would invite again).
 # ---------------------------------------------------------------------------
 

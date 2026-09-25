@@ -603,7 +603,7 @@ class WaitlistService:
     def _claimed_row_by_email(self, owner):
         """Find a claimed (signed_up) row for the normalized owner
         address. signed_up is TERMINAL in the spec's state machine
-        (WAITLIST_OPERATIONS.md §3: pending → confirmed → invited →
+        (WAITLIST_OPERATIONS.md §5: pending → confirmed → invited →
         signed_up — no transition back), so the submit paths must no-op
         on it exactly like they do on invited rows: a re-submit after a
         claim must not spawn a second pending row for the same address
@@ -1422,7 +1422,7 @@ class WaitlistService:
                              attempts).
           "already_claimed"  — the owner already claimed the invite
                              (signed_up is terminal — WAITLIST_OPERATIONS
-                             §3); no new row, no email, nothing refreshed.
+                             §5); no new row, no email, nothing refreshed.
                              The submission ledger event is still recorded.
           "intake_limited" — per-sender 3/day tripped; nothing written
                              except the triage the caller performs.
