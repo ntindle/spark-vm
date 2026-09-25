@@ -74,6 +74,11 @@ confirmation page live on the host.
   boot. Everything about it is produced by `jail/build.sh` in this
   repo — a corrupted jail is a rebuild, not a mystery. Rebuilds get a
   fresh `/etc/machine-id`; guest sshd host keys live in the rootfs.
+  The jail tree is **not** self-contained: `build.sh` installs the swapd CA
+  into the guest through `../proxy/build_ca_bundle.py` (which in turn
+  imports `proxy/safe_install.py`) and fails closed if the helper is absent
+  (issue #304). Vendoring or shipping `jail/` without the sibling `proxy/`
+  tree breaks the build — keep both trees together.
 
 ## Enforcement-downgrade contract (fail-closed)
 
