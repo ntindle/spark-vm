@@ -142,6 +142,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 TIME_TRAP_MIN_SECONDS = 3
 IP_RATE_LIMIT = 10
 IP_RATE_WINDOW = 3600
+# #390: bound on distinct client IPs kept in the in-process abuse-rate
+# state — the dict itself is never pruned, so without this it grows one
+# key per distinct submitter IP for the life of the process.
+IP_HITS_MAX_KEYS = 10000
+# #390: minimum seconds between _ip_hits bound sweeps — a flood of unique
+# IPs must not turn every request into an O(dict) rebuild.
+IP_HITS_SWEEP_COOLDOWN = 60
 EMAIL_SEND_CAP = 3
 EMAIL_SEND_WINDOW = 86400
 TOKEN_TTL_SECONDS = 14 * 86400
@@ -483,6 +490,7 @@ class WaitlistService:
         self.by_email = {}      # normalized owner_email -> entry_id
         self.consumed = set()   # consumed/invalidated token strings
         self._ip_hits = {}      # client ip -> [epoch ...] (in-process)
+        self._ip_hits_last_sweep = 0.0  # epoch of last bound sweep (#390)
         # Serializes the check-then-act sections (dedup on submit, consume
         # on confirm) — the handler runs on ThreadingHTTPServer threads.
         self._lock = threading.Lock()
@@ -557,6 +565,7 @@ class WaitlistService:
         self.by_email = {}
         self.consumed = set()
         self._ip_hits = {}
+        self._ip_hits_last_sweep = 0.0  # epoch of last bound sweep (#390)
         self._load()
 
     def _refresh_under_lock(self):
@@ -571,11 +580,13 @@ class WaitlistService:
         that has no on-disk representation — refreshing it would reset
         every request's rate window, so it is deliberately preserved."""
         ip_hits = self._ip_hits
+        ip_hits_last_sweep = self._ip_hits_last_sweep
         self.rows = {}
         self.by_email = {}
         self.consumed = set()
         self._load()
         self._ip_hits = ip_hits
+        self._ip_hits_last_sweep = ip_hits_last_sweep
 
     def _save_row(self, row):
         self._append("rows.jsonl", row)
@@ -735,6 +746,20 @@ class WaitlistService:
 
     def _ip_limited(self, ip):
         now = time.time()
+        if (len(self._ip_hits) > IP_HITS_MAX_KEYS
+                and now - self._ip_hits_last_sweep >= IP_HITS_SWEEP_COOLDOWN):
+            # Bound the in-process abuse-rate state (#390): the dict keys
+            # one entry per distinct client IP forever, so once over the
+            # bound, re-prune every key's hits and drop keys with no
+            # in-window activity. The cooldown rate-limits the sweep so a
+            # flood of unique IPs cannot turn every request into an
+            # O(dict) rebuild.
+            self._ip_hits = {
+                k: [t for t in v if now - t < IP_RATE_WINDOW]
+                for k, v in self._ip_hits.items()
+            }
+            self._ip_hits = {k: v for k, v in self._ip_hits.items() if v}
+            self._ip_hits_last_sweep = now
         hits = [t for t in self._ip_hits.get(ip, []) if now - t < IP_RATE_WINDOW]
         if len(hits) >= IP_RATE_LIMIT:
             self._ip_hits[ip] = hits
@@ -759,6 +784,38 @@ class WaitlistService:
         ledger sees only sends to an address with a live row.)"""
         return (self._email_send_allowed(row)
                 and self._patha_send_allowed(row["owner_email"]))
+
+    def _write_spool(self, name, doc):
+        """Atomically write one spool doc — closes #389.
+
+        Spool files are drained by the operator's sender as JSON; a torn
+        partial file (crash/full disk mid-write) would leave a committed
+        row claiming an email was queued alongside a half-written file
+        the sender could choke on or send half of. Write to a unique tmp
+        name in spool/ + flush + fsync + os.replace() (the same
+        discipline as _rewrite_rows): a kill -9 mid-write leaves either
+        the old file (never — spool names are unique per send) or the
+        new one, never a torn one. The tmp is removed on failure so no
+        partial file is ever left behind for the sender. OSError
+        propagates — the caller's contract is unchanged: the invite path
+        catches it and commits nothing; the other paths treat it as
+        fatal.
+        """
+        path = os.path.join(self.spool_dir, name)
+        tmp = f"{path}.tmp-{secrets.token_hex(4)}"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(doc, fh, indent=2, sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            # Never leave a partial tmp behind for the sender to choke on.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def _queue_confirm_email(self, row):
         """Spool the confirm email; the operator's sender drains the spool.
@@ -798,9 +855,7 @@ class WaitlistService:
         name = (f"{row['entry_id']}-{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.json")  # unique per send: two
         # sends in the same second for one row must not share a filename
-        with open(os.path.join(self.spool_dir, name), "w",
-                  encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=2, sort_keys=True)
+        self._write_spool(name, doc)  # atomic — #389
         row["email_sends"] = row.get("email_sends", []) + [
             self.clock().timestamp()
         ]
@@ -916,9 +971,7 @@ class WaitlistService:
         }
         name = (f"{row['entry_id']}-{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.json")
-        with open(os.path.join(self.spool_dir, name), "w",
-                  encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=2, sort_keys=True)
+        self._write_spool(name, doc)  # atomic — #389
         row["email_sends"] = row.get("email_sends", []) + [
             self.clock().timestamp()
         ]
@@ -1326,9 +1379,7 @@ class WaitlistService:
         }
         name = (f"patha-{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.json")
-        with open(os.path.join(self.spool_dir, name), "w",
-                  encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=2, sort_keys=True)
+        self._write_spool(name, doc)  # atomic — #389
         self._record_patha_event(to, "email")
         if row is not None:
             # Union half #2: the row ledger sees path-A sends too.
@@ -1612,9 +1663,7 @@ class WaitlistService:
         }
         name = (f"{entry_id}-deleted-{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.json")
-        with open(os.path.join(self.spool_dir, name), "w",
-                  encoding="utf-8") as fh:
-            json.dump(doc, fh, indent=2, sort_keys=True)
+        self._write_spool(name, doc)  # atomic — #389
         return True
 
 
@@ -1824,9 +1873,7 @@ class WaitlistService:
         name = (f"{row['entry_id']}-invite-{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.json")
         try:
-            with open(os.path.join(self.spool_dir, name), "w",
-                      encoding="utf-8") as fh:
-                json.dump(doc, fh, indent=2, sort_keys=True)
+            self._write_spool(name, doc)  # atomic — #389
         except OSError:
             # Spool failed: commit nothing. The old token (if any) stays
             # live, the minted token is never referenced, and the row is

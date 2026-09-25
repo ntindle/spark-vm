@@ -1207,3 +1207,90 @@ def test_claimed_row_by_email_matches_only_signed_up():
     found = svc._claimed_row_by_email(email)
     assert found is not None and found["entry_id"] == row["entry_id"]
     assert svc._claimed_row_by_email("nobody@example.com") is None
+
+
+def test_write_spool_writes_complete_doc_no_tmp_left():
+    # #389: the spool writer commits via tmp + os.replace — a completed
+    # write leaves exactly one final file and no *.tmp-* leftovers for
+    # the operator's sender to choke on.
+    svc, tmp = make_service()
+    svc._write_spool("x.json", {"a": 1})
+    files = spool_files(tmp)
+    assert files == ["x.json"]
+    with open(os.path.join(tmp, "spool", "x.json"),
+              encoding="utf-8") as fh:
+        assert json.load(fh) == {"a": 1}
+
+
+def test_write_spool_failure_removes_partial_and_raises():
+    # #389: a failed commit leaves no partial tmp behind, and the error
+    # propagates so the caller's contract is unchanged (invite path
+    # catches OSError and commits nothing; others treat it as fatal).
+    svc, tmp = make_service()
+    real_replace = os.replace
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    os.replace = boom
+    try:
+        with pytest.raises(OSError):
+            svc._write_spool("y.json", {"a": 1})
+    finally:
+        os.replace = real_replace
+    assert spool_files(tmp) == []  # no torn file, no tmp leftover
+
+
+def test_ip_hits_sweep_drops_stale_keys():
+    # #390: once over the bound, keys whose hits are all outside the
+    # window are dropped; the new IP still rate-limits correctly.
+    svc, tmp = make_service()
+    now = time.time()
+    stale = now - wd.IP_RATE_WINDOW - 10
+    svc._ip_hits = {f"10.0.{i // 256}.{i % 256}": [stale]
+                    for i in range(wd.IP_HITS_MAX_KEYS + 100)}
+    assert svc._ip_limited("203.0.113.9") is False
+    # 100 stale keys + 1 new key gone: back under the bound.
+    assert len(svc._ip_hits) <= wd.IP_HITS_MAX_KEYS + 1
+    assert "10.0.0.0" not in svc._ip_hits
+    assert "203.0.113.9" in svc._ip_hits
+    # Rate limit still enforced on the new key.
+    for _ in range(wd.IP_RATE_LIMIT - 1):
+        svc._ip_limited("203.0.113.9")
+    assert svc._ip_limited("203.0.113.9") is True
+
+
+def test_ip_hits_sweep_preserves_in_window_hits():
+    # #390: the sweep prunes per-key hit lists but keeps in-window hits —
+    # an active submitter stays limited across a sweep boundary.
+    svc, tmp = make_service()
+    now = time.time()
+    svc._ip_hits = {f"10.1.{i // 256}.{i % 256}": [now - wd.IP_RATE_WINDOW - 5]
+                    for i in range(wd.IP_HITS_MAX_KEYS)}
+    busy_ip = "198.51.100.7"
+    svc._ip_hits[busy_ip] = [now - 10] * wd.IP_RATE_LIMIT
+    assert svc._ip_limited("203.0.113.10") is False  # triggers the sweep
+    assert svc._ip_hits[busy_ip] == [now - 10] * wd.IP_RATE_LIMIT
+    assert svc._ip_limited(busy_ip) is True  # still limited
+
+
+def test_ip_hits_sweep_rate_limited_by_cooldown():
+    # #390: the sweep is not re-run on every request — within the
+    # cooldown, an over-bound dict is left alone (bounded growth instead
+    # of an O(dict) rebuild per request).
+    svc, tmp = make_service()
+    now = time.time()
+    stale = now - wd.IP_RATE_WINDOW - 10
+    svc._ip_hits = {f"10.2.{i // 256}.{i % 256}": [stale]
+                    for i in range(wd.IP_HITS_MAX_KEYS + 1)}
+    svc._ip_limited("203.0.113.11")  # first call sweeps
+    swept_at = svc._ip_hits_last_sweep
+    assert swept_at > 0
+    # Repopulate over the bound with fresh in-window hits; within the
+    # cooldown the next call must NOT re-sweep.
+    svc._ip_hits.update({f"10.3.{i // 256}.{i % 256}": [now]
+                         for i in range(wd.IP_HITS_MAX_KEYS + 2)})
+    before = len(svc._ip_hits)
+    svc._ip_limited("203.0.113.12")
+    assert svc._ip_hits_last_sweep == swept_at
+    assert len(svc._ip_hits) == before + 1  # only the new key added
