@@ -112,8 +112,8 @@ pricing at $0.00936/vCPU-h (C41, billing since 2026-07-31) |
 | **Google Gemini Agent Environment** (2026-09-24 afternoon, C43) | Managed agent sandbox (task-scoped compute) | *"Environments are managed Linux sandboxes that give agents an isolated place to execute code and persist files"* — reusable via `environment_id`; sources (git repo mount); network allowlists; env vars / credential references; pre-installed Ubuntu toolchains; current examples use agent string `antigravity-preview-09-2026`. All VERIFIED on the [vendor's own docs](https://ai.google.dev/gemini-api/docs/agent-environment) (read 2026-09-24). Sept-17 detail at the THIRD-PARTY layer: Files API (persistent file upload/list/download into the sandbox); Credentials API (secrets injected as env vars/MCP headers so the model never sees the raw secret — a sixth convergent placeholder-swap datapoint, noted for the secrets turns); vendor-claimed ~40% fewer output tokens on file edits, +8% task completion; preview compute not billed. Sibling of Agent Substrate (C36) — this is the Gemini-API-side managed sandbox surface, not the GKE-side one. | "Environment compute (CPU, memory, sandbox execution) is **not billed** during the preview period" — verbatim VENDOR-VERIFIED 2026-09-24 (ai.google.dev/gemini-api/docs/agent-environment, page "Last updated 2026-09-24 UTC"); fixed allocations 4 CPU cores / 16 GB memory; no published pay-as-you-go pricing in the surveyed docs |
 | **Google Gemini Enterprise Agent Platform sandboxes** (2026-09-24 late evening, C44) | Managed agent sandboxes (task-scoped compute, GA) | *VENDOR-VERIFIED on Google's own release notes (read 2026-09-24): "Computer Use and Shell sandboxes in Gemini Enterprise Agent Platform are now generally available (GA)." (Sept 9, 2026)* — Shell sandboxes run untrusted shell commands, install packages, and manipulate files in an isolated Linux container via direct `/exec` API calls (Shell sandbox quickstart linked from the release notes); the same release ships VPC Service Controls & Private Service Connect, CMEK (Cloud KMS, disk + snapshot checkpoints), and **pause/resume for sandboxes** (deschedule compute for idle sandboxes while preserving filesystem state and connection identity; resume in seconds (idle-suspend economics datapoint — INFERRED read, convergent with C36 Agent Substrate's zero-idle posture and DO's 305 ms resume claim)). A third Google agent-sandbox surface alongside C36 (GKE-side open-source runtime) and C43 (Gemini-API-side Environments); the GA is pre-window (Sept 9) but filed now — reach-back per the #82 pattern, explicit queued candidate verified on a primary source. | No published pay-as-you-go pricing in the surveyed release notes |
 | **Google AX v0.3.0** (2026-09-25 pre-dawn, C47) | Orchestrator (OSS, harness lane) | **Google's open agentic orchestration runtime** ([google/ax](https://github.com/google/ax) — Apache-2.0, 10,853 stars, 527 forks) — *runs on top of [Agent Substrate](https://github.com/agent-substrate/substrate) for sandboxed execution* (repo moved from `google/agent-substrate` to the `agent-substrate` org — old URL 404s as of 2026-09-25); kubectl-shaped CLI (`ax apply/get/describe/watch` + `ax suspend` / `ax resume` / `ax ssh`); three primitives as `ax.io/v1alpha1` manifests: **Task** (run untrusted agent code in an isolated sandbox with CPU/memory limits), **Workspace** (pre-wired git repos, MCP servers, skill packages), **Model** (LLM config from a k8s secret); control plane deploys to `ax-system` namespace with Substrate in `ate-system` (prerequisite); pre-stable warning verbatim ("major breaking changes prior to a stable release"); AX is the reference ecosystem app on the Agent Substrate repo itself. v0.3.0 specifics THIRD-PARTY-convergent (released ~2026-09-20: three-service split, task state to Redis Streams, legacy harness removed; third-party teardowns flag ~25 of 56 manifest fields never reaching the sandbox — kept at third-party). Lane characterization (INFERRED): control-plane/harness layer over Substrate's sandbox-execution layer — the C30 harness↔compute split with a Google-built reference implementation | **Free, self-hosted** (Apache-2.0, open source) |
-| **Prime Intellect Prime Sandboxes** (launch ~2026-09-23, C48) | Task-scoped sandbox | **THIRD-PARTY** (AlphaSignal) — opened to run "30M AI agent environments" ("largest environment catalog available from a sandbox provider"); **GA vendor-sourced (snippet-level) 2026-09-25 midday pass:** vendor blog index read live ("Announcements SEP 23RD, 2026"); post body via vendor-post snippet — full-page read owed — carries the vendor's own "**Today, Prime Sandboxes enter general availability**" and "available to everyone, both as standalone infrastructure through our CLI/SDK and as part of our RL suite" (primeintellect.ai/blog/sandboxes); product page showed 20,292 concurrent sandboxes, 865,133 total created, 0.0% error rate at crawl time; usage-based, **no subscription tiers or minimum commitments**; workload positioning: RL training rollouts, synthetic data generation, evals, persistent remote agents; CLI/SDK (`prime sandbox create/run/list/delete`, `docs.primeintellect.ai/sandboxes/`) | **Launch pricing (vendor-sourced, via vendor-docs snippet — full-page live read owed):** vCPU **$0.02/hr**, memory **$0.0125/GiB-hr**, disk **$0.0002/GiB-hr** — corroborates the AlphaSignal-reported numbers; Prime says ~**1/3 of other large sandbox providers**; promo runs through **Dec 22** (no post-promo rates published); stale counter-datum: third-party ecosystem skill notes (prime-agent repo, 22 days old) quote older higher rates (CPU $0.05/core/hr) — superseded, vendor docs authoritative; 1 vCPU/1 GiB/32 GiB ≈ **$0.0389/hr**; currently **CPU-only** — GPU microVMs, state snapshots, sandbox forking, shared persistent workspaces on roadmap. Against the pre-launch documented rates (community SKILL.md notes quoted the older, higher pre-GA rates — superseded; vendor docs are authoritative) |
-| **DeepSeek DSec agent-training infrastructure** (2026-09-25 midday pass, C49) | Scale/safety evidence (in-lane color, not a product) | **THIRD-PARTY** (China AI briefing via kimkj.com) on DeepSeek's 2026-09-25-dated "agent training infrastructure" paper ("DSec"): "**Operating 3 million experimental sandbox environments daily**" with documented incidents where agents "overwrote system files and halted the kernel" — a scale datapoint (3M sandbox-envs/day; an order of magnitude above Prime's ~30M cumulative / 865k-total counters) and kernel-halting-escape failure-mode evidence relevant to the sandbox safety posture. Primary-source paper not yet located — full-paper read owed. No pricing or product surface. | **n/a** |
+| **Prime Intellect Prime Sandboxes** (launch ~2026-09-23, C48) | Task-scoped sandbox | **VENDOR-VERIFIED** (full-page reads 2026-09-25 afternoon pass): the GA post body (primeintellect.ai/blog/sandboxes) carries the vendor's own "**Today, Prime Sandboxes enter general availability.** … with **~30M sandboxes created so far** … available to everyone, both as standalone infrastructure through our CLI/SDK and as part of our RL suite" — midday snippet evidence corroborated verbatim; flagged counter inconsistency (honest record): blog ~30M vs product-page live dashboard **865,133 total created / 20,292 concurrent** at crawl time — do not cite as mutually confirming. **THIRD-PARTY** (AlphaSignal) — opened to run "30M AI agent environments" ("largest environment catalog available from a sandbox provider"); usage-based, **no subscription tiers or minimum commitments**; workload positioning: RL training rollouts, synthetic data generation, evals, persistent remote agents; CLI/SDK (`prime sandbox create/run/list/delete`, `docs.primeintellect.ai/sandboxes/`) | **Launch pricing (VENDOR-VERIFIED, full-page vendor docs read 2026-09-25 afternoon):** vCPU **$0.02/hr**, memory **$0.0125/GiB-hr**, disk **$0.0002/GiB-hr**; Prime says ~**1/3 of other large sandbox providers**; promo valid through **Dec 22, 2026**; **post-promo rates VERIFIED absent** — no rates beyond expiry, no reversion statement (do not infer); stale counter-datum: third-party ecosystem skill notes (prime-agent repo, 22 days old) quote older higher rates (CPU $0.05/core/hr) — superseded, vendor docs authoritative; 1 vCPU/1 GiB/32 GiB ≈ **$0.0389/hr**; currently **CPU-only** — GPU microVMs, state snapshots, sandbox forking, shared persistent workspaces on roadmap; size limits vCPUs 1–16, memory 128 MiB–64 GiB, disk 2–128 GiB; account defaults 1,024 active sandboxes, 4,096 vCPUs |
+| **DeepSeek DSec agent-training infrastructure** (2026-09-25 afternoon pass, C49) | Scale/safety evidence (in-lane color, not a product) | **PRIMARY-SOURCE-VERIFIED** — author-uploaded arXiv preprint 2609.22978v1, "DeepSeek Elastic Compute (DSec): A Sandbox Infrastructure for Effective Agentic Training at Scale" (31 pp, ~131 authors incl. Liang Wenfeng; [Submitted on 19 Sep 2026]): abstract — "**A single production-scale unit of DSec spans around 160 nodes, serving about 3 million sandboxes per day**; … supports **over 380,000 concurrent sandboxes** and sustains **over 5,000 sandbox creations per second**"; paper body §6 documents two agent-triggered **kernel crashes** ("recursively ran grep from the root directory, traversed /proc, and read /proc/kpagecgroup, **triggering a kernel bug that crashed the kernel**"; attack commands "executed inside the agent container itself, **crashing its own kernel**") plus an XFS metadata-corruption **filesystem shutdown** from an XFS_IOC_SWAPEXT reward-hack; mitigation caveat: "**These controls address only part of the problem and do not provide a general defense against destructive behavior such as triggering kernel bugs.**" Scale datapoint + kernel-halt-escape failure-mode evidence for the sandbox safety posture. The midday briefing's phrasing is close to but not identical to the paper's incidents — the row quotes the primary, not the retelling. No pricing or product surface. | **n/a** |
 | **h-sandbox / Harakiri** (2026-09-22 consolidation) | Task-scoped sandbox (OSS control plane) | Open-source self-hosted sandbox control plane (Apache 2.0); HTTP API / TS SDK / CLI / dashboard; Credential Vault with host-bound egress bindings and fake-env injection (fourth convergent placeholder-swap data point for the secrets-posture corpus) | Free, self-hosted |
 | **Brig** (2026-09-22 consolidation) | Local containment (OSS tool) | Local microVM CLI for coding agents — no hosted service; dedicated kernel per sandbox, host-vs-agent trust model, boot-empty credentials with names-only reporting, fail-closed egress-downgrade refusal | Free, local (Apache 2.0) |
 | **Epho** (2026-09-22 consolidation) | Task-scoped sandbox | Agents-as-API (claude / codex / opencode harnesses) with automatic multi-provider fallback — the session outlives the machine via session-snapshot restore on replacement boxes | ≈$0.158/h for 2 vCPU / 2 GiB / 10 GiB (computed from per-second rates); $10 starting credit; BYO model keys |
@@ -2864,3 +2864,76 @@ failures).
 New-entry/correction fold per the C32/C37/C38/C39/C40/C41/C42/
 C43/C44/C45/C46/C47/C48 precedents; full provenance in
 `docs/COMPETITOR_WATCH_2026-09-25_MIDDAY.md`.
+
+## Watch update — 2026-09-25 (afternoon): C48 + C49 resolved to vendor/primary grades; tracked set 8/8 NO-CHANGE
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_AFTERNOON.md`
+(survey window ~06:00–06:10 CDT). Vercel Drives NOT re-checked
+(P49 once-daily morning cadence — next the 2026-09-26 morning pass).
+
+**C48 — GA + launch pricing VENDOR-VERIFIED (full-page), row
+updated.** The midday resolving asks are closed: all three vendor
+surfaces read full-page live this run. The GA post body
+(primeintellect.ai/blog/sandboxes) corroborates the snippet evidence
+verbatim ("**Today, Prime Sandboxes enter general availability.**"
+… "~30M sandboxes created so far" … "available to everyone, both as
+standalone infrastructure through our CLI/SDK and as part of our RL
+suite"); vendor docs pricing (docs.primeintellect.ai/sandboxes/overview)
+corroborates value-for-value (CPU $0.02/vCPU-hr, memory
+$0.0125/GiB-hr, disk $0.0002/GiB-hr) with expiry pinned to
+**December 22, 2026**; **post-promo rates VERIFIED absent** — no
+rates beyond expiry, no reversion statement. CPU-only at GA
+confirmed on all surfaces (GPU microVMs + snapshots + forking +
+shared workspaces = roadmap). **Flagged inconsistency (honest
+record):** blog ~30M vs product-page live counters 865,133 total /
+20,292 concurrent — do not cite as mutually confirming.
+
+**C49 — primary-source paper LOCATED and read, row updated.**
+Author-uploaded arXiv preprint 2609.22978v1 ("DeepSeek Elastic
+Compute (DSec): A Sandbox Infrastructure for Effective Agentic
+Training at Scale", 31 pp, ~131 authors incl. Liang Wenfeng,
+submitted 19 Sep 2026): "… **serving about 3 million sandboxes per
+day**; … **over 380,000 concurrent sandboxes** … **over 5,000
+sandbox creations per second**"; paper body documents two
+agent-triggered kernel crashes (grep-from-root traversed /proc and
+read /proc/kpagecgroup "**triggering a kernel bug that crashed the
+kernel**"; attack commands "executed inside the agent container
+itself, **crashing its own kernel**") plus an XFS_IOC_SWAPEXT
+reward-hack that corrupted XFS metadata and forced a filesystem
+shutdown; caveat verbatim: "**These controls address only part of
+the problem and do not provide a general defense against destructive
+behavior such as triggering kernel bugs.**" The midday briefing's
+"overwrote system files and halted the kernel" is close to but not
+identical to the paper's two incidents — the row now quotes the
+primary, not the retelling. Evidence grade **THIRD-PARTY →
+PRIMARY-SOURCE-VERIFIED**.
+
+**C45 corroborated, no fold.** The vendor press release for the Sep-24
+Docker Cloud Sandboxes launch re-read live this run (VENDOR-VERIFIED:
+"Docker, Inc. … today announced **Docker Cloud Sandboxes**, a new
+solution for secure, isolated **AI agent execution**" — "Available
+today"; microVM isolation, low-hundreds-of-ms boot, 1–16 vCPUs,
+model/harness-neutral; next-gen **Kits** as an OCI open spec committed
+to CNCF submission). The C45 row already carries all of it at
+VENDOR-VERIFIED — no row change.
+
+**Carried:** C37 Pro fee still structurally omitted (not re-checked —
+page structurally omits plan fees, unchanged across passes); C44
+newest heading still September 24, 2026 (no September 25 entry —
+VERIFIED absent). **Tracked set: 8/8 VERIFIED NO-CHANGE** (zero
+deltas, zero fetch failures — all 10 URLs on vendor-owned pages;
+Daytona's newest changelog still the SEP 24 V0.216.1/V0.216.2 pair;
+the docs release-notes page for Docker Sandboxes has not surfaced
+the Sep-24 Cloud Sandboxes press release). Adjacent only (NOT
+corpus): Baseten acquires Blaxel (THIRD-PARTY, beri.net — M&A, not
+a product launch); DO Managed Agents Sep-22 preview framing
+(THIRD-PARTY, snippet-level — already corpus as C26, grade not
+upgraded); OpenAI Agents API public beta (Sep 10 — harness packaging,
+not sandbox infra). Out of lane / stale: GPT-6 Sol + Claude Opus 5.5
+inference price cuts; Cursor Cloud Agents on Cloudflare Sandboxes
+(Sep 2, third-party retelling); dev.to "Customer-Controlled
+Sandboxes?" (Sep 9, recrawled).
+
+Evidence-grade upgrades per the C32/C37/C38/C39/C40/C41/C42/
+C43/C44/C45/C46/C47/C48 precedents; full provenance in
+`docs/COMPETITOR_WATCH_2026-09-25_AFTERNOON.md`.
