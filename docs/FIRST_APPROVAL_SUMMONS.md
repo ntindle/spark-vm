@@ -36,36 +36,77 @@ AgentMail credential. Two reasons, both load-bearing:
    mistake as the IMDSv1 host-wide grants H11 flagged (§3, swap-proxy
    trust boundary).
 2. **Blast radius.** The filing path (`_file_approval`) runs inside the
-   proxy's hot path on the box. Network calls to a mail API from there
-   would couple approval latency to mail-delivery latency. The existing
-   push integration already follows the right pattern: `_file_approval`
-   enqueues on a daemon thread to a durable journal
-   (`$CONFIRM_DIR/push-queue.jsonl`), never on the hot path, and a
-   standalone worker delivers with retry. The summons follows the same
-   pattern — on the box it is one locked append, nothing more.
+   proxy on the box. Network calls to a mail API from there would couple
+   approval latency to mail-delivery latency. The existing push
+   integration already separates concerns: `_file_approval` enqueues on
+   a daemon thread to a durable journal (`$CONFIRM_DIR/push-queue.jsonl`),
+   and a standalone worker delivers with retry. The summons follows the
+   same separation — the box records a journal row, the operator plane
+   delivers — with one deliberate divergence: the append happens inline
+   next to the filing write (same durability, not a weaker one), because
+   unlike push's poisoned-queue-file concern there is no reason to defer
+   it; see the S1 detail below.
 
 So the design has two halves:
 
 - **Box side (S1):** `_file_approval` appends a filing event to a durable
-  local outbox journal (`$APPROVALS_DIR/summons-outbox.jsonl`) on a daemon
-  thread, exactly like the push enqueue. Event payload: `aid`,
+  local journal (`$APPROVALS_DIR/summons-outbox.jsonl`) **inline, adjacent
+  to the `os.replace` that files the pending record**, inside the same
+  `except OSError` block. The filing path is already synchronous on the
+  hot path (makedirs, a full `listdir` scan, `os.replace`), so the
+  "hot path" argument against one locked append collapses — the append
+  shares the filing's durability rather than a weaker one. The residual
+  loss window is a process crash between the two writes; a box-side
+  reconciliation sweep (S1, on the same schedule as the event shipper)
+  diffs `pending/` against the journal and re-ships anything the inline
+  append missed, so even that window closes. Event payload: `aid`,
   `filed_at`, `expires`, the plain-language action summary (credential
   name + host + method — the same text the page already shows; never
-  model-authored free text, per the finding-49 discipline), and the
-  tenant identity. No secrets, no credential values, no request bodies.
-- **Control-plane side (S2):** an observer on the operator plane reads the
-  outbox (the H4 relay is the natural carrier for this read — the same
-  tailnet channel that already lets the control plane reach the box), and
-  sends the email via the operational AgentMail identity. The AgentMail
-  API key is installed only on the operator plane via `cred set` and
-  referenced in configs as the `hsurr:agentmail` placeholder (R2 rule) —
-  it is never written into the repo, the journal, or the box.
+  model-authored free text, per the finding-49 discipline), and a tenant
+  field carried as an **unverified hint** (see identity, below).
+  No secrets, no credential values, no request bodies.
+- **Control-plane side (S2):** the box *ships* filing events to the
+  control plane over `HOSTED_SIGNUP_ONBOARDING.md` §10's channel — signed,
+  append-only batches with per-VM sequence numbers, over a mutually
+  authenticated channel (per-VM client cert issued at provision time,
+  pinned to the tenant). This is a **box→plane push, never a
+  control-plane pull**: §6 pins `spec.network = {public_ingress: false}`
+  and forbids inbound paths to the VM, so there is no observer that
+  "reads the outbox" from outside. The summons events ride the same
+  audit-shipping batches (a dedicated event stream over the same channel
+  is S2's call). **This channel is unbuilt** — §10 is a design, not a
+  deployment — so it is an explicit S2 sequencing dependency, named
+  below. The AgentMail send itself happens on the operator plane with
+  the API key installed via `cred set` and referenced in configs as the
+  `hsurr:agentmail` placeholder (R2 rule) — the key is never written
+  into the repo, the journal, or the box.
+
+**Identity:** the observer keys the `first_summons_sent` flag,
+the pending-state mirror, and the recipient lookup off the
+**transport-authenticated box→tenant binding** (the per-VM client cert),
+treating the journal's tenant field as an unverified hint. A
+compromised box can suppress its summons events (per §10, suppression
+is detectable — a gap in the sequence numbers is the signal — but the
+email then never goes out); it cannot forge another tenant's events
+undetectably. Cross-tenant forgery degrades to self-spam or a re-check
+miss, never a misdirected summons.
+
+**Recipient:** the recipient is the magic-link email the human
+handed the signup flow (stage 1), read from the signup identity store
+(owner: the signup flow, H15). The control plane must be able to read
+that address at summons time — whether it is carried in the G3 tenant
+record (a record-extension question, named in S2's sequencing) or read
+from the identity store directly is S2's call; either way the field is
+named here so the dependency is visible.
 
 Fail-open throughout: observer, network, or API failure never loses the
-filed approval and never blocks the swap path. The journal is the durable
-record; the observer retries with backoff; a dead-letter journal holds
-events that exhausted retries. A summons that never sends is an
-observability event (see §6), not a filing failure.
+filed approval and never blocks the swap path. The observer retries with
+backoff; a dead-letter journal holds events that exhausted retries. A
+summons that never sends for *send-side* reasons is an observability
+event (see §6); a summons suppressed *box-side* shows up as a §10
+sequence gap, surfaced by the sentinel-side observer, not as
+`summons_failed`. Neither failure mode is silent, and neither touches
+the filing.
 
 ## 2. What the email contains
 
@@ -78,9 +119,13 @@ copy, and this doc pins the assembly rules:
   `<approvals_url>/approval/<aid>`. **G8's open question** (who writes
   `approvals_url`, and re-entry rotation) is the one sequencing dependency:
   if the tenant record has no `approvals_url` at summons time, the email
-  may not fabricate one — it sends with the approvals-page base URL from
-  operator config and notes the carrier as unresolved. G8's resolution
-  removes the fallback.
+  **omits the deep link entirely** — no fabrication. The human was handed
+  the approvals-page URL at signup stage 2 (spec §4 item 1) and already
+  holds it, so the email points there with the copy "open your approvals
+  page and tap the pending approval." `<base>/approval/<aid>` is not a
+  licensed fallback: the carrier contract shows `approvals_url` as
+  tenant-scoped, and a probably-broken link trains humans that summons
+  links are broken. G8's resolution removes the fallback.
 - **Plain-language action:** the filing record's tuple, rendered as the
   page renders it ("your Muse asked to use `<credential>` for
   `<host>`"). No model-authored text enters the email (finding-49
@@ -101,7 +146,7 @@ Per spec §4:
 - **Trigger:** the first approval request files. "First" is per tenant,
   per onboarding arc — the observer tracks a `first_summons_sent` flag
   in the tenant record so a box restart or journal replay cannot re-summon
-  (the journal is at-least-once; the flag makes the send idempotent).
+  (the journal plus the S1 reconciliation sweep is at-least-once; the flag makes the send idempotent).
 - **Reminder:** one re-send at T+TTL/2 if the approval is still pending.
   Approval TTL is 1 hour (`timedelta(hours=1)` in `_file_approval`), so
   the reminder fires at +30 minutes. Before re-sending, the observer
@@ -119,9 +164,12 @@ The spec says the email summons retires when the push service (H14)
 ships. The retirement rule, made precise:
 
 - Email remains the default for a tenant's **first** filing until the
-  control plane has recorded at least one confirmed push delivery for
-  that tenant (subscription created *and* a push acknowledged). Only
-  then does push become the primary summons channel for that tenant.
+  control plane has recorded a **push-service-accepted delivery** (201)
+  for that tenant. A 410 (dead subscription) does *not* retire email —
+  it falls back to email and marks the subscription for re-registration.
+  "Push acknowledged" is not a device-ack (push services return 201 from
+  the push network, never a human-saw-it); the retirement criterion is
+  the service accept, not a human read receipt.
 - This is a bootstrap exception, not a contradiction: H14's push can
   only summon a human who has subscribed, and subscription still
   happens after the first summons in the hosted first run. Email is the
@@ -137,21 +185,30 @@ ships. The retirement rule, made precise:
 The both-supported default (user-set 2026-09-18) applies: the summons
 module is a portable component — the journal emission (S1) ships in the
 open-source tree, and the sender driver (S2) is runnable by any operator.
-But email via the operational AgentMail identity is meaningless without
-an operational identity, so the sender is **disabled unless a summons
-channel is configured** — same shape as push.py's "disabled unless
-`CONFIRM_VAPID_KEYS` names a readable keypair" gate. Single-owner
-deployments (the owner is the operator; the approval page is local)
-need no summons channel at all: the box-side journal stays dormant and
-costs one locked append per filing at most. Config (env):
+But email via an operational AgentMail identity is meaningless without
+one, so the sender is **disabled unless a summons channel is configured**
+— same shape as push.py's "disabled unless `CONFIRM_VAPID_KEYS` names a
+readable keypair" gate. Single-owner deployments (the owner is the
+operator; the approval page is local) need no summons channel at all: the
+box-side emission still happens (one locked append per filing — the
+sender is dormant, not the journal), and costs nothing observable.
+
+For the **hosted** deployment, an unconfigured summons channel is a
+**provisioning gate, fail-closed**: a hosted deployment that ships
+without one silently degrades the first run to `human-drop-off` while
+the funnel copy promises "waiting on your approval." Provisioning must
+refuse to complete until a summons channel is configured.
+
+Config (env):
 
 - `CONFIRM_SUMMONS_DRIVER` — `agentmail` (default: unset = disabled)
-- `CONFIRM_SUMMONS_INBOX` — the operational inbox identity
-  (default `spark-agent@agentmail.to`)
+- `CONFIRM_SUMMONS_INBOX` — the operational inbox identity. **Unset and
+  required; the operator provisions a dedicated inbox** (the AgentMail
+  free tier allows 3 inboxes — waitlist, spark-agent, summons). No
+  default is blessed here: the product must not hard-code an
+  operator's identity.
 - `CONFIRM_SUMMONS_API_KEY` — referenced as `hsurr:agentmail`, installed
   via `cred set` on the operator plane only
-- `CONFIRM_SUMMONS_BASE_URL` — approvals-page base URL fallback (used
-  only while G8's carrier is unresolved — §2)
 
 ## 6. Observability: the funnel must see the summons
 
@@ -165,7 +222,9 @@ event vocabulary):
   visible. A tenant whose first summons dead-letters should surface in
   the operator dashboard: the human is waiting on a channel that is
   broken, and the funnel's "waiting on your approval" stage copy is a
-  lie until it's fixed.
+  lie until it's fixed. Covers send-side failures; a box-side-suppressed
+  summons shows up as a §10 sequence gap instead (see §1), surfaced by
+  the sentinel-side observer.
 - `summons_skipped_expired` — the reminder was suppressed because the
   approval expired (G1's silent outcome, made explicit here for the
   funnel's sake).
@@ -173,31 +232,52 @@ event vocabulary):
 ## 7. Build slices (for the `feature`/provisioning track)
 
 - **S1 — box-side journal:** `_file_approval` appends the filing event
-  to `$APPROVALS_DIR/summons-outbox.jsonl` on a daemon thread (mirrors
-  the push enqueue; unit-tested: journal row shape, hot-path
-  non-blocking, at-least-once tolerated). No sender, no network.
-- **S2 — control-plane observer + AgentMail driver:** the relay (H4)
-  reads the journal; the driver sends via AgentMail's REST API
-  (`POST /v0/inboxes/{inbox}/messages/send`) using the `hsurr:agentmail`
-  placeholder installed via `cred set` on the operator plane only;
-  reminder scheduler (+30m, state re-check before re-send); idempotency
-  via the tenant record's `first_summons_sent` flag; dead-letter journal.
-  Sequencing: needs G8's `approvals_url` write-ownership resolved for
-  the deep link (fallback licensed in §2 until then).
-- **S3 — retirement + funnel telemetry:** the H14 bootstrap rule (§4),
-  the §6 funnel events, and the operator-dashboard surfacing of
-  `summons_failed`. Sequencing: needs H14's confirmed-delivery signal.
+  to `$APPROVALS_DIR/summons-outbox.jsonl` inline, adjacent to the
+  `os.replace` (same durability as the filing itself), plus a box-side
+  reconciliation sweep that diffs `pending/` against the journal and
+  re-ships anything the inline append missed. Unit-tested: journal row
+  shape, adjacency, the sweep's diff. Naming note: `$APPROVALS_DIR` is
+  `_file_approval`'s tree (`SWAP_APPROVALS_DIR`, default
+  `/home/swapd/approvals`); push.py's `CONFIRM_DIR` defaults to the same
+  path — the journal lives in the approvals tree either way.
+- **S2 — box→plane event stream + AgentMail driver:** filing and
+  lifecycle events (filed/answered/expired) ship over §10's
+  mutually-authenticated channel; the control plane's driver sends via
+  AgentMail's REST API (`POST /v0/inboxes/{inbox}/messages/send`) using
+  the `hsurr:agentmail` placeholder installed via `cred set` on the
+  operator plane only; reminder scheduler (+30m, state re-check against
+  the observer's pending-state mirror — the mirror is fed by the box's
+  answered/expired lifecycle events over the same channel, keyed off
+  the transport-authenticated box→tenant binding); idempotency via the
+  tenant record's `first_summons_sent` flag; dead-letter journal.
+  **Sequencing:** (a) the §10 event channel is unbuilt — say so, and
+  verify its file/batch-read capability at implementation; (b) G3's S1
+  (the tenant-record store, carrying `first_summons_sent`,
+  `approvals_url`, and possibly the recipient) is unbuilt; (c) G8's
+  `approvals_url` write-ownership (fallback licensed in §2 until then);
+  (d) the recipient's read path from the signup identity store
+  (record-extension question, §1).
+- **S3 — retirement + funnel telemetry:** the §4 retirement rule (201
+  accepted = retired; 410 = email fallback + re-registration), the §6
+  funnel events, and the operator-dashboard surfacing of
+  `summons_failed`. Sequencing: needs H14's push-accept signal.
 
 ## 8. Open questions (carried, not decided here)
 
 - **G8 (dependency):** which signup-flow step owns the `approvals_url`
   write, and re-entry rotation. Blocks the deep link's carrier, not the
   design.
-- **Magic-link email already exists?** The signup flow already sends
-  magic-link emails (`HOSTED_SIGNUP_ONBOARDING.md` §5) — the summons
-  should reuse the same operator mail path if one exists rather than
-  standing up a second sender. The S2 implementer verifies this against
-  the signup implementation before writing a new driver.
+- **Magic-link email already exists?** `HOSTED_SIGNUP_ONBOARDING.md` §5
+  describes the magic-link flow, but in-tree there is only inbox
+  *reading* (`site/waitlist_patha.py`) — no sender. The S2 implementer
+  is likely building the first operator mail sender, not "verifying
+  reuse": verify the credential's *placement* (operator plane only,
+  `hsurr:agentmail` via `cred set`), not just the API path.
+- **Dedicated vs shared inbox:** the free tier allows 3 inboxes
+  (waitlist, spark-agent, +1). Whether the summons gets a dedicated
+  inbox or reuses an existing operational one is an operator decision —
+  S2 records the choice; §5 licenses only that no default is blessed
+  in the design.
 - **Per-tenant vs per-box:** G7's multi-box-tenant question applies to
   the summons too — a tenant with two boxes has two onboarding arcs,
   and "first filing" is per arc. S2 reads G7's resolution when it lands.
