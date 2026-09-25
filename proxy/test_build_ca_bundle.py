@@ -224,5 +224,102 @@ class TestBuildCaBundle(unittest.TestCase):
             self.assertFalse(dest.exists(), "no bundle on refusal")
 
 
+    def test_symlink_sys_is_refused_and_secret_not_leaked(self):
+        # Issue #372: the --sys path is invoker-controlled, so a symlink
+        # there must be refused exactly like a symlink at the CA path --
+        # the privileged read must not follow it into the bundle.
+        with tempfile.TemporaryDirectory() as d:
+            _, ca = self._files(d)
+            secret = Path(d) / "shadow"
+            secret.write_bytes(b"root:$6$SECRET-HASH\n")
+            sys_link = Path(d) / "sys-link.crt"
+            sys_link.symlink_to(secret)
+            dest = Path(d) / "ca-bundle.crt"
+            r = self._run("--sys", str(sys_link), "--ca", str(ca),
+                          "--dest", str(dest))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("symlink", r.stderr)
+            self.assertFalse(dest.exists(), "no bundle on refusal")
+            self.assertNotIn("SECRET-HASH", r.stderr + r.stdout)
+
+    def test_directory_sys_is_refused(self):
+        # Issue #372: a non-regular file at --sys is not bundle bytes.
+        with tempfile.TemporaryDirectory() as d:
+            _, ca = self._files(d)
+            sys_dir = Path(d) / "sys-dir"
+            sys_dir.mkdir()
+            dest = Path(d) / "ca-bundle.crt"
+            r = self._run("--sys", str(sys_dir), "--ca", str(ca),
+                          "--dest", str(dest))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertFalse(dest.exists())
+
+    def test_fifo_sys_is_refused_without_hanging(self):
+        # Issue #372: a planted FIFO at --sys must not block the privileged
+        # read -- the open discipline refuses it without hanging.
+        with tempfile.TemporaryDirectory() as d:
+            _, ca = self._files(d)
+            fifo = Path(d) / "sys-fifo.crt"
+            os.mkfifo(fifo)
+            dest = Path(d) / "ca-bundle.crt"
+            try:
+                r = subprocess.run(
+                    [sys.executable, SCRIPT, "--owner", _me(),
+                     "--group", _me(), "--sys", str(fifo),
+                     "--ca", str(ca), "--dest", str(dest)],
+                    capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                self.fail("helper hung reading a FIFO at the --sys source")
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertFalse(dest.exists())
+
+    def test_hardlink_sys_is_refused(self):
+        # Issue #372: a hardlink IS a regular file, so O_NOFOLLOW + S_ISREG
+        # do not stop it; the nlink check must refuse it, exit 2, no bundle.
+        with tempfile.TemporaryDirectory() as d:
+            _, ca = self._files(d)
+            secret = Path(d) / "shadow"
+            secret.write_bytes(b"root:$6$SECRET-HASH\n")
+            sys_link = Path(d) / "sys-link.crt"
+            os.link(secret, sys_link)
+            dest = Path(d) / "ca-bundle.crt"
+            r = self._run("--sys", str(sys_link), "--ca", str(ca),
+                          "--dest", str(dest))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("hardlink", r.stderr)
+            self.assertFalse(dest.exists(), "no bundle on refusal")
+            self.assertNotIn("SECRET-HASH", r.stderr + r.stdout)
+
+    def test_missing_sys_fails_closed(self):
+        # Issue #372: unlike the swapd CA, the system bundle has no
+        # legitimate first-deploy-missing state -- a missing --sys path
+        # fails closed (exit 2), it does not skip.
+        with tempfile.TemporaryDirectory() as d:
+            _, ca = self._files(d)
+            dest = Path(d) / "ca-bundle.crt"
+            r = self._run("--sys", str(Path(d) / "nope.crt"),
+                          "--ca", str(ca), "--dest", str(dest))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("missing", r.stderr)
+            self.assertFalse(dest.exists(), "no bundle on refusal")
+
+
+    def test_dangling_symlink_sys_is_refused_not_skipped(self):
+        # Issue #372: a dangling symlink at --sys is a broken/attacked
+        # deploy, not a first deploy -- ELOOP refusal (exit 2), fail closed.
+        # (Old code: plain open() followed the link -> FileNotFoundError
+        # traceback, exit 1.)
+        with tempfile.TemporaryDirectory() as d:
+            _, ca = self._files(d)
+            sys_link = Path(d) / "sys-link.crt"
+            sys_link.symlink_to(Path(d) / "nonexistent")
+            dest = Path(d) / "ca-bundle.crt"
+            r = self._run("--sys", str(sys_link), "--ca", str(ca),
+                          "--dest", str(dest))
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("symlink", r.stderr)
+            self.assertFalse(dest.exists(), "no bundle on refusal")
+
+
 if __name__ == "__main__":
     unittest.main()
