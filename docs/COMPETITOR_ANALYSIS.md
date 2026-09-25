@@ -91,7 +91,7 @@ isolation), because those are where the trust story lives.
 | **Docker Sandboxes** (morning pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, **v3 kits** (OCI-based packages: agent workload + reusable mixins for tools/config/credentials/network/instructions — C34), skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
 | **Boat** (tracked set; 2026-09-22 consolidation; **renamed from ASCII ~2026-09-17** — C40 deduped into this row) | Task-scoped sandbox / persistent computer | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement). Rename VERIFIED this run: `box.ascii.dev`, `boat.dev`, `ascii.dev` serve byte-identical product pages; YC's company page now `ycombinator.com/companies/boat` (YC F26); yc-oss mirror dates the rename 2026-09-17 (`former_names`: ["Ascii box","Ascii"]); the old YC slug `ycombinator.com/companies/ascii` now serves a **301 → `/companies/boat`** (VERIFIED 2026-09-24 midday — harder rename evidence than the page copy). Hardest evidence yet (VERIFIED 2026-09-24 late midday): the vendor's own API docs at `docs.ascii.dev/box/api/v1` render as **"Boat Public API v1"** — the legacy ASCII domain's developer surface brands the product *Boat* (`/box` path and box.ascii.dev endpoints persist). The documented API covers sandbox lifecycle (provisioning → ready/idle → running → archiving → archived; stop/archive, resume, fork, delete; desktop streaming; Idempotency-Key; per-sandbox API keys; data-retention API) plus a `prompt` endpoint running work through built-in agent harnesses `codex`, `claude-code`, `pi`, `opencode`, `prime-agent`, `kimi` (INFERRED read: Boat bundles coding-agent harnesses as first-class providers). Canonical domain now boat.dev. | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time; EU-only DE/FI/FR (FAQ verbatim — Germany, Finland, France; VERIFIED 2026-09-24 midday; folded from the deprecated C40 pointer row). |
-| **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, snapshots **$0.05/GiB-month on the docs pricing subpage ("Last verified 22 Sep 2026") vs $0.005/GiB-month in DO's own Sept 22 release** — the 10× discrepancy is REAL AND LIVE (both surfaces re-read 2026-09-24; neither corrected; docs figure matches platform-normal droplet-snapshot rate, release's $0.005 likely typo — INFERRED; carried open); late-night 2026-09-24 re-read: release side re-VERIFIED $0.005, docs subpage not locatable (3 searches + Harness Runtime docs carry no prices) — discrepancy not re-observable this pass; carried open; $5 new-user credit |
+| **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, snapshots **$0.005/GiB-month (vendor's 2026-09-22 investor release, evidence-backed)** — 2026-09-24 overnight pass RETIRED the carried $0.05/GiB-month docs figure as current (standalone docs pricing subpage unlocatable 4 consecutive passes; current general-snapshot snippets (page last verified 8 May 2024) read $0.06/GB-month Droplets / $0.06/GiB-month volumes; the 10× discrepancy framing is withdrawn — see "Watch update — 2026-09-24 (overnight)" for the correction and the prior $0.05 history); $5 new-user credit |
 | **Boxd** (2026-09-22 consolidation) | Persistent computer | "Composable computers" — KVM VMs with live memory forking in under 200 ms (vendor claim), snapshots/checkpoints, real SSH, per-machine HTTPS subdomain; self-hosted option ("run the whole platform on your own hardware") | Credit-based: €0.049/vCPU-hour running, €0.015/GiB-hour resident RAM, €0.0001/GiB-hour disk written; €30 free credits (**rate card VERIFIED 2026-09-23** — first own-page fetch, C29) |
 | **Upstash Box** (2026-09-22 consolidation; **own-docs VERIFIED 2026-09-24**) | Task-scoped sandbox / persistent computer | **VERIFIED on the vendor's own docs** ([Box quickstart](https://upstash.com/docs/box/overall/quickstart), read 2026-09-24): *"Upstash Box lets you give your AI agents a computer. Every Upstash Box is a **secure, isolated cloud container with an AI Agent built in**. Spin up as many as you want in parallel. Each one includes a full environment with a filesystem, shell, git, and a runtime."* Runtimes default Debian (glibc); keep-alive boxes (`keepAlive: true`) stay on between sessions; SSH access with a Box API key; *"Freeze a box anytime, and continue days or even weeks later with perfect resumability."* Standing datapoints: snapshot/restore API for reusable prepared environments, branching from snapshots, full outbound networking by default, 22.5 Gbps hosts on AWS; pause/resume unavailable with keepAlive enabled | **THIRD-PARTY** (vendor's own comparison blog, snippet-only this run): $0.10/$0.20/$0.40 per active CPU-hour (small/medium/large); free tier 10 boxes, 5 CPU-h/mo, $1 LLM budget, no card required |
 | **Freestyle** (2026-09-23 overnight, C37) | Persistent computer | "VMs for AI Agents" — hardware-virtualized Linux microVMs with live cloning, pause/resume, nested virtualization (Docker inside), custom domains, WireGuard tunnels, FUSE/eBPF; boot claim qualified 2026-09-24: vendor headline "65 ms" is marketing, docs give the honest number — **p99 under 400ms** (both VERIFIED on vendor's own pages); "run forever" with idle-timeout disabled (the anti-suspend-on-idle posture) | **Own pricing page VERIFIED 2026-09-24** ([freestyle.sh/pricing](https://www.freestyle.sh/pricing)): vCPU $0.04032/h (200/h included mo), GiB Memory $0.0129/h (400/mo), GiB Storage $0.000086/h (60,000/mo), Data Transfer $0.02/GB (50 GB free / 500 GB paid); Free / **Hobby $50/mo** (FAQ: "$50 on Hobby covers your first $50 of usage") / Pro (+ Enterprise custom); Pro's exact monthly fee not printed (only "monthly fee is a commitment that doubles as usage credit") — carried; dashboard-internal pricing not checked |
@@ -2272,6 +2272,83 @@ already-taken-slot rule — today's `_NIGHT` was taken by the night pass
 (#373, ~19:21 CDT) and `_LATE_NIGHT` by the late-night pass (#375,
 ~20:2x CDT), following the 2026-09-23 `_LATE_NIGHT` /
 `_POST_MID_EVENING` precedent family.
+
+## Watch update — 2026-09-24 (overnight): C41 pin moved, C26 $0.05 retired + DO billing-model garnish, OpenAI GA absence vendor-verified
+
+Garnish fold per the C32/C37/C38/C39/C40/C41/C42/C43/C44/C45
+precedents; full pass record in
+`docs/COMPETITOR_WATCH_2026-09-24_OVERNIGHT.md` (survey window
+~22:55–23:10 CDT).
+
+**C41 — repo HEAD pin MOVED for the first time (VENDOR-VERIFIED on
+the official repo's commits/HEAD page).** The corpus HEAD pin is now
+`96ff8a80f564271d6c3671a29dfecb6814bd6101` (short `96ff8a8`),
+replacing `39b6c3a20ec4597cceda497a4d8badf5384e2022`. Pricing digits
+unchanged (repo pricing file snippet-level: Eco 0.00936/0.004608,
+Std 0.01224/0.006012, Pro 0.01872/0.009360; disk 0.00031896 mainland
+CN / 0.00025308 outside). The pin moving after days of stillness is
+the first genuine C41 delta — the docs repo is actively maintained,
+not frozen.
+
+**C26 — the carried $0.05 figure is retired; the 10x discrepancy
+framing is withdrawn (honest correction).** The evidence-backed
+Managed Agents snapshot rate is **$0.005/GiB-month** (vendor's own
+investor release, 2026-09-22). The old search-historical $0.05 may
+not be re-asserted: current general-snapshot doc snippets (page
+last verified 8 May 2024) read
+$0.06/GB-month (Droplets) / $0.06/GiB-month (volumes), and the
+standalone Managed Agents pricing subpage missed its fourth
+consecutive pass. The corpus's C26 deep-dive entry still records the
+$0.05 as mid-evening-VERIFIED and is NOT silently rewritten — but on
+next touch it must carry the correction: no vendor-read general
+figure at $0.05 exists today. The weakened misattribution hypothesis
+stands: search material mixed general-product and Managed-Agents
+pricing; only $0.005 (vendor release) and $0.06 (current general,
+snippet-level) survive this run's reads.
+**C26 garnish — DigitalOcean's own billing model (LinkedIn, ~1 day
+old, vendor-published):** Harness Runtime bills on **active CPU by
+the second** — "$0.126/hr fully allocated" as the vendor's reference,
+**~$0.0310/hr for a typical 25%-active agent run**, zero while
+waiting. This is now the corpus's sharpest agent-sandbox duty-cycle
+pricing comp — held as a reference for spark-vm's own hosted pricing
+model.
+
+**OpenAI Agents API — GA absence upgraded to VENDOR-VERIFIED.**
+Official platform page + docs guide opened this run: still public
+beta (`client.beta.agents`), "working toward GA." This corrects the
+two prior passes' fetch failures — no longer search-level. **C37
+Freestyle Pro fee: UNVERIFIED-carried, unchanged** (no public Pro
+price; FAQ's $50/mo Hobby minimum re-VENDOR-VERIFIED; signed-in check
+still owed). **C36 snippet-level** (page not opened — full verify
+owed). **C43 VENDOR-VERIFIED in preview** (compute not billed during
+preview; clean line citation owed). **C44 unchanged** (newest
+release-note heading still Sep 22; Sep 9 GA stands). **Tensorlake no
+Sep-24 news** (Jul 28 BYOC post re-fetched).
+
+**Tracked set:** 8/8 VERIFIED NO-CHANGE — zero deltas, zero fetch
+failures. Daytona changelog still leads with SEP 24 V0.216.1 above
+V0.216.2; Docker Sandboxes release-notes still 2026-09-21;
+Microsandbox still v0.7.3; E2B, boat.dev pricing, TermSquad
+($9/$19/$29/$49 verbatim), AgentComputer (digit-for-digit),
+DigitalOcean still public preview. Daytona pricing not re-fetched
+(changelog-only scope; carried as baseline).
+
+**In-lane dated 9/24:** Docker Cloud Sandboxes reconfirmed
+(vendor snippet-level this run) — shape
+prices filled in (Micro $0.07 / Small $0.14 / Medium $0.28 / Large
+$0.56 / XL $1.12; sbx 0.45.1+; 24h max; $250 credit). Baseten×Blaxel
+is Sep-24 *commentary* on a Sep-10 deal (acquisition terms
+undisclosed; continuity promises lack duration/price/SLA guarantees),
+not a launch. A Daytona "announcement" search hit was a stale
+OpenHands-era PR — false positive, excluded. No credible Sep-24
+vendor announcements across the rest of the scan list. Adjacent
+context only: AWS Bedrock AgentCore sandbox DNS egress (~Sep 20,
+THIRD-PARTY; AWS calls it intended functionality, no patch —
+security-context for the loop); Upstash's 15-provider sandbox
+comparison (~Sep 16, vendor-authored) — ready cost-model reference.
+
+**Watch-doc naming:** `_OVERNIGHT` admitted per the 2026-09-23
+`_LATE_NIGHT` / `_POST_MID_EVENING` / `_OVERNIGHT` precedent family.
 
 ## Watch update — 2026-09-24 (post mid evening): C45 price-and-terms garnish, C26 third miss, C37 fee VENDOR-VERIFIED absent
 
