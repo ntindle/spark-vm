@@ -202,7 +202,12 @@ REGISTRY_FILE="${INFERENCE_REGISTRY_FILE:-/home/swapd/inference-registry.json}"
 # A bare `-` (not `:-`) preserves an explicitly empty SUDO_PREFIX --
 # the test seam; unset keeps the production default.
 SUDO_PREFIX="${SUDO_PREFIX-sudo -u swapd}"
-HERE="$(cd "$(dirname "$0")" && pwd)"  # canonical: a bare-PATH invocation must still find proxy_match.py
+# $0-relative: correct when the script is invoked by path. A bare-PATH
+# (PATH-lookup) invocation would resolve HERE to the caller's $PWD, not
+# the script dir -- the old bare-PATH claim on this line was optimistic.
+# No such callers exist: the injector is always run by explicit path
+# (the test suite's `bash "$INJECTOR"` uses an absolute path).
+HERE="$(cd "$(dirname "$0")" && pwd)"
 MANIFEST_CHECK="${INJECT_MANIFEST_CHECK:-$HERE/check-image-manifest.sh}"
 MANIFEST="${INJECT_MANIFEST:-/etc/sparkvm/image-manifest.json}"
 HARNESS_PROBE_BIN="${HARNESS_PROBE_BIN:-$HERE/harness-auth-probe}"
