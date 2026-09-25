@@ -2941,7 +2941,7 @@ C43/C44/C45/C46/C47/C48 precedents; full provenance in
 ## Watch update — 2026-09-25 (evening): full-quiet pass, tracked set 8/8 NO-CHANGE
 
 Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_EVENING.md`
-(survey window ~06:26–06:31 CDT). Vercel Drives NOT re-checked
+(survey window ~06:26–06:35 CDT). Vercel Drives NOT re-checked
 (P49 once-daily morning cadence — next the 2026-09-26 morning pass).
 
 **No corpus fold; no new C-numbers this pass.** Tracked set 8/8
@@ -2952,11 +2952,11 @@ V0.216.1/V0.216.2 pair; Docker docs release-notes newest heading still
 moves: Docker Cloud Sandboxes (the 9/25 Help Net Security piece is
 third-party re-telling — "OCI-based Kits to package agents and their
 guardrails" adds no verifiable fact beyond the already VENDOR-VERIFIED
-**C45**; no fold), DO Managed Agents (the investors.digitalocean.com
-release + 9/21 docs release notes carry the $5 credit, 886 ms
-session-ready / 305 ms resume-to-ready vendor benchmarks, and the
-OpenHands/Qencode/Amplitude launch partners — all already in the **C26**
-row; no fold), Prime Sandboxes GA (alphasignal.ai is a THIRD-PARTY
+**C45**; no fold), DO Managed Agents (the IR release carries the $5 credit and the
+named launch partners — all already in the **C26** row; the 886/305 ms
+vendor benchmarks were reported THIRD-PARTY by subagentic.ai on 9/23 and
+are already in the C26 watch-doc trail — 305 ms also in the row; no
+fold), Prime Sandboxes GA (alphasignal.ai is a THIRD-PARTY
 downgrade of facts the afternoon pass already VENDOR-VERIFIED at
 full-page grade — **C48**; no fold).
 
@@ -2965,9 +2965,11 @@ login-free surfaces this run (freestyle.sh/pricing read in full — the
 limits table carries no plan fees; docs.freestyle.sh is a marketing
 stub with no pricing; web searches polluted by "Freestyle Solutions",
 a different vendor; `site:freestyle.sh` zero results — the ask stays
-open, the dashboard-signed-in check remains owed); **C44** VERIFIED
-absent again (no Sep-25 heading; the Sep-24 Cloud Sandboxes press
-release still not on the docs release-notes page). **Anti-chase note:**
+open, the dashboard-signed-in check remains owed); **C44 NOT re-checked
+this pass** (the surveyor brief mislabeled the Docker docs-page heading
+check as C44 — corrected; the real ask is the Google release-notes
+heading check, carried to the 2026-09-26 morning pass). **Anti-chase
+note:**
 Daytona's "agent-agnostic infrastructure for sandboxing AI coding
 assistants" OpenHands demo is recrawled-old PRNewswire syndication
 (page stamps 633–3045 days), not a fresh announcement — future passes

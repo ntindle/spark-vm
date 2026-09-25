@@ -2,7 +2,7 @@
 
 Delta-only update against the 2026-09-25 afternoon pass
 (`docs/COMPETITOR_WATCH_2026-09-25_AFTERNOON.md`). Survey window
-**2026-09-25 ~06:26–06:31 CDT**; two read-only surveyors (read-only
+**2026-09-25 ~06:26–06:35 CDT**; two read-only surveyors (read-only
 fetches and searches; no logins, no writes): (A) vendor-page re-reads
 of the full tracked set + C44 heading check; (B) the carried C37 ask
 plus an open-web in-lane news scan dated 2026-09-25 (back-window Sep
@@ -84,14 +84,14 @@ in-lane items and all three dedupe to already-filed corpus entries:
   guardrails") is third-party re-telling of the Sep-24 launch already
   VENDOR-VERIFIED in **C45** — no new verifiable fact, no fold. The
   Register/ADTmag 9/24 corroboration predates this pass's window.
-- **DigitalOcean Managed Agents public preview** — the
-  investors.digitalocean.com release (9/22) and 9/21 docs release notes
-  carry the $5 new-user credit, the 886 ms session-ready / 305 ms
-  resume-to-ready vendor benchmarks, and the OpenHands/Qencode/
-  Amplitude launch partners — all already in the **C26** row (the IR
-  surface itself was read VENDOR-VERIFIED by the 9/25 morning pass).
-  Grade not upgraded (snippet-level sighting of VENDOR-VERIFIED
-  facts), no fold.
+- **DigitalOcean Managed Agents public preview** — the IR
+  release carries the $5 new-user credit and the named launch partners
+  (OpenHands/Qencode/Amplitude), all already in the **C26** row (the IR
+  surface itself was read VENDOR-VERIFIED by the 9/25 morning pass);
+  the 886 ms session-ready / 305 ms resume-to-ready vendor benchmarks
+  were reported THIRD-PARTY by subagentic.ai on 9/23 — already in the
+  C26 watch-doc trail (305 ms is also in the row). No grade upgrade, no
+  fold.
 - **Prime Sandboxes GA** — the alpasignal.ai piece (~9/23,
   THIRD-PARTY: ~30M sandboxes in private rollout, launch rates,
   promo through Dec 22, CPU-only at GA) is a THIRD-PARTY downgrade of
@@ -107,8 +107,14 @@ searches return nothing freestyle.sh-specific (`site:freestyle.sh`
 zero results; results polluted by "Freestyle Solutions", a different
 vendor). The ask stays open; the dashboard-signed-in check
 (admin.freestyle.sh / Stripe checkout) remains owed and out of
-anonymous reach. **C44** — no Sep-25 heading; newest heading remains
-2026-09-21 (VERIFIED absent).
+anonymous reach. **C44 NOT re-checked this pass** (correction: the
+surveyor brief mislabeled the Docker docs-page heading check as C44 —
+the Docker observation stands fully under the §1 Docker item, but it is
+not C44). The real **C44** ask is the Google Gemini Enterprise Agent
+Platform release-notes heading check
+(docs.cloud.google.com/gemini-enterprise-agent-platform/release-notes;
+Sep 24, 2026 newest, no Sep-25 entry — VERIFIED absent in the
+afternoon pass) — carried to the 2026-09-26 morning pass.
 
 **Anti-chase note (for future passes):** Daytona's "agent-agnostic
 infrastructure for sandboxing AI coding assistants" OpenHands demo is
@@ -124,7 +130,7 @@ lane).
 
 ## 3. Method notes
 
-- Survey windows ~06:26–06:31 CDT; two read-only surveyors; no logins,
+- Survey windows ~06:26–06:35 CDT; two read-only surveyors; no logins,
   no writes, no commits by surveyors (one capture file each in the
   loop's `agent_notes/` workspace).
 - Vercel Drives NOT re-checked (P49 once-daily morning cadence — next
