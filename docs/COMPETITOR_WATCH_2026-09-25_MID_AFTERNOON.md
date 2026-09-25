@@ -152,11 +152,17 @@ C44 (Computer Use and Shell sandboxes GA) still under September 09,
   www.perplexity.ai/hub/blog) list "Sep 23, 2026 — Escaping SPACE:
   Part I — Red-teaming VM isolation and network confinement for AI
   agents" at
-  https://www.perplexity.ai/hub/blog/escaping-space-part-i — but the
-  direct fetch returned HTTP 403 (upstream denied). Dated Sep 23,
-  outside today's window regardless. Upgrades the C54-adjacent
-  evidence to vendor-primary *listing* once a future pass reads it;
-  the read itself stays carried.
+  https://www.perplexity.ai/hub/blog/escaping-space-part-i —
+  automated fetches return HTTP 403 (upstream bot-block), but a
+  real-browser read 2026-09-25 ~14:10 CDT confirmed the page loads:
+  headline "Escaping SPACE: Part I", subtitle "Red-teaming VM
+  isolation and network confinement for AI agents", date SEP 23,
+  2026, author Perplexity Secure Intelligence Institute — all
+  matching the citation. Dated Sep 23, outside today's window
+  regardless. The URL is now a verified-live vendor-primary page
+  (bot-blocked for CI's link checker — host-level exclusion added
+  to `.github/workflows/ci.yml`); the full article-body read stays
+  carried for a future pass.
 - **Island Series F company-announcement read: RESOLVED — no
   file.** Found the company announcement (GlobeNewswire release,
   reprinted via Daily Guardian): "Island Announces $400 Million
@@ -168,8 +174,9 @@ C44 (Computer Use and Shell sandboxes GA) still under September 09,
 
 **Carried:** C37 Pro fee still structurally omitted (watched lines);
 C44 newest heading still Sep 24 (no Sep-25 entry — VERIFIED absent);
-C26 conflicts unchanged (watched lines); C54 primary-source read
-(the 403'd Perplexity page); C55 primary-source read
+C26 conflicts unchanged (watched lines); C54 primary-source page
+(the Perplexity "Escaping SPACE" article — automated fetches 403,
+real-browser verified live 2026-09-25 ~14:10 CDT); C55 primary-source read
 (blog.cloudflare.com disclosure); Vercel Drives NOT re-checked (P49
 once-daily morning cadence — next the 2026-09-26 morning pass).
 Deliberately not filed: BAND dedupe (already corpus C45 — see
