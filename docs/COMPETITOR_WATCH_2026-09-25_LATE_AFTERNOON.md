@@ -28,7 +28,7 @@ confirmed not present on it.
 
 Zero pricing/feature deltas across the set except the Docker
 release-notes heading move below. **Zero fetch failures** this pass —
-all 11 vendor fetches succeeded first try (Surveyor A, no retries).
+all 12 vendor fetches succeeded first try (Surveyor A, no retries).
 
 - **Daytona — VERIFIED NO-CHANGE** (changelog:
   https://www.daytona.io/changelog; pricing:

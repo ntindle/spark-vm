@@ -126,6 +126,8 @@ pricing at $0.00936/vCPU-h (C41, billing since 2026-07-31) |
 
 | **Perplexity "Escaping SPACE: Part I"** (published 2026-09-23, filed adjacent, C54) | Agent-sandbox security research (red team by the sandbox operator) | **THIRD-PARTY** (dennysentinel.com analysis read 2026-09-25; Perplexity's own post snippet-level this pass): 9 frontier models × 216 runs in a Firecracker microVM with root — 0/108 VM escapes, but domain-based egress allowlist bypassed in 11/54 partial-network runs; authority-switch bypasses reproduced against 8 of 10 third-party sandbox platforms (E2B, Vercel Sandbox, microsandbox, Modal, Daytona, Deno, Fly.io Sprites — Cloudflare Sandbox and NVIDIA OpenShell clean). Directly relevant to spark-vm's sandbox threat model: "Relying only on the destination IP address at the host to determine whether a connection is allowed is insufficient"; "Never express an egress policy as an IP or CIDR when the intent is a hostname." Filed adjacent — research, not a new product | N/A (published research) |
 
+| **Cloudflare Containers / Sandboxes cross-tenant disk-residue flaw** (disclosed 2026-09-24/25, filed adjacent 2026-09-25 early-afternoon, C55) | Agent-sandbox security (vendor-disclosed storage-layer flaw) | **VENDOR-VERIFIED** on blog.cloudflare.com (full-page read, 2026-09-25 late-afternoon): "On September 4, 2026, Oren Yomtov, a security researcher from Accomplish, responsibly reported a vulnerability affecting Cloudflare Containers and Cloudflare Sandboxes (which is built on Containers), through Cloudflare's bug bounty program." Root cause: dm-thin `skip_block_zeroing` on 64 KiB blocks let reused blocks retain prior tenants' data; vendor validation: 5,614 testable directory blocks, 2,700 distinct foreign inodes; residual material on 18 of 24 placements / 20 of 22 nodes across four continents; recovered "directory structures, database pages, and structurally complete SQLite databases." Vendor timeline: Sep 4 15:26 UTC report via HackerOne → 18:45 UTC incident opened → 21:27 UTC runtime fix merged → 23:15 UTC rollout started → Sep 7 06:13 UTC rollout complete + old-pool data clearing began → Sep 19 15:03 UTC cleanup of all pre-mitigation cached snapshots completed; "no evidence of malicious exploitation"; no customer-side configuration changes required. Clarification: storage-layer residual-data exposure, NOT a VM/container escape in the code-execution sense. Directly relevant to spark-vm's sandbox threat model: multi-tenant disk-wipe discipline | N/A (disclosed vulnerability) |
+
 ## TermSquad watch — first pass (R3)
 
 TermSquad is the closest competitor and the newest (launched three days before
@@ -3180,7 +3182,7 @@ Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_LATE_AFTERNOON.md`
 (P49 once-daily morning cadence — next the 2026-09-26 morning pass).
 
 **Tracked set 7/8 VERIFIED NO-CHANGE + one DELTA** (zero fetch
-failures — all 11 vendor fetches succeeded first try; Daytona,
+failures — all 12 vendor fetches succeeded first try; Daytona,
 E2B, boat.dev, Microsandbox v0.7.3, TermSquad, AgentComputer,
 DigitalOcean Managed Agents — all watched lines verbatim;
 C44 newest heading still Sep 24 — no Sep-25 entry, VERIFIED
@@ -3195,7 +3197,7 @@ v3-kits entry is verbatim unchanged (incl. the cloud-experimental
 caveat). The Sep-24 Docker Cloud Sandboxes launch still has no
 distinct launch note on the docs page (case-insensitive "Cloud
 Sandboxes" find: 0 → 2 hits, both lowercase/incidental — no
-launch-note). Design color for the C52/H4 thread: private kit
+launch-note). Design color for the C52 thread: private kit
 images in cloud sandboxes — Docker is closing the kit-image privacy
 loop on the cloud side.
 
