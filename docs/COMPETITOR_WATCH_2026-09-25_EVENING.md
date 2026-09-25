@@ -92,7 +92,7 @@ in-lane items and all three dedupe to already-filed corpus entries:
   were reported THIRD-PARTY by subagentic.ai on 9/23 — already in the
   C26 watch-doc trail (305 ms is also in the row). No grade upgrade, no
   fold.
-- **Prime Sandboxes GA** — the alpasignal.ai piece (~9/23,
+- **Prime Sandboxes GA** — the alphasignal.ai piece (~9/23,
   THIRD-PARTY: ~30M sandboxes in private rollout, launch rates,
   promo through Dec 22, CPU-only at GA) is a THIRD-PARTY downgrade of
   facts the afternoon pass already **VENDOR-VERIFIED at full-page
