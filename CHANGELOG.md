@@ -76,6 +76,12 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- A manual `auto-deploy.sh rollback` now marks the rolled-back commit
+  blocked (like automatic rollbacks always have), so the next timer tick
+  no longer redeploys the same bad commit in a fail/roll-back loop — the
+  block auto-clears once a newer commit supersedes it, `rollback
+  --no-block` skips it for investigate-not-condemn rollbacks, and `status`
+  prints the exact `rm` command to clear it by hand (#325, #374).
 - The harness auth probe's confirmd check now verifies the answering process
   behaves like confirmd — it requires confirmd's own 403 denial shape
   (`forbidden: <reason>` body plus `confirmd/1` server header, and never

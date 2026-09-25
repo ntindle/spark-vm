@@ -27,7 +27,9 @@
 #   auto-deploy.sh init      # one-time: create mirror repo + install updater copy
 #   auto-deploy.sh check     # fetch + report what a deploy would do (read-only)
 #   auto-deploy.sh deploy    # fetch, gate, install, restart, health-check
-#   auto-deploy.sh rollback  # restore the most recent snapshot + restart
+#   auto-deploy.sh rollback [--no-block]  # restore the newest snapshot + restart;
+#                                        # marks the rolled-back commit blocked
+#                                        # unless --no-block
 #   auto-deploy.sh status    # watermark, last run, timer state
 #   auto-deploy.sh map FROM TO  # print components changed between two commits
 #
@@ -1012,6 +1014,23 @@ cmd_deploy() {
 }
 
 cmd_rollback() {
+    # cmd_rollback [--no-block] — restore the newest snapshot.
+    # Marks the rolled-back commit blocked so the next timer tick does not
+    # retry-loop it (issue #325): the commit being rolled back FROM is the
+    # pre-rollback watermark (the deployed head). --no-block skips the mark
+    # for the investigate-not-condemn case — the same semantics as
+    # do_rollback's no_block (issue #324: the commit itself is fine).
+    # The block auto-clears in pending_range once a newer commit supersedes
+    # the blocked one; `status` tells the operator how to clear it by hand
+    # for the re-deploy-the-same-tree case.
+    local no_block=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-block) no_block=1 ;;
+            *) log "ERROR: unknown rollback flag '$1'"; return 1 ;;
+        esac
+        shift
+    done
     local snapdir
     snapdir="$(newest_snapshot)"
     [ -n "$snapdir" ] || { log "ERROR: no snapshots to roll back to"; return 1; }
@@ -1041,14 +1060,33 @@ cmd_rollback() {
         audit 'rollback' ',"result":"rollback-failed","snapshot":"'"$snapdir"'"'
         return 1
     fi
+    # The commit being rolled back FROM is the pre-rollback watermark —
+    # capture it before the watermark is rewound to `from`.
+    local rolled_from; rolled_from="$(cat "$WATERMARK" 2>/dev/null || true)"
     write_watermark "$from"
     local rbv; rbv="$(sync_version_from_deployed)"
+    # Issue #325: block the rolled-back commit so the next tick does not
+    # redeploy it. An empty watermark, or one already sitting at `from`
+    # (nothing was ever deployed past it), means there is no bad commit to
+    # block — writing `from` there would pin the updater on its own
+    # watermark head, so skip the mark instead of blocking blindly.
+    # The mark lands even when the restored components are unhealthy: the
+    # watermark was already rewound, so the retry-loop hazard is identical
+    # (the alert below already screams for the operator).
+    local blocked_wrote="none"
+    if [ -z "$no_block" ] && [ -n "$rolled_from" ] && [ "$rolled_from" != "$from" ]; then
+        printf '%s\n' "$rolled_from" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
+        blocked_wrote="$rolled_from"
+        log "marked rolled-back commit $rolled_from blocked (next tick will not retry it)"
+    elif [ -z "$no_block" ]; then
+        log "not marking a commit blocked: watermark was empty or already at $from"
+    fi
     if [ "$unhealthy" -eq 1 ]; then
         alert "manual rollback to $from completed but a component is unhealthy"
-        audit 'rollback' ',"result":"rollback-unhealthy","to":"'"$from"'","snapshot":"'"$snapdir"'"'
+        audit 'rollback' ',"result":"rollback-unhealthy","to":"'"$from"'","rolled_back_from":"'"$rolled_from"'","blocked":"'"$blocked_wrote"'","snapshot":"'"$snapdir"'"'
         return 1
     fi
-    audit 'rollback' ',"result":"manual-rollback","to":"'"$from"'","snapshot":"'"$snapdir"'","to_version":"'"$rbv"'"'
+    audit 'rollback' ',"result":"manual-rollback","to":"'"$from"'","rolled_back_from":"'"$rolled_from"'","blocked":"'"$blocked_wrote"'","snapshot":"'"$snapdir"'","to_version":"'"$rbv"'"'
     log "rolled back; watermark now $from; version now $rbv; services restarted + healthy"
 }
 
@@ -1057,6 +1095,11 @@ cmd_status() {
     echo "watermark:  $(cat "$WATERMARK" 2>/dev/null || echo '(none)')"
     echo "deployed version: $(deployed_version)"
     echo "blocked:    $(cat "$BLOCKED_COMMIT" 2>/dev/null || echo '(none)')"
+    if [ -f "$BLOCKED_COMMIT" ]; then
+        # Issue #325: the operator may need to re-deploy the blocked tree
+        # after a manual fix — tell them exactly how to clear the mark.
+        echo "  clear with: rm \"$BLOCKED_COMMIT\" (the mark auto-clears on the next newer commit)"
+    fi
     echo "audit log:  $AUDIT_LOG ($(wc -l <"$AUDIT_LOG" 2>/dev/null || echo 0) lines)"
     echo "snapshots:  $(find "$SNAPSHOT_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
     if [ -f "$LAST_FAILURE" ]; then echo "LAST FAILURE:"; cat "$LAST_FAILURE"; fi
@@ -1093,7 +1136,7 @@ main() {
             mkdir -p "$UPDATER_STATE_DIR"
             exec 9>"$LOCK_FILE"
             flock -n 9 || { log "a deploy holds the lock — retry the rollback after it finishes"; exit 1; }
-            cmd_rollback
+            cmd_rollback "${@:2}"
             ;;
         status)   cmd_status ;;
         map)      cmd_map "${2:?map needs FROM}" "${3:?map needs TO}" ;;
