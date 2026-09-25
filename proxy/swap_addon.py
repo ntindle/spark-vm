@@ -207,11 +207,20 @@ APPROVALS_ENABLED = os.environ.get("SWAP_ENABLE_APPROVALS", "1") == "1"
 # only channel the proxy has to its client. Denial suppression is
 # additionally scoped to the normalized request path (a denial for one
 # path cannot suppress filings for another). Vocabulary:
-#   X-Spark-Approval-Pending: <aid>[, <aid>...]
-#       a grant request is filed (or already pending); poll by re-issuing
-#       the gated request and reading X-Spark-Approval-Decision.
+#   X-Spark-Approval-Pending: <aid>
+#       a grant request is filed (or already pending) — always a single
+#       id: the proxy coalesces to one pending approval per tuple. Poll
+#       by re-issuing the gated request and reading
+#       X-Spark-Approval-Decision.
 #   X-Spark-Approval-Decision: <state>:<aid>[, <state>:<aid>...]
-#       terminal decision, state in {approved, denied, expired}.
+#       terminal decision, state in {approved, denied, expired}. A
+#       response can carry several: one request swapping two
+#       credentials under two grants records approved for each aid,
+#       and a filing scan can reap several expired tuple matches in
+#       one pass. A best-effort "expired" is usually accompanied by
+#       the fresh "pending" id, but the flood cap / 60s rate limit can
+#       suppress the fresh filing, leaving the expired leg
+#       unaccompanied (see the doc).
 # Header values carry only the approval id (random hex) and the state
 # word — never credential names, hosts, or secret material.
 APPROVAL_PENDING_HEADER = "X-Spark-Approval-Pending"
