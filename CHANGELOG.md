@@ -86,6 +86,15 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- Waitlist re-submit after a claim no longer spawns a second pending row
+  for the same address: `signed_up` is terminal in the waitlist state
+  machine, and the old dedup check missed it, so a claimed owner
+  re-submitting the form (or path-A email) got a fresh confirm email and
+  could be invited and claimed a second time — double-counting the
+  funnel and stealing a later wave's slot. Re-submits on claimed
+  addresses now get an honest "Already claimed" page / `already_claimed`
+  outcome: no new row, no new email, nothing refreshed ((#TBD)).
+
 - Approval-signal contract doc fixes: the pending id is always a single
   approval id (the list form was unreachable); the `expired` approval
   notice is documented as best-effort — confirmd's render loop usually

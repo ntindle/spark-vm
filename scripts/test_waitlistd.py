@@ -1136,3 +1136,74 @@ def test_http_claim_oversized_body_is_413(live_server):
     _, tok_status = svc.lookup_invite_token(itoken)
     assert tok_status == "ok"
     assert not [e for e in read_events(tmp) if e["event"] == "claimed"]
+
+
+# ---------------------------------------------------------------------------
+# Post-claim re-submit dedup (arch deep-read: signed_up is terminal —
+# WAITLIST_OPERATIONS.md §5 — so a re-submit after a claim must never
+# spawn a second pending row, which a later wave would invite again).
+# ---------------------------------------------------------------------------
+
+def _claim(svc, tmp, email):
+    """Submit → confirm → wave → claim. Returns the claimed row."""
+    row, itoken = _invite(svc, tmp, email)
+    status, _ = svc.claim_post(itoken)
+    assert status == 200
+    row = svc.rows[row["entry_id"]]
+    assert row["status"] == "signed_up"
+    return row
+
+
+def test_resubmit_form_after_claim_is_honest_noop():
+    svc, tmp = make_service()
+    row = _claim(svc, tmp, "claimed1@example.com")
+    before_rows = len(svc.rows)
+    before_spool = len(spool_files(tmp))
+    before_events = len(read_events(tmp))
+    status, body = svc.submit_form(
+        form_fields("claimed1@example.com"), "127.0.0.1")
+    assert status == 200
+    assert "Already claimed" in body
+    # The address is echoed (it came from the reader's own form — the
+    # same self-submitted-echo contract as page_already_invited and
+    # page_check_inbox; masking is for token-sourced addresses only).
+    assert "claimed1@example.com" in body
+    # No new row, no new email, no new funnel event, nothing refreshed.
+    assert len(svc.rows) == before_rows
+    assert len(spool_files(tmp)) == before_spool
+    assert len(read_events(tmp)) == before_events
+    assert svc.rows[row["entry_id"]]["status"] == "signed_up"
+    # The next wave has nothing to invite — the duplicate cycle is dead.
+    assert svc.send_invite_wave(
+        pricing_lines=PRICING, trial_terms=TERMS,
+        wave="w2", count=10) == []
+
+
+def test_submit_email_after_claim_returns_already_claimed():
+    svc, tmp = make_service()
+    row = _claim(svc, tmp, "claimed2@example.com")
+    before_rows = len(svc.rows)
+    before_spool = len(spool_files(tmp))
+    outcome, got = svc.submit_email(
+        owner="claimed2@example.com", sender="muse@x.io", inbound_auth=True)
+    assert outcome == "already_claimed"
+    assert got["entry_id"] == row["entry_id"]
+    assert len(svc.rows) == before_rows  # no duplicate row
+    assert len(spool_files(tmp)) == before_spool  # no new email
+
+
+def test_claimed_row_by_email_matches_only_signed_up():
+    svc, tmp = make_service()
+    email = "claimed3@example.com"
+    row = _submit(svc, email)  # pending
+    assert svc._claimed_row_by_email(email) is None
+    svc.confirm_post(row["active_token"])  # confirmed
+    assert svc._claimed_row_by_email(email) is None
+    invited = svc.send_invite_wave(
+        pricing_lines=PRICING, trial_terms=TERMS, wave="w3", count=10)
+    assert invited == [row["entry_id"]]  # invited
+    assert svc._claimed_row_by_email(email) is None
+    svc.claim_post(svc.rows[row["entry_id"]]["active_invite_token"])
+    found = svc._claimed_row_by_email(email)
+    assert found is not None and found["entry_id"] == row["entry_id"]
+    assert svc._claimed_row_by_email("nobody@example.com") is None
