@@ -102,7 +102,7 @@ the conflict annotated; the $0.005-as-Managed-Agents attribution
 stays INFERRED. The standing watch item remains the conflict(s)
 themselves — now scoped, not re-verified hourly.
 
-### 2b. C48 — Prime Sandboxes GA is vendor-confirmed; launch pricing folded (fold)
+### 2b. C48 — Prime Sandboxes GA is vendor-sourced (snippet-level); launch pricing folded (fold)
 
 Vendor blog (primeintellect.ai: "Prime Sandboxes: MicroVMs for
 Agentic RL Training at Scale" —
@@ -118,7 +118,9 @@ created during the private rollout. Vendor product page
 20,292 concurrent sandboxes, 865,133 total created, 0.0% error
 rate. Hardware-virtualized guest kernels (explicitly not gVisor);
 agents get system access for Docker Compose, background services,
-filesystem modification, long-running tasks.
+filesystem modification, long-running tasks — THIRD-PARTY color
+(AlphaSignal, carried from the 2026-09-25 late-morning pass; this
+pass did not re-verify these capability details).
 
 Launch pricing (from vendor docs,
 docs.primeintellect.ai/sandboxes/overview, "Last Updated: 1 day
@@ -136,11 +138,11 @@ higher rates (CPU $0.05/core/hr) — superseded; vendor docs are
 authoritative.
 
 Folding effect: C48's THIRD-PARTY launch report is now
-VENDOR-VERIFIED on both the GA fact (vendor blog, index live) and
-the launch pricing (vendor docs, via snippet). The corpus row's
-"vendor-primary verification owed" ask is resolved; the remaining
-ask is a full-page live read of the docs pricing page (snippet-level
-evidence only today).
+vendor-sourced-but-snippet on both the GA fact (vendor blog —
+index read live, post body via snippet) and the launch pricing
+(vendor docs, via snippet). VENDOR-VERIFIED is still owed on both
+(full-page live reads); the corpus row's "vendor-primary
+verification owed" ask stays open.
 
 ### 2c. C49 new — DeepSeek DSec "agent training infrastructure" paper (in-lane, THIRD-PARTY)
 
@@ -217,7 +219,7 @@ yet located).
   Updated: 212 and 234 days ago) — not fresh news.
 
 **Net:** one corpus fold pair (C26 conflict scoped + second conflict
-surfaced; C48 vendor-confirmed) and one new in-lane C-entry (C49
+surfaced; C48 vendor-sourced (snippet-level)) and one new in-lane C-entry (C49
 DeepSeek scale/safety color). Otherwise the lane is quiet — no
 pricing moves, no new launches.
 
@@ -230,7 +232,7 @@ pricing moves, no new launches.
   pricing page (currently snippet-level evidence).
 - C49: primary-source paper read owed if locatable.
 - C37: stays carried (page structurally omits plan fees).
-- C44: next check the Sep 25 heading arrival (overdue — Sep 24
+- C44: next check the Sep 25 heading arrival (Sep 24
   remains newest).
 - Vercel Drives: not checked (P49 once-daily morning cadence —
   next the 2026-09-26 morning pass).
