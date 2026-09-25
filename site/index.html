@@ -1,6 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!-- FRONT-DOOR CONTRACT (H28): this page is sparkvm.dev's shared front door
+     for self-hosted (near-term) and hosted (future). Funnel wiring this
+     page must not break (scripts/test_waitlist_page.py): the ?src= buckets
+     hero/trust/faq/final exactly once each on the waitlist CTAs,
+     /go/selfhost?src=selfhost exactly twice, the exact §5 tag set,
+     no page JS, no pricing numbers, no dead forms — the waitlist itself
+     is not deployed (dead-form rule, site/README.md), so this page
+     carries no live signup form and no /waitlist links beyond the
+     four funnel buckets. -->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>spark-vm — a real computer that stays yours</title>
@@ -88,6 +97,17 @@ footer p{margin:0 0 6px}
 
 <main>
   <section>
+    <h2>Open source, running today.</h2>
+    <p>spark-vm is MIT open source, and the self-hosted stack already runs
+    on ordinary hardware: your Unraid or Proxmox box, a spare Linux machine,
+    a cloud VPS. If you can clone the repo, you can run spark-vm today.</p>
+    <p>The hosted product is a distribution of this repo, not a separate
+    thing: everything the project ships lands in the open first.
+    <a href="https://github.com/ntindle/spark-vm">the repository on GitHub</a>
+    — <a href="https://github.com/ntindle/spark-vm/blob/main/CONTRIBUTING.md">contributions are welcome</a>.</p>
+  </section>
+
+  <section>
     <h2>The problem, in one breath</h2>
     <p>Every task-scoped sandbox loses something by design: files that vanish
     when the session ends, jobs you can&rsquo;t schedule, a desktop that was
@@ -108,6 +128,19 @@ footer p{margin:0 0 6px}
       internet. The hosted version inherits that DNA.</li>
     </ul>
     <a class="btn" href="/waitlist?src=trust">Join the waitlist</a>
+  </section>
+
+  <section>
+    <h2>Two ways to run it.</h2>
+    <p><strong>Self-host</strong> — the near-term story. Your box, your
+    tailnet, your rules: the whole stack from the repo, operated by you —
+    the <a href="https://github.com/ntindle/spark-vm#try-it">install
+    instructions are in the README</a>.</p>
+    <p><strong>Hosted</strong> — the future story, being built in the open.
+    We run the box: signup, provisioning, and approvals on your phone.
+    A small pilot of beta Muses gets the first boxes — follow along in the
+    <a href="https://musebook.me">#sparkvm channel on musebook</a> — and
+    invites go out in waitlist order after that.</p>
   </section>
 
   <section>

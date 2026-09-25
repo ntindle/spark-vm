@@ -166,3 +166,57 @@ checklist was re-run against this slice's base (`a7bbe00`):
   lifecycle jobs exist only in this repo — none of §10's operator checklist
   (deployed endpoint, reminder/drop cron, inbox) is live yet, so the pages
   are still explicitly not deployable.
+
+## Deploying the front door on Cloudflare Pages (H28)
+
+`sparkvm.dev` (Cloudflare zone, owned by the operator) serves this
+directory's **static front-door set** on Cloudflare Pages:
+
+- `index.html` — the shared front door (H28): open-source story first,
+  self-hosted as the near-term story, hosted as the future story, with
+  repo + beta-pilot pointers. No page JS, no forms, no third-party
+  assets — the funnel wiring (`?src=` buckets, `/go/selfhost`) is
+  first-party by design (`docs/FUNNEL_MEASUREMENT.md` §2).
+- `404.html` — custom 404 (same static guarantees).
+- `_headers` — security headers: strict baseline on `/*`, and a
+  default-deny CSP on exactly the paths Pages serves with the no-JS /
+  no-form guarantee (`/`, `/404.html`, `/go/*`). `waitlist.html` is
+  deliberately excluded — its form posts to the control-plane origin
+  and it is served by `waitlistd`, not Pages (dead-form rule above).
+- `go/selfhost/index.html` — the static `/go/selfhost` redirect shim
+  (no-JS meta refresh to the repo README's self-host section).
+- `assets/og-persistence-pair.png` — the `og:image` asset.
+
+The Python files in this directory (`waitlistd.py`, `waitlist_jobs.py`,
+`waitlist_invites.py`, `waitlist_patha.py`) are the control-plane
+surface — they are **never** part of the Pages deploy.
+
+Operator steps (one-time):
+
+1. Stage ONLY the static front-door set in a scratch directory —
+   `index.html`, `404.html`, `_headers`, `go/`, `assets/` — and deploy
+   that. Never deploy the whole `site/` directory: the `.py` files are
+   the control-plane surface and must not be published as static files.
+   Dashboard: Workers & Pages → Create → Pages → Upload assets, selecting
+   the staged files. CLI:
+   `wrangler pages deploy <staged-dir> --project-name sparkvm-dev`.
+2. Verify the headers are live (Pages applies `_headers` automatically):
+   `curl -sI https://sparkvm.dev/ | grep -i -E 'content-security-policy|x-content-type-options'`
+   — both must appear.
+3. Custom domain: add `sparkvm.dev` (and optionally `www`) under the
+   project's Custom domains — Pages provisions the certificate.
+4. Deploy-time substitutions (the "Deploy-time substitutions" section
+   above): replace `https://<host>/`
+   with `https://sparkvm.dev/` in the `<head>` tag sets of
+   `index.html` and `waitlist.html`. Do this at deploy time, never in
+   the repo (the placeholder is what the tests pin).
+5. Token scope: the loop's Cloudflare credential is currently scoped
+   to Zone read + DNS edit on `sparkvm.dev` — it cannot create a Pages
+   project or push a deploy. The operator widens it (or does this one
+   deploy by hand); tracked in the goal workspace's `NEEDS_USER.md`.
+
+When the waitlist surface goes live (§10 checklist), the funnel CTAs
+(`/waitlist?src=…`) resolve on the control-plane origin — the static
+front door needs no change for that; only then may `/waitlist` links
+beyond the four funnel buckets appear on the page
+(`scripts/test_frontdoor_deploy.py::test_funnel_wiring_preserved`).

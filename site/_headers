@@ -1,0 +1,25 @@
+# Cloudflare Pages `_headers` for the sparkvm.dev front door (H28).
+#
+# The front door is fully static: no page JS, no forms, no third-party
+# assets — so the baseline below can be strict everywhere. The front-door
+# CSP is scoped to the paths Pages actually serves with that guarantee;
+# waitlist.html is DELIBERATELY excluded (its form posts to the
+# control-plane origin, and it is served by waitlistd, not Pages —
+# dead-form rule, site/README.md). If waitlist.html ever ships on Pages,
+# it needs its own rule with form-action pointing at the control-plane
+# origin, set by the operator at launch.
+
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+
+/
+  Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+
+/404.html
+  Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+
+/go/*
+  Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
