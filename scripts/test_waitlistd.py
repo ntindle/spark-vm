@@ -1294,3 +1294,33 @@ def test_ip_hits_sweep_rate_limited_by_cooldown():
     svc._ip_limited("203.0.113.12")
     assert svc._ip_hits_last_sweep == swept_at
     assert len(svc._ip_hits) == before + 1  # only the new key added
+
+
+def test_ip_limited_concurrent_sweep_no_race():
+    # #390 regression: the bound sweep iterates _ip_hits while the
+    # ThreadingHTTPServer can insert keys concurrently — an unlocked
+    # sweep raised "dictionary changed size during iteration", killing
+    # the submitter's connection. Hammer with distinct-IP threads while
+    # over-bound and assert no exception escapes.
+    svc, tmp = make_service()
+    now = time.time()
+    stale = now - wd.IP_RATE_WINDOW - 10
+    svc._ip_hits = {f"10.4.{i // 256}.{i % 256}": [stale]
+                    for i in range(wd.IP_HITS_MAX_KEYS)}
+    errors = []
+
+    def hammer(n):
+        try:
+            for i in range(200):
+                svc._ip_limited(f"192.0.2.{n}-{i}")
+        except Exception as exc:  # noqa: BLE001 — any leak is the bug
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    # Dict is still bounded — sweeps happened and dropped the stale keys.
+    assert len(svc._ip_hits) <= wd.IP_HITS_MAX_KEYS + 8 * 200

@@ -745,28 +745,39 @@ class WaitlistService:
     # -- abuse guards -----------------------------------------------------
 
     def _ip_limited(self, ip):
-        now = time.time()
-        if (len(self._ip_hits) > IP_HITS_MAX_KEYS
-                and now - self._ip_hits_last_sweep >= IP_HITS_SWEEP_COOLDOWN):
-            # Bound the in-process abuse-rate state (#390): the dict keys
-            # one entry per distinct client IP forever, so once over the
-            # bound, re-prune every key's hits and drop keys with no
-            # in-window activity. The cooldown rate-limits the sweep so a
-            # flood of unique IPs cannot turn every request into an
-            # O(dict) rebuild.
-            self._ip_hits = {
-                k: [t for t in v if now - t < IP_RATE_WINDOW]
-                for k, v in self._ip_hits.items()
-            }
-            self._ip_hits = {k: v for k, v in self._ip_hits.items() if v}
-            self._ip_hits_last_sweep = now
-        hits = [t for t in self._ip_hits.get(ip, []) if now - t < IP_RATE_WINDOW]
-        if len(hits) >= IP_RATE_LIMIT:
+        # Lock-free before the #390 sweep: _refresh_under_lock() and the
+        # caller's data_lock+_lock sections all run AFTER this call, so
+        # this is the only touchpoint. The sweep iterates the dict, and
+        # ThreadingHTTPServer can insert a key concurrently (a flood of
+        # distinct IPs — the exact attack #390 defends against) → CPython
+        # raises "dictionary changed size during iteration" and the
+        # submitter's connection dies. Serialize the whole body under the
+        # thread lock: deadlock-safe (the single call site holds no lock,
+        # never nested inside data_lock), and the sweep cost (~10k keys,
+        # once per cooldown max) under the lock is negligible.
+        with self._lock:
+            now = time.time()
+            if (len(self._ip_hits) > IP_HITS_MAX_KEYS
+                    and now - self._ip_hits_last_sweep >= IP_HITS_SWEEP_COOLDOWN):
+                # Bound the in-process abuse-rate state (#390): the dict keys
+                # one entry per distinct client IP forever, so once over the
+                # bound, re-prune every key's hits and drop keys with no
+                # in-window activity. The cooldown rate-limits the sweep so a
+                # flood of unique IPs cannot turn every request into an
+                # O(dict) rebuild.
+                self._ip_hits = {
+                    k: [t for t in v if now - t < IP_RATE_WINDOW]
+                    for k, v in self._ip_hits.items()
+                }
+                self._ip_hits = {k: v for k, v in self._ip_hits.items() if v}
+                self._ip_hits_last_sweep = now
+            hits = [t for t in self._ip_hits.get(ip, []) if now - t < IP_RATE_WINDOW]
+            if len(hits) >= IP_RATE_LIMIT:
+                self._ip_hits[ip] = hits
+                return True
+            hits.append(now)
             self._ip_hits[ip] = hits
-            return True
-        hits.append(now)
-        self._ip_hits[ip] = hits
-        return False
+            return False
 
     def _email_send_allowed(self, row):
         cutoff = self.clock().timestamp() - EMAIL_SEND_WINDOW
