@@ -12,6 +12,7 @@ the one row per group marked that way.
 
 | Doc | What it is |
 | --- | ---------- |
+| [COMPETITOR_WATCH_2026-09-25_POST_LATE_EVENING.md](COMPETITOR_WATCH_2026-09-25_POST_LATE_EVENING.md) | Competitor watch, 2026-09-25 post-late-evening — tracked set **9/9 VERIFIED NO-CHANGE** (zero deltas, zero fetch failures; the late-evening pass's one UNVERIFIED item — the DO docs pricing subpage — fetched live at the carried URL: $0.044/vCPU-hour, $0.0095/GB-hour, $0.05/GiB-month, stamp 22 Sep 2026 — verbatim, unchanged). **No new C-numbers.** Sep-25-dated in-lane items were all THIRD-PARTY recaps of the already-filed Sep-24 Docker Cloud Sandboxes launch (no new facts; how2shout gives the newest granular third-party rate card: Micro $0.07/h → XL $1.12/h). Carried: C54 (403), C56 vendor-primary CVE-2026-82533 verification, C52 mechanics-docs lead re-pointed at the v3 "Learn more about kits" page, C37, C26; Vercel Drives not re-checked (P49 — next the 2026-09-26 morning pass). In-lane no-launch verdict dated 2026-09-25. |
 | [POSITIONING.md](POSITIONING.md) | **(start here)** The canonical copy bank: headline, differentiators, proof points, anti-claims, one-liners. Start here if you'll write *any* outward-facing copy about spark-vm. |
 | [TRUST_TRANSPARENCY.md](TRUST_TRANSPARENCY.md) | The trust posture in one place: what the agent can touch, the secrets-swapping proxy, deliberately exposed host surfaces, and vendor-trust attestations. |
 | [CI.md](CI.md) | What runs in CI on every PR and how to reproduce it locally. |

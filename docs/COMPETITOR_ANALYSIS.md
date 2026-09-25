@@ -3308,3 +3308,56 @@ also out of window), ByteAsk $1M pre-seed (Sep 24, out of window),
 third-party recaps of corpus-covered items (Docker Cloud Sandboxes,
 BAND × Docker Kits, DO Managed Agents ~Sep 22, E2B pricing piece —
 no new facts). In-lane no-launch verdict dated 2026-09-25.
+
+## Watch update — 2026-09-25 (post late-evening): DO subpage UNVERIFIED retired; tracked set 9/9 NO-CHANGE
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_POST_LATE_EVENING.md`
+
+Tracked set: 9/9 VERIFIED NO-CHANGE (zero pricing/feature deltas,
+zero fetch failures — all 9 tracked reads + the C44 heading check
+returned clean page text). Daytona's SEP 24 V0.216.1/V0.216.2 pair
+still newest (no September 25 entry — VERIFIED absent); Docker
+release-notes newest heading still *2026-09-22*; Microsandbox still
+v0.7.3 #1646; E2B, boat.dev, TermSquad, AgentComputer watched lines
+verbatim. **The late-evening pass's one UNVERIFIED item is resolved:**
+the DigitalOcean Managed Agents docs pricing subpage was fetched
+live this run at the late-morning carried URL
+(https://docs.digitalocean.com/products/managed-agents/agent-harness-runtime/details/pricing/)
+— CPU $0.044/vCPU-hour, Memory $0.0095/GB-hour, Session Storage /
+Snapshots-and-Checkpoints / BYOT each $0.05/GiB-month, stamp "Last
+verified 22 Sep 2026" — verbatim, unchanged. C44 VERIFIED NO-CHANGE
+(newest heading September 24, 2026 — Gemini 3.8 Live GA, Muse Spark
+1.3 Preview; no Sep-25 entry — VERIFIED absent). Vercel Drives not
+re-checked (P49 — next the 2026-09-26 morning pass).
+
+**In-lane, no new filings.** The only Sep-25-dated in-lane items were
+THIRD-PARTY recaps of the already-filed Sep-24 Docker Cloud
+Sandboxes launch (Forkast.news 8:18 PM UTC analysis, how2shout
+pricing explainer, webpronews Kit Spec recap, DEV.to editorial
+comparison) — no new facts. New third-party rate-card granularity on
+the record: Micro $0.07/h (1 vCPU/2GiB) → Small $0.14 → Medium $0.28
+→ Large $0.56 → XL $1.12/h, per-second billing, nothing charged while
+paused, volumes/egress/public-image + Kit hosting free, BYO model key,
+$250 free credit "for a limited period." In-lane no-launch verdict
+dated 2026-09-25 stands.
+
+**Carried:** C54 full article-body read (HTTP 403
+upstream_access_rejected on the carried URL, same bot-block as prior
+passes; the ~14:10 CDT real-browser headline/subtitle/SEP-23
+verification remains the only vendor confirmation); C56
+vendor-primary verification of CVE-2026-82533 (three searches — no
+DeepSeek advisory, no GitHub Security Advisory, no official
+0.1.2-alpha.2 release notes; THIRD-PARTY corroboration widened — OX
+Research, VulnCheck as assigning CNA, The Hacker News, Forkast.news,
+PIR-2026-0060; multi-source fix timeline: OX reported Aug 24 → patch
+commit Aug 25 → GitHub tag 0.1.2-alpha.1 Aug 27 → npm 0.1.2-alpha.2
+Aug 30 → OX retest Aug 30; third-party wrappers at 0.1.3-alpha.1 by
+Sep 6); C52 Kits-v2 follow-up (lead re-pointed: the Sep-21
+release-notes heading documents **v3 kits** — OCI-based packages with
+reusable mixins for tools/config/credentials/network/agent
+instructions, V2 kits remain supported — the linked "Learn more about
+kits" mechanics docs page is the unread lead); C37 Pro fee still
+structurally omitted (watched lines); C44 newest heading still Sep 24
+(no Sep-25 entry — VERIFIED absent); C26 conflicts unchanged
+(watched lines); Vercel Drives not re-checked (P49 — next the
+2026-09-26 morning pass).
