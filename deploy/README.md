@@ -105,7 +105,7 @@ fails fast, and a manual `proxy/deploy.sh` during a deploy fails fast.
 ```bash
 ./deploy/auto-deploy.sh check      # what would deploy (fetch + diff, no mutation)
 ./deploy/auto-deploy.sh deploy     # run a deploy now
-./deploy/auto-deploy.sh rollback   # restore the newest snapshot, restart + health-check
+./deploy/auto-deploy.sh rollback [--no-block]  # restore the newest snapshot, restart + health-check
 ./deploy/auto-deploy.sh status     # watermark, blocked commit, audit size, last failure
 tail -f ~/.sparkvm-deploy/audit.log
 ```
@@ -113,6 +113,16 @@ tail -f ~/.sparkvm-deploy/audit.log
 `rollback` restarts the snapshotted components' services and health-checks
 them — files at the old commit with processes still on the new build is the
 half-deployed state rollback exists to fix.
+
+A manual `rollback` also marks the rolled-back commit (the pre-rollback
+watermark, i.e. the deployed head being rolled back from) in
+`blocked-commit`, so the next timer tick does not redeploy the same bad
+commit — automatic rollbacks have always done this; manual ones now match
+(issue #325). Pass `--no-block` when the rollback is for investigation
+rather than condemnation (the tree itself is fine, you just need the old
+state back for a look). The block auto-clears once a newer commit
+supersedes the blocked one; to re-deploy the *same* tree after a manual
+fix, clear it by hand — `status` prints the exact `rm` command.
 
 ## Components
 

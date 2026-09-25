@@ -1259,3 +1259,132 @@ def test_record_updater_source_records_checkout_head(tmp_path):
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO,
                           capture_output=True, text=True).stdout.strip()
     assert recorded == head and re.fullmatch(r"[0-9a-f]{40}", recorded)
+
+
+# --- issue #325: manual rollback marks the rolled-back commit blocked --------
+
+def _manual_rollback_env(tmp_path):
+    """Minimal state dir + snapshot for exercising cmd_rollback.
+
+    The fake component tcomp has no services, user services, health
+    checks, or install step, so reload/restart/health are no-ops under
+    SKIP_SYSTEMCTL=1; SWAPD_HOME carries no VERSION file so the deployed
+    version re-derives to the "unknown" fallback.
+    """
+    state = tmp_path / "state"
+    swapd = tmp_path / "swapd"
+    swapd.mkdir(parents=True)
+    snap = state / "snapshots" / "snap1"
+    snap.mkdir(parents=True)
+    tconf = tmp_path / "t.conf"
+    tconf.write_text(
+        'COMPONENTS=(tcomp)\n'
+        'tcomp_paths=("tcomp/")\n'
+        'tcomp_services=()\n'
+        'tcomp_user_services=()\n'
+        'tcomp_tests="true"\n'
+        'tcomp_health=()\n'
+        'tcomp_install=""\n'
+        'tcomp_install_paths=()\n'
+    )
+    env = {
+        "UPDATER_STATE_DIR": str(state),
+        "UPDATER_COMPONENTS_CONF": str(tconf),
+        "SWAPD_HOME": str(swapd),
+        "SKIP_SYSTEMCTL": "1",
+        "SKIP_SUDO": "1",
+        "AUTO_DEPLOY_NO_MAIN": "1",
+    }
+    return state, snap, env
+
+
+def _arm_snapshot(state, snap, old, bad):
+    """Arm a snapshot rewinding bad -> old: the watermark sits at the bad
+    (deployed) commit, the snapshot's FROM_COMMIT at the good one, and the
+    snapshot's COMPONENTS names the fake component. Empty MANIFEST means
+    restore_snapshot has nothing to copy back (rc 0)."""
+    (snap / "FROM_COMMIT").write_text(old + "\n")
+    (snap / "COMPONENTS").write_text("tcomp\n")
+    (snap / "MANIFEST").write_text("")
+    (state / "deployed-commit").write_text(bad + "\n")
+
+
+def test_manual_rollback_blocks_rolled_back_commit(tmp_path):
+    """Issue #325: a manual rollback must mark the rolled-back commit
+    blocked so the next timer tick does not redeploy it.
+
+    The rolled-back commit is the pre-rollback watermark (the deployed
+    head); the audit line records both sides of the rewind and the block
+    decision.
+    """
+    import json
+    state, snap, env = _manual_rollback_env(tmp_path)
+    old, bad = "a" * 40, "b" * 40
+    _arm_snapshot(state, snap, old, bad)
+    r = source_and("cmd_rollback", env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (state / "deployed-commit").read_text().strip() == old
+    assert (state / "blocked-commit").read_text().strip() == bad
+    audit = (state / "audit.log").read_text()
+    entry = json.loads([l for l in audit.splitlines()
+                        if '"event":"rollback"' in l][-1])
+    assert entry["result"] == "manual-rollback"
+    assert entry["to"] == old
+    assert entry["rolled_back_from"] == bad
+    assert entry["blocked"] == bad
+
+
+def test_manual_rollback_no_block_flag(tmp_path):
+    """Issue #325 (b): --no-block is the investigate-not-condemn escape
+    hatch — the watermark still rewinds, but nothing is marked blocked."""
+    state, snap, env = _manual_rollback_env(tmp_path)
+    old, bad = "a" * 40, "b" * 40
+    _arm_snapshot(state, snap, old, bad)
+    r = source_and("cmd_rollback --no-block", env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (state / "deployed-commit").read_text().strip() == old
+    assert not (state / "blocked-commit").exists()
+
+
+def test_manual_rollback_noop_watermark_writes_no_block(tmp_path):
+    """Issue #325: when the watermark is already at FROM_COMMIT (nothing
+    was ever deployed past it), there is no bad commit to block. Writing
+    `from` would pin the updater on its own watermark head, so the
+    rollback must skip the mark and say why — not block blindly."""
+    state, snap, env = _manual_rollback_env(tmp_path)
+    old = "a" * 40
+    _arm_snapshot(state, snap, old, old)  # watermark == FROM_COMMIT
+    r = source_and("cmd_rollback", env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (state / "blocked-commit").exists()
+    assert "not marking a commit blocked" in r.stdout + r.stderr
+
+    # Missing watermark entirely: same skip, no failure.
+    (state / "deployed-commit").unlink()
+    r = source_and("cmd_rollback", env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (state / "blocked-commit").exists()
+    assert (state / "deployed-commit").read_text().strip() == old
+
+
+def test_manual_rollback_rejects_unknown_flags(tmp_path):
+    """An unrecognized rollback flag fails loud instead of silently
+    doing the default (blocked) rollback."""
+    state, snap, env = _manual_rollback_env(tmp_path)
+    _arm_snapshot(state, snap, "a" * 40, "b" * 40)
+    r = source_and("cmd_rollback --block", env_extra=env)
+    assert r.returncode != 0
+    # watermark untouched, nothing blocked: the rollback did not run
+    assert (state / "deployed-commit").read_text().strip() == "b" * 40
+    assert not (state / "blocked-commit").exists()
+
+
+def test_status_reports_how_to_clear_block(tmp_path):
+    """Issue #325 (a): `status` shows the blocked commit and the exact
+    command to clear it (re-deploy-the-same-tree after a manual fix)."""
+    state, snap, env = _manual_rollback_env(tmp_path)
+    (state / "blocked-commit").write_text("b" * 40 + "\n")
+    r = source_and("cmd_status", env_extra=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "b" * 40 in r.stdout
+    assert 'rm "%s"' % (state / "blocked-commit") in r.stdout
