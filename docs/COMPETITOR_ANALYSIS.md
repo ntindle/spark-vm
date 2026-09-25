@@ -87,7 +87,7 @@ isolation), because those are where the trust story lives.
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
 | **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation ("fast, isolated, persistent sandboxes and storage where developers can run their own agentic workflows and tool execution") | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
 | **Microsandbox** | Task-scoped sandbox (OSS) | libkrun microVM, network-layer secret injection | Free, self-hosted (YC F26) |
-| **Docker Cloud Sandboxes** (launch Sept 24, C45) | Task-scoped sandbox | Same microVM as local Docker Sandboxes, on Docker-managed compute; `sbx move --to cloud` (bidirectional filesystem migration); kits (Claude Code, Codex, Copilot, Antigravity, Open Code, Hermes), MCP gateway, per-agent network policies, secrets proxy-injected per request | **PAYG per-second:** Micro 1vCPU/2GiB $0.07/h → XL 16/32 $1.12/h; paused free; volumes/egress/images free; sessions ≤24h; limited-time $250 free credit; GA-venue garnish 2026-09-24 — onstage launch at WeAreDevelopers North America (Docker president Mark Cavage, THIRD-PARTY), keynote blog "available today with pay-as-you-go pricing" (VENDOR-VERIFIED), Sandbox Kits → standard OCI images + CNCF submission commitment, Hermes first-class Kit demo onstage; Register dated-2026-09-24 corroboration (THIRD-PARTY): named shapes Micro 1vCPU/2GiB $0.07/h → XL 16/32 $1.12/h, per-second, OCI-standard Kits — matches vendor figures value-for-value; pre-midnight garnish: launch availability VENDOR-VERIFIED on docker.com's own Sept-24 posts ("available today", 1–16 vCPUs, one-command laptop-to-cloud move, pay-as-you-go), Kits-as-standard-OCI VENDOR-VERIFIED ("Kits make authority reproducible"), BAND Python Kit for Docker Sandboxes announced Sept 24 (THIRD-PARTY) — first third-party Kit-ecosystem signal |
+| **Docker Cloud Sandboxes** (launch Sept 24, C45) | Task-scoped sandbox | Same microVM as local Docker Sandboxes, on Docker-managed compute; `sbx move --to cloud` (bidirectional filesystem migration); kits (Claude Code, Codex, Copilot, Antigravity, Open Code, Hermes), MCP gateway, per-agent network policies, secrets proxy-injected per request | **PAYG per-second:** Micro 1vCPU/2GiB $0.07/h → XL 16/32 $1.12/h; paused free; volumes/egress/images free; sessions ≤24h; limited-time $250 free credit; GA-venue garnish 2026-09-24 — onstage launch at WeAreDevelopers North America (Docker president Mark Cavage, THIRD-PARTY), keynote blog "available today with pay-as-you-go pricing" (VENDOR-VERIFIED), Sandbox Kits → standard OCI images + CNCF submission commitment, Hermes first-class Kit demo onstage; Register dated-2026-09-24 corroboration (THIRD-PARTY): named shapes Micro 1vCPU/2GiB $0.07/h → XL 16/32 $1.12/h, per-second, OCI-standard Kits — matches vendor figures value-for-value; pre-midnight garnish: launch availability VENDOR-VERIFIED on docker.com's own Sept-24 posts ("available today", 1–16 vCPUs, one-command laptop-to-cloud move, pay-as-you-go), Kits-as-standard-OCI VENDOR-VERIFIED ("Kits make authority reproducible"), BAND Python Kit for Docker Sandboxes announced Sept 24 (THIRD-PARTY) — first third-party Kit-ecosystem signal; post-mid-evening garnish (VENDOR-VERIFIED): first vendor-sourced price-and-terms package — one-command `sbx move --to cloud`, per-second, Micro $0.07/hr → XL $1.12/hr, paused free, 24h sessions, $250 new-account credit |
 | **Docker Sandboxes** (morning pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, **v3 kits** (OCI-based packages: agent workload + reusable mixins for tools/config/credentials/network/instructions — C34), skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
 | **Boat** (tracked set; 2026-09-22 consolidation; **renamed from ASCII ~2026-09-17** — C40 deduped into this row) | Task-scoped sandbox / persistent computer | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement). Rename VERIFIED this run: `box.ascii.dev`, `boat.dev`, `ascii.dev` serve byte-identical product pages; YC's company page now `ycombinator.com/companies/boat` (YC F26); yc-oss mirror dates the rename 2026-09-17 (`former_names`: ["Ascii box","Ascii"]); the old YC slug `ycombinator.com/companies/ascii` now serves a **301 → `/companies/boat`** (VERIFIED 2026-09-24 midday — harder rename evidence than the page copy). Hardest evidence yet (VERIFIED 2026-09-24 late midday): the vendor's own API docs at `docs.ascii.dev/box/api/v1` render as **"Boat Public API v1"** — the legacy ASCII domain's developer surface brands the product *Boat* (`/box` path and box.ascii.dev endpoints persist). The documented API covers sandbox lifecycle (provisioning → ready/idle → running → archiving → archived; stop/archive, resume, fork, delete; desktop streaming; Idempotency-Key; per-sandbox API keys; data-retention API) plus a `prompt` endpoint running work through built-in agent harnesses `codex`, `claude-code`, `pi`, `opencode`, `prime-agent`, `kimi` (INFERRED read: Boat bundles coding-agent harnesses as first-class providers). Canonical domain now boat.dev. | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time; EU-only DE/FI/FR (FAQ verbatim — Germany, Finland, France; VERIFIED 2026-09-24 midday; folded from the deprecated C40 pointer row). |
@@ -2271,4 +2271,65 @@ beehiiv BYOC post). C37 Freestyle Pro fee still UNVERIFIED
 already-taken-slot rule — today's `_NIGHT` was taken by the night pass
 (#373, ~19:21 CDT) and `_LATE_NIGHT` by the late-night pass (#375,
 ~20:2x CDT), following the 2026-09-23 `_LATE_NIGHT` /
+`_POST_MID_EVENING` precedent family.
+
+## Watch update — 2026-09-24 (post mid evening): C45 price-and-terms garnish, C26 third miss, C37 fee VENDOR-VERIFIED absent
+
+Garnish fold per the C32/C37/C38/C39/C40/C41/C42/C43/C44/C45
+precedents; full pass record in
+`docs/COMPETITOR_WATCH_2026-09-24_POST_MID_EVENING.md` (survey window
+~21:55–22:05 CDT).
+
+**C45 — first vendor-sourced price-and-terms package (VENDOR-VERIFIED
+garnish).** Docker's own Sept-24 launch posts (read this run) now
+supply the pricing/terms axis the corpus carried only from The
+Register: one-command laptop↔cloud move (`sbx move --to cloud`),
+pay-as-you-go **per-second**, Micro 1vCPU/2GiB **$0.07/hr** → XL
+16/32 **$1.12/hr**, **paused = free**, 24h max sessions, **$250
+new-account credit**, launched Sep 24 at WeAreDevelopers North
+America. Folded into the C45 field-table row. Register corroboration
+still value-for-value on the figures.
+
+**C26 — third consecutive docs-side miss; INFERRED misattribution
+hypothesis strengthened, not confirmed.** DO's own investor
+announcement re-VENDOR-VERIFIED: $0.044/vCPU-hour, $0.0095/GB-hour,
+snapshots **$0.005/GiB-month**, Managed Agents still public preview.
+No page ties the carried $0.05 to Managed Agents; DO's
+general-product $0.05/GB-month snapshot rate keeps surfacing near
+Managed Agents queries. Both the carried figure and the discrepancy
+stay open — deliberately not rewritten on absence-of-evidence.
+
+**C37 — VENDOR-VERIFIED: no monthly-fee line-item on pricing surfaces;
+FAQ discloses a $50/mo Hobby minimum-usage commitment** ("$50 on
+Hobby covers your first $50 of usage"). freestyle.sh/pricing and related
+public surfaces re-read this run. Dashboard-signed-in check still owed
+(read-only surveyors can't reach it).
+
+**Honest weakening — OpenAI Agents API GA absence is search-level
+only.** No GA announcement dated 2026-09-24 in search, but the
+official platform page fetch failed this run — so the absence is NOT
+re-confirmed at vendor level this pass. The VENDOR-VERIFIED Sep-10
+public-beta dating stands. The next pass owes a vendor-level
+re-confirm.
+
+**Re-verified unchanged:** C36 (allowlist-gated production GA,
+VENDOR-VERIFIED), C41 (repo HEAD pin `39b6c3a` still unmoved;
+pricing re-verified digit-for-digit — Eco/Std/Pro vCPU+mem+disk,
+hibernation/snapshot formula), C44 (Sept 9 GA, newest release-note
+heading still Sept 22). C43: official surface now identified
+(`ai.google.dev/gemini-api/docs/agent-environment`) but not opened
+this run — snippet-only, re-open owed. Tensorlake: search-level no
+9/24 news (re-open owed; was snippet-only).
+
+**Tracked set:** 8/8 VERIFIED NO-CHANGE — zero deltas. Scope honesty:
+Daytona pricing figures were not re-fetched this pass
+(changelog-only scope); carried as baseline-only. Vercel Drives not
+re-checked (P49 once-daily morning cadence). boat.dev product-news
+retry stays RETIRED (VERIFIED absent, 3 attempts). In-lane
+no-launch verdict otherwise (search-level evidence).
+
+**Watch-doc naming:** `_POST_MID_EVENING` admitted per the
+already-taken-slot rule — today's `_EVENING`, `_LATE_EVENING`,
+`_NIGHT`, `_LATE_NIGHT` and `_PRE_MIDNIGHT` were taken by earlier
+passes — following the 2026-09-23 `_LATE_NIGHT` /
 `_POST_MID_EVENING` precedent family.
