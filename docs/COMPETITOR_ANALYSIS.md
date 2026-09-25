@@ -124,8 +124,7 @@ pricing at $0.00936/vCPU-h (C41, billing since 2026-07-31) |
 | **Docker Sandbox Kit Spec** (announced ~Sep 24, surfaced/verified 2026-09-25 mid-morning, C52) | Open agent-permission standard (companion to C45) | **VENDOR-VERIFIED** on docker.com/blog (full-page read): "Today at WeAreDevelopers, we announced the Docker Sandbox Kit Spec, open source under Apache 2.0. A Kit carries three things in one image: the agent, its tools, and a typed list of everything it asks to reach, such as hosts, credentials, and volumes. Because the list is part of the image, pinning the image pins the agent and its requests together"; "Today, we're bringing the spec to CNCF, under their neutral governance, just like we did when the image format went to OCI"; "MCP gave agents a standard way to talk to a tool. Kits give the ecosystem a standard way to publish the whole arrangement: the agent, its tools, and what it asks to reach, in one image anyone can pull"; "Docker Sandboxes is the first runtime that enforces it. It should not be the only one, and under CNCF governance, it will not be". CNCF CTO Chris Aniszczyk: "By delivering Sandbox Kits as standard OCI images, Docker is giving the industry an open, repeatable way to package an AI agent, its tools, and its guardrails as one artifact." Spec repo `docker/sandbox-kit-spec` (spec, capability pages, worked tour). Ecosystem collaborators named: AWS, Box, Datadog, Dynatrace, JFrog, NanoClaw, OpenClaw, Palo Alto Networks, Snyk. Date caveat: vendor blog undated in-page ("Today at WeAreDevelopers"); third-party coverage pins the announcement to ~2026-09-24. Follow-up lead: docs.docker.com "Kits v2" page mechanics not yet read | Open standard (Apache 2.0) — no pricing |
 | **Ando** (out of stealth 2026-09-24, filed adjacent, C53) | Agent participation infrastructure (messaging layer, NOT execution) | **THIRD-PARTY** (TechCrunch 2026/09/24, corroborated by runtimewire.com + aiagentstore.ai daily 2026-09-25): "a team messaging platform designed for both human and AI workers"; "The app gives agents their own identities and inboxes and lets them partake in conversations as naturally as people can". Founder Sara Du (ex-Anthropic MCP work, ex-Alloy Automation; Thiel Fellow): "Agents were treated as apps you install even as they were becoming participants in the team". $20M raised from Accel, Index Ventures, Emergence Capital (RuntimeWire); "agent-agnostic, allowing teams to bring agents and harnesses they already use, including Codex, Claude and Grokbot". Adjacent — relevant to the "where agents live and act" surface, not a VM/sandbox/execution product | Not yet priced publicly (stealth-exit coverage) |
 
-| **Island** (announced 2026-09-24, filed adjacent, C54) | Enterprise browser → AI-agent security controls (adjacent, NOT execution) | **THIRD-PARTY** (techstartups.com + runtimewire.com, read 2026-09-25; primary source cited Reuters — Evolution Equity Partners led): "$400M Series F at $6.4B valuation" to build "security controls for AI agents" into the enterprise browser. CEO Mike Fey: "Every old control is breaking, so everything's up for grabs." Explicit competitive surface against spark-vm's own guardrails story: agent permissions, identity, visibility inside enterprise networks. Filed adjacent per the C53 precedent — not a VM/sandbox product | Not a hosted service (enterprise browser seats, no public per-agent pricing) |
-| **Perplexity "Escaping SPACE: Part I"** (published 2026-09-23, filed adjacent, C55) | Agent-sandbox security research (red team by the sandbox operator) | **THIRD-PARTY** (dennysentinel.com analysis read 2026-09-25; Perplexity's own post snippet-level this pass): 9 frontier models × 216 runs in a Firecracker microVM with root — 0/108 VM escapes, but domain-based egress allowlist bypassed in 11/54 partial-network runs; authority-switch bypasses reproduced against 8 of 10 third-party sandbox platforms (E2B, Vercel Sandbox, microsandbox, Modal, Daytona, Deno, Fly.io Sprites — Cloudflare Sandbox and NVIDIA OpenShell clean). Directly relevant to spark-vm's sandbox threat model: "Relying only on the destination IP address at the host to determine whether a connection is allowed is insufficient"; "Never express an egress policy as an IP or CIDR when the intent is a hostname." Filed adjacent — research, not a new product | N/A (published research) |
+| **Perplexity "Escaping SPACE: Part I"** (published 2026-09-23, filed adjacent, C54) | Agent-sandbox security research (red team by the sandbox operator) | **THIRD-PARTY** (dennysentinel.com analysis read 2026-09-25; Perplexity's own post snippet-level this pass): 9 frontier models × 216 runs in a Firecracker microVM with root — 0/108 VM escapes, but domain-based egress allowlist bypassed in 11/54 partial-network runs; authority-switch bypasses reproduced against 8 of 10 third-party sandbox platforms (E2B, Vercel Sandbox, microsandbox, Modal, Daytona, Deno, Fly.io Sprites — Cloudflare Sandbox and NVIDIA OpenShell clean). Directly relevant to spark-vm's sandbox threat model: "Relying only on the destination IP address at the host to determine whether a connection is allowed is insufficient"; "Never express an egress policy as an IP or CIDR when the intent is a hostname." Filed adjacent — research, not a new product | N/A (published research) |
 
 ## TermSquad watch — first pass (R3)
 
@@ -3119,30 +3118,29 @@ inference price cuts, datacenter deals, Salesforce outcome pricing,
 CARBONATO botnet, stale partnership recrawls, practitioner
 commentary with no new product facts.
 
-## Watch update — 2026-09-25 (post-mid-morning): C54 + C55 new (adjacent); tracked set 10/10 NO-CHANGE
+## Watch update — 2026-09-25 (post-mid-morning): C54 new (adjacent); tracked set 8/8 NO-CHANGE
 
 Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_POST_MID_MORNING.md`
 (survey window ~09:55–10:05 CDT). Vercel Drives NOT re-checked
 (P49 once-daily morning cadence — next the 2026-09-26 morning pass).
 
-**Tracked set 10/10 VERIFIED NO-CHANGE** (zero deltas, zero fetch
-failures — all 10 URLs on vendor-owned pages; Daytona's newest
+**Tracked set 8/8 VERIFIED NO-CHANGE** (zero deltas, zero fetch
+failures — all 11 URLs on vendor-owned pages; Daytona's newest
 changelog still the SEP 24 V0.216.1/V0.216.2 pair; Docker docs
 release-notes newest heading still 2026-09-21; Microsandbox still
 v0.7.3 #1646; C44 still no Sep-25 heading — VERIFIED absent; DO
 docs/pricing stamps unchanged).
 
-**Two adjacent filings this pass:**
+**One adjacent filing this pass:**
 
-- **C54 new — Island $400M Series F at $6.4B valuation (THIRD-PARTY,
-  adjacent).** Announced 2026-09-24 (techstartups.com + runtimewire.com
-  read in full; primary source Reuters). The enterprise-browser startup
-  is extending into "security controls for AI agents" — CEO Mike Fey:
-  "Every old control is breaking, so everything's up for grabs."
-  Filed adjacent per the C53 precedent: agent governance (permissions,
-  identity, visibility) competes with spark-vm's guardrails story, but
-  Island is not a VM/sandbox/execution product.
-- **C55 new — Perplexity "Escaping SPACE: Part I" (THIRD-PARTY,
+- **Adjacent only (NOT corpus): Island $400M Series F at $6.4B
+  valuation (THIRD-PARTY).** Announced 2026-09-24 (techstartups.com +
+  runtimewire.com read in full; Reuters wire as cited). A fundraise
+  states an intention, not a shipped surface — below the C-number bar
+  (the C53 precedent had an actual product launch). Kept as
+  intelligence: enterprise agent governance (permissions, identity,
+  visibility) competes with spark-vm's guardrails story.
+- **C54 new — Perplexity "Escaping SPACE: Part I" (THIRD-PARTY,
   adjacent).** Published 2026-09-23 (dennysentinel.com analysis read
   2026-09-25; Perplexity's own post snippet-level). Frontier-model red
   team of a Firecracker microVM agent sandbox: 0/108 VM escapes,
@@ -3153,7 +3151,8 @@ docs/pricing stamps unchanged).
   egress policy as IP/CIDR when the intent is a hostname. Filed adjacent
   — published security research, not a new product.
 
-**No corpus fold for Baseten/Blaxel** (Surveyor B proposed C54 for the
+**No corpus fold for Baseten/Blaxel** (Surveyor B proposed a new
+C-number for the
 beri.net continuity analysis — deduplicated): the acquisition is corpus
 **C11** and the beri.net piece was already logged as adjacent color in
 an earlier watch note. Analysis, not a vendor move.
@@ -3161,8 +3160,9 @@ an earlier watch note. Analysis, not a vendor move.
 **Carried:** C37 Pro fee still structurally omitted; C44 newest
 heading still Sep 24 (no Sep-25 entry — VERIFIED absent); C26
 conflicts unchanged (watched lines); C52 follow-up lead (Kits v2
-mechanics); C55 primary-source read (Perplexity's own post); C54
-primary-source read (Island/Reuters); Vercel Drives not re-checked
+mechanics); C54 primary-source read (Perplexity's own post); Island
+company announcement read (Reuters wire as cited); Vercel Drives not
+re-checked
 (P49 — next 2026-09-26 morning). Deliberately not filed: C50 press
 corroboration (second angle, no grade change); DeepSeek DSec Harness
 "leak" (UNVERIFIED single source — standing instruction); Meta Muse

@@ -23,10 +23,10 @@ not be fetched this run (never reported as NO-CHANGE). **VERIFIED
 absent** = the vendor's own page was read this run and the item is
 confirmed not present on it.
 
-## 1. The tracked set — 10/10 VERIFIED NO-CHANGE
+## 1. The tracked set — 8/8 VERIFIED NO-CHANGE
 
 Zero pricing/feature deltas across the whole set. **Zero fetch
-failures** this pass — all 10 URLs opened on vendor-owned pages.
+failures** this pass — all 11 URLs opened on vendor-owned pages.
 
 - **Daytona — VERIFIED NO-CHANGE** (changelog:
   https://www.daytona.io/changelog; pricing:
@@ -68,38 +68,42 @@ failures** this pass — all 10 URLs opened on vendor-owned pages.
   (running); Cold Storage $0.000027 per GB-hour (stopped).
 - **DigitalOcean Managed Agents — VERIFIED NO-CHANGE**
   (https://docs.digitalocean.com/products/managed-agents/; pricing
-  subpage .../agent-harness-runtime/details/pricing/). Stamps still
+  subpage
+  https://docs.digitalocean.com/products/managed-agents/agent-harness-runtime/details/pricing/).
+  Stamps still
   "Last verified 21 Sep 2026" and "Last verified 22 Sep 2026".
   Watched lines unchanged: CPU "$0.044 per vCPU-hour", Memory
   "$0.0095 per GB-hour", egress $0.01/GiB; footnote "*Active CPU
   billing is coming soon. Until then, you will be billed at 25% of
   the vCPUs allocated to your sandbox.*"
 
-**C44 check — VERIFIED absent:** Google Gemini Enterprise Agent
+**C44 check — VERIFIED absent (separate from the tracked set):**
+Google Gemini Enterprise Agent
 Platform release notes
 (https://docs.cloud.google.com/gemini-enterprise-agent-platform/release-notes)
 newest heading still **September 24, 2026**; no September 25, 2026
 heading exists. C44 (Computer Use and Shell sandboxes GA) still under
 September 09, 2026, wording unchanged.
 
-## 2. In-lane moves — two adjacent filings
+## 2. In-lane moves — one adjacent filing
 
-### C54 new — Island raises $400M Series F at $6.4B to defend against rogue AI agents (THIRD-PARTY, adjacent)
+### Adjacent color — Island raises $400M Series F at $6.4B (no C-number)
 
 Announced **September 24, 2026** (THIRD-PARTY: techstartups.com,
-runtimewire.com; primary source cited is Reuters — Evolution Equity
-Partners led the round; read in full this run). The Dallas-based
+runtimewire.com; Reuters wire as cited — Evolution Equity Partners
+led the round; read in full this run). The Dallas-based
 enterprise-browser startup is explicitly extending into "security
 controls for AI agents": CEO Mike Fey — "Every old control is
 breaking, so everything's up for grabs"; the $6.4B valuation is an
 investor bet that "enterprise browsers will become more valuable as
-AI agents spread through corporate networks". Adjacent to the
-execution-surface corpus: enterprise agent governance (permissions,
-identity, visibility) is the security surface spark-vm's own
-guardrails story competes with — not a VM/sandbox product, filed
-adjacent per the **C53** precedent.
+AI agents spread through corporate networks". Logged as adjacent
+color only (NOT corpus): a fundraise states an intention, not a
+shipped surface — below the C-number bar (the **C53** precedent had
+an actual product launch). Kept as intelligence: enterprise agent
+governance (permissions, identity, visibility) is the security
+surface spark-vm's own guardrails story competes with.
 
-### C55 new — Perplexity "Escaping SPACE: Part I" — sandbox egress-policy bypass red team (THIRD-PARTY, adjacent)
+### C54 new — Perplexity "Escaping SPACE: Part I" — sandbox egress-policy bypass red team (THIRD-PARTY, adjacent)
 
 Perplexity's sandbox-security writeup published **September 23,
 2026** (read via the Denny Sentinel analysis of September 24, 2026 —
@@ -144,8 +148,8 @@ product) per the precedent.
 
 No net-new **agent-sandbox or hosted-agent-runtime launches**
 surfaced in the Sep-25 window beyond what's already in the corpus
-(C45/C50/C52). The closest-to-lane fresh items are two
-security-adjacent filings (C54, C55) plus the C11 Baseten/Blaxel
+(C45/C50/C52). The closest-to-lane fresh item is one security-adjacent filing
+(C54) plus adjacent color (Island) and the C11 Baseten/Blaxel
 dedupe note above. Nothing new from Daytona, E2B, Microsandbox, or
 Docker beyond the carried C45 launch.
 
@@ -169,9 +173,10 @@ snippet-level); name collisions ("Daytona" motorcycle/pizza places).
 
 C37 Pro fee still structurally omitted; C44 newest heading still
 Sep 24 (no Sep-25 entry — VERIFIED absent); C26 conflicts unchanged
-(watched lines); C52 follow-up lead (Kits v2 mechanics read); C55
-primary-source read (Perplexity's own post); C54 primary-source read
-(Island/Reuters announcement); Vercel Drives not re-checked (P49 —
+(watched lines); C52 follow-up lead (Kits v2 mechanics read); C54
+primary-source read (Perplexity's own post); Island company
+announcement read (Reuters wire as cited); Vercel Drives not
+re-checked (P49 —
 next the 2026-09-26 morning pass). Next pass's ask: routine
 tracked-set re-reads; watch Docker docs release-notes for the C45
 Cloud Sandboxes surfacing.
