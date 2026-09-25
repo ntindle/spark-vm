@@ -331,7 +331,8 @@ class TestInjectorCli(unittest.TestCase):
                            input=registry(["api.anthropic.com"]),
                            capture_output=True, text=True,
                            env=env, timeout=30)
-        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(p.returncode, 2)  # unverifiable != clean, same
+        # exit-2 discipline as the bad-registry refusal above
 
     def test_echo_bound_hosts_bad_registry(self):
         p = run_cli(["echo-bound-hosts"], "not json")
