@@ -119,7 +119,7 @@ remains coincidental color only.
 - **DEV.to crosspost by alexcloudstar (~Sep 24/25)** —
   "Sandboxing AI-Generated Code: E2B vs Vercel Sandbox vs Modal vs
   Daytona in 2026"
-  (https://pengen.diewe.workers.dev/alexcloudstar/sandboxing-ai-generated-code-e2b-vs-vercel-sandbox-vs-modal-vs-daytona-in-2026-3c7g)
+  (https://dev.to/alexcloudstar/sandboxing-ai-generated-code-e2b-vs-vercel-sandbox-vs-modal-vs-daytona-in-2026-3c7g)
   — editorial comparison on existing rate cards; no new product
   facts. Don't file.
 
