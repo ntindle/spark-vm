@@ -3172,3 +3172,64 @@ OpenAI Agents API beta (Sep-10 vintage), Anthropic Claude Code
 Projects (Sep-17), VS Code 1.138 dev-container sessions (Sep 16),
 Alibaba FC billing (July rollout), funding outside window, misdated
 recrawls, name collisions.
+
+## Watch update — 2026-09-25 (late afternoon): Docker release-notes delta; C55 VENDOR-VERIFIED; tracked set 7/8 NO-CHANGE
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_LATE_AFTERNOON.md`
+(survey window ~14:28–14:40 CDT). Vercel Drives NOT re-checked
+(P49 once-daily morning cadence — next the 2026-09-26 morning pass).
+
+**Tracked set 7/8 VERIFIED NO-CHANGE + one DELTA** (zero fetch
+failures — all 11 vendor fetches succeeded first try; Daytona,
+E2B, boat.dev, Microsandbox v0.7.3, TermSquad, AgentComputer,
+DigitalOcean Managed Agents — all watched lines verbatim;
+C44 newest heading still Sep 24 — no Sep-25 entry, VERIFIED
+absent).
+
+**Docker Sandboxes release-notes delta:** the newest dated heading
+moved 2026-09-21 → 2026-09-22: sbx-releases **v0.45.1** —
+"Improved sandbox moves and support for private kit images in cloud
+sandboxes" (VENDOR-VERIFIED on the GitHub release page: released 22
+Sep 18:28 by docker-read-write, commit `cf6fa41`). The 2026-09-21
+v3-kits entry is verbatim unchanged (incl. the cloud-experimental
+caveat). The Sep-24 Docker Cloud Sandboxes launch still has no
+distinct launch note on the docs page (case-insensitive "Cloud
+Sandboxes" find: 0 → 2 hits, both lowercase/incidental — no
+launch-note). Design color for the C52/H4 thread: private kit
+images in cloud sandboxes — Docker is closing the kit-image privacy
+loop on the cloud side.
+
+**C55 evidence upgrade: THIRD-PARTY → VENDOR-VERIFIED.** The carried
+primary-source ask is resolved: Cloudflare's own disclosure post
+("How Cloudflare addressed a cross-tenant data exposure
+vulnerability in Containers", blog.cloudflare.com) was read in full
+this run. Vendor-exact facts: reported Sep 4, 2026 by Oren
+Yomtov/Accomplish via HackerOne; dm-thin `skip_block_zeroing` on 64
+KiB blocks let reused blocks retain prior tenants' data (directory
+structures, database pages, structurally complete SQLite databases
+— observed on 18 of 24 placements / 20 of 22 nodes across four
+continents in vendor validation); fleet-wide zeroing restored;
+cleanup of pre-mitigation cached snapshots completed Sep 19, 2026
+15:03 UTC; "no evidence of malicious exploitation"; no
+customer-side configuration changes required. Clarification:
+storage-layer residual-data exposure, NOT a VM/container escape in
+the code-execution sense; "Cloudflare Sandboxes" confirmed affected
+(built on Containers). Threat-model relevance for spark-vm:
+multi-tenant disk-wipe discipline — the exact failure mode the C55
+filing warned about, now vendor-confirmed as a fleet-wide default.
+No new C-number (the C55 corpus entry stands; its grade is
+upgraded).
+
+**Carried:** C54 full article-body read (Perplexity "Escaping
+SPACE" — automated fetches 403, real-browser verified live
+2026-09-25 ~14:10 CDT); C37 Pro fee still structurally omitted
+(watched lines); C44 newest heading still Sep 24 (no Sep-25 entry —
+VERIFIED absent); C26 conflicts unchanged (watched lines); Vercel
+Drives not re-checked (P49 — next the 2026-09-26 morning pass).
+Adjacent color only (NOT corpus): Kontext Security public launch +
+$4M seed (Sep 24, THIRD-PARTY — agent runtime-policy enforcement
+startup; fundraise, non-provider; below the C-number bar, outside
+window). Deliberately not filed: techmaniacs defensive-action line
+(C55 reference, no new facts), CVE-2026-26956 vm2 sandbox escape
+(undated PDF, marginal lane), Modern Treasury/Robocorp incident
+pages (out of lane). In-lane no-launch verdict dated 2026-09-25.
