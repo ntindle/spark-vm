@@ -17,8 +17,11 @@ into a world-readable ``/tmp`` staging file, then into the jail).
 This helper fixes the *read* side the way ``safe_install.py`` fixed the
 write side: the CA source is opened with ``O_NOFOLLOW``, so a symlink is
 refused atomically with the open (``ELOOP``) — there is no
-check-then-read TOCTOU window. The system CA bundle is a root-controlled
-path and is read normally. The destination write goes through
+check-then-read TOCTOU window. The ``--sys`` path is invoker-controlled
+(issue #372) and is read through the same O_NOFOLLOW + fstat-gated
+privileged discipline as the swapd CA (issues #144/#299/#300); a
+missing system bundle fails closed (exit 2), unlike the
+first-deploy-missing CA. The destination write goes through
 ``safe_install.safe_install``, which refuses symlink destinations and
 enforces owner/mode on the open fd.
 
@@ -79,13 +82,57 @@ def _missing_ca(ca_path, ca_only):
     raise SystemExit(0)
 
 
+def _privileged_read(path, on_missing):
+    """Shared open discipline for privileged reads (issues #144/#299/#300/#372).
+
+    ``on_missing`` is a zero-arg callable invoked when the path is absent;
+    it must raise SystemExit -- the swapd CA passes its loud first-deploy
+    skip; --sys passes a fail-closed refusal (a missing system bundle is
+    not a first-deploy state).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        on_missing()  # raises SystemExit -- raced away between check and open
+        # A non-raising on_missing is a caller bug: fail closed explicitly
+        # rather than falling through to an unbound-fd NameError.
+        raise SystemExit(1)  # unreachable by contract
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            _fail("%s is a symlink -- refusing to read through it "
+                  "(issue #144)" % path)
+        raise
+    # fstat the raw fd before fdopen: fdopen on a directory raises
+    # IsADirectoryError, and a FIFO open would block without O_NONBLOCK.
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        _fail("%s is not a regular file -- refusing to read it "
+              "(issue #144)" % path)
+    if st.st_nlink > 1:
+        # A hardlink IS a regular file, so O_NOFOLLOW + S_ISREG do not stop
+        # it: an attacker could hardlink a root-readable file into the read
+        # path. Refuse independent of the fs.protected_hardlinks sysctl
+        # (issue #299).
+        os.close(fd)
+        _fail("%s is a hardlink (nlink=%d) -- refusing to read it "
+              "(issue #299)" % (path, st.st_nlink))
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(_MAX_CA_BYTES + 1)
+    if len(data) > _MAX_CA_BYTES:
+        _fail("%s is %d bytes (cap %d) -- refusing to read it into the "
+              "privileged bundle (issue #300)"
+              % (path, len(data), _MAX_CA_BYTES))
+    return data
+
+
 def read_ca_bytes(ca_path, ca_only=False):
     """Read the swapd-controlled CA cert, refusing hostile inputs atomically.
 
     ``O_NOFOLLOW`` makes the symlink refusal part of the open itself: a
     symlink planted at *ca_path* (by swapd, or by anyone racing the deploy)
     fails with ELOOP instead of being read through. A dangling symlink also
-    fails here — that is a broken/attacked deploy, not a first deploy,
+    fails here -- that is a broken/attacked deploy, not a first deploy,
     so it fails closed rather than skipping silently. Non-regular files
     (FIFO, directory, ...) are refused too: a planted FIFO would otherwise
     block the privileged read forever, so the open is ``O_NONBLOCK`` and
@@ -95,54 +142,28 @@ def read_ca_bytes(ca_path, ca_only=False):
     issue #299), independent of the ``fs.protected_hardlinks`` sysctl. The
     read itself is capped at 1 MiB (issue #300): a real CA cert is ~1-2 KiB,
     and the cap is enforced on the read, so post-stat growth cannot exceed
-    it either.
+    it either. A missing CA is the loud first-deploy skip (not a refusal).
     """
-    try:
-        fd = os.open(ca_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
-        _missing_ca(ca_path, ca_only)  # raced away between check and open
-    except OSError as e:
-        if e.errno == errno.ELOOP:
-            _fail("%s is a symlink -- refusing to read through it "
-                  "(issue #144)" % ca_path)
-        raise
-    # fstat the raw fd before fdopen: fdopen on a directory raises
-    # IsADirectoryError, and a FIFO open would block without O_NONBLOCK.
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode):
-        os.close(fd)
-        _fail("%s is not a regular file -- refusing to read it "
-              "(issue #144)" % ca_path)
-    if st.st_nlink > 1:
-        # A hardlink IS a regular file, so O_NOFOLLOW + S_ISREG do not stop
-        # it: a swapd-level attacker could hardlink a root-readable file
-        # into the CA path. Refuse independent of the fs.protected_hardlinks
-        # sysctl (issue #299).
-        os.close(fd)
-        _fail("%s is a hardlink (nlink=%d) -- refusing to read it "
-              "(issue #299)" % (ca_path, st.st_nlink))
-    with os.fdopen(fd, "rb") as f:
-        data = f.read(_MAX_CA_BYTES + 1)
-    if len(data) > _MAX_CA_BYTES:
-        _fail("%s is %d bytes (cap %d) -- refusing to read it into the "
-              "privileged bundle (issue #300)"
-              % (ca_path, len(data), _MAX_CA_BYTES))
-    return data
+    return _privileged_read(
+        ca_path, on_missing=lambda: _missing_ca(ca_path, ca_only))
 
 
 def build_bundle(sys_path, ca_path):
     """System bundle bytes + swapd CA bytes.
 
-    The ``--sys`` flag makes sys_path invoker-controlled, so the
-    privileged read is capped exactly like the CA read (issue #300
-    pattern, #334 audit): the default root-controlled system bundle is
-    ~200 KiB, well under the 1 MiB cap.
+    The ``--sys`` flag makes sys_path invoker-controlled, so the privileged
+    read runs the same ``O_NOFOLLOW`` + fstat-gated open discipline as the
+    CA read (issue #372): a symlink/hardlink/non-regular file there is
+    refused, and the read is capped like the CA read (issue #300 pattern,
+    #334 audit). The default root-controlled system bundle is ~200 KiB,
+    well under the 1 MiB cap. A missing system bundle fails closed
+    (exit 2): unlike the swapd CA, there is no legitimate first-deploy
+    state for it.
     """
-    with open(sys_path, "rb") as f:
-        system = f.read(_MAX_CA_BYTES + 1)
-    if len(system) > _MAX_CA_BYTES:
-        _fail("%s is %d bytes (cap %d) -- refusing to read it into the "
-              "privileged bundle" % (sys_path, len(system), _MAX_CA_BYTES))
+    system = _privileged_read(
+        sys_path,
+        on_missing=lambda: _fail(
+            "%s missing -- the system bundle must exist" % sys_path))
     return system + read_ca_bytes(ca_path)
 
 
