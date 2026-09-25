@@ -2,7 +2,10 @@
 
 Delta-only update against the 2026-09-25 late-evening pass
 (`docs/COMPETITOR_WATCH_2026-09-25_LATE_EVENING.md`). Survey window
-**2026-09-25 ~16:0x–16:2x CDT**; two read-only surveyors (read-only
+**2026-09-25 ~16:24–17:05 CDT** — the 15:54 slot's run authored this pass
+then died before bookkeeping (its original surveyor captures were lost),
+so the adopting run re-read the full tracked set + C44 live in that
+window per P43 (captures named below); two read-only surveyors (read-only
 fetches and searches; no logins, no writes): (A) vendor-page re-reads
 of the full tracked set + C44 heading check; (B) an open-web in-lane
 news scan dated 2026-09-25 + the C54/C56/C52 carried asks. Vercel
