@@ -91,7 +91,7 @@ isolation), because those are where the trust story lives.
 | **Docker Sandboxes** (morning pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, **v3 kits** (OCI-based packages: agent workload + reusable mixins for tools/config/credentials/network/instructions — C34), skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
 | **Boat** (tracked set; 2026-09-22 consolidation; **renamed from ASCII ~2026-09-17** — C40 deduped into this row) | Task-scoped sandbox / persistent computer | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement). Rename VERIFIED this run: `box.ascii.dev`, `boat.dev`, `ascii.dev` serve byte-identical product pages; YC's company page now `ycombinator.com/companies/boat` (YC F26); yc-oss mirror dates the rename 2026-09-17 (`former_names`: ["Ascii box","Ascii"]); the old YC slug `ycombinator.com/companies/ascii` now serves a **301 → `/companies/boat`** (VERIFIED 2026-09-24 midday — harder rename evidence than the page copy). Hardest evidence yet (VERIFIED 2026-09-24 late midday): the vendor's own API docs at `docs.ascii.dev/box/api/v1` render as **"Boat Public API v1"** — the legacy ASCII domain's developer surface brands the product *Boat* (`/box` path and box.ascii.dev endpoints persist). The documented API covers sandbox lifecycle (provisioning → ready/idle → running → archiving → archived; stop/archive, resume, fork, delete; desktop streaming; Idempotency-Key; per-sandbox API keys; data-retention API) plus a `prompt` endpoint running work through built-in agent harnesses `codex`, `claude-code`, `pi`, `opencode`, `prime-agent`, `kimi` (INFERRED read: Boat bundles coding-agent harnesses as first-class providers). Canonical domain now boat.dev. | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time; EU-only DE/FI/FR (FAQ verbatim — Germany, Finland, France; VERIFIED 2026-09-24 midday; folded from the deprecated C40 pointer row). |
-| **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, snapshots **$0.005/GiB-month (vendor's 2026-09-22 investor release, evidence-backed)** — 2026-09-24 overnight pass RETIRED the carried $0.05/GiB-month docs figure as current (standalone docs pricing subpage unlocatable 5 consecutive passes as of the 2026-09-24 post-overnight pass — but the docs surface is now re-located and VENDOR-VERIFIED: product index "Last verified 21 Sep 2026", Harness Runtime index "Generated on 25 Sep 2026" (UTC), manage-sessions how-to "Last verified 21 Sep 2026" (sessions auto-pause after 15 min of inactivity — "suspends its compute while preserving the workspace"); the index confirms a Details section ("pricing, availability, limits") exists but exposes no URL — next pass tries doctl-linked docs URLs; current general-snapshot snippets (page last verified 8 May 2024) read $0.06/GB-month Droplets / $0.06/GiB-month volumes; the 10× discrepancy framing is withdrawn — see "Watch update — 2026-09-24 (post overnight)" for the re-location and the prior $0.05 history); $5 new-user credit |
+| **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, snapshots **$0.05/GiB-month** (vendor docs pricing subpage, VENDOR-VERIFIED — subpage located and read live 2026-09-25 late morning at the carried URL; stamp still "Last verified 22 Sep 2026"; the prior 8-pass "unlocated" streak was a search-discovery failure (INFERRED), not an availability failure — the page is reachable but effectively undiscoverable via search: `site:docs.digitalocean.com` queries return zero results) — 10× vendor-internal conflict annotated: DO's own 2026-09-22 investor launch page names **$0.005/GiB-month** (VENDOR-VERIFIED, re-read this run — no correction, no new date); misattribution hypothesis INFERRED: the $0.05 matches DO's general-product rate (THIRD-PARTY, navigators-guide PDF: Droplet/Volume snapshots $0.05/GB-month, nominal-value-for-value — GB vs GiB units differ); see "Watch update — 2026-09-25 (late morning)" for the full record and the retired "unlocated" framing; $5 new-user credit |
 | **Boxd** (2026-09-22 consolidation) | Persistent computer | "Composable computers" — KVM VMs with live memory forking in under 200 ms (vendor claim), snapshots/checkpoints, real SSH, per-machine HTTPS subdomain; self-hosted option ("run the whole platform on your own hardware") | Credit-based: €0.049/vCPU-hour running, €0.015/GiB-hour resident RAM, €0.0001/GiB-hour disk written; €30 free credits (**rate card VERIFIED 2026-09-23** — first own-page fetch, C29) |
 | **Upstash Box** (2026-09-22 consolidation; **own-docs VERIFIED 2026-09-24**) | Task-scoped sandbox / persistent computer | **VERIFIED on the vendor's own docs** ([Box quickstart](https://upstash.com/docs/box/overall/quickstart), read 2026-09-24): *"Upstash Box lets you give your AI agents a computer. Every Upstash Box is a **secure, isolated cloud container with an AI Agent built in**. Spin up as many as you want in parallel. Each one includes a full environment with a filesystem, shell, git, and a runtime."* Runtimes default Debian (glibc); keep-alive boxes (`keepAlive: true`) stay on between sessions; SSH access with a Box API key; *"Freeze a box anytime, and continue days or even weeks later with perfect resumability."* Standing datapoints: snapshot/restore API for reusable prepared environments, branching from snapshots, full outbound networking by default, 22.5 Gbps hosts on AWS; pause/resume unavailable with keepAlive enabled | **THIRD-PARTY** (vendor's own comparison blog, snippet-only this run): $0.10/$0.20/$0.40 per active CPU-hour (small/medium/large); free tier 10 boxes, 5 CPU-h/mo, $1 LLM budget, no card required |
 | **Freestyle** (2026-09-23 overnight, C37) | Persistent computer | "VMs for AI Agents" — hardware-virtualized Linux microVMs with live cloning, pause/resume, nested virtualization (Docker inside), custom domains, WireGuard tunnels, FUSE/eBPF; boot claim qualified 2026-09-24: vendor headline "65 ms" is marketing, docs give the honest number — **p99 under 400ms** (both VERIFIED on vendor's own pages); "run forever" with idle-timeout disabled (the anti-suspend-on-idle posture) | **Own pricing page VERIFIED 2026-09-24** ([freestyle.sh/pricing](https://www.freestyle.sh/pricing)): vCPU $0.04032/h (200/h included mo), GiB Memory $0.0129/h (400/mo), GiB Storage $0.000086/h (60,000/mo), Data Transfer $0.02/GB (50 GB free / 500 GB paid); Free / **Hobby $50/mo** (FAQ: "$50 on Hobby covers your first $50 of usage") / Pro (+ Enterprise custom); Pro's exact monthly fee not printed (only "monthly fee is a commitment that doubles as usage credit") — carried; 2026-09-24 post-overnight pass re-opened freestyle.sh/pricing VENDOR-VERIFIED — still no Pro dollar amount on the public page; Hobby $50 re-confirmed ("$50 on Hobby covers your first $50 of usage"); dashboard-internal pricing not checked |
@@ -823,7 +823,17 @@ itself on its own surfaces; the misattribution hypothesis (the $0.05
 is DO's general-product Volumes snapshot rate bleeding into the
 Managed Agents pricing page) is INFERRED and vendor-supported on the
 $0.005 side. Field-table cell keeps $0.05 (pricing-page figure) with
-the conflict annotated; see "Watch update — 2026-09-25 (morning)". So the
+the conflict annotated; see "Watch update — 2026-09-25 (morning)".
+**Correction (2026-09-25 late-morning fold):** the docs pricing
+subpage was reached live this run at the carried URL
+(VENDOR-VERIFIED; stamp still "Last verified 22 Sep 2026"; $0.05
+confirmed live) — the 8-miss streak was a discovery/indexing failure,
+not an availability failure. New THIRD-PARTY support for the
+misattribution hypothesis (digitalocean/navigators-guide PDF:
+general-product Droplet/Volume snapshots $0.05/GB-month —
+value-for-value with the docs subpage's figure). The standing watch
+item is now the 10× vendor-internal conflict itself
+($0.005 IR launch vs $0.05 docs, no correction on either surface). So the
 "zero while waiting" read of the headline rate is qualified: it holds
 only for paused sessions; a waiting-but-live sandbox costs 25% of
 allocation until active-CPU metering ships. Sandbox shapes
@@ -2694,3 +2704,84 @@ out-of-window folds — ~9/20 and ~9/23 — filed pre-dawn).
 New-entry/correction fold per the C32/C37/C38/C39/C40/C41/C42/
 C43/C44/C45/C46/C47/C48 precedents; full provenance in
 `docs/COMPETITOR_WATCH_2026-09-25_MORNING.md`.
+
+## Watch update — 2026-09-25 (late morning): C26 docs page located and read live — "unlocated" framing retired, conflict stands
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_LATE_MORNING.md`
+(survey window ~04:25–04:55 CDT).
+
+**C26 — the docs pricing subpage is reachable and was read live; the
+miss streak was a discovery failure (INFERRED).** The morning fold's *"subpage
+still unlocated, 8th consecutive miss"* line is retired: the surveyor
+reached the docs pricing subpage live this run at the corpus-carried
+URL
+https://docs.digitalocean.com/products/managed-agents/agent-harness-runtime/details/pricing/
+(VENDOR-VERIFIED). Title: "DigitalOcean Harness Runtime Pricing";
+stamp still **"Last verified 22 Sep 2026"** (no re-date); still
+**$0.05/GiB-month** under "Snapshots and Checkpoints" (same $0.05
+also on Session Storage / Volumes and Custom Sandbox Templates /
+BYOT); CPU $0.044/vCPU-hour (active CPU "coming soon"; billed 25% of
+allocated until then), memory $0.0095/GB-hour peak — all unchanged.
+The diagnosis: `site:docs.digitalocean.com` queries for the pricing
+subpage return **zero results**, and general web searches surface
+nothing from it — the page is **reachable but effectively
+undiscoverable via search**, which best explains the whole 8-miss streak.
+
+The vendor-internal conflict **stands unchanged on both surfaces**:
+the IR launch page re-read live this run (VENDOR-VERIFIED) still
+names **$0.005/GiB-month** snapshots in the Sep 22, 2026 press
+release — no correction, no new date. The vendor's own docs ($0.05)
+and the vendor's own IR launch ($0.005) conflict by 10× with no
+correction on either side.
+
+Supporting datum for the misattribution hypothesis (THIRD-PARTY,
+digitalocean/navigators-guide PDF): general-product Droplet/Volume
+snapshot storage is billed at **$0.05 per gigabyte each month** —
+nominal-value-for-value with the docs subpage's $0.05 (GB vs GiB
+units differ), consistent with the INFERRED "general-product
+(Volumes) rate bleeding into the Managed Agents pricing page"
+attribution for the docs line. The misattribution hypothesis now has
+THIRD-PARTY support for the docs-side ($0.05 = general-product rate)
+attribution; the $0.005 side remains VENDOR-VERIFIED on the IR launch
+page.
+Conservative handling (C32 precedent): the C26 field-table row keeps
+`$0.05/GiB-month` (pricing-page figure) with the conflict annotated;
+the $0.005-as-Managed-Agents attribution stays INFERRED. The "8th
+docs-subpage re-fetch" resolving ask is **resolved**; the standing
+watch item is the 10× vendor-internal conflict itself.
+
+**C47 watch color (no fold).** google/ax re-read live this run
+(VENDOR-VERIFIED): 10,942 stars (+27 vs the morning pass), 531 forks
+(+2), 633 commits (unchanged), head `e09ed1bc…`, Apache-2.0
+unchanged; README quickstart now shows the default Model example as
+`gemini-3.8-flash` (VENDOR-VERIFIED — previously rendered an example
+without this pin). v0.3.0 three-service-split specifics remain
+THIRD-PARTY.
+
+**C48 corroborating color (no fold — vendor-primary verification
+owed).** THIRD-PARTY (AlphaSignal, ~Sep 23) reports Prime Intellect
+**opened general access to Prime Sandboxes** — managed Linux microVM
+fleet for agent RL rollouts (hardware-virtualized guest kernels,
+explicitly not gVisor; ~30M sandboxes created during the private
+rollout; GA via CLI, SDK, or Prime's RL stack). Reads as
+corroboration of the already-filed C48 launch entry; vendor-primary
+verification owed.
+
+**Carried:** C37 Pro fee still UNVERIFIED (freestyle.sh/pricing
+re-read live ~04:35 CDT — the page structurally does not publish plan
+fees; usage rates re-confirmed verbatim); C44 newest heading still
+September 24, 2026 (no Sep 25 entry — VERIFIED absent; Sep 22
+empty-body heading unchanged); C41 pin static at `39b6c3a2`;
+C43/C36 unchanged; Tensorlake no Sep-24/25 news. The Sep-25
+aggregator's "Gemini API managed-agents harness + Files/Credentials
+APIs" item is already-filed C43 territory (primary-source
+verification owed). **Tracked set: 8/8 VERIFIED NO-CHANGE** (zero
+deltas, zero fetch failures). Adjacent investor color only (NOT
+corpus): Akamai $11.6B multi-year Anthropic commitment; Baselayer
+$35M Series A (Know Your Agent identity); webAI $30M Forge deal;
+Island $400M / Ando $20M already in corpus. Out of lane: Unryo
+agentic RAN/K8s, Axya $12M Series A.
+
+New-entry/correction fold per the C32/C37/C38/C39/C40/C41/C42/
+C43/C44/C45/C46/C47/C48 precedents; full provenance in
+`docs/COMPETITOR_WATCH_2026-09-25_LATE_MORNING.md`.
