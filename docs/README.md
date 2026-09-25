@@ -48,6 +48,7 @@ working.
 | [GOLDEN_IMAGE_GATE_PROCEDURE.md](GOLDEN_IMAGE_GATE_PROCEDURE.md) | Operator procedure for the spec §6.7 golden-image round-trip gate: manifest preflight, fixture install, gate-mode probe, file → answer → grant-mint → verify, filing-count determinism check, mandatory fixture teardown pre-publish. |
 | [TENANT_STATUS_ENDPOINT.md](TENANT_STATUS_ENDPOINT.md) | Design for the `GET /tenant/status` poll the first-ten-minutes spec, signup flow, and signup UI assume: 12 machine codes + transition rules, `approvals_url` carrier, two-sided auth, provider-layer vs tenant-layer separation (G3). |
 | [MULTI_TENANCY_AUDIT.md](MULTI_TENANCY_AUDIT.md) | The H11 multi-tenancy audit: every localhost-only / no-auth / single-owner assumption inventoried and ranked by blast radius; adopts/rejects the isolation research's findings; answers the four design questions (isolation story, swap-proxy trust boundary, tailnet fail-open/fail-closed, who holds root); releases the H5/H10/H12/H13 gates. |
+| [USAGE_METERING_DESIGN.md](USAGE_METERING_DESIGN.md) | H12 usage-metering design: billable-unit taxonomy (wall-clock, resource windows, approval volume, suspend/wake, push), the canonical metering event envelope shared with the H5 sentinel design (answers #353–#356; sequencing half of #354; the authentication half stays open for H5), per-surface mappers over S1–S4, emission via the H14 part a enqueue/retry pattern, counters-over-content privacy rules, and the filed gaps (#376–#378). |
 
 ## Product research corpus
 
