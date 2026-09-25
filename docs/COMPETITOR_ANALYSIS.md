@@ -813,7 +813,17 @@ on the vendor docs page (re-read 2026-09-23 mid-evening; page stamped
 "Last verified 22 Sep 2026"). The corpus's earlier $0.005/GiB-month
 figure came from the syndicated release, not the docs; the 10×
 snapshot-rate discrepancy (C26 watch item, carried as caveat in the
-mid-afternoon fold) is RETIRED in favor of the primary source. So the
+mid-afternoon fold) is RETIRED in favor of the primary source.
+**Correction (2026-09-25 morning fold):** the retirement is withdrawn —
+DO's own investor-relations launch page (investors.digitalocean.com,
+Sep 22, 2026, VENDOR-VERIFIED 2026-09-25 morning) names
+**$0.005/GiB-month** as the *Managed Agents* snapshot rate, which
+conflicts 10× with the docs page's $0.05. The vendor disagrees with
+itself on its own surfaces; the misattribution hypothesis (the $0.05
+is DO's general-product Volumes snapshot rate bleeding into the
+Managed Agents pricing page) is INFERRED and vendor-supported on the
+$0.005 side. Field-table cell keeps $0.05 (pricing-page figure) with
+the conflict annotated; see "Watch update — 2026-09-25 (morning)". So the
 "zero while waiting" read of the headline rate is qualified: it holds
 only for paused sessions; a waiting-but-live sandbox costs 25% of
 allocation until active-CPU metering ships. Sandbox shapes
@@ -2613,3 +2623,74 @@ and ~9/23 — newly filed this pass).
 
 New-entry fold per the C32/C37/C38/C39/C40/C41/C42 precedents; full
 provenance in `docs/COMPETITOR_WATCH_2026-09-25_PREDAWN.md`.
+
+## Watch update — 2026-09-25 (morning): C26 snapshot attribution RE-OPENED as a vendor-internal conflict, C44 heading moved
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_MORNING.md`
+(survey window ~03:55–04:15 CDT).
+
+**C26 — snapshot-rate attribution RE-OPENED.** The mid-evening
+fold's *"10× snapshot-rate discrepancy ... is RETIRED in favor of
+the primary source"* line is stale — the vendor now disagrees with
+itself on its own surfaces. DigitalOcean's own investor-relations
+launch page (investors.digitalocean.com, Sep 22, 2026 — the vendor's
+own claims, not syndication) states verbatim: *"Active CPU billing...
+CPU is billed per second of actual use at **$0.044 per vCPU-hour**
+and memory at **$0.0095 per GB-hour**, with **snapshots at $0.005
+per GiB-month**"* (VENDOR-VERIFIED this run). The vendor's own
+pricing subpage (stamped "Last verified 22 Sep 2026") names
+**$0.05/GiB-month** for the same line (carried from the 2026-09-23
+mid-evening read — the subpage stays unlocated this run, 8th consecutive
+miss). No correction observed on the IR surface this run; the 10× gap
+is a vendor-internal conflict, not a
+syndication error. Reading (INFERRED): the $0.05 is very likely
+DO's general-product (Volumes snapshot) rate bleeding into the
+Managed Agents pricing page — the night-pass misattribution
+hypothesis is now vendor-supported on the $0.005 side. Conservative
+handling: the C26 field-table row keeps its `$0.05/GiB-month`
+(vendor-pricing-page figure) with this conflict annotated; the
+$0.005-as-Managed-Agents attribution stays INFERRED until the
+pricing-subpage re-fetch (8th attempt, next pass) settles it.
+Primary-source-verification fold per the C32 precedent.
+
+**C44 — heading moved Sep 22 → Sep 24 (watch color, no fold).**
+Google's agent-platform release notes (VENDOR-VERIFIED this run)
+now top out at **September 24, 2026**: Gemini 3.8 Live GA
+(voice/model-reliability/orchestration) + Muse Spark 1.3 from Meta
+in Preview (agentic reasoning, MCP tool calling, 1M-token context).
+Neither entry is sandbox-shaped — watch color only. Sep-9 Computer
+Use + Shell sandboxes GA entry still present.
+
+**Retired duplicates:** surveyor's recommended google/ax corpus
+candidate = already-filed **C47** (repo re-opened this run —
+Apache-2.0 VENDOR-VERIFIED, 10,915 stars / 529 forks; README
+"runs on top of **Agent Substrate** for sandboxed execution"
+re-confirmed; v0.3.0 specifics stay THIRD-PARTY-convergent as
+filed); surveyor's Docker-Cloud-Sandboxes-launch candidate =
+already-filed **C45** (The Register 2026/09/24 + ADTmag second
+corroboration surface, facts value-for-value with the filed
+entry — C45's corroboration set is now vendor blog + keynote blog
++ WeAreDevelopers venue + The Register + ADTmag).
+
+**Carried:** C37 Pro fee still UNVERIFIED (freestyle.sh/pricing
+re-read — the page structurally does not publish plan fees; usage
+rates re-confirmed verbatim $0.04032/vCPU-hr, $0.0129/GiB-hr,
+$0.000086/GiB-storage-hr, $0.02/GB transfer; signed-in dashboard
+check still owed); C26 docs subpage 8th consecutive miss
+(standalone page may not exist for a preview product); Tensorlake
+no Sep-24/25 news (C46 stands); C41 pin static at `39b6c3a2`
+(digits unchanged); C43/C36 confirmed unchanged; C48 Prime
+Sandboxes no-op (no Sep 24–25 news); Vercel Drives still public
+beta (P49 morning cadence, 26th consecutive no-change pass; Drive
+pricing grid fully specified — digits already folded VERIFIED at
+C32; no fold). **Tracked set: 8/8 VERIFIED NO-CHANGE** (zero
+deltas, zero fetch failures). Adjacent investor color only (NOT
+corpus): Ando $20M (Sep 24, THIRD-PARTY — agent-native team
+messaging, harness-adjacent); Island $400M Series F at $6.4B
+(adjacent security lane). In-lane dated 9/25: no launches,
+pricing moves, or funding rounds in-window (C47/C48 are
+out-of-window folds — ~9/20 and ~9/23 — filed pre-dawn).
+
+New-entry/correction fold per the C32/C37/C38/C39/C40/C41/C42/
+C43/C44/C45/C46/C47/C48 precedents; full provenance in
+`docs/COMPETITOR_WATCH_2026-09-25_MORNING.md`.
