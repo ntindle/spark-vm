@@ -1,0 +1,13 @@
+[Unit]
+Description=Summons outbox reconciliation sweep, every 5 minutes (G4 S1)
+
+[Timer]
+# G4 §7: the box-side reconciliation sweep is S1-owned at minutes-scale
+# cadence. The residual loss window (crash between the filing write and
+# the journal append, for a record still pending) is bounded by this
+# interval: at most 5 minutes before the sweep re-ships the row.
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

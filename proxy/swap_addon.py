@@ -134,7 +134,9 @@ placeholder went somewhere it should not.
 import asyncio
 import base64
 import binascii
+import contextlib
 import errno
+import fcntl
 import hashlib
 import hmac
 import ipaddress
@@ -275,6 +277,204 @@ def _push_notify(item):
                           item.get("id"))
     t = threading.Thread(target=_run, name="swap-push-notify", daemon=True)
     t.start()
+
+
+# ---------------------------------------------------------------------------
+# G4 S1 — box-side summons outbox journal (GitHub #428, slice 1)
+# ---------------------------------------------------------------------------
+# The first approval's summons has no channel: VAPID push needs a browser
+# subscription that only exists after the first summons arrives, and no
+# mail sender exists on the filing path. The design
+# (docs/FIRST_APPROVAL_SUMMONS.md) closes this with a control-plane-observed
+# journal: _file_approval appends one filing event to this outbox inline,
+# adjacent to the os.replace that files the pending record — inside the
+# same try block, guarded by the existing except OSError. The append
+# shares the filing's durability rather than a weaker one; an append
+# failure demotes the client to no-signal (the same failure class as the
+# filing's own writes, which already return [] on OSError), and the
+# reconciliation sweep below recovers the filing from pending/.
+#
+# The journal is the box half only: the control-plane observer (S2) ships
+# the events and sends the fail-open email. The box never sends mail and
+# never holds the AgentMail credential (H11 trust boundary).
+#
+# Event payload: aid, filed_at, expires, the plain-language action summary
+# (credential name + host + method — the same text the page already shows;
+# never model-authored free text, finding-49 discipline), the same tuple
+# machine-readable (credential/host/method, so the S2 observer doesn't
+# re-parse English — no new information beyond the summary), and a tenant
+# field carried as an UNVERIFIED HINT. The observer keys identity off the
+# transport-authenticated box->tenant binding (per-VM client cert), never
+# off this hint. No secrets, no credential values, no request bodies.
+
+def summons_outbox_path():
+    """Path of the summons outbox journal: $APPROVALS_DIR/summons-outbox.jsonl.
+
+    SWAP_SUMMONS_OUTBOX overrides the path (tests); the default follows
+    APPROVALS_DIR, which the design names ($APPROVALS_DIR is the approvals
+    tree — confirm/push.py's CONFIRM_DIR defaults to the same path).
+    """
+    explicit = os.environ.get("SWAP_SUMMONS_OUTBOX")
+    if explicit:
+        return explicit
+    return os.path.join(APPROVALS_DIR, "summons-outbox.jsonl")
+
+
+def _summons_tenant_hint():
+    """Unverified tenant hint for the journal event (G4 §1, identity).
+
+    SWAP_TENANT when the operator names the tenant; otherwise the box
+    hostname. A compromised box can lie about this field — the S2
+    observer treats it as a hint and keys the first_summons_sent flag
+    off the transport-authenticated box->tenant binding instead.
+    """
+    return os.environ.get("SWAP_TENANT") or socket.gethostname()
+
+
+@contextlib.contextmanager
+def _summons_locked(path):
+    """Exclusive cross-process lock for journal read-modify-write.
+
+    Deliberately local (not borrowed from push.py): the journal must
+    work wherever the addon runs — in the repo tree push.py lives at
+    confirm/push.py while the box layout installs it next to the addon,
+    and _load_push_module only covers the box layout. The body is the
+    same flock-on-sidecar mechanics as push.py's `_locked`; there is no
+    logic here to diverge, only OS calls.
+    """
+    lock_path = path + ".lock"
+    with open(lock_path, "a+b") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+
+def _summons_append(event):
+    """Append one filing event to the summons outbox journal.
+
+    Raises OSError on I/O failure — the _file_approval caller lets it
+    propagate to its existing except OSError, demoting the client signal
+    to no-signal (the event never reached the observer's channel, so no
+    pending signal may be given). The reconciliation sweep recovers the
+    filing from pending/ on its next pass.
+
+    One locked append: the proxy's flow thread and the timer-driven
+    sweep are different processes; the lock keeps rows from
+    interleaving. File mode 0600 on create, matching the push queue
+    journal.
+    """
+    outbox = summons_outbox_path()
+    row = json.dumps(event, separators=(",", ":")) + "\n"
+    with _summons_locked(outbox):
+        fd = os.open(outbox, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(row)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            # fdopen took ownership of fd; on failure the file object
+            # closes it. OSError propagates to the caller (demote to
+            # no-signal); anything else is a bug, also propagated.
+            raise
+    log.info("swap: summons outbox appended approval %s", event.get("aid"))
+
+
+def _summons_sweep(outbox=None, pending_d=None):
+    """Reconciliation sweep: re-append journal rows for pending approvals
+    the inline append missed (G4 §7, S1-owned cadence, minutes-scale).
+
+    Diffs pending/ against the journal by aid and re-ships only rows
+    for records STILL in pending/ at sweep time: a record answered or
+    expiry-reaped before the sweep is moot — the human already engaged,
+    or the request expired into human-drop-off. A re-shipped event for
+    an already-answered aid is impossible here (answered records are
+    not in pending/), and the S2 observer's pending-state mirror
+    suppresses the summons for an answered aid anyway. The residual
+    loss window is therefore a process crash between the two writes
+    for a record still pending — stated, not hand-waved.
+
+    At-least-once: the observer's first_summons_sent flag makes the send
+    idempotent, so a duplicate row (inline append succeeded but the
+    journal read raced it) is benign.
+
+    Fail-open: never raises — a sweep failure must never lose a filed
+    approval. Returns the number of recovered rows.
+    """
+    recovered = 0
+    try:
+        outbox = outbox or summons_outbox_path()
+        pending_d = pending_d or os.path.join(APPROVALS_DIR, "pending")
+        now = datetime.now(timezone.utc).isoformat()
+        with _summons_locked(outbox):
+            journaled = set()
+            try:
+                with open(outbox, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            e = json.loads(line)
+                        except ValueError:
+                            # Corrupt line: journaled-set skips it, the
+                            # row is re-appended below if its aid is
+                            # still pending. Loud, not fatal.
+                            log.warning("swap: summons sweep skipping "
+                                        "corrupt journal line")
+                            continue
+                        aid = e.get("aid")
+                        if aid and _AID_RE.match(str(aid)):
+                            journaled.add(str(aid))
+            except FileNotFoundError:
+                pass  # No journal yet: every pending row is a miss.
+            try:
+                names = os.listdir(pending_d)
+            except OSError:
+                return 0
+            for fn in names:
+                if not fn.endswith(".json"):
+                    continue  # skips .json.tmp mid-write, like the
+                             # filing scan's own guard
+                try:
+                    with open(os.path.join(pending_d, fn),
+                              encoding="utf-8") as f:
+                        it = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                aid = it.get("id") or fn[:-len(".json")]
+                if not _AID_RE.match(str(aid)) or str(aid) in journaled:
+                    continue
+                event = {
+                    "aid": str(aid),
+                    "filed_at": it.get("created") or now,
+                    "expires": it.get("expires"),
+                    "summary": str(it.get("summary") or ""),
+                    "credential": it.get("credential"),
+                    "host": it.get("host"),
+                    "method": it.get("method"),
+                    "tenant_hint": _summons_tenant_hint(),
+                }
+                fd = os.open(outbox,
+                             os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(json.dumps(event,
+                                           separators=(",", ":")) + "\n")
+                        f.flush()
+                        os.fsync(f.fileno())
+                except BaseException:
+                    raise
+                journaled.add(str(aid))
+                recovered += 1
+                log.info("swap: summons sweep recovered approval %s", aid)
+    except Exception:
+        log.exception("swap: summons sweep failed")
+    return recovered
+
+
 SSRF_ALLOW_FILE = _env_path("SWAP_SSRF_FILE", "/home/swapd/ssrf.allow")
 # Finding 47: hard-deny list. Entries here refuse egress even if
 # ssrf.allow names the host — it covers the host's own tailnet
@@ -1201,6 +1401,22 @@ class SwapAddon:
             with open(tmp, "w") as f:
                 json.dump(item, f, indent=2)
             os.replace(tmp, os.path.join(pending, aid + ".json"))
+            # G4 S1 (GitHub #428): summons outbox journal — inline,
+            # adjacent to the filing write, inside the same try block.
+            # The append shares the filing's durability; an OSError here
+            # falls through to the existing except OSError, demoting the
+            # client to no-signal (the sweep recovers the filing from
+            # pending/ on its next pass).
+            _summons_append({
+                "aid": aid,
+                "filed_at": now.isoformat(),
+                "expires": item["expires"],
+                "summary": item["summary"],
+                "credential": name,
+                "host": host,
+                "method": method_up,
+                "tenant_hint": _summons_tenant_hint(),
+            })
             self._audit(None, "approval-filed:%s" % aid)
             # H2 (GitHub #2): VAPID push to the owner's devices.
             _push_notify(item)
@@ -2227,3 +2443,22 @@ class SwapAddon:
 
 
 addons = [SwapAddon()]
+
+if __name__ == "__main__":
+    # G4 S1 (GitHub #428): box-side reconciliation-sweep entry point,
+    # driven by proxy/summons-sweep.timer at minutes-scale cadence.
+    # Importing this module is side-effect-free (SwapAddon.__init__
+    # only initializes attributes), so running it as a script is safe.
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="summons outbox reconciliation sweep (G4 S1)")
+    ap.add_argument("--summons-sweep", action="store_true",
+                    help="diff pending/ against the summons outbox journal "
+                         "and re-append rows the inline append missed")
+    args = ap.parse_args()
+    if args.summons_sweep:
+        n = _summons_sweep()
+        print("summons-sweep: recovered %d row(s)" % n)
+    else:
+        ap.print_help()
+        sys.exit(2)
