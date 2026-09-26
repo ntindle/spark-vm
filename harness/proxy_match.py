@@ -180,8 +180,9 @@ def _is_mapped_loopback(text):
     """True when text is an IPv4-mapped IPv6 literal whose embedded IPv4
     address is in 127.0.0.0/8 (issue #269).
 
-    Normalization mirrors host_in_list (bracket strip, trailing-dot strip)
-    so this flags exactly the spellings that exact-match at enforcement.
+    Normalization mirrors host_in_list (lowercase, bracket strip,
+    trailing-dot strip) so this flags exactly the spellings that
+    exact-match at enforcement.
     The proxy's own SSRF layer already judges these as their embedded
     IPv4 (swap_addon._normalize_ip, finding 37: "::ffff:127.0.0.1 reaches
     localhost on Linux and must be judged as 127.0.0.1"); the echo layer
@@ -280,7 +281,7 @@ def is_echo_entry(entry, aliases=ECHO_ALIASES):
 def ssrf_line_is_echo(line):
     """True when a single ssrf.allow line (stripped, non-blank, non-comment)
     is an effective echo exemption: a CIDR covering 127.0.0.0/8 or ::1/128,
-    a CIDR inside the IPv4-mapped loopback space (issue #269 -- inert at
+    a CIDR overlapping the IPv4-mapped loopback space (issue #269 -- inert at
     enforcement because the proxy unwraps mapped addresses before the net
     check, but loopback-directed, so flagged fail-closed), or an echo
     hostname under the proxy's own parsing."""
