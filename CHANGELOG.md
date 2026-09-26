@@ -126,6 +126,14 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- The jail build now validates the agent's SSH public key before doing
+  anything with it: a file with Windows line endings, trailing blank
+  lines, or a malformed key fails the build with a clear error instead
+  of landing verbatim in the jail's authorized keys and failing the
+  agent's SSH login in a way that looked like a network problem. (#TBD)
+- The jail's firewall watchdog now re-checks the ruleset every minute
+  instead of every five, so a flushed or damaged firewall is caught and
+  fail-closed within about a minute rather than up to five. (#TBD)
 - Deploy helper now states its input bounds up front: `--src` refuses
   inputs over 1 MiB, and `--stdin` is documented as deliberately uncapped
   and un-gated (deploy-script-constructed input only, never
