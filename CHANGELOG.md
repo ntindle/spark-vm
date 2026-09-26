@@ -151,6 +151,16 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- proxy/deploy.sh now installs `scripts/bounded_http.py` to /home/swapd
+  alongside confirmd.py and registers it in confirm's install paths, so
+  the standalone deployment (and its rollback) can't start confirmd
+  with a missing-helper import failure. cred-ui gets the same treatment:
+  its auto-deploy install step now ships the helper into the working
+  checkout's `scripts/` (whose sync only refreshed `cred-ui/` + VERSION)
+  and registers it in cred-ui's install paths for snapshot/rollback, so a
+  cred-ui-only deploy can no longer restart the service into
+  ModuleNotFoundError (#471).
+
 - The desktop control bridge now serves each request on its own thread, with at most 8 handlers running at once: a slow driver call can no longer head-of-line-block the panel's screenshot polls or the keepalive's health probe. (#496)
 
 - Manual rollbacks now audit the extra-inputs digest reconciliation outcome:
@@ -287,6 +297,19 @@ This changelog only works if entries land with the change, not after it:
   legitimate approvals (browser poll + answer round-trips) complete well
   under the bound (#472). (#476)
 
+- cred-ui and waitlistd now run on the same bounded, slow-loris-hardened
+  HTTP server confirmd got in #469 (new shared `scripts/bounded_http.py`
+  — the bounded thread pool is promoted out of confirmd so all three
+  daemons share one implementation instead of diverging copies):
+  in-flight handler threads are capped at 64 with fail-closed
+  over-cap shedding, and the TLS handshake can never run in the accept
+  loop again. waitlistd also gains the 10 s per-socket timeout its
+  siblings already had — a stalled request body can no longer pin a
+  handler thread forever. confirmd itself now uses the shared helper
+  too (previously a local copy), and the #472 cumulative-deadline
+  protection moved into the shared helper as an opt-in switch so
+  confirmd keeps it — cred-ui and waitlistd leave it off, their #471
+  behavior unchanged. (#471) (#499)
 - The deploy installer now reads its `--src` input through the same
   symlink/hardlink/non-regular/oversize-refusing privileged-read
   discipline as the CA bundle builder (new shared `privileged_read`

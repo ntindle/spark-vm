@@ -67,7 +67,7 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/summons-sweep.service proxy/summons-sweep.timer \
          confirm/confirmd.py confirm/confirm-request confirm/confirmd.service \
          confirm/push-worker.service confirm/push.py \
-         VERSION scripts/sparkvm_version.py; do
+         VERSION scripts/sparkvm_version.py scripts/bounded_http.py; do
     if [ ! -f "$f" ]; then
         echo "ERROR: required repo file missing: $f — aborting before any mutation"
         exit 1
@@ -75,7 +75,7 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
 done
 python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py confirm/push.py \
     proxy/safe_install.py proxy/build_ca_bundle.py proxy/privileged_read.py \
-    scripts/sparkvm_version.py \
+    scripts/sparkvm_version.py scripts/bounded_http.py \
     || { echo "ERROR: python syntax check failed — aborting"; exit 1; }
 # VERSION feeds audit JSON via the updater: a non-semver VERSION must fail
 # the deploy here, loudly, rather than become "unknown" downstream.
@@ -116,6 +116,10 @@ done
 # --- 2. confirmd ---------------------------------------------------------
 echo "[2/7] Installing confirmd..."
 sudo install -o swapd -g swapd -m 0644 confirm/confirmd.py /home/swapd/confirmd.py
+# Issue #471: confirmd's shared bounded-HTTP helper must ship with it —
+# the standalone deployment adds /home/swapd to sys.path, so a missing
+# helper would fail the import loudly at service start.
+sudo install -o swapd -g swapd -m 0644 scripts/bounded_http.py /home/swapd/bounded_http.py
 # H2: VAPID push sender, installed next to confirmd.py and swap_addon.py
 # (both import it from their own directory).
 sudo install -o swapd -g swapd -m 0644 confirm/push.py /home/swapd/push.py

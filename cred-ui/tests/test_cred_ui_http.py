@@ -38,7 +38,7 @@ cred_ui = _load_cred_ui()
 @pytest.fixture()
 def server(monkeypatch):
     """cred-ui Handler on an ephemeral port with ALLOWED_HOSTS patched."""
-    srv = cred_ui.ThreadingHTTPServer(("127.0.0.1", 0), cred_ui.Handler)
+    srv = cred_ui.BoundedThreadingHTTPServer(("127.0.0.1", 0), cred_ui.Handler)
     port = srv.server_address[1]
     monkeypatch.setattr(
         cred_ui, "ALLOWED_HOSTS",

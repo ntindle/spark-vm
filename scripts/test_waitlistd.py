@@ -28,7 +28,6 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPConnection
-from http.server import ThreadingHTTPServer
 
 import pytest
 
@@ -585,7 +584,7 @@ def live_server():
     tmp = tempfile.mkdtemp(prefix="waitlistd-live-")
     svc = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid")
     wd._Handler.service = svc
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), wd._Handler)
+    httpd = wd.BoundedThreadingHTTPServer(("127.0.0.1", 0), wd._Handler)
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -1344,6 +1343,25 @@ def test_is_loopback_gate():
     assert wd._is_loopback("not-an-ip") is False
     assert wd._is_loopback("fe80::1%eth0") is False  # link-local, zone-stripped
     assert wd._is_loopback("::1%lo") is True  # loopback with zone id
+
+
+def test_is_loopback_gate_mapped_refusal_version_independent(monkeypatch):
+    # The gate must refuse ::ffff:127.0.0.1 fail-closed on EVERY Python:
+    # CPython changed IPv6Address.is_loopback for IPv4-mapped addresses
+    # between 3.12.x patch releases (False on 3.12.3, True on 3.12.14 via
+    # mapped-property inheritance), which turned this exact assertion into
+    # a CI-only failure. Emulate the new semantics and pin the refusal.
+    import ipaddress
+    orig = ipaddress.IPv6Address.is_loopback
+    monkeypatch.setattr(
+        ipaddress.IPv6Address, "is_loopback",
+        property(lambda self: (self.ipv4_mapped.is_loopback
+                               if self.ipv4_mapped is not None
+                               else orig.fget(self))))
+    assert ipaddress.ip_address("::ffff:127.0.0.1").is_loopback is True
+    assert wd._is_loopback("::ffff:127.0.0.1") is False  # still fail-closed
+    assert wd._is_loopback("::1") is True
+    assert wd._is_loopback("127.0.0.1") is True
 
 
 def test_status_snapshot_empty():

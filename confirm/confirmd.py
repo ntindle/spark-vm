@@ -56,7 +56,7 @@ import time
 import urllib.parse
 from collections import defaultdict
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 # --- spark-vm version stamping (docs/VERSIONING.md) ---
 # Single-source repo VERSION: reported at startup and on /api/version.
@@ -77,6 +77,16 @@ except Exception:
     # must never break the component's startup.
     SPARKVM_VERSION = "0.0.0-unknown"
 # --- end version stamping ---
+
+# Issue #471: the bounded pool + handshake-deferral server promoted out of
+# confirmd (#77 M8) into scripts/bounded_http.py — scripts/ is on sys.path
+# via the version-stamping block above. The import is unconditional: a
+# missing helper is a broken checkout and must fail loud, not silently
+# fall back to the unbounded server. confirmd subclasses it below to set
+# the #472 cumulative-deadline switch and audit the kill; the shared
+# mechanism stays one implementation for all three daemons
+# (confirmd, cred-ui, waitlistd).
+from bounded_http import BoundedThreadingHTTPServer as _BoundedHTTPServer
 
 PORT = int(os.environ.get("CONFIRM_PORT", "8443"))
 CERT = os.environ.get("CONFIRM_CERT", "/home/swapd/confirmd/cert.crt")
@@ -1922,167 +1932,24 @@ def _kill_connection(request, client_address):
               "connection aborted")
 
 
-class BoundedThreadingHTTPServer(ThreadingHTTPServer):
-    # Issue #77 (M8): bound the accept->thread fan-out (see main()).
-    # Capacity model: confirmd's client classes are the owner's browser and
-    # the agent proxy — expected peak ~4 concurrent requests. 64 threads is
-    # ~16x headroom. The 10s socket timeout reclaims idle stalls; a peer
-    # actively dripping >=1 byte/10s could still pin a slot, so the
-    # cumulative connection_deadline below aborts such connections
-    # fail-closed (state stays file-backed so a retry succeeds) rather than
-    # letting trickling peers saturate the pool.
-    max_threads = 64
 
-    # Backstop socket timeout for the deferred TLS handshake
-    # (process_request_thread): the handler class's own `timeout` is
-    # preferred when present; this covers handlers that don't set it.
-    # Kept equal to Handler.timeout (10).
-    socket_timeout = 10
-
-    # Issue #472: cumulative per-connection deadline (seconds) — absolute
-    # wall-clock cap on one accepted connection, covering the deferred TLS
-    # handshake AND the handler. Sizing: the per-operation socket timeout
-    # (10) and the 15s grant-writer subprocess window are the reference
-    # costs; 60 is 6x the socket timeout and 4x the grant window, so
-    # legitimate approvals (browser poll + answer round-trips) complete
-    # comfortably while a trickling peer can never hold a slot longer.
+class BoundedThreadingHTTPServer(_BoundedHTTPServer):
+    # Issue #472 (kept from PR #476): confirmd keeps the cumulative
+    # per-connection deadline — a peer dripping >=1 byte per socket-timeout
+    # can no longer pin a pool slot indefinitely. The timer + slot-release
+    # mechanism lives in the shared scripts/bounded_http.py helper
+    # (issue #471) behind its connection_deadline switch; confirmd sets
+    # the switch to 60 and audits the kill here because audit_log is
+    # confirmd-specific. cred-ui and waitlistd leave the switch off, so
+    # their behavior is unchanged from the #471 adoption.
     connection_deadline = 60
 
-    def __init__(self, *a, **k):
-        super().__init__(*a, **k)
-        self._slots = threading.Semaphore(self.max_threads)
-
-    def process_request(self, request, client_address):
-        if not self._slots.acquire(blocking=False):
-            self.close_request(request)
-            return
-        try:
-            # Architecture review B1: delegate thread creation, the
-            # daemon flag, and the _threads/block_on_close lifecycle
-            # bookkeeping to ThreadingMixIn — so future CPython changes
-            # to the mixin propagate instead of silently diverging from
-            # a copied body, and no socketserver-private import is
-            # needed. self.process_request_thread below is still this
-            # class's override (handshake deferral + slot release).
-            super().process_request(request, client_address)
-        except Exception:
-            # Thread creation can fail under the same resource exhaustion
-            # this pool guards against — log it, release the slot, and
-            # close the request so a transient crunch can't drain the pool
-            # permanently. Not re-raised: _handle_request_noblock would
-            # log it a second time via handle_error.
-            #
-            # B1 convergence: ThreadingMixIn.process_request registers the
-            # new thread in _threads BEFORE start(). If start() itself
-            # raised, the dead thread is now parked in the join list and a
-            # later server_close() would raise RuntimeError joining a
-            # thread that never started ("cannot join thread before it is
-            # started" — verified on this box's CPython 3.12). The pre-B1
-            # code avoided this by registering after start(); the
-            # delegation keeps B1's no-private-import requirement, so
-            # prune here instead. Daemon threads (this server's default
-            # via ThreadingHTTPServer) are never tracked, so this only
-            # matters for non-daemon configurations. is_alive() is also
-            # False for already-finished threads — dropping those from the
-            # join list is a no-op (join would have returned immediately).
-            # A concurrent in-flight request's not-yet-started thread
-            # could theoretically be pruned too; acceptable — this path
-            # only runs when thread creation is already failing, and
-            # non-daemon threads still block interpreter exit.
-            threads = vars(self).get("_threads")
-            if isinstance(threads, list):  # _Threads is a list subclass
-                for t in list(threads):
-                    if not t.is_alive():
-                        try:
-                            threads.remove(t)
-                        except ValueError:
-                            pass
-            self.handle_error(request, client_address)
-            self._slots.release()
-            self.close_request(request)
-
-    def process_request_thread(self, request, client_address):
-        # Issue #472: cumulative per-connection deadline — a peer dripping
-        # >=1 byte per socket-timeout of headers/body pins a pool slot
-        # indefinitely (the 10s timeout is per socket operation, not
-        # cumulative). A one-shot deadline timer aborts the whole
-        # connection at the bound: shutdown() unblocks the handler
-        # thread's in-flight recv/send, so the slot is released even while
-        # the peer is actively trickling. The timer covers the deferred
-        # TLS handshake above AND the handler below. Daemon thread so it
-        # can never block interpreter exit; cancelled as soon as the
-        # request completes, so well-behaved connections never pay for it.
-        deadline_fired = threading.Event()
-        request_done = threading.Event()
-
-        def _on_deadline():
-            # Narrow the spurious-audit race: a request completing in the
-            # same instant the timer fires must not get a false
-            # conn-deadline audit event on a healthy connection. The
-            # irreducible remainder is the check-then-act window while the
-            # timer thread is already inside this callback.
-            if request_done.is_set():
-                return
-            deadline_fired.set()
-            _kill_connection(request, client_address)
-
-        deadline = threading.Timer(self.connection_deadline, _on_deadline)
-        deadline.daemon = True
-        try:
-            # Security review (issue #472): start() is the only fallible
-            # step here — thread creation fails under exactly the
-            # resource-exhaustion pressure the pool bound guards against.
-            # It runs inside the try so a start failure still flows
-            # through the finally below and releases the pool slot;
-            # cancel() on a never-started Timer is a harmless no-op.
-            deadline.start()
-            # Issue #77 (M8): the TLS handshake runs here, in the bounded
-            # handler thread — never in the accept loop. main() wraps the
-            # listening socket with do_handshake_on_connect=False, so a peer
-            # that completes TCP and stalls the handshake burns one pool
-            # slot (subject to fail-closed shedding) instead of pinning the
-            # single serve_forever thread for every client. do_handshake()
-            # honors the socket timeout, so a stalled handshake raises
-            # socket.timeout and the slot is released below. Non-TLS
-            # requests (plain-socket tests) have no do_handshake and skip
-            # this.
-            do_handshake = getattr(request, "do_handshake", None)
-            if do_handshake is not None:
-                # Architecture review B2: the same attribute
-                # StreamRequestHandler.setup() honors, read off the
-                # configured handler class — not a module global — so
-                # this server stays reusable across daemons (#471). An
-                # explicit None check (not `or`): a handler could set
-                # timeout = 0 (non-blocking) and that must be honored.
-                # socket_timeout (10) is the backstop for handlers that
-                # don't set the attribute.
-                timeout = getattr(self.RequestHandlerClass, "timeout", None)
-                request.settimeout(
-                    timeout if timeout is not None else self.socket_timeout)
-                do_handshake()
-            self.finish_request(request, client_address)
-        except Exception:
-            # A deadline kill raises inside the handler; don't log a
-            # traceback for a mitigation we fired ourselves — the audit
-            # trail already carries the conn-deadline event. Genuine
-            # handler errors keep the existing handle_error path.
-            if not deadline_fired.is_set():
-                self.handle_error(request, client_address)
-        finally:
-            # Set before cancel(): a timer thread that already began
-            # executing _on_deadline sees this and skips the kill, so a
-            # request completing at exactly the deadline doesn't get a
-            # spurious conn-deadline audit event.
-            request_done.set()
-            deadline.cancel()
-            try:
-                self.shutdown_request(request)
-            finally:
-                # Release the pool slot even if shutdown_request raises: a
-                # raise here must never permanently burn one of the 64 slots
-                # (the mitigation must not become the DoS).
-                self._slots.release()
-
+    def kill_connection(self, request, client_address):
+        # Audit is confirmd-specific, so it lives here: the shared helper's
+        # base kill_connection performs the fail-closed abort, and this
+        # override routes through confirmd's own _kill_connection (abort +
+        # audit), which is also the unit-tested abort primitive.
+        _kill_connection(request, client_address)
 
 def main():
     # Finding 67: print the resolved origins at startup so the journal
