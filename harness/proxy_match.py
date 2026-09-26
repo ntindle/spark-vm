@@ -30,13 +30,11 @@ documents the resolution, not the divergence.
 LOAD-BEARING ASSUMPTION: the echo set is exactly 127.0.0.1 / localhost /
 ::1 plus the .localhost subtree, PLUS every IPv4 spelling that normalizes
 to 127.0.0.0/8 (127.1, 127.0.0.2, 0x7f.0.0.1, 2130706433, 0177.0.0.1,
-0x7f000001 -- issue #259). These spellings exact-match at enforcement and
-resolve to loopback on the box, so an echo detector that misses them
-leaves live exemptions the teardown never flags. IPv4-mapped IPv6
-(::ffff:127.0.0.1) exact-matches at enforcement since issue #257 but is
-deliberately not flagged here yet -- a known residual, tracked as issue
-#269 (needs on-box verification of the fixture's mapped-form routing
-before the echo set is extended).
+0x7f000001 -- issue #259), PLUS every IPv4-mapped IPv6 spelling whose
+embedded address is in 127.0.0.0/8 (::ffff:127.0.0.1, ::ffff:7f00:1 --
+issue #269). These spellings exact-match at enforcement and resolve to
+loopback on the box, so an echo detector that misses them leaves live
+exemptions the teardown never flags.
 
 Stdlib only. Deployed next to inject-provision-state.sh on the tenant box;
 the injector calls it as ``python3 "$HERE/proxy_match.py" <subcommand>``.
@@ -132,6 +130,13 @@ def parse_ssrf_allow(text):
 ECHO_ALIASES = ("127.0.0.1", "localhost", "::1")
 ECHO_NETS = (ipaddress.ip_network("127.0.0.0/8"),
              ipaddress.ip_network("::1/128"))
+# The IPv4-mapped rendering of 127.0.0.0/8, for the ssrf allow-file side
+# (issue #269). Enforcement unwraps mapped addresses before the net check
+# (finding 37), so a mapped net is inert there -- but the exemption still
+# reads as loopback-directed, so the echo layer flags the whole
+# mapped-loopback space (fail-closed; no legitimate allowlist entry is an
+# IPv4-mapped net).
+ECHO_MAPPED_LOOPBACK_NET = ipaddress.ip_network("::ffff:127.0.0.0/104")
 
 
 def _is_loopback_ipv4(text):
@@ -171,6 +176,49 @@ def _is_loopback_ipv4(text):
     return addr in ECHO_NETS[0]
 
 
+def _is_mapped_loopback(text):
+    """True when text is an IPv4-mapped IPv6 literal whose embedded IPv4
+    address is in 127.0.0.0/8 (issue #269).
+
+    Normalization mirrors host_in_list (lowercase, bracket strip,
+    trailing-dot strip) so this flags exactly the spellings that
+    exact-match at enforcement.
+    The proxy's own SSRF layer already judges these as their embedded
+    IPv4 (swap_addon._normalize_ip, finding 37: "::ffff:127.0.0.1 reaches
+    localhost on Linux and must be judged as 127.0.0.1"); the echo layer
+    was the one that missed them. On-box verification (2026-09-26): an
+    IPv4-mapped destination IS the embedded IPv4 address at the IP layer
+    (RFC 4291 s2.5.5.2 -- the kernel translates before routing, so a client
+    connecting to ::ffff:127.0.0.1 reaches the echo fixture bound to
+    127.0.0.1); ipaddress pins ipv4_mapped -> 127.0.0.1. A live-socket
+    check on the loop box was inconclusive (the runtime's transparent
+    egress proxy answered the AF_INET6 SYN -- getpeername showed the proxy,
+    the local listener never accepted), an environment artifact, not a
+    routing fact; the fix direction is fail-closed per the issue, so it
+    does not gate on that test.
+
+    An unbracketed port-carrying form ("::ffff:127.0.0.1:8080") never
+    parses as an address and stays inert -- entry-side ports never match
+    at enforcement (test pins), so it is correctly not flagged. The
+    bracketed literal-with-port form ("[::ffff:127.0.0.1]:8080") IS
+    stripped to the literal at enforcement (host_in_list), so it flags,
+    as does a zone-id form (exact-matches a same-zone host)."""
+    if not text:
+        return False
+    t = str(text).strip().lower()
+    if t.startswith("["):
+        end = t.find("]")
+        if end != -1 and (end == len(t) - 1 or t[end + 1] == ":"):
+            t = t[1:end]
+    t = t.rstrip(".")
+    try:
+        addr = ipaddress.ip_address(t)
+    except ValueError:
+        return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped is not None and mapped in ECHO_NETS[0]
+
+
 def is_echo_entry(entry, aliases=ECHO_ALIASES):
     """True when a single host-list entry (registry allowed_hosts item or
     hosts.allow line, already stripped) is an effective echo exemption
@@ -195,6 +243,10 @@ def is_echo_entry(entry, aliases=ECHO_ALIASES):
     checks -- the 127/8 and .localhost sets are always covered
     (fail-closed). (::1 and localhost themselves ride the alias set, so
     narrowing ECHO_ALIASES unflags them too.)
+    IPv4-mapped IPv6 loopback spellings (issue #269: ::ffff:127.0.0.1,
+    ::ffff:7f00:1, bracketed forms) are likewise always flagged: they
+    exact-match at enforcement since #257 and the kernel routes them to
+    loopback, matching the proxy's own finding-37 judgment.
     Entry-side ports stay inert (test pins): a registry entry
     carrying a port never matches at enforcement, so nothing strips the
     port before normalization."""
@@ -212,6 +264,12 @@ def is_echo_entry(entry, aliases=ECHO_ALIASES):
     # spellings, so this path only ever widens the fail-closed set).
     if _is_loopback_ipv4(s.lower().rstrip(".")):
         return True
+    # Issue #269: IPv4-mapped IPv6 loopback spellings exact-match at
+    # enforcement (host_in_list normalizes IP literals since #257) and
+    # route to loopback on the box, so a binding like ::ffff:127.0.0.1 is
+    # a live echo exemption the teardown must flag.
+    if _is_mapped_loopback(s):
+        return True
     low = s.lower().rstrip(".")
     if low.startswith(".") and low[1:] in tuple(a.lower() for a in aliases):
         return True
@@ -223,7 +281,10 @@ def is_echo_entry(entry, aliases=ECHO_ALIASES):
 def ssrf_line_is_echo(line):
     """True when a single ssrf.allow line (stripped, non-blank, non-comment)
     is an effective echo exemption: a CIDR covering 127.0.0.0/8 or ::1/128,
-    or an echo hostname under the proxy's own parsing."""
+    a CIDR overlapping the IPv4-mapped loopback space (issue #269 -- inert at
+    enforcement because the proxy unwraps mapped addresses before the net
+    check, but loopback-directed, so flagged fail-closed), or an echo
+    hostname under the proxy's own parsing."""
     net = None
     if "/" in line:
         try:
@@ -238,7 +299,8 @@ def ssrf_line_is_echo(line):
         except ValueError:
             pass
     if net is not None:
-        return any(net.overlaps(e) for e in ECHO_NETS)
+        return (any(net.overlaps(e) for e in ECHO_NETS)
+                or net.overlaps(ECHO_MAPPED_LOOPBACK_NET))
     return is_echo_entry(line)
 
 
