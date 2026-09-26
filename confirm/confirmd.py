@@ -56,9 +56,6 @@ import urllib.parse
 from collections import defaultdict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-# _Threads is socketserver-private, but this is the exact ThreadingMixIn
-# thread-lifecycle contract BoundedThreadingHTTPServer preserves below.
-from socketserver import _Threads
 
 # --- spark-vm version stamping (docs/VERSIONING.md) ---
 # Single-source repo VERSION: reported at startup and on /api/version.
@@ -1921,6 +1918,12 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     # long-term answer (follow-up).
     max_threads = 64
 
+    # Backstop socket timeout for the deferred TLS handshake
+    # (process_request_thread): the handler class's own `timeout` is
+    # preferred when present; this covers handlers that don't set it.
+    # Kept equal to Handler.timeout (10).
+    socket_timeout = 10
+
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
         self._slots = threading.Semaphore(self.max_threads)
@@ -1930,23 +1933,20 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self.close_request(request)
             return
         try:
-            t = threading.Thread(
-                target=self.process_request_thread,
-                args=(request, client_address))
-            t.daemon = self.daemon_threads
-            t.start()
-            if self.block_on_close:
-                # Preserve ThreadingMixIn's thread-lifecycle contract: the
-                # stock process_request registers the thread so server_close
-                # honors block_on_close. Registered after start() so a failed
-                # start never parks a dead thread in the join list.
-                vars(self).setdefault("_threads", _Threads())
-                self._threads.append(t)
+            # Architecture review B1: delegate thread creation, the
+            # daemon flag, and the _threads/block_on_close lifecycle
+            # bookkeeping to ThreadingMixIn — so future CPython changes
+            # to the mixin propagate instead of silently diverging from
+            # a copied body, and no socketserver-private import is
+            # needed. self.process_request_thread below is still this
+            # class's override (handshake deferral + slot release).
+            super().process_request(request, client_address)
         except Exception:
             # Thread creation can fail under the same resource exhaustion
-            # this pool guards against — log it, release the slot, and close
-            # the request so a transient crunch can't drain the pool
-            # permanently.
+            # this pool guards against — log it, release the slot, and
+            # close the request so a transient crunch can't drain the pool
+            # permanently. Not re-raised: _handle_request_noblock would
+            # log it a second time via handle_error.
             self.handle_error(request, client_address)
             self._slots.release()
             self.close_request(request)
@@ -1965,7 +1965,17 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # this.
             do_handshake = getattr(request, "do_handshake", None)
             if do_handshake is not None:
-                request.settimeout(Handler.timeout)
+                # Architecture review B2: the same attribute
+                # StreamRequestHandler.setup() honors, read off the
+                # configured handler class — not a module global — so
+                # this server stays reusable across daemons (#471). An
+                # explicit None check (not `or`): a handler could set
+                # timeout = 0 (non-blocking) and that must be honored.
+                # socket_timeout (10) is the backstop for handlers that
+                # don't set the attribute.
+                timeout = getattr(self.RequestHandlerClass, "timeout", None)
+                request.settimeout(
+                    timeout if timeout is not None else self.socket_timeout)
                 do_handshake()
             self.finish_request(request, client_address)
         except Exception:
