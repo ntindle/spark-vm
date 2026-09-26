@@ -3803,7 +3803,7 @@ Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_POST_MIDNIGHT.md`
   note (C45).** The 23:24 pass's Architecture review asked for a direct
   read of `docker/sandbox-kit-spec` to confirm or retract the
   "conforming-runtime standard now the interoperability reference"
-  claim (unattributed inference at fold time); the 00:08 slot read the
+  claim (unattributed inference at fold time); the 23:54–00:02 slot read the
   commits page only. This pass read the *spec content itself*
   (VENDOR-VERIFIED): repo subtitle names "the conformance suites";
   README §Conformance ships `kit-tck` (kit + runtime suites);
@@ -3817,7 +3817,7 @@ Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_POST_MIDNIGHT.md`
   unattributed inference to VENDOR-VERIFIED.** Advisory posture
   unchanged: treat the Kit spec as the interoperability reference;
   don't invent a proprietary grant format (H11 governance axis).
-- Design color for the H4 trail: the runtime TCK's adapter verbs are a
+- Design color for the H4 trail (weight-light, speculative — advisory only, not a corpus claim): the runtime TCK's adapter verbs are a
   *conformance-visible lifecycle vocabulary* — `stop`/`start` ("stop
   without discarding state"), `recreate`, `status`
   (`running`/`stopped`), `wait-idle` (for

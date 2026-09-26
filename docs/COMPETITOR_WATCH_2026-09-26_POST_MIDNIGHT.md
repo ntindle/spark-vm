@@ -9,11 +9,11 @@ convention (… `_POST_POST_PRE_MIDNIGHT` → `_NEAR_MIDNIGHT` → this is the
 
 Scope note: the last full tracked-set pass (post-late-evening, merged as
 PR #429) was **9/9 VERIFIED NO-CHANGE** ~16 hours earlier; the fast
-movers were re-verified NO-CHANGE ~80–90 minutes before this pass
-(00:08 slot). This pass's job is (a) confirming the fastest movers
+movers were re-verified NO-CHANGE ~90 minutes before this pass
+(the 23:54–00:02 slot). This pass's job is (a) confirming the fastest movers
 shipped no new daily-cycle entry in the ~90 minutes since, (b) the
 scheduled **direct content read of the `docker/sandbox-kit-spec` repo**
-(the Architecture note on the 23:24 pass scheduled it; the 00:08 slot
+(the Architecture note on the 23:24 pass scheduled it; the 23:54–00:02 slot
 read the *commits page only* — the "conforming-runtime standard"
 corpus claim still rested on unattributed inference), and (c) a narrow
 delta news scan. Carried leads C37 + C26 (verified ~22:00 2026-09-25) and
@@ -31,16 +31,16 @@ this run and the item is confirmed not present on it.
 
 ## 1. Tracked-set re-verification (targeted — fast movers)
 
-### Daytona changelog — VERIFIED NO-CHANGE
+### Daytona changelog — VENDOR-VERIFIED NO-CHANGE
 
 `daytona.io/changelog` read live this run (full page). Newest entries
 are still **SEP 26 2026 — V0.218.0** (`kvm` sandbox-creation parameter
 in every SDK + CLI login moved to a dedicated WorkOS application) and
 **SEP 25 2026 — V0.217.0** (NVIDIA B300 GPU type added to the API
-client) — character-identical summaries to the 00:08 baseline. No new
+client) — character-identical summaries to the 23:54–00:02 baseline. No new
 entry since. VERIFIED NO-CHANGE.
 
-### Daytona pricing — VERIFIED NO-CHANGE
+### Daytona pricing — VENDOR-VERIFIED NO-CHANGE
 
 `daytona.io/pricing` read live this run (full page). Rate card verbatim:
 vCPU $0.0504/h, memory $0.0162/GiB/h, storage $0.000108/GiB/h after
@@ -49,18 +49,18 @@ compute. Preemptible GPU ladder verbatim: B300 $4.08/h, B200 $3.59/h,
 AMD MI355X $3.44/h, H200 $2.61/h, H100 $2.27/h, RTX PRO 6000 $1.74/h,
 RTX 5090 $0.74/h, RTX 4090 $0.57/h. VERIFIED NO-CHANGE.
 
-### Docker Sandboxes release notes — VERIFIED NO-CHANGE
+### Docker Sandboxes release notes — VENDOR-VERIFIED NO-CHANGE
 
 `docs.docker.com/ai/sandboxes/release-notes/` read live this run
 (full page). Newest dated heading remains **2026-09-22** (v0.45.1 —
 improved sandbox moves + private kit images in cloud sandboxes).
 Nothing newer. VERIFIED NO-CHANGE.
 
-### Microsandbox releases — VERIFIED NO-CHANGE
+### Microsandbox releases — VENDOR-VERIFIED NO-CHANGE
 
 `github.com/superradcompany/microsandbox/releases` read live this run
 (full page). Newest release still **v0.7.3** (`chore: release v0.7.3`
-via #1646), followed by v0.7.1, v0.7.0, v0.6.x — identical to the 00:08
+via #1646), followed by v0.7.1, v0.7.0, v0.6.x — identical to the 23:54–00:02
 baseline. No new release since. VERIFIED NO-CHANGE.
 
 ## 2. Docker Sandbox Kit Spec — direct content read (CONFIRMED, vendor-attested)
@@ -69,7 +69,7 @@ The 23:24 pass's Architecture review scheduled a direct read of
 `github.com/docker/sandbox-kit-spec` to confirm or retract the corpus
 claim that "the conforming-runtime standard [is] now the
 interoperability reference" (C45 fold from the 22:54 pass —
-unattributed inference at the time). The 00:08 slot read the repo's
+unattributed inference at the time). The 23:54–00:02 slot read the repo's
 *commits page*; this pass read the *spec content itself*. **Confirmed —
 now VENDOR-VERIFIED, not inference:**
 
@@ -108,7 +108,7 @@ interoperability layer beyond a single vendor. The advisory posture
 stands ("treat the Kit spec as the interoperability reference, don't
 invent a proprietary grant format" for the H11 governance axis).
 
-Design color for the H4 design trail (weight-light, speculative): the
+Design color for the H4 design trail (weight-light, speculative — advisory only, not a corpus claim): the
 runtime TCK's adapter verbs are a *conformance-visible lifecycle
 vocabulary* — `stop`/`start` ("stop without discarding state"),
 `recreate` (fresh writable layer, declared volume state preserved),
@@ -127,7 +127,7 @@ release binaries attached per GitHub release.
 
 ## 3. Delta news scan — clean, NO-CHANGE
 
-Three narrow queries across the 00:08–01:33 window (launches, pricing
+Three narrow queries across the 00:02–01:36 window (launches, pricing
 changes, funding, provider releases, news vertical). Nothing genuinely
 new in-lane. Near-misses, all out-of-window or out-of-lane:
 
