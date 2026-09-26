@@ -119,6 +119,17 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- Auto-deploy: three extra-inputs follow-ups from the Security review. A
+  same-commit forced deploy now tags every audit line on the forced-deploy
+  path with `trigger: extra-inputs` (snapshot-fail, reload-fail, and the other
+  failure paths previously masqueraded as version deploys in the audit
+  trail). A manual rollback now re-hashes each rolled-back component's
+  host-side inputs and converges the recorded digests to the restored
+  reality, instead of keeping the stale post-deploy digest that would
+  force a spurious redeploy on the next tick. And a successful non-forced
+  deploy no longer wipes the forced-deploy dampening timestamp — any
+  version deploy touching the component used to silently reset the
+  anti-churn window. (#458)
 - Waitlist email spool writes are atomic now: each spooled email is written
   to a temporary file, flushed, synced, and renamed into place, so a crash
   or full disk mid-write can no longer leave a torn half-written email for
