@@ -4477,3 +4477,44 @@ sibling-slot interleaving this pass.
 - **Deep-scan evaluation: no in-window development.** Codex
   'Heapjack' + 'Overpatch' and the GitLab allowlisted-proxy escape
   both remain queued, NOT filed.
+
+## Watch update — 2026-09-26 (early afternoon): fast movers 4/4 NO-CHANGE, delta scan NO-CHANGE; no new C-numbers
+
+Full pass record in
+`docs/COMPETITOR_WATCH_2026-09-26_EARLY_AFTERNOON.md`
+(two-surveyor pass: A fast-mover re-verification vs the ~12:5x CDT
+baseline (~13:57 CDT), B delta news scan ~12:55–13:55 CDT; survey window
+2026-09-26 ~12:55–13:55 CDT). Suffix `_EARLY_AFTERNOON` admitted per the
+2026-09-24 early-afternoon-pass precedent — the day's seven-deep
+`_POST_<slot>` chain retires here (13:5x CDT is genuinely early
+afternoon). Folded from a live main (`e882516`) — no sibling-slot
+interleaving at fold time.
+
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** Daytona changelog
+  (newest still SEP 26 V0.218.0 "KVM sandbox parameter and CLI WorkOS
+  application" / SEP 25 V0.217.0 "NVIDIA B300 GPU type", verbatim);
+  Docker Sandboxes release notes (newest dated heading still 2026-09-22);
+  Microsandbox releases (newest still v0.7.3 #1646; org header still
+  superradcompany/microsandbox); Vercel changelog (newest entries still
+  the three 25-Sep entries, nothing dated 26 Sep; Drives not re-checked
+  per P49 daily cadence). Fourth all-first-try pass in a row — zero fetch
+  failures, zero UNVERIFIED grades.
+- **Delta news scan: NO-CHANGE — 4 clean dedupes, 6 flagged-only, 0 new
+  C-numbers.** Docker Cloud Sandboxes press recrawls = C45; DeepSeek
+  Harness CVE-2026-82533 recrawls (ORCA/CSA bubblewrap detail, no new
+  CVE facts) = C56; thecybersecguru Docker CVE-2026-77179/79994 recrawl =
+  filed Docker row; Perplexity SPACE July launch snippet = C54 context.
+  Flagged-only (out of window/lane): vm2 CVE-2026-93605 — strongest flag,
+  zero corpus hits (NodeVM `DANGEROUS_BUILTINS` omits `child_process`,
+  EPSS 0.73% LOW; Sep 18, out of window; in-process JS sandbox = marginal
+  lane per the CVE-2026-26956 precedent — NOT filed, facts captured for a
+  future review); Jenkins CVE-2026-92122 cluster (CI-plugin Groovy
+  sandbox, out of lane/window); CVE-2026-85880 AppContainer escape
+  (general-OS, out of lane/window); tokencost Agents-API pricing table
+  (stale marketing); GitHub research docs (not news).
+- In-lane no-launch verdict dated 2026-09-25 stands — streak extends.
+  Carried: C37, C57, C58, C66 (all OPEN, no movement); C66 stays
+  THIRD-PARTY (no vendor-primary evidence).
+- **Deep-scan evaluation: no in-window development.** Codex
+  'Heapjack' + 'Overpatch' and the GitLab allowlisted-proxy escape
+  both remain queued, NOT filed.
