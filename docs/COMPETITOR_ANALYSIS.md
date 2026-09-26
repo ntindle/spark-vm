@@ -4115,7 +4115,17 @@ baseline, B delta news scan; survey window 2026-09-26 ~06:30–06:40 CDT).
   not the agent-sandbox lane — but the failure mode is the
   isolation-breach class, and the 3-minute alert → 2-hour
   manual-stop gap is a sentinel-response-lag datapoint worth one
-  line in any future H5/H11 threat-model review. THIRD-PARTY grade
+  line in any future H5/H11 threat-model review. **Corroboration
+  annotation (14:24 slot):** startupfortune.com (Sep 26) widens the
+  halt scope — "training, evaluation, and inference involving tool
+  use for its most capable models remain paused" until the gap is
+  validated fixed plus more red-teaming; techbooky.com dates
+  OpenAI's incident-report update to Sep 25 and reports two blocking
+  layers added since the incident; Bloomberg Tech attribution via
+  scoopfeeds.com (Sep 26 4:29 AM), gateiolink.net, zubiqo.com, and
+  panews.io corroborate the ~20 queries and the Friday (Sep 25)
+  blog-post disclosure. All THIRD-PARTY — grade stands until a
+  vendor-primary advisory read upgrades it. THIRD-PARTY grade
   stands until a vendor-primary read upgrades it.
 - **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** Daytona changelog
   (newest still SEP 26 V0.218.0 / SEP 25 V0.217.0); Docker release
@@ -4512,6 +4522,53 @@ interleaving at fold time.
   sandbox, out of lane/window); CVE-2026-85880 AppContainer escape
   (general-OS, out of lane/window); tokencost Agents-API pricing table
   (stale marketing); GitHub research docs (not news).
+- In-lane no-launch verdict dated 2026-09-25 stands — streak extends.
+  Carried: C37, C57, C58, C66 (all OPEN, no movement); C66 stays
+  THIRD-PARTY (no vendor-primary evidence).
+- **Deep-scan evaluation: no in-window development.** Codex
+  'Heapjack' + 'Overpatch' and the GitLab allowlisted-proxy escape
+  both remain queued, NOT filed.
+
+## Watch update — 2026-09-26 (mid afternoon): fast movers 4/4 NO-CHANGE, delta scan NO-CHANGE; no new C-numbers
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_MID_AFTERNOON.md`
+(two-surveyor pass: A fast-mover re-verification vs the ~13:57 CDT
+baseline ~14:30–14:40 CDT, B delta news scan ~13:55–14:4x CDT; survey
+window 2026-09-26 ~14:2x–14:4x CDT).
+
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** Daytona changelog
+  (newest still SEP 26 V0.218.0 "KVM sandbox parameter and CLI WorkOS
+  application" / SEP 25 V0.217.0 "NVIDIA B300 GPU type", verbatim; no
+  V0.219.0, no 27-Sep entry); Docker Sandboxes release notes (newest
+  dated heading still 2026-09-22 — Desktop release notes separately
+  read, newest dated entry 2026-09-21, confirming the 2026-09-22 is the
+  Sandboxes page); Microsandbox releases (newest still v0.7.3 #1646);
+  Vercel changelog (newest entries still 25 Sep, nothing dated 26 Sep;
+  Drives not re-checked per P49 daily cadence). Fifth all-first-try
+  pass in a row — zero fetch failures, zero UNVERIFIED grades.
+- **Pricing parity — all VERIFIED NO-CHANGE.** E2B (Hobby free + $100
+  credit, Pro $150/mo, $0.000014/vCPU-s); boat.dev (small $0.018 /
+  default $0.036 / large $0.072 / xlarge $0.200 per hour, 25 free trial
+  hours); TermSquad ($9/$19/$29/$49 tiers, BYO-AI intact); DO Managed
+  Agents (public preview, active-CPU footnote intact; droplets
+  $4/$6/$12/$24 spot-checked via current third-party comparisons, not a
+  vendor-page read — no dollar deltas either way); AgentComputer ($0.07
+  CPU-h, $0.04375 GB-h, hot $0.000683 / stopped $0.000027 storage, still
+  no egress policy stated).
+- **Delta news scan: NO-CHANGE — 5 clean dedupes, 7 flagged-only, 0 new
+  C-numbers.** OpenAI DNS-tunnel offline-sandbox escape coverage = C62
+  (corroboration annotated into the C62 corpus section — widened halt
+  scope, Sep-25 incident-report update, Bloomberg attribution; grade
+  stands); Docker Cloud Sandboxes press recrawls = C45; Docker
+  CVE-2026-77179/79994 recap = filed Docker row; Cloudflare
+  storage-residue recrawl = C55; DeepSeek Harness CVE-2026-82533
+  recrawls = C56. Flagged-only (out of window/lane): vm2
+  CVE-2026-47686 (marginal lane per the CVE-2026-26956 / CVE-2026-93605
+  precedent — NOT filed, facts captured); QEMU 9pfs CVE-2026-93834
+  (pre-window + general hypervisor); Linux AF_UNIX CVE-2026-80521
+  (out of window/lane); Pillar Security "downstream tools" pattern;
+  July HF Artifactory zero-day detail; Meta Muse "Sentinel VM"
+  explainer; Australian OpenAI-agent portal incident.
 - In-lane no-launch verdict dated 2026-09-25 stands — streak extends.
   Carried: C37, C57, C58, C66 (all OPEN, no movement); C66 stays
   THIRD-PARTY (no vendor-primary evidence).
