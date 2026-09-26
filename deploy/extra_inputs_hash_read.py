@@ -43,6 +43,19 @@ secret); stdout carries only the digest material.
 Only the first <cap> bytes are read into memory; the cap arrives as
 argv[2] from the shell's EXTRA_INPUTS_HASH_MAX_BYTES, so the two stay
 single-sourced at the call site.
+
+Convergence note (issue #453, resolved 2026-09-26 as justify, not merge):
+this file's open discipline deliberately duplicates proxy/privileged_read.py
+rather than importing it. The divergence is protocol (this helper must
+never abort the deploy tick -- every refusal is a digest state, always
+exit 0; privileged_read fail-closes with SystemExit 2) and deployment
+(this file installs standalone into $UPDATER_STATE_DIR/bin with a
+fail-loud stale-install check; proxy/privileged_read.py is not installed
+there, and adding a second installed file would add import-resolution
+surface to a root-run helper for ~12 shared lines). The shared discipline
+is pinned by deploy/test_privileged_open_conformance.py, which runs both
+implementations against the same hostile-fixture matrix and asserts they
+classify identically on the shared subset.
 """
 import errno
 import hashlib

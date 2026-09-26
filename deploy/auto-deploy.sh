@@ -323,7 +323,11 @@ extra_inputs_hash() {
     # atomic open discipline in deploy/extra_inputs_hash_read.py
     # (O_RDONLY | O_NOFOLLOW | O_NONBLOCK, fstat before read, regular-file
     # gate, hardlink refusal, capped read — mirroring
-    # proxy/privileged_read.py). There is deliberately NO shell
+    # proxy/privileged_read.py). #453 convergence: the mirror is
+    # deliberate (protocol + standalone-install divergence) and pinned by
+    # deploy/test_privileged_open_conformance.py — do not "simplify" by
+    # importing the fail-closed primitive into this always-exit-0 helper.
+    # There is deliberately NO shell
     # check-then-read: the old `[ -L ]`/`[ -f ]` test followed by `head`
     # left a swap window a swapd-level writer could win — a symlink
     # winning the race got followed, and a symlink→FIFO winning the race

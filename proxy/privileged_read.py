@@ -29,6 +29,17 @@ must raise SystemExit -- the swapd CA passes its loud first-deploy skip;
 --sys passes a fail-closed refusal (a missing system bundle is not a
 first-deploy state). A non-raising on_missing is a caller bug: fail closed
 explicitly rather than falling through to an unbound-fd NameError.
+
+Convergence note (issue #453, resolved 2026-09-26 as justify, not merge):
+deploy/extra_inputs_hash_read.py carries its own inline copy of this
+discipline rather than importing this module. That is deliberate: the hash
+reader must never abort the deploy tick (every refusal is a digest state,
+always exit 0) and must size-fold oversize files into the digest (issue
+#302's rotation detection) -- importing the fail-closed primitive would
+either abort ticks or re-implement its policy under SystemExit-catching.
+The duplication is pinned by the discipline-conformance test in
+deploy/test_privileged_open_conformance.py, which runs both
+implementations against the same hostile-fixture matrix.
 """
 import errno
 import os

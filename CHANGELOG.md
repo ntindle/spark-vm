@@ -276,6 +276,15 @@ This changelog only works if entries land with the change, not after it:
 - The CA-bundle builder's system-bundle read is now capped at 1 MiB like
   the swapd-CA read, so a crafted `--sys` path can't turn the privileged
   helper into an unbounded root read (#334, #371).
+- Privileged-read convergence resolved as justify-with-a-test (#453): the
+  deploy tick's extra-inputs hash helper and the shared privileged-read
+  discipline now document why they stay separate implementations (the
+  helper must never abort a deploy tick, and an oversize file must still
+  flip the rotation digest instead of being refused), and a new
+  conformance test runs both against the same hostile-fixture matrix —
+  live/dangling symlinks, FIFOs, directories, hardlinks, missing paths,
+  oversize files, unreadable files — so the duplicated open discipline
+  cannot drift silently. (#480)
 
 ## [0.3.0] - 2026-09-24
 

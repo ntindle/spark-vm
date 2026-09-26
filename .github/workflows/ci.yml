@@ -5,7 +5,7 @@
 #   # the two seteuid install-safety tests self-skip as non-root; CI runs them under sudo:
 #   cd proxy   && sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest test_safe_install.py -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
 #   cd confirm && python3 -m pytest test_confirmd.py test_push.py test_push_queue.py
-#   cd deploy  && python3 -m pytest test_auto_deploy.py
+#   cd deploy  && python3 -m pytest test_auto_deploy.py test_privileged_open_conformance.py
 #   cd muse-job && python3 -m pytest tests/test_event_trust.py
 #   python3 -m pytest cred-ui/tests/ -q
 #   cd cua     && python3 -m pytest test_cua_bridge.py test_shell_scripts.py -q
@@ -75,7 +75,7 @@ jobs:
         working-directory: confirm
       - name: auto-deploy tests
         if: always()
-        run: python3 -m pytest test_auto_deploy.py -q
+        run: python3 -m pytest test_auto_deploy.py test_privileged_open_conformance.py -q
         working-directory: deploy
       - name: muse-job trust tests
         if: always()
