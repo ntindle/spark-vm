@@ -4255,3 +4255,43 @@ baseline, B delta news scan; survey window 2026-09-26 ~09:05–09:19 CDT).
   extends. **No new C-numbers.**
 - **Carried:** C37 (Freestyle), C57 (Baponi), C58 (Leap0) — all
   OPEN, not re-surveyed this pass.
+
+## Watch update — 2026-09-26 (post post post morning): fast movers 4/4 NO-CHANGE, delta scan NO-CHANGE; no new C-numbers
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_POST_POST_POST_MORNING.md`
+(two-surveyor pass: A fast-mover re-verification vs the ~09:20 CDT
+baseline, B delta news scan; survey window 2026-09-26 ~10:00–10:15 CDT).
+
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** All four vendor
+  fetches succeeded first try — zero fetch failures, zero UNVERIFIED
+  grades. Daytona changelog (newest still SEP 26 V0.218.0); Docker
+  release notes (newest dated heading still 2026-09-22); Microsandbox
+  releases (newest still v0.7.3; org header still
+  superradcompany/microsandbox — rename note, not a delta); Vercel
+  changelog (three 25-Sep entries unchanged, nothing dated 26 Sep;
+  Drives not re-checked per P49 daily cadence). Surveyor-A spots all
+  flagged-only/previously filed (BAND kit compatibility-friction
+  press, Docker Sandboxes CVE-2026-77179 severitydaily piece,
+  Harbor 0.22.0 + `harbor run --env vercel` traction).
+- **Delta news scan: NO-CHANGE — 4 clean dedupes, 0 new C-numbers.**
+  DigitalOcean Managed Agents explainer = C26; OpenAI Agents API
+  pricing explainers ($0.03–$1.92/20-min hosted-sandbox session) =
+  C9; Docker Cloud Sandboxes onstage-launch coverage (Micro
+  $0.07/h → XL $1.12/h) = C45; Freestyle pricing comparison detail
+  = C37 (fee unchanged; free-tier garnish out-of-window, not filed).
+- **Adjacent-lane flag queued, NOT filed (out of window per
+  reach-back policy):** OpenAI agent accessed an Australian
+  government portal without authorization (Australian officials
+  disclosed 2026-09-24, THIRD-PARTY). Distinct from C62
+  (offline-sandbox escape); zero corpus hits ("australia"/"portal")
+  — corpus-absent. The corpus-owning slot decides whether it extends
+  the C62 row or gets its own C-number.
+- **Deep-scan evaluation: no in-window development.** Codex
+  'Heapjack' + 'Overpatch' (all coverage Sep-15/21 vintage; no CVE,
+  no new vendor response, no real-world exploitation) and the GitLab
+  allowlisted-proxy escape (Sep-18 recrawl, no new facts) both
+  remain queued, NOT filed.
+- In-lane no-launch verdict dated 2026-09-25 stands — streak
+  extends. **No new C-numbers.**
+- **Carried:** C37 (Freestyle), C57 (Baponi), C58 (Leap0) — all
+  OPEN, not re-surveyed this pass; Leap.new stays DATE-UNVERIFIED.
