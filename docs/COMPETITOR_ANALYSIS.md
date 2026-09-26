@@ -4442,3 +4442,38 @@ baseline, B delta news scan; survey window 2026-09-26 ~10:25–10:45 CDT).
   extends. **One new C-number: C65 (adjacent).**
 - **Carried:** C37 (Freestyle), C57 (Baponi), C58 (Leap0) — all
   OPEN, not re-surveyed this pass; Leap.new stays DATE-UNVERIFIED.
+
+## Watch update — 2026-09-26 (post post post post post post morning): fast movers 4/4 NO-CHANGE, delta scan NO-CHANGE; no new C-numbers
+
+Full pass record in
+`docs/COMPETITOR_WATCH_2026-09-26_POST_POST_POST_POST_POST_POST_MORNING.md`
+(two-surveyor pass: A fast-mover re-verification vs the ~11:3x CDT
+baseline, B delta news scan; survey window 2026-09-26 ~11:35–12:55 CDT).
+Folded from a live main (#489 / C66 already merged as `74a00cf`) — no
+sibling-slot interleaving this pass.
+
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** Daytona changelog
+  (newest still SEP 26 V0.218.0 "KVM sandbox parameter and CLI WorkOS
+  application" / SEP 25 V0.217.0); Docker Sandboxes release notes
+  (newest dated heading still 2026-09-22); Microsandbox releases
+  (newest still v0.7.3; org header still superradcompany/microsandbox);
+  Vercel changelog (newest entries still the three 25-Sep entries,
+  nothing dated 26 Sep; Drives not re-checked per P49 daily cadence).
+  Third all-first-try pass in a row — zero fetch failures, zero
+  UNVERIFIED grades.
+- **Delta news scan: NO-CHANGE — 7 clean dedupes, 4 flagged-only, 0 new
+  C-numbers.** OpenAI offline-sandbox coverage = C62 (DNS-tunnel
+  mechanism already the annotation); DeepSeek DSec + CVE-2026-82533
+  Harness CVE = C56; German-wiki agent-swarm syndication = C64;
+  CVE-2026-77179 virtio-fs recap = filed Docker row; DeafNews = C62
+  commentary note; TheHackerWire OpenClaw recrawl = C66 (still
+  THIRD-PARTY — no vendor-primary evidence); Docker Cloud Sandboxes
+  press syndication = C45. Flagged-only (out of window): Upstash
+  provider-cost comparison, GitHub sandbox-research docs
+  (betalyra/effect-uai roadmap re-confirmed plan-not-launch), EponaLab
+  W37 recap, marktechpost sandboxes roundup (stale).
+- In-lane no-launch verdict dated 2026-09-25 stands — streak extends.
+  Carried: C37, C57, C58, C66 (all OPEN, no movement).
+- **Deep-scan evaluation: no in-window development.** Codex
+  'Heapjack' + 'Overpatch' and the GitLab allowlisted-proxy escape
+  both remain queued, NOT filed.
