@@ -193,10 +193,12 @@ remains unreachable until all four ship.
 - **R1 — session journal (passive instrument):** the relay daemon emits
   §2 frames to a bounded local journal + `relay_session_liveness(vm_id)`
   query. Rotation bound is part of R1's acceptance (unbounded = fail).
-- **R2 — dial prober (active instrument):** control-plane prober,
-  §3 cadence and outcome taxonomy, handshake-only, pinned-fingerprint
-  verification. Ships with an operator-visible `relay_path_state`
-  surface — no tenant-status wiring yet (§5 interim honesty).
+- **R2 — dial prober (active instrument):** control-plane prober
+  carrying the §2 identity-marker discriminator (prober handshakes
+  excluded from the session journal), §3 cadence and outcome taxonomy,
+  handshake-only, pinned-fingerprint verification. Ships with an
+  operator-visible `relay_path_state` surface — no tenant-status wiring
+  yet (§5 interim honesty).
 - **R3 — tenant-status producer wiring:** the tenant layer consumes
   `relay_path_state` — transition rule 6 suspension + the live-entry
   AND-combine. Runtime wiring only (the §2 row's producer pointer was
