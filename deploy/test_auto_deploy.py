@@ -2334,30 +2334,68 @@ def test_cmd_rollback_reconciles_extra_inputs_state(tmp_path):
 
 # --- issue #457: trigger-tag invariant --------------------------------------
 
-def _cmd_deploy_body_lines():
-    """Extract the cmd_deploy() function body lines from auto-deploy.sh."""
+def _shell_function_body_lines(name):
+    """Extract a top-level shell function body from auto-deploy.sh.
+
+    Terminates at the first column-0 `}`; callers add anchor assertions
+    so a future nested lone-`}` truncating the extraction fails loudly
+    instead of silently weakening the invariant.
+    """
     lines = open(SCRIPT).read().splitlines()
     start = next(i for i, l in enumerate(lines)
-                 if l.startswith("cmd_deploy() {"))
+                 if l.startswith(name + "() {"))
     end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
     return lines[start + 1:end]
 
 
 def test_cmd_deploy_all_deploy_audit_lines_carry_trigger_tag():
-    """Issue #457 (QA review): every `audit 'deploy'` line inside cmd_deploy
-    must carry the trigger tag ("$trig") — except pull-only, which is
-    unreachable when a trigger is set. Without the tag, a forced
-    extra-inputs deploy masquerades as a version deploy in the audit trail.
+    """Issue #457 (QA + Security review): every `audit 'deploy'` line in the
+    deploy path must carry the trigger tag — `"$trig"` inside cmd_deploy,
+    `"$atrig"` inside do_rollback (its 7th arg, which every call site must
+    pass as `"$trig"`). Without the tag, a forced extra-inputs deploy (or
+    its rollback) masquerades as a version deploy in the audit trail.
     Source-level invariant: covers all current lines AND future regressions
-    without an e2e test per failure path."""
-    lines = _cmd_deploy_body_lines()
-    audit_lines = [l for l in lines
-                   if re.search(r"""\baudit\s+'deploy'""", l)]
-    assert audit_lines, \
-        "no audit 'deploy' lines found inside cmd_deploy — extractor stale?"
-    untagged = [l.strip() for l in audit_lines
+    without an e2e test per failure path. The pull-only line is exempt: it
+    never deploys, so its result is self-describing and cannot masquerade."""
+    deploy_lines = _shell_function_body_lines("cmd_deploy")
+    rollback_lines = _shell_function_body_lines("do_rollback")
+    # Anchor assertions: the extractor must have seen the whole function,
+    # or a future edit could truncate coverage silently.
+    assert any('"result":"ok"' in l for l in deploy_lines), \
+        "cmd_deploy extraction truncated — anchor 'ok' line missing"
+    assert any('"result":"rolled-back"' in l for l in rollback_lines), \
+        "do_rollback extraction truncated — anchor 'rolled-back' missing"
+
+    def audit_deploy_lines(lines):
+        return [l for l in lines
+                if re.search(r"""\baudit\s+["']deploy["']""", l)]
+
+    deploy_audit = audit_deploy_lines(deploy_lines)
+    rollback_audit = audit_deploy_lines(rollback_lines)
+    assert deploy_audit and rollback_audit, \
+        "no audit 'deploy' lines found — extractor stale?"
+
+    untagged = [l.strip() for l in deploy_audit
                 if '"$trig"' not in l
                 and '"result":"pull-only"' not in l]
     assert not untagged, (
-        "audit 'deploy' lines inside cmd_deploy missing the \"$trig\" "
+        "cmd_deploy audit 'deploy' lines missing the \"$trig\" "
         "trigger tag:\n" + "\n".join(untagged))
+
+    # do_rollback carries the tag as its 7th positional arg ($atrig).
+    untagged_rb = [l.strip() for l in rollback_audit
+                   if '"$atrig"' not in l]
+    assert not untagged_rb, (
+        "do_rollback audit 'deploy' lines missing the \"$atrig\" "
+        "trigger tag:\n" + "\n".join(untagged_rb))
+
+    # Every do_rollback call site inside cmd_deploy must pass "$trig" as
+    # the 7th arg, or the tag never reaches the audit line.
+    call_sites = [l for l in deploy_lines
+                  if re.search(r"""\bdo_rollback\s""", l)
+                  and not l.lstrip().startswith("#")]
+    assert call_sites, "no do_rollback call sites found in cmd_deploy?"
+    missing_trig = [l.strip() for l in call_sites if '"$trig"' not in l]
+    assert not missing_trig, (
+        "do_rollback call sites not passing \"$trig\":\n"
+        + "\n".join(missing_trig))

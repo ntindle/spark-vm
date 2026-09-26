@@ -2013,15 +2013,29 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         # can never block interpreter exit; cancelled as soon as the
         # request completes, so well-behaved connections never pay for it.
         deadline_fired = threading.Event()
+        request_done = threading.Event()
 
         def _on_deadline():
+            # Narrow the spurious-audit race: a request completing in the
+            # same instant the timer fires must not get a false
+            # conn-deadline audit event on a healthy connection. The
+            # irreducible remainder is the check-then-act window while the
+            # timer thread is already inside this callback.
+            if request_done.is_set():
+                return
             deadline_fired.set()
             _kill_connection(request, client_address)
 
         deadline = threading.Timer(self.connection_deadline, _on_deadline)
         deadline.daemon = True
-        deadline.start()
         try:
+            # Security review (issue #472): start() is the only fallible
+            # step here — thread creation fails under exactly the
+            # resource-exhaustion pressure the pool bound guards against.
+            # It runs inside the try so a start failure still flows
+            # through the finally below and releases the pool slot;
+            # cancel() on a never-started Timer is a harmless no-op.
+            deadline.start()
             # Issue #77 (M8): the TLS handshake runs here, in the bounded
             # handler thread — never in the accept loop. main() wraps the
             # listening socket with do_handshake_on_connect=False, so a peer
@@ -2055,6 +2069,11 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             if not deadline_fired.is_set():
                 self.handle_error(request, client_address)
         finally:
+            # Set before cancel(): a timer thread that already began
+            # executing _on_deadline sees this and skips the kill, so a
+            # request completing at exactly the deadline doesn't get a
+            # spurious conn-deadline audit event.
+            request_done.set()
             deadline.cancel()
             try:
                 self.shutdown_request(request)
