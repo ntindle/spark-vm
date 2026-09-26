@@ -284,7 +284,7 @@ This changelog only works if entries land with the change, not after it:
   conformance test runs both against the same hostile-fixture matrix —
   live/dangling symlinks, FIFOs, directories, hardlinks, missing paths,
   oversize files, unreadable files — so the duplicated open discipline
-  cannot drift silently. (PR TBD)
+  cannot drift silently. (#480)
 
 ## [0.3.0] - 2026-09-24
 
