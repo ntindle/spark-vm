@@ -37,7 +37,7 @@ import re
 import subprocess
 import sys
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 # --- spark-vm version stamping (docs/VERSIONING.md) ---
 # Single-source repo VERSION: reported at startup and on /api/version.
@@ -49,6 +49,12 @@ if os.path.isfile(os.path.join(_SV_CAND, "sparkvm_version.py")):
         sys.path.insert(0, _SV_CAND)
 elif _SV_HERE not in sys.path:
     sys.path.insert(0, _SV_HERE)
+# Issue #471: the bounded pool + handshake-deferral server promoted out
+# of confirmd (#77 M8) into scripts/bounded_http.py. scripts/ is on
+# sys.path by the stamping block above; the import is unconditional —
+# a missing helper is a broken checkout and must fail loud, not
+# silently fall back to the unbounded server.
+from bounded_http import BoundedThreadingHTTPServer
 try:
     from sparkvm_version import sparkvm_version as _sv_fn
     SPARKVM_VERSION = _sv_fn(start=_SV_HERE)
@@ -381,7 +387,13 @@ def api_host(data, add):
 def main():
     import os
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    srv = ThreadingHTTPServer((BIND, PORT), Handler)
+    # Issue #471: bounded thread pool — ThreadingHTTPServer spawns one
+    # thread per connection, so a local peer slow-lorising the UI could
+    # grow the pool without bound. Over-cap connections are closed
+    # immediately (fail closed), never queued. Handler.timeout = 10
+    # (issue #282) already bounds each socket read; no TLS here, so the
+    # handshake-deferral half of the helper is inert.
+    srv = BoundedThreadingHTTPServer((BIND, PORT), Handler)
     print("cred-ui listening on http://%s:%d (localhost only)" % (BIND, PORT), flush=True)
     print("cred-ui version=%s" % SPARKVM_VERSION, flush=True)
     srv.serve_forever()

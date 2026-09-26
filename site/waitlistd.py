@@ -134,7 +134,20 @@ import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone, timedelta
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+# Issue #471: the bounded pool + handshake-deferral server promoted out
+# of confirmd (#77 M8) into scripts/bounded_http.py. scripts/ sits next
+# to site/ at the repo root; put it on sys.path so the import below
+# works whether waitlistd runs as a script or is loaded by
+# scripts/test_waitlistd.py. Unconditional import — a missing helper is
+# a broken checkout and must fail loud, not silently fall back to the
+# unbounded server.
+_WD_SCRIPTS = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+if os.path.isdir(_WD_SCRIPTS) and _WD_SCRIPTS not in sys.path:
+    sys.path.insert(0, _WD_SCRIPTS)
+from bounded_http import BoundedThreadingHTTPServer
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -2714,6 +2727,20 @@ class _Handler(BaseHTTPRequestHandler):
     service = None  # set by serve()
     server_version = "waitlistd/1"
 
+    # Issue #471: per-connection socket timeout. StreamRequestHandler
+    # applies this to the connection socket in setup(), so a client that
+    # stalls mid-headers or mid-body (a read with no bytes for 10 s)
+    # releases its handler thread instead of pinning it forever. This is
+    # a per-read idle bound, not a total deadline: a client that
+    # dribbles just under the timeout per read can still hold a thread
+    # (accepted residual — the daemon binds 127.0.0.1 by default and the
+    # bind address is operator config, so the exposure is a local or
+    # explicitly-trusted-network peer). The daemon does its slow work
+    # (store scans, token crypto) with no socket I/O between the body
+    # read and the response write, so the timeout cannot fire spuriously
+    # mid-request.
+    timeout = 10
+
     def _send(self, status, body, ctype="text/html; charset=utf-8"):
         data = body.encode("utf-8")
         self.send_response(status)
@@ -2894,7 +2921,13 @@ def main(argv):
         return 0
     service = WaitlistService(data_dir, key, host)
     _Handler.service = service
-    httpd = ThreadingHTTPServer((bind, port), _Handler)
+    # Issue #471: bounded thread pool — ThreadingHTTPServer spawns one
+    # thread per connection, so a peer slow-lorising the daemon could
+    # grow the pool without bound. Over-cap connections are closed
+    # immediately (fail closed), never queued. _Handler.timeout = 10
+    # bounds each socket read; no TLS here, so the handshake-deferral
+    # half of the helper is inert.
+    httpd = BoundedThreadingHTTPServer((bind, port), _Handler)
     sys.stderr.write(f"waitlistd: listening on {bind}:{port}\n")
     try:
         httpd.serve_forever()

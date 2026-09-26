@@ -28,7 +28,6 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPConnection
-from http.server import ThreadingHTTPServer
 
 import pytest
 
@@ -585,7 +584,7 @@ def live_server():
     tmp = tempfile.mkdtemp(prefix="waitlistd-live-")
     svc = wd.WaitlistService(tmp, KEY, "https://waitlist.example.invalid")
     wd._Handler.service = svc
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), wd._Handler)
+    httpd = wd.BoundedThreadingHTTPServer(("127.0.0.1", 0), wd._Handler)
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
