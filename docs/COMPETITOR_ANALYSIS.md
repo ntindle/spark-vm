@@ -3593,3 +3593,44 @@ plus a narrow delta news scan.
 
 Full pass record in
 `docs/COMPETITOR_WATCH_2026-09-25_PRE_MIDNIGHT.md`.
+
+## Watch update — 2026-09-25 (late pre-midnight): movers + carried leads NO-CHANGE; coverage rotated to Microsandbox
+
+Full pass record in
+`docs/COMPETITOR_WATCH_2026-09-25_LATE_PRE_MIDNIGHT.md`.
+
+Full tracked set not re-surveyed this pass (last full pass was 9/9
+VERIFIED NO-CHANGE ~4h earlier; pre-midnight targeted pass ~25 min
+earlier) — targeted re-verification of the fastest-moving tracked
+vendors, a Microsandbox releases re-read (rotation: last read in the
+post-late-evening full pass (~16:24–17:05 CDT) — a coverage gap the last two
+Daytona/Docker-only passes left open), the two standing carried
+leads, plus a narrow delta news scan.
+
+- **Daytona changelog**: VERIFIED NO-CHANGE — newest still SEP 26
+  V0.218.0 (`kvm` sandbox-creation parameter; full 2136-line page
+  read live).
+- **Docker Sandboxes release notes**: VERIFIED NO-CHANGE — newest
+  heading still 2026-09-22 (v0.45.1; full 444-line page read live).
+- **Microsandbox releases**: VERIFIED NO-CHANGE — newest still v0.7.3
+  (via #1646), identical to the post-late-evening full-pass read
+  (~16:24–17:05 CDT).
+- **C37 (freestyle.sh/pricing)**: VERIFIED NO-CHANGE — Pro fee still
+  not printed; rate card unchanged verbatim (vCPU $0.04032/hr, GiB
+  memory $0.0129/hr, GiB storage $0.000086/hr, transfer $0.02/GB).
+  Lead remains OPEN.
+- **C26 (DO docs pricing subpage)**: VERIFIED NO-CHANGE — $0.05/GiB-month
+  still present three times; page stamp "Last verified 22 Sep 2026";
+  active-CPU "coming soon" footnote vs present-tense per-second body
+  copy both still verbatim; the 10× discrepancy against DO's own
+  investor-relations page ($0.005) stands as the open caveat. Lead
+  remains OPEN.
+- **Delta news scan** (two searches): all in-lane candidates dedupe
+  to filed corpus — Docker Cloud Sandboxes Sep-24 launch recrawls
+  (ADTmag, The Register, GlobeNewswire syndication → **C45**; the
+  Register's Cavage Docker-socket demo is containment color, not a
+  new vendor surface), no new facts. **No new C-numbers.**
+- In-lane no-launch verdict dated 2026-09-25. Vercel Drives not
+  re-checked (P49 — next the 2026-09-26 morning pass). Zero fetch
+  failures this pass (all 5 vendor pages first-try).
+- **Carried:** C37, C26 (both OPEN).
