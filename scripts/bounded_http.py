@@ -6,7 +6,7 @@
 per connection, so a peer that opens connections and never finishes
 them grows the thread pool without bound; a peer that stalls the TLS
 handshake pins the single `serve_forever` accept thread and starves
-every client. This class closes both holes:
+every client. This class closes all three holes:
 
 - the accept->thread fan-out is capped by a semaphore (`max_threads`
   in-flight handler threads); over-cap connections are closed
@@ -15,6 +15,13 @@ every client. This class closes both holes:
   listening socket with `do_handshake_on_connect=False` and the
   handshake runs here, inside a bounded pool slot, cut off by
   `socket_timeout`.
+- the cumulative per-connection deadline (`connection_deadline`,
+  off by default): a peer dripping >=1 byte per socket-timeout of
+  headers/body would otherwise pin a pool slot indefinitely, because
+  the socket timeout is per operation, not cumulative. A daemon that
+  opts in gets a one-shot daemon timer per connection that aborts the
+  whole connection at the bound (fail closed); the timer is cancelled
+  on normal completion, so well-behaved connections never pay for it.
 
 The semaphore slot is released in `process_request_thread`'s `finally`
 — even if `shutdown_request` raises — so the mitigation can never
@@ -36,14 +43,15 @@ stays reusable across daemons whose handlers are named differently
 (`Handler`, `_Handler`, ...). A handler without the attribute falls
 back to `socket_timeout`; the two agreeing means one number to reason
 about. Neither is cumulative: a peer dripping >=1 byte per
-timeout of headers/body can still pin a slot; 64 such peers saturate
-the pool and shedding stays fail closed (connection dropped, state
-stays file-backed so a retry succeeds). A cumulative per-connection
-deadline is the long-term answer (issue #472).
+timeout of headers/body can still pin a slot; a daemon opts into the
+cumulative bound by setting `connection_deadline` (confirmd sets 60 —
+4x its 15s grant-writer window; cred-ui and waitlistd leave it off,
+keeping their #471 behavior).
 
 stdlib only.
 """
 
+import socket
 import threading
 from http.server import ThreadingHTTPServer
 
@@ -112,9 +120,49 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self.close_request(request)
 
     def process_request_thread(self, request, client_address):
+        deadline = self.connection_deadline
+        if deadline is not None:
+            # Cumulative per-connection deadline: a peer dripping >=1 byte
+            # per socket-timeout of headers/body pins a pool slot
+            # indefinitely (the socket timeout is per operation, not
+            # cumulative). A one-shot deadline timer aborts the whole
+            # connection at the bound: shutdown() unblocks the handler
+            # thread's in-flight recv/send, so the slot is released even
+            # while the peer is actively trickling. The timer covers the
+            # deferred TLS handshake below AND the handler. Daemon thread
+            # so it can never block interpreter exit; cancelled as soon as
+            # the request completes, so well-behaved connections never pay
+            # for it.
+            deadline_fired = threading.Event()
+            request_done = threading.Event()
+
+            def _on_deadline():
+                # Narrow the spurious-kill race: a request completing in the
+                # same instant the timer fires must not get a false kill on
+                # a healthy connection. The irreducible remainder is the
+                # check-then-act window while the timer thread is already
+                # inside this callback.
+                if request_done.is_set():
+                    return
+                deadline_fired.set()
+                self.kill_connection(request, client_address)
+
+            timer = threading.Timer(deadline, _on_deadline)
+            timer.daemon = True
+        else:
+            timer = None
+
         try:
+            if timer is not None:
+                # start() is the only fallible step here — thread creation
+                # fails under exactly the resource-exhaustion pressure the
+                # pool bound guards against. It runs inside the try so a
+                # start failure still flows through the finally below and
+                # releases the pool slot; cancel() on a never-started Timer
+                # is a harmless no-op.
+                timer.start()
             # The TLS handshake runs here, in the bounded handler thread
-            # — never in the accept loop. Daemons wrap the listening
+            # \u2014 never in the accept loop. Daemons wrap the listening
             # socket with do_handshake_on_connect=False, so a peer that
             # completes TCP and stalls the handshake burns one pool slot
             # (subject to fail-closed shedding) instead of pinning the
@@ -136,12 +184,45 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
                 do_handshake()
             self.finish_request(request, client_address)
         except Exception:
-            self.handle_error(request, client_address)
+            # A deadline kill raises inside the handler; don't log a
+            # traceback for a mitigation we fired ourselves — a daemon that
+            # audits the kill does so in kill_connection. Genuine handler
+            # errors keep the existing handle_error path.
+            if timer is None or not deadline_fired.is_set():
+                self.handle_error(request, client_address)
         finally:
+            if timer is not None:
+                # Set before cancel(): a timer thread that already began
+                # executing _on_deadline sees this and skips the kill, so a
+                # request completing at exactly the deadline doesn't get a
+                # spurious kill.
+                request_done.set()
+                timer.cancel()
             try:
                 self.shutdown_request(request)
             finally:
                 # Release the pool slot even if shutdown_request raises: a
-                # raise here must never permanently burn one of the slots
+                # raise here must never permanently burn one of the 64 slots
                 # (the mitigation must not become the DoS).
                 self._slots.release()
+
+    # Cumulative per-connection deadline (seconds), off by default —
+    # daemons opt in by setting it (confirmd sets 60; issue #472). Sizing
+    # guidance: a small multiple of the longest legitimate request cost
+    # (confirmd: 6x the 10s socket timeout, 4x the 15s grant-writer
+    # window), generous for legitimate work but finite against trickling
+    # peers. cred-ui and waitlistd leave it unset, keeping their #471
+    # behavior.
+    connection_deadline = None
+
+    def kill_connection(self, request, client_address):
+        """Fail-closed abort of a connection that exceeded the cumulative
+        per-connection deadline. shutdown() unblocks the handler thread's
+        in-flight recv/send, so the pool slot is released even while the
+        peer is actively trickling. Subclasses may override to audit the
+        kill (confirmd does); the base performs the abort unconditionally
+        — the kill itself must never depend on an audit path."""
+        try:
+            request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # already closed / peer gone — that's the goal state anyway
