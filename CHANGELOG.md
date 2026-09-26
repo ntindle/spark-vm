@@ -250,6 +250,14 @@ This changelog only works if entries land with the change, not after it:
 
 ### Security
 
+- confirmd now enforces a cumulative per-connection deadline (60 seconds,
+  covering the TLS handshake and the request): a tailnet peer trickling
+  data just under the per-operation socket timeout can no longer pin a
+  handler slot indefinitely. Over-deadline connections are aborted
+  fail-closed and logged to the audit trail as a `conn-deadline` event;
+  legitimate approvals (browser poll + answer round-trips) complete well
+  under the bound (#472). (#476)
+
 - The deploy installer now reads its `--src` input through the same
   symlink/hardlink/non-regular/oversize-refusing privileged-read
   discipline as the CA bundle builder (new shared `privileged_read`
