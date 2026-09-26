@@ -222,6 +222,14 @@ jobs:
         # SEP 23, 2026, author Perplexity Secure Intelligence Institute —
         # matches the C54-adjacent citation in the mid-afternoon watch).
         # Runner-egress IP reputation, not a broken link.
+        # dev.to 403s automated fetchers on GitHub Actions runner egress
+        # (bot-block; flagged on #459's link-check — the near-midnight
+        # competitor watch's dev.to roundup near-miss mention. Real-browser
+        # verified live 2026-09-26 ~00:3x CDT: dev.to loads, and the author's
+        # dev.to/alexcloudstar page carries "Sandboxing AI-Generated Code:
+        # E2B vs Vercel Sandbox vs Modal vs Daytona in 2026" (May 1, 13 min
+        # read, #ai #security #devtools #architecture) — matches the
+        # near-miss citation). Runner-egress IP reputation, not a broken link.
         # Excluded at host level (not per-URL): new links
         # from these hosts trip the same bot blocks, so the exclusion must
         # cover the whole host. When adding a link from one of these hosts,
@@ -246,7 +254,7 @@ jobs:
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
