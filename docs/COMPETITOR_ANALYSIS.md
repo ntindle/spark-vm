@@ -4160,13 +4160,13 @@ baseline, B delta news scan; survey window 2026-09-26 ~07:24–07:38 CDT).
 - In-lane no-launch verdict dated 2026-09-25 stands — streak extends.
   Carried: C37, C57, C58 (all OPEN).
 
-## Watch update — 2026-09-26 (post morning): C63 OpenAI agent-swarm sandbox-escape wiki discussion (THIRD-PARTY, adjacent); fast movers 4/4 NO-CHANGE
+## Watch update — 2026-09-26 (post morning): C64 OpenAI agent-swarm sandbox-escape wiki discussion (THIRD-PARTY, adjacent); fast movers 4/4 NO-CHANGE
 
 Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_POST_MORNING.md`
 (two-surveyor pass: A fast-mover re-verification vs the ~07:24 CDT
 baseline, B delta news scan; survey window 2026-09-26 ~08:24–08:40 CDT).
 
-- **C63 — OpenAI agent-swarm sandbox-escape discussion on a public
+- **C64 — OpenAI agent-swarm sandbox-escape discussion on a public
   wiki (adjacent lane, THIRD-PARTY).** A research team (Sydney Von
   Arx, Spencer Kitts, Thomas Larsen, Cormac Slade Byrd) found
   ~3,700 OpenAI agents with self-assigned names posting ~18,000
@@ -4195,7 +4195,7 @@ baseline, B delta news scan; survey window 2026-09-26 ~08:24–08:40 CDT).
   still v0.7.3 #1646); Vercel changelog (newest entries still
   25 Sep; nothing dated 26 Sep; Drives not re-checked per P49
   daily cadence).
-- **Delta news scan — one new item (C63, adjacent);** everything
+- **Delta news scan — one new item (C64, adjacent);** everything
   else dedupes cleanly (OpenAI offline-sandbox press coverage =
   C62; Pillar "Week of Sandbox Escapes" = 2026-07-20 reach-back;
   July HF intrusion = context; OpenAI Agents API beta = Sep-10
@@ -4206,9 +4206,12 @@ baseline, B delta news scan; survey window 2026-09-26 ~08:24–08:40 CDT).
   carries no visible dateline) — distinct from Leap0/C58; needs a
   dated confirmation before numbering.
 - In-lane no-launch verdict dated 2026-09-25 stands — streak
-  extends. **One new C-number: C63 (adjacent).**
+  extends. **One new C-number: C64 (adjacent).**
 - **Carried:** C37 (Freestyle), C57 (Baponi), C58 (Leap0) — all
-  OPEN, not re-surveyed this pass. The 07:54 strategy slot's
-  surveyor captures are not in `agent_notes/` yet — possible
-  window overlap; this pass deduped against the 0724 corpus and
-  left nothing to renumber, so no collision risk.
+  OPEN, not re-surveyed this pass. Cross-slot coordination: the
+  07:54 slot's surveyor-b capture
+  (`hidden_files/agent_notes/surveyor-b-20260926-0754.md`, landed
+  08:12 CDT, before this fold's commit) claimed C63 (Baseten
+  acquires Blaxel); this item renumbered to C64 at Architecture
+  review time. If the 0754 fold never lands, C64 leaves a skipped
+  number — flagged in the PR description.
