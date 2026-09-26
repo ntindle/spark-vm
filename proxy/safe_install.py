@@ -45,6 +45,16 @@ Usage:
                  when DEST already exists the content is left alone but
                  owner/mode are still enforced.
   (no content flags)  open the existing DEST and enforce owner/mode only.
+
+Input bounds (issues #454/#455):
+  --src is capped at 1 MiB: larger inputs are refused (the shared
+  privileged-read discipline's default), and symlink/hardlink/non-regular
+  paths are rejected. --stdin is deliberately uncapped and un-gated:
+  deploy.sh constructs its stdin inputs itself (printf pipes and shell
+  redirection -- e.g. the grants.json seed and the swap.log logrotate
+  policy fragment), never from attacker-chosen paths. The threat model is
+  paths, not parent-provided fds -- so do not assume --stdin carries
+  --src's bounds when adding a new caller.
 """
 import argparse
 import errno
@@ -275,9 +285,11 @@ def _enforce(fd, dest, owner, group, mode):
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     src = ap.add_mutually_exclusive_group()
-    src.add_argument("--src", help="file whose bytes are written to DEST")
+    src.add_argument("--src", help="file whose bytes are written to DEST "
+                     "(refused if over 1 MiB)")
     src.add_argument("--stdin", action="store_true",
-                     help="read the bytes from stdin")
+                     help="read the bytes from stdin (no size cap -- only "
+                     "for input the calling script constructs itself)")
     ap.add_argument("--create-only", action="store_true",
                      help="only write content when DEST does not exist")
     ap.add_argument("--owner", help="owner user name to enforce")
