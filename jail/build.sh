@@ -270,6 +270,13 @@ WantedBy=timers.target
 EOF
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable --now jail-firewall-verify.timer
+# Build-time self-test of the watchdog pin (issue #437): the verify
+# service exits 0 on a healthy table and nonzero on damage. Running it
+# once here proves the pin matches THIS box's live `nft list` output at
+# build time — a formatter/pin mismatch fails the build loudly instead of
+# surfacing as a fail-closed storm on the first 5-minute tick. (set -e:
+# a nonzero exit aborts the build.)
+$SUDO systemctl start jail-firewall-verify.service
 say "watchdog active (next run):"
 $SUDO systemctl list-timers jail-firewall-verify.timer --no-pager 2>/dev/null | head -3 || true
 

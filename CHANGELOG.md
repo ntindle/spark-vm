@@ -112,6 +112,15 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- Jail firewall watchdog: the allow-head check now compares rule lines
+  after stripping whitespace outside quoted names, so a future nftables
+  version that re-renders rule text (indent, brace spacing) can't turn the
+  watchdog into a false-alarm machine that stops the jail every five
+  minutes; interface names and log prefixes still match exactly. The jail
+  build also runs the watchdog once at build time, so a check-vs-table
+  mismatch fails the build loudly instead of surfacing on the first
+  timer tick. (#443)
+
 - Auto-deploy now notices when the mitmproxy CA certificate changes, even
   with no code change in the same window: the deploy timer hashes the CA
   cert alongside the repo diff and redeploys the proxy component so the
