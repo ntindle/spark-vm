@@ -171,7 +171,8 @@ no `stuck`.** What the interim emits instead is
 `insufficient-observability` per missing input — the wiring gaps are
 visible on the operator surface as gaps, never as stalls. The relay
 conjunct is dropped outright (§8 Q6): `connection-unreachable` detection
-is owned by the (undesigned) relay-liveness work, and the detector does
+is owned by the relay-liveness design (`docs/RELAY_LIVENESS_DESIGN.md`;
+R1–R4 unimplemented), and the detector does
 not fake the signal.
 
 The `arc_code(S) == live` conjunct is what enforces the ladder's
