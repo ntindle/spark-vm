@@ -302,7 +302,7 @@ This changelog only works if entries land with the change, not after it:
   too (previously a local copy), and the #472 cumulative-deadline
   protection moved into the shared helper as an opt-in switch so
   confirmd keeps it — cred-ui and waitlistd leave it off, their #471
-  behavior unchanged. (#471) (#TBD)
+  behavior unchanged. (#471) (#499)
 - The deploy installer now reads its `--src` input through the same
   symlink/hardlink/non-regular/oversize-refusing privileged-read
   discipline as the CA bundle builder (new shared `privileged_read`
