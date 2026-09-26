@@ -1655,18 +1655,27 @@ def test_extra_inputs_forced_deploy_fires_again_after_window(tmp_path):
         "change after the window must force again: " + r.stdout + r.stderr
 
 
-def test_extra_inputs_nonforced_record_drops_forced_timestamp(tmp_path):
-    """A normal (non-forced) successful deploy re-baselines the record:
-    the forced timestamp is dropped, so a later rotation is judged on its
-    own merits instead of against a stale dampening window."""
+def test_extra_inputs_nonforced_record_keeps_forced_timestamp(tmp_path):
+    """Nit (3) reversal of the old re-baseline contract: a normal
+    (non-forced) successful deploy must NOT drop the forced timestamp —
+    the old code stripped it on every successful record, so any version
+    deploy including the component silently reset the dampening window
+    and re-armed the swapd-churn retry loop (Security review nit). The
+    dampening epoch is now refreshed only by a forced deploy itself."""
     env, ca, state = _extra_inputs_env(tmp_path)
     ca.write_bytes(b"v1")
     r = source_and("record_extra_inputs proxy 1", env_extra=env)
     assert r.returncode == 0, r.stderr
-    assert "proxy_last_forced=" in (state / "extra-inputs-hash").read_text()
+    before = (state / "extra-inputs-hash").read_text()
+    m_before = re.search(r"^proxy_last_forced=(\d+)$", before, flags=re.M)
+    assert m_before, before
     r = source_and("record_extra_inputs proxy", env_extra=env)
     assert r.returncode == 0, r.stderr
-    assert "proxy_last_forced=" not in (state / "extra-inputs-hash").read_text()
+    after = (state / "extra-inputs-hash").read_text()
+    m_after = re.search(r"^proxy_last_forced=(\d+)$", after, flags=re.M)
+    assert m_after, "unforced record must keep the epoch line: " + after
+    assert m_after.group(1) == m_before.group(1), \
+        "unforced record must not refresh the epoch: " + after
 
 
 # --- FIFO guard (Security review B3) ------------------------------------------
@@ -2156,3 +2165,168 @@ def test_cmd_deploy_successful_forced_deploy_wiring(tmp_path):
         "forced snapshot needs its own dir: %s" % [d.name for d in snaps]
     assert (state / "deployed-commit").read_text().strip() == docs_only, \
         "zero-width deploy must not advance the watermark"
+
+
+# --- extra-inputs review nits (distribution): trigger tagging, rollback ----
+# --- reconciliation, _last_forced preservation -----------------------------
+
+def _forced_stub_fixture(tmp_path, ca_bytes=b"fake-ca"):
+    """Stub component (passing gate/install, extra_paths on a tmp CA file)
+    pinned at head with a converged digest — the rig for forced-deploy and
+    rollback tests. Returns (updater, state, env, ca, base, docs_only)."""
+    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    (state / "deployed-commit").write_text(docs_only + "\n")
+    swapd = tmp_path / "swapd"
+    ca_dir = swapd / ".mitmproxy"
+    ca_dir.mkdir(parents=True)
+    ca = ca_dir / "mitmproxy-ca-cert.pem"
+    ca.write_bytes(ca_bytes)
+    installed = swapd / "installed.txt"
+    installed.write_text("installed")
+    (swapd / "VERSION").write_text("0.9.9-test\n")
+    env = dict(env, SWAPD_HOME=str(swapd))
+    tconf = tmp_path / "stub.conf"
+    tconf.write_text(
+        'COMPONENTS=(stub)\n'
+        'stub_paths=("docs/")\n'
+        'stub_services=()\n'
+        'stub_user_services=()\n'
+        'stub_tests="true"\n'
+        'stub_health=()\n'
+        'stub_install="true"\n'
+        'stub_install_unit=""\n'
+        'stub_checkout_sync=""\n'
+        'stub_install_paths=("$SWAPD_HOME/installed.txt")\n'
+        'stub_extra_paths=("$SWAPD_HOME/.mitmproxy/mitmproxy-ca-cert.pem")\n'
+    )
+    env = dict(env, UPDATER_COMPONENTS_CONF=str(tconf))
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; record_extra_inputs stub",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return updater, state, env, ca, base, docs_only
+
+
+def _forced_audit_line(audit, result):
+    m = re.search(r'\{[^{}]*"result":"%s"[^{}]*\}' % re.escape(result), audit)
+    assert m, "expected a %s audit line: %s" % (result, audit)
+    return m.group(0)
+
+
+def test_cmd_deploy_forced_snapshot_fail_audit_has_trigger(tmp_path):
+    """Nit (1): on a same-commit forced deploy, the snapshot-fail audit line
+    must carry trigger=extra-inputs — it previously masqueraded as a version
+    deploy. mkdir is overridden to fail only under the snapshots dir."""
+    updater, state, env, ca, base, docs_only = _forced_stub_fixture(tmp_path)
+    ca.write_bytes(b"fake-ca-rotated")  # rotation, zero new commits
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; "
+                 "mkdir() { case \"$*\" in *snapshots*) return 1;; *) command mkdir \"$@\";; esac; }; "
+                 "set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=1" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    line = _forced_audit_line(audit, "snapshot-fail")
+    assert '"trigger":"extra-inputs"' in line, \
+        "snapshot-fail line must carry the trigger: " + line
+
+
+def test_cmd_deploy_forced_reload_fail_audit_has_trigger(tmp_path):
+    """Nit (1): the reload-fail audit line must carry trigger=extra-inputs.
+    (reload_and_enable unconditionally returns 0 today, so the override
+    exercises the audit construction on that path.)"""
+    updater, state, env, ca, base, docs_only = _forced_stub_fixture(tmp_path)
+    ca.write_bytes(b"fake-ca-rotated")  # rotation, zero new commits
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; "
+                 "reload_and_enable() { return 1; }; "
+                 "set +e; cmd_deploy; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=1" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    line = _forced_audit_line(audit, "reload-fail")
+    assert '"trigger":"extra-inputs"' in line, \
+        "reload-fail line must carry the trigger: " + line
+
+
+def test_record_extra_inputs_preserves_last_forced_on_unforced_deploy(tmp_path):
+    """Nit (3): a successful non-forced deploy must not clear the
+    _last_forced dampening epoch — the old code stripped it on every
+    successful record, so any version deploy including the component
+    silently re-armed the swapd-churn retry loop."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    rec = state / "extra-inputs-hash"
+    before = rec.read_text()
+    assert re.search(r"^proxy=[0-9a-f]{64}$", before, flags=re.M), before
+    rec.write_text(before + "proxy_last_forced=1234567890\n")
+    ca.write_bytes(b"fake-ca-bytes-changed")
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; record_extra_inputs proxy 0",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
+    after = rec.read_text()
+    assert "proxy_last_forced=1234567890" in after, \
+        "unforced record must preserve the dampening epoch: " + after
+    assert after.count("proxy_last_forced=") == 1, after
+    assert len(re.findall(r"^proxy=", after, flags=re.M)) == 1, \
+        "digest line must not duplicate: " + after
+    m = re.search(r"^proxy=([0-9a-f]{64})$", after, flags=re.M)
+    assert m, "digest must converge on success: " + after
+    fresh = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                     "source ./deploy/auto-deploy.sh; extra_inputs_hash proxy",
+                     env_extra=env, cwd=REPO).stdout.strip()
+    assert m.group(1) == fresh, "digest must match on-disk inputs"
+
+
+def test_record_extra_inputs_forced_updates_last_forced(tmp_path):
+    """Contrast pin: a forced deploy DOES refresh the _last_forced epoch."""
+    updater, state, env, ca = _converged_ca_fixture(tmp_path)
+    rec = state / "extra-inputs-hash"
+    rec.write_text(rec.read_text() + "proxy_last_forced=1234567890\n")
+    r = run_bash("set -e; export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; record_extra_inputs proxy 1",
+                 env_extra=env, cwd=REPO)
+    assert r.returncode == 0, r.stdout + r.stderr
+    after = rec.read_text()
+    assert "proxy_last_forced=1234567890" not in after, after
+    m = re.search(r"^proxy_last_forced=(\d+)$", after, flags=re.M)
+    assert m, "forced record must write a fresh epoch: " + after
+    assert int(m.group(1)) > 1234567890, after
+
+
+def test_cmd_rollback_reconciles_extra_inputs_state(tmp_path):
+    """Nit (2): a manual rollback restores the component files, but the
+    recorded extra-inputs digest is post-deploy. cmd_rollback must
+    reconcile it to the on-disk reality (and preserve _last_forced) —
+    otherwise the next tick compares rolled-back reality against the stale
+    digest and force-redeploys the rolled-back component."""
+    updater, state, env, ca, base, docs_only = _forced_stub_fixture(tmp_path)
+    rec = state / "extra-inputs-hash"
+    stale = rec.read_text()
+    assert re.search(r"^stub=[0-9a-f]{64}$", stale, flags=re.M), stale
+    rec.write_text(stale + "stub_last_forced=1234567890\n")
+    # Reality drifts from the record (snapshot restored an extra-input
+    # path, or the operator changed it between deploy and rollback).
+    ca.write_bytes(b"fake-ca-post-rollback")
+    snapdir = state / "snapshots" / docs_only
+    snapdir.mkdir(parents=True)
+    (snapdir / "FROM_COMMIT").write_text(base + "\n")
+    (snapdir / "COMPONENTS").write_text("stub\n")
+    (snapdir / "MANIFEST").write_text("ABSENT /tmp/spark-vm-rollback-test-absent\n")
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set -e; cmd_rollback; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=0" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    assert '"result":"manual-rollback"' in audit, audit
+    after = rec.read_text()
+    fresh = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                     "source ./deploy/auto-deploy.sh; extra_inputs_hash stub",
+                     env_extra=env, cwd=REPO).stdout.strip()
+    assert re.search(r"^stub=%s$" % re.escape(fresh), after, flags=re.M), \
+        "digest must be reconciled to on-disk reality: " + after
+    assert "stub_last_forced=1234567890" in after, \
+        "rollback must preserve the dampening epoch: " + after

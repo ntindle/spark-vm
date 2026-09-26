@@ -376,8 +376,15 @@ record_extra_inputs() {
     # grep rc=1 ("no lines selected") is the normal nothing-to-carry case;
     # only that is tolerated — rc=2 is a real read error and fails closed
     # under set -e rather than converging the digest on a corrupt state.
+    # The _last_forced epoch is stripped only when this deploy is itself
+    # forced (it is rewritten below): a successful non-forced deploy must
+    # not reset the dampening window of an unrelated forced deploy — the
+    # old code stripped it unconditionally, so any version deploy that
+    # included the component silently re-armed the swapd-churn retry loop.
+    local -a strip=( -e "^${c}=" )
+    [ "$forced" = "1" ] && strip+=( -e "^${c}_last_forced=" )
     if [ -f "$EXTRA_INPUTS_STATE" ]; then
-        grep -v -e "^${c}=" -e "^${c}_last_forced=" "$EXTRA_INPUTS_STATE" >"$tmp" 2>/dev/null || [ $? -eq 1 ]
+        grep -v "${strip[@]}" "$EXTRA_INPUTS_STATE" >"$tmp" 2>/dev/null || [ $? -eq 1 ]
     else
         : >"$tmp"
     fi
@@ -387,6 +394,48 @@ record_extra_inputs() {
         printf '%s_last_forced=%s\n' "$c" "$now" >>"$tmp"
     fi
     mv -f "$tmp" "$EXTRA_INPUTS_STATE"
+}
+
+reconcile_extra_inputs() {
+    # reconcile_extra_inputs <components...> — re-hash each named
+    # component's host-side inputs and converge the recorded digests to the
+    # on-disk reality (issue #302 follow-up). Called by cmd_rollback after
+    # the snapshot restore: the snapshot reverts the component files, but
+    # the recorded digest is post-deploy — without this the next tick
+    # compares the rolled-back reality against the stale digest, forcing a
+    # spurious redeploy of the rolled-back component (the mirror HEAD still
+    # holds the bad commit, and the BLOCKED_COMMIT mark only stops the
+    # *version* deploy path, not the extra-inputs forced path). _last_forced
+    # epochs are preserved: dampening is orthogonal to the rollback.
+    # Best-effort per component — a hashing or rewrite failure logs and
+    # skips that component rather than aborting the rollback (the restore
+    # already landed); returns nonzero if any component was skipped so the
+    # caller can warn.
+    local c h tmp failed=0
+    for c in "$@"; do
+        [ -n "$(get_arr "$c" extra_paths 2>/dev/null)" ] || continue
+        if ! h="$(extra_inputs_hash "$c")"; then
+            log "ERROR: could not re-hash extra inputs for $c — digest record left stale"
+            failed=1
+            continue
+        fi
+        tmp="$EXTRA_INPUTS_STATE.tmp"
+        # grep rc=1 ("no lines selected") is the normal nothing-to-carry
+        # case — same fail-closed read discipline as record_extra_inputs.
+        if [ -f "$EXTRA_INPUTS_STATE" ]; then
+            grep -v -e "^${c}=" "$EXTRA_INPUTS_STATE" >"$tmp" 2>/dev/null || [ $? -eq 1 ]
+        else
+            : >"$tmp"
+        fi
+        printf '%s=%s\n' "$c" "$h" >>"$tmp"
+        if ! mv -f "$tmp" "$EXTRA_INPUTS_STATE"; then
+            log "ERROR: could not rewrite $EXTRA_INPUTS_STATE for $c — digest record left stale"
+            failed=1
+            continue
+        fi
+        log "reconciled extra-inputs digest for $c"
+    done
+    return "$failed"
 }
 
 note_forced_attempt() {
@@ -1092,7 +1141,7 @@ cmd_deploy() {
     # Reset the mirror to the new commit (the mirror is never a working tree).
     git -C "$UPDATER_REPO" reset --hard -q "$new" || {
         alert "mirror reset to $new failed ($old -> $new)"
-        audit 'deploy' ',"result":"precheck-fail","from":"'"$old"'","to":"'"$new"'"'
+        audit 'deploy' ',"result":"precheck-fail","from":"'"$old"'","to":"'"$new"'"'"$trig"
         return 1
     }
 
@@ -1157,7 +1206,7 @@ cmd_deploy() {
         if [ -n "$sub" ]; then
             check_checkout_sync_ready "$c" "$sub" "$new" || {
                 alert "pre-deploy checkout-sync check failed for component $c ($old -> $new)"
-                audit 'deploy' ',"result":"gate-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'
+                audit 'deploy' ',"result":"gate-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'"$trig"
                 return 1
             }
         fi
@@ -1168,24 +1217,24 @@ cmd_deploy() {
     if [ "$range_synthesized" -eq 1 ]; then snapdir="${snapdir}-extra-inputs"; fi
     rm -rf "$snapdir"; mkdir -p "$snapdir" || {
         alert "could not create snapshot dir $snapdir ($old -> $new)"
-        audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'"'
+        audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'"'"$trig"
         return 1
     }
     printf '%s\n' "$old" >"$snapdir/FROM_COMMIT" || {
         alert "could not write snapshot manifest ($old -> $new)"
-        audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'"'
+        audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'"'"$trig"
         return 1
     }
     printf '%s\n' "${COMPS[@]}" >"$snapdir/COMPONENTS" || {
         alert "could not write snapshot manifest ($old -> $new)"
-        audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'"'
+        audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'"'"$trig"
         return 1
     }
     local snapc
     for snapc in "${COMPS[@]}"; do
         snapshot_component "$snapc" "$snapdir" || {
             alert "snapshot of component $snapc failed ($old -> $new)"
-            audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$snapc"'"'
+            audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$snapc"'"'"$trig"
             return 1
         }
     done
@@ -1214,7 +1263,7 @@ cmd_deploy() {
             # the next tick. do_rollback's no_block mode restores the snapshot
             # without writing BLOCKED_COMMIT; the watermark stays untouched.
             alert "checkout changed during deploy for component $c ($old -> $new) — refusing to overwrite (commit or stash first)"
-            audit 'deploy' ',"result":"checkout-dirty","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'
+            audit 'deploy' ',"result":"checkout-dirty","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'"$trig"
             if [ "$installed_any" -eq 1 ] || [ -n "$(get_str "$c" install)" ]; then
                 do_rollback "$snapdir" "$old" "$new" "$c" "checkout-dirty" "no_block" "$trig"
             fi
@@ -1228,7 +1277,7 @@ cmd_deploy() {
     #    in-memory unit definition), then restart only affected services.
     reload_and_enable "${COMPS[@]}" || {
         alert "daemon-reload/enable failed after install ($old -> $new) — rolling back"
-        audit 'deploy' ',"result":"reload-fail","from":"'"$old"'","to":"'"$new"'"'
+        audit 'deploy' ',"result":"reload-fail","from":"'"$old"'","to":"'"$new"'"'"$trig"
         do_rollback "$snapdir" "$old" "$new" "${COMPS[0]}" "reload" "$rb_no_block" "$trig"
         return 1
     }
@@ -1298,6 +1347,12 @@ cmd_rollback() {
     else
         rcomps=("${COMPONENTS[@]}")
     fi
+    # Issue #302 follow-up: the snapshot restored the component files, but
+    # the recorded extra-inputs digests are post-deploy. Reconcile them to
+    # the restored reality before the next tick's change detection runs —
+    # best-effort: a reconciliation failure must not abort the rollback.
+    reconcile_extra_inputs "${rcomps[@]}" || \
+        log "warning: extra-inputs digest reconciliation incomplete — check 'status' output"
     reload_and_enable "${rcomps[@]}"
     local c unhealthy=0
     for c in "${rcomps[@]}"; do
