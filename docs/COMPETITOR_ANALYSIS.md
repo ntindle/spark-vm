@@ -4575,3 +4575,50 @@ window 2026-09-26 ~14:2x–14:4x CDT).
 - **Deep-scan evaluation: no in-window development.** Codex
   'Heapjack' + 'Overpatch' and the GitLab allowlisted-proxy escape
   both remain queued, NOT filed.
+
+## Watch update — 2026-09-26 (late afternoon)
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_LATE_AFTERNOON.md`
+(two-surveyor pass: A fast-mover re-verification vs the ~14:35 CDT
+baseline ~15:26–15:29 CDT, B delta news scan ~14:40–15:40 CDT; survey
+window 2026-09-26 ~15:2x–15:4x CDT).
+
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** Daytona changelog
+  (newest still SEP 26 V0.218.0 "KVM sandbox parameter and CLI WorkOS
+  application", verbatim; chain V0.217.0 SEP 25 → V0.216.0 SEP 23
+  consistent; no V0.219.0, no 27-Sep entry); Docker Sandboxes release
+  notes (newest dated heading still 2026-09-22 — Desktop separately
+  read, newest 2026-09-21, confirming the 2026-09-22 is the Sandboxes
+  page); Microsandbox releases (newest still v0.7.3 #1646); Vercel
+  changelog (newest date header still 25 Sep, nothing dated 26 Sep;
+  Drives not re-checked per P49 daily cadence). Sixth all-first-try
+  pass in a row — zero fetch failures, zero UNVERIFIED grades.
+- **Pricing parity — all VENDOR-VERIFIED NO-CHANGE** (vendor-page reads
+  this pass, a step up from prior third-party spot-checks). E2B (Hobby
+  FREE / $100 one-time credit, Pro $150/month, $0.000014/s per vCPU);
+  boat.dev (small $0.018 / default $0.036 / large $0.072 / xlarge
+  $0.200 per hour, 25 free trial hours; stopped sandbox costs nothing);
+  TermSquad ($9/$19/$29/$49 tiers, BYO-AI intact); DO Managed Agents
+  (public preview, active-CPU footnote intact; droplets
+  $4.00/$6.00/$12.00/$24.00 tiers intact); AgentComputer ($0.07 CPU-h,
+  $0.04375 GB-h, hot $0.000683 / stopped $0.000027 storage, still no
+  egress policy stated).
+- **Delta news scan: NO-CHANGE — 7 clean dedupes, 9 flagged-only, 0 new
+  C-numbers.** DeepSeek CVE-2026-82533 recrawl = C56; Docker
+  CVE-2026-77179/79994 recrawls + Sep-15 aratech.ae piece = filed
+  Docker row; OpenAI offline-sandbox press wave (~20h old) = C62
+  (no new primary-source facts); secnews.gr /
+  thehackerwire CVE-2026-100589 pages = C66; datopian notes collage =
+  filed context. Flagged-only (out of window/lane or third-party-only
+  recaps): vm2 CVE-2026-47686 recap; Heapjack/Overpatch advisory recap;
+  tokencost.app Agents-API pricing (13 days old); Jenkins
+  CVE-2026-92122–92141 cluster (9 days old); GitLab proxy escape (no
+  in-window coverage); CCB Belgium CVE-2026-25253 (236 days old);
+  bitdoze OpenClaw guide; OWASP AISVS workload-sandboxing chapter;
+  tech-insider.org Agents API tutorial.
+- In-lane no-launch verdict dated 2026-09-25 stands — streak extends.
+  Carried: C37, C57, C58, C66 (all OPEN, no movement); C66 stays
+  THIRD-PARTY (no vendor-primary evidence).
+- **Deep-scan evaluation: no in-window development.** Heapjack +
+  Overpatch and the GitLab allowlisted-proxy escape both remain
+  queued, NOT filed.
