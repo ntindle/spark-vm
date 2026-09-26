@@ -853,9 +853,13 @@ class WaitlistService:
         Pure read: spool dir listing + file mtimes/queued_at, and a
         lock-copied view of self.rows. Spool names are unique per send and
         written atomically (os.replace), so a file that cannot be parsed
-        is the sender's artifact, not ours — it is skipped, never fatal.
-        Partial-write leftovers (".tmp-<hex>") are excluded: they are
-        removed on failure by _write_spool and never sender-visible.
+        is the sender's artifact, not ours — it is skipped, never fatal
+        (the read catch is (OSError, ValueError): JSONDecodeError and
+        UnicodeDecodeError are both ValueError subclasses). Partial-write
+        leftovers (".tmp-<hex>") are excluded: they are removed on failure
+        by _write_spool and never sender-visible. kind/status values that
+        are not strings (or are empty) normalize to "unknown" — they must
+        never crash the counting dict or json.dumps(sort_keys=True).
         Age is the max queued_at age across spool files, falling back to
         file mtime when queued_at is missing/unparsable, and None when
         the spool is empty.
@@ -874,11 +878,13 @@ class WaitlistService:
             try:
                 with open(path, encoding="utf-8") as fh:
                     doc = json.load(fh)
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 continue
             if not isinstance(doc, dict):
                 continue
             kind = doc.get("kind") or "unknown"
+            if not isinstance(kind, str):
+                kind = "unknown"
             spool["by_kind"][kind] = spool["by_kind"].get(kind, 0) + 1
             spool["files"] += 1
             age = None
@@ -903,6 +909,8 @@ class WaitlistService:
         counts = {}
         for row in rows:
             st = row.get("status") or "unknown"
+            if not isinstance(st, str):
+                st = "unknown"
             counts[st] = counts.get(st, 0) + 1
         counts["total"] = len(rows)
         return {"spool": spool, "rows": counts}
@@ -937,6 +945,7 @@ class WaitlistService:
         doc = {
             "to": row["owner_email"],
             "subject": CONFIRM_SUBJECT,
+            "kind": "confirm",  # #392: spool-by-kind counting; inert to sender
             "body": body_tpl.format(
                 confirm_link=link, forget_link=forget_link),
             "queued_at": iso_z(self.clock()),

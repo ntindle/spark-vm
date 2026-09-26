@@ -1364,15 +1364,15 @@ def _spool_doc(svc, name, kind=None, queued_at=None):
 
 def test_status_snapshot_spool_backlog():
     svc, tmp = make_service()  # frozen clock: NOW
-    _spool_doc(svc, "a-1.json", kind=None,
-               queued_at=wd.iso_z(NOW - timedelta(hours=2)))  # confirm: no kind
+    _spool_doc(svc, "a-1.json", kind="confirm",
+               queued_at=wd.iso_z(NOW - timedelta(hours=2)))
     _spool_doc(svc, "b-2.json", kind="invite",
                queued_at=wd.iso_z(NOW - timedelta(minutes=30)))
     _spool_doc(svc, "c-3.json", kind="reminder")  # queued NOW
     snap = svc.status_snapshot()
     assert snap["spool"]["files"] == 3
     assert snap["spool"]["oldest_age_seconds"] == 2 * 3600
-    assert snap["spool"]["by_kind"] == {"unknown": 1, "invite": 1,
+    assert snap["spool"]["by_kind"] == {"confirm": 1, "invite": 1,
                                         "reminder": 1}
 
 
@@ -1424,3 +1424,67 @@ def test_http_status_endpoint_loopback(live_server):
     assert snap["spool"]["files"] >= 1  # the confirm email just spooled
     assert snap["spool"]["oldest_age_seconds"] is not None
     assert snap["rows"]["pending"] >= 1
+
+
+def test_status_snapshot_skips_non_utf8():
+    # UnicodeDecodeError is not a JSONDecodeError subclass — a raw-bytes
+    # spool file must still be skipped, never fatal (Engineering round 1).
+    svc, tmp = make_service()
+    _spool_doc(svc, "good-1.json")
+    with open(os.path.join(tmp, "spool", "bad-2.json"),
+              "wb") as fh:
+        fh.write(b"\xff\xfe\x00not utf-8\x80")
+    snap = svc.status_snapshot()
+    assert snap["spool"]["files"] == 1
+    assert snap["spool"]["by_kind"] == {"unknown": 1}
+
+
+def test_status_snapshot_non_string_kind_and_status():
+    # A hostile/malformed spool doc or row must normalize to "unknown",
+    # never crash the counting dict or json.dumps(sort_keys=True)
+    # (Engineering round 1: unhashable kind; mixed str/int sort).
+    svc, tmp = make_service()
+    _spool_doc(svc, "list-kind.json", kind=["invite"])
+    _spool_doc(svc, "int-kind.json", kind=5)
+    _spool_doc(svc, "empty-kind.json", kind="")
+    svc.rows["e1"] = {"entry_id": "e1", "status": 7,
+                      "owner_email": "u1@example.com"}
+    svc.rows["e2"] = {"entry_id": "e2", "status": None,
+                      "owner_email": "u2@example.com"}
+    snap = svc.status_snapshot()
+    assert snap["spool"]["by_kind"] == {"unknown": 3}
+    assert snap["rows"] == {"unknown": 2, "total": 2}
+    json.dumps(snap, sort_keys=True)  # must not raise
+
+
+def test_confirm_spool_doc_carries_kind():
+    # #392's headline contract is "count by kind" — the most common spool
+    # kind (confirm emails) must not land in "unknown" (Engineering round 1).
+    svc, tmp = make_service()
+    row = {"entry_id": "e1", "owner_email": "u@example.com",
+           "status": "pending", "email_sends": []}
+    svc.rows["e1"] = row
+    assert svc._unified_send_allowed(row) is True
+    svc._queue_confirm_email(row)
+    names = os.listdir(os.path.join(tmp, "spool"))
+    assert len(names) == 1
+    with open(os.path.join(tmp, "spool", names[0]),
+              encoding="utf-8") as fh:
+        doc = json.load(fh)
+    assert doc["kind"] == "confirm"
+    snap = svc.status_snapshot()
+    assert snap["spool"]["by_kind"] == {"confirm": 1}
+
+
+def test_http_status_refused_off_loopback(monkeypatch, live_server):
+    # The security-critical half of the feature: the 404 wiring in do_GET.
+    # Simulate a non-loopback peer by forcing the gate closed on a real
+    # loopback connection (Engineering round 1).
+    monkeypatch.setattr(wd, "_is_loopback", lambda addr: False)
+    port, tmp = live_server
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/waitlist/status")
+    resp = conn.getresponse()
+    assert resp.status == 404
+    body = resp.read().decode("utf-8")
+    assert "Not found" in body
