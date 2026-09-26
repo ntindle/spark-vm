@@ -4622,3 +4622,48 @@ window 2026-09-26 ~15:2x–15:4x CDT).
 - **Deep-scan evaluation: no in-window development.** Heapjack +
   Overpatch and the GitLab allowlisted-proxy escape both remain
   queued, NOT filed.
+
+## Watch update — 2026-09-26 (evening)
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_EVENING.md`
+(two-surveyor pass: A fast-mover + pricing re-verification vs the
+~15:55 CDT baseline ~16:24–16:29 CDT, B delta news scan ~15:55–16:40
+CDT; survey window 2026-09-26 ~16:2x–16:4x CDT).
+
+- **Fast movers + pricing — 9/9 VENDOR-VERIFIED NO-CHANGE.** Daytona
+  changelog (newest still SEP 26 V0.218.0 "KVM sandbox parameter and
+  CLI WorkOS application", verbatim; chain V0.217.0 SEP 25 →
+  V0.215.0 SEP 22 consistent; no V0.219.0, no 27-Sep entry); Docker
+  Sandboxes release notes (newest dated heading still 2026-09-22 —
+  Desktop separately read, newest 2026-09-21, confirming the
+  2026-09-22 is the Sandboxes page); Microsandbox releases (newest
+  still v0.7.3 #1646); Vercel changelog (newest date header still 25
+  Sep, nothing dated 26 Sep in any lane; Drives not re-checked per P49
+  daily cadence). Pricing: E2B, boat.dev, TermSquad, DO Managed Agents,
+  AgentComputer — all VENDOR-VERIFIED NO-CHANGE (boat.dev's canonical
+  pricing page is now docs.boat.dev/pricing; boat.dev/pricing 404s).
+  Seventh all-first-try pass in a row — zero fetch failures, zero
+  UNVERIFIED grades. Side notes: Microsandbox releases URL now
+  redirects to the `superradcompany` org slug (path resolves fine).
+- **Delta news scan: NO-CHANGE — 6 clean dedupes, 8 flagged-only, 0 new
+  C-numbers.** Cloudflare recrawl = C55; Docker recrawl = filed row;
+  vm2 CVE-2026-47686 recap = already flagged-only; C62 press-wave
+  recrawls (techbooky, startupfortune, neoteo, jbiznews) = C62 (no new
+  primary facts); CVE-2026-100589 page = C66. Flagged-only (out of
+  window/lane or third-party-only): vm2 CVE-2026-92956 and CVE-2026-93603
+  (adjacent JS-sandbox lane, out of window — do not conflate with
+  47686); KVM ARM64 CVE-2026-89775 (in-window but no
+  agent-sandbox-product nexus; hypervisor-as-one-layer threat-model
+  note); Leap0 pricing datum (third-party list only — C58's "no
+  published pricing" stands until a vendor-primary read); Freestyle Pro
+  $500/mo claim (unverified rumor — C37's "Pro fee VERIFIED absent"
+  stands); OpenClaw CVE-2026-100585 (CWE-862) and CVE-2026-100579
+  (CWE-639) — adjacent harness lane, third-party-only, kept strictly
+  separate from C66 (100589, CWE-863); OpenAI incident-wave expansion
+  details (GitHub-token case folds into C62-wave context).
+- In-lane no-launch verdict dated 2026-09-25 stands — streak extends.
+  Carried: C37, C57, C58, C66 (all OPEN, no movement); C66 stays
+  THIRD-PARTY (no vendor-primary evidence).
+- **Deep-scan evaluation: no in-window development.** Heapjack +
+  Overpatch and the GitLab allowlisted-proxy escape both remain
+  queued, NOT filed.
