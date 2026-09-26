@@ -4242,7 +4242,10 @@ baseline, B delta news scan; survey window 2026-09-26 ~09:05–09:19 CDT).
   watch + source links); the capture's grep covered `agent_notes/`
   only. Recorded as a clean dedupe, not a new number. The 0754 slot
   left no completion entry and no branch commits (dead slot per
-  P40 taxonomy; no repair chain — no handoff existed).
+  P40 taxonomy; no repair chain — no handoff existed). Note:
+  supersedes the post-morning fold's "renumbered to C64" line —
+  retracted; C64 denotes only the OpenAI agent-swarm escape item.
+  The 0754 C63 claim was a dedupe miss and was never numbered.
 - **Deep-scan candidate queued (not filed):** Codex sandbox escapes
   'Heapjack' + 'Overpatch' (Accomplish AI, reported 2026-09-21 —
   zero corpus hits, genuinely new facts, but out-of-window +
