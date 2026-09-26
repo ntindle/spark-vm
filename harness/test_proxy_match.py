@@ -351,6 +351,14 @@ class TestInjectorCli(unittest.TestCase):
     def test_assert_key_binding_refuses_missing(self):
         p = run_cli(["assert-key-binding"], json.dumps({}))
         self.assertEqual(p.returncode, 1)
+        # Flake investigation (2026-09-26 dx turn): a one-off failure of
+        # this test was observed once (2026-09-25) with no reproduction in
+        # 150 isolated + 40 class-iteration runs. The code path is fully
+        # deterministic (empty registry -> "no registry entry" -> exit 1),
+        # so pin the stderr diagnostic too: if it ever fails again, the
+        # failure output distinguishes a CLI misbehavior from a harness
+        # problem (crash, env loss) instead of reporting a bare exit code.
+        self.assertIn("llm-api has no registry entry", p.stderr)
 
     def test_assert_key_binding_refuses_bad_placement(self):
         p = run_cli(["assert-key-binding"],
