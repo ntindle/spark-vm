@@ -122,6 +122,11 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- Deploy helper now states its input bounds up front: `--src` refuses
+  inputs over 1 MiB, and `--stdin` is documented as deliberately uncapped
+  and un-gated (deploy-script-constructed input only, never
+  attacker-chosen paths) so a future caller does not assume uniform
+  bounds. (#454, #455)
 - Auto-deploy: three extra-inputs follow-ups from the Security review. A
   same-commit forced deploy now tags every audit line on the forced-deploy
   path with `trigger: extra-inputs` (snapshot-fail, reload-fail, and the other
