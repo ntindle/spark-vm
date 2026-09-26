@@ -2330,6 +2330,102 @@ def test_cmd_rollback_reconciles_extra_inputs_state(tmp_path):
         "digest must be reconciled to on-disk reality: " + after
     assert "stub_last_forced=1234567890" in after, \
         "rollback must preserve the dampening epoch: " + after
+    # Issue #456 contrast pin: a successful reconcile leaves no
+    # "reconcile":"incomplete" marker on the manual-rollback audit line.
+    line = _forced_audit_line(audit, "manual-rollback")
+    assert '"reconcile"' not in line, \
+        "clean reconcile must not carry an incomplete marker: " + line
+
+
+def test_cmd_rollback_reconcile_hash_failure_audits_incomplete(tmp_path):
+    """Issue #456 (Security + QA review): when the extra-inputs digest
+    reconciliation fails, cmd_rollback must still complete (the restore
+    already landed), log the warning, skip the stale component — and the
+    manual-rollback audit line must carry "reconcile":"incomplete" so
+    forensics can tell reconcile fallout apart from a genuine rotation."""
+    updater, state, env, ca, base, docs_only = _forced_stub_fixture(tmp_path)
+    rec = state / "extra-inputs-hash"
+    stale = rec.read_text()
+    ca.write_bytes(b"fake-ca-post-rollback")
+    snapdir = state / "snapshots" / docs_only
+    snapdir.mkdir(parents=True)
+    (snapdir / "FROM_COMMIT").write_text(base + "\n")
+    (snapdir / "COMPONENTS").write_text("stub\n")
+    (snapdir / "MANIFEST").write_text("ABSENT /tmp/spark-vm-rollback-test-absent\n")
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; "
+                 "extra_inputs_hash() { return 1; }; "
+                 "set -e; cmd_rollback; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=0" in r.stdout, out
+    assert "reconciliation incomplete" in out, \
+        "the incomplete warning must fire: " + out
+    audit = (state / "audit.log").read_text()
+    line = _forced_audit_line(audit, "manual-rollback")
+    assert '"reconcile":"incomplete"' in line, \
+        "failed reconcile must be audited, not just logged: " + line
+    # The component was skipped — its digest record stays stale, not fresh.
+    after = rec.read_text()
+    assert stale.splitlines()[0] in after, \
+        "failed component must keep its stale record: " + after
+
+
+def test_cmd_rollback_reconcile_failure_audits_incomplete_on_unhealthy(tmp_path):
+    """Security review (issue #456): the reconcile marker must also land on
+    the rollback-unhealthy audit line — reconcile runs before the health
+    checks, and the unhealthy path is exactly the one forensics scrutinizes."""
+    updater, state, env, ca, base, docs_only = _forced_stub_fixture(tmp_path)
+    ca.write_bytes(b"fake-ca-post-rollback")
+    snapdir = state / "snapshots" / docs_only
+    snapdir.mkdir(parents=True)
+    (snapdir / "FROM_COMMIT").write_text(base + "\n")
+    (snapdir / "COMPONENTS").write_text("stub\n")
+    (snapdir / "MANIFEST").write_text("ABSENT /tmp/spark-vm-rollback-test-absent\n")
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; "
+                 "extra_inputs_hash() { return 1; }; "
+                 "health_check() { return 1; }; "
+                 "set +e; cmd_rollback; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=1" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    line = _forced_audit_line(audit, "rollback-unhealthy")
+    assert '"reconcile":"incomplete"' in line, \
+        "failed reconcile must be audited on the unhealthy path too: " + line
+
+
+def test_cmd_rollback_reconcile_missing_state_file(tmp_path):
+    """Issue #456 (QA review): a missing extra-inputs state file is a
+    legitimate reconcile path (first rollback before any deploy record) —
+    the digest must converge fresh and the audit line must NOT carry the
+    incomplete marker."""
+    updater, state, env, ca, base, docs_only = _forced_stub_fixture(tmp_path)
+    rec = state / "extra-inputs-hash"
+    rec.unlink()
+    ca.write_bytes(b"fake-ca-post-rollback")
+    snapdir = state / "snapshots" / docs_only
+    snapdir.mkdir(parents=True)
+    (snapdir / "FROM_COMMIT").write_text(base + "\n")
+    (snapdir / "COMPONENTS").write_text("stub\n")
+    (snapdir / "MANIFEST").write_text("ABSENT /tmp/spark-vm-rollback-test-absent\n")
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; set -e; "
+                 "cmd_rollback; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=0" in r.stdout, out
+    fresh = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                     "source ./deploy/auto-deploy.sh; extra_inputs_hash stub",
+                     env_extra=env, cwd=REPO).stdout.strip()
+    after = rec.read_text()
+    assert re.search(r"^stub=%s$" % re.escape(fresh), after, flags=re.M), \
+        "missing state file must converge a fresh digest: " + after
+    audit = (state / "audit.log").read_text()
+    line = _forced_audit_line(audit, "manual-rollback")
+    assert '"reconcile"' not in line, \
+        "missing-file converge must not carry an incomplete marker: " + line
 
 
 # --- issue #457: trigger-tag invariant --------------------------------------
