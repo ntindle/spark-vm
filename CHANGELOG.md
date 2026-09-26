@@ -126,6 +126,12 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- confirmd now bounds its HTTP thread pool and times out idle sockets: the
+  server caps in-flight handler threads at 64 (over-cap connections are
+  closed immediately, fail closed) and each accepted socket gets a 10s
+  timeout, so a tailnet peer slow-lorising connections can no longer grow
+  the thread pool without bound or hold a handler thread forever (#TBD).
+
 - The jail build now validates the agent's SSH public key before doing
   anything with it: a file with Windows line endings, trailing blank
   lines, or a malformed key fails the build with a clear error instead

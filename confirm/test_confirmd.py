@@ -1547,5 +1547,102 @@ class AuditLogTests(unittest.TestCase):
                 cd.audit_log("403", "100.99.0.1", "ntindle@github", "")
         self.assertIn("confirmd: cannot write audit log", err.getvalue())
 
+class M8ServerHardeningTests(unittest.TestCase):
+    """Issue #77 (M8): no socket/request timeouts, unbounded thread pool."""
+
+    def _make_server(self, max_threads=4):
+        srv = cd.BoundedThreadingHTTPServer(("127.0.0.1", 0), cd.Handler)
+        srv.max_threads = max_threads
+        srv._slots = __import__("threading").Semaphore(max_threads)
+        self.addCleanup(srv.server_close)
+        return srv
+
+    def test_handler_socket_timeout(self):
+        """A slow-lorising peer must not hold a handler thread forever."""
+        self.assertEqual(cd.Handler.timeout, 10)
+
+    def test_accepted_socket_gets_timeout(self):
+        """The timeout class attribute reaches the accepted socket — the
+        CPython mechanism is StreamRequestHandler.setup's settimeout, so
+        exercise exactly that against a bare handler."""
+        import socketserver
+        srv = self._make_server()
+        client, accepted = __import__("socket").socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        accepted.settimeout(None)
+        h = cd.Handler.__new__(cd.Handler)
+        h.request = accepted
+        h.server = srv
+        socketserver.StreamRequestHandler.setup(h)
+        self.assertEqual(accepted.gettimeout(), 10)
+
+    def test_over_cap_connection_closed_not_queued(self):
+        """When the pool is full, the connection is closed immediately —
+        fail closed, not queued unboundedly."""
+        srv = self._make_server(max_threads=1)
+        srv._slots.acquire()  # drain the single slot
+        client, accepted = __import__("socket").socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        threads_before = threading.active_count()
+        srv.process_request(accepted, ("127.0.0.1", 0))
+        time.sleep(0.2)
+        # The accepted socket was closed: no new thread, fileno invalid.
+        self.assertEqual(threading.active_count(), threads_before)
+        self.assertEqual(accepted.fileno(), -1)
+        srv._slots.release()  # restore for cleanup
+
+    def test_slot_released_after_request(self):
+        """A completed request returns its pool slot."""
+        srv = self._make_server(max_threads=2)
+        calls = []
+
+        def fake_finish(request, client_address):
+            calls.append(1)
+
+        with mock.patch.object(srv, "finish_request", fake_finish):
+            client, accepted = __import__("socket").socketpair()
+            self.addCleanup(client.close)
+            srv.process_request(accepted, ("127.0.0.1", 0))
+            for _ in range(100):
+                if calls:
+                    break
+                time.sleep(0.02)
+        self.assertEqual(len(calls), 1)
+        # Wait for the thread's finally (shutdown_request + release) — the
+        # release lags the finish call, and a bare successful acquire would
+        # probe the pre-release value. Poll for the full slot count.
+        for _ in range(100):
+            if srv._slots._value == 2:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("handler thread never released its pool slot")
+        # Both slots available again after the thread's finally ran.
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        self.assertFalse(srv._slots.acquire(blocking=False))
+        srv._slots.release()
+        srv._slots.release()
+
+    def test_thread_start_failure_releases_slot(self):
+        """A thread-creation failure must not permanently drain the pool —
+        otherwise the mitigation itself turns a transient resource crunch
+        into a hard outage (Architecture review B1)."""
+        srv = self._make_server(max_threads=1)
+        client, accepted = __import__("socket").socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        with mock.patch("threading.Thread", side_effect=RuntimeError(
+                "can't start new thread")):
+            srv.process_request(accepted, ("127.0.0.1", 0))
+        # The slot was released: still acquirable, and no handler ran.
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        srv._slots.release()
+        # The connection was closed, not left dangling.
+        self.assertEqual(accepted.fileno(), -1)
+
+
 if __name__ == "__main__":
     unittest.main()
