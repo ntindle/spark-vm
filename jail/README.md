@@ -195,6 +195,44 @@ drop-in; enables and starts the machine; configures the guest
 (static `host0` 10.99.0.2/30, empty resolv.conf, proxy env + apt
 proxy, openssh-server, `muse` user with the agent's SSH key,
 passwordless sudo inside the jail, swapd CA, jail `with-proxy`).
+The agent's public key is validated up front and fails the build
+loudly — see "Agent SSH key validation" below.
+
+### Agent SSH key validation (fail loud at build, not at login)
+
+The agent's public key (`PUBKEY_FILE`, default `~/agent-jail.pub` —
+copy the agent's `id_ed25519.pub` there before building) is validated
+**before** the build by `validate-pubkey.sh` (issue #439); the build
+aborts with an error on any invalid key. Previously the key was copied
+verbatim into the guest's `authorized_keys`, and a bad key file failed
+the agent's SSH login silently — it looked like a jail or network
+fault, not a key-format problem.
+
+What the validator does:
+
+- Normalizes: strips CR bytes (a CRLF line ending otherwise lands in
+  `authorized_keys` and breaks the login) and drops blank lines.
+- Requires exactly one key line — a second key line is an error; a
+  missing or empty file is an error.
+- Shape check: `<known key type> <base64 blob> [optional comment]`
+  (`ssh-ed25519` / `ssh-rsa` / `ssh-dss` / `ecdsa-sha2-nistp256|384|521`
+  / `sk-ssh-ed25519@openssh.com` / `sk-ecdsa-sha2-nistp256@openssh.com`).
+  Certificate key types (`*-cert-v01@openssh.com`) are rejected: certs
+  are not agent login keys.
+- Structural check when `ssh-keygen` is available: the blob must
+  actually decode to a key of the claimed type (catches corrupt base64
+  the shape check cannot see).
+
+The normalized key line is what build.sh writes into the guest's
+`~/.ssh/authorized_keys`.
+
+Operator pre-check (e.g. after generating a new agent key, before
+rebuilding):
+
+```bash
+~/spark-vm/jail/validate-pubkey.sh ~/agent-jail.pub   # prints the normalized key line on success;
+                                                      # an ERROR: ... and nonzero exit on failure
+```
 
 Verify:
 
@@ -241,6 +279,11 @@ through the proxy, and Chromium uses its NSS database.
 ## Files
 
 - `build.sh` — the reproducible build (run on the host).
+- `validate-pubkey.sh` — build-time validation of the agent's SSH
+  public key (issue #439): normalizes (CR strip, blank-line drop) and
+  rejects missing/empty/multi-key/malformed keys so a bad key fails
+  the build loudly instead of the SSH login silently; also usable
+  standalone as an operator pre-check.
 - `jail-firewall-verify.sh` (installed to `/usr/local/sbin/` by build.sh)
   — the runtime firewall watchdog: pins the enforcement rules every
   minute via its systemd timer; on damage it stops the jail
