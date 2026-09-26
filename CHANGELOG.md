@@ -149,6 +149,11 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- proxy/deploy.sh now installs `scripts/bounded_http.py` to /home/swapd
+  alongside confirmd.py and registers it in confirm's install paths, so
+  the standalone deployment (and its rollback) can't start confirmd
+  with a missing-helper import failure (#471).
+
 - The desktop control bridge now serves each request on its own thread, with at most 8 handlers running at once: a slow driver call can no longer head-of-line-block the panel's screenshot polls or the keepalive's health probe. (#496)
 
 - Manual rollbacks now audit the extra-inputs digest reconciliation outcome:
@@ -293,7 +298,11 @@ This changelog only works if entries land with the change, not after it:
   over-cap shedding, and the TLS handshake can never run in the accept
   loop again. waitlistd also gains the 10 s per-socket timeout its
   siblings already had — a stalled request body can no longer pin a
-  handler thread forever. (#471) (#TBD)
+  handler thread forever. confirmd itself now uses the shared helper
+  too (previously a local copy), and the #472 cumulative-deadline
+  protection moved into the shared helper as an opt-in switch so
+  confirmd keeps it — cred-ui and waitlistd leave it off, their #471
+  behavior unchanged. (#471) (#TBD)
 - The deploy installer now reads its `--src` input through the same
   symlink/hardlink/non-regular/oversize-refusing privileged-read
   discipline as the CA bundle builder (new shared `privileged_read`

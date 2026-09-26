@@ -207,6 +207,33 @@ def test_proxy_install_paths_cover_deploy_sh_writes():
         "unredirected literal system paths: %s" % unredirected
 
 
+def test_confirm_install_paths_cover_deploy_sh_writes():
+    """Every file proxy/deploy.sh installs for confirmd must be
+    rollback-restorable. Regression for issue #471: scripts/bounded_http.py
+    was installed to /home/swapd but missing from confirm_install_paths —
+    a rollback after a failed deploy would have reverted confirmd.py while
+    leaving the NEW helper live (or vice versa), the exact half-state
+    rollback exists to prevent."""
+    r = source_and('get_arr confirm install_paths')
+    assert r.returncode == 0, r.stderr
+    listed = {line.strip() for line in r.stdout.splitlines() if line.strip()}
+    required = {
+        "/home/swapd/confirmd.py",
+        "/home/swapd/bounded_http.py",  # issue #471: the shared server
+        # helper must ship with confirmd — the standalone deployment
+        # adds /home/swapd to sys.path, so a missing helper fails the
+        # import loudly at service start.
+        "/home/swapd/push.py",
+    }
+    missing = required - listed
+    assert not missing, "missing from confirm_install_paths: %s" % sorted(missing)
+    # Non-vacuous: deploy.sh really does write those targets.
+    with open(os.path.join(REPO, "proxy", "deploy.sh")) as f:
+        body = f.read()
+    for t in required:
+        assert t in body, "deploy.sh no longer writes %s (test is stale)" % t
+
+
 # --- change mapping ----------------------------------------------------------
 
 def test_map_changed_files(tmp_path):
