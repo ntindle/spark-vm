@@ -2,7 +2,7 @@
 
 The tenant-status vocabulary (`docs/TENANT_STATUS_ENDPOINT.md` §2) has a
 `connection-unreachable` code — "Relay/cert path failed while the poll
-says otherwise" (endpoint §2; spec §8) — whose producer
+says otherwise" (`docs/FIRST_TEN_MINUTES_SPEC.md` §8) — whose producer
 was always a placeholder: "Control-plane/relay defect instrumentation".
 No relay doc existed, no liveness signal existed, no producer existed.
 `docs/STUCK_DETECTOR_DESIGN.md` §8 Q6 named this the wiring gap and its
@@ -52,11 +52,6 @@ contract, not a later fix), exposed on a control-plane query surface:
 `relay_session_liveness(vm_id) → {session_id, state: active|idle|closed,
 last_bytes_at, hostkey_verified}`. Idle threshold: 5 minutes without
 bytes (a real cadence-friendly number, not a product promise — §9 Q1).
-Probe connections are control-plane traffic, not tenant sessions: the
-relay daemon MUST exclude prober handshakes from the session journal
-(R2 names the discriminator, e.g. a prober identity marker). Channel A
-journals tenant sessions only — a probe evidencing itself would collapse
-the two channels.
 
 ## 3. Two-channel liveness
 
@@ -118,28 +113,15 @@ Why both channels observe the path without any inbound path to the VM:
 ## 5. Producer contract — wiring into the tenant-status layer
 
 The instrument's shipped output is `relay_path_state(vm_id) → ok |
-degraded | down`, with the §3 sub-code (`relay` | `cert` | `box-leg`)
-on non-`ok` readings. Value mapping from the §3 taxonomy: `path_ok` →
-`ok`; `relay_defect`/`cert_defect`/`box_leg_defect` → `down` with the
-corresponding sub-code. `degraded` is the operator-warning state — the
-prober disagrees with itself across consecutive probes (flapping), or the
-passive journal is stale past the §2 idle threshold while the prober
-still reports `ok`. `degraded` does **not** fire transition rule 6 on
-its own (the rule fires only on `down`); it is recorded in `detail` and
-on the operator surface, and for the stuck detector's §6 conjunct a
-`degraded` reading is *suspect* — it evaluates as unobservable
-(`insufficient-observability`), never as assumed-`ok`.
+degraded | down`, with the §3 sub-code (`relay` | `cert` | `box-leg`).
 The tenant layer consumes it as the `connection-unreachable` producer:
 
 - The **`live`-entry AND-combine** (endpoint §4: "provider running **and**
   relay/cert path reachable") gets its second input. At provision, (a)
   reachability failure (no bundle ever handed out) still holds at
   `provisioning` per the existing rule — the instrument's job starts at
-  `live`. At live-entry the second input is the provision-time relay/cert
-  verification — the same reachability check rule 1(a) already performs
-  (unreachable ⇒ hold at `provisioning`); post-`live`, the prober's
-  readings maintain it.
-- **Transition rule 6** (relay/cert suspension) fires on a `down`
+  `live`.
+- **Transition rule 6** (relay/cert suspension) fires on a non-`ok`
   reading while the arc is post-`live`: latch the arc code, serve
   `connection-unreachable` with the sub-code in `detail`, record
   arc-advancing events against the latch, re-evaluate on recovery —
@@ -193,16 +175,14 @@ remains unreachable until all four ship.
 - **R1 — session journal (passive instrument):** the relay daemon emits
   §2 frames to a bounded local journal + `relay_session_liveness(vm_id)`
   query. Rotation bound is part of R1's acceptance (unbounded = fail).
-- **R2 — dial prober (active instrument):** control-plane prober
-  carrying the §2 identity-marker discriminator (prober handshakes
-  excluded from the session journal), §3 cadence and outcome taxonomy,
-  handshake-only, pinned-fingerprint verification. Ships with an
-  operator-visible `relay_path_state` surface — no tenant-status wiring
-  yet (§5 interim honesty).
+- **R2 — dial prober (active instrument):** control-plane prober,
+  §3 cadence and outcome taxonomy, handshake-only, pinned-fingerprint
+  verification. Ships with an operator-visible `relay_path_state`
+  surface — no tenant-status wiring yet (§5 interim honesty).
 - **R3 — tenant-status producer wiring:** the tenant layer consumes
   `relay_path_state` — transition rule 6 suspension + the live-entry
-  AND-combine. Runtime wiring only (the §2 row's producer pointer was
-  set by this design turn).
+  AND-combine. Updates `docs/TENANT_STATUS_ENDPOINT.md` §2's
+  `connection-unreachable` row from "instrumentation" to this producer.
 - **R4 — stuck-detector conjunct:** §6's predicate change; closed-world
   on instrument darkness; S2-calibration note that the soak's confusion
   classes gain a "suspension while measuring" row.
@@ -231,9 +211,9 @@ remains unreachable until all four ship.
 
 ## Cross-references
 
-- `docs/TENANT_STATUS_ENDPOINT.md` §2 (`connection-unreachable` row;
-  transition rule 6, relay/cert suspension), §4 (live-entry AND-combine)
-  — R3 wires this design in as the named producer.
+- `docs/TENANT_STATUS_ENDPOINT.md` §2 (`connection-unreachable` row),
+  §4 (live-entry AND-combine, rule 6 relay/cert suspension) — R3 wires
+  this design in as the named producer.
 - `docs/STUCK_DETECTOR_DESIGN.md` §4 (predicate), §7 S3, §8 Q6 — Q6's
   answer; S3's dependency list.
 - `docs/FIRST_TEN_MINUTES_SPEC.md` §2 (minute-0 relay criterion), §8
@@ -241,7 +221,7 @@ remains unreachable until all four ship.
 - `harness/provider_iface.py` (`ProvisionSpec.public_ingress` invariant,
   `ssh_info()`, `dial()` verb) — the contract the relay implements and
   the §4 discipline it must not violate.
-- `docs/USAGE_METERING_DESIGN.md` §5–§6 (counters-over-content privacy,
+- `docs/USAGE_METERING_DESIGN.md` §4–§5 (counters-over-content privacy,
   #376 rotation lesson) — frame and journal constraints.
 - `docs/SENTINEL_TELEMETRY_SURFACES.md` S3 — why the emitter is the relay
   daemon, never the tenant's Muse.
