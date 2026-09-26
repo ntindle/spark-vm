@@ -134,6 +134,16 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- confirmd now bounds its HTTP thread pool and its connection setup: the
+  server caps in-flight handler threads at 64 (over-cap connections are
+  closed immediately, fail closed), the TLS handshake runs inside a bounded
+  handler thread instead of the single accept loop (so one peer stalling
+  the handshake can no longer pin all new connections), and each accepted
+  socket gets a 10s timeout — an idle connection is reclaimed after 10s of
+  socket inactivity. Holding a slot indefinitely now requires actively
+  trickling data on all 64 connections (previously one idle connection
+  sufficed) (#469).
+
 - The jail build now validates the agent's SSH public key before doing
   anything with it: a file with Windows line endings, trailing blank
   lines, or a malformed key fails the build with a clear error instead
