@@ -56,6 +56,9 @@ import urllib.parse
 from collections import defaultdict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+# _Threads is socketserver-private, but this is the exact ThreadingMixIn
+# thread-lifecycle contract BoundedThreadingHTTPServer preserves below.
+from socketserver import _Threads
 
 # --- spark-vm version stamping (docs/VERSIONING.md) ---
 # Single-source repo VERSION: reported at startup and on /api/version.
@@ -1906,6 +1909,77 @@ def _version_payload():
             "handler": Handler.server_version}
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    # Issue #77 (M8): bound the accept->thread fan-out (see main()).
+    # Capacity model: confirmd's client classes are the owner's browser and
+    # the agent proxy — expected peak ~4 concurrent requests. 64 threads is
+    # ~16x headroom. The 10s socket timeout reclaims idle stalls; a peer
+    # actively dripping >=1 byte/10s can still pin a slot, so 64 dripping
+    # connections saturate the pool — shedding stays fail closed (connection
+    # dropped, state stays file-backed so a retry succeeds) rather than
+    # queued unboundedly. A cumulative per-connection deadline is the
+    # long-term answer (follow-up).
+    max_threads = 64
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._slots = threading.Semaphore(self.max_threads)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.close_request(request)
+            return
+        try:
+            t = threading.Thread(
+                target=self.process_request_thread,
+                args=(request, client_address))
+            t.daemon = self.daemon_threads
+            t.start()
+            if self.block_on_close:
+                # Preserve ThreadingMixIn's thread-lifecycle contract: the
+                # stock process_request registers the thread so server_close
+                # honors block_on_close. Registered after start() so a failed
+                # start never parks a dead thread in the join list.
+                vars(self).setdefault("_threads", _Threads())
+                self._threads.append(t)
+        except Exception:
+            # Thread creation can fail under the same resource exhaustion
+            # this pool guards against — log it, release the slot, and close
+            # the request so a transient crunch can't drain the pool
+            # permanently.
+            self.handle_error(request, client_address)
+            self._slots.release()
+            self.close_request(request)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            # Issue #77 (M8): the TLS handshake runs here, in the bounded
+            # handler thread — never in the accept loop. main() wraps the
+            # listening socket with do_handshake_on_connect=False, so a peer
+            # that completes TCP and stalls the handshake burns one pool
+            # slot (subject to fail-closed shedding) instead of pinning the
+            # single serve_forever thread for every client. do_handshake()
+            # honors the socket timeout, so a stalled handshake raises
+            # socket.timeout and the slot is released below. Non-TLS
+            # requests (plain-socket tests) have no do_handshake and skip
+            # this.
+            do_handshake = getattr(request, "do_handshake", None)
+            if do_handshake is not None:
+                request.settimeout(Handler.timeout)
+                do_handshake()
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            try:
+                self.shutdown_request(request)
+            finally:
+                # Release the pool slot even if shutdown_request raises: a
+                # raise here must never permanently burn one of the 64 slots
+                # (the mitigation must not become the DoS).
+                self._slots.release()
+
+
 def main():
     # Finding 67: print the resolved origins at startup so the journal
     # shows them; a missing ts.net name must be visible, not silent.
@@ -1933,50 +2007,20 @@ def main():
     # in-flight handler threads; over-cap connections are closed
     # immediately (fail closed) rather than queued unboundedly.
     srv = BoundedThreadingHTTPServer((BIND, PORT), Handler)
-    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    # Issue #77 (M8): defer the TLS handshake out of the accept loop.
+    # wrap_socket's default do_handshake_on_connect=True runs the handshake
+    # inside accept() on the single serve_forever thread — one tailnet peer
+    # completing TCP and stalling ClientHello would pin ALL new connections
+    # while the 64-slot pool sat idle (and Handler.timeout never applies
+    # there: accepted sockets do not inherit the listener's timeout).
+    # Deferred, a stalled handshake burns one bounded pool slot, is cut off
+    # by the socket timeout in process_request_thread, and stays subject to
+    # fail-closed over-cap shedding. Side benefit: shedding now happens
+    # before any TLS work is paid.
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True,
+                                 do_handshake_on_connect=False)
     print("confirmd on https://%s:%d/ as %s" % (BIND, PORT, OWNER), flush=True)
     srv.serve_forever()
-
-
-class BoundedThreadingHTTPServer(ThreadingHTTPServer):
-    # Issue #77 (M8): bound the accept->thread fan-out (see main()).
-    # Capacity model: confirmd's client classes are the owner's browser and
-    # the agent proxy — expected peak ~4 concurrent requests. 64 threads is
-    # ~16x headroom; the 10s socket timeout bounds each slot's hold time, so
-    # worst-case sustained throughput before shedding is ~6.4 slow req/s.
-    # Shedding is fail closed (connection dropped, state stays file-backed
-    # so a retry succeeds) rather than queued unboundedly.
-    max_threads = 64
-
-    def __init__(self, *a, **k):
-        super().__init__(*a, **k)
-        self._slots = threading.Semaphore(self.max_threads)
-
-    def process_request(self, request, client_address):
-        if not self._slots.acquire(blocking=False):
-            self.close_request(request)
-            return
-        try:
-            t = threading.Thread(
-                target=self.process_request_thread,
-                args=(request, client_address))
-            t.daemon = self.daemon_threads
-            t.start()
-        except Exception:
-            # Thread creation can fail under the same resource exhaustion
-            # this pool guards against — release the slot so a transient
-            # crunch can't drain the pool permanently.
-            self._slots.release()
-            self.close_request(request)
-
-    def process_request_thread(self, request, client_address):
-        try:
-            self.finish_request(request, client_address)
-        except Exception:
-            self.handle_error(request, client_address)
-        finally:
-            self.shutdown_request(request)
-            self._slots.release()
 
 
 if __name__ == "__main__":

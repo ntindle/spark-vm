@@ -1643,6 +1643,123 @@ class M8ServerHardeningTests(unittest.TestCase):
         # The connection was closed, not left dangling.
         self.assertEqual(accepted.fileno(), -1)
 
+    def test_slot_released_when_shutdown_request_raises(self):
+        """A raise in shutdown_request must not permanently burn a pool
+        slot — the mitigation must not become the DoS (Security review B2).
+        The raise still propagates (not swallowed); only the slot release
+        is guaranteed."""
+        srv = self._make_server(max_threads=1)
+        client, accepted = __import__("socket").socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        seen = []
+        old_hook = threading.excepthook
+        threading.excepthook = lambda args: seen.append(args.exc_value)
+        self.addCleanup(setattr, threading, "excepthook", old_hook)
+        with mock.patch.object(srv, "finish_request", lambda r, a: None), \
+             mock.patch.object(srv, "shutdown_request",
+                               side_effect=RuntimeError("boom")):
+            srv.process_request(accepted, ("127.0.0.1", 0))
+            for _ in range(100):
+                if srv._slots._value == 1:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("pool slot was not released when shutdown_request "
+                          "raised")
+        for _ in range(100):
+            if seen:
+                break
+            time.sleep(0.02)
+        self.assertEqual(len(seen), 1)
+        self.assertIsInstance(seen[0], RuntimeError)
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        srv._slots.release()
+
+    def test_handler_threads_registered_for_block_on_close(self):
+        """process_request preserves ThreadingMixIn's lifecycle bookkeeping:
+        with block_on_close, handler threads land in srv._threads so
+        server_close() waits for them (Architecture review)."""
+        import socket as _socket
+        srv = self._make_server(max_threads=2)
+        srv.daemon_threads = False  # _Threads only tracks non-daemon threads
+        self.assertTrue(srv.block_on_close)
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake_finish(request, client_address):
+            started.set()
+            release.wait(10)
+
+        with mock.patch.object(srv, "finish_request", fake_finish):
+            client, accepted = _socket.socketpair()
+            self.addCleanup(client.close)
+            self.addCleanup(accepted.close)
+            srv.process_request(accepted, ("127.0.0.1", 0))
+            self.assertTrue(started.wait(5), "handler thread never started")
+            for _ in range(100):
+                if any(t.is_alive() for t in srv._threads):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("handler thread was not registered in srv._threads")
+            release.set()
+
+    @unittest.skipUnless(__import__("shutil").which("openssl"),
+                         "openssl needed for a throwaway test cert")
+    def test_stalled_tls_handshake_does_not_pin_accept_loop(self):
+        """The TLS handshake must not run in the accept loop (Security
+        review B1): one peer stalling the handshake must not stop a
+        legitimate TLS client from being served."""
+        import shutil as _shutil  # noqa: F401 (used by the skipUnless above)
+        import socket as _socket
+        import ssl as _ssl
+        import subprocess as _subprocess
+        with tempfile.TemporaryDirectory() as d:
+            cert = os.path.join(d, "cert.pem")
+            key = os.path.join(d, "key.pem")
+            _subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048",
+                 "-keyout", key, "-out", cert, "-days", "1",
+                 "-nodes", "-subj", "/CN=localhost"],
+                check=True, capture_output=True, timeout=60)
+            old_timeout = cd.Handler.timeout
+            cd.Handler.timeout = 2  # keep the stalled-handshake thread short
+            self.addCleanup(setattr, cd.Handler, "timeout", old_timeout)
+            srv = self._make_server(max_threads=2)
+            sctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+            sctx.load_cert_chain(cert, key)
+            # Exactly what main() does:
+            srv.socket = sctx.wrap_socket(
+                srv.socket, server_side=True, do_handshake_on_connect=False)
+            served = []
+            with mock.patch.object(srv, "finish_request",
+                                   lambda r, a: served.append(1)), \
+                 mock.patch.object(srv, "handle_error"):
+                t = threading.Thread(target=srv.serve_forever, daemon=True)
+                t.start()
+                self.addCleanup(srv.shutdown)
+                port = srv.server_address[1]
+                # Attacker: completes TCP, never sends ClientHello.
+                attacker = _socket.create_connection(("127.0.0.1", port))
+                self.addCleanup(attacker.close)
+                # Legitimate client: full TLS handshake + request.
+                cctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+                cctx.check_hostname = False
+                cctx.verify_mode = _ssl.CERT_NONE
+                raw = _socket.create_connection(("127.0.0.1", port))
+                self.addCleanup(raw.close)
+                legit = cctx.wrap_socket(raw, server_hostname="localhost")
+                self.addCleanup(legit.close)
+                for _ in range(200):
+                    if served:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail("legitimate TLS client was not served within "
+                              "10s while one handshake stalled — the accept "
+                              "loop is pinned")
+
 
 if __name__ == "__main__":
     unittest.main()
