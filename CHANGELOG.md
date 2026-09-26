@@ -114,6 +114,14 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- Waitlist email spool writes are atomic now: each spooled email is written
+  to a temporary file, flushed, synced, and renamed into place, so a crash
+  or full disk mid-write can no longer leave a torn half-written email for
+  the operator's sender to choke on or send half of (#389).
+- The waitlist daemon's in-memory per-IP abuse-rate table is now bounded:
+  once it passes 10,000 distinct IPs, keys with no recent activity are
+  swept (rate-limited to one sweep per minute, so a flood of unique IPs
+  can't turn every request into a slow full-table rebuild) (#390).
 - Jail firewall watchdog: the allow-head check now compares rule lines
   after stripping whitespace outside quoted names, so a future nftables
   version that re-renders rule text (indent, brace spacing) can't turn the
