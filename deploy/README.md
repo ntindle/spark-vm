@@ -100,6 +100,56 @@ Concurrency: deploy and rollback take a `flock` on the state dir; an
 overlapping timer tick exits quietly, a manual `rollback` during a deploy
 fails fast, and a manual `proxy/deploy.sh` during a deploy fails fast.
 
+## Host-side change inputs (`extra_inputs`)
+
+The repo-diff mapping names changed components, but it cannot see files that
+live on the box and not in the repo. Issue #302: a mitmproxy CA rotation (or
+a first-run CA generation) with no concurrent code change used to leave a
+stale or absent `with-proxy` CA bundle indefinitely — the rebuild is coupled
+to the CA lifecycle now, not to code deploys. Each component may declare
+`<component>_extra_paths` in `deploy/components.conf`: host-side inputs
+whose digests are hashed on every tick and recorded in
+`~/.sparkvm-deploy/extra-inputs-hash`. A digest change forces that
+component's redeploy on the next tick, even when the repo diff is empty.
+
+The only declared extra input today is the proxy's:
+`"$SWAPD_HOME/.mitmproxy/mitmproxy-ca-cert.pem"` — a rotated or newly
+generated CA forces the proxy-confirm unit to redeploy, so `proxy/deploy.sh`
+step 4b rebuilds the bundle. Missing files hash as `missing`, non-regular
+files as `nonregular`, read errors as `unreadable`: all are legitimate
+digest inputs, so CA-generated, CA-rotated, and CA-deleted transitions all
+count as changes. Issue #303: the `WITH_PROXY_CA_BUNDLE` env override that
+`components.conf` advertises is now exported into the child shell that runs
+`proxy/deploy.sh`, so the snapshot/rollback coverage and the actual install
+write the same path (previously the override only redirected the snapshot).
+
+Forced-deploys are dampened: at most one extra-inputs-forced deploy per
+component per hour (`EXTRA_INPUTS_FORCE_MIN_SECS=3600`), and attempts are
+recorded even when they fail — a persistently-failing input cannot churn the
+10-minute tick into a deploy/rollback loop. A failed forced deploy retries
+on the next tick but **never marks the commit blocked** (the commit is fine —
+a same-commit forced deploy is not a version deploy): it gets its own
+snapshot directory (`<snapdir>-extra-inputs`, never clobbering the version
+deploy's snapshot), and its audit lines carry `"trigger":"extra-inputs"` so
+the trail does not masquerade as a version deploy. `status` surfaces the
+current state: `extra-inputs(proxy): in sync (…)` or `CHANGED — recorded
+… vs current … (next deploy force-redeploys proxy)`.
+
+The hashing reads at deploy privilege through
+`deploy/extra_inputs_hash_read.py` (installed next to the updater copy by
+`init`; a stale install missing the helper fails loud with an ERROR, never
+hashes everything as unreadable). The open discipline is atomic —
+`O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, fstat before read, regular-file gate,
+hardlink refusal — and the read is capped at 1 MiB
+(`EXTRA_INPUTS_HASH_MAX_BYTES`, with the full file size folded in so pure
+growth still flips the digest). The input is hashed twice per tick while
+holding the single-flight lock, so the cap is what keeps a planted sparse
+file or FIFO from stalling the tick; the same discipline pins
+`proxy/privileged_read.py` via `deploy/test_privileged_open_conformance.py`.
+Adding a new extra path: keep the list short, the files small, and the
+paths readable at deploy privilege, and leave a `components.conf` comment
+saying why (as the #302 comment does).
+
 ## Manual operations
 
 ```bash
@@ -128,7 +178,7 @@ fix, clear it by hand — `status` prints the exact `rm` command.
 
 | component | repo paths | services restarted | gate | install | health |
 |---|---|---|---|---|---|
-| `proxy` | `proxy/` | swap-proxy, swap-inference | pytest (swap addon, grant writer, round6) | `proxy/deploy.sh --no-restart` | tcp 127.0.0.1:18080, 18081 |
+| `proxy` | `proxy/` (+ host-side CA cert, [extra input](#host-side-change-inputs-extra_inputs)) | swap-proxy, swap-inference | pytest (swap addon, grant writer, round6) | `proxy/deploy.sh --no-restart` | tcp 127.0.0.1:18080, 18081 |
 | `confirm` | `confirm/` | confirmd | pytest (confirmd) | (shares proxy's unit) | tcp TAILNET:8443 (resolved at check time) |
 | `cred-ui` | `cred-ui/` | cred-ui (user unit) | py_compile | subtree sync into checkout | tcp 127.0.0.1:18740 |
 
