@@ -425,12 +425,21 @@ def _is_loopback(addr):
     operator-only /waitlist/status route (#392) is refused for every other
     peer — even if the daemon is bound to a non-loopback interface — so
     the status surface never leaks onto a public listener. ipaddress covers
-    both 127.0.0.0/8 and ::1; IPv4-mapped forms (::ffff:127.0.0.1) are NOT
-    loopback per ipaddress semantics and are refused, fail-closed."""
+    both 127.0.0.0/8 and ::1; IPv4-mapped forms (::ffff:127.0.0.1) are
+    refused, fail-closed, by explicit check below. Do NOT rely on
+    ipaddress's mapped-form semantics for this: CPython changed
+    IPv6Address.is_loopback for ::ffff:0.0.0.0/96 between patch releases
+    (False on 3.12.3, True on 3.12.14 — the embedded-IPv4 property is now
+    inherited), which made this gate's verdict depend on the interpreter's
+    patch version. The explicit ipv4_mapped refusal pins fail-closed on
+    every Python."""
     try:
-        return ipaddress.ip_address(addr.split("%")[0]).is_loopback
+        ip = ipaddress.ip_address(addr.split("%")[0])
     except ValueError:
         return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return False  # fail-closed, on every Python
+    return ip.is_loopback
 
 
 def b64url_encode(raw: bytes) -> str:
