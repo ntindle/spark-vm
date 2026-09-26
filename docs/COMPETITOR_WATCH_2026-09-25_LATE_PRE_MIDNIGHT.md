@@ -113,7 +113,7 @@ Two searches; all in-lane candidates dedupe to filed corpus.
   containment-color, not a new vendor surface.
 - **GlobeNewswire syndication recrawls** (marketminute.com,
   independent.mk, theantlersamerican, therapybutbetter.com,
-  sexaulity.com — all Sep-24-dated): the same Docker launch
+  sexuality.com — all Sep-24-dated): the same Docker launch
   announcement verbatim — dedupe to **C45**, no new facts.
 - First search's GitHub-dev-docs results (Daytona field-guide,
   sandbox provider specs, agentbox-sdk): third-party engineering
