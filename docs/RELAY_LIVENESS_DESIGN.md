@@ -134,7 +134,7 @@ The tenant layer consumes it as the `connection-unreachable` producer:
   verification — the same reachability check rule 1(a) already performs
   (unreachable ⇒ hold at `provisioning`); post-`live`, the prober's
   readings maintain it.
-- **Transition rule 6** (relay/cert suspension) fires on a non-`ok`
+- **Transition rule 6** (relay/cert suspension) fires on a `down`
   reading while the arc is post-`live`: latch the arc code, serve
   `connection-unreachable` with the sub-code in `detail`, record
   arc-advancing events against the latch, re-evaluate on recovery —
