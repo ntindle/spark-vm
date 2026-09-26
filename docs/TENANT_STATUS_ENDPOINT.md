@@ -77,7 +77,7 @@ and feeds *into* this endpoint; it is never exposed raw, per
 | `no-gated-action` | Muse never attempted the gated action | Pilot analysis; operator-only (no human rendering) |
 | `human-denied` | Human tapped Deny | The denial event |
 | `human-drop-off` | Approval expired unanswered (§4: one reminder at T+TTL/2, then expiry) | Expiry; pairs with G1 (expired approvals need an agent-visible terminal record, GitHub #213) |
-| `stuck` | First session stalled | Operator/heuristic, currently operator-set per spec §8's concrete rule (session abandonment: 30 minutes with no Muse action and no pending approval); G9's real stall detector targets that rule. Exits: operator/heuristic clears → the tenant layer re-evaluates to the current arc code; a reprovision restarts the session (transition rule 7). Until G9's detector lands, `stuck` must never be exposed as automatic. |
+| `stuck` | First session stalled | Operator/heuristic, currently operator-set per spec §8's concrete rule (session abandonment: 30 minutes with no Muse action and no pending approval); G9's real stall detector targets that rule. Exits: operator/heuristic clears → the tenant layer re-evaluates to the current arc code; a reprovision restarts the session (transition rule 7). Until S3's confidence bar is met (`docs/STUCK_DETECTOR_DESIGN.md` §6), `stuck` must never be exposed as automatic. |
 | `provisioning-failed` | Provisioning terminally failed | H4 driver terminal failure |
 
 ### Transition rules (no skips, no surprises)
@@ -283,6 +283,15 @@ readers                       tenant Muse (linked key) · signup page (cookie)
    screen" — `HOSTED_SIGNUP_WEB_UI.md` §5)? A re-entering tenant must not
    get a rotated approvals URL mid-arc. Needs a decision before S1
    serves real signup traffic. (Filed as G8.)
-3. **`stuck` detection:** currently a heuristic placeholder. A real stall
-   detector (no provider events + no Muse heartbeats for N minutes) is
-   its own design; until then `stuck` is operator-set. (Filed as G9.)
+3. **`stuck` detection:** answered by `docs/STUCK_DETECTOR_DESIGN.md`
+   (G9): the control-plane stall detector mechanizing the §8 rule (30 min,
+   no Muse action, no pending approval), with the confusion-class ladder
+   (`connection-unreachable`, `waiting-on-approval`, `human-drop-off`,
+   `policy-misfire`, `no-gated-action` are never relabeled `stuck` —
+   the §4 arc-scope conjunct hard-enforces this: only `live`-arc sessions
+   are eligible, and `connection-unreachable`, `box-unhealthy`,
+   `provisioning-failed`, `waiting-on-approval`, `human-drop-off`,
+   `human-denied` can never enter the predicate),
+   agent-forgeable-heartbeat cross-checking, and the S1→S2→S3 confidence
+   staging — until S3's bar is met, `stuck` stays operator-set and is
+   never exposed as automatic. (Filed as G9.)
