@@ -306,7 +306,8 @@ class BoundedHttpTests(unittest.TestCase):
 
 
 class DaemonAdoptionTests(unittest.TestCase):
-    """cred-ui and waitlistd actually use the shared helper (issue #471)."""
+    """All three daemons use the shared helper (issue #471); confirmd
+    additionally keeps the #472 cumulative-deadline switch on."""
 
     @classmethod
     def setUpClass(cls):
@@ -344,6 +345,28 @@ class DaemonAdoptionTests(unittest.TestCase):
         self.assertNotIn("httpd = ThreadingHTTPServer((bind, port), _Handler)",
                          src)
 
+    def test_confirmd_shares_helper_and_keeps_deadline(self):
+        """confirmd's BoundedThreadingHTTPServer is a thin subclass of the
+        shared helper — not a forked copy (issue #471) — with the #472
+        cumulative deadline switched on (60s). Guards against the
+        convergence silently dropping confirmd's deadline (PR #476)."""
+        confirmd = _load("confirmd_471", os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "confirm",
+            "confirmd.py")))
+        self.assertTrue(
+            issubclass(confirmd.BoundedThreadingHTTPServer,
+                       bounded_http.BoundedThreadingHTTPServer),
+            "confirmd must reuse the shared helper, not fork it")
+        self.assertEqual(
+            confirmd.BoundedThreadingHTTPServer.connection_deadline, 60,
+            "the #472 deadline must survive the #471 convergence")
+        # The kill still aborts fail-closed and audits: the subclass
+        # override must route through confirmd's own _kill_connection.
+        import inspect
+        src = inspect.getsource(
+            confirmd.BoundedThreadingHTTPServer.kill_connection)
+        self.assertIn("_kill_connection", src)
+
     def test_waitlistd_gains_socket_timeout(self):
         """waitlistd had NO socket timeout before #471 — a stalled
         headers/body read pinned a handler thread forever. Now bounded
@@ -373,6 +396,137 @@ class DaemonAdoptionTests(unittest.TestCase):
         resp = conn.getresponse()
         self.assertIn(resp.status, (200, 302, 404))
         resp.read()
+
+
+class _DeadlinePool(BoundedThreadingHTTPServer):
+    """A daemon that opts into the cumulative per-connection deadline."""
+
+    max_threads = 2
+    connection_deadline = 0.2
+
+
+class ConnDeadlineTests(unittest.TestCase):
+    """The cumulative per-connection deadline lives in the shared helper
+    (issue #472, ported from confirmd's local class in PR #476) — a peer
+    dripping >=1 byte per socket-timeout holds a pool slot indefinitely,
+    because the socket timeout is per operation, not cumulative."""
+
+    def _make_server(self, cls=_DeadlinePool):
+        srv = cls(("127.0.0.1", 0), socketserver.BaseRequestHandler)
+        self.addCleanup(srv.server_close)
+        return srv
+
+    def test_deadline_off_by_default(self):
+        """The deadline is opt-in: the base helper leaves it unset, so
+        cred-ui and waitlistd keep their #471 behavior byte-for-byte."""
+        self.assertIsNone(BoundedThreadingHTTPServer.connection_deadline)
+
+    def test_deadline_timer_fires_and_releases_slot(self):
+        """A handler stuck in recv while the peer trickles is aborted at
+        the cumulative deadline — the thread exits and the pool slot is
+        released instead of pinned forever."""
+        srv = self._make_server()
+        peer, server_end = socket.socketpair()
+        self.addCleanup(peer.close)
+        self.addCleanup(server_end.close)
+
+        def trickling_handler(request, client_address):
+            # Peer never sends; per-operation timeout would never fire
+            # here on a trickling peer either — only the deadline saves us.
+            server_end.recv(4096)
+
+        started = time.monotonic()
+        # Mirror the real path: process_request acquires the slot before
+        # spawning the handler thread; process_request_thread releases it.
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        with mock.patch.object(srv, "finish_request", trickling_handler):
+            t = threading.Thread(
+                target=srv.process_request_thread,
+                args=(server_end, ("127.0.0.1", 4242)), daemon=True)
+            t.start()
+            t.join(timeout=10)
+        elapsed = time.monotonic() - started
+        self.assertFalse(t.is_alive(),
+                         "handler thread still pinned after the deadline")
+        self.assertLess(elapsed, 10,
+                        "deadline did not abort the stalled handler")
+        # Slot released: the mitigation must not become the DoS.
+        self.assertEqual(srv._slots._value, 2)
+        # The peer observed the abort as EOF.
+        peer.settimeout(5)
+        self.assertEqual(peer.recv(1), b"")
+
+    def test_deadline_timer_cancelled_on_success(self):
+        """A request that completes before the bound cancels its timer —
+        well-behaved connections never pay for the mitigation, and no
+        error is logged for a normal completion."""
+        srv = self._make_server()
+        seen = []
+
+        class FakeTimer:
+            def __init__(self, interval, fn, args=()):
+                self.interval = interval
+                self.fn = fn
+                self.args = args
+                self.started = False
+                self.cancelled = False
+
+            def start(self):
+                self.started = True
+                seen.append(self)
+
+            def cancel(self):
+                self.cancelled = True
+
+        client, accepted = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        with mock.patch.object(threading, "Timer", FakeTimer), \
+             mock.patch.object(srv, "finish_request",
+                               lambda r, a: None), \
+             mock.patch.object(srv, "handle_error") as handle_error:
+            srv.process_request_thread(accepted, ("127.0.0.1", 4242))
+        self.assertEqual(len(seen), 1, "exactly one deadline timer per "
+                         "connection")
+        self.assertTrue(seen[0].started, "the deadline timer must arm")
+        self.assertTrue(seen[0].cancelled, "the deadline timer must "
+                        "disarm on normal completion")
+        handle_error.assert_not_called()
+
+    def test_kill_connection_aborts_and_is_idempotent(self):
+        """kill_connection aborts the connection: the peer sees EOF, and a
+        second kill on the already-dead socket is a no-op, not a raise."""
+        srv = self._make_server(_SmallPool)
+        client, accepted = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        srv.kill_connection(accepted, ("127.0.0.1", 4242))
+        client.settimeout(5)
+        self.assertEqual(client.recv(1), b"")
+        # Idempotent: killing twice must not raise (the timer path and
+        # shutdown_request both touch the socket).
+        srv.kill_connection(accepted, ("127.0.0.1", 4242))
+
+    def test_kill_connection_override_audits(self):
+        """The audit seam confirmd relies on: a subclass override runs its
+        audit while the base abort still executes underneath."""
+        audited = []
+
+        class AuditingPool(_DeadlinePool):
+            def kill_connection(self, request, client_address):
+                audited.append(client_address[0])
+                super().kill_connection(request, client_address)
+
+        srv = AuditingPool(("127.0.0.1", 0),
+                           socketserver.BaseRequestHandler)
+        self.addCleanup(srv.server_close)
+        client, accepted = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        srv.kill_connection(accepted, ("127.0.0.1", 4242))
+        self.assertEqual(audited, ["127.0.0.1"])
+        client.settimeout(5)
+        self.assertEqual(client.recv(1), b"")
 
 
 if __name__ == "__main__":

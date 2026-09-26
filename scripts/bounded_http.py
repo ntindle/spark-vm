@@ -162,7 +162,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
                 # is a harmless no-op.
                 timer.start()
             # The TLS handshake runs here, in the bounded handler thread
-            # \u2014 never in the accept loop. Daemons wrap the listening
+            # — never in the accept loop. Daemons wrap the listening
             # socket with do_handshake_on_connect=False, so a peer that
             # completes TCP and stalls the handshake burns one pool slot
             # (subject to fail-closed shedding) instead of pinning the
