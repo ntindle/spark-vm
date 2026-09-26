@@ -117,7 +117,7 @@ states the construction, not a static pin.
   guarded by a fail-closed watchdog.** The firewall is applied at build
   and at boot; `jail-firewall-verify.service` + `.timer` (installed by
   build.sh from `jail-firewall-verify.sh`) re-check the table every
-  5 minutes. The checked invariant is the enforcement rules themselves,
+  minute. The checked invariant is the enforcement rules themselves,
   not the chain shells: all three chains are `policy accept`, so the
   watchdog pins the drop-rule markers (`jail-fwd-drop:`,
   `jail-fwd-indrop:`, `jail-input-drop:`) and the proxy DNAT rule — an
@@ -153,7 +153,7 @@ states the construction, not a static pin.
   restored for new flows and the red unit alerts the operator; only
   hole-era established flows could theoretically survive a failed stop.) The residual is bounded downtime, not
   unbounded unenforced running: a table/ruleset loss can exist for up to
-  ~5 minutes before detection, and the re-apply resets the drop counters
+  ~1 minute before detection, and the re-apply resets the drop counters
   (silence on the `jail-*-drop:` prefixes right after a re-apply is
   expected, not peace of mind). Operational rule: the live table is not
   a debugging surface. Any rule the conf does not contain — including a
@@ -243,7 +243,7 @@ through the proxy, and Chromium uses its NSS database.
 - `build.sh` — the reproducible build (run on the host).
 - `jail-firewall-verify.sh` (installed to `/usr/local/sbin/` by build.sh)
   — the runtime firewall watchdog: pins the enforcement rules every
-  5 minutes via its systemd timer; on damage it stops the jail
+  minute via its systemd timer; on damage it stops the jail
   fail-closed, re-applies the table, and exits nonzero so the unit goes
   red — restart is the operator's explicit decision.
 - `cell-mirror.md` — how the agent's own cell works; the properties

@@ -22,6 +22,7 @@ A future edit that silently drops one of these properties fails the suite.
 """
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -1239,6 +1240,9 @@ class TestPubkeyValidation:
         assert r.returncode != 0
         assert b"more than one key" in r.stderr
 
+    @pytest.mark.skipif(
+        shutil.which("ssh-keygen") is None,
+        reason="structural layer needs ssh-keygen on PATH")
     def test_well_shaped_but_corrupt_blob_fails(self):
         # Passes the regex (valid base64 alphabet) but does not decode
         # to a key — only the ssh-keygen layer catches this.
@@ -1249,8 +1253,10 @@ class TestPubkeyValidation:
         assert b"ssh-keygen rejects" in r.stderr
 
     def test_comment_with_spaces_accepted(self):
-        r = self._run((_VALID_ED25519 + "\n").encode())
-        assert r.returncode == 0  # trailing comment already in fixture
+        key = _VALID_ED25519.replace("test-jail-pubkey", "test jail pubkey")
+        r = self._run((key + "\n").encode())
+        assert r.returncode == 0, r.stderr.decode()
+        assert r.stdout.decode().strip() == key
 
     def test_build_sh_validates_before_guest_setup(self, src, active):
         # Static wiring pin: build.sh must source the helper and abort on

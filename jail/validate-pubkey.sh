@@ -9,7 +9,10 @@
 # file BEFORE the build, and the build aborts loudly on any error.
 ## Usage from build.sh:
 #   . "$(dirname "$0")/validate-pubkey.sh"
-#   PUBKEY="$(validate_pubkey_file "$PUBKEY_FILE")"
+#   if ! PUBKEY="$(validate_pubkey_file "$PUBKEY_FILE")"; then
+#       echo "ERROR: invalid agent pubkey ($PUBKEY_FILE)" >&2
+#       exit 1
+#   fi
 # Usage standalone (smoke tests / operator pre-check):
 #   ./validate-pubkey.sh <pubkey-file>   # prints the normalized key line
 set -euo pipefail
@@ -26,7 +29,7 @@ validate_pubkey_file() {
     # Strip CR bytes: CRLF line endings otherwise land verbatim in
     # authorized_keys and break the agent's login.
     raw="$(tr -d '\r' <"$file")"
-    # Exactly one non-blank line is allowed — trailing blank lines are
+    # Exactly one non-blank line is allowed — blank lines anywhere are
     # tolerated (normalized away); any second key line is an error.
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "${line//[[:space:]]/}" ]] && continue
@@ -43,6 +46,9 @@ validate_pubkey_file() {
     }
     # Shape check (cheap, no fork): <known key type> <base64 blob>
     # [optional comment]. Fields are space- or tab-separated.
+    # Deliberately excludes cert key types (ssh-ed25519-cert-v01@...
+    # etc.): the ssh-keygen layer below is the backstop for anything
+    # the shape check cannot see, and certs are not agent login keys.
     if ! [[ "$key" =~ ^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)[[:space:]][A-Za-z0-9+/]+={0,3}([[:space:]].*)?$ ]]; then
         echo "ERROR: pubkey file is not a valid SSH public key line ($file)" >&2
         return 1
