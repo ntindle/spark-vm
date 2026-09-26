@@ -151,6 +151,12 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- When steering a job refuses because the TUI died between the liveness
+  poll and the paste, the refusal now reports the pane as seen at the
+  refusal instant instead of the stale pane captured during the earlier
+  poll — so the operator sees what actually defeated the paste, not
+  outdated output. (#TBD)
+
 - The desktop control bridge now serves each request on its own thread, with at most 8 handlers running at once: a slow driver call can no longer head-of-line-block the panel's screenshot polls or the keepalive's health probe. (#496)
 
 - Manual rollbacks now audit the extra-inputs digest reconciliation outcome:

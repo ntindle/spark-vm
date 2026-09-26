@@ -754,8 +754,12 @@ def _steer(slug, message, verify=True):
     # poll above leaves a window where the TUI can die before the text lands.
     # (The check lives before tmp-file creation so the refusal path leaves
     # no steer text on disk either.)
-    if not _pane_shows_live_tui(*_capture_pane_state(target)):
-        raise RuntimeError(_dead_tui_msg(target, pane))
+    # Issue #321: the refusal reports the FRESH pane, not the stale
+    # pre-TOCTOU capture -- the reported tail must match the refusal
+    # instant, not what the pane showed during the earlier poll.
+    fresh_pane, fresh_cmd = _capture_pane_state(target)
+    if not _pane_shows_live_tui(fresh_pane, fresh_cmd):
+        raise RuntimeError(_dead_tui_msg(target, fresh_pane))
     tmpd = os.path.join(job_dir(slug), "tmp")
     os.makedirs(tmpd, exist_ok=True)
     tmpf = os.path.join(tmpd, f"steer-{int(time.time() * 1000)}.txt")
