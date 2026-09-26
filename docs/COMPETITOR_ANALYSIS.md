@@ -90,8 +90,8 @@ isolation), because those are where the trust story lives.
 | **Docker Cloud Sandboxes** (launch Sept 24, C45) | Task-scoped sandbox | Same microVM as local Docker Sandboxes, on Docker-managed compute; `sbx move --to cloud` (bidirectional filesystem migration); kits (Claude Code, Codex, Copilot, Antigravity, Open Code, Hermes), MCP gateway, per-agent network policies, secrets proxy-injected per request | **PAYG per-second:** Micro 1vCPU/2GiB $0.07/h → XL 16/32 $1.12/h; paused free; volumes/egress/images free; sessions ≤24h; limited-time $250 free credit; GA-venue garnish 2026-09-24 — onstage launch at WeAreDevelopers North America (Docker president Mark Cavage, THIRD-PARTY), keynote blog "available today with pay-as-you-go pricing" (VENDOR-VERIFIED), Sandbox Kits → standard OCI images + CNCF submission commitment, Hermes first-class Kit demo onstage; Register dated-2026-09-24 corroboration (THIRD-PARTY): named shapes Micro 1vCPU/2GiB $0.07/h → XL 16/32 $1.12/h, per-second, OCI-standard Kits — matches vendor figures value-for-value; pre-midnight garnish: launch availability VENDOR-VERIFIED on docker.com's own Sept-24 posts ("available today", 1–16 vCPUs, one-command laptop-to-cloud move, pay-as-you-go), Kits-as-standard-OCI VENDOR-VERIFIED ("Kits make authority reproducible"), BAND Python Kit for Docker Sandboxes announced Sept 24 (THIRD-PARTY) — first third-party Kit-ecosystem signal; post-mid-evening garnish (VENDOR-VERIFIED): first vendor-sourced price-and-terms package — one-command `sbx move --to cloud`, per-second, Micro $0.07/hr → XL $1.12/hr, paused free, 24h sessions, $250 new-account credit; post-night garnish (2026-09-25): Docker's own press page (docker.com/press-release/cloud-sandboxes-extending-secure-ai-agent-isolation-beyond-the-laptop — VENDOR-VERIFIED, full-page read this run, datelined Sep 24, 2026, WeAreDevelopers North America launch, "available now") adds the boot-time quote ("Boot up in low hundreds of milliseconds … ready to go instantly, with secrets, policy, MCP gateways, and agent configuration already built in") and the compute range (1–16 vCPUs, Docker-managed) |
 | **Docker Sandboxes** (morning pass) | Task-scoped sandbox | Local microVMs for coding agents (`sbx` CLI), workspace bind-mounts, **v3 kits** (OCI-based packages: agent workload + reusable mixins for tools/config/credentials/network/instructions — C34), skills tri-state (`off/readonly/readwrite`, read-only default), host-side credential proxying with consent-default-decline, idle auto-stop; centrally managed network/filesystem/MCP policies + sign-in enforcement + audit logs via paid Docker AI Governance | **Free** — `sbx` CLI, incl. commercial use, no per-seat fee ([vendor FAQ](https://docs.docker.com/ai/sandboxes/faq/)); org governance paid (contact sales) |
 | **WSO2 Agent Manager** (evening pass) | Task-scoped sandbox (OSS control plane) | k8s pods + [NetworkPolicy egress](https://github.com/wso2/agent-manager/pull/1496) (runtime class unconfirmed), AgentID (OAuth2) per-agent identity, secret injection via SecretKeyRef, MCP proxy governance, real-time agent suspension | Free, self-hosted (Apache 2.0) or managed SaaS (pricing not published); webinar Sep 29; no independent developer reception found yet |
-| **Boat** (tracked set; 2026-09-22 consolidation; **renamed from ASCII ~2026-09-17** — C40 deduped into this row) | Task-scoped sandbox / persistent computer | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement). Rename VERIFIED this run: `box.ascii.dev`, `boat.dev`, `ascii.dev` serve byte-identical product pages; YC's company page now `ycombinator.com/companies/boat` (YC F26); yc-oss mirror dates the rename 2026-09-17 (`former_names`: ["Ascii box","Ascii"]); the old YC slug `ycombinator.com/companies/ascii` now serves a **301 → `/companies/boat`** (VERIFIED 2026-09-24 midday — harder rename evidence than the page copy). Hardest evidence yet (VERIFIED 2026-09-24 late midday): the vendor's own API docs at `docs.ascii.dev/box/api/v1` render as **"Boat Public API v1"** — the legacy ASCII domain's developer surface brands the product *Boat* (`/box` path and box.ascii.dev endpoints persist). The documented API covers sandbox lifecycle (provisioning → ready/idle → running → archiving → archived; stop/archive, resume, fork, delete; desktop streaming; Idempotency-Key; per-sandbox API keys; data-retention API) plus a `prompt` endpoint running work through built-in agent harnesses `codex`, `claude-code`, `pi`, `opencode`, `prime-agent`, `kimi` (INFERRED read: Boat bundles coding-agent harnesses as first-class providers). Canonical domain now boat.dev. | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time; EU-only DE/FI/FR (FAQ verbatim — Germany, Finland, France; VERIFIED 2026-09-24 midday; folded from the deprecated C40 pointer row). |
-| **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, snapshots **$0.05/GiB-month** (vendor docs pricing subpage, VENDOR-VERIFIED — subpage located and read live 2026-09-25 late morning at the carried URL; stamp still "Last verified 22 Sep 2026"; the prior 8-pass "unlocated" streak was a search-discovery failure (INFERRED), not an availability failure — the page is reachable but effectively undiscoverable via search: `site:docs.digitalocean.com` queries return zero results) — 10× vendor-internal conflict annotated: DO's own 2026-09-22 investor launch page names **$0.005/GiB-month** (VENDOR-VERIFIED, re-read this run — no correction, no new date); misattribution hypothesis INFERRED: the $0.05 matches DO's general-product rate (THIRD-PARTY, navigators-guide PDF: Droplet/Volume snapshots $0.05/GB-month, nominal-value-for-value — GB vs GiB units differ); see "Watch update — 2026-09-25 (late morning)" for the full record and the retired "unlocated" framing; **midday 2026-09-25 blast-radius scope (VENDOR-VERIFIED both surfaces): the 10× conflict is snapshots-only** — compute ($0.044/vCPU-hour) and memory ($0.0095/GB-hour) agree exactly on the IR launch page and the docs subpage; only Snapshots and Checkpoints disagree ($0.005 IR vs $0.05 docs). **Second conflict surfaced same pass (VENDOR-VERIFIED both surfaces):** the IR page presents active-CPU billing ("charges developers only for CPU cycles their agents consume") as live while the docs footnote says it is "coming soon" (interim: billed at 25% of allocated vCPUs); $5 new-user credit |
+| **Boat** (tracked set; 2026-09-22 consolidation; **renamed from ASCII ~2026-09-17** — C40 deduped into this row) | Task-scoped sandbox / persistent computer | Sandboxes for coding agents; per-second billing, "a stopped sandbox costs nothing"; xlarge (16 vCPU / 32 GB) is capacity-gated — needs a $100+/mo plan *and* operator allocation (vendor statement). Rename VERIFIED this run: `box.ascii.dev`, `boat.dev`, `ascii.dev` serve byte-identical product pages; YC's company page now `ycombinator.com/companies/boat` (YC F26); yc-oss mirror dates the rename 2026-09-17 (`former_names`: ["Ascii box","Ascii"]); the old YC slug `ycombinator.com/companies/ascii` now serves a **301 → `/companies/boat`** (VERIFIED 2026-09-24 midday — harder rename evidence than the page copy). Hardest evidence yet (VERIFIED 2026-09-24 late midday): the vendor's own API docs at `docs.ascii.dev/box/api/v1` render as **"Boat Public API v1"** — the legacy ASCII domain's developer surface brands the product *Boat* (`/box` path and box.ascii.dev endpoints persist). The documented API covers sandbox lifecycle (provisioning → ready/idle → running → archiving → archived; stop/archive, resume, fork, delete; desktop streaming; Idempotency-Key; per-sandbox API keys; data-retention API) plus a `prompt` endpoint running work through built-in agent harnesses `codex`, `claude-code`, `pi`, `opencode`, `prime-agent`, `kimi` (INFERRED read: Boat bundles coding-agent harnesses as first-class providers). Canonical domain now boat.dev. | **$0.036/h** default (4 vCPU / 8 GB / 50 GB); xlarge $0.200/h; 25 free-hour trial; $20/mo = $20 of time; EU-only DE/FI/FR (FAQ verbatim — Germany, Finland, France; VERIFIED 2026-09-24 midday; folded from the deprecated C40 pointer row). **2026-09-25 post-pre-midnight fold (VENDOR-VERIFIED, `docs.boat.dev/pricing`):** sizes now small $0.018/h (2 vCPU / 4 GB / 12 GB), default $0.036/h, large $0.072/h (8 vCPU / 16 GB / 125 GB), xlarge $0.200/h (16 vCPU / 32 GB / 251 GB — capacity-gated, needs $100+ plan + operator allocation); plans $20/$100/$500/$2,000-mo set concurrency (100 / 300 / 1,000 / 2,000 sandboxes) + start limits (12/60/200, 30/210/840, 65/420/1,680, 90/600/2,400 per min/hr/day); plan price = sandbox time (expires monthly); $20 credit packs (never expire) + auto-refill; trial 25 free hours (small+default only, 2 sandboxes at once); usage API `/api/v1/sandboxes/{id}/usage` with billingMultiplier 0.5/1/2 per size; incremental snapshots every minute + on stop, failed-stop pauses billing; compare-page table (vendor-verified 2026-09-18) 4vCPU/8GB wall-clock hr: boat $0.036, Novita $0.233, Freestyle $0.264, exe.dev $0.280, E2B/Daytona/Blaxel $0.331, Codespaces/Cloudflare $0.360, Modal $0.476, Islo $0.600, Runloop $0.634, Vercel Sandbox $0.682. |
+| **DigitalOcean Managed Agents** (2026-09-22 consolidation) | Managed agent stack (task-scoped) | Harness Runtime (microVM per session, pause/resume/fork) + Action Gateway (16,000+ tools via one managed MCP endpoint, credentials brokered at execution time) + Inference Engine; runs unmodified Claude Code / Codex / OpenCode / Hermes / LangGraph. **2026-09-25 post-pre-midnight fold:** public preview opened to ALL users 2026-09-22 (vendor PR release; early builders OpenHands/Qencode/Amplitude); Harness Runtime + Action Gateway as two independently scaling services; BYOT custom OCI templates; vendor latency measurements ~886 ms session-ready / ~305 ms resume-from-pause; Inference Engine 75+ models (Nemotron 3 Ultra, Kimi K3, GLM 5.3, Claude Fable 5.1, GPT 6 Astra) | **$0.044/vCPU-hour active CPU** (per-second; active-CPU billing coming soon — interim 25% of allocated vCPUs; "zero while waiting" holds only for paused sessions), $0.0095/GB-hour memory, snapshots **$0.05/GiB-month** (vendor docs pricing subpage, VENDOR-VERIFIED — subpage located and read live 2026-09-25 late morning at the carried URL; stamp still "Last verified 22 Sep 2026"; the prior 8-pass "unlocated" streak was a search-discovery failure (INFERRED), not an availability failure — the page is reachable but effectively undiscoverable via search: `site:docs.digitalocean.com` queries return zero results) — 10× vendor-internal conflict annotated: DO's own 2026-09-22 investor launch page names **$0.005/GiB-month** (VENDOR-VERIFIED, re-read this run — no correction, no new date); misattribution hypothesis INFERRED: the $0.05 matches DO's general-product rate (THIRD-PARTY, navigators-guide PDF: Droplet/Volume snapshots $0.05/GB-month, nominal-value-for-value — GB vs GiB units differ); see "Watch update — 2026-09-25 (late morning)" for the full record and the retired "unlocated" framing; **midday 2026-09-25 blast-radius scope (VENDOR-VERIFIED both surfaces): the 10× conflict is snapshots-only** — compute ($0.044/vCPU-hour) and memory ($0.0095/GB-hour) agree exactly on the IR launch page and the docs subpage; only Snapshots and Checkpoints disagree ($0.005 IR vs $0.05 docs). **Second conflict surfaced same pass (VENDOR-VERIFIED both surfaces):** the IR page presents active-CPU billing ("charges developers only for CPU cycles their agents consume") as live while the docs footnote says it is "coming soon" (interim: billed at 25% of allocated vCPUs); $5 new-user credit |
 | **Boxd** (2026-09-22 consolidation) | Persistent computer | "Composable computers" — KVM VMs with live memory forking in under 200 ms (vendor claim), snapshots/checkpoints, real SSH, per-machine HTTPS subdomain; self-hosted option ("run the whole platform on your own hardware") | Credit-based: €0.049/vCPU-hour running, €0.015/GiB-hour resident RAM, €0.0001/GiB-hour disk written; €30 free credits (**rate card VERIFIED 2026-09-23** — first own-page fetch, C29) |
 | **Upstash Box** (2026-09-22 consolidation; **own-docs VERIFIED 2026-09-24**) | Task-scoped sandbox / persistent computer | **VERIFIED on the vendor's own docs** ([Box quickstart](https://upstash.com/docs/box/overall/quickstart), read 2026-09-24): *"Upstash Box lets you give your AI agents a computer. Every Upstash Box is a **secure, isolated cloud container with an AI Agent built in**. Spin up as many as you want in parallel. Each one includes a full environment with a filesystem, shell, git, and a runtime."* Runtimes default Debian (glibc); keep-alive boxes (`keepAlive: true`) stay on between sessions; SSH access with a Box API key; *"Freeze a box anytime, and continue days or even weeks later with perfect resumability."* Standing datapoints: snapshot/restore API for reusable prepared environments, branching from snapshots, full outbound networking by default, 22.5 Gbps hosts on AWS; pause/resume unavailable with keepAlive enabled | **THIRD-PARTY** (vendor's own comparison blog, snippet-only this run): $0.10/$0.20/$0.40 per active CPU-hour (small/medium/large); free tier 10 boxes, 5 CPU-h/mo, $1 LLM budget, no card required |
 | **Freestyle** (2026-09-23 overnight, C37) | Persistent computer | "VMs for AI Agents" — hardware-virtualized Linux microVMs with live cloning, pause/resume, nested virtualization (Docker inside), custom domains, WireGuard tunnels, FUSE/eBPF; boot claim qualified 2026-09-24: vendor headline "65 ms" is marketing, docs give the honest number — **p99 under 400ms** (both VERIFIED on vendor's own pages); "run forever" with idle-timeout disabled (the anti-suspend-on-idle posture) | **Own pricing page VERIFIED 2026-09-24** ([freestyle.sh/pricing](https://www.freestyle.sh/pricing)): vCPU $0.04032/h (200/h included mo), GiB Memory $0.0129/h (400/mo), GiB Storage $0.000086/h (60,000/mo), Data Transfer $0.02/GB (50 GB free / 500 GB paid); Free / **Hobby $50/mo** (FAQ: "$50 on Hobby covers your first $50 of usage") / Pro (+ Enterprise custom); Pro's exact monthly fee not printed (only "monthly fee is a commitment that doubles as usage credit") — carried; 2026-09-24 post-overnight pass re-opened freestyle.sh/pricing VENDOR-VERIFIED — still no Pro dollar amount on the public page; Hobby $50 re-confirmed ("$50 on Hobby covers your first $50 of usage"); dashboard-internal pricing not checked |
@@ -869,6 +869,23 @@ Competitive inputs: active-CPU metering vs spark-vm's flat-monthly Tier 1
 thinking (filed in `docs/PRICING_THINKING.md` §2); 305 ms as the number to
 beat for C14; Action Gateway as an H16 org-policy vendor candidate; DO's
 OpenAI partner status (C30 below) sharpens C26.
+
+**2026-09-25 post-pre-midnight update:** the launch pricing is now
+carried on a SECOND vendor-owned surface — the Business Wire launch
+release (PR-PRIMARY, syndicated via Market Newsdesk 4 days ago) prints
+snapshots **$0.005/GiB-month**, compute $0.044/vCPU-hr, memory
+$0.0095/GB-hr. Vendor-internal weight of evidence is 2:1 for $0.005
+(IR page + launch release vs the docs pricing subpage's $0.05); the
+docs subpage remains the unreconciled oddity, so the field-table cell
+still keeps $0.05 with the conflict annotated. Also new on the vendor
+docs (VENDOR-VERIFIED, "Latest Updates 21 September 2026"): public
+preview opened to ALL users 2026-09-22; Harness Runtime + Action
+Gateway as two independently scaling services; **BYOT** custom OCI
+templates as sandbox templates ($0.05/GiB-month); vendor latency
+measurements **~886 ms session-ready / ~305 ms resume-from-pause**
+(C14 input discipline); Inference Engine 75+ models (Nemotron 3 Ultra,
+Kimi K3, GLM 5.3, Claude Fable 5.1, GPT 6 Astra). Early builders
+named: OpenHands, Qencode, Amplitude. C26 stays OPEN.
 
 ### Boxd — first corpus entry (C29, VERIFIED — watch continues)
 
@@ -3634,3 +3651,92 @@ leads, plus a narrow delta news scan.
   re-checked (P49 — next the 2026-09-26 morning pass). Zero fetch
   failures this pass (all 5 vendor pages first-try).
 - **Carried:** C37, C26 (both OPEN).
+
+## Watch update — 2026-09-25 (post pre-midnight): coverage rotated to slow movers; Boat DELTA, DO public-preview launch, C57/C58 new
+
+**Scope** (targeted delta pass, survey window 2026-09-25 ~22:28–22:40
+CDT; full pass `docs/COMPETITOR_WATCH_2026-09-25_POST_PRE_MIDNIGHT.md`):
+coverage rotation — the slower-moving tracked set not re-read since the
+post-late-evening full pass: E2B, Modal, Runloop, Cloudflare Sandbox
+SDK, Boat (tracked-set member), DO Managed Agents. Deliberately NOT
+re-surveyed: C37/C26 (verified ~25 min earlier in the late pre-midnight
+pass — carried), Vercel Drives (P49 — 2026-09-26 morning pass).
+Read-only fetches and searches; no logins, no writes.
+
+- **E2B** — VENDOR-VERIFIED NO-CHANGE. `e2b.dev/pricing` read live (full
+  page): Hobby FREE + $100 one-time credit / 1h sessions / 20
+  concurrent; Pro $150/mo + usage / 24h sessions / 100→1,100
+  concurrent; $0.000014/s per vCPU (2 vCPU default $0.000028/s). Rate
+  card and tiers verbatim.
+- **Modal** — VENDOR-VERIFIED NO-CHANGE. `modal.com/pricing` read live
+  (full page): standard core $0.0000131/s, sandbox tier
+  $0.00003942/s (ratio ≈ 3.009 — intact); GPU ladder verbatim incl. B300
+  $0.001972/s; Starter $0 + $30/mo compute, Team $250 + $100/mo
+  compute.
+- **Cloudflare Sandbox SDK** — VENDOR-VERIFIED NO-CHANGE.
+  `developers.cloudflare.com/sandbox/platform/pricing/` read live (full
+  page; "Last updated Aug 28, 2026"): inherits Containers platform
+  pricing verbatim; cross-checked the Containers page (crawled today):
+  Workers Paid $5/mo, 25 GiB-hr memory (+$0.0000025/GiB-s), 375
+  vCPU-min (+$0.000020/vCPU-s = $0.072/vCPU-hr — the corpus's
+  active-CPU figure), 200 GB-hr disk.
+- **Runloop** — THIRD-PARTY-corroborated NO-CHANGE, vendor-primary
+  UNREAD this pass (no public vendor pricing page located — consistent
+  with corpus). Upstash comparison blog (9 days old): $0.108/CPU-h,
+  $0.0252/GB-h, free Basic, $250/mo Pro — verbatim-consistent; new
+  third-party detail: $50 trial credit; suspended = storage-only
+  (Pro-only). Adjacent: **Runloop Public Benchmarks launched** ($25
+  base tier + PAYG; SWE-Bench Verified 500) — new product surface, not
+  a devbox pricing change.
+- **Boat — DELTA (vendor-primary).** `docs.boat.dev/pricing` (crawled 1
+  day ago) materially expands the product surface: new sizes **small
+  $0.018/h** (2 vCPU / 4 GB / 12 GB) and **large $0.072/h** (8 vCPU /
+  16 GB / 125 GB) — the corpus knew only default + xlarge; new plan
+  structure $20/$100/$500/$2,000-mo (concurrency 100/300/1,000/2,000
+  sandboxes; start limits per min/hr/day); plan price = sandbox time
+  (expires monthly), $20 credit packs (never expire) + auto-refill;
+  trial 25 free hours (small+default, 2 sandboxes); usage API
+  `/api/v1/sandboxes/{id}/usage` with billingMultiplier 0.5/1/2;
+  incremental snapshots every minute + on stop (failed-stop pauses
+  billing); compare-page table (vendor-verified 2026-09-18) at 4
+  vCPU / 8 GB wall-clock hour: boat $0.036, Novita $0.233, Freestyle
+  $0.264, exe.dev $0.280, E2B/Daytona/Blaxel $0.331,
+  Codespaces/Cloudflare $0.360, Modal $0.476, Islo $0.600, Runloop
+  $0.634, Vercel Sandbox $0.682. Field-table Boat row refreshed;
+  adjacent competitor names (Novita, exe.dev, Islo) noted, not filed.
+- **DO Managed Agents — DELTA (public preview launch).** The 2026-09-22
+  consolidation row advances to live-for-all: vendor PR release +
+  docs "Latest Updates 21 September 2026" (VENDOR-VERIFIED) confirm
+  public preview open to everyone; BYOT custom OCI templates;
+  Harness Runtime + Action Gateway as independently scaling services;
+  vendor latency measurements ~886 ms session-ready / ~305 ms
+  resume-from-pause (C14 input discipline); Inference Engine 75+
+  models; early builders OpenHands, Qencode, Amplitude. Pricing
+  (PR-PRIMARY, Business Wire copy): active-CPU $0.044/vCPU-hr,
+  $0.0095/GB-hr memory, snapshots **$0.005/GiB-month** — a SECOND
+  vendor-owned surface printing $0.005 (IR page was the first; docs
+  subpage still $0.05). C26 evidence: vendor-internal weight now 2:1
+  for $0.005; the docs subpage remains the unreconciled oddity. C26
+  stays OPEN.
+- **C57 — Baponi** (baponi.ai, NEW TO CORPUS, THIRD-PARTY:
+  tizkovatereza/awesome-ai-sandboxes): nsjail + namespace isolation,
+  seccomp-bpf allowlist, zero idle-cost sessions, per-execution
+  billing; Free $0 (1,000 credits/mo), Pro $97/mo (10,000 credits +
+  $1.00 per 1K), Enterprise BYOC. **OPEN.**
+- **C58 — Leap0** (NEW TO CORPUS, THIRD-PARTY:
+  msyvr/awesome-agent-sandboxes): Firecracker microVM per sandbox,
+  vendor-claimed ~100 ms boots, Jailer hardening + host-side credential
+  injection firewall (TLS MITM), full XFCE desktop, Apache-2.0 SDKs,
+  public preview, US-only, no published pricing. **OPEN.**
+- **Delta news scan** (two searches + vendor reads): the DO launch, the
+  Runloop benchmarks surface, and C57/C58 dedupe to the items above;
+  all other in-lane hits corroborate filed corpus figures (E2B/Modal/
+  Cloudflare corroborations; Daytona GPU chatter → known corpus).
+- **Verdict:** 3/3 VENDOR-VERIFIED NO-CHANGE (E2B, Modal, Cloudflare
+  Sandbox SDK) + Runloop third-party-corroborated NO-CHANGE (vendor
+  unread) + two DELTAs (Boat surface expansion; DO Managed Agents
+  public preview) + two new adjacent C-numbers (C57, C58). In-lane
+  no-launch verdict dated 2026-09-25 stands (DO Managed Agents was
+  already launched; the news is the public-preview opening). Zero
+  fetch failures (4 vendor-primary page reads first-try).
+- **Carried:** C37, C26 (both OPEN); C57, C58 (new, OPEN).
