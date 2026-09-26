@@ -429,7 +429,14 @@ specified):
   that pile visible. Off-loopback peers get a 404 even when the daemon
   binds a non-loopback interface; there is no HMAC auth on it because
   loopback is the whole trust story — bind `WAITLIST_BIND` to a
-  loopback address and keep it that way.
+  loopback address and keep it that way. Spool kinds are `confirm`,
+  `invite`, `reminder`, `deleted`, and the Path-A signup kinds; spool
+  files written before `kind` tagging (pre-existing files) report as
+  `unknown` until they drain. `oldest_age_seconds` is null when the
+  spool is empty; alert when it exceeds your sender's normal drain
+  window. If the spool directory is unreadable the payload carries
+  `spool.error: "spool directory unreadable"` — that is an outage,
+  not an empty spool.
 
 ## 10. Build checklist (the §5 gate, made actionable)
 

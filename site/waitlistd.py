@@ -847,7 +847,8 @@ class WaitlistService:
 
         Returns a JSON-serializable dict:
             {"spool": {"files": N, "oldest_age_seconds": int|None,
-                       "by_kind": {kind: N}},
+                       "by_kind": {kind: N},
+                       "error": "..."}  # only when spool dir unreadable
              "rows": {status: N, ..., "total": N}}
 
         Pure read: spool dir listing + file mtimes/queued_at, and a
@@ -862,7 +863,12 @@ class WaitlistService:
         never crash the counting dict or json.dumps(sort_keys=True).
         Age is the max queued_at age across spool files, falling back to
         file mtime when queued_at is missing/unparsable, and None when
-        the spool is empty.
+        the spool is empty. Negative ages (future-dated queued_at, or a
+        clock that moved backwards) clamp to 0.0: the endpoint reports
+        what to page on, not clock skew. If the spool directory itself
+        is unreadable, that is NOT a healthy empty spool — the snapshot
+        carries spool["error"] = "spool directory unreadable" (rows are
+        still counted; they come from memory).
         """
         now = self.clock()
         spool = {"files": 0, "oldest_age_seconds": None, "by_kind": {}}
@@ -871,6 +877,10 @@ class WaitlistService:
             names = sorted(os.listdir(self.spool_dir))
         except OSError:
             names = []
+            # A deleted/unreadable spool dir means every submit path is
+            # failing — reporting files: 0 would read as "all clear" to
+            # an operator alerting on this endpoint. Say so instead.
+            spool["error"] = "spool directory unreadable"
         for name in names:
             if ".tmp-" in name or not name.endswith(".json"):
                 continue

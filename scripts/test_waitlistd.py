@@ -1343,6 +1343,7 @@ def test_is_loopback_gate():
     assert wd._is_loopback("") is False
     assert wd._is_loopback("not-an-ip") is False
     assert wd._is_loopback("fe80::1%eth0") is False  # link-local, zone-stripped
+    assert wd._is_loopback("::1%lo") is True  # loopback with zone id
 
 
 def test_status_snapshot_empty():
@@ -1392,6 +1393,14 @@ def test_status_snapshot_skips_tmp_and_junk():
     with open(os.path.join(spool_dir, "torn.json"),
               "w", encoding="utf-8") as fh:
         fh.write('{"kind": "invite", ')  # torn mid-write
+    # Valid JSON excluded ONLY by the name filters (QA#4: without them the
+    # count would move — the filters are not dead code).
+    with open(os.path.join(spool_dir, "notes.txt"),
+              "w", encoding="utf-8") as fh:
+        json.dump({"kind": "invite", "queued_at": wd.iso_z(svc.clock())}, fh)
+    with open(os.path.join(spool_dir, "stale.tmp-deadbeef.json"),
+              "w", encoding="utf-8") as fh:
+        json.dump({"kind": "reminder", "queued_at": wd.iso_z(svc.clock())}, fh)
     snap = svc.status_snapshot()
     assert snap["spool"]["files"] == 1
     assert snap["spool"]["by_kind"] == {"unknown": 1}
@@ -1488,3 +1497,47 @@ def test_http_status_refused_off_loopback(monkeypatch, live_server):
     assert resp.status == 404
     body = resp.read().decode("utf-8")
     assert "Not found" in body
+    # The refusal must not advertise the route or leak the snapshot.
+    assert "oldest_age_seconds" not in body
+    assert "spool" not in body
+
+def test_status_snapshot_spool_unreadable(tmp_path):
+    # A deleted/unreadable spool dir is an outage, not an empty spool
+    # (QA round 1): the snapshot must flag it instead of reading "all clear".
+    import shutil
+    svc, tmp = make_service()
+    spool_dir = svc.spool_dir
+    svc.rows["a"] = {"entry_id": "a", "status": "invited"}
+    shutil.rmtree(spool_dir)
+    snap = svc.status_snapshot()
+    assert snap["spool"]["files"] == 0
+    assert snap["spool"]["error"] == "spool directory unreadable"
+    # Rows still counted — they come from memory, not the spool dir.
+    assert snap["rows"] == {"invited": 1, "total": 1}
+
+
+def test_status_snapshot_negative_age_clamps():
+    # Future-dated queued_at (clock skew) clamps to 0 rather than reporting
+    # a negative age (QA round 1).
+    svc, tmp = make_service()
+    spool_dir = svc.spool_dir
+    future = svc.clock() + timedelta(hours=1)
+    with open(os.path.join(spool_dir, "f.json"), "w", encoding="utf-8") as fh:
+        json.dump({"kind": "invite", "queued_at": wd.iso_z(future)}, fh)
+    snap = svc.status_snapshot()
+    assert snap["spool"]["oldest_age_seconds"] == 0
+
+
+def test_status_snapshot_mtime_fallback():
+    # Missing queued_at falls back to file mtime (QA round 1): pin the
+    # branch with an explicit utime under the frozen clock.
+    svc, tmp = make_service()
+    spool_dir = svc.spool_dir
+    path = os.path.join(spool_dir, "g.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"kind": "reminder"}, fh)
+    stamp = (svc.clock() - timedelta(hours=1)).timestamp()
+    os.utime(path, (stamp, stamp))
+    snap = svc.status_snapshot()
+    assert snap["spool"]["files"] == 1
+    assert snap["spool"]["oldest_age_seconds"] == 3600
