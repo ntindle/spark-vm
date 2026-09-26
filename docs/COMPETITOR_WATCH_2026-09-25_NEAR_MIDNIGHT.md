@@ -61,7 +61,7 @@ kit images in cloud sandboxes); nothing added after 2026-09-21.
 
 `github.com/superradcompany/microsandbox/releases` read live: newest
 still **v0.7.3** (`chore: release v0.7.3` by @toksdotdev in #1646);
-nothing published after v0.7.1 in this window.
+nothing published after v0.7.3 in this window.
 
 ## 2. Docker Sandbox Kit Spec repo activity (noted, timing unverifiable)
 
