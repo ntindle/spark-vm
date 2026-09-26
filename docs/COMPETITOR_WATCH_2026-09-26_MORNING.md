@@ -3,7 +3,8 @@
 Owes-writeup pass: the 02:24 slot's P49 morning pass VENDOR-VERIFIED two
 new 2026-09-25 Vercel changelog datapoints (in-lane C59, adjacent C60)
 and captured them in
-`agent_notes/surveyor-vercel-20260926-0224.md`; this pass writes them up
+`agent_notes/surveyor-vercel-20260926-0224.md` (the loop's goal-workspace
+notes, not in the repo); this pass writes them up
 (no re-survey needed) and folds them into the corpus. Survey window
 **2026-09-26 ~02:55–03:00 CDT** — the four fast movers were re-read
 live this run; the C59/C60 detail reads date to ~02:4x CDT (same
