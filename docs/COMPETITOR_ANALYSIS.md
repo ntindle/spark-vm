@@ -81,7 +81,7 @@ isolation), because those are where the trust story lives.
 | **Northflank** | Both | microVM/Kata/gVisor, stateful or ephemeral, self-serve BYOC | Lowest published rate: $0.01667/vCPU-hr; free sandbox tier |
 | **E2B** | Task-scoped sandbox | Firecracker microVM per sandbox, SDK-first, templates-as-code | Hobby $0 + $100 one-time credit (1h sessions, 20 concurrent); Pro **$150/mo** + usage (24h sessions); ~$78/mo usage for one continuous 2vCPU/512MB box; $21M Series A **2025-07-28** (Insight Partners lead; dated sources: PRNewswire wire + SiliconANGLE URL) |
 | **Daytona** | Task-scoped sandbox | Containers (+VM/Windows classes), stateful, stop/archive/pause/fork, GPU (ephemeral) | $200 free compute, no plan floor; $0.0504/vCPU-hr + $0.0162/GiB-hr; GPU on request (H100 listed $2.27/hr) |
-| **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team; in talks to raise at ~$15B valuation (2026-09-23, Bloomberg/Reuters THIRD-PARTY; $355M May raise at $4.65B) |
+| **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team; in talks to raise at ~$15B valuation (2026-09-23, Bloomberg/Reuters THIRD-PARTY; $355M May raise at $4.65B); **2026-09-26 late-morning fold (C61, THIRD-PARTY):** staff engineers detailed rebuilding the sandbox layer off Kubernetes for "millions of concurrent sandboxes and tens of thousands of creations per second" — forcing constraint was scheduling latency at creation time (my2cents.ai digest 2026-09-24; author + talk not directly verified this pass) |
 | **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots; **64 GB ephemeral NVMe default** (SDK ≥3.0.0/custom image; 32 GB on deprecated runtimes — C32 resolved, see "Watch update — 2026-09-23"); Drives public beta (persistent, ≤16 TiB/drive, usage-based pricing); **2026-09-26 morning fold (VENDOR-VERIFIED):** sandbox memory observability — Memory Usage card (avg/P75/P95 across sandboxes), per-sandbox detail page auto-scales y-axis to the memory limit with a dashed 85% reference line, `memoryUsedBytes` in the Observability query builder (custom queries + alerts), CLI `vercel metrics` under `vercel.sandbox.memory_used_bytes` (C59, in-lane); `vercel/vcr-action/login` GitHub Action — OIDC login to VCR, short-lived token revoked at job end, prepared image usable as custom sandbox image (`<repository>:<tag>`) (C60, adjacent) | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
 | **Cloudflare Sandbox** | Task-scoped sandbox | Containers on Workers, sleeps at 10 min idle, disk resets on sleep | Active-CPU billing ($0.072/vCPU-hr); $5/mo Workers Paid floor |
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
@@ -4025,3 +4025,52 @@ baseline, B delta news scan; survey window 2026-09-26 ~04:56–05:02 CDT).
   stands — streak extends.
 - **Carried:** C37 (Freestyle Pro fee VERIFIED absent, ~04:00 CDT),
   C57 (Baponi), C58 (Leap0) — all OPEN, not re-surveyed this pass.
+
+## Watch update — 2026-09-26 (late morning): C61 Modal off-Kubernetes rebuild (THIRD-PARTY); fast movers 4/4 NO-CHANGE
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_LATE_MORNING.md`
+(two-surveyor pass: A fast-mover re-verification vs the ~05:24 CDT
+baseline, B delta news scan; survey window 2026-09-26 ~05:54–06:05 CDT).
+
+- **C61 — Modal rebuilt its sandbox infrastructure off Kubernetes
+  (in-lane, THIRD-PARTY).** Modal staff engineers (Colin Weld,
+  Connor Adams) detailed rebuilding Modal's sandbox layer from
+  scratch off Kubernetes to support "millions of concurrent
+  sandboxes and tens of thousands of creations per second." The
+  forcing constraint was **scheduling latency at sandbox creation
+  time** — the dominant cost when each agent turn wants its own
+  isolated execution environment. Dated 2026-09-24 (my2cents.ai
+  digest, "AI Architecture Updates: September 24, 2026") — ~48h old,
+  slightly outside the ~24h window, but absent from the corpus
+  (greps for "off Kubernetes", "Weld", "million concurrent" returned
+  zero hits), so folded. The corpus Modal row covered gVisor/GPU/
+  snapshots and the $15B raise talks but nothing on the
+  off-Kubernetes infra rebuild or creation-latency economics.
+  Strategic color (advisory only, not a corpus claim): the economics
+  here are exactly the task-scoped-vs-persistent split this doc's
+  Scope note draws — when sandbox creation is the per-turn
+  operation, the scheduler IS the product. spark-vm's H4/H13
+  suspend/wake work is the persistent-side answer to the same
+  latency problem; the lesson travels sideways, not as a spec. The
+  author + talk are not directly verified this pass — THIRD-PARTY
+  grade stands until a vendor-primary read upgrades it.
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** Daytona changelog
+  (newest still SEP 26 V0.218.0 / SEP 25 V0.217.0); Docker release
+  notes (newest dated heading still 2026-09-22); Microsandbox
+  releases (newest still v0.7.3 #1646); Vercel changelog (newest
+  entries still 25 Sep — vcr-action/login, memory observability; no
+  26-Sep entries; Drives still public beta on the index, not
+  re-checked per P49 daily cadence). Zero fetch failures.
+- **Delta news scan — one new item (C61);** everything else dedupes
+  cleanly (Baseten/Blaxel continuity piece = C11; Modal $15B raise
+  talks = Modal row; DO Managed Agents launch PR = C26 CLOSED;
+  Cursor Rollouts — adjacent lane; Vercel Drives beta coverage =
+  Drives row; Vercel $1M Sandbox Challenge = folded; TermSquad launch
+  PR = C1; Prime Sandboxes GA = C48) or is out-of-lane
+  (DockerAsk/DockerDash prompt-injection vuln — Ask Gordon research,
+  not a sandbox-market move). Surveyor-B corpus-dedupe miss streak
+  broken: its greps were clean before flagging.
+- In-lane no-launch verdict dated 2026-09-25 stands — streak
+  extends. **One new C-number: C61.**
+- **Carried:** C37 (Freestyle Pro fee VERIFIED absent), C57
+  (Baponi), C58 (Leap0) — all OPEN, not re-surveyed this pass.
