@@ -592,6 +592,19 @@ class TestFirewallWatchdogStatic:
         assert "WantedBy=timers.target" in timer
         assert "systemctl enable --now jail-firewall-verify.timer" in active
 
+    def test_build_self_tests_watchdog_pin(self, active):
+        # Issue #437: build.sh must run the verify service once after
+        # enabling the timer — the build-time self-test proves the pin
+        # matches this box's live `nft list` output at build time. The
+        # oneshot exits 0 on healthy / nonzero on damage, and build.sh
+        # runs under `set -e`, so a pin mismatch fails the build loudly
+        # instead of surfacing as a fail-closed storm on the first tick.
+        enable = active.index(
+            "systemctl enable --now jail-firewall-verify.timer")
+        tail = active[enable:]
+        assert "systemctl start jail-firewall-verify.service" in tail, \
+            "watchdog verify service is never started at build time"
+
 
 # ---------------------------------------------------------------- functional
 # The detection semantics the round-1 review proved were missing: stub nft /
@@ -762,6 +775,25 @@ DUPLICATE_ACCEPT_RULESET = HEALTHY_RULESET.replace(
     '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept\n',
 )
 
+# The 2026-09-25 arch case (issue #436): the SAME ruleset re-rendered by a
+# different nft formatter — whitespace-only variance (indent width, brace
+# spacing, token gaps) carries no rule semantics, so the canonicalized pin
+# must still report healthy. Quotes stay intact (interface names, log
+# prefixes); semantic changes still fail (covered by the adversarial
+# fixtures above).
+REFORMATTED_HEALTHY_RULESET = HEALTHY_RULESET.replace(
+    '\t', '  ',
+).replace(
+    'tcp dport { 18080, 18081 }', 'tcp dport {18080, 18081}',
+).replace(
+    'ct state established,related', 'ct state  established,  related',
+).replace(
+    'ct state established,new', 'ct state   established, new',
+).replace(
+    'iifname "tailscale0" oifname "ve-jail"',
+    'iifname   "tailscale0"   oifname   "ve-jail"',
+)
+
 
 @pytest.fixture()
 def watchdog_stubs(tmp_path, monkeypatch):
@@ -820,6 +852,21 @@ class TestFirewallWatchdogFunctional:
         r = _run_watchdog(HEALTHY_RULESET, tmp_path=tmp_path,
                           monkeypatch=monkeypatch)
         assert r.returncode == 0
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop" not in calls
+        assert "destroy table" not in calls
+
+    def test_reformatted_ruleset_still_healthy(self, watchdog_stubs,
+                                              tmp_path, monkeypatch):
+        # The 2026-09-25 arch case (issue #436): the same ruleset as the
+        # conf, re-rendered by a different nft formatter (indent width,
+        # brace spacing, token gaps). Whitespace-only variance carries no
+        # rule semantics; the canonicalized pin must report healthy, not
+        # fail closed. Semantic changes still fail (all adversarial
+        # fixtures below run through the same canonicalization).
+        r = _run_watchdog(REFORMATTED_HEALTHY_RULESET, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 0, r.stderr
         calls = watchdog_stubs.read_text()
         assert "systemctl stop" not in calls
         assert "destroy table" not in calls
