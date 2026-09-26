@@ -124,6 +124,7 @@ import fcntl
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import os
 import re
@@ -404,6 +405,19 @@ def utcnow():
 
 def iso_z(dt):
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _is_loopback(addr):
+    """True iff the peer address string is a loopback address. The
+    operator-only /waitlist/status route (#392) is refused for every other
+    peer — even if the daemon is bound to a non-loopback interface — so
+    the status surface never leaks onto a public listener. ipaddress covers
+    both 127.0.0.0/8 and ::1; IPv4-mapped forms (::ffff:127.0.0.1) are NOT
+    loopback per ipaddress semantics and are refused, fail-closed."""
+    try:
+        return ipaddress.ip_address(addr.split("%")[0]).is_loopback
+    except ValueError:
+        return False
 
 
 def b64url_encode(raw: bytes) -> str:
@@ -827,6 +841,71 @@ class WaitlistService:
             except OSError:
                 pass
             raise
+
+    def status_snapshot(self):
+        """Operator observability for #392: spool backlog + row counts.
+
+        Returns a JSON-serializable dict:
+            {"spool": {"files": N, "oldest_age_seconds": int|None,
+                       "by_kind": {kind: N}},
+             "rows": {status: N, ..., "total": N}}
+
+        Pure read: spool dir listing + file mtimes/queued_at, and a
+        lock-copied view of self.rows. Spool names are unique per send and
+        written atomically (os.replace), so a file that cannot be parsed
+        is the sender's artifact, not ours — it is skipped, never fatal.
+        Partial-write leftovers (".tmp-<hex>") are excluded: they are
+        removed on failure by _write_spool and never sender-visible.
+        Age is the max queued_at age across spool files, falling back to
+        file mtime when queued_at is missing/unparsable, and None when
+        the spool is empty.
+        """
+        now = self.clock()
+        spool = {"files": 0, "oldest_age_seconds": None, "by_kind": {}}
+        oldest = None
+        try:
+            names = sorted(os.listdir(self.spool_dir))
+        except OSError:
+            names = []
+        for name in names:
+            if ".tmp-" in name or not name.endswith(".json"):
+                continue
+            path = os.path.join(self.spool_dir, name)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    doc = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(doc, dict):
+                continue
+            kind = doc.get("kind") or "unknown"
+            spool["by_kind"][kind] = spool["by_kind"].get(kind, 0) + 1
+            spool["files"] += 1
+            age = None
+            try:
+                queued = datetime.fromisoformat(
+                    str(doc.get("queued_at", "")).replace("Z", "+00:00"))
+                age = (now - queued).total_seconds()
+            except (ValueError, TypeError):
+                pass
+            if age is None:
+                try:
+                    age = now.timestamp() - os.stat(path).st_mtime
+                except OSError:
+                    pass
+            if age is not None:
+                age = max(0.0, age)
+                oldest = age if oldest is None else max(oldest, age)
+        spool["oldest_age_seconds"] = (
+            None if oldest is None else int(oldest))
+        with self._lock:
+            rows = list(self.rows.values())
+        counts = {}
+        for row in rows:
+            st = row.get("status") or "unknown"
+            counts[st] = counts.get(st, 0) + 1
+        counts["total"] = len(rows)
+        return {"spool": spool, "rows": counts}
 
     def _queue_confirm_email(self, row):
         """Spool the confirm email; the operator's sender drains the spool.
@@ -2720,6 +2799,20 @@ class _Handler(BaseHTTPRequestHandler):
         elif parts.path == "/go/selfhost":
             src = urllib.parse.parse_qs(parts.query).get("src", [None])[0]
             self._redirect(self.service.cta_selfhost(src))
+        elif parts.path == "/waitlist/status":
+            # Operator-only observability (#392): spool backlog + row
+            # counts. Loopback-gated even when the daemon binds a
+            # non-loopback interface — off-listener peers get a 404, not
+            # a 403, so the route does not advertise itself to scanners.
+            if not _is_loopback(self.client_address[0]):
+                self._send(404, PAGE_SHELL.format(
+                    title="Not found",
+                    body="<h1>Not found</h1>",
+                ))
+            else:
+                self._send(200, json.dumps(
+                    self.service.status_snapshot(), sort_keys=True),
+                    ctype="application/json")
         else:
             self._send(404, PAGE_SHELL.format(
                 title="Not found",

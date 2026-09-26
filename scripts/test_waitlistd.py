@@ -1324,3 +1324,103 @@ def test_ip_limited_concurrent_sweep_no_race():
     assert errors == []
     # Dict is still bounded — sweeps happened and dropped the stale keys.
     assert len(svc._ip_hits) <= wd.IP_HITS_MAX_KEYS + 8 * 200
+
+
+# ---------------------------------------------------------------------------
+# /waitlist/status operator observability (#392)
+# ---------------------------------------------------------------------------
+
+
+def test_is_loopback_gate():
+    # The operator-only route must stay off any public listener: the gate
+    # is the whole auth story, so it is fail-closed by construction.
+    assert wd._is_loopback("127.0.0.1") is True
+    assert wd._is_loopback("127.0.0.2") is True  # the whole 127/8 block
+    assert wd._is_loopback("::1") is True
+    assert wd._is_loopback("::ffff:127.0.0.1") is False  # fail-closed
+    assert wd._is_loopback("10.0.0.5") is False
+    assert wd._is_loopback("203.0.113.7") is False
+    assert wd._is_loopback("") is False
+    assert wd._is_loopback("not-an-ip") is False
+    assert wd._is_loopback("fe80::1%eth0") is False  # link-local, zone-stripped
+
+
+def test_status_snapshot_empty():
+    svc, tmp = make_service()
+    snap = svc.status_snapshot()
+    assert snap["spool"] == {"files": 0, "oldest_age_seconds": None,
+                             "by_kind": {}}
+    assert snap["rows"] == {"total": 0}
+
+
+def _spool_doc(svc, name, kind=None, queued_at=None):
+    doc = {"to": "a@example.com", "subject": "s", "body": "b",
+           "queued_at": queued_at or wd.iso_z(svc.clock()),
+           "entry_id": "e1"}
+    if kind is not None:
+        doc["kind"] = kind
+    svc._write_spool(name, doc)
+
+
+def test_status_snapshot_spool_backlog():
+    svc, tmp = make_service()  # frozen clock: NOW
+    _spool_doc(svc, "a-1.json", kind=None,
+               queued_at=wd.iso_z(NOW - timedelta(hours=2)))  # confirm: no kind
+    _spool_doc(svc, "b-2.json", kind="invite",
+               queued_at=wd.iso_z(NOW - timedelta(minutes=30)))
+    _spool_doc(svc, "c-3.json", kind="reminder")  # queued NOW
+    snap = svc.status_snapshot()
+    assert snap["spool"]["files"] == 3
+    assert snap["spool"]["oldest_age_seconds"] == 2 * 3600
+    assert snap["spool"]["by_kind"] == {"unknown": 1, "invite": 1,
+                                        "reminder": 1}
+
+
+def test_status_snapshot_skips_tmp_and_junk():
+    svc, tmp = make_service()
+    _spool_doc(svc, "real-1.json")
+    spool_dir = os.path.join(tmp, "spool")
+    # A partial-write leftover: _write_spool unlinks it on failure, but a
+    # kill -9 between replace and unlink is theoretically possible — the
+    # sender would choke on it, so it must not be counted.
+    with open(os.path.join(spool_dir, "real-2.json.tmp-deadbeef"),
+              "w", encoding="utf-8") as fh:
+        fh.write('{"kind": "invite"')
+    with open(os.path.join(spool_dir, "notes.txt"),
+              "w", encoding="utf-8") as fh:
+        fh.write("not a spool doc")
+    with open(os.path.join(spool_dir, "torn.json"),
+              "w", encoding="utf-8") as fh:
+        fh.write('{"kind": "invite", ')  # torn mid-write
+    snap = svc.status_snapshot()
+    assert snap["spool"]["files"] == 1
+    assert snap["spool"]["by_kind"] == {"unknown": 1}
+
+
+def test_status_snapshot_rows_by_status():
+    svc, tmp = make_service()
+    for i, st in enumerate(["pending", "pending", "confirmed", "invited",
+                            "dropped", "signed_up", "expired"]):
+        svc.rows[f"e{i}"] = {"entry_id": f"e{i}", "status": st,
+                             "owner_email": f"u{i}@example.com"}
+    snap = svc.status_snapshot()
+    assert snap["rows"] == {"pending": 2, "confirmed": 1, "invited": 1,
+                            "dropped": 1, "signed_up": 1, "expired": 1,
+                            "total": 7}
+
+
+def test_http_status_endpoint_loopback(live_server):
+    port, tmp = live_server
+    status, body = _post(port, "/waitlist/form", {
+        "owner_email": "status@example.com", "muse_email": "",
+        "website": "", "rendered_at": str(time.time() - 10)})
+    assert status == 200
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/waitlist/status")
+    resp = conn.getresponse()
+    assert resp.status == 200
+    assert resp.getheader("Content-Type") == "application/json"
+    snap = json.loads(resp.read().decode("utf-8"))
+    assert snap["spool"]["files"] >= 1  # the confirm email just spooled
+    assert snap["spool"]["oldest_age_seconds"] is not None
+    assert snap["rows"]["pending"] >= 1
