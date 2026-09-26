@@ -3995,3 +3995,33 @@ Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_EARLY_MORNING.md`
   public-preview" — and verified neither; canonical C57/C58 =
   Baponi/Leap0 stand). In-lane no-launch verdict dated 2026-09-25
   stands — streak extends. **No new C-numbers.**
+
+## Watch update — 2026-09-26 (mid morning): fast movers 4/4 NO-CHANGE; delta news scan dedupes to filed corpus
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_MID_MORNING.md`
+(two-surveyor pass: A fast-mover re-verification vs the ~04:24 CDT
+baseline, B delta news scan; survey window 2026-09-26 ~04:56–05:02 CDT).
+
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** Daytona changelog
+  (newest still SEP 26 V0.218.0 / SEP 25 V0.217.0); Docker release
+  notes (newest dated heading still 2026-09-22, v0.45.1);
+  Microsandbox releases (newest still v0.7.3 #1646); Vercel changelog
+  (newest entries still 25 Sep — vcr-action/login, memory
+  observability; no 26-Sep entries; Drives still public beta on the
+  index, not re-checked per P49 daily cadence). Zero fetch failures.
+- **Delta news scan — NO-CHANGE.** The market surveyor's three
+  in-window candidates dedupe to already-filed corpus entries at
+  vendor grade: the Cloudflare Containers/Sandboxes cross-tenant
+  disk-residue disclosure (dm-thin `skip_block_zeroing`) = **C55**
+  (VENDOR-VERIFIED on blog.cloudflare.com, 2026-09-25 early-afternoon
+  fold — the surveyor carried only third-party coverage, the corpus
+  holds the vendor-primary read); the Docker Sandbox Kit Spec
+  open-source/CNCF move = **C52** (VENDOR-VERIFIED on docker.com/blog,
+  2026-09-25 mid-morning fold); the Docker Cloud Sandboxes launch =
+  **C45** (VENDOR-VERIFIED with the full garnish chain). All three
+  "NEW" flags were corpus-dedupe misses — the brief now requires a
+  corpus grep before flagging an item NEW.
+- **No new C-numbers.** In-lane no-launch verdict dated 2026-09-25
+  stands — streak extends.
+- **Carried:** C37 (Freestyle Pro fee VERIFIED absent, ~04:00 CDT),
+  C57 (Baponi), C58 (Leap0) — all OPEN, not re-surveyed this pass.
