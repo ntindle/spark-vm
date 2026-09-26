@@ -4127,3 +4127,35 @@ baseline, B delta news scan; survey window 2026-09-26 ~06:30–06:40 CDT).
   extends. **One new C-number: C62 (adjacent).**
 - **Carried:** C37 (Freestyle Pro fee VERIFIED absent), C57
   (Baponi), C58 (Leap0) — all OPEN, not re-surveyed this pass.
+
+## Watch update — 2026-09-26 (post late morning): fast movers 4/4 NO-CHANGE, delta scan NO-CHANGE; no new C-numbers
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_POST_LATE_MORNING.md`
+(two-surveyor pass: A fast-mover re-verification vs the ~06:24 CDT
+baseline, B delta news scan; survey window 2026-09-26 ~07:24–07:38 CDT).
+
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** Daytona changelog
+  (newest still SEP 26 V0.218.0 "KVM sandbox parameter and CLI WorkOS
+  application" / SEP 25 V0.217.0); Docker Sandboxes release notes
+  (newest dated heading still 2026-09-22); Microsandbox releases
+  (newest still v0.7.3); Vercel changelog (newest entries still
+  2026-09-25; Drives public beta still on the index — not re-checked
+  per P49 daily cadence). Surveyor A's two fetch failures were
+  reported honestly as UNVERIFIED (never NO-CHANGE) and re-read live
+  by the worker this run (Daytona HTML page; Vercel's own
+  machine-readable full index) — zero standing fetch failures.
+- **Delta news scan: NO-CHANGE — 11 clean dedupes, 0 new C-numbers.**
+  All in-window candidates dedupe to filed corpus (Docker Cloud
+  Sandboxes recrawls = C45; BAND Python Kit = C45's Kit-ecosystem
+  signal; OpenAI offline-sandbox coverage = C62; Microsoft Copilot
+  Code = C50; Docker Sandboxes virtio-fs CVEs = Docker Sandboxes row;
+  DeafNews commentary = C62 note; Boxd = C29; ByteAsk/Factory =
+  watch-doc color/demand signal; Daytona sweep = V0.218.0 already
+  filed). **Noted for a future deep-scan (not folded — out of the
+  watch window per the reach-back policy):** GitLab agent-sandbox
+  escape via allowlisted package proxy (~Sep 19 GitLab blog vintage;
+  SSRF in package proxy + unsigned refresh-token escalation, ~1h to
+  open internet) — in-lane adjacent vendor security research, not a
+  product.
+- In-lane no-launch verdict dated 2026-09-25 stands — streak extends.
+  Carried: C37, C57, C58 (all OPEN).
