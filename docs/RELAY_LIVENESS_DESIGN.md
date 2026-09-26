@@ -52,6 +52,11 @@ contract, not a later fix), exposed on a control-plane query surface:
 `relay_session_liveness(vm_id) → {session_id, state: active|idle|closed,
 last_bytes_at, hostkey_verified}`. Idle threshold: 5 minutes without
 bytes (a real cadence-friendly number, not a product promise — §9 Q1).
+Probe connections are control-plane traffic, not tenant sessions: the
+relay daemon MUST exclude prober handshakes from the session journal
+(R2 names the discriminator, e.g. a prober identity marker). Channel A
+journals tenant sessions only — a probe evidencing itself would collapse
+the two channels.
 
 ## 3. Two-channel liveness
 
@@ -224,9 +229,9 @@ remains unreachable until all four ship.
 
 ## Cross-references
 
-- `docs/TENANT_STATUS_ENDPOINT.md` §2 (`connection-unreachable` row),
-  §4 (live-entry AND-combine, rule 6 relay/cert suspension) — R3 wires
-  this design in as the named producer.
+- `docs/TENANT_STATUS_ENDPOINT.md` §2 (`connection-unreachable` row;
+  transition rule 6, relay/cert suspension), §4 (live-entry AND-combine)
+  — R3 wires this design in as the named producer.
 - `docs/STUCK_DETECTOR_DESIGN.md` §4 (predicate), §7 S3, §8 Q6 — Q6's
   answer; S3's dependency list.
 - `docs/FIRST_TEN_MINUTES_SPEC.md` §2 (minute-0 relay criterion), §8
