@@ -3892,8 +3892,8 @@ captured in `agent_notes/surveyor-vercel-20260926-0224.md`).
   cost-control/capacity UX move for long-lived, memory-leaky agent
   workloads. Design color (weight-light, advisory only — not a corpus
   claim): when the H5 sentinel surface grows a per-box resource
-  dimension, mirror the 85%-of-limit reference-line convention — it's
-  it matches Vercel's shipped convention. No pricing attached.
+  dimension, mirror the 85%-of-limit reference-line convention — it
+  matches Vercel's shipped convention. No pricing attached.
 - **C60 — vercel/vcr-action/login GitHub Action (adjacent,
   VENDOR-VERIFIED).** Vercel's 2026-09-25 changelog entry "Push images
   to Vercel Container Registry from GitHub Actions":
