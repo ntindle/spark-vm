@@ -3557,3 +3557,39 @@ narrow delta news scan.
 
 Full pass record in
 `docs/COMPETITOR_WATCH_2026-09-25_POST_POST_LATE_NIGHT.md`.
+
+## Watch update — 2026-09-25 (pre-midnight): tracked movers + carried leads NO-CHANGE; scan dedupes 7-for-7
+
+Full tracked set not re-surveyed this pass (last full pass was 9/9
+VERIFIED NO-CHANGE ~5.5h earlier) — targeted re-verification of the
+two fastest-moving tracked vendors, the two standing carried leads,
+plus a narrow delta news scan.
+
+- **Daytona changelog**: VERIFIED NO-CHANGE — newest still SEP 26
+  V0.218.0 (`kvm` sandbox-creation parameter; full 2136-line page
+  read live).
+- **Docker Sandboxes release notes**: VERIFIED NO-CHANGE — newest
+  heading still 2026-09-22 (v0.45.1; full 444-line page read live).
+- **C37 (freestyle.sh/pricing)**: VERIFIED NO-CHANGE — Pro fee still
+  not printed; rate card unchanged verbatim (vCPU $0.04032/hr, GiB
+  memory $0.0129/hr, GiB storage $0.000086/hr, transfer $0.02/GB).
+  Lead remains OPEN.
+- **C26 (DO docs pricing subpage)**: VERIFIED NO-CHANGE — $0.05/GiB-month
+  still present three times; page stamp "Last verified 22 Sep 2026";
+  active-CPU "coming soon" footnote vs present-tense per-second body
+  copy both still verbatim; the 10× discrepancy against DO's own
+  investor-relations page ($0.005) stands as the open caveat. Lead
+  remains OPEN.
+- **Delta news scan** (narrow 2026-09-25 window): 7 in-lane candidates
+  all dedupe to filed corpus (Docker Cloud Sandboxes press recrawls —
+  C45 ×2 + BAND integration garnish; DeepSeek DSec — C56; Meta Muse
+  VM-filesystem-export — already adjacent watch-only color), out of
+  window (VMware Explore wrap-up, 22 days old), or out of lane
+  (Embedded LLM TokenVisor Spaces, Sep-19 enterprise PaaS). **No new
+  C-numbers.**
+- In-lane no-launch verdict dated 2026-09-25. Vercel Drives not
+  re-checked (P49 — next the 2026-09-26 morning pass). Zero fetch
+  failures this pass.
+
+Full pass record in
+`docs/COMPETITOR_WATCH_2026-09-25_PRE_MIDNIGHT.md`.
