@@ -4215,3 +4215,40 @@ baseline, B delta news scan; survey window 2026-09-26 ~08:24–08:40 CDT).
   acquires Blaxel); this item renumbered to C64 at Architecture
   review time. If the 0754 fold never lands, C64 leaves a skipped
   number — flagged in the PR description.
+
+## Watch update — 2026-09-26 (post post morning): fast movers 4/4 NO-CHANGE, delta scan NO-CHANGE; no new C-numbers
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_POST_POST_MORNING.md`
+(two-surveyor pass: A fast-mover re-verification vs the ~08:40 CDT
+baseline, B delta news scan; survey window 2026-09-26 ~09:05–09:19 CDT).
+
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** All four vendor
+  fetches succeeded first try — zero fetch failures, zero UNVERIFIED
+  grades. Daytona changelog (newest still SEP 26 V0.218.0); Docker
+  release notes (newest dated heading still 2026-09-22); Microsandbox
+  releases (newest still v0.7.3; org header now shows
+  superradcompany/microsandbox — rename note, not a delta); Vercel
+  changelog (newest entries still 25 Sep, nothing dated 26 Sep;
+  Drives not re-checked per P49 daily cadence).
+- **Delta news scan: NO-CHANGE — 11 clean dedupes, 0 new C-numbers.**
+  PANews/Zubiqo Sep-26 = C62; BAND Docker kit + WebPRONews Cloud
+  Sandboxes piece = C45; Copilot app opt-in local sandboxing =
+  filed; DeafNews commentary = C62 notes; DEV SwarmTraces = filed
+  HF-intrusion row; CVE-2026-82533 = filed; Runloop PRNewswire =
+  stale recrawl; Leap0 = C58 (Leap.new stays DATE-UNVERIFIED).
+- **Sibling-slot dedupe correction:** the 07:54 slot's orphaned
+  capture proposed "C63 — Baseten acquires Blaxel" — corpus grep
+  shows it was already filed (Blaxel vendor row + C11 integration
+  watch + source links); the capture's grep covered `agent_notes/`
+  only. Recorded as a clean dedupe, not a new number. The 0754 slot
+  left no completion entry and no branch commits (dead slot per
+  P40 taxonomy; no repair chain — no handoff existed).
+- **Deep-scan candidate queued (not filed):** Codex sandbox escapes
+  'Heapjack' + 'Overpatch' (Accomplish AI, reported 2026-09-21 —
+  zero corpus hits, genuinely new facts, but out-of-window +
+  adjacent lane; follows the GitLab-escape precedent). Full facts
+  in `hidden_files/agent_notes/surveyor-b-20260926-0854.md`.
+- In-lane no-launch verdict dated 2026-09-25 stands — streak
+  extends. **No new C-numbers.**
+- **Carried:** C37 (Freestyle), C57 (Baponi), C58 (Leap0) — all
+  OPEN, not re-surveyed this pass.
