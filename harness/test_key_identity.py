@@ -268,6 +268,23 @@ def test_cli_rejects_bad_key_file(tmp_path):
     assert "ERROR" in out.stderr
 
 
+def test_cli_rejects_out_of_range_expires_at_cleanly(tmp_path):
+    # year-9999 with a western offset cannot exist in UTC — the CLI must
+    # fail loud with its ERROR path, not an unhandled traceback.
+    pub = tmp_path / "key.pub"
+    pub.write_text(ED25519_LINE + "\n")
+    out = subprocess.run(
+        [sys.executable, "key_identity.py", str(pub),
+         "--expires-at", "9999-12-31T23:59:59-14:00"],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parent,
+    )
+    assert out.returncode == 1
+    assert "ERROR" in out.stderr
+    assert "Traceback" not in out.stderr
+
+
 def test_account_id_for_rejects_non_ascii_fingerprint():
     # must raise the module's loud error type, not a bare UnicodeEncodeError
     with pytest.raises(KeyIdentityError):

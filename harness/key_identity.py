@@ -341,12 +341,16 @@ def _cmd(argv: list[str] | None = None) -> int:
             return 1
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
-    manifest = first_connect_manifest(
-        keys[0],
-        claim_url=args.claim_url,
-        vm_endpoint=args.vm_endpoint,
-        expires_at=expires_at,
-    )
+    try:
+        manifest = first_connect_manifest(
+            keys[0],
+            claim_url=args.claim_url,
+            vm_endpoint=args.vm_endpoint,
+            expires_at=expires_at,
+        )
+    except KeyIdentityError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     json.dump(manifest, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
