@@ -10,7 +10,7 @@ account. This module provides the stateless identity half of that contract:
 - compute the OpenSSH ``SHA256:`` fingerprint of the key blob,
 - derive a stable, opaque account id from the fingerprint,
 - emit the first-connect agent manifest (account id, key fingerprint,
-  claim link, policy) as JSON.
+  expiry, claim link, policy) as JSON.
 
 Persistence — the fingerprint -> account registry, "same key resumes the
 same box" state, key rotation, and the claim/upgrade escape hatch — is a
@@ -69,6 +69,9 @@ class PublicKey:
     ``key_type`` is the outer type token (e.g. ``ssh-ed25519``), ``blob`` is
     the decoded key bytes, and ``comment`` is the optional trailing comment
     (present in authorized_keys lines; never echoed into the manifest).
+
+    Obtain instances via :func:`parse_public_key`, which enforces the
+    structural checks; constructing one directly skips them.
     """
 
     key_type: str
@@ -109,10 +112,12 @@ def _check_blob_structure(key_type: str, blob: bytes) -> None:
             f"key blob says {inner_name!r}"
         )
     if key_type in ("ssh-ed25519", "sk-ssh-ed25519@openssh.com"):
-        # string "ssh-ed25519" | string 32-byte-pubkey; sk- variant appends
-        # string application and a flags byte, which we deliberately do not
-        # parse further — the pubkey presence + exact first field is the
-        # structural check that matters for identity.
+        # The format pins down exactly one 32-byte public-key string after
+        # the algorithm name. Trailing bytes (sk-* application/flags
+        # fields, or future extensions) are NOT shape-checked here — they
+        # remain part of the key blob, so they still feed the fingerprint
+        # and identity. The check that matters for "loudly, never silently
+        # misidentifying a key" is the inner/outer type equality above.
         pubkey, _ = _read_ssh_string(blob, offset)
         if len(pubkey) != 32:
             raise KeyIdentityError(
@@ -202,9 +207,13 @@ def account_id_for(key_fingerprint: str) -> str:
         raise KeyIdentityError(
             f"not an OpenSSH SHA256 fingerprint: {key_fingerprint!r}"
         )
-    digest = hashlib.sha256(
-        (_ACCOUNT_ID_DOMAIN + key_fingerprint).encode("ascii")
-    ).hexdigest()
+    try:
+        domain_bytes = (_ACCOUNT_ID_DOMAIN + key_fingerprint).encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise KeyIdentityError(
+            f"not an OpenSSH SHA256 fingerprint: {key_fingerprint!r}"
+        ) from exc
+    digest = hashlib.sha256(domain_bytes).hexdigest()
     return f"acct_{digest[:16]}"
 
 
@@ -214,6 +223,7 @@ def first_connect_manifest(
     claim_url: str | None = None,
     vm_endpoint: str | None = None,
     box_id: str | None = None,
+    expires_at: datetime.datetime | None = None,
     issued_at: datetime.datetime | None = None,
 ) -> dict:
     """Build the first-connect agent manifest for a key.
@@ -223,17 +233,31 @@ def first_connect_manifest(
     claim-link escape hatch, and the policy the agent must report back to
     its operator. ``issued_at`` defaults to now (UTC); pass it explicitly
     in tests for determinism.
+
+    ``expires_at`` is an optional UTC timestamp for when the manifest (or
+    the claim link inside it) stops being honored. S1 semantics: ``None``
+    — key-identity accounts do not expire, and claim-link validity is set
+    by the claim/upgrade slice, not here.
     """
     fp = fingerprint(key)
     now = issued_at or datetime.datetime.now(datetime.timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=datetime.timezone.utc)
+
+    def _iso(dt: datetime.datetime | None) -> str | None:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc).isoformat()
+
     return {
         "manifest_version": MANIFEST_VERSION,
         "account_id": account_id_for(fp),
         "key_fingerprint": fp,
         "key_type": key.key_type,
-        "issued_at": now.astimezone(datetime.timezone.utc).isoformat(),
+        "issued_at": _iso(now),
+        "expires_at": _iso(expires_at),
         "vm_endpoint": vm_endpoint,
         "box_id": box_id,
         "claim_url": claim_url,
@@ -242,9 +266,13 @@ def first_connect_manifest(
             # account; there is no linking yet — the claim/upgrade escape
             # hatch (later slice) is the answer to key loss / rotation.
             "rotation": "not-implemented: a new key is a new account",
-            # Multiple keys = multiple identities; acceptable for
-            # self-hosted and agent-created accounts (see #446).
-            "sybil": "accepted: each key is its own identity",
+            # Multiple keys = multiple identities. Accepted for
+            # self-hosted and agent-created accounts; the hosted sybil
+            # policy is an open question (see #446).
+            "sybil": (
+                "accepted for self-hosted: each key is its own identity; "
+                "hosted policy TBD"
+            ),
         },
     }
 
@@ -271,6 +299,12 @@ def _cmd(argv: list[str] | None = None) -> int:
         default=None,
         help="VM endpoint (host:port) to embed in the manifest",
     )
+    parser.add_argument(
+        "--expires-at",
+        default=None,
+        metavar="ISO-8601",
+        help="manifest expiry timestamp (UTC ISO-8601) to embed",
+    )
     args = parser.parse_args(argv)
     try:
         with open(args.pubkey_file, encoding="utf-8") as fh:
@@ -289,8 +323,20 @@ def _cmd(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    expires_at = None
+    if args.expires_at is not None:
+        try:
+            expires_at = datetime.datetime.fromisoformat(args.expires_at)
+        except ValueError as exc:
+            print(f"ERROR: bad --expires-at: {exc}", file=sys.stderr)
+            return 1
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
     manifest = first_connect_manifest(
-        keys[0], claim_url=args.claim_url, vm_endpoint=args.vm_endpoint
+        keys[0],
+        claim_url=args.claim_url,
+        vm_endpoint=args.vm_endpoint,
+        expires_at=expires_at,
     )
     json.dump(manifest, sys.stdout, indent=2)
     sys.stdout.write("\n")

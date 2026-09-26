@@ -106,11 +106,13 @@ def test_account_id_rejects_non_fingerprint():
 
 def test_manifest_shape_and_fields():
     issued = datetime.datetime(2026, 9, 26, 16, 0, tzinfo=datetime.timezone.utc)
+    expiry = datetime.datetime(2026, 10, 26, 16, 0, tzinfo=datetime.timezone.utc)
     m = first_connect_manifest(
         parse_public_key(ED25519_LINE),
         claim_url="https://example.invalid/claim/abc",
         vm_endpoint="10.0.0.7:22",
         box_id="box-1",
+        expires_at=expiry,
         issued_at=issued,
     )
     assert m["manifest_version"] == 1
@@ -118,11 +120,26 @@ def test_manifest_shape_and_fields():
     assert m["key_fingerprint"] == ED25519_FP
     assert m["key_type"] == "ssh-ed25519"
     assert m["issued_at"] == "2026-09-26T16:00:00+00:00"
+    assert m["expires_at"] == "2026-10-26T16:00:00+00:00"
     assert m["claim_url"] == "https://example.invalid/claim/abc"
     assert m["vm_endpoint"] == "10.0.0.7:22"
     assert m["box_id"] == "box-1"
     assert "comment" not in json.dumps(m)  # operator comments never leak in
     assert m["policy"]["rotation"].startswith("not-implemented")
+
+
+def test_manifest_expiry_defaults_to_none():
+    # S1 semantics: key-identity accounts do not expire; the claim/upgrade
+    # slice sets claim-link validity, not this one.
+    m = first_connect_manifest(parse_public_key(ED25519_LINE))
+    assert "expires_at" in m
+    assert m["expires_at"] is None
+
+
+def test_manifest_expiry_naive_is_treated_as_utc():
+    naive = datetime.datetime(2026, 10, 26, 16, 0)
+    m = first_connect_manifest(parse_public_key(ED25519_LINE), expires_at=naive)
+    assert m["expires_at"] == "2026-10-26T16:00:00+00:00"
 
 
 def test_manifest_defaults_are_null_and_now():
@@ -153,10 +170,6 @@ def test_parse_authorized_keys_line_numbers_on_error():
         "ssh-unknown AAAAC3NzaC1lZDI1NTE5AAAAIHRlc3Q= x",  # unknown type
         "ssh-ed25519 !!!not-base64!!! x",  # bad base64
         "ssh-ed25519 QUJD x",  # truncated blob (3 bytes)
-        # blob whose embedded algorithm disagrees with the outer type:
-        "ssh-ed25519 "
-        + base64.b64encode(b"\x00\x00\x00\x07ssh-rsa" + b"\x00" * 32).decode()
-        + " x",
         # ed25519 with a short pubkey field (not 32 bytes):
         "ssh-ed25519 "
         + base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x04abcd").decode()
@@ -170,6 +183,36 @@ def test_parse_authorized_keys_line_numbers_on_error():
 def test_parse_rejects_malformed(bad):
     with pytest.raises(KeyIdentityError):
         parse_public_key(bad)
+
+
+def _confused_line(outer: str, inner: str) -> str:
+    """A key line whose blob embeds ``inner`` while the line says ``outer``.
+
+    The blob is otherwise well-formed (valid 32-byte field), so the ONLY
+    check that can reject it is the inner/outer type-equality check —
+    isolating that check from the payload-shape checks.
+    """
+    blob = (
+        len(inner).to_bytes(4, "big")
+        + inner.encode("ascii")
+        + b"\x00\x00\x00\x20"
+        + b"\x00" * 32
+    )
+    return outer + " " + base64.b64encode(blob).decode() + " x"
+
+
+@pytest.mark.parametrize(
+    "outer,inner",
+    [
+        ("ssh-ed25519", "ssh-rsa"),
+        # rsa gets NO payload-shape check at all — the type-equality check
+        # is its entire structural net; pin it on that side too.
+        ("ssh-rsa", "ssh-ed25519"),
+    ],
+)
+def test_parse_rejects_type_confusion(outer, inner):
+    with pytest.raises(KeyIdentityError, match="key type mismatch"):
+        parse_public_key(_confused_line(outer, inner))
 
 
 def test_stdlib_only():
@@ -206,6 +249,40 @@ def test_cli_rejects_bad_key_file(tmp_path):
     bad.write_text("not a key\n")
     out = subprocess.run(
         [sys.executable, "key_identity.py", str(bad)],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parent,
+    )
+    assert out.returncode != 0
+    assert "ERROR" in out.stderr
+
+
+def test_account_id_for_rejects_non_ascii_fingerprint():
+    # must raise the module's loud error type, not a bare UnicodeEncodeError
+    with pytest.raises(KeyIdentityError):
+        account_id_for("SHA256:☃☃☃☃☃☃☃☃")
+
+
+def test_cli_expires_at_round_trips(tmp_path):
+    pub = tmp_path / "key.pub"
+    pub.write_text(ED25519_LINE + "\n")
+    out = subprocess.run(
+        [sys.executable, "key_identity.py", str(pub),
+         "--expires-at", "2026-10-26T16:00:00+00:00"],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parent,
+    )
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["expires_at"] == "2026-10-26T16:00:00+00:00"
+
+
+def test_cli_rejects_bad_expires_at(tmp_path):
+    pub = tmp_path / "key.pub"
+    pub.write_text(ED25519_LINE + "\n")
+    out = subprocess.run(
+        [sys.executable, "key_identity.py", str(pub),
+         "--expires-at", "not-a-date"],
         capture_output=True,
         text=True,
         cwd=Path(__file__).resolve().parent,
