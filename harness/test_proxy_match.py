@@ -221,10 +221,10 @@ class TestEchoLayer(unittest.TestCase):
                   "0200.0.0.1", "0.0.0.0", "127.1:8080", "127.1.evil.com",
                   "\x00127.0.0.1", "127.0.0.1\x00", "126.1", "128.0.0.1"):
             self.assertFalse(pm.is_echo_entry(h), h)
-        # Known residual (module docstring, issue #269): IPv4-mapped IPv6
-        # exact-matches at enforcement since #257 but is deliberately not
-        # flagged on the hosts side yet.
-        self.assertFalse(pm.is_echo_entry("::ffff:127.0.0.1"))
+        # Issue #269 (fixed): IPv4-mapped IPv6 loopback spellings
+        # exact-match at enforcement since #257 and route to loopback on
+        # the box, so they are flagged on the hosts side now.
+        self.assertTrue(pm.is_echo_entry("::ffff:127.0.0.1"))
         # The ssrf path inherits the fix for bare-IP spellings via the
         # is_echo_entry fallback (hostname treatment of non-ipaddress
         # lines): "0x7f.0.0.1/8" is a different story -- the real
@@ -236,6 +236,45 @@ class TestEchoLayer(unittest.TestCase):
         # A CIDR-shaped non-canonical spelling is dead on both sides: the
         # real _parse_ssrf_allow treats it as an (inert) hostname too.
         self.assertFalse(pm.ssrf_line_is_echo("0x7f.0.0.1/8"))
+
+    def test_is_echo_entry_mapped_loopback(self):
+        # Issue #269: IPv4-mapped IPv6 spellings whose embedded address is
+        # in 127.0.0.0/8 exact-match at enforcement (host_in_list
+        # normalizes IP literals since #257 -- pinned by the drift
+        # tripwire) and route to loopback on the box (RFC 4291 mapped
+        # semantics; the proxy's own SSRF layer already judges them as
+        # 127.0.0.1 -- finding 37), so each is a live echo exemption the
+        # teardown must flag.
+        for h in ("::ffff:127.0.0.1", "::FFFF:127.0.0.1",
+                  "[::ffff:127.0.0.1]", "[::ffff:127.0.0.1]:8080",
+                  "::ffff:7f00:1", "::ffff:127.0.0.1.",
+                  "  ::ffff:127.0.0.1  ", "::ffff:127.0.0.1%eth0"):
+            self.assertTrue(pm.is_echo_entry(h), h)
+        # Non-loopback mapped addresses stay clean. An unbracketed
+        # port-carrying form never parses as an address and is inert at
+        # enforcement (pinned by
+        # test_is_echo_entry_entry_side_ports_are_inert), so it is
+        # correctly not flagged -- but the bracketed literal-with-port
+        # form IS stripped to the literal at enforcement (host_in_list),
+        # so it rides the True list above, as does the zone-id form
+        # (exact-matches a same-zone host at enforcement).
+        for h in ("::ffff:8.8.8.8", "::ffff:192.168.1.1",
+                  "::ffff:127.0.0.1:8080"):
+            self.assertFalse(pm.is_echo_entry(h), h)
+        # Narrowed-alias overrides cannot shrink the mapped set
+        # (fail-closed, like the 127/8 and .localhost sets).
+        self.assertTrue(pm.is_echo_entry("::ffff:127.0.0.1", aliases=()))
+
+    def test_ssrf_line_is_echo_mapped_loopback(self):
+        # Issue #269, ssrf side: mapped-loopback lines are flagged
+        # fail-closed (they read as loopback-directed; no legitimate
+        # allowlist entry is an IPv4-mapped net). Bare literals promote to
+        # /128 under the proxy's own parsing.
+        for line in ("::ffff:127.0.0.1", "::ffff:127.0.0.1/128",
+                     "::ffff:127.0.0.0/104", "::ffff:0.0.0.0/96"):
+            self.assertTrue(pm.ssrf_line_is_echo(line), line)
+        self.assertFalse(pm.ssrf_line_is_echo("::ffff:8.8.8.8"))
+        self.assertFalse(pm.ssrf_line_is_echo("::ffff:10.0.0.0/104"))
 
     def test_is_echo_entry_non_echo(self):
         # NB: "127.0.0.2" is NOT here -- since issue #259 it normalizes to

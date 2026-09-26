@@ -302,6 +302,8 @@ This changelog only works if entries land with the change, not after it:
 
 ### Security
 
+- The provision-time echo detector now flags IPv4-mapped IPv6 loopback bindings (`::ffff:127.0.0.1` and equivalent spellings): these exact-match the proxy's host allowlists and route to loopback on the box, so they were live echo exemptions the teardown never flagged. Closes the residual tracked as (#269).
+
 - Desktop screenshots are now written to a private temporary file (owner-only permissions, deleted right after serving) instead of a predictable world-readable path in the shared temp directory. (#496)
 
 - confirmd now enforces a cumulative per-connection deadline (60 seconds,
