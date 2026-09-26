@@ -73,6 +73,19 @@ Implements the executable half of the R2 pre-seeded-harness contract
   per-`vm_id` lifecycle is provisional on H11's isolation answer. Covered by
   `test_provider_iface.py` (41 contract tests incl. a fake in-memory
   driver exercising the full lifecycle).
+- **`key_identity.py`** — SSH-key-as-account identity primitives (GitHub
+  #446, slice S1): parses OpenSSH public-key lines structurally (the
+  algorithm embedded in the blob must equal the outer key type; per-type
+  payload checks), computes the OpenSSH `SHA256:` fingerprint (byte-identical
+  to `ssh-keygen -lf`), derives a stable one-way `acct_<16 hex>` account id
+  from the fingerprint (same key → same id; a new key is a new account —
+  rotation-as-new-identity until the claim story ships), and emits the
+  first-connect agent manifest (account id, fingerprint, claim link, policy)
+  as JSON. Stdlib only, no state, no network — the fingerprint→account
+  registry and same-key-resumes-same-box state are later slices. Run
+  `python3 key_identity.py <pubkey-file>` to print a key's manifest.
+  Covered by `test_key_identity.py` (27 tests, fingerprint vectors pinned
+  to real `ssh-keygen -lf` output).
 
 ## Fixture lifecycle
 

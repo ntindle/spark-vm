@@ -147,6 +147,8 @@ This changelog only works if entries land with the change, not after it:
   launches, pricing moves, or funding dated 2026-09-24. Full pass in
   `docs/COMPETITOR_WATCH_2026-09-24_EVENING.md` (#351).
 
+- SSH key as account, slice S1: the key-identity primitives that make a public key the account — parsing OpenSSH key lines, OpenSSH-identical `SHA256:` fingerprints, stable key-bound account ids, and the first-connect agent manifest (account id, fingerprint, claim link, policy). Stdlib-only, no state; the fingerprint registry, same-key-resumes-same-box state, and key rotation come in later slices of (#446).
+
 ### Changed
 
 - Multi-tenancy trust model is now framed in runtime-cell vocabulary: a hosted tenant's agent owns everything inside its cell — its per-tenant box (its jail on the cooperative tier), contained root-equivalent, never host root — while the enforcement layer — egress fencing, secret swapping, metering, break-glass — stays operator-owned and invisible from inside, seen only through approvals, status, and audit. Unchanged: support access stays tenant-visible, granted, logged, break-glass-only; no operator-blindness claim. (#432)
