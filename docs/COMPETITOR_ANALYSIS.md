@@ -4019,8 +4019,8 @@ baseline, B delta news scan; survey window 2026-09-26 ~04:56–05:02 CDT).
   open-source/CNCF move = **C52** (VENDOR-VERIFIED on docker.com/blog,
   2026-09-25 mid-morning fold); the Docker Cloud Sandboxes launch =
   **C45** (VENDOR-VERIFIED with the full garnish chain). All three
-  "NEW" flags were corpus-dedupe misses — the brief now requires a
-  corpus grep before flagging an item NEW.
+  "NEW" flags were corpus-dedupe misses — future market-surveyor briefs
+  will require a corpus grep before flagging an item NEW.
 - **No new C-numbers.** In-lane no-launch verdict dated 2026-09-25
   stands — streak extends.
 - **Carried:** C37 (Freestyle Pro fee VERIFIED absent, ~04:00 CDT),
