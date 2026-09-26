@@ -3819,9 +3819,8 @@ Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_POST_MIDNIGHT.md`
   don't invent a proprietary grant format (H11 governance axis).
 - Design color for the H4 trail (weight-light, speculative — advisory only, not a corpus claim): the runtime TCK's adapter verbs are a
   *conformance-visible lifecycle vocabulary* — `stop`/`start` ("stop
-  without discarding state"), `recreate`, `status`
-  (`running`/`stopped`), `wait-idle` (for
-  `com.docker.sandbox/long-running@1`) — same axis as H4's
+  without discarding state"), `recreate`, and the `wait-idle`/`status` pair (required only for
+  adapters claiming `com.docker.sandbox/long-running@1`) — same axis as H4's
   `suspended`/`waking` + async `dial()`; map it, don't invent a
   proprietary state vocabulary.
 - **Delta news scan — clean.** Z.ai open-sources ZCode (Sep 21) →

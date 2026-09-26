@@ -112,9 +112,9 @@ Design color for the H4 design trail (weight-light, speculative — advisory onl
 runtime TCK's adapter verbs are a *conformance-visible lifecycle
 vocabulary* — `stop`/`start` ("stop without discarding state"),
 `recreate` (fresh writable layer, declared volume state preserved),
-`status` (host-side `running`/`stopped` observation), and `wait-idle`
-(required only for adapters claiming
-`com.docker.sandbox/long-running@1`) — i.e. stopped-vs-running and
+`status` (host-side `running`/`stopped` observation), and both `wait-idle`
+and `status` are required only for adapters claiming
+`com.docker.sandbox/long-running@1` — i.e. stopped-vs-running and
 long-running vs task-scoped are conformance-testable runtime
 behaviors, not private vocabulary. That is the same axis as H4's
 `suspended`/`waking` + async `dial()` contract; a future H4 adapter
