@@ -252,6 +252,27 @@ def test_steer_refuses_when_tui_dies_after_poll(cli, monkeypatch):
     assert fr.sent_keys() == [], "must not send Enter into a dead pane"
 
 
+def test_steer_toctou_refusal_reports_fresh_pane(cli, monkeypatch):
+    # Issue #321: the pre-TOCTOU poll captured a live pane; the fresh
+    # re-check sees the pane die. The refusal's reported tail must come
+    # from the FRESH capture -- the stale live pane would mislead the
+    # operator about what the pane showed at refusal time.
+    fresh_dead = (
+        "fresh model output line alpha\n"
+        "❯ stale scrollback question\n"
+        "ntindle@spark-vm:~/work$ "
+    )
+    fr = steer_harness(cli, monkeypatch, [LIVE_PANE, fresh_dead])
+    with pytest.raises(RuntimeError) as excinfo:
+        cli._steer("demo", "harmless message")
+    msg = str(excinfo.value)
+    assert "fresh model output line alpha" in msg
+    assert "some model output" not in msg, \
+        "refusal showed the stale pre-TOCTOU pane, not the fresh one"
+    assert fr.pasted() == [], "must not paste into a pane that just died"
+    assert fr.sent_keys() == [], "must not send Enter into a dead pane"
+
+
 def test_steer_skips_enter_when_tui_dies_before_enter(cli, monkeypatch):
     # TUI dies between the paste and the Enter. The paste already happened
     # (unavoidable at that instant), but the Enter must not be sent: a dead
