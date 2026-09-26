@@ -1324,3 +1324,220 @@ def test_ip_limited_concurrent_sweep_no_race():
     assert errors == []
     # Dict is still bounded — sweeps happened and dropped the stale keys.
     assert len(svc._ip_hits) <= wd.IP_HITS_MAX_KEYS + 8 * 200
+
+
+# ---------------------------------------------------------------------------
+# /waitlist/status operator observability (#392)
+# ---------------------------------------------------------------------------
+
+
+def test_is_loopback_gate():
+    # The operator-only route must stay off any public listener: the gate
+    # is the whole auth story, so it is fail-closed by construction.
+    assert wd._is_loopback("127.0.0.1") is True
+    assert wd._is_loopback("127.0.0.2") is True  # the whole 127/8 block
+    assert wd._is_loopback("::1") is True
+    assert wd._is_loopback("::ffff:127.0.0.1") is False  # fail-closed
+    assert wd._is_loopback("10.0.0.5") is False
+    assert wd._is_loopback("203.0.113.7") is False
+    assert wd._is_loopback("") is False
+    assert wd._is_loopback("not-an-ip") is False
+    assert wd._is_loopback("fe80::1%eth0") is False  # link-local, zone-stripped
+    assert wd._is_loopback("::1%lo") is True  # loopback with zone id
+
+
+def test_status_snapshot_empty():
+    svc, tmp = make_service()
+    snap = svc.status_snapshot()
+    assert snap["spool"] == {"files": 0, "oldest_age_seconds": None,
+                             "by_kind": {}}
+    assert snap["rows"] == {"total": 0}
+
+
+def _spool_doc(svc, name, kind=None, queued_at=None):
+    doc = {"to": "a@example.com", "subject": "s", "body": "b",
+           "queued_at": queued_at or wd.iso_z(svc.clock()),
+           "entry_id": "e1"}
+    if kind is not None:
+        doc["kind"] = kind
+    svc._write_spool(name, doc)
+
+
+def test_status_snapshot_spool_backlog():
+    svc, tmp = make_service()  # frozen clock: NOW
+    _spool_doc(svc, "a-1.json", kind="confirm",
+               queued_at=wd.iso_z(NOW - timedelta(hours=2)))
+    _spool_doc(svc, "b-2.json", kind="invite",
+               queued_at=wd.iso_z(NOW - timedelta(minutes=30)))
+    _spool_doc(svc, "c-3.json", kind="reminder")  # queued NOW
+    snap = svc.status_snapshot()
+    assert snap["spool"]["files"] == 3
+    assert snap["spool"]["oldest_age_seconds"] == 2 * 3600
+    assert snap["spool"]["by_kind"] == {"confirm": 1, "invite": 1,
+                                        "reminder": 1}
+
+
+def test_status_snapshot_skips_tmp_and_junk():
+    svc, tmp = make_service()
+    _spool_doc(svc, "real-1.json")
+    spool_dir = os.path.join(tmp, "spool")
+    # A partial-write leftover: _write_spool unlinks it on failure, but a
+    # kill -9 between replace and unlink is theoretically possible — the
+    # sender would choke on it, so it must not be counted.
+    with open(os.path.join(spool_dir, "real-2.json.tmp-deadbeef"),
+              "w", encoding="utf-8") as fh:
+        fh.write('{"kind": "invite"')
+    with open(os.path.join(spool_dir, "notes.txt"),
+              "w", encoding="utf-8") as fh:
+        fh.write("not a spool doc")
+    with open(os.path.join(spool_dir, "torn.json"),
+              "w", encoding="utf-8") as fh:
+        fh.write('{"kind": "invite", ')  # torn mid-write
+    # Valid JSON excluded ONLY by the name filters (QA#4: without them the
+    # count would move — the filters are not dead code).
+    with open(os.path.join(spool_dir, "notes.txt"),
+              "w", encoding="utf-8") as fh:
+        json.dump({"kind": "invite", "queued_at": wd.iso_z(svc.clock())}, fh)
+    with open(os.path.join(spool_dir, "stale.tmp-deadbeef.json"),
+              "w", encoding="utf-8") as fh:
+        json.dump({"kind": "reminder", "queued_at": wd.iso_z(svc.clock())}, fh)
+    snap = svc.status_snapshot()
+    assert snap["spool"]["files"] == 1
+    assert snap["spool"]["by_kind"] == {"unknown": 1}
+
+
+def test_status_snapshot_rows_by_status():
+    svc, tmp = make_service()
+    for i, st in enumerate(["pending", "pending", "confirmed", "invited",
+                            "dropped", "signed_up", "expired"]):
+        svc.rows[f"e{i}"] = {"entry_id": f"e{i}", "status": st,
+                             "owner_email": f"u{i}@example.com"}
+    snap = svc.status_snapshot()
+    assert snap["rows"] == {"pending": 2, "confirmed": 1, "invited": 1,
+                            "dropped": 1, "signed_up": 1, "expired": 1,
+                            "total": 7}
+
+
+def test_http_status_endpoint_loopback(live_server):
+    port, tmp = live_server
+    status, body = _post(port, "/waitlist/form", {
+        "owner_email": "status@example.com", "muse_email": "",
+        "website": "", "rendered_at": str(time.time() - 10)})
+    assert status == 200
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/waitlist/status")
+    resp = conn.getresponse()
+    assert resp.status == 200
+    assert resp.getheader("Content-Type") == "application/json"
+    snap = json.loads(resp.read().decode("utf-8"))
+    assert snap["spool"]["files"] >= 1  # the confirm email just spooled
+    assert snap["spool"]["oldest_age_seconds"] is not None
+    assert snap["rows"]["pending"] >= 1
+
+
+def test_status_snapshot_skips_non_utf8():
+    # UnicodeDecodeError is not a JSONDecodeError subclass — a raw-bytes
+    # spool file must still be skipped, never fatal (Engineering round 1).
+    svc, tmp = make_service()
+    _spool_doc(svc, "good-1.json")
+    with open(os.path.join(tmp, "spool", "bad-2.json"),
+              "wb") as fh:
+        fh.write(b"\xff\xfe\x00not utf-8\x80")
+    snap = svc.status_snapshot()
+    assert snap["spool"]["files"] == 1
+    assert snap["spool"]["by_kind"] == {"unknown": 1}
+
+
+def test_status_snapshot_non_string_kind_and_status():
+    # A hostile/malformed spool doc or row must normalize to "unknown",
+    # never crash the counting dict or json.dumps(sort_keys=True)
+    # (Engineering round 1: unhashable kind; mixed str/int sort).
+    svc, tmp = make_service()
+    _spool_doc(svc, "list-kind.json", kind=["invite"])
+    _spool_doc(svc, "int-kind.json", kind=5)
+    _spool_doc(svc, "empty-kind.json", kind="")
+    svc.rows["e1"] = {"entry_id": "e1", "status": 7,
+                      "owner_email": "u1@example.com"}
+    svc.rows["e2"] = {"entry_id": "e2", "status": None,
+                      "owner_email": "u2@example.com"}
+    snap = svc.status_snapshot()
+    assert snap["spool"]["by_kind"] == {"unknown": 3}
+    assert snap["rows"] == {"unknown": 2, "total": 2}
+    json.dumps(snap, sort_keys=True)  # must not raise
+
+
+def test_confirm_spool_doc_carries_kind():
+    # #392's headline contract is "count by kind" — the most common spool
+    # kind (confirm emails) must not land in "unknown" (Engineering round 1).
+    svc, tmp = make_service()
+    row = {"entry_id": "e1", "owner_email": "u@example.com",
+           "status": "pending", "email_sends": []}
+    svc.rows["e1"] = row
+    assert svc._unified_send_allowed(row) is True
+    svc._queue_confirm_email(row)
+    names = os.listdir(os.path.join(tmp, "spool"))
+    assert len(names) == 1
+    with open(os.path.join(tmp, "spool", names[0]),
+              encoding="utf-8") as fh:
+        doc = json.load(fh)
+    assert doc["kind"] == "confirm"
+    snap = svc.status_snapshot()
+    assert snap["spool"]["by_kind"] == {"confirm": 1}
+
+
+def test_http_status_refused_off_loopback(monkeypatch, live_server):
+    # The security-critical half of the feature: the 404 wiring in do_GET.
+    # Simulate a non-loopback peer by forcing the gate closed on a real
+    # loopback connection (Engineering round 1).
+    monkeypatch.setattr(wd, "_is_loopback", lambda addr: False)
+    port, tmp = live_server
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/waitlist/status")
+    resp = conn.getresponse()
+    assert resp.status == 404
+    body = resp.read().decode("utf-8")
+    assert "Not found" in body
+    # The refusal must not advertise the route or leak the snapshot.
+    assert "oldest_age_seconds" not in body
+    assert "spool" not in body
+
+def test_status_snapshot_spool_unreadable(tmp_path):
+    # A deleted/unreadable spool dir is an outage, not an empty spool
+    # (QA round 1): the snapshot must flag it instead of reading "all clear".
+    import shutil
+    svc, tmp = make_service()
+    spool_dir = svc.spool_dir
+    svc.rows["a"] = {"entry_id": "a", "status": "invited"}
+    shutil.rmtree(spool_dir)
+    snap = svc.status_snapshot()
+    assert snap["spool"]["files"] == 0
+    assert snap["spool"]["error"] == "spool directory unreadable"
+    # Rows still counted — they come from memory, not the spool dir.
+    assert snap["rows"] == {"invited": 1, "total": 1}
+
+
+def test_status_snapshot_negative_age_clamps():
+    # Future-dated queued_at (clock skew) clamps to 0 rather than reporting
+    # a negative age (QA round 1).
+    svc, tmp = make_service()
+    spool_dir = svc.spool_dir
+    future = svc.clock() + timedelta(hours=1)
+    with open(os.path.join(spool_dir, "f.json"), "w", encoding="utf-8") as fh:
+        json.dump({"kind": "invite", "queued_at": wd.iso_z(future)}, fh)
+    snap = svc.status_snapshot()
+    assert snap["spool"]["oldest_age_seconds"] == 0
+
+
+def test_status_snapshot_mtime_fallback():
+    # Missing queued_at falls back to file mtime (QA round 1): pin the
+    # branch with an explicit utime under the frozen clock.
+    svc, tmp = make_service()
+    spool_dir = svc.spool_dir
+    path = os.path.join(spool_dir, "g.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"kind": "reminder"}, fh)
+    stamp = (svc.clock() - timedelta(hours=1)).timestamp()
+    os.utime(path, (stamp, stamp))
+    snap = svc.status_snapshot()
+    assert snap["spool"]["files"] == 1
+    assert snap["spool"]["oldest_age_seconds"] == 3600
