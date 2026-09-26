@@ -1080,9 +1080,11 @@ def test_tenant_record_preserves_existing_mode_0660(stack):
     # the pre-existing mode verbatim (stat.S_IMODE); the new-file branch
     # computes 0666 & ~umask. The 0600-seeded test above only pins "not
     # widened to 0644" -- a normalize-to-0600 regression would pass it.
-    # A 0660 seed survives only if the copy branch fired: no sane umask
-    # makes 0666 & ~umask == 0660, so the post-write 0660 is the copied
-    # mode, not the default arithmetic.
+    # A 0660 seed survives only if the copy branch fired: the injector
+    # hard-sets umask 022 at inject-provision-state.sh:162, so the new-file
+    # branch is deterministically 0644 -- no umask makes
+    # 0666 & ~umask == 0660, so the post-write 0660 is the copied mode,
+    # not the default arithmetic.
     import os
     import stat
     env, paths = stack
@@ -1097,6 +1099,29 @@ def test_tenant_record_preserves_existing_mode_0660(stack):
     record = json.loads(tenant_record.read_text())
     assert record["tenant_id"] == "tenant-42"
     assert stat.S_IMODE(os.stat(tenant_record).st_mode) == 0o660
+
+
+def test_tenant_record_new_file_mode_pins_umask_022(stack):
+    # QA follow-up from the #431 review: the 0660 test's discrimination
+    # rests on the new-file branch being deterministically 0644. The
+    # injector hard-sets umask 022 at inject-provision-state.sh:162, so a
+    # fresh tenant record is 0666 & ~022 = 0644 regardless of the ambient
+    # umask of whoever invoked it. Pin that here: a future umask edit
+    # (e.g. to 007, which would make new records 0660) fails LOUDLY
+    # instead of silently evacuating the 0660 test's premise.
+    import os
+    import stat
+    env, paths = stack
+    _seed_real_key(paths)
+    tenant_record = paths["tenant_record"]
+    assert not tenant_record.exists()
+    env = dict(env)
+    env["INJECT_TENANT_ID"] = "tenant-42"
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    record = json.loads(tenant_record.read_text())
+    assert record["tenant_id"] == "tenant-42"
+    assert stat.S_IMODE(os.stat(tenant_record).st_mode) == 0o644
 
 
 def test_identity_refuses_symlinked_ssh_dir(stack):
