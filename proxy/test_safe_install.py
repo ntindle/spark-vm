@@ -248,6 +248,67 @@ class TestSafeInstall(unittest.TestCase):
             self.assertEqual(dest2.read_bytes(), b"via src\n")
             self.assertEqual(stat.S_IMODE(os.stat(dest2).st_mode), 0o644)
 
+    def test_cli_src_refuses_planted_symlink(self):
+        # Issue #413: a symlink planted at --src used to be followed and
+        # its bytes installed by the privileged process. Fail closed.
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "target.txt"
+            target.write_text("precious\n")
+            link = Path(d) / "link.txt"
+            link.symlink_to(target)
+            dest = Path(d) / "out.txt"
+            r = subprocess.run(
+                [sys.executable, SCRIPT, "--src", str(link), "--mode",
+                 "0600", str(dest)], capture_output=True, timeout=30)
+            self.assertEqual(r.returncode, 2, r.stderr.decode())
+            self.assertIn("symlink", r.stderr.decode())
+            self.assertEqual(target.read_bytes(), b"precious\n")
+            self.assertFalse(dest.exists())
+
+    def test_cli_src_refuses_hardlink(self):
+        # Issue #413 via #299: a hardlink IS a regular file, so the symlink
+        # refusal alone does not stop it.
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "src.txt"
+            src.write_bytes(b"hardlink target\n")
+            hard = Path(d) / "hard.txt"
+            os.link(src, hard)
+            dest = Path(d) / "out.txt"
+            r = subprocess.run(
+                [sys.executable, SCRIPT, "--src", str(hard), "--mode",
+                 "0600", str(dest)], capture_output=True, timeout=30)
+            self.assertEqual(r.returncode, 2, r.stderr.decode())
+            self.assertIn("hardlink", r.stderr.decode())
+            self.assertFalse(dest.exists())
+
+    def test_cli_src_refuses_fifo_without_blocking(self):
+        # Issue #413 via #144: the old plain open() would block the
+        # privileged process on a planted FIFO forever; the shared
+        # discipline refuses it. timeout=30 proves no hang.
+        with tempfile.TemporaryDirectory() as d:
+            fifo = Path(d) / "pipe"
+            os.mkfifo(fifo)
+            dest = Path(d) / "out.txt"
+            r = subprocess.run(
+                [sys.executable, SCRIPT, "--src", str(fifo), "--mode",
+                 "0600", str(dest)], capture_output=True, timeout=30)
+            self.assertEqual(r.returncode, 2, r.stderr.decode())
+            self.assertIn("not a regular file", r.stderr.decode())
+            self.assertFalse(dest.exists())
+
+    def test_cli_src_missing_fails_closed(self):
+        # Issue #413: a missing --src is a refusal (exit 2), not an
+        # OSError crash (exit 1), like every other safe_install refusal.
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "out.txt"
+            r = subprocess.run(
+                [sys.executable, SCRIPT, "--src", str(Path(d) / "absent.txt"),
+                 "--mode", "0600", str(dest)], capture_output=True,
+                timeout=30)
+            self.assertEqual(r.returncode, 2, r.stderr.decode())
+            self.assertIn("refusing", r.stderr.decode())
+            self.assertFalse(dest.exists())
+
     def test_cli_refuses_symlink(self):
         with tempfile.TemporaryDirectory() as d:
             target = Path(d) / "target.txt"

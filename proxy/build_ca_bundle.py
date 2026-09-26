@@ -48,6 +48,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from safe_install import safe_install
+from privileged_read import privileged_read
 
 DEFAULT_SYS_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 DEFAULT_CA = "/home/swapd/.mitmproxy/mitmproxy-ca-cert.pem"
@@ -83,47 +84,15 @@ def _missing_ca(ca_path, ca_only):
 
 
 def _privileged_read(path, on_missing):
-    """Shared open discipline for privileged reads (issues #144/#299/#300/#372).
+    """Thin alias over the shared privileged-read open discipline.
 
-    ``on_missing`` is a zero-arg callable invoked when the path is absent;
-    it must raise SystemExit -- the swapd CA passes its loud first-deploy
-    skip; --sys passes a fail-closed refusal (a missing system bundle is
-    not a first-deploy state).
+    The discipline lives in proxy/privileged_read.py (issues
+    #144/#299/#300/#372) and is shared with safe_install.py's --src read
+    (issue #413), so the privileged-read family converges on one open
+    discipline instead of accumulating per-path hardening. This alias keeps
+    the old name for any out-of-tree callers.
     """
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
-        on_missing()  # raises SystemExit -- raced away between check and open
-        # A non-raising on_missing is a caller bug: fail closed explicitly
-        # rather than falling through to an unbound-fd NameError.
-        raise SystemExit(1)  # unreachable by contract
-    except OSError as e:
-        if e.errno == errno.ELOOP:
-            _fail("%s is a symlink -- refusing to read through it "
-                  "(issue #144)" % path)
-        raise
-    # fstat the raw fd before fdopen: fdopen on a directory raises
-    # IsADirectoryError, and a FIFO open would block without O_NONBLOCK.
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode):
-        os.close(fd)
-        _fail("%s is not a regular file -- refusing to read it "
-              "(issue #144)" % path)
-    if st.st_nlink > 1:
-        # A hardlink IS a regular file, so O_NOFOLLOW + S_ISREG do not stop
-        # it: an attacker could hardlink a root-readable file into the read
-        # path. Refuse independent of the fs.protected_hardlinks sysctl
-        # (issue #299).
-        os.close(fd)
-        _fail("%s is a hardlink (nlink=%d) -- refusing to read it "
-              "(issue #299)" % (path, st.st_nlink))
-    with os.fdopen(fd, "rb") as f:
-        data = f.read(_MAX_CA_BYTES + 1)
-    if len(data) > _MAX_CA_BYTES:
-        _fail("%s is %d bytes (cap %d) -- refusing to read it into the "
-              "privileged bundle (issue #300)"
-              % (path, len(data), _MAX_CA_BYTES))
-    return data
+    return privileged_read(path, on_missing, max_bytes=_MAX_CA_BYTES)
 
 
 def read_ca_bytes(ca_path, ca_only=False):
