@@ -113,7 +113,17 @@ Why both channels observe the path without any inbound path to the VM:
 ## 5. Producer contract — wiring into the tenant-status layer
 
 The instrument's shipped output is `relay_path_state(vm_id) → ok |
-degraded | down`, with the §3 sub-code (`relay` | `cert` | `box-leg`).
+degraded | down`, with the §3 sub-code (`relay` | `cert` | `box-leg`)
+on non-`ok` readings. Value mapping from the §3 taxonomy: `path_ok` →
+`ok`; `relay_defect`/`cert_defect`/`box_leg_defect` → `down` with the
+corresponding sub-code. `degraded` is the operator-warning state — the
+prober disagrees with itself across consecutive probes (flapping), or the
+passive journal is stale past the §2 idle threshold while the prober
+still reports `ok`. `degraded` does **not** fire transition rule 6 on
+its own (the rule fires only on `down`); it is recorded in `detail` and
+on the operator surface, and for the stuck detector's §6 conjunct a
+`degraded` reading is *suspect* — it evaluates as unobservable
+(`insufficient-observability`), never as assumed-`ok`.
 The tenant layer consumes it as the `connection-unreachable` producer:
 
 - The **`live`-entry AND-combine** (endpoint §4: "provider running **and**
@@ -221,7 +231,7 @@ remains unreachable until all four ship.
 - `harness/provider_iface.py` (`ProvisionSpec.public_ingress` invariant,
   `ssh_info()`, `dial()` verb) — the contract the relay implements and
   the §4 discipline it must not violate.
-- `docs/USAGE_METERING_DESIGN.md` §4–§5 (counters-over-content privacy,
+- `docs/USAGE_METERING_DESIGN.md` §5–§6 (counters-over-content privacy,
   #376 rotation lesson) — frame and journal constraints.
 - `docs/SENTINEL_TELEMETRY_SURFACES.md` S3 — why the emitter is the relay
   daemon, never the tenant's Muse.
