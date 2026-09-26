@@ -1947,6 +1947,32 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # close the request so a transient crunch can't drain the pool
             # permanently. Not re-raised: _handle_request_noblock would
             # log it a second time via handle_error.
+            #
+            # B1 convergence: ThreadingMixIn.process_request registers the
+            # new thread in _threads BEFORE start(). If start() itself
+            # raised, the dead thread is now parked in the join list and a
+            # later server_close() would raise RuntimeError joining a
+            # thread that never started ("cannot join thread before it is
+            # started" — verified on this box's CPython 3.12). The pre-B1
+            # code avoided this by registering after start(); the
+            # delegation keeps B1's no-private-import requirement, so
+            # prune here instead. Daemon threads (this server's default
+            # via ThreadingHTTPServer) are never tracked, so this only
+            # matters for non-daemon configurations. is_alive() is also
+            # False for already-finished threads — dropping those from the
+            # join list is a no-op (join would have returned immediately).
+            # A concurrent in-flight request's not-yet-started thread
+            # could theoretically be pruned too; acceptable — this path
+            # only runs when thread creation is already failing, and
+            # non-daemon threads still block interpreter exit.
+            threads = vars(self).get("_threads")
+            if isinstance(threads, list):  # _Threads is a list subclass
+                for t in list(threads):
+                    if not t.is_alive():
+                        try:
+                            threads.remove(t)
+                        except ValueError:
+                            pass
             self.handle_error(request, client_address)
             self._slots.release()
             self.close_request(request)

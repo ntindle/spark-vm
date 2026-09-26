@@ -1643,6 +1643,36 @@ class M8ServerHardeningTests(unittest.TestCase):
         # The connection was closed, not left dangling.
         self.assertEqual(accepted.fileno(), -1)
 
+    def test_failed_start_never_parks_dead_thread(self):
+        """B1 convergence: ThreadingMixIn registers the new thread in
+        _threads BEFORE start(). If start() raises, the dead thread must
+        not break a later server_close() with RuntimeError ("cannot join
+        thread before it is started"). Daemon threads (this server's
+        default) are never tracked, so pin the property with
+        daemon_threads=False — the only configuration where registration
+        happens at all."""
+        import socket as _socket
+        srv = self._make_server(max_threads=1)
+        srv.daemon_threads = False  # force _threads registration
+        real_thread = threading.Thread
+
+        def boom(*a, **k):
+            th = real_thread(*a, **k)
+            def fail():
+                raise RuntimeError("can't start new thread")
+            th.start = fail
+            return th
+
+        client, accepted = _socket.socketpair()
+        self.addCleanup(client.close)
+        with mock.patch("threading.Thread", boom):
+            srv.process_request(accepted, ("127.0.0.1", 0))
+        # server_close must stay clean despite the never-started thread.
+        srv.server_close()
+        # And the slot was still released.
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        srv._slots.release()
+
     def test_slot_released_when_shutdown_request_raises(self):
         """A raise in shutdown_request must not permanently burn a pool
         slot — the mitigation must not become the DoS (Security review B2).
