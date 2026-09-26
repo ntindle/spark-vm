@@ -40,9 +40,7 @@ Exit codes: 0 ok (or loud first-deploy skip), 2 symlink / hardlink /
 non-regular / oversize / missing-source refusal (fail closed), 1 other error.
 """
 import argparse
-import errno
 import os
-import stat
 import sys
 from pathlib import Path
 

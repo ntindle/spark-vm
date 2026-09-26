@@ -203,7 +203,7 @@ This changelog only works if entries land with the change, not after it:
   module): a symlink, hardlink, FIFO, directory, or over-1 MiB file at
   the `--src` path fails the deploy closed instead of being installed by
   the privileged process; a missing `--src` is a refusal, not a crash
-  (#413).
+  (#413). (#451)
 - The privileged deploy writer now stages into randomly-named directories
   (128-bit entropy) instead of predictable per-process names, so a
   lower-privileged local user can no longer pre-create colliding staging

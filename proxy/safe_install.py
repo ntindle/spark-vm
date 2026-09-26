@@ -56,7 +56,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from privileged_read import privileged_read
+from privileged_read import DEFAULT_MAX_BYTES, privileged_read
 
 
 def _fail(msg):
@@ -78,9 +78,9 @@ _STAGE_CREATE_RETRIES = 5
 # the shared open discipline (issues #144/#299/#300/#372, #413) instead of
 # a plain open() -- a symlink planted at --src used to be followed and its
 # bytes installed to a privileged destination by a privileged process.
-# The 1 MiB cap matches the discipline's default; deploy inputs (allow /
-# deny lists, sudoers fragments) are far smaller.
-_MAX_SRC_BYTES = 1 << 20
+# The cap is the discipline's shared default (deploy inputs: allow/deny
+# lists, sudoers fragments -- all far smaller).
+_MAX_SRC_BYTES = DEFAULT_MAX_BYTES
 
 
 def _random_stage_name():
