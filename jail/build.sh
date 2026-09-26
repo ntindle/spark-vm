@@ -263,6 +263,12 @@ Description=Run the jail firewall watchdog every minute
 
 [Timer]
 OnCalendar=*:0/1
+# Issue #440: the documented "~1 minute" detection bound only holds if
+# the tick actually lands every minute. systemd's default
+# AccuracySec=1min can defer a firing by up to a minute (batching for
+# power saving), silently doubling the bound the 5→1 minute change
+# buys. Pin the jitter to 10s so the bound is real.
+AccuracySec=10s
 Persistent=true
 
 [Install]

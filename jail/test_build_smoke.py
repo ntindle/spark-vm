@@ -594,6 +594,10 @@ class TestFirewallWatchdogStatic:
         timer = m.group(0)
         assert "OnCalendar=*:0/1" in timer
         assert "Run the jail firewall watchdog every minute" in timer
+        # Issue #440: the "~1 minute" detection bound needs the tick to
+        # actually land every minute — the default AccuracySec=1min can
+        # defer a firing by up to a minute and silently double it.
+        assert "AccuracySec=10s" in timer
         assert "WantedBy=timers.target" in timer
         assert "systemctl enable --now jail-firewall-verify.timer" in active
 
