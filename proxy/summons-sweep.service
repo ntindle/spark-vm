@@ -1,0 +1,20 @@
+[Unit]
+Description=Summons outbox reconciliation sweep (G4 S1, one-shot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=swapd
+Group=swapd
+# G4 S1 (GitHub #428): box-side reconciliation sweep — diffs
+# $SWAP_APPROVALS_DIR/pending/ against summons-outbox.jsonl and re-appends
+# rows the inline journal append missed (crash between the two writes).
+# Fail-open: the sweep never raises; a sweep failure just means the next
+# pass (5 minutes later) recovers the row. The journal carries approval
+# summaries + ids only — never secrets — so no NewPrivileges concerns.
+Environment=SWAP_APPROVALS_DIR=/home/swapd/approvals
+ExecStart=/usr/bin/python3 /home/swapd/swap_addon.py --summons-sweep
+PrivateTmp=yes
+ProtectSystem=full
+NoNewPrivileges=yes

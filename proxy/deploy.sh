@@ -64,6 +64,7 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/build_ca_bundle.py \
          proxy/privileged_read.py \
          proxy/swap-proxy.service proxy/swap-inference.service \
+         proxy/summons-sweep.service proxy/summons-sweep.timer \
          confirm/confirmd.py confirm/confirm-request confirm/confirmd.service \
          confirm/push-worker.service confirm/push.py \
          VERSION scripts/sparkvm_version.py; do
@@ -238,6 +239,10 @@ sudo install -o root -g root -m 0644 proxy/swap-proxy.service /etc/systemd/syste
 sudo install -o root -g root -m 0644 proxy/swap-inference.service /etc/systemd/system/swap-inference.service
 sudo install -o root -g root -m 0644 confirm/confirmd.service /etc/systemd/system/confirmd.service
 sudo install -o root -g root -m 0644 confirm/push-worker.service /etc/systemd/system/push-worker.service
+# G4 S1 (GitHub #428): summons outbox reconciliation sweep (one-shot +
+# 5-minute timer).
+sudo install -o root -g root -m 0644 proxy/summons-sweep.service /etc/systemd/system/summons-sweep.service
+sudo install -o root -g root -m 0644 proxy/summons-sweep.timer /etc/systemd/system/summons-sweep.timer
 
 # --- 6. sudoers -------------------------------------------------------------
 echo "[6/7] Installing sudoers..."
@@ -266,6 +271,7 @@ fi
 echo "[7/7] Reloading systemd and restarting services..."
 sudo systemctl daemon-reload
 sudo systemctl enable swap-proxy.service swap-inference.service confirmd.service push-worker.service
+sudo systemctl enable --now summons-sweep.timer
 sudo systemctl restart swap-proxy.service
 sudo systemctl restart swap-inference.service
 sudo systemctl restart confirmd.service
@@ -291,6 +297,14 @@ for svc in swap-proxy swap-inference confirmd push-worker; do
         sudo systemctl status "$svc.service" --no-pager | head -20
     fi
 done
+# G4 S1: the summons sweep is a timer, not a long-running service —
+# check the timer is armed, not the one-shot service.
+if sudo systemctl is-active --quiet "summons-sweep.timer"; then
+    echo "  summons-sweep.timer: active"
+else
+    echo "  summons-sweep.timer: FAILED"
+    sudo systemctl status "summons-sweep.timer" --no-pager | head -20
+fi
 
 # Warn if ssrf.deny is missing (finding 61).
 if ! sudo test -f /home/swapd/ssrf.deny; then  # 69(e): swapd home is 0700, test under sudo
