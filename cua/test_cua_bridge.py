@@ -24,7 +24,6 @@ import sys
 import threading
 from email.message import Message
 from http.client import HTTPConnection
-from http.server import HTTPServer
 from types import SimpleNamespace
 
 import pytest
@@ -283,7 +282,7 @@ def live(bridge, monkeypatch):
     """A real bridge HTTP server on loopback, driver stubbed out."""
     driver = FakeDriver(WINDOWS)
     monkeypatch.setattr(bridge, "call", driver)
-    srv = HTTPServer(("127.0.0.1", 0), bridge.Handler)
+    srv = bridge.BridgeServer(("127.0.0.1", 0), bridge.Handler)
     port = srv.server_address[1]
     monkeypatch.setattr(bridge, "ALLOWED_HOSTS",
                         bridge.ALLOWED_HOSTS | {f"127.0.0.1:{port}"})
@@ -471,3 +470,115 @@ class TestShellScripts:
         for name in self._scripts():
             mode = os.stat(os.path.join(self.BIN, name)).st_mode
             assert mode & stat.S_IXUSR, name
+
+
+# ---------------------------------------------------------------- concurrency + screenshot temp file
+
+
+class TestBridgeServer:
+    def test_server_is_threaded(self, bridge):
+        from http.server import ThreadingHTTPServer
+        assert issubclass(bridge.BridgeServer, ThreadingHTTPServer)
+        assert bridge.BridgeServer.daemon_threads is True
+
+    def test_concurrency_bound_is_sane(self, bridge):
+        assert isinstance(bridge.MAX_CONCURRENT_REQUESTS, int)
+        assert 1 < bridge.MAX_CONCURRENT_REQUESTS <= 32
+
+    def test_concurrent_requests_do_not_serialize(self, live, monkeypatch):
+        # A slow driver call must not head-of-line-block a second request:
+        # two parallel /api/windows with a 0.5s driver stall should finish
+        # in well under 1.0s on the threaded server.
+        import time
+        bridge, driver, port = live
+
+        def slow_call(tool, args):
+            if tool == "list_windows":
+                time.sleep(0.5)
+            return FakeDriver(WINDOWS)(tool, args)
+
+        monkeypatch.setattr(bridge, "call", slow_call)
+        results = []
+        start = time.monotonic()
+
+        def one():
+            results.append(req(port, "GET", "/api/windows"))
+
+        threads = [__import__("threading").Thread(target=one) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        elapsed = time.monotonic() - start
+        assert all(s == 200 for s, _ in results), results
+        assert elapsed < 0.95, f"requests serialized: {elapsed:.2f}s"
+
+
+class TestScreenshotTempFile:
+    def _raw_get(self, port, path):
+        conn = HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request("GET", path, headers={"X-CUA": "1"})
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        return resp.status, data
+
+    def test_screenshot_uses_private_tempfile(self, live, monkeypatch):
+        import tempfile
+        bridge, driver, port = live
+        seen_paths = []
+
+        def fake_call(tool, args):
+            if tool == "get_desktop_state":
+                out = args["screenshot_out_file"]
+                seen_paths.append(out)
+                with open(out, "wb") as f:
+                    f.write(b"\x89PNG-fake")
+                return {"ok": True}
+            return FakeDriver(WINDOWS)(tool, args)
+
+        monkeypatch.setattr(bridge, "call", fake_call)
+        status, body = self._raw_get(port, "/api/screenshot")
+        assert status == 200
+        assert len(seen_paths) == 1
+        out = seen_paths[0]
+        assert out != "/tmp/cua-bridge-shot.png"
+        assert os.path.dirname(out) == tempfile.gettempdir()
+        # private (0600) at creation and unlinked after serving
+        assert not os.path.exists(out)
+
+    def test_screenshot_paths_are_unique_per_request(
+            self, live, monkeypatch):
+        bridge, driver, port = live
+        seen_paths = []
+
+        def fake_call(tool, args):
+            if tool == "get_desktop_state":
+                seen_paths.append(args["screenshot_out_file"])
+                with open(args["screenshot_out_file"], "wb") as f:
+                    f.write(b"x")
+                return {"ok": True}
+            return FakeDriver(WINDOWS)(tool, args)
+
+        monkeypatch.setattr(bridge, "call", fake_call)
+        assert self._raw_get(port, "/api/screenshot")[0] == 200
+        assert self._raw_get(port, "/api/screenshot")[0] == 200
+        assert seen_paths[0] != seen_paths[1]
+
+    def test_screenshot_tempfile_is_0600(self, live, monkeypatch):
+        import stat as statmod
+        bridge, driver, port = live
+        modes = []
+
+        def fake_call(tool, args):
+            if tool == "get_desktop_state":
+                out = args["screenshot_out_file"]
+                modes.append(statmod.S_IMODE(os.stat(out).st_mode))
+                with open(out, "wb") as f:
+                    f.write(b"x")
+                return {"ok": True}
+            return FakeDriver(WINDOWS)(tool, args)
+
+        monkeypatch.setattr(bridge, "call", fake_call)
+        assert self._raw_get(port, "/api/screenshot")[0] == 200
+        assert modes == [0o600], modes

@@ -22,7 +22,9 @@ import os
 import shutil
 import subprocess
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _HOME = os.path.expanduser("~")
 DRIVER = os.path.join(_HOME, "cua/bin/cua-driver")
@@ -131,6 +133,28 @@ def focus_window(w):
     call("bring_to_front", {"pid": w["pid"], "window_id": w["window_id"]})
 
 
+# Concurrency: the stock HTTPServer handles one request at a time, so a slow
+# driver call (30s timeout) would head-of-line-block the whole bridge —
+# including the keepalive's health probe and a panel's screenshot poll.
+# Serve each request on a thread, but bound (cf. #471's unbounded-pool
+# concern on cred-ui/waitlistd): beyond MAX_CONCURRENT_REQUESTS, excess
+# connections wait in the listen backlog instead of spawning threads.
+# Single-operator, localhost-only traffic will never approach the bound.
+MAX_CONCURRENT_REQUESTS = 8
+
+
+class BridgeServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._slots = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+    def process_request_thread(self, request, client_address):
+        with self._slots:
+            super().process_request_thread(request, client_address)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "cua-bridge/1.0"
 
@@ -178,10 +202,21 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/windows":
                 self._json(call("list_windows", {}))
             elif self.path == "/api/screenshot":
-                out = "/tmp/cua-bridge-shot.png"
-                call("get_desktop_state", {"screenshot_out_file": out})
-                with open(out, "rb") as f:
-                    png = f.read()
+                # Private 0600 temp file, unlinked right after the read: the
+                # old fixed path (/tmp/cua-bridge-shot.png) was a predictable
+                # world-readable name in a shared dir — a symlink/snoop
+                # surface the moment a second local user exists.
+                fd, out = tempfile.mkstemp(suffix=".png", prefix="cua-shot-")
+                os.close(fd)
+                try:
+                    call("get_desktop_state", {"screenshot_out_file": out})
+                    with open(out, "rb") as f:
+                        png = f.read()
+                finally:
+                    try:
+                        os.unlink(out)
+                    except OSError:
+                        pass
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
                 self.send_header("Content-Length", str(len(png)))
@@ -272,6 +307,6 @@ if __name__ == "__main__":
         # bracket-trick so the pkill pattern never matches this process itself
         os.system("pkill -f 'cua-bridge[.]py' 2>/dev/null")
         sys.exit(0)
-    srv = HTTPServer(("127.0.0.1", PORT), Handler)
+    srv = BridgeServer(("127.0.0.1", PORT), Handler)
     print(f"cua-bridge listening on 127.0.0.1:{PORT}", flush=True)
     srv.serve_forever()

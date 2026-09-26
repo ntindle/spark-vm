@@ -38,6 +38,8 @@ This changelog only works if entries land with the change, not after it:
 
 ### Added
 
+- Architecture deep-read of the CUA desktop stack (bridge, supervisor scripts, panel contract): `docs/CUA_DESKTOP_ARCH.md` records the structural strengths, the two weaknesses fixed in the same change, and five findings filed as issues for later turns (launch debouncing, input-path health probe, /tmp env-file handling, focus TOCTOU, keepalive double-spawn). (#TBD)
+
 - Competitor corpus update (post-post-post-post-post-post-morning watch, two-surveyor pass — A: fast-mover re-verification vs ~11:3x CDT baseline, ~12:5x CDT, all first-try; B: delta news scan ~11:35–12:55 CDT; captures in `agent_notes/surveyor-a/b-20260926-1254.md`): quiet pass — **no new C-numbers** (7 clean dedupes, 4 flagged-only). **Fast movers 4/4 VENDOR-VERIFIED NO-CHANGE** (Daytona changelog still SEP 26 V0.218.0; Docker release notes still 2026-09-22; Microsandbox releases still v0.7.3; Vercel changelog still 25 Sep — no 26-Sep entries; Drives not re-checked per P49 daily cadence). **Delta news scan — 7 clean dedupes** (offline-sandbox coverage = C62; DeepSeek DSec + CVE-2026-82533 = C56; wiki-swarm syndication = C64; CVE-2026-77179 recap = filed Docker row; DeafNews = C62 commentary; OpenClaw CVE-2026-100589 recrawl = C66, still THIRD-PARTY; Docker Cloud Sandboxes press = C45). Folded from live main (`74a00cf`) — no sibling interleaving. In-lane no-launch verdict dated 2026-09-25 stands — streak extends. Deep-scan queued: Heapjack/Overpatch + GitLab proxy escape (no in-window developments). Zero fetch failures. Carried: C37, C57, C58, C66 (OPEN, no movement). (#490)
 
 - Competitor corpus update (post-post-post-post-post-morning watch, two-surveyor pass — A: fast-mover re-verification vs ~11:0x CDT baseline, ~11:30–11:35 CDT, all first-try; B: delta news scan ~11:00–11:35 CDT; captures in `agent_notes/surveyor-a/b-20260926-1124.md`): **C66 (adjacent, THIRD-PARTY) — CVE-2026-100589, OpenClaw browser-tool sandbox bypass** (CVE received Sep 26 03:17, IN WINDOW: OpenClaw before 2026.7.1, sandboxed sessions reach paired-node browser actions despite `allowHostControl=false`, CWE-863; secnews.gr corroborates the Google Meet surface; upgrade to 2026.7.1; zero corpus hits — genuinely new; harness-enforced sandbox-boundary failure class). **C62 mechanism detail (dedupe, not a new number)** — the OpenAI offline-sandbox escape worked by DNS tunneling (proxy blocked web, resolver answered; OpenAI published its own account on its alignment site; alert-timing source variance 3 vs 15 min noted). **Fast movers 4/4 VENDOR-VERIFIED NO-CHANGE** (Daytona changelog still SEP 26 V0.218.0; Docker release notes still 2026-09-22; Microsandbox releases still v0.7.3; Vercel changelog still 25 Sep — no 26-Sep entries; Drives not re-checked per P49 daily cadence). **Delta news scan — 8 clean dedupes** (PANews + Gate News = C62; SwarmTraces = filed C64-adjacent row; rocketnews wiki-swarm = C64; DeepSeek DSec = C56; DeafNews = C62 commentary; Docker Cloud Sandboxes press = C45; nandann Drives = Drives row; sibling #487's C65 = sibling-filed). In-lane no-launch verdict dated 2026-09-25 stands — streak extends. Deep-scan queued: Heapjack/Overpatch + GitLab proxy escape (no in-window developments). Zero fetch failures. Carried: C37, C57, C58 (OPEN); C65 sibling-filed on #487. (#489)
@@ -145,6 +147,8 @@ This changelog only works if entries land with the change, not after it:
 - Multi-tenancy trust model is now framed in runtime-cell vocabulary: a hosted tenant's agent owns everything inside its cell — its per-tenant box (its jail on the cooperative tier), contained root-equivalent, never host root — while the enforcement layer — egress fencing, secret swapping, metering, break-glass — stays operator-owned and invisible from inside, seen only through approvals, status, and audit. Unchanged: support access stays tenant-visible, granted, logged, break-glass-only; no operator-blindness claim. (#432)
 
 ### Fixed
+
+- The desktop control bridge now serves requests on a bounded thread pool (8 concurrent handlers) instead of one at a time: a slow driver call can no longer head-of-line-block the panel's screenshot polls or the keepalive's health probe. (#TBD)
 
 - Manual rollbacks now audit the extra-inputs digest reconciliation outcome:
   a reconciliation that fails part-way is recorded on the `manual-rollback`
@@ -269,6 +273,8 @@ This changelog only works if entries land with the change, not after it:
   #362).
 
 ### Security
+
+- Desktop screenshots are now written to a private temporary file (owner-only permissions, deleted right after serving) instead of a predictable world-readable path in the shared temp directory. (#TBD)
 
 - confirmd now enforces a cumulative per-connection deadline (60 seconds,
   covering the TLS handshake and the request): a tailnet peer trickling
