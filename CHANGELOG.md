@@ -254,7 +254,7 @@ This changelog only works if entries land with the change, not after it:
   handler slot indefinitely. Over-deadline connections are aborted
   fail-closed and logged to the audit trail as a `conn-deadline` event;
   legitimate approvals (browser poll + answer round-trips) complete well
-  under the bound (#472). (#TBD)
+  under the bound (#472). (#476)
 
 - The deploy installer now reads its `--src` input through the same
   symlink/hardlink/non-regular/oversize-refusing privileged-read
