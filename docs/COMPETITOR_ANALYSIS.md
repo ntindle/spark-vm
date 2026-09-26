@@ -4013,8 +4013,8 @@ baseline, B delta news scan; survey window 2026-09-26 ~04:56–05:02 CDT).
   in-window candidates dedupe to already-filed corpus entries at
   vendor grade: the Cloudflare Containers/Sandboxes cross-tenant
   disk-residue disclosure (dm-thin `skip_block_zeroing`) = **C55**
-  (VENDOR-VERIFIED on blog.cloudflare.com, 2026-09-25 early-afternoon
-  fold — the surveyor carried only third-party coverage, the corpus
+  (filed 2026-09-25 early-afternoon as THIRD-PARTY, upgraded to
+  VENDOR-VERIFIED on blog.cloudflare.com in the late-afternoon pass — the surveyor carried only third-party coverage, the corpus
   holds the vendor-primary read); the Docker Sandbox Kit Spec
   open-source/CNCF move = **C52** (VENDOR-VERIFIED on docker.com/blog,
   2026-09-25 mid-morning fold); the Docker Cloud Sandboxes launch =

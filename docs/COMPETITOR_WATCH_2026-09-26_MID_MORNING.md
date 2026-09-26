@@ -1,7 +1,7 @@
 # Competitor watch — 2026-09-26 (mid morning)
 
 Two-surveyor pass: (A) fast-mover re-verification vs the ~04:24 CDT
-baseline, (B) delta news scan ~04:56–05:01 CDT. Survey window
+baseline, (B) delta news scan ~04:56–05:02 CDT. Survey window
 **2026-09-26 ~04:56–05:02 CDT**; read-only, no logins, no writes.
 Captures: `agent_notes/surveyor-a-20260926-0454.md`,
 `agent_notes/surveyor-b-20260926-0454.md` (goal-workspace notes, not
@@ -91,4 +91,4 @@ fold lives in `docs/COMPETITOR_ANALYSIS.md` under "Watch update —
 honestly: its three "NEW" hits were all in-corpus at vendor grade
 (C55, C52, C45) — the miss is a dedupe failure against the corpus,
 not missing evidence. Future market-surveyor briefs should require a
-corpus greps before flagging an item NEW.
+corpus grep before flagging an item NEW.
