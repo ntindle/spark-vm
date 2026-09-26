@@ -2,7 +2,7 @@
 
 The tenant-status vocabulary (`docs/TENANT_STATUS_ENDPOINT.md` §2) has a
 `connection-unreachable` code — "Relay/cert path failed while the poll
-says otherwise" (`docs/FIRST_TEN_MINUTES_SPEC.md` §8) — whose producer
+says otherwise" (endpoint §2; spec §8) — whose producer
 was always a placeholder: "Control-plane/relay defect instrumentation".
 No relay doc existed, no liveness signal existed, no producer existed.
 `docs/STUCK_DETECTOR_DESIGN.md` §8 Q6 named this the wiring gap and its
@@ -130,7 +130,10 @@ The tenant layer consumes it as the `connection-unreachable` producer:
   relay/cert path reachable") gets its second input. At provision, (a)
   reachability failure (no bundle ever handed out) still holds at
   `provisioning` per the existing rule — the instrument's job starts at
-  `live`.
+  `live`. At live-entry the second input is the provision-time relay/cert
+  verification — the same reachability check rule 1(a) already performs
+  (unreachable ⇒ hold at `provisioning`); post-`live`, the prober's
+  readings maintain it.
 - **Transition rule 6** (relay/cert suspension) fires on a non-`ok`
   reading while the arc is post-`live`: latch the arc code, serve
   `connection-unreachable` with the sub-code in `detail`, record
@@ -191,8 +194,8 @@ remains unreachable until all four ship.
   surface — no tenant-status wiring yet (§5 interim honesty).
 - **R3 — tenant-status producer wiring:** the tenant layer consumes
   `relay_path_state` — transition rule 6 suspension + the live-entry
-  AND-combine. Updates `docs/TENANT_STATUS_ENDPOINT.md` §2's
-  `connection-unreachable` row from "instrumentation" to this producer.
+  AND-combine. Runtime wiring only (the §2 row's producer pointer was
+  set by this design turn).
 - **R4 — stuck-detector conjunct:** §6's predicate change; closed-world
   on instrument darkness; S2-calibration note that the soak's confusion
   classes gain a "suspension while measuring" row.
