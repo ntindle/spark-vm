@@ -2330,3 +2330,34 @@ def test_cmd_rollback_reconciles_extra_inputs_state(tmp_path):
         "digest must be reconciled to on-disk reality: " + after
     assert "stub_last_forced=1234567890" in after, \
         "rollback must preserve the dampening epoch: " + after
+
+
+# --- issue #457: trigger-tag invariant --------------------------------------
+
+def _cmd_deploy_body_lines():
+    """Extract the cmd_deploy() function body lines from auto-deploy.sh."""
+    lines = open(SCRIPT).read().splitlines()
+    start = next(i for i, l in enumerate(lines)
+                 if l.startswith("cmd_deploy() {"))
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    return lines[start + 1:end]
+
+
+def test_cmd_deploy_all_deploy_audit_lines_carry_trigger_tag():
+    """Issue #457 (QA review): every `audit 'deploy'` line inside cmd_deploy
+    must carry the trigger tag ("$trig") — except pull-only, which is
+    unreachable when a trigger is set. Without the tag, a forced
+    extra-inputs deploy masquerades as a version deploy in the audit trail.
+    Source-level invariant: covers all current lines AND future regressions
+    without an e2e test per failure path."""
+    lines = _cmd_deploy_body_lines()
+    audit_lines = [l for l in lines
+                   if re.search(r"""\baudit\s+'deploy'""", l)]
+    assert audit_lines, \
+        "no audit 'deploy' lines found inside cmd_deploy — extractor stale?"
+    untagged = [l.strip() for l in audit_lines
+                if '"$trig"' not in l
+                and '"result":"pull-only"' not in l]
+    assert not untagged, (
+        "audit 'deploy' lines inside cmd_deploy missing the \"$trig\" "
+        "trigger tag:\n" + "\n".join(untagged))

@@ -48,6 +48,7 @@ import os
 import pwd
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -1906,16 +1907,30 @@ def _version_payload():
             "handler": Handler.server_version}
 
 
+def _kill_connection(request, client_address):
+    """Issue #472: fail-closed abort of a connection that exceeded the
+    cumulative per-connection deadline. shutdown() unblocks the handler
+    thread's in-flight recv/send, so the pool slot is released even while
+    the peer is actively trickling; the kill is audited so the trail shows
+    the mitigation, not silence."""
+    try:
+        request.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass  # already closed / peer gone — that's the goal state anyway
+    audit_log("conn-deadline", client_address[0], None,
+              "cumulative per-connection deadline exceeded; "
+              "connection aborted")
+
+
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     # Issue #77 (M8): bound the accept->thread fan-out (see main()).
     # Capacity model: confirmd's client classes are the owner's browser and
     # the agent proxy — expected peak ~4 concurrent requests. 64 threads is
     # ~16x headroom. The 10s socket timeout reclaims idle stalls; a peer
-    # actively dripping >=1 byte/10s can still pin a slot, so 64 dripping
-    # connections saturate the pool — shedding stays fail closed (connection
-    # dropped, state stays file-backed so a retry succeeds) rather than
-    # queued unboundedly. A cumulative per-connection deadline is the
-    # long-term answer (follow-up).
+    # actively dripping >=1 byte/10s could still pin a slot, so the
+    # cumulative connection_deadline below aborts such connections
+    # fail-closed (state stays file-backed so a retry succeeds) rather than
+    # letting trickling peers saturate the pool.
     max_threads = 64
 
     # Backstop socket timeout for the deferred TLS handshake
@@ -1923,6 +1938,15 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     # preferred when present; this covers handlers that don't set it.
     # Kept equal to Handler.timeout (10).
     socket_timeout = 10
+
+    # Issue #472: cumulative per-connection deadline (seconds) — absolute
+    # wall-clock cap on one accepted connection, covering the deferred TLS
+    # handshake AND the handler. Sizing: the per-operation socket timeout
+    # (10) and the 15s grant-writer subprocess window are the reference
+    # costs; 60 is 6x the socket timeout and 4x the grant window, so
+    # legitimate approvals (browser poll + answer round-trips) complete
+    # comfortably while a trickling peer can never hold a slot longer.
+    connection_deadline = 60
 
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
@@ -1978,6 +2002,25 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self.close_request(request)
 
     def process_request_thread(self, request, client_address):
+        # Issue #472: cumulative per-connection deadline — a peer dripping
+        # >=1 byte per socket-timeout of headers/body pins a pool slot
+        # indefinitely (the 10s timeout is per socket operation, not
+        # cumulative). A one-shot deadline timer aborts the whole
+        # connection at the bound: shutdown() unblocks the handler
+        # thread's in-flight recv/send, so the slot is released even while
+        # the peer is actively trickling. The timer covers the deferred
+        # TLS handshake above AND the handler below. Daemon thread so it
+        # can never block interpreter exit; cancelled as soon as the
+        # request completes, so well-behaved connections never pay for it.
+        deadline_fired = threading.Event()
+
+        def _on_deadline():
+            deadline_fired.set()
+            _kill_connection(request, client_address)
+
+        deadline = threading.Timer(self.connection_deadline, _on_deadline)
+        deadline.daemon = True
+        deadline.start()
         try:
             # Issue #77 (M8): the TLS handshake runs here, in the bounded
             # handler thread — never in the accept loop. main() wraps the
@@ -2005,8 +2048,14 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
                 do_handshake()
             self.finish_request(request, client_address)
         except Exception:
-            self.handle_error(request, client_address)
+            # A deadline kill raises inside the handler; don't log a
+            # traceback for a mitigation we fired ourselves — the audit
+            # trail already carries the conn-deadline event. Genuine
+            # handler errors keep the existing handle_error path.
+            if not deadline_fired.is_set():
+                self.handle_error(request, client_address)
         finally:
+            deadline.cancel()
             try:
                 self.shutdown_request(request)
             finally:
