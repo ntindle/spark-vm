@@ -30,13 +30,10 @@ The component is in good shape where it counts:
    one request at a time, so one slow driver call (30s timeout) blocked the
    whole bridge — including the keepalive's health probe and the panel's
    screenshot polls. `cua-bridge.py` now uses `BridgeServer`, a
-   `ThreadingHTTPServer` subclass whose semaphore bounds how many handler
-   bodies execute concurrently (8). Accepted connections beyond the bound
-   block in `process_request_thread` before doing any work; threads are
-   still spawned per connection, so this is not a hard thread cap —
-   acceptable on the localhost-only, single-operator bridge (the #471
-   unbounded-pool concern is narrowed, not eliminated). Concurrency is
-   covered by hermetic tests, including a peak-in-flight bound test.
+   `ThreadingHTTPServer` subclass with a semaphore bound of 8 concurrent
+   handlers; excess connections wait in the listen backlog instead of
+   spawning unbounded threads (the #471 unbounded-pool concern, preempted
+   by design). Concurrency is covered by a hermetic timing test.
 2. **Screenshot via fixed world-readable /tmp path.** `/tmp/cua-bridge-shot.png`
    was predictable and world-readable in a shared directory — a
    symlink/snoop surface the moment a second local user exists on the box.
