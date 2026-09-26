@@ -48,6 +48,12 @@ def make_fixture_repo(tmp_path):
     (repo / "confirm" / "b.py").write_text("b")
     (repo / "cred-ui" / "c.py").write_text("c")
     (repo / "docs" / "d.md").write_text("d")
+    # Issue #471: the fixture models a repo at the new commit — which must
+    # carry scripts/bounded_http.py, or cred-ui's install step (ships the
+    # helper into the working checkout) fails its pre-mutation presence gate.
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "bounded_http.py").write_text(
+        "class BoundedThreadingHTTPServer: pass\n")
     run("git", "add", "."); run("git", "commit", "-qm", "base")
     base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
                           capture_output=True, text=True).stdout.strip()
@@ -232,6 +238,69 @@ def test_confirm_install_paths_cover_deploy_sh_writes():
         body = f.read()
     for t in required:
         assert t in body, "deploy.sh no longer writes %s (test is stale)" % t
+
+
+def test_cred_ui_install_paths_cover_install_writes():
+    """Every file cred-ui's install step writes into the working checkout
+    must be rollback-restorable. Regression for issue #471: cred-ui runs
+    from the working checkout, but the auto-deploy checkout sync refreshes
+    ONLY cred-ui/ + VERSION — nothing ever refreshes <checkout>/scripts/.
+    The shared scripts/bounded_http.py helper this PR added to cred-ui's
+    imports therefore had to ship via the install step; a snapshot that
+    didn't cover it would roll back cred-ui/ while leaving the NEW helper
+    live (or vice versa), the exact half-state rollback exists to prevent."""
+    fake_wc = "/tmp/fake-working-checkout-test"
+    r = source_and("get_arr cred_ui install_paths",
+                   env_extra={"WORKING_CHECKOUT": fake_wc})
+    assert r.returncode == 0, r.stderr
+    listed = {line.strip() for line in r.stdout.splitlines() if line.strip()}
+    expected = os.path.join(fake_wc, "scripts", "bounded_http.py")
+    assert expected in listed, \
+        "cred_ui_install_paths missing the shipped helper: %s (got %s)" % (
+            expected, sorted(listed))
+    # Non-vacuous: the install command really writes that target from the
+    # new commit's scripts/.
+    r2 = source_and("get_str cred_ui install")
+    assert r2.returncode == 0, r2.stderr
+    assert "scripts/bounded_http.py" in r2.stdout, \
+        "cred_ui_install no longer ships scripts/bounded_http.py (test is stale)"
+
+
+def test_cred_ui_install_ships_bounded_http_end_to_end(tmp_path):
+    """End-to-end: on a box whose working checkout predates
+    scripts/bounded_http.py, evaluating cred-ui's install step from the new
+    commit's tree must place the helper where cred-ui.py imports it from —
+    otherwise the restarted service dies with ModuleNotFoundError (issue
+    #471 deploy breakage, caught by the engineering review)."""
+    repo = tmp_path / "updater"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(
+        a, cwd=repo, check=True, capture_output=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    run("git", "config", "commit.gpgsign", "false")
+    (repo / "scripts").mkdir()
+    helper_src = "class BoundedThreadingHTTPServer: pass\n"
+    (repo / "scripts" / "bounded_http.py").write_text(helper_src)
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "add helper")
+    # Stale working checkout: scripts/ exists but WITHOUT the helper —
+    # exactly the production box's state at merge time.
+    wc = tmp_path / "wc"
+    (wc / "scripts").mkdir(parents=True)
+    (wc / "scripts" / "sparkvm_version.py").write_text("# old checkout\n")
+    r = run_bash(
+        "export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
+        'inst="$(get_str cred_ui install)"; '
+        '[ -n "$inst" ] || { echo "cred_ui_install is empty" >&2; exit 1; }; '
+        'cd "$UPDATER_REPO" && eval "$inst"',
+        env_extra={"UPDATER_REPO": str(repo), "WORKING_CHECKOUT": str(wc)},
+    )
+    assert r.returncode == 0, r.stderr + r.stdout
+    shipped = wc / "scripts" / "bounded_http.py"
+    assert shipped.is_file(), "install did not ship the helper into $WORKING_CHECKOUT/scripts"
+    assert shipped.read_text() == helper_src, "shipped helper content mismatch"
 
 
 # --- change mapping ----------------------------------------------------------
@@ -1087,6 +1156,10 @@ def test_snapshot_restores_checkout_version(tmp_path):
            "SKIP_SUDO": "1",
            "AUTO_DEPLOY_NO_MAIN": "1"}
     snap = tmp_path / "snap"
+    # Production (cmd_deploy) creates the snapshot dir before calling
+    # snapshot_component; the old empty cred_ui_install_paths masked this
+    # precondition.
+    snap.mkdir()
     r = source_and("snapshot_component cred-ui %s" % snap, env_extra=env)
     assert r.returncode == 0, r.stdout + r.stderr
     manifest = (snap / "MANIFEST").read_text()

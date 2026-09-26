@@ -44,7 +44,12 @@ from http.server import BaseHTTPRequestHandler
 # Best-effort — a missing/invalid VERSION must never break startup.
 _SV_HERE = os.path.dirname(os.path.abspath(__file__))
 _SV_CAND = os.path.normpath(os.path.join(_SV_HERE, "..", "scripts"))
-if os.path.isfile(os.path.join(_SV_CAND, "sparkvm_version.py")):
+# Gate the sys.path decision on the helper cred-ui actually needs (a hard
+# requirement), not on the best-effort version stamp: scripts/ is on
+# sys.path exactly when it carries bounded_http.py. The import below stays
+# unconditional and loud — a missing helper is a broken checkout and must
+# fail at startup, not silently fall back to the unbounded server.
+if os.path.isfile(os.path.join(_SV_CAND, "bounded_http.py")):
     if _SV_CAND not in sys.path:
         sys.path.insert(0, _SV_CAND)
 elif _SV_HERE not in sys.path:

@@ -152,7 +152,12 @@ This changelog only works if entries land with the change, not after it:
 - proxy/deploy.sh now installs `scripts/bounded_http.py` to /home/swapd
   alongside confirmd.py and registers it in confirm's install paths, so
   the standalone deployment (and its rollback) can't start confirmd
-  with a missing-helper import failure (#471).
+  with a missing-helper import failure. cred-ui gets the same treatment:
+  its auto-deploy install step now ships the helper into the working
+  checkout's `scripts/` (whose sync only refreshed `cred-ui/` + VERSION)
+  and registers it in cred-ui's install paths for snapshot/rollback, so a
+  cred-ui-only deploy can no longer restart the service into
+  ModuleNotFoundError (#471).
 
 - The desktop control bridge now serves each request on its own thread, with at most 8 handlers running at once: a slow driver call can no longer head-of-line-block the panel's screenshot polls or the keepalive's health probe. (#496)
 
