@@ -82,7 +82,7 @@ isolation), because those are where the trust story lives.
 | **E2B** | Task-scoped sandbox | Firecracker microVM per sandbox, SDK-first, templates-as-code | Hobby $0 + $100 one-time credit (1h sessions, 20 concurrent); Pro **$150/mo** + usage (24h sessions); ~$78/mo usage for one continuous 2vCPU/512MB box; $21M Series A **2025-07-28** (Insight Partners lead; dated sources: PRNewswire wire + SiliconANGLE URL) |
 | **Daytona** | Task-scoped sandbox | Containers (+VM/Windows classes), stateful, stop/archive/pause/fork, GPU (ephemeral) | $200 free compute, no plan floor; $0.0504/vCPU-hr + $0.0162/GiB-hr; GPU on request (H100 listed $2.27/hr) |
 | **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team; in talks to raise at ~$15B valuation (2026-09-23, Bloomberg/Reuters THIRD-PARTY; $355M May raise at $4.65B) |
-| **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots; **64 GB ephemeral NVMe default** (SDK ≥3.0.0/custom image; 32 GB on deprecated runtimes — C32 resolved, see "Watch update — 2026-09-23"); Drives public beta (persistent, ≤16 TiB/drive, usage-based pricing) | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
+| **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots; **64 GB ephemeral NVMe default** (SDK ≥3.0.0/custom image; 32 GB on deprecated runtimes — C32 resolved, see "Watch update — 2026-09-23"); Drives public beta (persistent, ≤16 TiB/drive, usage-based pricing); **2026-09-26 morning fold (VENDOR-VERIFIED):** sandbox memory observability — Memory Usage card (avg/P75/P95 across sandboxes), per-sandbox detail page auto-scales y-axis to the memory limit with a dashed 85% reference line, `memoryUsedBytes` in the Observability query builder (custom queries + alerts), CLI `vercel metrics` under `vercel.sandbox.memory_used_bytes` (C59, in-lane); `vercel/vcr-action/login` GitHub Action — OIDC login to VCR, short-lived token revoked at job end, prepared image usable as custom sandbox image (`<repository>:<tag>`) (C60, adjacent) | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
 | **Cloudflare Sandbox** | Task-scoped sandbox | Containers on Workers, sleeps at 10 min idle, disk resets on sleep | Active-CPU billing ($0.072/vCPU-hr); $5/mo Workers Paid floor |
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
 | **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation ("fast, isolated, persistent sandboxes and storage where developers can run their own agentic workflows and tool execution") | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
@@ -3865,3 +3865,59 @@ Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_NEAR_MIDNIGHT.md`
 - **Carried:** C26, C37, C57, C58 (all OPEN — not re-surveyed this pass,
   verified ~22:00 window); Vercel Drives not re-checked (P49 — 2026-09-26
   morning pass). Zero fetch failures (6/6 vendor fetches first try).
+
+## Watch update — 2026-09-26 (morning): C59 memory observability (in-lane) + C60 vcr-action/login (adjacent); fast movers NO-CHANGE
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_MORNING.md`
+(survey window 2026-09-26 ~02:55–03:00 CDT; C59/C60 detail reads
+VENDOR-VERIFIED ~02:4x CDT by the 02:24 slot's P49 morning pass,
+captured in `agent_notes/surveyor-vercel-20260926-0224.md`).
+
+- **C59 — Vercel Sandbox memory observability (in-lane,
+  VENDOR-VERIFIED).** Vercel's 2026-09-25 changelog entry "Vercel
+  Sandbox now supports memory observability": a Memory Usage card in
+  the dashboard (average, P75, P95 across sandboxes); the per-sandbox
+  detail page auto-scales the y-axis to the memory limit with a dashed
+  85% reference line; `memoryUsedBytes` in the Observability query
+  builder (custom queries + alerts); CLI via `vercel metrics` under
+  `vercel.sandbox.memory_used_bytes`. First *memory*-observability
+  surface among the tracked vendors recorded in the corpus.
+  (Comparative note — advisory only: the corpus records Daytona's
+  sessions auto-pause but no memory-usage dashboard; Docker's
+  `sbx ls --json` CPU/memory-limits reporting is a vendor
+  release-notes fact read this run
+  (`docs.docker.com/ai/sandboxes/release-notes/`, 2026-09-21 section)
+  not yet recorded in this corpus — and it reports limits, not
+  usage.) The 85% line + alertable `memoryUsedBytes` is a
+  cost-control/capacity UX move for long-lived, memory-leaky agent
+  workloads. Design color (weight-light, advisory only — not a corpus
+  claim): when the H5 sentinel surface grows a per-box resource
+  dimension, mirror the 85%-of-limit reference-line convention — it
+  matches Vercel's shipped convention. No pricing attached.
+- **C60 — vercel/vcr-action/login GitHub Action (adjacent,
+  VENDOR-VERIFIED).** Vercel's 2026-09-25 changelog entry "Push images
+  to Vercel Container Registry from GitHub Actions":
+  `vercel/vcr-action/login` logs workflows in to VCR with GitHub OIDC
+  ("removing long-lived registry credentials from secrets");
+  short-lived token revoked at job end; the prepared image can then be
+  used as a custom Vercel Sandbox image (`<repository>:<tag>`). The
+  move that matters is the closed loop — CI-built image → sandbox
+  custom image — with OIDC short-lived-credential hygiene as the
+  headline. Corroborates spark-vm's own direction: the `hsurr:`
+  placeholder-swap posture and the golden-image workflow
+  (`docs/GOLDEN_IMAGE_GATE_PROCEDURE.md`) both treat long-lived image
+  credentials as the thing to eliminate. Advisory color only; no
+  promotion.
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** Daytona changelog
+  (newest still SEP 26 V0.218.0 / SEP 25 V0.217.0, character-identical
+  to the 01:24 baseline); Docker release notes (newest dated heading
+  still 2026-09-22 v0.45.1); Microsandbox releases (newest still
+  v0.7.3 #1646); Vercel changelog (newest entries still 25 Sep —
+  Drives still public beta; GA watch NO-CHANGE).
+- **Two new C-numbers this pass: C59 + C60.** (The capturing slot
+  labeled them C50/C51; those identifiers were already taken — C50 =
+  Microsoft Copilot Managed Runtime, C51 = Gemini
+  antigravity-preview-09-2026 harness — so they were renumbered here.)
+  In-lane no-launch verdict dated 2026-09-25 stands.
+- **Carried:** C26, C37, C57, C58 (all OPEN — not re-surveyed this
+  pass). Zero fetch failures.
