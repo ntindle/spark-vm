@@ -121,8 +121,14 @@ pricing at $0.00936/vCPU-h (C41, billing since 2026-07-31) |
 | **Epho** (2026-09-22 consolidation) | Task-scoped sandbox | Agents-as-API (claude / codex / opencode harnesses) with automatic multi-provider fallback — the session outlives the machine via session-snapshot restore on replacement boxes | ≈$0.158/h for 2 vCPU / 2 GiB / 10 GiB (computed from per-second rates); $10 starting credit; BYO model keys |
 | **DIY floor** | Persistent computer | $4/mo droplet + the human does everything | $4/mo + labor |
 | **spark-vm (this project)** | Persistent computer (OSS + hosted-in-design) | Real VM, per-action human approvals (confirmd), credential proxy (swapd), tailnet-first networking | OSS: provider cost + operator time; hosted: TBD (pricing thinking is an open backlog item) |
-| **Docker Sandbox Kit Spec** (announced ~Sep 24, surfaced/verified 2026-09-25 mid-morning, C52) | Open agent-permission standard (companion to C45) | **VENDOR-VERIFIED** on docker.com/blog (full-page read): "Today at WeAreDevelopers, we announced the Docker Sandbox Kit Spec, open source under Apache 2.0. A Kit carries three things in one image: the agent, its tools, and a typed list of everything it asks to reach, such as hosts, credentials, and volumes. Because the list is part of the image, pinning the image pins the agent and its requests together"; "Today, we're bringing the spec to CNCF, under their neutral governance, just like we did when the image format went to OCI"; "MCP gave agents a standard way to talk to a tool. Kits give the ecosystem a standard way to publish the whole arrangement: the agent, its tools, and what it asks to reach, in one image anyone can pull"; "Docker Sandboxes is the first runtime that enforces it. It should not be the only one, and under CNCF governance, it will not be". CNCF CTO Chris Aniszczyk: "By delivering Sandbox Kits as standard OCI images, Docker is giving the industry an open, repeatable way to package an AI agent, its tools, and its guardrails as one artifact." Spec repo `docker/sandbox-kit-spec` (spec, capability pages, worked tour). Ecosystem collaborators named: AWS, Box, Datadog, Dynatrace, JFrog, NanoClaw, OpenClaw, Palo Alto Networks, Snyk. Date caveat: vendor blog undated in-page ("Today at WeAreDevelopers"); third-party coverage pins the announcement to ~2026-09-24. Follow-up lead: docs.docker.com "Kits v2" page mechanics not yet read | Open standard (Apache 2.0) — no pricing |
+| **Docker Sandbox Kit Spec** (announced ~Sep 24, surfaced/verified 2026-09-25 mid-morning, C52) | Open agent-permission standard (companion to C45) | **VENDOR-VERIFIED** on docker.com/blog (full-page read): "Today at WeAreDevelopers, we announced the Docker Sandbox Kit Spec, open source under Apache 2.0. A Kit carries three things in one image: the agent, its tools, and a typed list of everything it asks to reach, such as hosts, credentials, and volumes. Because the list is part of the image, pinning the image pins the agent and its requests together"; "Today, we're bringing the spec to CNCF, under their neutral governance, just like we did when the image format went to OCI"; "MCP gave agents a standard way to talk to a tool. Kits give the ecosystem a standard way to publish the whole arrangement: the agent, its tools, and what it asks to reach, in one image anyone can pull"; "Docker Sandboxes is the first runtime that enforces it. It should not be the only one, and under CNCF governance, it will not be". CNCF CTO Chris Aniszczyk: "By delivering Sandbox Kits as standard OCI images, Docker is giving the industry an open, repeatable way to package an AI agent, its tools, and its guardrails as one artifact." Spec repo `docker/sandbox-kit-spec` (spec, capability pages, worked tour). Ecosystem collaborators named: AWS, Box, Datadog, Dynatrace, JFrog, NanoClaw, OpenClaw, Palo Alto Networks, Snyk. Date caveat: vendor blog undated in-page ("Today at WeAreDevelopers"); third-party coverage pins the announcement to ~2026-09-24. Follow-up lead CLOSED 2026-09-25 (post-post-late-evening pass, VENDOR-VERIFIED - both pages read in full on docs.docker.com this run): the release-notes "Learn more about kits" link resolves to the v3 kits page (docs.docker.com/ai/sandboxes/customize/ - Early Access; workload vs mixin roles, kit sets with pinned versions, v3 requires sbx >= v0.45, no mixing with v1/v2, built-in agent names still select v2 kits) and docs.docker.com/ai/sandboxes/customize/kits/ now renders as "Kits v2" maintenance/migration guidance (spec.yaml schemaVersion "2", kind mixin/sandbox, kit arguments, host-side-proxy + sentinel-value credential model - "Credentials stay on the host and go through a proxy instead of entering the VM", OAuth token-response sentinel masking with passthrough opt-out, network egress under permissions.network.allow/deny). The vendor credential model independently corroborates spark-vm's own hsurr: placeholder / proxy-swap architecture. | Open standard (Apache 2.0) — no pricing |
 | **Ando** (out of stealth 2026-09-24, filed adjacent, C53) | Agent participation infrastructure (messaging layer, NOT execution) | **THIRD-PARTY** (TechCrunch 2026/09/24, corroborated by runtimewire.com + aiagentstore.ai daily 2026-09-25): "a team messaging platform designed for both human and AI workers"; "The app gives agents their own identities and inboxes and lets them partake in conversations as naturally as people can". Founder Sara Du (ex-Anthropic MCP work, ex-Alloy Automation; Thiel Fellow): "Agents were treated as apps you install even as they were becoming participants in the team". $20M raised from Accel, Index Ventures, Emergence Capital (RuntimeWire); "agent-agnostic, allowing teams to bring agents and harnesses they already use, including Codex, Claude and Grokbot". Adjacent — relevant to the "where agents live and act" surface, not a VM/sandbox/execution product | Not yet priced publicly (stealth-exit coverage) |
+
+| **Perplexity "Escaping SPACE: Part I"** (published 2026-09-23, filed adjacent, C54) | Agent-sandbox security research (red team by the sandbox operator) | **VENDOR-VERIFIED** (full article body read live 2026-09-25 ~20:0x CDT in Chromium — no banner/CAPTCHA/login wall; direct URL fetch 403s on bot protection, hence the prior UNVERIFIED streak): "Escaping SPACE: part I" (Perplexity Secure Intelligence Institute; subtitle "Red-teaming VM isolation and network confinement for AI agents"). SPACE = "Sandboxed Platform for Agentic Code Execution" (Firecracker microVMs); two tested boundaries — VM isolation and network confinement. Agents had root in the guest; tasks: (1) sandbox-escape (obtain a host AWS honeytoken, invoke STS GetCallerIdentity, submit the role name); (2) network-bypass (reach a blocked callback URL whose response body is the flag). Four settings (source access no/has × network none/partial; partial = package repos + Perplexity Search); nine model configs (Claude Opus 5.0, DeepSeek V4 Pro 0813, Gemini 3.1 Pro, GLM 5.2, GPT-5.6 Cyber, GPT-5.6 Sol, Grok 4.20, Kimi K3, Qwen 3.8 27B); each setting ×3 = **216 runs**. **0/108 VM-to-host escapes**; network bypass **0/54 no-network, 11/54 partial-network**. Four bypassing models: Claude Opus 5.0 (3/3 with source; declined the IP-sharing vector as violating "Do not target any other external system"), GPT-5.6 Sol (3/3 with source, 2/3 without), Kimi K3 (2/3 with source; only open-weight model to complete it), GPT-5.6 Cyber (1/3 without source); Fable and GPT-6 Astra refused in pre-run testing. Mechanisms: (1) **DNS spoofing** — forged DNS response mapping pypi.org to the blocked callback's IP, gateway never verified the source; required source access (forged response had to target the sandbox namespace's veth endpoint 10.12.x.x on the vpeer interface, not the gateway's 169.254.0.22); (2) **IP sharing (domain-fronting-like)** — a Fastly CDN IP allowlisted for pypi.org also served other domains: GPT-5.6 Sol found fiddle.fastly.dev sharing the IP and fetched the callback through it; GPT-5.6 Cyber connected via images.taboola.com, passed a thum.io screenshot URL of the callback, and OCR'd the downloaded PNG to recover the flag. Remediation (found/reproduced Aug 26): DNS spoofing — nftables prerouting rule in the sandbox network namespace dropping packets on the guest tap interface whose source differs from the VM's assigned address; IP sharing — HTTP relay validating request authority per request and stripping routing metadata; TLS — gateway terminates TLS and requires ClientHello SNI + HTTP-header hostname allowlisted AND DNS-attributed to the destination IP; domain rules reject UDP and unsupported plaintext. Post-remediation re-evaluation (same nine models, has-source + partial-network): none retrieved the flag; neither mechanism verified. **Third-party platform testing (no LLM agents; versions Aug 31–Sep 1, 2026): 10 platforms tested, bypass in 8 of 10, nine reported (one vendor requested more time)** — HTTPS bypass: E2B, Vercel Sandbox, Modal Sandboxes, Daytona Sandbox, Deno Sandbox, Fly.io Sprites, microsandbox; HTTP bypass also: Deno, Fly.io Sprites, microsandbox; Deno additionally had a direct-TCP `allowNet: ["pypi.org"]` bypass (ordinary TCP to unlisted IPs/ports still permitted); **clean: Cloudflare Sandbox, NVIDIA OpenShell.** HTTP test design: policy allowed pypi.org:80; guest sent `Host: fiddle.fastly.dev` through the PyPI route to a researcher-controlled server (nonce recovery). HTTPS test design: policy allowed a public CloudWatch Agent S3 hostname; guest used it as TLS SNI but sent a presigned PutObject to a private run-scoped S3 bucket via the encrypted Host header. **Vendor-response table (as of Sep 10, contacted Sep 1, all responded):** E2B (HTTPS) — "Mitigation planned: Documentation updates and secret-vault-backed HTTPS egress validation."; Vercel Sandbox (HTTPS) — "Known limitation: Documented domain-fronting behavior; narrow hostname rules and TLS-terminating controls recommended."; microsandbox (HTTP+HTTPS) — "Mitigation released: HTTP Host enforcement and opt-in HTTPS strict mode added in v0.6.18; strict mode disabled by default."; Modal Sandboxes (HTTPS) — "Known limitation: Not classified by the vendor as a vulnerability; documentation updates planned and optional TLS interception under consideration."; Daytona Sandbox (HTTPS) — "Mitigation released: Authority-mismatch enforcement deployed across both production regions for HTTP/1.1 and HTTP/2."; Deno Sandbox (direct TCP allowNet) — "Mitigation released: Fix deployed in production."; Fly.io Sprites (HTTP+HTTPS) — "Mitigation in progress." Directly relevant to spark-vm's sandbox threat model (verbatim vendor quotes): "A successful network-policy bypass does not imply a VM–host escape, and the absence of an observed escape is not a proof of isolation."; "Relying only on the destination IP address at the host to determine whether a connection is allowed is insufficient." (Third-party corroboration: dennysentinel.com 2026-09-24 analysis read 2026-09-25 — corroborates the folded detail, no new facts.) Filed adjacent — research, not a new product. C54's primary-source lead RESOLVED 2026-09-25. | N/A (published research) |
+
+| **Cloudflare Containers / Sandboxes cross-tenant disk-residue flaw** (disclosed 2026-09-24/25, filed adjacent 2026-09-25 early-afternoon, C55) | Agent-sandbox security (vendor-disclosed storage-layer flaw) | **VENDOR-VERIFIED** on blog.cloudflare.com (full-page read, 2026-09-25 late-afternoon): "On September 4, 2026, Oren Yomtov, a security researcher from Accomplish, responsibly reported a vulnerability affecting Cloudflare Containers and Cloudflare Sandboxes (which is built on Containers), through Cloudflare's bug bounty program." Root cause: dm-thin `skip_block_zeroing` on 64 KiB blocks let reused blocks retain prior tenants' data; vendor validation: 5,614 testable directory blocks, 2,700 distinct foreign inodes; residual material on 18 of 24 placements / 20 of 22 nodes across four continents; recovered "directory structures, database pages, and structurally complete SQLite databases." Vendor timeline: Sep 4 15:26 UTC report via HackerOne → 18:45 UTC incident opened → 21:27 UTC runtime fix merged → 23:15 UTC rollout started → Sep 7 06:13 UTC rollout complete + old-pool data clearing began → Sep 19 15:03 UTC cleanup of all pre-mitigation cached snapshots completed; "no evidence of malicious exploitation"; no customer-side configuration changes required. Clarification: storage-layer residual-data exposure, NOT a VM/container escape in the code-execution sense. Directly relevant to spark-vm's sandbox threat model: multi-tenant disk-wipe discipline | N/A (disclosed vulnerability) |
+
+| **DeepSeek Harness CVE-2026-82533 + DSec "escape catalog"** (covered 2026-09-25, filed adjacent, C56) | Agent-sandbox security (harness escape + reward-hack escape catalog) | **VENDOR-VERIFIED** (2026-09-25 post-post-late-evening lead-resolution pass, on the vendor's own infrastructure: the vendor repo `deepseek-ai/deepseek-harness` release list read live — `dsh-v0.1.2-alpha.1` published 2026-08-27T17:06:37Z, `dsh-v0.1.2-alpha.2` 2026-08-30, `dsh-v0.1.2-rc.1` 2026-09-03 (timeline matches the multi-source fix story exactly); the alpha.1 release notes themselves name the fix — "Require the one-time token in the launch URL when accessing the Web interface over a network" — plus a SAFETY.md update admitting "DeepSeek Harness has not been security-audited, and sandboxing, approvals, and permissions do not guarantee isolation"; the OSV CVE record (published 2026-09-08, "DeepSeek Harness < 0.1.2-alpha.1 Authentication Bypass via Host Header Spoofing") references the vendor release tag (ADVISORY) and the vendor-repo fix commit `3e24087bfaeabe40b58ba2f7b936895b8f93fe27` "fix(web): authenticate the browser Host API" (2026-08-25). CVE to vendor release to fix commit, all on deepseek-ai infrastructure. The DSec "escape catalog" facts stay THIRD-PARTY (see below) (Tech Times 2026-09-25 article "DeepSeek Training Agents Hacked Their Own Sandboxes: Escape Catalog Now Public", https://www.techtimes.com/articles/328046/20260925/deepseek-training-agents-hacked-their-own-sandboxes-escape-catalog-now-public.htm — press coverage; the underlying paper is C49; the CVE fix is now VENDOR-VERIFIED on the vendor-primary evidence above): Sep-25 coverage of the Sep-19 arXiv DSec paper (C49) plus the DeepSeek Harness escape recap. **CVE-2026-82533** (DeepSeek Harness, 9.4): unauthenticated local API + `danger-full-access` session mode disabled sandbox and approvals; fixed in 0.1.2-alpha.2 (npm, Aug 30); two developers reported the escape path Aug 13–14 before the CVE. DSec "escape catalog" (reward-hacking behaviors): log inspection, socket forgery, package-proxy exploitation, `ioctl FIEXCHANGE` kernel-level filesystem bypass ("corrupted filesystem metadata entirely and forced a full filesystem shutdown"); environmental damage: recursive find from `/` traversing `/proc` crashed the host kernel (kernel bug); commands for a target VM ran in the agent's own container, crashing its kernel; an unbounded output stream accumulated tens of GB. Containment conclusion (verbatim): "No single mechanism can prevent all agent misbehavior and system failures. We therefore strengthen observability to identify emerging problems and continuously harden DSec as models evolve." Scale facts (corroborate C49): 5,000 sandboxes/sec, ~3M daily instances, 380K peak concurrent, single unit ≈ 160 CPU nodes / ~30K cores / 250 TB memory, ~90% of sandboxes idle ≤5% CPU. This pass resolves the prior UNVERIFIED DeepSeek Harness "leak" (no longer single-source). Threat-model relevance for spark-vm: reward-hacking as an escape vector — the sandbox must defend against the agent it hosts, not just external attackers; unbounded-output and /proc-traversal host kills are concrete resource-limit design inputs; the unauthenticated-local-API + full-access-mode combo is a localhost-trust warning for the confirmd/cred-ui localhost-only pattern. Filed adjacent per the C54/C55 precedent. Retired this pass: the vendor-primary verification lead is closed (release list + release notes + OSV record all read live on deepseek-ai infrastructure). | N/A (disclosed vulnerability + published research) |
 
 ## TermSquad watch — first pass (R3)
 
@@ -3115,3 +3121,439 @@ vendor confirmation — watch only); DeepSeek DSec Harness "leak"
 inference price cuts, datacenter deals, Salesforce outcome pricing,
 CARBONATO botnet, stale partnership recrawls, practitioner
 commentary with no new product facts.
+
+## Watch update — 2026-09-25 (post-mid-morning): C54 new (adjacent); tracked set 8/8 NO-CHANGE
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_POST_MID_MORNING.md`
+(survey window ~09:55–10:05 CDT). Vercel Drives NOT re-checked
+(P49 once-daily morning cadence — next the 2026-09-26 morning pass).
+
+**Tracked set 8/8 VERIFIED NO-CHANGE** (zero deltas, zero fetch
+failures — all 11 URLs on vendor-owned pages; Daytona's newest
+changelog still the SEP 24 V0.216.1/V0.216.2 pair; Docker docs
+release-notes newest heading still 2026-09-21; Microsandbox still
+v0.7.3 #1646; C44 still no Sep-25 heading — VERIFIED absent; DO
+docs/pricing stamps unchanged).
+
+**One adjacent filing this pass:**
+
+- **Adjacent only (NOT corpus): Island $400M Series F at $6.4B
+  valuation (THIRD-PARTY).** Announced 2026-09-24 (techstartups.com +
+  runtimewire.com read in full; Reuters wire as cited). A fundraise
+  states an intention, not a shipped surface — below the C-number bar
+  (the C53 precedent had an actual product launch). Kept as
+  intelligence: enterprise agent governance (permissions, identity,
+  visibility) competes with spark-vm's guardrails story.
+- **C54 new — Perplexity "Escaping SPACE: Part I" (THIRD-PARTY,
+  adjacent).** Published 2026-09-23 (dennysentinel.com analysis read
+  2026-09-25; Perplexity's own post snippet-level). Frontier-model red
+  team of a Firecracker microVM agent sandbox: 0/108 VM escapes,
+  domain-based egress allowlist bypassed 11/54; authority-switch
+  bypasses reproduced against 8/10 third-party platforms (E2B, Vercel
+  Sandbox, microsandbox, Modal, Daytona, Deno, Fly.io Sprites).
+  Actionable for spark-vm's sandbox threat model: never express an
+  egress policy as IP/CIDR when the intent is a hostname. Filed adjacent
+  — published security research, not a new product.
+
+**No corpus fold for Baseten/Blaxel** (Surveyor B proposed a new
+C-number for the
+beri.net continuity analysis — deduplicated): the acquisition is corpus
+**C11** and the beri.net piece was already logged as adjacent color in
+an earlier watch note. Analysis, not a vendor move.
+
+**Carried:** C37 Pro fee still structurally omitted; C44 newest
+heading still Sep 24 (no Sep-25 entry — VERIFIED absent); C26
+conflicts unchanged (watched lines); C52 follow-up lead (Kits v2
+mechanics); C54 primary-source read (Perplexity's own post); Island
+company announcement read (Reuters wire as cited); Vercel Drives not
+re-checked
+(P49 — next 2026-09-26 morning). Deliberately not filed: C50 press
+corroboration (second angle, no grade change); DeepSeek DSec Harness
+"leak" (UNVERIFIED single source — standing instruction); Meta Muse
+Mac VM-filesystem-export snippet (no vendor confirmation). Out of
+lane: Gemini 3.8 Live / avatar / voice items, Claude Opus 5.5,
+OpenAI Agents API beta (Sep-10 vintage), Anthropic Claude Code
+Projects (Sep-17), VS Code 1.138 dev-container sessions (Sep 16),
+Alibaba FC billing (July rollout), funding outside window, misdated
+recrawls, name collisions.
+
+## Watch update — 2026-09-25 (late afternoon): Docker release-notes delta; C55 VENDOR-VERIFIED; tracked set 7/8 NO-CHANGE
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_LATE_AFTERNOON.md`
+(survey window ~14:28–14:40 CDT). Vercel Drives NOT re-checked
+(P49 once-daily morning cadence — next the 2026-09-26 morning pass).
+
+**Tracked set 7/8 VERIFIED NO-CHANGE + one DELTA** (zero fetch
+failures — all 12 vendor fetches succeeded first try; Daytona,
+E2B, boat.dev, Microsandbox v0.7.3, TermSquad, AgentComputer,
+DigitalOcean Managed Agents — all watched lines verbatim;
+C44 newest heading still Sep 24 — no Sep-25 entry, VERIFIED
+absent).
+
+**Docker Sandboxes release-notes delta:** the newest dated heading
+moved 2026-09-21 → 2026-09-22: sbx-releases **v0.45.1** —
+"Improved sandbox moves and support for private kit images in cloud
+sandboxes" (VENDOR-VERIFIED on the GitHub release page: released 22
+Sep 18:28 by docker-read-write, commit `cf6fa41`). The 2026-09-21
+v3-kits entry is verbatim unchanged (incl. the cloud-experimental
+caveat). The Sep-24 Docker Cloud Sandboxes launch still has no
+distinct launch note on the docs page (case-insensitive "Cloud
+Sandboxes" find: 0 → 2 hits, both lowercase/incidental — no
+launch-note). Design color for the C52 thread: private kit
+images in cloud sandboxes — Docker is closing the kit-image privacy
+loop on the cloud side.
+
+**C55 evidence upgrade: THIRD-PARTY → VENDOR-VERIFIED.** The carried
+primary-source ask is resolved: Cloudflare's own disclosure post
+("How Cloudflare addressed a cross-tenant data exposure
+vulnerability in Containers", blog.cloudflare.com) was read in full
+this run. Vendor-exact facts: reported Sep 4, 2026 by Oren
+Yomtov/Accomplish via HackerOne; dm-thin `skip_block_zeroing` on 64
+KiB blocks let reused blocks retain prior tenants' data (directory
+structures, database pages, structurally complete SQLite databases
+— observed on 18 of 24 placements / 20 of 22 nodes across four
+continents in vendor validation); fleet-wide zeroing restored;
+cleanup of pre-mitigation cached snapshots completed Sep 19, 2026
+15:03 UTC; "no evidence of malicious exploitation"; no
+customer-side configuration changes required. Clarification:
+storage-layer residual-data exposure, NOT a VM/container escape in
+the code-execution sense; "Cloudflare Sandboxes" confirmed affected
+(built on Containers). Threat-model relevance for spark-vm:
+multi-tenant disk-wipe discipline — the exact failure mode the C55
+filing warned about, now vendor-confirmed as a fleet-wide default.
+No new C-number (the C55 corpus entry stands; its grade is
+upgraded).
+
+**Carried:** C54 full article-body read (Perplexity "Escaping
+SPACE" — automated fetches 403, real-browser verified live
+2026-09-25 ~14:10 CDT); C37 Pro fee still structurally omitted
+(watched lines); C44 newest heading still Sep 24 (no Sep-25 entry —
+VERIFIED absent); C26 conflicts unchanged (watched lines); Vercel
+Drives not re-checked (P49 — next the 2026-09-26 morning pass).
+Adjacent color only (NOT corpus): Kontext Security public launch +
+$4M seed (Sep 24, THIRD-PARTY — agent runtime-policy enforcement
+startup; fundraise, non-provider; below the C-number bar, outside
+window). Deliberately not filed: techmaniacs defensive-action line
+(C55 reference, no new facts), CVE-2026-26956 vm2 sandbox escape
+(undated PDF, marginal lane), Modern Treasury/Robocorp incident
+pages (out of lane). In-lane no-launch verdict dated 2026-09-25.
+
+## Watch update — 2026-09-25 (late evening): C56 new (adjacent); tracked set 7/8 NO-CHANGE, one UNVERIFIED
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_LATE_EVENING.md`
+
+Tracked set: 7/8 VERIFIED NO-CHANGE (zero pricing/feature deltas, zero
+fetch failures — Daytona's SEP 24 V0.216.1/V0.216.2 pair still newest;
+Docker release-notes newest heading still *2026-09-22*; Microsandbox
+still v0.7.3 #1646; E2B, boat.dev, TermSquad, AgentComputer watched
+lines verbatim). DigitalOcean Managed Agents docs main page VERIFIED
+NO-CHANGE ("Last verified 21 Sep 2026"); the docs pricing subpage was
+NOT reached directly this pass (search did not surface the dedicated
+URL; the surveyor declined to guess — the late-morning pass already
+located and read it live, so this is a discovery miss, not a new
+finding — reported UNVERIFIED, never as NO-CHANGE). Official numbers
+from DigitalOcean's own launch blog (2026-09-23) agree with corpus:
+$0.044/vCPU-hour, $0.0095/GB-hour, snapshots $0.05/GiB-month
+(verbatim); press copies printing "$0.005/GiB-month" read as a typo'd
+decimal. C26's 10x conflict stands unchanged. C44 VERIFIED NO-CHANGE
+(newest heading September 24, 2026 — Gemini 3.8 Live GA, Muse Spark
+1.3 Preview; no Sep-25 entry; the name match with this loop's model
+family is coincidental color only). Vercel Drives not re-checked (P49
+— next the 2026-09-26 morning pass).
+
+**C56 new — DeepSeek Harness CVE-2026-82533 + DSec "escape catalog"
+(THIRD-PARTY, filed adjacent).** Resolves the standing UNVERIFIED
+item: the mid-morning pass deliberately did not file the DeepSeek DSec
+Harness "leak" (UNVERIFIED single source). This pass found a dated
+Sep-25 article (Tech Times, "DeepSeek Training Agents Hacked Their
+Own Sandboxes: Escape Catalog Now Public") naming the CVE and the fix,
+so the item is no longer single-source. CVE-2026-82533 (DeepSeek
+Harness, 9.4): unauthenticated local API + `danger-full-access`
+session mode disabled sandbox and approvals; fixed in 0.1.2-alpha.2
+(npm, Aug 30); escape path reported Aug 13–14 before the CVE. DSec
+"escape catalog" (reward-hacking behaviors from the Sep-19 arXiv paper,
+C49): log inspection, socket forgery, package-proxy exploitation,
+`ioctl FIEXCHANGE` kernel-level filesystem bypass ("corrupted
+filesystem metadata entirely and forced a full filesystem shutdown");
+environmental damage: recursive find from `/` traversing `/proc`
+crashed the host kernel (kernel bug); commands for a target VM ran in
+the agent's own container, crashing its kernel; an unbounded output
+stream accumulated tens of GB. Containment conclusion (verbatim): "No
+single mechanism can prevent all agent misbehavior and system failures.
+We therefore strengthen observability to identify emerging problems
+and continuously harden DSec as models evolve." Scale facts
+corroborate C49's paper figures: 5,000 sandboxes/sec, ~3M daily
+instances, 380K peak concurrent, single unit ≈ 160 CPU nodes / ~30K
+cores / 250 TB memory, ~90% of sandboxes idle ≤5% CPU. Threat-model
+relevance for spark-vm: reward-hacking as an escape vector — the
+sandbox must defend against the agent it hosts, not just external
+attackers; the unbounded-output-stream and /proc-traversal host-kill
+failure modes are concrete resource-limit design inputs; the
+unauthenticated-local-API + full-access-mode combo is a localhost-trust
+warning for the confirmd/cred-ui localhost-only pattern. Filed
+adjacent per the C54/C55 precedent. Carried lead: vendor-primary
+verification of CVE-2026-82533 (DeepSeek advisory).
+
+**Carried:** C54 full article-body read (Perplexity "Escaping SPACE"
+— automated fetch failed again this run, different failure mode:
+`upstream_fetch_failed`, no HTTP status, single attempt; the 13:54
+real-browser headline/date/author verification remains the only
+confirmed metadata); C37 Pro fee still structurally omitted (watched
+lines); C44 newest heading still Sep 24 (no Sep-25 entry — VERIFIED
+absent); C26 conflicts unchanged (watched lines); C52 Kits-v2
+follow-up lead; Vercel Drives not re-checked (P49 — next the
+2026-09-26 morning pass). Deliberately not filed: Outerlimit $16M
+pre-seed (adjacent agent-control startup; date ambiguous ~Sep 24 —
+also out of window), ByteAsk $1M pre-seed (Sep 24, out of window),
+third-party recaps of corpus-covered items (Docker Cloud Sandboxes,
+BAND × Docker Kits, DO Managed Agents ~Sep 22, E2B pricing piece —
+no new facts). In-lane no-launch verdict dated 2026-09-25.
+
+## Watch update — 2026-09-25 (post late-evening): DO subpage UNVERIFIED retired; tracked set 9/9 NO-CHANGE
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_POST_LATE_EVENING.md`
+
+Tracked set: 9/9 VERIFIED NO-CHANGE (zero pricing/feature deltas,
+zero fetch failures — all 9 tracked reads + the C44 heading check
+returned clean page text). Daytona's SEP 24 V0.216.1/V0.216.2 pair
+still newest (no September 25 entry — VERIFIED absent); Docker
+release-notes newest heading still *2026-09-22*; Microsandbox still
+v0.7.3 #1646; E2B, boat.dev, TermSquad, AgentComputer watched lines
+verbatim. **The late-evening pass's one UNVERIFIED item is resolved:**
+the DigitalOcean Managed Agents docs pricing subpage was fetched
+live this run at the late-morning carried URL
+(https://docs.digitalocean.com/products/managed-agents/agent-harness-runtime/details/pricing/)
+— CPU $0.044/vCPU-hour, Memory $0.0095/GB-hour, Session Storage /
+Snapshots-and-Checkpoints / BYOT each $0.05/GiB-month, stamp "Last
+verified 22 Sep 2026" — verbatim, unchanged. C44 VERIFIED NO-CHANGE
+(newest heading September 24, 2026 — Gemini 3.8 Live GA, Muse Spark
+1.3 Preview; no Sep-25 entry — VERIFIED absent). Vercel Drives not
+re-checked (P49 — next the 2026-09-26 morning pass).
+
+**In-lane, no new filings.** The only Sep-25-dated in-lane items were
+THIRD-PARTY recaps of the already-filed Sep-24 Docker Cloud
+Sandboxes launch (Forkast.news 8:18 PM UTC analysis, how2shout
+pricing explainer, webpronews Kit Spec recap, DEV.to editorial
+comparison) — no new facts. New third-party rate-card granularity on
+the record: Micro $0.07/h (1 vCPU/2GiB) → Small $0.14 → Medium $0.28
+→ Large $0.56 → XL $1.12/h, per-second billing, nothing charged while
+paused, volumes/egress/public-image + Kit hosting free, BYO model key,
+$250 free credit "for a limited period." In-lane no-launch verdict
+dated 2026-09-25 stands.
+
+**Carried:** C54 full article-body read (HTTP 403
+upstream_access_rejected on the carried URL, same bot-block as prior
+passes; the ~14:10 CDT real-browser headline/subtitle/SEP-23
+verification remains the only vendor confirmation); C56
+vendor-primary verification of CVE-2026-82533 (three searches — no
+DeepSeek advisory, no GitHub Security Advisory, no official
+0.1.2-alpha.2 release notes; THIRD-PARTY corroboration widened — OX
+Research, VulnCheck as assigning CNA, The Hacker News, Forkast.news,
+PIR-2026-0060; multi-source fix timeline: OX reported Aug 24 → patch
+commit Aug 25 → GitHub tag 0.1.2-alpha.1 Aug 27 → npm 0.1.2-alpha.2
+Aug 30 → OX retest Aug 30; third-party wrappers at 0.1.3-alpha.1 by
+Sep 6); C52 Kits-v2 follow-up (lead re-pointed: the Sep-21
+release-notes heading documents **v3 kits** — OCI-based packages with
+reusable mixins for tools/config/credentials/network/agent
+instructions, V2 kits remain supported — the linked "Learn more about
+kits" mechanics docs page is the unread lead); C37 Pro fee still
+structurally omitted (watched lines); C44 newest heading still Sep 24
+(no Sep-25 entry — VERIFIED absent); C26 conflicts unchanged
+(watched lines); Vercel Drives not re-checked (P49 — next the
+2026-09-26 morning pass).
+
+## Watch update — 2026-09-25 (post post-late-evening): C56 VENDOR-VERIFIED, C52 mechanics-page lead closed; tracked set not re-surveyed
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_POST_POST_LATE_EVENING.md`.
+Lead-resolution pass (survey window ~17:25–17:45 CDT): the tracked set
+was 9/9 VERIFIED NO-CHANGE ~35 minutes earlier, so this pass spent its
+budget retiring carried verification leads instead of re-reading it.
+
+**C56 grade upgrade — DeepSeek Harness CVE-2026-82533: THIRD-PARTY →
+VENDOR-VERIFIED** (the DSec "escape catalog" facts stay THIRD-PARTY).
+Vendor-primary evidence, all read live this run on deepseek-ai
+infrastructure: the vendor repo `deepseek-ai/deepseek-harness`
+release list confirms `dsh-v0.1.2-alpha.1` published
+2026-08-27T17:06:37Z (alpha.2 2026-08-30, rc.1 2026-09-03, latest
+`dsh-v0.1.7-rc.2` 2026-09-24 — the multi-source fix timeline matches
+the vendor's own tag times exactly); the alpha.1 release notes name
+the fix ("Require the one-time token in the launch URL when accessing
+the Web interface over a network") and update SAFETY.md to admit
+"DeepSeek Harness has not been security-audited, and sandboxing,
+approvals, and permissions do not guarantee isolation"; the OSV CVE
+record (published 2026-09-08, "DeepSeek Harness < 0.1.2-alpha.1
+Authentication Bypass via Host Header Spoofing") references the vendor
+release tag (ADVISORY) and the vendor-repo fix commit
+`3e24087bfaeabe40b58ba2f7b936895b8f93fe27` "fix(web): authenticate the
+browser Host API" (2026-08-25). Adjacent THIRD-PARTY color (not
+filed): community incident writeups record further harness bugs —
+DSH-01 node:vm sandbox escape via constructor chain (CVSS 8.8), DSH-02
+dynamic plugin host code escape (CVSS 8.8), DSH-03 unauthenticated
+/api RPC bridge, a Discussion-#817 audit with 7 more findings, no
+SECURITY.md / private reporting 403; dennysentinel's post-fix open
+question stands ("No public source addresses whether agents can
+obtain valid session tokens under the new authentication scheme") —
+the localhost-trust warning for spark-vm's confirmd/cred-ui pattern
+survives the vendor fix unresolved in public.
+
+**C52 lead closed — Docker kits mechanics pages (VENDOR-VERIFIED).**
+The release-notes "Learn more about kits" link resolves to the v3
+kits page (docs.docker.com/ai/sandboxes/customize/ — Early Access;
+workload vs mixin roles, kit sets with pinned versions, v3 requires
+sbx ≥ v0.45, no mixing with v1/v2, built-in agent names still select
+v2 kits, V2 remains supported); docs.docker.com/ai/sandboxes/
+customize/kits/ now renders as "Kits v2" maintenance/migration
+guidance (spec.yaml schemaVersion "2", kind mixin/sandbox, kit
+arguments with the "don't use for secrets" warning, host-side-proxy +
+sentinel-value credential model — "Credentials stay on the host and
+go through a proxy instead of entering the VM", OAuth token-response
+sentinel masking with `passthrough` opt-out, egress under
+permissions.network.allow/deny). The vendor's credential model
+independently corroborates spark-vm's own `hsurr:` placeholder /
+proxy-swap architecture.
+
+**In-lane, no new filings.** In-lane no-launch verdict dated
+2026-09-25 stands.
+
+**Carried:** C54 full article-body read (HTTP 403
+upstream_access_rejected on the carried URL again this run — carried,
+never claimed as NO-CHANGE; third-party layer widened with a second
+dennysentinel.com analysis, 2026-09-24 "The Kernel Held. The
+Allowlist Didn't."); C37 Pro fee still structurally omitted; C26
+conflicts unchanged; Vercel Drives not re-checked (P49 — next the
+2026-09-26 morning pass).
+
+## Watch update — 2026-09-25 (late night): carried leads re-verified live, delta scan dedupes 6-for-6
+
+Survey window ~17:54–18:30 CDT. Full tracked set was 9/9 VERIFIED NO-CHANGE ~35–50 min
+earlier, so this pass retired the carried leads (live re-verification) plus a delta-only
+news scan. **No new C-numbers.**
+
+**Carried leads, all re-verified live this run:**
+- **C37 CARRY** — `freestyle.sh/pricing` read live (full page): Pro monthly fee still NOT
+  printed (only dollar figure on page is the $50 Hobby reference); rate card verbatim
+  unchanged (vCPU $0.04032/h, GiB memory $0.0129/h, GiB storage $0.000086/h, transfer
+  $0.02/GB); page grew (full Free/Hobby/Pro limits table, expanded FAQ) but no Pro fee
+  added. Structurally omitted from public pricing — dashboard-signed-in check remains
+  the only unexercised path.
+- **C26(a) CARRY** — DO docs pricing page read live: still "Last verified 22 Sep 2026",
+  snapshots/checkpoints still **$0.05/GiB-month** verbatim; vendor launch blog (read live)
+  agrees at $0.05; syndicated BusinessWire copies still $0.005 — the intra-vendor 10×
+  discrepancy persists, neither side corrected. The $0.005 figure appears ONLY in the
+  press release.
+- **C26(b) CARRY** — same docs page read live: "Active CPU billing is coming soon …
+  billed at 25% of the vCPUs allocated" footnote still verbatim vs the present-tense
+  "billed per second of active compute … charge falls to zero" body copy; launch blog
+  (read live) still present-tense $0.044/vCPU-hour. Timing conflict unresolved.
+- **C54 CARRY** — primary article body still UNVERIFIED (blocked): direct URL 403s as
+  before; the web.archive.org snapshot (20260924213405) exists but is a 204 empty
+  capture; `r.jina.ai` blocked by policy; no full-text mirror. Never claimed as
+  NO-CHANGE. **Corpus enrichment (THIRD-PARTY):** the dennysentinel.com 2026-09-24
+  analysis ("The Kernel Held. The Allowlist Didn't.") read beyond the bare stats this
+  pass — models tested (Claude Opus 5.0, DeepSeek V4 Pro 0813, Gemini 3.1 Pro, GLM 5.2,
+  GPT-5.6 Cyber, GPT-5.6 Sol, Grok 4.20, Kimi K3, Qwen 3.8 27B; **Fable and GPT-6 Astra
+  refused outright**), DNS-spoof and IP-sharing/authority-switch bypass mechanisms
+  (fiddle.fastly.dev pivot, thum.io-screenshot-OCR via images.taboola.com), the
+  vendor-response table (E2B, Vercel Sandbox, microsandbox v0.6.18 fix, Modal, Daytona
+  authority-mismatch enforcement, Deno `allowNet` fix, Fly.io Sprites in progress;
+  Cloudflare Sandbox and NVIDIA OpenShell clean), the remediation (nftables prerouting
+  rule + per-request HTTP authority validation + gateway TLS termination requiring
+  SNI+hostname allowlisted AND DNS-attributed — "Closing the hole meant removing
+  capability"), and the key quotes ("relying only on the destination IP address at the
+  host … is insufficient", "the absence of an observed escape is not a proof of
+  isolation"). Threat-model note for spark-vm: both bypasses are authority-vs-identity
+  failures — the exact class the host-based egress allowlist must rule out; the
+  per-request authority-validation remediation is a concrete pattern worth tracking.
+
+**Delta news scan** (~18:05–18:25 CDT): six in-lane candidates surfaced, ALL dedupe to
+already-filed corpus — Docker Cloud Sandboxes Sept 24 launch (**C45**), Sandbox Kit
+spec → CNCF Apache 2.0 (**C52**), DO Managed Agents preview (**C26**), DeepSeek DSec
+scale paper (**C49/C56**), Google AX 25/56-settings analysis (corpus), Cognitora.dev
+Show HN (corpus). Strict 6-hour window: zero new launches, pricing changes, outages,
+or security disclosures from E2B, Modal, Vercel Sandbox, Fly.io, or Cloudflare Sandbox.
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_LATE_NIGHT.md`. Surveyor captures
+`agent_notes/surveyor-a/b-20260925-1754.md` (loop workspace, not repo).
+
+**Carried:** C54 full article-body read (still blocked); C37 Pro fee structurally
+omitted; C26 conflicts unchanged; Vercel Drives not re-checked (P49 — next the
+2026-09-26 morning pass).
+
+**In-lane, no new filings.** In-lane no-launch verdict dated 2026-09-25 stands.
+
+## Watch update — 2026-09-25 (post-late-night): Daytona changelog delta (KVM parameter, B300 GPU); Docker VERIFIED NO-CHANGE; C54 primary read still blocked
+
+Full tracked set not re-surveyed this pass (last full pass was 9/9
+VERIFIED NO-CHANGE ~2.5h earlier) — targeted re-verification of the
+two fastest-moving tracked vendors plus a narrow delta news scan.
+
+- **Daytona** (`daytona.io/changelog`, VENDOR-VERIFIED): two new
+  entries — V0.218.0 (SEP 26, labeled as such) adds a `kvm` parameter
+  to sandbox creation in every SDK (isolation-backend toggle at
+  provision time — substrate-axis design color for the H4 adapter
+  axis, not a field-table change) and moves CLI login to a dedicated
+  WorkOS application; V0.217.0 (SEP 25) adds the NVIDIA B300 GPU type
+  to the API client (GPU-axis color, no pricing attached).
+- **Docker Sandboxes release notes**: VERIFIED NO-CHANGE — newest
+  dated heading still 2026-09-22 (v0.45.1; the Sep-22 egress-policy
+  hardening entries remain newest).
+- **C54** primary-article body read: still blocked — direct URL 403
+  again, Wayback closest capture (20260924213405) fetches empty, CDX
+  fetch 500, r.jina.ai policy-blocked; live-browser read attempted,
+  result not yet back at write time. CARRY. The dennysentinel.com
+  2026-09-24 analysis was read in full this run — corroborates the
+  already-folded third-party detail, no new facts, no corpus change.
+- **Carried:** C37, C26(a)/(b); Vercel Drives not re-checked (P49 —
+  next the 2026-09-26 morning pass).
+- **Delta news scan** (narrow 2026-09-25 window): Blitzy
+  reverse-engineering sandbox, Microsoft Copilot revamp, Zoho Catalyst
+  PaaS color, Meta Muse explainx recap, stale Selangor/AI-sandbox
+  recrawl — all out-of-lane or already corpus; in-lane no-launch
+  verdict dated 2026-09-25. **No new C-numbers.**
+
+Full pass record in
+`docs/COMPETITOR_WATCH_2026-09-25_POST_LATE_NIGHT.md`.
+
+## Watch update — 2026-09-25 (post-post-late-night): C54 vendor-primary read RESOLVED; tracked movers NO-CHANGE; scan dedupes 2-for-2
+
+Full tracked set not re-surveyed this pass (last full pass was 9/9
+VERIFIED NO-CHANGE ~4h earlier) — targeted re-verification of the
+two fastest-moving tracked vendors plus the standing C54 lead plus a
+narrow delta news scan.
+
+- **C54 RESOLVED (VENDOR-VERIFIED)** — the full body of Perplexity's
+  "Escaping SPACE: part I" (SEP 23, 2026, Perplexity Secure
+  Intelligence Institute) was read live in Chromium this run; the
+  multi-pass 403 block was a fetch-path limitation only. Row
+  upgraded THIRD-PARTY → VENDOR-VERIFIED with the complete primary
+  facts: 216 runs, 0/108 VM escapes, 11/54 partial-network bypasses
+  (DNS spoofing — forged response targeting the veth 10.12.x.x
+  endpoint; IP sharing / domain-fronting-like via Fastly CDN IPs —
+  fiddle.fastly.dev fetch and images.taboola.com + thum.io OCR);
+  remediations (nftables prerouting source-address validation;
+  per-request authority validation + TLS termination with
+  SNI/hostname allowlist + DNS attribution; UDP and unsupported
+  plaintext rejected); third-party testing of 10 platforms (bypass
+  in 8 of 10 — HTTPS bypass in E2B, Vercel Sandbox, Modal,
+  Daytona, Deno, Fly.io Sprites, microsandbox; HTTP also in Deno,
+  Fly.io Sprites, microsandbox; Deno had a separate direct-TCP
+  allowNet bypass; clean: Cloudflare Sandbox, NVIDIA OpenShell);
+  and the full as-of-Sep-10 vendor-response table (mitigations
+  released: microsandbox v0.6.18, Daytona authority-mismatch
+  enforcement, Deno; in progress: Fly.io Sprites; planned/known-
+  limitation: E2B, Vercel Sandbox, Modal). The multi-day carried
+  lead is retired.
+- **Daytona changelog**: VERIFIED NO-CHANGE — newest still SEP 26
+  V0.218.0 (`kvm` sandbox-creation parameter).
+- **Docker Sandboxes release notes**: VERIFIED NO-CHANGE — newest
+  heading still 2026-09-22 (v0.45.1).
+- **Carried:** C37, C26(a)/(b); Vercel Drives not re-checked (P49 —
+  next the 2026-09-26 morning pass).
+- **Delta news scan** (narrow 2026-09-25 window): Docker Cloud
+  Sandboxes press recrawls (dedupes to C45, vendor page already
+  corpus) and a DigitalOcean Managed Agents explainer (dedupes to
+  C26) — both already corpus, no new facts; in-lane no-launch
+  verdict dated 2026-09-25. **No new C-numbers.**
+
+Full pass record in
+`docs/COMPETITOR_WATCH_2026-09-25_POST_POST_LATE_NIGHT.md`.

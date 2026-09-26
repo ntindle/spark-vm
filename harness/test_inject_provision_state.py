@@ -1075,6 +1075,30 @@ def test_tenant_record_preserves_existing_mode(stack):
     assert stat.S_IMODE(os.stat(tenant_record).st_mode) == 0o600
 
 
+def test_tenant_record_preserves_existing_mode_0660(stack):
+    # Distinct pin on the mode-COPY branch: the existing-file branch copies
+    # the pre-existing mode verbatim (stat.S_IMODE); the new-file branch
+    # computes 0666 & ~umask. The 0600-seeded test above only pins "not
+    # widened to 0644" -- a normalize-to-0600 regression would pass it.
+    # A 0660 seed survives only if the copy branch fired: no sane umask
+    # makes 0666 & ~umask == 0660, so the post-write 0660 is the copied
+    # mode, not the default arithmetic.
+    import os
+    import stat
+    env, paths = stack
+    _seed_real_key(paths)
+    tenant_record = paths["tenant_record"]
+    tenant_record.write_text("{}\n")
+    os.chmod(tenant_record, 0o660)
+    env = dict(env)
+    env["INJECT_TENANT_ID"] = "tenant-42"
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    record = json.loads(tenant_record.read_text())
+    assert record["tenant_id"] == "tenant-42"
+    assert stat.S_IMODE(os.stat(tenant_record).st_mode) == 0o660
+
+
 def test_identity_refuses_symlinked_ssh_dir(stack):
     # A planted ~/.ssh symlink would redirect validated tenant keys
     # into an attacker-chosen directory (e.g. /root/.ssh): refuse,

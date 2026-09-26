@@ -57,6 +57,44 @@ norm_rule_line() {
     printf '%s\n' "$t"
 }
 
+# Canonicalize a normalized rule line for comparison: strip ALL whitespace
+# outside double-quoted segments (issue #436). The watchdog pins `nft list`
+# output text, and nft's formatter is version-dependent (brace spacing,
+# indent width, token gaps); whitespace-only differences carry no rule
+# semantics, but a naive full-text match turns a formatter change into a
+# false fail-closed — the jail stopped every 5 minutes for nothing, training
+# the operator to ignore the red unit this component was built to produce.
+# Quoted segments (interface names, log prefixes, DNAT targets) are left
+# INTACT: stripping inside them would make iifname "ve-jail" and
+# iifname "tailscale0" indistinguishable (the IFACE_SWAP regression).
+# Residual (known, not absorbed): semantic re-renderings a formatter could
+# introduce, e.g. `ct state established,related` as
+# `ct state { established, related }`. The build-time self-test does NOT
+# cover that class: it catches deploy-time conf-vs-renderer skew (the
+# authoring side), but an nft upgrade AFTER the build that re-renders
+# semantically still false-fail-closes on the first 5-minute tick.
+# Tracked as issue #444 (semantic pin design: `nft --json` capture at
+# build time, compared with the same renderer at tick time).
+norm_canon() {
+    local rest="$1" out="" pre seg
+    while [[ "$rest" == *\"* ]]; do
+        pre="${rest%%\"*}"          # up to the first quote
+        seg="${rest#*\"}"           # after the first quote
+        out+="${pre//[[:space:]]/}"
+        if [[ "$seg" == *\"* ]]; then
+            out+="\"${seg%%\"*}\""
+            rest="${seg#*\"}"
+        else
+            # Unbalanced quote: cannot occur from nft/conf output; keep the
+            # tail verbatim (whitespace-stripped) rather than guessing.
+            out+="\"${seg//[[:space:]]/}"
+            rest=""
+        fi
+    done
+    out+="${rest//[[:space:]]/}"
+    printf '%s' "$out"
+}
+
 # The expected rule lines: every rule in the installed conf, normalized.
 # The conf is the single source of truth (build.sh renders it with the
 # real JAIL_SSH_PORT); nothing about the allow head is hardcoded here, so
@@ -79,19 +117,33 @@ conf_rule_lines() {
 # dport qualifier) or an altered DNAT target ('dnat ip to 127.0.0.1:9999',
 # 'dnat ip to 127.0.0.10') is not the expected line and fails closed — and a
 # verdict the conf never uses ('redirect', 'fwd', 'masquerade', ...) fails
-# closed the same way. Exact matching is safe because any conf change IS
+# closed the same way. Matching is safe because any conf change IS
 # the new truth. An unreadable conf fails closed too: the watchdog must
 # not bless a table it cannot compare.
+# The comparison is on CANONICALIZED lines (norm_canon), not the raw
+# `nft list` text: whitespace-only formatter variance (indent, brace
+# spacing, token gaps) carries no rule semantics and must not fail the pin
+# (issue #436). Quoted segments stay intact so interface-name and
+# log-prefix identity survive canonicalization.
 # (The build-time twin of this pin is
 # test_build_smoke.py::TestIsolation::test_nftables_accept_head_is_proxy_and_ssh_only.)
 allow_head_intact() {
-    local rules="$1" line t expected
+    local rules="$1" line t canon expected canon_expected
     expected="$(conf_rule_lines)" || expected=""
     [ -n "$expected" ] || return 1
+    # Canonicalize the expected set once (both sides go through the same
+    # norm_rule_line -> norm_canon pipeline).
+    canon_expected="$(while IFS= read -r line; do
+        t="$(norm_rule_line "$line")" || continue
+        [ -n "$t" ] || continue
+        norm_canon "$t"
+        printf '\n'
+    done <<< "$expected")"
     while IFS= read -r line; do
         t="$(norm_rule_line "$line")" || continue
         [ -n "$t" ] || continue
-        printf '%s\n' "$expected" | grep -qxF -- "$t" || return 1
+        canon="$(norm_canon "$t")"
+        printf '%s\n' "$canon_expected" | grep -qxF -- "$canon" || return 1
     done <<< "$rules"
     return 0
 }

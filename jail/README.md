@@ -74,6 +74,11 @@ confirmation page live on the host.
   boot. Everything about it is produced by `jail/build.sh` in this
   repo — a corrupted jail is a rebuild, not a mystery. Rebuilds get a
   fresh `/etc/machine-id`; guest sshd host keys live in the rootfs.
+  The jail tree is **not** self-contained: `build.sh` installs the swapd CA
+  into the guest through `../proxy/build_ca_bundle.py` (which in turn
+  imports `proxy/safe_install.py`) and fails closed if the helper is absent
+  (issue #304). Vendoring or shipping `jail/` without the sibling `proxy/`
+  tree breaks the build — keep both trees together.
 
 ## Enforcement-downgrade contract (fail-closed)
 
@@ -121,9 +126,17 @@ states the construction, not a static pin.
   must be one of the installed conf's rule lines, matched on the full
   rule text (match expression plus verdict), so a widened ruleset (an
   added broad accept above the drops, or a broadened match with a
-  dropped qualifier) fails closed the same as a missing one. The conf
+  dropped qualifier) fails closed the same as a missing one. The match
+  is whitespace-canonicalized (whitespace outside quoted names is
+  ignored on both sides), so an nftables version that re-renders rule
+  text — indent, brace spacing, token gaps — cannot turn the watchdog
+  into a false-alarm machine; quoted interface names and log prefixes
+  still match exactly. The conf
   is the single source of truth — the pin hardcodes nothing, so it
-  cannot drift from the table it guards. On confirmed damage (a
+  cannot drift from the table it guards. build.sh also runs the verify
+  service once at build time: a pin-vs-live-table mismatch fails the
+  build loudly instead of surfacing as a fail-closed storm on the first
+  5-minute tick. On confirmed damage (a
   10-second re-check filters the
   oneshot unit's own transient destroy-then-apply window), the watchdog
   is fail-closed: it **stops the jail first**, then re-applies

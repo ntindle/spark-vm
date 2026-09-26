@@ -171,6 +171,24 @@ shape: the human owns the host/hypervisor and keeps full root; their
 agent runs as a workload beneath that control; secret installation
 stays human-only via `cred set`).
 
+**The runtime-cell framing (adopted 2026-09-25 — vocabulary only).** The
+Muse Secure VM architecture post gives this boundary a crisp vocabulary
+that H11 now adopts — its words, not its claims. The **runtime cell** is
+the tenant's own computer on the hosted shape — their per-tenant box
+(their jail on the cooperative tier); either way, contained
+root-equivalent inside it, never host root. Everything **inside the
+cell** is the tenant's to see and break. Everything **outside the cell** is
+operator-owned and invisible from inside: the outer enforcement layer
+(egress fencing, secret swapping, metering, updater enforcement),
+billing, break-glass, and the secrets themselves. From inside the cell
+the enforcement layer is a black box — the tenant's agent meets the
+outside only through constrained surfaces: approvals, status, audit
+(the surfaces H10/H12 are designed to expose). The explicit non-adoption: Muse
+claims operator blindness ("zero privileged access"); H11 claims the
+opposite. The operator *can* technically inspect a tenant environment;
+support access is tenant-visible, explicitly granted, logged, and
+break-glass only (see §2 finding 4).
+
 The current shared `ntindle`-with-sudo domain on the swapd host matches
 no vendor precedent and must be retired for the hosted shape: operator
 tooling reaches the host through a dedicated, audited operator plane
@@ -190,7 +208,9 @@ noted here for consistency only.
 - **H5 (sentinel):** the sentinel runs on the operator plane (§3 Q4,
   decided 2026-09-24), authenticates tenants by tailnet identity, and
   never shares a host with tenant workloads on the per-tenant-box shape.
-  H5's design may proceed on that substrate.
+  It is the Sentinel role of this architecture: the operator-plane
+  sentinel that lives *outside* the tenant's runtime cell. H5's design
+  may proceed on that substrate.
 - **H10 (multi-tenant approvals) + H12 (usage metering):** the tenant
   key is the **BYO per-tenant tailnet identity** — H10's provisional
   assumption ("attribution keys on tailnet identity") is consistent with
@@ -210,11 +230,16 @@ noted here for consistency only.
   shape)"; "the jail is documented as a weaker-than-hardware boundary
   for cooperative tenants"; "swap-proxy trust model documented as
   host-wide grants (IMDSv1) pending per-tenant auth"; "fail-closed
-  enrollment / stale-authorization outage semantics adopted".
+  enrollment / stale-authorization outage semantics adopted"; "the
+  runtime-cell / outside-the-cell vocabulary for the tenant/operator
+  trust boundary (framing only — §3 Q4 states the explicit
+  non-adoption of operator blindness)".
 - **Forbidden:** any claim that the current box hosts multiple tenants
   safely; "jail = VM-equivalent isolation"; "tailnets isolate tenants"
-  (network only); citing this audit as the per-tenant implementation —
-  it is the decision record, not the build.
+  (network only); "operator blindness" / "zero privileged access" (Muse's
+  stronger claim — explicitly not adopted, see §3 Q4); citing this audit
+  as the per-tenant implementation — it is the decision record, not the
+  build.
 
 ## 6. Open verifications (unchanged from the research doc; filed §7)
 

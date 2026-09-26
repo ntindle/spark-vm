@@ -181,18 +181,22 @@ sudo python3 proxy/safe_install.py --stdin \
 # --- 4b. with-proxy + its CA bundle (owner decision 13) ------------------
 echo "[4b/7] Building the with-proxy CA bundle and installing with-proxy..."
 # The swapd CA is not in the host store; with-proxy uses system CAs plus
-# the swapd CA cert. Rebuilt on every deploy so a rotated CA is picked up.
-sudo mkdir -p /usr/local/share/with-proxy-ca
+# the swapd CA cert. Rebuilt on every proxy deploy — and since issue #302,
+# a CA rotation itself forces a proxy redeploy, so a rotated CA is picked
+# up without a concurrent code change.
+# Issue #303: honor WITH_PROXY_CA_BUNDLE (components.conf advertises it as
+# env-overridable for snapshot/rollback, but deploy.sh wrote a hardcoded
+# literal). The default keeps the old path, so the install-paths coverage
+# test's literal pin stays green.
+ca_bundle_dest="${WITH_PROXY_CA_BUNDLE:-/usr/local/share/with-proxy-ca/ca-bundle.crt}"
+sudo mkdir -p "$(dirname "$ca_bundle_dest")"
 # The CA source is swapd-writable: build_ca_bundle.py refuses a planted
 # symlink there (issue #144 — the old `cat` followed it and would leak a
 # root-readable file into this world-readable bundle). A missing CA on a
 # first deploy still skips LOUDLY inside the helper; the destination write
 # goes through safe_install (no symlink write-through, root:root 0644).
-# --dest is explicit (not just the helper default) so deploy.sh visibly
-# writes /usr/local/share/with-proxy-ca/ca-bundle.crt — the install-paths
-# coverage test pins that.
 sudo python3 proxy/build_ca_bundle.py \
-    --dest /usr/local/share/with-proxy-ca/ca-bundle.crt
+    --dest "$ca_bundle_dest"
 sudo install -o root -g root -m 0755 proxy/with-proxy /usr/local/bin/with-proxy
 
 # --- 4c. secrets dirs (issue #91) -------------------------------------------

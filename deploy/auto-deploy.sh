@@ -70,6 +70,21 @@ LOCK_FILE="$UPDATER_STATE_DIR/auto-deploy.lock"
 SNAPSHOT_DIR="$UPDATER_STATE_DIR/snapshots"
 LAST_FAILURE="$UPDATER_STATE_DIR/last-failure"
 INSTALLED_BIN="$UPDATER_STATE_DIR/bin"
+# Issue #302: recorded digests of components' host-side (non-repo) change
+# inputs (<component>_extra_paths in components.conf). A digest change
+# forces that component to redeploy on the next tick.
+EXTRA_INPUTS_STATE="$UPDATER_STATE_DIR/extra-inputs-hash"
+# Minimum seconds between two extra-inputs-forced deploys of the same
+# component (Security review): the CA cert is swapd-writable, so without
+# dampening a swapd-level writer could force a full gated redeploy on
+# every 10-minute tick by rewriting CA bytes.
+EXTRA_INPUTS_FORCE_MIN_SECS=3600
+# Maximum bytes of a host-side input file to hash (Security review): the
+# input is swapd-writable and hashed twice per tick while holding the
+# single-flight lock, so it must be bounded — matching build_ca_bundle.py's
+# _MAX_CA_BYTES. Bytes past the cap can never reach the deployed bundle, so
+# only the length is folded in to keep pure growth flipping the digest.
+EXTRA_INPUTS_HASH_MAX_BYTES=1048576
 
 # components.conf must be sourced AFTER the *_HOME vars exist, because its
 # install_paths reference them.
@@ -295,6 +310,149 @@ components_for_files() {
             done < <(get_arr "$c" paths)
         done
     done | sort -u
+}
+
+extra_inputs_hash() {
+    # extra_inputs_hash <component> — deterministic digest of the
+    # component's host-side (non-repo) inputs declared as <component>_extra_paths
+    # in components.conf (issue #302). Missing file -> "missing" token,
+    # non-regular file -> "nonregular" token, read error -> "unreadable"
+    # token: all are legitimate digest inputs, so CA-generated, CA-rotated,
+    # and CA-deleted transitions all count as changes.
+    # The read runs at the deploy privilege through sudo_run, via the
+    # atomic open discipline in deploy/extra_inputs_hash_read.py
+    # (O_RDONLY | O_NOFOLLOW | O_NONBLOCK, fstat before read, regular-file
+    # gate, hardlink refusal, capped read — mirroring
+    # build_ca_bundle.py::_privileged_read). There is deliberately NO shell
+    # check-then-read: the old `[ -L ]`/`[ -f ]` test followed by `head`
+    # left a swap window a swapd-level writer could win — a symlink
+    # winning the race got followed, and a symlink→FIFO winning the race
+    # made `head` block forever on the open while the tick held the
+    # single-flight lock (permanent deploy-tick liveness DoS). The refusal
+    # is part of the open itself now, so there is no window to race.
+    # Reading privileged also matches every other consumer of the path:
+    # nothing documents the CA path as readable by the invoking user, and
+    # a chmod-toggle by swapd could previously flip the digest without
+    # changing a single byte the deploy path would read.
+    # The || mat="" guards the bare assignment under set -e: a helper that
+    # fails outright (missing python3, broken install) retries the tick
+    # instead of aborting it.
+    local c="$1" p h digest mat
+    # Fail loud on a stale install: if init has not been re-run since the
+    # helper was introduced, the installed copy has no reader — hashing
+    # everything as "unreadable" instead would silently disable rotation
+    # detection (#302's whole purpose). The deploy/check paths abort via
+    # set -e; cmd_status guards the call (diagnostic command).
+    if [ ! -r "$SCRIPT_DIR/extra_inputs_hash_read.py" ]; then
+        log "ERROR: extra_inputs_hash_read.py missing next to the installed auto-deploy.sh — re-run 'auto-deploy.sh init'"
+        return 1
+    fi
+    digest=""
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        mat="$(sudo_run python3 "$SCRIPT_DIR/extra_inputs_hash_read.py" "$p" "$EXTRA_INPUTS_HASH_MAX_BYTES")" || mat=""
+        [ -n "$mat" ] || mat="unreadable"
+        h="$(printf '%s' "$mat" | sha256sum | cut -d' ' -f1)"
+        digest="${digest}${p}=${h}
+"
+    done < <(get_arr "$c" extra_paths)
+    printf '%s' "$digest" | sha256sum | cut -d' ' -f1
+}
+
+record_extra_inputs() {
+    # record_extra_inputs <component> [forced] — atomically record the
+    # current extra-inputs digest for <component> (issue #302). Called only
+    # on successful deploy — a failed deploy must not converge the record,
+    # or the next tick would skip the retry. No-op for components that
+    # declare no extra_paths. When forced=1 (the deploy was triggered by an
+    # extra-inputs change rather than a repo diff), also record the epoch:
+    # extra_inputs_changed uses it to dampen swapd-triggerable redeploy
+    # churn — a swapd-writable input must not force a full gated redeploy
+    # on every 10-minute tick.
+    local c="$1" forced="${2:-0}" h tmp now
+    [ -n "$(get_arr "$c" extra_paths 2>/dev/null)" ] || return 0
+    h="$(extra_inputs_hash "$c")"
+    tmp="$EXTRA_INPUTS_STATE.tmp"
+    # grep rc=1 ("no lines selected") is the normal nothing-to-carry case;
+    # only that is tolerated — rc=2 is a real read error and fails closed
+    # under set -e rather than converging the digest on a corrupt state.
+    if [ -f "$EXTRA_INPUTS_STATE" ]; then
+        grep -v -e "^${c}=" -e "^${c}_last_forced=" "$EXTRA_INPUTS_STATE" >"$tmp" 2>/dev/null || [ $? -eq 1 ]
+    else
+        : >"$tmp"
+    fi
+    printf '%s=%s\n' "$c" "$h" >>"$tmp"
+    if [ "$forced" = "1" ]; then
+        now="$(date +%s)"
+        printf '%s_last_forced=%s\n' "$c" "$now" >>"$tmp"
+    fi
+    mv -f "$tmp" "$EXTRA_INPUTS_STATE"
+}
+
+note_forced_attempt() {
+    # note_forced_attempt <component> — record that an extra-inputs-forced
+    # deploy was ATTEMPTED (success or failure), without converging the
+    # digest. Called when the forced deploy is decided, not only on success
+    # (Security review): a swapd-level writer must not be able to ride a
+    # persistently-failing forced deploy into an undampened 10-minute retry
+    # loop — e.g. a planted symlink at the CA path that build_ca_bundle.py
+    # fail-closes on, forever. The digest stays unconverged, so a failed
+    # deploy still retries — at the dampened rate, once the window passes.
+    # Idempotent with record_extra_inputs' forced write (same epoch key).
+    local c="$1" tmp now
+    [ -n "$(get_arr "$c" extra_paths 2>/dev/null)" ] || return 0
+    now="$(date +%s)"
+    tmp="$EXTRA_INPUTS_STATE.tmp"
+    # grep rc=1 ("no lines selected") is the normal nothing-to-carry case;
+    # only that is tolerated — rc=2 is a real read error and fails closed
+    # under set -e rather than stamping the dampening epoch on a corrupt state.
+    if [ -f "$EXTRA_INPUTS_STATE" ]; then
+        grep -v -e "^${c}_last_forced=" "$EXTRA_INPUTS_STATE" >"$tmp" 2>/dev/null || [ $? -eq 1 ]
+    else
+        : >"$tmp"
+    fi
+    printf '%s_last_forced=%s\n' "$c" "$now" >>"$tmp"
+    mv -f "$tmp" "$EXTRA_INPUTS_STATE"
+}
+
+extra_inputs_changed() {
+    # Exit 0 when the component declares host-side inputs AND their current
+    # digest differs from the last recorded one (issue #302). A missing
+    # record counts as changed: the first tick after the declaration lands
+    # (or after a state-dir wipe) redeploys the component once and records
+    # the digest, converging the state. Components with no extra_paths are
+    # never changed by this path.
+    # Dampening (Security review): the digest differs, but if the last
+    # extra-inputs-triggered deploy was under EXTRA_INPUTS_FORCE_MIN_SECS
+    # ago, exit 1 — a swapd-writable input (the CA cert) must not force a
+    # full gated redeploy on every 10-minute tick. A single legitimate
+    # rotation still deploys on the next tick; only repeated churn is
+    # damped. The digest is NOT converged on a damped tick, so the deploy
+    # still happens once the window passes.
+    local c="$1"
+    [ -n "$(get_arr "$c" extra_paths 2>/dev/null)" ] || return 1
+    local h rec last now
+    # A missing helper (stale install) must degrade to "not changed", not
+    # to h="" — an empty digest mismatches any recorded digest and would
+    # force an hourly full redeploy that can never converge
+    # (record_extra_inputs aborts under set -e on the same missing helper).
+    # The fail-loud ERROR gate in extra_inputs_hash already logged loudly.
+    # Every call site invokes this in an `if` condition (errexit off),
+    # so this must degrade explicitly here.
+    if ! h="$(extra_inputs_hash "$c")"; then
+        return 1
+    fi
+    rec="$(sed -n "s/^${c}=//p" "$EXTRA_INPUTS_STATE" 2>/dev/null | head -1)" || true
+    [ "$h" != "$rec" ] || return 1
+    last="$(sed -n "s/^${c}_last_forced=//p" "$EXTRA_INPUTS_STATE" 2>/dev/null | head -1)" || true
+    if [ -n "$last" ] && [[ "$last" =~ ^[0-9]+$ ]]; then
+        now="$(date +%s)"
+        if [ "$(( now - last ))" -lt "$EXTRA_INPUTS_FORCE_MIN_SECS" ]; then
+            log "host-side inputs changed for $c but last forced deploy was < $(( EXTRA_INPUTS_FORCE_MIN_SECS / 60 )) min ago — skipping"
+            return 1
+        fi
+    fi
+    return 0
 }
 
 expand_install_unit() {
@@ -687,7 +845,7 @@ sync_version_from_deployed() {
 }
 
 do_rollback() {
-    # do_rollback <snapdir> <old> <new> <failed-component> <phase> [no_block]
+    # do_rollback <snapdir> <old> <new> <failed-component> <phase> [no_block] [audit-trig]
     # Restore the snapshot, restart + health-check. Unless no_block is set,
     # mark the commit blocked so the next tick does not retry-loop it.
     # no_block is for aborts where the commit itself is fine (issue #324's
@@ -695,17 +853,17 @@ do_rollback() {
     # is never written — not even if the rollback itself fails (the alert
     # already screams for operator intervention; a good commit must not be
     # blocked). Always returns 1 (deploy failed).
-    local snapdir="$1" old="$2" new="$3" failed_c="$4" phase="$5" no_block="${6:-}"
+    local snapdir="$1" old="$2" new="$3" failed_c="$4" phase="$5" no_block="${6:-}" atrig="${7:-}"
     local c
-    if [ -n "$no_block" ]; then
+    if [ "$phase" = "checkout-dirty" ]; then
         alert "checkout-dirty abort for component $failed_c ($old -> $new) — rolling back already-installed components (commit or stash first)"
     else
         alert "deploy $phase failed for component $failed_c ($old -> $new) — rolling back"
     fi
-    audit 'deploy' ',"result":"deploy-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$failed_c"'","phase":"'"$phase"'"'
+    audit 'deploy' ',"result":"deploy-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$failed_c"'","phase":"'"$phase"'"'"$atrig"
     if ! restore_snapshot "$snapdir"; then
         alert "ROLLBACK FAILED for $new — box may be half-deployed, operator intervention required"
-        audit 'deploy' ',"result":"rollback-failed","from":"'"$old"'","to":"'"$new"'"'
+        audit 'deploy' ',"result":"rollback-failed","from":"'"$old"'","to":"'"$new"'"'"$atrig"
         if [ -z "$no_block" ]; then
             printf '%s\n' "$new" >"$BLOCKED_COMMIT.tmp" && mv -f "$BLOCKED_COMMIT.tmp" "$BLOCKED_COMMIT"
         fi
@@ -731,7 +889,7 @@ do_rollback() {
     # The restored snapshot reverted the deployed standalone files, so the
     # deployed version is whatever the restored VERSION file says.
     local rbv; rbv="$(sync_version_from_deployed)"
-    audit 'deploy' ',"result":"rolled-back","from":"'"$old"'","to":"'"$new"'","to_version":"'"$rbv"'"'
+    audit 'deploy' ',"result":"rolled-back","from":"'"$old"'","to":"'"$new"'","to_version":"'"$rbv"'"'"$atrig"
     return 1
 }
 
@@ -749,6 +907,10 @@ cmd_init() {
         git clone "$PINNED_UPSTREAM" "$UPDATER_REPO"
     fi
     install -m 0755 "$SCRIPT_DIR/auto-deploy.sh" "$INSTALLED_BIN/auto-deploy.sh"
+    # extra_inputs_hash() reads host-side inputs through this helper at the
+    # deploy privilege (sudo_run); the installed copy must carry it, or the
+    # digest read fails outright and the tick retries without converging.
+    install -m 0644 "$SCRIPT_DIR/extra_inputs_hash_read.py" "$INSTALLED_BIN/extra_inputs_hash_read.py"
     install -m 0644 "$UPDATER_COMPONENTS_CONF" "$INSTALLED_BIN/components.conf"
     record_updater_source
     log "installed updater to $INSTALLED_BIN (timer ExecStart must point here)"
@@ -837,7 +999,21 @@ cmd_check() {
     # set -e — a failing command substitution exits the shell before rc=$?
     # runs. The `if` condition suppresses errexit so rc is captured.
     if range="$(pending_range)"; then rc=0; else rc=$?; fi
-    if [ "$rc" -eq 1 ]; then return 0; fi  # up-to-date or blocked; already logged
+    if [ "$rc" -eq 1 ]; then
+        # Up-to-date (or blocked); already logged. Mirror deploy's
+        # synthesized-range check so `check` stays honest about what a
+        # deploy would do — but a blocked head stays quiet, exactly like
+        # deploy (Engineering review).
+        if [ ! -f "$BLOCKED_COMMIT" ]; then
+            local ec
+            for ec in "${COMPONENTS[@]}"; do
+                if extra_inputs_changed "$ec"; then
+                    log "up-to-date, but host-side inputs changed for $ec — deploy would force-redeploy it"
+                fi
+            done
+        fi
+        return 0
+    fi
     if [ "$rc" -ne 0 ]; then return "$rc"; fi  # propagate precheck errors (no silent success)
     old="${range%% *}"; new="${range##* }"
     log "would deploy $old -> $new"
@@ -850,29 +1026,68 @@ cmd_check() {
         local c
         for c in "${comps[@]}"; do log "  - $c"; done
     fi
+    local ec2
+    for ec2 in "${COMPONENTS[@]}"; do
+        if extra_inputs_changed "$ec2"; then
+            log "host-side inputs changed for $ec2 — deploy would force-redeploy it"
+        fi
+    done
     check_updater_drift
 }
 
 cmd_deploy() {
     mkdir -p "$UPDATER_STATE_DIR" "$SNAPSHOT_DIR"
-    local range rc old new
+    local range rc old new range_synthesized=0 FORCED_LIST=""
     # Same set -e trap as in cmd_check: the `if` captures the return code.
     if range="$(pending_range)"; then rc=0; else rc=$?; fi
     if [ "$rc" -eq 1 ]; then
         # A blocked head stays quiet: the rollback already audited + alerted.
         # (pending_range runs in $( ), so the reason can't come back via a
         # global — the blocked file's presence is the signal.)
-        if [ ! -f "$BLOCKED_COMMIT" ]; then
-            audit 'check' ',"result":"noop"'
+        if [ -f "$BLOCKED_COMMIT" ]; then
+            return 0
         fi
-        return 0
-    fi
-    if [ "$rc" -ne 0 ]; then
+        # Issue #302: host-side (non-repo) inputs can change with zero new
+        # commits — e.g. a mitmproxy CA rotation. pending_range reports
+        # "nothing to do" for an up-to-date repo, so scan the extra-inputs
+        # digests here; on a change, synthesize a zero-width range
+        # (old=new=head) and let the deploy path below run with the
+        # force-added components.
+        local ec forced_any=0
+        for ec in "${COMPONENTS[@]}"; do
+            if extra_inputs_changed "$ec"; then forced_any=1; break; fi
+        done
+        if [ "$forced_any" -eq 0 ]; then
+            audit 'check' ',"result":"noop"'
+            return 0
+        fi
+        old="$(cat "$WATERMARK" 2>/dev/null || echo "")"
+        new="$old"
+        range_synthesized=1
+        log "host-side inputs changed with no new commits — deploying changed components at $new"
+    elif [ "$rc" -ne 0 ]; then
         alert "pre-deploy check failed"
         audit 'check' ',"result":"precheck-fail"'
         return 1
     fi
-    old="${range%% *}"; new="${range##* }"
+    if [ "$range_synthesized" -eq 0 ]; then
+        old="${range%% *}"; new="${range##* }"
+    fi
+
+    # A same-commit (extra-inputs-forced) deploy is not a version deploy:
+    # - it must never mark HEAD blocked: the commit is fine, so a failed
+    #   forced deploy retries next tick instead of wedging the box until
+    #   the next code change (Engineering review). do_rollback's 6th arg
+    #   selects this ("no_block" vs "").
+    # - it gets its own snapshot dir, so it never clobbers the snapshot
+    #   from the original deploy of this commit.
+    # - its audit lines carry "trigger":"extra-inputs" so the trail does
+    #   not masquerade as a version deploy.
+    local rb_no_block="" trig=""
+    if [ "$range_synthesized" -eq 1 ]; then
+        rb_no_block="no_block"
+        trig=',"trigger":"extra-inputs"'
+    fi
 
     # Reset the mirror to the new commit (the mirror is never a working tree).
     git -C "$UPDATER_REPO" reset --hard -q "$new" || {
@@ -885,6 +1100,30 @@ cmd_deploy() {
     changed="$(git -C "$UPDATER_REPO" diff --name-only "$old" "$new")"
     local -a COMPS
     mapfile -t COMPS < <(printf '%s\n' "$changed" | components_for_files)
+
+    # Issue #302: host-side (non-repo) inputs. A mitmproxy CA rotation with
+    # no code change is invisible to the git-diff mapping above but must
+    # still redeploy the proxy so the CA bundle is rebuilt. Force-add any
+    # component whose extra-inputs digest changed since the last recorded
+    # deploy. (On an up-to-date repo the rc=1 branch above already
+    # synthesized a zero-width range on exactly this condition, so this
+    # loop re-detects the same components here.)
+    local ec
+    for ec in "${COMPONENTS[@]}"; do
+        if extra_inputs_changed "$ec"; then
+            log "host-side inputs changed for component $ec — forcing redeploy"
+            COMPS+=("$ec")
+            FORCED_LIST="$FORCED_LIST $ec"
+            # Record the attempt now (not only on success): a failing forced
+            # deploy must be dampened too, or a swapd writer rides the
+            # failure into an undampened 10-minute retry loop. The digest
+            # stays unconverged, so the retry still happens after the window.
+            note_forced_attempt "$ec"
+        fi
+    done
+    if [ "${#COMPS[@]}" -gt 0 ]; then
+        mapfile -t COMPS < <(printf '%s\n' "${COMPS[@]}" | sort -u)
+    fi
 
     if [ "${#COMPS[@]}" -eq 0 ]; then
         log "no deployable components changed — advancing watermark only"
@@ -911,7 +1150,7 @@ cmd_deploy() {
     for c in "${COMPS[@]}"; do
         run_gates "$c" || {
             alert "pre-deploy gate failed for component $c ($old -> $new)"
-            audit 'deploy' ',"result":"gate-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'
+            audit 'deploy' ',"result":"gate-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'"$trig"
             return 1
         }
         local sub; sub="$(get_str "$c" checkout_sync)"
@@ -926,6 +1165,7 @@ cmd_deploy() {
 
     # 2. snapshot for rollback
     local snapdir="$SNAPSHOT_DIR/$new"
+    if [ "$range_synthesized" -eq 1 ]; then snapdir="${snapdir}-extra-inputs"; fi
     rm -rf "$snapdir"; mkdir -p "$snapdir" || {
         alert "could not create snapshot dir $snapdir ($old -> $new)"
         audit 'deploy' ',"result":"snapshot-fail","from":"'"$old"'","to":"'"$new"'"'
@@ -976,11 +1216,11 @@ cmd_deploy() {
             alert "checkout changed during deploy for component $c ($old -> $new) — refusing to overwrite (commit or stash first)"
             audit 'deploy' ',"result":"checkout-dirty","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'
             if [ "$installed_any" -eq 1 ] || [ -n "$(get_str "$c" install)" ]; then
-                do_rollback "$snapdir" "$old" "$new" "$c" "checkout-dirty" "no_block"
+                do_rollback "$snapdir" "$old" "$new" "$c" "checkout-dirty" "no_block" "$trig"
             fi
             return 1
         fi
-        [ "$irc" -eq 0 ] || { do_rollback "$snapdir" "$old" "$new" "$c" "install"; return 1; }
+        [ "$irc" -eq 0 ] || { do_rollback "$snapdir" "$old" "$new" "$c" "install" "$rb_no_block" "$trig"; return 1; }
         installed_any=1
     done
 
@@ -989,16 +1229,16 @@ cmd_deploy() {
     reload_and_enable "${COMPS[@]}" || {
         alert "daemon-reload/enable failed after install ($old -> $new) — rolling back"
         audit 'deploy' ',"result":"reload-fail","from":"'"$old"'","to":"'"$new"'"'
-        do_rollback "$snapdir" "$old" "$new" "${COMPS[0]}" "reload"
+        do_rollback "$snapdir" "$old" "$new" "${COMPS[0]}" "reload" "$rb_no_block" "$trig"
         return 1
     }
     for c in "${COMPS[@]}"; do
-        restart_component_services "$c" || { do_rollback "$snapdir" "$old" "$new" "$c" "restart"; return 1; }
+        restart_component_services "$c" || { do_rollback "$snapdir" "$old" "$new" "$c" "restart" "$rb_no_block" "$trig"; return 1; }
     done
 
     # 5. health-check; failure rolls back.
     for c in "${COMPS[@]}"; do
-        health_check "$c" || { do_rollback "$snapdir" "$old" "$new" "$c" "health"; return 1; }
+        health_check "$c" || { do_rollback "$snapdir" "$old" "$new" "$c" "health" "$rb_no_block" "$trig"; return 1; }
     done
 
     # 6. success: advance watermark, record deployed version, clear any
@@ -1006,10 +1246,22 @@ cmd_deploy() {
     write_watermark "$new"
     local nv ov; nv="$(new_version)"; ov="$(deployed_version)"
     write_version "$nv"
+    # Issue #302: converge the host-side input digests for the deployed
+    # components — only on success, so a failed deploy retries next tick.
+    # Components force-added by an extra-inputs change also record a
+    # forced-deploy timestamp (dampens swapd-triggerable redeploy churn).
+    local rc forced_flag
+    for rc in "${COMPS[@]}"; do
+        forced_flag=0
+        case " $FORCED_LIST " in
+            *" $rc "*) forced_flag=1 ;;
+        esac
+        record_extra_inputs "$rc" "$forced_flag"
+    done
     rm -f "$BLOCKED_COMMIT" "$LAST_FAILURE"
     prune_snapshots
     local complist; complist="$(printf '%s\n' "${COMPS[@]}" | tr '\n' ' ' | xargs)"
-    audit 'deploy' ',"result":"ok","from":"'"$old"'","to":"'"$new"'","components":"'"$complist"'","to_version":"'"$nv"'","from_version":"'"$ov"'"'
+    audit 'deploy' ',"result":"ok","from":"'"$old"'","to":"'"$new"'","components":"'"$complist"'","to_version":"'"$nv"'","from_version":"'"$ov"'"'"$trig"
     log "deployed $new ($nv) — components: $complist"
 }
 
@@ -1102,6 +1354,27 @@ cmd_status() {
     fi
     echo "audit log:  $AUDIT_LOG ($(wc -l <"$AUDIT_LOG" 2>/dev/null || echo 0) lines)"
     echo "snapshots:  $(find "$SNAPSHOT_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"
+    # Issue #302: surface the host-side input digests so a proxy redeploy
+    # with an unchanged watermark is explainable (QA review).
+    local sc rec cur
+    for sc in "${COMPONENTS[@]}"; do
+        [ -n "$(get_arr "$sc" extra_paths 2>/dev/null)" ] || continue
+        # B1 (Engineering review): missing state file must not abort
+        # status under set -euo pipefail — the sed read is guarded like
+        # extra_inputs_changed's read. Reachable after init before the
+        # first successful proxy deploy, or after any state-dir wipe.
+        rec="$(sed -n "s/^${sc}=//p" "$EXTRA_INPUTS_STATE" 2>/dev/null | head -1 || true)"
+        # status is diagnostic: a broken digest read must not abort it.
+        if ! cur="$(extra_inputs_hash "$sc")"; then
+            echo "extra-inputs($sc): ERROR — could not hash host-side inputs (see log)"
+            continue
+        fi
+        if [ "$rec" = "$cur" ]; then
+            echo "extra-inputs($sc): in sync (${cur:0:12}…)"
+        else
+            echo "extra-inputs($sc): CHANGED — recorded '${rec:0:12}' vs current '${cur:0:12}' (next deploy force-redeploys $sc)"
+        fi
+    done
     if [ -f "$LAST_FAILURE" ]; then echo "LAST FAILURE:"; cat "$LAST_FAILURE"; fi
     if [ "$SKIP_SYSTEMCTL" = "1" ]; then
         echo "timer:      (systemctl skipped in this environment)"
