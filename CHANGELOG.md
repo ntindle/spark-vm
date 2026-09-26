@@ -148,7 +148,7 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
-- The desktop control bridge now serves requests on a bounded thread pool (8 concurrent handlers) instead of one at a time: a slow driver call can no longer head-of-line-block the panel's screenshot polls or the keepalive's health probe. (#TBD)
+- The desktop control bridge now serves each request on its own thread, with at most 8 handlers running at once: a slow driver call can no longer head-of-line-block the panel's screenshot polls or the keepalive's health probe. (#TBD)
 
 - Manual rollbacks now audit the extra-inputs digest reconciliation outcome:
   a reconciliation that fails part-way is recorded on the `manual-rollback`
