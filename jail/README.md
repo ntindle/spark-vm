@@ -136,7 +136,7 @@ states the construction, not a static pin.
   cannot drift from the table it guards. build.sh also runs the verify
   service once at build time: a pin-vs-live-table mismatch fails the
   build loudly instead of surfacing as a fail-closed storm on the first
-  5-minute tick. On confirmed damage (a
+  watchdog tick. On confirmed damage (a
   10-second re-check filters the
   oneshot unit's own transient destroy-then-apply window), the watchdog
   is fail-closed: it **stops the jail first**, then re-applies
@@ -264,7 +264,7 @@ After (re)building, confirm the isolation properties hold:
 - `sysctl net.ipv4.conf.ve-jail.route_localnet` is 1;
   `net.ipv4.conf.all.route_localnet` and `default` are 0 (finding 51).
 - `systemctl list-timers jail-firewall-verify.timer` shows the watchdog
-  scheduled every 5 minutes; after a simulated table loss
+  scheduled every minute; after a simulated table loss
   (`sudo nft delete table inet jail`) the jail is stopped and the table
   is back within one timer interval, and `journalctl -t
   jail-firewall-verify` shows the fail-closed event (restart is manual).

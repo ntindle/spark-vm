@@ -2,7 +2,7 @@
 # jail-firewall-verify.sh — runtime watchdog for `table inet jail` (C25).
 #
 # Fail-closed: the jail must not keep running on damaged enforcement.
-# The verify timer (jail-firewall-verify.timer, every 5 minutes) runs this
+# The verify timer (jail-firewall-verify.timer, every minute) runs this
 # service. The checked invariant is the enforcement rules themselves, not
 # the chain shells: all three chains are `policy accept`, so an emptied
 # chain (e.g. `nft flush chain inet jail forward`) is open egress — the
@@ -62,7 +62,7 @@ norm_rule_line() {
 # output text, and nft's formatter is version-dependent (brace spacing,
 # indent width, token gaps); whitespace-only differences carry no rule
 # semantics, but a naive full-text match turns a formatter change into a
-# false fail-closed — the jail stopped every 5 minutes for nothing, training
+# false fail-closed — the jail stopped every minute for nothing, training
 # the operator to ignore the red unit this component was built to produce.
 # Quoted segments (interface names, log prefixes, DNAT targets) are left
 # INTACT: stripping inside them would make iifname "ve-jail" and
@@ -72,7 +72,7 @@ norm_rule_line() {
 # `ct state { established, related }`. The build-time self-test does NOT
 # cover that class: it catches deploy-time conf-vs-renderer skew (the
 # authoring side), but an nft upgrade AFTER the build that re-renders
-# semantically still false-fail-closes on the first 5-minute tick.
+# semantically still false-fail-closes on the first watchdog tick.
 # Tracked as issue #444 (semantic pin design: `nft --json` capture at
 # build time, compared with the same renderer at tick time).
 norm_canon() {
