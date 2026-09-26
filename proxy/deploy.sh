@@ -62,6 +62,7 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/with-proxy proxy/ssrf.deny proxy/sudoers-swapd \
          proxy/safe_install.py \
          proxy/build_ca_bundle.py \
+         proxy/privileged_read.py \
          proxy/swap-proxy.service proxy/swap-inference.service \
          confirm/confirmd.py confirm/confirm-request confirm/confirmd.service \
          confirm/push-worker.service confirm/push.py \
@@ -72,7 +73,8 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
     fi
 done
 python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py confirm/push.py \
-    proxy/safe_install.py proxy/build_ca_bundle.py scripts/sparkvm_version.py \
+    proxy/safe_install.py proxy/build_ca_bundle.py proxy/privileged_read.py \
+    scripts/sparkvm_version.py \
     || { echo "ERROR: python syntax check failed — aborting"; exit 1; }
 # VERSION feeds audit JSON via the updater: a non-semver VERSION must fail
 # the deploy here, loudly, rather than become "unknown" downstream.

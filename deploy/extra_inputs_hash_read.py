@@ -5,7 +5,7 @@ extra_inputs_hash() in auto-deploy.sh hashes host-side (non-repo) input
 files declared as <component>_extra_paths in components.conf. Those paths
 are swapd-writable, so the read must not trust the filesystem: it runs
 through this helper with the same open discipline as
-proxy/build_ca_bundle.py::_privileged_read --
+proxy/privileged_read.py --
 
   os.open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) + fstat before read
 

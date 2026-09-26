@@ -53,6 +53,10 @@ import pwd
 import grp
 import stat
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from privileged_read import DEFAULT_MAX_BYTES, privileged_read
 
 
 def _fail(msg):
@@ -68,6 +72,15 @@ def _fail(msg):
 # fail-closed path survives only as an attack indicator (issue #333) and
 # is retried a bounded number of times before refusing.
 _STAGE_CREATE_RETRIES = 5
+
+
+# --src reads are privileged (deploy.sh runs as root): route them through
+# the shared open discipline (issues #144/#299/#300/#372, #413) instead of
+# a plain open() -- a symlink planted at --src used to be followed and its
+# bytes installed to a privileged destination by a privileged process.
+# The cap is the discipline's shared default (deploy inputs: allow/deny
+# lists, sudoers fragments -- all far smaller).
+_MAX_SRC_BYTES = DEFAULT_MAX_BYTES
 
 
 def _random_stage_name():
@@ -275,8 +288,10 @@ def main(argv):
 
     content = None
     if args.src is not None:
-        with open(args.src, "rb") as f:
-            content = f.read()
+        content = privileged_read(
+            args.src,
+            lambda: _fail("--src %s missing -- refusing" % args.src),
+            max_bytes=_MAX_SRC_BYTES)
     elif args.stdin:
         content = sys.stdin.buffer.read()
 
