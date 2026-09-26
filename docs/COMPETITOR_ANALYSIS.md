@@ -3723,11 +3723,19 @@ Read-only fetches and searches; no logins, no writes.
   seccomp-bpf allowlist, zero idle-cost sessions, per-execution
   billing; Free $0 (1,000 credits/mo), Pro $97/mo (10,000 credits +
   $1.00 per 1K), Enterprise BYOC. **OPEN.**
-- **C58 — Leap0** (NEW TO CORPUS, THIRD-PARTY:
-  msyvr/awesome-agent-sandboxes): Firecracker microVM per sandbox,
-  vendor-claimed ~100 ms boots, Jailer hardening + host-side credential
-  injection firewall (TLS MITM), full XFCE desktop, Apache-2.0 SDKs,
-  public preview, US-only, no published pricing. **OPEN.**
+- **C58 — Leap0** (NEW TO CORPUS, VENDOR-VERIFIED 2026-09-26 ~17:30 CDT
+  late-evening watch, https://leap0.dev/ read live):
+  Firecracker microVM per sandbox, vendor-claimed ~100 ms boots, Jailer
+  hardening + host-side credential injection firewall (TLS MITM), full
+  XFCE desktop, Apache-2.0 SDKs, public preview (free during public
+  preview, no credit card; vendor rates apply when billing goes live:
+  per vCPU **$0.0504/hour** ($0.00001400/s), per GB **$0.0162/GB·hour**
+  ($0.00000450/GB·s) — the 2026-09-26 evening third-party list figures
+  match the vendor page verbatim), US-only. The 2026-09-26 evening
+  pass's "no published pricing" qualifier is RETIRED; directional
+  observation: the $0.00001400/s per-vCPU-second figure equals E2B's
+  $0.000014/s — per-second CPU pricing is converging across vendors.
+  **OPEN.**
 - **Delta news scan** (two searches + vendor reads): the DO launch, the
   Runloop benchmarks surface, and C57/C58 dedupe to the items above;
   all other in-lane hits corroborate filed corpus figures (E2B/Modal/
@@ -4667,3 +4675,51 @@ CDT; survey window 2026-09-26 ~16:2x–16:4x CDT).
 - **Deep-scan evaluation: no in-window development.** Heapjack +
   Overpatch and the GitLab allowlisted-proxy escape both remain
   queued, NOT filed.
+
+## Watch update — 2026-09-26 (late evening): C58 Leap0 pricing closed VENDOR-VERIFIED; fast movers 9/9 NO-CHANGE
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_LATE_EVENING.md`
+(two-surveyor pass: A fast-mover + pricing re-verification vs the ~16:24
+CDT baseline ~17:25–17:30 CDT; B delta news scan ~16:40–17:40 CDT; suffix
+`_LATE_EVENING` admitted per the 2026-09-24 suffix-admission precedent).
+
+- **Fast movers — 9/9 VENDOR-VERIFIED NO-CHANGE** (eighth consecutive
+  all-first-try pass): Daytona changelog (newest still SEP 26 V0.218.0,
+  no V0.219.0, no 27-Sep entry); Docker Sandboxes release notes (newest
+  dated heading still 2026-09-22); Microsandbox releases (newest still
+  v0.7.3 #1646); Vercel changelog (newest header still 25 September;
+  Sandbox lane: memory observability 25 Sep, Drives public beta 23 Sep;
+  nothing dated 26 September in any lane; Drives not re-checked per P49
+  daily cadence). Pricing parity VENDOR-VERIFIED NO-CHANGE on all five
+  vendor pages: E2B, boat.dev, TermSquad, DO Managed Agents,
+  AgentComputer.
+- **CORPUS FOLD — C58 (Leap0) pricing closed at the vendor layer.**
+  In-window VENDOR-PRIMARY read of the vendor homepage
+  (`https://leap0.dev/`, read live ~17:30 CDT 2026-09-26 — the vendor's
+  own served infrastructure, per the C29 boxd.sh precedent): "Free
+  during public preview — no credit card required. The rates below
+  apply when billing goes live." — per vCPU **$0.0504/hour**
+  ($0.00001400/second); per GB **$0.0162/GB·hour** ($0.00000450/GB·second).
+  The third-party baponi list figures match the vendor page verbatim.
+  The **"no published pricing" qualifier is RETIRED**; C58's field-table
+  row is upgraded (above). Directional observation (not filed): the
+  $0.00001400/s per-vCPU-second figure equals E2B's $0.000014/s —
+  per-second CPU pricing is converging across vendors at this grain.
+- **Delta news scan — 0 new C-numbers, 8 clean dedupes, 7
+  flagged-only.** Dedupes: C55; Docker CVE-2026-77179/79994 recrawl;
+  vm2 CVE-2026-47686 recap; Docker Sandboxes press wave; C66
+  (CVE-2026-100589); OpenClaw CVE-2026-100585/100579 (already
+  flagged-only, kept separate from C66); Daytona changelog V0.218.0;
+  third-party pricing recaps. Flagged-only, NOT filed: vm2
+  CVE-2026-92937 (adjacent JS-sandbox lane); two new OpenClaw vulncheck
+  advisories (MCP-config, session-reset — adjacent harness lane);
+  BAND×Docker Sandboxes Sep-24 integration color (out of window);
+  Meta Muse VM-export note (adjacent + out of window); Freestyle Pro
+  $500/mo claim (unverified rumor — tokencost/upstash list only usage
+  rates $0.04032/vCPU-hr; C37's "Pro fee VERIFIED absent" stands).
+- In-lane no-launch verdict dated 2026-09-25 stands — streak extends.
+  Carried: C37, C55, C57, C58 (pricing now vendor-verified), C66 —
+  all OPEN; C66 stays THIRD-PARTY; C26 CLOSED-resolved.
+- **Deep-scan evaluation: no in-window development.** Heapjack +
+  Overpatch and the GitLab allowlisted-proxy escape both remain queued,
+  NOT filed.
