@@ -130,7 +130,7 @@ This changelog only works if entries land with the change, not after it:
   server caps in-flight handler threads at 64 (over-cap connections are
   closed immediately, fail closed) and each accepted socket gets a 10s
   timeout, so a tailnet peer slow-lorising connections can no longer grow
-  the thread pool without bound or hold a handler thread forever (#TBD).
+  the thread pool without bound or hold a handler thread forever (#469).
 
 - The jail build now validates the agent's SSH public key before doing
   anything with it: a file with Windows line endings, trailing blank
