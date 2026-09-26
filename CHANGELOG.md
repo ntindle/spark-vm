@@ -138,6 +138,16 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- Manual rollbacks now audit the extra-inputs digest reconciliation outcome:
+  a reconciliation that fails part-way is recorded on the `manual-rollback`
+  audit line as `"reconcile":"incomplete"` instead of logging a warning
+  while the audit trail reads as a full success — so a later forced redeploy
+  can't be misread as a genuine host-side input rotation. The rollback
+  itself still completes in this case (the snapshot restore already landed).
+  The reconciliation scratch file also got its own temp name so a manual
+  rollback overlapping a timer tick can't clobber a concurrent deploy's
+  digest rewrite. (#TBD)
+
 - confirmd now bounds its HTTP thread pool and its connection setup: the
   server caps in-flight handler threads at 64 (over-cap connections are
   closed immediately, fail closed), the TLS handshake runs inside a bounded

@@ -423,7 +423,13 @@ reconcile_extra_inputs() {
             failed=1
             continue
         fi
-        tmp="$EXTRA_INPUTS_STATE.tmp"
+        tmp="$EXTRA_INPUTS_STATE.reconcile.tmp"
+        # Own temp name (not the shared $EXTRA_INPUTS_STATE.tmp that
+        # record_extra_inputs/note_forced_attempt use): a manual rollback
+        # overlapping a timer tick must not clobber the other's in-flight
+        # rewrite (issue #457 residual note). The mv is atomic; the
+        # single-flight flock keeps the writers from racing the state
+        # file itself.
         # grep rc=1 ("no lines selected") is the normal nothing-to-carry
         # case — same fail-closed read discipline as record_extra_inputs.
         if [ -f "$EXTRA_INPUTS_STATE" ]; then
@@ -1355,8 +1361,14 @@ cmd_rollback() {
     # the recorded extra-inputs digests are post-deploy. Reconcile them to
     # the restored reality before the next tick's change detection runs —
     # best-effort: a reconciliation failure must not abort the rollback.
-    reconcile_extra_inputs "${rcomps[@]}" || \
+    # Issue #456: the outcome is audited, not just logged — forensics must
+    # be able to tell a spurious forced redeploy caused by reconcile
+    # fallout apart from a genuine host-side input rotation.
+    local reconcile_incomplete=""
+    reconcile_extra_inputs "${rcomps[@]}" || {
         log "warning: extra-inputs digest reconciliation incomplete — check 'status' output"
+        reconcile_incomplete=',"reconcile":"incomplete"'
+    }
     reload_and_enable "${rcomps[@]}"
     local c unhealthy=0
     for c in "${rcomps[@]}"; do
@@ -1397,7 +1409,7 @@ cmd_rollback() {
         audit 'rollback' ',"result":"rollback-unhealthy","to":"'"$from"'","rolled_back_from":"'"$rolled_from"'","blocked":"'"$blocked_wrote"'","snapshot":"'"$snapdir"'"'
         return 1
     fi
-    audit 'rollback' ',"result":"manual-rollback","to":"'"$from"'","rolled_back_from":"'"$rolled_from"'","blocked":"'"$blocked_wrote"'","snapshot":"'"$snapdir"'","to_version":"'"$rbv"'"'
+    audit 'rollback' ',"result":"manual-rollback","to":"'"$from"'","rolled_back_from":"'"$rolled_from"'","blocked":"'"$blocked_wrote"'","snapshot":"'"$snapdir"'","to_version":"'"$rbv"'"'"$reconcile_incomplete"
     log "rolled back; watermark now $from; version now $rbv; services restarted + healthy"
 }
 
