@@ -1179,6 +1179,11 @@ def _render_answered_list(items):
 class Handler(BaseHTTPRequestHandler):
     server_version = "confirmd/1"
 
+    # Issue #77 (M8): per-socket timeout — a tailnet peer slow-lorising a
+    # request body must not hold a handler thread forever. StreamRequestHandler
+    # applies this to every accepted socket in setup().
+    timeout = 10
+
     def _deny(self, peer, login, reason):
         audit_log("403", peer, login, reason)
         self.send_response(403)
@@ -1901,6 +1906,116 @@ def _version_payload():
             "handler": Handler.server_version}
 
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    # Issue #77 (M8): bound the accept->thread fan-out (see main()).
+    # Capacity model: confirmd's client classes are the owner's browser and
+    # the agent proxy — expected peak ~4 concurrent requests. 64 threads is
+    # ~16x headroom. The 10s socket timeout reclaims idle stalls; a peer
+    # actively dripping >=1 byte/10s can still pin a slot, so 64 dripping
+    # connections saturate the pool — shedding stays fail closed (connection
+    # dropped, state stays file-backed so a retry succeeds) rather than
+    # queued unboundedly. A cumulative per-connection deadline is the
+    # long-term answer (follow-up).
+    max_threads = 64
+
+    # Backstop socket timeout for the deferred TLS handshake
+    # (process_request_thread): the handler class's own `timeout` is
+    # preferred when present; this covers handlers that don't set it.
+    # Kept equal to Handler.timeout (10).
+    socket_timeout = 10
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._slots = threading.Semaphore(self.max_threads)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.close_request(request)
+            return
+        try:
+            # Architecture review B1: delegate thread creation, the
+            # daemon flag, and the _threads/block_on_close lifecycle
+            # bookkeeping to ThreadingMixIn — so future CPython changes
+            # to the mixin propagate instead of silently diverging from
+            # a copied body, and no socketserver-private import is
+            # needed. self.process_request_thread below is still this
+            # class's override (handshake deferral + slot release).
+            super().process_request(request, client_address)
+        except Exception:
+            # Thread creation can fail under the same resource exhaustion
+            # this pool guards against — log it, release the slot, and
+            # close the request so a transient crunch can't drain the pool
+            # permanently. Not re-raised: _handle_request_noblock would
+            # log it a second time via handle_error.
+            #
+            # B1 convergence: ThreadingMixIn.process_request registers the
+            # new thread in _threads BEFORE start(). If start() itself
+            # raised, the dead thread is now parked in the join list and a
+            # later server_close() would raise RuntimeError joining a
+            # thread that never started ("cannot join thread before it is
+            # started" — verified on this box's CPython 3.12). The pre-B1
+            # code avoided this by registering after start(); the
+            # delegation keeps B1's no-private-import requirement, so
+            # prune here instead. Daemon threads (this server's default
+            # via ThreadingHTTPServer) are never tracked, so this only
+            # matters for non-daemon configurations. is_alive() is also
+            # False for already-finished threads — dropping those from the
+            # join list is a no-op (join would have returned immediately).
+            # A concurrent in-flight request's not-yet-started thread
+            # could theoretically be pruned too; acceptable — this path
+            # only runs when thread creation is already failing, and
+            # non-daemon threads still block interpreter exit.
+            threads = vars(self).get("_threads")
+            if isinstance(threads, list):  # _Threads is a list subclass
+                for t in list(threads):
+                    if not t.is_alive():
+                        try:
+                            threads.remove(t)
+                        except ValueError:
+                            pass
+            self.handle_error(request, client_address)
+            self._slots.release()
+            self.close_request(request)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            # Issue #77 (M8): the TLS handshake runs here, in the bounded
+            # handler thread — never in the accept loop. main() wraps the
+            # listening socket with do_handshake_on_connect=False, so a peer
+            # that completes TCP and stalls the handshake burns one pool
+            # slot (subject to fail-closed shedding) instead of pinning the
+            # single serve_forever thread for every client. do_handshake()
+            # honors the socket timeout, so a stalled handshake raises
+            # socket.timeout and the slot is released below. Non-TLS
+            # requests (plain-socket tests) have no do_handshake and skip
+            # this.
+            do_handshake = getattr(request, "do_handshake", None)
+            if do_handshake is not None:
+                # Architecture review B2: the same attribute
+                # StreamRequestHandler.setup() honors, read off the
+                # configured handler class — not a module global — so
+                # this server stays reusable across daemons (#471). An
+                # explicit None check (not `or`): a handler could set
+                # timeout = 0 (non-blocking) and that must be honored.
+                # socket_timeout (10) is the backstop for handlers that
+                # don't set the attribute.
+                timeout = getattr(self.RequestHandlerClass, "timeout", None)
+                request.settimeout(
+                    timeout if timeout is not None else self.socket_timeout)
+                do_handshake()
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            try:
+                self.shutdown_request(request)
+            finally:
+                # Release the pool slot even if shutdown_request raises: a
+                # raise here must never permanently burn one of the 64 slots
+                # (the mitigation must not become the DoS).
+                self._slots.release()
+
+
 def main():
     # Finding 67: print the resolved origins at startup so the journal
     # shows them; a missing ts.net name must be visible, not silent.
@@ -1922,8 +2037,24 @@ def main():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT, KEY)
     # Finding 53(c): threaded, so a slow whois never blocks the page.
-    srv = ThreadingHTTPServer((BIND, PORT), Handler)
-    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    # Issue #77 (M8): bounded thread pool — ThreadingHTTPServer spawns one
+    # thread per connection, so a tailnet peer opening connections and
+    # slow-reading could grow the pool without bound. The semaphore caps
+    # in-flight handler threads; over-cap connections are closed
+    # immediately (fail closed) rather than queued unboundedly.
+    srv = BoundedThreadingHTTPServer((BIND, PORT), Handler)
+    # Issue #77 (M8): defer the TLS handshake out of the accept loop.
+    # wrap_socket's default do_handshake_on_connect=True runs the handshake
+    # inside accept() on the single serve_forever thread — one tailnet peer
+    # completing TCP and stalling ClientHello would pin ALL new connections
+    # while the 64-slot pool sat idle (and Handler.timeout never applies
+    # there: accepted sockets do not inherit the listener's timeout).
+    # Deferred, a stalled handshake burns one bounded pool slot, is cut off
+    # by the socket timeout in process_request_thread, and stays subject to
+    # fail-closed over-cap shedding. Side benefit: shedding now happens
+    # before any TLS work is paid.
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True,
+                                 do_handshake_on_connect=False)
     print("confirmd on https://%s:%d/ as %s" % (BIND, PORT, OWNER), flush=True)
     srv.serve_forever()
 

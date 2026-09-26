@@ -1547,5 +1547,249 @@ class AuditLogTests(unittest.TestCase):
                 cd.audit_log("403", "100.99.0.1", "ntindle@github", "")
         self.assertIn("confirmd: cannot write audit log", err.getvalue())
 
+class M8ServerHardeningTests(unittest.TestCase):
+    """Issue #77 (M8): no socket/request timeouts, unbounded thread pool."""
+
+    def _make_server(self, max_threads=4):
+        srv = cd.BoundedThreadingHTTPServer(("127.0.0.1", 0), cd.Handler)
+        srv.max_threads = max_threads
+        srv._slots = __import__("threading").Semaphore(max_threads)
+        self.addCleanup(srv.server_close)
+        return srv
+
+    def test_handler_socket_timeout(self):
+        """A slow-lorising peer must not hold a handler thread forever."""
+        self.assertEqual(cd.Handler.timeout, 10)
+
+    def test_accepted_socket_gets_timeout(self):
+        """The timeout class attribute reaches the accepted socket — the
+        CPython mechanism is StreamRequestHandler.setup's settimeout, so
+        exercise exactly that against a bare handler."""
+        import socketserver
+        srv = self._make_server()
+        client, accepted = __import__("socket").socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        accepted.settimeout(None)
+        h = cd.Handler.__new__(cd.Handler)
+        h.request = accepted
+        h.server = srv
+        socketserver.StreamRequestHandler.setup(h)
+        self.assertEqual(accepted.gettimeout(), 10)
+
+    def test_over_cap_connection_closed_not_queued(self):
+        """When the pool is full, the connection is closed immediately —
+        fail closed, not queued unboundedly."""
+        srv = self._make_server(max_threads=1)
+        srv._slots.acquire()  # drain the single slot
+        client, accepted = __import__("socket").socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        threads_before = threading.active_count()
+        srv.process_request(accepted, ("127.0.0.1", 0))
+        time.sleep(0.2)
+        # The accepted socket was closed: no new thread, fileno invalid.
+        self.assertEqual(threading.active_count(), threads_before)
+        self.assertEqual(accepted.fileno(), -1)
+        srv._slots.release()  # restore for cleanup
+
+    def test_slot_released_after_request(self):
+        """A completed request returns its pool slot."""
+        srv = self._make_server(max_threads=2)
+        calls = []
+
+        def fake_finish(request, client_address):
+            calls.append(1)
+
+        with mock.patch.object(srv, "finish_request", fake_finish):
+            client, accepted = __import__("socket").socketpair()
+            self.addCleanup(client.close)
+            srv.process_request(accepted, ("127.0.0.1", 0))
+            for _ in range(100):
+                if calls:
+                    break
+                time.sleep(0.02)
+        self.assertEqual(len(calls), 1)
+        # Wait for the thread's finally (shutdown_request + release) — the
+        # release lags the finish call, and a bare successful acquire would
+        # probe the pre-release value. Poll for the full slot count.
+        for _ in range(100):
+            if srv._slots._value == 2:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("handler thread never released its pool slot")
+        # Both slots available again after the thread's finally ran.
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        self.assertFalse(srv._slots.acquire(blocking=False))
+        srv._slots.release()
+        srv._slots.release()
+
+    def test_thread_start_failure_releases_slot(self):
+        """A thread-creation failure must not permanently drain the pool —
+        otherwise the mitigation itself turns a transient resource crunch
+        into a hard outage (Architecture review B1)."""
+        srv = self._make_server(max_threads=1)
+        client, accepted = __import__("socket").socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        with mock.patch("threading.Thread", side_effect=RuntimeError(
+                "can't start new thread")):
+            srv.process_request(accepted, ("127.0.0.1", 0))
+        # The slot was released: still acquirable, and no handler ran.
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        srv._slots.release()
+        # The connection was closed, not left dangling.
+        self.assertEqual(accepted.fileno(), -1)
+
+    def test_failed_start_never_parks_dead_thread(self):
+        """B1 convergence: ThreadingMixIn registers the new thread in
+        _threads BEFORE start(). If start() raises, the dead thread must
+        not break a later server_close() with RuntimeError ("cannot join
+        thread before it is started"). Daemon threads (this server's
+        default) are never tracked, so pin the property with
+        daemon_threads=False — the only configuration where registration
+        happens at all."""
+        import socket as _socket
+        srv = self._make_server(max_threads=1)
+        srv.daemon_threads = False  # force _threads registration
+        real_thread = threading.Thread
+
+        def boom(*a, **k):
+            th = real_thread(*a, **k)
+            def fail():
+                raise RuntimeError("can't start new thread")
+            th.start = fail
+            return th
+
+        client, accepted = _socket.socketpair()
+        self.addCleanup(client.close)
+        with mock.patch("threading.Thread", boom):
+            srv.process_request(accepted, ("127.0.0.1", 0))
+        # server_close must stay clean despite the never-started thread.
+        srv.server_close()
+        # And the slot was still released.
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        srv._slots.release()
+
+    def test_slot_released_when_shutdown_request_raises(self):
+        """A raise in shutdown_request must not permanently burn a pool
+        slot — the mitigation must not become the DoS (Security review B2).
+        The raise still propagates (not swallowed); only the slot release
+        is guaranteed."""
+        srv = self._make_server(max_threads=1)
+        client, accepted = __import__("socket").socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        seen = []
+        old_hook = threading.excepthook
+        threading.excepthook = lambda args: seen.append(args.exc_value)
+        self.addCleanup(setattr, threading, "excepthook", old_hook)
+        with mock.patch.object(srv, "finish_request", lambda r, a: None), \
+             mock.patch.object(srv, "shutdown_request",
+                               side_effect=RuntimeError("boom")):
+            srv.process_request(accepted, ("127.0.0.1", 0))
+            for _ in range(100):
+                if srv._slots._value == 1:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("pool slot was not released when shutdown_request "
+                          "raised")
+        for _ in range(100):
+            if seen:
+                break
+            time.sleep(0.02)
+        self.assertEqual(len(seen), 1)
+        self.assertIsInstance(seen[0], RuntimeError)
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        srv._slots.release()
+
+    def test_handler_threads_registered_for_block_on_close(self):
+        """process_request preserves ThreadingMixIn's lifecycle bookkeeping:
+        with block_on_close, handler threads land in srv._threads so
+        server_close() waits for them (Architecture review)."""
+        import socket as _socket
+        srv = self._make_server(max_threads=2)
+        srv.daemon_threads = False  # _Threads only tracks non-daemon threads
+        self.assertTrue(srv.block_on_close)
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake_finish(request, client_address):
+            started.set()
+            release.wait(10)
+
+        with mock.patch.object(srv, "finish_request", fake_finish):
+            client, accepted = _socket.socketpair()
+            self.addCleanup(client.close)
+            self.addCleanup(accepted.close)
+            srv.process_request(accepted, ("127.0.0.1", 0))
+            self.assertTrue(started.wait(5), "handler thread never started")
+            for _ in range(100):
+                if any(t.is_alive() for t in srv._threads):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("handler thread was not registered in srv._threads")
+            release.set()
+
+    @unittest.skipUnless(__import__("shutil").which("openssl"),
+                         "openssl needed for a throwaway test cert")
+    def test_stalled_tls_handshake_does_not_pin_accept_loop(self):
+        """The TLS handshake must not run in the accept loop (Security
+        review B1): one peer stalling the handshake must not stop a
+        legitimate TLS client from being served."""
+        import shutil as _shutil  # noqa: F401 (used by the skipUnless above)
+        import socket as _socket
+        import ssl as _ssl
+        import subprocess as _subprocess
+        with tempfile.TemporaryDirectory() as d:
+            cert = os.path.join(d, "cert.pem")
+            key = os.path.join(d, "key.pem")
+            _subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048",
+                 "-keyout", key, "-out", cert, "-days", "1",
+                 "-nodes", "-subj", "/CN=localhost"],
+                check=True, capture_output=True, timeout=60)
+            old_timeout = cd.Handler.timeout
+            cd.Handler.timeout = 2  # keep the stalled-handshake thread short
+            self.addCleanup(setattr, cd.Handler, "timeout", old_timeout)
+            srv = self._make_server(max_threads=2)
+            sctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+            sctx.load_cert_chain(cert, key)
+            # Exactly what main() does:
+            srv.socket = sctx.wrap_socket(
+                srv.socket, server_side=True, do_handshake_on_connect=False)
+            served = []
+            with mock.patch.object(srv, "finish_request",
+                                   lambda r, a: served.append(1)), \
+                 mock.patch.object(srv, "handle_error"):
+                t = threading.Thread(target=srv.serve_forever, daemon=True)
+                t.start()
+                self.addCleanup(srv.shutdown)
+                port = srv.server_address[1]
+                # Attacker: completes TCP, never sends ClientHello.
+                attacker = _socket.create_connection(("127.0.0.1", port))
+                self.addCleanup(attacker.close)
+                # Legitimate client: full TLS handshake + request.
+                cctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+                cctx.check_hostname = False
+                cctx.verify_mode = _ssl.CERT_NONE
+                raw = _socket.create_connection(("127.0.0.1", port))
+                self.addCleanup(raw.close)
+                legit = cctx.wrap_socket(raw, server_hostname="localhost")
+                self.addCleanup(legit.close)
+                for _ in range(200):
+                    if served:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail("legitimate TLS client was not served within "
+                              "10s while one handshake stalled — the accept "
+                              "loop is pinned")
+
+
 if __name__ == "__main__":
     unittest.main()
