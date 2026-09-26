@@ -3480,3 +3480,36 @@ omitted; C26 conflicts unchanged; Vercel Drives not re-checked (P49 — next the
 2026-09-26 morning pass).
 
 **In-lane, no new filings.** In-lane no-launch verdict dated 2026-09-25 stands.
+
+## Watch update — 2026-09-25 (post-late-night): Daytona changelog delta (KVM parameter, B300 GPU); Docker VERIFIED NO-CHANGE; C54 primary read still blocked
+
+Full tracked set not re-surveyed this pass (last full pass was 9/9
+VERIFIED NO-CHANGE ~2.5h earlier) — targeted re-verification of the
+two fastest-moving tracked vendors plus a narrow delta news scan.
+
+- **Daytona** (`daytona.io/changelog`, VENDOR-VERIFIED): two new
+  entries — V0.218.0 (SEP 26, labeled as such) adds a `kvm` parameter
+  to sandbox creation in every SDK (isolation-backend toggle at
+  provision time — substrate-axis design color for the H4 adapter
+  axis, not a field-table change) and moves CLI login to a dedicated
+  WorkOS application; V0.217.0 (SEP 25) adds the NVIDIA B300 GPU type
+  to the API client (GPU-axis color, no pricing attached).
+- **Docker Sandboxes release notes**: VERIFIED NO-CHANGE — newest
+  dated heading still 2026-09-22 (v0.45.1; the Sep-22 egress-policy
+  hardening entries remain newest).
+- **C54** primary-article body read: still blocked — direct URL 403
+  again, Wayback closest capture (20260924213405) fetches empty, CDX
+  fetch 500, r.jina.ai policy-blocked; live-browser read attempted,
+  result not yet back at write time. CARRY. The dennysentinel.com
+  2026-09-24 analysis was read in full this run — corroborates the
+  already-folded third-party detail, no new facts, no corpus change.
+- **Carried:** C37, C26(a)/(b); Vercel Drives not re-checked (P49 —
+  next the 2026-09-26 morning pass).
+- **Delta news scan** (narrow 2026-09-25 window): Blitzy
+  reverse-engineering sandbox, Microsoft Copilot revamp, Zoho Catalyst
+  PaaS color, Meta Muse explainx recap, stale Selangor/AI-sandbox
+  recrawl — all out-of-lane or already corpus; in-lane no-launch
+  verdict dated 2026-09-25. **No new C-numbers.**
+
+Full pass record in
+`docs/COMPETITOR_WATCH_2026-09-25_POST_LATE_NIGHT.md`.
