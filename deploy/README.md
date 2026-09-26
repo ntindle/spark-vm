@@ -118,7 +118,10 @@ generated CA forces the proxy-confirm unit to redeploy, so `proxy/deploy.sh`
 step 4b rebuilds the bundle. Missing files hash as `missing`, non-regular
 files as `nonregular`, read errors as `unreadable`: all are legitimate
 digest inputs, so CA-generated, CA-rotated, and CA-deleted transitions all
-count as changes. Issue #303: the `WITH_PROXY_CA_BUNDLE` env override that
+count as changes. Digests are recorded in the updater state dir's
+`extra-inputs-hash` file (`~/.sparkvm-deploy/extra-inputs-hash` —
+`/home/ntindle/.sparkvm-deploy` on the production box). Issue #303: the
+`WITH_PROXY_CA_BUNDLE` env override that
 `components.conf` advertises is now exported into the child shell that runs
 `proxy/deploy.sh`, so the snapshot/rollback coverage and the actual install
 write the same path (previously the override only redirected the snapshot).
@@ -127,8 +130,10 @@ Forced-deploys are dampened: at most one extra-inputs-forced deploy per
 component per hour (`EXTRA_INPUTS_FORCE_MIN_SECS=3600`), and attempts are
 recorded even when they fail — a persistently-failing input cannot churn the
 10-minute tick into a deploy/rollback loop. A failed forced deploy retries
-on the next tick but **never marks the commit blocked** (the commit is fine —
-a same-commit forced deploy is not a version deploy): it gets its own
+on a later tick once the dampening window passes (the recorded attempt
+stamps the same `_last_forced` epoch, so the immediate next tick skips it)
+but **never marks the commit blocked** (the commit is fine — a same-commit
+forced deploy is not a version deploy): it gets its own
 snapshot directory (`<snapdir>-extra-inputs`, never clobbering the version
 deploy's snapshot), and its audit lines carry `"trigger":"extra-inputs"` so
 the trail does not masquerade as a version deploy. `status` surfaces the
@@ -148,7 +153,9 @@ file or FIFO from stalling the tick; the same discipline pins
 `proxy/privileged_read.py` via `deploy/test_privileged_open_conformance.py`.
 Adding a new extra path: keep the list short, the files small, and the
 paths readable at deploy privilege, and leave a `components.conf` comment
-saying why (as the #302 comment does).
+saying why (as the #302 comment does). Prefer paths the service user itself
+cannot write: a writer of an extra path can force privileged redeploys at
+the dampened rate, so the writability boundary is part of the choice.
 
 ## Manual operations
 
