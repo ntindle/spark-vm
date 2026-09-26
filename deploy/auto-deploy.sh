@@ -425,11 +425,12 @@ reconcile_extra_inputs() {
         fi
         tmp="$EXTRA_INPUTS_STATE.reconcile.tmp"
         # Own temp name (not the shared $EXTRA_INPUTS_STATE.tmp that
-        # record_extra_inputs/note_forced_attempt use): a manual rollback
-        # overlapping a timer tick must not clobber the other's in-flight
-        # rewrite (issue #457 residual note). The mv is atomic; the
-        # single-flight flock keeps the writers from racing the state
-        # file itself.
+        # record_extra_inputs/note_forced_attempt use — issue #457 residual
+        # note). The single-flight flock in main() already serializes deploy
+        # vs rollback, so this is defense-in-depth: it protects the tmp from
+        # clobbering by any future lock-free direct caller of this function
+        # (e.g. a test sourcing the script without main()). The final mv is
+        # atomic.
         # grep rc=1 ("no lines selected") is the normal nothing-to-carry
         # case — same fail-closed read discipline as record_extra_inputs.
         if [ -f "$EXTRA_INPUTS_STATE" ]; then
@@ -1406,7 +1407,7 @@ cmd_rollback() {
     fi
     if [ "$unhealthy" -eq 1 ]; then
         alert "manual rollback to $from completed but a component is unhealthy"
-        audit 'rollback' ',"result":"rollback-unhealthy","to":"'"$from"'","rolled_back_from":"'"$rolled_from"'","blocked":"'"$blocked_wrote"'","snapshot":"'"$snapdir"'"'
+        audit 'rollback' ',"result":"rollback-unhealthy","to":"'"$from"'","rolled_back_from":"'"$rolled_from"'","blocked":"'"$blocked_wrote"'","snapshot":"'"$snapdir"'"'"$reconcile_incomplete"
         return 1
     fi
     audit 'rollback' ',"result":"manual-rollback","to":"'"$from"'","rolled_back_from":"'"$rolled_from"'","blocked":"'"$blocked_wrote"'","snapshot":"'"$snapdir"'","to_version":"'"$rbv"'"'"$reconcile_incomplete"

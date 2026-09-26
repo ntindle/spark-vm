@@ -2371,6 +2371,31 @@ def test_cmd_rollback_reconcile_hash_failure_audits_incomplete(tmp_path):
         "failed component must keep its stale record: " + after
 
 
+def test_cmd_rollback_reconcile_failure_audits_incomplete_on_unhealthy(tmp_path):
+    """Security review (issue #456): the reconcile marker must also land on
+    the rollback-unhealthy audit line — reconcile runs before the health
+    checks, and the unhealthy path is exactly the one forensics scrutinizes."""
+    updater, state, env, ca, base, docs_only = _forced_stub_fixture(tmp_path)
+    ca.write_bytes(b"fake-ca-post-rollback")
+    snapdir = state / "snapshots" / docs_only
+    snapdir.mkdir(parents=True)
+    (snapdir / "FROM_COMMIT").write_text(base + "\n")
+    (snapdir / "COMPONENTS").write_text("stub\n")
+    (snapdir / "MANIFEST").write_text("ABSENT /tmp/spark-vm-rollback-test-absent\n")
+    r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
+                 "source ./deploy/auto-deploy.sh; "
+                 "extra_inputs_hash() { return 1; }; "
+                 "health_check() { return 1; }; "
+                 "set +e; cmd_rollback; echo CMD_RC=$?",
+                 env_extra=env, cwd=REPO)
+    out = r.stdout + r.stderr
+    assert "CMD_RC=1" in r.stdout, out
+    audit = (state / "audit.log").read_text()
+    line = _forced_audit_line(audit, "rollback-unhealthy")
+    assert '"reconcile":"incomplete"' in line, \
+        "failed reconcile must be audited on the unhealthy path too: " + line
+
+
 def test_cmd_rollback_reconcile_missing_state_file(tmp_path):
     """Issue #456 (QA review): a missing extra-inputs state file is a
     legitimate reconcile path (first rollback before any deploy record) —
