@@ -113,6 +113,12 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- confirmd now bounds its HTTP thread pool and times out idle sockets: the
+  server caps in-flight handler threads at 64 (over-cap connections are
+  closed immediately, fail closed) and each accepted socket gets a 10s
+  timeout, so a tailnet peer slow-lorising connections can no longer grow
+  the thread pool without bound or hold a handler thread forever (#77 M8).
+
 - Jail firewall watchdog: the allow-head check now compares rule lines
   after stripping whitespace outside quoted names, so a future nftables
   version that re-renders rule text (indent, brace spacing) can't turn the

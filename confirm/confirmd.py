@@ -1179,6 +1179,11 @@ def _render_answered_list(items):
 class Handler(BaseHTTPRequestHandler):
     server_version = "confirmd/1"
 
+    # Issue #77 (M8): per-socket timeout — a tailnet peer slow-lorising a
+    # request body must not hold a handler thread forever. StreamRequestHandler
+    # applies this to every accepted socket in setup().
+    timeout = 10
+
     def _deny(self, peer, login, reason):
         audit_log("403", peer, login, reason)
         self.send_response(403)
@@ -1922,10 +1927,43 @@ def main():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT, KEY)
     # Finding 53(c): threaded, so a slow whois never blocks the page.
-    srv = ThreadingHTTPServer((BIND, PORT), Handler)
+    # Issue #77 (M8): bounded thread pool — ThreadingHTTPServer spawns one
+    # thread per connection, so a tailnet peer opening connections and
+    # slow-reading could grow the pool without bound. The semaphore caps
+    # in-flight handler threads; over-cap connections are closed
+    # immediately (fail closed) rather than queued unboundedly.
+    srv = BoundedThreadingHTTPServer((BIND, PORT), Handler)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     print("confirmd on https://%s:%d/ as %s" % (BIND, PORT, OWNER), flush=True)
     srv.serve_forever()
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    # Issue #77 (M8): bound the accept->thread fan-out (see main()).
+    max_threads = 64
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self._slots = threading.Semaphore(self.max_threads)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.close_request(request)
+            return
+        t = threading.Thread(
+            target=self.process_request_thread,
+            args=(request, client_address))
+        t.daemon = self.daemon_threads
+        t.start()
+
+    def process_request_thread(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+            self._slots.release()
 
 
 if __name__ == "__main__":
