@@ -504,14 +504,52 @@ class TestBridgeServer:
         def one():
             results.append(req(port, "GET", "/api/windows"))
 
-        threads = [__import__("threading").Thread(target=one) for _ in range(2)]
+        threads = [threading.Thread(target=one) for _ in range(2)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(10)
         elapsed = time.monotonic() - start
+        assert len(results) == 2
         assert all(s == 200 for s, _ in results), results
         assert elapsed < 0.95, f"requests serialized: {elapsed:.2f}s"
+
+    def test_concurrency_bound_enforced(self, live, monkeypatch):
+        # The headline claim of BridgeServer: no more than
+        # MAX_CONCURRENT_REQUESTS handler bodies execute at once. 16
+        # parallel slow requests must never peak above the bound — the
+        # test fails if the semaphore is removed or weakened (peak would
+        # hit 16), and the peak > 1 guard proves the bound is exercised
+        # rather than the requests merely serializing.
+        import time
+        bridge, driver, port = live
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def slow_call(tool, args):
+            nonlocal active, peak
+            if tool == "list_windows":
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                try:
+                    time.sleep(0.5)
+                finally:
+                    with lock:
+                        active -= 1
+            return FakeDriver(WINDOWS)(tool, args)
+
+        monkeypatch.setattr(bridge, "call", slow_call)
+        threads = [threading.Thread(target=lambda: req(port, "GET", "/api/windows"))
+                   for _ in range(16)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        assert peak <= bridge.MAX_CONCURRENT_REQUESTS, f"peak={peak}"
+        # and the bound is actually doing something (not trivially true)
+        assert peak > 1, f"peak={peak} — requests serialized, bound untested"
 
 
 class TestScreenshotTempFile:

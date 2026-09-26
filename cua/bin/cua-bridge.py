@@ -136,10 +136,15 @@ def focus_window(w):
 # Concurrency: the stock HTTPServer handles one request at a time, so a slow
 # driver call (30s timeout) would head-of-line-block the whole bridge —
 # including the keepalive's health probe and a panel's screenshot poll.
-# Serve each request on a thread, but bound (cf. #471's unbounded-pool
-# concern on cred-ui/waitlistd): beyond MAX_CONCURRENT_REQUESTS, excess
-# connections wait in the listen backlog instead of spawning threads.
-# Single-operator, localhost-only traffic will never approach the bound.
+# Serve each request on a thread, with a bound on how many handler bodies
+# execute at once (cf. #471's unbounded-pool concern on cred-ui/waitlistd).
+# Mechanism, stated honestly: ThreadingHTTPServer still spawns one thread
+# per accepted connection; the semaphore in process_request_thread bounds
+# the number of handlers doing work at any moment, and accepted connections
+# beyond the bound block there before touching anything. Threads can pile
+# up in the blocked state, so this is not a hard thread cap — acceptable
+# on this localhost-only, single-operator bridge, where traffic will never
+# approach the bound.
 MAX_CONCURRENT_REQUESTS = 8
 
 
