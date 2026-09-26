@@ -98,8 +98,9 @@ def _check_blob_structure(key_type: str, blob: bytes) -> None:
 
     Reads the embedded algorithm string and requires it to equal the outer
     key type (rejects type-confusion lines), then checks the payload shapes
-    the SSH formats pin down exactly (ed25519/sk-ed25519: one 32-byte
-    public-key string and nothing after).
+    the SSH formats pin down exactly (ed25519/sk-ed25519: the first field
+    must be a 32-byte public-key string; trailing bytes, if any, are not
+    shape-checked but still feed the fingerprint).
     """
     inner_type, offset = _read_ssh_string(blob, 0)
     try:
@@ -249,7 +250,15 @@ def first_connect_manifest(
             return None
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=datetime.timezone.utc)
-        return dt.astimezone(datetime.timezone.utc).isoformat()
+        try:
+            return dt.astimezone(datetime.timezone.utc).isoformat()
+        except (OverflowError, ValueError, OSError) as exc:
+            # e.g. datetime(9999, 12, 31, tzinfo=-14:00) cannot be
+            # represented in UTC — fail loud with the module's error type,
+            # never let a bare exception escape the caller's contract.
+            raise KeyIdentityError(
+                f"expiry timestamp out of representable range: {dt!r}"
+            ) from exc
 
     return {
         "manifest_version": MANIFEST_VERSION,

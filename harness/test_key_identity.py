@@ -142,6 +142,17 @@ def test_manifest_expiry_naive_is_treated_as_utc():
     assert m["expires_at"] == "2026-10-26T16:00:00+00:00"
 
 
+def test_manifest_expiry_out_of_range_fails_loud():
+    # datetime(9999,12,31) with a -14:00 offset cannot exist in UTC —
+    # the module's error type must surface, not a bare OverflowError.
+    dt = datetime.datetime(
+        9999, 12, 31, 23, 59, 59,
+        tzinfo=datetime.timezone(datetime.timedelta(hours=-14)),
+    )
+    with pytest.raises(KeyIdentityError):
+        first_connect_manifest(parse_public_key(ED25519_LINE), expires_at=dt)
+
+
 def test_manifest_defaults_are_null_and_now():
     m = first_connect_manifest(parse_public_key(ED25519_LINE))
     assert m["claim_url"] is None and m["vm_endpoint"] is None
