@@ -224,7 +224,7 @@ say "jail firewall watchdog"
 # The residual the contract used to carry: nothing re-applied the table at
 # runtime, so a flushed `table inet jail` silently voided the drop isolation
 # while the jail kept running. The watchdog closes it fail-closed: a systemd
-# timer runs the verify service every 5 minutes; the service checks the
+# timer runs the verify service every minute; the service checks the
 # enforcement rules themselves (drop-rule markers + proxy DNAT — all chains
 # are policy accept, so chain shells alone prove nothing) and, on confirmed
 # damage, stops the jail BEFORE repairing the table (a re-apply does not
@@ -259,10 +259,16 @@ ExecStart=/usr/local/sbin/jail-firewall-verify.sh
 EOF
 $SUDO tee /etc/systemd/system/jail-firewall-verify.timer >/dev/null <<'EOF'
 [Unit]
-Description=Run the jail firewall watchdog every 5 minutes
+Description=Run the jail firewall watchdog every minute
 
 [Timer]
-OnCalendar=*:0/5
+OnCalendar=*:0/1
+# Issue #440: the documented "~1 minute" detection bound only holds if
+# the tick actually lands every minute. systemd's default
+# AccuracySec=1min can defer a firing by up to a minute (batching for
+# power saving), silently doubling the bound the 5→1 minute change
+# buys. Pin the jitter to 10s so the bound is real.
+AccuracySec=10s
 Persistent=true
 
 [Install]
@@ -274,7 +280,7 @@ $SUDO systemctl enable --now jail-firewall-verify.timer
 # service exits 0 on a healthy table and nonzero on damage. Running it
 # once here proves the pin matches THIS box's live `nft list` output at
 # build time — a formatter/pin mismatch fails the build loudly instead of
-# surfacing as a fail-closed storm on the first 5-minute tick. (set -e:
+# surfacing as a fail-closed storm on the first watchdog tick. (set -e:
 # a nonzero exit aborts the build.)
 $SUDO systemctl start jail-firewall-verify.service
 say "watchdog active (next run):"
@@ -387,7 +393,17 @@ say "agent user $JAIL_USER"
 # The agent's SSH public key. Copy the agent's id_ed25519.pub to this
 # path on the host before running (override with PUBKEY_FILE=...).
 PUBKEY_FILE="${PUBKEY_FILE:-$HOME/agent-jail.pub}"
-PUBKEY="$(cat "$PUBKEY_FILE")"
+# Issue #439: the pubkey is written verbatim into the guest's
+# authorized_keys, so a CRLF line ending, trailing blank lines, or a
+# malformed key fails the agent's SSH login silently (it looks like a
+# jail/network fault, not a key-format problem). Validate up front and
+# fail the build loudly instead.
+# shellcheck disable=SC1091  # helper lives next to build.sh
+. "$(dirname "$0")/validate-pubkey.sh"
+if ! PUBKEY="$(validate_pubkey_file "$PUBKEY_FILE")"; then
+    echo "ERROR: refusing to build the jail with an invalid agent pubkey ($PUBKEY_FILE)" >&2
+    exit 1
+fi
 # All guest-side setup runs inside run_guest (heredoc via stdin, quoted
 # so nothing expands on the host; $1/$2 are passed as arguments).
 run_guest /bin/bash -s "$JAIL_USER" "$PUBKEY" <<'GUEST_EOF'

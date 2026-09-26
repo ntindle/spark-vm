@@ -22,6 +22,7 @@ A future edit that silently drops one of these properties fails the suite.
 """
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -391,7 +392,10 @@ class TestSecretHygiene:
         assert "ssh-rsa AAAA" not in src
 
     def test_pubkey_comes_from_file_not_literal(self, active):
-        assert 'PUBKEY="$(cat "$PUBKEY_FILE")"' in active
+        # Issue #439: the file read now goes through the validator — the
+        # key must still come from $PUBKEY_FILE, never an inline literal.
+        assert 'validate_pubkey_file "$PUBKEY_FILE"' in active
+        assert not re.search(r'PUBKEY="ssh-', active)
 
     def test_no_curl_pipe_bash(self, active):
         assert not re.search(r"curl[^\n]*\|\s*(ba)?sh", active)
@@ -588,7 +592,12 @@ class TestFirewallWatchdogStatic:
             active, re.S)
         assert m, "jail-firewall-verify.timer unit block not found"
         timer = m.group(0)
-        assert "OnCalendar=*:0/5" in timer
+        assert "OnCalendar=*:0/1" in timer
+        assert "Run the jail firewall watchdog every minute" in timer
+        # Issue #440: the "~1 minute" detection bound needs the tick to
+        # actually land every minute — the default AccuracySec=1min can
+        # defer a firing by up to a minute and silently double it.
+        assert "AccuracySec=10s" in timer
         assert "WantedBy=timers.target" in timer
         assert "systemctl enable --now jail-firewall-verify.timer" in active
 
@@ -1161,3 +1170,109 @@ class TestWithProxyHeredoc:
         assert 'export REQUESTS_CA="$CA_BUNDLE"' in rendered
         assert 'exec "$@"' in rendered
         assert "$HOST_VETH_IP" not in rendered
+
+# ---------------------------------------------------------------- pubkey validation
+# Issue #439: the pubkey is written verbatim into the guest's
+# authorized_keys, so a malformed file fails the agent's SSH login
+# silently. validate-pubkey.sh normalizes (CRLF/blank-line strip) and
+# validates up front; build.sh aborts loudly on failure. These tests run
+# the real helper as a subprocess — the same entry point build.sh
+# sources — and pin build.sh's wiring of it.
+
+# An ephemeral ed25519 keypair's public half, generated 2026-09-26 for
+# this test and never attached to anything. PUBLIC key material only —
+# safe to embed (this is exactly what a pubkey file contains).
+_VALID_ED25519 = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILx9f7U12S8F8f8rFUGv6+x5x60G5ULYfKOIeaYTXvRf "
+    "test-jail-pubkey"
+)
+
+
+class TestPubkeyValidation:
+    VALIDATOR = os.path.join(JAIL_DIR, "validate-pubkey.sh")
+
+    def _run(self, content: bytes):
+        # Real tempfiles: the validator requires a regular file
+        # (`[[ -f ]]`) — /dev/stdin pipes are rejected by design.
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".pub", delete=False) as f:
+            f.write(content)
+            path = f.name
+        try:
+            return subprocess.run(["bash", self.VALIDATOR, path],
+                                  capture_output=True)
+        finally:
+            os.unlink(path)
+
+    def test_valid_key_accepted(self):
+        r = self._run((_VALID_ED25519 + "\n").encode())
+        assert r.returncode == 0, r.stderr.decode()
+        assert r.stdout.decode().strip() == _VALID_ED25519
+
+    def test_crlf_and_trailing_blank_lines_normalized(self):
+        # Issue #439's exact failure mode: CRLF line endings and trailing
+        # blank lines must be stripped, not rejected — the normalized key
+        # is what lands in authorized_keys.
+        r = self._run((_VALID_ED25519 + "\r\n\r\n\n").encode())
+        assert r.returncode == 0, r.stderr.decode()
+        assert "\r" not in r.stdout.decode()
+        assert r.stdout.decode().strip() == _VALID_ED25519
+
+    def test_missing_file_fails(self, tmp_path):
+        r = subprocess.run(["bash", self.VALIDATOR,
+                            str(tmp_path / "no-such-file.pub")],
+                           capture_output=True)
+        assert r.returncode != 0
+        assert b"not found" in r.stderr
+
+    def test_empty_file_fails(self):
+        r = self._run(b"")
+        assert r.returncode != 0
+        assert b"empty" in r.stderr
+
+    def test_garbage_fails(self):
+        r = self._run(b"definitely-not-a-key\n")
+        assert r.returncode != 0
+        assert b"not a valid SSH public key line" in r.stderr
+
+    def test_unknown_key_type_fails(self):
+        r = self._run(b"ssh-magic AAAAC3NzaC1lZDI1NTE5AAAAILx9f7U12S8F8f8rFUGv6+x5x60G5ULYfKOIeaYTXvRf x\n")
+        assert r.returncode != 0
+
+    def test_two_keys_fails(self):
+        r = self._run((_VALID_ED25519 + "\n" + _VALID_ED25519 + "\n").encode())
+        assert r.returncode != 0
+        assert b"more than one key" in r.stderr
+
+    @pytest.mark.skipif(
+        shutil.which("ssh-keygen") is None,
+        reason="structural layer needs ssh-keygen on PATH")
+    def test_well_shaped_but_corrupt_blob_fails(self):
+        # Passes the regex (valid base64 alphabet) but does not decode
+        # to a key — only the ssh-keygen layer catches this.
+        corrupt = ("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICORRUPTEDBLOBxxx "
+                   "comment\n")
+        r = self._run(corrupt.encode())
+        assert r.returncode != 0
+        assert b"ssh-keygen rejects" in r.stderr
+
+    def test_comment_with_spaces_accepted(self):
+        key = _VALID_ED25519.replace("test-jail-pubkey", "test jail pubkey")
+        r = self._run((key + "\n").encode())
+        assert r.returncode == 0, r.stderr.decode()
+        assert r.stdout.decode().strip() == key
+
+    def test_build_sh_validates_before_guest_setup(self, src, active):
+        # Static wiring pin: build.sh must source the helper and abort on
+        # an invalid pubkey BEFORE the key is handed to run_guest for
+        # authorized_keys. The "active" fixture strips full-line comments,
+        # so this proves a live wiring, not a commented-out remnant.
+        source_idx = active.index('. "$(dirname "$0")/validate-pubkey.sh"')
+        validate_call = active.index("validate_pubkey_file", source_idx)
+        guest_idx = active.index('run_guest /bin/bash -s "$JAIL_USER" "$PUBKEY"')
+        assert validate_call < guest_idx, \
+            "pubkey validation must precede the guest authorized_keys write"
+        tail = active[validate_call:]
+        assert "refusing to build the jail with an invalid agent pubkey" in tail
+        # The raw `cat` read is gone — nothing bypasses the validator.
+        assert 'PUBKEY="$(cat "$PUBKEY_FILE")"' not in active
