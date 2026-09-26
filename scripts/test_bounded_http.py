@@ -115,6 +115,35 @@ class BoundedHttpTests(unittest.TestCase):
         srv._slots.release()
         self.assertEqual(accepted.fileno(), -1)
 
+    def test_failed_start_never_parks_dead_thread(self):
+        """B1 convergence (from PR #469's Architecture review):
+        ThreadingMixIn registers the new thread in _threads BEFORE
+        start(). If start() raises, the dead thread must not break a
+        later server_close() with RuntimeError. Daemon threads (this
+        server's default) are never tracked, so pin the property with
+        daemon_threads=False — the only configuration where
+        registration happens at all."""
+        srv = self._make_server(_TinyPool)
+        srv.daemon_threads = False  # force _threads registration
+        real_thread = threading.Thread
+
+        def boom(*a, **k):
+            th = real_thread(*a, **k)
+            def fail():
+                raise RuntimeError("can't start new thread")
+            th.start = fail
+            return th
+
+        client, accepted = socket.socketpair()
+        self.addCleanup(client.close)
+        with mock.patch("threading.Thread", boom), \
+             mock.patch.object(srv, "handle_error"):
+            srv.process_request(accepted, ("127.0.0.1", 0))
+        # server_close must stay clean despite the never-started thread.
+        srv.server_close()
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        srv._slots.release()
+
     def test_slot_released_when_shutdown_request_raises(self):
         """A raise in shutdown_request must not permanently burn a pool
         slot — the mitigation must not become the DoS. The raise still
@@ -214,6 +243,41 @@ class BoundedHttpTests(unittest.TestCase):
         self.assertEqual(events, [("settimeout", srv.socket_timeout),
                                   ("do_handshake",)])
         self.assertEqual(finished, [req])
+
+    def test_handshake_timeout_prefers_handler_class(self):
+        """The pre-handshake timeout is read off the configured handler
+        class — the same attribute StreamRequestHandler.setup() honors —
+        never a module global (Architecture review B2). A handler
+        without the attribute falls back to socket_timeout."""
+
+        class TimeoutHandler(socketserver.BaseRequestHandler):
+            timeout = 7
+
+        class PlainHandler(socketserver.BaseRequestHandler):
+            pass
+
+        def run_case(handler_cls, expected):
+            srv = BoundedThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+            self.addCleanup(srv.server_close)
+            events = []
+
+            class FakeTLSRequest:
+                def settimeout(self, t):
+                    events.append(("settimeout", t))
+
+                def do_handshake(self):
+                    events.append(("do_handshake",))
+
+            req = FakeTLSRequest()
+            with mock.patch.object(srv, "finish_request",
+                                   lambda r, a: None), \
+                 mock.patch.object(srv, "shutdown_request", lambda r: None):
+                srv.process_request_thread(req, ("127.0.0.1", 0))
+            self.assertEqual(events, [("settimeout", expected),
+                                      ("do_handshake",)])
+
+        run_case(TimeoutHandler, 7)
+        run_case(PlainHandler, BoundedThreadingHTTPServer.socket_timeout)
 
     def test_stalled_handshake_releases_slot(self):
         """A handshake that raises (stalled peer, cut off by the socket
