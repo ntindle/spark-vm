@@ -1791,5 +1791,115 @@ class M8ServerHardeningTests(unittest.TestCase):
                               "loop is pinned")
 
 
+class ConnDeadlineTests(unittest.TestCase):
+    """Issue #472: cumulative per-connection deadline — a peer dripping
+    >=1 byte per socket-timeout holds a pool slot indefinitely, because
+    the 10s socket timeout is per operation, not cumulative."""
+
+    def _make_server(self, max_threads=4):
+        srv = cd.BoundedThreadingHTTPServer(("127.0.0.1", 0), cd.Handler)
+        srv.max_threads = max_threads
+        srv._slots = __import__("threading").Semaphore(max_threads)
+        self.addCleanup(srv.server_close)
+        return srv
+
+    def test_deadline_bound_sizing(self):
+        """The cumulative bound is a multiple of the per-operation
+        timeout: generous for legitimate approvals (the grant-writer
+        subprocess window is 15s) but finite against trickling peers."""
+        self.assertGreaterEqual(
+            cd.BoundedThreadingHTTPServer.connection_deadline,
+            4 * cd.BoundedThreadingHTTPServer.socket_timeout)
+
+    def test_kill_connection_aborts_stalled_peer(self):
+        """_kill_connection aborts the connection: the peer sees EOF, and
+        a second kill on the already-dead socket is a no-op, not a raise."""
+        client, accepted = __import__("socket").socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        cd._kill_connection(accepted, ("127.0.0.1", 4242))
+        client.settimeout(5)
+        self.assertEqual(client.recv(1), b"")
+        # Idempotent: killing twice must not raise (the timer path and
+        # shutdown_request both touch the socket).
+        cd._kill_connection(accepted, ("127.0.0.1", 4242))
+
+    def test_deadline_timer_fires_and_releases_slot(self):
+        """A handler stuck in recv while the peer trickles is aborted at
+        the cumulative deadline — the thread exits and the pool slot is
+        released instead of pinned forever."""
+        srv = self._make_server(max_threads=2)
+        srv.connection_deadline = 0.2
+        peer, server_end = __import__("socket").socketpair()
+        self.addCleanup(peer.close)
+        self.addCleanup(server_end.close)
+
+        def trickling_handler(request, client_address):
+            # Peer never sends; per-operation timeout would never fire
+            # here on a trickling peer either — only the deadline saves us.
+            server_end.recv(4096)
+
+        started = time.monotonic()
+        # Mirror the real path: process_request acquires the slot before
+        # spawning the handler thread; process_request_thread releases it.
+        self.assertTrue(srv._slots.acquire(blocking=False))
+        with mock.patch.object(srv, "finish_request", trickling_handler):
+            t = threading.Thread(
+                target=srv.process_request_thread,
+                args=(server_end, ("127.0.0.1", 4242)), daemon=True)
+            t.start()
+            t.join(timeout=10)
+        elapsed = time.monotonic() - started
+        self.assertFalse(t.is_alive(),
+                         "handler thread still pinned after the deadline")
+        self.assertLess(elapsed, 10,
+                        "deadline did not abort the stalled handler")
+        # Slot released: the mitigation must not become the DoS.
+        self.assertEqual(srv._slots._value, 2)
+        # The peer observed the abort as EOF.
+        peer.settimeout(5)
+        self.assertEqual(peer.recv(1), b"")
+
+    def test_deadline_timer_cancelled_on_success(self):
+        """A request that completes before the bound cancels its timer —
+        well-behaved connections never pay for the mitigation, and no
+        error is logged for a normal completion."""
+        srv = self._make_server(max_threads=2)
+        srv.connection_deadline = 60
+        seen = []
+
+        class FakeTimer:
+            def __init__(self, interval, fn, args=()):
+                self.interval = interval
+                self.fn = fn
+                self.args = args
+                self.started = False
+                self.cancelled = False
+
+            def start(self):
+                self.started = True
+                seen.append(self)
+
+            def cancel(self):
+                self.cancelled = True
+
+        client, accepted = __import__("socket").socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(accepted.close)
+        with mock.patch.object(threading, "Timer", FakeTimer), \
+             mock.patch.object(srv, "finish_request",
+                               lambda r, a: None), \
+             mock.patch.object(srv, "handle_error") as handle_error:
+            srv.process_request_thread(accepted, ("127.0.0.1", 4242))
+        self.assertEqual(len(seen), 1, "exactly one deadline timer per "
+                         "connection")
+        timer = seen[0]
+        self.assertTrue(timer.started)
+        self.assertTrue(timer.cancelled,
+                        "completed request left its deadline timer armed")
+        self.assertEqual(timer.interval, 60)
+        handle_error.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
