@@ -3865,3 +3865,59 @@ Full pass record in `docs/COMPETITOR_WATCH_2026-09-25_NEAR_MIDNIGHT.md`
 - **Carried:** C26, C37, C57, C58 (all OPEN — not re-surveyed this pass,
   verified ~22:00 window); Vercel Drives not re-checked (P49 — 2026-09-26
   morning pass). Zero fetch failures (6/6 vendor fetches first try).
+
+## Watch update — 2026-09-26 (morning): C59 memory observability (in-lane) + C60 vcr-action/login (adjacent); fast movers NO-CHANGE
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-26_MORNING.md`
+(survey window 2026-09-26 ~02:55–03:00 CDT; C59/C60 detail reads
+VENDOR-VERIFIED ~02:4x CDT by the 02:24 slot's P49 morning pass,
+captured in `agent_notes/surveyor-vercel-20260926-0224.md`).
+
+- **C59 — Vercel Sandbox memory observability (in-lane,
+  VENDOR-VERIFIED).** Vercel's 2026-09-25 changelog entry "Vercel
+  Sandbox now supports memory observability": a Memory Usage card in
+  the dashboard (average, P75, P95 across sandboxes); the per-sandbox
+  detail page auto-scales the y-axis to the memory limit with a dashed
+  85% reference line; `memoryUsedBytes` in the Observability query
+  builder (custom queries + alerts); CLI via `vercel metrics` under
+  `vercel.sandbox.memory_used_bytes`. First *memory*-observability
+  surface among the tracked vendors recorded in the corpus.
+  (Comparative note — advisory only: the corpus records Daytona's
+  sessions auto-pause but no memory-usage dashboard; Docker's
+  `sbx ls --json` CPU/memory-limits reporting is a vendor
+  release-notes fact read this run
+  (`docs.docker.com/ai/sandboxes/release-notes/`, 2026-09-21 section)
+  not yet recorded in this corpus — and it reports limits, not
+  usage.) The 85% line + alertable `memoryUsedBytes` is a
+  cost-control/capacity UX move for long-lived, memory-leaky agent
+  workloads. Design color (weight-light, advisory only — not a corpus
+  claim): when the H5 sentinel surface grows a per-box resource
+  dimension, mirror the 85%-of-limit reference-line convention — it's
+  it matches Vercel's shipped convention. No pricing attached.
+- **C60 — vercel/vcr-action/login GitHub Action (adjacent,
+  VENDOR-VERIFIED).** Vercel's 2026-09-25 changelog entry "Push images
+  to Vercel Container Registry from GitHub Actions":
+  `vercel/vcr-action/login` logs workflows in to VCR with GitHub OIDC
+  ("removing long-lived registry credentials from secrets");
+  short-lived token revoked at job end; the prepared image can then be
+  used as a custom Vercel Sandbox image (`<repository>:<tag>`). The
+  move that matters is the closed loop — CI-built image → sandbox
+  custom image — with OIDC short-lived-credential hygiene as the
+  headline. Corroborates spark-vm's own direction: the `hsurr:`
+  placeholder-swap posture and the golden-image workflow
+  (`docs/GOLDEN_IMAGE_GATE_PROCEDURE.md`) both treat long-lived image
+  credentials as the thing to eliminate. Advisory color only; no
+  promotion.
+- **Fast movers — 4/4 VENDOR-VERIFIED NO-CHANGE.** Daytona changelog
+  (newest still SEP 26 V0.218.0 / SEP 25 V0.217.0, character-identical
+  to the 01:24 baseline); Docker release notes (newest dated heading
+  still 2026-09-22 v0.45.1); Microsandbox releases (newest still
+  v0.7.3 #1646); Vercel changelog (newest entries still 25 Sep —
+  Drives still public beta; GA watch NO-CHANGE).
+- **Two new C-numbers this pass: C59 + C60.** (The capturing slot
+  labeled them C50/C51; those identifiers were already taken — C50 =
+  Microsoft Copilot Managed Runtime, C51 = Gemini
+  antigravity-preview-09-2026 harness — so they were renumbered here.)
+  In-lane no-launch verdict dated 2026-09-25 stands.
+- **Carried:** C26, C37, C57, C58 (all OPEN — not re-surveyed this
+  pass). Zero fetch failures.
