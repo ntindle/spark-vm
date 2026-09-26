@@ -345,7 +345,7 @@ as the `stuck` code.
   liveness signal, no producer. The detector's relay-dependent conditions
   stay unobservable until this ships; the predicate drops the relay
   conjunct rather than faking it, and S3's gate includes it.
-  **DESIGN SHIPPED 2026-09-26 ~10:0x CDT gap turn:** `docs/RELAY_LIVENESS_DESIGN.md`
+  **DESIGN SHIPPED 2026-09-26 ~10:3x CDT gap turn:** `docs/RELAY_LIVENESS_DESIGN.md`
   (session frames + two-channel liveness — passive relay journal and
   handshake-only synthetic dial prober, no-inbound observation discipline,
   `relay_path_state` producer contract for the tenant-status layer, the
