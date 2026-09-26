@@ -5,8 +5,10 @@ baseline, (B) delta news scan ~06:40–07:30 CDT. Survey window
 **2026-09-26 ~07:24–07:38 CDT**; read-only, no logins, no writes.
 Captures: `agent_notes/surveyor-a-20260926-0724.md`,
 `agent_notes/surveyor-b-20260926-0724.md` (goal-workspace notes, not
-in the repo). Suffix `_POST_LATE_MORNING` is admitted (2026-09-24
-precedent); LATE_MORNING was taken by the 05:54 slot.
+in the repo). Suffix `_POST_LATE_MORNING` is admitted (`_POST_<slot>`
+family admitted 2026-09-24 — e.g. `_POST_MID_EVENING`, `_POST_OVERNIGHT` —
+extended 2026-09-25 with `_POST_MID_MORNING`); LATE_MORNING was taken by the
+05:54 slot.
 
 Evidence labels: **VERIFIED** = read on a vendor's own page, doc, or
 repo this run. **VENDOR-VERIFIED** = confirmed on the vendor's own
@@ -28,7 +30,7 @@ All four read live this run, vs the ~06:24 baseline:
   parsing; the worker re-read the live page directly this run.)
 - **Docker Sandboxes release notes**
   (`docs.docker.com/ai/sandboxes/release-notes/`) — VENDOR-VERIFIED
-  NO-CHANGE (full page read live, lines 0–237 of 444). Newest dated
+  NO-CHANGE (top 237 of 444 lines — the newest-entries region — read live). Newest dated
   heading still **\*2026-09-22\*** ("Improved sandbox moves and
   support for private kit images in cloud sandboxes"), then
   \*2026-09-21\* (v3 kits). Nothing dated 2026-09-26.
