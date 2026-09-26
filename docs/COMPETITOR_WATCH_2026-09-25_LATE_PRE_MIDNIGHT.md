@@ -13,8 +13,8 @@ re-verified the two fastest-moving tracked vendors ~25 minutes ago.
 The value this slot is in (a) confirming the fastest movers haven't
 shipped another daily-cycle entry in the ~25–30 minutes since the
 last pass, (b) **rotating the mover coverage**: Microsandbox's
-release list re-verified this pass (last read in the 17:45 CDT full
-pass — a coverage gap the last two Daytona/Docker-only passes left
+release list re-verified this pass (last read in the post-late-evening
+full pass (~16:24–17:05 CDT) — a coverage gap the last two Daytona/Docker-only passes left
 open), (c) the two standing carried leads C37 + C26, and (d) a
 narrow delta news scan.
 
@@ -53,7 +53,7 @@ VERIFIED NO-CHANGE.
 run (full page). Newest release is still **v0.7.3** (the
 `chore: release v0.7.3` via #1646 entry), followed by v0.7.1
 (full changelog `v0.7.0...v0.7.1`), v0.7.0, and the v0.6.x series —
-identical to the 17:45 CDT full-pass read. No new release since.
+identical to the post-late-evening full-pass read (~16:24–17:05 CDT). No new release since.
 VERIFIED NO-CHANGE.
 
 ## 2. Carried-lead re-verification

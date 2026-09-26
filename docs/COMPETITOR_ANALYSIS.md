@@ -3603,7 +3603,7 @@ Full tracked set not re-surveyed this pass (last full pass was 9/9
 VERIFIED NO-CHANGE ~4h earlier; pre-midnight targeted pass ~25 min
 earlier) — targeted re-verification of the fastest-moving tracked
 vendors, a Microsandbox releases re-read (rotation: last read in the
-17:45 CDT full pass — a coverage gap the last two
+post-late-evening full pass (~16:24–17:05 CDT) — a coverage gap the last two
 Daytona/Docker-only passes left open), the two standing carried
 leads, plus a narrow delta news scan.
 
@@ -3613,7 +3613,8 @@ leads, plus a narrow delta news scan.
 - **Docker Sandboxes release notes**: VERIFIED NO-CHANGE — newest
   heading still 2026-09-22 (v0.45.1; full 444-line page read live).
 - **Microsandbox releases**: VERIFIED NO-CHANGE — newest still v0.7.3
-  (via #1646), identical to the 17:45 CDT read.
+  (via #1646), identical to the post-late-evening full-pass read
+  (~16:24–17:05 CDT).
 - **C37 (freestyle.sh/pricing)**: VERIFIED NO-CHANGE — Pro fee still
   not printed; rate card unchanged verbatim (vCPU $0.04032/hr, GiB
   memory $0.0129/hr, GiB storage $0.000086/hr, transfer $0.02/GB).
