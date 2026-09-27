@@ -23,7 +23,7 @@ contact, not a quiet pass. Applied this pass: the already-aged-out trio —
 Heapjack/Overpatch, GitLab proxy escape (CVE-2026-85706), Dextr AI —
 drew zero recrawl hits (quiet) — all remain out; no new age-outs this
 pass (every carried item had contact: C37/C55/C57/C58 vendor re-verified;
-C62/C66 recrawled). Carried P63 gap: still no re-fold path for an
+C62 recrawled via the OpenAI coverage wave; C66 no contact this pass (quiet)). Carried P63 gap: still no re-fold path for an
 aged-out item that resurfaces with real movement (follow-up proposal from
 the 0224 pass).
 
@@ -102,7 +102,8 @@ no new facts; does not fold.
 
 Flagged-only (1, recrawl — NOT new): the same OpenAI training-sandbox
 coverage wave — first-sighted at the 0154 pass, deduped at 0224,
-flagged-only at 0424, recrawled again here. Lane-adjacent containment
+clean dedupe at 0424 (the 0424 doc's review reclassified the surveyor capture's
+pre-correction "flagged-only" label per the 0224 recrawl precedent), recrawled again here. Lane-adjacent containment
 color (the DNS-gap egress-boundary failure corroborates C12's
 egress-policy-transparency tracking), NOT a launch / funding / pricing /
 GA / new CVE. NO-LAUNCH verdict stands.
@@ -112,9 +113,10 @@ Dextr AI) drew recrawl hits or new facts — all stay out.
 
 Stale-version rule: compliant this pass — every version number and pricing
 figure quoted came from a vendor page read live; no snippet-sourced
-figures were folded. Surveyor B checked the last 3 watch docs for recrawls
-before classifying (the 0424 pass's process lesson) — no false
-first-sightings this pass.
+figures were folded. Surveyor B checked the last 3 watch docs (not the surveyor captures) for
+recrawls before classifying (the 0424 pass's process lesson) — no false
+first-sightings this pass; the history above uses the 0424 doc's corrected
+classification, not the 0424 surveyor capture's pre-correction label.
 
 ## Standing status
 
