@@ -22,8 +22,9 @@ recrawl-mention of the item; vendor re-verification contact counts as
 contact, not a quiet pass. Applied this pass: the already-aged-out trio —
 Heapjack/Overpatch, GitLab proxy escape (CVE-2026-85706), Dextr AI —
 drew zero recrawl hits (quiet) — all remain out; no new age-outs this
-pass (every carried item had contact: C37/C55/C57/C58 vendor re-verified;
-C62 recrawled via the OpenAI coverage wave; C66 no contact this pass (quiet)). Carried P63 gap: still no re-fold path for an
+pass (C37/C55/C57/C58 vendor re-verified; C62 recrawled via the OpenAI
+training-sandbox coverage wave; C66 drew no in-window contact this pass —
+a P63 quiet pass). Carried P63 gap: still no re-fold path for an
 aged-out item that resurfaces with real movement (follow-up proposal from
 the 0224 pass).
 
