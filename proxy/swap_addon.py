@@ -144,6 +144,7 @@ import json
 import logging
 import os
 import posixpath
+import pwd
 import re
 import socket
 import struct
@@ -235,6 +236,66 @@ APPROVAL_SIGNAL_TTL = timedelta(hours=1)
 # $ also matches before a trailing newline, which would let a
 # newline-bearing planted id into a response header.
 _AID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+
+
+def _file_owner_name(path):
+    """confirmd Finding 50, same mechanism: the requester is the filing
+    file's owner, never an argument. S1 (#511) names it as the requester
+    source for the expired-record stamp on both reapers."""
+    try:
+        st = os.stat(path)
+        return pwd.getpwuid(st.st_uid).pw_name
+    except (OSError, KeyError):
+        return None
+
+
+def _stamp_expired_consumed(aid, it, pending_path, expired_by):
+    """S1 (#511): stamp the expired-approval terminal record.
+
+    Write-if-absent via O_EXCL — the mirror of confirmd's
+    _stamp_expired_consumed (same record schema, same
+    docs/EXPIRED_APPROVAL_TERMINAL_RECORD.md contract; the two are
+    deliberately duplicated rather than imported across the
+    proxy/confirmd component boundary, like _AID_RE/ID_RE). The winner
+    of the render-reap / filing-scan race creates consumed/<aid>.json;
+    the loser gets FileExistsError and moves on.
+
+    Returns True when this call created the record, False when one
+    already existed. Raises ValueError for an aid that fails _AID_RE
+    (an unvalidated aid must never touch consumed/ — design §10
+    to-verify); raises OSError when the record cannot be written (the
+    caller keeps the pending file so the next scan retries).
+    """
+    if not _AID_RE.match(str(aid)):
+        raise ValueError("refusing to stamp consumed/ for bad aid %r"
+                         % (aid,))
+    rec = dict(it)
+    rec.pop("_csrf", None)
+    rec.pop("_csrf_nonces", None)
+    rec["decision"] = "expired"
+    rec["expired_at"] = datetime.now(timezone.utc).isoformat()
+    rec["expired_by"] = expired_by
+    rec["requester"] = _file_owner_name(pending_path)
+    # Reserved for H10 (multi-tenant confirmd): null means "unscoped,
+    # single-tenant host" — today's exact semantic. No tenant filter
+    # is invented before H10.
+    rec["tenant_id"] = None
+    path = os.path.join(str(APPROVALS_DIR), "consumed", aid + ".json")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(rec, f, indent=2)
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise OSError("expired stamp write failed for %s" % aid)
+    return True
 
 
 def _load_push_module():
@@ -1326,16 +1387,37 @@ class SwapAddon:
                         if exp.tzinfo is None:
                             exp = exp.replace(tzinfo=timezone.utc)
                         if now >= exp:
+                            p = os.path.join(pending, fn)
+                            old_aid = (it.get("id")
+                                       or fn[:-len(".json")])
                             if (it.get("credential") == name
                                     and it.get("host") == host
                                     and (it.get("method") or "").upper()
-                                    == method_up):
-                                old_aid = (it.get("id")
-                                           or fn[:-len(".json")])
-                                if _AID_RE.match(str(old_aid)):
-                                    signals.append((str(old_aid),
-                                                    "expired"))
-                            os.remove(os.path.join(pending, fn))
+                                    == method_up
+                                    and _AID_RE.match(str(old_aid))):
+                                signals.append((str(old_aid),
+                                                "expired"))
+                            # S1 (#511): stamp the terminal expired record
+                            # BEFORE the pending file is deleted
+                            # (stamp-then-delete, same rationale as
+                            # confirmd's render reap: a crash between the
+                            # two self-heals on the next scan — the stamp
+                            # is EEXIST-skipped and the delete retried).
+                            # The aid must validate before consumed/ is
+                            # touched (design §10 to-verify).
+                            try:
+                                _stamp_expired_consumed(str(old_aid), it,
+                                                        p, "proxy")
+                            except ValueError:
+                                # Malformed aid: refuse to touch
+                                # consumed/, but still reap the expired
+                                # file below.
+                                pass
+                            except OSError:
+                                # Stamp failed: keep the pending file so
+                                # the next scan retries the stamp.
+                                continue
+                            os.remove(p)
                             continue
                     except (ValueError, TypeError):
                         pass
