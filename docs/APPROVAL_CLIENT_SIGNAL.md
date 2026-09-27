@@ -30,8 +30,9 @@ responses):
 - `X-Spark-Approval-Decision: <state>:<aid>[, <state>:<aid>...]` —
   terminal decision(s) for the tuple, `state` in: a single response can
   carry more than one — one request that swaps two credentials under
-  two grants records `approved` for each aid, and a filing scan can
-  reap several expired tuple matches in one pass. Clients must tolerate
+  two grants records `approved` for each aid, and an `expired` leg can
+  ride alongside the fresh `pending` id when a stamped expiry record
+  for the tuple is inside its delivery window. Clients must tolerate
   the comma-joined list and act on each leg.
   - `approved:<aid>` — the owner approved; the request that carries this
     header was swapped under the grant minted from `<aid>`.
@@ -44,24 +45,24 @@ responses):
     request, re-issue the gated request; it then succeeds with
     `approved:<new-aid>`. Surface as `human-denied`.
   - `expired:<aid>` — the pending approval the client was waiting on
-    expired unanswered. **Best-effort, not a guarantee**: the proxy
-    reports this leg only when its own filing scan observed the stale
-    item in pending/ at scan time (the actual delete may still be won
-    by confirmd's render reap — the leg is appended before the proxy's
-    own delete attempt). `confirmd`'s pending renderer reaps expired
-    items independently (plain delete — they never reach the answered
-    history), so when the owner has the pending page open between the
-    expiry instant and the agent's next poll, confirmd usually wins the
-    race: the proxy then files the replacement *silently*, and the
-    client sees only a changed `X-Spark-Approval-Pending: <new-aid>`
-    with no decision header at all. Treat a changed pending id exactly
-    like an explicit `expired:<old>` — keep waiting on the newest id.
-    When the proxy *is* the reaper, the same response normally carries
-    a fresh `X-Spark-Approval-Pending: <new-aid>` so the client keeps
-    waiting on the new id. (If no fresh pending id accompanies it, the
+    expired unanswered. **Deterministic within the delivery window**:
+    whichever side reaps the stale item (confirmd's render reap or the
+    proxy's filing-scan reap) stamps a terminal record in `consumed/`
+    first (#511, `docs/EXPIRED_APPROVAL_TERMINAL_RECORD.md`), and the
+    proxy serves the `expired:<aid>` leg from that record on every
+    gated refusal for the tuple for one hour after the expiry instant —
+    it no longer depends on who won the reaping race at scan time. The
+    same response normally carries a fresh
+    `X-Spark-Approval-Pending: <new-aid>` so the client keeps waiting
+    on the new id. (If no fresh pending id accompanies it, the
     replacement filing was suppressed — the per-credential flood cap or
     the 60s filing rate limit is active — so keep polling; the
-    replacement files once the window clears.)
+    replacement files once the window clears.) Expiry never suppresses
+    re-filing: an `expired` leg is information, not a veto. The
+    changed-pending-id inference rule remains the documented fallback
+    for clients behind proxies older than the terminal-record change
+    (pre-#511): treat a changed pending id exactly like an explicit
+    `expired:<old>` — keep waiting on the newest id.
 
 Header values carry only the approval id and the state word — never
 credential names, hosts, or secret material. Ids are validated against
@@ -75,9 +76,10 @@ must not be able to forge them.
 
 ## Contract: the `consumed/` item schema (v1)
 
-The proxy's terminal-denial lookup and confirmd's answered history agree
-on one on-disk contract: `consumed/<aid>.json`. It is the pending item
-as the proxy filed it, plus confirmd's answer stamp:
+The proxy's terminal-denial lookup, its terminal-expiry lookup (#511
+S2), and confirmd's answered history agree on one on-disk contract:
+`consumed/<aid>.json`. It is the pending item as the proxy filed it,
+plus confirmd's answer stamp:
 
 - Filed by the proxy: `id` (16 random hex chars), `created`,
   `expires`, `kind` (`grant-request`), `credential`, `host`, `method`,
@@ -139,6 +141,15 @@ approval id), so a client that retries its gated request after the
 human approves sees both the successful swap and the explicit
 `approved:<aid>` confirmation.
 
+An `expired` decision ends nothing: the proxy files the replacement
+approval on the same pass, so the parked task keeps waiting — on the
+new pending id. The 1-hour window (measured from the record's
+`expired_at`) bounds how long the proxy keeps delivering
+`expired:<aid>` to clients that keep polling; after the window the leg
+goes quiet (the expiry is history, not news). Expiry never suppresses
+filing or pushing — "the owner didn't see it" is not "the owner said
+no", and re-push is the correct escalation.
+
 ### Recovery after a mistaken denial
 
 The proxy never re-files or re-pushes for a denied tuple inside the
@@ -181,14 +192,18 @@ the escape hatch for a mistaken denial.
    → continue the task. `expired:<old>` → keep waiting on the new
    `X-Spark-Approval-Pending` id from the same response — if none
    accompanies it, keep polling; the replacement files once the
-   filing window clears. Note that `expired:<old>` is best-effort:
-   confirmd's render loop usually reaps expired items first, so there
-   is often NO `expired` leg — the client simply sees the pending id
-   change (`X-Spark-Approval-Pending: <new-aid>`, no decision header).
+   filing window clears. The `expired` leg is delivered on every poll
+   of the tuple for one hour after the expiry instant; behind a proxy
+   older than the terminal-record change there is often NO `expired`
+   leg — the client simply sees the pending id change
+   (`X-Spark-Approval-Pending: <new-aid>`, no decision header).
    Treat a changed pending id exactly like an explicit `expired:<old>`:
    keep waiting on the new id. A client MAY also stop after repeated
    expiries and report `human-drop-off` (per
-   `docs/TENANT_STATUS_ENDPOINT.md` §2) rather than waiting forever.
+   `docs/TENANT_STATUS_ENDPOINT.md` §2) rather than waiting forever —
+   with the terminal record, "repeated expiries" is countable (one
+   stamped record per expired aid) instead of inferred from a
+   changed pending id.
 
 ## What this is not
 

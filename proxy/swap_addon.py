@@ -219,11 +219,13 @@ APPROVALS_ENABLED = os.environ.get("SWAP_ENABLE_APPROVALS", "1") == "1"
 #       terminal decision, state in {approved, denied, expired}. A
 #       response can carry several: one request swapping two
 #       credentials under two grants records approved for each aid,
-#       and a filing scan can reap several expired tuple matches in
-#       one pass. A best-effort "expired" is usually accompanied by
-#       the fresh "pending" id, but the flood cap / 60s rate limit can
-#       suppress the fresh filing, leaving the expired leg
-#       unaccompanied (see the doc).
+#       and an "expired" leg rides alongside the fresh "pending" id
+#       when a stamped expired record is inside its delivery window
+#       (S2, #511: deterministic, read from consumed/ — at most one
+#       expired leg per tuple per pass). An "expired" leg is usually
+#       accompanied by the fresh "pending" id, but the flood cap /
+#       60s rate limit can suppress the fresh filing, leaving the
+#       expired leg unaccompanied (see the doc).
 # Header values carry only the approval id (random hex) and the state
 # word — never credential names, hosts, or secret material.
 APPROVAL_PENDING_HEADER = "X-Spark-Approval-Pending"
@@ -241,6 +243,13 @@ APPROVAL_SIGNAL_TTL = timedelta(hours=1)
 # unboundedly. Eviction only costs a rescan — never correctness.
 _DENIAL_CACHE_TTL = timedelta(seconds=30)
 _DENIAL_CACHE_MAX_KEYS = 1024
+# S2 (#511): the expired-record lookup (_terminal_expiry) gets the
+# same cache shape and TTL as the denial lookup — an independent dict,
+# because the two lookups key different decisions and different
+# timestamps. Same invalidation discipline as #307 (dir-mtime), same
+# eviction-is-a-rescan semantics.
+_EXPIRY_CACHE_TTL = timedelta(seconds=30)
+_EXPIRY_CACHE_MAX_KEYS = 1024
 # Approval ids are random hex; anything else in a consumed/ item's id
 # field is not ours to echo into a header. \A…\Z anchoring (not ^…$):
 # $ also matches before a trailing newline, which would let a
@@ -951,6 +960,11 @@ class SwapAddon:
         # consumed/ dir-mtime change; eviction is a rescan, never a
         # correctness change.
         self._denial_cache = {}
+        # S2 (#511): TTL cache for the per-refusal consumed/ expired
+        # scan (_terminal_expiry): key (credential, host, method, norm
+        # path) -> (aid or None, valid_until, dir_mtime). Same
+        # invalidation discipline as _denial_cache (#307).
+        self._expiry_cache = {}
         self._load()
         log.warning("swap_addon: spark-vm version %s", SPARKVM_VERSION)
 
@@ -1388,20 +1402,153 @@ class SwapAddon:
         except OSError:
             return None
 
+    def _terminal_expiry(self, name, host, method, path, fresh=False):
+        """S2 (#511): newest consumed/ expiry record for this
+        (credential, host, method) tuple *and this normalized path*,
+        stamped within APPROVAL_SIGNAL_TTL. Newest is keyed on the
+        record's own expired_at (the reap instant), not mtime. This
+        is the deterministic replacement for the retired best-effort
+        filing-scan observation leg: whichever reaper won the race
+        (confirmd's render reap or the proxy's filing-scan reap) left
+        the same stamped record, so the leg no longer depends on who
+        observed the stale pending item at scan time.
+
+        The leg is informational only. Expiry is terminal for the aid,
+        never for the tuple — unlike _terminal_denial it must never
+        suppress filing or pushing (design
+        docs/EXPIRED_APPROVAL_TERMINAL_RECORD.md §4 "No veto").
+        Path-scoped identically to the deny lookup (fail closed: a
+        consumed item without a matching path_prefix is ignored); the
+        retired scan leg's tuple-only match narrows nothing in
+        practice — filing coalesces to one pending aid per
+        (credential, host, method), so the expired aid's path_prefix
+        always matches the tuple it is served for.
+
+        The consumed/ scan is cached per (credential, host, method,
+        path) with consumed/ dir-mtime invalidation plus a short TTL
+        (same discipline as #307): an agent can already trigger
+        refusals at will, so repeated refusals must not pay the full
+        listdir+stat scan each time. A terminal write (deny,
+        expired-stamp, prune) always lands a new file in consumed/
+        (or removes one), so an unchanged dir-mtime means the scan
+        result cannot have changed; st_mtime_ns (integer) so a
+        sub-microsecond rename cannot collide with the scan's stat;
+        valid_until additionally bounds the record's own
+        APPROVAL_SIGNAL_TTL ageing. fresh=True bypasses the cache for
+        one authoritative read.
+
+        Returns the approval id, or None."""
+        try:
+            d = os.path.join(APPROVALS_DIR, "consumed")
+            method_up = (method or "").upper()
+            norm = _normalize_path(path or "/")
+            now = datetime.now(timezone.utc)
+            key = (name, host, method_up, norm)
+            try:
+                dir_mtime = os.stat(d).st_mtime_ns
+            except OSError:
+                return None
+            if not fresh:
+                hit = self._expiry_cache.get(key)
+                if hit is not None:
+                    aid, valid_until, seen_mtime = hit
+                    if seen_mtime == dir_mtime and now < valid_until:
+                        return aid
+            best = None  # (expired_at, aid)
+            for fn in os.listdir(d):
+                if not fn.endswith(".json"):
+                    continue
+                p = os.path.join(d, fn)
+                try:
+                    # mtime pre-filter: consumed/ expiry records are
+                    # written with expired_at stamped just before the
+                    # write — so mtime >= expired_at always, and a file
+                    # older than the signal TTL cannot hold a
+                    # qualifying record. Skip the open + JSON parse for
+                    # those: this scan runs synchronously on the proxy
+                    # event loop per refusal, and consumed/ keeps up to
+                    # 1000 items.
+                    if (now.timestamp() - os.stat(p).st_mtime
+                            > APPROVAL_SIGNAL_TTL.total_seconds()):
+                        continue
+                    with open(p) as f:
+                        it = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                if it.get("credential") != name:
+                    continue
+                if it.get("host") != host:
+                    continue
+                if (it.get("method") or "").upper() != method_up:
+                    continue
+                if it.get("path_prefix") != norm:
+                    continue
+                if it.get("decision") != "expired":
+                    continue
+                try:
+                    expired = datetime.fromisoformat(it.get("expired_at"))
+                    if expired.tzinfo is None:
+                        expired = expired.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    continue
+                if now - expired > APPROVAL_SIGNAL_TTL:
+                    continue
+                aid = it.get("id") or fn[:-len(".json")]
+                if not _AID_RE.match(str(aid)):
+                    continue
+                if best is None or expired > best[0]:
+                    best = (expired, str(aid))
+            if best is not None:
+                aid, expired = best[1], best[0]
+                # The cached positive must not outlive the record's own
+                # APPROVAL_SIGNAL_TTL window.
+                valid_until = min(now + _EXPIRY_CACHE_TTL,
+                                  expired + APPROVAL_SIGNAL_TTL)
+            else:
+                aid = None
+                valid_until = now + _EXPIRY_CACHE_TTL
+            if len(self._expiry_cache) >= _EXPIRY_CACHE_MAX_KEYS:
+                # Coarse eviction: a path-varying agent can force
+                # arbitrary cache keys; dropping the cache only costs a
+                # rescan, never correctness (fail-open cost, not a
+                # security change).
+                self._expiry_cache.clear()
+            self._expiry_cache[key] = (aid, valid_until, dir_mtime)
+            return aid
+        except OSError:
+            return None
+
     def _approval_signal_for_refusal(self, name, host, method, path,
                                      reason):
         """H18 (#133): the single decision point for "a swap was refused
         for this tuple". Returns a list of (aid, state) signals for the
         client-visible channel: a terminal denial is delivered (and no
         fresh approval is filed or pushed); otherwise the pending
-        signal, whether the approval was just filed, already pending, or
-        an expired one is being replaced."""
+        signal, whether the approval was just filed or already pending.
+        S2 (#511): when a stamped expired record for the tuple is
+        inside its delivery window, an "expired" leg is appended —
+        expiry never suppresses the filing (see design §4)."""
         if not APPROVALS_ENABLED:
             return []
         denied = self._terminal_denial(name, host, method, path)
         if denied is not None:
             return [(denied, "denied")]
-        return self._file_approval(name, host, method, path, reason)
+        signals = self._file_approval(name, host, method, path, reason)
+        # S2 (#511): the expired terminal record is served
+        # deterministically from consumed/ — appended to the filing
+        # signals, never the deny-style short-circuit above. Expiry is
+        # terminal for the aid, not for the tuple: the replacement
+        # filing already happened (or is rate-limited), and the leg
+        # must never suppress it (design §4 "No veto"). A deny leg
+        # supersedes: the #306 fresh-recheck terminal branch inside
+        # _file_approval returns [(denied, "denied")] with no filing
+        # at all, and the same precedence applies here — an expired
+        # aid is never reported alongside a deny for the same refusal.
+        if not any(state == "denied" for _, state in signals):
+            expired = self._terminal_expiry(name, host, method, path)
+            if expired is not None:
+                signals.append((expired, "expired"))
+        return signals
 
     def _file_approval(self, name, host, method, path, reason):
         # Finding 60: the inference proxy has no approvals directory.
@@ -1417,9 +1564,11 @@ class SwapAddon:
 
         H18 (#133): returns the client-visible signals for this refusal
         as a list of (aid, state) pairs. "pending" covers a freshly
-        filed approval and a coalesced-on existing one; when the
-        existing pending item had expired, the old aid is reported as
-        "expired" alongside the replacement's "pending"."""
+        filed approval and a coalesced-on existing one. S2 (#511): the
+        "expired" leg is no longer emitted here — the scan's reap still
+        stamps the terminal record (S1, below), and _terminal_expiry
+        serves the leg deterministically from consumed/ for every
+        refusal inside the delivery window."""
         signals = []
         try:
             pending = os.path.join(APPROVALS_DIR, "pending")
@@ -1437,10 +1586,15 @@ class SwapAddon:
                 try:
                     with open(os.path.join(pending, fn)) as f:
                         it = json.load(f)
-                    # Reap expired while scanning (finding 58). A tuple
-                    # match that expired is a terminal "expired" signal
-                    # for the client holding the old aid (H18) — the
-                    # fresh filing below carries the replacement.
+                    # Reap expired while scanning (finding 58). S2
+                    # (#511): the reap stamps the terminal expired
+                    # record (S1, below) but emits no "expired" leg —
+                    # the best-effort scan-time observation leg is
+                    # retired (keeping it would double-report the same
+                    # expiry on the proxy-wins reap path). The leg is
+                    # now served deterministically from consumed/ by
+                    # _terminal_expiry for every refusal inside the
+                    # delivery window.
                     try:
                         exp = datetime.fromisoformat(it.get("expires"))
                         if exp.tzinfo is None:
@@ -1449,13 +1603,6 @@ class SwapAddon:
                             p = os.path.join(pending, fn)
                             old_aid = (it.get("id")
                                        or fn[:-len(".json")])
-                            if (it.get("credential") == name
-                                    and it.get("host") == host
-                                    and (it.get("method") or "").upper()
-                                    == method_up
-                                    and _AID_RE.match(str(old_aid))):
-                                signals.append((str(old_aid),
-                                                "expired"))
                             # S1 (#511): stamp the terminal expired record
                             # BEFORE the pending file is deleted
                             # (stamp-then-delete, same rationale as
@@ -1501,8 +1648,10 @@ class SwapAddon:
                 except (OSError, ValueError):
                     continue
             # Already pending for this tuple: the client's signal is the
-            # existing approval, not a new filing. Any expired signals
-            # collected above are preserved alongside it.
+            # existing approval, not a new filing. (S2 (#511): the
+            # expired leg, if any, is appended by
+            # _approval_signal_for_refusal from consumed/ — it is no
+            # longer collected in this scan.)
             if tuple_aid is not None and _AID_RE.match(str(tuple_aid)):
                 return signals + [(str(tuple_aid), "pending")]
             # Finding 58: cap and rate limit. A capped or rate-limited
@@ -1526,9 +1675,9 @@ class SwapAddon:
             # immediately before minting and writing the new approval:
             # a denial is terminal — abort the filing (and the VAPID
             # push) and deliver the denial instead. The terminal signal
-            # supersedes any expired signals collected in this scan's
-            # pass, matching _approval_signal_for_refusal's terminal
-            # branch. Residual (accepted): a deny landing in the
+            # supersedes any expiry: _approval_signal_for_refusal skips
+            # the _terminal_expiry append when a denied leg is present,
+            # matching the terminal branch here. Residual (accepted): a deny landing in the
             # microseconds between the fresh re-check and the
             # os.replace below still files+pushes once; the next
             # refusal poll re-scans fresh (mtime-invalidated) and
