@@ -749,9 +749,11 @@ a.card:active{background:#f0f2f5}
 padding:2px 10px;border-radius:999px;margin-left:6px;vertical-align:middle}
 .badge-approve{background:#dff3e4;color:#1a7f37}
 .badge-deny{background:#fde8e8;color:#b3261e}
+.badge-expired{background:#fdf0d5;color:#8a5a00}
 @media(prefers-color-scheme:dark){
 .badge-deny{background:#3a1f1f;color:#f2a9a2}
-.badge-approve{background:#173a24;color:#9fe0b4}}
+.badge-approve{background:#173a24;color:#9fe0b4}
+.badge-expired{background:#43300a;color:#f5c86e}}
 table.detail{width:100%;border-collapse:collapse;margin:12px 0;font-size:.95rem}
 table.detail th{text-align:left;padding:8px 10px;background:#f0f2f5;
 width:34%;border-radius:6px 0 0 6px}
@@ -903,15 +905,27 @@ function answeredCard(it){
   h.textContent=id;c.appendChild(h);
   var d=document.createElement("span");
   var dec=String(it.decision||"?");
-  if(dec==="approve"||dec==="deny"){
-    d.className="badge "+(dec==="approve"?"badge-approve":"badge-deny");
-    d.textContent=dec;h.appendChild(d);
+  // S3 (#546): expired is the third terminal decision — its badge is
+  // distinct (amber) from approve (green) / deny (red).
+  if(dec==="approve"||dec==="deny"||dec==="expired"){
+    d.className="badge "+(dec==="approve"?"badge-approve":
+      dec==="deny"?"badge-deny":"badge-expired");
+    d.textContent=dec==="approve"||dec==="deny"?dec:"expired";h.appendChild(d);
   }
   var s=document.createElement("div");s.className="summary";
   s.textContent=String(it.summary||"");c.appendChild(s);
-  metaLine(c,[it.answered_by?("by "+String(it.answered_by)):"",
-    it.answered_at?fmtTime(it.answered_at):"",
-    String(it.kind||"")]);
+  // Design §5: never reuse the answer fields for an expiry — expired
+  // records carry no answered_by/answered_at, so the meta line reads
+  // "expired by <reaper> · <expired_at>" instead.
+  if(dec==="expired"){
+    metaLine(c,[it.expired_by?("expired by "+String(it.expired_by)):"expired",
+      it.expired_at?fmtTime(it.expired_at):"",
+      String(it.kind||"")]);
+  }else{
+    metaLine(c,[it.answered_by?("by "+String(it.answered_by)):"",
+      it.answered_at?fmtTime(it.answered_at):"",
+      String(it.kind||"")]);
+  }
   // H20: re-open form for denied items (mirrors the server-rendered card).
   if(dec==="deny"&&validId(id)&&it.reopen_csrf){
     var f=document.createElement("form");
@@ -1101,6 +1115,12 @@ def _load_answered():
     """Newest answered first (issue #1), by answered_at — filenames are
     random hex, so filename order is NOT chronological (engineering).
 
+    S3 (#546): expired terminal records carry no answered_at (design §2:
+    the answer fields must never be reused for an expiry), so they sort
+    on expired_at — the record's own stamp. Both keys mean "when this
+    aid reached its terminal state", so one ordering covers the whole
+    answered history.
+
     Perf (issue #214 / G2): the 5 s /api/answered poll used to list,
     parse, and sort EVERY consumed/ file (up to _CONSUMED_KEEP = 1000),
     so per-poll parse cost was O(consumed-dir). Directory entries are
@@ -1132,8 +1152,9 @@ def _load_answered():
                 items.append(json.load(f))
         except Exception:
             continue
-    items.sort(key=lambda it: _parse_expiry(it.get("answered_at")) or
-               datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    items.sort(key=lambda it: _parse_expiry(
+        it.get("answered_at") or it.get("expired_at")) or
+        datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     return items
 
 
@@ -1227,7 +1248,10 @@ def _answered_api_item(it):
     """Issue #1: JSON surface for the answered-history poller.
     Allowlisted fields only. H20: a denied item additionally carries its
     re-open CSRF nonce so the answered card can offer the re-open form —
-    non-deny items carry no nonce."""
+    non-deny items carry no nonce. S3 (#546): an expired item carries
+    its expired_at/expired_by so the answered card can render the Expired
+    badge — the answer fields are never reused for an expiry (design §2),
+    so both families ride the feed with their own stamp fields."""
     out = {
         "id": str(it.get("id", "")),
         "summary": str(it.get("summary", "")),
@@ -1235,6 +1259,8 @@ def _answered_api_item(it):
         "decision": str(it.get("decision", "")),
         "answered_by": str(it.get("answered_by", "")),
         "answered_at": str(it.get("answered_at", "")),
+        "expired_at": str(it.get("expired_at", "")),
+        "expired_by": str(it.get("expired_by", "")),
     }
     if out["decision"] == "deny" and ID_RE.match(out["id"]):
         out["reopen_csrf"] = _mint_reopen_nonce(out["id"])
@@ -1301,10 +1327,24 @@ def _render_answered_list(items):
             badge = ('<span class="badge %s">%s</span>' % (
                 "badge-approve" if dec == "approve" else "badge-deny",
                 html.escape(dec)))
-        meta = _meta_line([
-            ("by %s" % it.get("answered_by")) if it.get("answered_by") else "",
-            it.get("answered_at") or "",
-            it.get("kind") or ""])
+        elif dec == "expired":
+            # S3 (#546): the third terminal decision gets a badge too —
+            # distinct style (amber), never approve green / deny red.
+            badge = '<span class="badge badge-expired">expired</span>'
+        if dec == "expired":
+            # Design §2: the answer fields are never reused for an expiry —
+            # the meta line shows the record's own expired_at/expired_by.
+            meta = _meta_line([
+                ("expired by %s" % it.get("expired_by"))
+                if it.get("expired_by") else "expired",
+                it.get("expired_at") or "",
+                it.get("kind") or ""])
+        else:
+            meta = _meta_line([
+                ("by %s" % it.get("answered_by"))
+                if it.get("answered_by") else "",
+                it.get("answered_at") or "",
+                it.get("kind") or ""])
         # H20: a denied approval can be re-filed from its card (the
         # mis-tapped-Deny recovery). The nonce is minted per deny item
         # and verified one-shot on POST /reopen.
@@ -1326,6 +1366,27 @@ def _render_answered_list(items):
                 html.escape(str(it.get("id", "?"))), badge,
                 html.escape(str(it.get("summary", ""))), meta, reopen))
     return "".join(cards)
+
+
+def _expired_record_link_html(aid):
+    """S3 (#546): for the expired 410 pages. When a terminal expired
+    record already exists for this aid in consumed/ (stamped by one of
+    the reapers before the synchronous path reaped the pending file),
+    return the answered-history link — the human can see the Expired
+    badge card instead of a dead end. Otherwise "" — no record, no
+    history to point at, and the bare 410 stands honest. Never raises:
+    a corrupt or foreign consumed/ file must not 500 an error page."""
+    if not ID_RE.match(aid):
+        return ""
+    try:
+        with open(os.path.join(consumed_dir(), aid + ".json")) as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return ""
+    if isinstance(rec, dict) and rec.get("decision") == "expired":
+        return ('<p class="nav"><a href="/answered">'
+                "see it in the answered history</a></p>")
+    return ""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1375,10 +1436,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _err(self, msg, code):
-        self._send_html('<div class="card"><p>%s</p></div>'
+    def _err(self, msg, code, suffix=""):
+        # S3 (#546): `suffix` carries pre-rendered HTML inserted before
+        # the back-nav (the expired 410s use it for the answered-history
+        # link). It is the caller's responsibility to build it from
+        # trusted fragments only — msg stays escaped, suffix is markup.
+        self._send_html('<div class="card"><p>%s</p></div>%s'
                         '<p class="nav"><a href="/">back to pending</a></p>'
-                        % html.escape(msg), code, title="Approvals")
+                        % (html.escape(msg), suffix), code, title="Approvals")
 
     def _send_json(self, obj, code=200):
         """Issue #1: JSON surface for the list pollers. Authenticated
@@ -1533,6 +1598,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if is_expired(it):
                     # Finding 53(a): refuse with a message, and reap.
+                    # S3 (#546): when a terminal expired record already
+                    # exists for the aid, the 410 links the human to the
+                    # answered history where the Expired badge card
+                    # renders — otherwise the bare 410 stands.
                     try:
                         os.remove(p)
                     except OSError:
@@ -1540,7 +1609,8 @@ class Handler(BaseHTTPRequestHandler):
                     _evict_aid_lock(aid)
                     audit_log("expired-reaped", self.client_address[0], login,
                               "id=%s" % aid)
-                    self._err("This approval expired and was removed.", 410)
+                    self._err("This approval expired and was removed.", 410,
+                              suffix=_expired_record_link_html(aid))
                     return
                 # Finding 48 + issue #75: mint a CSRF nonce, keeping a small
                 # ring of recent nonces in the pending file (a fresh GET in a
@@ -1738,6 +1808,8 @@ class Handler(BaseHTTPRequestHandler):
                       "again.", 403)
             return
         # Finding 53(a): expired items are refused, not silently denied.
+        # S3 (#546): link to the answered history when a terminal expired
+        # record already exists (see the GET detail reap above).
         if is_expired(it):
             try:
                 os.remove(src)
@@ -1746,7 +1818,8 @@ class Handler(BaseHTTPRequestHandler):
             _evict_aid_lock(aid)
             audit_log("expired-reaped", self.client_address[0], login,
                       "id=%s" % aid)
-            self._err("This approval expired and was removed.", 410)
+            self._err("This approval expired and was removed.", 410,
+                      suffix=_expired_record_link_html(aid))
             return
         # Finding 50: the requester is the file owner, and only
         # bdrive/swapd may file.

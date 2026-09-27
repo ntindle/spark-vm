@@ -354,14 +354,17 @@ class ConfirmdTests(unittest.TestCase):
 
     def test_1_answered_api_allowlists_fields(self):
         """Answered JSON exposes only id/summary/kind/decision/
-        answered_by/answered_at."""
+        answered_by/answered_at (+ the S3 expired_at/expired_by for
+        expired records — the expiry's own stamp fields, never the
+        answer fields reused)."""
         it = dict(self._evil_item())
         it.update({"decision": "approve", "answered_by": "ntindle@github",
                    "answered_at": "2026-09-18T10:05:00+00:00"})
         out = cd._answered_api_item(it)
         self.assertEqual(set(out),
                          {"id", "summary", "kind", "decision",
-                          "answered_by", "answered_at"})
+                          "answered_by", "answered_at",
+                          "expired_at", "expired_by"})
         self.assertEqual(out["decision"], "approve")
 
     def test_1_pending_sorted_oldest_first(self):
@@ -789,8 +792,8 @@ class ConfirmdTests(unittest.TestCase):
         with mock.patch.object(cd.Handler, "_auth",
                                return_value="ntindle@github"), \
              mock.patch.object(cd.Handler, "_err",
-                               side_effect=lambda m, c: got.update(
-                                   msg=m, code=c)), \
+                               side_effect=lambda m, c, suffix="": got.update(
+                                   msg=m, code=c, suffix=suffix)), \
              mock.patch.object(cd, "APPROVALS", str(self.approvals)):
             h.do_GET()
         self.assertEqual(got["code"], 410)
