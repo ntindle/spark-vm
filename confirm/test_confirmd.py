@@ -1258,6 +1258,120 @@ class ConfirmdTests(unittest.TestCase):
             (self.approvals / "consumed" / (aid + ".json")).exists())
         self.assertNotIn(aid, cd._aid_locks)
 
+    def test_294_writer_refusal_routes_to_honest_410(self):
+        """Issue #294 (architecture B1): when the writer refuses at mint
+        time (exit 3 = expiry crossed, its own fresh clock under the
+        mint lock), confirmd must route into the honest #240 path —
+        410 + 'answer-expired-mid-mint' + aid-lock eviction — not the
+        generic 500. The item's own expiry is far in the future, so the
+        410 here can only come from the writer-refusal route, not the
+        in-memory is_expired re-check."""
+        aid = "writer-refusal-410-1"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00",
+              "credential": "c", "host": "h", "method": "GET"}
+        nonce = cd._mint_csrf_nonce(it)
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                # The writer's fresh clock saw the expiry cross mid-mint.
+                class R:
+                    returncode = 3
+                    stdout = ""
+                    stderr = ("grant-writer: refusing to mint: approval "
+                              "expired at 2026-09-27T06:40:00+00:00")
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        events = []
+        cd._aid_lock(aid)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch("subprocess.run", side_effect=fake_run), \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda *a: events.append(a)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._answer_locked("ntindle@github", aid, nonce, "approve")
+        self.assertEqual(got.get("code"), 410, got)
+        self.assertTrue(
+            any(e[0] == "answer-expired-mid-mint" for e in events),
+            "no answer-expired-mid-mint audit; events: %r" % (events,))
+        # Not the generic failure path…
+        self.assertFalse(
+            any(e[0] == "grant-failed" for e in events),
+            "writer refusal must not take the generic path; events: %r"
+            % (events,))
+        # …and never an answer record for a grant that was never minted.
+        self.assertFalse(
+            any(e[0] == "answer" for e in events),
+            "contradictory answer event; events: %r" % (events,))
+        self.assertFalse(
+            (self.approvals / "answered" / (aid + ".json")).exists())
+        self.assertFalse(
+            (self.approvals / "consumed" / (aid + ".json")).exists())
+        self.assertTrue(src.exists(), "pending file stays for the reap")
+        self.assertNotIn(aid, cd._aid_locks)
+
+    def test_294_writer_unparseable_keeps_500(self):
+        """Issue #294 (architecture B1): exit 4 = the writer could not
+        parse the expiry instant — a bug, not an expiry — so it must
+        keep the generic 500 'grant-failed' path and must NOT be
+        mislabeled as expired."""
+        aid = "writer-refusal-500-1"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00",
+              "credential": "c", "host": "h", "method": "GET"}
+        nonce = cd._mint_csrf_nonce(it)
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                class R:
+                    returncode = 4
+                    stdout = ""
+                    stderr = ("grant-writer: refusing to mint: unparseable "
+                              "approval-expiry 'garbage'")
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        events = []
+        cd._aid_lock(aid)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch("subprocess.run", side_effect=fake_run), \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda *a: events.append(a)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._answer_locked("ntindle@github", aid, nonce, "approve")
+        self.assertEqual(got.get("code"), 500, got)
+        self.assertTrue(
+            any(e[0] == "grant-failed" for e in events),
+            "no grant-failed audit; events: %r" % (events,))
+        self.assertFalse(
+            any(e[0] == "answer-expired-mid-mint" for e in events),
+            "unparseable must not be mislabeled as expired; events: %r"
+            % (events,))
+        self.assertFalse(
+            any(e[0] == "answer" for e in events),
+            "contradictory answer event; events: %r" % (events,))
+
     def test_534_grant_window_helper_boundaries(self):
         """Issue #534: _grant_window_ok — no expiry means no window to
         guard (True); malformed expiry parses to None (same as is_expired);

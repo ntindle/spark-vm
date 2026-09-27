@@ -293,7 +293,8 @@ class GrantWriterTests(unittest.TestCase):
         (fail-closed), leaves no grant, and writes the distinct audit
         line."""
         r = self._add_with_expiry("exp-past", self._past())
-        self.assertNotEqual(r.returncode, 0)
+        # Exit 3 = crossed (the honest-path signal confirmd routes on).
+        self.assertEqual(r.returncode, 3, r.stderr)
         self.assertIn("refusing to mint", r.stderr)
         self.assertEqual(
             self.read_grants() if os.path.exists(self.grants_file) else [],
@@ -306,7 +307,9 @@ class GrantWriterTests(unittest.TestCase):
         """Issue #294: an unparseable expiry instant cannot be trusted —
         fail closed, not mint."""
         r = self._add_with_expiry("exp-bad", "not-an-instant")
-        self.assertNotEqual(r.returncode, 0)
+        # Exit 4 = unparseable (a bug, not an expiry — confirmd must not
+        # mislabel it as expired).
+        self.assertEqual(r.returncode, 4, r.stderr)
         self.assertIn("unparseable", r.stderr)
         self.assertEqual(
             self.read_grants() if os.path.exists(self.grants_file) else [],
