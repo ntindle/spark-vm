@@ -17,6 +17,20 @@
 set -euo pipefail
 umask 077
 
+# Issue #90: INFERENCE_SECRETS_DIR exists ONLY for tests (see the header
+# comment). Enforcement keys off the effective UID (see
+# cred-registry-set): when running as swapd, a caller-set dir fails
+# closed before anything is read or written — a direct-as-swapd
+# invocation honoring caller env would turn this narrow writer into an
+# arbitrary-path file write as swapd. Outside the swapd identity (tests,
+# dev) the override is honored.
+_swapd_uid="$(id -u swapd 2>/dev/null || true)"
+if [ -n "$_swapd_uid" ] && [ "$(id -u)" = "$_swapd_uid" ] && [ -n "${INFERENCE_SECRETS_DIR:-}" ]; then
+    echo "cred-store-set-inference: refusing: INFERENCE_SECRETS_DIR is set (path overrides are not honored when running as swapd)" >&2
+    exit 2
+fi
+unset _swapd_uid
+
 dir="${INFERENCE_SECRETS_DIR:-/home/swapd/inference-secrets}"
 max_bytes=65536
 
