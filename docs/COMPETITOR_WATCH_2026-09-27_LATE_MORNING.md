@@ -126,7 +126,8 @@ rather than a new platform. The sandbox-infrastructure lane itself remains
 quiet this window. A new verdict baseline is set from this pass.
 
 Carried: C37, C55, C57, C58 (pricing vendor-verified), C62 (no movement,
-recrawl contact — quiet count reset); C26 CLOSED; C12 OPEN (AgentComputer
+recrawl contact — quiet count reset), C67 (NEW this pass, carried forward
+for P63 quiet-count tracking); C26 CLOSED; C12 OPEN (AgentComputer
 still no egress policy). Aged out this pass: C66 (third consecutive quiet
 pass — one-notice line above). Aged out (staying out): Heapjack/Overpatch
 (recrawl contact, no new facts), GitLab proxy escape (CVE-2026-85706),
