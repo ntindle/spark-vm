@@ -54,6 +54,7 @@ class ExpiredTerminalStampTests(unittest.TestCase):
         self.addon = sa.SwapAddon.__new__(sa.SwapAddon)
         self.addon._audit = lambda *a: True
         self.addon._denial_cache = {}  # #307: per-tuple consumed/ scan cache
+        self.addon._expiry_cache = {}  # S2 (#511): expiry-lookup cache
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -116,25 +117,33 @@ class ExpiredTerminalStampTests(unittest.TestCase):
     # --- filing-scan reap integration ---
 
     def test_filing_scan_reap_stamps_and_signals(self):
-        """An expired tuple-matching pending item is reaped: the
-        consumed/ record is stamped (expired_by=proxy), the pending file
-        is deleted, and the expired:<aid> signal is reported alongside
-        the replacement filing."""
+        """S2 (#511): an expired tuple-matching pending item is reaped —
+        the consumed/ record is stamped (expired_by=proxy) and the
+        pending file deleted. _file_approval itself no longer emits the
+        expired leg (the retired scan-time observation leg); the leg is
+        served deterministically from consumed/ via
+        _approval_signal_for_refusal's _terminal_expiry append."""
         self._plant_pending(_expired_pending())
         pdir, pen, summons, push = self._ctx()
         with pdir, pen, summons, push:
-            signals = self.addon._file_approval("github", "github.com",
-                                                "POST", "/gists", "test")
-        aids = [s[0] for s in signals]
-        self.assertIn((AID, "expired"), signals)
-        # A replacement was filed for the tuple.
-        self.assertIn("pending", [s[1] for s in signals])
+            filing_signals = self.addon._file_approval(
+                "github", "github.com", "POST", "/gists", "test")
+        # Retired leg: _file_approval emits only the replacement filing.
+        self.assertNotIn((AID, "expired"), filing_signals)
+        self.assertIn("pending", [s[1] for s in filing_signals])
         self.assertFalse((self.approvals / "pending" / (AID + ".json"))
                          .exists())
         rec = self._consumed(AID)
         self.assertIsNotNone(rec)
         self.assertEqual(rec["decision"], "expired")
         self.assertEqual(rec["expired_by"], "proxy")
+        # The composition point serves the deterministic leg alongside
+        # the coalesced pending signal.
+        with pdir, pen, summons, push:
+            signals = self.addon._approval_signal_for_refusal(
+                "github", "github.com", "POST", "/gists", "test")
+        self.assertIn((AID, "expired"), signals)
+        self.assertIn("pending", [s[1] for s in signals])
         # The replacement filing is a distinct, live approval.
         new_aids = [s[0] for s in signals if s[1] == "pending"]
         self.assertEqual(len(new_aids), 1)

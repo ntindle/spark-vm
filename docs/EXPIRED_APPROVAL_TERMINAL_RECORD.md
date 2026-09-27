@@ -1,6 +1,9 @@
 # Expired approvals as a terminal record (G1 / GitHub #213)
 
-**Status: design** — implementation slices S1–S3 are not yet built. Track:
+**Status: partial implementation** — S1 shipped (#520); **S2
+(deterministic expired-leg serving) ships with this change**; S3
+(human surface: Expired badge card, 410 link, human-drop-off row)
+remains open. Track:
 open-source (confirmd/proxy are self-hosted components; the contract carries
 to the hosted plane unchanged). Areas: `confirmd`, `proxy`.
 
@@ -278,13 +281,13 @@ terminal history, not a second feed).
    approve/deny record (the answer path's unconditional `os.replace`
    wins); regression: today's `_terminal_denial` ignores the new records
    (fail-closed on pre-S2 proxies).
-2. **S2 — serve the record (proxy).** New `_terminal_expiry` lookup
-   parallel to `_terminal_denial`, same TTL window, same mtime
-   pre-filter, "newest expired wins" keyed on `expired_at`; retire the
-   best-effort filing-scan `expired:<aid>` leg; compose in
-   `_approval_signal_for_refusal` as an append to `_file_approval`'s
-   signals (never the deny-style short-circuit); update
-   `docs/APPROVAL_CLIENT_SIGNAL.md` (decision vocabulary,
+2. **S2 — serve the record (proxy).** *Shipped (this change).* New
+   `_terminal_expiry` lookup parallel to `_terminal_denial`, same TTL
+   window, same mtime pre-filter, "newest expired wins" keyed on
+   `expired_at`; the best-effort filing-scan `expired:<aid>` leg is
+   retired; composed in `_approval_signal_for_refusal` as an append to
+   `_file_approval`'s signals (never the deny-style short-circuit);
+   `docs/APPROVAL_CLIENT_SIGNAL.md` updated (decision vocabulary,
    the inference rule becomes the documented fallback, the
    no-suppression rule). Tests: newest-expired-wins over the tuple,
    TTL expiry of the leg, path-scoping parity with the deny lookup,

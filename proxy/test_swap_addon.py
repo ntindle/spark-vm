@@ -214,6 +214,7 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY,
     a._current_egress_ip = None
     a._approval_signal = None  # reset per request by request()
     a._denial_cache = {}  # #307: per-tuple consumed/ scan cache
+    a._expiry_cache = {}  # S2 (#511): expiry-lookup cache, same shape
     a.refused = []
     a._audit_refused = lambda host, name, reason: a.refused.append(
         (host, name, reason))
@@ -2335,8 +2336,12 @@ class ApprovalSignalTests(unittest.TestCase):
                     json.loads(files[0].read_text())["id"], "a1b2c3d4")
 
     def test_h18_expired_pending_delivers_expired_and_refiles(self):
-        """An expired pending item reports 'expired:<old-aid>' alongside
-        the replacement's pending signal; the stale file is reaped."""
+        """S2 (#511): an expired pending item is reaped and stamped to
+        consumed/ (S1), and the terminal record is served
+        deterministically as 'expired:<old-aid>' alongside the
+        replacement's pending signal — the leg comes from
+        _terminal_expiry's consumed/ lookup, not from the scan-time
+        observation (retired). The stale file is reaped."""
         import datetime as dt
         with tempfile.TemporaryDirectory() as tmp:
             pdir, pen = self._ctx(tmp)
@@ -2348,6 +2353,7 @@ class ApprovalSignalTests(unittest.TestCase):
                 (pdir_ / "expired01.json").write_text(json.dumps({
                     "id": "expired01", "credential": "github",
                     "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists",
                     "created": (past - dt.timedelta(hours=2)).isoformat(),
                     "expires": past.isoformat()}))
                 a = self._addon(tmp)
@@ -2360,6 +2366,11 @@ class ApprovalSignalTests(unittest.TestCase):
                 self.assertNotEqual(new_aid, "expired01")
                 self.assertFalse((pdir_ / "expired01.json").exists())
                 self.assertTrue((pdir_ / (new_aid + ".json")).exists())
+                # S2: the leg was served from the stamped terminal
+                # record, not the scan observation.
+                rec = json.loads((Path(tmp) / "consumed"
+                                  / "expired01.json").read_text())
+                self.assertEqual(rec["decision"], "expired")
 
     def test_h18_approved_grant_delivers_approved(self):
         """A swap authorized by an owner-minted grant delivers
