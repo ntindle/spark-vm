@@ -198,6 +198,25 @@ cooperative tier: operator holds host root; tenants get contained
 guest-root-equivalent; secrets for the cooperative tenants stay in
 swapd on the host under the operator's exclusive domain.
 
+**Containment mechanism matrix (per-segment — closes #465).** The
+"contained root-equivalent" phrasing above and in §2 finding 4 does a
+lot of work, so this table states which primitive each
+`docs/ICP.md` segment commits to. A reader auditing the claim against
+the §1 blast-radius inventory needs exactly these three rows.
+
+| Segment (`docs/ICP.md`) | Containment primitive committed | Why (auditable against §1) |
+|---|---|---|
+| 1 — Self-hosters | The jail — a persistent **systemd-nspawn container** on the human-owned host (`jail/build.sh`); the agent runs inside as a workload beneath the human's full host/hypervisor root | Single owner: tenant == operator, so there is no tenant-vs-tenant boundary to hold (§3 Q4: the human owns the host/hypervisor and keeps full root; their agent runs as a workload beneath that control). With the tenant count at one, the §1 inventory rows (A1–A3, A8, A12) describe the single-owner trust model rather than cross-tenant exposure — the jail is the agent's workload cell, not the isolation boundary. |
+| 2 — Hosted signups | Per-tenant box — **Fly Sprites** (the decided provider, §3 Q1; pattern: per-sandbox private network, isolation by default) | Mutually-untrusted tenants. The §1 inventory is the evidence: on a shared host, A1 (host-wide proxy grants) + A2 (one shared credential universe) make the broker a shared secret dispenser — the §3 Q1 ruling: "cannot host mutually-untrusted tenants until A1 (tenant-bound swaps) is fixed." §5 forbids claiming the jail is VM-equivalent isolation. The tenant's agent gets contained root-equivalent inside the box — never host root (the operator keeps root only on the outer enforcement layer, per the §3 Q4 decision). |
+| 3 — Sandbox harness builders | Cooperative-jail / contained-root tier — **the jail** (systemd-nspawn), NOT a per-tenant box | Cooperative tenants: the harness's own coding agents, CI-like trust; the harness, not the substrate, owns the tenant trust story (`docs/ICP.md`). The jail is the honest boundary here and per-tenant boxes would be over-engineering — adopted from research finding 1 (§2): the jail is documented as a *weaker-than-hardware* boundary for cooperative tenants. |
+
+Cross-row rules: never sell the segment-3 jail tier to segment 2 as
+hosted-grade (§5 forbids "jail = VM-equivalent isolation" in any copy
+or docs — the matrix above is the auditable form of that prohibition).
+The A12 shared-root-domain retirement (dedicated, audited operator
+plane instead of passwordless-sudo human co-resident with tenant
+secrets) applies to segment 2 only.
+
 ## 4. Gate release
 
 H11 gates H5, H12, H13 (BACKLOG). This audit releases them to design.
