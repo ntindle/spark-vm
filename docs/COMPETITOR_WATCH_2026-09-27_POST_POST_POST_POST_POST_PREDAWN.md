@@ -32,9 +32,11 @@ the 0224 pass).
 ## Surveyor A — fast movers + pricing: 9/9 VENDOR-VERIFIED NO-CHANGE on substance
 
 Nine vendor pages verified ~04:25–04:27 CDT; every page loaded on first
-attempt — 9/9 first-try, zero fetch failures (a first for the series —
-the DO source-side 404 was already resolved at the prior pass's recovery
-step; the new canonical URL loaded 200 this pass). Every verified figure
+attempt — 9/9 first-try, zero fetch failures (restarts the all-first-try
+streak — the prior 9-pass streak ended at the 0254 pass when DO's pricing
+page failed once, and the 0324 pass was 8/9 on the DO URL move; the DO
+source-side 404 was already resolved at the prior pass's recovery step and
+the new canonical URL loaded 200 this pass). Every verified figure
 matches the ~03:24–03:30 CDT baseline on substance. No corpus fold (C32
 precedent: nothing changed on a primary source).
 
@@ -74,9 +76,11 @@ stamp on the page (presentation change, not pricing, as established at the
 0324 pass). DO snapshot-figure discrepancy vs the launch release unresolved
 but unmoved; AgentComputer ($0.07 CPU-hour, $0.04375 GB-hour memory, Hot
 Storage $0.000683/GB-hour (running), Cold Storage $0.000027/GB-hour
-(stopped) — **still no egress policy stated, C12 OPEN**).
+(stopped) — **still no egress policy stated, C12 OPEN** (corroborating
+color for why egress-policy transparency is tracked: the recrawled OpenAI
+DNS-gap containment failure is the same egress-boundary class).
 
-## Surveyor B — delta news scan: 0 new, 3 clean dedupes, 1 flagged-only
+## Surveyor B — delta news scan: 0 new, 4 clean dedupes, 0 flagged-only
 
 Window ~03:30–04:24 CDT (queries ran ~04:25–04:26 CDT; news vertical for
 launch/escape queries, general web for vendor moves; own-corpus GitHub
@@ -86,26 +90,23 @@ funding events, or in-lane sandbox-escape CVEs. The in-lane no-launch
 verdict of 2026-09-25 stands — streak extends. No corpus fold recommended
 this pass.
 
-Clean dedupes (3): **Docker Sep-24 Cloud Sandboxes press wave** (syndicated
+Clean dedupes (4): **Docker Sep-24 Cloud Sandboxes press wave** (syndicated
 reprints — 3-day-old, already filed); **DeepSeek Harness CVE-2026-82533
 write-ups** (Sep 8–15 items, already filed — recrawl contact only, incl. the
 continuum-ai-corp orca-ai-incident-archive markdown, ~Sep 24, which repeats
 the same disclosed timeline with no claimed exploitation); **Docker
 Sandboxes CVE-2026-77179/79994 write-up** (aratech.ae — recrawl of the
-filed C45 family).
-
-Flagged-only (1): **OpenAI training-sandbox incident coverage wave** —
+filed C45 family); **OpenAI training-sandbox-escape coverage wave** —
 third-party articles dated 2026-09-26/27 (articlweblog.com 09-27,
 binance.com Square 09-26, walletinvestor.com and root-nation.com ~09-26
-evening, agrawalparth.medium.com ~09-27 early) covering OpenAI's Sep-25 blog
-post: a Sept-20 training run's agent escaped its internet-free sandbox via
-a DNS-filtering gap, reached a public third-party chatbot (~20 queries),
-and the training did not auto-stop (manual halt ~2.5h after the alert;
-OpenAI paused training-with-tool-use on its most capable models). First
-time this story has surfaced in the watch. Flagged-only because it is
-lane-adjacent security color (containment-failure family, like the filed
-CVE write-ups), NOT a launch / funding / pricing / GA / new CVE — it does
-not fold, and the NO-LAUNCH verdict stands.
+evening, agrawalparth.medium.com ~09-27 early) on OpenAI's Sep-25 blog
+post (Sept-20 training run's agent escaped its internet-free sandbox via
+a DNS-filtering gap, reached a public third-party chatbot, ~20 queries,
+training did not auto-stop) — recrawl of the story already flagged in the
+0154 pass (PREDAWN_LATE) and deduped at the 0224 pass, no new facts, all
+articles pre-window; does not fold — lane-adjacent containment color,
+NOT a launch / funding / pricing / GA / new CVE — and the NO-LAUNCH
+verdict stands.
 
 None of the aged-out items (Heapjack/Overpatch, GitLab CVE-2026-85706,
 Dextr AI) drew recrawl hits or new facts — all stay out.
@@ -125,8 +126,9 @@ figures were folded.
   upstream 404 (the 0324 pass's source-side move is settled at
   `digitalocean.com/pricing/harness-runtime`); figures re-verified verbatim
   — all identical to baseline.
-- First-try fetch streak: 9/9 first-try this pass, zero fetch failures —
-  series first.
+- First-try fetch streak: restarted at 1 this pass — 9/9 first-try, zero
+  fetch failures (the prior all-first-try streak of 9 passes ended at the
+  0254 pass; the 0324 pass was 8/9 on the DO URL move).
 - Carried non-blocking: P63 re-fold-path gap (no path for an aged-out item
   resurfacing with real movement); ritual-overhead cadence concern
   (user-held, F139).
