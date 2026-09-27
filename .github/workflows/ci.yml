@@ -54,6 +54,10 @@ jobs:
         # suite cannot mask another. scripts/test_pytest_ini_covers_all.py
         # pins the residual drift class: a test_*.py outside testpaths fails
         # the run instead of never running.
+        # if: always(): never let an infra flake in an earlier setup step
+        # (shellcheck's apt-get, pip) skip the whole suite and void the
+        # merge gate's test signal.
+        if: always()
         run: python3 -m pytest -q
       - name: proxy install-safety root tests (substitution regression)
         # test_staged_temp_unreachable_by_parent_dir_attacker and
