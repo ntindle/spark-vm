@@ -53,6 +53,7 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- The grant writer now enforces the approval's expiry at mint time: it refuses to mint when the approval's expiry instant has crossed (or is unreadable), checked against its own clock at the moment the grant would be created — so an expiry crossing during the grant call can't leave a live grant behind. (#549)
 - Approvals are no longer granted in a race against their own expiry: an approval with less than 30 seconds of validity remaining is now refused up front (HTTP 410 with a distinct audit event) instead of minting a grant that could land after the approval had already expired — the grant writer has no revoke path. (#534)
 - confirmd's self-peer address check now re-resolves the box's Tailscale IPs every minute instead of once at startup, so a tailscaled renumber mid-daemon can't silently disable the self-refusal boundary; a failed refresh keeps the last good set rather than shrinking the boundary. (#536)
 

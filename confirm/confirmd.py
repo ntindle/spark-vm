@@ -1763,6 +1763,10 @@ class Handler(BaseHTTPRequestHandler):
         it["requester"] = requester
         # Finding 60: on approve, mint the grant via the single writer
         # BEFORE moving to consumed/. Finding 64: validate the tuple.
+        # Issue #294: whether the writer refused at mint time for a
+        # crossed expiry (exit 3) — routed into the honest #240 block
+        # below. Defaults False; only the mint path can set it.
+        writer_refused_expired = False
         if decision == "approve":
             # Issue #534: refuse to START the mint when the remaining
             # validity is under the worst-case mint window — an expiry
@@ -1793,24 +1797,44 @@ class Handler(BaseHTTPRequestHandler):
                           "id=%s reason=missing credential/host/method" % aid)
                 self._err("Cannot mint grant: missing fields.", 400)
                 return
-            # Call the single writer (finding 60).
+            # Call the single writer (finding 60). Issue #294: hand the
+            # approval's expiry instant to the writer so it can fail
+            # closed at mint time (its own fresh clock, under the mint
+            # lock) if the instant crossed while confirmd was working —
+            # the second layer behind the #534 pre-mint guard above and
+            # the #240 post-mint re-check below.
+            mint_argv = [GRANT_WRITER, "add",
+                         "--credential", name,
+                         "--host", host,
+                         "--method", method,
+                         "--path-prefix", it.get("path_prefix") or "/",
+                         "--approval-id", aid,
+                         "--scope", it.get("scope") or "",
+                         "--job", it.get("job") or ""]
+            approval_expires = it.get("expires")
+            if approval_expires:
+                mint_argv += ["--approval-expires", str(approval_expires)]
+            # Issue #294: the writer's distinct exit codes let confirmd
+            # route a mint-time expiry refusal into the honest #240 path
+            # below instead of the generic 500. Exit 3 = the approval's
+            # expiry crossed (honest 410); anything else non-zero —
+            # including 4 = unparseable instant, a bug rather than an
+            # expiry — keeps the generic failure (it must not be
+            # mislabeled as expired).
             try:
                 out = subprocess.run(
-                    [GRANT_WRITER, "add",
-                     "--credential", name,
-                     "--host", host,
-                     "--method", method,
-                     "--path-prefix", it.get("path_prefix") or "/",
-                     "--approval-id", aid,
-                     "--scope", it.get("scope") or "",
-                     "--job", it.get("job") or ""],
+                    mint_argv,
                     capture_output=True, text=True,
                     timeout=_GRANT_MINT_TIMEOUT)
                 if out.returncode != 0:
-                    audit_log("grant-failed", self.client_address[0], login,
-                              "id=%s err=%s" % (aid, out.stderr.strip()))
-                    self._err("Grant minting failed.", 500)
-                    return
+                    if out.returncode == 3:
+                        writer_refused_expired = True
+                    else:
+                        audit_log("grant-failed", self.client_address[0],
+                                  login,
+                                  "id=%s err=%s" % (aid, out.stderr.strip()))
+                        self._err("Grant minting failed.", 500)
+                        return
             except Exception as e:
                 audit_log("grant-failed", self.client_address[0], login,
                           "id=%s err=%s" % (aid, e))
@@ -1823,10 +1847,19 @@ class Handler(BaseHTTPRequestHandler):
         # than recording an answered/ record for an already-expired
         # approval (which would show answer/approve for an item whose
         # expiry had passed at mint time). The grant itself cannot be
-        # un-minted (no revoke path in the grant-writer interface), so
+        # un-minted (no per-approval-id revoke path in the grant-writer
+        # interface — `revoke` is by job), so
         # the fix is the refusal + the distinct trail event, not
-        # retroactive revocation.
-        if is_expired(it):
+        # retroactive revocation. Issue #294 adds the writer-side layer:
+        # the approval's expiry is passed to grant-writer above, which
+        # refuses at mint time (its own fresh clock, under the mint lock)
+        # when the instant has crossed — so no live grant can exist for
+        # an approval whose expiry crossed before mint completion. A
+        # writer refusal (exit 3) routes into this same honest block, so
+        # the 410 + distinct trail event is the outcome in both cases.
+        # This refusal + distinct trail event remains the confirmd-side
+        # backstop either way.
+        if writer_refused_expired or is_expired(it):
             audit_log("answer-expired-mid-mint", self.client_address[0],
                       login, "id=%s decision=%s" % (aid, decision))
             _evict_aid_lock(aid)

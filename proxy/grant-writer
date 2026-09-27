@@ -16,9 +16,17 @@ Proxies (main and inference) only READ grants.json.
 Usage:
   grant-writer add --credential NAME --host HOST --method METHOD
                   --path-prefix PREFIX --approval-id ID [--scope S]
-                  [--job J] [--ttl-hours H]
+                  [--job J] [--ttl-hours H] [--approval-expires ISO]
   grant-writer revoke --job JOB
   grant-writer list
+
+--approval-expires is the approval's own expiry instant (issue #294):
+the writer checks it against a fresh clock under the mint lock and
+refuses to mint when it has crossed (exit 3) or is unparseable
+(exit 4) — fail-closed at the authority that creates the credential,
+independent of confirmd's pre-mint guard (#534) and post-mint re-check
+(#240). Absent means the approval has no expiry; confirmd always
+passes it when one exists.
 
 --job is recorded on the grant for revoke-by-job and audit. It is NOT
 enforced per-request by the proxy: grants are host-wide, because an
@@ -150,6 +158,59 @@ def _reap_expired(grants):
     return kept
 
 
+class _MintRefused(Exception):
+    """Raised inside the mint path when the approval-expiry check
+    fails closed (issue #294). Carries the process exit code so the
+    caller (confirmd) can route the refusal: 3 = the approval's expiry
+    crossed before mint completion (the honest #240 path); 4 = the
+    expiry instant was unparseable (a bug, not an expiry — must not be
+    mislabeled as one). 2 is already taken (argparse CLI errors and the
+    import-time path-override refusal), so the refusal codes start at
+    3 to avoid any ambiguity."""
+
+    def __init__(self, code, reason):
+        super().__init__(reason)
+        self.code = code
+
+
+_MINT_REFUSED_EXPIRED = 3
+_MINT_REFUSED_UNPARSEABLE = 4
+
+
+def _approval_expiry_refusal(exp_str):
+    """Issue #294: return (exit_code, reason), or (None, None) to proceed.
+
+    The grant-writer is the authority that creates the credential, so
+    it enforces the approval's expiry instant at mint time against its
+    own fresh clock — independent of confirmd's pre-mint guard (#534)
+    and post-mint re-check (#240). Checked inside the mint path under
+    the grants lock, microseconds before the append (the atomic save
+    follows in the same locked section; the residual check-vs-save
+    window is sub-millisecond on one machine).
+
+    - Missing/empty: the approval has no expiry (confirmd's
+      _grant_window_ok allows those) — no constraint, proceed.
+    - Unparseable: fail closed (exit 4). A malformed instant cannot be
+      trusted; minting on a bug is the unsafe direction.
+    - Crossed (now >= exp, the same boundary is_expired and
+      _reap_expired use): refuse (exit 3) — no live grant may exist
+      for an approval whose expiry crossed before mint completion.
+    """
+    if not exp_str:
+        return None, None
+    try:
+        exp = datetime.fromisoformat(exp_str)
+    except (ValueError, TypeError):
+        return (_MINT_REFUSED_UNPARSEABLE,
+                "unparseable approval-expiry %r" % (exp_str,))
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) >= exp:
+        return (_MINT_REFUSED_EXPIRED,
+                "approval expired at %s" % exp.isoformat())
+    return None, None
+
+
 def _with_lock(fn):
     """Run fn(grants) -> (new_grants, audit_msg) under exclusive lock.
 
@@ -221,6 +282,12 @@ def cmd_add(args):
                and g.get("approval_id") == args.approval_id
                for g in grants):
             return grants, None
+        # Issue #294: fail closed at mint time, under the lock, against
+        # a fresh clock — no live grant may exist for an approval whose
+        # expiry crossed before mint completion.
+        code, refusal = _approval_expiry_refusal(args.approval_expires)
+        if refusal:
+            raise _MintRefused(code, refusal)
         grants.append(grant)
         msg = ("grant=created approval_id=%s credential=%s host=%s "
                "method=%s path_prefix=%s job=%s"
@@ -228,7 +295,17 @@ def cmd_add(args):
                   grant["method"], grant["path_prefix"], grant["job"]))
         return grants, msg
 
-    result = _with_lock(add_fn)
+    try:
+        result = _with_lock(add_fn)
+    except _MintRefused as e:
+        # Refusing is the safe action, so the audit line is best-effort:
+        # unlike the save path, a failed audit must not flip this into
+        # a mint. The distinct exit code lets confirmd route a crossed
+        # expiry into the honest #240 path instead of the generic 500.
+        _audit("grant-refused-approval-expired approval_id=%s reason=%s"
+               % (args.approval_id, e))
+        print("grant-writer: refusing to mint: %s" % e, file=sys.stderr)
+        return e.code
     if result is None:
         return 1
     print("grant added: %s" % args.approval_id)
@@ -289,6 +366,10 @@ def main():
     p_add.add_argument("--scope", default="")
     p_add.add_argument("--job", default="")
     p_add.add_argument("--ttl-hours", type=int, default=24)
+    p_add.add_argument("--approval-expires", default=None,
+                       help="approval expiry instant (ISO 8601); the "
+                            "writer refuses to mint when it has crossed "
+                            "or is unparseable (issue #294)")
     p_add.set_defaults(fn=cmd_add)
 
     p_rev = sub.add_parser("revoke", help="revoke grants for a job")

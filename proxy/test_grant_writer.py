@@ -263,6 +263,68 @@ class GrantWriterTests(unittest.TestCase):
         self.assertTrue(audit.is_file())
         self.assertEqual(oct(os.stat(audit).st_mode & 0o777), "0o600")
 
+    def _add_with_expiry(self, aid, expires):
+        argv = ["add", "--credential", "c", "--host", "h",
+                "--method", "GET", "--approval-id", aid]
+        if expires is not None:
+            argv += ["--approval-expires", expires]
+        return self.run_writer(*argv)
+
+    def _future(self):
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc)
+                + timedelta(hours=1)).isoformat()
+
+    def _past(self):
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc)
+                - timedelta(hours=1)).isoformat()
+
+    def test_294_future_approval_expiry_mints(self):
+        """Issue #294: a live approval expiry passes the writer-side
+        check and mints normally."""
+        r = self._add_with_expiry("exp-ok", self._future())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.read_grants()), 1)
+
+    def test_294_crossed_approval_expiry_refuses(self):
+        """Issue #294: an approval whose expiry crossed before mint
+        completion must not produce a live grant — the writer refuses
+        (fail-closed), leaves no grant, and writes the distinct audit
+        line."""
+        r = self._add_with_expiry("exp-past", self._past())
+        # Exit 3 = crossed (the honest-path signal confirmd routes on).
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("refusing to mint", r.stderr)
+        self.assertEqual(
+            self.read_grants() if os.path.exists(self.grants_file) else [],
+            [])
+        audit = (Path(self.tmp.name) / "audit.log").read_text()
+        self.assertIn("grant-refused-approval-expired", audit)
+        self.assertIn("approval_id=exp-past", audit)
+
+    def test_294_malformed_approval_expiry_refuses(self):
+        """Issue #294: an unparseable expiry instant cannot be trusted —
+        fail closed, not mint."""
+        r = self._add_with_expiry("exp-bad", "not-an-instant")
+        # Exit 4 = unparseable (a bug, not an expiry — confirmd must not
+        # mislabel it as expired).
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertIn("unparseable", r.stderr)
+        self.assertEqual(
+            self.read_grants() if os.path.exists(self.grants_file) else [],
+            [])
+        audit = (Path(self.tmp.name) / "audit.log").read_text()
+        self.assertIn("grant-refused-approval-expired", audit)
+
+    def test_294_absent_approval_expiry_mints(self):
+        """Issue #294: no --approval-expires (an approval with no
+        expiry, which confirmd's pre-mint guard also allows) mints as
+        before — the flag is backward-compatible."""
+        r = self._add_with_expiry("exp-none", None)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.read_grants()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
