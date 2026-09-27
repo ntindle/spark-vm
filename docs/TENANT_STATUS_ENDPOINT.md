@@ -235,7 +235,10 @@ readers                       tenant Muse (linked key) · signup page (cookie)
   rendering of the expiry G1 instruments agent-side; the two must agree
   on the TTL boundary (one reminder at T+TTL/2, then expiry — §4), and
   G1's agent-visible terminal record must carry the same approval id the
-  summons deep-linked.
+  summons deep-linked. (**Design shipped 2026-09-26:**
+  `docs/EXPIRED_APPROVAL_TERMINAL_RECORD.md` — expiry becomes a third
+  `decision: "expired"` value in `consumed/<aid>.json`; same aid, same
+  TTL boundary; S1–S3 build slices.)
 - **G5 (golden-image gate):** the gate procedure's pass criterion —
   file → answer → grant-mint → verify — is observable as
   `waiting-on-approval` → `approved` on this endpoint; `policy-misfire`
