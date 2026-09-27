@@ -21,17 +21,27 @@ pass doc naming the aged item, so the fold stays auditable; no silent
 drops. A quiet pass = a pass with no new information, movement, or
 recrawl-mention of the item; vendor re-verification contact counts as
 contact, not a quiet pass. Applied this pass: **C11 (Baseten/Blaxel) drew
-zero mentions for the third consecutive pass — C11 AGES OUT this pass**
-(the mandatory one-notice line; aged items stay out pending real movement
-per the open re-fold-path gap). **C56 (DeepSeek Harness CVE-2026-82533)
+zero mentions this pass — quiet pass 1 of 3 (corrected lineage — see note
+below).** **C56 (DeepSeek Harness CVE-2026-82533)
 drew zero mentions — quiet pass 2 of 3.** C62 (OpenAI offline-sandbox
 escape) drew recrawl contact (aiagentsdirectory AI Agents News Brief,
 teknowire Kontext piece) — quiet count stays 0. C12 stays OPEN
 (AgentComputer still no egress line; no movement). Aged-out items stayed
 out or silent with no real movement (C66; Heapjack/Overpatch; GitLab
-CVE-2026-85706; Dextr AI). Re-fold-path gap still open: no re-fold path
-for an aged-out item that resurfaces with real movement (follow-up proposal
-from the 0224 pass).
+CVE-2026-85706; Dextr AI). Nothing ages out this pass. Re-fold-path gap
+still open: no re-fold path for an aged-out item that resurfaces with real
+movement (follow-up proposal from the 0224 pass).
+
+**P63 lineage correction (caught at review):** the evening pass claimed C11
+at "quiet pass 2 of 3" while its own dedupe section contained
+recrawl-mentions of C11's subject (runtimewire Baseten $26B recrawl;
+beri.net Baseten-acquires-Blaxel analysis color) — under P63 those break a
+quiet pass (the same standard the evening pass applied to C62's recrawl
+contact), so the evening pass's 2-of-3 was invalid. Corrected chain:
+AFTERNOON recrawl contact (count 0) → LATE_AFTERNOON quiet pass 1 (the
+openai-cookbook provider-list Blaxel name-drop is tangential, not an
+item-mention) → EVENING recrawl-mentions (count 0) → this pass quiet pass
+1 of 3. C11 stays OPEN.
 
 ## Surveyor A — fast movers + pricing: 9/9 VENDOR-VERIFIED NO-CHANGE on substance
 
@@ -174,7 +184,9 @@ lane stays quiet.** Vendors: 9/9 unchanged; the all-first-try streak reaches
 9 passes. News: 0 new, recrawls only. New-to-corpus sightings are all
 flagged-only lane-adjacent items (Docker Engine escape CVE-2026-71443; six
 third-party comparison/engineering write-ups; yuraoak E2B pricing analysis). Corpus
-movement: **C11 (Baseten/Blaxel) ages out** (quiet pass 3 of 3 — one-notice
-line above; no silent drop); C56 quiet pass 2 of 3; C62 recrawl contact
+movement: **nothing ages out**; C11 (Baseten/Blaxel) quiet pass 1 of 3
+(corrected lineage — the evening pass's 2-of-3 was invalid: its own dedupe
+section contained Baseten recrawl-mentions); C56 quiet pass 2 of 3; C62
+recrawl contact
 (count 0); C12 OPEN (AgentComputer still no egress line); aged-out stay out;
 re-fold-path gap still open.
