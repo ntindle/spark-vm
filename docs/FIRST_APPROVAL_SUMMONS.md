@@ -119,16 +119,28 @@ copy, and this doc pins the assembly rules:
 - **Deep link:** the summons body's approval URL is built from the
   `approvals_url` carrier in the tenant record (G3's scope —
   `TENANT_STATUS_ENDPOINT.md` §3) plus the approval id:
-  `<approvals_url>/approval/<aid>`. **G8's open question** (who writes
-  `approvals_url`, and re-entry rotation) is the one sequencing dependency:
-  if the tenant record has no `approvals_url` at summons time, the email
-  **omits the deep link entirely** — no fabrication. The human was handed
-  the approvals-page URL at signup stage 2 (spec §4 item 1) and already
-  holds it, so the email points there with the copy "open your approvals
-  page and tap the pending approval." `<base>/approval/<aid>` is not a
-  licensed fallback: the carrier contract shows `approvals_url` as
+  `<approvals_url>/approval/<aid>`. G8 resolved 2026-09-26
+  (`TENANT_STATUS_ENDPOINT.md` §8): the signup step that hands the
+  human the approvals-page URL (activation-funnel stage 2) owns the
+  write — mint-once, persisted before render — so the carrier is present
+  from stage 2 on and the deep link is fully licensed. No fallback: the
+  human was handed the approvals-page URL at signup stage 2 (spec §4
+  item 1) and already holds it; `<base>/approval/<aid>` is not a
+  licensed shape — the carrier contract shows `approvals_url` as
   tenant-scoped, and a probably-broken link trains humans that summons
-  links are broken. G8's resolution removes the fallback.
+  links are broken. Missing-carrier case: if the tenant record has no `approvals_url`
+  at summons time, treat it as a **store-inconsistency defect and file
+  it** — a filing implies the funnel passed stage 2, which implies the
+  handler persisted the URL before render, so the human holds a URL the
+  record lacks. The email still omits the deep link and keeps the
+  approvals-page copy ("open your approvals page and tap the pending
+  approval" — valid, because the human was handed the URL at stage 2) —
+  no fabrication — and the defect is filed as an event in the §6
+  funnel-telemetry vocabulary (the `WAITLIST_OPERATIONS.md` event
+  vocabulary — `funnel_events`, emitted from day one per
+  `HOSTED_SIGNUP_WEB_UI.md` §5), surfaced by S3's operator dashboard,
+  not the summons path. There is no licensed pre-stage-2 summons: a filing
+  cannot exist before stage 2.
 - **Plain-language action:** the filing record's tuple, rendered as the
   page renders it ("your Muse asked to use `<credential>` for
   `<host>`"). No model-authored text enters the email (finding-49
@@ -270,10 +282,10 @@ event vocabulary):
   **Sequencing:** (a) the §10 event channel is unbuilt — say so, and
   verify its batch-write/ship capability at implementation; (b) G3's S1
   (the tenant-record store, carrying `first_summons_sent`,
-  `approvals_url`, and possibly the recipient) is unbuilt; (c) G8's
-  `approvals_url` write-ownership — until it resolves, the email omits
-  the deep link per §2; (d) the recipient's read path from the H9
-  identity records (record-extension question, §1).
+  `approvals_url`, and possibly the recipient) is unbuilt; (c) the
+  recipient's read path from the H9 identity records (record-extension
+  question, §1). G8's `approvals_url` write-ownership is RESOLVED
+  2026-09-26 (`TENANT_STATUS_ENDPOINT.md` §8 — deep link licensed).
 - **S3 — retirement + funnel telemetry:** the §4 retirement rule (201
   accepted = retired; 410 = email fallback + re-registration), the §6
   funnel events, and the operator-dashboard surfacing of
@@ -281,9 +293,10 @@ event vocabulary):
 
 ## 8. Open questions (carried, not decided here)
 
-- **G8 (dependency):** which signup-flow step owns the `approvals_url`
-  write, and re-entry rotation. Blocks the deep link's carrier, not the
-  design.
+- **G8 (dependency):** RESOLVED 2026-09-26 (`TENANT_STATUS_ENDPOINT.md`
+  §8 — the stage-2 hand-over step owns the write, mint-once; re-entry is
+  a read path). The §2 sequencing note above is updated; the deep link
+  is licensed.
 - **Operator mail path exists — reuse decision, not greenfield.**
   `site/waitlistd.py` already spools outbound transactional mail
   (`_spool_patha_email`: clarification replies, forget confirmations,
@@ -296,6 +309,6 @@ event vocabulary):
   inbox or reuses an existing operational one is an operator decision —
   S2 records the choice; §5 licenses only that no default is blessed
   in the design.
-- **Per-tenant vs per-box:** G7's multi-box-tenant question applies to
-  the summons too — a tenant with two boxes has two onboarding arcs,
-  and "first filing" is per arc. S2 reads G7's resolution when it lands.
+- **Per-tenant vs per-box:** ANSWERED → `TENANT_STATUS_ENDPOINT.md`
+  §8 (2026-09-26): the summons' first-filing trigger stays per box-side
+  arc (the outbox journal is per-box); S2 reads §8.
