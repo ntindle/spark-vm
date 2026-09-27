@@ -18,8 +18,34 @@
 # Root-owned 0755; ntindle can only execute it via the sudoers entry.
 set -euo pipefail
 
+# Issue #90: CRED_REGISTRY_FILE / CRED_REGISTRY_LOCK exist ONLY for tests.
+# Enforcement keys off the effective UID — not a caller-settable bless
+# marker (the old SWAPD_WRITER_PATH_OVERRIDE design was unsound: a
+# direct-as-swapd caller can set any marker, so it was no boundary at
+# all). When this script actually runs as swapd, a caller-set override
+# fails closed before any path is read — sudo's env_reset already strips
+# these on the sudo path; this covers direct-as-swapd invocation, which
+# would otherwise turn this narrow writer into an arbitrary-path file
+# write as swapd. Outside the swapd identity (tests, dev) the overrides
+# are honored; root already has arbitrary write authority, so no new
+# capability is granted there. PATH-independence is load-bearing for this
+# boundary: `id` is resolved by absolute path and the self-check uses
+# bash's $EUID builtin, so a hostile `id` earlier on a caller-controlled
+# PATH cannot neuter the guard (usrmerge Ubuntu: /usr/bin/id always
+# exists).
+_swapd_uid="$(/usr/bin/id -u swapd 2>/dev/null || true)"
+if [ -n "$_swapd_uid" ] && [ "$EUID" = "$_swapd_uid" ]; then
+    for _ov in CRED_REGISTRY_FILE CRED_REGISTRY_LOCK; do
+        if [ -n "${!_ov:-}" ]; then
+            echo "cred-registry-set: refusing: $_ov is set (path overrides are not honored when running as swapd)" >&2
+            exit 2
+        fi
+    done
+fi
+unset _swapd_uid _ov
+
 exec python3 - "$@" <<'PYEOF'
-import fcntl, json, os, re, sys, tempfile
+import fcntl, json, os, pwd, re, sys, tempfile
 import atexit
 
 def fail(msg):
@@ -86,8 +112,44 @@ def check_host_legacy(h):
         fail("invalid host %r" % (h,))
     return lowered
 
-reg_path = os.environ.get("CRED_REGISTRY_FILE",
-                           "/home/swapd/credentials.json")
+def _running_as_swapd():
+    # Issue #90: the effective UID is the enforcement identity (see the
+    # bash guard above). No swapd user on the box (tests, dev) means we
+    # are not swapd — the override seam stays open there.
+    try:
+        return os.geteuid() == pwd.getpwnam("swapd").pw_uid
+    except KeyError:
+        return False
+
+
+if _running_as_swapd():
+    # Defense in depth behind the bash guard above: refuse caller-set
+    # path overrides here too, via PATH-independent syscalls (os.geteuid
+    # / pwd never consult PATH). Unreachable when the bash guard is
+    # intact — it already exited 2 — but the boundary must not depend on
+    # a single layer. The wrapper's CRED_REGISTRY_INFERENCE flag is not
+    # a path var and is unaffected.
+    _bad = [v for v in ("CRED_REGISTRY_FILE", "CRED_REGISTRY_LOCK")
+            if v in os.environ]
+    if _bad:
+        sys.stderr.write(
+            "cred-registry-set: refusing: %s set (path overrides are not "
+            "honored when running as swapd)\n" % ", ".join(_bad))
+        sys.exit(2)
+
+
+if (os.environ.get("CRED_REGISTRY_INFERENCE") == "1"
+        and "CRED_REGISTRY_FILE" not in os.environ):
+    # Pinned by the cred-registry-set-inference wrapper (root-owned): the
+    # flag carries no path, it only selects the fixed inference registry.
+    # No arbitrary path is reachable through it, even direct-as-swapd —
+    # and the bash guard above already refused a caller-set
+    # CRED_REGISTRY_FILE in the swapd identity, so the flag cannot be
+    # combined with a redirected path there either.
+    reg_path = "/home/swapd/inference-registry.json"
+else:
+    reg_path = os.environ.get("CRED_REGISTRY_FILE",
+                              "/home/swapd/credentials.json")
 reg_dir = os.path.dirname(reg_path) or "."
 
 # All read-modify-write cycles run under an exclusive flock on a
@@ -179,7 +241,21 @@ if action == "set":
     )
     if not ok:
         fail("invalid placement %r" % (placement,))
-    reg.setdefault(name, {})[entry] = {"placement": placement}
+    # Issue #96: merge, don't replace — a re-`set` must not silently drop
+    # a per-entry `scrub:false` opt-out (finding 36) or any other
+    # entry-scoped field a later verb (set-scrub) maintains. Deliberate
+    # scrub-flag changes have their own verb; `set` only owns placement.
+    name_spec = reg.setdefault(name, {})
+    if not isinstance(name_spec, dict):
+        fail("registry entry for '%s' is not an object" % (name,))
+    entry_spec = name_spec.get(entry)
+    if entry_spec is None:
+        name_spec[entry] = {"placement": placement}
+    else:
+        if not isinstance(entry_spec, dict):
+            fail("registry entry '%s' for '%s' is not an object"
+                 % (entry, name))
+        entry_spec["placement"] = placement
     save()
     print("registered '%s' entry '%s'" % (name, entry))
 elif action == "remove":

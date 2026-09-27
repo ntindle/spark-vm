@@ -10,8 +10,42 @@ Usage: cred-grant-revoke --job <job-id>
 """
 import argparse
 import os
+import pwd
 import subprocess
 import sys
+
+
+# Issue #90: GRANT_WRITER selects the binary this script execs, so it is
+# the sharpest of the narrow-writer path overrides — it exists ONLY for
+# tests. Enforcement keys off the effective UID, not a caller-settable
+# bless marker (the old SWAPD_WRITER_PATH_OVERRIDE design was unsound: a
+# direct-as-swapd caller can set any marker, so it was no boundary at
+# all). When this process actually runs as swapd, a caller-set GRANT_WRITER
+# fails closed before the binary path is read; sudo's env_reset already
+# strips it on the sudo path. Outside the swapd identity (tests, dev) the
+# override is honored — root already has arbitrary exec authority, so no
+# new capability is granted there. getpwnam is injectable (and euid
+# overridable) so the decision function is unit-testable without a swapd
+# user on the box.
+def _running_as_swapd(euid=None, getpwnam=pwd.getpwnam):
+    try:
+        swapd_uid = getpwnam("swapd").pw_uid
+    except KeyError:
+        return False
+    return (os.geteuid() if euid is None else euid) == swapd_uid
+
+
+def _check_path_overrides():
+    if not _running_as_swapd():
+        return
+    if "GRANT_WRITER" in os.environ:
+        sys.stderr.write(
+            "cred-grant-revoke: refusing: GRANT_WRITER set (binary overrides "
+            "are not honored when running as swapd)\n")
+        sys.exit(2)
+
+
+_check_path_overrides()
 
 GRANT_WRITER = os.environ.get("GRANT_WRITER", "/home/swapd/grant-writer")
 
