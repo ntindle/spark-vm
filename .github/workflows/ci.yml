@@ -35,9 +35,9 @@ jobs:
           python-version: "3.12"
       # The merge gate proves exactly what a contributor runs locally
       # (CONTRIBUTING.md "Running the tests"): requirements-test.txt is the
-      # whole dependency set — pytest, cryptography (confirm/push.py's Web
-      # Push tests), pillow (waitlist page og:image assertions). mitmproxy
-      # is a *deploy* dependency, never imported by a test module.
+      # whole dependency set — pytest plus cryptography for confirm/push.py's
+      # Web Push tests. mitmproxy is a *deploy* dependency, never imported
+      # by a test module.
       - name: install test dependencies
         run: pip install -r requirements-test.txt
       # cua/test_shell_scripts.py gates on shellcheck warnings; pin it
@@ -54,10 +54,6 @@ jobs:
         # suite cannot mask another. scripts/test_pytest_ini_covers_all.py
         # pins the residual drift class: a test_*.py outside testpaths fails
         # the run instead of never running.
-        # if: always(): never let an infra flake in an earlier setup step
-        # (shellcheck's apt-get, pip) skip the whole suite and void the
-        # merge gate's test signal.
-        if: always()
         run: python3 -m pytest -q
       - name: proxy install-safety root tests (substitution regression)
         # test_staged_temp_unreachable_by_parent_dir_attacker and

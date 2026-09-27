@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PYTEST_INI = ROOT / "pytest.ini"
 
 
-def get_testpaths():
+def testpaths():
     parser = configparser.ConfigParser()
     parser.read(PYTEST_INI)
     raw = parser.get("pytest", "testpaths")
@@ -49,7 +49,7 @@ def all_test_files():
 
 class TestPytestIniCoversAll(unittest.TestCase):
     def test_every_test_file_is_under_testpaths(self):
-        paths = get_testpaths()
+        paths = testpaths()
         uncovered = [
             f.relative_to(ROOT).as_posix()
             for f in all_test_files()
@@ -68,7 +68,7 @@ class TestPytestIniCoversAll(unittest.TestCase):
         )
 
     def test_testpaths_entries_exist(self):
-        missing = [str(p.relative_to(ROOT)) for p in get_testpaths() if not p.exists()]
+        missing = [str(p.relative_to(ROOT)) for p in testpaths() if not p.exists()]
         self.assertEqual(
             missing,
             [],
