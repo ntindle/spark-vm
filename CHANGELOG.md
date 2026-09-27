@@ -328,6 +328,8 @@ This changelog only works if entries land with the change, not after it:
 
 ### Security
 
+- Denial is now terminal even in the race window (#306): the proxy re-checks for an owner denial immediately before filing a fresh approval, so a Deny tapped while a refusal was in flight no longer files a new approval and re-pushes the owner. Separately, the per-refusal denial lookup is now cached per request tuple with invalidation on every terminal write, so agents that trigger refusals at will no longer pay a full directory scan per refusal (#307). (#522)
+
 - The credential/grant narrow writers (`cred-registry-set`, `grant-writer`, `cred-grant-revoke`, and the inference variants) no longer honor caller-controlled path-redirect variables when running as the `swapd` user: enforcement is keyed off the effective user ID, so even a direct as-`swapd` invocation (outside `sudo`, where `env_reset` already stripped them) cannot redirect the registry, grants, lock, audit-log, or secrets paths. The inference registry wrapper pins its child to the fixed inference registry via a pathless flag instead of an overridable variable. Test and development runs outside the `swapd` identity keep the override seam. (#90, #518)
 - `cred-registry-set set` now merges the new placement into the existing credential entry instead of replacing it, so re-registering a credential no longer silently drops its per-entry response-scrubbing opt-out. (#96, #518)
 
