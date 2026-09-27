@@ -58,6 +58,17 @@ BACKLOG.md block points here.
   sections in this doc are candidates for summarization by a review/meta
   run — the baseline stays skimmable; the archived watch docs preserve the
   record.
+- **The corpus (canonical definition, declared 2026-09-27):** for the
+  stale-version dedupe rule and the P63 aging pipeline, "the corpus" =
+  every watch-pass document (`docs/COMPETITOR_WATCH_*.md`, including
+  archived ones under `docs/archive/competitor-watch/`) PLUS this doc
+  (`docs/COMPETITOR_ANALYSIS.md`) PLUS `CHANGELOG.md` (watch entries are
+  dated there too). Dedupe must scan the FULL series — not just the last 3
+  watch docs — because never-folded flagged-only candidates live in older
+  pass docs; the CVE-2026-92940 misfile (2026-09-27 late-evening) proved
+  the 3-doc window insufficient. The `docs/README.md` index is a map of
+  the series but carries only summaries, not evidence — it cannot
+  substitute for the docs.
 
 **Scope note:** the market splits into two segments and spark-vm only plays in
 one of them. **Task-scoped sandboxes** (E2B, Daytona, Modal, Vercel, Cloudflare,
