@@ -36,7 +36,19 @@ lines (writes atomically via `install`; idempotent; supports `--dry-run`).
   checkout — a compromised or half-written checkout cannot inject code into
   the update path.
 - Updates **defer while any `mjob-*` tmux session exists** (conservative idle
-  gate); `--force` bypasses.
+  gate); `--force` bypasses. **Known limitation:** tmux sockets are per-uid,
+  so the gate (running as root) only sees root's tmux server — `mjob-*`
+  sessions owned by another uid (e.g. `ntindle`) are invisible to it, and a
+  missing/broken tmux probe also reads as "no jobs". In v0 this is acceptable
+  because `update` never restarts services or installs packages itself — it
+  only rewrites the apt config — but the gate must not be relied on as a hard
+  exclusion until it is made uid-aware (follow-up slice).
+- The `os-security` repair **overwrites** `/etc/apt/apt.conf.d/20auto-upgrades`
+  with exactly the two required lines. Any operator tuning in that file
+  (e.g. `Unattended-Upgrade::Allowed-Origins`) is discarded on repair — on a
+  fresh box the file holds exactly those lines, so this is normally a no-op.
+  Merge-in-place of operator tuning is a follow-up slice; until then, put
+  custom apt tuning in a separate file under `/etc/apt/apt.conf.d/`.
 - Single-flight `flock`, `umask 077`, JSONL audit log plus a stable run log.
 - Weekly Sunday 03:00 local quiet-hours schedule with a 30-minute randomized
   delay (`sparkvm-toolset-update.timer`, `Persistent=false`).

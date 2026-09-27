@@ -291,6 +291,7 @@ cmd_update() {
     exec 9>"$STATE_LOCK" 2>/dev/null || { log "update: cannot open lock"; return 1; }
     if ! flock -n 9 2>/dev/null; then
         log "update: another run holds the lock; no-op"
+        audit 'toolset-update' ',"result":"deferred","reason":"lock-held"'
         return 0
     fi
 

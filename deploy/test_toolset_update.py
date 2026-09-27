@@ -416,7 +416,9 @@ def test_uninstall_disables_timer_via_systemctl(env):
 
 def test_unit_files_content_fidelity():
     # The timer must drive the INSTALLED copy, not the checkout; schedule
-    # and targets must match docs/TOOLSET_UPDATE.md.
+    # and targets must match docs/TOOLSET_UPDATE.md. Security pins: no
+    # environment injection surface (systemd gives the service a clean env),
+    # no privilege escalation, private /tmp.
     svc = open(os.path.join(REPO, "deploy", "sparkvm-toolset-update.service")).read()
     tmr = open(os.path.join(REPO, "deploy", "sparkvm-toolset-update.timer")).read()
     assert "ExecStart=/home/ntindle/.sparkvm-toolset/bin/toolset-update.sh update" in svc
@@ -425,6 +427,10 @@ def test_unit_files_content_fidelity():
     assert "Persistent=false" in tmr
     assert "WantedBy=timers.target" in tmr
     assert "WantedBy=multi-user.target" in svc
+    for directive in ("EnvironmentFile=", "PassEnvironment=", "Environment="):
+        assert directive not in svc, directive
+    assert "NoNewPrivileges=true" in svc
+    assert "PrivateTmp=true" in svc
 
 
 def test_optout_env_var_is_noop(env):

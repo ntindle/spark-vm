@@ -18,6 +18,10 @@ Type=oneshot
 # (see docs/TOOLSET_UPDATE.md).
 User=root
 ExecStart=/home/ntindle/.sparkvm-toolset/bin/toolset-update.sh update
+# Harden the root service: no privilege escalation from the updater itself,
+# private /tmp so staged files are invisible to other users.
+NoNewPrivileges=true
+PrivateTmp=true
 # A failed run must be loud in the journal and in the state dir.
 StandardOutput=journal
 StandardError=journal
