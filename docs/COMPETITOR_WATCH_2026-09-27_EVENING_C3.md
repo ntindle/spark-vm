@@ -5,7 +5,7 @@ delta-only against the afternoon cycle-3 pass (#582, merged as
 `9164444`): (A) fast-mover + pricing re-verification vs the
 ~17:12–~17:13 CDT (2026-09-27) baseline (vendor reads ~18:26–~18:28
 CDT 2026-09-27), (B) delta news scan ~17:55–~18:26 CDT (~30-min delta
-window; scan ran ~18:27–~18:29 CDT; 20 search queries, snippet level,
+window; scan ran ~18:27–~18:55 CDT; 20 search queries, snippet level,
 zero pages opened — no genuinely-new first-party claims surfaced).
 Read-only, no logins, no writes. Captures:
 `hidden_files/agent_notes/surveyor-a-20260927-1824.md`,
@@ -226,7 +226,7 @@ no-launch verdict dated 2026-09-25 stands — streak extends.
    C68-candidate material — schedule the DevDay-outcome check in the
    Sep-29 slots.
 2. **C62 quiet-count restart** — this pass's 7-outlet recrawl wave
-   (crawls <1h) RESET the quiet count from 2/3 → 0/3. The prior
+   (crawls <1h–4h) RESET the quiet count from 2/3 → 0/3. The prior
    three B-lane quiet passes are superseded — watch the wave for a
    genuine wind-down before any new aging run.
 3. CVE-2026-93993 fold decision (see corpus-gap note 2 — parent
