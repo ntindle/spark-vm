@@ -21,8 +21,8 @@ CI_YML = ROOT / ".github" / "workflows" / "ci.yml"
 def ci_job_check_names(ci_yml_path):
     """Check-run names GitHub derives from ci.yml's jobs: `name:` if set, else the job id.
 
-    Purpose-built minimal parser (no PyYAML — the CI python-tests job
-    installs only pytest, so this must not need anything else). It
+    Purpose-built minimal parser (no PyYAML — requirements-test.txt carries
+    no PyYAML, and this test must not need anything beyond it). It
     understands only this file's shape:
 
         jobs:
