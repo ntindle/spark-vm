@@ -1,9 +1,8 @@
 # Expired approvals as a terminal record (G1 / GitHub #213)
 
-**Status: partial implementation** — S1 shipped (#520); **S2
-(deterministic expired-leg serving) ships with this change**; S3
-(human surface: Expired badge card, 410 link, human-drop-off row)
-remains open. Track:
+**Status: full implementation** — S1 shipped (#520); S2 shipped (#545);
+S3 (human surface: Expired badge card, 410 link, human-drop-off row)
+ships with this change (#546). Track:
 open-source (confirmd/proxy are self-hosted components; the contract carries
 to the hosted plane unchanged). Areas: `confirmd`, `proxy`.
 
@@ -148,7 +147,7 @@ the aid's lifetime.
 - The synchronous human answer path (`is_expired` → 410 + the existing
   `expired-reaped` audit line) is unchanged. (S3) If a terminal expired
   record already exists for the aid, the 410 page links the human to
-  the answered history, where S3 renders the expired card (§7).
+  the answered history, where S3 renders the expired card (§5).
 
 Which reaper won is recorded in `expired_by`. Operators reading the
 audit log (`expired-reaped` lines) can join to the terminal record on
@@ -281,8 +280,8 @@ terminal history, not a second feed).
    approve/deny record (the answer path's unconditional `os.replace`
    wins); regression: today's `_terminal_denial` ignores the new records
    (fail-closed on pre-S2 proxies).
-2. **S2 — serve the record (proxy).** *Shipped (this change).* New
-   `_terminal_expiry` lookup parallel to `_terminal_denial`, same TTL
+2. **S2 — serve the record (proxy).** *Shipped (PR #545, merged).*
+   New `_terminal_expiry` lookup parallel to `_terminal_denial`, same TTL
    window, same mtime pre-filter, "newest expired wins" keyed on
    `expired_at`; the best-effort filing-scan `expired:<aid>` leg is
    retired; composed in `_approval_signal_for_refusal` as an append to
@@ -292,10 +291,12 @@ terminal history, not a second feed).
    no-suppression rule). Tests: newest-expired-wins over the tuple,
    TTL expiry of the leg, path-scoping parity with the deny lookup,
    expired-never-suppresses-filing.
-3. **S3 — human surface.** Answered-history Expired badge card
-   (distinct from Approved/Denied; shows `expired_at`, `expired_by`);
-   410 page links to the card; `TENANT_STATUS_ENDPOINT.md` §2
-   `human-drop-off` row cites this doc.
+3. **S3 — human surface.** *Shipped (this change, #546).*
+   Answered-history Expired badge card (distinct amber style from
+   Approved/Denied; shows `expired_at`, `expired_by`); the two
+   synchronous expired 410s (GET detail, POST answer) link to the card
+   when a terminal expired record already exists for the aid;
+   `TENANT_STATUS_ENDPOINT.md` §2 `human-drop-off` row cites this doc.
 
 ## 10. Open questions
 

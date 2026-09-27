@@ -76,7 +76,7 @@ and feeds *into* this endpoint; it is never exposed raw, per
 | `policy-misfire` | First task produced zero or 2+ filings (§6.7 gate; zero-filings is misfire only for a task that *does* take the gated action — no action at all is `no-gated-action`) | Golden-image gate fixture; operator-only (no human rendering) |
 | `no-gated-action` | Muse never attempted the gated action | Pilot analysis; operator-only (no human rendering) |
 | `human-denied` | Human tapped Deny | The denial event |
-| `human-drop-off` | Approval expired unanswered (§4: one reminder at T+TTL/2, then expiry) | Expiry; pairs with G1 (expired approvals need an agent-visible terminal record, GitHub #213) |
+| `human-drop-off` | Approval expired unanswered (§4: one reminder at T+TTL/2, then expiry) | Expiry. Human surface: the answered-history Expired badge card + the expired-410 → answered-history link (`docs/EXPIRED_APPROVAL_TERMINAL_RECORD.md` §3/§5, S3) |
 | `stuck` | First session stalled | Operator/heuristic, currently operator-set per spec §8's concrete rule (session abandonment: 30 minutes with no Muse action and no pending approval); G9's real stall detector targets that rule. Exits: operator/heuristic clears → the tenant layer re-evaluates to the current arc code; a reprovision restarts the session (transition rule 7). Until S3's confidence bar is met (`docs/STUCK_DETECTOR_DESIGN.md` §6), `stuck` must never be exposed as automatic. |
 | `provisioning-failed` | Provisioning terminally failed | H4 driver terminal failure |
 
@@ -247,7 +247,10 @@ readers                       tenant Muse (linked key) · signup page (cookie)
   summons deep-linked. (**Design shipped 2026-09-26:**
   `docs/EXPIRED_APPROVAL_TERMINAL_RECORD.md` — expiry becomes a third
   `decision: "expired"` value in `consumed/<aid>.json`; same aid, same
-  TTL boundary; S1–S3 build slices.)
+  TTL boundary; S1–S3 build slices — all three now shipped: the stamp
+  (S1), the deterministic agent serving (S2), and the human surface
+  (S3: answered-history Expired badge card + expired-410 →
+  answered-history link).)
 - **G5 (golden-image gate):** the gate procedure's pass criterion —
   file → answer → grant-mint → verify — is observable as
   `waiting-on-approval` → `approved` on this endpoint; `policy-misfire`
