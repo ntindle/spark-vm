@@ -265,6 +265,51 @@ class ConfirmdTests(unittest.TestCase):
         self.assertIn("100.65.241.20", cd.HOST_ADDRS)
         self.assertIn("fd7a:115c:a1e0::ee39:f116", cd.HOST_ADDRS)
 
+    # --- 536: HOST_ADDRS is TTL-refreshed, not frozen at import ---------
+
+    def test_536_refresh_picks_up_renumbered_addrs(self):
+        """After the TTL, a renumbered tailscale IP set is picked up —
+        the finding-47 self-refusal can't go stale on a renumber."""
+        with mock.patch.object(cd, "_host_addrs",
+                               side_effect=[({"1.1.1.1"}, True),
+                                            ({"2.2.2.2"}, True)]):
+            sa = cd._SelfAddrs()
+            self.assertIn("1.1.1.1", sa)
+            sa._ts -= cd._HOST_ADDRS_TTL + 1  # age past the TTL
+            self.assertNotIn("1.1.1.1", sa)
+            self.assertIn("2.2.2.2", sa)
+
+    def test_536_failed_refresh_keeps_stale_set(self):
+        """A failed refresh must not shrink the refusal boundary — the
+        last good set is kept, not collapsed to BIND."""
+        with mock.patch.object(cd, "_host_addrs",
+                               side_effect=[({"1.1.1.1"}, True),
+                                            ({"0.0.0.0"}, False)]):
+            sa = cd._SelfAddrs()
+            sa._ts -= cd._HOST_ADDRS_TTL + 1  # age past the TTL
+            self.assertIn("1.1.1.1", sa)
+
+    def test_536_concurrent_contains_is_thread_safe(self):
+        """Handler threads share the instance; concurrent `in` checks
+        across a refresh must not raise or return garbage."""
+        with mock.patch.object(cd, "_host_addrs",
+                               return_value=({"1.1.1.1"}, True)):
+            sa = cd._SelfAddrs()
+            errors = []
+            def probe():
+                try:
+                    for _ in range(200):
+                        assert ("1.1.1.1" in sa)
+                except Exception as e:  # noqa: BLE001
+                    errors.append(e)
+            sa._ts -= cd._HOST_ADDRS_TTL + 1  # force refresh on all threads
+            threads = [threading.Thread(target=probe) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+
     # --- 50: requester from file owner ------------------------------------
 
     def test_50_file_owner_name(self):

@@ -384,7 +384,9 @@ def _csrf_nonce_ok(it, csrf):
 # never the human on a remote node.
 def _host_addrs():
     """Finding 63(b): try sudo first (same narrow rule as whois). If
-    tailscaled is unreachable, warn - the set collapses to BIND only."""
+    tailscaled is unreachable, warn - the set collapses to BIND only.
+    Returns (addrs, ok); ok is False exactly when no tailscale query
+    succeeded."""
     addrs = set()
     ok = False
     for cmd in (["sudo", "-n", "tailscale", "ip"], ["tailscale", "ip"]):
@@ -407,9 +409,49 @@ def _host_addrs():
               "set is BIND only", flush=True)
     # Belt and braces: the bind address is always self.
     addrs.add(BIND)
-    return addrs
+    return addrs, ok
 
-HOST_ADDRS = _host_addrs()
+
+# Issue #536: the self-peer address set was frozen at import — a tailscaled
+# renumber mid-daemon left finding 47's self-refusal stale for the process
+# lifetime. Re-resolve on a slow cadence (60 s, mirroring the whois cache).
+_HOST_ADDRS_TTL = 60
+
+
+class _SelfAddrs:
+    """TTL-cached self-address set for finding 47's self-peer refusal.
+
+    Keeps the module-level ``HOST_ADDRS`` name and its ``in`` shape, so
+    callers and tests are unchanged. A failed refresh keeps the last good
+    set (the refusal boundary must never silently shrink); the import-time
+    resolve keeps finding 63(b)'s warn-and-collapse-to-BIND semantics.
+    Thread-safe: handler threads share the one instance.
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        addrs, _ = _host_addrs()
+        self._addrs = addrs
+        self._ts = time.monotonic()
+
+    def _refresh(self):
+        now = time.monotonic()
+        with self._lock:
+            if now - self._ts < _HOST_ADDRS_TTL:
+                return
+            addrs, ok = _host_addrs()
+            if ok:
+                self._addrs = addrs
+            # else: keep the stale set — a refusal boundary must not
+            # shrink because tailscaled was momentarily unreachable.
+            self._ts = now
+
+    def __contains__(self, peer):
+        if time.monotonic() - self._ts >= _HOST_ADDRS_TTL:
+            self._refresh()
+        return peer in self._addrs
+
+
+HOST_ADDRS = _SelfAddrs()
 
 # Small whois cache: identity checks are per-request, tailscaled is local.
 _whois_cache = {}
