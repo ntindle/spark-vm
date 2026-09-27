@@ -235,6 +235,17 @@ _reopen_nonces = {}
 _REOPEN_NONCE_TTL = 15 * 60
 _REOPEN_NONCE_CAP = 4096
 
+# Issue #534: the grant-mint subprocess bound and the pre-mint validity
+# window. The approve path refuses to START a mint when the remaining
+# validity is under the worst-case mint duration + margin: an expiry that
+# crosses mid-mint would land a grant for an already-expired approval,
+# and the grant writer has no revoke path — so the window must be closed
+# before the subprocess starts. The #240 post-mint check can only refuse
+# the *recording*, never the mint. The subprocess timeout below is the
+# same constant, so the bound is a single source of truth.
+_GRANT_MINT_TIMEOUT = 15
+_GRANT_MINT_WINDOW = 30  # seconds of remaining validity required
+
 
 def _mint_reopen_nonce(aid):
     """Mint (or re-issue the live) re-open nonce for a denied aid. The
@@ -594,6 +605,22 @@ def is_expired(item):
     # item is expired exactly at its instant everywhere.
     exp = _parse_expiry(item.get("expires"))
     return exp is not None and datetime.now(timezone.utc) >= exp
+
+
+def _grant_window_ok(it):
+    """Issue #534: True when a grant mint may start — the item has no
+    expiry, or its remaining validity covers the worst-case mint window.
+    Called on the approve path before the grant subprocess: an expiry
+    crossing mid-mint mints an un-revokable grant, so a narrow window is
+    refused honestly (410 + distinct audit event) instead of minting
+    into it. The pending file is left in place; the render reap stamps
+    `expired` when the clock crosses — the honest outcome label for a
+    request whose window lapsed."""
+    exp = _parse_expiry(it.get("expires"))
+    if exp is None:
+        return True
+    remaining = (exp - datetime.now(timezone.utc)).total_seconds()
+    return remaining >= _GRANT_MINT_WINDOW
 
 
 def file_owner_name(path):
@@ -1695,6 +1722,27 @@ class Handler(BaseHTTPRequestHandler):
         # Finding 60: on approve, mint the grant via the single writer
         # BEFORE moving to consumed/. Finding 64: validate the tuple.
         if decision == "approve":
+            # Issue #534: refuse to START the mint when the remaining
+            # validity is under the worst-case mint window — an expiry
+            # crossing mid-mint would land a grant for an already-expired
+            # approval, and there is no revoke path. The pending file is
+            # left in place: the render reap stamps `expired` when the
+            # clock crosses (the honest outcome label for a request whose
+            # window lapsed), and the 410 tells the owner to file a fresh
+            # request.
+            if not _grant_window_ok(it):
+                exp = _parse_expiry(it.get("expires"))
+                remaining = (0 if exp is None else
+                             max(0, int((exp - datetime.now(
+                                 timezone.utc)).total_seconds())))
+                audit_log("approve-refused-expiry-window",
+                          self.client_address[0], login,
+                          "id=%s remaining=%ds" % (aid, remaining))
+                _evict_aid_lock(aid)
+                self._err("This approval is too close to expiry to grant "
+                          "safely — wait for it to expire, or ask the agent "
+                          "to file a fresh request.", 410)
+                return
             name = it.get("credential")
             host = it.get("host")
             method = (it.get("method") or "").upper()
@@ -1714,7 +1762,8 @@ class Handler(BaseHTTPRequestHandler):
                      "--approval-id", aid,
                      "--scope", it.get("scope") or "",
                      "--job", it.get("job") or ""],
-                    capture_output=True, text=True, timeout=15)
+                    capture_output=True, text=True,
+                    timeout=_GRANT_MINT_TIMEOUT)
                 if out.returncode != 0:
                     audit_log("grant-failed", self.client_address[0], login,
                               "id=%s err=%s" % (aid, out.stderr.strip()))
