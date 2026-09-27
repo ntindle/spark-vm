@@ -397,3 +397,100 @@ def test_status_uses_custom_pins_file(tmp_path, capsys):
     rc = self_update.main(["status", "--pins", str(pins_file)])
     assert rc == 0
     assert "DRIFT" in capsys.readouterr().out  # real VERSION != 9.9.9
+
+
+# --- unknown-pin warnings (dead config must be loud) -------------------------
+
+
+def test_pin_warnings_flags_unknown_names():
+    pins = {"docker": "27.5.1", "doker": "27.5.1", "nobe": "1.0"}
+    assert self_update.pin_warnings(pins) == ["doker", "nobe"]
+
+
+def test_pin_warnings_empty_when_all_known():
+    assert self_update.pin_warnings({"docker": "27.5.1"}) == []
+    assert self_update.pin_warnings({}) == []
+
+
+def test_status_table_warns_on_unknown_pin(tmp_path, capsys):
+    pins_file = tmp_path / "pins.conf"
+    pins_file.write_text("docker = 27.5.1\ndoker = 27.5.1\n")
+    rc = self_update.main(["status", "--pins", str(pins_file)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "unmatched pins (no such probe): doker" in out
+
+
+def test_status_json_warns_on_unknown_pin(tmp_path, capsys):
+    pins_file = tmp_path / "pins.conf"
+    pins_file.write_text("docker = 27.5.1\ndoker = 27.5.1\n")
+    rc = self_update.main(["status", "--json", "--pins", str(pins_file)])
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["pin_warnings"] == ["doker"]
+
+
+def test_status_json_no_warnings_when_all_known(tmp_path, capsys):
+    pins_file = tmp_path / "pins.conf"
+    pins_file.write_text("docker = 27.5.1\n")
+    rc = self_update.main(["status", "--json", "--pins", str(pins_file)])
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["pin_warnings"] == []
+
+
+# --- banner lines above the version line ------------------------------------
+
+
+def test_pattern_scans_past_stdout_banner_lines():
+    runner = fake_runner({("docker", "--version"):
+                          (0, "Using Docker Engine API v1.47\n"
+                              "Docker version 27.5.1, build 9f78933\n", "")})
+    installed, version, _ = self_update.probe_docker(
+        which=fake_which({"docker": "/usr/bin/docker"}), runner=runner)
+    assert installed is True
+    assert version == "27.5.1"  # banner must not become the version
+
+
+def test_pattern_fallback_still_whole_first_line_without_any_match():
+    runner = fake_runner({("docker", "--version"):
+                          (0, "totally unexpected banner\nand more\n", "")})
+    installed, version, _ = self_update.probe_docker(
+        which=fake_which({"docker": "/usr/bin/docker"}), runner=runner)
+    assert installed is True
+    assert version == "totally unexpected banner"
+
+
+# --- real timeout kill path --------------------------------------------------
+
+
+def test_default_runner_kills_hanging_probe():
+    import time
+    start = time.monotonic()
+    rc, stdout, stderr = self_update.default_runner(
+        ["sleep", "30"], timeout=0.5)
+    elapsed = time.monotonic() - start
+    assert rc == 127  # timeout contract
+    assert stdout == "" and stderr == ""
+    assert elapsed < 5  # killed promptly, not left hanging
+
+
+# --- snap edge cases ---------------------------------------------------------
+
+
+def test_snap_list_failure_still_counts_installed():
+    runner = fake_runner({("snap", "list"): (1, "", "boom")})
+    installed, version, note = self_update.probe_snap(
+        which=fake_which({"snap": "/usr/bin/snap"}), runner=runner)
+    assert installed is True
+    assert version is None
+    assert "failed" in note
+
+
+def test_snap_header_only_reports_zero():
+    out = ("Name    Version   Rev   Tracking       Publisher   Notes\n")
+    runner = fake_runner({("snap", "list"): (0, out, "")})
+    installed, version, note = self_update.probe_snap(
+        which=fake_which({"snap": "/usr/bin/snap"}), runner=runner)
+    assert installed is True
+    assert version == "0 snaps"

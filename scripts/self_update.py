@@ -89,7 +89,22 @@ def _probe_binary_version(binary, argv, pattern=None, which=shutil.which,
         return True, None, "found at %s but version query failed" % path
     version = line
     if pattern is not None:
-        m = re.search(pattern, line)
+        # Some tools print banners above their version line; scan all
+        # non-empty lines for the first pattern match before falling back
+        # to the raw first line (a banner must never become the version).
+        # stdout is searched before stderr, matching _version_output's
+        # preference (B1).
+        m = None
+        for stream in (stdout, stderr):
+            for candidate in (stream or "").strip().splitlines():
+                candidate = candidate.strip()
+                if not candidate:
+                    continue
+                m = re.search(pattern, candidate)
+                if m:
+                    break
+            if m:
+                break
         version = m.group(1) if m else line
     return True, version, "via %s %s" % (binary, " ".join(argv))
 
@@ -339,7 +354,18 @@ def status(pins_path=_PINS_FILE):
     return [run_probe(name, probe, pins) for name, _, probe in PROBES]
 
 
-def format_table(records):
+def pin_warnings(pins):
+    """Pin names matching no registered probe — dead config must be loud.
+
+    A misspelled pin (`doker = ...`) would otherwise silently report no
+    drift forever, so unknown pin names are surfaced as warnings in both
+    the table footer and the --json document.
+    """
+    known = {name for name, _, _ in PROBES}
+    return sorted(name for name in pins if name not in known)
+
+
+def format_table(records, pin_warnings=()):
     rows = [("TOOL", "INSTALLED", "VERSION", "PINNED", "DRIFT", "NOTE")]
     for r in records:
         rows.append((
@@ -365,6 +391,9 @@ def format_table(records):
         lines.append("not installed: %s" % ", ".join(missing))
     if drifted:
         lines.append("drift from pin: %s" % ", ".join(drifted))
+    if pin_warnings:
+        lines.append("unmatched pins (no such probe): %s"
+                     % ", ".join(pin_warnings))
     return "\n".join(lines)
 
 
@@ -382,14 +411,16 @@ def main(argv=None):
 
     if args.command == "status":
         records = status(pins_path=args.pins)
+        warnings = pin_warnings(load_pins(args.pins))
         if args.json:
             print(json.dumps({
                 "generated_at": int(time.time()),
                 "slice": "S1-status",
                 "tools": records,
+                "pin_warnings": warnings,
             }, indent=2))
         else:
-            print(format_table(records))
+            print(format_table(records, pin_warnings=warnings))
         return 0
     return 2  # unreachable: argparse enforces the subcommand
 
