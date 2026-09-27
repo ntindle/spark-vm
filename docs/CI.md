@@ -9,6 +9,7 @@ against `main`, and on manual `workflow_dispatch` runs.
 | `shellcheck` | shellcheck at `--severity=error` over every `*.sh` (gates on real breakage, not style) |
 | `markdown-links` | lychee checks every link in every `*.md` (`--exclude-loopback`: docs reference localhost service addresses that can never resolve on a runner; `--exclude` for the bot-blocking hosts — boat.dev, businesswire.com, daytona.io, fourweekmba.com, globenewswire.com, medium.com, producthunt.com, tvgreport.com, plus the release-compare URL pattern — see the exclusion comments in `.github/workflows/ci.yml`; the local-run block below documents the manual re-sweep ritual for the medium.com / businesswire.com / globenewswire.com subset). Mail links are excluded by lychee's default in current versions — do not pass `--exclude-mail`; the flag was removed upstream and fails the step. |
 | `png-check` | Playwright screenshots example.com (`scripts/pw-test.py`) and `scripts/png-check.py` validates the PNG signature/dimensions |
+| `changelog-ritual` | `scripts/lint-changelog-ritual.py` enforces the CHANGELOG ritual's rules 1 + 4: entries must not reference workspace-internal paths (`agent_notes/`, `hidden_files/`, `workspace/goals/`) that never exist in a reader's checkout. The ritual preamble documenting the rule is exempt. |
 
 # replicate the CI jobs locally before opening a PR:
 

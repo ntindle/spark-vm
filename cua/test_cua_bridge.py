@@ -483,7 +483,10 @@ class TestBridgeServer:
 
     def test_concurrency_bound_is_sane(self, bridge):
         assert isinstance(bridge.MAX_CONCURRENT_REQUESTS, int)
-        assert 1 < bridge.MAX_CONCURRENT_REQUESTS <= 32
+        # Pin the exact bound: widening 8 -> 16 (or narrowing it) is a
+        # deliberate concurrency policy change, not a tune-by-feel tweak,
+        # so it must edit this assertion, not slip through a range check.
+        assert bridge.MAX_CONCURRENT_REQUESTS == 8
 
     def test_concurrent_requests_do_not_serialize(self, live, monkeypatch):
         # A slow driver call must not head-of-line-block a second request:

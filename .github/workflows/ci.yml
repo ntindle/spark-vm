@@ -12,6 +12,7 @@
 #   cd jail    && python3 -m pytest test_build_smoke.py -q
 #   cd scripts && python3 -m pytest test_bounded_http.py test_waitlistd.py -q
 #   cd harness && python3 -m pytest test_proxy_match.py test_inject_provision_state.py -q
+#   python3 scripts/lint-changelog-ritual.py  # changelog ritual lint (enforced as a CI job too)
 
 name: ci
 
@@ -121,6 +122,21 @@ jobs:
         uses: ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca
         with:
           severity: error
+
+  changelog-ritual:
+    name: changelog ritual lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Enforces CHANGELOG.md's own ritual (rules 1 + 4): entries must not
+      # reference workspace-internal paths (agent_notes/, hidden_files/,
+      # workspace/goals/) that never exist in a reader's checkout. The
+      # ritual preamble that documents the rule is exempt (see the script).
+      - name: lint changelog for workspace-internal path references
+        run: python3 scripts/lint-changelog-ritual.py
 
   markdown-links:
     name: markdown link check
