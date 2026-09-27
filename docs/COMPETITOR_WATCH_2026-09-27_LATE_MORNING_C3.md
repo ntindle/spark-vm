@@ -39,9 +39,12 @@ piece carries a 4-round valuation-history table (Modal ~$1.1B Sep-25 →
 ~$15B talks Sep-26; Baseten $2.1B Sep-25 → ~$26B talks) — funding-
 trajectory color if the corpus ever wants it. **Daytona** — changelog
 top entry still SEP 26 / V0.218.0, no V0.219+; no movement.
-**Microsandbox** — v0.7.1 still newest tagged release; v0.7.2 bump PR
-#1610 still release-preparation only (downstream inoio/agents-sandbox
-v0.3.1 consumes unreleased code) — no new tagged release.
+**Microsandbox** — no new tagged release: v0.7.3 still newest on the
+vendor releases page (#1646), vendor-verified this pass. Surveyor B's
+snippet-level "v0.7.1 still newest tagged / v0.7.2 bump PR still
+release-prep" chatter contradicts the vendor releases page and is
+discarded per the vendor-authoritative convention (same call as the
+1554 pass).
 **E2B / Vercel Sandbox / Runloop / TermSquad / boat.dev** — no
 product/pricing movement (TermSquad Sep-15 launch-press syndication
 recrawls only; Vercel Sandbox Drives still public beta, no GA
@@ -150,10 +153,10 @@ family); CVE-2026-92122 (Jenkins) + CVE-2026-63587 (VMware ESXi)
 (recrawls only, no movement); Modal $15B raise talks (bytevyte,
 runtimewire, radio-syndication reprints — filed Sep-23, neither round
 closed); Daytona (changelog top entry still SEP 26 / V0.218.0 — no
-V0.219+); Microsandbox (v0.7.1 still newest tagged — v0.7.2 bump PR
-still release-preparation); E2B / Vercel Sandbox / Runloop / TermSquad /
-boat.dev (no product/pricing movement; TermSquad Sep-15 syndication
-recrawls only); vm2 CVE-2026-47686 (1dayexploit analysis recrawl, filed);
+V0.219+); Microsandbox (v0.7.3 vendor-verified — B's snippet-level "v0.7.1
+newest" chatter discarded per the vendor-authoritative convention);
+E2B / Vercel Sandbox / Runloop / TermSquad / boat.dev (no
+product/pricing movement; TermSquad Sep-15 syndication recrawls only); vm2 CVE-2026-47686 (1dayexploit analysis recrawl, filed);
 C26 (no movement, closed stays closed); C56 (devops.com, dennysentinel
 recrawls — aged-out, not re-folded); C62 not sighted in B lane (quiet
 count held at 0/3, see P63 section); C12 not sighted in-lane (stays
