@@ -213,6 +213,7 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY,
     a._audit = lambda host, matched: True
     a._current_egress_ip = None
     a._approval_signal = None  # reset per request by request()
+    a._denial_cache = {}  # #307: per-tuple consumed/ scan cache
     a.refused = []
     a._audit_refused = lambda host, name, reason: a.refused.append(
         (host, name, reason))
@@ -2642,6 +2643,222 @@ class ApprovalSignalTests(unittest.TestCase):
                 self.assertIsNone(
                     a._terminal_denial("github", "github.com", "POST",
                                        "/gists"))
+
+    def test_306_denial_race_aborts_filing(self):
+        """#306: a denial landing between the initial _terminal_denial
+        check and the filing write must abort the filing (and the VAPID
+        push) — the re-check immediately before minting runs fresh,
+        bypassing the #307 cache, and delivers the denial instead."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                a = self._addon(tmp)
+                seen = []
+
+                def racy(name, host, method, path, fresh=False):
+                    # First call: the initial scan in
+                    # _approval_signal_for_refusal (clean). Second call:
+                    # the #306 re-check in _file_approval — the owner's
+                    # deny lands in the window.
+                    seen.append(fresh)
+                    return [None, "deadbeef01"][len(seen) - 1]
+
+                with (mock.patch.object(a, "_terminal_denial",
+                                        side_effect=racy),
+                      mock.patch.object(sa, "_push_notify") as push,
+                      mock.patch.object(sa, "_summons_append") as summons):
+                    signals = a._approval_signal_for_refusal(
+                        "github", "github.com", "POST", "/gists",
+                        "no grant")
+                # The initial scan ran through the cache path; the
+                # re-check ran fresh.
+                self.assertEqual(seen, [False, True])
+                self.assertEqual(signals, [("deadbeef01", "denied")])
+                # Nothing filed, nothing pushed, nothing journaled.
+                self.assertFalse(
+                    list((Path(tmp) / "pending").glob("*.json")))
+                push.assert_not_called()
+                summons.assert_not_called()
+
+    def test_306_recheck_bypasses_stale_negative_cache(self):
+        """#306/#307 interplay: the pre-filing re-check must find a
+        denial even when the #307 cache still holds a negative for the
+        same tuple — the re-check reads fresh by contract, not from
+        cache."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                a = self._addon(tmp)
+                # First refusal: negative scan (cached), approval filed.
+                with mock.patch.object(sa, "_push_notify"):
+                    first = a._approval_signal_for_refusal(
+                        "github", "github.com", "POST", "/gists", "no grant")
+                self.assertEqual(len(first), 1)
+                self.assertEqual(first[0][1], "pending")
+                # Owner taps Deny after the scan.
+                now = dt.datetime.now(dt.timezone.utc)
+                (cdir / "deadbeef01.json").write_text(json.dumps({
+                    "id": "deadbeef01", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "deny",
+                    "answered_at": now.isoformat()}))
+                # Freeze the cache as a stale negative with the CURRENT
+                # dir mtime, so only a fresh-by-contract re-check can
+                # see the denial.
+                key = ("github", "github.com", "POST", "/gists")
+                dm = os.stat(cdir).st_mtime_ns
+                a._denial_cache[key] = (
+                    None, now + dt.timedelta(seconds=30), dm)
+                # Drop the filed approval so the second _file_approval
+                # reaches the fresh-filing path (no coalesce shortcut).
+                for f in (Path(tmp) / "pending").glob("*.json"):
+                    f.unlink()
+                with mock.patch.object(sa, "_push_notify") as push:
+                    signals = a._file_approval(
+                        "github", "github.com", "POST", "/gists",
+                        "no grant")
+                self.assertEqual(signals, [("deadbeef01", "denied")])
+                self.assertFalse(
+                    list((Path(tmp) / "pending").glob("*.json")))
+                push.assert_not_called()
+
+    def _counting_listdir(self, cdir):
+        """Wrap os.listdir, counting calls that scan the consumed/ dir."""
+        real_listdir = os.listdir
+        calls = []
+
+        def counting(d, *args, **kwargs):
+            if Path(d) == cdir:
+                calls.append(d)
+            return real_listdir(d, *args, **kwargs)
+        return calls, counting
+
+    def test_307_denial_scan_cached_per_tuple(self):
+        """#307: repeated refusals for the same tuple must not pay the
+        full consumed/ scan each time — the second scan is served from
+        the cache (no second listdir on consumed/)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                a = self._addon(tmp)
+                calls, counting = self._counting_listdir(cdir)
+                with mock.patch("os.listdir", side_effect=counting):
+                    r1 = a._terminal_denial("github", "github.com",
+                                            "POST", "/gists")
+                    r2 = a._terminal_denial("github", "github.com",
+                                            "POST", "/gists")
+                self.assertIsNone(r1)
+                self.assertIsNone(r2)
+                self.assertEqual(len(calls), 1)
+
+    def test_307_denial_cache_invalidated_by_new_terminal_write(self):
+        """#307: a new terminal write in consumed/ bumps the dir mtime
+        and invalidates the cache — the next scan re-reads and finds
+        the fresh denial."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                a = self._addon(tmp)
+                calls, counting = self._counting_listdir(cdir)
+                with mock.patch("os.listdir", side_effect=counting):
+                    self.assertIsNone(a._terminal_denial(
+                        "github", "github.com", "POST", "/gists"))
+                    now = dt.datetime.now(dt.timezone.utc)
+                    (cdir / "deadbeef01.json").write_text(json.dumps({
+                        "id": "deadbeef01", "credential": "github",
+                        "host": "github.com", "method": "POST",
+                        "path_prefix": "/gists", "decision": "deny",
+                        "answered_at": now.isoformat()}))
+                    got = a._terminal_denial("github", "github.com",
+                                             "POST", "/gists")
+                self.assertEqual(got, "deadbeef01")
+                self.assertEqual(len(calls), 2)
+
+    def test_307_denial_positive_result_cached(self):
+        """#307: a found denial is also cached — the second lookup for
+        the same tuple does not re-scan consumed/."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                now = dt.datetime.now(dt.timezone.utc)
+                (cdir / "deadbeef01.json").write_text(json.dumps({
+                    "id": "deadbeef01", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "deny",
+                    "answered_at": now.isoformat()}))
+                a = self._addon(tmp)
+                calls, counting = self._counting_listdir(cdir)
+                with mock.patch("os.listdir", side_effect=counting):
+                    r1 = a._terminal_denial("github", "github.com",
+                                            "POST", "/gists")
+                    r2 = a._terminal_denial("github", "github.com",
+                                            "POST", "/gists")
+                self.assertEqual(r1, "deadbeef01")
+                self.assertEqual(r2, "deadbeef01")
+                self.assertEqual(len(calls), 1)
+
+    def test_307_denial_cache_key_isolation(self):
+        """#307: the cache is keyed per (credential, host, method,
+        path) — a cached negative for one path must not mask a denial
+        for a different path, and a cached denial must not suppress
+        filings for other paths (Security: one planted denial cannot
+        black out approvals)."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                now = dt.datetime.now(dt.timezone.utc)
+                (cdir / "deadbeef01.json").write_text(json.dumps({
+                    "id": "deadbeef01", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "deny",
+                    "answered_at": now.isoformat()}))
+                a = self._addon(tmp)
+                calls, counting = self._counting_listdir(cdir)
+                with mock.patch("os.listdir", side_effect=counting):
+                    # Negative for /other is cached…
+                    self.assertIsNone(a._terminal_denial(
+                        "github", "github.com", "POST", "/other"))
+                    # …but does not mask the /gists denial…
+                    self.assertEqual(a._terminal_denial(
+                        "github", "github.com", "POST", "/gists"),
+                        "deadbeef01")
+                    # …and the /other negative is still served cached.
+                    self.assertIsNone(a._terminal_denial(
+                        "github", "github.com", "POST", "/other"))
+                self.assertEqual(len(calls), 2)
+
+    def test_307_denial_cache_bounded(self):
+        """#307: the cache is size-capped so a path-varying agent
+        cannot grow it unboundedly; eviction only costs a rescan, and
+        evicted keys still resolve correctly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                (Path(tmp) / "consumed").mkdir()
+                a = self._addon(tmp)
+                with mock.patch.object(sa, "_DENIAL_CACHE_MAX_KEYS", 2):
+                    for i in range(3):
+                        self.assertIsNone(a._terminal_denial(
+                            "github", "github.com", "POST",
+                            "/p%d" % i))
+                    self.assertLessEqual(len(a._denial_cache), 2)
+                    # Evicted keys still resolve correctly on rescan.
+                    self.assertIsNone(a._terminal_denial(
+                        "github", "github.com", "POST", "/p0"))
 
     def test_h18_unknown_entry_grant_no_approved_signal(self):
         """QA B4: a grant carrying approval_id that authorizes the request,
