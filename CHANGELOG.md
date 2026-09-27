@@ -36,6 +36,8 @@ This changelog only works if entries land with the change, not after it:
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-26
+
 ### Added
 - Competitor corpus update (post-post-post-post-post-post-post-late-evening watch, two-surveyor pass — A: fast-mover + pricing re-verification vs ~20:55–21:01 CDT baseline ~21:27–21:45 CDT, all first-try (streak extends to 5); B: delta news scan ~21:00–21:45 CDT; captures in `agent_notes/surveyor-a/b-20260926-2124.md`): quiet pass — **no new C-numbers** (18 clean dedupes, 9 flagged-only). **Fast movers + pricing 9/9 VENDOR-VERIFIED NO-CHANGE** (Daytona changelog still SEP 26 V0.218.0; Docker Sandboxes release notes still 2026-09-22; Microsandbox releases still v0.7.3; Vercel changelog still 25 Sep — no 26-Sep entries in any lane; Drives not re-checked per P49 daily cadence; E2B, boat.dev, TermSquad, DO Managed Agents, AgentComputer pricing all VENDOR-VERIFIED NO-CHANGE; boat.dev "Compared to others" benchmark table is marketing content, no rate change; DO snapshot-figure discrepancy unresolved but unmoved; AgentComputer still no egress policy — C12 stands). **Delta news scan — 18 clean dedupes** (C62 OpenAI offline-sandbox recrawls; C62/C64 HF nine-zero-days recrawls — #517's strongest flag still third-party garnish; DevDay "O" always-on-agent rumor still speculation; DO Managed Agents launch explainer; Keenable $26M stays aged out). **9 flagged-only, NOT filed** (Trebellar $18M, Ema $77M Series B, Finch pre-A merger — all lane fail; Mycel sandbox architecture pre-window; E2B/Vercel/Modal/Daytona DEV comparison third-party; Upstash comparison pre-window; Meta Muse Sentinel/VM-security + VM privacy explainers own-product third-party; jurniti lane-adjacent new name, watchlist only). In-lane no-launch verdict dated 2026-09-25 stands — streak extends. Deep-scan queued: Heapjack/Overpatch + GitLab proxy escape (no in-window developments). (#519)
 
@@ -1455,6 +1457,7 @@ This changelog only works if entries land with the change, not after it:
 - Fixed critical and high findings from the security code review
   ([`dd382af`](https://github.com/ntindle/spark-vm/commit/dd382af))
 
-[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ntindle/spark-vm/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ntindle/spark-vm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ntindle/spark-vm/releases/tag/v0.2.0
