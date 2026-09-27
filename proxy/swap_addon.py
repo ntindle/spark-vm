@@ -250,6 +250,33 @@ _DENIAL_CACHE_MAX_KEYS = 1024
 # eviction-is-a-rescan semantics.
 _EXPIRY_CACHE_TTL = timedelta(seconds=30)
 _EXPIRY_CACHE_MAX_KEYS = 1024
+# #563: the per-refusal pending/ scan in _file_approval is cached per
+# (credential, host, method) — the same discipline as #307's consumed/
+# cache: invalidated on pending/ dir-mtime change (every filing lands
+# a new file there and every terminal transition removes one, so the
+# scan result cannot change without a mtime bump) and additionally
+# clamped to a short TTL so an expiry reap deferred by a cache hit can
+# never lag more than this bound. The reap-while-scanning expiry
+# handling moves with the scan: a cache hit performs no reap, so
+# expiries are collected at most _PENDING_CACHE_TTL late (confirmd's
+# render reap also runs independently, so expiry handling never
+# depends solely on this scan). Key count is capped: a tuple-varying
+# agent must not grow the cache unboundedly. Eviction only costs a
+# rescan — never correctness.
+_PENDING_CACHE_TTL = timedelta(seconds=30)
+_PENDING_CACHE_MAX_KEYS = 1024
+# Issue #562 (mirror of confirmd's #534 mint window, enforcement
+# side): a grant that expires within this many seconds of the
+# enforcement-side check is treated as unusable — the upstream
+# exchange would almost certainly outlive the owner-minted TTL, and
+# the grant was authorized only for swaps initiated inside its
+# lifetime. Unlike #534's 30 s mint window (the mint subprocess is
+# time-bounded), upstream exchange latency is unbounded, so the
+# enforcement window stays small: it only refuses grants expiring
+# within seconds. Env-tunable; 0 disables the window. Static registry
+# bindings carry no TTL, so the window is grant-only — a request the
+# registry allows statically is unaffected.
+_GRANT_SWAP_MIN_VALIDITY_S = _env_int("SWAP_GRANT_MIN_VALIDITY_S", 5)
 # Approval ids are random hex; anything else in a consumed/ item's id
 # field is not ours to echo into a header. \A…\Z anchoring (not ^…$):
 # $ also matches before a trailing newline, which would let a
@@ -960,6 +987,14 @@ class SwapAddon:
         # consumed/ dir-mtime change; eviction is a rescan, never a
         # correctness change.
         self._denial_cache = {}
+        # #563: TTL cache for the per-refusal pending/ scan
+        # (_file_approval): key (credential, host, method) -> (tuple_aid
+        # or None, per_cred count, newest filing datetime or None,
+        # valid_until, dir_mtime). Same invalidation discipline as
+        # _denial_cache (#307): pending/ dir-mtime change or TTL. A
+        # cache hit skips the scan AND its inline expiry reap — reaps
+        # lag at most _PENDING_CACHE_TTL (documented at the constant).
+        self._pending_cache = {}
         # S2 (#511): TTL cache for the per-refusal consumed/ expired
         # scan (_terminal_expiry): key (credential, host, method, norm
         # path) -> (aid or None, valid_until, dir_mtime). Same
@@ -1550,6 +1585,88 @@ class SwapAddon:
                 signals.append((expired, "expired"))
         return signals
 
+    def _scan_pending(self, pending, name, host, method_up, now):
+        """#563: the pending/ scan for _file_approval, extracted so the
+        result can be cached per (credential, host, method). Coalesce
+        by (credential, host, method); count per credential for the
+        cap; track newest filing for the rate limit. Expired filings
+        are reaped inline (finding 58): the reap stamps the terminal
+        expired record BEFORE the pending file is deleted
+        (stamp-then-delete, S1 #511 — a crash between the two
+        self-heals on the next scan). Returns (tuple_aid, per_cred,
+        newest)."""
+        per_cred = 0
+        newest = None
+        tuple_aid = None  # live pending approval for this exact tuple
+        for fn in os.listdir(pending):
+            if not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(pending, fn)) as f:
+                    it = json.load(f)
+                # Reap expired while scanning (finding 58). S2
+                # (#511): the reap stamps the terminal expired
+                # record (S1, below) but emits no "expired" leg —
+                # the best-effort scan-time observation leg is
+                # retired (keeping it would double-report the same
+                # expiry on the proxy-wins reap path). The leg is
+                # now served deterministically from consumed/ by
+                # _terminal_expiry for every refusal inside the
+                # delivery window.
+                try:
+                    exp = datetime.fromisoformat(it.get("expires"))
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=timezone.utc)
+                    if now >= exp:
+                        p = os.path.join(pending, fn)
+                        old_aid = (it.get("id")
+                                   or fn[:-len(".json")])
+                        # S1 (#511): stamp the terminal expired record
+                        # BEFORE the pending file is deleted
+                        # (stamp-then-delete, same rationale as
+                        # confirmd's render reap: a crash between the
+                        # two self-heals on the next scan — the stamp
+                        # is EEXIST-skipped and the delete retried).
+                        # The aid must validate before consumed/ is
+                        # touched (design §10 to-verify).
+                        try:
+                            _stamp_expired_consumed(str(old_aid), it,
+                                                    p, "proxy")
+                        except ValueError:
+                            # Malformed aid: refuse to touch
+                            # consumed/, but still reap the expired
+                            # file below.
+                            pass
+                        except OSError:
+                            # Stamp failed: keep the pending file so
+                            # the next scan retries the stamp.
+                            continue
+                        os.remove(p)
+                        continue
+                except (ValueError, TypeError):
+                    pass
+                if it.get("credential") != name:
+                    continue
+                per_cred += 1
+                try:
+                    created = datetime.fromisoformat(it.get("created"))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    if newest is None or created > newest:
+                        newest = created
+                except (ValueError, TypeError):
+                    pass
+                # Coalesced: same credential, host, method.
+                if (it.get("host") == host
+                        and (it.get("method") or "").upper()
+                        == method_up):
+                    if tuple_aid is None:
+                        tuple_aid = (it.get("id")
+                                     or fn[:-len(".json")])
+            except (OSError, ValueError):
+                continue
+        return tuple_aid, per_cred, newest
+
     def _file_approval(self, name, host, method, path, reason):
         # Finding 60: the inference proxy has no approvals directory.
         if not APPROVALS_ENABLED:
@@ -1575,78 +1692,43 @@ class SwapAddon:
             os.makedirs(pending, exist_ok=True)
             method_up = (method or "").upper()
             now = datetime.now(timezone.utc)
-            # Coalesce by (credential, host, method); count per
-            # credential for the cap; track newest filing for rate limit.
-            per_cred = 0
-            newest = None
-            tuple_aid = None  # live pending approval for this exact tuple
-            for fn in os.listdir(pending):
-                if not fn.endswith(".json"):
-                    continue
-                try:
-                    with open(os.path.join(pending, fn)) as f:
-                        it = json.load(f)
-                    # Reap expired while scanning (finding 58). S2
-                    # (#511): the reap stamps the terminal expired
-                    # record (S1, below) but emits no "expired" leg —
-                    # the best-effort scan-time observation leg is
-                    # retired (keeping it would double-report the same
-                    # expiry on the proxy-wins reap path). The leg is
-                    # now served deterministically from consumed/ by
-                    # _terminal_expiry for every refusal inside the
-                    # delivery window.
-                    try:
-                        exp = datetime.fromisoformat(it.get("expires"))
-                        if exp.tzinfo is None:
-                            exp = exp.replace(tzinfo=timezone.utc)
-                        if now >= exp:
-                            p = os.path.join(pending, fn)
-                            old_aid = (it.get("id")
-                                       or fn[:-len(".json")])
-                            # S1 (#511): stamp the terminal expired record
-                            # BEFORE the pending file is deleted
-                            # (stamp-then-delete, same rationale as
-                            # confirmd's render reap: a crash between the
-                            # two self-heals on the next scan — the stamp
-                            # is EEXIST-skipped and the delete retried).
-                            # The aid must validate before consumed/ is
-                            # touched (design §10 to-verify).
-                            try:
-                                _stamp_expired_consumed(str(old_aid), it,
-                                                        p, "proxy")
-                            except ValueError:
-                                # Malformed aid: refuse to touch
-                                # consumed/, but still reap the expired
-                                # file below.
-                                pass
-                            except OSError:
-                                # Stamp failed: keep the pending file so
-                                # the next scan retries the stamp.
-                                continue
-                            os.remove(p)
-                            continue
-                    except (ValueError, TypeError):
-                        pass
-                    if it.get("credential") != name:
-                        continue
-                    per_cred += 1
-                    try:
-                        created = datetime.fromisoformat(it.get("created"))
-                        if created.tzinfo is None:
-                            created = created.replace(tzinfo=timezone.utc)
-                        if newest is None or created > newest:
-                            newest = created
-                    except (ValueError, TypeError):
-                        pass
-                    # Coalesced: same credential, host, method.
-                    if (it.get("host") == host
-                            and (it.get("method") or "").upper()
-                            == method_up):
-                        if tuple_aid is None:
-                            tuple_aid = (it.get("id")
-                                         or fn[:-len(".json")])
-                except (OSError, ValueError):
-                    continue
+            # #563: cache the pending/ scan per (credential, host,
+            # method) — same discipline as #307's consumed/ cache:
+            # invalidated on pending/ dir-mtime change, additionally
+            # clamped to _PENDING_CACHE_TTL. On a hit the scan and its
+            # inline expiry reap are skipped (reaps lag at most the
+            # TTL); a terminal transition (deny, expired-stamp, prune,
+            # new filing) always adds or removes a file in pending/,
+            # so an unchanged dir-mtime means the scan result cannot
+            # have changed.
+            pkey = (name, host, method_up)
+            try:
+                pdir_mtime = os.stat(pending).st_mtime_ns
+            except OSError:
+                pdir_mtime = None
+            cached = None
+            if pdir_mtime is not None:
+                hit = self._pending_cache.get(pkey)
+                if hit is not None:
+                    (tuple_aid, per_cred, newest,
+                     valid_until, seen_mtime) = hit
+                    if seen_mtime == pdir_mtime and now < valid_until:
+                        cached = (tuple_aid, per_cred, newest)
+            if cached is not None:
+                tuple_aid, per_cred, newest = cached
+            else:
+                tuple_aid, per_cred, newest = self._scan_pending(
+                    pending, name, host, method_up, now)
+                if pdir_mtime is not None:
+                    if len(self._pending_cache) >= _PENDING_CACHE_MAX_KEYS:
+                        # Coarse eviction: a tuple-varying agent can
+                        # force arbitrary cache keys; dropping the
+                        # cache only costs a rescan, never correctness
+                        # (fail-open cost, not a security change).
+                        self._pending_cache.clear()
+                    self._pending_cache[pkey] = (
+                        tuple_aid, per_cred, newest,
+                        now + _PENDING_CACHE_TTL, pdir_mtime)
             # Already pending for this tuple: the client's signal is the
             # existing approval, not a new filing. (S2 (#511): the
             # expired leg, if any, is appended by
@@ -1756,7 +1838,11 @@ class SwapAddon:
         deliberately NOT checked here. An HTTP request carries no
         unforgeable job identity, so any local process using the proxy
         can spend any active grant; `job` exists for revoke-by-job and
-        audit only."""
+        audit only.
+
+        Issue #562: a grant whose remaining validity is under
+        SWAP_GRANT_MIN_VALIDITY_S seconds is skipped — swaps are never
+        initiated on a grant expiring within the window."""
         reg = getattr(self, "registry", None) or {}
         spec = reg.get(name)
         if not isinstance(spec, dict):
@@ -1779,6 +1865,19 @@ class SwapAddon:
             except (ValueError, TypeError):
                 continue
             if now >= exp_dt:
+                continue
+            # Issue #562: a grant expiring within the enforcement
+            # window is not initiated on — the swap would spend the
+            # credential past the owner-minted TTL. The loop keeps
+            # looking (another grant may have healthy validity) and,
+            # failing that, the static registry check below decides;
+            # a request the registry allows statically carries no TTL
+            # and is unaffected. The honest outcome for a method/path
+            # widenable only by grant is the usual grant-less refusal,
+            # which files a fresh approval (the owner re-pings rather
+            # than the dying grant being spent).
+            if ((exp_dt - now).total_seconds()
+                    < _GRANT_SWAP_MIN_VALIDITY_S):
                 continue
             if g.get("host") != host:
                 continue

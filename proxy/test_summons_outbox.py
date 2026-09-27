@@ -34,6 +34,7 @@ def make_addon():
     a = sa.SwapAddon.__new__(sa.SwapAddon)
     a._audit = lambda host, matched: True  # noqa: E731
     a._denial_cache = {}  # #307: per-tuple consumed/ scan cache
+    a._pending_cache = {}  # #563: per-tuple pending/ scan cache
     return a
 
 
