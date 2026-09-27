@@ -343,21 +343,32 @@ Rules:
    clock start (the live-anchor's `provisioning → live`
    `status_updated_at`). While no box's arc has yet reached `live`,
    `GET /tenant/status` reports the **most-advanced arc** among the
-   boxes still onboarding, ranked by an explicit selection preference
-   (closest to `live` without failure first): `live` > `provisioning` >
-   `box-unhealthy` > `provisioning-failed` (`live` is listed for
-   completeness — pre-`live` no candidate holds it; the first box to
-   reach `live` ends the pre-live phase). Ties (same code) break by
-   newest box-record `created_at`, then box-id lexical — so the reported
-   box identity in `detail` cannot flap between polls when a batch
-   shares `created_at`. Arc transitions are forward moves, not
+   boxes still onboarding, ranked by a **total selection preference**
+   over all 12 codes (closest to `live` without failure first —
+   deterministic for every pair of candidate codes, which is what G3's
+   S1 implementer needs): `live` > `waiting-on-approval` >
+   `provisioning` > `box-unhealthy` > `no-gated-action` >
+   `policy-misfire`, with the arc-terminal codes (`approved`,
+   `human-denied`, `human-drop-off`, `provisioning-failed`) ranked last.
+   (`live` is listed for completeness — pre-`live` no candidate holds it;
+   the first box to reach `live` ends the pre-live phase.
+   `no-gated-action`/`policy-misfire` are operator-only diagnostic
+   end-states — never progressing, ranked below `box-unhealthy`.)
+   Suspension codes (`stuck`, `connection-unreachable`) compare by their
+   **latched underlying arc code** (the code the arc held at suspension
+   entry, updated by arc-advancing events during the suspension per
+   transition rule 6) — the suspension itself neither promotes nor
+   demotes the candidate. Ties (same effective code) break by newest
+   box-record `created_at`, then box-id lexical — so the reported box
+   identity in `detail` cannot flap between polls when a batch shares
+   `created_at`. Arc transitions are forward moves, not
    regressions: `provisioning → box-unhealthy` per transition rule 1 is
    the ordinary single-box failure path, and the monotonicity invariant
    below constrains *cross-box selection switches*, not arc
-   transitions. Terminal arcs (`provisioning-failed`) participate only
-   while no non-terminal candidate exists — a dead box never outranks a
-   progressing one (progress wins over recency: "newest" answers a
-   Boxes-panel question, not an onboarding-arc question). The
+   transitions. Terminal arcs participate only while no non-terminal
+   candidate exists — a dead box never outranks a progressing one
+   (progress wins over recency: "newest" answers a Boxes-panel question,
+   not an onboarding-arc question). The
    monotonicity invariant is scoped: within a single box onboarding
    session, the reported code never moves to an earlier stage
    than the last reported code — but a rule-7 cross-session restart

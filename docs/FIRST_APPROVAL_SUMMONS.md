@@ -135,8 +135,11 @@ copy, and this doc pins the assembly rules:
   record lacks. The email still omits the deep link and keeps the
   approvals-page copy ("open your approvals page and tap the pending
   approval" — valid, because the human was handed the URL at stage 2) —
-  no fabrication — and the defect goes to the operator surface, not the
-  summons path. There is no licensed pre-stage-2 summons: a filing
+  no fabrication — and the defect is filed as an event in the §6
+  funnel-telemetry vocabulary (the `WAITLIST_OPERATIONS.md` event
+  vocabulary — `funnel_events`, emitted from day one per
+  `HOSTED_SIGNUP_WEB_UI.md` §5), surfaced by S3's operator dashboard,
+  not the summons path. There is no licensed pre-stage-2 summons: a filing
   cannot exist before stage 2.
 - **Plain-language action:** the filing record's tuple, rendered as the
   page renders it ("your Muse asked to use `<credential>` for
@@ -306,6 +309,6 @@ event vocabulary):
   inbox or reuses an existing operational one is an operator decision —
   S2 records the choice; §5 licenses only that no default is blessed
   in the design.
-- **Per-tenant vs per-box:** G7's multi-box-tenant question applies to
-  the summons too — a tenant with two boxes has two onboarding arcs,
-  and "first filing" is per arc. S2 reads G7's resolution when it lands.
+- **Per-tenant vs per-box:** ANSWERED → `TENANT_STATUS_ENDPOINT.md`
+  §8 (2026-09-26): the summons' first-filing trigger stays per box-side
+  arc (the outbox journal is per-box); S2 reads §8.
