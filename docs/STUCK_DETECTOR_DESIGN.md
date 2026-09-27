@@ -316,11 +316,13 @@ as the `stuck` code.
 - **Q1 (#377):** idle-heartbeat semantics — what "idle" means (no traffic?
   no job? no browser?). Decided before S2; the soak cannot be read
   without it.
-- **Q2:** multi-box tenants (G7): a tenant with two boxes has two
-  sessions — the predicate is per-session, but the 12-code vocabulary is
-  per-tenant. G7's decision (per-box status vs newest-box arc) determines
-  whether the detector emits per-box candidates or one tenant-level
-  stall.
+- **Q2:** multi-box tenants (G7): ANSWERED → `TENANT_STATUS_ENDPOINT.md`
+  §8 rule 4 (2026-09-26): one tenant-level stall; per-box candidates are
+  evaluation-internal to the detector and are not surfaced on the
+  endpoint. The predicate stays per-session, but the 12-code vocabulary
+  is per-tenant — G7's decision (per-tenant arc, explicit selection
+  preference) means the detector emits per-box session-arc candidates
+  internally and one tenant-level stall outward.
 - **Q3:** the summons observer (G4) as a confusion-class input: until the
   S2 sender ships, "human has been nudged" is not a detector-readable
   fact. And until G1's terminal record (#213) ships, the detector cannot
