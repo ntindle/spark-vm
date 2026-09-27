@@ -86,6 +86,13 @@ as the proxy filed it, plus confirmd's answer stamp:
   `answered_at` (UTC ISO8601), `answered_by` (the answering owner's
   tailnet login name), `requester` (the filing process's owner name —
   `bdrive` or `swapd`).
+- Stamped by either expiry reaper (confirmd's render reap or the
+  proxy's filing-scan reap) at expiry time (#511): `decision`
+  (`expired`), `expired_at` (UTC ISO8601 of the reap), `expired_by`
+  (`confirmd` or `proxy`), `requester` (the filing process's owner
+  name), `tenant_id` (reserved null until H10 multi-tenant confirmd).
+  Expiry records carry no `answered_at` / `answered_by` — those fields
+  describe a human answering and are never stamped on an expiry.
 
 Two independent processes read and write it — confirmd writes on answer
 (via the answered→consumed move; strays via the answered sweep), the
@@ -97,7 +104,17 @@ one is the obvious v2 step if the field set ever changes). Writers may
 ADD new fields freely — readers ignore fields they don't know. Changing
 or removing a field, or redefining what any field means, requires
 bumping the version label in this doc (v1 → v2) and a reader check on
-both sides.
+both sides. One deliberate exception, adopted with the expired-approval
+terminal record (#511, design
+`docs/EXPIRED_APPROVAL_TERMINAL_RECORD.md`): **additive decision values
+are v1** — a new `decision` value is not a redefinition so long as
+every existing reader already ignores unknown decision values
+fail-closed. Verified for `expired`: the proxy's denial lookup requires
+`decision == "deny"` (and a parseable `answered_at`); the answered
+renderers badge only `approve`/`deny` and render anything else
+badgeless; the answered API allowlists fields and mints the re-open
+nonce only for `deny`; re-open 400s on non-`deny`; POST /answer only
+accepts `approve`/`deny` as the incoming form decision.
 
 Drift is fail-closed: the proxy skips consumed/ items it cannot parse
 or whose fields fail its checks, so a drifted file degrades to "no

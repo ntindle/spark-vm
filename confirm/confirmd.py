@@ -532,6 +532,27 @@ def load_pending():
                 # subprocess acquires no locks — no lock-ordering hazard.
                 aid = fn[:-len(".json")]
                 with _aid_lock(aid):
+                    # S1 (#511): stamp the expired terminal record BEFORE
+                    # the pending file is deleted (stamp-then-delete: a
+                    # crash between the two self-heals on the next reap —
+                    # the stamp is EEXIST-skipped, the delete retried —
+                    # while the reverse order could lose the expiry with
+                    # no record at all). If the answer path already
+                    # consumed this aid while we waited on the lock, its
+                    # terminal record exists and our O_EXCL create fails
+                    # -> False: the human answer wins, and we must not
+                    # resurrect the pending file.
+                    try:
+                        _stamp_expired_consumed(aid, it, p, "confirmd")
+                    except ValueError:
+                        # Malformed aid: refuse to touch consumed/, but
+                        # still reap the expired file below.
+                        pass
+                    except OSError:
+                        # Stamp failed (e.g. ENOSPC): keep the pending
+                        # file so the next render retries the stamp.
+                        _evict_aid_lock(aid)
+                        continue
                     try:
                         os.remove(p)
                     except OSError:
@@ -582,6 +603,57 @@ def file_owner_name(path):
         return pwd.getpwuid(st.st_uid).pw_name
     except (OSError, KeyError):
         return None
+
+
+def _stamp_expired_consumed(aid, it, pending_path, expired_by):
+    """S1 (#511): stamp the expired-approval terminal record.
+
+    Write-if-absent via O_EXCL: the winner of the confirmd-render-reap /
+    proxy-filing-scan race creates consumed/<aid>.json; the loser gets
+    FileExistsError and must move on without resurrecting anything.
+    Returns True when this call created the record, False when one
+    already existed (the other reaper — or the answer path — won).
+
+    Raises ValueError for an aid that fails ID_RE: an unvalidated aid
+    must never touch consumed/ (design §10 to-verify). Raises OSError
+    when the record cannot be written (the caller keeps the pending
+    file so the next reap retries — deleting it now would lose the
+    expiry with no record, the hazard stamp-then-delete avoids).
+    """
+    if not ID_RE.match(aid):
+        raise ValueError("refusing to stamp consumed/ for bad aid %r"
+                         % (aid,))
+    rec = dict(it)
+    rec.pop("_csrf", None)
+    rec.pop("_csrf_nonces", None)
+    rec["decision"] = "expired"
+    rec["expired_at"] = datetime.now(timezone.utc).isoformat()
+    rec["expired_by"] = expired_by
+    # Finding 50: the requester is the filing file's owner, never an
+    # argument — the same mechanism the answer path uses.
+    rec["requester"] = file_owner_name(pending_path)
+    # Reserved for H10 (multi-tenant confirmd): null means "unscoped,
+    # single-tenant host" — today's exact semantic. No tenant filter
+    # is invented before H10.
+    rec["tenant_id"] = None
+    path = os.path.join(consumed_dir(), aid + ".json")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(rec, f, indent=2)
+    except BaseException:
+        # A torn record must not stand: the loser mistakes presence
+        # for a win. Best-effort unlink, then re-raise as OSError so
+        # callers keep the pending file for the next reap's retry.
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise OSError("expired stamp write failed for %s" % aid)
+    return True
 
 
 STYLE = """<style>
