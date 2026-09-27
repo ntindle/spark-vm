@@ -65,7 +65,8 @@ precedent: nothing changed on a primary source).
 **C67 (in-lane, THIRD-PARTY) — Huawei Cloud CodeArts Agent
 commercial-availability launch in Malaysia (2026-09-27).** Single
 regional-outlet source — pocketnews.com.my, "Huawei Cloud Launches Enterprise
-AI Coding Tool CodeArts Agent in Malaysia" (URL carries the 2026/09/27 date;
+AI Coding Tool CodeArts Agent in Malaysia" (URL carries the 2026/09/27 date:
+https://pocketnews.com.my/2026/09/27/huawei-cloud-launches-enterprise-ai-coding-tool-codearts-agent-in-malaysia/ —
 Kuala Lumpur dateline). Corroboration pending — THIRD-PARTY grade stands.
 Who/what: an enterprise AI coding platform with 16 specialised agents
 (architecture, coding, testing, troubleshooting, code review), claimed
