@@ -265,6 +265,51 @@ class ConfirmdTests(unittest.TestCase):
         self.assertIn("100.65.241.20", cd.HOST_ADDRS)
         self.assertIn("fd7a:115c:a1e0::ee39:f116", cd.HOST_ADDRS)
 
+    # --- 536: HOST_ADDRS is TTL-refreshed, not frozen at import ---------
+
+    def test_536_refresh_picks_up_renumbered_addrs(self):
+        """After the TTL, a renumbered tailscale IP set is picked up —
+        the finding-47 self-refusal can't go stale on a renumber."""
+        with mock.patch.object(cd, "_host_addrs",
+                               side_effect=[({"1.1.1.1"}, True),
+                                            ({"2.2.2.2"}, True)]):
+            sa = cd._SelfAddrs()
+            self.assertIn("1.1.1.1", sa)
+            sa._ts -= cd._HOST_ADDRS_TTL + 1  # age past the TTL
+            self.assertNotIn("1.1.1.1", sa)
+            self.assertIn("2.2.2.2", sa)
+
+    def test_536_failed_refresh_keeps_stale_set(self):
+        """A failed refresh must not shrink the refusal boundary — the
+        last good set is kept, not collapsed to BIND."""
+        with mock.patch.object(cd, "_host_addrs",
+                               side_effect=[({"1.1.1.1"}, True),
+                                            ({"0.0.0.0"}, False)]):
+            sa = cd._SelfAddrs()
+            sa._ts -= cd._HOST_ADDRS_TTL + 1  # age past the TTL
+            self.assertIn("1.1.1.1", sa)
+
+    def test_536_concurrent_contains_is_thread_safe(self):
+        """Handler threads share the instance; concurrent `in` checks
+        across a refresh must not raise or return garbage."""
+        with mock.patch.object(cd, "_host_addrs",
+                               return_value=({"1.1.1.1"}, True)):
+            sa = cd._SelfAddrs()
+            errors = []
+            def probe():
+                try:
+                    for _ in range(200):
+                        assert ("1.1.1.1" in sa)
+                except Exception as e:  # noqa: BLE001
+                    errors.append(e)
+            sa._ts -= cd._HOST_ADDRS_TTL + 1  # force refresh on all threads
+            threads = [threading.Thread(target=probe) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+
     # --- 50: requester from file owner ------------------------------------
 
     def test_50_file_owner_name(self):
@@ -980,6 +1025,178 @@ class ConfirmdTests(unittest.TestCase):
             # One tick in the past: expired.
             past = t - real_datetime.resolution
             self.assertTrue(cd.is_expired({"expires": past.isoformat()}))
+
+    def test_534_approve_refused_when_expiry_inside_mint_window(self):
+        """Issue #534: an approve whose expiry sits inside the worst-case
+        mint window must be refused BEFORE the grant subprocess starts —
+        the writer has no revoke path, so a mid-mint expiry crossing would
+        mint a grant for an already-expired approval. Refusal is 410 + the
+        distinct 'approve-refused-expiry-window' audit event; the pending
+        file stays for the render reap to stamp `expired` (no silent loss,
+        no contradictory trail); the aid lock is evicted (issue #231)."""
+        from datetime import datetime as real_datetime, timezone as real_tz, \
+            timedelta
+        aid = "narrow-window-1"
+        t0 = real_datetime.now(real_tz.utc)
+        exp = t0 + timedelta(seconds=10)  # inside the 30 s window
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": exp.isoformat(),
+              "credential": "c", "host": "h", "method": "GET"}
+        nonce = cd._mint_csrf_nonce(it)
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+
+        class _Clock:
+            instant = t0
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.instant
+
+            fromisoformat = staticmethod(real_datetime.fromisoformat)
+
+        mint_calls = []
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                mint_calls.append(cmd)
+
+                class R:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        events = []
+        cd._aid_lock(aid)  # ensure the entry exists pre-answer
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch.object(cd, "datetime", _Clock), \
+             mock.patch("subprocess.run", side_effect=fake_run), \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda *a: events.append(a)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._answer_locked("ntindle@github", aid, nonce, "approve")
+        self.assertEqual(got["code"], 410)
+        self.assertTrue(
+            any(e[0] == "approve-refused-expiry-window" for e in events),
+            "no approve-refused-expiry-window audit; events: %r" % (events,))
+        self.assertEqual(mint_calls, [],
+                         "grant writer must not be invoked inside the "
+                         "mint window")
+        self.assertTrue(src.exists(),
+                        "pending file must stay for the render reap's "
+                        "expired stamp")
+        self.assertFalse(
+            (self.approvals / "answered" / (aid + ".json")).exists())
+        self.assertFalse(
+            (self.approvals / "consumed" / (aid + ".json")).exists())
+        self.assertNotIn(aid, cd._aid_locks)
+
+    def test_534_approve_proceeds_when_expiry_outside_mint_window(self):
+        """Issue #534: an approve with expiry comfortably outside the
+        window mints normally — the guard must not starve legitimate
+        approvals."""
+        from datetime import datetime as real_datetime, timezone as real_tz, \
+            timedelta
+        aid = "ample-window-1"
+        t0 = real_datetime.now(real_tz.utc)
+        exp = t0 + timedelta(seconds=120)
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": exp.isoformat(),
+              "credential": "c", "host": "h", "method": "GET"}
+        nonce = cd._mint_csrf_nonce(it)
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+
+        class _Clock:
+            instant = t0
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.instant
+
+            fromisoformat = staticmethod(real_datetime.fromisoformat)
+
+        mint_calls = []
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                mint_calls.append(cmd)
+
+                class R:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        events = []
+        h.send_response = lambda c: got.update(code=c)
+        h.send_header = lambda *a: None
+        h.end_headers = lambda: None
+        cd._aid_lock(aid)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch.object(cd, "datetime", _Clock), \
+             mock.patch("subprocess.run", side_effect=fake_run), \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda *a: events.append(a)):
+            h._answer_locked("ntindle@github", aid, nonce, "approve")
+        self.assertEqual(got.get("code"), 303)
+        self.assertEqual(len(mint_calls), 1,
+                         "the mint must proceed outside the window")
+        self.assertTrue(
+            any(e[0] == "answer" and "decision=approve" in e[3]
+                for e in events),
+            "no answer/approve audit; events: %r" % (events,))
+        self.assertFalse(src.exists(), "pending file must be consumed")
+        self.assertTrue(
+            (self.approvals / "consumed" / (aid + ".json")).exists())
+        self.assertNotIn(aid, cd._aid_locks)
+
+    def test_534_grant_window_helper_boundaries(self):
+        """Issue #534: _grant_window_ok — no expiry means no window to
+        guard (True); malformed expiry parses to None (same as is_expired);
+        < window refuses; comfortably >= window allows."""
+        from datetime import datetime as real_datetime, timezone as real_tz, \
+            timedelta
+        t0 = real_datetime.now(real_tz.utc)
+
+        def item(seconds=None, raw=None):
+            d = {}
+            if raw is not None:
+                d["expires"] = raw
+            elif seconds is not None:
+                d["expires"] = (t0 + timedelta(seconds=seconds)).isoformat()
+            return d
+
+        self.assertTrue(cd._grant_window_ok(item()),
+                        "no expiry must not block the mint")
+        self.assertTrue(cd._grant_window_ok(item(raw="not-a-date")),
+                        "malformed expiry must match is_expired semantics")
+        self.assertTrue(cd._grant_window_ok(item(seconds=3600)))
+        self.assertFalse(cd._grant_window_ok(item(seconds=10)),
+                         "10 s remaining is inside the 30 s window")
+        self.assertFalse(cd._grant_window_ok(item(seconds=-5)),
+                         "already expired is outside the window")
+        # The window is a 2x multiple of the subprocess bound: raising the
+        # timeout without raising the window would reopen the race.
+        self.assertGreaterEqual(cd._GRANT_MINT_WINDOW,
+                                2 * cd._GRANT_MINT_TIMEOUT)
 
     def test_233_sweep_answered_moves_old_files(self):
         """answered/ strays older than the grace period move to
