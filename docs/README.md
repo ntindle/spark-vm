@@ -74,6 +74,7 @@ working.
 
 | Doc | What it is |
 | --- | ---------- |
+| [TOOLSET_UPDATE.md](TOOLSET_UPDATE.md) | v0 self-update framework (`deploy/toolset-update.sh`): trust model, idle gate, audit, weekly timer, and the real `os-security` updater layer; component updaters, snapshots/rollback, and failure freeze are follow-ups under issue #532. |
 | [SENTINEL_TELEMETRY_SURFACES.md](SENTINEL_TELEMETRY_SURFACES.md) | Arch deep-read of the four audit/telemetry surfaces the hosted sentinel (H5) would consume: schema catalog, six structural findings (no shared envelope, no sequencing/auth, second-resolution timestamps, unstated trust tiers, one silent audit failure — fixed, no rotation bound on confirmd's audit.log), and the ordered H5 prerequisites. |
 | [HOSTED_GAP_ANALYSIS.md](HOSTED_GAP_ANALYSIS.md) | **(start here)** Vision vs repo state: the master gap list for the hosted product. |
 | [DAY_ONE_GAP_ANALYSIS.md](DAY_ONE_GAP_ANALYSIS.md) | What a tenant Muse needs on day one vs what the repo has. |
