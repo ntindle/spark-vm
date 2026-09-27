@@ -1793,17 +1793,26 @@ class Handler(BaseHTTPRequestHandler):
                           "id=%s reason=missing credential/host/method" % aid)
                 self._err("Cannot mint grant: missing fields.", 400)
                 return
-            # Call the single writer (finding 60).
+            # Call the single writer (finding 60). Issue #294: hand the
+            # approval's expiry instant to the writer so it can fail
+            # closed at mint time (its own fresh clock, under the mint
+            # lock) if the instant crossed while confirmd was working —
+            # the second layer behind the #534 pre-mint guard above and
+            # the #240 post-mint re-check below.
+            mint_argv = [GRANT_WRITER, "add",
+                         "--credential", name,
+                         "--host", host,
+                         "--method", method,
+                         "--path-prefix", it.get("path_prefix") or "/",
+                         "--approval-id", aid,
+                         "--scope", it.get("scope") or "",
+                         "--job", it.get("job") or ""]
+            approval_expires = it.get("expires")
+            if approval_expires:
+                mint_argv += ["--approval-expires", str(approval_expires)]
             try:
                 out = subprocess.run(
-                    [GRANT_WRITER, "add",
-                     "--credential", name,
-                     "--host", host,
-                     "--method", method,
-                     "--path-prefix", it.get("path_prefix") or "/",
-                     "--approval-id", aid,
-                     "--scope", it.get("scope") or "",
-                     "--job", it.get("job") or ""],
+                    mint_argv,
                     capture_output=True, text=True,
                     timeout=_GRANT_MINT_TIMEOUT)
                 if out.returncode != 0:
@@ -1825,7 +1834,13 @@ class Handler(BaseHTTPRequestHandler):
         # expiry had passed at mint time). The grant itself cannot be
         # un-minted (no revoke path in the grant-writer interface), so
         # the fix is the refusal + the distinct trail event, not
-        # retroactive revocation.
+        # retroactive revocation. Issue #294 adds the writer-side layer:
+        # the approval's expiry is passed to grant-writer above, which
+        # refuses at mint time (its own fresh clock, under the mint lock)
+        # when the instant has crossed — so no live grant can exist for
+        # an approval whose expiry crossed before mint completion. This
+        # refusal + distinct trail event remains the confirmd-side
+        # backstop either way.
         if is_expired(it):
             audit_log("answer-expired-mid-mint", self.client_address[0],
                       login, "id=%s decision=%s" % (aid, decision))

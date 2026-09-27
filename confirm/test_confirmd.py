@@ -1163,6 +1163,96 @@ class ConfirmdTests(unittest.TestCase):
             any(e[0] == "answer" and "decision=approve" in e[3]
                 for e in events),
             "no answer/approve audit; events: %r" % (events,))
+
+    def test_294_approval_expires_passed_to_grant_writer(self):
+        """Issue #294: the approve path hands the approval's expiry
+        instant to grant-writer as --approval-expires, so the writer
+        can fail closed at mint time."""
+        aid = "expiry-passthrough-1"
+        exp_str = "2999-01-01T00:00:00+00:00"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": exp_str,
+              "credential": "c", "host": "h", "method": "GET"}
+        nonce = cd._mint_csrf_nonce(it)
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+
+        mint_calls = []
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                mint_calls.append(cmd)
+
+                class R:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        h.send_response = lambda c: got.update(code=c)
+        h.send_header = lambda *a: None
+        h.end_headers = lambda: None
+        cd._aid_lock(aid)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch("subprocess.run", side_effect=fake_run), \
+             mock.patch.object(cd, "audit_log"):
+            h._answer_locked("ntindle@github", aid, nonce, "approve")
+        self.assertEqual(got.get("code"), 303)
+        self.assertEqual(len(mint_calls), 1)
+        cmd = mint_calls[0]
+        self.assertIn("--approval-expires", cmd)
+        self.assertEqual(
+            cmd[cmd.index("--approval-expires") + 1], exp_str,
+            "writer got %r, item expires is %r" % (cmd, exp_str))
+
+    def test_294_no_expiry_means_no_flag(self):
+        """Issue #294: an approval with no expiry passes no
+        --approval-expires flag — the writer treats absence as no
+        constraint, matching confirmd's pre-mint guard."""
+        aid = "no-expiry-passthrough-1"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "credential": "c", "host": "h", "method": "GET"}
+        nonce = cd._mint_csrf_nonce(it)
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+
+        mint_calls = []
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                mint_calls.append(cmd)
+
+                class R:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        h.send_response = lambda c: got.update(code=c)
+        h.send_header = lambda *a: None
+        h.end_headers = lambda: None
+        cd._aid_lock(aid)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch("subprocess.run", side_effect=fake_run), \
+             mock.patch.object(cd, "audit_log"):
+            h._answer_locked("ntindle@github", aid, nonce, "approve")
+        self.assertEqual(got.get("code"), 303)
+        self.assertEqual(len(mint_calls), 1)
+        self.assertNotIn("--approval-expires", mint_calls[0])
         self.assertFalse(src.exists(), "pending file must be consumed")
         self.assertTrue(
             (self.approvals / "consumed" / (aid + ".json")).exists())
