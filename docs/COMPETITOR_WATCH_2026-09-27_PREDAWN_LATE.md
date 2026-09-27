@@ -3,7 +3,7 @@
 Two-surveyor pass, delta-only against the post-pre-dawn pass (#530, slot
 20260927-0124, squash-merged as `76308c5`): (A) fast-mover + pricing
 re-verification vs the ~01:28–01:38 CDT (2026-09-27) baseline (vendor reads
-~01:57:53–01:58:26 CDT 2026-09-27), (B) delta news scan ~01:40–02:20 CDT.
+~01:57:53–01:58:26 CDT 2026-09-27), (B) delta news scan ~01:40–01:58 CDT.
 Read-only, no logins, no writes. Captures:
 `hidden_files/agent_notes/surveyor-a/b-20260927-0154.md`. Drives not
 re-checked per P49 (daily-morning cadence).
