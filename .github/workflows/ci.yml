@@ -10,7 +10,7 @@
 #   python3 -m pytest cred-ui/tests/ -q
 #   cd cua     && python3 -m pytest test_cua_bridge.py test_shell_scripts.py -q
 #   cd jail    && python3 -m pytest test_build_smoke.py -q
-#   cd scripts && python3 -m pytest test_bounded_http.py test_waitlistd.py -q
+#   cd scripts && python3 -m pytest test_bounded_http.py test_waitlistd.py test_lint_changelog_ritual.py -q
 #   cd harness && python3 -m pytest test_proxy_match.py test_inject_provision_state.py -q
 #   python3 scripts/lint-changelog-ritual.py  # changelog ritual lint (enforced as a CI job too)
 
@@ -102,12 +102,14 @@ jobs:
         if: always()
         run: python3 -m pytest test_proxy_match.py test_inject_provision_state.py -q
         working-directory: harness
-      - name: scripts tests (shared bounded HTTP server, waitlistd)
+      - name: scripts tests (shared bounded HTTP server, waitlistd, changelog ritual lint)
         # scripts/bounded_http.py is the slow-loris-hardened server shared by
         # confirmd, cred-ui and waitlistd (issues #77 M8, #471, #472); its
         # suite must run on every push, not just on the author's box.
+        # test_lint_changelog_ritual.py guards the changelog-ritual lint the
+        # same way: a lint whose tests never run rots silently.
         if: always()
-        run: python3 -m pytest test_bounded_http.py test_waitlistd.py -q
+        run: python3 -m pytest test_bounded_http.py test_waitlistd.py test_lint_changelog_ritual.py -q
         working-directory: scripts
 
   shellcheck:

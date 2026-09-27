@@ -23,6 +23,12 @@ python3 -m pytest cred-ui/tests/ -q
 cd cua     && python3 -m pytest test_cua_bridge.py -q
 cd jail    && python3 -m pytest test_build_smoke.py -q
 
+# changelog ritual lint (same check as the CI `changelog-ritual` job):
+# entries must not reference the maintainer's internal working-note paths
+# (agent_notes/, hidden_files/, workspace/goals/).
+python3 scripts/lint-changelog-ritual.py
+cd scripts && python3 -m pytest test_lint_changelog_ritual.py -q
+
 # shellcheck (same --severity=error gate as CI)
 shellcheck --severity=error $(git ls-files '*.sh')
 
