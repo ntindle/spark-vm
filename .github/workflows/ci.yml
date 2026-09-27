@@ -35,9 +35,9 @@ jobs:
           python-version: "3.12"
       # The merge gate proves exactly what a contributor runs locally
       # (CONTRIBUTING.md "Running the tests"): requirements-test.txt is the
-      # whole dependency set — pytest plus cryptography for confirm/push.py's
-      # Web Push tests. mitmproxy is a *deploy* dependency, never imported
-      # by a test module.
+      # whole dependency set — pytest, cryptography (confirm/push.py's Web
+      # Push tests), pillow (waitlist page og:image assertions). mitmproxy
+      # is a *deploy* dependency, never imported by a test module.
       - name: install test dependencies
         run: pip install -r requirements-test.txt
       # cua/test_shell_scripts.py gates on shellcheck warnings; pin it
