@@ -215,7 +215,7 @@ _os_security_repair() {
     # Atomic publish: stage with correct ownership/mode, then rename so
     # readers never see a half-written 20auto-upgrades.
     _sudo install -o root -g root -m 0644 "$tmp" "$newf" \
-        || { rm -f "$tmp"; log "os-security: config stage failed"; return 1; }
+        || { rm -f "$tmp" "$newf"; log "os-security: config stage failed"; return 1; }
     rm -f "$tmp"
     _sudo mv -f "$newf" "$UNATTENDED_CONF" \
         || { _sudo rm -f "$newf"; log "os-security: config publish failed"; return 1; }
