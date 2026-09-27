@@ -6,7 +6,10 @@ in docs/PRE_SEEDED_HARNESS_RESEARCH.md §5):
 
     </dev/null timeout 10 <harness-auth-probe>
 
-Exit 0, zero prompts, stdin closed, 10-second external cap. Verifies, in
+Exit 0, zero prompts, stdin closed, 10-second external cap (gate mode; the
+probe self-enforces its own wall-clock budget per mode — GitHub #158 — so a
+caller that forgets the external `timeout 10` wrapper still gets a bounded
+run; the wrapper stays as belt-and-braces). Verifies, in
 order:
   (a) the tenant runtime's model calls route through the inference proxy
       (:18081) and the proxy swaps in a valid credential;
@@ -56,12 +59,25 @@ and the probe fails closed naming the routing attempted.
 
 Exit codes: 0 ok · 1 check failed · 2 usage/config error · 3 environment
 error (fail-closed: muse CLI missing, fixture absent, unreadable echo log).
-"""
+Wall-clock expiry and external termination (SIGTERM — e.g. the invoker's
+own `timeout 10` firing) are exit 1 with a named message: every probe
+termination stays inside the 0/1/2/3 contract. (The external wrapper's own
+report to *its* caller is still 124 unless it passes `--preserve-status`;
+that is the wrapper's status, not the probe's.)
+
+CLI vehicle budgets are mode-aware (GitHub #159): gate keeps 6s — the peer
+is a localhost echo fixture and a hang there means the image's CLI cannot
+complete a model call, so R1 §5 says fail the gate; provision gets 25s — the
+peer is the real provider and TLS, a cold model endpoint, or inference
+latency can exceed 6s on a healthy box. Provision-mode timeouts and
+provider rejections are distinct failure messages, never conflated."""
 
 import argparse
 import json
+import math
 import os
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -69,8 +85,12 @@ import time
 import urllib.error
 import urllib.request
 
-CLI_TIMEOUT_S = 6.0       # budget for the CLI vehicle call (gate + provision)
+CLI_TIMEOUT_S_GATE = 6.0        # budget for the CLI vehicle call, gate mode
+CLI_TIMEOUT_S_PROVISION = 25.0  # budget for the CLI vehicle call, provision
+                                # mode (real provider — GitHub #159)
 CONFIRMD_TIMEOUT_S = 3.0  # budget for the confirmd liveness check
+WALL_CLOCK_S_GATE = 10.0       # self-enforced whole-run budget, gate mode
+WALL_CLOCK_S_PROVISION = 45.0  # self-enforced whole-run budget, provision mode
 
 EXIT_OK = 0
 EXIT_CHECK_FAILED = 1
@@ -81,6 +101,54 @@ EXIT_ENV = 3
 def die(code, msg):
     print(f"harness-auth-probe: {msg}", file=sys.stderr)
     return code
+
+
+def _budget_env(name, default):
+    """Read a seconds budget from the environment (test-facing overrides).
+
+    Invalid values exit 2 (usage error) via SystemExit — never a traceback.
+    Production callers never need these; the self-enforced wall-clock
+    budget always wins over any CLI-timeout override, so no override can
+    make the probe unbounded. Values are capped at 3600s so even a huge
+    finite value cannot take the unclassified `setitimer` crash path.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        val = float("nan")
+    if not math.isfinite(val) or val <= 0:
+        raise SystemExit(die(EXIT_USAGE,
+                             f"{name}={raw!r} must be a positive finite "
+                             "number of seconds"))
+    return min(val, 3600.0)
+
+
+def _arm_wall_clock(budget_s):
+    """Self-enforce the probe's whole-run wall-clock budget (GitHub #158).
+
+    The R1 §5 contract pins an external cap for the gate invocation, but the
+    probe itself never enforced it: a future caller that forgets the
+    `timeout 10` wrapper gets an unbounded probe. The probe now arms its own
+    deadline per mode. Expiry is exit 1 (check failed) with a named message —
+    inside the documented 0/1/2/3 contract, never a bare 124. An external
+    kill (SIGTERM — e.g. the old invoker's `timeout 10` wrapper firing) is
+    classified the same way instead of dying silently.
+    """
+    def _expire(signum, _frame):
+        if signum == signal.SIGALRM:
+            detail = f"wall-clock budget expired after {budget_s:g}s"
+        else:
+            detail = ("terminated externally before the wall-clock budget "
+                      f"({budget_s:g}s) elapsed")
+        sys.stderr.write(f"harness-auth-probe: {detail} — failing the check.\n")
+        sys.stderr.flush()
+        os._exit(EXIT_CHECK_FAILED)
+    signal.signal(signal.SIGALRM, _expire)
+    signal.signal(signal.SIGTERM, _expire)
+    signal.setitimer(signal.ITIMER_REAL, budget_s)
 
 
 def parse_args(argv):
@@ -107,7 +175,7 @@ def child_env(proxy, key_name):
     return env
 
 
-def run_cli(muse_bin, base_url, proxy, key_name):
+def run_cli(muse_bin, base_url, proxy, key_name, cli_timeout):
     """Run the CLI vehicle. Returns (returncode, stdout_tail, stderr_tail, timed_out)."""
     cmd = [muse_bin, "exec", "--provider", "meta",
            "--base-url", base_url,
@@ -117,7 +185,7 @@ def run_cli(muse_bin, base_url, proxy, key_name):
             cmd, env=child_env(proxy, key_name),
             stdin=subprocess.DEVNULL,          # contract: stdin closed
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=CLI_TIMEOUT_S, check=False, text=True,
+            timeout=cli_timeout, check=False, text=True,
         )
         return proc.returncode, proc.stdout[-2000:], proc.stderr[-2000:], False
     except subprocess.TimeoutExpired as e:
@@ -150,7 +218,8 @@ def read_new_records(echo_log, since_size):
     return records, None
 
 
-def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped):
+def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped,
+               cli_timeout):
     try:
         # If the log is truncated between getsize and read, the seek below
         # lands past EOF and yields an empty read — fail-closed "no requests".
@@ -158,16 +227,16 @@ def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped):
     except OSError as e:
         return die(EXIT_ENV, f"gate fixture echo log not readable: {echo_log}: {e}")
 
-    rc, out, err, timed_out = run_cli(muse_bin, base_url, proxy, key_name)
+    rc, out, err, timed_out = run_cli(muse_bin, base_url, proxy, key_name, cli_timeout)
     print(f"[gate] cli vehicle rc={rc} timed_out={timed_out} "
           f"stdout_tail={out[-300:]!r} stderr_tail={err[-300:]!r}", file=sys.stderr)
     if timed_out:
         # A hang is not explained by the fixture's non-model response body
         # (which justifies ignoring a nonzero exit): a CLI that cannot finish
-        # a model call against a localhost fixture in CLI_TIMEOUT_S is a
-        # broken image. R1 §5: hang = fail.
+        # a model call against a localhost fixture in the gate CLI budget is
+        # a broken image. R1 §5: hang = fail.
         return die(EXIT_CHECK_FAILED,
-                   f"cli vehicle timed out after {CLI_TIMEOUT_S}s against the "
+                   f"cli vehicle timed out after {cli_timeout:g}s against the "
                    f"gate fixture via {proxy}: the image's CLI cannot complete "
                    "a model call — failing the gate.")
 
@@ -196,18 +265,22 @@ def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped):
     return EXIT_OK
 
 
-def check_provision(muse_bin, base_url, proxy, key_name):
+def check_provision(muse_bin, base_url, proxy, key_name, cli_timeout):
     # Known limitation: provision mode has no echo log (the real provider),
     # so it trusts the CLI's exit code. A CLI that exited 0 without sending
     # anything would pass here; gate mode is protected against that class by
     # the echo-log assertion. The failure message below keeps the ambiguity
     # explicit rather than claiming more than the signal supports.
-    rc, out, err, timed_out = run_cli(muse_bin, base_url, proxy, key_name)
+    rc, out, err, timed_out = run_cli(muse_bin, base_url, proxy, key_name, cli_timeout)
     if timed_out:
+        # Distinct from the rejection below: slowness is not proof of a bad
+        # credential (TLS, a cold model endpoint, or inference latency can
+        # exceed even the longer provision budget on a healthy box).
         return die(EXIT_CHECK_FAILED,
-                   f"cli vehicle timed out after {CLI_TIMEOUT_S}s against "
+                   f"cli vehicle timed out after {cli_timeout:g}s against "
                    f"{base_url} via {proxy}: the injected credential path is "
-                   "not answering.")
+                   "not answering in time — this is slowness, not proof the "
+                   "credential is wrong.")
     if rc != 0:
         return die(EXIT_CHECK_FAILED,
                    f"cli vehicle exited {rc} against the provider via the "
@@ -324,6 +397,16 @@ def main(argv=None):
     proxy = os.environ.get("PROBE_PROXY", "http://127.0.0.1:18081")
     muse_bin = os.environ.get("PROBE_MUSE_BIN", "muse")
     confirmd_url = os.environ.get("PROBE_CONFIRMD_URL", "https://127.0.0.1:8443")
+    if args.mode == "gate":
+        cli_default, wall_default = CLI_TIMEOUT_S_GATE, WALL_CLOCK_S_GATE
+    else:
+        cli_default, wall_default = CLI_TIMEOUT_S_PROVISION, WALL_CLOCK_S_PROVISION
+    cli_timeout = _budget_env("PROBE_CLI_TIMEOUT_S", cli_default)
+    wall_clock = _budget_env("PROBE_WALL_CLOCK_S", wall_default)
+    # Self-enforce the wall-clock budget before doing anything else (GitHub
+    # #158): this is the hard bound, no matter what the CLI budget or the
+    # invoker's wrapper says.
+    _arm_wall_clock(wall_clock)
     t0 = time.monotonic()
 
     muse_path = shutil.which(muse_bin)
@@ -343,20 +426,24 @@ def main(argv=None):
             return die(EXIT_USAGE, f"gate mode requires {', '.join(missing)} "
                                    "(the gate installs the fixture; see "
                                    "harness/README.md).")
-        rc = check_gate(muse_path, base_url, proxy, key_name, echo_log, expected)
+        rc = check_gate(muse_path, base_url, proxy, key_name, echo_log, expected,
+                      cli_timeout)
     else:
         base_url = os.environ.get("PROBE_BASE_URL")
         if not base_url:
             return die(EXIT_USAGE, "provision mode requires PROBE_BASE_URL "
                                    "(the provider base URL).")
         key_name = os.environ.get("PROBE_KEY_NAME", "llm-api")
-        rc = check_provision(muse_path, base_url, proxy, key_name)
+        rc = check_provision(muse_path, base_url, proxy, key_name, cli_timeout)
 
     if rc != EXIT_OK:
         return rc
     rc = check_confirmd(confirmd_url)
     if rc != EXIT_OK:
         return rc
+    signal.setitimer(signal.ITIMER_REAL, 0)  # disarm: run stayed in budget.
+    # (Early-return paths need no disarm: every one exits the process, so a
+    # pending timer is moot.)
     dt = time.monotonic() - t0
     print(f"harness-auth-probe: OK ({args.mode} mode, {dt:.1f}s)", file=sys.stderr)
     return EXIT_OK
