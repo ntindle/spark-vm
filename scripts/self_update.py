@@ -39,22 +39,33 @@ _PINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 
 def default_runner(argv, timeout=_PROBE_TIMEOUT_S):
-    """Run argv, return (returncode, stdout_text). Never raises."""
+    """Run argv, return (returncode, stdout_text, stderr_text). Never raises."""
     try:
         proc = subprocess.run(
             argv,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             timeout=timeout,
             text=True,
         )
-        return proc.returncode, proc.stdout
+        return proc.returncode, proc.stdout, proc.stderr
     except (OSError, subprocess.SubprocessError):
-        return 127, ""
+        return 127, "", ""
 
 
 def _first_line(text):
     return (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+
+
+def _version_output(stdout, stderr):
+    """First non-empty line of stdout, falling back to stderr.
+
+    Some tools print versions to stderr (java-style). stdout is preferred so
+    stderr noise (deprecation warnings, PYTHONWARNINGS, sitecustomize
+    banners) can never masquerade as the version — see B1.
+    """
+    line = _first_line(stdout)
+    return line if line else _first_line(stderr)
 
 
 def _probe_binary_version(binary, argv, pattern=None, which=shutil.which,
@@ -68,12 +79,12 @@ def _probe_binary_version(binary, argv, pattern=None, which=shutil.which,
     if not path:
         return False, None, "not found on PATH"
     try:
-        rc, out = runner([binary] + argv)
+        rc, stdout, stderr = runner([binary] + argv)
     except Exception:
         # A runner that raises (rather than returning rc != 0) still must not
         # break the inventory — the binary exists, its version is unknown.
         return True, None, "found at %s but version query raised" % path
-    line = _first_line(out)
+    line = _version_output(stdout, stderr)
     if rc != 0 or not line:
         return True, None, "found at %s but version query failed" % path
     version = line
@@ -83,39 +94,60 @@ def _probe_binary_version(binary, argv, pattern=None, which=shutil.which,
     return True, version, "via %s %s" % (binary, " ".join(argv))
 
 
-def _probe_python_package(package, runner=default_runner):
+def _probe_python_package(package, python=sys.executable,
+                           runner=default_runner):
     """Probe an installed Python package via importlib.metadata."""
-    rc, out = runner([
-        sys.executable, "-c",
+    rc, stdout, stderr = runner([
+        python, "-c",
         "import importlib.metadata as m; print(m.version(%r))" % package,
     ])
-    line = _first_line(out)
+    line = _version_output(stdout, stderr)
     if rc != 0 or not line:
         return False, None, "python package %r not installed" % package
     return True, line, "python package"
 
 
-def probe_unattended_upgrades(which=shutil.which, runner=default_runner):
-    """OS security auto-installs: the unattended-upgrades package + config."""
+_DEFAULT_UU_CONF_PATHS = ("/etc/apt/apt.conf.d/20auto-upgrades",
+                          "/etc/apt/apt.conf.d/10periodic")
+
+
+def probe_unattended_upgrades(which=shutil.which, runner=default_runner,
+                              conf_paths=_DEFAULT_UU_CONF_PATHS):
+    """OS security auto-installs: the unattended-upgrades package + config.
+
+    `conf_paths` is injectable so the enabled/disabled detection is testable
+    against fixture files (B2).
+    """
     path = which("unattended-upgrade")
     if not path:
         return False, None, "unattended-upgrade not on PATH"
     version = None
-    rc, out = runner(["dpkg-query", "-W", "-f=${Version}",
-                      "unattended-upgrades"])
-    if rc == 0 and _first_line(out):
-        version = _first_line(out)
+    rc, stdout, _ = runner(["dpkg-query", "-W", "-f=${Version}",
+                            "unattended-upgrades"])
+    if rc == 0 and _first_line(stdout):
+        version = _first_line(stdout)
     enabled = False
-    try:
-        for conf in ("/etc/apt/apt.conf.d/20auto-upgrades",
-                     "/etc/apt/apt.conf.d/10periodic"):
+    read_any = False
+    for conf in conf_paths:
+        try:
             with open(conf, encoding="utf-8", errors="replace") as f:
-                if re.search(r'Unattended-Upgrade\s+"1"', f.read()):
-                    enabled = True
-                    break
-    except OSError:
-        pass
-    note = "auto-installs %s" % ("ENABLED" if enabled else "DISABLED")
+                read_any = True
+                for line in f:
+                    # Commented-out directives must not count as enabled.
+                    stripped = line.strip()
+                    if stripped.startswith("//") or stripped.startswith("#"):
+                        continue
+                    if re.search(r'Unattended-Upgrade\s+"1"', line):
+                        enabled = True
+                        break
+        except OSError:
+            continue
+        if enabled:
+            break
+    if not read_any:
+        note = "config unreadable"
+    else:
+        note = "auto-installs %s" % ("ENABLED" if enabled else "DISABLED")
     return True, version, note
 
 
@@ -135,8 +167,16 @@ def probe_gh(which=shutil.which, runner=default_runner):
                                  which=which, runner=runner)
 
 
-def probe_playwright(runner=default_runner):
-    return _probe_python_package("playwright", runner=runner)
+def probe_playwright(runner=default_runner, which=shutil.which):
+    """Probe the playwright package in the box's canonical python3.
+
+    Uses the PATH-resolved `python3` (the interpreter SETUP provisioned
+    Playwright into), not necessarily the interpreter running this script —
+    invoking via a venv or uv-managed python must not false-report a miss
+    (B4).
+    """
+    python = which("python3") or sys.executable
+    return _probe_python_package("playwright", python=python, runner=runner)
 
 
 def probe_playwright_browsers(home=None):
@@ -153,7 +193,8 @@ def probe_playwright_browsers(home=None):
     except OSError:
         return False, None, "no browser cache at %s" % base
     browsers = [e for e in entries
-                if os.path.isdir(os.path.join(base, e))]
+                if not e.startswith(".")  # skip Playwright's .links dir
+                and os.path.isdir(os.path.join(base, e))]
     if not browsers:
         return False, None, "browser cache dir exists but is empty"
     return True, "%d build(s)" % len(browsers), ", ".join(browsers)
@@ -163,11 +204,11 @@ def probe_snap(which=shutil.which, runner=default_runner):
     path = which("snap")
     if not path:
         return False, None, "not found on PATH"
-    rc, out = runner(["snap", "list"])
+    rc, stdout, _ = runner(["snap", "list"])
     if rc != 0:
         return True, None, "snap present but `snap list` failed"
     names = []
-    for line in out.splitlines()[1:]:  # skip the header row
+    for line in stdout.splitlines()[1:]:  # skip the header row
         parts = line.split()
         if parts:
             names.append(parts[0])
@@ -200,8 +241,8 @@ def probe_swapd(which=shutil.which, runner=default_runner):
     # swap audit) is S2's post-update health-check work.
     if not which("id"):
         return False, None, "cannot check: `id` not on PATH"
-    rc, out = runner(["id", "-u", "swapd"])
-    if rc != 0 or not _first_line(out):
+    rc, stdout, _ = runner(["id", "-u", "swapd"])
+    if rc != 0 or not _first_line(stdout):
         return False, None, "swapd system user absent"
     return True, None, "swapd system user present"
 
@@ -275,7 +316,12 @@ def run_probe(name, probe, pins):
     except Exception as exc:  # noqa: BLE001 - probes must never break status
         installed, version, note = False, None, "probe error: %s" % exc
     pinned = pins.get(name)
-    drift = bool(pinned and installed and version and version != pinned)
+    # Presence-only probes (version None) can still drift against a pin:
+    # a pin naming them means someone cares, and an unverifiable version
+    # must be loud, not silently ignored (B3).
+    drift = bool(pinned and installed and version != pinned)
+    if drift and version is None:
+        note = "%s; pinned %s but version unverifiable" % (note, pinned)
     return {
         "tool": name,
         "scope": next((s for n, s, _ in PROBES if n == name), ""),

@@ -23,9 +23,10 @@ def fake_which(mapping):
 
 
 def fake_runner(responses):
-    """responses: {argv_tuple: (rc, stdout)}. Unknown argv -> (127, '')."""
+    """responses: {argv_tuple: (rc, stdout, stderr)}.
+    Unknown argv -> (127, '', '')."""
     def runner(argv, timeout=10):
-        return responses.get(tuple(argv), (127, ""))
+        return responses.get(tuple(argv), (127, "", ""))
     return runner
 
 
@@ -72,7 +73,7 @@ def test_binary_probe_missing_from_path():
 
 def test_docker_version_parsed():
     runner = fake_runner({("docker", "--version"):
-                          (0, "Docker version 27.5.1, build 9f78933\n")})
+                          (0, "Docker version 27.5.1, build 9f78933\n", "")})
     installed, version, note = self_update.probe_docker(
         which=fake_which({"docker": "/usr/bin/docker"}), runner=runner)
     assert installed is True
@@ -81,7 +82,7 @@ def test_docker_version_parsed():
 
 def test_pattern_fallback_keeps_whole_first_line():
     runner = fake_runner({("gh", "--version"):
-                          (0, "some-unexpected-format 1.2\nsecond line\n")})
+                          (0, "some-unexpected-format 1.2\nsecond line\n", "")})
     installed, version, _ = self_update.probe_gh(
         which=fake_which({"gh": "/usr/bin/gh"}), runner=runner)
     assert installed is True
@@ -89,7 +90,7 @@ def test_pattern_fallback_keeps_whole_first_line():
 
 
 def test_version_query_failure_still_counts_as_installed():
-    runner = fake_runner({("node", "--version"): (1, "")})
+    runner = fake_runner({("node", "--version"): (1, "", "")})
     installed, version, note = self_update.probe_node(
         which=fake_which({"node": "/usr/bin/node"}), runner=runner)
     assert installed is True
@@ -104,6 +105,26 @@ def test_runner_exception_becomes_not_found():
     assert version is None
 
 
+def test_stderr_noise_does_not_pollute_version():
+    # B1: warnings merged into the version string must not happen; stdout
+    # wins, stderr is only a fallback.
+    runner = fake_runner({("gh", "--version"):
+                          (0, "gh version 2.101.0\n",
+                           "DeprecationWarning: pkg_resources is deprecated\n")})
+    installed, version, _ = self_update.probe_gh(
+        which=fake_which({"gh": "/usr/bin/gh"}), runner=runner)
+    assert installed is True
+    assert version == "2.101.0"
+
+
+def test_version_falls_back_to_stderr_when_stdout_empty():
+    runner = fake_runner({("gh", "--version"): (0, "", "gh version 2.101.0\n")})
+    installed, version, _ = self_update.probe_gh(
+        which=fake_which({"gh": "/usr/bin/gh"}), runner=runner)
+    assert installed is True
+    assert version == "2.101.0"
+
+
 # --- python package probes -------------------------------------------------
 
 def test_playwright_probe_reports_real_package_or_clean_miss():
@@ -112,6 +133,20 @@ def test_playwright_probe_reports_real_package_or_clean_miss():
     assert isinstance(installed, bool)
     if installed:
         assert version and version[0].isdigit()
+
+
+def test_playwright_probe_uses_path_python3():
+    # B4: the probe must target the box's canonical python3, not the
+    # interpreter running this script.
+    seen = {}
+    def runner(argv, timeout=10):
+        seen["argv"] = argv
+        return 0, "1.49.1\n", ""
+    installed, version, _ = self_update.probe_playwright(
+        runner=runner, which=fake_which({"python3": "/usr/bin/python3"}))
+    assert seen["argv"][0] == "/usr/bin/python3"
+    assert installed is True
+    assert version == "1.49.1"
 
 
 # --- playwright browsers ---------------------------------------------------
@@ -127,11 +162,94 @@ def test_playwright_browsers_lists_builds(tmp_path):
     cache = tmp_path / ".cache" / "ms-playwright"
     (cache / "chromium-1181").mkdir(parents=True)
     (cache / "firefox-1490").mkdir(parents=True)
+    (cache / ".links").mkdir(parents=True)  # Playwright internal, not a build
     installed, version, note = self_update.probe_playwright_browsers(
         home=str(tmp_path))
     assert installed is True
     assert version == "2 build(s)"
     assert "chromium-1181" in note and "firefox-1490" in note
+
+
+# --- unattended-upgrades ---------------------------------------------------
+
+def _uu_which_runner(conf_dir, version_out=(0, "2.10.2\n", ""), tmp_path=None):
+    which = fake_which({"unattended-upgrade": "/usr/bin/unattended-upgrade",
+                        "dpkg-query": "/usr/bin/dpkg-query"})
+    runner = fake_runner({
+        ("dpkg-query", "-W", "-f=${Version}", "unattended-upgrades"):
+            version_out})
+    return which, runner
+
+
+def test_unattended_upgrades_enabled(tmp_path):
+    conf = tmp_path / "20auto-upgrades"
+    conf.write_text('APT::Periodic::Update-Package-Lists "1";\n'
+                    'APT::Periodic::Unattended-Upgrade "1";\n')
+    which, runner = _uu_which_runner(tmp_path)
+    installed, version, note = self_update.probe_unattended_upgrades(
+        which=which, runner=runner, conf_paths=(str(conf),))
+    assert installed is True
+    assert version == "2.10.2"
+    assert "ENABLED" in note
+
+
+def test_unattended_upgrades_disabled(tmp_path):
+    conf = tmp_path / "20auto-upgrades"
+    conf.write_text('APT::Periodic::Unattended-Upgrade "0";\n')
+    which, runner = _uu_which_runner(tmp_path)
+    installed, _, note = self_update.probe_unattended_upgrades(
+        which=which, runner=runner, conf_paths=(str(conf),))
+    assert installed is True
+    assert "DISABLED" in note
+
+
+def test_unattended_upgrades_commented_directive_is_not_enabled(tmp_path):
+    # B2: `// APT::Periodic::Unattended-Upgrade "1";` must not count.
+    conf = tmp_path / "20auto-upgrades"
+    conf.write_text('// APT::Periodic::Unattended-Upgrade "1";\n'
+                    '# APT::Periodic::Unattended-Upgrade "1";\n')
+    which, runner = _uu_which_runner(tmp_path)
+    installed, _, note = self_update.probe_unattended_upgrades(
+        which=which, runner=runner, conf_paths=(str(conf),))
+    assert installed is True
+    assert "DISABLED" in note
+
+
+def test_unattended_upgrades_missing_binary():
+    installed, version, _ = self_update.probe_unattended_upgrades(
+        which=fake_which({}), runner=fake_runner({}))
+    assert installed is False
+    assert version is None
+
+
+def test_unattended_upgrades_dpkg_query_failure(tmp_path):
+    conf = tmp_path / "20auto-upgrades"
+    conf.write_text('APT::Periodic::Unattended-Upgrade "1";\n')
+    which, runner = _uu_which_runner(tmp_path, version_out=(1, "", ""))
+    installed, version, note = self_update.probe_unattended_upgrades(
+        which=which, runner=runner, conf_paths=(str(conf),))
+    assert installed is True
+    assert version is None  # package query failed; config still readable
+    assert "ENABLED" in note
+
+
+def test_unattended_upgrades_unreadable_config(tmp_path):
+    which, runner = _uu_which_runner(tmp_path)
+    installed, _, note = self_update.probe_unattended_upgrades(
+        which=which, runner=runner,
+        conf_paths=(str(tmp_path / "no-such.conf"),))
+    assert installed is True
+    assert note == "config unreadable"
+
+
+def test_unattended_upgrades_first_conf_missing_falls_through(tmp_path):
+    conf = tmp_path / "10periodic"
+    conf.write_text('APT::Periodic::Unattended-Upgrade "1";\n')
+    which, runner = _uu_which_runner(tmp_path)
+    installed, _, note = self_update.probe_unattended_upgrades(
+        which=which, runner=runner,
+        conf_paths=(str(tmp_path / "no-such.conf"), str(conf)))
+    assert "ENABLED" in note
 
 
 # --- snap ------------------------------------------------------------------
@@ -140,7 +258,7 @@ def test_snap_list_parsed():
     out = ("Name    Version   Rev   Tracking       Publisher   Notes\n"
            "core22  20250101  1234  latest/stable  canonical✓  base\n"
            "lxd     5.21      5678  latest/stable  canonical✓  -\n")
-    runner = fake_runner({("snap", "list"): (0, out)})
+    runner = fake_runner({("snap", "list"): (0, out, "")})
     installed, version, note = self_update.probe_snap(
         which=fake_which({"snap": "/usr/bin/snap"}), runner=runner)
     assert installed is True
@@ -183,6 +301,16 @@ def test_no_drift_when_versions_match():
     assert r["drift"] is False
 
 
+def test_drift_fires_when_version_unverifiable_against_pin():
+    # B3: a pin naming a presence-only probe (cred/swapd report version None)
+    # must be loud, not silently ignored.
+    def probe():
+        return True, None, "installed at /x (no version flag)"
+    r = self_update.run_probe("cred", probe, {"cred": "1.0"})
+    assert r["drift"] is True
+    assert "unverifiable" in r["note"]
+
+
 def test_no_drift_without_pin_or_when_missing():
     def probe():
         return True, "1.0", "ok"
@@ -211,7 +339,7 @@ def test_cred_probe_missing():
 
 
 def test_swapd_probe_user_present():
-    runner = fake_runner({("id", "-u", "swapd"): (0, "999\n")})
+    runner = fake_runner({("id", "-u", "swapd"): (0, "999\n", "")})
     installed, version, note = self_update.probe_swapd(
         which=fake_which({"id": "/usr/bin/id"}), runner=runner)
     assert installed is True
@@ -220,14 +348,14 @@ def test_swapd_probe_user_present():
 
 
 def test_swapd_probe_user_absent():
-    runner = fake_runner({("id", "-u", "swapd"): (1, "")})
+    runner = fake_runner({("id", "-u", "swapd"): (1, "", "")})
     installed, version, _ = self_update.probe_swapd(
         which=fake_which({"id": "/usr/bin/id"}), runner=runner)
     assert installed is False
 
 
 def test_muse_job_version():
-    runner = fake_runner({("muse-job", "--version"): (0, "0.4.0\n")})
+    runner = fake_runner({("muse-job", "--version"): (0, "0.4.0\n", "")})
     installed, version, _ = self_update.probe_muse_job(
         which=fake_which({"muse-job": "/usr/local/bin/muse-job"}),
         runner=runner)

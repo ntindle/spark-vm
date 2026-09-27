@@ -49,23 +49,27 @@ was never provisioned by spark-vm (missing tools just report `no`).
 
 ## Behavior requirements
 
-- **Runs on a systemd timer** (default: weekly, in a quiet-hours window,
+(These describe the finished system. Items marked S2/S3 arrive in later
+slices — see "Build slices" below; S1 ships the inventory only.)
+
+- **Runs on a systemd timer** *(S3)* (default: weekly, in a quiet-hours window,
   configurable) with `--now` and `--dry-run` flags.
-- **Never disrupts running agent work**: no service restarts while jobs are
+- **Never disrupts running agent work** *(S2)*: no service restarts while jobs are
   active. Updates apply at idle or defer to the next window — agent jobs must
   survive an update run. The updater checks for live `muse-job` sessions
   (and any operator-declared busy signal) before touching anything.
 - **Per-tool version pinning** where breaking changes matter: the updater
   holds the tool on the pin in `scripts/self_update_pins.conf` until the pin
-  is deliberately bumped (with a changelog note).
-- **Everything logged** to a stable location (`/var/log/sparkvm-self-update/`
+  is deliberately bumped (with a changelog note). *(S1 reports drift; S2
+  enforces the hold.)*
+- **Everything logged** *(S2)* to a stable location (`/var/log/sparkvm-self-update/`
   on the box, mirrored to the operator's journal); failures are loud (log +
   status flag), successes are quiet.
-- **Idempotent and re-runnable**; safe to run on an already-current box
+- **Idempotent and re-runnable** *(S2)*; safe to run on an already-current box
   (no-op).
-- **Installed by provisioning** (cloud-init / setup path) **and backfillable**
+- **Installed by provisioning** *(S3)* (cloud-init / setup path) **and backfillable**
   onto existing boxes with one command (`self-update install`).
-- **Opt-out supported** (`self-update disable`), manual mode supported
+- **Opt-out supported** *(S2)* (`self-update disable`), manual mode supported
   (`self-update run --now`).
 
 ## Acceptance (from #532)
