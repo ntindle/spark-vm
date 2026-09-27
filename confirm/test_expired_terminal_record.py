@@ -168,28 +168,38 @@ class ExpiredTerminalRecordTests(unittest.TestCase):
     def test_answer_replace_wins_over_racing_stamp(self):
         """The design's precedence contract: if an expiry stamp lands
         first and the answer path then runs its UNCONDITIONAL os.replace,
-        the approve/deny record is the terminal state. This test pins the
-        answer path's os.replace — an implementer "fixing" it to
-        write-if-absent would invert the precedence and fail here."""
-        item = _pending_item()
+        the approve/deny record is the terminal state. This test drives
+        the REAL _answer_locked — not a hand-simulated os.replace — so
+        an implementer "fixing" the answer path's answered->consumed
+        move to write-if-absent fails here. (QA mutation review
+        2026-09-26: the hand-simulated version of this test was
+        vacuous — converting _answer_locked to write-if-absent broke
+        nothing. This version pins the actual path.)
+
+        Scenario: the proxy's filing-scan reap won the race mid-flight
+        and stamped an expiry record; the human's deny then lands and
+        must overwrite it."""
+        item = _pending_item(expired=False)  # answerable: not expired
+        nonce = cd._mint_csrf_nonce(item)    # mint BEFORE planting
         p = self._plant_pending(item)
         with self._ctx():
-            self.assertTrue(cd._stamp_expired_consumed(AID, item, p,
-                                                       "confirmd"))
-            # The answer path's move: answered/ -> consumed/, os.replace
-            # (unconditional), exactly as _answer_locked does.
-            answered = dict(item)
-            answered["decision"] = "approve"
-            answered["answered_at"] = datetime.now(timezone.utc).isoformat()
-            answered["answered_by"] = "ntindle@github"
-            dst = self.approvals / "answered" / (AID + ".json")
-            dst.write_text(json.dumps(answered))
-            os.replace(str(dst),
-                       str(self.approvals / "consumed" / (AID + ".json")))
+            # The proxy won the race mid-flight: expiry record stamped.
+            self.assertTrue(
+                cd._stamp_expired_consumed(AID, item, p, "proxy"))
+            h = cd.Handler.__new__(cd.Handler)  # real answer path
+            h.client_address = ("100.99.0.1", 1234)
+            h.send_response = lambda code: None
+            h.send_header = lambda k, v: None
+            h.end_headers = lambda: None
+            with mock.patch.object(cd, "file_owner_name",
+                                   return_value="swapd"):
+                h._answer_locked("ntindle@github", AID, nonce, "deny")
             final = json.loads(
                 (self.approvals / "consumed" / (AID + ".json")).read_text())
-        self.assertEqual(final["decision"], "approve")
+        self.assertEqual(final["decision"], "deny")
         self.assertIn("answered_at", final)
+        self.assertIn("answered_by", final)
+        self.assertNotIn("expired_at", final)
 
     def test_stamp_loses_when_answer_record_exists(self):
         """If the answer path already wrote the terminal record, the
