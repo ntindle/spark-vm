@@ -177,9 +177,9 @@ class TestMainBranchRuleset(unittest.TestCase):
         self.assertEqual(contexts, ci_job_check_names(CI_YML))
         self.assertTrue(checks["parameters"]["strict_required_status_checks_policy"])
 
-    def test_ci_job_check_names_are_the_declared_four(self):
+    def test_ci_job_check_names_are_the_declared_five(self):
         # Known-good anchor: the protection is *supposed* to require exactly
-        # these four checks. A ci.yml job rename/add/remove must update this
+        # these five checks. A ci.yml job rename/add/remove must update this
         # set deliberately, under review, together with the ruleset JSON —
         # the equality test above then forces the JSON to follow.
         self.assertEqual(
@@ -189,6 +189,7 @@ class TestMainBranchRuleset(unittest.TestCase):
                 "shellcheck",
                 "markdown link check",
                 "PNG screenshot smoke test",
+                "changelog ritual lint",
             },
         )
 
