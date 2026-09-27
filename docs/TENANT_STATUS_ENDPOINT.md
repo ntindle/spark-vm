@@ -295,6 +295,15 @@ readers                       tenant Muse (linked key) · signup page (cookie)
    `live`; that moment starts the H3 §5 clock); no `box_id` schema
    sibling (§8). The stall detector's Q2 is closed in §8 too (one
    tenant-level stall).
+   *Amended 2026-09-27: rule 1 is now a total selection preference over
+   all 12 codes (see §8) — the ranking above was the pre-amendment
+   2026-09-26 version. `waiting-on-approval` now ranks between `live`
+   and `provisioning`; `no-gated-action` and `policy-misfire` rank below
+   `box-unhealthy`; the arc-terminal codes
+   (`approved`, `human-denied`, `human-drop-off`, `provisioning-failed`)
+   participate only while no non-terminal candidate exists; suspension
+   codes (`stuck`, `connection-unreachable`) compare by their latched
+   underlying arc code.*
 2. **Who writes `approvals_url`: ANSWERED → §8 (G8 resolution, 2026-09-26
    gap turn).** Original question kept for history: signup stage 2 hands
    it to the human (spec §4), but the control plane must persist it into
