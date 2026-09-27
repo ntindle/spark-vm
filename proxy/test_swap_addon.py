@@ -215,6 +215,7 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY,
     a._approval_signal = None  # reset per request by request()
     a._denial_cache = {}  # #307: per-tuple consumed/ scan cache
     a._expiry_cache = {}  # S2 (#511): expiry-lookup cache, same shape
+    a._pending_cache = {}  # #563: per-tuple pending/ scan cache
     a.refused = []
     a._audit_refused = lambda host, name, reason: a.refused.append(
         (host, name, reason))

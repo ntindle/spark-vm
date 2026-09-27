@@ -88,6 +88,7 @@ class ExpiredTerminalServingTests(unittest.TestCase):
         self.addon._audit = lambda *a: True
         self.addon._denial_cache = {}  # #307: per-tuple consumed/ scan cache
         self.addon._expiry_cache = {}  # S2 (#511): same shape, expiry lookup
+        self.addon._pending_cache = {}  # #563: per-tuple pending/ scan cache
 
     def tearDown(self):
         self.tmp.cleanup()
