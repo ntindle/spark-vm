@@ -430,7 +430,7 @@ This changelog only works if entries land with the change, not after it:
   oversize files, unreadable files — so the duplicated open discipline
   cannot drift silently. (#480)
 
-- Every line written to the approval audit log is now flushed to disk before the call returns: previously a crash could silently erase recent refusals from the page-cache window, and only a write error was reported. The remaining documented window is a brand-new log file's directory entry. (#72, #584)
+- Every line written to the approval audit log is now flushed to disk before the call returns: previously a crash could silently erase recent refusals from the page-cache window, and only a write error was reported. The remaining documented window is a brand-new log file's directory entry. (#72, #TBD)
 
 ## [0.3.0] - 2026-09-24
 
