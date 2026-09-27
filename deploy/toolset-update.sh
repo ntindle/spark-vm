@@ -19,15 +19,17 @@
 #     when agent jobs are active, unless --force. v0 never restarts services.
 #   - Fail-closed: unknown/missing state is reported, never silently skipped.
 #   - Idempotent: safe to run on an already-current box (no-op).
-#   - --dry-run changes nothing; --now runs immediately instead of waiting
-#     for the weekly window (the idle gate still applies; --force bypasses it).
+#   - --dry-run changes nothing. --now is informational-only in v0: the
+#     timer owns the weekly schedule; the flag only logs that the operator
+#     asked for an immediate run (the idle gate still applies unless
+#     --force).
 #   - Opt-out: /etc/sparkvm/toolset-update.optout (or $TOOLSET_UPDATE_OPTOUT=1)
 #     makes `update` a no-op.
 #
 # Usage:
-#   toolset-update.sh status [--json]  # machine-readable inventory report
+#   toolset-update.sh status  # machine-readable TSV inventory report
 #   toolset-update.sh update [--dry-run] [--now] [--force]
-#   toolset-update.sh install [--force]  # backfill onto an existing box
+#   toolset-update.sh install  # backfill onto an existing box
 #   toolset-update.sh uninstall
 #   toolset-update.sh optout | optin
 #   toolset-update.sh version
@@ -43,9 +45,10 @@
 #     refreshes it. Treat `install` (reinstall) as a privileged step: review
 #     the checkout diff first. The timer automates the operator's existing
 #     root maintenance — it does not grant new privilege to anyone.
-#   - v0 only ever writes $APT_CONF_DIR/20auto-upgrades (repair) and its own
-#     state dir. It runs no package manager itself; unattended-upgrades does
-#     the installing on its own schedule.
+#   - v0 only ever writes inside $APT_CONF_DIR (the 20auto-upgrades config,
+#     staged then renamed into place) and its own state dir. It runs no
+#     package manager itself; unattended-upgrades does the installing on
+#     its own schedule.
 #   - The script never executes anything fetched over the network and never
 #     runs downloaded code. There is no update channel to poison — the v0
 #     "update" is a config-state guarantee.
@@ -168,7 +171,7 @@ readonly WANT_UPDATE_LIST='APT::Periodic::Update-Package-Lists "1";'
 readonly WANT_UNATTENDED='APT::Periodic::Unattended-Upgrade "1";'
 
 _os_security_state() {
-    # Prints one of: ok | repair-needed | unknown — never fails the caller.
+    # Prints one of: ok | repair-needed — never fails the caller.
     if ! command -v unattended-upgrades >/dev/null 2>&1 \
         && ! dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
         printf 'repair-needed'
@@ -205,12 +208,17 @@ _os_security_repair() {
         _sudo apt-get install -y unattended-upgrades \
             || { log "os-security: apt-get install failed"; return 1; }
     fi
-    local tmp; tmp="$(mktemp)"
+    local tmp newf
+    tmp="$(mktemp)"
+    newf="$APT_CONF_DIR/.20auto-upgrades.new.$$"
     printf '%s\n%s\n' "$WANT_UPDATE_LIST" "$WANT_UNATTENDED" >"$tmp"
-    # Atomic install, root-owned, world-readable (apt reads it as non-root).
-    _sudo install -o root -g root -m 0644 "$tmp" "$UNATTENDED_CONF" \
-        || { rm -f "$tmp"; log "os-security: config install failed"; return 1; }
+    # Atomic publish: stage with correct ownership/mode, then rename so
+    # readers never see a half-written 20auto-upgrades.
+    _sudo install -o root -g root -m 0644 "$tmp" "$newf" \
+        || { rm -f "$tmp"; log "os-security: config stage failed"; return 1; }
     rm -f "$tmp"
+    _sudo mv -f "$newf" "$UNATTENDED_CONF" \
+        || { _sudo rm -f "$newf"; log "os-security: config publish failed"; return 1; }
     log "os-security: config repaired"
     return 0
 }
@@ -262,7 +270,7 @@ cmd_update() {
             *) echo "ERROR: unknown flag: $a" >&2; return 2 ;;
         esac
     done
-    [ "$now" = "1" ] && log "update --now: running outside the weekly window"
+    [ "$now" = "1" ] && log "update --now: informational only in v0 (the timer owns the schedule); running now"
 
     if _opted_out; then
         log "update: opted out ($OPTOUT_FILE or TOOLSET_UPDATE_OPTOUT); no-op"
@@ -273,6 +281,13 @@ cmd_update() {
     # Single-flight: never interleave two update runs.
     mkdir -p "$TOOLSET_STATE_DIR" 2>/dev/null \
         || { log "update: cannot create state dir $TOOLSET_STATE_DIR"; return 1; }
+    if ! command -v flock >/dev/null 2>&1; then
+        # A missing flock must not degrade into a silent perpetual no-op:
+        # fail loud so the timer's failure is visible in the audit log.
+        log "update: flock not found; cannot take the single-flight lock"
+        audit 'toolset-update' ',"result":"failed","reason":"flock-missing"'
+        return 1
+    fi
     exec 9>"$STATE_LOCK" 2>/dev/null || { log "update: cannot open lock"; return 1; }
     if ! flock -n 9 2>/dev/null; then
         log "update: another run holds the lock; no-op"
@@ -307,8 +322,9 @@ cmd_install() {
     # One-command backfill: copy the script to the state-dir installed copy,
     # install the systemd units, enable the timer. Re-running refreshes the
     # installed copy (privileged step — review the diff first).
-    local force=0
-    for a in "$@"; do case "$a" in --force) force=1 ;; *) echo "ERROR: unknown flag: $a" >&2; return 2 ;; esac; done
+    # install takes no flags; re-running refreshes the installed copy
+    # (privileged step — review the diff first).
+    for a in "$@"; do case "$a" in *) echo "ERROR: unknown flag: $a" >&2; return 2 ;; esac; done
     _sudo mkdir -p "$INSTALLED_BIN" "$SYSTEMD_DIR" \
         || { echo "ERROR: cannot create install dirs" >&2; return 1; }
     _sudo install -o root -g root -m 0755 "$SCRIPT_DIR/toolset-update.sh" "$INSTALLED_SCRIPT" \
@@ -363,7 +379,8 @@ cmd_version() {
 }
 
 usage() {
-    sed -n '2,40p' "$SCRIPT_DIR/toolset-update.sh"
+    # Print the full header comment (everything up to `set -euo pipefail`).
+    sed -n '2,/^set -euo pipefail$/p' "$SCRIPT_DIR/toolset-update.sh" | sed '$d'
     exit 2
 }
 

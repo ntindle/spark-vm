@@ -18,10 +18,10 @@ Commands:
 
 | Command | Effect |
 | ------- | ------ |
-| `status` | TSV per-component state (`ok` / `repair-needed` / `probe-only` / `unknown`); operator-readable, no root needed |
-| `update [--force] [--dry-run] [--now]` | Repair `os-security`, then report component states; no actual component updates yet (v0) |
-| `install` / `uninstall` | Install the systemd units and backfill the installed script copy |
-| `optout` / `optin` | Machine-wide opt-out via `/etc/sparkvm/toolset-update.optout` |
+| `status` | TSV per-component state (`ok` / `repair-needed` for `os-security`; `present` / `absent` for the version probes); operator-readable, no root needed |
+| `update [--force] [--dry-run] [--now]` | Repair `os-security` (fail-loud, idempotent); `--now` is informational-only in v0 — the timer owns the weekly schedule, the flag only logs intent |
+| `install` / `uninstall` | Install the systemd units and backfill the installed script copy / remove the units only (the installed copy and state dir — including audit history — are left in place) |
+| `optout` / `optin` | Machine-wide opt-out via `/etc/sparkvm/toolset-update.optout` (or `TOOLSET_UPDATE_OPTOUT=1` in the environment) |
 | `version` | Print the framework version |
 
 The `os-security` layer is the only real updater in v0. It ensures the
@@ -46,8 +46,8 @@ lines (writes atomically via `install`; idempotent; supports `--dry-run`).
 ## Component status (v0)
 
 Only `os-security` reports `ok` / `repair-needed`. Docker, node, npm, gh,
-playwright, and cua-driver are **status probes only** (`probe-only`) until
-their updater layers land.
+playwright, and cua-driver are **status probes only** (`present` / `absent`)
+until their updater layers land.
 
 ## Follow-ups (issue #532, not in this slice)
 

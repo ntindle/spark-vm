@@ -27,6 +27,9 @@ GOOD_CONF = (
 )
 
 
+_stub_counter = [0]
+
+
 def make_realtools(tmp_path):
     """Symlink dir of the real system tools the script needs (grep, flock,
     ...). Lets package-absent tests build a PATH that provably lacks
@@ -41,9 +44,6 @@ def make_realtools(tmp_path):
         if p:
             (d / t).symlink_to(p)
     return str(d)
-
-
-_stub_counter = [0]
 
 
 def make_stub_bin(tmp_path, files):
@@ -176,8 +176,9 @@ def test_update_installs_missing_package(env):
     # apt-get stub records the install call; package absent from PATH/dpkg.
     aptlog = env["tmp"] / "apt-calls.log"
     bindir = make_stub_bin(env["tmp"] / "aptbin", {
-        # No unattended-upgrades on PATH (this VM has none) and the dpkg stub
-        # reports not-installed: the install branch must fire.
+        # Hermetic PATH: no unattended-upgrades anywhere (realtools has no
+        # symlink for it), and the dpkg stub reports not-installed, so the
+        # install branch must fire and call the apt-get stub.
         "dpkg": "exit 1",
         "tmux": "exit 1",
         "sudo": "echo STUB-SUDO-CALLED >&2; exit 1",
@@ -299,11 +300,19 @@ def test_optout_optin_roundtrip(env):
 
 def test_script_never_fetches_code():
     # The v0 trust claim: no network fetch, no package manager of its own.
-    # apt-get appears only for installing unattended-upgrades itself.
+    # apt-get appears exactly once: the unattended-upgrades bootstrap.
+    # A future slice adding a second package-manager call must update this pin.
+    # (Matches command invocations only — the "apt-get install failed" log
+    # string is not a second call site.)
+    import re
     text = open(SCRIPT).read()
     for banned in ("curl ", "wget ", "git clone", "pip install", "npm install",
                    "http://", "https://"):
         assert banned not in text, f"v0 must not contain: {banned}"
+    invocations = [l for l in text.splitlines()
+                   if re.search(r"^\s*(_sudo\s+)?apt-get\b", l)]
+    assert len(invocations) == 1, invocations
+    assert "install -y unattended-upgrades" in invocations[0]
 
 
 def test_umask_is_restrictive():
@@ -317,3 +326,112 @@ def test_audit_lines_are_json(env):
     assert lines
     for entry in lines:
         assert "ts" in entry and "event" in entry
+
+
+# --- reviewer-driven hardening (round 1) -------------------------------------
+
+def test_update_fails_loud_when_apt_get_fails(env):
+    # Package absent + apt-get stub exits 1: the install branch must fail
+    # loud (audit failed), not silently skip.
+    bindir = make_stub_bin(env["tmp"], {
+        "dpkg": "exit 1",
+        "tmux": "exit 1",
+        "apt-get": "exit 1",
+    })
+    e = dict(env["env"])
+    e["PATH"] = bindir + os.pathsep + make_realtools(env["tmp"])
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0
+    assert not (env["apt"] / "20auto-upgrades").exists()
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+
+
+def test_update_fails_loud_when_flock_missing(env):
+    # No flock on PATH: must fail loud with an honest reason, never degrade
+    # into a silent perpetual no-op that keeps the timer green.
+    bindir = make_stub_bin(env["tmp"], {"dpkg": "exit 1", "tmux": "exit 1"})
+    tools = env["tmp"] / "flocklesstools"
+    tools.mkdir(exist_ok=True)
+    for t in ("bash", "mkdir", "date", "wc", "tail", "mv", "dirname"):
+        p = shutil.which(t)
+        if p:
+            (tools / t).symlink_to(p)
+    e = dict(env["env"])
+    e["PATH"] = f"{bindir}{os.pathsep}{tools}"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert lines[-1].get("reason") == "flock-missing"
+
+
+def test_unknown_command_exits_2(env):
+    r = run_bash("./deploy/toolset-update.sh frobnicate", env_extra=env["env"])
+    assert r.returncode == 2
+
+
+def test_now_flag_is_informational(env):
+    # --now changes nothing in v0 except a log line (the timer owns the
+    # schedule); it must still succeed and repair normally.
+    e = dict(env["env"])
+    r = run_bash("./deploy/toolset-update.sh update --now", env_extra=e)
+    assert r.returncode == 0
+    logtext = (env["state"] / "toolset-update.log").read_text()
+    assert "--now: informational only in v0" in logtext
+    assert (env["apt"] / "20auto-upgrades").read_text() == GOOD_CONF
+
+
+def test_install_enables_timer_via_systemctl(env):
+    syscalls = env["tmp"] / "systemctl-calls.log"
+    bindir = make_stub_bin(env["tmp"] / "sysctl", {
+        "systemctl": f"echo \"$@\" >> {syscalls}; exit 0",
+    })
+    e = dict(env["env"])
+    e["SKIP_SYSTEMCTL"] = "0"
+    e["PATH"] = bindir + os.pathsep + os.environ["PATH"]
+    r = run_bash("./deploy/toolset-update.sh install", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    calls = syscalls.read_text()
+    assert "daemon-reload" in calls
+    assert "enable sparkvm-toolset-update.timer" in calls
+
+
+def test_uninstall_disables_timer_via_systemctl(env):
+    syscalls = env["tmp"] / "systemctl-calls.log"
+    bindir = make_stub_bin(env["tmp"] / "sysctl2", {
+        "systemctl": f"echo \"$@\" >> {syscalls}; exit 0",
+    })
+    e = dict(env["env"])
+    e["SKIP_SYSTEMCTL"] = "0"
+    e["PATH"] = bindir + os.pathsep + os.environ["PATH"]
+    r = run_bash("./deploy/toolset-update.sh install", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    r = run_bash("./deploy/toolset-update.sh uninstall", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    calls = syscalls.read_text()
+    assert "disable --now sparkvm-toolset-update.timer" in calls
+    assert "daemon-reload" in calls
+
+
+def test_unit_files_content_fidelity():
+    # The timer must drive the INSTALLED copy, not the checkout; schedule
+    # and targets must match docs/TOOLSET_UPDATE.md.
+    svc = open(os.path.join(REPO, "deploy", "sparkvm-toolset-update.service")).read()
+    tmr = open(os.path.join(REPO, "deploy", "sparkvm-toolset-update.timer")).read()
+    assert "ExecStart=/home/ntindle/.sparkvm-toolset/bin/toolset-update.sh update" in svc
+    assert "OnCalendar=Sun *-*-* 03:00:00" in tmr
+    assert "RandomizedDelaySec=30min" in tmr
+    assert "Persistent=false" in tmr
+    assert "WantedBy=timers.target" in tmr
+    assert "WantedBy=multi-user.target" in svc
+
+
+def test_optout_env_var_is_noop(env):
+    e = dict(env["env"])
+    e["TOOLSET_UPDATE_OPTOUT"] = "1"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0
+    assert not (env["apt"] / "20auto-upgrades").exists()
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "opted-out"
