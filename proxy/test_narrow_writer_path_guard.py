@@ -17,9 +17,15 @@ Because the refusal only triggers in the swapd identity, subprocess tests
 simulate it two ways:
 - python writers: the decision function _running_as_swapd() takes an injectable
   euid/getpwnam, so it is unit-tested directly (importlib load, no .py suffix).
-- bash writers: a fake `id` earlier on PATH reports a fixed uid for both
-  `id -u` and `id -u swapd`, driving the real guard code down the as-swapd
-  branch. FAKE_ID_NO_SWAPD=1 makes `id -u swapd` fail (no such user).
+- bash writers: run under a real `swapd` uid via setpriv. The class provisions
+  a temporary `swapd` user when running as root (removed afterwards); without
+  root and without a pre-existing swapd user those tests skip. Scripts are
+  copied to a world-accessible temp dir because the worktree is not
+  traversable by other uids.
+
+A hostile-`id`-on-PATH regression test proves the bash identity check is
+PATH-independent (/usr/bin/id + $EUID): even an `id` that claims the swapd
+identity must not arm or disarm the guard.
 
 Issue #96: cred-registry-set `set` replaced the whole entry dict, silently
 dropping a per-entry `scrub:false` opt-out. It now merges (placement only).
@@ -30,6 +36,7 @@ import importlib.util
 import io
 import json
 import os
+import pwd
 import stat
 import subprocess
 import sys
@@ -67,36 +74,6 @@ def run(script, args, env, input_text=None):
 def plain_env(extra=None):
     """Ordinary caller env (no marker — the marker design is gone)."""
     env = dict(os.environ)
-    if extra:
-        env.update(extra)
-    return env
-
-
-def fake_id_env(extra=None, no_swapd=False, uid=FAKE_UID):
-    """Env whose PATH puts a fake `id` first, simulating the swapd identity.
-
-    The fake reports `uid` for `id -u` and (unless no_swapd) for
-    `id -u swapd`, so the bash guards take the as-swapd branch even though
-    the test process is not swapd. With no_swapd=True, `id -u swapd`
-    fails, simulating a box with no swapd user (guard inert).
-    """
-    d = tempfile.mkdtemp(prefix="fakeid-")
-    fake = Path(d) / "id"
-    real_uid = os.getuid()
-    fake.write_text(
-        "#!/bin/bash\n"
-        "if [ \"${2:-}\" = \"swapd\" ] && "
-        "[ \"${FAKE_ID_NO_SWAPD:-0}\" = \"1\" ]; then exit 1; fi\n"
-        "if [ \"${1:-}\" = \"-u\" ]; then "
-        "echo \"${FAKE_ID_UID:-%d}\"; exit 0; fi\n"
-        "exec /usr/bin/id \"$@\"\n" % real_uid,
-        encoding="utf-8")
-    fake.chmod(0o755)
-    env = dict(os.environ)
-    env["PATH"] = d + os.pathsep + env.get("PATH", "")
-    env["FAKE_ID_UID"] = str(uid)
-    if no_swapd:
-        env["FAKE_ID_NO_SWAPD"] = "1"
     if extra:
         env.update(extra)
     return env
@@ -158,16 +135,90 @@ class SwapdIdentityUnitTests(unittest.TestCase):
                         self.assertIn("refusing", err.getvalue())
 
 
+def hostile_id_env(extra=None):
+    """Env with a hostile `id` on PATH claiming the swapd identity.
+
+    Regression test for the PATH-independence of the bash guards: the
+    fake reports FAKE_UID for every `id` invocation. The guards must
+    ignore it — identity comes from /usr/bin/id and $EUID, never PATH.
+    """
+    d = tempfile.mkdtemp(prefix="hostileid-")
+    fake = Path(d) / "id"
+    fake.write_text("#!/bin/bash\necho %d\nexit 0\n" % FAKE_UID,
+                    encoding="utf-8")
+    fake.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = d + os.pathsep + env.get("PATH", "")
+    if extra:
+        env.update(extra)
+    return env
+
+
 class BashGuardAsSwapdTests(unittest.TestCase):
-    """Bash writers' guards under the simulated swapd identity (fake `id`)."""
+    """Bash writers' guards under a real swapd uid (setpriv).
+
+    The temporary `swapd` user is provisioned only when running as root
+    and no swapd user exists; a pre-existing swapd user is used as-is and
+    never removed. Refusal tests write nothing — the guard fires before
+    any path is used — so they are safe against a real swapd account too.
+    """
+
+    swapd_created = False
+    script_dir = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            pwd.getpwnam("swapd")
+            cls.have_swapd = True
+        except KeyError:
+            cls.have_swapd = False
+            if os.geteuid() == 0:
+                subprocess.run(
+                    ["useradd", "-M", "-s", "/bin/false", "swapd"],
+                    check=True, capture_output=True, timeout=30)
+                cls.have_swapd = True
+                cls.swapd_created = True
+        # World-accessible copies: the worktree is not traversable by
+        # other uids.
+        cls._tmp = tempfile.mkdtemp(prefix="swapdscripts-")
+        os.chmod(cls._tmp, 0o755)
+        for name in ("cred-registry-set", "cred-registry-set-inference",
+                     "cred-store-set-inference", "grant-writer",
+                     "cred-grant-revoke"):
+            dst = Path(cls._tmp) / name
+            dst.write_bytes((PROXY / name).read_bytes())
+            dst.chmod(0o755)
+        cls.script_dir = cls._tmp
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        shutil.rmtree(cls._tmp, ignore_errors=True)
+        if cls.swapd_created:
+            subprocess.run(["userdel", "swapd"], capture_output=True,
+                           timeout=30)
+
+    def _as_swapd(self, script, args, extra_env=None, input_text=None):
+        if not self.have_swapd:
+            self.skipTest("no swapd user and not root — cannot provision one")
+        env = {"PATH": "/usr/bin:/bin"}
+        if extra_env:
+            env.update(extra_env)
+        cmd = ["setpriv", "--reuid", "swapd", "--regid", "swapd",
+               "--clear-groups", str(Path(self.script_dir) / script)]
+        cmd += list(args)
+        return subprocess.run(cmd, env=env, input=input_text,
+                              capture_output=True, text=True, timeout=30)
 
     def test_registry_set_refuses_override_as_swapd(self):
         with tempfile.TemporaryDirectory() as d:
             reg = str(Path(d) / "evil.json")
             lock = str(Path(d) / "evil.lock")
-            p = run(REGISTRY_SET, ["set", "x", "y", '"bearer_header"'],
-                    fake_id_env({"CRED_REGISTRY_FILE": reg,
-                                 "CRED_REGISTRY_LOCK": lock}))
+            p = self._as_swapd("cred-registry-set",
+                               ["set", "x", "y", '"bearer_header"'],
+                               {"CRED_REGISTRY_FILE": reg,
+                                "CRED_REGISTRY_LOCK": lock})
             self.assertEqual(p.returncode, 2)
             self.assertIn("refusing", p.stderr)
             self.assertIn("CRED_REGISTRY_FILE", p.stderr)
@@ -179,33 +230,35 @@ class BashGuardAsSwapdTests(unittest.TestCase):
         # direct-as-swapd caller is still refused.
         with tempfile.TemporaryDirectory() as d:
             reg = str(Path(d) / "evil.json")
-            p = run(REGISTRY_SET, ["set", "x", "y", '"bearer_header"'],
-                    fake_id_env({"CRED_REGISTRY_FILE": reg,
-                                 "SWAPD_WRITER_PATH_OVERRIDE": "1"}))
+            p = self._as_swapd("cred-registry-set",
+                               ["set", "x", "y", '"bearer_header"'],
+                               {"CRED_REGISTRY_FILE": reg,
+                                "SWAPD_WRITER_PATH_OVERRIDE": "1"})
             self.assertEqual(p.returncode, 2)
             self.assertIn("refusing", p.stderr)
             self.assertFalse(Path(reg).exists())
 
-    def test_registry_set_honors_override_when_no_swapd_user(self):
-        # Box with no swapd user: the guard is inert, the test seam works.
-        with tempfile.TemporaryDirectory() as d:
-            reg = str(Path(d) / "reg.json")
-            p = run(REGISTRY_SET,
-                    ["set", "mycred", "access_token", '"bearer_header"'],
-                    fake_id_env({"CRED_REGISTRY_FILE": reg,
-                                 "CRED_REGISTRY_LOCK": str(Path(d) / "r.lock")},
-                                no_swapd=True))
-            self.assertEqual(p.returncode, 0, p.stderr)
-            data = json.loads(Path(reg).read_text(encoding="utf-8"))
-            self.assertEqual(data["mycred"]["access_token"]["placement"],
-                             "bearer_header")
+    def test_grant_writer_refuses_override_as_swapd(self):
+        p = self._as_swapd("grant-writer", ["list"],
+                           {"SWAP_GRANTS_FILE": "/tmp/evil.json",
+                            "SWAP_LOG_FILE": "/tmp/evil.log"})
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("refusing", p.stderr)
+        self.assertIn("SWAP_GRANTS_FILE", p.stderr)
+
+    def test_grant_revoke_refuses_writer_override_as_swapd(self):
+        p = self._as_swapd("cred-grant-revoke", ["--job", "j1"],
+                           {"GRANT_WRITER": "/tmp/evil-writer"})
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("refusing", p.stderr)
+        self.assertIn("GRANT_WRITER", p.stderr)
 
     def test_store_set_inference_refuses_override_as_swapd(self):
         with tempfile.TemporaryDirectory() as d:
             target = str(Path(d) / "secrets")
-            p = run(STORE_SET_INFERENCE, [],
-                    fake_id_env({"INFERENCE_SECRETS_DIR": target}),
-                    input_text="sekret\n")
+            p = self._as_swapd("cred-store-set-inference", [],
+                               {"INFERENCE_SECRETS_DIR": target},
+                               input_text="sekret\n")
             self.assertEqual(p.returncode, 2)
             self.assertIn("refusing", p.stderr)
             self.assertIn("INFERENCE_SECRETS_DIR", p.stderr)
@@ -214,12 +267,50 @@ class BashGuardAsSwapdTests(unittest.TestCase):
     def test_wrapper_refuses_caller_paths_as_swapd(self):
         for var in ("CRED_REGISTRY_FILE", "CRED_REGISTRY_SET"):
             with self.subTest(var=var):
-                p = run(REGISTRY_SET_INFERENCE,
-                        ["set", "x", "y", '"bearer_header"'],
-                        fake_id_env({var: "/tmp/evil"}))
+                p = self._as_swapd("cred-registry-set-inference",
+                                   ["set", "x", "y", '"bearer_header"'],
+                                   {var: "/tmp/evil"})
                 self.assertEqual(p.returncode, 2)
                 self.assertIn("refusing", p.stderr)
                 self.assertIn(var, p.stderr)
+
+    def test_hostile_path_id_is_ignored(self):
+        # A hostile `id` on PATH claiming the swapd identity must not arm
+        # the guard: on this box the real /usr/bin/id reports no swapd
+        # user, so the override seam stays open and the writes succeed.
+        # (The attack this prevents: a hostile `id` making `id -u swapd`
+        # fail while really running as swapd, neutering the guard so
+        # caller overrides are honored.)
+        with tempfile.TemporaryDirectory() as d:
+            # cred-registry-set: override honored, write succeeds.
+            reg = str(Path(d) / "reg.json")
+            p = run(REGISTRY_SET, ["set", "c", "e", '"bearer_header"'],
+                    hostile_id_env({"CRED_REGISTRY_FILE": reg,
+                                    "CRED_REGISTRY_LOCK": str(Path(d) / "r.lock")}))
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertNotIn("refusing", p.stderr)
+            self.assertTrue(Path(reg).exists())
+            # cred-registry-set-inference: wrapper does not refuse the
+            # caller var; it execs the CRED_REGISTRY_SET double.
+            double = Path(d) / "double"
+            double.write_text("#!/bin/bash\necho double-ok\n",
+                              encoding="utf-8")
+            double.chmod(0o755)
+            p = run(REGISTRY_SET_INFERENCE, [],
+                    hostile_id_env({"CRED_REGISTRY_FILE": "/tmp/evil",
+                                    "CRED_REGISTRY_SET": str(double)}))
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertNotIn("refusing", p.stderr)
+            self.assertIn("double-ok", p.stdout)
+            # cred-store-set-inference: override honored, write succeeds.
+            target = str(Path(d) / "secrets")
+            os.mkdir(target, 0o700)
+            p = run(STORE_SET_INFERENCE, [],
+                    hostile_id_env({"INFERENCE_SECRETS_DIR": target}),
+                    input_text="sekret\n")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertNotIn("refusing", p.stderr)
+            self.assertTrue(Path(target, "llm-api").exists())
 
 
 class NonSwapdOverrideTests(unittest.TestCase):

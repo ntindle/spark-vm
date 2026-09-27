@@ -18,8 +18,12 @@ set -euo pipefail
 # closed. Outside the swapd identity (tests) the tool path stays
 # overridable so the install steps can be exercised without
 # /usr/local/bin; the data path override still works there too.
-_swapd_uid="$(id -u swapd 2>/dev/null || true)"
-if [ -n "$_swapd_uid" ] && [ "$(id -u)" = "$_swapd_uid" ]; then
+# PATH-independence is load-bearing for this boundary: `id` is resolved
+# by absolute path and the self-check uses bash's $EUID builtin, so a
+# hostile `id` earlier on a caller-controlled PATH cannot neuter the
+# guard (usrmerge Ubuntu: /usr/bin/id always exists).
+_swapd_uid="$(/usr/bin/id -u swapd 2>/dev/null || true)"
+if [ -n "$_swapd_uid" ] && [ "$EUID" = "$_swapd_uid" ]; then
     for _ov in CRED_REGISTRY_FILE CRED_REGISTRY_SET; do
         if [ -n "${!_ov:-}" ]; then
             echo "cred-registry-set-inference: refusing: $_ov is set (not honored when running as swapd)" >&2

@@ -28,9 +28,13 @@ set -euo pipefail
 # would otherwise turn this narrow writer into an arbitrary-path file
 # write as swapd. Outside the swapd identity (tests, dev) the overrides
 # are honored; root already has arbitrary write authority, so no new
-# capability is granted there.
-_swapd_uid="$(id -u swapd 2>/dev/null || true)"
-if [ -n "$_swapd_uid" ] && [ "$(id -u)" = "$_swapd_uid" ]; then
+# capability is granted there. PATH-independence is load-bearing for this
+# boundary: `id` is resolved by absolute path and the self-check uses
+# bash's $EUID builtin, so a hostile `id` earlier on a caller-controlled
+# PATH cannot neuter the guard (usrmerge Ubuntu: /usr/bin/id always
+# exists).
+_swapd_uid="$(/usr/bin/id -u swapd 2>/dev/null || true)"
+if [ -n "$_swapd_uid" ] && [ "$EUID" = "$_swapd_uid" ]; then
     for _ov in CRED_REGISTRY_FILE CRED_REGISTRY_LOCK; do
         if [ -n "${!_ov:-}" ]; then
             echo "cred-registry-set: refusing: $_ov is set (path overrides are not honored when running as swapd)" >&2

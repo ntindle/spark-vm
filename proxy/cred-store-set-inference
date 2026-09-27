@@ -24,8 +24,12 @@ umask 077
 # invocation honoring caller env would turn this narrow writer into an
 # arbitrary-path file write as swapd. Outside the swapd identity (tests,
 # dev) the override is honored.
-_swapd_uid="$(id -u swapd 2>/dev/null || true)"
-if [ -n "$_swapd_uid" ] && [ "$(id -u)" = "$_swapd_uid" ] && [ -n "${INFERENCE_SECRETS_DIR:-}" ]; then
+# PATH-independence is load-bearing for this boundary: `id` is resolved
+# by absolute path and the self-check uses bash's $EUID builtin, so a
+# hostile `id` earlier on a caller-controlled PATH cannot neuter the
+# guard (usrmerge Ubuntu: /usr/bin/id always exists).
+_swapd_uid="$(/usr/bin/id -u swapd 2>/dev/null || true)"
+if [ -n "$_swapd_uid" ] && [ "$EUID" = "$_swapd_uid" ] && [ -n "${INFERENCE_SECRETS_DIR:-}" ]; then
     echo "cred-store-set-inference: refusing: INFERENCE_SECRETS_DIR is set (path overrides are not honored when running as swapd)" >&2
     exit 2
 fi
