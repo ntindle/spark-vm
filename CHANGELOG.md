@@ -167,6 +167,15 @@ This changelog only works if entries land with the change, not after it:
 
 ### Fixed
 
+- The harness auth probe no longer depends on its invoker for the 10-second
+  wall-clock cap: it arms its own per-mode deadline (10s gate, 45s
+  provision), and a budget expiry — or an external `timeout` wrapper's
+  SIGTERM — now exits 1 with a named message instead of dying as an
+  unclassified 124. The provision-mode CLI vehicle budget also grew from
+  6s to 25s, so a slow but healthy provider (TLS, cold model endpoint,
+  inference latency) no longer fails provisioning; a provision timeout is
+  reported as slowness, never misdiagnosed as a bad credential. (#158, #159; #513)
+
 - proxy/deploy.sh now installs `scripts/bounded_http.py` to /home/swapd
   alongside confirmd.py and registers it in confirm's install paths, so
   the standalone deployment (and its rollback) can't start confirmd

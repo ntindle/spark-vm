@@ -21,12 +21,14 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -218,10 +220,23 @@ _NEUTRALIZED = ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy",
                 "NO_PROXY", "no_proxy")
 
 
-def run_probe(fixtures, tmp_path, mode="gate", extra_env=None, argv_extra=(),
-              stdin=None):
-    """stdin=None -> subprocess.DEVNULL; otherwise the given fd is passed
-    through (used by the never-reads-stdin test with an unwritten pipe)."""
+@contextmanager
+def neutralized_env():
+    """Pop ambient proxy/bypass vars for the duration: keep the suite
+    hermetic even where the runner's env has proxies set. Never
+    permanently mutates the test process env."""
+    saved = {}
+    for var in _NEUTRALIZED:
+        if var in os.environ:
+            saved[var] = os.environ.pop(var)
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
+
+def probe_env(fixtures, tmp_path, mode="gate", extra_env=None):
+    """The probe's full child env (also reused by the SIGTERM test's Popen)."""
     env = {
         "PATH": os.path.dirname(fixtures["muse"]) + os.pathsep + os.environ.get("PATH", ""),
         "PROBE_MUSE_BIN": "muse",
@@ -233,21 +248,23 @@ def run_probe(fixtures, tmp_path, mode="gate", extra_env=None, argv_extra=(),
         "PROBE_CONFIRMD_URL": fixtures["confirmd_url"],
         "FAKE_MUSE_MODE": "ok",
     }
-    # Keep the test hermetic even where the ambient env has proxies set.
-    # Snapshot/restore: never permanently mutate the test process env.
-    saved = {}
-    for var in _NEUTRALIZED:
-        if var in os.environ:
-            saved[var] = os.environ.pop(var)
-    try:
-        if extra_env:
-            env.update(extra_env)
-        if mode == "provision":
-            env.pop("PROBE_ECHO_LOG", None)
-            env.pop("PROBE_EXPECTED_SWAPPED", None)
-            env["PROBE_KEY_NAME"] = "llm-api"
-        stdin = subprocess.DEVNULL if stdin is None else stdin
-        t0 = time.monotonic()
+    if extra_env:
+        env.update(extra_env)
+    if mode == "provision":
+        env.pop("PROBE_ECHO_LOG", None)
+        env.pop("PROBE_EXPECTED_SWAPPED", None)
+        env["PROBE_KEY_NAME"] = "llm-api"
+    return env
+
+
+def run_probe(fixtures, tmp_path, mode="gate", extra_env=None, argv_extra=(),
+              stdin=None):
+    """stdin=None -> subprocess.DEVNULL; otherwise the given fd is passed
+    through (used by the never-reads-stdin test with an unwritten pipe)."""
+    env = probe_env(fixtures, tmp_path, mode=mode, extra_env=extra_env)
+    stdin = subprocess.DEVNULL if stdin is None else stdin
+    t0 = time.monotonic()
+    with neutralized_env():
         proc = subprocess.run(
             [sys.executable, PROBE, "--mode", mode, *argv_extra],
             env={**os.environ, **env},
@@ -255,9 +272,7 @@ def run_probe(fixtures, tmp_path, mode="gate", extra_env=None, argv_extra=(),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=60, text=True,
         )
-        return proc, time.monotonic() - t0
-    finally:
-        os.environ.update(saved)
+    return proc, time.monotonic() - t0
 
 
 def echo_auths(path):
@@ -392,11 +407,108 @@ def _load_probe_module():
     return mod
 
 
-def test_internal_timeouts_fit_the_10s_contract():
-    # Deterministic pin: the worst-case internal budget must stay under the
-    # external `timeout 10` from the R1 §5 contract.
+def test_internal_budgets_fit_self_enforced_wall_clock():
+    # Deterministic pin: per mode, the worst-case internal budgets must stay
+    # under the probe's own self-enforced wall-clock budget (GitHub #158) —
+    # the wall clock is the hard bound even when the invoker forgets the
+    # external wrapper.
     mod = _load_probe_module()
-    assert mod.CLI_TIMEOUT_S + mod.CONFIRMD_TIMEOUT_S < 10
+    assert mod.CLI_TIMEOUT_S_GATE + mod.CONFIRMD_TIMEOUT_S < mod.WALL_CLOCK_S_GATE
+    assert (mod.CLI_TIMEOUT_S_PROVISION + mod.CONFIRMD_TIMEOUT_S
+            < mod.WALL_CLOCK_S_PROVISION)
+
+
+def test_gate_wall_clock_is_the_r1_10s_cap():
+    # The R1 §5 contract pins a 10-second cap for the gate invocation; the
+    # probe now enforces it itself instead of depending on the invoker.
+    mod = _load_probe_module()
+    assert mod.WALL_CLOCK_S_GATE == 10.0
+
+
+def test_provision_cli_budget_longer_than_gate():
+    # GitHub #159: a real provider (TLS, cold model endpoint, inference
+    # latency) can exceed the gate's 6s on a healthy box.
+    mod = _load_probe_module()
+    assert mod.CLI_TIMEOUT_S_PROVISION > mod.CLI_TIMEOUT_S_GATE
+
+
+def test_self_enforced_wall_clock_fires(fixtures, tmp_path):
+    # GitHub #158: no external `timeout` wrapper in play — a hanging CLI
+    # must still terminate inside the documented exit contract (exit 1,
+    # named), never hang or die with a bare 124.
+    proc, dt = run_probe(fixtures, tmp_path,
+                         extra_env={"FAKE_MUSE_MODE": "sleep",
+                                    "PROBE_WALL_CLOCK_S": "2"})
+    assert proc.returncode == 1
+    assert "wall-clock budget expired after 2s" in proc.stderr
+    assert dt < 15, f"probe ran {dt:.1f}s past its own wall-clock budget"
+
+
+def test_external_sigterm_is_classified(fixtures, tmp_path):
+    # An invoker that still wraps the probe in `timeout 10` sends SIGTERM;
+    # the probe must classify it (exit 1, named) instead of dying silently.
+    env = probe_env(fixtures, tmp_path, extra_env={"FAKE_MUSE_MODE": "sleep"})
+    with neutralized_env():
+        proc = subprocess.Popen(
+            [sys.executable, PROBE, "--mode", "gate"],
+            env={**os.environ, **env},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(1.0)  # let the probe arm its handlers before the kill
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=30)
+    assert proc.returncode == 1, err
+    assert "terminated externally" in err
+
+
+def test_provision_cli_timeout_is_slowness_not_rejection(fixtures, tmp_path):
+    # GitHub #159: provision-mode slowness must never be misdiagnosed as a
+    # bad credential. PROBE_CLI_TIMEOUT_S shrinks the budget for the test;
+    # production keeps the 25s default.
+    proc, dt = run_probe(fixtures, tmp_path, mode="provision",
+                         extra_env={"FAKE_MUSE_MODE": "sleep",
+                                    "PROBE_CLI_TIMEOUT_S": "2"})
+    assert proc.returncode == 1
+    assert "timed out" in proc.stderr
+    assert "not proof" in proc.stderr
+    assert "did not accept the swapped credential" not in proc.stderr
+    assert dt < 15
+
+
+def test_budget_env_rejects_nonfinite_and_nonpositive(monkeypatch):
+    # Engineering round-1 blocker: inf/nan/absurd overrides must exit 2
+    # with a named message, never a traceback from setitimer. Huge-but-
+    # finite values are capped at 3600s.
+    mod = _load_probe_module()
+    for raw in ("banana", "inf", "-inf", "nan", "-3", "0"):
+        monkeypatch.setenv("PROBE_WALL_CLOCK_S", raw)
+        with pytest.raises(SystemExit) as ei:
+            mod._budget_env("PROBE_WALL_CLOCK_S", 10.0)
+        assert ei.value.code == 2, raw
+    monkeypatch.setenv("PROBE_WALL_CLOCK_S", "1e308")
+    assert mod._budget_env("PROBE_WALL_CLOCK_S", 10.0) == 3600.0
+    monkeypatch.delenv("PROBE_WALL_CLOCK_S", raising=False)
+    assert mod._budget_env("PROBE_WALL_CLOCK_S", 10.0) == 10.0
+
+
+def test_wall_clock_wins_over_cli_budget(fixtures, tmp_path):
+    # The wall clock is the hard bound: even a CLI budget longer than the
+    # wall clock cannot outrun it.
+    proc, dt = run_probe(fixtures, tmp_path,
+                         extra_env={"FAKE_MUSE_MODE": "sleep",
+                                    "PROBE_CLI_TIMEOUT_S": "60",
+                                    "PROBE_WALL_CLOCK_S": "2"})
+    assert proc.returncode == 1
+    assert "wall-clock budget expired after 2s" in proc.stderr
+    assert dt < 15
+
+
+def test_invalid_wall_clock_override_is_usage_error(fixtures, tmp_path):
+    # End-to-end: the invalid override exits 2 before any network work.
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"PROBE_WALL_CLOCK_S": "nan"})
+    assert proc.returncode == 2
+    assert "must be a positive finite number of seconds" in proc.stderr
 
 
 def test_gate_cli_hang_after_request_fails(fixtures, tmp_path):
@@ -427,13 +539,6 @@ def test_gate_unreachable_base_url_fails_closed(fixtures, tmp_path):
     assert proc.returncode == 1
     assert "no requests reached the echo fixture" in proc.stderr
 
-
-def test_provision_cli_timeout_fails(fixtures, tmp_path):
-    proc, dt = run_probe(fixtures, tmp_path, mode="provision",
-                         extra_env={"FAKE_MUSE_MODE": "sleep"})
-    assert proc.returncode == 1
-    assert "timed out" in proc.stderr
-    assert dt < 15
 
 
 def test_gate_duplicate_records_pass(fixtures, tmp_path):

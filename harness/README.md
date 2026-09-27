@@ -21,8 +21,22 @@ Implements the executable half of the R2 pre-seeded-harness contract
   `hsurr:` placeholder never reaches the origin) and `provision`
   (live tenant box, against the real provider — asserts the provider
   accepted the swapped key). See the script header for the full env
-  contract. Never handles a real secret: it names only `hsurr:<name>`
-  placeholders.
+  contract. Timeouts are mode-aware (GitHub #158, #159): gate keeps the
+  6s CLI budget (a hang against a localhost fixture fails the gate per
+  R1 §5) under a self-enforced 10s wall clock; provision gets a 25s CLI
+  budget (TLS, cold model endpoints, and inference latency can exceed 6s
+  on a healthy box) under a self-enforced 45s wall clock — provision-mode
+  slowness is reported as slowness, never misdiagnosed as a bad
+  credential. Wall-clock expiry and an external SIGTERM (e.g. the
+  invoker's own `timeout 10` firing) exit 1 with a named message, so the
+  probe process itself never dies as a bare 124 — every probe termination
+  stays inside the documented 0/1/2/3 contract. (An invoker that still
+  wraps the probe in an external `timeout` sees that wrapper's own 124/143
+  status unless it passes `--preserve-status`; that is the wrapper's
+  report, not the probe's.)
+  `PROBE_CLI_TIMEOUT_S` / `PROBE_WALL_CLOCK_S` are test-facing budget
+  overrides; the wall clock always wins. Never handles a real secret: it
+  names only `hsurr:<name>` placeholders.
 - **`generate-image-manifest.sh`** — emits the golden-image manifest JSON
   for the current checkout: repo SHA as `image_version`, the baked-component
   list, registry paths, unit names, and the `injector_expect` block the
