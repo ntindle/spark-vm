@@ -231,6 +231,16 @@ APPROVAL_DECISION_HEADER = "X-Spark-Approval-Decision"
 # A terminal decision stays deliverable for the same window an approval
 # would have lived (1h). After that a fresh refusal may file again.
 APPROVAL_SIGNAL_TTL = timedelta(hours=1)
+# #307: the per-refusal consumed/ scan in _terminal_denial is cached per
+# (credential, host, method, normalized path). The cache is invalidated
+# on consumed/ dir-mtime change (every terminal write lands a new file
+# there, so the scan result cannot change without a mtime bump) and is
+# additionally clamped to a short TTL so a denial aging out of
+# APPROVAL_SIGNAL_TTL can never be served past its expiry from cache.
+# The key count is capped: a path-varying agent must not grow the cache
+# unboundedly. Eviction only costs a rescan — never correctness.
+_DENIAL_CACHE_TTL = timedelta(seconds=30)
+_DENIAL_CACHE_MAX_KEYS = 1024
 # Approval ids are random hex; anything else in a consumed/ item's id
 # field is not ours to echo into a header. \A…\Z anchoring (not ^…$):
 # $ also matches before a trailing newline, which would let a
@@ -935,6 +945,12 @@ class SwapAddon:
         # make request()/responseheaders() async or @concurrent without
         # reworking this per-addon state.
         self._approval_signal = None
+        # #307: TTL cache for the per-refusal consumed/ scan
+        # (_terminal_denial): key (credential, host, method, norm path) ->
+        # (aid or None, valid_until, dir_mtime). Invalidated on
+        # consumed/ dir-mtime change; eviction is a rescan, never a
+        # correctness change.
+        self._denial_cache = {}
         self._load()
         log.warning("swap_addon: spark-vm version %s", SPARKVM_VERSION)
 
@@ -1267,7 +1283,7 @@ class SwapAddon:
             if pair not in self._approval_signal:
                 self._approval_signal.append(pair)
 
-    def _terminal_denial(self, name, host, method, path):
+    def _terminal_denial(self, name, host, method, path, fresh=False):
         """H18 (#133): newest consumed/ denial for this (credential, host,
         method) tuple *and this normalized path*, answered within
         APPROVAL_SIGNAL_TTL. A denial is terminal — the owner's answer is
@@ -1275,12 +1291,39 @@ class SwapAddon:
         re-push the owner). Path-scoped so one planted denial cannot
         suppress filings for other paths on the same tuple (fail closed:
         a consumed item without a matching path_prefix is ignored).
+
+        #307: the consumed/ scan is cached per (credential, host, method,
+        path) with consumed/ dir-mtime invalidation plus a short TTL —
+        an agent can already trigger refusals at will, so repeated
+        refusals must not pay the full listdir+stat scan each time.
+        fresh=True bypasses the cache for one authoritative read; used
+        by #306's pre-filing re-check, which exists precisely to catch a
+        denial that landed after the cached initial scan.
+
         Returns the approval id, or None."""
         try:
             d = os.path.join(APPROVALS_DIR, "consumed")
             method_up = (method or "").upper()
             norm = _normalize_path(path or "/")
             now = datetime.now(timezone.utc)
+            key = (name, host, method_up, norm)
+            try:
+                dir_mtime = os.stat(d).st_mtime_ns
+            except OSError:
+                return None
+            if not fresh:
+                hit = self._denial_cache.get(key)
+                if hit is not None:
+                    aid, valid_until, seen_mtime = hit
+                    # A terminal write (deny, expired-stamp, prune)
+                    # always lands a new file in consumed/ (or removes
+                    # one), so an unchanged dir-mtime means the scan
+                    # result cannot have changed. st_mtime_ns (integer)
+                    # so a sub-microsecond rename cannot collide with
+                    # the scan's stat. valid_until additionally bounds
+                    # a denial's APPROVAL_SIGNAL_TTL ageing.
+                    if seen_mtime == dir_mtime and now < valid_until:
+                        return aid
             best = None  # (answered_at, aid)
             for fn in os.listdir(d):
                 if not fn.endswith(".json"):
@@ -1325,7 +1368,23 @@ class SwapAddon:
                     continue
                 if best is None or answered > best[0]:
                     best = (answered, str(aid))
-            return best[1] if best else None
+            if best is not None:
+                aid, answered = best[1], best[0]
+                # The cached positive must not outlive the denial's own
+                # APPROVAL_SIGNAL_TTL window.
+                valid_until = min(now + _DENIAL_CACHE_TTL,
+                                  answered + APPROVAL_SIGNAL_TTL)
+            else:
+                aid = None
+                valid_until = now + _DENIAL_CACHE_TTL
+            if len(self._denial_cache) >= _DENIAL_CACHE_MAX_KEYS:
+                # Coarse eviction: a path-varying agent can force
+                # arbitrary cache keys; dropping the cache only costs a
+                # rescan, never correctness (fail-open cost, not a
+                # security change).
+                self._denial_cache.clear()
+            self._denial_cache[key] = (aid, valid_until, dir_mtime)
+            return aid
         except OSError:
             return None
 
@@ -1459,6 +1518,30 @@ class SwapAddon:
                 return signals
             if newest is not None and (now - newest).total_seconds() < 60:
                 return signals
+            # #306: the owner's deny may have landed between the initial
+            # _terminal_denial check (in _approval_signal_for_refusal)
+            # and this filing write — the confirmd deny path moves
+            # pending->answered->consumed as separate steps, so the
+            # window is real. Re-check FRESH (bypassing the #307 cache)
+            # immediately before minting and writing the new approval:
+            # a denial is terminal — abort the filing (and the VAPID
+            # push) and deliver the denial instead. The terminal signal
+            # supersedes any expired signals collected in this scan's
+            # pass, matching _approval_signal_for_refusal's terminal
+            # branch. Residual (accepted): a deny landing in the
+            # microseconds between the fresh re-check and the
+            # os.replace below still files+pushes once; the next
+            # refusal poll re-scans fresh (mtime-invalidated) and
+            # delivers terminal "denied", so the window is
+            # self-healing — closing it would need a cross-process
+            # lockfile shared with the confirmd daemon.
+            # (The coalesce return above has no re-check: it
+            # files and pushes nothing, so the worst case is one stale
+            # pending signal; the next refusal poll re-scans fresh.)
+            denied = self._terminal_denial(name, host, method, path,
+                                           fresh=True)
+            if denied is not None:
+                return [(denied, "denied")]
             norm_path = _normalize_path(path or "/")
             aid = uuid.uuid4().hex[:16]
             item = {

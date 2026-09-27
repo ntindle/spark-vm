@@ -36,6 +36,8 @@ This changelog only works if entries land with the change, not after it:
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-26
+
 ### Added
 - Competitor corpus update (post-post-post-post-post-post-post-post-late-evening watch, two-surveyor pass — A: fast-mover + pricing re-verification vs ~21:27–21:45 CDT baseline ~22:25–22:35 CDT, all first-try (streak extends to 6); B: delta news scan ~21:45–22:25 CDT; captures in `agent_notes/surveyor-a/b-20260926-2224.md`): quiet pass — **no new C-numbers** (7 clean dedupes, 2 flagged-only). **Fast movers + pricing 9/9 VENDOR-VERIFIED NO-CHANGE** (Daytona changelog still SEP 26 V0.218.0; Docker Sandboxes release notes still 2026-09-22; Microsandbox releases still v0.7.3; Vercel changelog still 25 Sep — no 26-Sep entries in any lane; Drives not re-checked per P49 daily cadence; E2B, boat.dev, TermSquad, DO Managed Agents, AgentComputer pricing all VENDOR-VERIFIED NO-CHANGE; DO snapshot-figure discrepancy unresolved but unmoved; AgentComputer still no egress policy — C12 stands). **Delta news scan — 7 clean dedupes** (C62 OpenAI offline-sandbox recrawls incl. the Bloomberg re-report updated 2026-09-27 06:14 AM IST ≈ 19:44 CDT Sep 26; C62/C64 HF nine-zero-days recrawl; DeepSeek DSec reward-hacking recrawl CVE-2026-82533 pre-window; Vercel Sandbox Drives public beta confirmed Sep 23 — already in baseline; Accomplish sandbox-escape disclosures Sep 12 pre-window; Guava "Daytona" voice-model name collision out-of-lane; DevDay "O" always-on-agent rumor still speculation). **2 flagged-only, NOT filed** (dev.to "Copilot joins AI SDK, agents ship on Vercel" ~Sep 24 — ecosystem color, no sandbox launch; E2B/DEV + Upstash comparison recrawls — stale secondary). Surveyor B's "notes for next pass" carried stale search-result versions (Daytona V0.216.0, Microsandbox v0.7.1, Docker notes 2026-09-21) — superseded by surveyor A's vendor-verified baselines, not folded. In-lane no-launch verdict dated 2026-09-25 stands — streak extends. Deep-scan: Heapjack/Overpatch + GitLab proxy escape both quiet — aging candidates next pass if still quiet. Carried: C37, C55, C57, C58 (pricing vendor-verified), C62 (no movement), C66 (OPEN, THIRD-PARTY); C26 CLOSED. (#521)
 
@@ -329,6 +331,8 @@ This changelog only works if entries land with the change, not after it:
   #362).
 
 ### Security
+
+- Denial is now terminal even in the race window (#306): the proxy re-checks for an owner denial immediately before filing a fresh approval, so a Deny tapped while a refusal was in flight no longer files a new approval and re-pushes the owner. Separately, the per-refusal denial lookup is now cached per request tuple with invalidation on every terminal write, so agents that trigger refusals at will no longer pay a full directory scan per refusal (#307). (#522)
 
 - The credential/grant narrow writers (`cred-registry-set`, `grant-writer`, `cred-grant-revoke`, and the inference variants) no longer honor caller-controlled path-redirect variables when running as the `swapd` user: enforcement is keyed off the effective user ID, so even a direct as-`swapd` invocation (outside `sudo`, where `env_reset` already stripped them) cannot redirect the registry, grants, lock, audit-log, or secrets paths. The inference registry wrapper pins its child to the fixed inference registry via a pathless flag instead of an overridable variable. Test and development runs outside the `swapd` identity keep the override seam. (#90, #518)
 - `cred-registry-set set` now merges the new placement into the existing credential entry instead of replacing it, so re-registering a credential no longer silently drops its per-entry response-scrubbing opt-out. (#96, #518)
@@ -1455,6 +1459,7 @@ This changelog only works if entries land with the change, not after it:
 - Fixed critical and high findings from the security code review
   ([`dd382af`](https://github.com/ntindle/spark-vm/commit/dd382af))
 
-[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ntindle/spark-vm/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ntindle/spark-vm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ntindle/spark-vm/releases/tag/v0.2.0

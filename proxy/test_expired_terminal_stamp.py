@@ -53,6 +53,7 @@ class ExpiredTerminalStampTests(unittest.TestCase):
         (self.approvals / "pending").mkdir(parents=True)
         self.addon = sa.SwapAddon.__new__(sa.SwapAddon)
         self.addon._audit = lambda *a: True
+        self.addon._denial_cache = {}  # #307: per-tuple consumed/ scan cache
 
     def tearDown(self):
         self.tmp.cleanup()
