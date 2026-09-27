@@ -122,6 +122,22 @@ def _running_as_swapd():
         return False
 
 
+if _running_as_swapd():
+    # Defense in depth behind the bash guard above: refuse caller-set
+    # path overrides here too, via PATH-independent syscalls (os.geteuid
+    # / pwd never consult PATH). Unreachable when the bash guard is
+    # intact — it already exited 2 — but the boundary must not depend on
+    # a single layer. The wrapper's CRED_REGISTRY_INFERENCE flag is not
+    # a path var and is unaffected.
+    _bad = [v for v in ("CRED_REGISTRY_FILE", "CRED_REGISTRY_LOCK")
+            if v in os.environ]
+    if _bad:
+        sys.stderr.write(
+            "cred-registry-set: refusing: %s set (path overrides are not "
+            "honored when running as swapd)\n" % ", ".join(_bad))
+        sys.exit(2)
+
+
 if (os.environ.get("CRED_REGISTRY_INFERENCE") == "1"
         and "CRED_REGISTRY_FILE" not in os.environ):
     # Pinned by the cred-registry-set-inference wrapper (root-owned): the

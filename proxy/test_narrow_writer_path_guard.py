@@ -141,6 +141,9 @@ def hostile_id_env(extra=None):
     Regression test for the PATH-independence of the bash guards: the
     fake reports FAKE_UID for every `id` invocation. The guards must
     ignore it — identity comes from /usr/bin/id and $EUID, never PATH.
+
+    Returns (env, cleanup): the caller must run cleanup() — mkdtemp dirs
+    are not auto-removed.
     """
     d = tempfile.mkdtemp(prefix="hostileid-")
     fake = Path(d) / "id"
@@ -151,7 +154,8 @@ def hostile_id_env(extra=None):
     env["PATH"] = d + os.pathsep + env.get("PATH", "")
     if extra:
         env.update(extra)
-    return env
+    import shutil
+    return env, lambda: shutil.rmtree(d, ignore_errors=True)
 
 
 class BashGuardAsSwapdTests(unittest.TestCase):
@@ -276,17 +280,19 @@ class BashGuardAsSwapdTests(unittest.TestCase):
 
     def test_hostile_path_id_is_ignored(self):
         # A hostile `id` on PATH claiming the swapd identity must not arm
-        # the guard: on this box the real /usr/bin/id reports no swapd
-        # user, so the override seam stays open and the writes succeed.
-        # (The attack this prevents: a hostile `id` making `id -u swapd`
-        # fail while really running as swapd, neutering the guard so
-        # caller overrides are honored.)
+        # the guard: the test process is not swapd ($EUID, not PATH, is
+        # the identity), so the override seam stays open and the writes
+        # succeed. (The attack this prevents: a hostile `id` making
+        # `id -u swapd` fail while really running as swapd, neutering the
+        # guard so caller overrides are honored.)
         with tempfile.TemporaryDirectory() as d:
             # cred-registry-set: override honored, write succeeds.
             reg = str(Path(d) / "reg.json")
-            p = run(REGISTRY_SET, ["set", "c", "e", '"bearer_header"'],
-                    hostile_id_env({"CRED_REGISTRY_FILE": reg,
-                                    "CRED_REGISTRY_LOCK": str(Path(d) / "r.lock")}))
+            env, cleanup = hostile_id_env(
+                {"CRED_REGISTRY_FILE": reg,
+                 "CRED_REGISTRY_LOCK": str(Path(d) / "r.lock")})
+            self.addCleanup(cleanup)
+            p = run(REGISTRY_SET, ["set", "c", "e", '"bearer_header"'], env)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertNotIn("refusing", p.stderr)
             self.assertTrue(Path(reg).exists())
@@ -296,18 +302,20 @@ class BashGuardAsSwapdTests(unittest.TestCase):
             double.write_text("#!/bin/bash\necho double-ok\n",
                               encoding="utf-8")
             double.chmod(0o755)
-            p = run(REGISTRY_SET_INFERENCE, [],
-                    hostile_id_env({"CRED_REGISTRY_FILE": "/tmp/evil",
-                                    "CRED_REGISTRY_SET": str(double)}))
+            env, cleanup = hostile_id_env(
+                {"CRED_REGISTRY_FILE": "/tmp/evil",
+                 "CRED_REGISTRY_SET": str(double)})
+            self.addCleanup(cleanup)
+            p = run(REGISTRY_SET_INFERENCE, [], env)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertNotIn("refusing", p.stderr)
             self.assertIn("double-ok", p.stdout)
             # cred-store-set-inference: override honored, write succeeds.
             target = str(Path(d) / "secrets")
             os.mkdir(target, 0o700)
-            p = run(STORE_SET_INFERENCE, [],
-                    hostile_id_env({"INFERENCE_SECRETS_DIR": target}),
-                    input_text="sekret\n")
+            env, cleanup = hostile_id_env({"INFERENCE_SECRETS_DIR": target})
+            self.addCleanup(cleanup)
+            p = run(STORE_SET_INFERENCE, [], env, input_text="sekret\n")
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertNotIn("refusing", p.stderr)
             self.assertTrue(Path(target, "llm-api").exists())
