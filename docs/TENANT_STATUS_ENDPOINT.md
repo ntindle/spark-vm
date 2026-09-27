@@ -165,18 +165,24 @@ and feeds *into* this endpoint; it is never exposed raw, per
   S1's tenant-record store carries it from stage 2. Pre-stage-2 polls
   (the tenant record is created at `HOSTED_SIGNUP_ONBOARDING.md` §4.1
   step 1; the URL is minted later) get the documented `404` — this
-  endpoint does not serve the tenant record until stage 2. Which
-  signup-flow step owns the write — mint at record creation, or hand over
-  at stage 2 — is the open G8 decision (needed before S1 serves real
-  signup traffic); the read-side contract is fixed regardless. G4's
+  endpoint does not serve the tenant record until stage 2. Resolved by
+  the §8 G8 rules (2026-09-26): the stage-2 hand-over step owns the
+  write — write-if-absent + re-read, mint-once; funnel re-entry is a
+  read path, never a rewrite. G4's
   summons design builds its email body on this field (the carrier scope
   G4 names explicitly).
 - `detail` — free-form machine sub-code, present only where a sub-decision
   exists: the unhealthy/unreachable/stuck family (`box-unhealthy:
   <check>` per §2), and `waiting-on-approval` (the minute-bound check
   name, per transition rule 2). Absent on `provisioning`, `live`
-  (pre-arc — no sub-decision yet), and on the arc-terminal codes
-  (`approved`, `human-denied`, `human-drop-off`, `provisioning-failed`).
+  (pre-arc — no sub-decision yet) — with one exception: under §8's
+  multi-box rule, `detail` carries the box identity
+  (`"<sub-code> @ box=<box-name>"` style — e.g. `box-unhealthy:
+  relay-dial-failed @ box=kitchen-pi`) whenever the reported arc belongs
+  to a box other than the pre-live earliest-created box still
+  onboarding (the rule-1 "first" for the detail exception). Absent on
+  the arc-terminal codes (`approved`, `human-denied`, `human-drop-off`,
+  `provisioning-failed`).
   The human page never renders it raw.
 - `human_key` — the `FIRST_TEN_MINUTES_SPEC.md` §4 rendering key. The
   signup page holds the human copy (the spec §4's "exact sentences the
@@ -272,20 +278,30 @@ readers                       tenant Muse (linked key) · signup page (cookie)
    no-JS discipline (§1) stays — the page renders `human_key` copy it
    already holds.
 
-## 7. Open questions (→ backlog, not blockers)
+## 7. Open questions (answered — kept for history)
 
-1. **Multi-box tenants:** the vocabulary is per-tenant, but a tenant with
-   two boxes has two onboarding arcs. Options: per-box status resource
-   (`/tenant/status?box=<id>`) or tenant-status = the arc of the newest
-   box. Needs a decision before S1 — the schema's `tenant_id` may need a
-   `box_id` sibling. (Filed below as G7.)
-2. **Who writes `approvals_url`:** signup stage 2 hands it to the human
-   (spec §4), but the control plane must persist it into the tenant
-   record at claim time — which signup-flow step owns the write, and what
-   happens on re-entry ("the funnel re-enters at the first incomplete
-   screen" — `HOSTED_SIGNUP_WEB_UI.md` §5)? A re-entering tenant must not
-   get a rotated approvals URL mid-arc. Needs a decision before S1
-   serves real signup traffic. (Filed as G8.)
+1. **Multi-box tenants: ANSWERED → §8 (G7 resolution, 2026-09-26 gap turn).**
+   Original question kept for history: the vocabulary is per-tenant, but a
+   tenant with two boxes has two onboarding arcs. Options were a per-box
+   status resource (`/tenant/status?box=<id>`) or tenant-status = the arc
+   of the newest box. Decision: per-tenant onboarding-arc resource with
+   the rule-1 selection preference (`live` > `provisioning` >
+   `box-unhealthy` > `provisioning-failed`, ties → newest `created_at`
+   then box-id lexical); "tenant reaches
+   `live`" = the live-anchor box's arc reaches `live` (first to reach
+   `live`; that moment starts the H3 §5 clock); no `box_id` schema
+   sibling (§8). The stall detector's Q2 is closed in §8 too (one
+   tenant-level stall).
+2. **Who writes `approvals_url`: ANSWERED → §8 (G8 resolution, 2026-09-26
+   gap turn).** Original question kept for history: signup stage 2 hands
+   it to the human (spec §4), but the control plane must persist it into
+   the tenant record at claim time — which signup-flow step owns the
+   write, and what happens on re-entry ("the funnel re-enters at the
+   first incomplete screen" — `HOSTED_SIGNUP_WEB_UI.md` §5)? A re-entering
+   tenant must not get a rotated approvals URL mid-arc. Decision: the
+   hand-over step owns the write — write-if-absent + re-read, renders
+   the stored value (§8 rules 1–4); funnel re-entry is a read path, never
+   a rewrite; rotation only via an explicit operator event.
 3. **`stuck` detection:** answered by `docs/STUCK_DETECTOR_DESIGN.md`
    (G9): the control-plane stall detector mechanizing the §8 rule (30 min,
    no Muse action, no pending approval), with the confusion-class ladder
@@ -298,3 +314,133 @@ readers                       tenant Muse (linked key) · signup page (cookie)
    agent-forgeable-heartbeat cross-checking, and the S1→S2→S3 confidence
    staging — until S3's bar is met, `stuck` stays operator-set and is
    never exposed as automatic. (Filed as G9.)
+
+
+## 8. G7/G8 resolutions (2026-09-26 gap turn)
+
+Both were §7 open questions blocking G3's S1 implementation. Resolved
+here; the implementation slices (S1–S3, §6) are unchanged except where
+noted.
+
+### G7 — multi-box tenants vs the per-tenant vocabulary
+
+**Decision: the endpoint tracks the tenant's onboarding arc, per-tenant,
+no `box_id` schema sibling.** The 12 codes are an onboarding vocabulary,
+not a per-box inventory API — the dashboard's Boxes panel already owns
+per-box status through the H3 §6 provider mapping (`creating →
+provisioning`, `ready → live`, `degraded`/`dead` as-is). Two readers of
+the same box state with two vocabularies is the duplication the §4
+layering was built to prevent.
+
+Rules:
+
+1. **"The tenant reaches `live`" means the first box's arc reaches
+   `live`** — where "first box" is the **live-anchor**: the box whose
+   arc first reaches `live`. That moment is the H3 §5 first-ten-minutes
+   clock start (the live-anchor's `provisioning → live`
+   `status_updated_at`). While no box's arc has yet reached `live`,
+   `GET /tenant/status` reports the **most-advanced arc** among the
+   boxes still onboarding, ranked by an explicit selection preference
+   (closest to `live` without failure first): `live` > `provisioning` >
+   `box-unhealthy` > `provisioning-failed`. Ties (same code) break by
+   newest box-record `created_at`, then box-id lexical — so the reported
+   box identity in `detail` cannot flap between polls when a batch
+   shares `created_at`. Arc transitions are forward moves, not
+   regressions: `provisioning → box-unhealthy` per transition rule 1 is
+   the ordinary single-box failure path, and the monotonicity invariant
+   below constrains *cross-box selection switches*, not arc
+   transitions. Terminal arcs (`provisioning-failed`) participate only
+   while no non-terminal candidate exists — a dead box never outranks a
+   progressing one (progress wins over recency: "newest" answers a
+   Boxes-panel question, not an onboarding-arc question). The
+   monotonicity invariant is scoped: within a single box onboarding
+   session/generation, the reported code never moves to an earlier stage
+   than the last reported code — but a rule-7 cross-session restart
+   (`box-unhealthy → provisioning`,
+   `provisioning-failed → provisioning`) resets the comparison baseline
+   (`status_updated_at` resets per rule 7), so the sanctioned restart is
+   a forward move, not a violation. Empty candidate set (the leading box
+   is deleted pre-`live` with no other candidates): hold the last
+   reported code with `detail` noting the operator event, until a new
+   provisioning or a rule-7 restart supplies a candidate. Box identity
+   rides `detail` as `"<existing sub-code> @ box=<box-name>"` (per the
+   §3 exception — e.g. `box-unhealthy: relay-dial-failed @
+   box=kitchen-pi`; for codes with no existing sub-code, `provisioning @
+   box=<box-name>`); the `tenant_id` correlation aid is unchanged.
+2. **Once the tenant is `live`, a different box's later provisioning never
+   regresses the endpoint.** A second box's provisioning is a
+   provider-layer event (H4 `BoxStatus` `creating/ready/degraded/dead`),
+   surfaced by the dashboard Boxes panel — not by this endpoint. The
+   tenant is onboarded; a page polling during second-box provisioning
+   correctly keeps seeing `live`. Carve-out: reprovision of the live-anchor
+   box (the box whose arc reached `live` first, per rule 1) follows
+   transition rule 7's cross-session move — the endpoint serves the new
+   session (including its `provisioning`), because operator reprovision is
+   rule 7's path, not a second box's provisioning.
+3. **S1 impact:** the tenant-record store keeps per-box arc records
+   internally (keyed by box id) to evaluate the most-advanced-incomplete
+   rule, but the response schema is unchanged — per-tenant, no `box_id`
+   field.
+4. **The stall detector emits one tenant-level stall.**
+   `STUCK_DETECTOR_DESIGN.md` §8 Q2 delegates this to G7's decision: the
+   detector evaluates per-box session arcs from the internal records
+   (rule 3) but emits a single tenant-level stall — the 12-code
+   vocabulary is per-tenant; per-box candidates are evaluation-internal
+   to the detector and are not surfaced on this endpoint. (Closes Q2.)
+5. **Explicit non-goal:** no per-box arc resource ships, and no shape is
+   named or reserved, until a consumer demands per-box arc reads
+   (dashboard v2, per-box approval routing under H10). YAGNI, per the
+   layering §4.
+
+### G8 — who writes `approvals_url`, and re-entry rotation
+
+**Decision: the signup step that hands the human the approvals-page URL
+owns the write — mint-once at activation-funnel stage 2
+(`FIRST_TEN_MINUTES_SPEC.md` §4 item 1: the signup flow "must hand the
+human" the approvals-page URL "no later than stage 2").**
+
+Rules:
+
+1. **Single writer, write-if-absent + re-read.** The stage-2 hand-over
+   handler mints the URL, persists it through an idempotent
+   write-if-absent, then **re-reads the record and renders the stored
+   value**. "What the human saw" == "what the record holds" is enforced
+   by the re-read, not by the mint: two concurrent stage-2 submissions
+   can each mint locally, but the loser's write is a no-op and the loser
+   renders the winner's stored URL — the human never holds a URL the
+   record doesn't. **S1 store requirement:** the conditional write must
+   be atomic/linearizable — under last-writer-wins, two concurrent
+   read-absent submissions could both persist, and the loser would
+   render a URL the record doesn't hold, breaking the invariant above.
+   No other signup-flow step writes this field.
+2. **Not minted at claim/record creation.** Pre-stage-2 the field is
+   absent and the endpoint keeps its documented §3 `404` — unchanged.
+   Minting at claim would create URLs for abandoned signups and would
+   have licensed G4's summons sender to build deep links from a URL the
+   human never saw.
+3. **Funnel re-entry is a read path, never a rewrite.** The funnel
+   re-enters at the first incomplete screen (`HOSTED_SIGNUP_WEB_UI.md`
+   §5) — that step re-reads the stored value and re-renders it. A
+   re-entering tenant never gets a rotated approvals URL mid-arc. (This
+   is deliberately stricter than §5's screen-3 token rule, where a
+   lost/expired token is replaced with a *fresh* token: the enrollment
+   token is single-use by design, but the approvals URL is the address
+   G4's summons deep-links and human bookmarks point at — rotating it
+   mid-arc breaks both.)
+4. **The only rotation path is an explicit operator event.** If rotation
+   is ever required (suspected exposure, domain/path change — never a
+   funnel side effect), the control plane rewrites the field as an
+   explicit operator-side event that also re-notifies the human through
+   the notification channel of record — following G4's retirement rule
+   when H14 ships (the email summons channel retires to push; the
+   re-notify path tracks the channel of record, not the retired one).
+   Rotation is never a funnel side effect. Pre-launch: rotation is out
+   of scope; mint-once is the complete contract.
+5. **S1 impact:** the tenant-record store treats `approvals_url` as
+   write-once-with-explicit-rotation; contract tests assert that
+   simulated funnel re-entries at every stage return the identical URL.
+6. **G4 unblocked:** `FIRST_APPROVAL_SUMMONS.md` §2's sequencing
+   dependency is resolved — the deep link
+   `<approvals_url>/approval/<aid>` is now licensed and the
+   omit-the-link fallback is retired (see the paired edits in this PR);
+   S2's sender can assume the carrier is present from stage 2 on.
