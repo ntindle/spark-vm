@@ -1,18 +1,46 @@
 #!/bin/bash
 # cred-registry-set-inference — registry writer for the inference proxy
 # (finding 39). The inference mitmdump reads
-# /home/swapd/inference-registry.json, but cred-registry-set writes only
-# /home/swapd/credentials.json unless CRED_REGISTRY_FILE is set, which
-# sudo's env_reset strips. This fixed-path wrapper sets the variable
-# AFTER sudo (inside the script, running as swapd), so the documented
-# install steps work through the narrow path:
+# /home/swapd/inference-registry.json, but cred-registry-set defaults to
+# /home/swapd/credentials.json. This fixed-path wrapper pins the child to
+# the inference registry via CRED_REGISTRY_INFERENCE=1 (a flag, not a
+# path — the child maps it to the fixed path), so the documented install
+# steps work through the narrow path:
 #   sudo -u swapd cred-registry-set-inference set llm-api access_token '"bearer_header"'
 #   sudo -u swapd cred-registry-set-inference add-host llm-api <provider host>
 set -euo pipefail
 
-# A pre-set CRED_REGISTRY_FILE (tests) wins; sudo's env_reset guarantees
-# it is unset in production, so the fixed path always applies there.
-export CRED_REGISTRY_FILE="${CRED_REGISTRY_FILE:-/home/swapd/inference-registry.json}"
-# Same for the registry tool itself: fixed in production, overridable in
-# tests so the install steps can be exercised without /usr/local/bin.
-exec "${CRED_REGISTRY_SET:-/usr/local/bin/cred-registry-set}" "$@"
+# Issue #90: guard the CALLER's environment before this wrapper pins
+# anything itself. Enforcement keys off the effective UID (see
+# cred-registry-set): when running as swapd, a caller-set
+# CRED_REGISTRY_FILE would redirect this writer and a caller-set
+# CRED_REGISTRY_SET would substitute the binary it execs — both fail
+# closed. Outside the swapd identity (tests) the tool path stays
+# overridable so the install steps can be exercised without
+# /usr/local/bin; the data path override still works there too.
+# PATH-independence is load-bearing for this boundary: `id` is resolved
+# by absolute path and the self-check uses bash's $EUID builtin, so a
+# hostile `id` earlier on a caller-controlled PATH cannot neuter the
+# guard (usrmerge Ubuntu: /usr/bin/id always exists).
+_swapd_uid="$(/usr/bin/id -u swapd 2>/dev/null || true)"
+if [ -n "$_swapd_uid" ] && [ "$EUID" = "$_swapd_uid" ]; then
+    for _ov in CRED_REGISTRY_FILE CRED_REGISTRY_SET; do
+        if [ -n "${!_ov:-}" ]; then
+            echo "cred-registry-set-inference: refusing: $_ov is set (not honored when running as swapd)" >&2
+            exit 2
+        fi
+    done
+    _registry_set=/usr/local/bin/cred-registry-set
+else
+    _registry_set="${CRED_REGISTRY_SET:-/usr/local/bin/cred-registry-set}"
+fi
+unset _swapd_uid _ov
+
+# Pin the child to the inference registry with a flag, not a path:
+# cred-registry-set maps CRED_REGISTRY_INFERENCE=1 to the fixed
+# /home/swapd/inference-registry.json. The flag carries no path, so no
+# arbitrary redirect is reachable through it. A pre-set CRED_REGISTRY_FILE
+# (tests, non-swapd only) still wins in the child, preserving the old
+# override seam.
+export CRED_REGISTRY_INFERENCE=1
+exec "$_registry_set" "$@"
