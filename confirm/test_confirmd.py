@@ -1971,6 +1971,43 @@ class AuditLogTests(unittest.TestCase):
                 cd.audit_log("403", "100.99.0.1", "ntindle@github", "")
         self.assertIn("confirmd: cannot write audit log", err.getvalue())
 
+    def test_audit_log_fsyncs_before_return(self):
+        """Issue #72: the audit append must be fsync'd so the line is
+        crash-durable once audit_log() returns — no silent page-cache
+        window. The fd passed to fsync is a real open descriptor, and the
+        bytes must already be visible at OS level when fsync runs (a plain
+        os.fsync after a buffered write would sync nothing)."""
+        path = os.path.join(self.tmp.name, "audit.log")
+        seen = {}
+
+        def fake_fsync(fd):
+            with open(path, "rb") as rf:  # fresh read: only OS-level bytes
+                seen["content"] = rf.read()
+
+        with mock.patch.object(cd, "AUDIT", path), \
+                mock.patch("os.fsync", side_effect=fake_fsync) as mock_fsync:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                cd.audit_log("403", "100.99.0.1", "ntindle@github",
+                             "reason=bad-nonce")
+        self.assertEqual(err.getvalue(), "")
+        mock_fsync.assert_called_once()
+        (fd,), _ = mock_fsync.call_args
+        self.assertIsInstance(fd, int)
+        self.assertIn(b"event=403", seen["content"])
+
+    def test_audit_log_fsync_failure_signals_stderr(self):
+        """Issue #72: an fsync OSError is a lost audit line like any write
+        OSError — it must take the same stderr-signaling path, not pass."""
+        path = os.path.join(self.tmp.name, "audit.log")
+        with mock.patch.object(cd, "AUDIT", path), \
+                mock.patch("os.fsync", side_effect=OSError("simulated")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                cd.audit_log("403", "100.99.0.1", "ntindle@github", "")
+        self.assertIn("confirmd: cannot write audit log", err.getvalue())
+        self.assertIn("simulated", err.getvalue())
+
 class M8ServerHardeningTests(unittest.TestCase):
     """Issue #77 (M8): no socket/request timeouts, unbounded thread pool."""
 
