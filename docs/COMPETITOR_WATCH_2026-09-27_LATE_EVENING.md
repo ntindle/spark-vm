@@ -3,15 +3,16 @@
 Two-surveyor pass (both read-only subagents, dispatched in parallel),
 delta-only against the evening pass (#560, merged as `a8bc757`): (A)
 fast-mover + pricing re-verification vs the ~08:55–09:05 CDT (2026-09-27)
-baseline (vendor reads ~09:25–09:35 CDT 2026-09-27), (B) delta news scan
-~09:05–09:50 CDT (~45-min delta window; 8 search queries). Read-only, no
+baseline (vendor reads ~09:24–09:27 CDT 2026-09-27), (B) delta news scan
+~09:05–~09:29 CDT (~24-min delta window since the evening pass; scan ran
+~09:24–09:29 CDT; 8 search queries). Read-only, no
 logins, no writes. Captures: `agent_notes/surveyor-a-20260927-0924.md`,
 `agent_notes/surveyor-b-20260927-0924.md`.
 
 Naming-hygiene note: label rotation continues — `MORNING` → `LATE_MORNING` →
 `MIDDAY` → `AFTERNOON` → `LATE_AFTERNOON` → `EVENING` → `LATE_EVENING`
 (chains rotate, not stack; the label is a rotation counter, not a wall-clock
-claim — this pass ran ~09:25–09:50 CDT). A further same-day pass rotates
+claim — this pass ran ~09:24–09:29 CDT). A further same-day pass rotates
 again (`NIGHT`) rather than reusing or POST_-stacking.
 
 **Corpus aging pipeline (P63, adopted at the 0224 pass):** N consecutive
@@ -34,7 +35,7 @@ from the 0224 pass).
 
 ## Surveyor A — fast movers + pricing: 9/9 VENDOR-VERIFIED NO-CHANGE on substance
 
-Nine vendor pages verified ~09:25–09:35 CDT; every page loaded on first
+Nine vendor pages verified ~09:24–09:27 CDT; every page loaded on first
 attempt — 9/9 first-try, zero retries, zero bot-blocks. The all-first-try
 streak extends to **9 passes**.
 
@@ -77,14 +78,22 @@ streak extends to **9 passes**.
 **No changes detected on any primary source (C32 precedent: nothing to fold).**
 No UNVERIFIED items this pass.
 
-## Surveyor B — delta news scan: 0 NEW / 21 clean dedupes / 8 flagged-only
+## Surveyor B — delta news scan: 0 NEW / 22 clean dedupes / 7 flagged-only
 
-8 search queries (~09:05–09:50 CDT window); every candidate grepped against
-the last 3 watch docs + the corpus before classification — no false
-first-sightings. No new in-window in-lane launches, pricing moves, or
-fundings. No new C-numbers.
+8 search queries (~09:05–~09:29 CDT delta window; scan ran ~09:24–09:29
+CDT); every candidate grepped against the last 3 watch docs + the corpus
+before classification — with one exception caught at review:
+CVE-2026-92940 was already flagged-only in the 2026-09-26
+post-late-evening pass (outside the 3-doc window; never folded into
+COMPETITOR_ANALYSIS.md, so the corpus leg missed it). Moved to
+recrawl-contact below; see the stale-version rule note. No new in-window
+in-lane launches, pricing moves, or fundings. No new C-numbers.
 
-**Recrawl contact (existing item mentioned again, no new facts):** C29
+**Recrawl contact (existing item mentioned again, no new facts):** CVE-2026-92940
+(vm2 https.globalAgent leak, CVSS 10.0) — first flagged-only in the
+2026-09-26 post-late-evening pass; re-surfaced this pass via the vm2
+advisory-wave recrawl — recrawl contact of a filed flagged-only item, no
+new facts. C29
 (Boxd $2M pre-seed, 6ic.com recrawl); C62 (OpenAI offline-sandbox escape —
 aiagentsdirectory brief + teknowire); CVE-2026-80521 (Ubuntu AF_UNIX UAF
 container escape — thehackernews + cyberrecaps + tech-insider + realhacker.news);
@@ -99,45 +108,38 @@ API pricing analysis (14d recrawl); effect-uai/plans/sandbox.md (capability
 matrix matches filed state); computesdk provider table + CHANGELOG (25
 providers, no new facts).
 
-**8 flagged-only, NOT folded, no C-number** (all new-to-corpus but
-lane-adjacent or third-party analysis):
-1. **CVE-2026-92940 — vm2 https.globalAgent sandbox leak** (CVSS 10.0;
-   3.11.3–3.11.6, fixed 3.11.7; VulnCheck CVE'd 2026-09-17; advisory updated
-   2026-09-20). Sandboxed code could register listeners on the host's
-   process-wide HTTPS agent, capturing Authorization headers, destination
-   hostnames, and plaintext TLS data — cross-tenant credential theft without
-   host RCE. vm2-CVE flagged-only precedent applies. Threat-model color for
-   multi-tenant sandbox hosts, not a sandbox product move.
-2. **CVE-2026-71443 — Docker Engine container escape / privilege escalation**
+**7 flagged-only, NOT folded, no C-number** (new-to-corpus lane-adjacent or
+third-party analysis):
+1. **CVE-2026-71443 — Docker Engine container escape / privilege escalation**
    (disclosed 2026-09-22, CVSS 8.8; runc exec-handler fd leak →
    `/proc/self/exe` exploitation; Snyk Security Research; securewithumer PoC
    repo). CVE-2026-63587 (VMware ESXi SVGA escape) flagged-only precedent
    applies — runtime-level, lane-adjacent security color. No C-number.
-3. **ryanalberts/best-of-agent-harnesses — comparisons/sandboxed-code-execution.md**
+2. **ryanalberts/best-of-agent-harnesses — comparisons/sandboxed-code-execution.md**
    (updated 3 days ago) — third-party comparison (E2B, Modal, Daytona,
    Vercel Sandbox, Cloudflare, AgentCore, GKE, kubernetes-sigs agent-sandbox,
    Docker Sandboxes, microsandbox); reproduces the "Daytona public repo
    unmaintained since June 2026" line; prices Vercel Sandbox by active CPU.
    Comparison write-up = flagged-only (Alex Yedi field-guide precedent), no
    product/pricing move.
-4. **pioneeraiacademy/cowork-genealogy — docs/specs/sandbox-provider-spec.md**
+3. **pioneeraiacademy/cowork-genealogy — docs/specs/sandbox-provider-spec.md**
    (updated ~6 days ago) — third-party E2B-vs-Daytona provider spec (egress
    gated Tier-3 $500 prepaid top-up on Daytona, compliance status contested).
    Comparison write-up = flagged-only, no C-number.
-5. **kuanpak/enterprise-harness-agents — research/sandbox-mgmt.md** (updated
+4. **kuanpak/enterprise-harness-agents — research/sandbox-mgmt.md** (updated
    ~5 days ago) — engineering research: Daytona lifecycle automation survey
    (autoStop 15 min default, autoPause, warm pools exact-match claiming) +
    "steal E2B's data-plane design" (snapshot-as-template, UFFD lazy memory,
    per-slot nftables egress). Third-party analysis = flagged-only.
-6. **colemurray/background-agents — docs/VERCEL_SANDBOX_PROVIDER.md** (updated
+5. **colemurray/background-agents — docs/VERCEL_SANDBOX_PROVIDER.md** (updated
    3 days ago) — third-party engineering doc (Vercel repo-image builds inside
    sandboxes, snapshot precedence, shutdown lifecycle). Vercel write-ups
    flagged-only precedent applies.
-7. **proagentstore/platform — docs/cloudflare-agent-stack-2026.md** (updated
+6. **proagentstore/platform — docs/cloudflare-agent-stack-2026.md** (updated
    3 days ago; content as-of 2026-08-06, pre-window) — third-party
    Cloudflare Sandbox SDK analysis (unproven for persistent interactive
    sessions). Third-party analysis = flagged-only.
-8. **dev.to/yuraoak — "E2B sandboxes: pricing, lifecycle and alternatives"**
+7. **dev.to/yuraoak — "E2B sandboxes: pricing, lifecycle and alternatives"**
    (Sep 23) — third-party pricing analysis; figures cited match
    vendor-verified corpus — no new pricing move. Flagged-only.
 
@@ -149,8 +151,14 @@ CVE-2025-39964 (2025 kernel AF_ALG UAF, pre-window); Lokahi Therapeutics
 name); helgesverre/glue (Apr 2026), rars-oss/sbx (Sep 12), agentsystemlabs
 mission-control removal plan (pre-window) — all pre-window or out of lane.
 
-Stale-version rule compliant; Surveyor B grepped the last 3 watch docs plus
-corpus for every candidate before classifying — no false first-sightings.
+Stale-version rule mostly compliant with one review-caught exception:
+Surveyor B grepped the last 3 watch docs + COMPETITOR_ANALYSIS.md for every
+candidate, but CVE-2026-92940 (flagged-only on 2026-09-26, never folded into
+the corpus) fell outside that window and was misfiled as new — corrected
+above. Lesson for future passes: the corpus leg of the rule must cover the
+full watch-doc series (or the docs/README.md index) for never-folded
+flagged-only candidates, since COMPETITOR_ANALYSIS.md alone cannot catch
+them.
 
 **Corpus-health note for a future pass:** third-party comparison/analytics
 content keeps accumulating in the lane (ryanalberts, cowork-genealogy,
@@ -164,9 +172,8 @@ flags. Not actioned this pass (doc-only delta scope).
 **No new in-window in-lane launches this window; the sandbox-infrastructure
 lane stays quiet.** Vendors: 9/9 unchanged; the all-first-try streak reaches
 9 passes. News: 0 new, recrawls only. New-to-corpus sightings are all
-flagged-only lane-adjacent items (vm2 https.globalAgent leak
-CVE-2026-92940; Docker Engine escape CVE-2026-71443; six third-party
-comparison/engineering write-ups; yuraoak E2B pricing analysis). Corpus
+flagged-only lane-adjacent items (Docker Engine escape CVE-2026-71443; six
+third-party comparison/engineering write-ups; yuraoak E2B pricing analysis). Corpus
 movement: **C11 (Baseten/Blaxel) ages out** (quiet pass 3 of 3 — one-notice
 line above; no silent drop); C56 quiet pass 2 of 3; C62 recrawl contact
 (count 0); C12 OPEN (AgentComputer still no egress line); aged-out stay out;
