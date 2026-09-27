@@ -133,8 +133,10 @@ and feeds *into* this endpoint; it is never exposed raw, per
    suspend yet).
 7. **Session restart:** the numbered rules are per onboarding session.
    The only legal cross-session moves are `box-unhealthy` →
-   `provisioning` (operator reprovision) and `provisioning-failed` →
-   `provisioning` (operator retry). The endpoint serves the latest
+   `provisioning` (operator reprovision), `provisioning-failed` →
+   `provisioning` (operator retry), and `live`/`approved` →
+   `provisioning` (operator reprovision of a live box starts a new
+   onboarding session — the §8 G7 carve-out). The endpoint serves the latest
    session, `status_updated_at` resets, and the 10-minute clock restarts
    at the new session's `provisioning` → `live` transition.
 
@@ -178,9 +180,10 @@ and feeds *into* this endpoint; it is never exposed raw, per
   (pre-arc — no sub-decision yet) — with one exception: under §8's
   multi-box rule, `detail` carries the box identity
   (`"<sub-code> @ box=<box-name>"` style — e.g. `box-unhealthy:
-  relay-dial-failed @ box=kitchen-pi`) whenever the reported arc belongs
-  to a box other than the pre-live earliest-created box still
-  onboarding (the rule-1 "first" for the detail exception). Absent on
+  relay-dial-failed @ box=kitchen-pi`) whenever more than one box is
+  still onboarding — so the reported arc is always disambiguated, per
+  rule 1's rationale that `detail` carries the reported box identity.
+  Absent on
   the arc-terminal codes (`approved`, `human-denied`, `human-drop-off`,
   `provisioning-failed`).
   The human page never renders it raw.
@@ -342,7 +345,9 @@ Rules:
    `GET /tenant/status` reports the **most-advanced arc** among the
    boxes still onboarding, ranked by an explicit selection preference
    (closest to `live` without failure first): `live` > `provisioning` >
-   `box-unhealthy` > `provisioning-failed`. Ties (same code) break by
+   `box-unhealthy` > `provisioning-failed` (`live` is listed for
+   completeness — pre-`live` no candidate holds it; the first box to
+   reach `live` ends the pre-live phase). Ties (same code) break by
    newest box-record `created_at`, then box-id lexical — so the reported
    box identity in `detail` cannot flap between polls when a batch
    shares `created_at`. Arc transitions are forward moves, not
@@ -354,7 +359,7 @@ Rules:
    progressing one (progress wins over recency: "newest" answers a
    Boxes-panel question, not an onboarding-arc question). The
    monotonicity invariant is scoped: within a single box onboarding
-   session/generation, the reported code never moves to an earlier stage
+   session, the reported code never moves to an earlier stage
    than the last reported code — but a rule-7 cross-session restart
    (`box-unhealthy → provisioning`,
    `provisioning-failed → provisioning`) resets the comparison baseline
@@ -374,9 +379,14 @@ Rules:
    tenant is onboarded; a page polling during second-box provisioning
    correctly keeps seeing `live`. Carve-out: reprovision of the live-anchor
    box (the box whose arc reached `live` first, per rule 1) follows
-   transition rule 7's cross-session move — the endpoint serves the new
-   session (including its `provisioning`), because operator reprovision is
-   rule 7's path, not a second box's provisioning.
+   transition rule 7's cross-session move (`live`/`approved` →
+   `provisioning`, starting a new session). The new session is an
+   ordinary candidate in rule 1's selection — it does not pin the
+   endpoint: the carve-out licenses the resulting regression (e.g.
+   `live` → `provisioning` on reprovision), and if the anchor's new
+   session stalls while a second box's arc progresses, rule 1's
+   dead-box-never-outranks-progressing preference applies unchanged.
+   Operator reprovision is rule 7's path, not a second box's provisioning.
 3. **S1 impact:** the tenant-record store keeps per-box arc records
    internally (keyed by box id) to evaluate the most-advanced-incomplete
    rule, but the response schema is unchanged — per-tenant, no `box_id`
