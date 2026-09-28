@@ -138,6 +138,18 @@ update-plane layer adopts it for pinning enforcement as it lands (v0's
 `os-security` layer predates the contract and is exempt — its guarantee is
 config-state, not version pins).
 
+Pin-file placement on a deployed box: the installed-copy trust model exists
+because the repo checkout is untrusted-by-design for the update path, and that
+rationale extends to pin *data* — a checkout writer with version-selection
+authority over what root installs is the data-plane equivalent of the code
+injection the model was built to prevent (bounded by signed apt/pip repo
+contents, but pin-to-vulnerable-version is still real authority). So future
+privileged layers MUST read pins from an installed/backfilled copy refreshed
+only via the privileged `install` step (path TBD by the landing slice —
+proposed: alongside the installed script under the toolset state dir), never
+from the live checkout. Until a layer implements this, the contract is
+status-plane-only.
+
 ## Recovery (from #532)
 
 Self-update without recovery is just a fancier way to break the box. The

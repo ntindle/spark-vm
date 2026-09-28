@@ -41,10 +41,11 @@ lines (writes atomically via `install`; idempotent; supports `--dry-run`).
   gate); `--force` bypasses. **Known limitation:** tmux sockets are per-uid,
   so the gate (running as root) only sees root's tmux server — `mjob-*`
   sessions owned by another uid (e.g. `ntindle`) are invisible to it, and a
-  missing/broken tmux probe also reads as "no jobs". In v0 this is acceptable
-  because `update` never restarts services or installs packages itself — it
-  only rewrites the apt config — but the gate must not be relied on as a hard
-  exclusion until it is made uid-aware (follow-up slice).
+  missing/broken tmux probe also reads as "no jobs". In v0 the blind gate is
+  acceptable because `update` never restarts services, and its only package
+  install is the one-time `unattended-upgrades` bootstrap via the box's apt
+  sources (not a running-workload change) — but the gate must not be relied on
+  as a hard exclusion until it is made uid-aware (follow-up slice).
 - The `os-security` repair **overwrites** `/etc/apt/apt.conf.d/20auto-upgrades`
   with exactly the two required lines. Any operator tuning in that file
   (e.g. `Unattended-Upgrade::Allowed-Origins`) is discarded on repair — on a
@@ -55,7 +56,12 @@ lines (writes atomically via `install`; idempotent; supports `--dry-run`).
 - Weekly Sunday 03:00 local quiet-hours schedule with a 30-minute randomized
   delay (`sparkvm-toolset-update.timer`, `Persistent=false`).
 - Root-required operations fail loudly instead of silently skipping.
-- **v0 makes no network fetch or download calls** — the suite pins this.
+- **v0 executes no code fetched over the network and has no bespoke update
+  channel to poison**: the only package-manager call is a one-time
+  `apt-get install -y unattended-upgrades` bootstrap (downloads from the box's
+  configured, signature-verified apt sources, only if the package is missing).
+  The suite pins exactly that shape — no `curl`/`wget`/`git clone`/`pip
+  install`/`npm install`/URL literals, one `apt-get` call site.
 
 ## Component status (v0)
 

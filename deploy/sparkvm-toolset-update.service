@@ -8,8 +8,9 @@ Type=oneshot
 # Runs as root: the updater repairs /etc/apt/apt.conf.d (unattended-upgrades
 # config) and manages system services. This is the box's own scheduled root
 # maintenance, not a privilege granted to anyone new — same trust as a manual
-# `sudo apt` run by the operator. The updater runs no package manager itself;
-# unattended-upgrades performs installs on its own schedule.
+# `sudo apt` run by the operator. The updater's only package-manager call is a
+# one-time `apt-get install -y unattended-upgrades` bootstrap (missing package
+# only); unattended-upgrades performs installs on its own schedule.
 #
 # CRITICAL: ExecStart points at the INSTALLED COPY in
 # /home/ntindle/.sparkvm-toolset/bin/ — never at the repo checkout. A writer

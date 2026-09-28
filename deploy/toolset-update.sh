@@ -49,9 +49,11 @@
 #     staged then renamed into place) and its own state dir. It runs no
 #     package manager itself; unattended-upgrades does the installing on
 #     its own schedule.
-#   - The script never executes anything fetched over the network and never
-#     runs downloaded code. There is no update channel to poison — the v0
-#     "update" is a config-state guarantee.
+#   - The script executes no code fetched over the network and has no bespoke
+#     update channel to poison: the only package-manager call is a one-time
+#     `apt-get install -y unattended-upgrades` bootstrap (box's configured,
+#     signature-verified apt sources, only if the package is missing). The v0
+#     "update" is otherwise a config-state guarantee.
 
 set -euo pipefail
 set -o pipefail
