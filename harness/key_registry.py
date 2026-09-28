@@ -79,6 +79,8 @@ _LOCK_POLL_S = 0.05
 # Bounded journal: the #376 lesson (unbounded = fail). The per-record
 # rotated_to pointer is never dropped, so capping the journal only bounds
 # the window of operator-visible audit history, never lineage.
+# Sane range: 1..2**31 — 0 would silently empty the journal on every
+# rotate (degenerate config, not guarded against by design).
 ROTATIONS_CAP = 1000
 
 
