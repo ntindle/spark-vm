@@ -125,6 +125,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Credential registration is now atomic: registering a credential together
+  with its host bindings lands in a single locked write, so a mid-save
+  failure can no longer leave it registered with only some of its intended
+  hosts ([#151](https://github.com/ntindle/spark-vm/pull/151), fixes
+  [#116](https://github.com/ntindle/spark-vm/issues/116) and
+  [#146](https://github.com/ntindle/spark-vm/issues/146))
 - CUA desktop stack startup hardening: the bridge and keepalive no longer trust the desktop env file blindly — it is only consumed when it is a regular file owned by the service user with no group/other write permission, and the runtime directory it lives in is now created with private (0700) permissions, so another local user cannot inject values into the desktop's environment by planting the file (closes #493); and two overlapping keepalive runs can no longer double-spawn the bridge — the bridge takes an exclusive startup lock and exits if one is already running (closes #495). (#596)
 - confirmd's synchronous expired reaps (the Finding 53(a) GET-detail and POST-answer paths) now stamp the S1 expired-approval terminal record before removing the pending file (stamp-then-delete, mirroring the render reap), so "expired between render and answer" leaves a terminal record in the answered history — the expired 410 page now links to it — instead of a bare removal with no record. (#598)
 - Repeated swaps refused for the same credential/host/method no longer re-scan the whole approvals pending directory on every refusal: the pending-scan result is cached per credential/host/method, invalidated whenever the directory changes and additionally every 30 seconds, so expiry handling can lag at most that bound. (#568)
