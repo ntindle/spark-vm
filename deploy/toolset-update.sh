@@ -34,12 +34,28 @@
 #   toolset-update.sh optout | optin
 #   toolset-update.sh version
 #
+# Update layers (run in order by `update`):
+#   os-security  — unattended-upgrades presence + 20auto-upgrades config (v0)
+#   cua-driver   — hold the cua-driver binary on the pins.conf pin: compare
+#                  `cua-driver --version` against the pin and reinstall the
+#                  pinned binary from the upstream release when drifted or
+#                  absent. The tarball is SHA256-verified against the
+#                  release's checksums.txt before install. Never restarts the
+#                  CUA daemon — the new binary takes effect at the next
+#                  daemon restart, which the updater does not perform.
+#
 # Env overrides (for tests): TOOLSET_STATE_DIR, APT_CONF_DIR, SYSTEMD_DIR,
 # OPTOUT_FILE, SKIP_SYSTEMCTL=1 (skip systemctl calls), SKIP_SUDO=1 (run
 # file ops without sudo), TMUX_BIN (idle-gate probe), TOOLSET_UPDATE_NO_MAIN=1
 # (source functions only, for tests), TOOLSET_INSTALL_OWNER/GROUP (owner for
 # installed files; default root — tests run non-root, e.g. CI, set these to
 # the current uid/gid since `install -o root` requires privilege).
+# PINS_FILE (pin file; default $TOOLSET_STATE_DIR/self_update_pins.conf —
+# refreshed only by the privileged `install` step, never read from the live
+# checkout), CUA_DRIVER_BIN (default /home/ntindle/cua/bin/cua-driver),
+# CUA_DRIVER_OWNER/GROUP (default ntindle — the daemon runs as ntindle, not
+# root), CUA_RELEASE_BASE (release download base; tests point it at a local
+# dir).
 #
 # Trust model (read docs/TOOLSET_UPDATE.md before enabling):
 #   - THE TIMER RUNS THE INSTALLED COPY at $TOOLSET_STATE_DIR/bin/, NOT the
@@ -52,10 +68,16 @@
 #     package manager itself; unattended-upgrades does the installing on
 #     its own schedule.
 #   - The script executes no code fetched over the network and has no bespoke
-#     update channel to poison: the only package-manager call is a one-time
-#     `apt-get install -y unattended-upgrades` bootstrap (box's configured,
-#     signature-verified apt sources, only if the package is missing). The v0
-#     "update" is otherwise a config-state guarantee.
+#     update channel to poison — EXCEPT the cua-driver layer, which downloads
+#     the pinned release tarball from github.com/trycua/cua and SHA256-verifies
+#     it against the release's checksums.txt before installing (the version it
+#     may install is bounded by the operator-owned pins file; the tarball is
+#     never executed and never extracted wholesale — only a single member
+#     named `cua-driver` is extracted, after the member list is screened for
+#     unsafe entries (symlinks/hardlinks/devices, `..`, absolute paths)). The
+#     one-time `apt-get install -y
+#     unattended-upgrades` bootstrap uses the box's configured,
+#     signature-verified apt sources.
 
 set -euo pipefail
 set -o pipefail
@@ -75,6 +97,14 @@ VERSION_FILE="$(dirname "$SCRIPT_DIR")/VERSION"
 : "${TMUX_BIN:=tmux}"
 : "${TOOLSET_INSTALL_OWNER:=root}"
 : "${TOOLSET_INSTALL_GROUP:=root}"
+# Pin file: read from the installed/backfilled copy refreshed only by the
+# privileged `install` step — never from the live repo checkout (see
+# docs/SELF_UPDATE.md "Two planes" contract).
+: "${PINS_FILE:=$TOOLSET_STATE_DIR/self_update_pins.conf}"
+: "${CUA_DRIVER_BIN:=/home/ntindle/cua/bin/cua-driver}"
+: "${CUA_DRIVER_OWNER:=ntindle}"
+: "${CUA_DRIVER_GROUP:=ntindle}"
+: "${CUA_RELEASE_BASE:=https://github.com/trycua/cua/releases/download}"
 
 STATE_AUDIT_LOG="$TOOLSET_STATE_DIR/audit.log"
 STATE_RUN_LOG="$TOOLSET_STATE_DIR/toolset-update.log"
@@ -229,6 +259,196 @@ _os_security_repair() {
     return 0
 }
 
+# --- component: cua-driver (pinned binary reinstall) ---------------------------
+# Holds the cua-driver binary on the pins.conf pin (#532): compare the
+# MANAGED binary's `$CUA_DRIVER_BIN --version` against the pin (PATH is
+# never consulted — the timer runs as root, and the layer converges
+# $CUA_DRIVER_BIN, so only the managed binary is a meaningful probe);
+# reinstall the pinned release when drifted or absent. Never restarts the CUA
+# daemon — the new binary takes effect at the next daemon restart, which the
+# updater does not perform.
+_read_pin() {
+    # _read_pin <tool> — print the pinned version from the pins file, or
+    # nothing. Format: one `tool = version` per line; `#` comments and blank
+    # lines ignored. First matching tool wins; fail-closed (empty) on a
+    # missing/unreadable pins file.
+    local tool="$1"
+    local pins="${PINS_FILE:-}"
+    [ -n "$pins" ] && [ -f "$pins" ] || return 0
+    local line name ver
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in \#*|'') continue ;; esac
+        case "$line" in *"="*) ;; *) continue ;; esac
+        name="$(printf '%s' "$line" | cut -d= -f1 | tr -d ' \t')"
+        ver="$(printf '%s' "$line" | cut -d= -f2- | tr -d ' \t')"
+        if [ "$name" = "$tool" ] && [ -n "$ver" ]; then
+            printf '%s' "$ver"
+            return 0
+        fi
+    done <"$pins"
+    return 0
+}
+
+_pin_ok() {
+    # _pin_ok <pin> — the pin is interpolated into a release URL and a
+    # filename, so it must be URL/filename-safe: no separators, no leading
+    # dot or dash (blocks .. and absolute paths; / is excluded by the class).
+    case "$1" in
+        ''|*[!A-Za-z0-9._-]*|-*|.*) return 1 ;;
+    esac
+    return 0
+}
+
+_cua_driver_current() {
+    # Print the installed version, or: absent | version-unknown.
+    # Probe the MANAGED binary only — never PATH. The timer runs as root,
+    # and executing a PATH-resolved binary as root invites PATH hijacking;
+    # and the layer converges $CUA_DRIVER_BIN, so probing anything else lets
+    # a stray PATH copy mask drift of the managed binary (or substitute for
+    # it when the managed binary is absent). Operators point the layer at a
+    # different location with CUA_DRIVER_BIN itself.
+    local out ver
+    [ -n "${CUA_DRIVER_BIN:-}" ] && [ -x "$CUA_DRIVER_BIN" ] \
+        || { printf 'absent'; return 0; }
+    out="$("$CUA_DRIVER_BIN" --version 2>/dev/null | head -n 1 || true)"
+    ver="$(printf '%s' "$out" | grep -oE '[0-9][A-Za-z0-9._-]*' | head -n 1 || true)"
+    # A bare number is not a version — demand at least one dot so a stray
+    # counter can never compare equal to a real pin.
+    case "$ver" in
+        *.*) printf '%s' "$ver" ;;
+        *) printf 'version-unknown' ;;
+    esac
+}
+
+_cua_driver_arch() {
+    # Map the host to the release asset's platform tag.
+    case "$(uname -m)" in
+        x86_64) printf 'linux-x86_64' ;;
+        aarch64|arm64) printf 'linux-arm64' ;;
+        *) return 1 ;;
+    esac
+}
+
+_cua_driver_layer() {
+    # _cua_driver_layer <dry:0|1> — converge cua-driver onto the pins.conf pin.
+    # Idempotent: a box already on the pin is a no-op. Fail-closed: missing
+    # pin, unsafe pin, unparseable installed version, missing arch asset,
+    # download failure, or checksum mismatch all refuse loudly.
+    local dry="$1"
+    local pin cur arch
+    pin="$(_read_pin cua-driver)"
+    if [ -z "$pin" ]; then
+        log "cua-driver: no pin for cua-driver in $PINS_FILE — refusing (fail-closed)"
+        return 1
+    fi
+    if ! _pin_ok "$pin"; then
+        log "cua-driver: pin '$pin' is not URL/filename-safe — refusing"
+        return 1
+    fi
+    cur="$(_cua_driver_current)"
+    case "$cur" in
+        "$pin")
+            log "cua-driver: already on pin $pin, no-op"
+            return 0 ;;
+        version-unknown)
+            log "cua-driver: installed but version unparseable — refusing to guess (fail-closed)"
+            return 1 ;;
+        absent)
+            log "cua-driver: absent — installing pin $pin" ;;
+        *)
+            log "cua-driver: drift $cur -> $pin" ;;
+    esac
+    if [ "$dry" = "1" ]; then
+        log "cua-driver: DRY-RUN would install cua-driver $pin (current: $cur)"
+        return 0
+    fi
+    arch="$(_cua_driver_arch)" \
+        || { log "cua-driver: unsupported arch $(uname -m) — no release asset"; return 1; }
+    if ! command -v curl >/dev/null 2>&1; then
+        log "cua-driver: curl not found — cannot fetch the release tarball"
+        return 1
+    fi
+    local tag asset base work
+    tag="cua-driver-rs-v${pin}"
+    asset="cua-driver-rs-${pin}-${arch}-binary.tar.gz"
+    base="${CUA_RELEASE_BASE%/}"
+    work="$(mktemp -d)" || { log "cua-driver: cannot create staging dir"; return 1; }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work'" RETURN
+    log "cua-driver: fetching $tag/$asset"
+    if ! curl -fsSL --max-time 300 -o "$work/checksums.txt" "$base/$tag/checksums.txt"; then
+        log "cua-driver: could not fetch checksums.txt for $tag"
+        return 1
+    fi
+    if ! curl -fsSL --max-time 600 -o "$work/$asset" "$base/$tag/$asset"; then
+        log "cua-driver: could not fetch $asset"
+        return 1
+    fi
+    # Exact-field match on the expected filename — a prefix/substring match
+    # could let a lookalike asset pass against the wrong digest.
+    local want
+    want="$(awk -v a="$asset" '{ sub(/\r$/, "", $2); if ($2 == a) { print $1; exit } }' "$work/checksums.txt" 2>/dev/null || true)"
+    if [ -z "$want" ]; then
+        log "cua-driver: $asset not listed in checksums.txt — refusing"
+        return 1
+    fi
+    ( cd "$work" && printf '%s  %s\n' "$want" "$asset" | sha256sum -c - >/dev/null 2>&1 ) \
+        || { log "cua-driver: SHA256 mismatch for $asset — refusing"; return 1; }
+    # The tarball is never executed, and never extracted wholesale: list its
+    # members first and refuse archives with unsafe members. The checksum
+    # gate is same-channel (it cannot rule out a tampered release), and a
+    # whole-archive `tar -xzf` as root would let a crafted tarball write
+    # outside the staging dir (symlink/hardlink/device members, `..` or
+    # absolute paths). Only the single wanted member is extracted.
+    local members member newbin verbose bad
+    members="$(tar -tzf "$work/$asset" 2>/dev/null)" \
+        || { log "cua-driver: tarball list failed"; return 1; }
+    bad="$(printf '%s\n' "$members" | grep -E '(^|/)\.\.(/|$)|^/' || true)"
+    if [ -n "$bad" ]; then
+        log "cua-driver: tarball has absolute or dot-dot member paths — refusing"
+        return 1
+    fi
+    # Capture the verbose listing BEFORE grepping it: `tar -tzvf | grep -q`
+    # under `set -o pipefail` is racy — grep -q exits on the first match, tar
+    # takes SIGPIPE (exit 141), the pipeline reports failure, and an unsafe
+    # member would slip through (caught as an intermittent test failure).
+    verbose="$(tar -tzvf "$work/$asset" 2>/dev/null)" \
+        || { log "cua-driver: tarball list failed"; return 1; }
+    bad="$(printf '%s\n' "$verbose" | grep -E '^[^d-]' || true)"
+    if [ -n "$bad" ]; then
+        log "cua-driver: tarball has non-regular members (symlink/hardlink/device/fifo) — refusing"
+        return 1
+    fi
+    member="$(printf '%s\n' "$members" | grep -E '(^|/)cua-driver$' | head -n 1 || true)"
+    if [ -z "$member" ]; then
+        log "cua-driver: no cua-driver binary inside $asset — refusing"
+        return 1
+    fi
+    if ! tar -xzf "$work/$asset" -C "$work" -- "$member" 2>/dev/null; then
+        log "cua-driver: tarball extract failed"
+        return 1
+    fi
+    newbin="$work/$member"
+    if [ ! -f "$newbin" ] || [ -L "$newbin" ]; then
+        log "cua-driver: extracted member is not a regular file — refusing"
+        return 1
+    fi
+    # Atomic publish beside the target, preserving the daemon's ownership
+    # (ntindle, not root). Unpredictable stage name (mktemp in the target
+    # dir, not a $$ suffix) so the stage path can't be pre-planted.
+    local stage
+    _sudo mkdir -p "$(dirname "$CUA_DRIVER_BIN")" \
+        || { log "cua-driver: cannot create $(dirname "$CUA_DRIVER_BIN")"; return 1; }
+    stage="$(_sudo mktemp "$(dirname "$CUA_DRIVER_BIN")/cua-driver.new.XXXXXX")" \
+        || { log "cua-driver: cannot create stage file"; return 1; }
+    _sudo install -o "$CUA_DRIVER_OWNER" -g "$CUA_DRIVER_GROUP" -m 0755 "$newbin" "$stage" \
+        || { _sudo rm -f "$stage"; log "cua-driver: stage failed"; return 1; }
+    _sudo mv -f "$stage" "$CUA_DRIVER_BIN" \
+        || { _sudo rm -f "$stage"; log "cua-driver: publish failed"; return 1; }
+    log "cua-driver: installed $pin (was: $cur) — takes effect at next daemon restart"
+    return 0
+}
+
 # --- status probes (read-only, informational) -----------------------------------
 _probe_version() {
     # _probe_version <name> <cmd...> — "name<TAB>present|absent<TAB>version-or-dash"
@@ -308,18 +528,23 @@ cmd_update() {
         return 0
     fi
 
-    local rc=0
+    local rc=0 failed_comps=""
     if ! _os_security_repair "$dry"; then
         rc=1
+        failed_comps="os-security"
+    fi
+    if ! _cua_driver_layer "$dry"; then
+        rc=1
+        failed_comps="${failed_comps:+$failed_comps }cua-driver"
     fi
 
     if [ "$dry" = "1" ]; then
         audit 'toolset-update' ',"result":"dry-run"'
     elif [ "$rc" = "0" ]; then
-        audit 'toolset-update' ',"result":"ok","component":"os-security"'
+        audit 'toolset-update' ',"result":"ok","components":"os-security cua-driver"'
     else
-        audit 'toolset-update' ',"result":"failed","component":"os-security"'
-        log "update: FAILED (os-security); see audit log"
+        audit 'toolset-update' ',"result":"failed","failed":"'"$failed_comps"'"'
+        log "update: FAILED ($failed_comps); see audit log"
     fi
     return "$rc"
 }
@@ -336,6 +561,12 @@ cmd_install() {
         || { echo "ERROR: cannot create install dirs" >&2; return 1; }
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0755 "$SCRIPT_DIR/toolset-update.sh" "$INSTALLED_SCRIPT" \
         || { echo "ERROR: cannot install script copy" >&2; return 1; }
+    # The pins file is the operator-owned version authority for pinned
+    # layers (cua-driver). It is installed/backfilled ONLY here — the update
+    # plane never reads it from the live checkout, per the installed-copy
+    # trust model (docs/SELF_UPDATE.md "Two planes" contract).
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/../scripts/self_update_pins.conf" "$TOOLSET_STATE_DIR/self_update_pins.conf" \
+        || { echo "ERROR: cannot install pins file" >&2; return 1; }
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/sparkvm-toolset-update.service" "$SYSTEMD_DIR/" \
         || { echo "ERROR: cannot install service unit" >&2; return 1; }
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/sparkvm-toolset-update.timer" "$SYSTEMD_DIR/" \
