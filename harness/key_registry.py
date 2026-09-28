@@ -381,22 +381,34 @@ class KeyRegistry:
         new key parses, not just the fingerprint's shape.
 
         Atomically (one lock, one store write): the old record is stamped
-        ``rotated_to``/``rotated_at`` (its ``last_seen_at`` freezes — the
-        rotation is the last lifecycle event), the new key registers as a
-        NEW account (new ``acct_`` id per S1), the box binding is inherited
-        so "same box" continuity survives the rotation, and a lineage entry
-        lands in the bounded ``rotations`` journal (the audit trail S2
-        noted ``remove`` lacks, scoped to rotation; capped at
-        ``ROTATIONS_CAP``, oldest-first eviction).
+        ``rotated_to``/``rotated_at`` (rotation itself does not advance the
+        record's ``last_seen_at`` — the rotation is recorded in
+        ``rotated_at``; liveness via ``touch()`` or re-``register()`` still
+        updates ``last_seen_at`` afterwards, rotation is lineage not a ban),
+        the new key registers as a NEW account (new ``acct_`` id per S1),
+        the box binding is inherited so "same box" continuity survives the
+        rotation, and a lineage entry lands in the bounded ``rotations``
+        journal (the audit trail S2 noted ``remove`` lacks, scoped to
+        rotation; capped at ``ROTATIONS_CAP``, oldest-first eviction).
+
+        Trust boundary: ``rotate()`` performs NO cryptographic proof that
+        the caller holds the old key — attestation is assumed from the
+        caller (the local operator rotating their own key). A network
+        caller must prove possession before calling; the claim protocol
+        (S3, #446) owns that decision, not this slice.
 
         Returns ``{"old": old_record, "new": new_record,
         "rotation": journal_entry}``. ``lookup(old_fp)`` keeps returning the
         old record (with ``rotated_to``) — the link is followed, never
-        silently dereferenced, because identity is still the key. Rotating
-        an already-rotated key re-links forward (chains are legal; the
-        journal records every hop).
+        silently dereferenced, because identity is still the key. Rotating an
+        already-rotated key is refused (RegistryError: rotate the LATEST key)
+        — the record pointer and the journal must never diverge on who the
+        current key is. Chains are built by rotating forward: rotate(old)
+        then rotate(new), each hop journaled.
         """
         old_fp = normalize_fingerprint(old_fingerprint)
+        if not isinstance(key_line, str) or not key_line.strip():
+            raise RegistryError("rotate needs the new key's public-key line")
         key = key_identity.parse_public_key(key_line)
         new_fp = fingerprint(key)
         if new_fp == old_fp:
@@ -412,6 +424,12 @@ class KeyRegistry:
                 raise RegistryError(
                     f"rotate: unknown old fingerprint {old_fp} "
                     "(register it first — rotation never implicitly registers)"
+                )
+            if old.get("rotated_to") is not None:
+                raise RegistryError(
+                    f"rotate: {old_fp} already rotated to {old['rotated_to']} "
+                    "(rotate the latest key — the record pointer and the "
+                    "journal must never diverge)"
                 )
             if new_fp in accounts:
                 raise RegistryError(

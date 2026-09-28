@@ -88,8 +88,10 @@ policy (and S1's): **a new key is a new account** — rotate registers the
 new key as a NEW account id and *links* the accounts rather than
 preserving the id. Atomically, under one lock and one store write:
 
-- the old record is stamped `rotated_to` / `rotated_at` (its
-  `last_seen_at` freezes — rotation is the record's last lifecycle event);
+- the old record is stamped `rotated_to` / `rotated_at` (rotation itself
+  does not advance the record's `last_seen_at` — the rotation is recorded
+  in `rotated_at`; liveness via `touch` or re-`register` still updates
+  `last_seen_at` afterwards — rotation is lineage, not a ban);
   the old record is never deleted by rotate (deprovisioning stays a
   deliberate `remove`);
 - the new key registers as a new account with the box binding inherited,
@@ -103,10 +105,18 @@ preserving the id. Atomically, under one lock and one store write:
 Preconditions fail loudly: unknown old fingerprint (rotation never
 implicitly registers — a typo must not mint an account), already-registered
 new key (rotation never merges two existing accounts — the silent-misbind
-edge), same-key (old == new), malformed input. The new key's public-key
-*line* is required so rotate verifies the key parses, not just the
+edge), already-rotated old key (rotate the *latest* key — the record
+pointer and the journal must never diverge on who the current key is),
+same-key (old == new), malformed input. The new key's public-key *line* is
+required so rotate verifies the key parses, not just the
 fingerprint's shape. Re-registering the old key afterwards is legal and
 refreshes `last_seen_at` — rotation is lineage, not a ban.
+
+Trust boundary: `rotate` performs NO cryptographic proof that the caller
+holds the old key — attestation is assumed from the caller (the local
+operator rotating their own key). A network caller must prove possession
+before calling; the claim protocol (S3, #446) owns that decision, not
+this slice.
 
 **Lost-key rotation is NOT this slice.** If the operator no longer holds
 the old key, there is nothing to attest with — that path needs the claim

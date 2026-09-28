@@ -451,6 +451,10 @@ def test_rotate_happy_path(reg, monkeypatch):
     assert old["fingerprint"] == old_fp
     assert old["rotated_to"] == new_fp
     assert old["rotated_at"] == "2026-09-27T12:00:00+00:00"
+    # rotation itself does not advance the record's last_seen_at — the
+    # rotation is recorded in rotated_at (liveness via touch/re-register
+    # still updates last_seen_at afterwards)
+    assert old["last_seen_at"] == "2026-09-27T10:00:00+00:00"
     assert "rotated_to" not in new and "rotated_at" not in new
     # the journal is the audit trail
     assert entry == {
@@ -583,3 +587,93 @@ def test_rotate_cli_unknown_old_fails_loud(tmp_path):
     r = _cli("rotate", _rot_fp_of(1), "--key-line", ROT_LINE_2, root=root)
     assert r.returncode == 2
     assert "unknown old fingerprint" in r.stderr
+
+
+def test_rotate_on_corrupt_store_fails_closed(reg):
+    # rotate() is the first mutating path to hit the new _load rotations
+    # validation: a corrupt store must refuse, not reset or mint.
+    reg.register(key_line=ROT_LINE_1)
+    reg.store_path.write_text("{not json")
+    with pytest.raises(RegistryError):
+        reg.rotate(_rot_fp_of(1), key_line=ROT_LINE_2)
+    # the failed write minted nothing and touched nothing
+    assert reg.store_path.read_text() == "{not json"
+
+
+def test_junk_rotations_journal_fails_closed(reg):
+    reg.register(key_line=ROT_LINE_1)
+    reg.store_path.write_text(
+        json.dumps({"schema_version": 1, "accounts": {}, "rotations": "junk"})
+    )
+    with pytest.raises(RegistryError):
+        reg.rotations()
+    with pytest.raises(RegistryError):
+        reg.rotate(_rot_fp_of(1), key_line=ROT_LINE_2)
+
+
+def test_rotate_already_rotated_key_refuses(reg):
+    # record pointer and journal must never diverge on who the current key
+    # is: rotate the LATEST key, never an ancestor.
+    old_fp = _rot_fp_of(1)
+    mid_fp = _rot_fp_of(2)
+    reg.register(key_line=ROT_LINE_1)
+    reg.rotate(old_fp, key_line=ROT_LINE_2)
+    with pytest.raises(RegistryError):
+        reg.rotate(old_fp, key_line=ROT_LINE_3)
+    # nothing changed: the pointer still names the first hop, the journal
+    # holds exactly one entry
+    assert reg.lookup(old_fp)["rotated_to"] == mid_fp
+    assert len(reg.rotations()) == 1
+    # the forward path still works
+    out = reg.rotate(mid_fp, key_line=ROT_LINE_3)
+    assert out["new"]["fingerprint"] == _rot_fp_of(3)
+    assert len(reg.rotations()) == 2
+
+
+def test_rotate_rejects_missing_key_line(reg):
+    reg.register(key_line=ROT_LINE_1)
+    with pytest.raises(RegistryError):
+        reg.rotate(_rot_fp_of(1), key_line=None)
+    with pytest.raises(RegistryError):
+        reg.rotate(_rot_fp_of(1), key_line="   ")
+
+
+def test_rotate_inherits_absent_box_binding(reg):
+    # box_ref=None is not "unbound": rotate propagates it, never invents one.
+    new_fp = _rot_fp_of(2)
+    reg.register(key_line=ROT_LINE_1)
+    out = reg.rotate(_rot_fp_of(1), key_line=ROT_LINE_2)
+    assert out["new"]["box_ref"] is None
+    assert out["rotation"]["box_ref"] is None
+    assert reg.lookup(new_fp)["box_ref"] is None
+
+
+def test_rotate_chain_journal_timestamps_ordered(reg, monkeypatch):
+    # per-hop frozen times: the journal's "oldest first" claim holds on
+    # timestamps as well as on fingerprints.
+    fps = [_rot_fp_of(n) for n in range(1, 4)]
+    times = [
+        "2026-09-27T10:00:00+00:00",
+        "2026-09-27T11:00:00+00:00",
+        "2026-09-27T12:00:00+00:00",
+    ]
+    for t in times:
+        _frozen(monkeypatch, t)
+        if t == times[0]:
+            reg.register(key_line=ROT_LINE_1)
+        else:
+            reg.rotate(fps[times.index(t) - 1], key_line=_ROT_LINES[times.index(t)])
+    journal = reg.rotations()
+    assert [e["rotated_at"] for e in journal] == times[1:]
+    assert journal == sorted(journal, key=lambda e: e["rotated_at"])
+
+
+def test_rotate_cli_malformed_key_line_fails_clean(tmp_path):
+    root = str(tmp_path / "cli-rot-bad")
+    old_fp = _rot_fp_of(1)
+    r = _cli("register", "--key-line", ROT_LINE_1, root=root)
+    assert r.returncode == 0, r.stderr
+    r = _cli("rotate", old_fp, "--key-line", "ssh-ed25519 not-base64 rot-test", root=root)
+    assert r.returncode == 2
+    assert "error:" in r.stderr
+    assert "Traceback" not in r.stderr
