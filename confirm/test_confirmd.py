@@ -310,6 +310,145 @@ class ConfirmdTests(unittest.TestCase):
                 t.join()
             self.assertEqual(errors, [])
 
+    # --- 535/360: writer-side audit rotation -----------------------------
+
+    def test_535_audit_rotates_at_cap(self):
+        """At _AUDIT_MAX_BYTES the chain rolls (live -> .1) and newest
+        events land in a fresh live segment. With a roomy _AUDIT_KEEP,
+        no event is lost."""
+        audit = Path(self.tmp.name) / "audit.log"
+        n = 60
+        with mock.patch.object(cd, "AUDIT", str(audit)), \
+             mock.patch.object(cd, "_AUDIT_MAX_BYTES", 1024), \
+             mock.patch.object(cd, "_AUDIT_KEEP", 10):
+            for i in range(n):
+                cd.audit_log("test-ev", "peer", "login", "detail-%d" % i)
+        self.assertTrue(audit.exists())
+        self.assertTrue(Path(str(audit) + ".1").exists())
+        live = audit.read_text()
+        rotated = Path(str(audit) + ".1").read_text()
+        self.assertIn("detail-59", live)      # newest event on live
+        self.assertNotIn("detail-59", rotated)
+        # No event lost across the rolls: every detail exactly once.
+        details = []
+        for p in (str(audit),) + tuple("%s.%d" % (audit, i)
+                                       for i in range(1, 10)):
+            if os.path.exists(p):
+                details += Path(p).read_text().splitlines()
+        self.assertEqual(len(details), n)
+        self.assertEqual(len({d.split("detail-")[1] for d in details}), n)
+
+    def test_535_rotation_keeps_newest_after_roll(self):
+        """The newest events survive even the second roll; only the
+        oldest segments are dropped past _AUDIT_KEEP."""
+        audit = Path(self.tmp.name) / "audit2.log"
+        n = 120
+        with mock.patch.object(cd, "AUDIT", str(audit)), \
+             mock.patch.object(cd, "_AUDIT_MAX_BYTES", 1024), \
+             mock.patch.object(cd, "_AUDIT_KEEP", 3):
+            for i in range(n):
+                cd.audit_log("test-ev", "peer", "login", "detail-%d" % i)
+        self.assertIn("detail-119", audit.read_text())  # newest on live
+        self.assertFalse(Path(str(audit) + ".3").exists())  # cap honored
+        self.assertFalse("detail-0\n" in "".join(  # oldest dropped by design
+            Path(p).read_text() for p in
+            (str(audit), str(audit) + ".1", str(audit) + ".2")))
+        # All lines on disk intact, newest event present exactly once.
+        lines = []
+        for p in (str(audit), str(audit) + ".1", str(audit) + ".2"):
+            lines += Path(p).read_text().splitlines()
+        for line in lines:
+            self.assertRegex(line, r"^ts=\S+ event=test-ev peer=peer "
+                                   r"login=login detail-\d+$")
+        self.assertEqual(sum("detail-119" in l for l in lines), 1)
+
+    def test_535_rotation_keep_one_drops_old_segment(self):
+        """_AUDIT_KEEP=1 keeps the live segment only: the oversized
+        segment is dropped, the newest events still land in the fresh
+        live file, and no .1 is created."""
+        audit = Path(self.tmp.name) / "audit4.log"
+        with mock.patch.object(cd, "AUDIT", str(audit)), \
+             mock.patch.object(cd, "_AUDIT_MAX_BYTES", 512), \
+             mock.patch.object(cd, "_AUDIT_KEEP", 1):
+            for i in range(40):
+                cd.audit_log("test-ev", "peer", "login", "detail-%d" % i)
+        self.assertFalse(Path(str(audit) + ".1").exists())
+        self.assertIn("detail-39", audit.read_text())  # newest survives
+
+    def test_535_concurrent_audit_no_interleave(self):
+        """Concurrent audit_log calls serialize on _AUDIT_LOCK: every
+        line intact, no event lost."""
+        audit = Path(self.tmp.name) / "audit3.log"
+        with mock.patch.object(cd, "AUDIT", str(audit)), \
+             mock.patch.object(cd, "_AUDIT_MAX_BYTES", 10 ** 9):
+            def worker(w):
+                for i in range(50):
+                    cd.audit_log("ev", "peer", "login",
+                                 "w%d-i%d" % (w, i))
+            threads = [threading.Thread(target=worker, args=(w,))
+                       for w in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        lines = audit.read_text().splitlines()
+        self.assertEqual(len(lines), 400)
+        for line in lines:
+            self.assertRegex(line, r"^ts=\S+ event=ev peer=peer "
+                                   r"login=login w\d+-i\d+$")
+
+    # --- 537: reopened index ----------------------------------------------
+
+    def _537_write_pending(self, aid, **fields):
+        p = self.approvals / "pending" / ("%s.json" % aid)
+        doc = {"id": aid}
+        doc.update(fields)
+        p.write_text(json.dumps(doc))
+
+    def test_537_index_hit_avoids_full_scan(self):
+        """An index hit answers from one file — the full pending/ scan
+        never runs (os.listdir raises if touched)."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            self._537_write_pending("baid", reopened_from="aaid",
+                                    expires="2030-01-01T00:00:00+00:00")
+            cd._index_reopened("aaid", "baid")
+            try:
+                with mock.patch("os.listdir",
+                                side_effect=AssertionError("scan ran")):
+                    self.assertEqual(cd._pending_reopened_aid("aaid"),
+                                     "baid")
+            finally:
+                cd._reopened_index.pop("aaid", None)
+
+    def test_537_stale_index_entry_falls_back_to_scan(self):
+        """An index entry pointing at a file that is not this aid's
+        re-file is dropped and the full scan (kept as the
+        exact-semantics fallback) still finds the real one."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            self._537_write_pending("b", reopened_from="other",
+                                    expires="2030-01-01T00:00:00+00:00")
+            self._537_write_pending("c", reopened_from="aaid",
+                                    expires="2030-01-01T00:00:00+00:00")
+            cd._index_reopened("aaid", "b")
+            try:
+                self.assertEqual(cd._pending_reopened_aid("aaid"), "c")
+                self.assertEqual(cd._reopened_index.get("aaid"), "c")
+            finally:
+                cd._reopened_index.pop("aaid", None)
+
+    def test_537_expired_index_entry_dropped(self):
+        """An index hit on an expired re-file drops the entry and
+        returns None — the repeat POST files fresh, as before."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            self._537_write_pending("b", reopened_from="aaid",
+                                    expires="2020-01-01T00:00:00+00:00")
+            cd._index_reopened("aaid", "b")
+            try:
+                self.assertIsNone(cd._pending_reopened_aid("aaid"))
+                self.assertNotIn("aaid", cd._reopened_index)
+            finally:
+                cd._reopened_index.pop("aaid", None)
+
     # --- 50: requester from file owner ------------------------------------
 
     def test_50_file_owner_name(self):
