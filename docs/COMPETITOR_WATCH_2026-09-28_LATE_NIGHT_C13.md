@@ -59,7 +59,7 @@ straight fully-quiet A-lane pass of the nightly series.
    page spot-check unchanged.
 7. **E2B / boat.dev / TermSquad / AgentComputer — VERIFIED NO-CHANGE
    (4/4).** All verbatim identical. AgentComputer still publishes **no
-   first-party egress pricing line — C12 stays OPEN** (14th
+   first-party egress pricing line — C12 stays OPEN** (13th
    consecutive first-party read, no wording drift).
 8. **Boat legacy-domain behavior — VERIFIED NO-CHANGE (4/4).**
    `ascii.dev` and `box.ascii.dev` both serve the Boat homepage
@@ -83,9 +83,11 @@ first-party-confirmed development. **0 new C-numbers.**
 
 **Clean dedupes (pre-window, recrawled only):** Modal $15B / Baseten
 $26B talks (C11 — talks still unclosed, no close signal); OpenAI
-DNS-escape / training pause (C62 — the thejoai UN-GA piece's ~19:15
-CDT Sep-27 update recrawled; it is the same update already counted at
-C12, not a new publication); agent-O echo (13th daily cycle — 6+
+DNS-escape / training pause (C62 — the thejoai UN-GA piece
+("OpenAI, Anthropic CEOs Warn UN of AI Risks", ~19:15 CDT Sep-27
+update) newly surfaced but same-evening-wave pre-window content as
+C12's counted coverage — not an in-window publication, so not a P63
+contact); agent-O echo (13th daily cycle — 6+
 sources, all third-party rumor/leak, zero OpenAI confirmation);
 Plugin4Shell (patch scoreboard unchanged; sh3llc0d3's
 "CVE-2026-92104" claim still uncorroborated — zero CVE-db/NVD hits);
@@ -122,9 +124,10 @@ announcement).
 6. **Modal egress Oct-1 — third-party mirrors match first-party
    terms** (Oct 1, 1/10/100 TiB, $0.04/GiB); no allowance surprises;
    ~3 days to the effective date — re-confirm post-effective-date.
-7. **C62 thejoai UN-GA piece** — the ~19:15 CDT Sep-27 update is the
-   same publication already counted at C12; a recrawl, not a new
-   contact (quiet → 1/3).
+7. **C62 thejoai UN-GA piece** — "OpenAI, Anthropic CEOs Warn UN of
+   AI Risks" (~19:15 CDT Sep-27 update) newly surfaced, but
+   same-evening-wave pre-window content as C12's counted coverage —
+   not an in-window publication, so not a P63 contact (quiet → 1/3).
 8. **Boat ASCII legacy domains — quiet;** migration-complete state
    holds.
 9. **NanoClaw/NanoCo — no new first-party sandbox/compute
@@ -148,15 +151,16 @@ announcement).
     FILE ON CLOSE regardless of clock state.** The talks are still
     unclosed this pass (no close signal) — no filing action now, but
     the instruction stands for the pass that sees a close.
-  - **C62 → quiet 1/3** (the thejoai UN-GA update is the C12-counted
-    publication recrawled, not a new contact).
+  - **C62 → quiet 1/3** (the thejoai UN-GA piece newly surfaced but
+    same-evening-wave pre-window content — not an in-window
+    publication, so not a P63 contact).
   - Aged-out stay out: C29 (Boxd), C45 (Docker Cloud Sandboxes
     CVE-family watch — only search-driven recrawls this pass, no
     fresh CVE/launch, per the C9 rule it does not resurface), C56,
     C66, Heapjack/Overpatch, GitLab CVE-2026-85706, Dextr AI,
     **C67 this pass**. C26 closed.
   - C12 (AgentComputer) stays OPEN — still no first-party egress
-    pricing line (14th consecutive read). No re-folds.
+    pricing line (13th consecutive read). No re-folds.
 - **Ember-1 index status: STABLE.** No flip-flop this pass — the
   "27 September" index section carries the entry and the page
   renders live (AI-Gateway lane, never folded). Record-accuracy
@@ -170,7 +174,7 @@ announcement).
   daily cycle; only an actual OpenAI confirmation files C68);
   **Plugin4Shell** — watch for a REAL CVE assignment (treat
   sh3llc0d3's CVE-2026-92104 as suspect until CVE-db corroborated);
-  **C12 (AgentComputer)** — 15th consecutive first-party read next
+  **C12 (AgentComputer)** — 14th consecutive first-party read next
   pass, note any wording drift; **Vercel Sandbox Drives GA expected
   2026-09-28 (today)** — P49's daily re-check was satisfied at C12
   (~00:47 CDT); the A-lane's normal Vercel reads keep re-grading it;
