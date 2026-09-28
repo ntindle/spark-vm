@@ -94,7 +94,8 @@ accepted-for-self-hosted, hosted-policy-TBD, per #446.
   'ssh-ed25519 AAAA...' [--box-ref <id>] [--registry-root <dir>]`
   (also `lookup`, `touch`, `bind`, `remove`, `manifest`, `status`);
   data commands emit JSON. `--registry-root` may appear before or after
-  the subcommand.
+  the subcommand; if given in both positions, the after-subcommand value
+  wins.
 - `manifest` is how the onboarding path answers "what does this key
   resume?": it fills the `box_id` slot S1's README promised the registry
   slice would fill. `vm_endpoint`/`claim_url` stay null until the

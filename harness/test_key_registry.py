@@ -314,11 +314,33 @@ def test_cli_register_lookup_round_trip(tmp_path):
     root = str(tmp_path / "cli-reg")
     r = _cli("register", "--key-line", ED25519_LINE, root=root)
     assert r.returncode == 0, r.stderr
+    # Pin the location: --registry-root before the subcommand must actually
+    # select the root (a subparser-default clobber once sent these writes
+    # to the default root while every CLI test still passed, because
+    # register and lookup resolved to the same wrong place).
+    assert (tmp_path / "cli-reg" / "registry.json").is_file()
     rec = json.loads(r.stdout)
     assert rec["fingerprint"] == ED25519_FP
     r = _cli("lookup", ED25519_FP, root=root)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["account_id"] == rec["account_id"]
+
+
+def test_cli_registry_root_before_subcommand_selects_root(tmp_path):
+    # The exact QA delta-round regression: --registry-root in the global
+    # position must not be silently clobbered by the subparser default.
+    root = tmp_path / "before"
+    cmd = [sys.executable, "key_registry.py", "--registry-root", str(root),
+           "register", "--key-line", ED25519_LINE, "--box-ref", "box-b"]
+    r = subprocess.run(
+        cmd, cwd=Path(__file__).resolve().parent,
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    store = root / "registry.json"
+    assert store.is_file(), "register did not write to the --registry-root dir"
+    rec = json.loads(store.read_text())["accounts"][ED25519_FP]
+    assert rec["box_ref"] == "box-b"
 
 
 def test_cli_registry_root_accepted_after_subcommand(tmp_path):
@@ -332,6 +354,7 @@ def test_cli_registry_root_accepted_after_subcommand(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["fingerprint"] == ED25519_FP
+    assert (tmp_path / "after" / "registry.json").is_file()
 
 
 def test_cli_manifest_and_remove(tmp_path):

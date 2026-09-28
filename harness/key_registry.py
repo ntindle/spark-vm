@@ -370,11 +370,18 @@ def _cmd(argv: list[str] | None = None) -> int:
     # --registry-root lives on a shared parent parser so it is accepted
     # both before the subcommand (global position) and after it — an agent
     # or operator typing the subcommand first must not hit an argparse error
-    # (Product blocker, round 1).
+    # (Product blocker, round 1). The default is SUPPRESS, not None: a
+    # subparser parses into a FRESH namespace and copies every key back
+    # onto the main namespace, so a plain None default would silently
+    # clobber a --registry-root given in the global position (QA blocker,
+    # delta round: the flag resolved to the default root). With SUPPRESS
+    # the subparser only sets the attribute when the flag is actually
+    # present after the subcommand; given in both positions, the later
+    # (subcommand) value wins.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--registry-root",
-        default=None,
+        default=argparse.SUPPRESS,
         help="registry directory (default: $XDG_STATE_HOME/spark-vm/key-registry)",
     )
     parser = argparse.ArgumentParser(
@@ -429,7 +436,9 @@ def _cmd(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
-    reg = KeyRegistry(root=args.registry_root)
+    # getattr: with the SUPPRESS default the attribute is absent unless the
+    # flag was given in either position.
+    reg = KeyRegistry(root=getattr(args, "registry_root", None))
 
     def _out(obj: dict | list) -> int:
         # Data commands are JSON-first: the registry is an agent-operations
