@@ -4854,3 +4854,51 @@ delegated by the evening cycle-3 doc's watch-out #5).
   re-folds.
 - Full evidence in
   `docs/COMPETITOR_WATCH_2026-09-27_LATE_EVENING_C7.md`.
+
+## Watch update — 2026-09-27 (night, cycle 8): two-surveyor pass, quiet; C29 aged out
+
+- **Surveyor A (first-party re-verification, ~22:23:30–~22:25:00 CDT):
+  8/8 NO-CHANGE, 8/8 first-try** (all-first-try streak extends to nine
+  straight zero-fetch-failure passes). Unchanged: Daytona changelog
+  (still SEP 26 / V0.218.0), Docker Sandboxes release notes (still
+  2026-09-22), Microsandbox (still v0.7.3), Vercel changelog (still the
+  2026-09-27 "Ember-1 from Fireworks now available on AI Gateway" —
+  model-availability, NOT Sandbox; Drives GA not re-checked per P49
+  daily cadence, next due 2026-09-28), DO canonical pricing (figures
+  identical; "Last verified 22 Sep 2026" stamp present; the Sep-22
+  press-release snapshot figure is the standing 10× conflict's other
+  leg — unresolved but unmoved), Modal egress billing (starts Oct 1,
+  2026 — 1/10/100 TiB allowances, $0.04/GiB overage; ~2 days out),
+  E2B / boat.dev / TermSquad / AgentComputer pricing (verbatim
+  identical; AgentComputer still no egress line — C12 OPEN), Boat
+  legacy domains (no 301s anywhere; migration-complete holds, no
+  flip-flop).
+- **Surveyor B (delta news scan ~21:28–~22:25 CDT, 12 queries, snippet
+  level, zero pages opened): quiet pass — 0 new C-numbers.** 0 NEW
+  with evidence; 11 clean dedupes; 14 flagged-only. Notable: the
+  "agent O" rumor's eighth daily echo cycle (still UNCONFIRMED — no
+  OpenAI confirmation; not C68-candidate; DevDay Sep-29 gate stands);
+  Modal $15B / Baseten $26B still talks (bytevyte's round table gives
+  the full escalation curve; file on close); Plugin4Shell
+  (Sep-17 zero-click supply-chain RCE across coding-agent CLIs —
+  flagged-only, re-fold on new exploitation or a first-party vendor
+  response); FastGPT E2B deprecation (Sep-14, market color only);
+  Vercel Drives third-party security review (pre-window, lane-adjacent
+  color, not folded); Hugo CVE-2026-100690 still has no 100690-specific
+  GHSA (stays out); Mistral Vibe family stays corpus-gap candidacy
+  (93993 parent call stands — NOT folded).
+- **Aging (P63) — one age-out this pass (mandatory notice): C29 Boxd is
+  AGED OUT** after three consecutive news-scan passes without surface
+  (C7 + C8; C4–C6 ran no B lane). The Boxd field-table row (VERIFIED
+  2026-09-23 rate card) is retained as canonical reference — the
+  age-out retires the watch item from the aging pipeline, not the
+  vendor facts (same treatment as C56's retained row). P66 re-fold path
+  stands if Boxd resurfaces. Contact resets: agent-O wave, Hugo
+  100690, Mistral Vibe family, 93993 US-CERT mirror, Plugin4Shell,
+  C11 (quiet stays 0/3). Quiet this pass: C45 (Docker Cloud Sandboxes)
+  2/3, C62 (OpenAI offline-sandbox escape) 2/3, C67 (Huawei CodeArts
+  Agent) 2/3 — one more quiet pass each fires the threshold. Aged-out
+  stay out: C56, C66, Heapjack/Overpatch, GitLab CVE-2026-85706, Dextr
+  AI, C29 (this pass). C26 closed. No re-folds.
+- Full evidence in
+  `docs/COMPETITOR_WATCH_2026-09-27_NIGHT_C8.md`.
