@@ -5,7 +5,7 @@ G3 ("tenant onboarding status poll with the spec's machine vocabulary").
 
 **The gap:** three spec documents agree on a control-plane poll —
 `FIRST_TEN_MINUTES_SPEC.md` §2 prescribes the tenant status poll carrying
-the 12 machine codes + `approvals_url` in the tenant record (§2, minute
+the 13 machine codes + `approvals_url` in the tenant record (§2, minute
 4–5); `HOSTED_SIGNUP_ONBOARDING.md` §5 says "Muse polls GET /tenant/status
 with its key; the signup page polls the same endpoint — when status flips
 to `live`, both sides see 'your box is ready'"; `HOSTED_SIGNUP_WEB_UI.md`
@@ -55,7 +55,10 @@ of status inputs; this endpoint is the *reader*.
 
 `provisioning`, `live`, `waiting-on-approval`, `approved`, `box-unhealthy`,
 `connection-unreachable`, `policy-misfire`, `no-gated-action`,
-`human-denied`, `human-drop-off`, `stuck`, `provisioning-failed`.
+`human-denied`, `human-drop-off`, `stuck`, `provisioning-failed`,
+`maintenance` (the last added by `UPDATE_CHANNEL_POLICY.md` §2 — the
+spec's §2 enumerates the first twelve; `maintenance` is the update-channel
+extension).
 
 These are **tenant-layer** codes — the onboarding script's vocabulary —
 not provider vocabulary. `harness/provider_iface.py`'s `BoxStatus` /
@@ -79,6 +82,7 @@ and feeds *into* this endpoint; it is never exposed raw, per
 | `human-drop-off` | Approval expired unanswered (§4: one reminder at T+TTL/2, then expiry) | Expiry. Human surface: the answered-history Expired badge card + the expired-410 → answered-history link (`docs/EXPIRED_APPROVAL_TERMINAL_RECORD.md` §3/§5, S3) |
 | `stuck` | First session stalled | Operator/heuristic, currently operator-set per spec §8's concrete rule (session abandonment: 30 minutes with no Muse action and no pending approval); G9's real stall detector targets that rule. Exits: operator/heuristic clears → the tenant layer re-evaluates to the current arc code; a reprovision restarts the session (transition rule 7). Until S3's confidence bar is met (`docs/STUCK_DETECTOR_DESIGN.md` §6), `stuck` must never be exposed as automatic. |
 | `provisioning-failed` | Provisioning terminally failed | H4 driver terminal failure |
+| `maintenance` | Box under scheduled update/maintenance; workload paused or moving, not broken | Control plane's update scheduler / reimage orchestrator (a future G15/G18 component) — never the provider driver, never the Muse; see transition rule 8 and `UPDATE_CHANNEL_POLICY.md` §2 |
 
 ### Transition rules (no skips, no surprises)
 
@@ -143,6 +147,18 @@ and feeds *into* this endpoint; it is never exposed raw, per
    resume path). The endpoint serves the latest
    session, `status_updated_at` resets, and the 10-minute clock restarts
    at the new session's `provisioning` → `live` transition.
+8. **Scheduled maintenance:** `live` → `maintenance` | `approved` →
+   `maintenance` (entered only by the control plane's update scheduler,
+   never from pre-`live` codes — no arc to maintain yet — and never from
+   `provisioning-failed`). On completion the endpoint returns the
+   **latched** arc code (`live`, or `approved` for post-onboarding
+   maintenance) — the update neither advances nor restarts the arc, and
+   the 10-minute clock is unaffected. A scheduled reimage-for-update
+   happens *inside* `maintenance`, never as `provisioning` (rule 7's
+   carve-out stays for operator-initiated session restarts, not scheduled
+   updates). Failure during maintenance moves the endpoint to
+   `box-unhealthy` with `detail: maintenance-failed: <check>`. See
+   `UPDATE_CHANNEL_POLICY.md` §2 for the full contract.
 
 ## 3. Response schema
 
@@ -179,7 +195,8 @@ and feeds *into* this endpoint; it is never exposed raw, per
   G4 names explicitly).
 - `detail` — free-form machine sub-code, present only where a sub-decision
   exists: the unhealthy/unreachable/stuck family (`box-unhealthy:
-  <check>` per §2), and `waiting-on-approval` (the minute-bound check
+  <check>` per §2), `maintenance` (`maintenance: <operation>`, e.g.
+  `maintenance: reimage-for-update`), and `waiting-on-approval` (the minute-bound check
   name, per transition rule 2). Absent on `provisioning`, `live`
   (pre-arc — no sub-decision yet) — with one exception: under §8's
   multi-box rule, `detail` carries the box identity
@@ -205,7 +222,7 @@ and feeds *into* this endpoint; it is never exposed raw, per
 ```
 provider (H4 driver)          BoxStatus: provisioning/running/… + health
         │  maps, never exposes raw
-control plane                 tenant status layer: the 12 codes, transition
+control plane                 tenant status layer: the 13 codes, transition
         │  rules, approvals_url carrier, authz per §1
 readers                       tenant Muse (linked key) · signup page (cookie)
 ```
@@ -228,6 +245,10 @@ readers                       tenant Muse (linked key) · signup page (cookie)
   forge its own health, violating the spec §8 "instrument each
   separately" attribution discipline). S1 names the event→transition
   mapping as a tested unit alongside the S2 provider mapping.
+- `maintenance` is set by the control plane's update scheduler / reimage
+  orchestrator (the future G15/G18 component) — likewise an input to the
+  tenant layer, never a direct status write by the producer; the tenant
+  layer owns the rule-8 entry/exit/latch.
 - `suspended`/`waking` (H13's future vocabulary, and the status mapping in
   `HOSTED_SIGNUP_WEB_UI.md` §6, `creating→provisioning`, `ready→live`,
   with the "later `suspended`/`waking`" wording in §7's `/tenant/status`
@@ -311,6 +332,9 @@ readers                       tenant Muse (linked key) · signup page (cookie)
    participate only while no non-terminal candidate exists; suspension
    codes (`stuck`, `connection-unreachable`) compare by their latched
    underlying arc code.*
+   *Amended 2026-09-28: `maintenance` (13th code, transition rule 8)
+   joins the suspension family in §8 rule-1 — it compares by its latched
+   underlying arc code per the paragraph above.*
 2. **Who writes `approvals_url`: ANSWERED → §8 (G8 resolution, 2026-09-26
    gap turn).** Original question kept for history: signup stage 2 hands
    it to the human (spec §4), but the control plane must persist it into
@@ -344,7 +368,7 @@ noted.
 ### G7 — multi-box tenants vs the per-tenant vocabulary
 
 **Decision: the endpoint tracks the tenant's onboarding arc, per-tenant,
-no `box_id` schema sibling.** The 12 codes are an onboarding vocabulary,
+no `box_id` schema sibling.** The 13 codes are an onboarding vocabulary,
 not a per-box inventory API — the dashboard's Boxes panel already owns
 per-box status through the H3 §6 provider mapping (`creating →
 provisioning`, `ready → live`, `degraded`/`dead` as-is). Two readers of
@@ -360,7 +384,7 @@ Rules:
    `status_updated_at`). While no box's arc has yet reached `live`,
    `GET /tenant/status` reports the **most-advanced arc** among the
    boxes still onboarding, ranked by a **total selection preference**
-   over all 12 codes (closest to `live` without failure first —
+   over all 13 codes (closest to `live` without failure first —
    deterministic for every pair of candidate codes, which is what G3's
    S1 implementer needs): `live` > `waiting-on-approval` >
    `provisioning` > `box-unhealthy` > `no-gated-action` >
@@ -370,11 +394,13 @@ Rules:
    the first box to reach `live` ends the pre-live phase.
    `no-gated-action`/`policy-misfire` are operator-only diagnostic
    end-states — never progressing, ranked below `box-unhealthy`.)
-   Suspension codes (`stuck`, `connection-unreachable`) compare by their
-   **latched underlying arc code** (the code the arc held at suspension
-   entry, updated by arc-advancing events during the suspension per
-   transition rule 6) — the suspension itself neither promotes nor
-   demotes the candidate. Ties (same effective code) break by newest
+   Suspension codes (`stuck`, `connection-unreachable`, `maintenance`)
+   compare by their **latched underlying arc code** (the code the arc
+   held at suspension/maintenance entry, updated by arc-advancing events
+   during the suspension per transition rule 6 (for `maintenance` the
+   latch is fixed at entry — no arc-advancing events are defined during
+   a reimage window)) — the suspension
+   or maintenance itself neither promotes nor demotes the candidate. Ties (same effective code) break by newest
    box-record `created_at`, then box-id lexical — so the reported box
    identity in `detail` cannot flap between polls when a batch shares
    `created_at`. Arc transitions are forward moves, not
@@ -421,7 +447,7 @@ Rules:
 4. **The stall detector emits one tenant-level stall.**
    `STUCK_DETECTOR_DESIGN.md` §8 Q2 delegates this to G7's decision: the
    detector evaluates per-box session arcs from the internal records
-   (rule 3) but emits a single tenant-level stall — the 12-code
+   (rule 3) but emits a single tenant-level stall — the 13-code
    vocabulary is per-tenant; per-box candidates are evaluation-internal
    to the detector and are not surfaced on this endpoint. (Closes Q2.)
 5. **Explicit non-goal:** no per-box arc resource ships, and no shape is
