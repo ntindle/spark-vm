@@ -52,6 +52,14 @@ BACKEND_ENV = "SPARK_CRED_BACKEND"
 STORE = "/home/swapd/secrets"
 SUDO = ["sudo", "-n", "-u", "swapd"]
 STORE_SET = "/usr/local/bin/cred-store-set"
+# The swapd writer refuses values over 64 KiB (cred-store-set: max_bytes=65536).
+# The frontend must enforce the same bound on the *bytes* it reads from stdin
+# (#149) — never the decoded characters: 64 KiB of 4-byte UTF-8 is only 16 Ki
+# characters, so a character cap would let multi-megabyte input through.
+SECRET_MAX_BYTES = 65536
+# One trailing newline ("\n" or "\r\n") is chomped from the piped secret
+# before it reaches the writer, so the frontend's read bound is the cap + 2.
+_READ_MARGIN_BYTES = 2
 MISSING_MSG = "credential '{name}' not set \u2014 add with: cred set {name}"
 
 
@@ -125,12 +133,27 @@ def run_as_swapd(argv, input_bytes=None):
 
 
 def read_secret_stdin():
-    data = sys.stdin.read()
+    # Bounded read (#149): the writer refuses values over SECRET_MAX_BYTES,
+    # so read at most that (+ the chomped-newline margin, + 1 sentinel byte)
+    # and refuse cleanly before the unbounded old `sys.stdin.read()` could
+    # balloon this process on a huge pipe. Byte cap, not character cap —
+    # read bytes and decode after the length check so multibyte input can't
+    # slip past. The +1 sentinel can never cut a character in half: when it
+    # fires, the input is longer than cap+margin and is refused without
+    # decoding.
+    raw = sys.stdin.buffer.read(SECRET_MAX_BYTES + _READ_MARGIN_BYTES + 1)
+    if len(raw) > SECRET_MAX_BYTES + _READ_MARGIN_BYTES:
+        raise CredentialError(
+            "secret exceeds 64 KiB \u2014 refusing before invoking the writer")
+    data = raw.decode("utf-8")
     # chomp one trailing newline (echo adds one); interior content untouched
     if data.endswith("\r\n"):
         data = data[:-2]
     elif data.endswith("\n"):
         data = data[:-1]
+    if len(data.encode("utf-8")) > SECRET_MAX_BYTES:
+        raise CredentialError(
+            "secret exceeds 64 KiB \u2014 refusing before invoking the writer")
     return data
 
 
