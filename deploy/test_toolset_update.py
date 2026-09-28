@@ -98,6 +98,11 @@ def env(tmp_path):
         "OPTOUT_FILE": str(optout),
         "SKIP_SYSTEMCTL": "1",
         "SKIP_SUDO": "1",
+        # install -o/-g needs privilege for root; hermetic tests run as
+        # whoever invokes pytest (CI runners are non-root), so stage files
+        # owned by the current uid/gid. Production default stays root.
+        "TOOLSET_INSTALL_OWNER": str(os.getuid()),
+        "TOOLSET_INSTALL_GROUP": str(os.getgid()),
         "TMUX_BIN": os.path.join(bindir, "tmux"),
         "PATH": bindir + os.pathsep + os.environ["PATH"],
     }
