@@ -41,13 +41,24 @@ reconciliation contract; currently `cua-driver = 0.28.2`). On every
 `update`:
 
 - **No-op** when the installed `cua-driver` binary reports the pinned
-  version — the common case, no network.
+  version — the common case, no network. The version probe senses **only**
+  the managed binary (`$CUA_DRIVER_BIN --version`) and never `PATH`: the
+  timer runs as root, so executing a `PATH`-resolved binary would invite
+  `PATH` hijacking, and the layer converges `$CUA_DRIVER_BIN` — probing
+  anything else would let a stray `PATH` copy mask drift of (or substitute
+  for) the managed binary.
 - On absence or drift, downloads the **exact pinned release asset** from
   `https://github.com/trycua/cua/releases/download` and installs it
   **atomically**: the SHA-256 digest is taken from the release's
   `checksums.txt` (exact filename match), `sha256sum -c` must pass, and the
   new binary is written to a staging path alongside the target then
   **renamed** over it — the live binary is never partially written.
+- The tarball is **never executed and never extracted wholesale**: the
+  member list is screened first — any symlink, hardlink, device, fifo,
+  `..`, or absolute-path member refuses the whole update — and only the
+  single `cua-driver` member is extracted (a same-channel tarball therefore
+  cannot write outside the staging dir even if the release were tampered
+  with).
 - A missing pin, an unsafe pin (anything outside
   `[A-Za-z0-9._-]`, leading dot/dash, path separators), an unparseable
   installed version, a checksum mismatch, or a missing asset entry in
@@ -61,7 +72,11 @@ HTTPS (CA bundle as curl configures it) and treats `checksums.txt` as a
 **corruption/mismatch detector, not publisher authentication** — it detects
 a wrong or damaged artifact, it does not prove the release wasn't tampered
 with at the source. A future slice can pin Sigstore signatures or
-releases.attestation records.
+releases.attestation records. The tarball itself is never executed — but
+note the installed artifact *is* executed by later runs' version probes
+(`$CUA_DRIVER_BIN --version`, as the update user — root on the timer); that
+exec lives inside the same accepted release-trust envelope as the install,
+not outside it.
 
 Overrides (environment): `PINS_FILE` (installed pins path),
 `CUA_DRIVER_BIN` (default `/home/ntindle/cua/bin/cua-driver`),
@@ -127,5 +142,5 @@ Docker, node, npm, gh, and Playwright remain **status probes only**
 
 ## Tests
 
-`deploy/test_toolset_update.py` — 37 hermetic tests (stub PATH, real-tool
+`deploy/test_toolset_update.py` — 42 hermetic tests (stub PATH, real-tool
 symlinks, no root assumptions). Wired into CI alongside the deploy tests.

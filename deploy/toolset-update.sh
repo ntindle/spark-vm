@@ -72,8 +72,10 @@
 #     the pinned release tarball from github.com/trycua/cua and SHA256-verifies
 #     it against the release's checksums.txt before installing (the version it
 #     may install is bounded by the operator-owned pins file; the tarball is
-#     never executed, only unpacked, and only a file named `cua-driver` from
-#     inside it is installed). The one-time `apt-get install -y
+#     never executed and never extracted wholesale — only a single member
+#     named `cua-driver` is extracted, after the member list is screened for
+#     unsafe entries (symlinks/hardlinks/devices, `..`, absolute paths)). The
+#     one-time `apt-get install -y
 #     unattended-upgrades` bootstrap uses the box's configured,
 #     signature-verified apt sources.
 
@@ -258,10 +260,13 @@ _os_security_repair() {
 }
 
 # --- component: cua-driver (pinned binary reinstall) ---------------------------
-# Holds the cua-driver binary on the pins.conf pin (#532): compare
-# `cua-driver --version` against the pin; reinstall the pinned release when
-# drifted or absent. Never restarts the CUA daemon — the new binary takes
-# effect at the next daemon restart, which the updater does not perform.
+# Holds the cua-driver binary on the pins.conf pin (#532): compare the
+# MANAGED binary's `$CUA_DRIVER_BIN --version` against the pin (PATH is
+# never consulted — the timer runs as root, and the layer converges
+# $CUA_DRIVER_BIN, so only the managed binary is a meaningful probe);
+# reinstall the pinned release when drifted or absent. Never restarts the CUA
+# daemon — the new binary takes effect at the next daemon restart, which the
+# updater does not perform.
 _read_pin() {
     # _read_pin <tool> — print the pinned version from the pins file, or
     # nothing. Format: one `tool = version` per line; `#` comments and blank
@@ -296,9 +301,16 @@ _pin_ok() {
 
 _cua_driver_current() {
     # Print the installed version, or: absent | version-unknown.
+    # Probe the MANAGED binary only — never PATH. The timer runs as root,
+    # and executing a PATH-resolved binary as root invites PATH hijacking;
+    # and the layer converges $CUA_DRIVER_BIN, so probing anything else lets
+    # a stray PATH copy mask drift of the managed binary (or substitute for
+    # it when the managed binary is absent). Operators point the layer at a
+    # different location with CUA_DRIVER_BIN itself.
     local out ver
-    command -v cua-driver >/dev/null 2>&1 || { printf 'absent'; return 0; }
-    out="$(cua-driver --version 2>/dev/null | head -n 1 || true)"
+    [ -n "${CUA_DRIVER_BIN:-}" ] && [ -x "$CUA_DRIVER_BIN" ] \
+        || { printf 'absent'; return 0; }
+    out="$("$CUA_DRIVER_BIN" --version 2>/dev/null | head -n 1 || true)"
     ver="$(printf '%s' "$out" | grep -oE '[0-9][A-Za-z0-9._-]*' | head -n 1 || true)"
     # A bare number is not a version — demand at least one dot so a stray
     # counter can never compare equal to a real pin.
@@ -382,24 +394,53 @@ _cua_driver_layer() {
     fi
     ( cd "$work" && printf '%s  %s\n' "$want" "$asset" | sha256sum -c - >/dev/null 2>&1 ) \
         || { log "cua-driver: SHA256 mismatch for $asset — refusing"; return 1; }
-    # The tarball is unpacked, never executed: install only a file literally
-    # named `cua-driver` from inside it.
-    if ! tar -xzf "$work/$asset" -C "$work" 2>/dev/null; then
-        log "cua-driver: tarball extract failed"
+    # The tarball is never executed, and never extracted wholesale: list its
+    # members first and refuse archives with unsafe members. The checksum
+    # gate is same-channel (it cannot rule out a tampered release), and a
+    # whole-archive `tar -xzf` as root would let a crafted tarball write
+    # outside the staging dir (symlink/hardlink/device members, `..` or
+    # absolute paths). Only the single wanted member is extracted.
+    local members member newbin verbose bad
+    members="$(tar -tzf "$work/$asset" 2>/dev/null)" \
+        || { log "cua-driver: tarball list failed"; return 1; }
+    bad="$(printf '%s\n' "$members" | grep -E '(^|/)\.\.(/|$)|^/' || true)"
+    if [ -n "$bad" ]; then
+        log "cua-driver: tarball has absolute or dot-dot member paths — refusing"
         return 1
     fi
-    local newbin
-    newbin="$(find "$work" -maxdepth 2 -type f -name cua-driver | head -n 1 || true)"
-    if [ -z "$newbin" ]; then
+    # Capture the verbose listing BEFORE grepping it: `tar -tzvf | grep -q`
+    # under `set -o pipefail` is racy — grep -q exits on the first match, tar
+    # takes SIGPIPE (exit 141), the pipeline reports failure, and an unsafe
+    # member would slip through (caught as an intermittent test failure).
+    verbose="$(tar -tzvf "$work/$asset" 2>/dev/null)" \
+        || { log "cua-driver: tarball list failed"; return 1; }
+    bad="$(printf '%s\n' "$verbose" | grep -E '^[^d-]' || true)"
+    if [ -n "$bad" ]; then
+        log "cua-driver: tarball has non-regular members (symlink/hardlink/device/fifo) — refusing"
+        return 1
+    fi
+    member="$(printf '%s\n' "$members" | grep -E '(^|/)cua-driver$' | head -n 1 || true)"
+    if [ -z "$member" ]; then
         log "cua-driver: no cua-driver binary inside $asset — refusing"
         return 1
     fi
+    if ! tar -xzf "$work/$asset" -C "$work" -- "$member" 2>/dev/null; then
+        log "cua-driver: tarball extract failed"
+        return 1
+    fi
+    newbin="$work/$member"
+    if [ ! -f "$newbin" ] || [ -L "$newbin" ]; then
+        log "cua-driver: extracted member is not a regular file — refusing"
+        return 1
+    fi
     # Atomic publish beside the target, preserving the daemon's ownership
-    # (ntindle, not root).
+    # (ntindle, not root). Unpredictable stage name (mktemp in the target
+    # dir, not a $$ suffix) so the stage path can't be pre-planted.
     local stage
-    stage="$CUA_DRIVER_BIN.new.$$"
     _sudo mkdir -p "$(dirname "$CUA_DRIVER_BIN")" \
         || { log "cua-driver: cannot create $(dirname "$CUA_DRIVER_BIN")"; return 1; }
+    stage="$(_sudo mktemp "$(dirname "$CUA_DRIVER_BIN")/cua-driver.new.XXXXXX")" \
+        || { log "cua-driver: cannot create stage file"; return 1; }
     _sudo install -o "$CUA_DRIVER_OWNER" -g "$CUA_DRIVER_GROUP" -m 0755 "$newbin" "$stage" \
         || { _sudo rm -f "$stage"; log "cua-driver: stage failed"; return 1; }
     _sudo mv -f "$stage" "$CUA_DRIVER_BIN" \

@@ -115,6 +115,15 @@ def env(tmp_path):
         "TMUX_BIN": os.path.join(bindir, "tmux"),
         "PATH": bindir + os.pathsep + os.environ["PATH"],
     }
+    # The probe senses the managed binary only (never PATH), so the fixture
+    # materializes one at the pin — otherwise every full `update` test would
+    # try to download the real release.
+    managed = tmp_path / "cua-bin" / "cua-driver"
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    write_version_stub(managed, "0.28.2")
+    e["CUA_DRIVER_BIN"] = str(managed)
+    e["CUA_DRIVER_OWNER"] = str(os.getuid())
+    e["CUA_DRIVER_GROUP"] = str(os.getgid())
     return {"env": e, "tmp": tmp_path, "apt": aptdir, "state": statedir,
             "sys": sysdir, "optout": optout}
 
@@ -510,11 +519,21 @@ def make_pinned_release(tmp_path, pin, binary_body, digest=None):
     return str(base)
 
 
+def write_version_stub(path, version):
+    """Executable cua-driver stub reporting `version` — the managed-binary
+    shape the probe senses in production."""
+    path.write_text(f'#!/bin/sh\necho "cua-driver {version}"\n')
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
+               | stat.S_IXOTH)
+
+
 def cua_env(env, tmp_path, pin="0.28.2", cur_version="0.28.2",
             release_base=None):
     """Env for cua-driver layer tests: pins file, PATH with a cua-driver stub
-    reporting cur_version, CUA_DRIVER_BIN under tmp, and (optionally) a
-    file:// release base for hermetic downloads."""
+    reporting cur_version, CUA_DRIVER_BIN under tmp (materialized as an
+    executable stub reporting cur_version, so the probe senses the managed
+    binary — the production shape), and (optionally) a file:// release base
+    for hermetic downloads."""
     e = dict(env["env"])
     (env["state"] / "self_update_pins.conf").write_text(
         f"# test pins\ncua-driver = {pin}\n")
@@ -523,7 +542,10 @@ def cua_env(env, tmp_path, pin="0.28.2", cur_version="0.28.2",
         "tmux": "exit 1",
     })
     e["PATH"] = bindir + os.pathsep + e["PATH"]
-    e["CUA_DRIVER_BIN"] = str(tmp_path / "cua-bin" / "cua-driver")
+    managed = tmp_path / "cua-bin" / "cua-driver"
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    write_version_stub(managed, cur_version)
+    e["CUA_DRIVER_BIN"] = str(managed)
     e["CUA_DRIVER_OWNER"] = str(os.getuid())
     e["CUA_DRIVER_GROUP"] = str(os.getgid())
     if release_base is not None:
@@ -554,24 +576,29 @@ def test_pin_ok_rejects_unsafe(env):
 
 
 def test_cua_driver_current_parsing(env, tmp_path):
-    bindir = make_stub_bin(tmp_path / "verbin", {
-        "cua-driver": 'echo "cua-driver 0.28.2 (abc123)"',
-    })
-    e = dict(env["env"])
-    e["PATH"] = bindir + os.pathsep + e["PATH"]
+    # Every subcase points CUA_DRIVER_BIN at an explicit managed stub: the
+    # probe senses the managed binary only, never PATH.
+    def managed_case(body):
+        e = dict(env["env"])
+        stub = tmp_path / f"managed-{abs(hash(body)) % 100000}" / "cua-driver"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text("#!/bin/sh\n" + body + "\n")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
+                   | stat.S_IXOTH)
+        e["CUA_DRIVER_BIN"] = str(stub)
+        return e
+
+    e = managed_case('echo "cua-driver 0.28.2 (abc123)"')
     r = source_and("_cua_driver_current", e)
     assert r.stdout == "0.28.2"
     # No version-like token, or a bare number: version-unknown (fail-closed,
     # never guessed).
     for body in ('echo "no version here"', 'echo "build 12345"'):
-        bindir2 = make_stub_bin(tmp_path / "verbin2", {"cua-driver": body})
-        e2 = dict(env["env"])
-        e2["PATH"] = bindir2 + os.pathsep + os.environ["PATH"]
-        r = source_and("_cua_driver_current", e2)
+        r = source_and("_cua_driver_current", managed_case(body))
         assert r.stdout == "version-unknown", body
     # Absent binary.
     e3 = dict(env["env"])
-    e3["PATH"] = make_realtools(tmp_path / "notools")
+    e3["CUA_DRIVER_BIN"] = str(tmp_path / "no-such-dir" / "cua-driver")
     r = source_and("_cua_driver_current", e3)
     assert r.stdout == "absent"
 
@@ -596,8 +623,10 @@ def test_cua_driver_installs_pinned_on_drift(env, tmp_path):
     base = make_pinned_release(tmp_path, "0.28.2", new_body)
     e = cua_env(env, tmp_path, cur_version="0.27.0", release_base=base)
     target = tmp_path / "cua-bin" / "cua-driver"
-    target.parent.mkdir(parents=True)
-    target.write_bytes(b"OLD-BINARY")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Drifted managed binary: executable, reports the old version (the probe
+    # must sense it via the managed path, not PATH).
+    write_version_stub(target, "0.27.0")
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode == 0, r.stderr
     assert target.read_bytes() == new_body
@@ -625,6 +654,9 @@ def test_cua_driver_absent_installs_pin(env, tmp_path):
             (nobin / name).symlink_to(os.path.join(fixture_bin, name))
     e["PATH"] = str(nobin) + os.pathsep + os.environ["PATH"]
     e["CUA_RELEASE_BASE"] = f"file://{base}"
+    # The fixture materializes a managed stub at pin; this test needs the
+    # managed binary ABSENT.
+    (tmp_path / "cua-bin" / "cua-driver").unlink()
     e["CUA_DRIVER_BIN"] = str(tmp_path / "cua-bin" / "cua-driver")
     e["CUA_DRIVER_OWNER"] = str(os.getuid())
     e["CUA_DRIVER_GROUP"] = str(os.getgid())
@@ -639,11 +671,12 @@ def test_cua_driver_refuses_on_checksum_mismatch(env, tmp_path):
     base = make_pinned_release(tmp_path, "0.28.2", b"REAL", digest="0" * 64)
     e = cua_env(env, tmp_path, cur_version="0.27.0", release_base=base)
     target = tmp_path / "cua-bin" / "cua-driver"
-    target.parent.mkdir(parents=True)
-    target.write_bytes(b"OLD-BINARY")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_version_stub(target, "0.27.0")
+    before = target.read_bytes()
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode != 0
-    assert target.read_bytes() == b"OLD-BINARY", \
+    assert target.read_bytes() == before, \
         "failed verify must not touch the live binary"
     lines = audit_lines(env)
     assert lines and lines[-1]["result"] == "failed"
@@ -670,9 +703,184 @@ def test_cua_driver_dry_run_changes_nothing(env, tmp_path):
     r = run_bash("./deploy/toolset-update.sh update --dry-run", env_extra=e)
     assert r.returncode == 0, r.stderr
     assert not curlog.exists(), "dry-run must not fetch"
-    assert not (tmp_path / "cua-bin" / "cua-driver").exists()
+    managed = tmp_path / "cua-bin" / "cua-driver"
+    assert managed.read_bytes() == b'#!/bin/sh\necho "cua-driver 0.27.0"\n', \
+        "dry-run must not replace the managed binary"
     lines = audit_lines(env)
     assert lines and lines[-1]["result"] == "dry-run"
+
+
+def test_cua_driver_installs_managed_when_absent_despite_path_at_pin(env, tmp_path):
+    # Probe-only regression (review round 1): PATH is never consulted. A
+    # PATH cua-driver already at the pin must not substitute for an absent
+    # managed binary — the daemon runs $CUA_DRIVER_BIN, so "absent" there is
+    # drift that must be repaired, not a no-op.
+    new_body = b"FAKE-CUA-DRIVER-FRESH"
+    base = make_pinned_release(tmp_path, "0.28.2", new_body)
+    e = dict(env["env"])
+    (env["state"] / "self_update_pins.conf").write_text("cua-driver = 0.28.2\n")
+    # Hermetic PATH like test_cua_driver_absent_installs_pin (fixture stubs
+    # minus cua-driver, plus real tools), with a PATH cua-driver stub at the
+    # pin — which the probe must ignore.
+    fixture_bin = e["PATH"].split(os.pathsep)[0]
+    nobin = tmp_path / "pathbin"
+    nobin.mkdir()
+    for name in os.listdir(fixture_bin):
+        if name != "cua-driver":
+            (nobin / name).symlink_to(os.path.join(fixture_bin, name))
+    path_stub = nobin / "cua-driver"
+    path_stub.write_text('#!/bin/sh\necho "cua-driver 0.28.2"\n')
+    path_stub.chmod(path_stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
+                    | stat.S_IXOTH)
+    e["PATH"] = str(nobin) + os.pathsep + os.environ["PATH"]
+    e["CUA_RELEASE_BASE"] = f"file://{base}"
+    # Absent managed binary — note the fixture materializes tmp_path/cua-bin,
+    # so use a sibling dir to keep "absent" honest.
+    e["CUA_DRIVER_BIN"] = str(tmp_path / "cua-bin-absent" / "cua-driver")
+    e["CUA_DRIVER_OWNER"] = str(os.getuid())
+    e["CUA_DRIVER_GROUP"] = str(os.getgid())
+    r = run_bash("command -v cua-driver", env_extra=e)
+    assert r.returncode == 0, "test setup: PATH must offer cua-driver at pin"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    target = tmp_path / "cua-bin-absent" / "cua-driver"
+    assert target.read_bytes() == new_body, \
+        "absent managed binary must be installed even when PATH is at pin"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+    assert "cua-driver" in lines[-1]["components"]
+
+
+def test_cua_driver_noop_senses_managed_binary_not_path(env, tmp_path):
+    # Regression (review round 1): the probe must sense the managed binary
+    # ($CUA_DRIVER_BIN), not PATH. The timer runs as root, whose PATH lacks
+    # the daemon user's bindir — a PATH-only probe misreports "absent" in
+    # production and re-downloads the pin on every run.
+    curlog = tmp_path / "curl.log"
+    curlbin = make_stub_bin(tmp_path / "curlbin3",
+                            {"curl": f"echo \"$@\" >> {curlog}; exit 0"})
+    e = dict(env["env"])
+    (env["state"] / "self_update_pins.conf").write_text("cua-driver = 0.28.2\n")
+    fixture_bin = e["PATH"].split(os.pathsep)[0]
+    nobin = tmp_path / "nobin1"
+    nobin.mkdir()
+    for name in os.listdir(fixture_bin):
+        if name != "cua-driver":
+            (nobin / name).symlink_to(os.path.join(fixture_bin, name))
+    (nobin / "curl").symlink_to(os.path.join(curlbin, "curl"))
+    e["PATH"] = str(nobin) + os.pathsep + os.environ["PATH"]
+    managed = tmp_path / "cua-bin" / "cua-driver"
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    managed.write_text('#!/bin/sh\necho "cua-driver 0.28.2"\n')
+    managed.chmod(managed.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
+                  | stat.S_IXOTH)
+    e["CUA_DRIVER_BIN"] = str(managed)
+    e["CUA_DRIVER_OWNER"] = str(os.getuid())
+    e["CUA_DRIVER_GROUP"] = str(os.getgid())
+    r = run_bash("command -v cua-driver || echo ABSENT", env_extra=e)
+    assert "ABSENT" in r.stdout, "test setup: cua-driver must be absent from PATH"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert not curlog.exists(), "no download when the managed binary is on pin"
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+
+
+def test_cua_driver_drift_detected_on_managed_binary_despite_path(env, tmp_path):
+    # Reverse direction of the probe/target divergence: a PATH cua-driver at
+    # the pin must not mask drift of the managed binary.
+    new_body = b"FAKE-CUA-DRIVER-PINNED"
+    base = make_pinned_release(tmp_path, "0.28.2", new_body)
+    e = cua_env(env, tmp_path, cur_version="0.28.2", release_base=base)
+    managed = tmp_path / "cua-bin" / "cua-driver"
+    managed.write_text('#!/bin/sh\necho "cua-driver 0.27.0"\n')
+    managed.chmod(managed.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
+                  | stat.S_IXOTH)
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert managed.read_bytes() == new_body, \
+        "drifted managed binary must be reinstalled despite PATH being at pin"
+    assert stat.S_IMODE(managed.stat().st_mode) == 0o755
+
+
+def _make_evil_release(tmp_path, pin, members):
+    """Stage a release whose tarball has exactly the given members.
+    members: list of (name, kind, payload); kind is "file" (payload bytes)
+    or "symlink" (payload = link target)."""
+    import io
+    import tarfile
+    base = tmp_path / "evilrelease"
+    tagdir = base / f"cua-driver-rs-v{pin}"
+    tagdir.mkdir(parents=True, exist_ok=True)
+    asset = f"cua-driver-rs-{pin}-{_release_arch()}-binary.tar.gz"
+    with tarfile.open(str(tagdir / asset), "w:gz") as tf:
+        for name, kind, payload in members:
+            ti = tarfile.TarInfo(name)
+            if kind == "symlink":
+                ti.type = tarfile.SYMTYPE
+                ti.linkname = payload
+                tf.addfile(ti)
+            else:
+                ti.size = len(payload)
+                ti.mode = 0o755
+                tf.addfile(ti, io.BytesIO(payload))
+    want = hashlib.sha256((tagdir / asset).read_bytes()).hexdigest()
+    (tagdir / "checksums.txt").write_text(f"{want}  {asset}\n")
+    return str(base)
+
+
+def test_cua_driver_refuses_tarball_with_symlink_member(env, tmp_path):
+    # Attack shape (review round 1): symlink member `link -> <victim>`
+    # followed by a regular `link/cua-driver` — a whole-archive `tar -xzf`
+    # as root would write through the symlink outside the staging dir. The
+    # layer must refuse at member screening and extract nothing.
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    base = _make_evil_release(tmp_path, "0.28.2", [
+        ("link", "symlink", str(victim)),
+        ("link/cua-driver", "file", b"EVIL-BINARY"),
+    ])
+    e = cua_env(env, tmp_path, cur_version="0.27.0", release_base=base)
+    target = tmp_path / "cua-bin" / "cua-driver"
+    write_version_stub(target, "0.27.0")
+    before = target.read_bytes()
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0
+    assert target.read_bytes() == before, \
+        "refused update must not touch the live binary"
+    assert not (victim / "cua-driver").exists(), \
+        "nothing may be written outside the staging dir"
+    # The MEMBER SCREENING must be the refuser (not tar's incidental
+    # behavior): the old whole-archive code logs "extract failed" instead.
+    runlog = (env["state"] / "toolset-update.log").read_text()
+    assert "non-regular members" in runlog, runlog[-2000:]
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "cua-driver" in lines[-1]["failed"]
+
+
+def test_cua_driver_refuses_tarball_with_dotdot_member(env, tmp_path):
+    base = _make_evil_release(tmp_path, "0.28.2", [
+        ("../escape", "file", b"EVIL"),
+        ("cua-driver", "file", b"REAL-BINARY"),
+    ])
+    e = cua_env(env, tmp_path, cur_version="0.27.0", release_base=base)
+    target = tmp_path / "cua-bin" / "cua-driver"
+    write_version_stub(target, "0.27.0")
+    before = target.read_bytes()
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0
+    assert target.read_bytes() == before, \
+        "refused update must not touch the live binary"
+    assert not (tmp_path / "escape").exists()
+    # The MEMBER SCREENING must be the refuser: the old whole-archive code
+    # lets tar strip the ".." and would install the member.
+    runlog = (env["state"] / "toolset-update.log").read_text()
+    assert "absolute or dot-dot member paths" in runlog, runlog[-2000:]
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "cua-driver" in lines[-1]["failed"]
 
 
 def test_install_copies_pins_file(env):
