@@ -177,6 +177,58 @@ sentinel design doesn't inherit the gap silently.
 TermSquad ships Squad (coordinated parallel agents); we have muse-job
 (single-operator). Backlog H8 covers it. Not re-litigated here.
 
+### 13. Tenant-box updates — the vision has no update channel
+
+The pipeline above ends at "box": provision → live → done. Nothing in the
+vision says what happens to a tenant box in month two. The box half of the
+product has two update mechanisms, and neither covers a tenant box:
+
+| Vision (implied) | Current state |
+|---|---|
+| A tenant's box stays secure and current without the tenant Muse becoming a sysadmin | Golden images are versioned (`harness/generate-image-manifest.sh`: `image_version` = repo SHA, `built_from_version` = VERSION), gate-checked at provision time (`check-image-manifest.sh`, `docs/GOLDEN_IMAGE_GATE_PROCEDURE.md`), and baked into the image at `/etc/sparkvm/image-manifest.json` — so a box can report its own image, but the provisioner tracks no per-box image_version, and **no path moves a live box from image N to image N+1**. |
+| Updates are visible and attributable | The 12 tenant-status codes (`docs/TENANT_STATUS_ENDPOINT.md` §2) have no maintenance/updating code. An in-place update would surface as `box-unhealthy`, as `provisioning` (reimage = a rule-7 session restart), or as nothing at all — the tenant Muse cannot distinguish "updating" from "broken". |
+| The renewal path doesn't corrupt the funnel | The only designed renewal path is operator reprovision. #527's `live`/`approved` → `provisioning` carve-out is now on main (transition rule 7's cross-session move for reprovision of the live-anchor box, starting a new session) — so reimage-for-update is licensed, not blocked. The residual question is funnel attribution, not legality: the new session still restarts the clock, and until funnel telemetry distinguishes update-churn from provision-churn, update churn reads as fresh onboarding. |
+| Update authority is explicit | #532's toolset updater (merged PR #588 — #542/#551 closed as superseded; the reconciled two-plane system: `scripts/self_update.py` as the unprivileged read-only status plane, `deploy/toolset-update.sh` + `sparkvm-toolset-update.{service,timer}` as the privileged weekly update plane with idle gate, single-flight lock, JSONL audit, machine-wide opt-out, os-security updater layer) is the box half's answer — and both planes remain the box owner's. It was designed for the single-operator box: the tenant operator≠user split was never in scope (that's H11 territory): who opts out, who reads the audit log, and what stops the tenant Muse from influencing the updater's code — all unanswered. `auto-deploy` is worse: it deploys whatever merges to main, and its own trust doc states anyone who can merge to main can execute code on the box. Pointing it at tenant boxes as-is would hand every merger code-exec on every tenant workload — a use the vision has not licensed. |
+
+Gap class: `[DESIGN]` for G11/G13 (the decisions exist nowhere), `[PARTIAL]`
+for G12 (the status endpoint design exists; the vocabulary doesn't), `[POLICY]` for
+the G11 fork (in-place vs reimage is an operator-shaped call with cost and
+funnel consequences).
+
+New backlog items (filed as GitHub issues #553–#556 by the 2026-09-27 gap turn):
+
+- **G11 — tenant-box update policy: in-place vs reimage.** Decide the
+  renewal model before H4 ships: does the provisioner track per-box
+  `image_version` and offer rolling reimage — including the third path,
+  immutable reimage with tenant-state migration (cattle boxes, stateful
+  disks: keeps the golden-image invariant while preserving tenant data) —
+  or do tenant boxes get an in-place updater? Rule 7's cross-session move
+  (carve-out merged in #527) now licenses reimage-for-update, but the new
+  session still restarts the clock and funnel telemetry still can't
+  attribute update-churn vs provision-churn — that attribution is a design
+  choice revisitable for an update path (cf. rule 6's arc-preserving
+  suspension latch), not inherent to reimage. In-place
+  needs per-box update state the provisioner doesn't track today. Either
+  way the decision must land before the first tenant box lives long
+  enough to need it.
+- **G12 — tenant-visible update state.** Extend the status vocabulary (or
+  the `detail` contract) with an updating/maintenance signal so the tenant
+  Muse and the signup page can distinguish maintenance from failure — the
+  same honesty treatment rule 6 gives relay suspension (latch the arc,
+  don't lie). Until then, updates must not be scheduled silently.
+- **G13 — update trust model for tenant boxes.** Design who authorizes
+  updates on a tenant's box (operator? tenant Muse? automatic within
+  policy?), where the audit trail lands (attributable per §11), and how
+  the installed-copy discipline survives a tenant Muse with shell on the
+  box. Whichever fork G11 picks, an in-place updater needs this trust
+  model in full; a reimage path needs at least the reprovision-attribution
+  half. A future design goes through Security review.
+- **G14 — updates vs idle/suspend and the session clock.** H13's
+  suspend/wake and G9's stall detector both assume the box is either
+  working or stalled: is an update window a trusted signal (quiet clock)
+  or does the detector see a stall? Does a suspended box wake for updates,
+  or update on wake? Unspecified — decide with H13.
+
 ## Deliberately not gaps
 
 - **Agent onboarding on the box** (R2 pre-seeded harness state): a feature
