@@ -45,6 +45,15 @@ BACKLOG.md block points here.
   UNVERIFIABLE to VERIFIED this way).
 - **Deep-scan cadence:** on-demand by review/meta runs, not by the hourly
   loop. The hourly pass stays delta-only.
+- **Deprecated-row expiry** (declared 2026-09-27, adopts BACKLOG's nit (e)):
+  a field-table row marked `DEPRECATED ROW` is retained for provenance, not
+  for authority — the canonical row carries the facts. Once a deprecated
+  row's unique facts are folded into the canonical row, the deprecated row
+  becomes a *removal candidate*; only a consolidation pass may remove it
+  (the pass weighs provenance retention against corpus hygiene — a watch
+  turn may tag a candidate, never delete). The C40 row (ASCII → Boat) is the
+  rule's first standing candidate: its facts are folded into the tracked-set
+  Boat row; removal waits on a consolidation pass.
 - **Consolidation queue:** this pass folds #64 (night) → #82 (morning) →
   #102 (midday) → this doc (#54's evening-pass consolidation merged
   separately as 1c244be). Consolidated watch docs are archived under
