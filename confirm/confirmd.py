@@ -165,7 +165,58 @@ def _page_origins():
         origins.add("https://%s:%d" % (dns, PORT))
     return origins
 
-PAGE_ORIGINS = _page_origins()
+
+# Issue #619: PAGE_ORIGINS was frozen at import — a tailscale DNS rename
+# mid-daemon (machine rename, tailnet domain change) left finding 57's
+# Origin exact-match check stale for the process lifetime: the owner's
+# real browser POSTs from the new ts.net origin would 403 until restart.
+# Same treatment as #536's _SelfAddrs: re-resolve on a slow cadence (60 s,
+# mirroring the whois cache). A failed refresh keeps the last good set —
+# a refusal boundary must never silently shrink (an unreachable
+# tailscaled must not collapse the set to the IP literal alone) — and the
+# CONFIRM_ORIGINS env override pins the set (no re-probe) for operators
+# who manage names out of band.
+_PAGE_ORIGINS_TTL = 60
+
+
+class _PageOrigins:
+    """TTL-cached origin set for finding 57's exact-match Origin check.
+
+    Keeps the module-level ``PAGE_ORIGINS`` name and its ``in`` /
+    ``sorted()`` shapes, so callers and tests are unchanged. Thread-safe:
+    handler threads share the one instance.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._pinned = bool(os.environ.get("CONFIRM_ORIGINS", "").strip())
+        self._origins = _page_origins()
+        self._ts = time.monotonic()
+
+    def _refresh(self):
+        now = time.monotonic()
+        with self._lock:
+            if now - self._ts < _PAGE_ORIGINS_TTL:
+                return
+            if not self._pinned and _tailnet_dnsname() is not None:
+                # Only rebuild when the DNS name re-resolves; a failed
+                # lookup keeps the last good set.
+                self._origins = _page_origins()
+            self._ts = now
+
+    def _snapshot(self):
+        if time.monotonic() - self._ts >= _PAGE_ORIGINS_TTL:
+            self._refresh()
+        return self._origins
+
+    def __contains__(self, origin):
+        return origin in self._snapshot()
+
+    def __iter__(self):
+        return iter(self._snapshot())
+
+
+PAGE_ORIGINS = _PageOrigins()
 
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")

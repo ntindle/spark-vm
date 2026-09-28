@@ -1223,6 +1223,21 @@ class SwapAddonTests(unittest.TestCase):
         # no over-scrub: a shorter innocent token is untouched
         self.assertIn("secrettok1", scrubbed)
 
+    def test_121_dict_value_scrubs_bare_rendering(self):
+        """#121: a multi-entry (dict) value with significant trailing
+        whitespace must scrub both the verbatim rendering and the bare
+        rendering servers echo back trimmed — the #88 gap, one branch
+        down (the dict branch only registered the verbatim triple)."""
+        a = make_addon(secrets={"k": {"api_key": "secrettok12\n"}})
+        text = ("verbatim: [secrettok12\n] bare: 'secrettok12' "
+                "other: secrettok1")
+        scrubbed = a._scrub_text_value(text)
+        self.assertNotIn("secrettok12\n", scrubbed)
+        self.assertNotIn("'secrettok12'", scrubbed)
+        self.assertIn("hsurr:k:api_key", scrubbed)
+        # no over-scrub: a shorter innocent token is untouched
+        self.assertIn("secrettok1", scrubbed)
+
     def test_nit_inference_recipe_names_right_files(self):
         """REVIEW item 46: the install recipe must bind the provider in
         inference-hosts.allow (never the main hosts.allow) and run the

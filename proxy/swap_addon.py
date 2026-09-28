@@ -2722,6 +2722,17 @@ class SwapAddon:
                     if self._scrubbable_entry(name, entry, v):
                         triples.append((v, "hsurr:%s:%s" % (name, entry),
                                         False))
+                        # #121: mirror #88's bare-rendering triple for
+                        # multi-entry (dict) values — a `k=v` line with
+                        # significant trailing whitespace has the same
+                        # trimmed-echo scrub gap as single-value secrets
+                        # (server echoes the bare value, only the verbatim
+                        # rendering is scrubbed).
+                        bare = v.strip() if isinstance(v, str) else v
+                        if bare != v and self._scrubbable_entry(name, entry,
+                                                               bare):
+                            triples.append(
+                                (bare, "hsurr:%s:%s" % (name, entry), False))
             elif self._scrubbable_entry(name, None, val):
                 triples.append((val, "hsurr:%s" % name, False))
                 # #88: a whitespace-significant value (e.g. stored

@@ -142,6 +142,73 @@ class ConfirmdTests(unittest.TestCase):
         self.assertNotIn("https://spark-vm.axolotl-sirius.ts.net:9999",
                          cd.PAGE_ORIGINS)
 
+    # --- 619: PAGE_ORIGINS re-resolution -----------------------------------
+
+    def _dns_fake(self, dnsname, fail=False):
+        """subprocess.run fake returning one DNS name (or failing)."""
+        def fake(cmd, **kwargs):
+            class F:
+                returncode = 1 if fail else 0
+                stdout = "" if fail else json.dumps(
+                    {"Self": {"DNSName": dnsname}})
+                stderr = "" if fail else ""
+            return F()
+        return fake
+
+    def _fresh_origins(self, dnsname, fail=False):
+        with mock.patch("subprocess.run",
+                        side_effect=self._dns_fake(dnsname, fail)):
+            return cd._PageOrigins()
+
+    def test_619_refresh_picks_up_dns_rename(self):
+        """A tailscale DNS rename mid-daemon must refresh the accepted
+        origins within the TTL — the stale-for-process-lifetime bug."""
+        po = self._fresh_origins("old-name.ts.net.")
+        old = "https://old-name.ts.net:8443"
+        new = "https://new-name.ts.net:8443"
+        self.assertIn(old, po)
+        self.assertNotIn(new, po)
+        # TTL expired, tailscaled now reports the new name.
+        po._ts -= cd._PAGE_ORIGINS_TTL + 1
+        with mock.patch("subprocess.run",
+                        side_effect=self._dns_fake("new-name.ts.net.")):
+            self.assertIn(new, po)
+        # The old name leaves the accepted set (the rename is the truth).
+        self.assertNotIn(old, po)
+
+    def test_619_failed_refresh_keeps_last_good_set(self):
+        """An unreachable tailscaled must not shrink the refusal
+        boundary: a failed re-resolve keeps the last good origins."""
+        po = self._fresh_origins("good-name.ts.net.")
+        good = "https://good-name.ts.net:8443"
+        self.assertIn(good, po)
+        po._ts -= cd._PAGE_ORIGINS_TTL + 1
+        with mock.patch("subprocess.run",
+                        side_effect=self._dns_fake("x", fail=True)):
+            self.assertIn(good, po)
+        self.assertIn(good, po)
+
+    def test_619_env_override_pins_set(self):
+        """CONFIRM_ORIGINS pins the set: no re-probe, no drift, even
+        after the TTL — operators who manage names out of band keep
+        full control."""
+        with mock.patch.dict(os.environ,
+                             {"CONFIRM_ORIGINS":
+                              "https://pinned.example:8443"}):
+            po = self._fresh_origins("whatever.ts.net.")
+            self.assertEqual(list(po), ["https://pinned.example:8443"])
+            po._ts -= cd._PAGE_ORIGINS_TTL + 1
+            with mock.patch("subprocess.run",
+                            side_effect=self._dns_fake("new.ts.net.")):
+                self.assertIn("https://pinned.example:8443", po)
+                self.assertNotIn("https://new.ts.net:8443", po)
+
+    def test_619_origins_iterable_for_startup_print(self):
+        """sorted(PAGE_ORIGINS) (the startup journal print) works on the
+        TTL-cached object."""
+        printed = sorted(cd.PAGE_ORIGINS)
+        self.assertIn("https://100.65.241.20:8443", printed)
+
     # --- 48: nonce -------------------------------------------------------
 
     def test_48_nonce_format(self):
