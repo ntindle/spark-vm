@@ -235,6 +235,20 @@ _reopen_nonces = {}
 _REOPEN_NONCE_TTL = 15 * 60
 _REOPEN_NONCE_CAP = 4096
 
+# Issue #537: the re-open idempotency check (_pending_reopened_aid) used
+# to os.listdir + json.load EVERY pending file on every /reopen POST —
+# O(n) JSON parses in the request hot path. The index below answers the
+# hot path from one entry: original (denied) aid -> newest re-filed aid.
+# Bounded like _reopen_nonces; invalidation is by validation, not TTL:
+# on a hit, the single candidate file is opened and checked (exists, is
+# the re-file of this aid, unexpired) — any mismatch drops the entry and
+# falls through to the full scan, which is kept as the exact-semantics
+# fallback and repopulates the index on a hit. Worst case is a duplicate
+# filing, exactly as before the index — it can only make the check
+# cheaper, never wronger.
+_reopened_index = {}
+_REOPENED_INDEX_CAP = 4096
+
 # Issue #534: the grant-mint subprocess bound and the pre-mint validity
 # window. The approve path refuses to START a mint when the remaining
 # validity is under the worst-case mint duration + margin: an expiry that
@@ -284,6 +298,28 @@ def _evict_reopen_nonce(aid):
     _reopen_nonces.pop(aid, None)
 
 
+def _reopened_index_ok(aid, new_aid):
+    """Validate a single index hit: the candidate file must exist, be
+    the re-file of `aid`, and be unexpired. A cheap single-file check —
+    the index is never trusted alone."""
+    p = os.path.join(pending_dir(), new_aid + ".json")
+    try:
+        with open(p) as f:
+            it = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(it, dict) or it.get("reopened_from") != aid:
+        return False
+    return not is_expired(it)
+
+
+def _index_reopened(aid, new_aid):
+    """Record a re-file in the index, keeping the map bounded."""
+    _reopened_index[aid] = new_aid
+    while len(_reopened_index) > _REOPENED_INDEX_CAP:
+        _reopened_index.pop(next(iter(_reopened_index)))
+
+
 def _pending_reopened_aid(aid):
     """H20: idempotent re-open. If this denied aid was already re-filed
     and the new item is still pending (and unexpired), return its aid so
@@ -291,6 +327,15 @@ def _pending_reopened_aid(aid):
     deny card re-mints a fresh nonce on every render, so a second POST
     for the same deny is normal (double-tap, deliberate repeat) — not
     an attack. Returns None when no live re-opened item exists."""
+    # Issue #537: consult the in-memory index first — the hot path opens
+    # one file instead of parsing the whole pending/ dir. A stale entry
+    # (the re-filed item left pending since) is dropped and the full
+    # scan below runs as the exact-semantics fallback.
+    hit = _reopened_index.get(aid)
+    if hit and _reopened_index_ok(aid, hit):
+        return hit
+    if hit:
+        _reopened_index.pop(aid, None)
     try:
         names = os.listdir(pending_dir())
     except OSError:
@@ -313,6 +358,7 @@ def _pending_reopened_aid(aid):
             continue
         new_aid = it.get("id") or name[:-5]
         if isinstance(new_aid, str) and new_aid:
+            _index_reopened(aid, new_aid)
             return new_aid
     return None
 
@@ -504,6 +550,65 @@ def _find_login(obj):
     return None
 
 
+# Issue #535 (open-source) / #360 (hosted S1): the audit trail is
+# append-only with no cap — answered/consumed are pruned but the refusal
+# trail grows unbounded, accelerating the disk-full condition the A5
+# stderr signal handles. Writer-side rotation: when the live segment
+# reaches _AUDIT_MAX_BYTES, the segment chain rolls (audit.log -> .1 ->
+# .2 ..., oldest dropped past _AUDIT_KEEP). Never drops the newest
+# events: rotation keeps the newest _AUDIT_KEEP segments and always
+# appends to a fresh live file. Crash-safe: renames are ordered
+# oldest-first with the live segment renamed last — a crash between
+# renames loses at most old segments, never creates a gap in the newest
+# trail; a crash before the live file is recreated just leaves the next
+# append to create it (the open is "a"). The check+rotate+append is
+# serialized on _AUDIT_LOCK: handler threads must not interleave a
+# rotation between another thread's size check and its write.
+_AUDIT_MAX_BYTES = _env_int("CONFIRM_AUDIT_MAX_BYTES", 10 * 1024 * 1024,
+                            1024)
+_AUDIT_KEEP = _env_int("CONFIRM_AUDIT_KEEP", 4, 1)  # live + (KEEP-1) rotated
+_AUDIT_LOCK = threading.Lock()
+
+
+def _rotate_audit():
+    """Roll the audit segment chain (caller holds _AUDIT_LOCK).
+
+    Oldest-first renames; the live segment is renamed last. KEEP=1 (live
+    only): the oversized live segment is dropped outright — the newest
+    events still land in the fresh live file. Any OSError aborts the
+    roll (the oversized file stays, the failure is journaled, and the
+    next audit event retries) — the trail is never truncated by a
+    half-rolled chain.
+    """
+    try:
+        if _AUDIT_KEEP <= 1:
+            os.remove(AUDIT)  # may already be gone; the append recreates
+        else:
+            # i = KEEP-2 .. 1: .(KEEP-2)->.(KEEP-1) drops the oldest kept
+            # segment, ..., .1->.2, then live->.1.
+            for i in range(_AUDIT_KEEP - 2, 0, -1):
+                src = "%s.%d" % (AUDIT, i)
+                if os.path.exists(src):
+                    os.replace(src, "%s.%d" % (AUDIT, i + 1))
+            os.replace(AUDIT, "%s.1" % AUDIT)
+    except OSError as e:
+        print("confirmd WARNING: audit rotation failed: %s" % e,
+              flush=True)
+
+
+def _maybe_rotate_audit():
+    """Rotate the audit chain when the live segment reached the cap
+    (caller holds _AUDIT_LOCK). A stat failure is a miss, not an abort:
+    the append below still runs, and its own OSError path names the lost
+    event."""
+    try:
+        if os.path.getsize(AUDIT) < _AUDIT_MAX_BYTES:
+            return
+    except OSError:
+        return
+    _rotate_audit()
+
+
 def audit_log(event, peer, login, detail=""):
     """Finding 47/53(e): every refusal leaves a trail with peer and login.
     Event policy: malformed/missing CSRF nonces are logged as violations
@@ -528,16 +633,24 @@ def audit_log(event, peer, login, detail=""):
     closed: if AUDIT did not exist and was just created, the directory
     entry is not fsync'd here — a crash at that exact instant can lose the
     file. The file is created once and persists afterwards, so this is not
-    a steady-state exposure."""
+    a steady-state exposure. Writer-side rotation (issues #535/#360):
+    before each append the live segment's size is checked under
+    _AUDIT_LOCK; at _AUDIT_MAX_BYTES the chain rolls, keeping the newest
+    _AUDIT_KEEP segments. The newest events are never dropped (they land
+    in a fresh live segment), and the oldest-first rename order keeps a
+    crash from creating a gap in the newest trail."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    line = ("ts=%s event=%s peer=%s login=%s %s\n"
+            % (ts, event, peer, login or "-", detail))
     try:
-        with open(AUDIT, "a", encoding="utf-8") as f:
-            f.write("ts=%s event=%s peer=%s login=%s %s\n"
-                    % (ts, event, peer, login or "-", detail))
-            f.flush()  # user-space buffer -> OS; fsync below only reaches
-            # the kernel page cache, so without the flush it would sync
-            # nothing (the line is still in CPython's buffer).
-            os.fsync(f.fileno())
+        with _AUDIT_LOCK:
+            _maybe_rotate_audit()
+            with open(AUDIT, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()  # user-space buffer -> OS; fsync below only reaches
+                # the kernel page cache, so without the flush it would sync
+                # nothing (the line is still in CPython's buffer).
+                os.fsync(f.fileno())
     except OSError as e:
         print("confirmd: cannot write audit log: %s (lost event=%s peer=%s login=%s)"
               % (e, event, peer, login or "-"), file=sys.stderr)
@@ -2173,6 +2286,9 @@ class Handler(BaseHTTPRequestHandler):
         with open(tmp, "w") as f:
             json.dump(new, f, indent=2)
         os.replace(tmp, dst)
+        # Issue #537: the new item is pending — index it so the next
+        # idempotency check opens one file instead of scanning pending/.
+        _index_reopened(aid, new_aid)
         # One-shot nonce: the loser of a re-open race sees stale-nonce.
         # Evict the per-aid lock entry too (issue #231 hygiene — the old
         # aid's item never comes back, so the lock must not linger).
