@@ -1,0 +1,14 @@
+[Unit]
+Description=Run spark-vm toolset-update weekly in the quiet-hours window
+
+[Timer]
+# Weekly, Sunday 03:00 box-local time: quiet hours for agent workloads.
+# RandomizedDelaySec spreads the apt-refresh load across boxes.
+OnCalendar=Sun *-*-* 03:00:00
+RandomizedDelaySec=30min
+# Don't pile up missed runs after downtime; the updater is idempotent —
+# the next tick converges to the same healthy state anyway.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
