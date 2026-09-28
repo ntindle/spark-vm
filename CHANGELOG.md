@@ -55,6 +55,7 @@
 
 ### Fixed
 
+- CUA desktop stack startup hardening: the bridge and keepalive no longer trust the desktop env file blindly — it is only consumed when it is a regular file owned by the service user with no group/other write permission, and the runtime directory it lives in is now created with private (0700) permissions, so another local user cannot inject values into the desktop's environment by planting the file (closes #493); and two overlapping keepalive runs can no longer double-spawn the bridge — the bridge takes an exclusive startup lock and exits if one is already running (closes #495). (#TBD)
 - Repeated swaps refused for the same credential/host/method no longer re-scan the whole approvals pending directory on every refusal: the pending-scan result is cached per credential/host/method, invalidated whenever the directory changes and additionally every 30 seconds, so expiry handling can lag at most that bound. (#568)
 - The grant writer now enforces the approval's expiry at mint time: it refuses to mint when the approval's expiry instant has crossed (or is unreadable), checked against its own clock at the moment the grant would be created — so an expiry crossing during the grant call can't leave a live grant behind. (#549)
 - Approvals are no longer granted in a race against their own expiry: an approval with less than 30 seconds of validity remaining is now refused up front (HTTP 410 with a distinct audit event) instead of minting a grant that could land after the approval had already expired — the grant writer has no revoke path. (#534)

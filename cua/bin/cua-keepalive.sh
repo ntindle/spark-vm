@@ -4,10 +4,27 @@
 set -u
 export PATH="$HOME/cua/bin:/usr/local/bin:/usr/bin:/bin"
 
+# Serialize the whole run (#495): two overlapping keepalive invocations
+# (slow box, cron skew) can both fail the bridge health probe and both
+# spawn the bridge, which is the double-spawn vector. A contended
+# invocation just exits — the holder does the whole check-and-start.
+exec 9>/tmp/cua-bridge.keepalive.lock
+flock -n 9 || exit 0
+
+# The env file lives in world-writable /tmp and sourcing executes it as
+# this user (#493). Source it only if it is a regular file, owned by us,
+# and not writable by group/other; otherwise proceed without it.
+safe_source_env() { # safe_source_env [env_file] — arg override exists for tests
+  local f=${1:-/tmp/cua-desktop/env}
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  [ "$(stat -c %U "$f")" = "$(id -un)" ] || return 1
+  [ $(( 0$(stat -c %a "$f") & 022 )) -eq 0 ] || return 1
+  # shellcheck disable=SC1091
+  . "$f"
+}
+safe_source_env || true
+
 # Stack processes down => restart them (idempotent)
-# (source the env file; executing it in a subshell would be a no-op)
-# shellcheck disable=SC1091
-. /tmp/cua-desktop/env 2>/dev/null || true
 if ! $HOME/cua/bin/cua-desktop.sh status 2>/dev/null | grep -q "\[down\]"; then
   : # all up
 else

@@ -54,9 +54,16 @@ The component is in good shape where it counts:
 - #493 The bridge parses `/tmp/cua-desktop/env` from world-writable /tmp —
   env-injection vector (DISPLAY/PATH) into driver subprocesses if another
   local user exists; the env file should live in a private rundir or be
-  integrity-checked.
+  integrity-checked. **Fixed 2026-09-27 (#TBD):** `cua-desktop.sh` creates
+  the rundir with 0700 and refuses symlink/wrong-owner plants;
+  `cua-bridge.py` only parses the env file when it is a regular file owned
+  by the service user with no group/other write (skips loudly otherwise);
+  `cua-keepalive.sh` sources it only after the same integrity checks.
 - #494 focus-then-type/key has a TOCTOU window: `bring_to_front` then
   `type_text`/`press_key` — focus can be stolen between the two calls.
 - #495 keepalive can double-spawn the bridge: two overlapping keepalive runs
   can both fail the curl and both spawn; the bridge has no pidfile or
-  singleton guard.
+  singleton guard. **Fixed 2026-09-27 (#TBD):** the bridge takes an
+  exclusive non-blocking flock on a singleton lock at startup and exits
+  if another instance holds it; `cua-keepalive.sh` serializes its whole
+  run under `flock -n` so overlapping invocations cannot both spawn.

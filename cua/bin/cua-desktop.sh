@@ -13,7 +13,32 @@ DISPLAY_NUM=98
 SOCK="$HOME/.cache/cua-driver/cua-driver.sock"
 DRIVER_BIN="$HOME/cua/bin/cua-driver"
 
-mkdir -p "$RUNDIR"
+# Secure the rundir (#493): it holds the desktop env file that the bridge,
+# the driver launchers, and the keepalive all consume, and /tmp is
+# world-writable. Create it with 0700; if it already exists, verify it is a
+# real directory owned by us and repair the mode — a symlink or a dir owned
+# by someone else is a plant and fails loudly (plain `mkdir -p` would
+# silently accept either).
+ensure_private_rundir() {
+  if [ -L "$RUNDIR" ]; then
+    echo "cua-desktop: $RUNDIR is a symlink (possible plant), refusing to start" >&2
+    return 1
+  fi
+  if mkdir "$RUNDIR" 2>/dev/null; then
+    chmod 700 "$RUNDIR" || return 1
+  else
+    [ -d "$RUNDIR" ] || {
+      echo "cua-desktop: $RUNDIR exists but is not a directory, refusing" >&2
+      return 1
+    }
+    if [ "$(stat -c %U "$RUNDIR")" != "$(id -un)" ]; then
+      echo "cua-desktop: $RUNDIR is owned by another user (possible plant), refusing" >&2
+      return 1
+    fi
+    chmod 700 "$RUNDIR" || return 1
+  fi
+}
+ensure_private_rundir || exit 1
 
 running() { # running <pidfile>
   [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
