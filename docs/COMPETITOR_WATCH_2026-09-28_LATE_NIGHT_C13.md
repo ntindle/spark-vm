@@ -47,7 +47,7 @@ straight fully-quiet A-lane pass of the nightly series.
    daily cadence; this pass's normal lane read re-grades the same
    outcome). Record-accuracy note: a 24 September "Vercel Connect /
    TanStack AI" index section appears that C11/C12 captures never
-   called out — lane-neutral (model/connectivity announcement, not
+   called out — lane-neutral (connectivity announcement, not
    Sandbox), no verdict impact.
 5. **DigitalOcean canonical pricing — VERIFIED NO-CHANGE.** All figures
    verbatim identical; the "Last verified 22 Sep 2026" stamp IS
@@ -144,8 +144,8 @@ announcement).
     consecutive quiet passes (contact at C10, 1/3 at C11, quiet 2/3
     at C12, quiet 3/3 this pass — no new publication since the
     Sep-27 republication; recrawls never re-count). Vendor facts
-    retained as canonical reference; re-fold path stands on real
-    movement (new vendor action, launch, or first-party
+    retained as canonical reference; the P66 re-fold path stands on
+    real movement (new vendor action, launch, or first-party
     confirmation).
   - **C11 (Modal/Baseten talks-wave) → quiet 3/3 — threshold FIRED.
     FILE ON CLOSE regardless of clock state.** The talks are still
