@@ -382,3 +382,204 @@ def test_default_root_honors_xdg_state_home(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
     reg2 = KeyRegistry()
     assert reg2.root == tmp_path / "xdg" / "spark-vm" / "key-registry"
+
+
+# -- rotate (slice S2.5: key rotation with lineage, GH #446) --------------------
+# Five real ed25519 keys (ssh-keygen, comments rot-test-key-N). Fingerprints
+# are computed through the module (the RSA pattern), never hand-copied, so
+# a drift between line and fingerprint fails loudly.
+ROT_LINE_1 = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIBqZgPvZlLJBHCs1vZ+FLOXh6wIVkJEMV/6fYZKTNsyk "
+    "rot-test-key-1"
+)
+ROT_LINE_2 = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIDKqI1gdbmLmAo4OHLsQ3+mE0sx44XCiJsbvotBqhusY "
+    "rot-test-key-2"
+)
+ROT_LINE_3 = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIPTNuffNdBD/uFzxLr+LghWTAForqSvmrv0yQ7ItN3SI "
+    "rot-test-key-3"
+)
+ROT_LINE_4 = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIBobeRpKQ/cptC58h8sTnZsDwDdDaOOndO+g1QnRKFwY "
+    "rot-test-key-4"
+)
+ROT_LINE_5 = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIPiHsysmEftD4DKjkEQ8r2F1Kii7A5Y9SqsTmlPifAct "
+    "rot-test-key-5"
+)
+_ROT_LINES = (ROT_LINE_1, ROT_LINE_2, ROT_LINE_3, ROT_LINE_4, ROT_LINE_5)
+
+
+def _rot_fp(line):
+    return key_registry.fingerprint(key_registry.key_identity.parse_public_key(line))
+
+
+def _rot_fp_of(n):
+    return _rot_fp(_ROT_LINES[n - 1])
+
+
+def test_rotations_journal_empty_initially(reg):
+    assert reg.rotations() == []
+
+
+def test_rotate_happy_path(reg, monkeypatch):
+    _frozen(monkeypatch, "2026-09-27T10:00:00+00:00")
+    old_fp = _rot_fp_of(1)
+    reg.register(key_line=ROT_LINE_1, box_ref="box-1")
+    _frozen(monkeypatch, "2026-09-27T12:00:00+00:00")
+    new_fp = _rot_fp_of(2)
+    out = reg.rotate(old_fp, key_line=ROT_LINE_2)
+
+    new = out["new"]
+    old = out["old"]
+    entry = out["rotation"]
+    # S1 policy: a new key is a NEW account — rotation links, never preserves.
+    assert new["fingerprint"] == new_fp
+    assert new["account_id"] == key_registry.account_id_for(new_fp)
+    assert new["account_id"] != key_registry.account_id_for(old_fp)
+    assert new["key_type"] == "ssh-ed25519"
+    # box continuity survives the rotation
+    assert new["box_ref"] == "box-1"
+    assert new["created_at"] == "2026-09-27T12:00:00+00:00"
+    # old record is stamped, not deleted
+    assert old["fingerprint"] == old_fp
+    assert old["rotated_to"] == new_fp
+    assert old["rotated_at"] == "2026-09-27T12:00:00+00:00"
+    assert "rotated_to" not in new and "rotated_at" not in new
+    # the journal is the audit trail
+    assert entry == {
+        "old_fingerprint": old_fp,
+        "old_account_id": key_registry.account_id_for(old_fp),
+        "new_fingerprint": new_fp,
+        "new_account_id": new["account_id"],
+        "key_type": "ssh-ed25519",
+        "box_ref": "box-1",
+        "rotated_at": "2026-09-27T12:00:00+00:00",
+    }
+    assert reg.rotations() == [entry]
+
+
+def test_rotate_unknown_old_fingerprint_raises(reg):
+    with pytest.raises(RegistryError):
+        reg.rotate(_rot_fp_of(1), key_line=ROT_LINE_2)
+    # nothing minted: rotation never implicitly registers
+    assert reg.accounts() == [] and reg.rotations() == []
+
+
+def test_rotate_already_registered_new_key_raises(reg):
+    old_fp = _rot_fp_of(1)
+    new_fp = _rot_fp_of(2)
+    reg.register(key_line=ROT_LINE_1)
+    reg.register(key_line=ROT_LINE_2)
+    with pytest.raises(RegistryError):
+        reg.rotate(old_fp, key_line=ROT_LINE_2)
+    # old record untouched — no silent account merge happened
+    assert "rotated_to" not in reg.lookup(old_fp)
+    assert reg.rotations() == []
+
+
+def test_rotate_same_key_raises(reg):
+    old_fp = _rot_fp_of(1)
+    reg.register(key_line=ROT_LINE_1)
+    with pytest.raises(RegistryError):
+        reg.rotate(old_fp, key_line=ROT_LINE_1)
+    assert "rotated_to" not in reg.lookup(old_fp)
+
+
+def test_rotate_rejects_malformed_input(reg):
+    reg.register(key_line=ROT_LINE_1)
+    with pytest.raises(KeyIdentityError):
+        reg.rotate("SHA256:not base64!!!", key_line=ROT_LINE_2)
+    with pytest.raises(KeyIdentityError):
+        reg.rotate(_rot_fp_of(1), key_line="ssh-ed25519 not-base64 rot-test")
+
+
+def test_rotate_lookup_old_shows_forward_link(reg):
+    old_fp = _rot_fp_of(1)
+    new_fp = _rot_fp_of(2)
+    reg.register(key_line=ROT_LINE_1)
+    reg.rotate(old_fp, key_line=ROT_LINE_2)
+    # the link is followed, never silently dereferenced
+    assert reg.lookup(old_fp)["rotated_to"] == new_fp
+    assert reg.lookup(new_fp)["account_id"] != reg.lookup(old_fp)["account_id"]
+
+
+def test_rotate_reregistering_old_key_keeps_lineage(reg, monkeypatch):
+    old_fp = _rot_fp_of(1)
+    new_fp = _rot_fp_of(2)
+    _frozen(monkeypatch, "2026-09-27T10:00:00+00:00")
+    reg.register(key_line=ROT_LINE_1)
+    reg.rotate(old_fp, key_line=ROT_LINE_2)
+    _frozen(monkeypatch, "2026-09-27T14:00:00+00:00")
+    # rotation is lineage, not a ban: the old key can still check in
+    rec = reg.register(key_line=ROT_LINE_1)
+    assert rec["rotated_to"] == new_fp
+    assert rec["last_seen_at"] == "2026-09-27T14:00:00+00:00"
+
+
+def test_rotate_touch_after_rotation_still_works(reg):
+    old_fp = _rot_fp_of(1)
+    reg.register(key_line=ROT_LINE_1)
+    reg.rotate(old_fp, key_line=ROT_LINE_2)
+    assert reg.touch(old_fp) is True
+
+
+def test_rotate_persists_across_reload(reg, tmp_path):
+    old_fp = _rot_fp_of(1)
+    new_fp = _rot_fp_of(2)
+    reg.register(key_line=ROT_LINE_1, box_ref="box-9")
+    entry = reg.rotate(old_fp, key_line=ROT_LINE_2)["rotation"]
+    reloaded = KeyRegistry(root=tmp_path / "registry")
+    assert reloaded.lookup(old_fp)["rotated_to"] == new_fp
+    assert reloaded.lookup(new_fp)["box_ref"] == "box-9"
+    assert reloaded.rotations() == [entry]
+
+
+def test_rotate_chains_and_journal_is_bounded(reg, monkeypatch):
+    # monkeypatch the cap small: the bound must be enforced by the code,
+    # not by the size of the fixture set.
+    monkeypatch.setattr(key_registry, "ROTATIONS_CAP", 3)
+    monkeypatch.setattr(key_registry, "_utcnow",
+                        lambda: datetime.datetime.now(datetime.timezone.utc))
+    fps = [_rot_fp_of(n) for n in range(1, 6)]
+    reg.register(key_line=ROT_LINE_1, box_ref="box-chain")
+    for n in range(2, 6):
+        reg.rotate(fps[n - 2], key_line=_ROT_LINES[n - 1])
+    journal = reg.rotations()
+    # 4 rotations happened; the journal keeps the newest 3, oldest first
+    assert len(journal) == 3
+    assert [e["old_fingerprint"] for e in journal] == fps[1:4]
+    assert [e["new_fingerprint"] for e in journal] == fps[2:5]
+    assert all(e["box_ref"] == "box-chain" for e in journal)
+    # lineage chains forward on the records themselves (never journal-capped)
+    assert reg.lookup(fps[0])["rotated_to"] == fps[1]
+    assert reg.lookup(fps[3])["rotated_to"] == fps[4]
+    assert "rotated_to" not in reg.lookup(fps[4])
+
+
+def test_rotate_cli_round_trip(tmp_path):
+    root = str(tmp_path / "cli-rot")
+    old_fp = _rot_fp_of(1)
+    r = _cli("register", "--key-line", ROT_LINE_1, "--box-ref", "box-cli", root=root)
+    assert r.returncode == 0, r.stderr
+    r = _cli("rotate", old_fp, "--key-line", ROT_LINE_2, root=root)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["old"]["rotated_to"] == _rot_fp_of(2)
+    assert out["new"]["box_ref"] == "box-cli"
+    assert out["rotation"]["old_fingerprint"] == old_fp
+    r = _cli("lookup", old_fp, root=root)
+    assert json.loads(r.stdout)["rotated_to"] == _rot_fp_of(2)
+
+
+def test_rotate_cli_unknown_old_fails_loud(tmp_path):
+    root = str(tmp_path / "cli-rot-err")
+    r = _cli("rotate", _rot_fp_of(1), "--key-line", ROT_LINE_2, root=root)
+    assert r.returncode == 2
+    assert "unknown old fingerprint" in r.stderr
