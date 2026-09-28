@@ -679,6 +679,25 @@ class TestEnvFileTrust:
         monkeypatch.setattr(bridge.os, "geteuid", lambda: real_euid + 999999)
         assert bridge._env_file_trusted(p) is False
 
+    def test_env_open_is_single_syscall_with_no_follow(
+            self, bridge, tmp_path, monkeypatch):
+        # the check and the open must be one syscall: O_NOFOLLOW on the
+        # open whose fd the validation reads from, so a planted symlink
+        # cannot be swapped in between check and parse (#493 TOCTOU)
+        p = _write_env_file(str(tmp_path / "env"))
+        seen = {}
+        real_open = os.open
+
+        def spy_open(path, flags, *args):
+            seen["flags"] = flags
+            return real_open(path, flags, *args)
+
+        monkeypatch.setattr(bridge.os, "open", spy_open)
+        assert bridge._env_file_trusted(p) is True
+        assert "flags" in seen, "validation never opened the file"
+        assert seen["flags"] & os.O_NOFOLLOW, \
+            "env file opened without O_NOFOLLOW"
+
 
 class TestLoadSandboxEnv:
     def test_parses_trusted_env_file(self, bridge, tmp_path, monkeypatch):
@@ -772,3 +791,22 @@ class TestSingletonLock:
         assert not os.path.exists(lock)
         assert bridge.acquire_singleton_lock(lock) is not None
         assert os.path.exists(lock)
+
+    def test_default_lock_lives_in_private_cache(self, bridge):
+        # never world-writable /tmp: any local user could squat a /tmp
+        # lock and hold the bridge down, or plant a symlink there that
+        # the O_CREAT open would follow (#493's sibling)
+        assert bridge._SINGLETON_LOCK_FILE == os.path.join(
+            bridge._HOME, ".cache", "cua-bridge.lock")
+        assert not bridge._SINGLETON_LOCK_FILE.startswith("/tmp/")
+
+    def test_lock_open_failure_is_loud(self, bridge, tmp_path, capsys):
+        # an unopenable lock (here: the parent path is a regular file, so
+        # the makedirs fails) must exit 1 with a message — never a silent
+        # skip that leaves the bridge unprotected
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x")
+        with pytest.raises(SystemExit) as e:
+            bridge.acquire_singleton_lock(str(blocker / "bridge.lock"))
+        assert e.value.code == 1
+        assert "cannot open singleton lock" in capsys.readouterr().err

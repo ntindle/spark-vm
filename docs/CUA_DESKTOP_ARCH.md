@@ -55,10 +55,16 @@ The component is in good shape where it counts:
   env-injection vector (DISPLAY/PATH) into driver subprocesses if another
   local user exists; the env file should live in a private rundir or be
   integrity-checked. **Fixed 2026-09-27 (#TBD):** `cua-desktop.sh` creates
-  the rundir with 0700 and refuses symlink/wrong-owner plants;
-  `cua-bridge.py` only parses the env file when it is a regular file owned
-  by the service user with no group/other write (skips loudly otherwise);
-  `cua-keepalive.sh` sources it only after the same integrity checks.
+  the rundir with 0700 (atomically, `mkdir -m 700`, symlink re-checked
+  after a lost creation race) and refuses symlink/wrong-owner plants; its
+  `ensure_private_rundir` is the single choke point that also removes any
+  pre-existing env file failing the trust check (stale plants cannot
+  survive a start/status/stop); every consumer — `cua-desktop.sh`,
+  `start-xfce.sh`, `cua-keepalive.sh` (via the shared `cua/bin/cua-trust.sh`
+  predicate), and `cua-bridge.py` (single `O_NOFOLLOW` open + `fstat` on the
+  same fd, so there is no check-then-open TOCTOU) — applies the same
+  regular-file/owner/no-group-other-write check before sourcing or parsing;
+  the writer and the gate agree on mode 0600.
 - #494 focus-then-type/key has a TOCTOU window: `bring_to_front` then
   `type_text`/`press_key` — focus can be stolen between the two calls.
 - #495 keepalive can double-spawn the bridge: two overlapping keepalive runs
@@ -66,4 +72,10 @@ The component is in good shape where it counts:
   singleton guard. **Fixed 2026-09-27 (#TBD):** the bridge takes an
   exclusive non-blocking flock on a singleton lock at startup and exits
   if another instance holds it; `cua-keepalive.sh` serializes its whole
-  run under `flock -n` so overlapping invocations cannot both spawn.
+  run under `flock -n` so overlapping invocations cannot both spawn. Both
+  locks live in the user's own `~/.cache` (never world-writable /tmp, where
+  a planted symlink would be truncated by the lock open and any local user
+  could squat the lock); every long-lived child spawned while the keepalive
+  lock is held closes fd 9 (`9>&-`) so inherited fds cannot pin the flock
+  after the run exits; a status probe that fails or prints nothing counts
+  as DOWN, never "all up".

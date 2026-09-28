@@ -43,40 +43,59 @@ ALLOWED_HOSTS = {"127.0.0.1:18731", "localhost:18731", "127.0.0.1:18732", "local
 CSRF_HEADER = "X-CUA"
 CSRF_VALUE = "1"
 
-def _env_file_trusted(path):
-    """True if the desktop env file is safe to parse.
+def _open_trusted_env(path):
+    """Open the desktop env file and validate it in one step.
 
-    The file lives in world-writable /tmp and its contents flow into the
-    environment of every driver/launcher subprocess, so it must not be a
-    symlink (swap/plant vector), must be a regular file owned by this user,
-    and must not be writable by group/other (#493).
+    The file is opened ONCE with O_NOFOLLOW and validated with fstat on
+    the resulting fd — the validation and the parse below read from the
+    same fd, so there is no check-then-open TOCTOU window in which a
+    planted symlink could be swapped in between (#493).
+    Returns the open fd (caller closes), or None if the file is missing,
+    is a symlink, is not a regular file owned by this user, or is
+    group/other-writable.
     """
     try:
-        st = os.lstat(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
+        return None  # missing, symlink (ELOOP), or unreadable — all untrusted
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return None
+    if (not stat.S_ISREG(st.st_mode)
+            or st.st_uid != os.geteuid()
+            or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        os.close(fd)
+        return None
+    return fd
+
+
+def _env_file_trusted(path):
+    """True if the desktop env file is safe to parse (#493)."""
+    fd = _open_trusted_env(path)
+    if fd is None:
         return False
-    if not stat.S_ISREG(st.st_mode):
-        return False  # symlink, dir, fifo — anything non-regular is untrusted
-    if st.st_uid != os.geteuid():
-        return False
-    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        return False
+    os.close(fd)
     return True
 
 
 def _load_sandbox_env():
     """Build the subprocess environment: desktop env file merged over the
-    ambient environment, then the bridge's forced X11 pins. An untrusted or
-    missing env file is skipped (with a stderr warning), never parsed —
-    the bridge still runs on sane ambient defaults (#493)."""
+    ambient environment, then the bridge's forced X11 pins. The env file is
+    opened once with O_NOFOLLOW and parsed from that same validated fd —
+    an untrusted or missing env file is skipped (with a stderr warning),
+    never parsed; the bridge still runs on sane ambient defaults (#493)."""
     env = dict(os.environ)
     if os.path.exists(ENV_FILE):
-        if _env_file_trusted(ENV_FILE):
-            for line in open(ENV_FILE):
-                line = line.strip()
-                if line.startswith("export "):
-                    k, _, v = line[len("export "):].partition("=")
-                    env[k] = v
+        fd = _open_trusted_env(ENV_FILE)
+        if fd is not None:
+            with os.fdopen(fd, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("export "):
+                        k, _, v = line[len("export "):].partition("=")
+                        env[k] = v
         else:
             print(f"cua-bridge: WARNING: {ENV_FILE} is untrusted "
                   "(symlink/owner/mode) — ignoring it", file=sys.stderr)
@@ -96,13 +115,30 @@ BASE_ENV = _load_sandbox_env()
 # kept here — never GC'd out from under the lock holder (#495).
 _singleton_lock_fds = []
 
+# The lock lives in the user's own ~/.cache (never world-writable /tmp:
+# any local user could otherwise squat the lock file and hold the bridge
+# down, or plant a symlink there — #493's sibling).
+_SINGLETON_LOCK_FILE = os.path.join(_HOME, ".cache", "cua-bridge.lock")
 
-def acquire_singleton_lock(path="/tmp/cua-bridge.lock"):
+
+def acquire_singleton_lock(path=_SINGLETON_LOCK_FILE):
     """Hold an exclusive flock on the singleton lock for this process's
     lifetime. Returns the fd, or None if another bridge already holds it
     (#495). flock (not a pidfile): the lock releases itself if the process
-    dies, so there are no stale-pid races."""
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    dies, so there are no stale-pid races.
+    Python's os.open sets CLOEXEC (PEP 446) and subprocess defaults
+    close_fds=True, so driver/launcher children never inherit this fd — the
+    bridge side cannot jam its own lock the way a shell-held fd can.
+    If the lock file itself cannot be opened (missing dir, permissions),
+    this exits(1) with a stderr message — lock failure is fatal and loud,
+    never a silent skip."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as e:
+        print(f"cua-bridge: cannot open singleton lock {path}: {e}",
+              file=sys.stderr)
+        raise SystemExit(1)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:

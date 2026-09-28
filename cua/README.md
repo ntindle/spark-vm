@@ -93,8 +93,11 @@ Blender GUI on `:98` to view/drive it.
   bracket trick: `pkill -f "cua-bridge.p[y]"`. Restarting the bridge port:
   `fuser -k 18731/tcp`.
 - **Driver CLI reads JSON from stdin.** `echo '{...}' | cua-driver call <tool>`
-  — with no stdin it hangs. Always source `/tmp/cua-desktop/env` first so
-  `DISPLAY`/`DBUS_SESSION_BUS_ADDRESS` are set.
+  — with no stdin it hangs. Set up the desktop environment first; the env
+  file at `/tmp/cua-desktop/env` is sourced (executed), so only source it
+  after the trust check in `cua/bin/cua-trust.sh` passes — e.g.
+  `trust_env_file /tmp/cua-desktop/env && source /tmp/cua-desktop/env`
+  — which sets `DISPLAY`/`DBUS_SESSION_BUS_ADDRESS`.
 - **Click coords are window-local** for the driver's `click` (subtract the
   window's `bounds.x`/`bounds.y`); the bridge's `/api/click` takes screen
   coords and handles the translation.
