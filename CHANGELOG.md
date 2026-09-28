@@ -69,7 +69,7 @@
 
 ### Security
 
-- `cred set` no longer reads stdin unbounded before the swapd writer's 64 KiB cap: the frontend reads at most 64 KiB + a 2-byte chomp margin + 1 sentinel byte and refuses oversized input with a clear message itself, so piping a huge file can't balloon the CLI's memory (the cap existed one layer too late). The bound is on *bytes*, not decoded characters, so multibyte UTF-8 can't slip past; the cap mirrors `cred-store-set`'s `max_bytes=65536` exactly. (closes #149) (#TBD)
+- `cred set` no longer reads stdin unbounded before the swapd writer's 64 KiB cap: the frontend reads at most 64 KiB + a 2-byte chomp margin + 1 sentinel byte and refuses oversized input with a clear message itself, so piping a huge file can't balloon the CLI's memory (the cap existed one layer too late). The bound is on *bytes*, not decoded characters, so multibyte UTF-8 can't slip past; the cap mirrors `cred-store-set`'s `max_bytes=65536` exactly. (closes #149) (#602)
 
 ## [0.4.0] - 2026-09-26
 
