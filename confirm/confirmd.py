@@ -154,18 +154,80 @@ def _tailnet_dnsname():
     return None
 
 def _page_origins():
-    """Exact set of origins the page is served at (finding 57)."""
+    """Exact set of origins the page is served at (finding 57).
+
+    Returns (origins, dns_ok): dns_ok is False when the ts.net DNS name
+    could not be resolved, so a refresh keeps the last good set instead
+    of committing an IP-literal-only shrink (the refusal boundary must
+    never silently shrink). The IP-literal half comes from import-time
+    BIND — a tailscale IP renumber mid-daemon still needs a restart."""
     # Explicit override wins (deploy.sh sets both IP and ts.net name).
     env = os.environ.get("CONFIRM_ORIGINS", "")
     if env.strip():
-        return {o.strip() for o in env.split(",") if o.strip()}
+        return {o.strip() for o in env.split(",") if o.strip()}, True
     origins = {"https://%s:%d" % (BIND, PORT)}
     dns = _tailnet_dnsname()
     if dns:
         origins.add("https://%s:%d" % (dns, PORT))
-    return origins
+        return origins, True
+    # Finding 67: import-time fallback — DNS unresolvable at startup, the
+    # set holds the IP literal only so every real browser POST doesn't 403.
+    return origins, False
 
-PAGE_ORIGINS = _page_origins()
+
+# Issue #619: PAGE_ORIGINS was frozen at import — a tailscale DNS rename
+# mid-daemon (machine rename, tailnet domain change) left finding 57's
+# Origin exact-match check stale for the process lifetime: the owner's
+# real browser POSTs from the new ts.net origin would 403 until restart.
+# Same treatment as #536's _SelfAddrs: re-resolve on a slow cadence (60 s,
+# mirroring the whois cache). A failed refresh keeps the last good set —
+# a refusal boundary must never silently shrink (an unreachable
+# tailscaled must not collapse the set to the IP literal alone) — and the
+# CONFIRM_ORIGINS env override pins the set (no re-probe) for operators
+# who manage names out of band.
+_PAGE_ORIGINS_TTL = 60
+
+
+class _PageOrigins:
+    """TTL-cached origin set for finding 57's exact-match Origin check.
+
+    Keeps the module-level ``PAGE_ORIGINS`` name and its ``in`` /
+    ``sorted()`` shapes, so callers and tests are unchanged. Thread-safe:
+    handler threads share the one instance.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._pinned = bool(os.environ.get("CONFIRM_ORIGINS", "").strip())
+        self._origins, _ = _page_origins()
+        self._ts = time.monotonic()
+
+    def _refresh(self):
+        now = time.monotonic()
+        with self._lock:
+            if now - self._ts < _PAGE_ORIGINS_TTL:
+                return
+            if not self._pinned:
+                origins, ok = _page_origins()
+                if ok:
+                    self._origins = origins
+                # else: keep the last good set — the refusal boundary must
+                # never silently shrink.
+            self._ts = now
+
+    def _snapshot(self):
+        if time.monotonic() - self._ts >= _PAGE_ORIGINS_TTL:
+            self._refresh()
+        return self._origins
+
+    def __contains__(self, origin):
+        return origin in self._snapshot()
+
+    def __iter__(self):
+        return iter(self._snapshot())
+
+
+PAGE_ORIGINS = _PageOrigins()
 
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")

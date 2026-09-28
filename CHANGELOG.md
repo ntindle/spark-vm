@@ -129,6 +129,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- confirmd's browser-origin check now re-resolves the box's Tailscale DNS
+  name every minute instead of once at startup (mirroring the self-peer
+  address refresh): a tailnet DNS rename mid-daemon no longer leaves the
+  owner's browser form submissions failing the origin check until a
+  restart; a failed refresh keeps the last good origins rather than
+  shrinking the accepted set, and operators who pin origins via
+  CONFIRM_ORIGINS see no behavior change. (closes #619) (#623)
+- The response scrubber now also masks the trimmed rendering of
+  multi-entry credential values: previously only the exact stored bytes of
+  a `name: entry` value were scrubbed, so a server echoing the value back
+  without trailing whitespace would leak it into proxied responses. (closes
+  #121) (#623)
 - Credential registration is now atomic: registering a credential together
   with its host bindings lands in a single locked write, so a mid-save
   failure can no longer leave it registered with only some of its intended
