@@ -1615,6 +1615,27 @@ class Handler(BaseHTTPRequestHandler):
                     # exists for the aid, the 410 links the human to the
                     # answered history where the Expired badge card
                     # renders — otherwise the bare 410 stands.
+                    # #539: stamp the S1 expired-approval terminal record
+                    # BEFORE removing the pending file (stamp-then-delete:
+                    # a crash between the two self-heals on the next reap
+                    # — the stamp is EEXIST-skipped, the delete retried —
+                    # while the reverse order could lose the expiry with
+                    # no record at all). If the stamp fails (e.g. ENOSPC),
+                    # keep the pending file so a later reap retries.
+                    try:
+                        _stamp_expired_consumed(aid, it, p, "confirmd")
+                    except ValueError:
+                        # Malformed aid: refuse to touch consumed/, but
+                        # still reap the expired file below.
+                        pass
+                    except OSError:
+                        _evict_aid_lock(aid)
+                        audit_log("expired-reaped", self.client_address[0],
+                                  login, "id=%s" % aid)
+                        self._err("This approval expired and was removed.",
+                                  410,
+                                  suffix=_expired_record_link_html(aid))
+                        return
                     try:
                         os.remove(p)
                     except OSError:
@@ -1823,7 +1844,27 @@ class Handler(BaseHTTPRequestHandler):
         # Finding 53(a): expired items are refused, not silently denied.
         # S3 (#546): link to the answered history when a terminal expired
         # record already exists (see the GET detail reap above).
+        # #539: stamp the S1 expired-approval terminal record BEFORE
+        # removing the pending file (stamp-then-delete: a crash between
+        # the two self-heals on the next reap — the stamp is EEXIST-skipped,
+        # the delete retried — while the reverse order could lose the
+        # expiry with no record at all). If the stamp fails (e.g. ENOSPC),
+        # keep the pending file so a later reap retries, and still refuse
+        # honestly with 410.
         if is_expired(it):
+            try:
+                _stamp_expired_consumed(aid, it, src, "confirmd")
+            except ValueError:
+                # Malformed aid: refuse to touch consumed/, but still
+                # remove the expired pending file below.
+                pass
+            except OSError:
+                _evict_aid_lock(aid)
+                audit_log("expired-reaped", self.client_address[0], login,
+                          "id=%s" % aid)
+                self._err("This approval expired and was removed.", 410,
+                          suffix=_expired_record_link_html(aid))
+                return
             try:
                 os.remove(src)
             except OSError:
