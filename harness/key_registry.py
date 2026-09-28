@@ -32,6 +32,16 @@ depth costs nothing.
 The claim/upgrade escape hatch is a LATER slice (see #446): this module
 records no claim state at all, so S2 cannot preempt S3's claim-protocol
 decisions. Per S1's policy, a new key is a new account.
+
+Key rotation is slice S2.5 (this module, :meth:`KeyRegistry.rotate`): the
+operator-facing path for a key the operator still holds — "I generated a
+new key and want this box to know it's me". Rotation registers the new key
+as a NEW account (the S1 policy stands: identity is the key), marks the
+old record with ``rotated_to``/``rotated_at``, inherits the box binding,
+and appends an entry to the bounded ``rotations`` journal — the audit
+trail S2 noted ``remove`` lacks, scoped to rotation. Lost-key rotation
+(no old key to attest with) is NOT this slice; it needs the claim
+protocol (S3).
 """
 from __future__ import annotations
 
@@ -66,6 +76,12 @@ STORE_NAME = "registry.json"
 LOCK_DIR_NAME = "registry.lock.d"
 LOCK_TIMEOUT_S = 10.0
 _LOCK_POLL_S = 0.05
+# Bounded journal: the #376 lesson (unbounded = fail). The per-record
+# rotated_to pointer is never dropped, so capping the journal only bounds
+# the window of operator-visible audit history, never lineage.
+# Sane range: 1..2**31 — 0 would silently empty the journal on every
+# rotate (degenerate config, not guarded against by design).
+ROTATIONS_CAP = 1000
 
 
 class RegistryError(Exception):
@@ -189,7 +205,11 @@ class KeyRegistry:
         try:
             text = self.store_path.read_text()
         except FileNotFoundError:
-            return {"schema_version": SCHEMA_VERSION, "accounts": {}}
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "accounts": {},
+                "rotations": [],
+            }
         try:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
@@ -211,6 +231,15 @@ class KeyRegistry:
                     f"registry record for {fp} is not an object, "
                     f"refusing to proceed: {self.store_path}"
                 )
+        rotations = data.get("rotations", [])
+        if not isinstance(rotations, list) or not all(
+            isinstance(entry, dict) for entry in rotations
+        ):
+            raise RegistryError(
+                f"registry rotations journal has unexpected shape, "
+                f"refusing to proceed: {self.store_path}"
+            )
+        data["rotations"] = rotations  # normalize: missing key -> empty journal
         return data
 
     def _save(self, data: dict) -> None:
@@ -342,6 +371,106 @@ class KeyRegistry:
             self._save(data)
             return True
 
+    def rotate(self, old_fingerprint: str, *, key_line: str) -> dict:
+        """Rotate to a new key, keeping the S1 policy: a new key is a new account.
+
+        ``old_fingerprint`` must already be registered — rotation never
+        implicitly registers (a typo'd old fingerprint must not mint an
+        account), and the new key must NOT already be registered — merging
+        two existing accounts under one rotation would silently misbind
+        identities. The new key's public-key line is required (parsed via
+        S1); a bare fingerprint is refused because rotate must verify the
+        new key parses, not just the fingerprint's shape.
+
+        Atomically (one lock, one store write): the old record is stamped
+        ``rotated_to``/``rotated_at`` (rotation itself does not advance the
+        record's ``last_seen_at`` — the rotation is recorded in
+        ``rotated_at``; liveness via ``touch()`` or re-``register()`` still
+        updates ``last_seen_at`` afterwards, rotation is lineage not a ban),
+        the new key registers as a NEW account (new ``acct_`` id per S1),
+        the box binding is inherited so "same box" continuity survives the
+        rotation, and a lineage entry lands in the bounded ``rotations``
+        journal (the audit trail S2 noted ``remove`` lacks, scoped to
+        rotation; capped at ``ROTATIONS_CAP``, oldest-first eviction).
+
+        Trust boundary: ``rotate()`` performs NO cryptographic proof that
+        the caller holds the old key — attestation is assumed from the
+        caller (the local operator rotating their own key). A network
+        caller must prove possession before calling; the claim protocol
+        (S3, #446) owns that decision, not this slice.
+
+        Returns ``{"old": old_record, "new": new_record,
+        "rotation": journal_entry}``. ``lookup(old_fp)`` keeps returning the
+        old record (with ``rotated_to``) — the link is followed, never
+        silently dereferenced, because identity is still the key. Rotating an
+        already-rotated key is refused (RegistryError: rotate the LATEST key)
+        — the record pointer and the journal must never diverge on who the
+        current key is. Chains are built by rotating forward: rotate(old)
+        then rotate(new), each hop journaled.
+        """
+        old_fp = normalize_fingerprint(old_fingerprint)
+        if not isinstance(key_line, str) or not key_line.strip():
+            raise RegistryError("rotate needs the new key's public-key line")
+        key = key_identity.parse_public_key(key_line)
+        new_fp = fingerprint(key)
+        if new_fp == old_fp:
+            raise RegistryError("rotate needs a different key (old == new)")
+        now = _iso(_utcnow())
+        result: dict = {}
+
+        def _do(data: dict) -> None:
+            nonlocal result
+            accounts = data["accounts"]
+            old = accounts.get(old_fp)
+            if old is None:
+                raise RegistryError(
+                    f"rotate: unknown old fingerprint {old_fp} "
+                    "(register it first — rotation never implicitly registers)"
+                )
+            if old.get("rotated_to") is not None:
+                raise RegistryError(
+                    f"rotate: {old_fp} already rotated to {old['rotated_to']} "
+                    "(rotate the latest key — the record pointer and the "
+                    "journal must never diverge)"
+                )
+            if new_fp in accounts:
+                raise RegistryError(
+                    f"rotate: new key {new_fp} is already registered "
+                    "(rotation never merges two existing accounts)"
+                )
+            old["rotated_to"] = new_fp
+            old["rotated_at"] = now
+            new_rec = {
+                "fingerprint": new_fp,
+                "account_id": account_id_for(new_fp),
+                "key_type": key.key_type,
+                "created_at": now,
+                "last_seen_at": now,
+                "box_ref": old.get("box_ref"),
+                "schema_version": SCHEMA_VERSION,
+            }
+            accounts[new_fp] = new_rec
+            entry = {
+                "old_fingerprint": old_fp,
+                "old_account_id": old["account_id"],
+                "new_fingerprint": new_fp,
+                "new_account_id": new_rec["account_id"],
+                "key_type": key.key_type,
+                "box_ref": old.get("box_ref"),
+                "rotated_at": now,
+            }
+            journal = data["rotations"]
+            journal.append(entry)
+            del journal[: max(0, len(journal) - ROTATIONS_CAP)]
+            result = {
+                "old": dict(old),
+                "new": dict(new_rec),
+                "rotation": dict(entry),
+            }
+
+        self._mutate(_do)
+        return result
+
     def remove(self, fp: str) -> bool:
         """Delete an account record. Returns False when unknown."""
         fp = normalize_fingerprint(fp)
@@ -363,6 +492,12 @@ class KeyRegistry:
             recs = [dict(r) for r in data["accounts"].values()]
         recs.sort(key=lambda r: (r.get("created_at", ""), r.get("fingerprint", "")))
         return recs
+
+    def rotations(self) -> list[dict]:
+        """Rotation lineage journal, oldest first (bounded at ROTATIONS_CAP)."""
+        with self._locked():
+            data = self._load()
+            return [dict(e) for e in data["rotations"]]
 
 
 # -- CLI ---------------------------------------------------------------------
@@ -423,6 +558,19 @@ def _cmd(argv: list[str] | None = None) -> int:
         "remove", parents=[common], help="delete an account record"
     )
     p_remove.add_argument("fingerprint")
+
+    p_rotate = sub.add_parser(
+        "rotate",
+        parents=[common],
+        help=(
+            "rotate to a new key (lineage-recorded re-registration; "
+            "the new key becomes a new account per S1 policy)"
+        ),
+    )
+    p_rotate.add_argument("old_fingerprint", help="already-registered old key")
+    p_rotate.add_argument(
+        "--key-line", required=True, help="one OpenSSH public-key line (the new key)"
+    )
 
     p_manifest = sub.add_parser(
         "manifest",
@@ -501,6 +649,8 @@ def _cmd(argv: list[str] | None = None) -> int:
                 return 1
             print("ok")
             return 0
+        if args.command == "rotate":
+            return _out(reg.rotate(args.old_fingerprint, key_line=args.key_line))
         if args.command == "manifest":
             rec = reg.lookup(args.fingerprint)
             if rec is None:
