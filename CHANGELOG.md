@@ -49,6 +49,7 @@
 - Competitor-watch changelog prose is now reader-facing: released bullets (0.2.0–0.4.0) no longer reference internal corpus identifiers (C-numbers) — every released mention now names the product, paper, or incident directly, so the changelog reads without access to the competitor-analysis corpus (changelog ritual rule 1). (#529)
 
 ### Fixed
+- The credential-swap proxy no longer depends on the Python version's form-field limit when reading login-style request bodies: a form with more than 1,000 fields previously crashed the swap mid-request on newer Python versions, after headers and the URL had already been rewritten. The proxy now pins the parsing limit off (its own 5 MiB body cap already bounds the work) and swaps every field. (#565)
 
 - Repeated swaps refused for the same credential/host/method no longer re-scan the whole approvals pending directory on every refusal: the pending-scan result is cached per credential/host/method, invalidated whenever the directory changes and additionally every 30 seconds, so expiry handling can lag at most that bound. (#568)
 - The grant writer now enforces the approval's expiry at mint time: it refuses to mint when the approval's expiry instant has crossed (or is unreadable), checked against its own clock at the moment the grant would be created — so an expiry crossing during the grant call can't leave a live grant behind. (#549)

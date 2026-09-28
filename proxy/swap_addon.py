@@ -2266,7 +2266,17 @@ class SwapAddon:
         are decoded by the parse and handled identically; literal colons
         (curl/requests style) work too. Bodies with no swappable fields
         fall back to the encoded-placeholder regex."""
-        pairs = urllib.parse.parse_qsl(text, keep_blank_values=True)
+        # parse_qsl's max_num_fields default changed across Python versions
+        # (1000 on 3.12.8+): a form body within the proxy's own swap cap
+        # (finding 71, 5 MiB) can legitimately hold more fields, and an
+        # uncaught ValueError escapes the request() hook — which only
+        # guards UnicodeDecodeError — killing the flow mid-request: the
+        # headers/query/path mutations die with it (availability hit, not
+        # a leak — the partially-mutated request is never forwarded) and
+        # the body swap never happens. The proxy already owns the DoS
+        # bound via the body-size cap, so pin the stdlib knob off.
+        pairs = urllib.parse.parse_qsl(text, keep_blank_values=True,
+                                       max_num_fields=None)
         new_pairs = [(k, self._swap_text(v, host, method, path,
                                          location=location))
                      for k, v in pairs]

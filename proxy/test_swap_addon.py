@@ -261,6 +261,45 @@ class SwapAddonTests(unittest.TestCase):
         self.assertEqual(fields["password"], [SECRETS["pw"]])
         self.assertEqual(fields["user"], ["x"])
 
+    def test_holds_form_body_over_1000_fields_swaps(self):
+        # parse_qsl's max_num_fields default is version-dependent (1000 on
+        # Python 3.12.8+); the proxy pins it off because it owns the DoS
+        # bound via the body-size cap (finding 71). A many-field form must
+        # swap, not crash the request hook mid-flight.
+        a = make_addon()
+        pairs = ["f%d=v%d" % (i, i) for i in range(1500)]
+        pairs[700] = "password=hsurr:pw"
+        req = Request("github.com", "/login",
+                      [("Content-Type", "application/x-www-form-urlencoded")],
+                      ("&".join(pairs)).encode())
+        a.request(Flow(req))
+        fields = urllib.parse.parse_qs(req.content.decode())
+        self.assertEqual(len(fields), 1500)
+        self.assertEqual(fields["password"], [SECRETS["pw"]])
+        self.assertEqual(fields["f0"], ["v0"])
+
+    def test_holds_form_body_pins_parse_qsl_limit_off(self):
+        # Version-independent guard for the pin above: on interpreters
+        # whose stdlib default is still unlimited (e.g. this box's
+        # 3.12.3) the 1500-field test passes with or without the fix.
+        # The spy asserts the pin actually reaches parse_qsl, so this
+        # test fails pre-fix on EVERY interpreter.
+        captured = {}
+        real = urllib.parse.parse_qsl
+
+        def spy(qs, **kwargs):
+            captured.update(kwargs)
+            return real(qs, **kwargs)
+
+        a = make_addon()
+        req = Request("github.com", "/login",
+                      [("Content-Type", "application/x-www-form-urlencoded")],
+                      b"user=x&password=hsurr:pw")
+        with mock.patch.object(urllib.parse, "parse_qsl", spy):
+            a.request(Flow(req))
+        self.assertIn("max_num_fields", captured)
+        self.assertIsNone(captured["max_num_fields"])
+
     def test_holds_bearer_header(self):
         a = make_addon()
         req = Request("api.github.com", "/user",
