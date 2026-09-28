@@ -90,7 +90,16 @@ def env(tmp_path):
         # sudo stub: fails loudly when invoked (no passwordless sudo in tests)
         "sudo": "echo STUB-SUDO-CALLED >&2; exit 1",
         "apt-get": "echo STUB-APT-GET-CALLED >&2; exit 1",
+        # cua-driver at the pinned version: the cua-driver layer no-ops
+        # (layer-specific tests override the pin/PATH as needed)
+        "cua-driver": 'echo "cua-driver 0.28.2"',
     })
+    # pins file the updater reads (installed-copy model: tests stage it in
+    # the state dir the same way `install` would)
+    statedir.mkdir(parents=True, exist_ok=True)
+    (statedir / "self_update_pins.conf").write_text(
+        "# test pins\ncua-driver = 0.28.2\n"
+    )
     e = {
         "TOOLSET_STATE_DIR": str(statedir),
         "APT_CONF_DIR": str(aptdir),
@@ -188,6 +197,9 @@ def test_update_installs_missing_package(env):
         "tmux": "exit 1",
         "sudo": "echo STUB-SUDO-CALLED >&2; exit 1",
         "apt-get": f"echo \"$@\" >> {aptlog}; exit 0",
+        # cua-driver at the fixture pin: the new layer must no-op here so
+        # this test stays about the os-security install branch.
+        "cua-driver": 'echo "cua-driver 0.28.2"',
     })
     e = dict(env["env"])
     e["PATH"] = bindir + os.pathsep + make_realtools(env["tmp"])
@@ -223,6 +235,9 @@ def test_force_bypasses_idle_gate(env):
         "tmux": 'echo "mjob-builder-1"; exit 0',
         "sudo": "exit 1",
         "apt-get": "exit 1",
+        # cua-driver at the fixture pin: the new layer must no-op here so
+        # this test stays about the idle-gate bypass.
+        "cua-driver": 'echo "cua-driver 0.28.2"',
     })
     e = dict(env["env"])
     e["PATH"] = bindir + os.pathsep + os.environ["PATH"]
@@ -304,20 +319,38 @@ def test_optout_optin_roundtrip(env):
 # --- safety pins ---------------------------------------------------------------
 
 def test_script_never_fetches_code():
-    # The v0 trust claim: no network fetch, no package manager of its own.
-    # apt-get appears exactly once: the unattended-upgrades bootstrap.
-    # A future slice adding a second package-manager call must update this pin.
+    # Trust-model pin (#532): the script's only network surface is the
+    # cua-driver layer's pinned release fetch. apt-get appears exactly once:
+    # the unattended-upgrades bootstrap. curl appears exactly twice: the
+    # checksums.txt + tarball fetch inside _cua_driver_layer, both against
+    # "$base/$tag/..." (base defaults to the single https:// constant
+    # CUA_RELEASE_BASE). A future slice adding network or package-manager
+    # surface must update this pin and docs/TOOLSET_UPDATE.md.
     # (Matches command invocations only — the "apt-get install failed" log
     # string is not a second call site.)
     import re
     text = open(SCRIPT).read()
-    for banned in ("curl ", "wget ", "git clone", "pip install", "npm install",
-                   "http://", "https://"):
-        assert banned not in text, f"v0 must not contain: {banned}"
+    for banned in ("wget ", "git clone", "pip install", "npm install",
+                   "http://"):
+        assert banned not in text, f"must not contain: {banned}"
     invocations = [l for l in text.splitlines()
                    if re.search(r"^\s*(_sudo\s+)?apt-get\b", l)]
     assert len(invocations) == 1, invocations
     assert "install -y unattended-upgrades" in invocations[0]
+    curls = [l for l in text.splitlines() if "curl -fsSL" in l]
+    assert len(curls) == 2, curls
+    for line in curls:
+        assert "$base/$tag/" in line, line
+    # No other curl call sites (the remaining "curl" mentions are the
+    # presence check and the missing-curl log string, not invocations).
+    other_curl = [l for l in text.splitlines()
+                  if re.search(r"\bcurl\b", l) and "curl -fsSL" not in l
+                  and "command -v curl" not in l
+                  and "curl not found" not in l]
+    assert not other_curl, other_curl
+    https = [l for l in text.splitlines() if "https://" in l]
+    assert len(https) == 1, https
+    assert 'CUA_RELEASE_BASE:=' in https[0] and 'github.com/trycua/cua' in https[0]
 
 
 def test_umask_is_restrictive():
@@ -446,3 +479,205 @@ def test_optout_env_var_is_noop(env):
     assert not (env["apt"] / "20auto-upgrades").exists()
     lines = audit_lines(env)
     assert lines and lines[-1]["result"] == "opted-out"
+
+
+# --- cua-driver layer (#532) -----------------------------------------------------
+
+import hashlib
+import platform
+
+
+def _release_arch():
+    return "linux-x86_64" if platform.machine() == "x86_64" else "linux-arm64"
+
+
+def make_pinned_release(tmp_path, pin, binary_body, digest=None):
+    """Stage a fake cua-driver release tree: <base>/cua-driver-rs-v<pin>/
+    with the binary tarball + checksums.txt. Returns the base dir."""
+    base = tmp_path / "release"
+    tagdir = base / f"cua-driver-rs-v{pin}"
+    tagdir.mkdir(parents=True, exist_ok=True)
+    staged = tmp_path / "stage"
+    staged.mkdir(exist_ok=True)
+    (staged / "cua-driver").write_bytes(binary_body)
+    asset = f"cua-driver-rs-{pin}-{_release_arch()}-binary.tar.gz"
+    subprocess.run(
+        ["tar", "-czf", str(tagdir / asset), "-C", str(staged), "cua-driver"],
+        check=True)
+    want = digest if digest is not None else hashlib.sha256(
+        (tagdir / asset).read_bytes()).hexdigest()
+    (tagdir / "checksums.txt").write_text(f"{want}  {asset}\n")
+    return str(base)
+
+
+def cua_env(env, tmp_path, pin="0.28.2", cur_version="0.28.2",
+            release_base=None):
+    """Env for cua-driver layer tests: pins file, PATH with a cua-driver stub
+    reporting cur_version, CUA_DRIVER_BIN under tmp, and (optionally) a
+    file:// release base for hermetic downloads."""
+    e = dict(env["env"])
+    (env["state"] / "self_update_pins.conf").write_text(
+        f"# test pins\ncua-driver = {pin}\n")
+    bindir = make_stub_bin(tmp_path / "cuabin", {
+        "cua-driver": f'echo "cua-driver {cur_version}"',
+        "tmux": "exit 1",
+    })
+    e["PATH"] = bindir + os.pathsep + e["PATH"]
+    e["CUA_DRIVER_BIN"] = str(tmp_path / "cua-bin" / "cua-driver")
+    e["CUA_DRIVER_OWNER"] = str(os.getuid())
+    e["CUA_DRIVER_GROUP"] = str(os.getgid())
+    if release_base is not None:
+        e["CUA_RELEASE_BASE"] = f"file://{release_base}"
+    return e
+
+
+def test_read_pin_parses_pins_file(env):
+    pins = env["tmp"] / "pins.conf"
+    pins.write_text("# comment\n\ncua-driver = 0.28.2\ndocker=26.1\nno-equals-line\n")
+    r = source_and(f'PINS_FILE={pins} _read_pin cua-driver', env["env"])
+    assert r.stdout == "0.28.2"
+    r = source_and(f'PINS_FILE={pins} _read_pin docker', env["env"])
+    assert r.stdout == "26.1"
+    r = source_and(f'PINS_FILE={pins} _read_pin missing-tool', env["env"])
+    assert r.returncode == 0 and r.stdout == ""
+    r = source_and('PINS_FILE=/nonexistent-pins _read_pin cua-driver',
+                   env["env"])
+    assert r.returncode == 0 and r.stdout == ""
+
+
+def test_pin_ok_rejects_unsafe(env):
+    for bad in ("", "../x", "/abs", "-x", ".x", "a b", "a;b", "a/b", "0.28.2\n"):
+        r = source_and(f'_pin_ok "{bad}"', env["env"])
+        assert r.returncode != 0, bad
+    r = source_and('_pin_ok "0.28.2"', env["env"])
+    assert r.returncode == 0
+
+
+def test_cua_driver_current_parsing(env, tmp_path):
+    bindir = make_stub_bin(tmp_path / "verbin", {
+        "cua-driver": 'echo "cua-driver 0.28.2 (abc123)"',
+    })
+    e = dict(env["env"])
+    e["PATH"] = bindir + os.pathsep + e["PATH"]
+    r = source_and("_cua_driver_current", e)
+    assert r.stdout == "0.28.2"
+    # No version-like token, or a bare number: version-unknown (fail-closed,
+    # never guessed).
+    for body in ('echo "no version here"', 'echo "build 12345"'):
+        bindir2 = make_stub_bin(tmp_path / "verbin2", {"cua-driver": body})
+        e2 = dict(env["env"])
+        e2["PATH"] = bindir2 + os.pathsep + os.environ["PATH"]
+        r = source_and("_cua_driver_current", e2)
+        assert r.stdout == "version-unknown", body
+    # Absent binary.
+    e3 = dict(env["env"])
+    e3["PATH"] = make_realtools(tmp_path / "notools")
+    r = source_and("_cua_driver_current", e3)
+    assert r.stdout == "absent"
+
+
+def test_cua_driver_noop_when_at_pin(env, tmp_path):
+    # curl stub records any call: the layer must not fetch when on-pin.
+    curlog = tmp_path / "curl.log"
+    bindir = make_stub_bin(tmp_path / "curlbin",
+                           {"curl": f"echo \"$@\" >> {curlog}; exit 0"})
+    e = cua_env(env, tmp_path)
+    e["PATH"] = bindir + os.pathsep + e["PATH"]
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert not curlog.exists(), "no download when already on pin"
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+    assert "cua-driver" in lines[-1]["components"]
+
+
+def test_cua_driver_installs_pinned_on_drift(env, tmp_path):
+    new_body = b"FAKE-CUA-DRIVER-0.28.2"
+    base = make_pinned_release(tmp_path, "0.28.2", new_body)
+    e = cua_env(env, tmp_path, cur_version="0.27.0", release_base=base)
+    target = tmp_path / "cua-bin" / "cua-driver"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"OLD-BINARY")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert target.read_bytes() == new_body
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+
+
+def test_cua_driver_absent_installs_pin(env, tmp_path):
+    # cua-driver missing from PATH entirely: fresh install of the pin.
+    # Hermetic PATH: the fixture's stub dir minus the cua-driver stub, plus
+    # the real tools the layer needs (curl/tar/sha256sum/...). The os.environ
+    # PATH tail is only a fallback for real tools — this box and CI have no
+    # real cua-driver (verified), so "absent" is honest.
+    new_body = b"FAKE-CUA-DRIVER-FRESH"
+    base = make_pinned_release(tmp_path, "0.28.2", new_body)
+    e = dict(env["env"])
+    (env["state"] / "self_update_pins.conf").write_text(
+        "cua-driver = 0.28.2\n")
+    fixture_bin = e["PATH"].split(os.pathsep)[0]
+    nobin = tmp_path / "nobin"
+    nobin.mkdir()
+    for name in os.listdir(fixture_bin):
+        if name != "cua-driver":
+            (nobin / name).symlink_to(os.path.join(fixture_bin, name))
+    e["PATH"] = str(nobin) + os.pathsep + os.environ["PATH"]
+    e["CUA_RELEASE_BASE"] = f"file://{base}"
+    e["CUA_DRIVER_BIN"] = str(tmp_path / "cua-bin" / "cua-driver")
+    e["CUA_DRIVER_OWNER"] = str(os.getuid())
+    e["CUA_DRIVER_GROUP"] = str(os.getgid())
+    r = run_bash("command -v cua-driver || echo ABSENT", env_extra=e)
+    assert "ABSENT" in r.stdout, "test setup: cua-driver must be absent"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "cua-bin" / "cua-driver").read_bytes() == new_body
+
+
+def test_cua_driver_refuses_on_checksum_mismatch(env, tmp_path):
+    base = make_pinned_release(tmp_path, "0.28.2", b"REAL", digest="0" * 64)
+    e = cua_env(env, tmp_path, cur_version="0.27.0", release_base=base)
+    target = tmp_path / "cua-bin" / "cua-driver"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"OLD-BINARY")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0
+    assert target.read_bytes() == b"OLD-BINARY", \
+        "failed verify must not touch the live binary"
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "cua-driver" in lines[-1]["failed"]
+
+
+def test_cua_driver_fail_closed_without_pin(env, tmp_path):
+    e = dict(env["env"])
+    (env["state"] / "self_update_pins.conf").write_text(
+        "# no cua-driver pin\ndocker = 26.1\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "cua-driver" in lines[-1]["failed"]
+
+
+def test_cua_driver_dry_run_changes_nothing(env, tmp_path):
+    curlog = tmp_path / "curl.log"
+    bindir = make_stub_bin(tmp_path / "curlbin2",
+                           {"curl": f"echo \"$@\" >> {curlog}; exit 0"})
+    e = cua_env(env, tmp_path, cur_version="0.27.0")
+    e["PATH"] = bindir + os.pathsep + e["PATH"]
+    r = run_bash("./deploy/toolset-update.sh update --dry-run", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert not curlog.exists(), "dry-run must not fetch"
+    assert not (tmp_path / "cua-bin" / "cua-driver").exists()
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "dry-run"
+
+
+def test_install_copies_pins_file(env):
+    r = run_bash("./deploy/toolset-update.sh install", env_extra=env["env"])
+    assert r.returncode == 0, r.stderr
+    pins = env["state"] / "self_update_pins.conf"
+    assert pins.exists()
+    assert "cua-driver = 0.28.2" in pins.read_text()

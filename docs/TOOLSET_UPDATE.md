@@ -1,13 +1,15 @@
 # Toolset update (`deploy/toolset-update.sh`)
 
-**Status: v0 framework.** Partial implementation of issue #532 ("Self-update
-system: keep the box and its default toolset current"). This slice ships the
-framework — trust model, scheduling, audit, idle gate, opt-out — and one
-real updater layer (`os-security`: unattended-upgrades). The remaining
-#532 slices (component updaters, snapshots/rollback, failure freeze,
-independent backup path) are explicitly follow-ups. Reconciled with #542's
-read-only status plane — this script is the *update* plane; see
-"Two planes" in `docs/SELF_UPDATE.md` for the canonical architecture.
+**Status: framework + two real layers.** Partial implementation of issue
+#532 ("Self-update system: keep the box and its default toolset current").
+This ships the framework — trust model, scheduling, audit, idle gate,
+opt-out — and two real updater layers: `os-security`
+(unattended-upgrades) and `cua-driver` (pinned reinstall from the upstream
+GitHub release). The remaining #532 slices (further component updaters,
+snapshots/rollback, failure freeze, independent backup path) are explicitly
+follow-ups. Reconciled with #542's read-only status plane — this script is
+the *update* plane; see "Two planes" in `docs/SELF_UPDATE.md` for the
+canonical architecture.
 
 ## What it does
 
@@ -21,15 +23,50 @@ Commands:
 | Command | Effect |
 | ------- | ------ |
 | `status` | TSV per-component *update state* (`ok` / `repair-needed` for `os-security`; `present` / `absent` for layers without an updater yet); operator-readable, no root needed. For installed-version drift against the pin list, read the status plane instead: `python3 scripts/self_update.py status` (see "Two planes" in `docs/SELF_UPDATE.md`) |
-| `update [--force] [--dry-run] [--now]` | Repair `os-security` (fail-loud, idempotent); `--now` is informational-only in v0 — the timer owns the weekly schedule, the flag only logs intent |
-| `install` / `uninstall` | Install the systemd units and backfill the installed script copy / remove the units only (the installed copy and state dir — including audit history — are left in place) |
+| `update [--force] [--dry-run] [--now]` | Repair `os-security` and enforce the `cua-driver` pin (fail-loud, idempotent); `--now` is informational-only — the timer owns the weekly schedule, the flag only logs intent |
+| `install` / `uninstall` | Install the systemd units and backfill the installed script copy **plus the installed pins file** / remove the units only (the installed copy and state dir — including audit history — are left in place) |
 | `optout` / `optin` | Machine-wide opt-out via `/etc/sparkvm/toolset-update.optout` (or `TOOLSET_UPDATE_OPTOUT=1` in the environment) |
 | `version` | Print the framework version |
 
-The `os-security` layer is the only real updater in v0. It ensures the
-`unattended-upgrades` package is present and that
-`/etc/apt/apt.conf.d/20auto-upgrades` contains exactly the two required
-lines (writes atomically via `install`; idempotent; supports `--dry-run`).
+The `os-security` layer ensures the `unattended-upgrades` package is present
+and that `/etc/apt/apt.conf.d/20auto-upgrades` contains exactly the two
+required lines (writes atomically via `install`; idempotent; supports
+`--dry-run`).
+
+## The `cua-driver` layer (issue #532)
+
+The `cua-driver` layer enforces the version pin in the installed copy of
+`scripts/self_update_pins.conf` (the canonical pin file per the
+reconciliation contract; currently `cua-driver = 0.28.2`). On every
+`update`:
+
+- **No-op** when the installed `cua-driver` binary reports the pinned
+  version — the common case, no network.
+- On absence or drift, downloads the **exact pinned release asset** from
+  `https://github.com/trycua/cua/releases/download` and installs it
+  **atomically**: the SHA-256 digest is taken from the release's
+  `checksums.txt` (exact filename match), `sha256sum -c` must pass, and the
+  new binary is written to a staging path alongside the target then
+  **renamed** over it — the live binary is never partially written.
+- A missing pin, an unsafe pin (anything outside
+  `[A-Za-z0-9._-]`, leading dot/dash, path separators), an unparseable
+  installed version, a checksum mismatch, or a missing asset entry in
+  `checksums.txt` all **fail closed**: `update` exits non-zero and the audit
+  line names `cua-driver` as failed, leaving the existing binary untouched.
+- **Never restarts the CUA daemon** — a running driver keeps working; the new
+  binary takes effect on the next restart. Safe by default on live boxes.
+
+Network trust boundary: the updater talks to GitHub release artifacts over
+HTTPS (CA bundle as curl configures it) and treats `checksums.txt` as a
+**corruption/mismatch detector, not publisher authentication** — it detects
+a wrong or damaged artifact, it does not prove the release wasn't tampered
+with at the source. A future slice can pin Sigstore signatures or
+releases.attestation records.
+
+Overrides (environment): `PINS_FILE` (installed pins path),
+`CUA_DRIVER_BIN` (default `/home/ntindle/cua/bin/cua-driver`),
+`CUA_DRIVER_OWNER`/`CUA_DRIVER_GROUP` (default `ntindle`),
+`CUA_RELEASE_BASE` (default `https://github.com/trycua/cua/releases/download`).
 
 ## Trust model
 
@@ -56,22 +93,28 @@ lines (writes atomically via `install`; idempotent; supports `--dry-run`).
 - Weekly Sunday 03:00 local quiet-hours schedule with a 30-minute randomized
   delay (`sparkvm-toolset-update.timer`, `Persistent=false`).
 - Root-required operations fail loudly instead of silently skipping.
-- **v0 executes no code fetched over the network and has no bespoke update
-  channel to poison**: the only package-manager call is a one-time
-  `apt-get install -y unattended-upgrades` bootstrap (downloads from the box's
-  configured, signature-verified apt sources, only if the package is missing).
-  The suite pins exactly that shape — no `curl`/`wget`/`git clone`/`pip
-  install`/`npm install`/URL literals, one `apt-get` call site.
+- **The only code fetched over the network is the `cua-driver` layer's
+  pinned release fetch**, deliberately and narrowly: exactly two `curl`
+  calls (the release's `checksums.txt` and the exact pinned tarball, both
+  under `$CUA_RELEASE_BASE/cua-driver-rs-v<pin>/`), with SHA-256 verification
+  against the release's own checksums file before anything is executed or
+  installed — see "The `cua-driver` layer" for the fail-closed rules. The
+  only package-manager call remains the one-time
+  `apt-get install -y unattended-upgrades` bootstrap (downloads from the
+  box's configured, signature-verified apt sources, only if the package is
+  missing). The suite pins exactly that shape — no `wget`/`git clone`/`pip
+  install`/`npm install`, one `apt-get` call site, two `curl` call sites.
 
-## Component status (v0)
+## Component status
 
-Only `os-security` reports `ok` / `repair-needed`. Docker, node, npm, gh,
-playwright, and cua-driver are **status probes only** (`present` / `absent`)
-until their updater layers land.
+`os-security` reports `ok` / `repair-needed`; `cua-driver` is enforced
+against the installed pins file (on-pin, absent→install, drift→reinstall).
+Docker, node, npm, gh, and Playwright remain **status probes only**
+(`present` / `absent`) until their updater layers land.
 
 ## Follow-ups (issue #532, not in this slice)
 
-- Real updater layers for docker / node / npm / gh / Playwright / cua-driver
+- Real updater layers for docker / node / npm / gh / Playwright
   (adopt `scripts/self_update_pins.conf` as the canonical pin file per the
   reconciliation contract in `docs/SELF_UPDATE.md` "Two planes")
 - Status-plane wiring: consult `self_update.py` drift output when deciding
@@ -84,5 +127,5 @@ until their updater layers land.
 
 ## Tests
 
-`deploy/test_toolset_update.py` — 27 hermetic tests (stub PATH, real-tool
+`deploy/test_toolset_update.py` — 37 hermetic tests (stub PATH, real-tool
 symlinks, no root assumptions). Wired into CI alongside the deploy tests.
