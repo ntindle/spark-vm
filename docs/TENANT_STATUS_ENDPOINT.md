@@ -134,9 +134,13 @@ and feeds *into* this endpoint; it is never exposed raw, per
 7. **Session restart:** the numbered rules are per onboarding session.
    The only legal cross-session moves are `box-unhealthy` →
    `provisioning` (operator reprovision), `provisioning-failed` →
-   `provisioning` (operator retry), and `live`/`approved` →
+   `provisioning` (operator retry), `live`/`approved` →
    `provisioning` (operator reprovision of a live box starts a new
-   onboarding session — the §8 G7 carve-out). The endpoint serves the latest
+   onboarding session — the §8 G7 carve-out), and `stuck` →
+   `provisioning` (operator reprovision of a stalled-then-reimaged
+   box — the `stuck` row's "a reprovision restarts the session"
+   exit is this rule; the old box image is gone, so there is no
+   resume path). The endpoint serves the latest
    session, `status_updated_at` resets, and the 10-minute clock restarts
    at the new session's `provisioning` → `live` transition.
 
@@ -384,8 +388,8 @@ Rules:
    monotonicity invariant is scoped: within a single box onboarding
    session, the reported code never moves to an earlier stage
    than the last reported code — but a rule-7 cross-session restart
-   (`box-unhealthy → provisioning`,
-   `provisioning-failed → provisioning`) resets the comparison baseline
+   (`box-unhealthy`, `provisioning-failed`, `live`/`approved`, or
+   `stuck` → `provisioning`) resets the comparison baseline
    (`status_updated_at` resets per rule 7), so the sanctioned restart is
    a forward move, not a violation. Empty candidate set (the leading box
    is deleted pre-`live` with no other candidates): hold the last
