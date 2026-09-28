@@ -73,5 +73,9 @@ fi
 # Bridge down => restart it (localhost-only)
 if ! curl -s --max-time 5 http://127.0.0.1:18731/api/status >/dev/null 2>&1; then
   # 9>&-: see above — the bridge must not inherit the run lock.
-  setsid $HOME/cua/bin/cua-bridge.py 9>&- >/tmp/cua-bridge.log 2>&1 < /dev/null &
+  # Bridge log lives in the user's own ~/.cache (never world-writable
+  # /tmp: a planted /tmp/cua-bridge.log symlink would get truncated by
+  # the O_TRUNC open — the #493 symlink primitive — by the 5-minute
+  # keepalive cron, truncating any victim-writable target as this user).
+  setsid $HOME/cua/bin/cua-bridge.py 9>&- >>"$HOME/.cache/cua-bridge.log" 2>&1 < /dev/null &
 fi
