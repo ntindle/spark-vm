@@ -17,9 +17,11 @@ Endpoints:
                                   the driver's own launch tool is
                                   permission-denied in standard mode)
 """
+import fcntl
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -30,7 +32,6 @@ _HOME = os.path.expanduser("~")
 DRIVER = os.path.join(_HOME, "cua/bin/cua-driver")
 ENV_FILE = "/tmp/cua-desktop/env"
 PORT = 18731
-
 # CSRF hardening: the bridge binds localhost only, but a browser on the
 # user's own machine can reach it through their SSH tunnel — exactly what
 # a malicious web page would abuse. So (a) reject any request whose Host
@@ -42,19 +43,109 @@ ALLOWED_HOSTS = {"127.0.0.1:18731", "localhost:18731", "127.0.0.1:18732", "local
 CSRF_HEADER = "X-CUA"
 CSRF_VALUE = "1"
 
-BASE_ENV = dict(os.environ)
-if os.path.exists(ENV_FILE):
-    for line in open(ENV_FILE):
-        line = line.strip()
-        if line.startswith("export "):
-            k, _, v = line[len("export "):].partition("=")
-            BASE_ENV[k] = v
-BASE_ENV["PATH"] = os.path.join(_HOME, "cua/bin") + ":" + BASE_ENV.get("PATH", "")
-# Force the X11 backend: without this, GTK apps on :98 probe the Wayland
-# socket in XDG_RUNTIME_DIR (the GNOME session's) and misbehave/crash.
-BASE_ENV["GDK_BACKEND"] = "x11"
-BASE_ENV["XDG_SESSION_TYPE"] = "x11"
-BASE_ENV.pop("WAYLAND_DISPLAY", None)
+def _open_trusted_env(path):
+    """Open the desktop env file and validate it in one step.
+
+    The file is opened ONCE with O_NOFOLLOW and validated with fstat on
+    the resulting fd — the validation and the parse below read from the
+    same fd, so there is no check-then-open TOCTOU window in which a
+    planted symlink could be swapped in between (#493).
+    Returns the open fd (caller closes), or None if the file is missing,
+    is a symlink, is not a regular file owned by this user, or is
+    group/other-writable.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None  # missing, symlink (ELOOP), or unreadable — all untrusted
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return None
+    if (not stat.S_ISREG(st.st_mode)
+            or st.st_uid != os.geteuid()
+            or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        os.close(fd)
+        return None
+    return fd
+
+
+def _env_file_trusted(path):
+    """True if the desktop env file is safe to parse (#493)."""
+    fd = _open_trusted_env(path)
+    if fd is None:
+        return False
+    os.close(fd)
+    return True
+
+
+def _load_sandbox_env():
+    """Build the subprocess environment: desktop env file merged over the
+    ambient environment, then the bridge's forced X11 pins. The env file is
+    opened once with O_NOFOLLOW and parsed from that same validated fd —
+    an untrusted or missing env file is skipped (with a stderr warning),
+    never parsed; the bridge still runs on sane ambient defaults (#493)."""
+    env = dict(os.environ)
+    if os.path.exists(ENV_FILE):
+        fd = _open_trusted_env(ENV_FILE)
+        if fd is not None:
+            with os.fdopen(fd, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("export "):
+                        k, _, v = line[len("export "):].partition("=")
+                        env[k] = v
+        else:
+            print(f"cua-bridge: WARNING: {ENV_FILE} is untrusted "
+                  "(symlink/owner/mode) — ignoring it", file=sys.stderr)
+    env["PATH"] = os.path.join(_HOME, "cua/bin") + ":" + env.get("PATH", "")
+    # Force the X11 backend: without this, GTK apps on :98 probe the Wayland
+    # socket in XDG_RUNTIME_DIR (the GNOME session's) and misbehave/crash.
+    env["GDK_BACKEND"] = "x11"
+    env["XDG_SESSION_TYPE"] = "x11"
+    env.pop("WAYLAND_DISPLAY", None)
+    return env
+
+
+BASE_ENV = _load_sandbox_env()
+
+
+# The singleton lock fds must stay open for the whole process, so they are
+# kept here — never GC'd out from under the lock holder (#495).
+_singleton_lock_fds = []
+
+# The lock lives in the user's own ~/.cache (never world-writable /tmp:
+# any local user could otherwise squat the lock file and hold the bridge
+# down, or plant a symlink there — #493's sibling).
+_SINGLETON_LOCK_FILE = os.path.join(_HOME, ".cache", "cua-bridge.lock")
+
+
+def acquire_singleton_lock(path=_SINGLETON_LOCK_FILE):
+    """Hold an exclusive flock on the singleton lock for this process's
+    lifetime. Returns the fd, or None if another bridge already holds it
+    (#495). flock (not a pidfile): the lock releases itself if the process
+    dies, so there are no stale-pid races.
+    Python's os.open sets CLOEXEC (PEP 446) and subprocess defaults
+    close_fds=True, so driver/launcher children never inherit this fd — the
+    bridge side cannot jam its own lock the way a shell-held fd can.
+    If the lock file itself cannot be opened (missing dir, permissions),
+    this exits(1) with a stderr message — lock failure is fatal and loud,
+    never a silent skip."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as e:
+        print(f"cua-bridge: cannot open singleton lock {path}: {e}",
+              file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    _singleton_lock_fds.append(fd)
+    return fd
 
 
 # launch allowlist: the driver's own launch tool is permission-denied in
@@ -312,6 +403,13 @@ if __name__ == "__main__":
         # bracket-trick so the pkill pattern never matches this process itself
         os.system("pkill -f 'cua-bridge[.]py' 2>/dev/null")
         sys.exit(0)
+    # Singleton guard (#495): overlapping keepalive invocations (or a manual
+    # double-start) must not run two bridges — the second bind would fail
+    # silently under the keepalive's setsid. Exit rather than limp.
+    if acquire_singleton_lock() is None:
+        print("cua-bridge: another instance is already running; exiting",
+              file=sys.stderr)
+        sys.exit(1)
     srv = BridgeServer(("127.0.0.1", PORT), Handler)
     print(f"cua-bridge listening on 127.0.0.1:{PORT}", flush=True)
     srv.serve_forever()

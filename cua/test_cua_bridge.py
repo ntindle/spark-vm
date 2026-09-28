@@ -13,6 +13,10 @@ Covers:
     desktop-coordinate -> window-relative mapping and the Xfce4-panel
     global-click branch
   - shell-script syntax/shebang/executable-bit for cua/bin/*.sh
+  - #493: desktop env file trust (owner/mode/symlink gate; fail-safe skip
+    with a loud warning; sane defaults when untrusted/missing)
+  - #495: bridge singleton flock (same-process + cross-process exclusion,
+    release-on-close, lock file creation)
 """
 import importlib.util
 import io
@@ -623,3 +627,186 @@ class TestScreenshotTempFile:
         monkeypatch.setattr(bridge, "call", fake_call)
         assert self._raw_get(port, "/api/screenshot")[0] == 200
         assert modes == [0o600], modes
+
+
+# ------------------------------------------------- #493 env-file trust
+
+
+def _write_env_file(path, content="export DISPLAY=:98\nexport DBUS_SESSION_BUS_ADDRESS=unix:x\n", mode=0o600):
+    with open(path, "w") as f:
+        f.write(content)
+    os.chmod(path, mode)
+    return path
+
+
+class TestEnvFileTrust:
+    def test_trusted_file_is_accepted(self, bridge, tmp_path):
+        p = _write_env_file(str(tmp_path / "env"))
+        assert bridge._env_file_trusted(p) is True
+
+    def test_missing_file_is_untrusted(self, bridge, tmp_path):
+        assert bridge._env_file_trusted(str(tmp_path / "nope")) is False
+
+    def test_group_writable_is_untrusted(self, bridge, tmp_path):
+        p = _write_env_file(str(tmp_path / "env"), mode=0o620)
+        assert bridge._env_file_trusted(p) is False
+
+    def test_other_writable_is_untrusted(self, bridge, tmp_path):
+        p = _write_env_file(str(tmp_path / "env"), mode=0o606)
+        assert bridge._env_file_trusted(p) is False
+
+    def test_group_readable_but_not_writable_is_trusted(self, bridge, tmp_path):
+        p = _write_env_file(str(tmp_path / "env"), mode=0o640)
+        assert bridge._env_file_trusted(p) is True
+
+    def test_symlink_is_untrusted_even_to_trusted_target(
+            self, bridge, tmp_path):
+        target = _write_env_file(str(tmp_path / "real"))
+        link = str(tmp_path / "link")
+        os.symlink(target, link)
+        # the swap vector: follows the link (exists) but the link itself
+        # is untrusted
+        assert os.path.exists(link)
+        assert bridge._env_file_trusted(link) is False
+
+    def test_directory_is_untrusted(self, bridge, tmp_path):
+        assert bridge._env_file_trusted(str(tmp_path)) is False
+
+    def test_other_owner_is_untrusted(self, bridge, tmp_path, monkeypatch):
+        p = _write_env_file(str(tmp_path / "env"))
+        # owned by the real euid; pretend we run as someone else
+        real_euid = os.geteuid()
+        monkeypatch.setattr(bridge.os, "geteuid", lambda: real_euid + 999999)
+        assert bridge._env_file_trusted(p) is False
+
+    def test_env_open_is_single_syscall_with_no_follow(
+            self, bridge, tmp_path, monkeypatch):
+        # the check and the open must be one syscall: O_NOFOLLOW on the
+        # open whose fd the validation reads from, so a planted symlink
+        # cannot be swapped in between check and parse (#493 TOCTOU)
+        p = _write_env_file(str(tmp_path / "env"))
+        seen = {}
+        real_open = os.open
+
+        def spy_open(path, flags, *args):
+            seen["flags"] = flags
+            return real_open(path, flags, *args)
+
+        monkeypatch.setattr(bridge.os, "open", spy_open)
+        assert bridge._env_file_trusted(p) is True
+        assert "flags" in seen, "validation never opened the file"
+        assert seen["flags"] & os.O_NOFOLLOW, \
+            "env file opened without O_NOFOLLOW"
+
+
+class TestLoadSandboxEnv:
+    def test_parses_trusted_env_file(self, bridge, tmp_path, monkeypatch):
+        p = _write_env_file(str(tmp_path / "env"),
+                            "export DISPLAY=:98\nexport CUA_TEST_MARKER=hello\n")
+        monkeypatch.setattr(bridge, "ENV_FILE", p)
+        env = bridge._load_sandbox_env()
+        assert env["DISPLAY"] == ":98"
+        assert env["CUA_TEST_MARKER"] == "hello"
+
+    def test_ignores_untrusted_env_file(self, bridge, tmp_path, monkeypatch,
+                                        capsys):
+        p = _write_env_file(str(tmp_path / "env"),
+                            "export CUA_TEST_MARKER=evil\n", mode=0o666)
+        monkeypatch.setattr(bridge, "ENV_FILE", p)
+        env = bridge._load_sandbox_env()
+        # fail-safe: the hostile content never enters the environment
+        assert "CUA_TEST_MARKER" not in env
+        # ... and the skip is loud, not silent
+        assert "untrusted" in capsys.readouterr().err
+
+    def test_ignores_symlinked_env_file(self, bridge, tmp_path, monkeypatch,
+                                        capsys):
+        target = _write_env_file(str(tmp_path / "real"),
+                                 "export CUA_TEST_MARKER=evil\n")
+        link = str(tmp_path / "env")
+        os.symlink(target, link)
+        monkeypatch.setattr(bridge, "ENV_FILE", link)
+        env = bridge._load_sandbox_env()
+        assert "CUA_TEST_MARKER" not in env
+        assert "untrusted" in capsys.readouterr().err
+
+    def test_missing_env_file_still_yields_sane_defaults(
+            self, bridge, tmp_path, monkeypatch):
+        monkeypatch.setattr(bridge, "ENV_FILE", str(tmp_path / "nope"))
+        env = bridge._load_sandbox_env()
+        assert env["GDK_BACKEND"] == "x11"
+        assert env["XDG_SESSION_TYPE"] == "x11"
+        assert "WAYLAND_DISPLAY" not in env
+        assert env["PATH"].split(os.pathsep)[0].endswith("cua/bin")
+
+    def test_module_base_env_keeps_x11_pins(self, bridge):
+        # pins the import-time contract: untrusted env files must not strip
+        # the forced backend flags out of BASE_ENV
+        assert bridge.BASE_ENV["GDK_BACKEND"] == "x11"
+        assert bridge.BASE_ENV["XDG_SESSION_TYPE"] == "x11"
+        assert "WAYLAND_DISPLAY" not in bridge.BASE_ENV
+
+
+# ------------------------------------------------- #495 singleton lock
+
+
+class TestSingletonLock:
+    def test_second_acquire_in_same_process_fails(self, bridge, tmp_path):
+        lock = str(tmp_path / "bridge.lock")
+        fd = bridge.acquire_singleton_lock(lock)
+        assert fd is not None
+        # LOCK_NB: the second contender must fail fast, not block
+        assert bridge.acquire_singleton_lock(lock) is None
+
+    def test_lock_releases_when_holder_closes(self, bridge, tmp_path):
+        lock = str(tmp_path / "bridge.lock")
+        fd = bridge.acquire_singleton_lock(lock)
+        assert fd is not None
+        os.close(fd)
+        assert bridge.acquire_singleton_lock(lock) is not None
+
+    def test_cross_process_exclusion(self, bridge, tmp_path):
+        lock = str(tmp_path / "bridge.lock")
+        # first process holds the lock; it prints "ready" only after the
+        # flock is held, so there is no startup race with the assertion
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import fcntl, os, time; "
+             f"fd = os.open({lock!r}, os.O_RDWR | os.O_CREAT, 0o644); "
+             "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); "
+             "import sys; sys.stdout.write('ready'); sys.stdout.flush(); "
+             "time.sleep(10)"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        try:
+            assert holder.stdout.read(5) == "ready"
+            assert bridge.acquire_singleton_lock(lock) is None
+        finally:
+            holder.terminate()
+            holder.wait(timeout=10)
+        # after the holder dies the lock is free again — no stale state
+        assert bridge.acquire_singleton_lock(lock) is not None
+
+    def test_lock_file_is_created(self, bridge, tmp_path):
+        lock = str(tmp_path / "bridge.lock")
+        assert not os.path.exists(lock)
+        assert bridge.acquire_singleton_lock(lock) is not None
+        assert os.path.exists(lock)
+
+    def test_default_lock_lives_in_private_cache(self, bridge):
+        # never world-writable /tmp: any local user could squat a /tmp
+        # lock and hold the bridge down, or plant a symlink there that
+        # the O_CREAT open would follow (#493's sibling)
+        assert bridge._SINGLETON_LOCK_FILE == os.path.join(
+            bridge._HOME, ".cache", "cua-bridge.lock")
+        assert not bridge._SINGLETON_LOCK_FILE.startswith("/tmp/")
+
+    def test_lock_open_failure_is_loud(self, bridge, tmp_path, capsys):
+        # an unopenable lock (here: the parent path is a regular file, so
+        # the makedirs fails) must exit 1 with a message — never a silent
+        # skip that leaves the bridge unprotected
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x")
+        with pytest.raises(SystemExit) as e:
+            bridge.acquire_singleton_lock(str(blocker / "bridge.lock"))
+        assert e.value.code == 1
+        assert "cannot open singleton lock" in capsys.readouterr().err

@@ -8,12 +8,57 @@
 set -u
 export PATH="$HOME/cua/bin:/usr/local/bin:/usr/bin:/bin"
 
+# Shared env-file trust predicate (#493) — the same check every consumer
+# of the desktop env file applies.
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/cua-trust.sh"
+
 RUNDIR=/tmp/cua-desktop
 DISPLAY_NUM=98
 SOCK="$HOME/.cache/cua-driver/cua-driver.sock"
 DRIVER_BIN="$HOME/cua/bin/cua-driver"
 
-mkdir -p "$RUNDIR"
+# Secure the rundir (#493): it holds the desktop env file that the bridge,
+# the driver launchers, and the keepalive all consume, and /tmp is
+# world-writable. Create it with 0700 (atomically via -m, so there is no
+# umask window for a watching local user); if it already exists, verify it
+# is a real directory owned by us and repair the mode — a symlink or a dir
+# owned by someone else is a plant and fails loudly (plain `mkdir -p`
+# would silently accept either). Also the single choke point for stale
+# env-file plants: an existing $RUNDIR/env that fails the trust check is
+# removed here (do_start regenerates it below), so no consumer can source
+# pre-fix planted contents.
+ensure_private_rundir() {
+  if [ -L "$RUNDIR" ]; then
+    echo "cua-desktop: $RUNDIR is a symlink (possible plant), refusing to proceed" >&2
+    return 1
+  fi
+  if mkdir -m 700 "$RUNDIR" 2>/dev/null; then
+    :
+  else
+    # mkdir lost the race or the dir pre-existed: re-check for a symlink
+    # before any dereferencing operation (a swap between the check above
+    # and mkdir would otherwise get chmod applied through the link).
+    if [ -L "$RUNDIR" ]; then
+      echo "cua-desktop: $RUNDIR is a symlink (possible plant), refusing to proceed" >&2
+      return 1
+    fi
+    [ -d "$RUNDIR" ] || {
+      echo "cua-desktop: $RUNDIR exists but is not a directory, refusing to proceed" >&2
+      return 1
+    }
+    if [ "$(stat -c %U "$RUNDIR")" != "$(id -un)" ]; then
+      echo "cua-desktop: $RUNDIR is owned by another user (possible plant), refusing to proceed" >&2
+      return 1
+    fi
+    chmod 700 "$RUNDIR" || return 1
+  fi
+  if [ -e "$RUNDIR/env" ] && ! trust_env_file "$RUNDIR/env"; then
+    echo "cua-desktop: WARNING: $RUNDIR/env failed the trust check (possible plant) — removing it" >&2
+    rm -f "$RUNDIR/env" || return 1
+  fi
+}
+ensure_private_rundir || exit 1
 
 running() { # running <pidfile>
   [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
@@ -42,7 +87,17 @@ do_start() {
     DBUS_ADDR=$(head -1 "$RUNDIR/dbus.env"); DBUS_PID=$(tail -1 "$RUNDIR/dbus.env")
     echo "$DBUS_PID" > "$RUNDIR/dbus.pid"
     printf 'export DISPLAY=:%s\nexport DBUS_SESSION_BUS_ADDRESS=%s\n' "$DISPLAY_NUM" "$DBUS_ADDR" > "$RUNDIR/env"
+    chmod 600 "$RUNDIR/env"
+  elif [ ! -f "$RUNDIR/env" ]; then
+    # ensure_private_rundir removed an untrusted env file (or it was lost):
+    # regenerate from the recorded dbus address rather than running sourceless.
+    DBUS_ADDR=$(head -1 "$RUNDIR/dbus.env" 2>/dev/null)
+    printf 'export DISPLAY=:%s\nexport DBUS_SESSION_BUS_ADDRESS=%s\n' "$DISPLAY_NUM" "$DBUS_ADDR" > "$RUNDIR/env"
+    chmod 600 "$RUNDIR/env"
   fi
+  # NOTE: the env file is safe to source here — ensure_private_rundir above
+  # removed anything failing the trust check, and the writes just above are
+  # ours with mode 0600 (writer and trust gate agree regardless of umask).
   # shellcheck disable=SC1091
   source "$RUNDIR/env"
   # 3. Desktop environment: XFCE as individual components
@@ -78,6 +133,9 @@ do_stop() {
 }
 
 do_status() {
+  # NOTE: safe to source — ensure_private_rundir (top of this script) removed
+  # any env file failing the trust check before we get here, and the 0700
+  # rundir keeps other users from replacing it between the check and this.
   # shellcheck disable=SC1091
   [ -f "$RUNDIR/env" ] && source "$RUNDIR/env"
   for c in "xvfb:Xvfb" "dbus:D-Bus" "driver:cua-driver daemon"; do

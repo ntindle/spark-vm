@@ -3,8 +3,20 @@
 # GDK_BACKEND=x11 is REQUIRED: without it, GTK apps probe the Wayland socket
 # in XDG_RUNTIME_DIR (the GNOME session's) and xfce4-panel segfaults in libwnck.
 set -u
+# Shared env-file trust predicate (#493) — the same check every consumer
+# of the desktop env file applies. Standalone runs of this script source
+# the env file too, so the check lives here, not just in cua-desktop.sh.
 # shellcheck disable=SC1091
-source /tmp/cua-desktop/env
+. "$(dirname "${BASH_SOURCE[0]}")/cua-trust.sh"
+# The env file is sourced (executed), so it must pass the trust check
+# first (#493); without it the components start without DISPLAY/DBUS
+# rather than executing a planted file.
+if trust_env_file /tmp/cua-desktop/env; then
+  # shellcheck disable=SC1091
+  source /tmp/cua-desktop/env
+else
+  echo "start-xfce: WARNING: /tmp/cua-desktop/env failed the trust check — starting without it" >&2
+fi
 export GDK_BACKEND=x11
 unset WAYLAND_DISPLAY
 export XDG_SESSION_TYPE=x11
