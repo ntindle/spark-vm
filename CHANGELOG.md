@@ -67,6 +67,10 @@
 - Approvals are no longer granted in a race against their own expiry: an approval with less than 30 seconds of validity remaining is now refused up front (HTTP 410 with a distinct audit event) instead of minting a grant that could land after the approval had already expired — the grant writer has no revoke path. (#534)
 - confirmd's self-peer address check now re-resolves the box's Tailscale IPs every minute instead of once at startup, so a tailscaled renumber mid-daemon can't silently disable the self-refusal boundary; a failed refresh keeps the last good set rather than shrinking the boundary. (#536)
 
+### Security
+
+- `cred set` no longer reads stdin unbounded before the swapd writer's 64 KiB cap: the frontend reads at most 64 KiB + a 2-byte chomp margin + 1 sentinel byte and refuses oversized input with a clear message itself, so piping a huge file can't balloon the CLI's memory (the cap existed one layer too late). The bound is on *bytes*, not decoded characters, so multibyte UTF-8 can't slip past; the cap mirrors `cred-store-set`'s `max_bytes=65536` exactly. (closes #149) (#TBD)
+
 ## [0.4.0] - 2026-09-26
 
 ### Added
