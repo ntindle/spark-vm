@@ -111,6 +111,13 @@ class Flow:
         self.websocket = None
         self.server_conn = None  # set by mitmproxy once connected
         self.metadata = {}  # mitmproxy flows carry a metadata dict
+        self.error = None  # set by kill(), mirroring mitmproxy's Flow
+
+    def kill(self):
+        """Mirror mitmproxy's Flow.kill(): mark the flow dead. The
+        proxy layers tear down both sides; nothing further is
+        delivered on a killed flow."""
+        self.error = "killed"
 
 
 class FakeServerConn:
@@ -128,8 +135,9 @@ class FakeServerConnectData:
 
 class FakeResponse:
     """Minimal mitmproxy response: text property, content, headers."""
-    def __init__(self, content, content_type):
+    def __init__(self, content, content_type, status_code=200):
         self.content = content
+        self.status_code = status_code
         self.headers = Headers([("content-type", content_type),
                                 ("content-length", str(len(content)))])
 
@@ -2017,19 +2025,152 @@ class SecuritySweepTests(unittest.TestCase):
         a.request(Flow(req))
         self.assertEqual(req.headers.get("Authorization"), "Bearer API-TOKEN")
 
-    def test_responseheaders_scrubs_streaming_headers(self):
-        """Streaming/SSE responses never finish the buffered body hook,
-        so secret-bearing headers must be scrubbed at responseheaders
-        time — the body hook firing (or not) cannot be the gate."""
+    def test_responseheaders_kills_streaming_body(self):
+        """Streaming/SSE responses can never be body-scrubbed (the
+        buffered `response` hook only fires when the body completes, and
+        a never-ending stream buffers unboundedly), so the flow is
+        killed in `responseheaders` — a synthetic replacement body set
+        here would be overwritten by mitmproxy's post-hook body
+        buffering, so killing is the only sound refusal. Finding 40e
+        (issue #92)."""
         a = make_addon()
         resp = FakeResponse(b'data: {"x": 1}\n\n', "text/event-stream")
         resp.headers["Set-Cookie"] = "session=correct horse; Path=/"
         flow = Flow(Request("github.com", "/stream"))
         flow.response = resp
         a.responseheaders(flow)  # headers arrive; the body never completes
+        self.assertIsNotNone(flow.error)  # killed: nothing is forwarded
+        # the refusal leaves a trail like any other refusal
+        self.assertIn(("github.com", "stream-refused", "sse"),
+                      a.audit_notes)
+        # header scrubbing still ran before the kill: no secret value
+        # leaks, and the placeholder pin proves scrubbing actually ran
+        # rather than merely coinciding with the kill
         cookies = resp.headers.get_all("Set-Cookie")
         self.assertTrue(all("correct horse" not in c for c in cookies))
         self.assertIn("session=hsurr:acme:password; Path=/", cookies)
+
+
+class StreamRefusalTests(unittest.TestCase):
+    """Finding 40e (issue #92): message-stream responses from allowlisted
+    hosts are killed in `responseheaders` — never proxied unscrubbed. A
+    synthetic replacement body would be overwritten by mitmproxy's
+    post-hook body buffering, so killing is the only sound refusal."""
+
+    def _sse_flow(self, host="github.com", content_type="text/event-stream"):
+        a = make_addon()
+        resp = FakeResponse(b'data: {"x": 1}\n\n', content_type)
+        del resp.headers["content-length"]
+        resp.headers["transfer-encoding"] = "chunked"
+        flow = Flow(Request(host, "/stream"))
+        flow.response = resp
+        return a, flow, resp
+
+    def test_sse_killed_even_when_chunked(self):
+        a, flow, resp = self._sse_flow()
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)  # killed: nothing is forwarded
+        self.assertIn(("github.com", "stream-refused", "sse"),
+                      a.audit_notes)
+        # header scrubbing still ran before the kill: the delivered
+        # handshake headers carry no raw secret values
+        self.assertEqual(resp.status_code, 200)  # untouched: kill, not rewrite
+
+    def test_sse_content_type_with_parameters_killed(self):
+        a, flow, resp = self._sse_flow(
+            content_type="text/event-stream; charset=utf-8")
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("github.com", "stream-refused", "sse"),
+                      a.audit_notes)
+
+    def test_any_101_upgrade_killed(self):
+        # After a 101 the bytes are no longer HTTP (WebSocket or any
+        # other protocol), so the body can never be scrubbed — the
+        # upgrade header value is not the gate, the 101 is.
+        a = make_addon()
+        resp = FakeResponse(b"", "application/octet-stream", status_code=101)
+        resp.headers["upgrade"] = "websocket"
+        resp.headers["connection"] = "Upgrade"
+        flow = Flow(Request("github.com", "/ws"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("github.com", "stream-refused", "protocol-upgrade"),
+                      a.audit_notes)
+
+    def test_duplicate_content_type_stream_in_second_position_killed(self):
+        # Headers.get returns the first value only — a stream content
+        # type in a non-first duplicate header must still be detected.
+        a = make_addon()
+        resp = FakeResponse(b'data: 1\n\n', "application/json")
+        # model a duplicate wire header: stream type in non-first position
+        resp.headers._items.append(("content-type", "text/event-stream"))
+        flow = Flow(Request("github.com", "/stream"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("github.com", "stream-refused", "sse"),
+                      a.audit_notes)
+
+    def test_101_h2c_also_killed(self):
+        # Even a non-WebSocket 101 (e.g. h2c) is refused: the scrubber
+        # cannot see post-upgrade bytes either.
+        a = make_addon()
+        resp = FakeResponse(b"ok", "text/plain", status_code=101)
+        flow = Flow(Request("github.com", "/h2c"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("github.com", "stream-refused", "protocol-upgrade"),
+                      a.audit_notes)
+
+    def test_finite_chunked_json_not_refused(self):
+        # Chunked framing alone is not a stream signal: finite chunked
+        # bodies still buffer and are scrubbed by the `response` hook.
+        a = make_addon()
+        resp = FakeResponse(b'{"ok": true}', "application/json")
+        del resp.headers["content-length"]
+        resp.headers["transfer-encoding"] = "chunked"
+        flow = Flow(Request("github.com", "/api"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("transfer-encoding"), "chunked")
+        self.assertEqual(a.audit_notes, [])
+
+    def test_non_allowlisted_host_sse_untouched(self):
+        a = make_addon()
+        resp = FakeResponse(b'data: 1\n\n', "text/event-stream")
+        flow = Flow(Request("evil.example", "/stream"))
+        flow.response = resp
+        a.responseheaders(flow)  # early return: host not allowlisted
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(a.audit_notes, [])
+
+    def test_approval_signal_cannot_ride_killed_flow(self):
+        # The approval-signal headers are rendered above the refusal,
+        # but a killed flow delivers nothing — the dropped connection
+        # is itself the client-visible signal. Documented trade-off:
+        # the refusal audit note (not a response header) is the durable
+        # record of what happened.
+        a, flow, resp = self._sse_flow()
+        flow.metadata["spark_approval_signal"] = [("aid-1", "pending")]
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("github.com", "stream-refused", "sse"),
+                      a.audit_notes)
+
+    def test_stream_refusal_reason_unit(self):
+        r = FakeResponse(b"", "text/event-stream")
+        self.assertEqual(sa.SwapAddon._stream_refusal_reason(r), "sse")
+        r2 = FakeResponse(b"", "TEXT/EVENT-STREAM")
+        self.assertEqual(sa.SwapAddon._stream_refusal_reason(r2), "sse")
+        r3 = FakeResponse(b"", "application/json", status_code=101)
+        self.assertEqual(sa.SwapAddon._stream_refusal_reason(r3),
+                         "protocol-upgrade")
+        r4 = FakeResponse(b"", "application/json")
+        self.assertIsNone(sa.SwapAddon._stream_refusal_reason(r4))
 
 
 class AuditLogDiskGuardTests(unittest.TestCase):

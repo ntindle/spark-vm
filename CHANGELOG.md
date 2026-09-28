@@ -162,6 +162,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- The swap proxy now refuses streaming responses (server-sent events and protocol upgrades) from allowed hosts by dropping the connection, instead of passing their bodies through unscrubbed: a stream never finishes, so the response-body scrubber can never see it, and the proxy would otherwise buffer a never-ending stream unboundedly. Clients that need the data should retry with streaming disabled. (#92) (#631)
 - `cred set` no longer reads stdin unbounded before the swapd writer's 64 KiB cap: the frontend reads at most 64 KiB + a 2-byte chomp margin + 1 sentinel byte and refuses oversized input with a clear message itself, so piping a huge file can't balloon the CLI's memory (the cap existed one layer too late). The bound is on *bytes*, not decoded characters, so multibyte UTF-8 can't slip past; the cap mirrors `cred-store-set`'s `max_bytes=65536` exactly. (closes #149) (#602)
 
 ## [0.4.0] - 2026-09-26

@@ -64,6 +64,15 @@ the credential, never the value. Registry entries may set
 "scrub": false for usernames and emails. TOTP codes are matched as
 whole tokens only, so a six-digit code collides with neither prices
 nor IDs. Residual, stated not solved: images and binary bodies.
+Message-stream responses (server-sent events, protocol upgrades) are
+refused outright — the flow is killed in `responseheaders` — because
+their bodies never finish and the scrubber can never see them; a
+replacement body synthesized at headers time would be overwritten by
+mitmproxy's post-hook body buffering, so killing is the only sound
+refusal (finding 40e, issue #92). Stated residuals: never-ending
+chunked streams with an ordinary content type (indistinguishable from
+finite chunked bodies at headers time), HTTP/2 extended-CONNECT
+websockets (answer 200, no 101), images and binary bodies.
 
 Egress guard: the `server_connect` hook resolves the request host
 BEFORE the upstream TCP connect (finding 38), so a refused host never
@@ -2604,6 +2613,14 @@ class SwapAddon:
                             "client-visible approval signal")
 
     def websocket_message(self, flow):
+        # SUPERSEDED by the finding-40e stream refusal (issue #92):
+        # `responseheaders` kills the 101 upgrade for allowlisted hosts,
+        # so this hook sees no 101 from those hosts — but H2
+        # extended-CONNECT websockets (answer 200, a stated #92 residual)
+        # still reach it, and non-allowlisted hosts early-return in both
+        # hooks. Kept, with its unit tests, for the insertion logic
+        # itself — a per-host stream opt-in (follow-up to #92) would
+        # re-enable this path.
         self._maybe_reload()
         self._current_egress_ip = None
         # H18: no header channel exists on websocket messages, so any
@@ -2763,6 +2780,29 @@ class SwapAddon:
                 new_text = new_text.replace(value, placeholder)
         return new_text
 
+    @staticmethod
+    def _stream_refusal_reason(resp):
+        """Return a short refusal reason when `resp` is a message stream
+        whose body can never be scrubbed, else None.
+
+        Detectable at headers time: server-sent events (content-type
+        text/event-stream) and protocol upgrades (101 — after the
+        upgrade the bytes are no longer HTTP, for WebSocket or any
+        other protocol). All content-type header values are checked —
+        a duplicate header with the stream type in a non-first position
+        must not slip past `Headers.get`'s first-value behavior. A
+        chunked stream with an ordinary content type is indistinguishable
+        from a finite chunked body at headers time, and HTTP/2
+        extended-CONNECT websockets answer 200 (no 101) — both stay
+        stated residual risks (finding 40e).
+        """
+        ctypes = resp.headers.get_all("content-type") or []
+        if any("text/event-stream" in (c or "").lower() for c in ctypes):
+            return "sse"
+        if getattr(resp, "status_code", 0) == 101:
+            return "protocol-upgrade"
+        return None
+
     def responseheaders(self, flow):
         """Scrub response headers as soon as they arrive.
 
@@ -2773,10 +2813,12 @@ class SwapAddon:
         headers (Set-Cookie, X-Subject-Token, an echoing /headers
         endpoint) unscrubbed — the body hook never fires for a stream.
         Header values are short, so there is no size cap to check here;
-        triples are computed once, not per header value. (Streaming
-        *bodies* remain a residual risk — filed as
-        https://github.com/ntindle/spark-vm/issues/92 — but headers no
-        longer depend on the body finishing.)
+        triples are computed once, not per header value. Streaming
+        *bodies* are refused outright below (finding 40e, issue #92): a
+        message stream can never be scrubbed, so the flow is killed
+        before anything is forwarded — no stream bytes, not even the
+        handshake headers, reach the client; header scrubbing still runs
+        first so the killed flow's records carry no raw secrets.
         """
         self._maybe_reload()
         req = flow.request
@@ -2798,7 +2840,10 @@ class SwapAddon:
         # the refused request learns the approval id ("pending") or the
         # terminal decision ("approved"/"denied"/"expired") from these
         # headers on the proxied response. The hook runs before the body
-        # finishes, so the signal also rides streaming responses. Values
+        # finishes, so the signal rides the headers of finite responses;
+        # message streams are killed below (finding 40e, issue #92), so
+        # for them the dropped connection is the signal and the audit
+        # note is the durable record. Values
         # carry only the approval id and the state word — never
         # credential names, hosts, or secret material — and aids were
         # validated at record time.
@@ -2819,6 +2864,21 @@ class SwapAddon:
             resp.headers[APPROVAL_PENDING_HEADER] = ", ".join(pending)
         if decisions:
             resp.headers[APPROVAL_DECISION_HEADER] = ", ".join(decisions)
+        # Finding 40e (issue #92): streaming response bodies can never
+        # be scrubbed — the buffered-body `response` hook only fires
+        # when the body completes, and mitmproxy buffers a never-ending
+        # stream unboundedly (a memory DoS on shared infra). A synthetic
+        # replacement body set here would be overwritten by the buffered
+        # upstream bytes when the body completes, so the only sound
+        # refusal is to kill the flow: nothing unscrubbed is forwarded
+        # and the upstream read stops. The refusal is recorded on the
+        # audit trail like any other refusal. The approval-signal
+        # headers rendered above cannot ride a killed flow — inherent to
+        # refusal; the dropped connection is the client-visible signal.
+        reason = self._stream_refusal_reason(resp)
+        if reason is not None:
+            self._audit_note(host, "stream-refused", reason)
+            flow.kill()
 
     def response(self, flow):
         """Scrub known secret values out of text response bodies from
@@ -2835,8 +2895,10 @@ class SwapAddon:
         (non-text or over-size bodies) — broken framing on shared proxy
         infra is a desync risk, not a cosmetic one.
 
-        The hook buffers the whole body (finding 40d): obox must not
-        depend on streamed provider responses through this proxy."""
+        The hook buffers the whole body: message-stream responses (SSE /
+        protocol upgrades) are killed in `responseheaders` (finding 40e)
+        and never reach this hook; obox must not depend on streamed
+        provider responses through this proxy."""
         self._maybe_reload()
         req = flow.request
         host = req.pretty_host if req else ""
