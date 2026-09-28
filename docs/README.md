@@ -97,6 +97,7 @@ working.
 
 | Doc | What it is |
 | --- | ---------- |
+| [TOOLSET_UPDATE.md](TOOLSET_UPDATE.md) | v0 self-update framework (`deploy/toolset-update.sh`): trust model, idle gate, audit, weekly timer, and the real `os-security` updater layer; component updaters, snapshots/rollback, and failure freeze are follow-ups under issue #532. |
 | [SENTINEL_TELEMETRY_SURFACES.md](SENTINEL_TELEMETRY_SURFACES.md) | Arch deep-read of the four audit/telemetry surfaces the hosted sentinel (H5) would consume: schema catalog, six structural findings (no shared envelope, no sequencing/auth, second-resolution timestamps, unstated trust tiers, one silent audit failure — fixed, no rotation bound on confirmd's audit.log), and the ordered H5 prerequisites. |
 | [HOSTED_GAP_ANALYSIS.md](HOSTED_GAP_ANALYSIS.md) | **(start here)** Vision vs repo state: the master gap list for the hosted product. |
 | [DAY_ONE_GAP_ANALYSIS.md](DAY_ONE_GAP_ANALYSIS.md) | What a tenant Muse needs on day one vs what the repo has. |
@@ -123,6 +124,7 @@ working.
 | [EXPIRED_APPROVAL_TERMINAL_RECORD.md](EXPIRED_APPROVAL_TERMINAL_RECORD.md) | Design for expired approvals as a first-class terminal record (G1 / #213): the winning reaper stamps `consumed/<aid>.json` with `decision: "expired"` (exactly-once, stamp-then-delete), the agent gets a deterministic `expired:<aid>` decision leg, expiry never suppresses the replacement filing, a reserved `tenant_id: null` field carries the H10 tenant story — S1–S3 build slices. |
 | [MULTI_TENANCY_AUDIT.md](MULTI_TENANCY_AUDIT.md) | The H11 multi-tenancy audit: every localhost-only / no-auth / single-owner assumption inventoried and ranked by blast radius; adopts/rejects the isolation research's findings; answers the four design questions (isolation story, swap-proxy trust boundary, tailnet fail-open/fail-closed, who holds root); releases the H5/H10/H12/H13 gates. |
 | [USAGE_METERING_DESIGN.md](USAGE_METERING_DESIGN.md) | H12 usage-metering design: billable-unit taxonomy (wall-clock, resource windows, approval volume, suspend/wake, push), the canonical metering event envelope shared with the H5 sentinel design (answers #353–#356; sequencing half of #354; the authentication half stays open for H5), per-surface mappers over S1–S4, emission via the H14 part a enqueue/retry pattern, counters-over-content privacy rules, and the filed gaps (#376–#378). |
+| [SELF_UPDATE.md](SELF_UPDATE.md) | Self-update system design (issue #532): keeps the box and its default toolset current without manual intervention — scope, behavior requirements, pinning, opt-out, log locations, and the S1/S2/S3 build slices. S1 (`self_update.py status`) is the read-only version inventory. |
 
 ## Product research corpus
 
