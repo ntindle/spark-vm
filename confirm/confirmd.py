@@ -519,12 +519,25 @@ def audit_log(event, peer, login, detail=""):
     approvals trail without a signal. confirmd cannot fail the request
     the same way (the audit call happens after the decision), so the
     except path emits to stderr (naming the lost event), which lands in
-    the journal under systemd — the trail gap is operator-visible."""
+    the journal under systemd — the trail gap is operator-visible. Crash
+    durability (issue #72): the append is fsync'd before the fd closes, so
+    once audit_log() returns the line is durable against a crash — without
+    the fsync, a crash loses the whole page-cache window, silently erasing
+    recent refusals from the trail. An fsync OSError takes the same stderr
+    path (the event is treated as lost). Remaining window, documented not
+    closed: if AUDIT did not exist and was just created, the directory
+    entry is not fsync'd here — a crash at that exact instant can lose the
+    file. The file is created once and persists afterwards, so this is not
+    a steady-state exposure."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         with open(AUDIT, "a", encoding="utf-8") as f:
             f.write("ts=%s event=%s peer=%s login=%s %s\n"
                     % (ts, event, peer, login or "-", detail))
+            f.flush()  # user-space buffer -> OS; fsync below only reaches
+            # the kernel page cache, so without the flush it would sync
+            # nothing (the line is still in CPython's buffer).
+            os.fsync(f.fileno())
     except OSError as e:
         print("confirmd: cannot write audit log: %s (lost event=%s peer=%s login=%s)"
               % (e, event, peer, login or "-"), file=sys.stderr)
