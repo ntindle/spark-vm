@@ -107,9 +107,12 @@ close(slug)   # kill, remove worktree, delete branch, archive (terminal)
 - **Structured approvals** (browser's purchase review): jobs run `--yolo`
   per the user's standing authorization; the only gate is the watchdog.
 - **The `serve` stdio bridge**: investigated 2026-09-17 — `muse serve`
-  speaks JSON-RPC/MCP over stdio and the initialize handshake answers, but
-  post-handshake calls return `Not initialized`; the completion step is
-  undocumented. Deferred again until the tmux transport actually breaks.
+  speaks JSON-RPC over stdio and the initialize handshake answers, but
+  post-handshake calls returned `Not initialized`; the missing step was the
+  `initialized` notification (verified 2026-09-21 against muse 1.3.0). No
+  longer deferred: #228 adopts MSP as the job transport and #221's
+  `bin/msp_host.py` implements the transport + handshake. The tmux paths
+  stay until the cutover slices (#222–#227) land.
 
 ## 6. The question channel in practice
 
