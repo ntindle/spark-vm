@@ -307,10 +307,16 @@ PROBES = (
 
 
 def load_pins(path=_PINS_FILE):
-    """Read the known-good pin file. Returns {tool: pinned_version}."""
+    """Read the known-good pin file. Returns {tool: pinned_version}.
+
+    Never raises: a malformed file (non-UTF-8 bytes, garbage lines) must not
+    crash the status inventory (B2). Non-decodable bytes are replaced — the
+    same defensive pattern as probe_unattended_upgrades — and lines without
+    "name=value" shape are skipped.
+    """
     pins = {}
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:

@@ -117,6 +117,23 @@ def test_stderr_noise_does_not_pollute_version():
     assert version == "2.101.0"
 
 
+def test_stderr_noise_does_not_pollute_patternless_probe_version():
+    # B1, second guard: the stdout-first preference must also hold on the
+    # pattern-less path (_probe_python_package), where _version_output's
+    # choice is NOT rescued by the pattern-scan loop. This test fails if
+    # _version_output ever prefers stderr; the pattern-based test above
+    # cannot catch that mutation.
+    probe_cmd = (sys.executable, "-c",
+                 "import importlib.metadata as m; print(m.version('playwright'))")
+    runner = fake_runner({probe_cmd:
+                          (0, "1.49.1\n",
+                           "DeprecationWarning: pkg_resources is deprecated\n")})
+    installed, version, _ = self_update.probe_playwright(
+        runner=runner, which=fake_which({"python3": sys.executable}))
+    assert installed is True
+    assert version == "1.49.1"
+
+
 def test_version_falls_back_to_stderr_when_stdout_empty():
     runner = fake_runner({("gh", "--version"): (0, "", "gh version 2.101.0\n")})
     installed, version, _ = self_update.probe_gh(
@@ -284,6 +301,18 @@ def test_load_pins_parses_file(tmp_path):
 
 def test_load_pins_missing_file_returns_empty(tmp_path):
     assert self_update.load_pins(str(tmp_path / "nope.conf")) == {}
+
+
+def test_load_pins_survives_malformed_bytes(tmp_path):
+    # B2: a pins file with non-UTF-8 bytes must not crash load_pins — the
+    # status inventory's contract is "probes never raise, always exits 0".
+    # Non-decodable bytes are replaced (same defensive pattern as
+    # probe_unattended_upgrades); the garbage line is skipped and
+    # well-formed lines still parse.
+    pins_file = tmp_path / "pins.conf"
+    pins_file.write_bytes(b"\xff\xfe not-utf8\nplaywright=1.49.1\n")
+    pins = self_update.load_pins(str(pins_file))
+    assert pins == {"playwright": "1.49.1"}
 
 
 def test_drift_true_when_version_differs_from_pin():
