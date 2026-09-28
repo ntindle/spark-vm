@@ -12,6 +12,7 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 | `bin/muse-job` | CLI: `spawn/steer/status/list/log/kill/resume/close/watch`. Single-file Python, stdlib only. |
 | `bin/muse-job-watchdog` | Watchdog pass script (also reachable as `muse-job watch`): emits JSON findings for blocked/question/stuck/over-budget jobs; silent when healthy. |
 | `bin/muse-job-sweep` | Disk sweeper: prunes stale closed job dirs at >=85% disk; at >=93% kills the largest non-closed job (emergency breaker). Always JSON, fails open. |
+| `bin/msp_host.py` | MSP serve-host client (issue #221, #228 plan): stdlib-only module that spawns/owns one `muse serve` per job, speaks NDJSON JSON-RPC 2.0 over stdio, runs the initialize/initialized handshake, correlates calls, dispatches notifications, routes server→client requests, and pins the schema fingerprint. Imported by `bin/muse-job` as the tmux replacement lands slice by slice. |
 | `plugin/` | `muse-job` Muse plugin source (v0.3.1, user-scope, approved): `Stop` hook classifies turn ends (blocked/done/question/idle), `SessionEnd` hook, `PreLLMCall` session-UUID registry. Events land in `~/.local/share/muse-job/events/<uuid>.jsonl`. |
 | `client/muse_job.py` | Python client presenting the subagent-like API (`spawn/steer/interrupt/status/list_jobs/log/wait_for_turn/pending_question/kill/resume/close`). Runs from the operator box over SSH. |
 | `TOOL_INTERFACE.md` | Interaction map (subagents / browser tasks / exec / cron) and the Muse-Code-as-a-tool spec the client implements. |
@@ -23,6 +24,7 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 | `bin/muse-job` | `/home/ntindle/bin/muse-job` (on PATH) |
 | `bin/muse-job-watchdog` | `/home/ntindle/bin/muse-job-watchdog` |
 | `bin/muse-job-sweep` | `/home/ntindle/bin/muse-job-sweep` |
+| `bin/msp_host.py` | `/home/ntindle/bin/msp_host.py` (to be imported by `bin/muse-job` as the #222–#227 cutover slices land) |
 | `plugin/` | `/home/ntindle/muse-job-plugin/` (source) → user-scope plugin: `muse plugins install ./muse-job/plugin` (run from `~/spark-vm`), then `muse plugins approve` (`--force` on reinstall) |
 
 Redeploy: copy the files over, then reinstall the plugin with `--force`
@@ -70,5 +72,5 @@ Redeploy: copy the files over, then reinstall the plugin with `--force`
 - Never combine text+Enter in one `tmux send-keys` (silently no-ops vs the TUI); use separate text / sleep / Enter and verify the input box cleared.
 - Spawn prompts via argv: `muse --yolo "$(cat prompt.md)"`.
 - Muse's sqlite session index lags for TUI sessions; use the hook registry (`~/.local/share/muse-job/sessions/`).
-- `muse serve` (JSON-RPC/MCP over stdio) was investigated as a cleaner transport; post-handshake calls return `Not initialized` (undocumented completion step). Deferred until tmux breaks.
+- `muse serve` (NDJSON JSON-RPC over stdio) is the planned job transport (#228): the 2026-09-17 `Not initialized` mystery was the missing `initialized` notification after `initialize` (verified 2026-09-21 against muse 1.3.0). `bin/msp_host.py` implements the transport + handshake (#221); tmux stays until the cutover slices land.
 - `muse session-message send` fails for exec AND TUI sessions (`external_agent_ingress_closed`); steering is tmux-only.
