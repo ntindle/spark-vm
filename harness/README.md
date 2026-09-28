@@ -110,17 +110,20 @@ Implements the executable half of the R2 pre-seeded-harness contract
 - **`key_registry.py`** — SSH-key-as-account registry (GitHub #446, slice
   S2): the stateful half S1 points at. A per-host fingerprint→account
   record store (`$XDG_STATE_HOME/spark-vm/key-registry`, override with
-  `--registry-root`) with created/last-seen timestamps, box binding, and
-  claim state — this is how "same key -> same box" resumes work: the first
-  connect registers the key, later connects look the fingerprint up.
-  Single JSON file, atomic writes (`O_EXCL` temp + `os.replace`), lockdir
-  mutual exclusion (stale locks reclaimed via pid check), corrupt stores
-  fail closed rather than silently rebuilding, `0600`/`0700` modes. No
-  secrets, no key material — records hold public fingerprints and one-way
-  derived account ids. Idempotent `register` (explicit `--box-ref` rebinds;
-  omitting it leaves the binding alone), plus `lookup`, `touch`, `claim`,
-  `bind`, `remove`, and JSON `status`. Stdlib only, no network. Covered by
-  `test_key_registry.py` (30 tests incl. a threaded contention test and
+  `--registry-root`, either side of the subcommand) with created/last-seen
+  timestamps and box binding — the storage foundation for "same key ->
+  same box" resumes: first connects register the key, later connects look
+  the fingerprint up. Single JSON file, atomic writes (`O_EXCL` temp +
+  `os.replace`), lockdir mutual exclusion (stale locks reclaimed via pid
+  check), corrupt stores fail closed rather than silently rebuilding,
+  `0600`/`0700` modes. No secrets, no key material — records hold public
+  fingerprints and one-way derived account ids. Idempotent `register`
+  (explicit `--box-ref` rebinds; omitting it leaves the binding alone; an
+  empty `--box-ref` is rejected), plus `lookup`, `touch`, `bind`,
+  `remove`, a registry-issued `manifest` (fills the S1-promised `box_id`
+  slot), and JSON `status`. No claim state — the claim protocol is a later
+  slice (S3) and S2 must not preempt it. Stdlib only, no network. Covered
+  by `test_key_registry.py` (33 tests incl. a threaded contention test and
   stale-lock/corrupt-store fail-closed checks). Design note:
   `docs/KEY_IDENTITY_REGISTRY.md`.
 

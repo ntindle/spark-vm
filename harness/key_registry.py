@@ -4,8 +4,8 @@
 Slice S1 (``harness/key_identity.py``) is the stateless half: parse a public
 key, fingerprint it, derive the stable opaque account id. This module is the
 stateful half: a per-host registry mapping SSH key fingerprints to account
-records — ``created_at``, ``last_seen_at``, key type, box binding, and claim
-state. "Same key -> same box" resume state lives here.
+records — ``created_at``, ``last_seen_at``, key type, and box binding.
+"Same key -> same box" resume state lives here.
 
 Storage and lookup choices (the design half of #446's acceptance criteria):
 - Single JSON file (``<root>/registry.json``) keyed by the OpenSSH
@@ -15,9 +15,9 @@ Storage and lookup choices (the design half of #446's acceptance criteria):
   discipline (runs unchanged on the self-hosted box, the hosted control
   plane, and the operator laptop).
 - Interprocess mutual exclusion is a lockdir (``<root>/registry.lock.d``)
-  created with ``os.mkdir`` (atomic on POSIX). fcntl locks are not portable
-  (the operator laptop may be macOS, the box is Linux); the lockdir works
-  on both, and across threads in one process too.
+  created with ``os.mkdir`` (atomic on POSIX). A lockdir also serializes
+  threads inside one process, which fcntl locks do not; portability across
+  the box and the operator laptop comes free.
 - Writes are atomic: temp file (``O_EXCL``) + ``os.replace``. A crashed
   writer can never leave a half-written registry behind.
 - Corrupt ``registry.json`` fails closed (``RegistryError``), never silently
@@ -29,10 +29,9 @@ ids, and operator-visible metadata. The store is ``0o600`` / root dir
 ``0o700`` anyway — the account ids map to whoever's keys, and defense in
 depth costs nothing.
 
-Key rotation and the claim/upgrade escape hatch are LATER slices (see
-#446): here a new key is a new account (same policy as S1), and
-``mark_claimed`` only records the operator's claim decision — it does not
-implement the claim protocol.
+The claim/upgrade escape hatch is a LATER slice (see #446): this module
+records no claim state at all, so S2 cannot preempt S3's claim-protocol
+decisions. Per S1's policy, a new key is a new account.
 """
 from __future__ import annotations
 
@@ -93,16 +92,25 @@ def default_registry_root() -> Path:
 def normalize_fingerprint(fp: str) -> str:
     """Validate an OpenSSH SHA256 fingerprint string, return it unchanged.
 
-    Raises KeyIdentityError: fingerprints are identity, and a malformed one
-    must never silently become a different record key.
+    Enforces the exact canonical shape S1 emits: ``SHA256:`` + 43 chars of
+    unpadded base64 (SHA-256 is 32 bytes; 32 bytes base64-encode to 43
+    unpadded chars). Padding is never legitimate — S1's ``fingerprint()``
+    always strips it — and accepting a padded twin would mint a second
+    account id for the same key (QA blocker, round 1: padded and unpadded
+    forms derive different ``acct_`` ids). A malformed fingerprint raises
+    ``KeyIdentityError`` loudly rather than silently becoming a different
+    record key.
     """
     if not isinstance(fp, str) or not fp.startswith("SHA256:"):
         raise KeyIdentityError(f"not an OpenSSH SHA256 fingerprint: {fp!r}")
     b64 = fp[len("SHA256:") :]
-    if not b64 or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in b64):
+    if len(b64) != 43 or any(
+        c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        for c in b64
+    ):
         raise KeyIdentityError(f"not an OpenSSH SHA256 fingerprint: {fp!r}")
-    # account_id_for re-validates length/shape; keep the derivation and the
-    # registry on the same acceptance rule.
+    # account_id_for re-checks the SHA256: prefix and ASCII-ness; the shape
+    # check above is this module's stricter canonical rule.
     account_id_for(fp)
     return fp
 
@@ -142,6 +150,11 @@ class KeyRegistry:
             pass  # best effort; perms verified by tests on fresh dirs
         deadline = time.monotonic() + LOCK_TIMEOUT_S
         while True:
+            if time.monotonic() >= deadline:
+                raise RegistryError(
+                    f"registry lock not acquired within {LOCK_TIMEOUT_S}s: "
+                    f"{self.lock_path}"
+                )
             try:
                 os.mkdir(self.lock_path)
                 break
@@ -150,18 +163,15 @@ class KeyRegistry:
                     # Stale lock: the holder died mid-write. Reclaim by
                     # removing and re-creating. (Pid-reuse race: a recycled
                     # pid would make us wait instead of reclaim — a
-                    # liveness miss, never a corruption.)
+                    # liveness miss, never a corruption.) The deadline is
+                    # checked at the top of the loop, so pathological
+                    # stale-lock churn cannot spin forever.
                     try:
                         (self.lock_path / "pid").unlink(missing_ok=True)
                         os.rmdir(self.lock_path)
                     except OSError:
                         pass  # lost the race to another reclaimer; retry
                     continue
-                if time.monotonic() >= deadline:
-                    raise RegistryError(
-                        f"registry lock not acquired within {LOCK_TIMEOUT_S}s: "
-                        f"{self.lock_path}"
-                    )
                 time.sleep(_LOCK_POLL_S)
         try:
             (self.lock_path / "pid").write_text(str(os.getpid()))
@@ -190,6 +200,17 @@ class KeyRegistry:
             raise RegistryError(
                 f"registry has unexpected shape, refusing to proceed: {self.store_path}"
             )
+        if data.get("schema_version") != SCHEMA_VERSION:
+            raise RegistryError(
+                f"registry schema v{data.get('schema_version')}, "
+                f"this code reads v{SCHEMA_VERSION}: {self.store_path}"
+            )
+        for fp, rec in data["accounts"].items():
+            if not isinstance(rec, dict):
+                raise RegistryError(
+                    f"registry record for {fp} is not an object, "
+                    f"refusing to proceed: {self.store_path}"
+                )
         return data
 
     def _save(self, data: dict) -> None:
@@ -237,6 +258,11 @@ class KeyRegistry:
         """
         if (key_line is None) == (fingerprint_str is None):
             raise RegistryError("register needs exactly one of key_line / fingerprint_str")
+        if box_ref == "":
+            # An empty string is provided-but-meaningless: it would silently
+            # clear a binding while nothing downstream distinguishes "unbound"
+            # (None) from "bound to empty". Reject loudly instead.
+            raise RegistryError("box_ref must not be empty")
         if key_line is not None:
             key = key_identity.parse_public_key(key_line)
             fp = fingerprint(key)
@@ -270,11 +296,10 @@ class KeyRegistry:
                 "created_at": now,
                 "last_seen_at": now,
                 "box_ref": box_ref,
-                "claimed": False,
-                "claimed_at": None,
                 "schema_version": SCHEMA_VERSION,
             }
             accounts[fp] = record
+            record = dict(record)  # return a copy, like the existing-record path
 
         self._mutate(_do)
         return record
@@ -306,6 +331,8 @@ class KeyRegistry:
     def bind_box(self, fp: str, box_ref: str) -> bool:
         """Bind a fingerprint to a box. Returns False when unknown."""
         fp = normalize_fingerprint(fp)
+        if box_ref == "":
+            raise RegistryError("box_ref must not be empty")
         with self._locked():
             data = self._load()
             rec = data["accounts"].get(fp)
@@ -314,28 +341,6 @@ class KeyRegistry:
             rec["box_ref"] = box_ref
             self._save(data)
             return True
-
-    def mark_claimed(self, fp: str) -> bool:
-        """Record the operator's claim decision. Returns False when unknown.
-
-        This only records the decision (the claim protocol itself is a later
-        slice per #446); ``claimed_at`` is the audit timestamp.
-        """
-        fp = normalize_fingerprint(fp)
-        now = _iso(_utcnow())
-        found = False
-
-        def _do(data: dict) -> None:
-            nonlocal found
-            rec = data["accounts"].get(fp)
-            if rec is not None:
-                rec["claimed"] = True
-                rec["claimed_at"] = now
-                rec["last_seen_at"] = now
-                found = True
-
-        self._mutate(_do)
-        return found
 
     def remove(self, fp: str) -> bool:
         """Delete an account record. Returns False when unknown."""
@@ -362,44 +367,66 @@ class KeyRegistry:
 
 # -- CLI ---------------------------------------------------------------------
 def _cmd(argv: list[str] | None = None) -> int:
+    # --registry-root lives on a shared parent parser so it is accepted
+    # both before the subcommand (global position) and after it — an agent
+    # or operator typing the subcommand first must not hit an argparse error
+    # (Product blocker, round 1).
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--registry-root",
+        default=None,
+        help="registry directory (default: $XDG_STATE_HOME/spark-vm/key-registry)",
+    )
     parser = argparse.ArgumentParser(
         prog="key_registry",
+        parents=[common],
         description=(
             "SSH-key-as-account registry (#446, slice S2): remember "
             "first-connect keys on this box so the same key resumes the "
             "same account."
         ),
     )
-    parser.add_argument(
-        "--registry-root",
-        default=None,
-        help="registry directory (default: $XDG_STATE_HOME/spark-vm/key-registry)",
-    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_reg = sub.add_parser("register", help="register a key (idempotent)")
+    p_reg = sub.add_parser(
+        "register", parents=[common], help="register a key (idempotent)"
+    )
     p_reg.add_argument("--key-line", help="one OpenSSH public-key line")
     p_reg.add_argument("--fingerprint", help="SHA256: fingerprint (needs --key-type)")
     p_reg.add_argument("--key-type", help="key type, with --fingerprint")
     p_reg.add_argument("--box-ref", default=None, help="box this account binds to")
 
-    p_lookup = sub.add_parser("lookup", help="show the record for a fingerprint")
+    p_lookup = sub.add_parser(
+        "lookup", parents=[common], help="show the record for a fingerprint"
+    )
     p_lookup.add_argument("fingerprint")
 
-    p_touch = sub.add_parser("touch", help="refresh last_seen_at")
+    p_touch = sub.add_parser(
+        "touch", parents=[common], help="refresh last_seen_at"
+    )
     p_touch.add_argument("fingerprint")
 
-    p_claim = sub.add_parser("claim", help="record the operator's claim decision")
-    p_claim.add_argument("fingerprint")
-
-    p_bind = sub.add_parser("bind", help="bind a fingerprint to a box")
+    p_bind = sub.add_parser(
+        "bind", parents=[common], help="bind a fingerprint to a box"
+    )
     p_bind.add_argument("fingerprint")
     p_bind.add_argument("box_ref")
 
-    p_remove = sub.add_parser("remove", help="delete an account record")
+    p_remove = sub.add_parser(
+        "remove", parents=[common], help="delete an account record"
+    )
     p_remove.add_argument("fingerprint")
 
-    sub.add_parser("status", help="list all registered accounts")
+    p_manifest = sub.add_parser(
+        "manifest",
+        parents=[common],
+        help="emit the resume manifest for a fingerprint (registry-issued)",
+    )
+    p_manifest.add_argument("fingerprint")
+
+    sub.add_parser(
+        "status", parents=[common], help="list all registered accounts"
+    )
 
     args = parser.parse_args(argv)
     reg = KeyRegistry(root=args.registry_root)
@@ -409,6 +436,28 @@ def _cmd(argv: list[str] | None = None) -> int:
         # tool, and JSON is the contract (human-readable enough anyway).
         print(json.dumps(obj, indent=2, sort_keys=True))
         return 0
+
+    def _resume_manifest(rec: dict) -> dict:
+        # The registry-issued resume manifest: the same field vocabulary as
+        # S1's first-connect manifest (harness/key_identity.py), with the
+        # box_id slot filled from the registry's box binding — the slot S1's
+        # README promised this slice would fill. vm_endpoint and claim_url
+        # stay null: the endpoint is connect-time knowledge (a later wiring
+        # slice) and the claim protocol is S3 (#446). "registry_issued"
+        # distinguishes this document from S1's connect-time manifest.
+        now = _iso(_utcnow())
+        return {
+            "manifest_version": key_identity.MANIFEST_VERSION,
+            "account_id": rec["account_id"],
+            "key_fingerprint": rec["fingerprint"],
+            "key_type": rec["key_type"],
+            "issued_at": now,
+            "expires_at": None,
+            "vm_endpoint": None,
+            "box_id": rec["box_ref"],
+            "claim_url": None,
+            "registry_issued": True,
+        }
 
     try:
         if args.command == "register":
@@ -431,12 +480,6 @@ def _cmd(argv: list[str] | None = None) -> int:
                 return 1
             print("ok")
             return 0
-        if args.command == "claim":
-            if not reg.mark_claimed(args.fingerprint):
-                print(f"unknown fingerprint: {args.fingerprint}", file=sys.stderr)
-                return 1
-            print("ok")
-            return 0
         if args.command == "bind":
             if not reg.bind_box(args.fingerprint, args.box_ref):
                 print(f"unknown fingerprint: {args.fingerprint}", file=sys.stderr)
@@ -449,6 +492,12 @@ def _cmd(argv: list[str] | None = None) -> int:
                 return 1
             print("ok")
             return 0
+        if args.command == "manifest":
+            rec = reg.lookup(args.fingerprint)
+            if rec is None:
+                print(f"unknown fingerprint: {args.fingerprint}", file=sys.stderr)
+                return 1
+            return _out(_resume_manifest(rec))
         if args.command == "status":
             return _out(reg.accounts())
     except (RegistryError, KeyIdentityError) as exc:
