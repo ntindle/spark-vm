@@ -92,7 +92,7 @@ isolation), because those are where the trust story lives.
 | **Northflank** | Both | microVM/Kata/gVisor, stateful or ephemeral, self-serve BYOC | Lowest published rate: $0.01667/vCPU-hr; free sandbox tier |
 | **E2B** | Task-scoped sandbox | Firecracker microVM per sandbox, SDK-first, templates-as-code | Hobby $0 + $100 one-time credit (1h sessions, 20 concurrent); Pro **$150/mo** + usage (24h sessions); ~$78/mo usage for one continuous 2vCPU/512MB box; $21M Series A **2025-07-28** (Insight Partners lead; dated sources: PRNewswire wire + SiliconANGLE URL) |
 | **Daytona** | Task-scoped sandbox | Containers (+VM/Windows classes), stateful, stop/archive/pause/fork, GPU (ephemeral) | $200 free compute, no plan floor; $0.0504/vCPU-hr + $0.0162/GiB-hr; GPU on request (H100 listed $2.27/hr) |
-| **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team; in talks to raise at ~$15B valuation (2026-09-23, Bloomberg/Reuters THIRD-PARTY; $355M May raise at $4.65B); **2026-09-26 late-morning fold (C61, THIRD-PARTY):** staff engineers detailed rebuilding the sandbox layer off Kubernetes for "millions of concurrent sandboxes and tens of thousands of creations per second" — forcing constraint was scheduling latency at creation time (my2cents.ai digest 2026-09-24; author + talk not directly verified this pass) |
+| **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team; in talks to raise at ~$15B valuation (2026-09-23, Bloomberg/Reuters THIRD-PARTY; $355M May raise at $4.65B); **2026-09-26 late-morning fold (C61, THIRD-PARTY):** staff engineers detailed rebuilding the sandbox layer off Kubernetes for "millions of concurrent sandboxes and tens of thousands of creations per second" — forcing constraint was scheduling latency at creation time. (C61 source: my2cents.ai digest 2026-09-24; author + talk not directly verified this pass.) **2026-09-27 evening scoped fold (VENDOR-VERIFIED):** network egress billed from **Oct 1, 2026** — 1/10/100 TiB per-cycle allowances (Starter/Team/Enterprise), **$0.04/GiB** overage; usage visible on Usage & Billing since Sep 1 (no September charge), first bill with egress Nov 1, 2026; meters container NIC + inter-container private traffic + Cloud Bucket Mount uploads, excludes Modal Volumes I/O (vendor docs `modal.com/docs/guide/network-egress-billing`, read live 2026-09-27 ~20:05 CDT). Corpus's richest published sandbox-egress datapoint (DO harness-runtime: $0.01/GiB public egress; AgentComputer C12 stays OPEN). |
 | **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots; **64 GB ephemeral NVMe default** (SDK ≥3.0.0/custom image; 32 GB on deprecated runtimes — C32 resolved, see "Watch update — 2026-09-23"); Drives public beta (persistent, ≤16 TiB/drive, usage-based pricing); **2026-09-26 morning fold (VENDOR-VERIFIED):** sandbox memory observability — Memory Usage card (avg/P75/P95 across sandboxes), per-sandbox detail page auto-scales y-axis to the memory limit with a dashed 85% reference line, `memoryUsedBytes` in the Observability query builder (custom queries + alerts), CLI `vercel metrics` under `vercel.sandbox.memory_used_bytes` (C59, in-lane); `vercel/vcr-action/login` GitHub Action — OIDC login to VCR, short-lived token revoked at job end, prepared image usable as custom sandbox image (`<repository>:<tag>`) (C60, adjacent) | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
 | **Cloudflare Sandbox** | Task-scoped sandbox | Containers on Workers, sleeps at 10 min idle, disk resets on sleep | Active-CPU billing ($0.072/vCPU-hr); $5/mo Workers Paid floor |
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
@@ -4734,3 +4734,31 @@ CDT baseline ~17:25–17:30 CDT; B delta news scan ~16:40–17:40 CDT; suffix
 - **Deep-scan evaluation: no in-window development.** Heapjack +
   Overpatch and the GitLab allowlisted-proxy escape both remain queued,
   NOT filed.
+
+## Watch update — 2026-09-27 (evening, cycle 4): Modal egress billing VENDOR-VERIFIED fold
+
+Full pass record in `docs/COMPETITOR_WATCH_2026-09-27_EVENING_C4.md`
+(scoped, not a two-surveyor pass: a single targeted first-party verification
+delegated by the evening cycle-3 doc's watch-out #5).
+
+- **CORPUS FOLD — Modal network-egress pricing, VENDOR-VERIFIED.** The
+  evening cycle-3 flagged-only item ("Modal egress billing: third-party
+  GitHub doc, ~11d pre-window: egress charges from Oct 1 2026, $0.04/GiB")
+  reads verbatim on Modal's own docs
+  (`modal.com/docs/guide/network-egress-billing`, read live ~20:05 CDT
+  2026-09-27): network egress billed from Oct 1, 2026; per-cycle allowances
+  Starter 1 TiB / Team 10 TiB / Enterprise 100 TiB; $0.04/GiB overage; Usage
+  & Billing page shows egress since Sep 1, 2026 (no September charge), first
+  bill including egress Nov 1, 2026. Metering covers outbound from Modal
+  tasks — container NIC traffic, private inter-container traffic, Cloud
+  Bucket Mount uploads; Modal Volumes reads/writes excluded. Folded as a
+  dated note on the Modal field-table row — no new C-number (the C68
+  reservation for a DevDay agent-O confirmation stands). Directional
+  observation (not filed): $0.04/GiB undercuts hyperscaler first-tier egress
+  ($0.08–0.12/GiB at GCP), and the 1 TiB Starter allowance is generous;
+  DO's harness-runtime charges $0.01/GiB for public internet egress while
+  AgentComputer's C12 egress-policy ask stays open — Modal is now the
+  corpus's richest published sandbox-egress datapoint.
+- **No other vendor re-checks this turn** — the cycle-3 baseline
+  (~18:26–~18:55 CDT) stands; no new C-numbers; the in-lane no-launch
+  verdict dated 2026-09-25 stands.
