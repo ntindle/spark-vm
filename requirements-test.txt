@@ -2,5 +2,7 @@
 # then `python3 -m pytest` from the repo root (see pytest.ini).
 pytest>=8
 cryptography>=42  # confirm/test_push.py — VAPID / Web Push (confirm/push.py)
+pillow  # scripts/test_waitlist_page.py — og:image dimension/format assertions
+# (unpinned: any recent wheel decodes PNG; pin only if a version breaks the suite)
 # Note: mitmproxy is a *deploy* dependency of the swap proxy (installed by
 # proxy/deploy.sh), not a test dependency — no test module imports it.
