@@ -54,7 +54,7 @@ The component is in good shape where it counts:
 - #493 The bridge parses `/tmp/cua-desktop/env` from world-writable /tmp —
   env-injection vector (DISPLAY/PATH) into driver subprocesses if another
   local user exists; the env file should live in a private rundir or be
-  integrity-checked. **Fixed 2026-09-27 (#TBD):** `cua-desktop.sh` creates
+  integrity-checked. **Fixed 2026-09-27 (#596):** `cua-desktop.sh` creates
   the rundir with 0700 (atomically, `mkdir -m 700`, symlink re-checked
   after a lost creation race) and refuses symlink/wrong-owner plants; its
   `ensure_private_rundir` is the single choke point that also removes any
@@ -69,7 +69,7 @@ The component is in good shape where it counts:
   `type_text`/`press_key` — focus can be stolen between the two calls.
 - #495 keepalive can double-spawn the bridge: two overlapping keepalive runs
   can both fail the curl and both spawn; the bridge has no pidfile or
-  singleton guard. **Fixed 2026-09-27 (#TBD):** the bridge takes an
+  singleton guard. **Fixed 2026-09-27 (#596):** the bridge takes an
   exclusive non-blocking flock on a singleton lock at startup and exits
   if another instance holds it; `cua-keepalive.sh` serializes its whole
   run under `flock -n` so overlapping invocations cannot both spawn. Both
