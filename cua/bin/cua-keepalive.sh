@@ -18,6 +18,8 @@ export PATH="$HOME/cua/bin:/usr/local/bin:/usr/bin:/bin"
 # below — #493's sibling — and any local user could squat the lock).
 # Returns 0 when the lock is held, 2 when another run holds it (not an
 # error), 1 when the lock cannot be acquired at all (loud failure).
+# shellcheck disable=SC2120 # tests (cua/test_shell_scripts.py) call take_run_lock
+# with a lockfile arg override; the production call site passes none.
 take_run_lock() { # take_run_lock [lockfile] — arg override exists for tests
   local lock=${1:-$HOME/.cache/cua-bridge.keepalive.lock}
   mkdir -p "$(dirname "$lock")" 2>/dev/null || {
@@ -41,10 +43,12 @@ take_run_lock || rc=$?
 # The env file lives in world-writable /tmp and sourcing executes it as
 # this user (#493). Source it only if it passes the shared trust check;
 # otherwise proceed without it.
+# shellcheck disable=SC2120 # tests (cua/test_shell_scripts.py) call safe_source_env
+# with an env-file arg override; the production call site passes none.
 safe_source_env() { # safe_source_env [env_file] — arg override exists for tests
   local f=${1:-/tmp/cua-desktop/env}
   trust_env_file "$f" || return 1
-  # shellcheck disable=SC1091
+  # shellcheck disable=SC1090,SC1091
   . "$f"
 }
 safe_source_env || true
