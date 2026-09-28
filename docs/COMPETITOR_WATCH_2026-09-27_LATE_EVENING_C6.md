@@ -14,7 +14,7 @@ fold, and the C5 NanoClaw parent-call closure all stand).
 Delta-only against the cycle-5 scoped verification
 (`docs/COMPETITOR_WATCH_2026-09-27_LATE_EVENING_C5.md`).
 
-## Pre-deletion re-verification (first-party, read live ~21:0x–21:1x CDT 2026-09-27)
+## Pre-deletion re-verification (first-party, read live ~20:5x CDT 2026-09-27)
 
 - **YC rename evidence — no drift:** `ycombinator.com/companies/ascii`
   still serves **301 → `https://www.ycombinator.com/companies/boat`**

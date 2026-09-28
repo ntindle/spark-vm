@@ -4791,7 +4791,7 @@ delegated by the evening cycle-3 doc's watch-out #5).
   (superseded by the richer 2026-09-25 fold); EU-only DE/FI/FR geography
   ("folded from the deprecated C40 pointer row"). Nothing unique remains in
   the deprecated row — audit passes.
-- Pre-deletion re-verification (first-party, ~21:0x–21:1x CDT 2026-09-27):
+- Pre-deletion re-verification (first-party, ~20:5x CDT 2026-09-27):
   `ycombinator.com/companies/ascii` → 301 → `/companies/boat` (no drift);
   `docs.boat.dev/pricing` value-for-value identical to the 2026-09-25 fold;
   legacy domains now redirect — `box.ascii.dev` and `ascii.dev` both
