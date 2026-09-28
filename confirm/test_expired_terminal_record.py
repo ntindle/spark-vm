@@ -449,18 +449,65 @@ class ExpiredHumanSurfaceTests(unittest.TestCase):
         got = self._do_get_expired_detail(aid)
         self.assertEqual(got["code"], 410)
         self.assertIn('href="/answered"', got["body"])
+
+    def test_post_answer_expired_410_stamps_terminal_record(self):
+        """#539: POST /answer on an already-expired item (Finding 53(a))
+        stamps the S1 expired-approval terminal record BEFORE removing
+        the pending file — the "expired between render and answer" case
+        no longer leaves the expiry with no terminal record."""
+        aid = "expiredlink4"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2020-01-01T00:00:00+00:00",
+              "credential": "c", "host": "h", "method": "GET"}
+        nonce = cd._mint_csrf_nonce(it)
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            json.dumps(it))
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+
+        def fake_send_html(self, body, code=200, title="Approvals",
+                           script=""):
+            got.update(body=body, code=code)
+
+        cd._aid_lock(aid)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch.object(cd.Handler, "_send_html", fake_send_html):
+            h._answer_locked("ntindle@github", aid, nonce, "deny")
+        self.assertEqual(got["code"], 410)
+        rec_path = self.approvals / "consumed" / (aid + ".json")
+        self.assertTrue(rec_path.exists(), "no terminal record stamped")
+        rec = json.loads(rec_path.read_text())
+        self.assertEqual(rec["decision"], "expired")
+        self.assertEqual(rec["expired_by"], "confirmd")
+        self.assertFalse(
+            (self.approvals / "pending" / (aid + ".json")).exists(),
+            "pending file not reaped")
+        self.assertIn('href="/answered"', got["body"])
         self.assertIn("answered history", got["body"])
 
-    def test_get_expired_410_bare_when_no_record(self):
-        """Without a terminal record the 410 stays bare — no history to
-        point at, and the message is unchanged."""
+    def test_get_expired_410_stamps_record_and_links_history(self):
+        """#539: GET /approval/<aid> on an expired item stamps the S1
+        expired-approval terminal record BEFORE removing the pending file
+        (stamp-then-delete), so the 410 now links to the answered history —
+        the bare 410 only stands when a record cannot be stamped."""
         aid = "expiredlink2"
         self._plant_expired_pending(aid)
         got = self._do_get_expired_detail(aid)
         self.assertEqual(got["code"], 410)
-        self.assertNotIn("/answered", got["body"])
-        self.assertIn("This approval expired and was removed.",
-                     got["body"])
+        self.assertIn('href="/answered"', got["body"])
+        self.assertIn("answered history", got["body"])
+        rec_path = self.approvals / "consumed" / (aid + ".json")
+        self.assertTrue(rec_path.exists(), "no terminal record stamped")
+        rec = json.loads(rec_path.read_text())
+        self.assertEqual(rec["decision"], "expired")
+        self.assertEqual(rec["expired_by"], "confirmd")
+        self.assertFalse(
+            (self.approvals / "pending" / (aid + ".json")).exists(),
+            "pending file not reaped")
 
     def test_post_answer_expired_410_links_history(self):
         """POST /answer on an expired item: same link behavior as the GET
