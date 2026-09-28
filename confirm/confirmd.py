@@ -154,16 +154,25 @@ def _tailnet_dnsname():
     return None
 
 def _page_origins():
-    """Exact set of origins the page is served at (finding 57)."""
+    """Exact set of origins the page is served at (finding 57).
+
+    Returns (origins, dns_ok): dns_ok is False when the ts.net DNS name
+    could not be resolved, so a refresh keeps the last good set instead
+    of committing an IP-literal-only shrink (the refusal boundary must
+    never silently shrink). The IP-literal half comes from import-time
+    BIND — a tailscale IP renumber mid-daemon still needs a restart."""
     # Explicit override wins (deploy.sh sets both IP and ts.net name).
     env = os.environ.get("CONFIRM_ORIGINS", "")
     if env.strip():
-        return {o.strip() for o in env.split(",") if o.strip()}
+        return {o.strip() for o in env.split(",") if o.strip()}, True
     origins = {"https://%s:%d" % (BIND, PORT)}
     dns = _tailnet_dnsname()
     if dns:
         origins.add("https://%s:%d" % (dns, PORT))
-    return origins
+        return origins, True
+    # Finding 67: import-time fallback — DNS unresolvable at startup, the
+    # set holds the IP literal only so every real browser POST doesn't 403.
+    return origins, False
 
 
 # Issue #619: PAGE_ORIGINS was frozen at import — a tailscale DNS rename
@@ -190,7 +199,7 @@ class _PageOrigins:
     def __init__(self):
         self._lock = threading.Lock()
         self._pinned = bool(os.environ.get("CONFIRM_ORIGINS", "").strip())
-        self._origins = _page_origins()
+        self._origins, _ = _page_origins()
         self._ts = time.monotonic()
 
     def _refresh(self):
@@ -198,10 +207,12 @@ class _PageOrigins:
         with self._lock:
             if now - self._ts < _PAGE_ORIGINS_TTL:
                 return
-            if not self._pinned and _tailnet_dnsname() is not None:
-                # Only rebuild when the DNS name re-resolves; a failed
-                # lookup keeps the last good set.
-                self._origins = _page_origins()
+            if not self._pinned:
+                origins, ok = _page_origins()
+                if ok:
+                    self._origins = origins
+                # else: keep the last good set — the refusal boundary must
+                # never silently shrink.
             self._ts = now
 
     def _snapshot(self):
