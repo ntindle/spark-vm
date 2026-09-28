@@ -37,7 +37,9 @@
 # Env overrides (for tests): TOOLSET_STATE_DIR, APT_CONF_DIR, SYSTEMD_DIR,
 # OPTOUT_FILE, SKIP_SYSTEMCTL=1 (skip systemctl calls), SKIP_SUDO=1 (run
 # file ops without sudo), TMUX_BIN (idle-gate probe), TOOLSET_UPDATE_NO_MAIN=1
-# (source functions only, for tests).
+# (source functions only, for tests), TOOLSET_INSTALL_OWNER/GROUP (owner for
+# installed files; default root — tests run non-root, e.g. CI, set these to
+# the current uid/gid since `install -o root` requires privilege).
 #
 # Trust model (read docs/TOOLSET_UPDATE.md before enabling):
 #   - THE TIMER RUNS THE INSTALLED COPY at $TOOLSET_STATE_DIR/bin/, NOT the
@@ -71,6 +73,8 @@ VERSION_FILE="$(dirname "$SCRIPT_DIR")/VERSION"
 : "${SKIP_SYSTEMCTL:=0}"
 : "${SKIP_SUDO:=0}"
 : "${TMUX_BIN:=tmux}"
+: "${TOOLSET_INSTALL_OWNER:=root}"
+: "${TOOLSET_INSTALL_GROUP:=root}"
 
 STATE_AUDIT_LOG="$TOOLSET_STATE_DIR/audit.log"
 STATE_RUN_LOG="$TOOLSET_STATE_DIR/toolset-update.log"
@@ -216,7 +220,7 @@ _os_security_repair() {
     printf '%s\n%s\n' "$WANT_UPDATE_LIST" "$WANT_UNATTENDED" >"$tmp"
     # Atomic publish: stage with correct ownership/mode, then rename so
     # readers never see a half-written 20auto-upgrades.
-    _sudo install -o root -g root -m 0644 "$tmp" "$newf" \
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$tmp" "$newf" \
         || { rm -f "$tmp" "$newf"; log "os-security: config stage failed"; return 1; }
     rm -f "$tmp"
     _sudo mv -f "$newf" "$UNATTENDED_CONF" \
@@ -330,11 +334,11 @@ cmd_install() {
     for a in "$@"; do case "$a" in *) echo "ERROR: unknown flag: $a" >&2; return 2 ;; esac; done
     _sudo mkdir -p "$INSTALLED_BIN" "$SYSTEMD_DIR" \
         || { echo "ERROR: cannot create install dirs" >&2; return 1; }
-    _sudo install -o root -g root -m 0755 "$SCRIPT_DIR/toolset-update.sh" "$INSTALLED_SCRIPT" \
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0755 "$SCRIPT_DIR/toolset-update.sh" "$INSTALLED_SCRIPT" \
         || { echo "ERROR: cannot install script copy" >&2; return 1; }
-    _sudo install -o root -g root -m 0644 "$SCRIPT_DIR/sparkvm-toolset-update.service" "$SYSTEMD_DIR/" \
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/sparkvm-toolset-update.service" "$SYSTEMD_DIR/" \
         || { echo "ERROR: cannot install service unit" >&2; return 1; }
-    _sudo install -o root -g root -m 0644 "$SCRIPT_DIR/sparkvm-toolset-update.timer" "$SYSTEMD_DIR/" \
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/sparkvm-toolset-update.timer" "$SYSTEMD_DIR/" \
         || { echo "ERROR: cannot install timer unit" >&2; return 1; }
     if [ "$SKIP_SYSTEMCTL" != "1" ]; then
         _sudo systemctl daemon-reload || { echo "ERROR: daemon-reload failed" >&2; return 1; }
