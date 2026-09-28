@@ -1,17 +1,11 @@
 # spark-vm CI: python tests, shellcheck, markdown link check, PNG smoke test.
 #
-# Run locally with:
-#   cd proxy   && python3 -m pytest test_swap_addon.py test_grant_writer.py test_round6.py test_safe_install.py test_build_ca_bundle.py test_privileged_read.py test_enforce_secrets_dir.py test_validation_conformance.py
+# Run locally with (from the repo root — the one-liner in CONTRIBUTING.md):
+#   python3 -m pytest
+# (`pytest.ini` testpaths enumerate every suite; CI runs exactly this, so a
+# suite can never land unwired the way the old per-directory lists allowed.)
 #   # the two seteuid install-safety tests self-skip as non-root; CI runs them under sudo:
-#   cd proxy   && sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest test_safe_install.py -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
-#   cd confirm && python3 -m pytest test_confirmd.py test_push.py test_push_queue.py
-#   cd deploy  && python3 -m pytest test_auto_deploy.py test_privileged_open_conformance.py
-#   cd muse-job && python3 -m pytest tests/test_event_trust.py
-#   python3 -m pytest cred-ui/tests/ -q
-#   cd cua     && python3 -m pytest test_cua_bridge.py test_shell_scripts.py -q
-#   cd jail    && python3 -m pytest test_build_smoke.py -q
-#   cd scripts && python3 -m pytest test_bounded_http.py test_waitlistd.py test_lint_changelog_ritual.py -q
-#   cd harness && python3 -m pytest test_proxy_match.py test_inject_provision_state.py -q
+#   sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest proxy/test_safe_install.py -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
 #   python3 scripts/lint-changelog-ritual.py  # changelog ritual lint (enforced as a CI job too)
 
 name: ci
@@ -39,78 +33,48 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest
-      # test_push.py imports the cryptography package at module level
-      # (the push tests exercise the real RFC 8291 encrypt/decrypt round
-      # trip); the runner image doesn't carry it.
-      - name: install cryptography (push tests)
-        run: pip install cryptography
-      # test_auto_deploy.py::test_scripts_syntax gates on shellcheck warnings;
-      # pin it explicitly rather than relying on the runner image carrying it.
+      # The merge gate proves exactly what a contributor runs locally
+      # (CONTRIBUTING.md "Running the tests"): requirements-test.txt is the
+      # whole dependency set — pytest, cryptography (confirm/push.py's Web
+      # Push tests), pillow (waitlist page og:image assertions). mitmproxy
+      # is a *deploy* dependency, never imported by a test module.
+      - name: install test dependencies
+        run: pip install -r requirements-test.txt
+      # cua/test_shell_scripts.py gates on shellcheck warnings; pin it
+      # explicitly rather than relying on the runner image carrying it.
       # (2026-09-18: the runner-preinstalled shellcheck caught 5 warnings the
       # PR author could not reproduce locally — the gate must be deterministic.)
       - name: install shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-      - name: proxy tests (swap addon, grant writer, install safety, CA bundle, privileged reads, secrets-dir, validation grammars)
-        run: python3 -m pytest test_swap_addon.py test_grant_writer.py test_round6.py test_safe_install.py test_build_ca_bundle.py test_privileged_read.py test_enforce_secrets_dir.py test_validation_conformance.py -q
-        working-directory: proxy
+      - name: full test suite (repo-root one-liner)
+        # pytest.ini testpaths enumerate every suite, so this step can never
+        # silently drop one the way the old per-directory file lists did
+        # (~two dozen suites landed unwired before 2026-09-27). pytest continues past
+        # a failing suite and reports every failure at the end, so one red
+        # suite cannot mask another. scripts/test_pytest_ini_covers_all.py
+        # pins the residual drift class: a test_*.py outside testpaths fails
+        # the run instead of never running.
+        # if: always(): never let an infra flake in an earlier setup step
+        # (shellcheck's apt-get, pip) skip the whole suite and void the
+        # merge gate's test signal.
+        if: always()
+        run: python3 -m pytest -q
       - name: proxy install-safety root tests (substitution regression)
         # test_staged_temp_unreachable_by_parent_dir_attacker and
         # test_staging_dir_swap_fails_closed self-skip as non-root, so the
-        # plain proxy suite above never executes the staged-temp
-        # substitution TOCTOU guard (issue #336). Run them under sudo so the
-        # merge gate proves the guard; SAFE_INSTALL_ROOT_TESTS=require turns
-        # a self-skip into a failure, so a skipped test can never read as a
-        # green build. (Pytest exits 5 if the -k selection ever matches
-        # nothing, e.g. after a rename -- also a failure.)
+        # one-liner above never executes the staged-temp substitution TOCTOU
+        # guard (issue #336). Run them under sudo so the merge gate proves
+        # the guard; SAFE_INSTALL_ROOT_TESTS=require turns a self-skip into
+        # a failure, so a skipped test can never read as a green build.
+        # (Pytest exits 5 if the -k selection ever matches nothing, e.g.
+        # after a rename -- also a failure.)
         if: always()
         # NB: sudo resets PATH to secure_path, so bare `python3` would resolve
         # to /usr/bin/python3 (no pytest) -- that failed the CI step with
         # "No module named pytest". Resolve the setup-python interpreter OUTSIDE
         # sudo (setup-python puts it first on PATH) and pass it as an absolute
         # path; sudo's VAR=value form still carries SAFE_INSTALL_ROOT_TESTS.
-        run: sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest test_safe_install.py -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
-        working-directory: proxy
-      - name: confirmd tests
-        if: always()
-        run: python3 -m pytest test_confirmd.py test_push.py test_push_queue.py -q
-        working-directory: confirm
-      - name: auto-deploy tests
-        if: always()
-        run: python3 -m pytest test_auto_deploy.py test_privileged_open_conformance.py test_toolset_update.py -q
-        working-directory: deploy
-      - name: muse-job trust tests
-        if: always()
-        run: python3 -m pytest tests/test_event_trust.py -q
-        working-directory: muse-job
-      - name: cred-ui tests
-        if: always()
-        run: python3 -m pytest cred-ui/tests/ -q
-      - name: cua bridge tests
-        if: always()
-        run: python3 -m pytest test_cua_bridge.py test_shell_scripts.py -q
-        working-directory: cua
-      - name: jail build smoke tests
-        if: always()
-        run: python3 -m pytest test_build_smoke.py -q
-        working-directory: jail
-      - name: harness tests (provision injector, proxy-match mirror)
-        # The proxy-match mirror's drift tripwire must run on every push:
-        # it pins harness/proxy_match.py against proxy/swap_addon.py, so a
-        # matcher change without a mirror update fails CI loudly instead of
-        # silently voiding the injector's fail-closed teardown model.
-        if: always()
-        run: python3 -m pytest test_proxy_match.py test_inject_provision_state.py -q
-        working-directory: harness
-      - name: scripts tests (shared bounded HTTP server, waitlistd, changelog ritual lint)
-        # scripts/bounded_http.py is the slow-loris-hardened server shared by
-        # confirmd, cred-ui and waitlistd (issues #77 M8, #471, #472); its
-        # suite must run on every push, not just on the author's box.
-        # test_lint_changelog_ritual.py guards the changelog-ritual lint the
-        # same way: a lint whose tests never run rots silently.
-        if: always()
-        run: python3 -m pytest test_bounded_http.py test_waitlistd.py test_lint_changelog_ritual.py -q
-        working-directory: scripts
+        run: sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest proxy/test_safe_install.py -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
 
   shellcheck:
     name: shellcheck
