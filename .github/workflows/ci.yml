@@ -77,7 +77,7 @@ jobs:
         working-directory: confirm
       - name: auto-deploy tests
         if: always()
-        run: python3 -m pytest test_auto_deploy.py test_privileged_open_conformance.py -q
+        run: python3 -m pytest test_auto_deploy.py test_privileged_open_conformance.py test_toolset_update.py -q
         working-directory: deploy
       - name: muse-job trust tests
         if: always()

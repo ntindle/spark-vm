@@ -1,0 +1,30 @@
+[Unit]
+Description=spark-vm toolset-update: keep the box's default toolset current (#532)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as root: the updater repairs /etc/apt/apt.conf.d (unattended-upgrades
+# config) and manages system services. This is the box's own scheduled root
+# maintenance, not a privilege granted to anyone new — same trust as a manual
+# `sudo apt` run by the operator. The updater runs no package manager itself;
+# unattended-upgrades performs installs on its own schedule.
+#
+# CRITICAL: ExecStart points at the INSTALLED COPY in
+# /home/ntindle/.sparkvm-toolset/bin/ — never at the repo checkout. A writer
+# with checkout access must not be able to rewire the updater's own code;
+# refreshing the installed copy is the privileged `install` step
+# (see docs/TOOLSET_UPDATE.md).
+User=root
+ExecStart=/home/ntindle/.sparkvm-toolset/bin/toolset-update.sh update
+# Harden the root service: no privilege escalation from the updater itself,
+# private /tmp so staged files are invisible to other users.
+NoNewPrivileges=true
+PrivateTmp=true
+# A failed run must be loud in the journal and in the state dir.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
