@@ -29,9 +29,15 @@ ids, and operator-visible metadata. The store is ``0o600`` / root dir
 ``0o700`` anyway — the account ids map to whoever's keys, and defense in
 depth costs nothing.
 
-The claim/upgrade escape hatch is a LATER slice (see #446): this module
-records no claim state at all, so S2 cannot preempt S3's claim-protocol
-decisions. Per S1's policy, a new key is a new account.
+The claim/upgrade escape hatch is slice S3 (this module, #446): single-use
+claim codes for the key-loss path S2.5 deferred. Issuing
+(``KeyRegistry.issue_claim``) mints a 144-bit random code shown once to
+the operator — the registry stores ONLY its SHA-256 hash — with an
+expiry (default 7 days); redeeming (``KeyRegistry.redeem_claim``) is
+single-use and expiry-enforced under one lock, stamping the record
+``claimed_at``/``claimed_by``. Per S1's policy, a new key is still a new
+account; claim is the upgrade path, not a registration path (issue
+never implicitly registers).
 
 Key rotation is slice S2.5 (this module, :meth:`KeyRegistry.rotate`): the
 operator-facing path for a key the operator still holds — "I generated a
@@ -48,8 +54,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime
+import hashlib
+import hmac
 import json
+import math
 import os
+import secrets
 import sys
 import tempfile
 import time
@@ -82,6 +92,30 @@ _LOCK_POLL_S = 0.05
 # Sane range: 1..2**31 — 0 would silently empty the journal on every
 # rotate (degenerate config, not guarded against by design).
 ROTATIONS_CAP = 1000
+# Claim protocol (slice S3, #446): single-use claim codes. 144 bits of
+# entropy (18 bytes -> 24 base64url chars) keeps brute force infeasible
+# even at bot scale. Default TTL 7 days: long enough for a human to
+# redeem at their own pace, short enough that a leaked code dies on its
+# own. Only SHA-256 hashes are ever stored — a stolen registry.json
+# yields no live claim codes.
+CLAIM_CODE_ENTROPY_BYTES = 18
+CLAIM_DEFAULT_TTL_HOURS = 24 * 7
+
+
+def _claim_code_hash(code: str) -> str:
+    """SHA-256 hash of a claim code, ``"sha256:<hex>"``.
+
+    Only hashes are ever stored; the plaintext code is shown once at
+    issue time. Garbage (non-ASCII) input is a loud RegistryError, never
+    a traceback — the CLI's error path catches RegistryError only.
+    """
+    if not isinstance(code, str) or not code:
+        raise RegistryError("claim code must be a non-empty string")
+    try:
+        digest = hashlib.sha256(code.encode("ascii")).hexdigest()
+    except UnicodeEncodeError as exc:
+        raise RegistryError("claim code is not ASCII") from exc
+    return "sha256:" + digest
 
 
 class RegistryError(Exception):
@@ -471,6 +505,145 @@ class KeyRegistry:
         self._mutate(_do)
         return result
 
+    def issue_claim(
+        self, fp: str, *, ttl_hours: int | float = CLAIM_DEFAULT_TTL_HOURS
+    ) -> dict:
+        """Issue a single-use claim code for a registered account (slice S3).
+
+        The claim code is the key-loss escape hatch #446 promised: an
+        operator who no longer holds the old key upgrades a key-only
+        account to a claimed account by redeeming the code the operator
+        was shown at issue time. One live code per account — issuing a
+        new code revokes the old one. The registry stores ONLY the
+        SHA-256 hash of the code (``"sha256:<hex>"``); the plaintext is
+        returned once in the result and must be shown to the operator
+        then, because it cannot be recovered later.
+
+        ``ttl_hours`` must be positive. Expiry is checked on redeem
+        against the registry's own clock (``_utcnow``); expired codes are
+        refused and removed. Issue requires a REGISTERED fingerprint —
+        like rotate, issuing never implicitly registers (a typo must not
+        mint an account).
+
+        Returns ``{"account_id", "claim_code", "expires_at",
+        "ttl_hours"}``. ``claim_code`` is the plaintext code — shown once.
+        """
+        fp = normalize_fingerprint(fp)
+        # bool is a subclass of int — True would mean a 1-hour TTL, which
+        # is never what the caller meant; nan/inf sail past `<= 0` and
+        # then die as ValueError/OverflowError inside timedelta (raw
+        # traceback, not RegistryError). Finite and positive, or refuse.
+        if (
+            not isinstance(ttl_hours, (int, float))
+            or isinstance(ttl_hours, bool)
+            or not math.isfinite(ttl_hours)
+            or ttl_hours <= 0
+        ):
+            raise RegistryError("issue_claim needs ttl_hours > 0 (finite)")
+        now_dt = _utcnow()
+        now = _iso(now_dt)
+        code = secrets.token_urlsafe(CLAIM_CODE_ENTROPY_BYTES)
+        code_hash = _claim_code_hash(code)
+        expires_at = _iso(now_dt + datetime.timedelta(hours=ttl_hours))
+        issued: dict = {}
+
+        def _do(data: dict) -> None:
+            nonlocal issued
+            accounts = data["accounts"]
+            rec = accounts.get(fp)
+            if rec is None:
+                raise RegistryError(
+                    f"issue_claim: unknown fingerprint {fp} "
+                    "(register it first — issuing never implicitly registers)"
+                )
+            if rec.get("rotated_to") is not None:
+                # A rotated-out record is superseded lineage, not a live
+                # identity — claiming it would stamp a dead record. Same
+                # fail-loud rule as rotate's "rotate the latest key".
+                raise RegistryError(
+                    f"issue_claim: {fp} was rotated to {rec['rotated_to']} "
+                    "(claim the latest key, not a rotated-out record)"
+                )
+            rec["claim"] = {
+                "code_hash": code_hash,
+                "issued_at": now,
+                "expires_at": expires_at,
+                "ttl_hours": ttl_hours,
+            }
+            issued = {
+                "account_id": rec["account_id"],
+                "claim_code": code,
+                "expires_at": expires_at,
+                "ttl_hours": ttl_hours,
+            }
+
+        self._mutate(_do)
+        return issued
+
+    def redeem_claim(self, code: str, *, claimed_by: str | None = None) -> dict:
+        """Redeem a claim code, upgrading the account to claimed (slice S3).
+
+        Single-use and expiry-enforced, atomically under the lock: the
+        first successful redeem consumes the code (the ``claim`` entry is
+        deleted) and stamps the record ``claimed_at``/``claimed_by``; a
+        racing second redeem finds no live code and fails. An expired
+        code is refused AND removed (self-cleaning — the holder proved
+        knowledge of the code, which is the credential, so nothing an
+        attacker could have learned is destroyed). Unknown codes fail
+        loudly. Hash comparison is constant-time (``hmac.compare_digest``)
+        — not because timing matters at these code sizes, but because
+        non-constant comparison is a habit the security half of this file
+        does not want to teach.
+
+        Re-claiming an already-claimed account is allowed: a fresh
+        ``issue_claim`` mints a new code, and redeeming it restamps
+        ``claimed_at``/``claimed_by`` (label change is a feature, not an
+        error). The ``claim`` entry on a record always describes the ONE
+        currently-live code; the ``claimed_*`` stamps describe the most
+        recent successful redemption.
+        """
+        presented = _claim_code_hash(code)
+        now = _iso(_utcnow())
+        redeemed: dict = {}
+        # _mutate persists whatever fn leaves behind and ABORTS the save
+        # when fn raises — so the expired-code self-clean must persist
+        # FIRST and raise AFTER, never raise from inside fn.
+        expired: dict | None = None
+
+        def _do(data: dict) -> None:
+            nonlocal redeemed, expired
+            for fp, rec in data["accounts"].items():
+                claim = rec.get("claim")
+                if not isinstance(claim, dict):
+                    continue
+                if hmac.compare_digest(claim.get("code_hash", ""), presented):
+                    if claim.get("expires_at", "") <= now:
+                        del rec["claim"]  # expired: self-clean on disk...
+                        expired = {
+                            "account_id": rec.get("account_id"),
+                            "expires_at": claim.get("expires_at"),
+                        }
+                        return  # ...then refuse below, after the save
+                    del rec["claim"]  # single-use: consumed on success
+                    rec["claimed_at"] = now
+                    rec["claimed_by"] = claimed_by
+                    redeemed = {
+                        "account_id": rec["account_id"],
+                        "claimed_at": now,
+                        "claimed_by": claimed_by,
+                    }
+                    return
+
+        self._mutate(_do)
+        if expired is not None:
+            raise RegistryError(
+                f"claim code for {expired['account_id']} expired "
+                f"(expired_at={expired['expires_at']})"
+            )
+        if not redeemed:
+            raise RegistryError("unknown or already-redeemed claim code")
+        return redeemed
+
     def remove(self, fp: str) -> bool:
         """Delete an account record. Returns False when unknown."""
         fp = normalize_fingerprint(fp)
@@ -579,6 +752,48 @@ def _cmd(argv: list[str] | None = None) -> int:
     )
     p_manifest.add_argument("fingerprint")
 
+    p_claim_issue = sub.add_parser(
+        "claim-issue",
+        parents=[common],
+        help=(
+            "issue a single-use claim code for a registered fingerprint "
+            "(the code prints once — the registry stores only its hash)"
+        ),
+    )
+    p_claim_issue.add_argument("fingerprint")
+    p_claim_issue.add_argument(
+        "--ttl-hours",
+        type=float,
+        default=CLAIM_DEFAULT_TTL_HOURS,
+        help=f"code lifetime in hours (default {CLAIM_DEFAULT_TTL_HOURS}, must be > 0)",
+    )
+
+    p_claim_redeem = sub.add_parser(
+        "claim-redeem",
+        parents=[common],
+        help="redeem a claim code, stamping the account claimed",
+    )
+    p_claim_redeem.add_argument(
+        "code",
+        nargs="?",
+        default=None,
+        help=(
+            "claim code (WARNING: a positional code is visible in the "
+            "process list and shell history — on a multi-user host use "
+            "--code-stdin instead)"
+        ),
+    )
+    p_claim_redeem.add_argument(
+        "--code-stdin",
+        action="store_true",
+        help="read the claim code from stdin instead of argv",
+    )
+    p_claim_redeem.add_argument(
+        "--claimed-by",
+        default=None,
+        help="operator label/email recorded as the claimer",
+    )
+
     sub.add_parser(
         "status", parents=[common], help="list all registered accounts"
     )
@@ -657,6 +872,29 @@ def _cmd(argv: list[str] | None = None) -> int:
                 print(f"unknown fingerprint: {args.fingerprint}", file=sys.stderr)
                 return 1
             return _out(_resume_manifest(rec))
+        if args.command == "claim-issue":
+            return _out(
+                reg.issue_claim(args.fingerprint, ttl_hours=args.ttl_hours)
+            )
+        if args.command == "claim-redeem":
+            # The code is a bearer credential: argv exposes it in the
+            # process list (/proc/<pid>/cmdline, ps) and shell history,
+            # so --code-stdin is the safe path on multi-user hosts.
+            if args.code_stdin and args.code is not None:
+                print(
+                    "error: pass the claim code via stdin or argv, not both",
+                    file=sys.stderr,
+                )
+                return 2
+            code = sys.stdin.read().strip() if args.code_stdin else args.code
+            if not code:
+                print(
+                    "error: claim-redeem needs a code "
+                    "(positional, or --code-stdin)",
+                    file=sys.stderr,
+                )
+                return 2
+            return _out(reg.redeem_claim(code, claimed_by=args.claimed_by))
         if args.command == "status":
             return _out(reg.accounts())
     except (RegistryError, KeyIdentityError) as exc:

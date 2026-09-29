@@ -63,9 +63,11 @@ tests). The root dir is `0700`, the store `0600`.
 - `manifest <fingerprint>` emits the **registry-issued resume manifest**:
   the same field vocabulary as S1's first-connect manifest, with the
   `box_id` slot filled from the registry's box binding — the slot S1's
-  README said this slice would fill. `vm_endpoint` and `claim_url` stay
-  null: the endpoint is connect-time knowledge (a later wiring slice) and
-  the claim protocol is slice S3 (#446). `remove` is a deliberate
+  README said this slice would fill. `vm_endpoint` stays null: the
+  endpoint is connect-time knowledge (a later wiring slice); `claim_url`
+  stays null until the connect-time wiring fills it — the claim protocol
+  itself is slice S3 (#446) and is shipped (see "Claim protocol" below).
+  `remove` is a deliberate
   deprovisioning operation (account teardown / key retirement), not an
   undo button — it has no audit trail by design at this slice; deleting a
   record means the same key re-registers as a new account on next connect.
@@ -122,18 +124,104 @@ this slice.
 the old key, there is nothing to attest with — that path needs the claim
 protocol (slice S3, #446), which this module still records no state for.
 
+**Claim protocol (slice S3, shipped).** `KeyRegistry.issue_claim` /
+`KeyRegistry.redeem_claim` (+ CLI `claim-issue` / `claim-redeem`) are the
+key-loss escape hatch #446 promised: an operator who no longer holds the
+old key upgrades a key-only account to a claimed account by redeeming a
+single-use claim code shown once at issue time.
+
+- One live code per account; issuing a new code revokes the old one.
+- Only SHA-256 hashes are ever stored (`"sha256:<hex>"` on the record's
+  `claim` entry) — the plaintext code is returned once by `issue_claim`
+  and cannot be recovered afterwards, so a stolen `registry.json` yields
+  no live claim codes. The module's "no secrets" posture holds: the
+  store holds hashes, never plaintext codes.
+- Codes carry an expiry (default 7 days, `--ttl-hours` to set; must be
+  positive) checked against the registry's own clock; expired codes are
+  refused AND removed (self-cleaning). Redemption is single-use and
+  atomic under the lock: the first redeem consumes the code and stamps
+  `claimed_at` / `claimed_by` (operator label/email, optional); a racing
+  second redeem fails.
+- Like rotate, issue never implicitly registers — the fingerprint must
+  already be known, and a rotated-out (`rotated_to`-stamped) record is
+  refused: claiming superseded lineage would stamp a dead record, so
+  claim the latest key. Redeeming an unknown code fails loudly; hash
+  comparison is constant-time.
+- Re-claiming an already-claimed account is allowed (restamps
+  `claimed_at` / `claimed_by` — a label change is a feature, not an
+  error). `claim` on a record describes the one currently-live code;
+  `claimed_*` describe the most recent redemption.
+
+**The operator's decision rule — claim vs rotate.** Both are box-local
+CLI ops that trust the local caller, but they answer different
+questions. `rotate` (S2.5) is for "I still control this box and I have
+a new key": the new key registers as a NEW account, the old record
+keeps a forward link, the box binding carries over — identity stays the
+key, lineage is preserved. `claim` is for "I cannot prove key
+possession": the operator lost the old key, or wants to bind the
+account to a party (a human owner, an agent) who never held a key at
+all. The operator — whoever holds local access to the registry, the
+trust root of this protocol — mints a code and hands it to the
+claimant OUT OF BAND (paste it into the agent's config, hand it to the
+human, read it over the phone: the protocol is deliberately
+channel-agnostic because the right channel differs between a
+self-hosted box and the hosted control plane). The claimant redeems
+it, and the SAME account is upgraded in place — same `acct_` id,
+stamped `claimed_at` / `claimed_by` — instead of a new account with a
+lineage link. Rotate is not delegable; a claim code is.
+
+**What redemption buys at this slice.** Honestly: the stamps. No policy
+reads `claimed_at` yet, `claim_url` is still null, and a new key is
+still a new account (identity-is-the-key stands). What the slice
+delivers is the record-level upgrade the wiring slices build on: a
+lost-key account can be re-associated with its human without the old
+key, and an operator can distinguish "key-only" from
+"operator-vouched" accounts in `status` / `lookup` output. The escape
+hatch is real; the consumers are later.
+
+**"Claimed" is not "full account".** #446's target is a full account —
+email, billing, recovery. "Claimed" is the trust state this slice
+records: the operator vouched for the binding between this account and
+this claimant. The full-account record (validated contact, billing,
+recovery) is a later slice built on top of it; `claimed_by` is a
+free-text label that MAY hold an email but is not validated as one, and
+carries no billing semantics.
+
+**`claim_url`, defined at last.** The resume/first-connect manifest's
+`claim_url` will be the URL where the claimant redeems their code
+without registry-local CLI access — an on-box or control-plane endpoint
+that accepts the code and performs the same single-use, expiry-checked
+redemption `claim-redeem` does. Filling it belongs to #446's
+"connect-time wiring of the registry" slice (still open, tracked under
+#446's later slices) — the third deferral now has a named owner, not a
+bare "later slices".
+
+Sequencing: this slice is the protocol. Filling the resume manifest's
+`claim_url` slot and wiring claim issuance into the connect-time path
+remain later slices; the manifest's vocabulary is unchanged.
+
 ## Operations
 
 - CLI: `python3 harness/key_registry.py register --key-line
   'ssh-ed25519 AAAA...' [--box-ref <id>] [--registry-root <dir>]`
-  (also `lookup`, `touch`, `bind`, `remove`, `rotate`, `manifest`,
-  `status`); data commands emit JSON. `--registry-root` may appear before or after
+  (also `lookup`, `touch`, `bind`, `remove`, `rotate`, `claim-issue`,
+  `claim-redeem`, `manifest`, `status`); data commands emit JSON. `--registry-root` may appear before or after
   the subcommand; if given in both positions, the after-subcommand value
   wins.
 - `manifest` is how the onboarding path answers "what does this key
   resume?": it fills the `box_id` slot S1's README promised the registry
   slice would fill. `vm_endpoint`/`claim_url` stay null until the
-  connect-time wiring (later slice) and the claim protocol (S3) land.
+  connect-time wiring (later slice) fills them — the claim protocol
+  itself (S3) is shipped, see above.
+- `claim-issue <fingerprint> [--ttl-hours N]` prints the single-use
+  claim code ONCE (the store keeps only its hash — it cannot be recovered
+  afterwards); `claim-redeem <code> [--claimed-by <label>]` consumes the
+  code and stamps the account `claimed_at` / `claimed_by`. The code is a
+  bearer credential: a positional code is visible in the process list
+  (`ps`, `/proc/<pid>/cmdline`) and lands in shell history — on a
+  multi-user host pass it via `claim-redeem --code-stdin` instead
+  (Security review, round 1). Treat a printed code like a password: don't
+  paste it into chat or tickets.
 - **Rotate:** `key_registry.py rotate <old-fingerprint> --key-line
   '<new key line>'` — operator-held-key rotation (see Rotation above).
   Emits the old record, the new record, and the journal entry as JSON.

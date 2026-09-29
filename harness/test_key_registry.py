@@ -6,6 +6,7 @@ touches the real $XDG_STATE_HOME store in tests. Time is frozen via
 monkeypatching key_registry._utcnow for last_seen assertions.
 """
 import datetime
+import hashlib
 import json
 import os
 import stat
@@ -674,6 +675,257 @@ def test_rotate_cli_malformed_key_line_fails_clean(tmp_path):
     r = _cli("register", "--key-line", ROT_LINE_1, root=root)
     assert r.returncode == 0, r.stderr
     r = _cli("rotate", old_fp, "--key-line", "ssh-ed25519 not-base64 rot-test", root=root)
+    assert r.returncode == 2
+    assert "error:" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+# -- claim protocol (slice S3, #446) ----------------------------------------------
+def _registered(reg, monkeypatch=None):
+    # Register the ed25519 test key; returns its fingerprint.
+    reg.register(key_line=ED25519_LINE)
+    return ED25519_FP
+
+
+def test_issue_claim_happy_path(reg, monkeypatch):
+    _frozen(monkeypatch, "2026-09-29T00:30:00+00:00")
+    _registered(reg)
+    out = reg.issue_claim(ED25519_FP, ttl_hours=24)
+    assert out["account_id"] == key_registry.account_id_for(ED25519_FP)
+    assert len(out["claim_code"]) == 24  # 18 bytes -> 24 base64url chars
+    assert out["expires_at"] == "2026-09-30T00:30:00+00:00"
+    rec = reg.lookup(ED25519_FP)
+    claim = rec["claim"]
+    assert claim["code_hash"] == key_registry._claim_code_hash(out["claim_code"])
+    assert claim["issued_at"] == "2026-09-29T00:30:00+00:00"
+    assert claim["ttl_hours"] == 24
+
+
+def test_issue_claim_store_holds_hash_only(reg):
+    # The security invariant, pinned: the plaintext code never lands in
+    # the store. If this test goes quiet (no code minted), the issue call
+    # above fails first — the test is not vacuous on its own.
+    _registered(reg)
+    out = reg.issue_claim(ED25519_FP)
+    store_text = reg.store_path.read_text()
+    assert out["claim_code"] not in store_text
+    assert key_registry._claim_code_hash(out["claim_code"])[len("sha256:"):] in store_text
+    # QA M12b: the module's own helper is a circular oracle — pin the
+    # algorithm independently so a silent hash swap fails loudly.
+    assert (
+        key_registry._claim_code_hash(out["claim_code"])
+        == "sha256:" + hashlib.sha256(out["claim_code"].encode("ascii")).hexdigest()
+    )
+
+
+def test_issue_claim_unknown_fingerprint_fails_and_mints_nothing(reg):
+    with pytest.raises(RegistryError):
+        reg.issue_claim(ED25519_FP)
+    assert reg.lookup(ED25519_FP) is None
+
+
+def test_issue_claim_rejects_nonpositive_ttl(reg):
+    _registered(reg)
+    for bad in (0, -1, -2.5):
+        with pytest.raises(RegistryError):
+            reg.issue_claim(ED25519_FP, ttl_hours=bad)
+    assert "claim" not in reg.lookup(ED25519_FP)
+
+
+def test_redeem_claim_happy_path(reg, monkeypatch):
+    _frozen(monkeypatch, "2026-09-29T00:30:00+00:00")
+    _registered(reg)
+    code = reg.issue_claim(ED25519_FP)["claim_code"]
+    out = reg.redeem_claim(code, claimed_by="op@example.test")
+    assert out["account_id"] == key_registry.account_id_for(ED25519_FP)
+    assert out["claimed_at"] == "2026-09-29T00:30:00+00:00"
+    assert out["claimed_by"] == "op@example.test"
+    rec = reg.lookup(ED25519_FP)
+    assert "claim" not in rec  # single-use: consumed
+    assert rec["claimed_at"] == "2026-09-29T00:30:00+00:00"
+    assert rec["claimed_by"] == "op@example.test"
+
+
+def test_redeem_claim_single_use(reg):
+    _registered(reg)
+    code = reg.issue_claim(ED25519_FP)["claim_code"]
+    reg.redeem_claim(code)
+    with pytest.raises(RegistryError):
+        reg.redeem_claim(code)  # consumed: no longer live
+
+
+def test_redeem_claim_unknown_code_fails(reg):
+    _registered(reg)
+    reg.issue_claim(ED25519_FP)
+    with pytest.raises(RegistryError):
+        reg.redeem_claim("x" * 24)  # well-formed, but not the live code
+
+
+def test_redeem_claim_expired_fails_and_self_cleans(reg, monkeypatch):
+    _frozen(monkeypatch, "2026-09-29T00:30:00+00:00")
+    _registered(reg)
+    code = reg.issue_claim(ED25519_FP, ttl_hours=1)["claim_code"]
+    _frozen(monkeypatch, "2026-09-29T02:30:01+00:00")  # past expiry
+    with pytest.raises(RegistryError, match="expired"):
+        reg.redeem_claim(code)
+    rec = reg.lookup(ED25519_FP)
+    assert "claim" not in rec  # expired code self-cleans
+    assert "claimed_at" not in rec  # refused, not stamped
+
+
+def test_issue_claim_reissue_revokes_old(reg):
+    _registered(reg)
+    old_code = reg.issue_claim(ED25519_FP)["claim_code"]
+    new_code = reg.issue_claim(ED25519_FP)["claim_code"]
+    assert old_code != new_code
+    with pytest.raises(RegistryError):
+        reg.redeem_claim(old_code)  # revoked
+    out = reg.redeem_claim(new_code)
+    assert out["account_id"] == key_registry.account_id_for(ED25519_FP)
+
+
+def test_redeem_claim_reclaim_restamps(reg, monkeypatch):
+    # Re-claiming an already-claimed account is a label change, not an error.
+    _frozen(monkeypatch, "2026-09-29T00:30:00+00:00")
+    _registered(reg)
+    reg.redeem_claim(reg.issue_claim(ED25519_FP)["claim_code"], claimed_by="first")
+    _frozen(monkeypatch, "2026-09-30T00:30:00+00:00")
+    out = reg.redeem_claim(
+        reg.issue_claim(ED25519_FP)["claim_code"], claimed_by="second"
+    )
+    assert out["claimed_at"] == "2026-09-30T00:30:00+00:00"
+    assert out["claimed_by"] == "second"
+    # QA M8: the returned dict is built from call args — pin the
+    # PERSISTED record too, or a refactor dropping the record write
+    # would stay green.
+    rec = reg.lookup(ED25519_FP)
+    assert rec["claimed_at"] == "2026-09-30T00:30:00+00:00"
+    assert rec["claimed_by"] == "second"
+
+
+def test_claim_cli_round_trip(tmp_path):
+    root = str(tmp_path / "cli-claim")
+    r = _cli("register", "--key-line", ED25519_LINE, root=root)
+    assert r.returncode == 0, r.stderr
+    r = _cli("claim-issue", ED25519_FP, "--ttl-hours", "24", root=root)
+    assert r.returncode == 0, r.stderr
+    issued = json.loads(r.stdout)
+    assert len(issued["claim_code"]) == 24
+    r = _cli("claim-redeem", issued["claim_code"], "--claimed-by", "op", root=root)
+    assert r.returncode == 0, r.stderr
+    redeemed = json.loads(r.stdout)
+    assert redeemed["claimed_by"] == "op"
+    assert redeemed["account_id"] == issued["account_id"]
+    r = _cli("claim-redeem", issued["claim_code"], root=root)  # consumed
+    assert r.returncode == 2
+    assert "error:" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_claim_cli_non_ascii_code_fails_clean(tmp_path):
+    root = str(tmp_path / "cli-claim-bad")
+    r = _cli("register", "--key-line", ED25519_LINE, root=root)
+    assert r.returncode == 0, r.stderr
+    _cli("claim-issue", ED25519_FP, root=root)  # code exists; input is garbage
+    r = _cli("claim-redeem", "not-ascii-→", root=root)
+    assert r.returncode == 2
+    assert "error:" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def _cli_stdin(subcommand, *args, root=None, stdin_text=""):
+    # claim-redeem --code-stdin: the code arrives on stdin, never argv
+    # (Security B1: a bearer credential must not sit in /proc/<pid>/cmdline).
+    cmd = [sys.executable, "key_registry.py"]
+    if root is not None:
+        cmd += ["--registry-root", root]
+    cmd += [subcommand, *args]
+    return subprocess.run(
+        cmd,
+        cwd=Path(__file__).resolve().parent,
+        capture_output=True,
+        text=True,
+        input=stdin_text,
+    )
+
+
+def test_claim_redeem_stdin_round_trip(tmp_path):
+    root = str(tmp_path / "cli-claim-stdin")
+    r = _cli("register", "--key-line", ED25519_LINE, root=root)
+    assert r.returncode == 0, r.stderr
+    r = _cli("claim-issue", ED25519_FP, root=root)
+    assert r.returncode == 0, r.stderr
+    code = json.loads(r.stdout)["claim_code"]
+    r = _cli_stdin("claim-redeem", "--code-stdin", root=root, stdin_text=code + "\n")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["account_id"] == key_registry.account_id_for(ED25519_FP)
+
+
+def test_claim_redeem_stdin_and_argv_rejected(tmp_path):
+    root = str(tmp_path / "cli-claim-both")
+    r = _cli("register", "--key-line", ED25519_LINE, root=root)
+    assert r.returncode == 0, r.stderr
+    code = json.loads(_cli("claim-issue", ED25519_FP, root=root).stdout)["claim_code"]
+    r = _cli_stdin("claim-redeem", code, "--code-stdin", root=root, stdin_text=code)
+    assert r.returncode == 2
+    assert "not both" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_claim_redeem_no_code_fails_clean(tmp_path):
+    root = str(tmp_path / "cli-claim-nocode")
+    r = _cli("register", "--key-line", ED25519_LINE, root=root)
+    assert r.returncode == 0, r.stderr
+    r = _cli("claim-redeem", root=root)  # neither positional nor --code-stdin
+    assert r.returncode == 2
+    assert "error:" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_claim_redeem_empty_stdin_fails_clean(tmp_path):
+    root = str(tmp_path / "cli-claim-emptystdin")
+    r = _cli("register", "--key-line", ED25519_LINE, root=root)
+    assert r.returncode == 0, r.stderr
+    _cli("claim-issue", ED25519_FP, root=root)
+    r = _cli_stdin("claim-redeem", "--code-stdin", root=root, stdin_text="  \n")
+    assert r.returncode == 2
+    assert "error:" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_issue_claim_rejects_nonfinite_ttl(reg):
+    # nan/inf sail past `<= 0` and die as ValueError/OverflowError inside
+    # timedelta — raw tracebacks, not RegistryError (Engineering B1).
+    _registered(reg)
+    for bad in (float("nan"), float("inf"), float("-inf"), True, False):
+        with pytest.raises(RegistryError):
+            reg.issue_claim(ED25519_FP, ttl_hours=bad)
+    assert "claim" not in reg.lookup(ED25519_FP)
+
+
+def test_claim_issue_cli_nonfinite_ttl_fails_clean(tmp_path):
+    root = str(tmp_path / "cli-claim-nan")
+    r = _cli("register", "--key-line", ED25519_LINE, root=root)
+    assert r.returncode == 0, r.stderr
+    for bad in ("nan", "inf", "-inf"):
+        r = _cli("claim-issue", ED25519_FP, "--ttl-hours", bad, root=root)
+        assert r.returncode == 2, bad
+        assert "error:" in r.stderr, bad
+        assert "Traceback" not in r.stderr, bad
+
+
+def test_issue_claim_refuses_rotated_out_record(reg):
+    # A rotated-out record is superseded lineage — claiming it would
+    # stamp a dead record. Fail loud, like rotate's "latest key" rule.
+    reg.register(key_line=ED25519_LINE)
+    reg.rotate(ED25519_FP, key_line=ROT_LINE_1)
+    with pytest.raises(RegistryError, match="rotated"):
+        reg.issue_claim(ED25519_FP)
+
+
+def test_claim_issue_cli_unknown_fingerprint_fails_clean(tmp_path):
+    root = str(tmp_path / "cli-claim-unknown")
+    r = _cli("claim-issue", ED25519_FP, root=root)  # never registered
     assert r.returncode == 2
     assert "error:" in r.stderr
     assert "Traceback" not in r.stderr
