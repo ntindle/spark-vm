@@ -20,10 +20,13 @@ story; §6 names the tenant constraints so nobody wires this up early.
 Today:
 
 - `auto-deploy.sh`'s `audit()` appends one JSON line per event to the
-  box-local `$UPDATER_STATE_DIR/audit.log` (`{"ts":"…","event":"check"|"deploy",…}`),
-  bounded at 12k lines / 10k newest. Nobody reads it off-box.
+  box-local `$UPDATER_STATE_DIR/audit.log`
+  (`{"ts":"…","event":"check"|"deploy"|"rollback",…}` — fifteen (event,
+  result) shapes, §3), bounded at 12k lines / 10k newest. Nobody reads it
+  off-box.
 - The toolset updater (SELF_UPDATE.md S2) plans the same audit format at
-  `/var/log/sparkvm-self-update/`. Same fate.
+  `/var/log/sparkvm-self-update/` — the same who/what/when/version shape
+  auto-deploy uses; its result vocabulary is still undefined. Same fate.
 - The fleet collector (G16 S1) already pulls per-box `audit-tail.jsonl`
   into its estate dir — but treats the tail as cross-check evidence for
   *version claims*, not as an event stream. Outcomes are incidental.
@@ -40,20 +43,21 @@ unknown fields are ignored by readers (versioning: additive fields only).
 
 | Field | Type | Meaning |
 |---|---|---|
-| `event_id` | string | UUIDv7 — unique, sortable; the dedup key |
-| `box_id` | string | Stable box identity (G15 §8: must survive reimage) |
-| `session_epoch` | int | Reimage counter from the provisioner's box record; soak and event windows are keyed (box, session, build) — see §3 |
+| `event_id` | string | UUIDv7 for box-emitted events; deterministic UUIDv5 for fleet-canonicalized legacy lines — the dedup key in both cases (see §4 S1) |
+| `box_id` | string | Stable box identity (G15 §8: must survive reimage); the S1 canonicalizer sources it from the collector's per-box pull context (the estate dir name / G16's operator-maintained mapping) |
+| `session_epoch` | int \| null | Reimage counter from the provisioner's box record; S1 canonicalizer emits `null` (OQ3 tracks the record that makes it non-null); soak/aggregation keying degrades to (box, build) while null |
 | `emitted_at` | string | Box clock, ISO-8601 UTC |
-| `received_at` | string | Collector/plane clock, ISO-8601 UTC; box clocks are never trusted for ordering |
+| `received_at` | string | Collector/plane clock, ISO-8601 UTC; box clocks are never trusted for ordering — consumers order by `(emitted_at, event_id)` so re-collection never reorders history |
 | `source` | enum | `auto-deploy` \| `toolset-update` \| `manual` \| `controller` |
-| `component` | enum | `repo` \| `toolset-cua-driver` \| `image` (reimage, later) |
-| `kind` | enum | `check` \| `deploy` \| `rollback` \| `gate-answer` \| `freeze-hold` |
-| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` |
+| `component` | enum | `repo` \| `toolset-cua-driver` \| `image` (reimage, later) — which updater, not which part: an audit line's own `component` (`proxy`, `confirm`, `cred_ui`, …) is sub-component granularity and becomes the additive `subcomponent`/`subcomponents` field, never this enum |
+| `kind` | enum | `check` \| `deploy` \| `rollback` \| `gate-answer` \| `freeze-hold` — `freeze-hold` is emitted only by the controller on freeze flip/clear into the fleet journal (S3; owner: G15 controller work) |
+| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `rollback-unhealthy` \| `superseded` — `rollback-unhealthy` means restored but post-restore health failed (not a good restore). `started`, `superseded` and the `freeze`/`gate` triggers are S2-forward vocabulary with no legacy producer — named explicitly here so nothing is left to be inferred |
 | `from` / `to` | string | Commit (repo) or pin version (toolset); absent on pure checks |
 | `from_version` / `to_version` | string | Human versions where they exist (auto-deploy's `from_version`/`to_version`) |
 | `phase` | string | Box-side failure phase where known (auto-deploy's `phase`) |
+| `window` | string \| null | `"maintenance"` when the event was emitted inside a G14 maintenance window (UPDATE_IDLE_SUSPEND_CLOCK.md D1/D6: maintenance events never feed the stall detector) |
 | `rollout` | object | `{release_id, wave}` — null until G15 S2 assigns waves |
-| `trigger` | enum | `scheduled` \| `manual` \| `freeze` \| `gate` \| `extra-inputs` |
+| `trigger` | enum | `scheduled` \| `manual` \| `freeze` \| `gate` \| `extra-inputs` — absent `trigger` on a legacy line means `scheduled` (the timer path); `extra-inputs` is emitted only on the range-synthesized forced path (`deploy/auto-deploy.sh`, the `trig` variable); `freeze`/`gate` are reserved for S2 emitters |
 | `attested` | bool | S1/S2: `false`. S3: `true` when the event rode G13's attested box→plane channel |
 | `note` | string | Human/alert text (the box-side alert reason, not a debug dump) |
 
@@ -84,19 +88,37 @@ Example:
 
 S1 requires **no new box-side artifact**. The fleet-side canonicalizer
 translates the existing audit lines into the standard shape at collect
-time. The mapping is exact because the audit shapes are known
-(`deploy/auto-deploy.sh`, the `audit()` calls):
+time. The translation is defined against the actual `audit()` calls in
+`deploy/auto-deploy.sh` — all fifteen (event, result) shapes the script
+emits (audit lines without a `trigger` field canonicalize to
+`trigger: scheduled`; only the range-synthesized forced path emits
+`trigger: extra-inputs`):
 
 | Audit line | Standard event (`kind`, `outcome`) |
 |---|---|
 | `{"event":"check","result":"noop"}` | `check`, `noop` |
 | `{"event":"check","result":"precheck-fail"}` | `check`, `precheck-fail` |
 | `{"event":"deploy","result":"precheck-fail","from","to"}` | `deploy`, `precheck-fail` |
+| `{"event":"deploy","result":"gate-fail","from","to","component"}` | `deploy`, `precheck-fail` (pre-deploy gates refused before any mutation) |
+| `{"event":"deploy","result":"snapshot-fail","from","to"}` | `deploy`, `precheck-fail` (pre-mutation; no mutation occurred) |
+| `{"event":"deploy","result":"checkout-dirty","from","to","component"}` | `deploy`, `precheck-fail` (abort before mutation) |
 | `{"event":"deploy","result":"deploy-fail","from","to","phase"}` | `deploy`, `failed` |
+| `{"event":"deploy","result":"reload-fail","from","to"}` | `deploy`, `failed` (mutation occurred; rollback follows) |
 | `{"event":"deploy","result":"rollback-failed","from","to","phase"}` | `deploy`, `rollback-failed` |
 | `{"event":"deploy","result":"rolled-back","from","to","to_version"}` | `deploy`, `rolled-back` |
 | `{"event":"deploy","result":"pull-only","from","to","from_version","to_version"}` | `deploy`, `succeeded` |
-| `trigger` field (`extra-inputs`, …) | → `trigger` |
+| `{"event":"deploy","result":"ok","from","to","components",…}` | `deploy`, `succeeded` (the normal success path: components installed, health checks passed) |
+| `{"event":"rollback","result":"rollback-failed","snapshot"}` | `rollback`, `rollback-failed` |
+| `{"event":"rollback","result":"manual-rollback","to","to_version",…}` | `rollback`, `rolled-back` |
+| `{"event":"rollback","result":"rollback-unhealthy","to",…}` | `rollback`, `rollback-unhealthy` (restored, but post-restore health failed — not a clean restore) |
+
+The audit line's `component` (and the plural `components` on the `ok`
+line) becomes the additive `subcomponent`/`subcomponents` field; standard
+`component` is `repo` for every `auto-deploy` line. For the toolset
+updater, only the promise is known — SELF_UPDATE.md S2 commits to "the
+same format auto-deploy already uses" for who/what/when/versions, but its
+result vocabulary is undefined, so the toolset half of this table is
+planned-not-known until the updater ships.
 
 The canonicalizer is fail-closed on malformed lines: box-side `audit()`
 interpolates raw variables into JSON, so the collector parses with a
@@ -119,8 +141,11 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   box-side file, no new port. The canonicalizer runs inside
   `fleet/inventory.py` (or a sibling `fleet/events.py`) and appends
   standard-shape events to the store's event journal; `received_at` is the
-  collect clock. Event dedup is on `(box_id, event_id)` — a re-pulled tail
-  re-canonicalizes to the same ids, so double-collection is a no-op.
+  collect clock. Event dedup is on `(box_id, event_id)`, and for S1
+  canonicalization `event_id` is synthesized deterministically — UUIDv5
+  over `box_id|ts|event|result|from|to` — so a re-pulled tail
+  re-canonicalizes to identical ids and double-collection is a no-op
+  (box-emitted S2 journal lines carry native UUIDv7 instead).
 - **Read:** `fleet events` shows the per-box outcome series;
   `fleet events --wave` filters by the rollout envelope (null until G15 S2).
 - **Alert — the promptness ask.** The issue's core requirement is that a
@@ -154,7 +179,8 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
     (box, session, build) — the session epoch keying is why reimage
     resets soak (G15 §4): old-session events for build X never count
     toward the new session's soak on X;
-  - `skipped-frozen`/`freeze-hold` events explain quiet waves — a wave
+  - `skipped-frozen` box-side events and controller-emitted `freeze-hold`
+    events explain quiet waves — a wave
     with no events during a freeze is a *frozen* wave, not a failed one,
     and never passes the gate on a window with a frozen gap (G15 §4's
     toll rule consumes these events);
@@ -163,23 +189,31 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
 - **Retention:** the event journal gets a real policy — 90 days of
   per-event records per box, compacted after 30 days into per-day
   outcome histograms keyed (box, component, build). This is the fleet
-  journal discipline G16 S1's README owed as an open question; the
-  inventory and event journals share it.
+  journal discipline G16 S1's README owed no later than S2 (its design
+  doc's OQ2 names S3 — this doc's S2 slice delivers it, and both get
+  updated to match).
 
 ### S3 — control-plane endpoint with attestation (hosted)
 
 - **Sink:** boxes push events to the control plane (or the plane pulls —
-  S2's transport decision); the push endpoint rides G13's signed
-  box→plane channel (TENANT_UPDATE_TRUST_MODEL.md §10), with per-tenant
-  attribution into the control-plane journal.
+  S2's transport decision); the push endpoint is built on the provisioned
+  trust root (`ROLLOUT_CONTROLLER_DESIGN.md` §5: the box learns the
+  controller's identity at install/provision time, pinned in
+  operator-deployed config). The signed box→plane channel itself is S3
+  design work owned by the G13 residual — until it exists, tenant-fleet
+  gates stay operator-promote-only per G15 §4 (never automatic).
 - **Trust:** gate-consumed events must be `attested: true`. Unattested
   self-reported events are *informational only* — visible to the operator,
   never admitted to a gate quorum. The operator estate keeps its trusted
   pull model; the tenant fleet gets attestation or it gets no gates.
   Forged events are the G15 §6 attack: fake `succeeded` promotes a bad
-  release, fake `failed` halts a good one. `event_id` is bound to
-  `box_id`, so replays never double-count; attestation binds the box
-  identity to the event content.
+  release, fake `failed` halts a good one. The `(box_id, event_id)` dedup
+  key makes exact resends of a captured event a no-op — nothing more: a
+  shell-holding tenant can mint fresh UUIDv7s with forged outcomes that
+  sail past dedup untouched. Only attestation stops that. Attestation
+  binds (box_id, event_id, outcome, …) to the box identity via the
+  provisioned trust root, and the signing key MUST be tenant-inaccessible
+  (open question 5: key custody under G13 §3's tenant-with-shell model).
 - **Slicing:** H11 per-tenant waves consume per-tenant event series;
   one tenant's correlated-failure alert never fires another tenant's.
 
@@ -266,11 +300,18 @@ waits on:
 3. **Session-epoch provenance:** the provisioner must maintain the
    reimage counter (§2, §4). Today no box record carries it. G15 §8's
    box_id-stability requirement gets a sibling: the provisioner's per-box
-   record owns `session_epoch`, incremented at reimage.
+   record owns `session_epoch`, incremented at reimage. Until then the
+   schema's `session_epoch` stays `null` and keying degrades to
+   (box, build).
 4. **Cross-component correlation:** a bad repo build and a toolset pin
    failure on the same box in the same window look correlated but aren't.
    The census gates are per (component, build); the fleet alert rule (S1
    rule 2) should probably key the same way. S1 keys (component, to).
+5. **Attestation key custody:** under G13 §3's tenant-with-shell model, a
+   box-resident signing key the tenant can read collapses the S3 trust
+   story — attestation that the tenant can sign for is not attestation.
+   Where the key lives (and how the updater reaches it without the tenant
+   being able to) is S3 design work alongside the signed channel itself.
 
 ---
 *Design for G17 (#608), from the 2026-09-28 fleet-rollout gap analysis
