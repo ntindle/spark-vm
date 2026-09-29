@@ -204,6 +204,10 @@ def make_addon(secrets=SECRETS, hosts=HOSTS, registry=REGISTRY,
     a._smoke_startup_checked = True
     a.registry = {k: (dict(v) if isinstance(v, dict) else v)
                   for k, v in registry.items()}
+    # Issue #694: production builds the Cookie-placement cache at
+    # _load(); injected addons mirror it here so _swap_headers reads
+    # the same cached set.
+    a._cookie_swap_name_set = a._cookie_swap_names()
     a.inference_mode = False
     a.ssrf_hosts = []
     a.ssrf_nets = []
@@ -416,6 +420,64 @@ class SwapAddonTests(unittest.TestCase):
         a.request(Flow(req))
         self.assertEqual(req.headers.get("Cookie"),
                          "t=hsurr:github; sess=sess-SECRET")
+
+    def test_694_cookie_scan_is_cached_not_rescanned(self):
+        """Issue #694: a Cookie-bearing request must not rescan the
+        registry — _swap_headers reads the cached set built at load."""
+        a = make_addon()
+        calls = []
+        orig = sa.SwapAddon._cookie_swap_names
+
+        def counting(self):
+            calls.append(1)
+            return orig(self)
+
+        try:
+            sa.SwapAddon._cookie_swap_names = counting
+            for _ in range(3):
+                req = Request("github.com", "/x",
+                              [("Cookie", "sess=hsurr:sess")])
+                a.request(Flow(req))
+                self.assertEqual(req.headers.get("Cookie"),
+                                 "sess=sess-SECRET")
+        finally:
+            sa.SwapAddon._cookie_swap_names = orig
+        self.assertEqual(calls, [],
+                         "hot path must not rescan the registry")
+        # The cache built at load time agrees with a fresh scan.
+        self.assertEqual(a._cookie_swap_name_set,
+                         a._cookie_swap_names())
+
+    def test_694_cookie_cache_refreshes_with_registry(self):
+        """Issue #694: a registry change + reload rebuilds the cache —
+        the stale-cache window cannot outlive _maybe_reload()."""
+        a = make_addon()
+        self.assertNotIn("pw", a._cookie_swap_name_set)
+        req = Request("github.com", "/x",
+                      [("Cookie", "t=hsurr:pw")])
+        a.request(Flow(req))
+        # 'pw' has no Cookie placement: placeholder passes through.
+        self.assertEqual(req.headers.get("Cookie"), "t=hsurr:pw")
+        # Registry gains a Cookie placement; reload rebuilds the cache.
+        a.registry["pw"]["access_token"] = {
+            "placement": {"custom_header": "Cookie"}}
+        a._cookie_swap_name_set = a._cookie_swap_names()  # = _load() tail
+        self.assertIn("pw", a._cookie_swap_name_set)
+        req = Request("github.com", "/x",
+                      [("Cookie", "t=hsurr:pw")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Cookie"), "t=" + SECRETS["pw"])
+
+    def test_694_unplaceable_registry_keeps_cookie_closed(self):
+        """Issue #694: a registry with no Cookie placements yields an
+        empty cache — Cookie placeholders stay untouched (fail closed)."""
+        a = make_addon(registry={"github": {"allowed_hosts":
+                                            ["github.com"]}})
+        self.assertEqual(a._cookie_swap_name_set, set())
+        req = Request("github.com", "/x",
+                      [("Cookie", "t=hsurr:github")])
+        a.request(Flow(req))
+        self.assertEqual(req.headers.get("Cookie"), "t=hsurr:github")
 
     def test_bug_subdomain_binding_matches(self):
         """Item 1: a leading-dot allowed_hosts entry matches subdomains,
