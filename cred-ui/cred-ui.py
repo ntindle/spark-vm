@@ -350,6 +350,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": str(e)})
 
 
+# The swapd writer refuses values over 64 KiB (cred-store-set:
+# max_bytes=65536). The UI must enforce the same bound on the *bytes* it
+# sends — never the decoded characters — before invoking the writer, the
+# same frontend/writer agreement the `cred` CLI holds (#149): 64 KiB of
+# 4-byte UTF-8 is only 16 Ki characters, so a character cap would let
+# multi-megabyte input through. Today the writer refuses late with a
+# 500; refuse early with a 400, before the sudo spawn.
+SECRET_MAX_BYTES = 65536
+
+
 def api_set(data):
     name = data.get("name", "")
     value = data.get("value", "")
@@ -377,6 +387,13 @@ def api_set(data):
     elif value.endswith("\n"):
         value = value[:-1]
     secret = value.encode("utf-8")
+    if len(secret) > SECRET_MAX_BYTES:
+        # #149 parity with the `cred` CLI: the writer refuses >64 KiB, so
+        # the UI must refuse up front with a clean 400 rather than
+        # spawning sudo and 500ing on the writer's refusal. Byte cap,
+        # not character cap (see SECRET_MAX_BYTES), checked after the
+        # one-newline chomp above, so stored bytes == intended value.
+        raise ValueError("secret exceeds 64 KiB \u2014 refusing before invoking the writer")
 
     rc, _, err = run(STORE_SET + [name], inp=secret)
     if rc != 0:
