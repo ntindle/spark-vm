@@ -46,11 +46,16 @@ python3 -m pytest
 ```
 
 `pytest.ini`'s `testpaths` is the authoritative suite inventory — one
-directory per component. Two pins keep it honest:
+directory per component. Three pins keep it honest:
 `scripts/test_pytest_ini_covers_all.py` fails if a `test_*.py` file lands
-outside the listed directories (no silently unwired suites), and
+outside the listed directories (no silently unwired suites),
 `scripts/test_contributing_suites.py` fails if the component table below
-and `testpaths` disagree in either direction (no drifted contributor docs).
+and `testpaths` disagree in either direction (no drifted contributor docs),
+and `scripts/test_deploy_gate_tests_coverage.py` fails if a `test_*.py`
+file under a gate-enumerated component directory (`proxy/`, `confirm/`)
+is not registered in that component's pre-deploy gate command in
+`deploy/components.conf` — or if a registration points at a deleted file
+(a new test must be exercised before deploys, not just in CI).
 All suites pass on `main`; your PR should keep them green.
 
 Install the test dependencies first:
