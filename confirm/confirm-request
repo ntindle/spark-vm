@@ -64,8 +64,16 @@ def main():
     os.makedirs(d, exist_ok=True)
     # Finding 50: the file owner is the requester; the dir is setgid
     # so group stays consistent. No --requester argument exists.
-    with open(os.path.join(d, aid + ".json"), "w") as f:
+    # Issue #232: write atomically (tmp + os.replace, the same idiom as
+    # proxy/swap_addon.py's filer) — a kill or ENOSPC mid-write must never
+    # leave a torn pending file. `aid` is a fresh uuid per invocation, so
+    # the tmp name cannot collide with another writer's.
+    tmp = os.path.join(d, aid + ".json.tmp")
+    with open(tmp, "w") as f:
         json.dump(item, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, os.path.join(d, aid + ".json"))
     print(aid)
 
 

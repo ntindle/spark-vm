@@ -744,11 +744,91 @@ def consumed_dir():
 GRANT_WRITER = os.environ.get("GRANT_WRITER", "/home/swapd/grant-writer")
 
 
+# Issue #232: grace periods for the pending-file lifecycle fix. A corrupt
+# file younger than the quarantine grace may be a torn mid-write from the
+# pre-#232 non-atomic confirm-request filer — it looks exactly like
+# corruption, so it is left alone; the render reap catches it on a later
+# pass if it never completes. Same reasoning for stray *.tmp files:
+# atomic writers hold the tmp name for milliseconds, so anything older
+# than the sweep grace is crash residue, never an in-flight write.
+_CORRUPT_QUARANTINE_GRACE_S = _env_int("CONFIRM_CORRUPT_GRACE_S", 120, 0)
+_TMP_SWEEP_GRACE_S = _env_int("CONFIRM_TMP_SWEEP_GRACE_S", 300, 0)
+
+
+def _quarantine_dir():
+    d = os.path.join(APPROVALS, "pending-quarantine")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _quarantine_corrupt_pending(aid, src):
+    """Issue #232: move an unparsable pending/<aid>.json out of pending/.
+
+    A corrupt file is unanswerable — every GET/POST 404s on it — and the
+    old render reap silently skipped it, so it sat in pending/ for the
+    daemon's lifetime. The quarantine dir is never scanned by
+    load_pending, so the move takes the file out of the hot path; the
+    file itself is preserved for forensics and an audit event records
+    the move. Returns True when the file was quarantined.
+
+    Crash-residue guard: files newer than _CORRUPT_QUARANTINE_GRACE_S are
+    left in place (a torn mid-write from the old non-atomic filer is
+    indistinguishable from corruption). A mid-sweep race with the answer
+    path is benign: the answer path 404s on corrupt files without
+    mutating them, and aids are never reused, so nothing can
+    legitimately recreate this name afterwards."""
+    try:
+        age = time.time() - os.path.getmtime(src)
+    except OSError:
+        return False
+    if age < _CORRUPT_QUARANTINE_GRACE_S:
+        return False
+    qd = _quarantine_dir()
+    # `aid` comes from a listdir entry minus the ".json" suffix — it
+    # cannot contain a path separator, so the join cannot escape qd.
+    dst = os.path.join(qd, aid + ".json")
+    try:
+        os.replace(src, dst)
+    except OSError:
+        return False
+    audit_log("pending-quarantined", "confirmd", "",
+              # Security hardening: `aid` derives from a listdir filename,
+              # which may contain newlines — sanitize before interpolating
+              # into the line-based audit log (defense in depth; a pending/
+              # writer could already plant worse directly).
+              "id=%s reason=unparsable"
+              % re.sub(r"[^A-Za-z0-9._-]", "_", aid))
+    return True
+
+
+def _sweep_stale_tmp(d):
+    """Issue #232: remove crash-residue *.tmp files from pending/.
+
+    Atomic writers (confirm-request, swap_addon.py's filer, GET's nonce
+    write-back) hold the tmp name only for the write+replace window, so
+    a *.tmp older than _TMP_SWEEP_GRACE_S is residue from a crashed
+    writer, never an in-flight one. Best-effort: races are fail-silent,
+    the next render retries."""
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith(".tmp"):
+            continue
+        p = os.path.join(d, fn)
+        try:
+            if time.time() - os.path.getmtime(p) < _TMP_SWEEP_GRACE_S:
+                continue
+            os.remove(p)
+        except OSError:
+            pass
+
+
 def load_pending():
     """Finding 58: reap expired items when the list is rendered."""
     items = []
     d = pending_dir()
     now = datetime.now(timezone.utc)
+    # Issue #232: sweep crash-residue tmp files on every render — the
+    # grace period keeps this from ever touching an in-flight writer.
+    _sweep_stale_tmp(d)
     for fn in sorted(os.listdir(d)):
         if not fn.endswith(".json"):
             continue
@@ -756,6 +836,14 @@ def load_pending():
         try:
             with open(p) as f:
                 it = json.load(f)
+        except Exception:
+            # Issue #232: a corrupt/torn pending file is unanswerable
+            # (every GET/POST 404s on it) — quarantine it (grace-gated,
+            # so a torn mid-write from the old non-atomic filer is not
+            # misclassified) instead of silently skipping it forever.
+            _quarantine_corrupt_pending(fn[:-len(".json")], p)
+            continue
+        try:
             exp = _parse_expiry(it.get("expires"))
             if exp is not None and now >= exp:
                 # Issue #233: the render reap mutates pending/ while the

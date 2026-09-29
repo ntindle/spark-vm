@@ -1850,6 +1850,103 @@ class ConfirmdTests(unittest.TestCase):
         self.assertNotIn(aid, cd._aid_locks)
 
 
+    # --- #232: pending-file lifecycle ------------------------------------
+    # corrupt pending files are quarantined (not skipped forever);
+    # confirm-request writes atomically; stale *.tmp files are swept.
+
+    def _write_pending(self, name, content, mtime_age=0):
+        p = self.approvals / "pending" / name
+        p.write_text(content)
+        if mtime_age:
+            old = time.time() - mtime_age
+            os.utime(p, (old, old))
+        return str(p)
+
+    def _valid_item(self, aid):
+        return {"id": aid,
+                "expires": "2999-01-01T00:00:00+00:00",
+                "summary": "x"}
+
+    def test_232_corrupt_pending_quarantined(self):
+        """An old corrupt pending file leaves pending/ for quarantine."""
+        aid = "deadbeef01234567"
+        self._write_pending(aid + ".json", "{torn", mtime_age=600)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            items = cd.load_pending()
+        self.assertEqual(items, [])
+        self.assertFalse((self.approvals / "pending" / (aid + ".json")).exists())
+        qp = self.approvals / "pending-quarantine" / (aid + ".json")
+        self.assertTrue(qp.exists(), "corrupt file must be quarantined")
+        self.assertEqual(qp.read_text(), "{torn")
+
+    def test_232_fresh_corrupt_pending_spared(self):
+        """A fresh corrupt file may be a torn mid-write — leave it alone."""
+        aid = "freshbeef01234567"
+        self._write_pending(aid + ".json", "{torn")
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd.load_pending()
+        self.assertTrue((self.approvals / "pending" / (aid + ".json")).exists())
+        self.assertFalse((self.approvals / "pending-quarantine").exists())
+
+    def test_232_fresh_corrupt_ages_into_quarantine(self):
+        """The grace is a delay, not an exemption: with the grace at 0
+        (simulating time passing), the same fresh file quarantines."""
+        aid = "agingbeef01234567"
+        self._write_pending(aid + ".json", "{torn")
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "_CORRUPT_QUARANTINE_GRACE_S", 0):
+            cd.load_pending()
+        self.assertFalse(
+            (self.approvals / "pending" / (aid + ".json")).exists())
+        self.assertTrue(
+            (self.approvals / "pending-quarantine" / (aid + ".json")).exists())
+
+    def test_232_quarantine_audited(self):
+        """The quarantine move leaves an audit trail event."""
+        aid = "auditbeef01234567"
+        self._write_pending(aid + ".json", "{torn", mtime_age=600)
+        audit = self.tmp.name + "/audit.log"
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "AUDIT", audit):
+            cd.load_pending()
+        trail = Path(audit).read_text()
+        self.assertIn("event=pending-quarantined", trail)
+        self.assertIn("id=%s" % aid, trail)
+
+    def test_232_stale_tmp_swept(self):
+        """Old *.tmp crash residue is removed; fresh tmp is kept."""
+        old = self._write_pending("aaa.json.tmp", "x", mtime_age=900)
+        fresh = self._write_pending("bbb.json.tmp", "x")
+        aid = "validbeef01234567"
+        self._write_pending(aid + ".json", json.dumps(self._valid_item(aid)))
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            items = cd.load_pending()
+        self.assertFalse(os.path.exists(old), "stale tmp must be swept")
+        self.assertTrue(os.path.exists(fresh), "fresh tmp must survive")
+        self.assertEqual([it["id"] for it in items], [aid])
+
+    def test_232_confirm_request_atomic(self):
+        """confirm-request leaves a complete file and no tmp residue."""
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "confirm-request")
+        env = dict(os.environ, CONFIRM_DIR=str(self.approvals))
+        r = subprocess.run(
+            [sys.executable, script, "--kind", "first-use",
+             "--credential", "github", "--host", "api.github.com"],
+            capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        aid = r.stdout.strip()
+        self.assertRegex(aid, r"^[0-9a-f]{16}$")
+        final = self.approvals / "pending" / (aid + ".json")
+        self.assertTrue(final.exists())
+        it = json.loads(final.read_text())
+        self.assertEqual(it["id"], aid)
+        leftovers = [p for p in (self.approvals / "pending").iterdir()
+                     if p.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [], "tmp residue after atomic write")
+
+
 class ReopenTests(unittest.TestCase):
     """H20: POST /reopen — re-file a denied approval as a new pending item.
 
@@ -2667,7 +2764,6 @@ class ConnDeadlineTests(unittest.TestCase):
                         "completed request left its deadline timer armed")
         self.assertEqual(timer.interval, 60)
         handle_error.assert_not_called()
-
 
 if __name__ == "__main__":
     unittest.main()
