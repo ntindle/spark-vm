@@ -823,17 +823,27 @@ def test_stderr_log_tightens_preexisting_mode(fake_serve, tmp_path):
 
 
 def test_stderr_log_never_loosens_stricter_mode(fake_serve, tmp_path):
-    # Permissions are only revoked, never granted: a 0400 log stays 0400.
+    # Permissions are only revoked, never granted. A 0400 log is
+    # unopenable-for-write by a non-root operator: the open fails with
+    # EACCES -> MSPError, still fail-closed (no spawn). As root the open
+    # succeeds and the mode must stay 0400 -- never loosened to 0600.
     argv, _record = fake_serve
     log = tmp_path / "job.log"
     log.write_bytes(b"old\n")
     os.chmod(str(log), 0o400)
     host = make_host(argv, log_path=str(log))
-    try:
-        host.open()
+    if os.geteuid() == 0:
+        try:
+            host.open()
+            assert stat.S_IMODE(os.stat(str(log)).st_mode) == 0o400
+        finally:
+            host.close()
+    else:
+        with pytest.raises(msp.MSPError):
+            host.open()
+        assert not host.is_alive()
+        assert host._proc is None
         assert stat.S_IMODE(os.stat(str(log)).st_mode) == 0o400
-    finally:
-        host.close()
 
 
 def test_stderr_log_rejects_symlink(fake_serve, tmp_path):
