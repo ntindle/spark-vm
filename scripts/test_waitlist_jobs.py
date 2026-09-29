@@ -723,3 +723,86 @@ def test_jobs_cli_fails_loud_without_key(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         wj.main(["--remind"])
     assert exc.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# #388: consumed_tokens.txt is garbage-collected at every rows rewrite
+# ---------------------------------------------------------------------------
+
+
+def _consumed_on_disk(tmp):
+    path = os.path.join(tmp, "consumed_tokens.txt")
+    if not os.path.exists(path):
+        return set()
+    with open(path, encoding="utf-8") as fh:
+        return {ln.strip() for ln in fh if ln.strip()}
+
+
+def test_purge_gc_prunes_consumed_tokens_of_gone_rows():
+    # #388: purge and forget removed rows but left their tokens behind —
+    # the file only ever grew. The rows rewrite now GCs it: consumed
+    # tokens of gone rows (and superseded tokens) go, while tokens that
+    # still matter stay — every consumed forget token (forget_get's fast
+    # path renders it as "already deleted"), and tokens still referenced
+    # by surviving rows (the reinstate/diagnose crash-repair reads).
+    svc, tmp, clock = make_service()
+
+    # Keeper: confirmed; its consumed confirm token is referenced by a
+    # surviving row, so it must survive the GC.
+    submit(svc, "keeper@example.com")
+    keeper_id = svc.by_email["keeper@example.com"]
+    keeper_token = svc.rows[keeper_id]["active_token"]
+    svc.confirm_post(keeper_token)
+
+    # Goner: a re-submit consumes the first token (superseded), then the
+    # row drops and purges — neither the superseded token nor anything
+    # of the gone row may remain.
+    submit(svc, "goner@example.com")
+    goner_id = svc.by_email["goner@example.com"]
+    superseded = svc.rows[goner_id]["active_token"]
+    submit(svc, "goner@example.com")  # re-mint consumes `superseded`
+    assert superseded in svc.consumed
+    clock.advance(days=15)
+    assert svc.drop_expired() == [goner_id]
+    clock.advance(days=30, seconds=1)
+    assert svc.purge_dropped() == [goner_id]
+
+    # Crashed invite: invited row whose invite token was consumed but the
+    # row never rolled back — the diagnose path reads this as
+    # "consumed", so the GC must keep it (the row survives).
+    submit(svc, "crashed@example.com")
+    crashed_id = svc.by_email["crashed@example.com"]
+    svc.confirm_post(svc.rows[crashed_id]["active_token"])
+    crash_token = "invite." + crashed_id + ".1.nonce.sig"
+    svc.rows[crashed_id]["active_invite_token"] = crash_token
+    svc.rows[crashed_id]["status"] = "invited"
+    svc._save_row(svc.rows[crashed_id])
+    svc._consume_token(crash_token)
+
+    # Forget-deleted row: the forget token must survive (the fast path
+    # renders it "already deleted"), the row's confirm token must not.
+    submit(svc, "forgetme@example.com")
+    forget_id = svc.by_email["forgetme@example.com"]
+    forget_confirm = svc.rows[forget_id]["active_token"]
+    svc.confirm_post(forget_confirm)
+    forget_token = svc.mint_forget_token(
+        forget_id, svc.rows[forget_id]["owner_email"])
+    status, _page = svc.forget_post(forget_token)
+    assert status == 200
+    assert forget_id not in svc.rows
+
+    on_disk = _consumed_on_disk(tmp)
+    # Gone/superseded tokens are pruned...
+    assert superseded not in on_disk
+    assert forget_confirm not in on_disk
+    # ...while tokens that still matter survive, on disk and in memory.
+    assert keeper_token in on_disk
+    assert forget_token in on_disk
+    assert crash_token in on_disk
+    assert svc.consumed == on_disk
+
+    # Behavioral: the kept forget token still renders the honest page —
+    # the fast path, not the row lookup, since the row is gone.
+    status, html = svc.forget_get(forget_token)
+    assert status == 200
+    assert "already deleted" in html

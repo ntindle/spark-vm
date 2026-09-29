@@ -162,6 +162,19 @@ codified as rule 6 so future watch bullets arrive compliant.)
   tmux session: detached background builds that used to survive the
   kill are terminated (SIGTERM, then SIGKILL) and any survivors are
   reported. (closes #12 item L4) (#649)
+- The waitlist's consumed-token store no longer grows forever: the
+  purge and forget-deletion paths now garbage-collect the token file
+  alongside the rows rewrite, keeping only tokens a surviving entry
+  still references and every consumed forget token (so a re-clicked
+  delete link still renders "already deleted" instead of "expired").
+  Dropped confirm/invite tokens render the same page as before —
+  nothing the operator or the entrant sees changes. (#651)
+- Every invite-wave invocation now writes a per-invocation manifest
+  (wave name, time, requested count, invited and skipped entry IDs) to
+  `wave_manifests/`, and the CLI prints the invited IDs plus the
+  manifest path — so a crash mid-wave and its retry read as two
+  manifests under the same wave name instead of one ambiguous count.
+  (closes #405) (#651)
 - confirmd's post-answer housekeeping no longer scans the answered and
   consumed history directories on every approval: the stray-file sweep and
   the history prune now run at most once an hour (tunable via

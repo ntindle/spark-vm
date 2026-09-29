@@ -284,7 +284,17 @@ def main(argv):
                 wave=wave, count=count)
             sys.stdout.write(
                 f"waitlist_invites: wave {wave!r} invited "
-                f"{len(invited)} row(s)\n")
+                f"{len(invited)} row(s): "
+                f"{', '.join(invited) if invited else '(none)'}\n")
+            if service.last_wave_manifest:
+                sys.stdout.write(
+                    "waitlist_invites: wave manifest: "
+                    f"{service.last_wave_manifest}\n")
+            else:
+                sys.stdout.write(
+                    "waitlist_invites: WARNING: no wave manifest was "
+                    "written — the wave committed; inspect rows.jsonl "
+                    "for the invited rows\n")
         elif want_reconcile:
             reconciled = service.reconcile_invite_events(dry_run=dry_run)
             verb = "would reconcile" if dry_run else "reconciled"

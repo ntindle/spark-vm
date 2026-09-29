@@ -1559,3 +1559,51 @@ def test_status_snapshot_mtime_fallback():
     snap = svc.status_snapshot()
     assert snap["spool"]["files"] == 1
     assert snap["spool"]["oldest_age_seconds"] == 3600
+
+
+# ---------------------------------------------------------------------------
+# #388 follow-up: the GC prunes superseded confirm tokens — the lookup must
+# still retire them via the active-token comparison, or dead links come
+# back to life.
+# ---------------------------------------------------------------------------
+
+
+def test_superseded_confirm_token_stays_retired_across_gc():
+    # A re-submit consumes the old confirm token and installs a fresh
+    # active_token. A later rows rewrite (here: an unrelated
+    # forget-delete) prunes the old token from consumed_tokens.txt — the
+    # dead link must still render expired and must not confirm the row.
+    svc, tmp = make_service()
+    status, _ = svc.submit_form(form_fields("a@example.com"), "127.0.0.1")
+    assert status == 200
+    eid = svc.by_email["a@example.com"]
+    old_token = svc.rows[eid]["active_token"]
+    status, _ = svc.submit_form(form_fields("a@example.com"), "127.0.0.1")
+    assert status == 200
+    new_token = svc.rows[eid]["active_token"]
+    assert new_token != old_token
+    assert old_token in svc.consumed
+
+    # An unrelated forget-delete forces a rows rewrite + GC.
+    svc.submit_form(form_fields("b@example.com"), "127.0.0.1")
+    bid = svc.by_email["b@example.com"]
+    svc.confirm_post(svc.rows[bid]["active_token"])
+    f_tok = svc.mint_forget_token(bid, svc.rows[bid]["owner_email"])
+    status, _ = svc.forget_post(f_tok)
+    assert status == 200
+    assert old_token not in svc.consumed  # pruned by the GC
+
+    # The dead link renders expired...
+    row, lookup_status = svc._lookup_token_row(old_token)
+    assert lookup_status == "consumed"
+    status, html = svc.confirm_get(old_token)
+    assert status == 200
+    assert "Link expired" in html
+    # ...and cannot confirm the row.
+    status, html = svc.confirm_post(old_token)
+    assert status == 200
+    assert "Link expired" in html
+    assert svc.rows[eid]["status"] == "pending"
+    # The live token is untouched.
+    row, lookup_status = svc._lookup_token_row(new_token)
+    assert lookup_status == "ok"

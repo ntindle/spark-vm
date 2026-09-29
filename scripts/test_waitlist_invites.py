@@ -433,7 +433,12 @@ def test_forget_post_on_invited_row():
     status, _page = service.forget_post(token)
     assert status == 200
     assert row["entry_id"] not in service.rows
-    assert invite_token in service.consumed
+    # #388: the forget-time rewrite GCs consumed_tokens.txt — the dead
+    # row's invite token is pruned (no surviving row references it and
+    # it is not a forget token). The claim lookup is unchanged: the row
+    # is gone, so it honestly reports invalid either way.
+    assert invite_token not in service.consumed
+    assert token in service.consumed  # the forget token itself stays
     # The row is gone, so the claim lookup honestly reports invalid —
     # there is nothing left to claim.
     _, status = service.lookup_invite_token(invite_token)
@@ -1687,3 +1692,167 @@ def test_cli_reinstate_and_diagnose(tmp_path, monkeypatch, capsys):
     svc3 = wd.WaitlistService(data, KEY, "https://waitlist.example.invalid",
                               clock=clock2)
     assert svc3.rows[eid2]["reinstate_consumed_live_token"] is True
+
+
+# ---------------------------------------------------------------------------
+# #405: every wave invocation writes a per-invocation manifest
+# ---------------------------------------------------------------------------
+
+
+def _manifests(tmp):
+    d = os.path.join(tmp, "wave_manifests")
+    return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+
+def _read_manifest(tmp, name):
+    with open(os.path.join(tmp, "wave_manifests", name),
+              encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def test_wave_writes_manifest():
+    # #405: one manifest per invocation — wave name, time, requested
+    # count, invited IDs in wave order, skipped IDs. A crash and its
+    # retry read as two manifests under the same wave name, not one
+    # ambiguous count.
+    service, tmp, clock = make_service()
+    a = confirm_row(service, "a@example.com", clock,
+                    at=NOW - timedelta(days=2))
+    b = confirm_row(service, "b@example.com", clock,
+                    at=NOW - timedelta(days=1))
+    invited = wave(service, count=5, wave="wave1")
+    assert invited == [a["entry_id"], b["entry_id"]]
+
+    names = _manifests(tmp)
+    assert len(names) == 1
+    manifest = _read_manifest(tmp, names[0])
+    assert manifest["wave"] == "wave1"
+    assert manifest["requested"] == 5
+    assert manifest["invited"] == [a["entry_id"], b["entry_id"]]
+    assert manifest["skipped"] == []
+    assert manifest["invoked_at"]
+    # The service stashes the path for the CLI to print.
+    assert service.last_wave_manifest.endswith(names[0])
+
+    # A second invocation is a second manifest, even under the same
+    # wave name.
+    wave(service, count=5, wave="wave1")
+    assert len(_manifests(tmp)) == 2
+
+
+def test_wave_manifest_records_skipped_rows(monkeypatch):
+    # A wave that invites fewer than requested says which rows it
+    # skipped (cap-suppressed or spool-failed) — the operator no longer
+    # has to guess "crash mid-wave" vs "cap-suppressed".
+    service, tmp, clock = make_service()
+    a = confirm_row(service, "a@example.com", clock,
+                    at=NOW - timedelta(days=2))
+    b = confirm_row(service, "b@example.com", clock,
+                    at=NOW - timedelta(days=1))
+
+    real_open = open
+    fail = {"on": True}
+
+    def flaky_open(path, *args, **kwargs):
+        if (fail["on"] and isinstance(path, str)
+                and b["entry_id"] in path and "-invite-" in path):
+            raise OSError("simulated disk-full")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", flaky_open)
+    invited = wave(service, count=2, wave="wave1")
+    assert invited == [a["entry_id"]]
+
+    names = _manifests(tmp)
+    assert len(names) == 1
+    manifest = _read_manifest(tmp, names[0])
+    assert manifest["invited"] == [a["entry_id"]]
+    assert manifest["skipped"] == [b["entry_id"]]
+    fail["on"] = False
+
+
+def test_cli_wave_prints_manifest(tmp_path, monkeypatch, capsys):
+    pricing = tmp_path / "pricing.txt"
+    terms = tmp_path / "terms.txt"
+    pricing.write_text(PRICING)
+    terms.write_text(TERMS)
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
+    monkeypatch.setenv("WAITLIST_DATA", str(data))
+    monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
+                       "https://waitlist.example.invalid")
+    monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
+    service = wd.WaitlistService(str(data), KEY,
+                                 "https://waitlist.example.invalid",
+                                 clock=MutClock())
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    entry_id = row["entry_id"]
+
+    assert wi.main(["--send-wave", "--wave", "w1", "--count", "5",
+                    "--pricing-file", str(pricing),
+                    "--trial-terms-file", str(terms)]) == 0
+    out = capsys.readouterr().out
+    assert "invited 1 row(s)" in out
+    # Per-invocation attribution on the console: which rows, and where
+    # the manifest landed.
+    assert entry_id in out
+    assert "wave manifest:" in out
+    manifest_path = [ln for ln in out.splitlines()
+                     if "wave manifest:" in ln][0].split("wave manifest:")[1].strip()
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    assert manifest["wave"] == "w1"
+    assert manifest["invited"] == [entry_id]
+
+
+def test_cli_wave_manifest_failure_warns_but_invites(tmp_path, monkeypatch,
+                                                     capsys):
+    # The manifest is an audit aid, not the commit: a manifest write
+    # failure must not fail the wave — the operator gets a loud warning
+    # instead, and the wave's rows are inspectable in rows.jsonl.
+    pricing = tmp_path / "pricing.txt"
+    terms = tmp_path / "terms.txt"
+    pricing.write_text(PRICING)
+    terms.write_text(TERMS)
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
+    monkeypatch.setenv("WAITLIST_DATA", str(data))
+    monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
+                       "https://waitlist.example.invalid")
+    monkeypatch.setenv("WAITLIST_CLAIM_LIVE", "1")
+    service = wd.WaitlistService(str(data), KEY,
+                                 "https://waitlist.example.invalid",
+                                 clock=MutClock())
+    service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
+    row = service.rows[service.by_email["a@example.com"]]
+    service.confirm_post(row["active_token"])
+    entry_id = row["entry_id"]
+
+    real_open = open
+
+    def failing_open(path, *args, **kwargs):
+        if isinstance(path, str) and "wave_manifests" in path:
+            raise OSError("simulated manifest-dir failure")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+    assert wi.main(["--send-wave", "--wave", "w1", "--count", "5",
+                    "--pricing-file", str(pricing),
+                    "--trial-terms-file", str(terms)]) == 0
+    captured = capsys.readouterr()
+    # The wave committed normally...
+    assert "invited 1 row(s)" in captured.out
+    assert entry_id in captured.out
+    # ...but the missing manifest is loud, not silent.
+    assert "wave manifest write failed" in captured.err
+    assert "no wave manifest was written" in captured.out
+    assert _manifests(str(data)) == []
+    # rows.jsonl remains the source of truth: the row is invited.
+    check = wd.WaitlistService(str(data), KEY,
+                               "https://waitlist.example.invalid",
+                               clock=MutClock())
+    assert check.rows[entry_id]["status"] == "invited"
