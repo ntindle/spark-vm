@@ -2412,6 +2412,60 @@ class AuditLogTests(unittest.TestCase):
         self.assertIn("confirmd: cannot write audit log", err.getvalue())
         self.assertIn("simulated", err.getvalue())
 
+    def test_audit_log_sanitizes_client_influenced_fields(self):
+        """Issue #683 (#17 twin): `login` is user-supplied web-UI form
+        input and `detail` can carry client-influenced values, so a
+        newline or a `ts=`-looking fragment must not forge audit lines.
+        The sanitize choke point strips everything outside printable
+        ASCII; well-formed values pass through unchanged."""
+        path = os.path.join(self.tmp.name, "audit.log")
+        with mock.patch.object(cd, "AUDIT", path):
+            cd.audit_log("403", "100.99.0.1",
+                         "attacker\nts=2026-01-01T00:00:00Z event=approved",
+                         "host=x.example\nforged=1\u2028")
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), 1)  # no injected line break survived
+        line = lines[0]
+        # Spaces die too (0x20 is below '!' in the allowlist), so the forged
+        # fragment is fused into the login/detail token — it can never parse
+        # as a separate line or a separate k=v token.
+        self.assertNotIn("\u2028", line)
+        self.assertIn("login=attackerts=2026-01-01T00:00:00Zevent=approved",
+                      line)
+        self.assertIn("host=x.exampleforged=1", line)
+
+    def test_audit_log_well_formed_fields_unchanged(self):
+        """Sanitization is mechanical: printable-ASCII audit values are
+        byte-identical before and after (#683)."""
+        path = os.path.join(self.tmp.name, "audit.log")
+        with mock.patch.object(cd, "AUDIT", path):
+            cd.audit_log("403", "100.99.0.1", "ntindle@github",
+                         "reason=bad-nonce")
+        with open(path, encoding="utf-8") as f:
+            line = f.read().splitlines()[0]
+        self.assertRegex(line, r"^ts=\S+ event=403 peer=100\.99\.0\.1 "
+                               r"login=ntindle@github reason=bad-nonce$")
+
+    def test_audit_log_none_login_renders_dash(self):
+        """None still renders as '-' (pre-#683 `login or '-'` semantics
+        preserved through the sanitize choke point)."""
+        path = os.path.join(self.tmp.name, "audit.log")
+        with mock.patch.object(cd, "AUDIT", path):
+            cd.audit_log("conn-deadline", "100.99.0.1", None, "")
+        with open(path, encoding="utf-8") as f:
+            line = f.read().splitlines()[0]
+        self.assertIn("login=-", line)
+
+    def test_sanitize_audit_field_helper(self):
+        """Direct contract of the #683 helper: printable ASCII passes,
+        everything outside `!`..`~` is dropped, None -> '-'."""
+        self.assertEqual(cd._sanitize_audit_field(None), "-")
+        self.assertEqual(cd._sanitize_audit_field("ok-1_2.3"), "ok-1_2.3")
+        self.assertEqual(cd._sanitize_audit_field("a\nb\rc\td"), "abcd")
+        self.assertEqual(cd._sanitize_audit_field("é"), "")
+        self.assertEqual(cd._sanitize_audit_field(404), "404")
+
 class M8ServerHardeningTests(unittest.TestCase):
     """Issue #77 (M8): no socket/request timeouts, unbounded thread pool."""
 

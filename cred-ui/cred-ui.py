@@ -156,15 +156,31 @@ def run(argv, inp=None):
     return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
 
 
+class RegistryCorruptError(Exception):
+    """The registry file exists and is readable but is not valid JSON (or
+    not a JSON object), or the store read itself failed. Raised (not
+    swallowed) so /api/creds fails loud with the generic scrubbed 500
+    instead of rendering every credential as `registered: false` — the
+    silent-downgrade class (#672)."""
+
+
 def read_registry():
-    rc, out, _ = run(REGISTRY_CAT)
+    rc, out, err = run(REGISTRY_CAT)
     if rc != 0:
-        return {}
+        # A genuinely absent store (fresh box, nothing registered yet) is
+        # the one honest-empty case; cat names it on stderr. Any other
+        # read failure (sudo misconfiguration, permission loss) is a
+        # loud error, not an empty rendering.
+        if "No such file or directory" in err:
+            return {}
+        raise RegistryCorruptError("registry read failed")
     try:
         reg = json.loads(out)
     except ValueError:
-        return {}
-    return reg if isinstance(reg, dict) else {}
+        raise RegistryCorruptError("registry is not valid JSON")
+    if not isinstance(reg, dict):
+        raise RegistryCorruptError("registry is not a JSON object")
+    return reg
 
 
 def list_secret_names():

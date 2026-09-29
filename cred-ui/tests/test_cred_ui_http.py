@@ -286,6 +286,65 @@ def test_creds_read_failure_is_generic(server, monkeypatch):
     assert "swapd" not in payload.decode()
 
 
+# --- issue #672: corrupt registry must fail loud, not render empty --------
+
+
+def test_read_registry_absent_store_returns_empty(monkeypatch):
+    """A genuinely absent store (fresh box, cat names it on stderr) is the
+    one honest-empty case — nothing is registered yet, so {} tells the
+    truth."""
+    monkeypatch.setattr(
+        cred_ui, "run",
+        lambda argv, inp=None: (
+            1, "",
+            "/usr/bin/cat: /home/swapd/credentials.json: No such file or directory\n"))
+    assert cred_ui.read_registry() == {}
+
+
+def test_read_registry_sudo_failure_raises(monkeypatch):
+    """Any other read failure (e.g. sudo misconfiguration) is a loud
+    error, not an empty rendering — the UI must not claim 'none stored'
+    when the store may hold 12 credentials."""
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: (1, "", "sudo: a password is required"))
+    with pytest.raises(cred_ui.RegistryCorruptError):
+        cred_ui.read_registry()
+
+
+def test_read_registry_corrupt_json_raises(monkeypatch):
+    """A present-but-corrupt registry raises instead of degrading to {} —
+    the UI must not render every credential as `registered: false`."""
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: (0, '{"gh": {"token": ', ""))
+    with pytest.raises(cred_ui.RegistryCorruptError):
+        cred_ui.read_registry()
+
+
+def test_read_registry_non_dict_json_raises(monkeypatch):
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: (0, '["gh", "token"]', ""))
+    with pytest.raises(cred_ui.RegistryCorruptError):
+        cred_ui.read_registry()
+
+
+def test_read_registry_valid_json_returns_dict(monkeypatch):
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: (0, '{"gh": {"token": {}}}', ""))
+    assert cred_ui.read_registry() == {"gh": {"token": {}}}
+
+
+def test_creds_corrupt_registry_is_generic_500(server, monkeypatch):
+    """Corrupt registry over HTTP: loud generic 500 with scrubbed paths,
+    never a 200 whose `registered: false` lies to the human."""
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: (0, '{"gh": {"token": ', ""))
+    status, _, payload = _req(server, "GET", "/api/creds")
+    assert status == 500
+    body = json.loads(payload)
+    assert body == {"error": "read failed"}
+    assert "swapd" not in payload.decode()
+
+
 # --- issue #670: sudo argv must pin absolute paths ----------------------------
 
 
