@@ -377,16 +377,24 @@ def _ensure_store(store_dir):
 
 
 def append_journal(store_dir, records):
-    """Append records to the journal. Returns (line_count, error)."""
+    """Append records to the journal. Returns (line_count, error).
+
+    Each record is one newline-terminated line written as a single
+    write() syscall (line buffering), which O_APPEND keeps atomic in
+    positioning under concurrent writers (e.g. overlapping collect
+    crons). fsync before returning gives the "crash-safe" guarantee
+    the design claims: a collect that exits 0 survives an OS crash.
+    """
     err = _ensure_store(store_dir)
     if err:
         return None, err
     journal_path = os.path.join(store_dir, JOURNAL_NAME)
     try:
-        with open(journal_path, "a", encoding="utf-8") as fh:
+        with open(journal_path, "a", encoding="utf-8", buffering=1) as fh:
             for record in records:
                 fh.write(json.dumps(record, sort_keys=True) + "\n")
             fh.flush()
+            os.fsync(fh.fileno())
     except OSError as exc:
         return None, "cannot append to journal: %s" % exc
     return rebuild_snapshot(store_dir)

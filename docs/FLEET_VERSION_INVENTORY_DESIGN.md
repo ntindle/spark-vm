@@ -182,7 +182,8 @@ artifacts:
 > one subdirectory per box holding the three artifacts, which the
 > operator rsyncs/scps together (or points at a mounted tree) — rather
 > than pulling over SSH itself. The record schema and the store are
-> unchanged either way; live SSH pull is a later collector slice. the tail of the auto-deploy audit log, a fresh
+> unchanged either way; live SSH pull is a later collector slice.
+the tail of the auto-deploy audit log, a fresh
 `self_update.py status --json` run, and a small box-side snapshot script
 that emits `{repo_commit, gate_answer_age, frozen, arc_active,
 image_version}` — all derived from on-box state the updaters already

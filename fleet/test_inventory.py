@@ -394,6 +394,33 @@ def test_rebuild_skips_malformed_journal_lines(env):
     assert set(snap["boxes"]) == {"tower"}
 
 
+def test_large_record_round_trips_whole_line(env):
+    """A record bigger than one stdio block buffer (8 KB) must land in the
+    journal as one complete line, never a torn multi-write line: the append
+    path uses line buffering so each record is a single O_APPEND write."""
+    estate, store = env
+    big = "x" * 20000  # comfortably over the old 8 KB block buffer
+    status = _status_json()
+    status["padding_to_exceed_stdio_buffer"] = big
+    _write_box(estate, "tower", status=status)
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    with open(os.path.join(store, "journal.jsonl"), "r") as fh:
+        raw_lines = [line for line in fh if line.strip()]
+    assert len(raw_lines) == 1
+    assert len(raw_lines[0]) > 8192
+    record = json.loads(raw_lines[0])
+    assert record["versions"]["toolset_pins"]["padding_to_exceed_stdio_buffer"] == big
+    # Rebuild replays the journal; the record must survive byte-identical.
+    proc = run_inventory("rebuild", "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    with open(os.path.join(store, "journal.jsonl"), "r") as fh:
+        raw_lines2 = [line for line in fh if line.strip()]
+    assert raw_lines2 == raw_lines
+    assert _snapshot(store)["boxes"]["tower"]["versions"]["toolset_pins"][
+        "padding_to_exceed_stdio_buffer"] == big
+
+
 # --- box_snapshot.py -----------------------------------------------------
 
 
