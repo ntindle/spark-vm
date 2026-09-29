@@ -264,6 +264,18 @@ def test_creds_read_failure_is_generic(server, monkeypatch):
     assert "swapd" not in payload.decode()
 
 
+# --- issue #670: sudo argv must pin absolute paths ----------------------------
+
+
+def test_sudo_read_argv_pins_absolute_paths():
+    """Issue #670: the sudoers entries are absolute (/usr/bin/cat,
+    /usr/bin/ls); a bare name only matches when sudo resolves it through
+    the deploy target's secure_path. The UI must pin the absolute paths
+    the sudoers entries name."""
+    assert cred_ui.REGISTRY_CAT[4] == "/usr/bin/cat"
+    assert cred_ui.SECRETS_LS[4] == "/usr/bin/ls"
+
+
 # --- issue #282: request/read timeout -------------------------------------
 
 

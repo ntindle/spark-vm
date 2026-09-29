@@ -127,10 +127,15 @@ PARAM_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 # -n everywhere: the sudoers entries are NOPASSWD, and a request thread
 # must never block on a password prompt (matches the cred CLI).
+# Absolute /usr/bin paths (issue #670): the sudoers entries are absolute
+# (/usr/bin/cat, /usr/bin/ls), and a bare `cat` only matches them when
+# sudo happens to resolve it through secure_path to the same path — a
+# property of the deploy target, not of this repo. Sibling readers
+# (credlib) already pin the path; the UI does the same.
 STORE_SET = ["sudo", "-n", "-u", "swapd", "/usr/local/bin/cred-store-set"]
 REGISTRY_SET = ["sudo", "-n", "-u", "swapd", "/usr/local/bin/cred-registry-set"]
-REGISTRY_CAT = ["sudo", "-n", "-u", "swapd", "cat", "/home/swapd/credentials.json"]
-SECRETS_LS = ["sudo", "-n", "-u", "swapd", "ls", "/home/swapd/secrets"]
+REGISTRY_CAT = ["sudo", "-n", "-u", "swapd", "/usr/bin/cat", "/home/swapd/credentials.json"]
+SECRETS_LS = ["sudo", "-n", "-u", "swapd", "/usr/bin/ls", "/home/swapd/secrets"]
 SECRET_DELETE = ["sudo", "-n", "-u", "swapd", "/usr/local/bin/cred-store-delete"]
 
 

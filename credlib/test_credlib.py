@@ -49,10 +49,13 @@ class NameValidationTests(unittest.TestCase):
                          "hsurr:%s:%s" % (long_name, "y" * 100))
         # fill_secret's filesystem read validates through the same choke
         # point: a legacy name must reach the (stubbed) store read, not
-        # raise at validation.
+        # raise at validation. The read goes through the narrow
+        # cred-store-get writer (issue #669) — the name is its final
+        # argv element.
         class Proc:
             returncode = 0
             stdout = b"tok"
+            stderr = b""
         real_run = fill_secret.subprocess.run
         seen = []
         def fake_run(argv, **kwargs):
@@ -64,7 +67,8 @@ class NameValidationTests(unittest.TestCase):
                              "tok")
         finally:
             fill_secret.subprocess.run = real_run
-        self.assertTrue(any(a[-1].endswith("/" + long_name) for a in seen))
+        self.assertTrue(any("/usr/local/bin/cred-store-get" in a
+                            and a[-1] == long_name for a in seen))
 
     def test_valid_names_still_resolve(self):
         """Legitimate names are unaffected; surrogate format unchanged."""
@@ -115,6 +119,7 @@ class ReadValueVerbatimTests(unittest.TestCase):
         class Proc:
             returncode = 1
             stdout = b""
+            stderr = b""
         real_run = fill_secret.subprocess.run
         fill_secret.subprocess.run = lambda *a, **k: Proc()
         try:
@@ -122,6 +127,24 @@ class ReadValueVerbatimTests(unittest.TestCase):
                 fill_secret._read_value("gh", "access_token")
         finally:
             fill_secret.subprocess.run = real_run
+
+    def test_reader_failure_surfaces_writer_stderr(self):
+        """#147 class: a denied/broken read must not mask as plain
+        \"not set\" — the narrow writer's stderr (which never carries
+        secret values) is surfaced in the error."""
+        class Proc:
+            returncode = 1
+            stdout = b""
+            stderr = b"sudo: a password is required\n"
+        real_run = fill_secret.subprocess.run
+        fill_secret.subprocess.run = lambda *a, **k: Proc()
+        try:
+            with self.assertRaises(DynamicCredentialError) as ctx:
+                fill_secret._read_value("gh", "access_token")
+        finally:
+            fill_secret.subprocess.run = real_run
+        self.assertIn("reader: sudo: a password is required", str(ctx.exception))
+        self.assertIn("cred set gh", str(ctx.exception))
 
 
 if __name__ == "__main__":
