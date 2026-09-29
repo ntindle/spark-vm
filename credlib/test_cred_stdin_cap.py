@@ -117,3 +117,13 @@ def test_multibyte_over_cap_refused(cred, monkeypatch):
     _piped_stdin(cred, "é".encode("utf-8") * 32769, monkeypatch)
     with pytest.raises(cred.CredentialError, match="64 KiB"):
         cred.read_secret_stdin()
+
+
+def test_invalid_utf8_stdin_raises_unicode_decode_error(cred, monkeypatch):
+    # Invalid UTF-8 is rejected by the strict decode — the pre-#149 code read
+    # sys.stdin in text mode, which raises UnicodeDecodeError the same way;
+    # the bounded byte-read preserves that behavior instead of replacing or
+    # mangling undecodable bytes (QA-verified identical on the #149 review).
+    _piped_stdin(cred, b"hunter2\xff\xfe\n", monkeypatch)
+    with pytest.raises(UnicodeDecodeError):
+        cred.read_secret_stdin()

@@ -45,10 +45,13 @@ One command, from the repo root:
 python3 -m pytest
 ```
 
-`pytest.ini` discovers every suite (`proxy`, `confirm`, `muse-job/tests`,
-`deploy`, `scripts`, `cred-ui/tests`, `harness`, `browser-driver`, `cua`,
-`jail`, `credlib`). All suites pass on `main`;
-your PR should keep them green.
+`pytest.ini`'s `testpaths` is the authoritative suite inventory — one
+directory per component. Two pins keep it honest:
+`scripts/test_pytest_ini_covers_all.py` fails if a `test_*.py` file lands
+outside the listed directories (no silently unwired suites), and
+`scripts/test_contributing_suites.py` fails if the component table below
+and `testpaths` disagree in either direction (no drifted contributor docs).
+All suites pass on `main`; your PR should keep them green.
 
 Install the test dependencies first:
 
@@ -56,21 +59,25 @@ Install the test dependencies first:
 pip install -r requirements-test.txt
 ```
 
-Per-component dependency notes:
+To run one component's suite: `python3 -m pytest <dir>` from the repo
+root (e.g. `python3 -m pytest proxy`).
 
-| Component | Suites | Extra deps beyond stdlib + pytest |
+Per-component dependency notes — install these (beyond stdlib + pytest)
+before running that component's suite:
+
+| Component | Run it | Extra deps beyond stdlib + pytest |
 |---|---|---|
-| `proxy/` | `test_swap_addon`, `test_grant_writer`, `test_round6` | none (mitmproxy is a *deploy* dependency, installed by `proxy/deploy.sh`; no test module imports it) |
-| `confirm/` | `test_confirmd`, `test_push` | `cryptography` (VAPID / Web Push in `confirm/push.py`) |
-| `muse-job/tests/` | `test_event_trust`, `test_session_lifecycle`, `test_steer_tui_guard`, `test_version` | none |
-| `deploy/` | `test_auto_deploy` | none |
-| `scripts/` | `test_sparkvm_version` | none |
-| `cred-ui/tests/` | `test_cred_ui_version` | none |
-| `harness/` | `test_probe`, `test_manifest`, `test_install_gate_fixture` | none |
-| `browser-driver/bdrive/` | `test_bdrive_protocol` | none |
-| `cua/` | `test_cua_bridge`, `test_shell_scripts` | none (the bridge's driver calls are stubbed; the `.sh` scripts get `bash -n` syntax + shellcheck-warning gates only — they run with real side effects on spark-vm) |
-| `jail/` | `test_build_smoke` | none (`build.sh --help` executes the real script's arg parsing and exits before any side effect; full builds need root + systemd-nspawn on the box) |
-| `credlib/` | `test_credlib` | none (name-validation unit tests only; the `/home/swapd/secrets` store is a string constant, never touched) |
+| `proxy/` | `python3 -m pytest proxy` | none (mitmproxy is a *deploy*-time dependency — the swap proxy runs under it on the box; no test module imports it) |
+| `confirm/` | `python3 -m pytest confirm` | `cryptography` (VAPID / Web Push in `confirm/push.py`) |
+| `muse-job/tests/` | `python3 -m pytest muse-job/tests` | none |
+| `deploy/` | `python3 -m pytest deploy` | none |
+| `scripts/` | `python3 -m pytest scripts` | `pillow` (`test_waitlist_page.py` — og:image dimension/format assertions) |
+| `cred-ui/tests/` | `python3 -m pytest cred-ui/tests` | none |
+| `harness/` | `python3 -m pytest harness` | none |
+| `browser-driver/` | `python3 -m pytest browser-driver` | none |
+| `cua/` | `python3 -m pytest cua` | none (the bridge's driver calls are stubbed; the `.sh` scripts get `bash -n` syntax + shellcheck-warning gates plus isolated extraction-tests of their security guards — they run with real side effects on spark-vm) |
+| `jail/` | `python3 -m pytest jail` | none (`build.sh --help` executes the real script's arg parsing and exits before any side effect; full builds need root + systemd-nspawn on the box) |
+| `credlib/` | `python3 -m pytest credlib` | none (name-validation + stdin-cap unit tests only; the `/home/swapd/secrets` store is a string constant, never touched) |
 
 Two conventions keep the one-liner working: keep every `test_*.py`
 basename unique across the repo (pytest imports test modules by basename),
