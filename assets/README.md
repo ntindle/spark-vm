@@ -215,7 +215,10 @@ Recorded 2026-09-19 against a **demo** cred-ui instance on this box
 The demo is the real `cred-ui/cred-ui.py` with **no code overrides**:
 reads went through the real `sudo -u swapd cat /home/swapd/credentials.json`
 and `sudo -u swapd ls /home/swapd/secrets` paths against a scratch
-`swapd` layout holding only the demo fixture. The fixture registry has
+`swapd` layout holding only the demo fixture. (Recorded 2026-09-19,
+before issue #670 pinned the read paths to their absolute binaries —
+current cred-ui pins `/usr/bin/cat` and `/usr/bin/ls`; re-recordings
+should follow the current read paths, not these.) The fixture registry has
 two demo-named entries (`demo-github-ro`, registered + bearer-header
 placement on `api.github.com`; `demo-llm-api`, registered + custom-header
 placement on `inference.example.com`, no value) and the secret file is
