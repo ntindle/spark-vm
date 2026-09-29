@@ -34,6 +34,7 @@ from tenant_status import (
     TenantStatusService,
     TenantStore,
     TransitionError,
+    _DUMMY_VERIFY_KEY,
     apply_event,
     canonical_poll_message,
     human_key_for,
@@ -76,6 +77,26 @@ def _stub_verify(message: bytes, signature: bytes, public_key: str) -> bool:
     # b"sig:" + the canonical message; the public key is carried so tests
     # prove the verifier receives the record's linked key.
     return signature == b"sig:" + message and public_key.startswith("ssh-ed25519")
+
+
+class _RecordingVerify:
+    """Wraps a verify stub, recording every (message, signature, public_key) call.
+
+    Test-only — do not copy into production: recording real (message,
+    signature, public_key) triples outside a test would be a
+    secret-handling hazard.
+
+    Lets a test pin the verification *mechanism* (verification ran, and
+    against which key) rather than just the request's outcome.
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = []
+
+    def __call__(self, message, signature, public_key):
+        self.calls.append((message, signature, public_key))
+        return self.inner(message, signature, public_key)
 
 
 def _service(store, verify=_stub_verify):
@@ -315,7 +336,7 @@ def test_unknown_event_and_code_rejected():
 # G8 — approvals_url: write-if-absent + re-read, mint-once, re-entry reads.
 
 
-def test_ensure_approvals_url_mints_once_and_reentry_is_a_read(store):
+def test_ensure_approvals_url_mints_once_and_reentry_is_a_read(store, store_path):
     rec = _tenant(approvals_url=None)
     store.create(rec)
     calls = []
@@ -326,9 +347,14 @@ def test_ensure_approvals_url_mints_once_and_reentry_is_a_read(store):
 
     rec1, minted1 = store.ensure_approvals_url("tnt_test1", mint)
     assert minted1 and rec1.approvals_url == "https://approve.example/a/tnt_test1"
-    # Funnel re-entry at any stage: read path, the mint never runs again.
+    # Funnel re-entry at any stage: read path, the mint never runs again,
+    # the stored URL is unchanged, and the lock-protected atomic rewrite
+    # carries identical content (so re-entry serializes behind writers
+    # without changing anything).
+    before = _store_hash(store_path)
     rec2, minted2 = store.ensure_approvals_url("tnt_test1", mint)
     assert not minted2 and rec2.approvals_url == rec1.approvals_url
+    assert _store_hash(store_path) == before
     assert len(calls) == 1
 
 
@@ -544,10 +570,23 @@ def test_401_nonexistent_tenant_with_wellformed_signature(store):
     # The timing-oracle regression test: verification must RUN even when
     # the tenant id names no record (the stub would accept this
     # signature), and the record check must still reject afterwards.
+    # The call-recording stub pins the mechanism, not just the 401: a
+    # skipped verification could never produce this call record.
     _seeded(store)
     headers = _signed_headers("tnt_nonexistent")
-    status, _ = _service(store).handle_get("/tenant/status", headers)
+    recorder = _RecordingVerify(_stub_verify)
+    status, _ = TenantStatusService(store, recorder).handle_get("/tenant/status", headers)
     assert status == 401
+
+    assert len(recorder.calls) == 1
+    message, signature, public_key = recorder.calls[0]
+    # Verification ran against the dummy key — the tenant names no
+    # record, so there is no linked key to verify against.
+    assert public_key == _DUMMY_VERIFY_KEY
+    assert message == canonical_poll_message("tnt_nonexistent", headers["x-signature-ts"])
+    # The stub accepted this signature, so the 401 came from the record
+    # check rejecting afterwards — not from a verify rejection.
+    assert signature == b"sig:" + message
 
 
 def test_401_malformed_base64_signature(store):

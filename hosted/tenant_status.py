@@ -685,7 +685,10 @@ class TenantStore:
         store lock: exactly one mints, the losers render the winner's
         stored URL — the human never holds a URL the record doesn't.
         Funnel re-entry is a read path: with the field present, no mint
-        runs and no write happens (G8 rule 3).
+        runs and the stored URL is never reassigned (G8 rule 3) — the
+        lock-protected atomic rewrite still happens, carrying identical
+        content, so a re-entering call serializes behind concurrent
+        writers instead of racing them.
 
         ``mint`` runs while the store lock is held: keep it fast and
         side-effect-free (never touch the store from inside it).
