@@ -51,7 +51,7 @@ unknown fields are ignored by readers (versioning: additive fields only).
 | `source` | enum | `auto-deploy` \| `toolset-update` \| `manual` \| `controller` |
 | `component` | enum | `repo` \| `toolset-cua-driver` \| `image` (reimage, later) — which updater, not which part: an audit line's own `component` (`proxy`, `confirm`, `cred_ui`, …) is sub-component granularity and becomes the additive `subcomponent`/`subcomponents` field, never this enum |
 | `kind` | enum | `check` \| `deploy` \| `rollback` \| `gate-answer` \| `freeze-hold` — `freeze-hold` is emitted only by the controller on freeze flip/clear into the fleet journal (S3; owner: G15 controller work) |
-| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` — `started`, `deferred-arc`, `skipped-frozen`, `gate-answer` and `freeze-hold` are S2/S3 vocabulary with no legacy producer; S1 delivers `succeeded`/`failed`/`rolled-back` (and `precheck-fail`) only |
+| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` — `started`, `deferred-arc`, `skipped-frozen`, `gate-answer` and `freeze-hold` are S2/S3 vocabulary with no legacy producer; S1 delivers `succeeded`/`failed`/`rolled-back`/`rollback-failed` (and `precheck-fail`) only (`noop` stays local-only per the S1 noise discipline) |
 | `from` / `to` | string | Commit (repo) or pin version (toolset); absent on pure checks |
 | `from_version` / `to_version` | string | Human versions where they exist (auto-deploy's `from_version`/`to_version`) |
 | `phase` | string | Box-side failure phase where known (auto-deploy's `phase`) |
@@ -158,7 +158,7 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
 - **Read:** `fleet events` shows the per-box outcome series;
   `fleet events --wave` filters by the rollout envelope (null until G15 S2).
 - **Alert — the promptness ask.** The issue's core requirement is that a
-  failed fleet update is *noticed*, not discovered. Three fleet-side rules,
+  failed fleet update is *noticed*, not discovered. Four fleet-side rules,
   evaluated on every collect:
   1. **Any `rollback-failed`** → immediate alert (a box stuck on a
      known-bad build).
@@ -299,9 +299,10 @@ waits on:
 ## Build slices
 
 - **S1 — canonicalize + alert (ship first):** fleet-side canonicalizer for
-  the two known audit shapes; event journal in the fleet store with
-  (box_id, event_id) dedup; `fleet events` CLI; the three alert rules with
-  interim journal+exit-code transport; noop-stays-local noise discipline.
+  the auto-deploy audit shape (the toolset half is planned-not-known);
+  event journal in the fleet store with (box_id, event_id) dedup;
+  `fleet events` CLI; the four alert rules with interim journal+exit-code
+  transport; noop-stays-local noise discipline.
   No box-side change. #608's acceptance sketch is this slice.
 - **S2 — box-side journal + gate aggregation:** `update-events.jsonl`
   emitted in-shape by both updaters; per-wave outcome census, failure-rate
@@ -315,8 +316,7 @@ waits on:
 
 1. **Noop shipping:** S1 keeps check-noops local. If a future gate wants
    tick-heartbeat evidence (a wave of silent boxes is ambiguous), the
-   heartbeat may need to travel — or the silence rule (S1 alert 3) may
-   suffice. Revisit when a consumer proves need.
+   heartbeat may need to travel — or the silence rule (alert rule 3, scoped to G15 S2) may suffice. Revisit when a consumer proves need.
 2. **Tenant-box alert ownership:** when a tenant box's update
    `rollback-fail`s, who gets the alert — the tenant, the operator, or
    both? Tenant-visible is G12's surface; the routing rule belongs to the
