@@ -55,7 +55,7 @@ def _read_value(credential_name, entry_name):
         capture_output=True, check=False, timeout=10,
     )
     if p.returncode != 0:
-        # The writer's stderr distinguishes the cases (#147 class): a
+        # The reader's stderr distinguishes the cases (#147 class): a
         # missing file vs a broken read path. It never carries secret
         # values (validation + cat errors only), so surfacing the tail
         # is safe and keeps "not set" from masking a denied read.

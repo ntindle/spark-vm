@@ -50,7 +50,7 @@ class NameValidationTests(unittest.TestCase):
         # fill_secret's filesystem read validates through the same choke
         # point: a legacy name must reach the (stubbed) store read, not
         # raise at validation. The read goes through the narrow
-        # cred-store-get writer (issue #669) — the name is its final
+        # cred-store-get reader (issue #669) — the name is its final
         # argv element.
         class Proc:
             returncode = 0
@@ -128,9 +128,9 @@ class ReadValueVerbatimTests(unittest.TestCase):
         finally:
             fill_secret.subprocess.run = real_run
 
-    def test_reader_failure_surfaces_writer_stderr(self):
+    def test_reader_failure_surfaces_reader_stderr(self):
         """#147 class: a denied/broken read must not mask as plain
-        \"not set\" — the narrow writer's stderr (which never carries
+        \"not set\" — the narrow reader's stderr (which never carries
         secret values) is surfaced in the error."""
         class Proc:
             returncode = 1

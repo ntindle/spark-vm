@@ -75,6 +75,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Browser credential fill-in now reads through the same narrow store reader the CLI uses, instead of a direct privileged read the system configuration never granted — fill-in works again on deployed boxes, and a denied read now reports the reader's reason instead of a bare "not set". (#669)
 - The credential web UI's system-reader calls now use the same absolute program paths the system configuration grants, instead of depending on the target machine's command lookup. (#670)
 - The credential command line and web UI now reject reserved registry entry names (such as `allowed_hosts`) up front, instead of failing at the credential store after the fact. (#677)
+- Release recovery hardening: the recovery publish step now also waits for the freshly pushed tag to become visible to GitHub before publishing — a retry seconds after a failed publish no longer re-fails on tag replication lag — the API publish call carries the same bounded network timeouts as the status checks, and the API fallback accepts the workflow's usual token variable name, so the fallback actually works in CI instead of fail-closing. (#687, #678, #692)
 
 ### Security
 - The swap proxy's audit log now strips control characters and whitespace from every client-influenced field before writing: a hostile or buggy local client can no longer smuggle newlines or forged entries into the audit trail. Well-formed hosts, IP addresses, and credential names are written exactly as before. (#682)

@@ -3,8 +3,9 @@
 Identical public interface: same function names, signatures, and
 DynamicCredentialError. The ONLY intentional difference is transport:
 the cell POSTs to authd's Unix socket; here entries resolve from the
-local registry /home/swapd/credentials.json (read via `sudo -u swapd cat`,
-since this runs as ntindle). A credential name with no registry entry
+local registry /home/swapd/credentials.json (read via the pinned
+`sudo -n -u swapd /usr/bin/cat` (issue #670), since this runs as
+ntindle). A credential name with no registry entry
 defaults to placement "bearer_header" with entry "access_token"
 (zero-config common case).
 

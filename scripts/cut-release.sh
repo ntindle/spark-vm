@@ -41,7 +41,8 @@
 #      ntindle/spark-vm), CUT_RELEASE_DIR (repo root override; testing hook),
 #      CUT_RELEASE_NO_GH (set to force the API fallback even when `gh`
 #      exists; testing hook), GITHUB_TOKEN (API fallback when `gh` is
-#      unavailable; never logged), CUT_RELEASE_POLL_ATTEMPTS (default 10;
+#      unavailable; never logged; GH_TOKEN accepted as an alias),
+#      CUT_RELEASE_POLL_ATTEMPTS (default 10;
 #      0 disables the wait) and CUT_RELEASE_POLL_SLEEP (default 3) bound
 #      the post-tag-push replication wait before publishing.
 #
@@ -75,7 +76,8 @@ previous tag), annotated tag v<VERSION>, and a published GitHub release.
 Environment: CUT_RELEASE_REMOTE, CUT_RELEASE_REPO (default
 ntindle/spark-vm), CUT_RELEASE_DIR (repo-root override, testing hook),
 CUT_RELEASE_NO_GH (force the API fallback; testing hook),
-GITHUB_TOKEN (API fallback when `gh` is unavailable).
+GITHUB_TOKEN (API fallback when `gh` is unavailable; GH_TOKEN is
+accepted as an alias — the workflow exports GH_TOKEN).
 EOF
 }
 
@@ -88,6 +90,9 @@ CI=0
 NOTES_FILE=""
 REMOTE="${CUT_RELEASE_REMOTE:-origin}"
 REPO="${CUT_RELEASE_REPO:-ntindle/spark-vm}"
+# GH_TOKEN is gh's conventional name (the release workflow exports it);
+# accept it as a one-line alias so the API fallback is live in CI (#687 item 4).
+GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -319,9 +324,11 @@ have_gh() { [[ -z "${CUT_RELEASE_NO_GH:-}" ]] && command -v gh >/dev/null 2>&1; 
 # Print the path of a 0600 curl config file carrying the GitHub token
 # as an Authorization header (the token never appears on a command line).
 # The file lives under $NOTES_DIR, so the EXIT trap cleans it on any
-# abnormal-but-catchable exit too; callers rm -f it on the normal path
-# right after use. (mktemp creates 0600, so the token is never readable by
-# other users even for an instant.)
+# abnormal-but-catchable exit too; callers either rm -f it on the normal
+# path right after use (api_get) or leave it for the EXIT trap
+# (publish_release — the config must survive the whole publish sequence).
+# (mktemp creates 0600, so the token is never readable by other users
+# even for an instant.)
 token_curl_cfg() {
     local cfg; cfg="$(mktemp -p "$NOTES_DIR")"
     printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" > "$cfg"
@@ -389,6 +396,17 @@ publish_release() {
             && gh release view "$TAG" >/dev/null 2>&1; then
         die "release $TAG is already published"
     fi
+    # Auth-gated replication wait: the tag pushed seconds ago can be
+    # invisible to the Releases API's tag_name validation (replication
+    # lag — the tag-pushed/publish-failed state #659 documented). Waiting
+    # here, rather than only on the --execute path, makes --publish-only
+    # self-healing for its exact recovery purpose instead of re-failing
+    # loudly seconds after the first publish attempt. Skipped when
+    # publishing is impossible anyway (no gh, no token): publish_release
+    # fail-closes immediately below with its own diagnostic.
+    if have_gh || [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        wait_for_tag_replication
+    fi
     GH_ARGS=(release create "$TAG" --title "$TAG" --notes-file "$NOTES" --target main)
     if [[ "$VERSION" == *-* ]]; then
         GH_ARGS+=(--prerelease)
@@ -425,7 +443,7 @@ print(json.dumps({
     "prerelease": "-" in os.environ["VERSION"],
 }))
 PYEOF
-        curl -sS -X POST -K "$CURL_CFG" \
+        curl -sS -X POST --connect-timeout 10 --max-time 30 -K "$CURL_CFG" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$REPO/releases" \
             -d @"$PAYLOAD" -o "$NOTES_DIR/release.json" \
@@ -475,11 +493,6 @@ echo "cut-release.sh: pushed $TAG to $REMOTE"
 # pushed seconds ago can be invisible to the API's tag_name validation
 # (replication lag), and gh release create then fails even though the tag
 # is on the remote — the tag-pushed/publish-failed state GitHub #659
-# documented. Bounded and non-fatal by design (see the function). Skipped
-# when publishing is impossible anyway (no gh, no token): publish_release
-# fail-closes immediately below with its own diagnostic.
-if have_gh || [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    wait_for_tag_replication
-fi
+# documented. Bounded and non-fatal by design (see the function).
 
 publish_release
