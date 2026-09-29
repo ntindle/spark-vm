@@ -847,3 +847,63 @@ def test_execute_fails_without_gh_or_token(workrepo, tmp_path):
     assert "GITHUB_TOKEN" in r.stderr
     # The tag was still pushed before the publish step failed.
     assert bare_tags(workrepo) == ["v0.2.0"]
+
+
+def test_publish_only_waits_for_tag_replication_before_publishing(workrepo, tmp_path):
+    # #687 item 3: the replication wait moved into publish_release
+    # (auth-gated), so --publish-only self-heals on #659 lag instead of
+    # re-failing loudly seconds after the first publish attempt. Pin the
+    # order: the tag-visibility GET happens before the publish POST.
+    badbin = tmp_path / "badcurl-po"
+    badbin.mkdir()
+    bad = badbin / "curl"
+    bad.write_text("#!/bin/sh\nexit 1\n")
+    bad.chmod(bad.stat().st_mode | stat.S_IXUSR)
+    r = run_script(workrepo, "--execute", "--yes",
+                   env={"PATH": str(badbin) + os.pathsep + os.environ.get("PATH", ""),
+                        "CUT_RELEASE_NO_GH": "1", "GITHUB_TOKEN": "fake",
+                        "CUT_RELEASE_POLL_ATTEMPTS": "0"})
+    assert r.returncode != 0
+    assert bare_tags(workrepo) == ["v0.2.0"]  # tag pushed, publish failed
+
+    goodbin = tmp_path / "goodcurl-po"
+    goodbin.mkdir()
+    good = goodbin / "curl"
+    good.write_text(FAKE_CURL)
+    good.chmod(good.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    curl_log = tmp_path / "curl-po.log"
+    r2 = run_script(workrepo, "--publish-only", "--yes",
+                    env={"PATH": str(goodbin) + os.pathsep + os.environ.get("PATH", ""),
+                         "CUT_RELEASE_NO_GH": "1", "GITHUB_TOKEN": "sekrit",
+                         "CURL_LOG": str(curl_log),
+                         "CUT_RELEASE_POLL_SLEEP": "0"})
+    assert r2.returncode == 0, r2.stderr + r2.stdout
+    assert "visible to the GitHub API (poll 1/10)" in r2.stdout
+    lines = curl_log.read_text().splitlines()
+    polls = [i for i, l in enumerate(lines) if "git/ref/tags/v0.2.0" in l]
+    posts = [i for i, l in enumerate(lines) if "/releases" in l and "-X" in l]
+    assert polls and posts and min(polls) < min(posts)
+
+
+def test_api_fallback_accepts_gh_token_alias(workrepo, tmp_path):
+    # #687 item 4: the release workflow exports GH_TOKEN (gh's
+    # conventional name); the API fallback accepts it as an alias so the
+    # fallback is live in CI instead of fail-closing dead.
+    bindir = tmp_path / "curlbin-gh"
+    bindir.mkdir()
+    curl = bindir / "curl"
+    curl.write_text(FAKE_CURL)
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    curl_log = tmp_path / "curl-gh.log"
+    r = run_script(workrepo, "--execute", "--yes",
+                   env={"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+                        "CUT_RELEASE_NO_GH": "1",
+                        "GITHUB_TOKEN": "",  # unset-by-value: only the alias carries
+                        "GH_TOKEN": "gh-alias-sekrit",
+                        "CURL_LOG": str(curl_log),
+                        "CUT_RELEASE_POLL_ATTEMPTS": "0"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "published release v0.2.0" in r.stdout
+    log = curl_log.read_text()
+    assert "CONFIG_HAS_AUTH_HEADER" in log  # the alias carried the token
+    assert "gh-alias-sekrit" not in log  # ...and never on the command line

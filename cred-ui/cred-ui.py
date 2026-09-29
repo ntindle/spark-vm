@@ -10,10 +10,13 @@ touching a terminal. Writes go through the same narrow sudo writers the
     sudo -u swapd /usr/local/bin/cred-registry-set ...
     sudo -u swapd /usr/local/bin/cred-store-delete <name>
 
-Reads go through:
+Reads go through (issue #670: absolute binary paths — the sudoers
+entries pin /usr/bin/cat and /usr/bin/ls, and a bare `cat`/`ls` only
+matches them when the deploy target's secure_path resolves to the same
+path, a property of the deploy target, not of this repo):
 
-    sudo -u swapd cat /home/swapd/credentials.json
-    sudo -u swapd ls /home/swapd/secrets
+    sudo -n -u swapd /usr/bin/cat /home/swapd/credentials.json
+    sudo -n -u swapd /usr/bin/ls /home/swapd/secrets
 
 Security properties (keep them if you touch this file):
 
