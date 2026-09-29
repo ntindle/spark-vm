@@ -2,15 +2,19 @@
 
 Run from the repo root:  python3 -m pytest fleet/test_inventory.py -q
 
-All tests are hermetic: per-box estates and stores live under tmp dirs,
-and the CLIs are exercised through subprocess, never imported. Time is
-controlled through the --staleness-hours flag (0 makes every record
-stale, a large value makes all eligible) so no test depends on the wall
-clock beyond "collect just ran".
+All tests run locally with no network and no home-dir writes: per-box
+estates and stores live under tmp dirs, and the CLIs are exercised through
+subprocess, never imported. The two producer-contract tests additionally
+shell the repo's real `scripts/self_update.py` and `deploy/auto-deploy.sh`
+(hermetic in practice — no network, fast — but not in the strictest
+sense). Time is controlled through the --staleness-hours flag (0 makes
+every record stale, a large value makes all eligible) so no test depends
+on the wall clock beyond "collect just ran".
 """
 
 import json
 import os
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -78,7 +82,7 @@ def env():
 
 
 def _write_box(estate, box, status=None, audit=None, snapshot=None,
-               raw_status=None):
+               raw_status=None, raw_snapshot=None):
     boxdir = os.path.join(estate, box)
     os.makedirs(boxdir, exist_ok=True)
     if raw_status is not None:
@@ -91,7 +95,10 @@ def _write_box(estate, box, status=None, audit=None, snapshot=None,
         with open(os.path.join(boxdir, "audit-tail.jsonl"), "w") as fh:
             for line in audit:
                 fh.write(json.dumps(line) + "\n")
-    if snapshot is not None:
+    if raw_snapshot is not None:
+        with open(os.path.join(boxdir, "snapshot.json"), "w") as fh:
+            fh.write(raw_snapshot)
+    elif snapshot is not None:
         with open(os.path.join(boxdir, "snapshot.json"), "w") as fh:
             json.dump(snapshot, fh)
 
@@ -419,6 +426,93 @@ def test_large_record_round_trips_whole_line(env):
     assert raw_lines2 == raw_lines
     assert _snapshot(store)["boxes"]["tower"]["versions"]["toolset_pins"][
         "padding_to_exceed_stdio_buffer"] == big
+
+
+# --- FOLLOW-fleet6 (QA N1): previously-empirical regression pins -------
+
+
+def test_collect_corrupt_box_snapshot_is_noted_not_fatal(env):
+    """A corrupt box-side snapshot.json must not sink the collect: the
+    box records with null versions plus a loud unreadable note."""
+    _collect(env, {
+        "bad": {"raw_snapshot": "{not json",
+                "status": _status_json()},
+        "good": {"snapshot": _snapshot_json(COMMIT_A)},
+    })
+    estate, store = env
+    records = {r["box_id"]: r for r in _journal(store)}
+    assert set(records) == {"bad", "good"}
+    assert records["bad"]["versions"]["repo_commit"] is None
+    assert any("snapshot.json unreadable" in n
+               for n in records["bad"]["notes"])
+    assert records["good"]["versions"]["repo_commit"] == COMMIT_A
+
+
+def test_collect_non_object_box_snapshot_is_ignored(env):
+    """Valid JSON that is not an object (a list here) is not a snapshot:
+    ignored with the exact "not an object" note, not a crash."""
+    _collect(env, {
+        "bad": {"snapshot": ["not", "an", "object"],
+                "status": _status_json()},
+    })
+    estate, store = env
+    record = _journal(store)[0]
+    assert record["versions"]["repo_commit"] is None
+    assert "snapshot.json is not an object; ignored" in record["notes"]
+
+
+def test_store_snapshot_corrupt_or_wrong_schema_is_exit_2(env):
+    """A torn or hand-edited store snapshot must fail the readers with
+    exit 2 (bad input), never a traceback or a silently empty fleet."""
+    _collect(env, {"tower": {"snapshot": _snapshot_json(COMMIT_A)}})
+    estate, store = env
+    snapshot_path = os.path.join(store, "snapshot.json")
+
+    with open(snapshot_path, "w") as fh:
+        fh.write("{corrupt")
+    proc = run_inventory("inventory", "--store", store)
+    assert proc.returncode == 2
+    assert "run collect first" in proc.stderr
+
+    with open(snapshot_path, "w") as fh:
+        json.dump({"schema": "not-a-fleet-snapshot", "boxes": {}}, fh)
+    proc = run_inventory("inventory", "--store", store)
+    assert proc.returncode == 2
+    assert "not a fleet inventory snapshot" in proc.stderr
+
+
+def _estate_checksum(estate):
+    """Content checksum of every file under the estate: the pull-only
+    proof hashes contents (not mtimes), in deterministic order."""
+    digest = hashlib.sha256()
+    for dirpath, _dirnames, filenames in os.walk(estate):
+        for name in sorted(filenames):
+            path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, estate)
+            digest.update(rel.encode("utf-8") + b"\x00")
+            with open(path, "rb") as fh:
+                digest.update(fh.read())
+            digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def test_collect_is_pull_only_on_the_estate(env):
+    """collect reads the estate but must never write to it (the S1
+    pull-only contract): a full content checksum of the estate is
+    identical before and after."""
+    estate, store = env
+    _write_box(estate, "tower", status=_status_json(),
+               snapshot=_snapshot_json(COMMIT_A))
+    _write_box(estate, "spark", status=_status_json(),
+               audit=[_audit_line(NOW, "deploy", COMMIT_A, COMMIT_B)])
+    mapping = os.path.join(estate, "ids.json")
+    with open(mapping, "w") as fh:
+        json.dump({"spark": "spark"}, fh)
+    before = _estate_checksum(estate)
+    proc = run_inventory("collect", "--estate", estate, "--store", store,
+                         "--box-id-map", mapping)
+    assert proc.returncode == 0, proc.stderr
+    assert _estate_checksum(estate) == before
 
 
 # --- box_snapshot.py -----------------------------------------------------
