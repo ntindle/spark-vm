@@ -26,8 +26,9 @@ one auditable command; no automation applies these.
   is unacceptable.
 - `main-branch-protection.json` — **main branch protection** (owner proposal
   from issue #138). Blocks branch deletion and force-pushes, requires every
-  change to land via PR, and requires all four CI checks green on an
-  up-to-date branch before merge. Deliberately does **not** require approving
+  change to land via PR, and requires the declared CI checks green on an
+  up-to-date branch before merge (five contexts since #591 — see the
+  enforced-vs-declared drift note below). Deliberately does **not** require approving
   reviews (`required_approving_review_count: 0`): the improvement loop opens
   and merges its own PRs, so a human-approval gate would block all loop
   merges. Raise the count the day a second human reviewer exists.
@@ -55,7 +56,7 @@ scripts/apply-rulesets.sh --file deploy/rulesets/tag-protection-vstar.json --exe
   guarded bidirectionally by `scripts/test_apply_rulesets.py`: the test
   parses the job check names out of `.github/workflows/ci.yml` (job `name:`
   if set, else the job id) and requires exact set-equality with the
-  declared contexts, plus a known-good anchor on the four current check
+  declared contexts, plus a known-good anchor on the five current check
   names. Renaming, adding, or removing a CI job fails the suite until the
   ruleset JSON is updated deliberately, under review, alongside it. No
   manual cross-checking needed.
@@ -70,3 +71,19 @@ scripts/apply-rulesets.sh --file deploy/rulesets/tag-protection-vstar.json --exe
   declared files don't carry — compare the normalized forms (`jq -c -f
   scripts/ruleset-normalize.jq`) to see exactly which field differs before
   re-applying.
+- **Enforced-vs-declared drift is owner-side, not CI-side.** The test pin
+  above guards declared-JSON ↔ `.github/workflows/ci.yml`; nothing in CI
+  can see the *live* ruleset (that needs an admin-scoped token). So a new
+  required check lands in two steps: (1) the JSON and the test are updated
+  under review — the check runs in CI immediately, as an advisory gate; (2)
+  the owner re-runs `scripts/apply-rulesets.sh --file
+  deploy/rulesets/main-branch-protection.json --execute --yes`, which
+  promotes the check to a real merge gate. Until step (2), the new check
+  runs but cannot block merges — GitHub gates on the last-applied ruleset,
+  not the declared one. Verify with `scripts/apply-rulesets.sh --file
+  deploy/rulesets/main-branch-protection.json --check` (exits 2 on drift).
+  **Standing drift (2026-09-29):** `changelog ritual lint` has been a
+  declared required context since #591, but the live ruleset
+  `main-branch-protection` (applied 2026-09-24) still gates only the four
+  older contexts — the changelog lint is advisory until the owner
+  re-applies.
