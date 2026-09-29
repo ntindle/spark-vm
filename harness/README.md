@@ -108,7 +108,7 @@ Implements the executable half of the R2 pre-seeded-harness contract
   Covered by `test_key_identity.py` (fingerprint vectors pinned
   to real `ssh-keygen -lf` output).
 - **`key_registry.py`** — SSH-key-as-account registry (GitHub #446, slices
-  S2 + S2.5): the stateful half S1 points at. A per-host fingerprint→account
+  S2 + S2.5 + S3): the stateful half S1 points at. A per-host fingerprint→account
   record store (`$XDG_STATE_HOME/spark-vm/key-registry`, override with
   `--registry-root`, either side of the subcommand) with created/last-seen
   timestamps and box binding — the storage foundation for "same key ->
@@ -117,18 +117,21 @@ Implements the executable half of the R2 pre-seeded-harness contract
   `os.replace`), lockdir mutual exclusion (stale locks reclaimed via pid
   check), corrupt stores fail closed rather than silently rebuilding,
   `0600`/`0700` modes. No secrets, no key material — records hold public
-  fingerprints and one-way derived account ids. Idempotent `register`
+  fingerprints, one-way derived account ids, and claim-code SHA-256 hashes
+  (never plaintext codes). Idempotent `register`
   (explicit `--box-ref` rebinds; omitting it leaves the binding alone; an
   empty `--box-ref` is rejected), plus `lookup`, `touch`, `bind`,
   `remove`, a registry-issued `manifest` (fills the S1-promised `box_id`
-  slot), JSON `status`, and `rotate` (slice S2.5: operator-held-key
+  slot), JSON `status`, `rotate` (slice S2.5: operator-held-key
   rotation — the new key registers as a new account per the
   identity-is-the-key policy, the old record keeps a forward link, the
   box binding carries over, and a bounded lineage journal records the
-  rotation). No claim state — the claim protocol is a later
-  slice (S3) and the registry must not preempt it. Stdlib only, no network. Covered
-  by `test_key_registry.py` (47 tests incl. a threaded contention test and
-  stale-lock/corrupt-store fail-closed checks). Design note:
+  rotation), and `claim-issue` / `claim-redeem` (slice S3: single-use
+  claim codes with expiry — the key-loss upgrade path; the code is shown
+  once, the store keeps only its hash). Stdlib only, no network. Covered
+  by `test_key_registry.py` (66 tests incl. a threaded contention test,
+  stale-lock/corrupt-store fail-closed checks, and the claim-protocol
+  suite). Design note:
   `docs/KEY_IDENTITY_REGISTRY.md`.
 
 ## Fixture lifecycle
