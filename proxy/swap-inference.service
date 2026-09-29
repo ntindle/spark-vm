@@ -26,6 +26,26 @@ Environment=SWAP_ENABLE_APPROVALS=0
 ExecStart=/home/swapd/.venvs/mitm/bin/mitmdump -p 18081 --set listen_host=127.0.0.1 -s /home/swapd/swap_addon.py --set termlog_verbosity=warn --set "dumper_filter=~d nomatch.invalid"
 Restart=always
 RestartSec=5
+# Issue #95: systemd hardening (mirrors cred-ui's #115 shape, extended).
+# What this process needs: the mitm venv + addon under /home/swapd, and
+# its runtime paths (SWAP_*_DIR/FILE defaults, all under /home/swapd,
+# verified against proxy/swap_addon.py), plus the stdlib. Deploy order
+# note: /home/swapd must exist before the unit starts (a missing
+# ReadWritePaths dir fails service startup; it is not auto-created).
+#
+# NoNewPrivileges IS set here (unlike cred-ui's #115 unit): the addon never
+# escalates — no sudo, no setuid helpers, no subprocesses at all
+# (grep-verified) — so locking out privilege acquisition costs nothing.
+# The kernel trio is set because these are system units (installed to
+# /etc/systemd/system/ by proxy/deploy.sh); cred-ui's user unit cannot use
+# them (systemd documents them as system-unit-only).
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/swapd
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
 
 [Install]
 WantedBy=multi-user.target

@@ -515,3 +515,58 @@ def test_api_set_one_byte_over_cap_after_chomp_refused(monkeypatch):
     with pytest.raises(ValueError, match="exceeds 64 KiB"):
         cred_ui.api_set(_set_body("x" * (cred_ui.SECRET_MAX_BYTES + 1)))
     assert calls == []
+
+
+# --- post-chomp emptiness check (#708) --------------------------------------
+
+
+@pytest.mark.parametrize("paste", ["\n", "\r\n"])
+def test_api_set_all_newline_paste_is_400_not_500(monkeypatch, paste):
+    """#708: an all-newline paste that chomps to "" is truthy pre-chomp,
+    so the old check let it through to 500 on the writer's empty-refusal.
+    It must be a clean ValueError (400) here, before any writer call.
+    (A "\\n\\n" paste chomps only one newline and stores "\\n" — not the
+    500 path, and unchanged by this fix.)"""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    with pytest.raises(ValueError, match="empty secret value"):
+        cred_ui.api_set(_set_body(paste))
+    assert calls == []  # no sudo writer ran: nothing was stored
+
+
+def test_api_set_empty_value_rejected(monkeypatch):
+    """The plain "" case stays a 400 exactly as before the chomp reorder."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    with pytest.raises(ValueError, match="empty secret value"):
+        cred_ui.api_set(_set_body(""))
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad", [None, 123, ["x"]])
+def test_api_set_non_string_value_rejected(monkeypatch, bad):
+    """Non-string values are a 400, not an AttributeError on .endswith."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    with pytest.raises(ValueError, match="empty secret value"):
+        cred_ui.api_set(_set_body(bad))
+    assert calls == []
+
+
+def test_api_set_chomp_semantics_unchanged(monkeypatch):
+    """The reorder must not change chomp semantics: at most one trailing
+    newline is stripped — a secret legitimately ending in two newlines
+    keeps the second one, byte-identical through to the writer."""
+    stored = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: stored.append(inp) or (0, "", ""))
+    out = cred_ui.api_set(_set_body("tok\n\n"))
+    assert out == {"ok": True, "name": "gh"}
+    assert stored and stored[0] == b"tok\n"
+    stored.clear()
+    out = cred_ui.api_set(_set_body("tok\n"))
+    assert out == {"ok": True, "name": "gh"}
+    assert stored and stored[0] == b"tok"
