@@ -344,7 +344,16 @@ def main(argv):
             out = {"sessions": sessions, "nextCursor": cursor}
         else:  # read
             out = {"session": read_session(host, args.session_id)}
-    # NOT redacted: see the module's Security and trust section.
+    # NOT redacted: see the module's Security and trust section. Say it on
+    # stderr on EVERY invocation, not just in --help: this output lands on
+    # stdout, where it is one pipe or paste away from somewhere an agent
+    # can read it.
+    print(
+        "WARNING: this output is NOT redacted and may contain real secret "
+        "values (session transcripts, history) -- do not paste it where "
+        "agents can read it.",
+        file=sys.stderr,
+    )
     print(json.dumps(out, indent=2, default=str))
     return 0
 

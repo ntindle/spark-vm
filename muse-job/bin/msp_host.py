@@ -37,9 +37,13 @@ fully trusted -- it sees every handler result and every transcript.
 Callers must never log `call()` results or route them into agent-visible
 paths; secret policy (`hsurr:<name>` placeholders, proxy-side swaps) is
 enforced above this layer. `serve_argv` is trusted as given (executed
-directly, never through a shell) and `log_path` is trusted as given (no
-symlink validation); the log file is created mode 0o600 because serve
-stderr can carry secrets.
+directly, never through a shell). `log_path` is opened with O_NOFOLLOW
+(a symlink is refused, fail-closed, before the serve host spawns) and a
+pre-existing regular file is tightened to mode 0o600, because serve
+stderr can carry secrets -- creation mode alone does not protect a file
+that already exists. Non-regular log targets (e.g. /dev/null) are left
+as-is. Parent-directory races on `log_path` are outside the threat model
+(same caveat as the rest of the on-box operator surface).
 
 Threading: one reader thread owns stdout. `call` blocks on a condition;
 subscriber callbacks and request handlers run ON the reader thread, so
@@ -60,6 +64,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -177,6 +182,60 @@ def verify_schema_fingerprint(schema_bytes, expected):
     return actual
 
 
+def _open_secret_log(path):
+    """Open the serve-stderr log file, holding it to mode 0o600.
+
+    Serve stderr can carry real secret values (see the module's Security
+    and trust section). The file is opened with O_NOFOLLOW and validated
+    with fstat on the resulting fd -- the check and the open are one
+    syscall path, so there is no check-then-open TOCTOU window in which
+    a planted symlink could be swapped in between. A symlink is refused
+    fail-closed (ELOOP). O_NONBLOCK keeps a pre-planted FIFO from hanging
+    the open forever: a reader-less FIFO fails fast with ENXIO (the #23 H5
+    class the muse-job hooks already defend against). A pre-existing
+    regular file that grants any group/other permission is tightened to
+    0o600 (os.open's mode applies only at creation; without this,
+    appending new secret bytes to an old 0644 log would leak them).
+    Permissions are only ever revoked, never granted -- a 0400 file stays
+    0400. Non-regular targets (e.g. /dev/null) are left alone.
+
+    Returns the binary append-mode file object. Raises MSPError
+    fail-closed (never leaves a half-opened fd): the caller must not
+    spawn the serve host afterwards.
+    """
+    try:
+        fd = os.open(
+            path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_APPEND
+            | os.O_NOFOLLOW
+            | os.O_NONBLOCK,
+            0o600,
+        )
+    except OSError as e:
+        raise MSPError(
+            f"log_path {path!r} refused (missing, unreadable, a symlink, "
+            f"or a reader-less FIFO -- symlinks are never followed): {e}"
+        ) from e
+    try:
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) & 0o077:
+            os.fchmod(fd, 0o600)
+            print(
+                f"msp_host: WARNING: tightened {path!r} to mode 0o600 "
+                f"(was {stat.S_IMODE(st.st_mode):04o}); serve stderr can "
+                f"carry secret values",
+                file=sys.stderr,
+            )
+        return os.fdopen(fd, "ab")
+    except OSError as e:
+        os.close(fd)
+        raise MSPError(
+            f"log_path {path!r} could not be validated after open: {e}"
+        ) from e
+
+
 class MSPHost:
     """Owns one `muse serve` process and its NDJSON JSON-RPC 2.0 session."""
 
@@ -200,8 +259,10 @@ class MSPHost:
         client_name: must match ^[a-z0-9_]+$ (serve-side rule, see #221).
         log_path: the serve process's stderr goes here (the job log); None
             discards stderr. Created mode 0o600 (serve stderr can carry
-            secrets); the path itself is trusted as given (no symlink
-            validation). See the module's Security and trust section.
+            secrets); a pre-existing regular file with group/other
+            permission bits is tightened to 0o600; a symlink at log_path
+            is refused (fail-closed, no spawn). See the module's Security
+            and trust section.
         expected_schema_fingerprint: "sha256:<hex>" pin; enforced at open()
             when verify_schema_on_open is true (exports the schema from
             serve_argv[0]). The full pin value is recorded from the
@@ -303,14 +364,10 @@ class MSPHost:
             )
         try:
             if self._log_path:
-                # Created 0o600, not the process umask: serve stderr can
-                # carry secret values (see Security and trust).
-                fd = os.open(
-                    self._log_path,
-                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                    0o600,
-                )
-                self._log_fh = os.fdopen(fd, "ab")
+                # Held to 0o600 / symlink-refused by _open_secret_log --
+                # serve stderr can carry secret values (see Security and
+                # trust). Raises MSPError fail-closed: no spawn happens.
+                self._log_fh = _open_secret_log(self._log_path)
             else:
                 self._log_fh = None
             stderr = self._log_fh if self._log_fh else subprocess.DEVNULL
