@@ -525,6 +525,9 @@ class WaitlistService:
         self.rows = {}          # entry_id -> row dict
         self.by_email = {}      # normalized owner_email -> entry_id
         self.consumed = set()   # consumed/invalidated token strings
+        self.last_wave_manifest = None  # path of the most recent
+        # send_invite_wave manifest (#405); the CLI prints it so the
+        # operator can see what one invocation did.
         self._ip_hits = {}      # client ip -> [epoch ...] (in-process)
         self._ip_hits_last_sweep = 0.0  # epoch of last bound sweep (#390)
         # Serializes the check-then-act sections (dedup on submit, consume
@@ -766,6 +769,14 @@ class WaitlistService:
         if not hmac.compare_digest(expected_sig, sig):
             return None, "invalid"
         if token in self.consumed:
+            return row, "consumed"
+        if (kind == "confirm" and row.get("active_token")
+                and token != row["active_token"]):
+            # Superseded token (re-mint/re-submit installed a fresh
+            # active_token): #388's GC prunes it from the consumed set,
+            # so the active-token comparison — not consumed membership —
+            # is what keeps the dead link retired. The truthy guard keeps
+            # legacy rows that predate active_token on the TTL path.
             return row, "consumed"
         ttl = FORGET_TTL_SECONDS if kind == "forget" else TOKEN_TTL_SECONDS
         if self.clock().timestamp() - issued > ttl:
@@ -1191,9 +1202,11 @@ class WaitlistService:
         Rows are written sorted by entry_id with one line per entry
         (self.rows is already deduped — appends merge by entry_id on
         load), so operator diffs are deterministic. funnel_events.jsonl
-        and consumed_tokens.txt are append-only and untouched — the
-        `dropped`/`purged` events are the audit trail; the PII leaves
-        with the row."""
+        stays append-only and untouched — the `dropped`/`purged` events
+        are the audit trail; the PII leaves with the row.
+
+        The same pass garbage-collects consumed_tokens.txt (#388) — see
+        _gc_consumed_tokens."""
         path = os.path.join(self.data_dir, "rows.jsonl")
         tmp = path + ".purge-tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -1203,6 +1216,52 @@ class WaitlistService:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+        self._gc_consumed_tokens()
+
+    def _gc_consumed_tokens(self):
+        """Bound consumed_tokens.txt at every rows rewrite (#388).
+
+        Consumed tokens only ever accumulated: purge and forget removed
+        rows but left their tokens behind, so the file (and the in-memory
+        set) grew ~1-3 tokens per entrant forever. The rewrite keeps
+        exactly the tokens that can still matter:
+
+        - every token a surviving row still references (active_token /
+          active_invite_token) — this includes consumed tokens of
+          still-live rows, which the reinstate/diagnose crash-repair
+          paths read as "consumed";
+        - every consumed forget token — forget_get's fast path renders a
+          consumed forget token as "already deleted" before the row
+          lookup, so dropping them would downgrade that honest page to
+          "expired".
+
+        Dropped: consumed confirm/invite tokens of gone rows and of
+        superseded (re-minted/rolled) tokens. No user-visible state
+        changes: a gone row's token lookup returns "invalid" either way
+        (the row lookup precedes the consumed check), and a superseded
+        token fails the active-token comparison either way.
+
+        Atomic rewrite (tmp + fsync + os.replace, same discipline as the
+        rows rewrite); self.consumed is replaced with the kept set so
+        file and memory stay in agreement. The caller holds data_lock()
+        + the thread lock (the _rewrite_rows contract)."""
+        live = set()
+        for row in self.rows.values():
+            for key in ("active_token", "active_invite_token"):
+                token = row.get(key)
+                if token:
+                    live.add(token)
+        kept = {t for t in self.consumed
+                if t.startswith("forget.") or t in live}
+        path = os.path.join(self.data_dir, "consumed_tokens.txt")
+        tmp = path + ".gc-tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for token in sorted(kept):
+                fh.write(token + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        self.consumed = kept
 
     def purge_dropped(self):
         """30d job: permanently delete every purge-due dropped row.
@@ -2029,6 +2088,67 @@ class WaitlistService:
         self._emit("invite_sent", row["entry_id"])
         return True
 
+    def _write_wave_manifest(self, *, wave, requested, invited, skipped):
+        """Per-invocation wave manifest — the durable audit trail of what
+        THIS --send-wave invocation did (#405).
+
+        Same wave name, two invocations, different outcomes (e.g. a crash
+        after 5 of 25 invites, then a retry) are indistinguishable from
+        rows.jsonl alone: both stamp invite_wave=<name> and the retry
+        invites 20 more rows under the same name, while the CLI printed
+        only a count. The manifest records the invocation: the wave name,
+        invocation time, requested count, the invited entry_ids in wave
+        order, and the skipped entry_ids (cap-suppressed or
+        spool-failed rows — still confirmed, cleanly retried by the next
+        wave).
+
+        Written atomically (tmp + fsync + os.replace, the _write_spool
+        discipline) into wave_manifests/, one uniquely-named file per
+        invocation; the caller holds data_lock. Returns the manifest
+        path.
+
+        A manifest write failure is non-fatal: rows.jsonl + the
+        invite_sent events remain the source of truth, and the missing
+        manifest is loud (the CLI prints the expected path, so absence
+        reads as failure, not success). OSError from the dir creation
+        or the write is reported to stderr and None is returned instead
+        of a path."""
+        manifest_dir = os.path.join(self.data_dir, "wave_manifests")
+        safe = "".join(c if (c.isalnum() or c in "-_") else "_"
+                       for c in wave) or "wave"
+        name = (f"{safe}-{int(self.clock().timestamp())}-"
+                f"{secrets.token_hex(4)}.json")
+        path = os.path.join(manifest_dir, name)
+        doc = {
+            "wave": wave,
+            "invoked_at": iso_z(self.clock()),
+            "requested": requested,
+            "invited": list(invited),
+            "skipped": list(skipped),
+        }
+        tmp = f"{path}.tmp"
+        try:
+            # Inside the try: a manifest-dir creation failure is as
+            # non-fatal as a write failure (the non-fatal contract is
+            # literal — nothing in this method may raise).
+            os.makedirs(manifest_dir, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(doc, fh, indent=2, sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except OSError as exc:
+            sys.stderr.write(
+                f"waitlistd: wave manifest write failed ({exc}); the wave "
+                "committed normally — inspect rows.jsonl for the invited "
+                "rows\n")
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return None
+        return path
+
     def send_invite_wave(self, *, pricing_lines, trial_terms, wave, count):
         """Operator-driven invite wave (WAITLIST_OPERATIONS.md §7).
 
@@ -2052,6 +2172,15 @@ class WaitlistService:
         shows fewer than requested — re-running the wave retries those
         rows cleanly. Returns the invited entry_ids in wave order.
 
+        Per-invocation attribution (#405): the invocation's manifest —
+        requested count, invited entry_ids, skipped entry_ids — is
+        written to wave_manifests/ (one file per invocation, so a crash
+        and its retry are two manifests, not one ambiguous count) and
+        its path is stashed as self.last_wave_manifest for the CLI to
+        print. Skipped rows are the eligible rows iterated but not
+        invited (cap-suppressed or spool-failed); rows past `count` are
+        not skipped, they simply never came up.
+
         Caller must hold data_lock (the operator CLI does) — like the
         lifecycle jobs' send_reminders/drop_unconfirmed, this method
         mutates the store and spools without taking the lock itself.
@@ -2072,6 +2201,7 @@ class WaitlistService:
         # rows are not ranked — every later invite would read "#1".)
         rank = {r["entry_id"]: i + 1 for i, r in enumerate(eligible)}
         invited = []
+        skipped = []
         for row in eligible:
             if len(invited) >= count:
                 break
@@ -2084,8 +2214,11 @@ class WaitlistService:
             # the email exists, and nothing is committed twice.)
             if not self._queue_invite_email(row, position, pricing_lines,
                                             trial_terms, wave, now):
+                skipped.append(row["entry_id"])
                 continue
             invited.append(row["entry_id"])
+        self.last_wave_manifest = self._write_wave_manifest(
+            wave=wave, requested=count, invited=invited, skipped=skipped)
         return invited
 
     def rollover_expired_invites(self):

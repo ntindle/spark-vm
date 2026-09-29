@@ -339,6 +339,19 @@ daily `--rollover` first so they rejoin confirmed. Reviving dead invites
 is the #235 operator tooling, not this pass. Run it after any suspected
 crash; re-running when nothing is missing is a no-op.
 
+**Per-invocation wave manifests (issue #405):** every `--send-wave`
+invocation writes one JSON manifest to `wave_manifests/` in the data
+dir, recording the wave name, invocation time, requested count, the
+invited entry IDs in wave order, and the skipped entry IDs
+(cap-suppressed or spool-failed rows — still confirmed, retried cleanly
+by the next wave). The CLI prints the invited IDs and the manifest path.
+This is the audit trail of *what one invocation did*: a crash after 5 of
+25 invites followed by a retry reads as two manifests under the same
+wave name, not as one wave whose count is ambiguous — re-running
+`--wave wave1` invites 20 *more* rows under the same name (the status
+gate prevents double-invites), and the two manifests show exactly which
+rows each invocation invited.
+
 **Invite-wave recovery (issue #235):** a second crash window lives in the
 re-invite path — a crash after `_consume_token(old)` but before the row
 commit leaves the on-disk row `invited` with a consumed token. The same
