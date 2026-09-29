@@ -116,11 +116,16 @@ let lastOk = 0;
 async function refresh() {
   try {
     const r = await fetch('/api/creds', {cache: 'no-store'});
+    // A non-OK status (e.g. the store is damaged or unreadable) must NOT
+    // render as an empty list: "none stored" would lie to the operator
+    // about credentials that still exist on disk (issue #672).
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     render(data.creds || []);
     lastOk = Date.now();
     $('refresh-note').textContent = 'updated just now';
   } catch (e) {
+    $('list').innerHTML = '<p class="bad">couldn\u2019t load the credential list — the credential store may be damaged or unreadable. Nothing was changed; retrying\u2026</p>';
     $('refresh-note').textContent = 'refresh failed — retrying…';
   }
 }

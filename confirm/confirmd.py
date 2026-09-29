@@ -631,6 +631,26 @@ _AUDIT_MAX_BYTES = _env_int("CONFIRM_AUDIT_MAX_BYTES", 10 * 1024 * 1024,
 _AUDIT_KEEP = _env_int("CONFIRM_AUDIT_KEEP", 4, 1)  # live + (KEEP-1) rotated
 _AUDIT_LOCK = threading.Lock()
 
+_AUDIT_FIELD_ALLOW_RE = re.compile(r"[^!-~]")
+
+
+def _sanitize_audit_field(value):
+    """Keep printable-ASCII only in one audit-log field (#683, #17 twin).
+
+    Audit lines are `k=v` tokens separated by spaces; `login` is
+    user-supplied web-UI form input and `detail` can carry
+    client-influenced values (e.g. hosts), so a newline, a Unicode line
+    separator, or a `ts=`-looking fragment in one forges audit lines.
+    Same shape as the swap-proxy fix for #17 (PR #682,
+    `proxy/swap_addon.py::_sanitize_audit_field`) — sanitize on write,
+    one choke point every interpolated field routes through. Well-formed
+    values pass through unchanged. None renders as "-"; other non-str
+    values are coerced.
+    """
+    if value is None:
+        return "-"
+    return _AUDIT_FIELD_ALLOW_RE.sub("", str(value))
+
 
 def _rotate_audit():
     """Roll the audit segment chain (caller holds _AUDIT_LOCK).
@@ -703,7 +723,11 @@ def audit_log(event, peer, login, detail=""):
     crash from creating a gap in the newest trail."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     line = ("ts=%s event=%s peer=%s login=%s %s\n"
-            % (ts, event, peer, login or "-", detail))
+            % (ts,
+               _sanitize_audit_field(event),
+               _sanitize_audit_field(peer),
+               _sanitize_audit_field(login),
+               _sanitize_audit_field(detail)))
     try:
         with _AUDIT_LOCK:
             _maybe_rotate_audit()
@@ -715,7 +739,9 @@ def audit_log(event, peer, login, detail=""):
                 os.fsync(f.fileno())
     except OSError as e:
         print("confirmd: cannot write audit log: %s (lost event=%s peer=%s login=%s)"
-              % (e, event, peer, login or "-"), file=sys.stderr)
+              % (e, _sanitize_audit_field(event),
+                 _sanitize_audit_field(peer),
+                 _sanitize_audit_field(login)), file=sys.stderr)
 
 
 def pending_dir():
