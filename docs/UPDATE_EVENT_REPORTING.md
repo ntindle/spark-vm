@@ -50,8 +50,10 @@ unknown fields are ignored by readers (versioning: additive fields only).
 | `received_at` | string | Collector/plane clock, ISO-8601 UTC; box clocks are never trusted for ordering — consumers order by `(emitted_at, event_id)` so re-collection never reorders history |
 | `source` | enum | `auto-deploy` \| `toolset-update` \| `manual` \| `controller` |
 | `component` | enum | `repo` \| `toolset-cua-driver` \| `image` (reimage, later) — which updater, not which part: an audit line's own `component` (`proxy`, `confirm`, `cred_ui`, …) is sub-component granularity and becomes the additive `subcomponent`/`subcomponents` field, never this enum |
+| `subcomponent` | string \| null | Audit-line component granularity (`proxy`, `confirm`, `cred_ui`, … — the values `deploy/components.conf` actually carries); null on lines that carry none |
+| `subcomponents` | string \| null | The plural `components` value verbatim (space-joined, from the `ok` line) for readers that need the un-fanned form; the canonical S1 fan-out emits one event per component in `subcomponent` instead |
 | `kind` | enum | `check` \| `deploy` \| `rollback` \| `gate-answer` \| `freeze-hold` — `freeze-hold` is emitted only by the controller on freeze flip/clear into the fleet journal (S3; owner: G15 controller work) |
-| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` — `started`, `deferred-arc`, `skipped-frozen`, `gate-answer` and `freeze-hold` are S2/S3 vocabulary with no legacy producer; S1 delivers `succeeded`/`failed`/`rolled-back`/`rollback-failed` (and `precheck-fail`) only (`noop` stays local-only per the S1 noise discipline) |
+| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` — `started`, `superseded`, `deferred-arc`, `skipped-frozen` are S2/S3-forward outcomes with no legacy producer (the `gate-answer`/`freeze-hold` producer kinds are defined under `kind`); the `freeze`/`gate` triggers are reserved for S2 emitters; S1 delivers `succeeded`/`failed`/`rolled-back`/`rollback-failed` (and `precheck-fail`) only (`noop` stays local-only per the S1 noise discipline) |
 | `from` / `to` | string | Commit (repo) or pin version (toolset); absent on pure checks |
 | `from_version` / `to_version` | string | Human versions where they exist (auto-deploy's `from_version`/`to_version`) |
 | `phase` | string | Box-side failure phase where known (auto-deploy's `phase`) |
@@ -104,7 +106,7 @@ emits (audit lines without a `trigger` field canonicalize to
 | `{"event":"deploy","result":"precheck-fail","from","to"}` | `deploy`, `precheck-fail` |
 | `{"event":"deploy","result":"gate-fail","from","to","component"}` | `deploy`, `precheck-fail` (pre-deploy gates refused before any mutation) |
 | `{"event":"deploy","result":"snapshot-fail","from","to"}` | `deploy`, `precheck-fail` (pre-mutation; no mutation occurred) |
-| `{"event":"deploy","result":"checkout-dirty","from","to","component"}` | `deploy`, `precheck-fail` (abort before mutation) |
+| `{"event":"deploy","result":"checkout-dirty","from","to","component"}` | `deploy`, `precheck-fail` (aborted; any partial mutation rolled back) |
 | `{"event":"deploy","result":"deploy-fail","from","to","phase"}` | `deploy`, `failed` |
 | `{"event":"deploy","result":"reload-fail","from","to"}` | `deploy`, `failed` — mutation occurred, rollback follows; the line carries no `component` or `phase`, so `phase` is synthesized as `"reload"` (noted as synthesized, not box-emitted) |
 | `{"event":"deploy","result":"rollback-failed","from","to","phase"}` | `deploy`, `rollback-failed` |
