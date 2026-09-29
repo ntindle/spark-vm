@@ -423,3 +423,95 @@ def test_282_stalled_body_releases_handler_thread(server, monkeypatch):
     while threading.active_count() > baseline and time.monotonic() < deadline:
         time.sleep(0.1)
     assert threading.active_count() <= baseline, "handler thread leaked"
+
+# --- 64 KiB secret byte cap at the UI boundary (#149 parity) ---------------
+
+
+def _set_body(value):
+    return {
+        "name": "gh", "value": value, "entry": "access_token",
+        "placement": "bearer_header", "placement_arg": "",
+        "hosts": ["api.github.com"],
+    }
+
+
+def test_secret_max_bytes_matches_writer():
+    """The UI cap must mirror proxy/cred-store-set's max_bytes=65536
+    exactly (#149 parity): the boundary tests below use SECRET_MAX_BYTES
+    symbolically, so only an absolute pin catches a drift that would
+    silently break the frontend/writer agreement (credlib's
+    test_cap_matches_writer is the convention's precedent)."""
+    assert cred_ui.SECRET_MAX_BYTES == 65536
+
+
+def test_api_set_rejects_oversize_secret_before_any_store(monkeypatch):
+    """#149 parity with the `cred` CLI: the writer refuses values over
+    64 KiB, so api_set must refuse up front with a clean ValueError
+    (400) — never spawning the sudo writer to fail late with a 500.
+    The run() monkeypatch records calls; it must stay empty."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    with pytest.raises(ValueError, match="exceeds 64 KiB"):
+        cred_ui.api_set(_set_body("x" * (cred_ui.SECRET_MAX_BYTES + 1)))
+    assert calls == []  # no sudo writer ran: the secret was never stored
+
+
+def test_api_set_byte_cap_not_char_cap(monkeypatch):
+    """The cap is on encoded bytes, not decoded characters (#149): 16 Ki
+    4-byte UTF-8 characters are 64 KiB of payload — a 65537-byte value
+    must be refused even though it is far fewer characters."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    four_byte = "𐀀"  # U+10000: 4 bytes in UTF-8
+    assert len(four_byte.encode("utf-8")) == 4
+    oversize = four_byte * ((cred_ui.SECRET_MAX_BYTES // 4) + 1)
+    assert len(oversize.encode("utf-8")) > cred_ui.SECRET_MAX_BYTES
+    with pytest.raises(ValueError, match="exceeds 64 KiB"):
+        cred_ui.api_set(_set_body(oversize))
+    assert calls == []
+
+
+def test_api_set_accepts_exactly_64kib(monkeypatch):
+    """The boundary is inclusive: exactly 64 KiB still stores."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    out = cred_ui.api_set(_set_body("x" * cred_ui.SECRET_MAX_BYTES))
+    assert out == {"ok": True, "name": "gh"}
+    assert any("cred-store-set" in " ".join(c) for c in calls)
+
+
+def test_api_set_chomp_does_not_break_cap(monkeypatch):
+    """A trailing newline is chomped before the cap is measured, so a
+    64 KiB + 1 input bytes paste (64 KiB after the chomp) still stores —
+    the UI chomps what password-manager pastes add, like every other
+    frontend."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    out = cred_ui.api_set(_set_body("x" * cred_ui.SECRET_MAX_BYTES + "\n"))
+    assert out == {"ok": True, "name": "gh"}
+    assert any("cred-store-set" in " ".join(c) for c in calls)
+
+def test_api_set_exactly_cap_plus_crlf_accepted(monkeypatch):
+    """CLI parity: a 64 KiB value with an incidental \\r\\n (Windows
+    clipboard) is accepted — the \\r\\n chomp happens before the cap."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    out = cred_ui.api_set(_set_body("x" * cred_ui.SECRET_MAX_BYTES + "\r\n"))
+    assert out == {"ok": True, "name": "gh"}
+    assert any("cred-store-set" in " ".join(c) for c in calls)
+
+
+def test_api_set_one_byte_over_cap_after_chomp_refused(monkeypatch):
+    """The cap is measured after the chomp: 64 KiB + 1 bytes with no
+    trailing newline to chomp is still refused."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    with pytest.raises(ValueError, match="exceeds 64 KiB"):
+        cred_ui.api_set(_set_body("x" * (cred_ui.SECRET_MAX_BYTES + 1)))
+    assert calls == []
