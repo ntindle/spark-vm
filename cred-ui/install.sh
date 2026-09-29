@@ -35,6 +35,11 @@ REPO="$(dirname "$HERE")"
 : "${CRED_UI_INSTALL_DIR:=${HOME}/.local/share/spark-vm/cred-ui}"
 : "${SYSTEMD_USER_DIR:=${HOME}/.config/systemd/user}"
 
+# Normalize a trailing slash: the staging dir below is a SIBLING
+# ("${CRED_UI_INSTALL_DIR}.staging.XXXXXX"), and a trailing slash would
+# silently turn it into a CHILD of the install dir instead.
+CRED_UI_INSTALL_DIR="${CRED_UI_INSTALL_DIR%/}"
+
 # Repo-relative sources, in install order. The .py files must compile;
 # VERSION must parse as semver (the reader reports 0.0.0-unknown otherwise,
 # which would silently age the deployed UI's version stamp).
@@ -91,6 +96,27 @@ mkdir -p "$CRED_UI_INSTALL_DIR" "$SYSTEMD_USER_DIR" || {
     exit 1
 }
 
+# Atomic publication: the whole runtime set + unit is assembled in a
+# staging directory first, then renamed over the live files. The staging
+# dir is a SIBLING of the install dir (same parent directory, so the
+# publication renames below stay renames, never copy+unlink) and is NOT
+# one of the deploy's snapshot/rollback paths, so it never lands in a
+# snapshot. Consequence of the ordering: a crash or copy failure any time
+# before publication leaves the live install byte-identical to before —
+# no partially-written live file, ever. (The per-file publication below
+# can still leave a transient mixed old/new FILE SET mid-deploy; the
+# writer is the trusted deploy path, which is the stated residual — the
+# per-file guarantee is the new part.)
+STAGING="$(mktemp -d "${CRED_UI_INSTALL_DIR}.staging.XXXXXX")" || {
+    echo "ERROR: cannot create staging dir next to $CRED_UI_INSTALL_DIR" >&2
+    exit 1
+}
+# The EXIT trap cleans the staging dir on every exit path — except SIGKILL,
+# which leaves a stale 0700 sibling holding only public runtime copies. It
+# is never read by the service and never snapshotted; harmless clutter.
+cleanup_staging() { rm -rf "$STAGING"; }
+trap cleanup_staging EXIT
+
 # --remove-destination: replace a symlinked destination instead of writing
 # through it. Only matters against a same-uid attacker (the stated
 # residual), but it is one flag and removes the ambiguity.
@@ -100,15 +126,49 @@ cp --remove-destination \
    "$REPO/scripts/bounded_http.py" \
    "$REPO/scripts/sparkvm_version.py" \
    "$REPO/VERSION" \
-   "$CRED_UI_INSTALL_DIR/" || {
-    echo "ERROR: runtime copy failed" >&2
+   "$REPO/cred-ui/cred-ui.service" \
+   "$STAGING/" || {
+    echo "ERROR: runtime staging failed — live install untouched" >&2
     exit 1
 }
 
-cp --remove-destination \
-   "$REPO/cred-ui/cred-ui.service" \
-   "$SYSTEMD_USER_DIR/cred-ui.service" || {
-    echo "ERROR: unit install failed" >&2
+# Durability before publication: a crash after a rename must not surface a
+# zero-length file.
+if ! python3 - "$STAGING" <<'PYEOF'
+import os, sys
+d = sys.argv[1]
+fds = []
+dfd = None
+try:
+    for name in sorted(os.listdir(d)):
+        fds.append(os.open(os.path.join(d, name), os.O_RDONLY))
+    dfd = os.open(d, os.O_RDONLY)
+    for fd in fds:
+        os.fsync(fd)
+    os.fsync(dfd)
+finally:
+    for fd in fds:
+        os.close(fd)
+    if dfd is not None:
+        os.close(dfd)
+PYEOF
+then
+    echo "ERROR: staging fsync failed — live install untouched" >&2
+    exit 1
+fi
+
+# Publish: each mv is an atomic rename on the same filesystem — the live
+# file is never observed partially written. Runtime set first, then the
+# unit (the unit is re-read only on daemon-reload, after publication).
+for f in cred-ui.py index.html bounded_http.py sparkvm_version.py VERSION; do
+    mv -f "$STAGING/$f" "$CRED_UI_INSTALL_DIR/$f" || {
+        echo "ERROR: publishing $f failed — live set may be mixed old/new; re-run install.sh to complete" >&2
+        exit 1
+    }
+done
+
+mv -f "$STAGING/cred-ui.service" "$SYSTEMD_USER_DIR/cred-ui.service" || {
+    echo "ERROR: unit publish failed — re-run install.sh to complete" >&2
     exit 1
 }
 

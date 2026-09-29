@@ -182,6 +182,114 @@ def test_installed_copy_prefers_own_helpers(tmp_path):
         "shadow ../scripts/bounded_http.py took precedence: %s" % r2.stdout.strip()
 
 
+def test_install_mid_copy_failure_leaves_live_set_untouched(tmp_path):
+    """A failure DURING the copy phase (after every gate passed) must not
+    mutate the live install. The old direct-copy implementation wrote
+    straight into the live dir with `cp --remove-destination`, which unlinks
+    the live destination BEFORE reading the source — so an unreadable source
+    mid-copy deleted the live file outright (and replaced earlier ones). The
+    staged install assembles everything before publishing, so the live set
+    stays byte-identical. Non-vacuous: against a direct-copy install.sh this
+    test fails — the live index.html is gone when the unreadable source
+    aborts the copy."""
+    # Permission-based unreadability is invisible to root (root bypasses
+    # file permission checks), so this test needs a non-root invoker —
+    # the same guard the harness install-gate suite uses. CI and the
+    # post-ship venv run non-root, where the pin holds.
+    if os.geteuid() == 0:
+        pytest.skip("needs a non-root invoker: root reads 000 files")
+    install_dir = tmp_path / "install"
+    unit_dir = tmp_path / "units"
+    r = _run_install(REPO, install_dir, unit_dir)
+    assert r.returncode == 0, r.stderr + r.stdout
+    # Sentinel: the live set we must not disturb.
+    sentinels = {p: p.read_bytes() for p in install_dir.iterdir()}
+    assert len(sentinels) == 5, "expected the 5 runtime files, got %s" % (
+        sorted(p.name for p in sentinels),)
+    # A fake repo whose sources pass every gate but fail mid-copy:
+    # index.html is presence-checked yet never syntax-checked or parsed,
+    # so an unreadable index.html aborts the copy after the staged set is
+    # otherwise complete.
+    fake = tmp_path / "fakerepo"
+    for src in list(REPO_SOURCES.values()) + [
+            os.path.join("cred-ui", "install.sh"),
+            os.path.join("cred-ui", "cred-ui.service")]:
+        dst = fake / src
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(os.path.join(REPO, src), dst)
+    (fake / "cred-ui" / "index.html").chmod(0o000)
+    try:
+        r = _run_install(str(fake), install_dir, unit_dir)
+    finally:
+        (fake / "cred-ui" / "index.html").chmod(0o644)
+    assert r.returncode != 0, "install succeeded with an unreadable source"
+    for p, want in sentinels.items():
+        assert p.read_bytes() == want, \
+            "live file mutated on failed install: %s" % p.name
+    # No staging residue next to the install dir.
+    leftovers = [p for p in install_dir.parent.iterdir()
+                 if p.name.startswith(install_dir.name + ".staging.")]
+    assert not leftovers, "staging residue: %s" % leftovers
+
+
+def test_install_leaves_no_staging_residue_on_success(tmp_path):
+    """A successful install leaves no staging directory behind: the
+    install dir holds exactly the runtime set, and nothing staging-shaped
+    sits next to it."""
+    install_dir = tmp_path / "install"
+    unit_dir = tmp_path / "units"
+    r = _run_install(REPO, install_dir, unit_dir)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert sorted(p.name for p in install_dir.iterdir()) == sorted(RUNTIME_FILES)
+    leftovers = [p for p in install_dir.parent.iterdir()
+                 if p.name.startswith(install_dir.name + ".staging.")]
+    assert not leftovers, "staging residue: %s" % leftovers
+
+
+def test_install_publish_failure_is_recoverable_by_rerun(tmp_path):
+    """The publish loop is the mechanism behind the no-partial-file claim,
+    and the script promises recovery ("re-run install.sh to complete")
+    when publication fails mid-way. Pin both: a publish-phase failure must
+    exit nonzero naming the re-run, and the re-run must complete the
+    install. Non-vacuous: without the per-file publish loop there is no
+    mid-publish failure mode to recover from — and the re-run half fails if
+    publication is not idempotent."""
+    # Permission-based failure needs a non-root invoker (same guard as the
+    # mid-copy test: root bypasses directory permission checks).
+    if os.geteuid() == 0:
+        pytest.skip("needs a non-root invoker: root writes through 555 dirs")
+    install_dir = tmp_path / "install"
+    unit_dir = tmp_path / "units"
+    unit_dir.mkdir()
+    # The unit publish fails (unwritable dir); the 5 runtime publishes
+    # succeed — the documented mixed state: new runtime, unit pending.
+    unit_dir.chmod(0o555)
+    try:
+        r = _run_install(REPO, install_dir, unit_dir)
+    finally:
+        unit_dir.chmod(0o755)
+    assert r.returncode != 0, "install succeeded with an unwritable unit dir"
+    assert "re-run" in r.stderr, r.stderr
+    for name in RUNTIME_FILES:
+        got = install_dir / name
+        assert got.is_file(), \
+            "runtime file missing after partial publish: %s" % name
+        want = open(os.path.join(REPO, REPO_SOURCES[name]), "rb").read()
+        assert got.read_bytes() == want, "content drift: %s" % name
+    assert not (unit_dir / "cred-ui.service").exists(), \
+        "unit published despite the unwritable dir"
+    # The promised recovery: re-run completes the install.
+    r = _run_install(REPO, install_dir, unit_dir)
+    assert r.returncode == 0, r.stderr + r.stdout
+    unit = unit_dir / "cred-ui.service"
+    assert unit.is_file(), "unit not installed after re-run"
+    assert unit.read_bytes() == open(
+        os.path.join(REPO, "cred-ui", "cred-ui.service"), "rb").read()
+    leftovers = [p for p in install_dir.parent.iterdir()
+                 if p.name.startswith(install_dir.name + ".staging.")]
+    assert not leftovers, "staging residue: %s" % leftovers
+
+
 def test_service_unit_points_at_install_default(tmp_path):
     """The unit hardcodes the production default install path; the deploy
     manifest must compute the same default — otherwise a deploy installs

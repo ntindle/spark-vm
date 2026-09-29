@@ -19,6 +19,10 @@ systemctl --user enable --now cred-ui
 `~/.config/systemd/user/` — the running service never executes from the
 working checkout, so an edit to the checkout can't change the page your
 browser loads. Re-run `install.sh` after pulling to refresh the install.
+The install is staged: the full runtime set is assembled in a staging
+directory next to the install dir and each file is renamed over the live
+copy, so an interrupted install can never leave a half-written live file
+behind.
 
 It listens on **127.0.0.1:18740** only. Reach it over an SSH tunnel:
 
