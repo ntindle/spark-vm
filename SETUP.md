@@ -272,9 +272,12 @@ credentials.
    handles that). The site receives the real credentials; everything on
    the agent's side stays placeholders.
 
-6. **Verify in the audit log** (placeholder names only, never values):
+6. **Verify in the audit log** (placeholder names only, never values).
+   Read as root — `swap.log` is 0600 and swapd-owned, and there is no
+   sudoers grant for reading it as swapd (the narrow read grants cover
+   only the registry and secret files):
    ```
-   sudo -u swapd tail -5 /home/swapd/swap.log
+   sudo tail -5 /home/swapd/swap.log
    # ts=... host=acme.example.com swapped=hsurr:acme:password
    ```
 
@@ -354,7 +357,9 @@ TOTP) can't be auto-filled: the agent asks you for the code instead.
 
 **Verifying:** `sudo ausearch -k swapd-secrets` shows every read/write of the
 secret store and registry. `sudo journalctl -u swap-proxy` shows the proxy
-log. `sudo -u swapd cat /home/swapd/swap.log` shows every swap (names only).
+log. `sudo cat /home/swapd/swap.log` shows every swap (names only). As
+above, read it as root: the log is 0600 and swapd-owned, and no sudoers
+rule grants reading it as swapd.
 
 **Honest limits.** With root on this box, this is verifiable hygiene, not a
 hard boundary: root can read swapd's files and the proxy's memory. What it
