@@ -43,7 +43,7 @@ unknown fields are ignored by readers (versioning: additive fields only).
 
 | Field | Type | Meaning |
 |---|---|---|
-| `event_id` | string | UUIDv7 for box-emitted events; deterministic UUIDv5 for fleet-canonicalized legacy lines — the dedup key in both cases (see §4 S1) |
+| `event_id` | string | UUIDv7 for box-emitted events; deterministic UUIDv5 for fleet-canonicalized legacy lines — the dedup key in both cases (see §4 S1). The S1 synthesis is UUIDv5 over `box_id|ts|event|result|from|to`, with a per-subcomponent suffix for the plural-`components` success line |
 | `box_id` | string | Stable box identity (G15 §8: must survive reimage); the S1 canonicalizer sources it from the collector's per-box pull context (the estate dir name / G16's operator-maintained mapping) |
 | `session_epoch` | int \| null | Reimage counter from the provisioner's box record; S1 canonicalizer emits `null` (OQ3 tracks the record that makes it non-null); soak/aggregation keying degrades to (box, build) while null |
 | `emitted_at` | string | Box clock, ISO-8601 UTC |
@@ -51,7 +51,7 @@ unknown fields are ignored by readers (versioning: additive fields only).
 | `source` | enum | `auto-deploy` \| `toolset-update` \| `manual` \| `controller` |
 | `component` | enum | `repo` \| `toolset-cua-driver` \| `image` (reimage, later) — which updater, not which part: an audit line's own `component` (`proxy`, `confirm`, `cred_ui`, …) is sub-component granularity and becomes the additive `subcomponent`/`subcomponents` field, never this enum |
 | `kind` | enum | `check` \| `deploy` \| `rollback` \| `gate-answer` \| `freeze-hold` — `freeze-hold` is emitted only by the controller on freeze flip/clear into the fleet journal (S3; owner: G15 controller work) |
-| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `rollback-unhealthy` \| `superseded` — `rollback-unhealthy` means restored but post-restore health failed (not a good restore). `started`, `superseded` and the `freeze`/`gate` triggers are S2-forward vocabulary with no legacy producer — named explicitly here so nothing is left to be inferred |
+| `outcome` | enum | `started` \| `noop` \| `precheck-fail` \| `deferred-arc` \| `skipped-frozen` \| `succeeded` \| `failed` \| `rolled-back` \| `rollback-failed` \| `superseded` — `started`, `deferred-arc`, `skipped-frozen`, `gate-answer` and `freeze-hold` are S2/S3 vocabulary with no legacy producer; S1 delivers `succeeded`/`failed`/`rolled-back` (and `precheck-fail`) only |
 | `from` / `to` | string | Commit (repo) or pin version (toolset); absent on pure checks |
 | `from_version` / `to_version` | string | Human versions where they exist (auto-deploy's `from_version`/`to_version`) |
 | `phase` | string | Box-side failure phase where known (auto-deploy's `phase`) |
@@ -59,7 +59,7 @@ unknown fields are ignored by readers (versioning: additive fields only).
 | `rollout` | object | `{release_id, wave}` — null until G15 S2 assigns waves |
 | `trigger` | enum | `scheduled` \| `manual` \| `freeze` \| `gate` \| `extra-inputs` — absent `trigger` on a legacy line means `scheduled` (the timer path); `extra-inputs` is emitted only on the range-synthesized forced path (`deploy/auto-deploy.sh`, the `trig` variable); `freeze`/`gate` are reserved for S2 emitters |
 | `attested` | bool | S1/S2: `false`. S3: `true` when the event rode G13's attested box→plane channel |
-| `note` | string | Human/alert text (the box-side alert reason, not a debug dump) |
+| `note` | string | Human/alert text — at S1 synthesized from the audit line itself (the box-side alert reason lives in `$LAST_FAILURE`, which the collector does not pull), never a debug dump |
 
 The outcome vocabulary is closed by design: `noop` (check, nothing to do),
 `precheck-fail` (gates refused before any mutation), `deferred-arc`
@@ -81,8 +81,11 @@ history of claims).
 Example:
 
 ```json
-{"event_id":"0196c4a2-…","box_id":"tower","session_epoch":3,"emitted_at":"2026-09-29T22:04:11Z","received_at":"2026-09-29T22:04:13Z","source":"auto-deploy","component":"repo","kind":"deploy","outcome":"rolled-back","from":"e54dc03c","to":"dbc7b206","phase":"post-deploy-health","rollout":{"release_id":"stable-20260929-2","wave":"canary"},"trigger":"scheduled","attested":false,"note":"post-deploy health check failed; restored snapshot"}
+{"event_id":"0196c4a2-…","box_id":"tower","session_epoch":3,"emitted_at":"2026-09-29T22:04:11Z","received_at":"2026-09-29T22:04:13Z","source":"auto-deploy","component":"repo","kind":"deploy","outcome":"rolled-back","from":"e54dc03c","to":"dbc7b206","phase":"reload","rollout":{"release_id":"stable-20260929-2","wave":"canary"},"trigger":"scheduled","attested":false,"note":"daemon-reload failed after install; restored snapshot"}
 ```
+
+(S2-era example — the `rollout` envelope is null until G15 S2 assigns
+waves.)
 
 ## 3. Emitters: what the boxes already emit
 
@@ -103,18 +106,22 @@ emits (audit lines without a `trigger` field canonicalize to
 | `{"event":"deploy","result":"snapshot-fail","from","to"}` | `deploy`, `precheck-fail` (pre-mutation; no mutation occurred) |
 | `{"event":"deploy","result":"checkout-dirty","from","to","component"}` | `deploy`, `precheck-fail` (abort before mutation) |
 | `{"event":"deploy","result":"deploy-fail","from","to","phase"}` | `deploy`, `failed` |
-| `{"event":"deploy","result":"reload-fail","from","to"}` | `deploy`, `failed` (mutation occurred; rollback follows) |
+| `{"event":"deploy","result":"reload-fail","from","to"}` | `deploy`, `failed` — mutation occurred, rollback follows; the line carries no `component` or `phase`, so `phase` is synthesized as `"reload"` (noted as synthesized, not box-emitted) |
 | `{"event":"deploy","result":"rollback-failed","from","to","phase"}` | `deploy`, `rollback-failed` |
 | `{"event":"deploy","result":"rolled-back","from","to","to_version"}` | `deploy`, `rolled-back` |
 | `{"event":"deploy","result":"pull-only","from","to","from_version","to_version"}` | `deploy`, `succeeded` |
-| `{"event":"deploy","result":"ok","from","to","components",…}` | `deploy`, `succeeded` (the normal success path: components installed, health checks passed) |
+| `{"event":"deploy","result":"ok","from","to","components",…}` | `deploy`, `succeeded` — the normal success path (components installed, health checks passed); the `components` value is space-joined plural, so this yields **one event per component**, with `event_id` derived per (line, component) |
 | `{"event":"rollback","result":"rollback-failed","snapshot"}` | `rollback`, `rollback-failed` |
-| `{"event":"rollback","result":"manual-rollback","to","to_version",…}` | `rollback`, `rolled-back` |
-| `{"event":"rollback","result":"rollback-unhealthy","to",…}` | `rollback`, `rollback-unhealthy` (restored, but post-restore health failed — not a clean restore) |
+| `{"event":"rollback","result":"manual-rollback","to","to_version",…}` | `rollback`, `rolled-back` (`from` = `rolled_back_from`) — the operator's own recovery path is in the stream |
+| `{"event":"rollback","result":"rollback-unhealthy","to",…}` | `rollback`, `rolled-back`, with `note`: "restored but post-restore health failed" — not a clean restore |
+
+The optional `,"trigger":"extra-inputs"` fragment appears only on forced
+extra-input runs; absent `trigger` canonicalizes to `scheduled`.
 
 The audit line's `component` (and the plural `components` on the `ok`
-line) becomes the additive `subcomponent`/`subcomponents` field; standard
-`component` is `repo` for every `auto-deploy` line. For the toolset
+line) becomes the additive `subcomponent`/`subcomponents` field — one
+event per subcomponent for the plural success line; standard `component`
+is `repo` for every `auto-deploy` line. For the toolset
 updater, only the promise is known — SELF_UPDATE.md S2 commits to "the
 same format auto-deploy already uses" for who/what/when/versions, but its
 result vocabulary is undefined, so the toolset half of this table is
@@ -143,9 +150,11 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   standard-shape events to the store's event journal; `received_at` is the
   collect clock. Event dedup is on `(box_id, event_id)`, and for S1
   canonicalization `event_id` is synthesized deterministically — UUIDv5
-  over `box_id|ts|event|result|from|to` — so a re-pulled tail
-  re-canonicalizes to identical ids and double-collection is a no-op
-  (box-emitted S2 journal lines carry native UUIDv7 instead).
+  over `box_id|ts|event|result|from|to`, with a per-subcomponent suffix
+  for the plural-`components` success line (one event per component) — so
+  a re-pulled tail re-canonicalizes to identical ids and
+  double-collection is a no-op (box-emitted S2 journal lines carry native
+  UUIDv7 instead).
 - **Read:** `fleet events` shows the per-box outcome series;
   `fleet events --wave` filters by the rollout envelope (null until G15 S2).
 - **Alert — the promptness ask.** The issue's core requirement is that a
@@ -154,11 +163,22 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   1. **Any `rollback-failed`** → immediate alert (a box stuck on a
      known-bad build).
   2. **Correlated failure:** ≥2 boxes reporting `failed`/`rolled-back` for
-     the same component+`to` within a 30-minute window → fleet alert (this
-     is the bad-release shape).
-  3. **Silent wave:** wave-eligible boxes with zero non-noop events over
-     the max-wait window → operator alert (feeds G15 §4's max-wait page;
-     silence is missing evidence, not health).
+     the same (`subcomponent`, `to`) within a 30-minute window → fleet
+     alert (this is the bad-release shape). Audit lines that carry no
+     component (`reload-fail`, the deploy-side `rollback-failed`) are
+     correlated on (`to`) alone, labeled `subcomponent: unknown`.
+  3. **Silent wave (live at G15 S2):** boxes with a non-null `rollout`
+     envelope and zero non-noop events over the armed max-wait window →
+     operator alert (feeds G15 §4's max-wait page). At S1 the envelope is
+     null on every event and no max-wait is armed, so this rule cannot
+     fire — the collector records silence as missing-evidence in the
+     journal without paging. (A literal S1 reading would page every
+     healthy idle estate, since check-`noop`s stay local-only by design.)
+  4. **Stuck precheck:** ≥N `precheck-fail` events on one box inside the
+     window → operator alert. The precheck class (gate-fail,
+     snapshot-fail, checkout-dirty) emits non-noop events forever, so no
+     other rule catches a box stuck failing pre-deployment — and a
+     perpetually un-updated box is #608's pain in a quieter key.
   Alert transport, honestly staged: S1 writes the alert into the
   operator's fleet journal and `fleet events watch` exits nonzero on
   unacknowledged alerts — a cron or the operator's existing paging consumes
@@ -202,10 +222,12 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   operator-deployed config). The signed box→plane channel itself is S3
   design work owned by the G13 residual — until it exists, tenant-fleet
   gates stay operator-promote-only per G15 §4 (never automatic).
-- **Trust:** gate-consumed events must be `attested: true`. Unattested
-  self-reported events are *informational only* — visible to the operator,
-  never admitted to a gate quorum. The operator estate keeps its trusted
-  pull model; the tenant fleet gets attestation or it gets no gates.
+- **Trust:** the attested-admission rule is G13's standing decision —
+  tenant-fleet gates consume only box-identity-attested G17 events;
+  unattested events may be logged, never gate-consumed
+  (TENANT_UPDATE_TRUST_MODEL.md §3, T2). The signed box→plane channel
+  mechanism itself is S3 design work — until it exists, tenant-fleet
+  gates stay operator-promote-only per G15 §4 (never automatic).
   Forged events are the G15 §6 attack: fake `succeeded` promotes a bad
   release, fake `failed` halts a good one. The `(box_id, event_id)` dedup
   key makes exact resends of a captured event a no-op — nothing more: a
@@ -231,8 +253,10 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   expected, and maintenance-window events never feed the stall detector
   (UPDATE_IDLE_SUSPEND_CLOCK.md D1/D6).
 - **G18:** the box-side gate query answer is itself an event source —
-  `kind: gate-answer` with outcomes `succeeded` (permitted commit X) and
-  `skipped-frozen` (fleet frozen). The freeze propagation proof G18 must
+  `kind: gate-answer` with outcomes `succeeded` (permitted commit X —
+  the outcome vocabulary stretches here: `succeeded` reads as
+  "permitted", not "deployed") and `skipped-frozen` (fleet frozen). The
+  freeze propagation proof G18 must
   deliver is *observable* in this stream: a freeze flipped at T0 must show
   `skipped-frozen` events on fleet-managed boxes within the G18 latency
   bound, or the bound is theater with evidence.
@@ -305,8 +329,10 @@ waits on:
    (box, build).
 4. **Cross-component correlation:** a bad repo build and a toolset pin
    failure on the same box in the same window look correlated but aren't.
-   The census gates are per (component, build); the fleet alert rule (S1
-   rule 2) should probably key the same way. S1 keys (component, to).
+   The census gates are per (subcomponent, build); lines that carry no
+   component (`reload-fail`, the deploy-side `rollback-failed`) correlate
+   on (`to`) alone, labeled `subcomponent: unknown`. The fleet alert rule
+   (S1 rule 2) keys (subcomponent or unknown, `to`).
 5. **Attestation key custody:** under G13 §3's tenant-with-shell model, a
    box-resident signing key the tenant can read collapses the S3 trust
    story — attestation that the tenant can sign for is not attestation.
