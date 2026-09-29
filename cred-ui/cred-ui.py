@@ -372,13 +372,8 @@ def api_set(data):
         raise ValueError("bad credential name (use [A-Za-z0-9_-], max 64 chars)")
     if not ENTRY_RE.match(entry) or entry in RESERVED_ENTRIES:
         raise ValueError("bad entry name")
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str):
         raise ValueError("empty secret value")
-    if not isinstance(hosts, list) or not all(host_ok(h) for h in hosts):
-        raise ValueError("bad host (use a hostname: letters, digits, "
-                         "hyphens, dots; no underscores, no ports)")
-    pjson = placement_json(kind, arg)
-
     # Strip at most one trailing newline -- pastes from password managers
     # and textareas commonly include one. (rstrip would silently alter a
     # secret that legitimately ends in several newlines.)
@@ -386,6 +381,17 @@ def api_set(data):
         value = value[:-2]
     elif value.endswith("\n"):
         value = value[:-1]
+    # Emptiness is checked AFTER the chomp (#708): a "\n"-only paste is
+    # truthy pre-chomp, chomps to "", and would otherwise sail past this
+    # check and hit the writer's empty-refusal late as a 500 instead of
+    # the clean 400 the UI owes for empty input.
+    if not value:
+        raise ValueError("empty secret value")
+    if not isinstance(hosts, list) or not all(host_ok(h) for h in hosts):
+        raise ValueError("bad host (use a hostname: letters, digits, "
+                         "hyphens, dots; no underscores, no ports)")
+    pjson = placement_json(kind, arg)
+
     secret = value.encode("utf-8")
     if len(secret) > SECRET_MAX_BYTES:
         # #149 parity with the `cred` CLI: the writer refuses >64 KiB, so
