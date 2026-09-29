@@ -115,11 +115,18 @@ One record per (box, observation):
   operator keeps the alias on the box), not from a provisioner. The
   provisioner path stays the S2/S3 target, and the record schema is
   identical either way.
+  S1 ships the sample as a CLI flag: `fleet/inventory.py collect
+  --box-id-map box-ids.json` where the file is a JSON object mapping
+  estate directory names (SSH host aliases) to box_ids.
 - `observed_at` — collector-side timestamp. Box-side `generated_at` is
   kept in the payload but never trusted for ordering (clock skew, §11).
 - `reporter` — what produced this record: `auto-deploy-audit`,
   `self-update-status`, `gate-hook-snapshot`, or `control-plane-probe`
   (§5). Records keep their provenance so the collector can weight them.
+  S1 deviation (2026-09-29): the shipped pull collector stamps
+  `estate-collector-s1`, which predates this enum — the enum gains the
+  S1 value (or the collector adopts one) before any strict consumer
+  validates it.
 - `versions` — the three dimensions:
   - `repo_commit`: current deployed commit of the box's spark-vm checkout
     (from auto-deploy's snapshot, not from a fresh `git rev-parse` at
@@ -169,7 +176,13 @@ One record per (box, observation):
 **S1 — the operator pulls (ships first).** The operator's estate already
 has SSH to its boxes. The S1 collector runs on the operator's machine
 (from a cron or by hand), connects to each known box, and reads three
-artifacts: the tail of the auto-deploy audit log, a fresh
+artifacts:
+> **S1 implementation note (2026-09-29):** the shipped S1 collector
+> (`fleet/inventory.py collect`) reads from a local estate directory —
+> one subdirectory per box holding the three artifacts, which the
+> operator rsyncs/scps together (or points at a mounted tree) — rather
+> than pulling over SSH itself. The record schema and the store are
+> unchanged either way; live SSH pull is a later collector slice. the tail of the auto-deploy audit log, a fresh
 `self_update.py status --json` run, and a small box-side snapshot script
 that emits `{repo_commit, gate_answer_age, frozen, arc_active,
 image_version}` — all derived from on-box state the updaters already
@@ -378,6 +391,6 @@ controller, and this design already has one.
 controller design (`ROLLOUT_CONTROLLER_DESIGN.md`, G15/#606): the
 controller reads this inventory for its gates (§4) and this inventory
 reads the controller's wave manifests for its "missed the window"
-semantics (§6). Implementation (S1–S3) remains — tracked on #607.
+semantics (§6). S1 shipped 2026-09-29 as the fleet/ component (JSONL journal + rebuildable snapshot, estate-dir pull collector, box-side snapshot emitter, inventory/drift/rebuild CLI, hermetic suite); S2–S3 remain — tracked on #607.
 Related: G17 (#608), G18 (#609), G15 (#606), G13 (#555), G11–G12
 (UPDATE_CHANNEL_POLICY.md), P7 (status page).*
