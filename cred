@@ -145,6 +145,8 @@ def read_secret_stdin():
     if len(raw) > SECRET_MAX_BYTES + _READ_MARGIN_BYTES:
         raise CredentialError(
             "secret exceeds 64 KiB \u2014 refusing before invoking the writer")
+    # Strict decode (no errors=...): invalid UTF-8 raises UnicodeDecodeError,
+    # the same as the pre-#149 text-mode sys.stdin.read() did.
     data = raw.decode("utf-8")
     # chomp one trailing newline (echo adds one); interior content untouched
     if data.endswith("\r\n"):
