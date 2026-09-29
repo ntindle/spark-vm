@@ -31,7 +31,9 @@
 #   --yes          confirm the --execute run (no prompt).
 #   --ci           workflow mode: verify GITHUB_REF is refs/heads/main
 #                  instead of checking the local branch (CI checks out
-#                  detached), then execute.
+#                  detached); implies --execute unless an explicit mode is
+#                  given (the release workflow's recovery step runs
+#                  --publish-only --yes --ci on the same detached checkout).
 #   --notes-file   write the generated release notes to PATH as well.
 #   --remote       git remote to use (default: origin; env CUT_RELEASE_REMOTE).
 #
@@ -39,7 +41,9 @@
 #      ntindle/spark-vm), CUT_RELEASE_DIR (repo root override; testing hook),
 #      CUT_RELEASE_NO_GH (set to force the API fallback even when `gh`
 #      exists; testing hook), GITHUB_TOKEN (API fallback when `gh` is
-#      unavailable; never logged).
+#      unavailable; never logged), CUT_RELEASE_POLL_ATTEMPTS (default 10;
+#      0 disables the wait) and CUT_RELEASE_POLL_SLEEP (default 3) bound
+#      the post-tag-push replication wait before publishing.
 #
 # Never commits secrets: the token is read from the environment only.
 
@@ -61,7 +65,9 @@ previous tag), annotated tag v<VERSION>, and a published GitHub release.
   --publish-only publish the release for the already-pushed tag v<VERSION>
                  (recovery: --execute pushed the tag but publishing failed)
   --ci           workflow mode: check GITHUB_REF is refs/heads/main instead
-                 of the local branch, then execute without --yes
+                 of the local branch, then execute without --yes (unless an
+                 explicit mode is given — the workflow's recovery step runs
+                 --publish-only --yes --ci)
   --notes-file PATH  also write the generated notes to PATH
   --remote NAME  git remote to use (default: origin)
   -h, --help     show this help
@@ -76,6 +82,7 @@ EOF
 die() { echo "cut-release.sh: $*" >&2; exit 1; }
 
 MODE="dry-run"
+MODE_EXPLICIT=0  # set when --dry-run/--execute/--publish-only is given
 CONFIRM=0
 CI=0
 NOTES_FILE=""
@@ -84,11 +91,11 @@ REPO="${CUT_RELEASE_REPO:-ntindle/spark-vm}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --dry-run) MODE="dry-run"; shift ;;
-        --execute) MODE="execute"; shift ;;
-        --publish-only) MODE="publish-only"; shift ;;
+        --dry-run) MODE="dry-run"; MODE_EXPLICIT=1; shift ;;
+        --execute) MODE="execute"; MODE_EXPLICIT=1; shift ;;
+        --publish-only) MODE="publish-only"; MODE_EXPLICIT=1; shift ;;
         --yes) CONFIRM=1; shift ;;
-        --ci) CI=1; MODE="execute"; shift ;;
+        --ci) CI=1; shift ;;
         --notes-file) [[ $# -ge 2 ]] || die "--notes-file needs a path"; NOTES_FILE="$2"; shift 2 ;;
         --remote) [[ $# -ge 2 ]] || die "--remote needs a name"; REMOTE="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -96,6 +103,20 @@ while [[ $# -gt 0 ]]; do
         *) die "unexpected argument: $1 (see --help)" ;;
     esac
 done
+
+# --ci without an explicit mode means execute (the workflow's cut step);
+# an explicit --dry-run/--execute/--publish-only always wins, even with
+# --ci (so --ci --dry-run stays a dry run).
+if [[ "$CI" == "1" && "$MODE_EXPLICIT" == "0" ]]; then
+    MODE="execute"
+fi
+
+# Fail fast on malformed poll hooks, before any remote mutation.
+[[ "${CUT_RELEASE_POLL_ATTEMPTS:-10}" =~ ^[0-9]+$ ]] \
+    || die "CUT_RELEASE_POLL_ATTEMPTS must be a non-negative integer (got '${CUT_RELEASE_POLL_ATTEMPTS:-10}')"
+[[ "${CUT_RELEASE_POLL_SLEEP:-3}" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+    || die "CUT_RELEASE_POLL_SLEEP must be a non-negative number (got '${CUT_RELEASE_POLL_SLEEP:-3}')"
+
 
 REPO_DIR="${CUT_RELEASE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$REPO_DIR"
@@ -290,6 +311,76 @@ echo "cut-release.sh: ---- end draft ----"
 
 have_gh() { [[ -z "${CUT_RELEASE_NO_GH:-}" ]] && command -v gh >/dev/null 2>&1; }
 
+# Emit the body of GET /repos/$REPO/<endpoint> to stdout; nonzero exit on
+# transport failure or an HTTP error status (gh's `api --silent` fails on
+# 4xx/5xx; the token path uses curl --fail for the same semantics). The
+# token path reuses the 0600-config-file pattern: the token never appears
+# on a command line.
+# Print the path of a 0600 curl config file carrying the GitHub token
+# as an Authorization header (the token never appears on a command line).
+# The file lives under $NOTES_DIR, so the EXIT trap cleans it on any
+# abnormal-but-catchable exit too; callers rm -f it on the normal path
+# right after use. (mktemp creates 0600, so the token is never readable by
+# other users even for an instant.)
+token_curl_cfg() {
+    local cfg; cfg="$(mktemp -p "$NOTES_DIR")"
+    printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" > "$cfg"
+    printf '%s\n' "$cfg"
+}
+
+api_get() {
+    local endpoint="$1"
+    if have_gh; then
+        gh api --silent "repos/$REPO/$endpoint"
+    else
+        local cfg; cfg="$(token_curl_cfg)"
+        # Bounded per-attempt: a blackholed network must not hang one poll
+        # far past the whole wait budget.
+        curl -sS --fail --connect-timeout 10 --max-time 30 -K "$cfg" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/$endpoint"
+        local rc=$?
+        rm -f "$cfg"
+        return $rc
+    fi
+}
+
+# True when the GitHub API can see the just-pushed tag in its git-ref
+# namespace — the same namespace the Releases API validates `tag_name`
+# against, so visibility here is the publish precondition the v0.5.0 cut
+# (#659) violated by racing. Exit-code based: both api_get paths fail on
+# HTTP errors, so no body sniffing is needed.
+tag_visible_to_api() {
+    api_get "git/ref/tags/$TAG" >/dev/null 2>&1
+}
+
+# Bounded best-effort wait for the pushed tag to become visible to the
+# GitHub API before publishing. Never fatal on timeout: it prints a
+# WARNING and the publish attempt still runs — the workflow's publish-only
+# recovery step covers a tag-pushed/publish-failed outcome (GitHub #659),
+# and refusing to publish at all would guarantee exactly that state.
+# CUT_RELEASE_POLL_ATTEMPTS=0 disables the wait explicitly (no warning).
+wait_for_tag_replication() {
+    local attempts="${CUT_RELEASE_POLL_ATTEMPTS:-10}"
+    local sleep_s="${CUT_RELEASE_POLL_SLEEP:-3}"
+    # (validated up front, before any remote mutation)
+    if (( attempts == 0 )); then
+        echo "cut-release.sh: tag replication wait disabled (CUT_RELEASE_POLL_ATTEMPTS=0)"
+        return 0
+    fi
+    local i=1
+    while (( i <= attempts )); do
+        if tag_visible_to_api; then
+            echo "cut-release.sh: tag $TAG visible to the GitHub API (poll $i/$attempts)"
+            return 0
+        fi
+        sleep "$sleep_s"
+        i=$((i + 1))
+    done
+    echo "cut-release.sh: WARNING: tag $TAG not visible to the GitHub API after $attempts polls; attempting publish anyway" >&2
+    return 0
+}
+
 publish_release() {
     # Publish the GitHub release for $TAG from $NOTES. In --publish-only
     # mode the release must not already exist (the API path fail-closes on
@@ -304,16 +395,22 @@ publish_release() {
         echo "cut-release.sh: prerelease version detected; marking GitHub release as prerelease"
     fi
     if have_gh; then
-        gh "${GH_ARGS[@]}" || die "gh release create failed"
+        echo "cut-release.sh: publishing release $TAG via gh"
+        gh "${GH_ARGS[@]}" || die "gh release create failed for $TAG (gh's error is above)"
+        # The release URL is the operator's handle on the published state.
+        # Non-fatal: if the view lags the create, the publish already
+        # succeeded — don't turn a diagnostics read into a failure.
+        local RELEASE_URL=""
+        RELEASE_URL="$(gh release view "$TAG" --json url -q .url 2>/dev/null || true)"
+        [[ -n "$RELEASE_URL" ]] && echo "cut-release.sh: release URL: $RELEASE_URL"
     elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        echo "cut-release.sh: publishing release $TAG via GitHub API fallback (no gh on PATH)"
         # API fallback for operators without `gh`. The token comes from the
         # environment only and is never printed, logged, or placed on a command
         # line: it travels in a 0600 curl config file under the trap-cleaned
         # temp dir, so it never appears in ps output.
         PAYLOAD="$NOTES_DIR/payload.json"
-        CURL_CFG="$NOTES_DIR/curl.cfg"
-        printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" > "$CURL_CFG"
-        chmod 600 "$CURL_CFG"
+        CURL_CFG="$(token_curl_cfg)"
         TAG="$TAG" REPO="$REPO" VERSION="$VERSION" NOTES_PATH="$NOTES" \
             python3 - > "$PAYLOAD" <<'PYEOF' || die "release payload build failed"
 import json, os
@@ -341,7 +438,7 @@ url = d.get("html_url")
 if not url:
     sys.stderr.write("github API error: %s\n" % json.dumps(d)[:500])
     sys.exit(1)
-print("release URL: %s" % url)
+print("cut-release.sh: release URL: %s" % url)
 PYEOF
     else
         die "no 'gh' on PATH and GITHUB_TOKEN unset; cannot publish the release (tag $TAG is on the remote; re-run with --publish-only once publishing is possible)"
@@ -373,5 +470,16 @@ git push "$REMOTE" "$TAG" \
     || { git tag -d "$TAG" >/dev/null 2>&1 || true
          die "git push of $TAG failed (local tag removed; fix and re-run)"; }
 echo "cut-release.sh: pushed $TAG to $REMOTE"
+
+# Give the Releases API a moment to see the tag before publishing: a tag
+# pushed seconds ago can be invisible to the API's tag_name validation
+# (replication lag), and gh release create then fails even though the tag
+# is on the remote — the tag-pushed/publish-failed state GitHub #659
+# documented. Bounded and non-fatal by design (see the function). Skipped
+# when publishing is impossible anyway (no gh, no token): publish_release
+# fail-closes immediately below with its own diagnostic.
+if have_gh || [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    wait_for_tag_replication
+fi
 
 publish_release

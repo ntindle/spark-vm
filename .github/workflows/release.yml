@@ -21,6 +21,12 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# If the cut step pushed the tag but publishing failed (the v0.5.0 cut,
+# GitHub #659), the recovery step below publishes the release for the
+# existing tag via --publish-only. It fail-closes when there is nothing to
+# recover (tag missing locally → clean die), so a pre-publish failure
+# stays a clear failure with diagnostics instead of a silent half-release.
+
 permissions:
   contents: write # push the release tag + publish the GitHub release
 
@@ -43,3 +49,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/cut-release.sh --ci
+      - name: Recover tag-pushed / publish-failed state
+        # GitHub #659: the v0.5.0 cut pushed its tag but the publish step
+        # failed. If this step ever runs (the cut step failed), publish the
+        # release for the existing tag — --publish-only regenerates the
+        # notes and fail-closes when the tag is missing or the release
+        # already exists, so the job's verdict stays accurate either way.
+        # --ci: the checkout is detached (actions/checkout), so the
+        # GITHUB_REF check applies instead of the attached-branch check.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/cut-release.sh --publish-only --yes --ci
