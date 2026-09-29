@@ -84,6 +84,7 @@ before running that component's suite:
 | `cua/` | `python3 -m pytest cua` | none (the bridge's driver calls are stubbed; the `.sh` scripts get `bash -n` syntax + shellcheck-warning gates plus isolated extraction-tests of their security guards — they run with real side effects on spark-vm) |
 | `jail/` | `python3 -m pytest jail` | none (`build.sh --help` executes the real script's arg parsing and exits before any side effect; full builds need root + systemd-nspawn on the box) |
 | `credlib/` | `python3 -m pytest credlib` | none (name-validation + stdin-cap unit tests only; the `/home/swapd/secrets` store is a string constant, never touched) |
+| `fleet/` | `python3 -m pytest fleet` | none (stdlib-only — the operator-estate collector and its hermetic suite) |
 
 Two conventions keep the one-liner working: keep every `test_*.py`
 basename unique across the repo (pytest imports test modules by basename),
