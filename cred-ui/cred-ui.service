@@ -9,6 +9,31 @@ Restart=on-failure
 RestartSec=5
 # No secret values ever pass through here; the UI only writes via the
 # narrow sudo writers and never returns stored values.
+#
+# Issue #115: sandboxing for the page the human pastes secrets into
+# (compare confirmd's #77 L8 hardening). What the UI's own process
+# needs: read index.html + the python stdlib, bind 127.0.0.1:18740,
+# and exec `sudo -n -u swapd` for every credential read/write. The
+# writers touch /home/swapd (secrets/, credentials.json) — verified
+# against the argv literals in cred-ui.py — so /home/swapd is the one
+# writable path; the rest of the OS tree is read-only. Deploy order
+# note: /home/swapd must exist before this unit starts (a missing
+# ReadWritePaths dir fails service startup, it is not auto-created). The mount layer
+# still leaves /home/swapd writable by the UI process itself; the real
+# boundary there remains DAC (swapd-owned files the UI's user cannot
+# touch). NoNewPrivileges is intentionally NOT set: it would break
+# every `sudo -n -u swapd` writer call (same reason as confirmd).
+
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/home/swapd
+# ProtectKernelTunables/Modules/ControlGroups deliberately absent: systemd
+# documents all three as system-unit-only ("not supported for services
+# running in per-user instances of the service manager") — on systemd 255
+# ProtectKernelModules in a user unit fails startup with 218/CAPABILITIES.
+# Unnecessary anyway: the UI runs unprivileged, so it already lacks
+# CAP_SYS_ADMIN/CAP_SYS_MODULE and cannot touch tunables, modules, or
+# cgroup hierarchies regardless.
 
 [Install]
 WantedBy=default.target
