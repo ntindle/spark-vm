@@ -48,9 +48,10 @@ def make_fixture_repo(tmp_path):
     (repo / "confirm" / "b.py").write_text("b")
     (repo / "cred-ui" / "c.py").write_text("c")
     (repo / "docs" / "d.md").write_text("d")
-    # Issue #471: the fixture models a repo at the new commit — which must
-    # carry scripts/bounded_http.py, or cred-ui's install step (ships the
-    # helper into the working checkout) fails its pre-mutation presence gate.
+    # scripts/ is vestigial in the fixture: issue #85 moved cred-ui's
+    # runtime out of the working checkout, so no install step reads the
+    # fixture's scripts/ anymore. Kept (harmless) to avoid churning every
+    # fixture consumer.
     (repo / "scripts").mkdir()
     (repo / "scripts" / "bounded_http.py").write_text(
         "class BoundedThreadingHTTPServer: pass\n")
@@ -241,66 +242,67 @@ def test_confirm_install_paths_cover_deploy_sh_writes():
 
 
 def test_cred_ui_install_paths_cover_install_writes():
-    """Every file cred-ui's install step writes into the working checkout
-    must be rollback-restorable. Regression for issue #471: cred-ui runs
-    from the working checkout, but the auto-deploy checkout sync refreshes
-    ONLY cred-ui/ + VERSION — nothing ever refreshes <checkout>/scripts/.
-    The shared scripts/bounded_http.py helper this PR added to cred-ui's
-    imports therefore had to ship via the install step; a snapshot that
-    didn't cover it would roll back cred-ui/ while leaving the NEW helper
-    live (or vice versa), the exact half-state rollback exists to prevent."""
-    fake_wc = "/tmp/fake-working-checkout-test"
+    """Every path cred-ui's install step writes must be rollback-restorable.
+    Issue #85 moved the runtime out of the working checkout: install.sh
+    writes the runtime set into $CRED_UI_INSTALL_DIR and the unit into
+    $SYSTEMD_USER_DIR. Both are env-overridable for tests, so the manifest
+    must reference the same variables the script reads — a literal drift
+    would snapshot one path while the script wrote another, the exact
+    half-state rollback exists to prevent."""
     r = source_and("get_arr cred_ui install_paths",
-                   env_extra={"WORKING_CHECKOUT": fake_wc})
+                   env_extra={"CRED_UI_INSTALL_DIR": "/tmp/x-inst",
+                              "SYSTEMD_USER_DIR": "/tmp/x-units"})
     assert r.returncode == 0, r.stderr
     listed = {line.strip() for line in r.stdout.splitlines() if line.strip()}
-    expected = os.path.join(fake_wc, "scripts", "bounded_http.py")
-    assert expected in listed, \
-        "cred_ui_install_paths missing the shipped helper: %s (got %s)" % (
-            expected, sorted(listed))
-    # Non-vacuous: the install command really writes that target from the
-    # new commit's scripts/.
+    expected = {
+        "/tmp/x-inst/cred-ui.py",
+        "/tmp/x-inst/index.html",
+        "/tmp/x-inst/bounded_http.py",
+        "/tmp/x-inst/sparkvm_version.py",
+        "/tmp/x-inst/VERSION",
+        "/tmp/x-units/cred-ui.service",
+    }
+    assert expected <= listed, \
+        "cred_ui_install_paths missing: %s (got %s)" % (
+            sorted(expected - listed), sorted(listed))
+    # Non-vacuous: the install command really delegates to install.sh (the
+    # file set above is the script's contract, pinned by cred-ui/tests/).
     r2 = source_and("get_str cred_ui install")
     assert r2.returncode == 0, r2.stderr
-    assert "scripts/bounded_http.py" in r2.stdout, \
-        "cred_ui_install no longer ships scripts/bounded_http.py (test is stale)"
+    assert r2.stdout.strip() == "bash cred-ui/install.sh", \
+        "cred_ui_install no longer delegates to install.sh (test is stale): %r" \
+        % r2.stdout
 
 
-def test_cred_ui_install_ships_bounded_http_end_to_end(tmp_path):
-    """End-to-end: on a box whose working checkout predates
-    scripts/bounded_http.py, evaluating cred-ui's install step from the new
-    commit's tree must place the helper where cred-ui.py imports it from —
-    otherwise the restarted service dies with ModuleNotFoundError (issue
-    #471 deploy breakage, caught by the engineering review)."""
-    repo = tmp_path / "updater"
-    repo.mkdir()
-    run = lambda *a: subprocess.run(
-        a, cwd=repo, check=True, capture_output=True)
-    run("git", "init", "-q")
-    run("git", "config", "user.email", "t@t")
-    run("git", "config", "user.name", "t")
-    run("git", "config", "commit.gpgsign", "false")
-    (repo / "scripts").mkdir()
-    helper_src = "class BoundedThreadingHTTPServer: pass\n"
-    (repo / "scripts" / "bounded_http.py").write_text(helper_src)
-    run("git", "add", ".")
-    run("git", "commit", "-qm", "add helper")
-    # Stale working checkout: scripts/ exists but WITHOUT the helper —
-    # exactly the production box's state at merge time.
-    wc = tmp_path / "wc"
-    (wc / "scripts").mkdir(parents=True)
-    (wc / "scripts" / "sparkvm_version.py").write_text("# old checkout\n")
+def test_cred_ui_install_end_to_end(tmp_path):
+    """End-to-end (issue #85): evaluating cred-ui's install step from the
+    repo must place the whole runtime set + unit at the configured fixed
+    locations — the service runs from there, never from the checkout."""
+    install_dir = tmp_path / "install"
+    unit_dir = tmp_path / "units"
     r = run_bash(
         "export AUTO_DEPLOY_NO_MAIN=1; source ./deploy/auto-deploy.sh; "
         'inst="$(get_str cred_ui install)"; '
         '[ -n "$inst" ] || { echo "cred_ui_install is empty" >&2; exit 1; }; '
         'cd "$UPDATER_REPO" && eval "$inst"',
-        env_extra={"UPDATER_REPO": str(repo), "WORKING_CHECKOUT": str(wc)},
+        env_extra={"UPDATER_REPO": REPO,
+                   "CRED_UI_INSTALL_DIR": str(install_dir),
+                   "SYSTEMD_USER_DIR": str(unit_dir)},
     )
     assert r.returncode == 0, r.stderr + r.stdout
-    shipped = wc / "scripts" / "bounded_http.py"
-    assert shipped.is_file(), "install did not ship the helper into $WORKING_CHECKOUT/scripts"
-    assert shipped.read_text() == helper_src, "shipped helper content mismatch"
+    for name, src in (("cred-ui.py", "cred-ui/cred-ui.py"),
+                      ("index.html", "cred-ui/index.html"),
+                      ("bounded_http.py", "scripts/bounded_http.py"),
+                      ("sparkvm_version.py", "scripts/sparkvm_version.py"),
+                      ("VERSION", "VERSION")):
+        got = install_dir / name
+        assert got.is_file(), "install step did not write %s" % name
+        want = open(os.path.join(REPO, src), "rb").read()
+        assert got.read_bytes() == want, "content drift: %s" % name
+    unit = unit_dir / "cred-ui.service"
+    assert unit.is_file(), "install step did not install the unit"
+    assert unit.read_bytes() == open(
+        os.path.join(REPO, "cred-ui", "cred-ui.service"), "rb").read()
 
 
 # --- change mapping ----------------------------------------------------------
@@ -799,6 +801,49 @@ def test_health_check_parses_ipv4_and_tailnet():
     assert "HEALTH_OK" in r.stdout, r.stdout
 
 
+def test_reload_and_enable_propagates_daemon_reload_failure(tmp_path):
+    """B1 (security review, issue #85): reload_and_enable must report a
+    failed daemon-reload — cmd_deploy's reload-fail → rollback branch
+    depends on it. A silent success would restart cred-ui under the STALE
+    in-memory unit (the old checkout-path ExecStart) while the deploy
+    reports OK and the watermark advances: the #85 fix silently not
+    taking effect, with false confidence. Non-vacuous: the pre-fix
+    `return 0` makes this test fail."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "systemctl").write_text("#!/bin/bash\nexit 1\n")
+    (bin_dir / "systemctl").chmod(0o755)
+    tconf = tmp_path / "t.conf"
+    tconf.write_text(
+        'COMPONENTS=(stubc)\n'
+        'stubc_paths=("stubc/")\n'
+        'stubc_services=()\n'
+        'stubc_user_services=("stubc.service")\n'
+        'stubc_tests="true"\n'
+        'stubc_health=()\n'
+        'stubc_install=""\n'
+        'stubc_install_unit=""\n'
+        'stubc_checkout_sync=""\n'
+        'stubc_install_paths=()\n'
+    )
+    env = dict(os.environ)
+    env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+    env["UPDATER_COMPONENTS_CONF"] = str(tconf)
+    env["AUTO_DEPLOY_NO_MAIN"] = "1"
+    # SKIP_SYSTEMCTL unset on purpose: sctl must call the (failing) stub.
+    env.pop("SKIP_SYSTEMCTL", None)
+    r = subprocess.run(
+        ["bash", "-c",
+         "export AUTO_DEPLOY_NO_MAIN=1; "
+         "source ./deploy/auto-deploy.sh >/dev/null 2>&1; "
+         "if reload_and_enable stubc; then echo RELOAD_RC=0; "
+         "else echo RELOAD_RC=1; fi"],
+        cwd=REPO, capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert "RELOAD_RC=1" in r.stdout, \
+        "reload_and_enable swallowed the daemon-reload failure: " + r.stdout + r.stderr
+
+
 def test_health_check_rejects_malformed_tcp_entry():
     """Non-numeric or missing ports fail closed with a clear log line
     instead of feeding a mangled host/port to tcp_ok (#323)."""
@@ -941,29 +986,29 @@ def _commit_all(repo, msg):
                           text=True).stdout.strip()
 
 
-def test_install_component_syncs_version_with_checkout(tmp_path):
-    """A checkout-synced component's install also refreshes the root VERSION
-    in the working checkout — otherwise a version-only deploy leaves
-    cred-ui reporting the old release (QA regression)."""
-    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
-    checkout = tmp_path / "checkout"
-    # A real git clone: install_component re-runs the checkout-sync
-    # preconditions before the destructive sync (issue #324), and those fail
-    # closed on a non-git directory.
-    subprocess.run(["git", "clone", "-q", str(tmp_path / "origin"), str(checkout)],
-                   check=True, capture_output=True)
-    (updater / "cred-ui" / "cred-ui.py").write_text("# ui v2")
-    (updater / "VERSION").write_text("9.9.9\n")
-    new = _commit_all(updater, "cred-ui + VERSION")
-    r = source_and("install_component cred-ui %s" % new,
-                   env_extra={"UPDATER_STATE_DIR": str(state),
-                              "UPDATER_REPO": str(updater),
-                              "WORKING_CHECKOUT": str(checkout),
+def test_install_component_cred_ui_ships_version_to_install_dir(tmp_path):
+    """Issue #85: install_component runs cred-ui's install step from the
+    updater repo at the new commit — the runtime (including VERSION, the
+    deployed UI's version stamp) lands in the fixed install dir, not in
+    the working checkout. A version-only deploy therefore refreshes the
+    reported version via the install step (the old checkout-sync path is
+    gone)."""
+    install_dir = tmp_path / "install"
+    unit_dir = tmp_path / "units"
+    r = source_and("install_component cred-ui %s" % ("0" * 40),
+                   env_extra={"UPDATER_REPO": REPO,
+                              "CRED_UI_INSTALL_DIR": str(install_dir),
+                              "SYSTEMD_USER_DIR": str(unit_dir),
                               "SKIP_SUDO": "1",
                               "AUTO_DEPLOY_NO_MAIN": "1"})
     assert r.returncode == 0, r.stdout + r.stderr
-    assert (checkout / "cred-ui" / "cred-ui.py").read_text() == "# ui v2"
-    assert (checkout / "VERSION").read_text() == "9.9.9\n"
+    want_version = open(os.path.join(REPO, "VERSION"),
+                        encoding="utf-8").read().strip()
+    assert (install_dir / "VERSION").read_text(
+        encoding="utf-8").strip() == want_version
+    assert (install_dir / "cred-ui.py").is_file()
+    assert (install_dir / "index.html").is_file()
+    assert (unit_dir / "cred-ui.service").is_file()
 
 
 def test_install_component_rechecks_checkout_before_clobber(tmp_path):
@@ -972,31 +1017,72 @@ def test_install_component_rechecks_checkout_before_clobber(tmp_path):
     clobbered. The gate check passes on the clean tree; the operator edit
     lands; the install must refuse and leave the operator's file untouched.
     Non-vacuous: the pre-fix install_component had no re-check, so the edit
-    would be clobbered and the sync would succeed (returncode 0)."""
-    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    would be clobbered and the sync would succeed (returncode 0).
+
+    The vehicle is a stub component: cred-ui no longer uses checkout_sync
+    (issue #85 moved its runtime out of the checkout); the machinery itself
+    is unchanged and still covered here."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "init", "-q", "--bare"], cwd=origin, check=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, check=True,
+                                   capture_output=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    run("git", "config", "commit.gpgsign", "false")
+    (repo / "stubc").mkdir()
+    (repo / "stubc" / "f.py").write_text("v1")
+    (repo / "VERSION").write_text("1.0.0\n")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "base")
+    run("git", "remote", "add", "origin", str(origin))
+    run("git", "push", "-q", "origin", "HEAD:main")
+    subprocess.run(["git", "--git-dir", str(origin), "symbolic-ref",
+                    "HEAD", "refs/heads/main"], check=True)
+    updater = tmp_path / "updater"
+    subprocess.run(["git", "clone", "-q", str(origin), str(updater)],
+                   check=True)
     checkout = tmp_path / "checkout"
-    subprocess.run(["git", "clone", "-q", str(tmp_path / "origin"), str(checkout)],
-                   check=True, capture_output=True)
-    (updater / "cred-ui" / "cred-ui.py").write_text("# ui v2")
-    (updater / "VERSION").write_text("9.9.9\n")
-    new = _commit_all(updater, "cred-ui + VERSION")
-    env2 = {"UPDATER_STATE_DIR": str(state),
+    subprocess.run(["git", "clone", "-q", str(origin), str(checkout)],
+                   check=True)
+    (updater / "stubc" / "f.py").write_text("v2")
+    new = _commit_all(updater, "stubc v2")
+    tconf = tmp_path / "t.conf"
+    tconf.write_text(
+        'COMPONENTS=(stubc)\n'
+        'stubc_paths=("stubc/")\n'
+        'stubc_services=()\n'
+        'stubc_user_services=()\n'
+        'stubc_tests="true"\n'
+        'stubc_health=()\n'
+        'stubc_install=""\n'
+        'stubc_install_unit=""\n'
+        'stubc_checkout_sync="stubc"\n'
+        'stubc_install_paths=()\n'
+    )
+    state = tmp_path / "state"
+    state.mkdir()
+    env2 = {"UPDATER_COMPONENTS_CONF": str(tconf),
+            "UPDATER_STATE_DIR": str(state),
             "UPDATER_REPO": str(updater),
             "WORKING_CHECKOUT": str(checkout),
             "SKIP_SUDO": "1",
             "AUTO_DEPLOY_NO_MAIN": "1"}
     # the gate phase passes on the clean tree
-    r = source_and("check_checkout_sync_ready cred-ui cred-ui %s" % new,
+    r = source_and("check_checkout_sync_ready stubc stubc %s" % new,
                    env_extra=env2)
     assert r.returncode == 0, r.stdout + r.stderr
     # the operator edits the working checkout in the gate->install window
-    (checkout / "cred-ui" / "cred-ui.py").write_text("# OPERATOR EDIT")
-    r = source_and("install_component cred-ui %s" % new, env_extra=env2)
+    (checkout / "stubc" / "f.py").write_text("# OPERATOR EDIT")
+    r = source_and("install_component stubc %s" % new, env_extra=env2)
     assert r.returncode == 2, \
         "must fail closed with the pre-destruction code (2), not install-failure (1): " \
         + r.stdout + r.stderr
     # the operator's edit is NOT clobbered; the new commit is NOT installed
-    assert (checkout / "cred-ui" / "cred-ui.py").read_text() == "# OPERATOR EDIT"
+    assert (checkout / "stubc" / "f.py").read_text() == "# OPERATOR EDIT"
 
 
 def test_cmd_deploy_checkout_dirty_rolls_back_without_blocking(tmp_path):
@@ -1112,29 +1198,61 @@ def test_cmd_deploy_checkout_dirty_rolls_back_without_blocking(tmp_path):
 def test_install_component_rechecks_version_before_clobber(tmp_path):
     """Issue #324, VERSION branch of the same re-check: an uncommitted edit
     to the working checkout's root VERSION (which travels with every sync)
-    must also fail the install closed before the VERSION sync step."""
-    updater, state, env, base, mid, docs_only = _make_pinned_fixture(tmp_path)
+    must also fail the install closed before the VERSION sync step.
+
+    Stub vehicle: cred-ui no longer uses checkout_sync (issue #85)."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "init", "-q", "--bare"], cwd=origin, check=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, check=True,
+                                   capture_output=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    run("git", "config", "commit.gpgsign", "false")
+    (repo / "stubc").mkdir()
+    (repo / "stubc" / "f.py").write_text("v1")
+    (repo / "VERSION").write_text("1.0.0\n")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "base")
+    run("git", "remote", "add", "origin", str(origin))
+    run("git", "push", "-q", "origin", "HEAD:main")
+    subprocess.run(["git", "--git-dir", str(origin), "symbolic-ref",
+                    "HEAD", "refs/heads/main"], check=True)
+    updater = tmp_path / "updater"
+    subprocess.run(["git", "clone", "-q", str(origin), str(updater)],
+                   check=True)
     checkout = tmp_path / "checkout"
-    subprocess.run(["git", "clone", "-q", str(tmp_path / "origin"), str(checkout)],
-                   check=True, capture_output=True)
-    (checkout / "VERSION").write_text("1.2.3\n")
-    subprocess.run(["git", "-C", str(checkout), "add", "VERSION"], check=True,
-                   capture_output=True)
-    subprocess.run(["git", "-C", str(checkout), "-c", "user.email=t@t",
-                    "-c", "user.name=t", "-c", "commit.gpgsign=false",
-                    "commit", "-qm", "operator VERSION"], check=True,
-                   capture_output=True)
-    (updater / "cred-ui" / "cred-ui.py").write_text("# ui v2")
-    (updater / "VERSION").write_text("9.9.9\n")
-    new = _commit_all(updater, "cred-ui + VERSION")
-    env2 = {"UPDATER_STATE_DIR": str(state),
+    subprocess.run(["git", "clone", "-q", str(origin), str(checkout)],
+                   check=True)
+    (updater / "stubc" / "f.py").write_text("v2")
+    new = _commit_all(updater, "stubc v2")
+    tconf = tmp_path / "t.conf"
+    tconf.write_text(
+        'COMPONENTS=(stubc)\n'
+        'stubc_paths=("stubc/")\n'
+        'stubc_services=()\n'
+        'stubc_user_services=()\n'
+        'stubc_tests="true"\n'
+        'stubc_health=()\n'
+        'stubc_install=""\n'
+        'stubc_install_unit=""\n'
+        'stubc_checkout_sync="stubc"\n'
+        'stubc_install_paths=()\n'
+    )
+    state = tmp_path / "state"
+    state.mkdir()
+    env2 = {"UPDATER_COMPONENTS_CONF": str(tconf),
+            "UPDATER_STATE_DIR": str(state),
             "UPDATER_REPO": str(updater),
             "WORKING_CHECKOUT": str(checkout),
             "SKIP_SUDO": "1",
             "AUTO_DEPLOY_NO_MAIN": "1"}
     # operator edits VERSION in the gate->install window
     (checkout / "VERSION").write_text("0.0.0-operator\n")
-    r = source_and("install_component cred-ui %s" % new, env_extra=env2)
+    r = source_and("install_component stubc %s" % new, env_extra=env2)
     assert r.returncode == 2, \
         "must fail closed with the pre-destruction code (2): " \
         + r.stdout + r.stderr
@@ -1144,31 +1262,47 @@ def test_install_component_rechecks_version_before_clobber(tmp_path):
 def test_snapshot_restores_checkout_version(tmp_path):
     """The root VERSION file travels with checkout syncs, so it must be
     snapshotted and restored too — else rollback leaves new-VERSION under
-    old code."""
+    old code. Stub vehicle: cred-ui no longer uses checkout_sync
+    (issue #85)."""
     state = tmp_path / "state"
     checkout = tmp_path / "checkout"
-    checkout_ui = checkout / "cred-ui"
-    state.mkdir(); checkout_ui.mkdir(parents=True)
-    (checkout_ui / "cred-ui.py").write_text("UI CODE")
+    checkout_sub = checkout / "stubc"
+    state.mkdir(); checkout_sub.mkdir(parents=True)
+    (checkout_sub / "f.py").write_text("SUB CODE")
     (checkout / "VERSION").write_text("1.1.1\n")
-    env = {"UPDATER_STATE_DIR": str(state),
+    tconf = tmp_path / "t.conf"
+    tconf.write_text(
+        'COMPONENTS=(stubc)\n'
+        'stubc_paths=("stubc/")\n'
+        'stubc_services=()\n'
+        'stubc_user_services=()\n'
+        'stubc_tests="true"\n'
+        'stubc_health=()\n'
+        'stubc_install=""\n'
+        'stubc_install_unit=""\n'
+        'stubc_checkout_sync="stubc"\n'
+        'stubc_install_paths=()\n'
+    )
+    env = {"UPDATER_COMPONENTS_CONF": str(tconf),
+           "UPDATER_STATE_DIR": str(state),
            "WORKING_CHECKOUT": str(checkout),
            "SKIP_SUDO": "1",
            "AUTO_DEPLOY_NO_MAIN": "1"}
     snap = tmp_path / "snap"
     # Production (cmd_deploy) creates the snapshot dir before calling
-    # snapshot_component; the old empty cred_ui_install_paths masked this
-    # precondition.
+    # snapshot_component.
     snap.mkdir()
-    r = source_and("snapshot_component cred-ui %s" % snap, env_extra=env)
+    r = source_and("snapshot_component stubc %s" % snap, env_extra=env)
     assert r.returncode == 0, r.stdout + r.stderr
     manifest = (snap / "MANIFEST").read_text()
-    assert "CHECKOUT cred-ui VERSION" in manifest, manifest
+    assert "CHECKOUT stubc stubc" in manifest, manifest
+    assert "CHECKOUT stubc VERSION" in manifest, manifest
     (checkout / "VERSION").write_text("2.2.2\n")
+    (checkout_sub / "f.py").write_text("MUTATED")
     r = source_and("restore_snapshot %s" % snap, env_extra=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert (checkout / "VERSION").read_text() == "1.1.1\n"
-    assert (checkout_ui / "cred-ui.py").read_text() == "UI CODE"
+    assert (checkout_sub / "f.py").read_text() == "SUB CODE"
 
 
 def test_version_state_defaults_unknown(tmp_path):

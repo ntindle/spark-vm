@@ -19,11 +19,15 @@ health checks, rollback, and an audit trail.
   A writer with checkout-only access therefore cannot rewire the updater's own
   code or config. Treat `init` (reinstall) as a privileged step — review the
   checkout diff before re-running it.
-- Residual: `cred-ui` *executes* from the working checkout (`%h/spark-vm/…`),
-  so checkout-write access still implies code influence over cred-ui at
-  restart time. The updater syncs the `cred-ui/` subtree from the mirror at
-  deploy (failing closed on uncommitted changes), but the checkout remains a
-  trust boundary for that one component — documented, not silent.
+- Residual: the updater deploys whatever is merged to `main` — treat `init`
+  (reinstall) as a privileged step and review the checkout diff first.
+- `cred-ui` runs from a fixed install directory outside the working
+  checkout (`~/.local/share/spark-vm/cred-ui`), written only by its gated
+  install step. A writer with checkout-only access can no longer change the
+  page the human's browser loads, and a dirty checkout no longer fails its
+  deploy closed. Residual: the install dir is owned by the deploy user, so
+  this closes the checkout-writer hole, not the deploy-operator trust the
+  updater already assumes.
 - The fetch remote is pinned to `https://github.com/ntindle/spark-vm`
   (`PINNED_UPSTREAM`). If `origin` is rewired, the updater refuses to deploy.
 - Pre-deploy gates (the component's test suite) run **before** any file is
@@ -187,7 +191,7 @@ fix, clear it by hand — `status` prints the exact `rm` command.
 |---|---|---|---|---|---|
 | `proxy` | `proxy/` (+ host-side CA cert, [extra input](#host-side-change-inputs-extra_inputs)) | swap-proxy, swap-inference | pytest (swap addon, grant writer, round6) | `proxy/deploy.sh --no-restart` | tcp 127.0.0.1:18080, 18081 |
 | `confirm` | `confirm/` | confirmd | pytest (confirmd) | (shares proxy's unit) | tcp TAILNET:8443 (resolved at check time) |
-| `cred-ui` | `cred-ui/` | cred-ui (user unit) | py_compile | subtree sync into checkout | tcp 127.0.0.1:18740 |
+| `cred-ui` | `cred-ui/` | cred-ui (user unit) | py_compile + pytest (http, version, install) | `cred-ui/install.sh` → fixed dir + user unit | tcp 127.0.0.1:18740 |
 
 Add a component by extending `deploy/components.conf` (paths, services, gate,
 health, install command or checkout_sync, install paths) — then re-run `init`
@@ -213,9 +217,10 @@ so the installed copy picks it up.
   warn when `origin/main` carries newer `deploy/` changes, so the staleness
   is visible instead of silent. The quiet up-to-date timer tick deliberately
   stays quiet.
-- **cred-ui's runtime is the working checkout.** The updater owns the
-  `cred-ui/` subtree once enabled (uncommitted changes there fail the deploy
-  closed); don't hand-edit it on the box.
+- **cred-ui's runtime is the fixed install directory**
+  (`~/.local/share/spark-vm/cred-ui`), refreshed from the mirror by the
+  install step at deploy. The working checkout's `cred-ui/` subtree is dev
+  source only — hand-edits there no longer affect the running service.
 - The updater does not deploy unreviewed branches — it only ever advances the
   mirror to `origin/main`.
 - First run has no watermark and deploys everything at the current head.

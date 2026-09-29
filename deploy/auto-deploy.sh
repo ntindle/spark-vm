@@ -9,11 +9,12 @@
 # Trust model (read deploy/README.md before enabling):
 #   - THE TIMER RUNS THE INSTALLED COPY at $UPDATER_STATE_DIR/bin/, NOT the
 #     repo checkout. `init` copies the script + components.conf there from the
-#     checkout; re-running `init` refreshes them. A checkout-only writer
-#     therefore cannot rewire the updater's own code or config — but CAN still
-#     influence cred-ui at restart time, because cred-ui executes from the
-#     working checkout (its subtree is synced from the mirror at deploy).
-#     Treat `init` (reinstall) as a privileged step: review the diff first.
+#     checkout; re-running `init` refreshes them. (Issue #85: cred-ui used to
+#     execute from the working checkout — it now runs from $CRED_UI_INSTALL_DIR,
+#     written only by its gated install step. A checkout writer can no longer
+#     change the served page, and a dirty checkout no longer fails its deploy
+#     closed.) Treat `init` (reinstall) as a privileged step: review the diff
+#     first.
 #   - The updater deploys whatever is merged to main. Anyone who can merge to
 #     main can therefore execute code on the box — the same trust deploy.sh
 #     already assumes. Enabling the timer automates an existing trust, it does
@@ -38,7 +39,8 @@
 # installed copy there.
 #
 # Env overrides (for tests): UPDATER_STATE_DIR, UPDATER_REPO, SWAPD_HOME,
-# BIN_DIR, SYSTEMD_DIR, WORKING_CHECKOUT, UPDATER_COMPONENTS_CONF,
+# BIN_DIR, SYSTEMD_DIR, SYSTEMD_USER_DIR, CRED_UI_INSTALL_DIR,
+# WORKING_CHECKOUT, UPDATER_COMPONENTS_CONF,
 # SKIP_SYSTEMCTL=1 (skip systemctl calls), SKIP_SUDO=1 (run file ops without
 # sudo), PINNED_UPSTREAM.
 
@@ -810,6 +812,12 @@ reload_and_enable() {
     # reload_and_enable <components...> — daemon-reload after unit installs
     # (a restart without reload runs the STALE in-memory unit definition),
     # and enable units so a PR that adds a service doesn't install-but-never-enable.
+    # Returns nonzero when a reload fails: the deploy caller rolls back on
+    # that (a restart under the stale unit would report success while
+    # running old code — for cred-ui, issue #85, the stale unit is the old
+    # checkout-path ExecStart, i.e. the vulnerability silently persisting).
+    # Callers that must continue best-effort (manual rollback) guard the
+    # call with their own || handler.
     local c svc any_sys=0 any_user=0
     for c in "$@"; do
         while IFS= read -r svc; do
@@ -823,8 +831,8 @@ reload_and_enable() {
             sctl --user enable "$svc" >/dev/null 2>&1 || log "  warning: user enable $svc failed"
         done < <(get_arr "$c" user_services)
     done
-    [ "$any_sys" -eq 1 ] && sctl daemon-reload
-    [ "$any_user" -eq 1 ] && sctl --user daemon-reload
+    [ "$any_sys" -eq 1 ] && { sctl daemon-reload || return 1; }
+    [ "$any_user" -eq 1 ] && { sctl --user daemon-reload || return 1; }
     return 0
 }
 
@@ -1370,7 +1378,11 @@ cmd_rollback() {
         log "warning: extra-inputs digest reconciliation incomplete — check 'status' output"
         reconcile_incomplete=',"reconcile":"incomplete"'
     }
-    reload_and_enable "${rcomps[@]}"
+    # Best-effort like the rest of manual rollback: a reload failure here
+    # must not abort the watermark rewind below (reload_and_enable reports
+    # failures since the B1 fix; this caller opts into continuing).
+    reload_and_enable "${rcomps[@]}" \
+        || log "warning: daemon-reload/enable failed during manual rollback — continuing restore"
     local c unhealthy=0
     for c in "${rcomps[@]}"; do
         restart_component_services "$c" || unhealthy=1

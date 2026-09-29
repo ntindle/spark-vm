@@ -7,12 +7,18 @@ front end for `cred set` / `cred register`.
 ## Run it
 
 ```bash
-# install + start (user systemd service; linger is enabled on this box)
-mkdir -p ~/.config/systemd/user
-cp ~/spark-vm/cred-ui/cred-ui.service ~/.config/systemd/user/
+# install the runtime outside the checkout, then enable the user service
+# (linger is enabled on this box)
+bash ~/spark-vm/cred-ui/install.sh
 systemctl --user daemon-reload
 systemctl --user enable --now cred-ui
 ```
+
+`install.sh` copies the page and the server into
+`~/.local/share/spark-vm/cred-ui/` and installs the user unit into
+`~/.config/systemd/user/` — the running service never executes from the
+working checkout, so an edit to the checkout can't change the page your
+browser loads. Re-run `install.sh` after pulling to refresh the install.
 
 It listens on **127.0.0.1:18740** only. Reach it over an SSH tunnel:
 
@@ -39,6 +45,15 @@ Then open `http://127.0.0.1:18740` in a browser.
 
 ## Security notes
 
+- The service runs from a fixed install directory
+  (`~/.local/share/spark-vm/cred-ui`), written only by `install.sh` or the
+  gated auto-deploy path — never from the working checkout. An edit to the
+  checkout (a stray agent write, a dirty merge) can no longer change the
+  page your browser loads, and can no longer block the updater from
+  refreshing the install. Honest residual: the install directory is owned
+  by the same user that runs the deploy, so this closes the
+  checkout-writer hole, not the deploy-operator trust the auto-deploy
+  already assumes (it deploys whatever is merged to `main`).
 - Writes go through the same narrow sudo writers as the `cred` CLI
   (`cred-store-set`, `cred-registry-set`); the UI adds no new privilege path.
 - No endpoint returns a secret value, and the server never logs request

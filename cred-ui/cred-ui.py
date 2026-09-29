@@ -48,11 +48,16 @@ from http.server import BaseHTTPRequestHandler
 _SV_HERE = os.path.dirname(os.path.abspath(__file__))
 _SV_CAND = os.path.normpath(os.path.join(_SV_HERE, "..", "scripts"))
 # Gate the sys.path decision on the helper cred-ui actually needs (a hard
-# requirement), not on the best-effort version stamp: scripts/ is on
-# sys.path exactly when it carries bounded_http.py. The import below stays
-# unconditional and loud — a missing helper is a broken checkout and must
-# fail at startup, not silently fall back to the unbounded server.
-if os.path.isfile(os.path.join(_SV_CAND, "bounded_http.py")):
+# requirement), not on the best-effort version stamp. The install dir
+# (issue #85) is self-contained — its own helpers ship flat next to
+# cred-ui.py — so _SV_HERE wins when it carries the helper; otherwise the
+# checkout layout's ../scripts is used. A missing helper is a broken
+# install and must fail at startup, not silently fall back to the
+# unbounded server: the import below stays unconditional and loud.
+if os.path.isfile(os.path.join(_SV_HERE, "bounded_http.py")):
+    if _SV_HERE not in sys.path:
+        sys.path.insert(0, _SV_HERE)
+elif os.path.isfile(os.path.join(_SV_CAND, "bounded_http.py")):
     if _SV_CAND not in sys.path:
         sys.path.insert(0, _SV_CAND)
 elif _SV_HERE not in sys.path:
