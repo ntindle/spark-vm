@@ -74,6 +74,7 @@ before running that component's suite:
 | `scripts/` | `python3 -m pytest scripts` | `pillow` (`test_waitlist_page.py` — og:image dimension/format assertions) |
 | `cred-ui/tests/` | `python3 -m pytest cred-ui/tests` | none |
 | `harness/` | `python3 -m pytest harness` | none |
+| `hosted/` | `python3 -m pytest hosted` | none (stdlib-only by design — the tenant-status layer runs unchanged on the self-hosted box, the hosted control plane, and the operator laptop) |
 | `browser-driver/` | `python3 -m pytest browser-driver` | none |
 | `cua/` | `python3 -m pytest cua` | none (the bridge's driver calls are stubbed; the `.sh` scripts get `bash -n` syntax + shellcheck-warning gates plus isolated extraction-tests of their security guards — they run with real side effects on spark-vm) |
 | `jail/` | `python3 -m pytest jail` | none (`build.sh --help` executes the real script's arg parsing and exits before any side effect; full builds need root + systemd-nspawn on the box) |
