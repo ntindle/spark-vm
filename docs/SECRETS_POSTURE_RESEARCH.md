@@ -188,8 +188,8 @@ Doc: https://www.daytona.io/docs/en/secrets/.
 
 ### OpenComputer (diggerhq/opencomputer) — VENDOR-VERIFIED
 
-Doc: https://github.com/diggerhq/opencomputer/blob/HEAD/docs/agent-sessions/credentials.mdx
-("How your keys are protected"), verified 2026-09-21. Spotted in the
+Doc: https://github.com/diggerhq/opencomputer/blob/HEAD/docs-sandbox/sandboxes/secrets.mdx
+("Secrets" — successor to the cited `credentials.mdx` / "How your keys are protected" page, removed upstream 2026-09-28 in their stale-docs cleanup; the verbatim quote below is from the original page), original verified 2026-09-21, successor link verified 2026-09-28. Spotted in the
 2026-09-21 competitor watch as a lighter docs-verified data point — outside
 the five-vendor deep set above.
 
