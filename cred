@@ -92,6 +92,37 @@ def check_name(name):
     return name
 
 
+# Structural registry keys that must never become credential entries.
+# Mirrors proxy/cred-registry-set's RESERVED_ENTRIES (finding 34b): the
+# writer rejects these on both its creation path (check_entry) and its
+# legacy management path (check_entry_legacy), so the frontend must
+# reject them up front too (#150: no frontend-accepts / writer-rejects
+# drift on creation — or on management).
+RESERVED_ENTRIES = ("allowed_hosts", "allowed_methods", "allowed_paths",
+                    "grants")
+
+
+def check_entry(name):
+    # Creation path: canonical name + reserved guard, mirroring the
+    # writer's check_entry. A reserved entry must die here, not at the
+    # writer after the user believes the registration is fine.
+    check_name(name)
+    if name in RESERVED_ENTRIES:
+        raise CredentialError("entry name %r is reserved" % (name,))
+    return name
+
+
+def check_entry_legacy(name):
+    # Management path: legacy-tolerant name + reserved guard, mirroring
+    # the writer's check_entry_legacy (finding 34b). Matching the writer
+    # cannot reduce manageability: the writer rejects reserved entries
+    # on this path too.
+    check_name_legacy(name)
+    if name in RESERVED_ENTRIES:
+        raise CredentialError("entry name %r is reserved" % (name,))
+    return name
+
+
 HOST_RE = re.compile(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$")
 HOST_MAX_LEN = 253
 HOST_LABEL_MAX_LEN = 63
@@ -284,11 +315,11 @@ def cmd_register(args):
     i = 0
     while i < len(rest):
         if rest[i] == "--entry" and i + 1 < len(rest):
-            # Creation verb: entries are always canonical. check_name (not
+            # Creation verb: entries are always canonical. check_entry (not
             # the legacy gate) — the writer's `set` re-enforces check_entry,
-            # but the CLI must reject up front so frontend and writer agree
+            # and the CLI must reject up front so frontend and writer agree
             # (#150: no frontend-accepts / writer-rejects drift on creation).
-            entry = check_name(rest[i + 1])
+            entry = check_entry(rest[i + 1])
             i += 2
         elif rest[i] == "--placement" and i + 1 < len(rest):
             placement = parse_placement(rest[i + 1])
@@ -315,14 +346,16 @@ def cmd_unregister(args):
     args = _strip_dashdash(args)
     if not args:
         raise CredentialError("usage: cred unregister <name> [--entry <entry>]")
-    # Management path: legacy names/entries stay unregisterable.
+    # Management path: legacy names/entries stay unregisterable — except
+    # reserved structural keys, which the writer rejects on this path too
+    # (check_entry_legacy, finding 34b), so the CLI mirrors it.
     name = check_name_legacy(args[0])
     rest = args[1:]
     entry = None
     i = 0
     while i < len(rest):
         if rest[i] == "--entry" and i + 1 < len(rest):
-            entry = check_name_legacy(rest[i + 1])
+            entry = check_entry_legacy(rest[i + 1])
             i += 2
         else:
             raise CredentialError("usage: cred unregister <name> [--entry <entry>]")

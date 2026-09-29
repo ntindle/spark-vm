@@ -104,6 +104,15 @@ def host_ok_legacy(h):
     return (isinstance(h, str) and bool(h)
             and bool(_HOST_SHAPE_RE.match(h)))
 ENTRY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Structural registry keys that must never become credential entries.
+# Mirrors proxy/cred-registry-set's RESERVED_ENTRIES (finding 34b) and the
+# `cred` CLI's check_entry: the writer rejects all four on creation, so the
+# UI must reject them up front too (#150). The old `entry == "allowed_hosts"`
+# check left grants/allowed_methods/allowed_paths to fail at the writer
+# AFTER the secret was already stored ("register failed (secret IS
+# stored)") — the confusing path this guard exists to prevent.
+RESERVED_ENTRIES = ("allowed_hosts", "allowed_methods", "allowed_paths",
+                    "grants")
 # Canonical host contract shared with the `cred` CLI's check_host() and
 # proxy/cred-registry-set's check_host() (#150): dotted-hostname shape
 # ^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$ -- no underscores, no ports -- with
@@ -327,7 +336,7 @@ def api_set(data):
 
     if not NAME_RE.match(name):
         raise ValueError("bad credential name (use [A-Za-z0-9_-], max 64 chars)")
-    if not ENTRY_RE.match(entry) or entry == "allowed_hosts":
+    if not ENTRY_RE.match(entry) or entry in RESERVED_ENTRIES:
         raise ValueError("bad entry name")
     if not isinstance(value, str) or not value:
         raise ValueError("empty secret value")

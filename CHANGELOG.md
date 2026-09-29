@@ -65,6 +65,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ### Fixed
 - Browser credential fill-in now reads through the same narrow store reader the CLI uses, instead of a direct privileged read the system configuration never granted — fill-in works again on deployed boxes, and a denied read now reports the reader's reason instead of a bare "not set". (#669)
 - The credential web UI's system-reader calls now use the same absolute program paths the system configuration grants, instead of depending on the target machine's command lookup. (#670)
+- The credential command line and web UI now reject reserved registry entry names (such as `allowed_hosts`) up front, instead of failing at the credential store after the fact. (#677)
 
 ## [0.5.0] - 2026-09-29
 

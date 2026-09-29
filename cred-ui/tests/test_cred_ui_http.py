@@ -139,6 +139,28 @@ def test_api_set_rejects_port_before_any_store(monkeypatch):
     assert calls == []  # no sudo writer ran: the secret was never stored
 
 
+# --- issue #675: reserved entry names --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "entry", ["allowed_hosts", "allowed_methods", "allowed_paths", "grants"])
+def test_api_set_rejects_reserved_entries_before_any_store(monkeypatch, entry):
+    """Issue #675: the narrow writer rejects all four reserved entry names
+    (finding 34b), so the UI must reject them up front — the old
+    `entry == "allowed_hosts"` check let the other three through to fail
+    at the writer AFTER the secret was already stored."""
+    calls = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: calls.append(argv) or (0, "", ""))
+    with pytest.raises(ValueError, match="bad entry name"):
+        cred_ui.api_set({
+            "name": "gh", "value": "tok", "entry": entry,
+            "placement": "bearer_header", "placement_arg": "",
+            "hosts": ["api.github.com"],
+        })
+    assert calls == []  # no sudo writer ran: the secret was never stored
+
+
 @pytest.mark.parametrize("bad", [123, None, ["nested"], {"h": "x"}])
 def test_api_set_rejects_non_string_hosts(monkeypatch, bad):
     """Non-string host values are a clean 400 (ValueError), not a TypeError
