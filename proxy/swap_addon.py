@@ -1036,6 +1036,10 @@ class SwapAddon:
         # path) -> (aid or None, valid_until, dir_mtime). Same
         # invalidation discipline as _denial_cache (#307).
         self._expiry_cache = {}
+        # Issue #694: Cookie-placement name set, rebuilt by _load().
+        # Initialized here so _swap_headers can never observe the
+        # attribute missing (e.g. if a subclass skips _load()).
+        self._cookie_swap_name_set = set()
         self._load()
         log.warning("swap_addon: spark-vm version %s", SPARKVM_VERSION)
 
@@ -1239,6 +1243,12 @@ class SwapAddon:
         self._registry_mtime = self._mtime(REGISTRY_FILE)
         self._ssrf_mtime = self._mtime(SSRF_ALLOW_FILE)
         self._deny_mtime = self._mtime(SSRF_DENY_FILE)
+        # Issue #694: cache the Cookie-placement name set per load. The
+        # mtime-gated _maybe_reload() rebuilds it with every registry
+        # reload, so the cache can never go stale relative to
+        # self.registry — and _swap_headers no longer rescans the whole
+        # registry on each Cookie-bearing request.
+        self._cookie_swap_name_set = self._cookie_swap_names()
 
     @staticmethod
     def _mtime(p):
@@ -1956,7 +1966,11 @@ class SwapAddon:
     def _cookie_swap_names(self):
         """Credential names whose registry placement explicitly targets the
         Cookie header ({"custom_header": "Cookie"}). Only these may swap
-        inside Cookie headers."""
+        inside Cookie headers.
+
+        This is the pure scan; the hot path reads the cached
+        `_cookie_swap_name_set` built at _load() time (issue #694).
+        """
         names = set()
         reg = getattr(self, "registry", None) or {}
         for name, spec in reg.items():
@@ -2530,7 +2544,11 @@ class SwapAddon:
                             if nv == v else nv
                             for v, nv in zip(vals, new_vals)]
             elif kl == "cookie":
-                allowed = self._cookie_swap_names()
+                # Issue #694: the Cookie-placement name set is cached at
+                # _load() time — rescanning the whole registry on every
+                # Cookie-bearing request is O(credentials x entries) in
+                # the request hot path.
+                allowed = self._cookie_swap_name_set
                 new_vals = [self._swap_text(v, host, method, path,
                                             allow=allowed,
                                             location=("header", "cookie"))
