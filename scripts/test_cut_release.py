@@ -235,7 +235,11 @@ def test_publish_only_recovers_after_failed_publish(workrepo, tmp_path):
     bad.write_text("#!/bin/sh\nexit 1\n")
     bad.chmod(bad.stat().st_mode | stat.S_IXUSR)
     no_gh_env = {"PATH": str(badbin) + os.pathsep + os.environ.get("PATH", ""),
-                 "CUT_RELEASE_NO_GH": "1", "GITHUB_TOKEN": "fake"}
+                 "CUT_RELEASE_NO_GH": "1", "GITHUB_TOKEN": "fake",
+                 # The poll would otherwise make 10 real HTTPS requests
+                 # here (the suite's "no network" contract); the wait is
+                 # not what this test exercises.
+                 "CUT_RELEASE_POLL_ATTEMPTS": "0"}
     r = run_script(workrepo, "--execute", "--yes", env=no_gh_env)
     assert r.returncode != 0
     assert bare_tags(workrepo) == ["v0.2.0"]  # tag pushed, publish failed
@@ -280,6 +284,292 @@ def test_pr_reference_anchored_to_end_of_subject(workrepo):
     r = run_script(workrepo, "--dry-run")
     assert r.returncode == 0, r.stderr
     assert "- #22 — fix (#1) thing" in r.stdout
+
+
+FAKE_GH_POLL_RETRY = """#!/bin/sh
+# Fails the first two `gh api ... git/ref/tags/...` visibility polls, then
+# succeeds — exercises the replication-wait retry path. GH_COUNT names a
+# counter file.
+{
+echo "ARGS: $*"
+} >> "$GH_LOG"
+case "$*" in
+  *"git/ref/tags/"*)
+    n=0
+    [ -f "${GH_COUNT:-/nonexistent}" ] && n=$(cat "$GH_COUNT")
+    n=$((n + 1)); echo "$n" > "$GH_COUNT"
+    [ "$n" -le 2 ] && exit 1
+    exit 0 ;;
+esac
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--notes-file" ]; then
+    echo "NOTES-FILE: $a"
+    cat "$a"
+  fi
+  prev="$a"
+done
+exit 0
+"""
+
+
+FAKE_GH_POLL_FAIL = """#!/bin/sh
+# Fails every `gh api ... git/ref/tags/...` visibility poll — exercises the
+# poll-timeout warning path (publish must still be attempted).
+{
+echo "ARGS: $*"
+} >> "$GH_LOG"
+case "$*" in *"git/ref/tags/"*) exit 1 ;; esac
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--notes-file" ]; then
+    echo "NOTES-FILE: $a"
+    cat "$a"
+  fi
+  prev="$a"
+done
+exit 0
+"""
+
+
+def fake_gh_with(bindir_src, text, tmp_path):
+    bindir = tmp_path / bindir_src
+    bindir.mkdir(exist_ok=True)
+    gh = bindir / "gh"
+    gh.write_text(text)
+    gh.chmod(gh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return bindir
+
+
+def test_execute_announces_publish_path_and_outcome_via_gh(workrepo, fake_gh):
+    # GitHub #659 follow-up: the failing publish step gave no
+    # operator-visible signal beyond the red run — the path used and the
+    # outcome must be announced.
+    r, recorded = run_with_gh(workrepo, fake_gh, "--execute", "--yes")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "publishing release v0.2.0 via gh" in r.stdout
+    assert "published release v0.2.0" in r.stdout
+    assert "ARGS: release create v0.2.0" in recorded
+
+
+def test_execute_polls_tag_visibility_before_publish(workrepo, fake_gh):
+    r, recorded = run_with_gh(workrepo, fake_gh, "--execute", "--yes")
+    assert r.returncode == 0, r.stderr + r.stdout
+    lines = recorded.splitlines()
+    poll_idx = next(i for i, l in enumerate(lines)
+                    if "git/ref/tags/v0.2.0" in l)
+    create_idx = next(i for i, l in enumerate(lines)
+                      if l.startswith("ARGS: release create v0.2.0"))
+    assert poll_idx < create_idx
+    assert "tag v0.2.0 visible to the GitHub API" in r.stdout
+
+
+def test_tag_poll_retries_then_publishes(workrepo, tmp_path):
+    bindir = fake_gh_with("retrybin", FAKE_GH_POLL_RETRY, tmp_path)
+    log = tmp_path / "gh.log"
+    count = tmp_path / "count"
+    e = {"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+         "GH_LOG": str(log), "GH_COUNT": str(count),
+         "CUT_RELEASE_POLL_SLEEP": "0"}
+    r = run_script(workrepo, "--execute", "--yes", env=e)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "poll 3/10" in r.stdout
+    assert "ARGS: release create v0.2.0" in log.read_text()
+
+
+def test_tag_poll_timeout_warns_but_publishes_anyway(workrepo, tmp_path):
+    bindir = fake_gh_with("failbin", FAKE_GH_POLL_FAIL, tmp_path)
+    log = tmp_path / "gh.log"
+    e = {"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+         "GH_LOG": str(log),
+         "CUT_RELEASE_POLL_ATTEMPTS": "2", "CUT_RELEASE_POLL_SLEEP": "0"}
+    r = run_script(workrepo, "--execute", "--yes", env=e)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "WARNING: tag v0.2.0 not visible to the GitHub API after 2 polls" in r.stderr
+    assert "attempting publish anyway" in r.stderr
+    assert "ARGS: release create v0.2.0" in log.read_text()
+
+
+FAKE_CURL_REF_OK = """#!/bin/sh
+# API-fallback curl fake: git-ref visibility polls get a real-looking ref
+# body on stdout; the publish POST writes the release JSON to its -o target.
+{
+echo "CURL_ARGV: $*"
+} >> "$CURL_LOG"
+for a in "$@"; do
+  case "$a" in
+    *git/ref/tags/*) printf '{"ref":"refs/tags/v0.2.0","object":{"sha":"abc"}}' ;;
+  esac
+done
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    printf '{"html_url":"https://example.invalid/r/v0.2.0"}' > "$a"
+  fi
+  prev="$a"
+done
+exit 0
+"""
+
+
+def test_api_fallback_polls_and_announces_path(workrepo, tmp_path):
+    bindir = tmp_path / "curlbin2"
+    bindir.mkdir()
+    curl = bindir / "curl"
+    curl.write_text(FAKE_CURL_REF_OK)
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    curl_log = tmp_path / "curl3.log"
+    r = run_script(workrepo, "--execute", "--yes",
+                   env={"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+                        "CUT_RELEASE_NO_GH": "1",
+                        "GITHUB_TOKEN": "sekrit",
+                        "CURL_LOG": str(curl_log),
+                        "CUT_RELEASE_POLL_SLEEP": "0"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "publishing release v0.2.0 via GitHub API fallback" in r.stdout
+    assert "tag v0.2.0 visible to the GitHub API" in r.stdout
+    assert "release URL: https://example.invalid/r/v0.2.0" in r.stdout
+    log = curl_log.read_text()
+    assert "sekrit" not in log  # token stayed in the 0600 config file
+
+
+FAKE_GH_VIEW_FAIL = """#!/bin/sh
+# `gh release view` fails (release not yet published) while everything else
+# succeeds — models the workflow recovery step's view of the world.
+{
+echo "ARGS: $*"
+} >> "$GH_LOG"
+case "$*" in
+  "release view"*) exit 1 ;;
+esac
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--notes-file" ]; then
+    echo "NOTES-FILE: $a"
+    cat "$a"
+  fi
+  prev="$a"
+done
+exit 0
+"""
+
+
+def test_publish_only_recovers_from_detached_head_ci(workrepo, tmp_path):
+    # The workflow's recovery step runs `cut-release.sh --publish-only
+    # --yes --ci` on actions/checkout's detached HEAD: the --ci flag must
+    # apply the GITHUB_REF check (not clobber the mode to execute) so the
+    # recovery actually publishes instead of dying on the ref preflight.
+    bindir = fake_gh_with("viewfailbin", FAKE_GH_VIEW_FAIL, tmp_path)
+    log = tmp_path / "gh.log"
+    git("tag", "-a", "v0.2.0", "-m", "release v0.2.0", cwd=workrepo)
+    git("push", "origin", "v0.2.0", cwd=workrepo)
+    git("checkout", "--detach", "HEAD", cwd=workrepo)
+    e = {"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+         "GH_LOG": str(log)}
+    r = run_script(workrepo, "--publish-only", "--yes", "--ci",
+                   env=dict(e, GITHUB_REF="refs/heads/main"))
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "publishing release v0.2.0 via gh" in r.stdout
+    assert "published release v0.2.0" in r.stdout
+    assert "ARGS: release create v0.2.0" in log.read_text()
+
+
+def test_publish_only_ci_still_rejects_wrong_ref(workrepo, tmp_path):
+    # --ci keeps the ref guard: a detached checkout NOT on main's ref must
+    # not publish, even in publish-only mode.
+    bindir = fake_gh_with("viewfailbin2", FAKE_GH_VIEW_FAIL, tmp_path)
+    log = tmp_path / "gh.log"
+    git("tag", "-a", "v0.2.0", "-m", "release v0.2.0", cwd=workrepo)
+    git("push", "origin", "v0.2.0", cwd=workrepo)
+    git("checkout", "--detach", "HEAD", cwd=workrepo)
+    e = {"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+         "GH_LOG": str(log)}
+    r = run_script(workrepo, "--publish-only", "--yes", "--ci",
+                   env=dict(e, GITHUB_REF="refs/heads/feature"))
+    assert r.returncode != 0
+    assert "GITHUB_REF" in r.stderr
+    # gh was never invoked (the ref guard fires before any network I/O).
+    assert not log.exists()
+
+
+FAKE_CURL_POLL_RETRY = """#!/bin/sh
+# Fails the first two git-ref visibility polls (exit 22, like curl --fail
+# on a 404), then returns a ref body — exercises the token path's retry
+# integration. CURL_COUNT names a counter file.
+{
+echo "CURL_ARGV: $*"
+} >> "$CURL_LOG"
+for a in "$@"; do
+  case "$a" in
+    *git/ref/tags/*)
+      n=0
+      [ -f "${CURL_COUNT:-/nonexistent}" ] && n=$(cat "$CURL_COUNT")
+      n=$((n + 1)); echo "$n" > "$CURL_COUNT"
+      if [ "$n" -le 2 ]; then exit 22; fi
+      printf '{"ref":"refs/tags/v0.2.0","object":{"sha":"abc"}}' ;;
+  esac
+done
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    printf '{"html_url":"https://example.invalid/r/v0.2.0"}' > "$a"
+  fi
+  prev="$a"
+done
+exit 0
+"""
+
+
+def test_api_fallback_poll_retries_then_publishes(workrepo, tmp_path):
+    bindir = tmp_path / "curlbin3"
+    bindir.mkdir()
+    curl = bindir / "curl"
+    curl.write_text(FAKE_CURL_POLL_RETRY)
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    curl_log = tmp_path / "curl4.log"
+    count = tmp_path / "curlcount"
+    r = run_script(workrepo, "--execute", "--yes",
+                   env={"PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+                        "CUT_RELEASE_NO_GH": "1",
+                        "GITHUB_TOKEN": "sekrit",
+                        "CURL_LOG": str(curl_log),
+                        "CURL_COUNT": str(count),
+                        "CUT_RELEASE_POLL_SLEEP": "0"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "poll 3/10" in r.stdout
+    assert "release URL: https://example.invalid/r/v0.2.0" in r.stdout
+    assert "sekrit" not in curl_log.read_text()
+
+
+def test_poll_attempts_zero_disables_wait(workrepo, fake_gh):
+    r, recorded = run_with_gh(workrepo, fake_gh, "--execute", "--yes",
+                              env={"CUT_RELEASE_POLL_ATTEMPTS": "0"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "tag replication wait disabled" in r.stdout
+    assert "WARNING" not in r.stderr
+    assert "ARGS: release create v0.2.0" in recorded
+
+
+def test_poll_rejects_non_numeric_hooks(workrepo, fake_gh):
+    r, _ = run_with_gh(workrepo, fake_gh, "--execute", "--yes",
+                       env={"CUT_RELEASE_POLL_ATTEMPTS": "abc"})
+    assert r.returncode != 0
+    assert "CUT_RELEASE_POLL_ATTEMPTS" in r.stderr
+
+
+def test_release_workflow_has_publish_only_recovery_step():
+    # GitHub #659: the workflow must recover a tag-pushed/publish-failed
+    # state on its own instead of leaving a manual recovery to the operator.
+    wf = os.path.join(REPO, ".github", "workflows", "release.yml")
+    text = open(wf, encoding="utf-8").read()
+    # The recovery step runs the exact command the detached-HEAD test
+    # exercises: publish-only with the --ci ref check for the detached
+    # checkout.
+    assert "cut-release.sh --publish-only --yes --ci" in text
+    assert "if: failure()" in text
+    # The recovery step lives in the same job, after the cut step, so it
+    # reuses the checkout (the local tag) and the runner's gh.
+    assert text.index("cut-release.sh --ci") < text.index("--publish-only --yes --ci")
 
 
 def test_release_workflow_pins_checkout_and_sets_identity():
@@ -524,6 +814,18 @@ def test_ci_mode_requires_main_ref(workrepo, fake_gh):
                        env={"GITHUB_REF": "refs/heads/feature"})
     assert r.returncode != 0
     assert "GITHUB_REF" in r.stderr
+
+
+def test_ci_dry_run_never_executes(workrepo, fake_gh):
+    # --ci must not discard an explicit --dry-run: an operator probing the
+    # CI path with the safety flag must get the plan, never a release.
+    git("checkout", "--detach", "HEAD", cwd=workrepo)
+    r, recorded = run_with_gh(workrepo, fake_gh, "--ci", "--dry-run",
+                              env={"GITHUB_REF": "refs/heads/main"})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "dry run" in r.stdout
+    assert bare_tags(workrepo) == []
+    assert recorded == ""  # gh never invoked: no tag, no publish
 
 
 def test_ci_mode_executes_on_main_ref_detached(workrepo, fake_gh):
