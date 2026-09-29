@@ -22,13 +22,17 @@ assuming the other tenants are honest. Rows marked `[EXISTS]` have an
 open GitHub issue; the two rows without a pre-existing issue (A1, and
 the §6 open verifications) were filed this turn — linked in §7.
 
+**Row refresh:** rows A3 and A8 were updated 2026-09-29 (#711) after
+their sandboxing issues shipped (#115/#95); the audit baseline remains
+the 2026-09-24 one named below.
+
 ### Critical — one tenant can take another tenant's secrets
 
 | # | Assumption | Code | Who can exploit | Existing / new |
 |---|------------|------|-----------------|----------------|
 | A1 | **The swap proxy trusts any local process.** Grants are host-wide, not job-scoped, and not tenant-scoped: "an HTTP request carries no unforgeable job identity, so any local process using the proxy can spend any active grant. Do not rely on grants for per-job isolation." (`proxy/swap_addon.py:111-114`) | proxy/swap_addon.py:111-114 | Any tenant process that can reach the proxy listener (localhost, or the jail DNAT — see A4) | [EXISTS] #339 |
 | A2 | **The credential stack has no tenant dimension.** The `cred` CLI and the narrow writers it drives have no tenant key anywhere (`grep tenant cred` = no match). Secrets live in one shared stack per host. | `cred` (repo root, Python); registry | Any tenant that can invoke the writer path or reach cred-ui | [EXISTS] #280 (cred stack has no tenant dimension — hosted multi-tenancy blocker) |
-| A3 | **cred-ui: localhost-only, zero user auth, zero systemd sandboxing.** The management API authenticates with a non-secret header only; the service file hardens nothing. On a shared host, "localhost-only" means "every tenant on the box". | cred-ui/cred-ui.py; cred-ui/cred-ui.service | Any tenant process on the shared host — full read/write of the credential stack | [EXISTS] #86, #281 (no auth), #115 (no hardening) |
+| A3 | **cred-ui: localhost-only, zero user auth; systemd sandboxing shipped (#115).** The management API still authenticates with a non-secret header only. The service file no longer hardens nothing: since 2026-09-29 it carries `PrivateTmp=yes`, `ProtectSystem=strict`, and `ReadWritePaths=/home/swapd` — the narrow sudo writers' path is the one writable path. Deliberately absent: `NoNewPrivileges` (it would break the `sudo -n -u swapd` writer calls) and the kernel-tunable/module/cgroup directives (system-unit-only; the UI runs as an unprivileged user unit). On a shared host, "localhost-only" still means "every tenant on the box". | cred-ui/cred-ui.py; cred-ui/cred-ui.service | Any tenant process on the shared host — full read/write of the credential stack | [EXISTS] #86, #281 (no auth); #115 closed — sandboxing shipped 2026-09-29 (PR #655) |
 
 Why A1 is the load-bearing finding: on today's single-owner box the
 shared-host trust model is coherent — the jail's nftables egress DNAT
@@ -54,7 +58,7 @@ processes require the IMDSv2 treatment (research finding 2).
 
 | # | Assumption | Code | Existing / new |
 |---|------------|------|----------------|
-| A8 | **Swap proxy services have no systemd hardening.** mitmdump runs as `swapd` with zero sandboxing directives; compromise of the proxy process yields the whole stack. | proxy/swap-proxy.service, proxy/swap-inference.service | [EXISTS] #95 |
+| A8 | **Swap proxy services: systemd sandboxing shipped (#95); the host-wide grant surface remains.** Both units now carry `PrivateTmp=yes`, `ProtectSystem=strict`, `ReadWritePaths=/home/swapd`, `NoNewPrivileges=yes`, and the kernel trio (`ProtectKernelTunables` / `ProtectKernelModules` / `ProtectControlGroups=yes`) — system units, shipped 2026-09-29 (PR #712). Sandboxing limits post-compromise persistence, not the exposure: compromise of the proxy process still yields the whole stack, and any local process can still spend any active grant (A1). | proxy/swap-proxy.service, proxy/swap-inference.service | #95 closed — hardening shipped 2026-09-29 (PR #712); residual: host-wide grants per A1 |
 | A9 | **confirmd has no multi-replica story** (in-process locks, per-aid lock entries never evicted, answered history bounded on disk). Hosted scale-out needs a shared-state design. | confirm/confirmd.py | [EXISTS] #194, #192, #193 |
 | A10 | **muse-job is single-operator.** Job agents can reach management metadata (#11); no per-job identity, no per-tenant scoping. | muse-job/ | [EXISTS] #11 (job agent can rewrite ../job.json) |
 | A11 | **Dev bridges (cua-bridge, bdrive) are localhost-bound single-tenant.** Fine for self-hosted; hosted needs per-tenant instances or removal from the tenant surface. | cua/bin/cua-bridge.py; browser-driver/bdrive/config.py | noted, no issue — out of hosted v1 scope until #47 ships |
