@@ -516,3 +516,19 @@ def test_smoke_cli_start_and_list(session_serve, tmp_path):
     doc = json.loads(p.stdout)
     assert isinstance(doc["sessions"], list)
     assert "nextCursor" in doc
+
+
+def test_smoke_cli_warns_not_redacted_on_stderr(session_serve, tmp_path):
+    # The smoke CLI's stdout is never redacted: the warning must appear
+    # on stderr on EVERY invocation, not just in --help, while stdout
+    # stays clean parseable JSON.
+    argv, _record, _store = session_serve
+    p = subprocess.run(
+        [sys.executable, str(BIN_PATH), "list", "--limit", "5",
+         "--", *argv],
+        capture_output=True, text=True, timeout=60)
+    assert p.returncode == 0, p.stderr
+    assert "NOT redacted" in p.stderr
+    assert "agents can read it" in p.stderr
+    doc = json.loads(p.stdout)  # stdout carries no warning text
+    assert isinstance(doc["sessions"], list)

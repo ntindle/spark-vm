@@ -805,6 +805,90 @@ def test_stderr_log_created_mode_0600(fake_serve, tmp_path):
         host.close()
 
 
+def test_stderr_log_tightens_preexisting_mode(fake_serve, tmp_path):
+    # os.open's mode applies only at creation: a pre-existing 0644 log
+    # would otherwise keep leaking new secret bytes to group/other, so
+    # open() tightens it to 0o600 before the serve host spawns.
+    argv, _record = fake_serve
+    log = tmp_path / "job.log"
+    log.write_bytes(b"old\n")
+    os.chmod(str(log), 0o644)
+    host = make_host(argv, log_path=str(log))
+    try:
+        host.open()
+        assert stat.S_IMODE(os.stat(str(log)).st_mode) == 0o600
+        assert b"old" in log.read_bytes()  # content preserved, not truncated
+    finally:
+        host.close()
+
+
+def test_stderr_log_never_loosens_stricter_mode(fake_serve, tmp_path):
+    # Permissions are only revoked, never granted: a 0400 log stays 0400.
+    argv, _record = fake_serve
+    log = tmp_path / "job.log"
+    log.write_bytes(b"old\n")
+    os.chmod(str(log), 0o400)
+    host = make_host(argv, log_path=str(log))
+    try:
+        host.open()
+        assert stat.S_IMODE(os.stat(str(log)).st_mode) == 0o400
+    finally:
+        host.close()
+
+
+def test_stderr_log_rejects_symlink(fake_serve, tmp_path):
+    # A symlink at log_path is refused fail-closed: the serve host is
+    # never spawned and no bytes are written through the link.
+    argv, _record = fake_serve
+    target = tmp_path / "real.log"
+    link = tmp_path / "job.log"
+    link.symlink_to(target)
+    host = make_host(argv, log_path=str(link))
+    with pytest.raises(msp.MSPError, match="symlink"):
+        host.open()
+    assert not host.is_alive()
+    assert host._proc is None
+    assert not target.exists()
+
+
+def test_stderr_log_readerless_fifo_fails_fast(tmp_path):
+    # A pre-planted FIFO must not hang open(): O_NONBLOCK makes the
+    # reader-less open fail fast with ENXIO -> MSPError (the #23 H5 class
+    # the muse-job hooks already defend against). Unit-level on the
+    # helper so a regression fails the test instead of hanging the suite:
+    # the thread join bounds the wait.
+    import threading
+    fifo = tmp_path / "job.log"
+    os.mkfifo(str(fifo))
+    outcome = []
+
+    def attempt():
+        try:
+            msp._open_secret_log(str(fifo))
+        except Exception as e:  # noqa: BLE001 -- recorded for assertion
+            outcome.append(e)
+
+    t = threading.Thread(target=attempt, daemon=True)
+    t.start()
+    t.join(timeout=10)
+    assert not t.is_alive(), "open() hung on a reader-less FIFO"
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], msp.MSPError)
+
+
+def test_stderr_log_nonregular_target_allowed(fake_serve):
+    # Non-regular log targets (e.g. /dev/null) keep working: only regular
+    # files get the 0o600 treatment.
+    argv, _record = fake_serve
+    host = make_host(argv, log_path="/dev/null")
+    try:
+        host.open()
+        assert host.is_alive()
+        assert host.call("session/list")["sessions"][0]["uuid"] == "sess-1"
+    finally:
+        host.close()
+
+
 def test_read_frame_respects_byte_budget():
     # Unit-level: _read_frame caps one frame at max_frame_bytes (the
     # anti-OOM path for a wedged serve host emitting a giant line).
