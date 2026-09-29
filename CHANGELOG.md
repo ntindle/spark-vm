@@ -69,6 +69,9 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - The credential web UI's system-reader calls now use the same absolute program paths the system configuration grants, instead of depending on the target machine's command lookup. (#670)
 - The credential command line and web UI now reject reserved registry entry names (such as `allowed_hosts`) up front, instead of failing at the credential store after the fact. (#677)
 
+### Security
+- The swap proxy's audit log now strips control characters and whitespace from every client-influenced field before writing: a hostile or buggy local client can no longer smuggle newlines or forged entries into the audit trail. Well-formed hosts, IP addresses, and credential names are written exactly as before. (#682)
+
 ## [0.5.0] - 2026-09-29
 
 ### Added

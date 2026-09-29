@@ -2051,6 +2051,103 @@ class SecuritySweepTests(unittest.TestCase):
         self.assertIn("session=hsurr:acme:password; Path=/", cookies)
 
 
+class AuditFieldSanitizationTests(unittest.TestCase):
+    """Issue #17: audit-log log injection.
+
+    Audit lines are `k=v` tokens separated by spaces; `host`, `authority`,
+    `reason`, etc. flow from the client-controlled request. A newline or a
+    `ts=`-looking fragment in one field forges audit lines, undermining the
+    security trail. Every audit write routes its fields through
+    `_sanitize_audit_field` on the way in.
+    """
+
+    def _audit_in_tmp(self, d, calls):
+        """Run `calls` (a function of the addon) with LOG_FILE patched to
+        the temp dir; return the written lines."""
+        with mock.patch.object(sa, "SECRETS_DIR", Path(d)), \
+             mock.patch.object(sa, "HOSTS_FILE", Path(d) / "h"), \
+             mock.patch.object(sa, "REGISTRY_FILE", Path(d) / "r"), \
+             mock.patch.object(sa, "SSRF_ALLOW_FILE", Path(d) / "s"), \
+             mock.patch.object(sa, "LOG_FILE", Path(d) / "swap.log"):
+            a = sa.SwapAddon()
+            calls(a)
+        return (Path(d) / "swap.log").read_text().splitlines()
+
+    def test_sanitize_helper(self):
+        """The helper strips controls/whitespace, passes well-formed
+        values through byte-identical, and renders None as "-"."""
+        self.assertEqual(sa._sanitize_audit_field("api.example.com"),
+                         "api.example.com")
+        self.assertEqual(sa._sanitize_audit_field("10.0.0.9"),
+                         "10.0.0.9")
+        self.assertEqual(sa._sanitize_audit_field("hsurr:github:8080"),
+                         "hsurr:github:8080")
+        self.assertEqual(sa._sanitize_audit_field("evil\nx"), "evilx")
+        self.assertEqual(sa._sanitize_audit_field("a\r\nb"), "ab")
+        self.assertEqual(sa._sanitize_audit_field("a\tb"), "ab")
+        self.assertEqual(sa._sanitize_audit_field("a b"), "ab")
+        self.assertEqual(sa._sanitize_audit_field("a\x00b"), "ab")
+        self.assertEqual(sa._sanitize_audit_field("a\x7fb"), "ab")
+        self.assertEqual(sa._sanitize_audit_field("a\x9bb"), "ab")
+        # Unicode separators split lines/tokens under splitlines()/split():
+        # U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+00A0 NBSP,
+        # U+2009 THIN SPACE, U+3000 IDEOGRAPHIC SPACE all must go
+        self.assertEqual(sa._sanitize_audit_field("a\u2028b"), "ab")
+        self.assertEqual(sa._sanitize_audit_field("a\u2029b"), "ab")
+        self.assertEqual(sa._sanitize_audit_field("a\u00a0b"), "ab")
+        self.assertEqual(sa._sanitize_audit_field("a\u2009b"), "ab")
+        self.assertEqual(sa._sanitize_audit_field("a\u3000b"), "ab")
+        self.assertEqual(sa._sanitize_audit_field(None), "-")
+        self.assertEqual(sa._sanitize_audit_field(8080), "8080")
+
+    def test_audit_methods_stay_single_line_on_hostile_host(self):
+        """Every audit method: a hostile host/authority/reason cannot
+        forge extra lines or tokens in the audit log."""
+        hostile = "evil.com\nts=1970-01-01T00:00:00 host=fake swapped=yes"
+        with tempfile.TemporaryDirectory() as d:
+            def calls(a):
+                a._audit(hostile, "github")
+                a._audit_refused(hostile, "github", "deny\nlist")
+                a._audit_note(hostile, "blocked", "smoke\r\nhost")
+                a._audit_authority_mismatch(hostile, "evil.com\nts=1",
+                                            "10.0.0.9")
+                a._audit_ssrf_refused(hostile, "10.0.0.9", "private\nrange")
+                # Unicode forgery: U+2028 splits lines under splitlines(),
+                # U+00A0 splits tokens under split()
+                a._audit("evil.com\u2028ts=1970-01-01T00:00:00\u00a0host=fake", "github")
+            lines = self._audit_in_tmp(d, calls)
+        # six calls, six physical lines: nothing smuggled a newline
+        self.assertEqual(len(lines), 6)
+        # parse the lines the way any k=v log consumer does: split on
+        # whitespace, then on "=". A forged line would appear here as a
+        # standalone forged token; glued inside one real token it is
+        # inert (the real token's value is just garbled).
+        tokens = [tok for line in lines for tok in line.split()]
+        self.assertNotIn("host=fake", tokens)
+        self.assertNotIn("swapped=yes", tokens)
+        self.assertFalse(any(tok.startswith("ts=1970-01-01") for tok in tokens))
+        self.assertFalse(any(tok == "ts=1" for tok in tokens))
+        # the real fields are still recorded, stripped of whitespace
+        joined = "\n".join(lines)
+        self.assertIn("host=evil.comts=1970-01-01T00:00:00host=fakeswapped=yes",
+                      joined)
+        self.assertIn("reason=privaterange", joined)
+
+    def test_audit_well_formed_hosts_unchanged(self):
+        """Sanitization is a no-op for well-formed values: the log format
+        for normal traffic is byte-identical to the pre-#17 layout."""
+        with tempfile.TemporaryDirectory() as d:
+            lines = self._audit_in_tmp(
+                d, lambda a: a._audit("api.example.com", "github"))
+            line = lines[0]
+        self.assertRegex(line,
+                         r"^ts=\S+ host=api\.example\.com "
+                         r"swapped=github ip=-$")
+        # every interpolated field survives verbatim
+        self.assertIn("host=api.example.com", line)
+        self.assertIn("swapped=github", line)
+
+
 class StreamRefusalTests(unittest.TestCase):
     """Finding 40e (issue #92): message-stream responses from allowlisted
     hosts are killed in `responseheaders` — never proxied unscrubbed. A

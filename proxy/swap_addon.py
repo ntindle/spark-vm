@@ -619,8 +619,35 @@ ENCODED_PLACEHOLDER_RE = re.compile(
 # Headers that must never be swapped: a substituted Referer/Origin would
 # hand the real value to the server's logs on every later request.
 NEVER_SWAP_HEADERS = frozenset({"referer", "origin"})
+# Audit-log field sanitizer (issue #17): audit lines are `k=v` tokens
+# separated by spaces, so a newline or a `ts=`-looking fragment in a
+# client-influenced field forges audit lines. Keep ONLY printable ASCII
+# in every interpolated field: an allowlist stays correct against any
+# exotic Unicode separator or control character a strip-list could miss
+# (e.g. U+2028/U+2029 split lines under str.splitlines(), U+00A0 splits
+# tokens under str.split()). Hostnames, IPs, placeholder names, and
+# fixed reason strings are all printable ASCII, so the allowlist never
+# touches well-formed values.
+_AUDIT_FIELD_ALLOW_RE = re.compile(r"[^!-~]")
 
 log = logging.getLogger(__name__)
+
+
+def _sanitize_audit_field(value):
+    """Keep printable-ASCII only in one audit-log field (#17).
+
+    Audit lines are `k=v` tokens separated by spaces; `host`, `authority`,
+    `reason`, and other fields flow from the client-controlled request, so
+    a newline, a Unicode line separator, or a `ts=`-looking fragment in one
+    forges audit lines. Every audit method routes its interpolated fields
+    through this choke point. Well-formed values (hostnames, IPs,
+    placeholder names, fixed-string reasons) are printable ASCII and pass
+    through unchanged. None renders as "-"; other non-str values are
+    coerced.
+    """
+    if value is None:
+        return "-"
+    return _AUDIT_FIELD_ALLOW_RE.sub("", str(value))
 
 
 def _open_audit_log():
@@ -2111,8 +2138,11 @@ class SwapAddon:
         try:
             with _open_audit_log() as f:
                 f.write("ts=%s host=%s swapped=%s ip=%s\n"
-                        % (ts, host, matched,
-                           getattr(self, "_current_egress_ip", None) or "-"))
+                        % (ts, _sanitize_audit_field(host),
+                           _sanitize_audit_field(matched),
+                           _sanitize_audit_field(
+                               getattr(self, "_current_egress_ip", None)
+                               or "-")))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
             return False
@@ -2125,8 +2155,12 @@ class SwapAddon:
         try:
             with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=hsurr:%s reason=%s ip=%s\n"
-                        % (ts, host, name, reason,
-                           getattr(self, "_current_egress_ip", None) or "-"))
+                        % (ts, _sanitize_audit_field(host),
+                           _sanitize_audit_field(name),
+                           _sanitize_audit_field(reason),
+                           _sanitize_audit_field(
+                               getattr(self, "_current_egress_ip", None)
+                               or "-")))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
@@ -2140,8 +2174,12 @@ class SwapAddon:
         try:
             with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=%s reason=%s ip=%s\n"
-                        % (ts, host, refused, reason,
-                           getattr(self, "_current_egress_ip", None) or "-"))
+                        % (ts, _sanitize_audit_field(host),
+                           _sanitize_audit_field(refused),
+                           _sanitize_audit_field(reason),
+                           _sanitize_audit_field(
+                               getattr(self, "_current_egress_ip", None)
+                               or "-")))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
@@ -2155,8 +2193,9 @@ class SwapAddon:
             with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=authority-mismatch "
                         "authority=%s ip=%s\n"
-                        % (ts, host, authority or "-",
-                           egress_ip or "-"))
+                        % (ts, _sanitize_audit_field(host),
+                           _sanitize_audit_field(authority or "-"),
+                           _sanitize_audit_field(egress_ip or "-")))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
@@ -2380,7 +2419,9 @@ class SwapAddon:
         try:
             with _open_audit_log() as f:
                 f.write("ts=%s host=%s refused=egress reason=%s ip=%s\n"
-                        % (ts, host, reason, ip))
+                        % (ts, _sanitize_audit_field(host),
+                           _sanitize_audit_field(reason),
+                           _sanitize_audit_field(ip)))
         except OSError as e:
             log.warning("swap: cannot write audit log: %s", e)
 
