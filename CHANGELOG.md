@@ -150,6 +150,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Approval requests are now filed atomically: a crash mid-write can no
+  longer leave a torn, permanently unanswerable entry in the pending
+  queue. Corrupt pending entries that do appear are quarantined to a
+  separate directory with an audit-trail event (after a short grace
+  period, so an in-flight write is never misclassified), and stale
+  temporary files from crashed writers are swept on the same pass.
+  (closes #232) (#649)
+- `muse-job kill` now reaps the job's whole process tree, not just the
+  tmux session: detached background builds that used to survive the
+  kill are terminated (SIGTERM, then SIGKILL) and any survivors are
+  reported. (closes #12 item L4) (#649)
 - confirmd's post-answer housekeeping no longer scans the answered and
   consumed history directories on every approval: the stray-file sweep and
   the history prune now run at most once an hour (tunable via

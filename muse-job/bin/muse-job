@@ -7,7 +7,7 @@ Same vocabulary as the other agents this operator manages:
   status - inspect one job (like subagent.list, single)
   list   - all jobs
   log    - recent terminal output
-  kill   - kill the tmux session (recoverable via resume)
+  kill   - kill the tmux session and reap its process tree (recoverable via resume)
   resume - recover a dead tmux session via `muse resume`
   close  - terminal: archive the job, remove its worktree
   watch  - watchdog pass over active jobs (cron: JSON lines)
@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import stat
 import subprocess
@@ -1477,9 +1478,178 @@ def cmd_log(args):
     return 0
 
 
+# Issue #12 item L4: grace between SIGTERM and SIGKILL when reaping a
+# job's process tree. Short enough to keep the CLI snappy; detached
+# grandchildren that ignore SIGTERM get SIGKILL right after.
+_KILL_SIGTERM_GRACE_S = 3.0
+
+
+def _tmux_pane_pids(slug):
+    """PIDs of the tmux panes backing the job session (tree roots).
+
+    Issue #12 L4 (Security B2): dead panes are excluded — a pane whose
+    process already exited may have had its PID recycled by an unrelated
+    process before our snapshot, and the starttime guard only covers
+    post-snapshot recycling. Only live pane PIDs may be kill roots.
+    """
+    try:
+        out = run("tmux", "list-panes", "-t", f"mjob-{slug}",
+                  "-F", "#{pane_pid} #{pane_dead}", timeout=15).stdout.decode(
+                      errors="replace")
+    except Exception:
+        return []
+    pids = []
+    for line in out.splitlines():
+        parts = line.split()
+        # pane_dead == 0 -> live pane; anything else is never a root.
+        if len(parts) == 2 and parts[0].isdigit() and parts[1] == "0":
+            pids.append(int(parts[0]))
+    return pids
+
+
+def _proc_starttime(pid):
+    """Boot-relative start time of a PID, or None if unreadable.
+
+    Field 22 of /proc/<pid>/stat; the comm field (in parens) can contain
+    spaces and parens, so fields are counted from the last ')': token[0]
+    is field 3 (state), hence starttime is token[19]. (Security B1: an
+    earlier draft used token[20] — field 23, vsize — which both changes
+    under memory allocation and collides across identical processes,
+    breaking the reuse guard in both directions.)
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            st = f.read()
+        return int(st.rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _proc_state(pid):
+    """Single-letter process state (field 3 of /proc/<pid>/stat), or None
+    if unreadable. Z (zombie) matters to the reaper: a zombie holds no
+    resources and cannot be signaled — only its parent's wait() clears it
+    — so the tree kill treats it as already dead."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            st = f.read()
+        return st.rsplit(")", 1)[1].split()[0]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _descendant_pids(roots):
+    """All PIDs in the process subtrees rooted at `roots`.
+
+    ps-based (no psutil dependency — muse-job is a dependency-free
+    script); best-effort, snapshot semantics.
+    """
+    try:
+        out = run("ps", "-eo", "pid,ppid", timeout=15).stdout.decode(
+            errors="replace")
+    except Exception:
+        return set()
+    children = {}
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    seen = set()
+    stack = list(roots)
+    while stack:
+        p = stack.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        stack.extend(children.get(p, ()))
+    return seen
+
+
+def _kill_process_tree(slug):
+    """Issue #12 L4: reap the job's whole process tree, not just the
+    tmux session.
+
+    `tmux kill-session` kills the pane processes, but detached
+    grandchildren (nohup'd, backgrounded builds, setsid'd helpers) are
+    reparented away from the pane and survive — runaway jobs persisted
+    past kill. So: snapshot the pane subtree first, kill the session,
+    then SIGTERM -> (grace) -> SIGKILL the survivors and verify.
+
+    PID-reuse guard: starttimes are snapshotted before any signal, and
+    every kill/verify step re-checks /proc/<pid>/stat's starttime — a
+    PID that exits and gets recycled after the snapshot is never
+    signaled. Two honest residuals: (a) a PID recycled between tmux's
+    list-panes and our snapshot (microsecond window; dead panes are
+    excluded from roots to shrink it); (b) grandchildren that detached
+    (setsid/double-fork) before the kill are invisible to a kill-time
+    snapshot and remain unreaped — same as the old behavior, strictly
+    safer than signaling a possibly-wrong PID. Only own-UID processes
+    are signalable anyway; EPERM is fail-silent (the PID lands in the
+    returned leaked list).
+
+    Returns the list of PIDs that could not be reaped (empty on the
+    happy path). Never raises: kill must not fail the operator's
+    command — the leaked list is the honest signal.
+    """
+    roots = _tmux_pane_pids(slug)
+    tree = _descendant_pids(roots) if roots else set()
+    stamped = {}
+    for p in tree:
+        st = _proc_starttime(p)
+        if st is not None:
+            stamped[p] = st
+
+    def alive_same(p):
+        # Zombies are already dead for reaping purposes (a zombie's
+        # /proc entry outlives the process until the parent wait()s;
+        # signaling it is a no-op and reporting it as leaked is noise).
+        # Unreadable state (None) means the process is gone.
+        return (p in stamped and _proc_starttime(p) == stamped[p]
+                and _proc_state(p) not in ("Z", None))
+
+    # Security (required): the never-raises guarantee covers a missing
+    # tmux binary too — subprocess.run raises FileNotFoundError, and the
+    # old bare kill-session had the same hole.
+    try:
+        run("tmux", "kill-session", "-t", f"mjob-{slug}", check=False)
+    except Exception:
+        pass
+    survivors = [p for p in stamped if alive_same(p)]
+    for p in survivors:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.time() + _KILL_SIGTERM_GRACE_S
+    while time.time() < deadline:
+        survivors = [p for p in survivors if alive_same(p)]
+        if not survivors:
+            break
+        time.sleep(0.2)
+    for p in survivors:
+        if not alive_same(p):
+            continue
+        try:
+            os.kill(p, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    time.sleep(0.5)
+    leaked = [p for p in survivors if alive_same(p)]
+    return leaked
+
+
 def cmd_kill(args):
-    run("tmux", "kill-session", "-t", f"mjob-{args.slug}", check=False)
-    print(json.dumps({"slug": args.slug, "tmux": "killed"}))
+    # Issue #12 L4: kill the session AND reap the pane process trees —
+    # detached grandchildren must not survive the kill.
+    leaked = _kill_process_tree(args.slug)
+    # Engineering review: "tree_killed": True with a non-empty leaked
+    # list would be misleading — the honest signal is the leak list.
+    out = {"slug": args.slug, "tmux": "killed",
+           "tree_killed": not leaked, "leaked_pids": leaked}
+    if leaked:
+        print("muse-job: warning: %d process(es) survived kill: %s"
+              % (len(leaked), ",".join(map(str, leaked))), file=sys.stderr)
+    print(json.dumps(out))
     return 0
 
 
@@ -1612,7 +1782,9 @@ def cmd_close(args):
 
 def _close(slug):
     job = load_job(slug)
-    run("tmux", "kill-session", "-t", f"mjob-{slug}", check=False)
+    # Issue #12 L4: same tree-reap as cmd_kill — closing a job must not
+    # leave detached grandchildren running against the removed worktree.
+    _kill_process_tree(slug)
     # Destructive git inputs re-derived from the slug, never from the
     # agent-writable job.json (issue #11): a recorded branch="main" must not
     # reach `git branch -D`, nor a recorded worktree pointing at another
@@ -1870,7 +2042,7 @@ def main():
     s.add_argument("-n", type=int, default=60)
     s.set_defaults(fn=cmd_log)
 
-    s = sub.add_parser("kill", help="kill the tmux session (recoverable)")
+    s = sub.add_parser("kill", help="kill the tmux session and reap its process tree")
     s.add_argument("slug")
     s.set_defaults(fn=cmd_kill)
 
