@@ -84,6 +84,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - The credential web UI now reports a visible error when the credential registry exists but is damaged or unreadable, instead of quietly telling you none of your credentials are registered. (#696)
 
 ### Security
+- The credential web UI no longer runs from the working checkout: the updater now installs its page and server into a fixed location outside the checkout that only a deploy refreshes, so a stray edit to the checkout can neither change the secret-pasting page your browser loads nor block the updater from refreshing it. (#700)
 - The swap proxy's audit log now strips control characters and whitespace from every client-influenced field before writing: a hostile or buggy local client can no longer smuggle newlines or forged entries into the audit trail. Well-formed hosts, IP addresses, and credential names are written exactly as before. (#682)
 
 ## [0.5.0] - 2026-09-29

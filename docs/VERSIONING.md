@@ -65,10 +65,10 @@ exactly — `docs/VERSIONING.md` does **not** match — so the updater redeploys
 the proxy-confirm unit plus cred-ui and the new version takes effect
 everywhere. (Exact-file entries may be claimed by more than one component;
 directory prefixes still must not overlap — see `test_manifest_no_path_overlap`.)
-When cred-ui's checkout subtree is synced, the root `VERSION` file travels
-with it, and rollback snapshots cover it: a rollback restores the old
+The install step ships the root `VERSION` into the install dir alongside
+the runtime, and rollback snapshots cover it: a rollback restores the old
 VERSION alongside the old code, so cred-ui never reports a version newer
-than its own checkout. `muse-job --version` reads the repo file.
+than its own installed copy. `muse-job --version` reads the repo file.
 
 ## Cutting a release
 

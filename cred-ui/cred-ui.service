@@ -4,7 +4,16 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 %h/spark-vm/cred-ui/cred-ui.py
+# Issue #85: the runtime lives OUTSIDE the working checkout, in a fixed
+# install directory written only by the gated deploy path
+# (cred-ui/install.sh — run by deploy/auto-deploy.sh from the updater
+# mirror at the new commit, or by hand from your own checkout). A writer
+# with checkout access can no longer change the page the browser loads —
+# before this, index.html was served straight from the checkout and needed
+# no restart to take effect — and a dirty checkout no longer fails the
+# cred-ui deploy closed. Manual installs: run cred-ui/install.sh (it also
+# installs this unit into ~/.config/systemd/user/), then daemon-reload.
+ExecStart=/usr/bin/python3 %h/.local/share/spark-vm/cred-ui/cred-ui.py
 Restart=on-failure
 RestartSec=5
 # No secret values ever pass through here; the UI only writes via the
