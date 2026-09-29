@@ -731,6 +731,82 @@ def _recover_resume_banner(slug, timeout=60):
         time.sleep(5)
 
 
+def _tui_swap_event(job, pane_cmd):
+    """Detect an in-place Muse TUI auto-update under a running job (#212).
+
+    The TUI's update prompt/notice states cannot be matched on text (the
+    prompt wording is not grounded anywhere), but the update EVENT is
+    observable: the pane's foreground process name is the versioned TUI
+    binary (`muse-bin-1.3.0-R3233.1`, `-R3401.1`, ...) and an auto-update
+    that swaps the binary shows up as a *change* in that name across
+    watchdog passes while tmux stays alive.
+
+    Returns the `tui-updated` event dict (without the `job` key) on a
+    confirmed swap, else None. Maintains the `tui_cmd` baseline in `job`
+    (manager-owned watchdog state, same class as `last_bytes`); the caller
+    persists the job afterwards.
+
+    Baseline rules:
+    - Absent or unusable baseline (not a TUI process name): adopt the
+      current name silently -- a pre-#212 job has no baseline, and a
+      poisoned value is a baseline repair, not a pageable anomaly. Never
+      adopt a non-TUI name (a shell at adoption time would fire a bogus
+      swap the moment the TUI relaunches).
+    - Current name not a TUI process (shell, capture failure): not a
+      swap -- the dead-TUI path owns that case (`tui-dead`, loud). The
+      baseline is kept so a later relaunch with a new binary still fires.
+    - Both TUI process names and different: the swap. The event is
+      diagnostic, not a recovery action: the per-pass liveness probe
+      (tui-recovered / tui-unrecovered / tui-dead) already ran this pass
+      via job_status, and the policy half of #212 (auto-accept vs defer
+      updates while a job is active) is deliberately undecided here --
+      detection only, no keystrokes sent.
+
+    Trust note (#23 class): `tui_cmd` lives in agent-writable job.json, so
+    a same-user agent can plant it to suppress one informational event.
+    That suppresses only the diagnosis -- the fail-loud liveness signals
+    (tui-dead every pass on a parked pane) do not depend on the baseline.
+
+    One acknowledged limitation: a launcher<->versioned-binary presentation
+    flip (e.g. `muse` -> `muse-bin-...`) with no real update also fires.
+    The bar is "the foreground process really changed identity", which is
+    still worth logging -- the event is diagnostic, never a recovery
+    trigger.
+    """
+    if not isinstance(pane_cmd, str) or not _is_tui_process(pane_cmd):
+        return None
+    old = job.get("tui_cmd")
+    if not isinstance(old, str) or not _is_tui_process(old):
+        # No baseline (or a poisoned one): adopt silently, no event.
+        job["tui_cmd"] = pane_cmd
+        return None
+    if old == pane_cmd:
+        return None
+    job["tui_cmd"] = pane_cmd
+    return {"signal": "tui-updated",
+            "detail": f"TUI binary changed under the running job "
+                      f"({_clean_text(old)} -> {_clean_text(pane_cmd)}); "
+                      f"the pane liveness probe ran this pass -- see the "
+                      f"tui-recovered / tui-dead / tui-unrecovered signals "
+                      f"for the post-swap state (issue #212; detection only, "
+                      f"no update-accept policy applied)"}
+
+
+def _emit_tui_swap_event(job, slug, pane_cmd, events):
+    """One watchdog pass of the TUI-binary-swap check (issue #212).
+
+    Extracted from cmd_watch so the emission contract is unit-testable:
+    appends the `tui-updated` event (with the `job` key) to `events` on a
+    confirmed swap and always persists the (possibly adopted/advanced)
+    baseline via save_job. Callers hold the per-slug lock.
+    """
+    swap = _tui_swap_event(job, pane_cmd)
+    save_job(job, slug)
+    if swap is not None:
+        swap["job"] = slug
+        events.append(swap)
+
+
 def _steer(slug, message, verify=True):
     """The one place the tmux input quirk lives.
 
@@ -1350,7 +1426,11 @@ def job_status(job, slug):
     # Binary TUI-liveness probe for the watchdog and status render: tmux
     # alive says nothing about the Muse session inside it (a model-stream
     # death parks the pane at the TUI's resume banner with no hook event).
+    # pane_cmd (the pane's foreground process name) is also the input to
+    # the TUI-binary-swap detector (issue #212): an in-place Muse
+    # auto-update shows up as a change in that name across watchdog passes.
     pane_live, pane_banner = False, False
+    pane_cmd = ""
     if alive:
         pane, pane_cmd = _capture_pane_state(f"mjob-{slug}")
         pane_live = _pane_shows_live_tui(pane, pane_cmd)
@@ -1361,6 +1441,7 @@ def job_status(job, slug):
         "tmux_alive": alive,
         "pane_live_tui": pane_live,
         "pane_resume_banner": pane_banner,
+        "pane_cmd": pane_cmd,
         # Server-side session creation time: the unspoofable anchor for the
         # liveness grace windows (issue #23, sec review). None when tmux is
         # unreachable; _grace_anchor falls back to the job.json anchor then.
@@ -1877,6 +1958,15 @@ def cmd_watch(args):
                                          "refusing to send anything (issue #4). Operator remedy: "
                                          "inspect with muse-job log, then muse-job kill <slug> "
                                          "and muse-job resume <slug>"})
+
+        # Issue #212: detect an in-place Muse auto-update (TUI binary swap)
+        # as its own signal instead of lumping the aftermath into tui-dead.
+        # Runs after the dead-TUI block so the per-pass liveness probe and
+        # any banner recovery already happened this pass. The emission
+        # contract (event appended with the job key, baseline persisted)
+        # is pinned by test_watch_emission_contract in
+        # tests/test_tui_update_signal.py.
+        _emit_tui_swap_event(job, slug, st["pane_cmd"], events)
 
         if not job.get("session_uuid"):
             # Spawn's 90s uuid discovery can miss a slow first model call.
