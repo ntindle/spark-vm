@@ -59,6 +59,10 @@ class ConfirmdTests(unittest.TestCase):
         self.approvals.mkdir()
         for sub in ("pending", "answered", "consumed"):
             (self.approvals / sub).mkdir()
+        # Issue #620: housekeeping is cadence-gated on module state — each
+        # test starts with it due so answer-path behavior is deterministic
+        # regardless of test order.
+        cd._reset_housekeeping_for_tests()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -947,6 +951,101 @@ class ConfirmdTests(unittest.TestCase):
         """The keep floor (100) is coherent with the answered-feed cap."""
         self.assertGreaterEqual(cd._CONSUMED_KEEP, cd._ANSWERED_FEED_LIMIT)
 
+    # --- Issue #620: cadence-gated housekeeping ----------------------
+
+    def test_prune_consumed_skips_stat_storm_when_under_cap(self):
+        """#620: at/below the cap, _prune_consumed lists only — no
+        per-file getmtime calls (the hot-path stat storm)."""
+        names = ["a0.json", "a1.json"]
+        self._seed_consumed(names, 1_700_000_000)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch("os.path.getmtime") as mtime:
+            cd._prune_consumed(limit=3)
+        mtime.assert_not_called()
+        remaining = sorted(p.name for p in (self.approvals / "consumed")
+                           .iterdir())
+        self.assertEqual(remaining, names)
+
+    def test_housekeeping_runs_when_due(self):
+        """First call after a reset runs the sweep+prune pair."""
+        with mock.patch.object(cd, "_sweep_answered") as sw, \
+             mock.patch.object(cd, "_prune_consumed") as pr:
+            self.assertTrue(cd._housekeeping_if_due())
+        sw.assert_called_once_with()
+        pr.assert_called_once_with()
+
+    def test_housekeeping_skips_when_not_due(self):
+        """A second immediate call is gated — one pair per interval."""
+        with mock.patch.object(cd, "_sweep_answered") as sw, \
+             mock.patch.object(cd, "_prune_consumed") as pr:
+            self.assertTrue(cd._housekeeping_if_due())
+            self.assertFalse(cd._housekeeping_if_due())
+        sw.assert_called_once_with()
+        pr.assert_called_once_with()
+
+    def test_housekeeping_zero_interval_always_runs(self):
+        """Patching the interval to 0 restores the old every-answer
+        behavior (the escape hatch tests rely on)."""
+        with mock.patch.object(cd, "_HOUSEKEEPING_INTERVAL_S", 0), \
+             mock.patch.object(cd, "_sweep_answered") as sw, \
+             mock.patch.object(cd, "_prune_consumed") as pr:
+            self.assertTrue(cd._housekeeping_if_due())
+            self.assertTrue(cd._housekeeping_if_due())
+        self.assertEqual(sw.call_count, 2)
+        self.assertEqual(pr.call_count, 2)
+
+    def test_housekeeping_concurrent_callers_run_once(self):
+        """Racing handler threads can't both decide 'due': the timestamp
+        commits under the lock before the work starts, so the second
+        caller sees the gate closed even while the first is still
+        sweeping."""
+        calls = []
+
+        def slow_sweep():
+            calls.append(1)
+            time.sleep(0.2)
+
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "_sweep_answered",
+                               side_effect=slow_sweep), \
+             mock.patch.object(cd, "_prune_consumed", return_value=None):
+            threads = [threading.Thread(target=cd._housekeeping_if_due)
+                       for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(len(calls), 1)
+
+    def test_answer_path_housekeeping_cadence(self):
+        """Wiring, not just the helper: the after-answer call site runs
+        housekeeping on the first answer and skips it on the next one
+        (the #620 behavior change at the call site)."""
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        h.send_response = lambda code: None
+        h.send_header = lambda k, v: None
+        h.end_headers = lambda: None
+
+        def answer(aid):
+            it = {"id": aid, "summary": "s", "kind": "first-use",
+                  "created": "2026-09-18T10:00:00+00:00",
+                  "expires": "2999-01-01T00:00:00+00:00"}
+            nonce = cd._mint_csrf_nonce(it)
+            (self.approvals / "pending" / (aid + ".json")).write_text(
+                json.dumps(it))
+            h._answer_locked("ntindle@github", aid, nonce, "deny")
+
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch.object(cd, "_sweep_answered") as sw, \
+             mock.patch.object(cd, "_prune_consumed") as pr:
+            answer("hk-cadence-1")
+            answer("hk-cadence-2")
+        self.assertEqual(sw.call_count, 1)
+        self.assertEqual(pr.call_count, 1)
+
     def test_evict_aid_lock(self):
         """The per-aid lock entry is dropped once the item leaves pending;
         evicting an absent id is a no-op."""
@@ -1765,6 +1864,8 @@ class ReopenTests(unittest.TestCase):
         for sub in ("pending", "answered", "consumed"):
             (self.approvals / sub).mkdir()
         cd._reopen_nonces.clear()
+        # Issue #620: see ConfirmdTests.setUp — same cadence-gate reset.
+        cd._reset_housekeeping_for_tests()
 
     def tearDown(self):
         self.tmp.cleanup()

@@ -1405,31 +1405,77 @@ def _sweep_answered(grace=None):
 def _prune_consumed(limit=None):
     """Delete consumed/ history beyond the newest `limit` files (by mtime).
 
-    Called after each answer is consumed. Pruning is mtime-ordered on
-    purpose: it never parses file contents, so the prune itself stays
-    cheap even as history grows. Races with a concurrent answer are
-    benign — only the oldest files are ever deletion candidates, and a
-    lost race surfaces as FileNotFoundError, which is tolerated."""
+    Called by _housekeeping_if_due() (cadence-gated), after _sweep_answered().
+    Pruning is mtime-ordered on purpose: it never parses file contents, so the
+    prune itself stays cheap even as history grows. A count gate skips the
+    mtime stat storm entirely when the dir is within the cap (issue #620).
+    Races with a concurrent answer are benign — only the oldest files are
+    ever deletion candidates, and a lost race surfaces as FileNotFoundError,
+    which is tolerated."""
     if limit is None:
         limit = _CONSUMED_KEEP
     d = consumed_dir()
     try:
-        entries = []
-        for fn in os.listdir(d):
-            if not fn.endswith(".json"):
-                continue
-            try:
-                entries.append((os.path.getmtime(os.path.join(d, fn)), fn))
-            except OSError:
-                continue
-        entries.sort()
+        names = [fn for fn in os.listdir(d) if fn.endswith(".json")]
     except OSError:
         return
+    # Issue #620: skip the mtime stat storm when nothing is over the cap —
+    # the prune only has work to do when the dir actually grew past it.
+    if len(names) <= limit:
+        return
+    entries = []
+    for fn in names:
+        try:
+            entries.append((os.path.getmtime(os.path.join(d, fn)), fn))
+        except OSError:
+            continue
+    entries.sort()
     for _, fn in entries[:max(0, len(entries) - limit)]:
         try:
             os.remove(os.path.join(d, fn))
         except OSError:
             pass
+
+
+# Issue #620: _sweep_answered() + _prune_consumed() ran after EVERY answer —
+# a full answered/ listing and a consumed/ listdir + getmtime-per-file +
+# sort in the request hot path. Strays only age into sweep eligibility on
+# the grace cadence (default a day) and the prune cap is already soft, so
+# the pair now runs at most once per _HOUSEKEEPING_INTERVAL_S (default one
+# housekeeping runs at most once per _HOUSEKEEPING_INTERVAL_S (default one
+# hour) via _housekeeping_if_due(); the first call in a process always runs
+# (None sentinel: never ran). Read at call time so tests can force
+# always-run by patching the module attribute to 0.
+_HOUSEKEEPING_INTERVAL_S = _env_int("CONFIRM_HOUSEKEEPING_INTERVAL_S", 3600, 60)
+_housekeeping_lock = threading.Lock()
+_last_housekeeping_mono = None
+
+
+def _reset_housekeeping_for_tests():
+    """Test hook: make the next _housekeeping_if_due() call run."""
+    global _last_housekeeping_mono
+    with _housekeeping_lock:
+        _last_housekeeping_mono = None
+
+
+def _housekeeping_if_due():
+    """Run the answered-sweep + consumed-prune at most once per interval.
+
+    Returns True when the pair ran. Benign under handler concurrency: the
+    timestamp commits under _housekeeping_lock before the work starts, so
+    two threads can't both decide "due"; the sweep and prune are
+    individually race-tolerant (write-once files, oldest-only deletes, all
+    OSError paths tolerated)."""
+    with _housekeeping_lock:
+        global _last_housekeeping_mono
+        now = time.monotonic()
+        if (_last_housekeeping_mono is not None
+                and now - _last_housekeeping_mono < _HOUSEKEEPING_INTERVAL_S):
+            return False
+        _last_housekeeping_mono = now
+    _sweep_answered()
+    _prune_consumed()
+    return True
 
 
 def _answered_api_item(it):
@@ -2217,8 +2263,12 @@ class Handler(BaseHTTPRequestHandler):
         # move waits out the grace period (journaled loudly via the
         # stdout WARNING), biased toward never sweeping an in-flight
         # file.
-        _sweep_answered()
-        _prune_consumed()
+        # Issue #620: sweep+prune no longer run on every answer — the pair
+        # is cadence-gated (_housekeeping_if_due, default one hour) so the
+        # hot path skips the full directory scans; strays age into sweep
+        # eligibility on the grace cadence anyway, and the prune's count
+        # gate keeps the cap without the per-answer stat storm.
+        _housekeeping_if_due()
         audit_log("answer", self.client_address[0], login,
                   "id=%s decision=%s requester=%s"
                   % (aid, decision, requester))

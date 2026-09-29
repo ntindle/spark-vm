@@ -149,6 +149,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- confirmd's post-answer housekeeping no longer scans the answered and
+  consumed history directories on every approval: the stray-file sweep and
+  the history prune now run at most once an hour (tunable via
+  CONFIRM_HOUSEKEEPING_INTERVAL_S), and the prune skips its per-file scan
+  entirely when the history is within its keep limit — so answering stays
+  fast as the history grows toward the thousand-entry bound. (closes
+  #620) (#647)
 - confirmd's browser-origin check now re-resolves the box's Tailscale DNS
   name every minute instead of once at startup (mirroring the self-peer
   address refresh): a tailnet DNS rename mid-daemon no longer leaves the

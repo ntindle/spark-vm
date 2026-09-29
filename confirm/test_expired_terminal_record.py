@@ -82,6 +82,9 @@ class ExpiredTerminalRecordTests(unittest.TestCase):
         self.approvals.mkdir()
         for sub in ("pending", "answered", "consumed"):
             (self.approvals / sub).mkdir()
+        # Issue #620: housekeeping is cadence-gated on module state —
+        # reset per test so answer-path behavior is order-independent.
+        cd._reset_housekeeping_for_tests()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -312,6 +315,8 @@ class ExpiredHumanSurfaceTests(unittest.TestCase):
         self.approvals.mkdir()
         for sub in ("pending", "answered", "consumed"):
             (self.approvals / sub).mkdir()
+        # Issue #620: same cadence-gate reset as above.
+        cd._reset_housekeeping_for_tests()
 
     def tearDown(self):
         self.tmp.cleanup()
