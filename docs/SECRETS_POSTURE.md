@@ -15,8 +15,7 @@ the competitor watch, outside the five-vendor research set below — is
 opencomputer.dev: their docs describe a secret-store egress proxy where the
 runtime runs with an opaque placeholder and the real key is swapped
 in-flight, only on the outbound HTTPS call to the model provider, under an
-egress allowlist ([credentials.mdx](https://github.com/diggerhq/opencomputer/blob/HEAD/docs/agent-sessions/credentials.mdx),
-verbatim quote in the research doc, verified 2026-09-21). A fourth —
+egress allowlist ([secrets.mdx](https://github.com/diggerhq/opencomputer/blob/HEAD/docs-sandbox/sandboxes/secrets.mdx) — successor to the cited `credentials.mdx`, removed upstream 2026-09-28 in their stale-docs cleanup; verbatim quote from the original page in the research doc, verified 2026-09-21). A fourth —
 spotted the same day in the competitor watch — is h-sandbox's Credential
 Vault (open-source, self-hosted control plane): their own docs say "the
 sandbox sees only fake environment variables or no variables at all" while
