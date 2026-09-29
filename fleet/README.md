@@ -74,8 +74,8 @@ provisioner's per-box record (G15 §8) supersedes it.
   build for 3 hours" is a journal query. Journal growth: each collect
   appends one record per box carrying the full toolset payload — at the
   design's 10-minute cadence that is ~144 records/box/day; a
-  retention/compaction policy is owed no later than S2 (design open
-  question 2).
+  retention/compaction policy: see UPDATE_EVENT_REPORTING.md §4 S2 (G17) —
+  the 90-day/30-day journal discipline covers the inventory journal too.
 
 ## What's still S2/S3 (#607 stays open)
 
