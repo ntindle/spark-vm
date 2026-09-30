@@ -45,6 +45,16 @@ Implements the executable half of the R2 pre-seeded-harness contract
   schema mismatch, missing fields, or `image_version` drift vs
   `--expect-version` (defaults to the current checkout's HEAD; the
   injector passes its own pinned SHA).
+- **`scan-baked-secrets.sh`** — gate-time negative scan enforcing the
+  never-bake-values rule (GitHub #154): real secret shapes (PEM private
+  keys, AWS/GitHub/OpenAI/Anthropic token shapes) must not appear in any
+  baked file, credential-shaped filenames (`id_rsa`, `.env`,
+  `auth.json`, ...) must not exist, and the credential value dirs
+  (`home/swapd/secrets`, `home/swapd/inference-secrets`) must hold no
+  non-empty value except the allowlisted public gate-fixture dummy.
+  Pattern list in `baked-secrets-patterns.txt` (reviewed like code).
+  Exit 0 clean, exit 1 gate refusal with per-hit report, exit 2 bad
+  invocation. Wired as Step 0b of `docs/GOLDEN_IMAGE_GATE_PROCEDURE.md`.
 
 - **`install-gate-fixture.sh`** — installs the gate fixture the `gate`-mode
   probe asserts against: the public dummy inference credential under the

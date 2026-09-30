@@ -6,7 +6,8 @@ task files, the human can answer, the grant mints, and the task verifies
 end-to-end, with the filing-count determinism check. This doc is the
 procedure the operator actually runs per image. The tooling it drives is
 the gate-fixture tooling (`harness/install-gate-fixture.sh`,
-`harness/check-image-manifest.sh`, `harness/harness-auth-probe`,
+`harness/check-image-manifest.sh`, `harness/scan-baked-secrets.sh`,
+`harness/harness-auth-probe`,
 `harness/echo-fixture.py`, `harness/proxy_match.py`,
 `proxy/with-proxy`, `proxy/cred-store-set`,
 `proxy/cred-registry-set`, `proxy/cred-store-delete`,
@@ -84,6 +85,34 @@ the gate record.
   claims. Do not proceed; rebuild from a clean tree.
 - **Exit 2** is an **invocation error** (bad arguments, bad flags):
   fix the command and re-run — it is not a verdict on the image.
+
+## Step 0b — baked-secrets negative scan (pre-publish refusal)
+
+The manifest's `baked[]` claims "empty credential stores with fixed
+registry paths" and "CA generated per tenant at first boot; private key
+never baked" — but the Step 0 preflight only validates the claim's shape.
+This step checks the truth, before the gate installs anything:
+
+```bash
+harness/scan-baked-secrets.sh /
+```
+
+The scan enforces the never-bake-values rule three ways: real secret
+shapes (PEM private-key blocks, AWS/GitHub/OpenAI/Anthropic token shapes)
+must not appear in any baked file; credential-shaped filenames
+(`id_rsa`, `.env`, `auth.json`, ...) must not exist; and the credential
+value dirs (`/home/swapd/secrets`, `/home/swapd/inference-secrets`) must
+hold no non-empty value except the public gate-fixture dummy. The pattern
+list lives in `harness/baked-secrets-patterns.txt` and is reviewed like
+code — extend it when new secret shapes matter.
+
+- **Exit 0** means the image carries no baked secret material the scan
+  knows. Proceed to Step 1.
+- **Exit 1** is a **gate refusal**: the report names every hit
+  (`baked-secrets-scan: HIT <rule> <path>`). Do not proceed; find how the
+  material got baked, remove it at the image build, and rebuild.
+- **Exit 2** is an **invocation error**: fix the command and re-run — it
+  is not a verdict on the image.
 
 ## Step 1 — install the gate fixture
 
