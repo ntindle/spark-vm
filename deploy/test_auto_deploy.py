@@ -1856,7 +1856,26 @@ def test_cmd_deploy_forced_failure_never_blocks_head(tmp_path):
     fake_py = bindir / "python3"
     fake_py.write_text("#!/bin/sh\nexit 0\n")
     fake_py.chmod(0o755)
-    env = dict(env, PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+    # Issue #720: proxy_install_paths carries literal system paths beyond
+    # SWAPD_HOME (/etc/sudoers.d/swapd, /usr/local/bin/*, ...). The pinned
+    # fixture redirects only SWAPD_HOME at tmp, so on a deployed box
+    # /etc/sudoers.d/swapd is stat-able but unreadable by the test user and
+    # the forced snapshot dies in `cp -a` with Permission denied — a
+    # `snapshot-fail` audit before the deploy-fail path the test exercises.
+    # Redirect the remaining components.conf literal-path prefixes at tmp
+    # via their env overrides (the #108 pattern) so the suite never touches
+    # the host. The redirected paths stay absent, exactly the CI case.
+    literals = tmp_path / "literals"
+    sysd = tmp_path / "systemd"
+    literals.mkdir()
+    sysd.mkdir()
+    env = dict(env,
+               PATH=str(bindir) + os.pathsep + os.environ["PATH"],
+               BIN_DIR=str(bindir),
+               SYSTEMD_DIR=str(sysd),
+               SUDOERS_D_SWAPD=str(literals / "swapd"),
+               WITH_PROXY_CA_BUNDLE=str(literals / "ca-bundle.crt"),
+               LOGROTATE_SWAP_PROXY=str(literals / "swap-proxy"))
     ca.write_bytes(b"fake-ca-bytes-rotated")  # rotation, zero new commits
     r = run_bash("export AUTO_DEPLOY_NO_MAIN=1; "
                  "source ./deploy/auto-deploy.sh; set +e; cmd_deploy; echo CMD_RC=$?",
