@@ -220,7 +220,8 @@ VM's host-key fingerprint, which the control plane attests over the
 authenticated provisioning channel — the Muse pins it in the connection
 bundle (no blind TOFU).
 
-**Provisioning sequence** (all code, no human):
+**Provisioning sequence** (all code, no human on the primary relay path;
+optional BYO-tailnet step 3 is human-gated):
 
 1. `provision()` → VM boots from cloud-init (MVP; §7) that installs
    dependencies and clones the pinned spark-vm release.
@@ -239,9 +240,11 @@ bundle (no blind TOFU).
    human's tailnet admin as pending and the human approves it there, so
    the "all code, no human" claim does not apply to this path — the
    relay in step 5 is the primary path and stays fully unattended.
-   Network posture: the box is reachable only on the tenant's own tailnet
-   (or via the relay) — never on shared control-plane infrastructure —
-   so cross-tenant visibility fails closed by construction. (Decided
+   Network posture: the box lives on the tenant's own tailnet — never a
+   shared tenant-to-tenant network — so a misconfigured tailnet rule
+   cannot expose one tenant to another, and the control plane holds no
+   cross-tenant key material to misconfigure. Tenant isolation on the
+   relay path is the H11 multi-tenancy audit's call. (Decided
    2026-09-19 hosted unblock pass, P11: BYO Tailscale supersedes the
    earlier per-tenant-tailnet recommendation. The exact enrollment
    handshake — join intent at provision time vs the human running
