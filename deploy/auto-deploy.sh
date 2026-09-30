@@ -778,8 +778,46 @@ health_check() {
             return 1
         fi
     done < <(get_arr "$c" health)
+    # Issue #261: swap_addon.py hard-imports the sibling host_match.py at
+    # module load; mitmproxy swallows a script import failure and keeps
+    # running addon-less (no ssrf.deny/hosts.allow enforcement) while
+    # is-active + TCP stay green. The addon's __init__ logs
+    # "swap_addon: spark-vm version ..." on every successful load -- for
+    # the proxy component, require that signal in the journal since the
+    # service (re)started, else fail the health check so the deploy rolls
+    # back. (Positive signal, not an "error in script" grep: a renamed
+    # mitmproxy log line fails loudly instead of passing silently.)
+    if [ "$c" = "proxy" ] && [ "$SKIP_SYSTEMCTL" != "1" ]; then
+        for svc in swap-proxy.service swap-inference.service; do
+            if ! proxy_addon_loaded "$svc"; then
+                log "  health: $svc shows no swap_addon load signal since its (re)start -- addon may be missing (no enforcement)"
+                return 1
+            fi
+        done
+    fi
     log "  health: $c OK"
     return 0
+}
+
+proxy_addon_loaded() {
+    # proxy_addon_loaded <service> — true when the journal shows the
+    # addon's load signal since the service (re)started. Retry briefly:
+    # journald delivery can lag the restart by a second or two.
+    # PROXY_ADDON_LOAD_RETRIES overrides the retry count (tests).
+    local svc="$1" start_ts attempt journal_out retries="${PROXY_ADDON_LOAD_RETRIES:-5}"
+    start_ts=$(systemctl show "$svc" -p ExecMainStartTimestamp --value 2>/dev/null)
+    [ -n "$start_ts" ] && [ "$start_ts" != "n/a" ] || return 1
+    for attempt in $(seq 1 "$retries"); do
+        # Capture-then-grep (no pipe): `journalctl | grep -q` under
+        # pipefail races SIGPIPE (141) when grep -q exits on first match,
+        # false-reporting "not loaded" on a healthy box.
+        journal_out=$(journalctl -u "$svc" --since "$start_ts" --no-pager 2>/dev/null) || true
+        if grep -q "swap_addon: spark-vm version" <<< "$journal_out"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
 }
 
 # --- rollback driver -------------------------------------------------------------

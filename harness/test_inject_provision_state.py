@@ -679,7 +679,7 @@ def test_refuses_allowlist_residue(stack):
 def test_refuses_allowlist_format_variants(stack, residue):
     # The proxy parses allowlist entries case-insensitively,
     # whitespace-stripped, trailing-dot-stripped, with leading-dot
-    # subdomain matching for hostnames (proxy/swap_addon.py::_host_in_list;
+    # subdomain matching for hostnames (proxy/host_match.py::host_in_list;
     # IP literals compare as addresses since issue #257). The injector
     # must enforce the proxy's semantics, not exact lines -- each of
     # these is a live echo exemption the old grep -qxF missed.
@@ -840,12 +840,11 @@ def test_proxy_match_single_mirror_invariant():
     # ARCHITECTURE INVARIANT: the injector must not hand-mirror the
     # proxy's matching semantics inline. All three echo-detection call
     # sites (registry teardown, allowlist scan, key assertion) shell out
-    # to harness/proxy_match.py -- the single shared mirror of
-    # proxy/swap_addon.py::_host_in_list and _parse_ssrf_allow. The
-    # behavioral agreement with the real proxy functions is pinned by
-    # harness/test_proxy_match.py's drift tripwire; this test pins the
-    # delegation itself, so a future edit cannot silently reintroduce a
-    # second copy.
+    # to harness/proxy_match.py -- which imports the shared matcher from
+    # proxy/host_match.py (issue #261), the same module the proxy
+    # enforces with. The wiring + behavior contract is pinned by
+    # harness/test_proxy_match.py; this test pins the delegation itself,
+    # so a future edit cannot silently reintroduce a second copy.
     src = open(INJECTOR, encoding="utf-8").read()
     assert "def host_in_list(" not in src, \
         "injector reintroduced an inline _host_in_list mirror"
@@ -1354,7 +1353,7 @@ def test_teardown_subdomain_echo_binding(stack):
     # The leading-dot gap: a ".localhost" binding matches *.localhost
     # (loopback) at enforcement, so it is a live echo exemption -- but
     # the old inline logic only matched bare aliases and would have let
-    # it survive teardown as "clean". The shared mirror flags it, the
+    # it survive teardown as "clean". The shared matcher flags it, the
     # narrow writer removes it, the run proceeds.
     env, paths = stack
     (paths["secrets_dir"] / KEY_NAME).write_text(REAL_KEY)
@@ -1391,7 +1390,7 @@ def test_teardown_deep_subdomain_echo_binding(stack):
     # The blocker's regression test at suite level: ".sub.localhost"
     # matches x.sub.localhost at enforcement and bare "sub.localhost"
     # matches that exact (loopback) name -- both are live echo
-    # exemptions the first version of the shared mirror still missed.
+    # exemptions the first version of the shared matcher still missed.
     env, paths = stack
     (paths["secrets_dir"] / KEY_NAME).write_text(REAL_KEY)
     paths["registry_file"].write_text(json.dumps({

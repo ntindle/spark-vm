@@ -17,13 +17,13 @@
 #      then VERIFIES no effective echo binding remains AND that no echo
 #      exemption survives in inference-hosts.allow or the inference
 #      proxy's own inference-ssrf.allow. "Effective" uses the inference
-#      proxy's own matching semantics via harness/proxy_match.py -- the
-#      single shared mirror of proxy/swap_addon.py::_host_in_list and
-#      _parse_ssrf_allow, pinned against the real functions by
-#      harness/test_proxy_match.py's drift tripwire (case-insensitive,
-#      whitespace-stripped, trailing dots stripped, CIDR-aware) -- a
-#      check narrower than the enforcement point would let a real key
-#      coexist with a live exemption. Fail-closed: the injector has no
+#      proxy's own matching semantics via harness/proxy_match.py --
+#      which imports the shared matcher from proxy/host_match.py (the
+#      same module the proxy itself imports, issue #261): enforcement
+#      and this echo detection cannot diverge by construction
+#      (case-insensitive, whitespace-stripped, trailing dots stripped,
+#      CIDR-aware) -- a check narrower than the enforcement point would
+#      let a real key coexist with a live exemption. Fail-closed: the injector has no
 #      narrow path to remove allowlist lines (production sudoers is
 #      append-only by design), so a surviving echo entry is REFUSED --
 #      loudly, naming the image-build gate (which runs as root on the
@@ -226,8 +226,8 @@ if [ -z "${INJECT_SMOKE_HOST:-}" ]; then
     exit 2
 fi
 # Lowercase-normalized: the proxy's host matching is case-insensitive
-# (proxy_match.py's host_in_list mirror), and the allow file stores the
-# canonical form.
+# (proxy_match.py's host_in_list, from the shared proxy/host_match.py),
+# and the allow file stores the canonical form.
 SMOKE_HOST="$(printf '%s' "$INJECT_SMOKE_HOST" | tr '[:upper:]' '[:lower:]')"
 if ! SMOKE_HOST="$SMOKE_HOST" python3 - <<'EOF'; then
 import os, re, sys
@@ -303,22 +303,28 @@ EOF
 }
 
 # require_proxy_match: the three matcher call sites depend on
-# harness/proxy_match.py; a missing helper must refuse with a named error,
+# harness/proxy_match.py, which imports the shared matcher from
+# proxy/host_match.py (issue #261 -- the provision bundle ships proxy/ as
+# a sibling of harness/). A missing helper must refuse with a named error,
 # not a misleading "cannot read the registry" diagnostic.
 require_proxy_match() {
     if [ ! -f "$HERE/proxy_match.py" ]; then
-        echo "inject-provision-state: refusing: $HERE/proxy_match.py is missing -- the shared proxy-match mirror must ship next to this script" >&2
+        echo "inject-provision-state: refusing: $HERE/proxy_match.py is missing -- harness/proxy_match.py must ship next to this script" >&2
+        exit 1
+    fi
+    if [ ! -f "$HERE/../proxy/host_match.py" ]; then
+        echo "inject-provision-state: refusing: $HERE/../proxy/host_match.py is missing -- the shared matcher (issue #261) must ship as a sibling of harness/" >&2
         exit 1
     fi
 }
 
 # echo_bound_hosts: print the llm-api allowed_hosts entries that are
 # effective echo exemptions, one per line, under the inference proxy's
-# own matching semantics. Implemented in harness/proxy_match.py -- the
-# single shared mirror of proxy/swap_addon.py::_host_in_list (pinned by
-# harness/test_proxy_match.py's drift tripwire). Exits 2 when the
-# registry cannot be read -- an unverifiable teardown is not a clean
-# teardown (fail-closed).
+# own matching semantics. Implemented in harness/proxy_match.py, which
+# imports the shared matcher from proxy/host_match.py (issue #261 -- the
+# same module the proxy enforces with). Exits 2 when the registry cannot
+# be read -- an unverifiable teardown is not a clean teardown
+# (fail-closed).
 echo_bound_hosts() {
     require_proxy_match
     run_priv cat "$REGISTRY_FILE" 2>/dev/null \
@@ -327,12 +333,12 @@ echo_bound_hosts() {
 }
 
 # allowlist_echo_entries <kind> <file>: print the file's effective echo
-# exemptions, one per line. Implemented in harness/proxy_match.py (mirror
-# of _host_in_list for "hosts", of _parse_ssrf_allow for "ssrf" -- the
-# ssrf file additionally honors CIDR literals and promotes bare IPs to
-# /32 or /128 nets, which are exemptions when they cover 127.0.0.0/8 or
-# ::1/128). The proxy_match module is the single mirror; the tripwire
-# test pins it against the real proxy functions.
+# exemptions, one per line. Implemented in harness/proxy_match.py over the
+# shared matcher (host_in_list for "hosts", parse_ssrf_allow for "ssrf"
+# -- the ssrf file additionally honors CIDR literals and promotes bare
+# IPs to /32 or /128 nets, which are exemptions when they cover
+# 127.0.0.0/8 or ::1/128); the matcher is proxy/host_match.py itself
+# (issue #261), so the injector cannot diverge from enforcement.
 allowlist_echo_entries() {
     require_proxy_match
     python3 "$HERE/proxy_match.py" allowlist-echo-entries "$1" "$2"
@@ -353,9 +359,9 @@ fi
 # sudoers is append-only by design); a surviving echo entry fails closed
 # here, naming the image-build gate -- which runs as root on the build
 # box pre-publish -- as the teardown owner. Every match below uses the
-# inference proxy's own semantics via harness/proxy_match.py (the single
-# shared mirror, pinned by the drift tripwire): a check narrower than
-# the enforcement point would let a real key coexist with a live
+# inference proxy's own semantics via harness/proxy_match.py, importing
+# the shared proxy/host_match.py module (issue #261): a check narrower
+# than the enforcement point would let a real key coexist with a live
 # exemption.
 TEARDOWN="absent"
 if ! bound="$(echo_bound_hosts)"; then
@@ -409,8 +415,8 @@ echo "inject-provision-state: fixture teardown $TEARDOWN (no echo binding, no ec
 # fixture echo aliases (127.0.0.1, ::1, localhost),
 # and the blind compare must prove the stored value is NOT the public
 # fixture dummy. The real value is never read. The assertion lives in
-# harness/proxy_match.py (assert-key-binding) -- the same shared mirror
-# as the teardown checks, pinned by the drift tripwire.
+# harness/proxy_match.py (assert-key-binding) -- the same shared matcher
+# (proxy/host_match.py, issue #261) as the teardown checks.
 if ! run_priv cat "$REGISTRY_FILE" 2>/dev/null \
     | { require_proxy_match; KEY_NAME="$KEY_NAME" ECHO_ALIASES="$ECHO_ALIASES" \
         python3 "$HERE/proxy_match.py" assert-key-binding; } >&2; then
@@ -857,8 +863,8 @@ fi
 # Runs AFTER 8b (see the ordering note there): the smoke-only scoping
 # list is always in place before the echo host becomes reachable.
 # Presence is checked with the proxy's own matching semantics
-# (proxy_match.py's host_in_list, the tripwire-pinned mirror); the
-# append is idempotent. The injector runs as root at provision time, so
+# (proxy_match.py's host_in_list, imported from the shared
+# proxy/host_match.py -- issue #261); the append is idempotent. The injector runs as root at provision time, so
 # the append is a direct O_APPEND write (no sudoers surface needed).
 require_proxy_match
 if [ -r "$MAIN_HOSTS_ALLOW" ] && SMOKE_HOST="$SMOKE_HOST" ALLOW_FILE="$MAIN_HOSTS_ALLOW" IMPORT_DIR="$HERE" python3 - <<'EOF'; then

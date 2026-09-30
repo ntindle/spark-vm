@@ -179,6 +179,10 @@ def test_proxy_install_paths_cover_deploy_sh_writes():
         "/usr/local/share/with-proxy-ca/ca-bundle.crt",
         "/etc/logrotate.d/swap-proxy",  # QA follow-up: deploy.sh writes
         # it (line 177) but the required set never checked it
+        "/home/swapd/host_match.py",  # issue #261: the shared matcher
+        # swap_addon.py hard-imports at load -- rollback must restore it
+        # with the addon, or the box reverts to an addon-less proxy with
+        # no enforcement and green health checks.
     }
     missing = required - listed
     assert not missing, "missing from proxy_install_paths: %s" % sorted(missing)
@@ -898,6 +902,57 @@ def test_health_check_rejects_malformed_tcp_entry():
         assert r.returncode != 0, "%s should fail: %s" % (bad, r.stdout)
         assert "malformed tcp check" in r.stdout, r.stdout
         assert "TCPCALL" not in r.stdout, r.stdout
+
+
+def test_proxy_addon_loaded_detects_addonless_proxy(tmp_path):
+    """Issue #261 / Security review B2: mitmproxy swallows a script import
+    failure and keeps running addon-less (no ssrf.deny/hosts.allow
+    enforcement) while is-active + TCP stay green. proxy_addon_loaded
+    must report failure when the journal shows no addon load signal since
+    the service (re)started, so health_check fails and the deploy rolls
+    back. Non-vacuous: a journal WITH the version line passes, and an
+    undeterminable start time also fails."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    show_body = 'Wed 2026-09-30 14:00:00 CDT'
+    (bin_dir / "systemctl").write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "show" ]; then echo "%s"; exit 0; fi\n'
+        "exit 0\n" % show_body)
+    (bin_dir / "systemctl").chmod(0o755)
+    (bin_dir / "journalctl").write_text(
+        "#!/bin/bash\necho \"$JOURNAL_BODY\"\n")
+    (bin_dir / "journalctl").chmod(0o755)
+
+    def run_loaded(journal_body, show_out=show_body):
+        env = dict(os.environ)
+        env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+        env["JOURNAL_BODY"] = journal_body
+        env["SHOW_OUT"] = show_out
+        # the stub reads SHOW_OUT so the empty-start-time case is covered
+        (bin_dir / "systemctl").write_text(
+            "#!/bin/bash\n"
+            'if [ "$1" = "show" ]; then echo "$SHOW_OUT"; exit 0; fi\n'
+            "exit 0\n")
+        (bin_dir / "systemctl").chmod(0o755)
+        return subprocess.run(
+            ["bash", "-c",
+             "export AUTO_DEPLOY_NO_MAIN=1 PROXY_ADDON_LOAD_RETRIES=1; "
+             "source ./deploy/auto-deploy.sh >/dev/null 2>&1; "
+             "if proxy_addon_loaded swap-proxy.service; then echo LOADED_RC=0; "
+             "else echo LOADED_RC=1; fi"],
+            cwd=REPO, capture_output=True, text=True, timeout=60, env=env)
+
+    r = run_loaded("swap_addon: spark-vm version 0.5.0\n")
+    assert "LOADED_RC=0" in r.stdout, r.stdout + r.stderr
+    # addon-less: mitmproxy logged the script error, never the version line
+    r = run_loaded("error in script /home/swapd/swap_addon.py\n")
+    assert "LOADED_RC=1" in r.stdout, r.stdout + r.stderr
+    r = run_loaded("")
+    assert "LOADED_RC=1" in r.stdout, r.stdout + r.stderr
+    # start time undeterminable: unverifiable, never "loaded"
+    r = run_loaded("swap_addon: spark-vm version 0.5.0\n", show_out="")
+    assert "LOADED_RC=1" in r.stdout, r.stdout + r.stderr
 
 
 # --- audit -----------------------------------------------------------------------

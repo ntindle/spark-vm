@@ -1,31 +1,24 @@
 #!/usr/bin/env python3
-"""proxy_match.py -- the injector's model of proxy/swap_addon.py matching.
+"""proxy_match.py -- the injector's echo-detection layer over the proxy's own matching.
 
 harness/inject-provision-state.sh must decide, at provision time, whether a
 credential binding or an allowlist entry is an *effective* echo-host exemption
 under the inference proxy's own matching semantics. The proxy enforces with
-proxy/swap_addon.py::_host_in_list (exact/leading-dot host entries, also used
-for registry allowed_hosts and hosts.allow) and _parse_ssrf_allow (hostname or
-CIDR entries). This module is the single shared mirror of those two functions
-plus the echo-alias layer the injector needs.
+host_in_list (exact/leading-dot host entries, also used for registry
+allowed_hosts and hosts.allow) and parse_ssrf_allow (hostname or CIDR
+entries).
 
-It exists because the injector previously embedded three hand-copied mirrors
-of the proxy logic in bash heredocs with nothing pinning them to the real
-functions: a proxy matcher change would have silently voided the injector's
-fail-closed teardown model (in either direction -- a missed exemption lets a
-real key coexist with a live gate bypass; an over-strict mirror refuses
-healthy images). harness/test_proxy_match.py is the drift tripwire: it
-asserts this module agrees with the real swap_addon functions on a fixed
-corpus, so either side can only change deliberately.
+Issue #261: the injector's matching semantics ARE the proxy's own functions,
+imported from the stdlib-only shared module proxy/host_match.py (which
+proxy/swap_addon.py imports too). Enforcement and this echo detection can no
+longer diverge: the old byte-faithful mirror in this file plus the drift
+tripwire in harness/test_proxy_match.py are gone, replaced by the import and
+a much smaller contract test.
 
-RESOLVED DIVERGENCE (2026-09-22, issue #257): sa._host_in_list used to
-fumble the "::1" literal ("::1".split(":")[0] is ""), so a "::1" binding
-or hosts.allow entry never matched at enforcement while the injector's
-echo detection treated "::1" as a live echo alias anyway -- a documented
-fail-closed superset. The proxy matcher now compares IP literals as
-normalized addresses (issue #257), so the two sides agree on "::1"
-again; the injector's echo layer needs no special case and this module
-documents the resolution, not the divergence.
+Historical note (2026-09-22, issue #257): the proxy matcher used to fumble
+the "::1" literal, so the old mirror carried a documented fail-closed
+superset for it; the shared matcher now compares IP literals as normalized
+addresses, so the echo layer needs no special case.
 
 LOAD-BEARING ASSUMPTION: the echo set is exactly 127.0.0.1 / localhost /
 ::1 plus the .localhost subtree, PLUS every IPv4 spelling that normalizes
@@ -46,83 +39,30 @@ import os
 import socket
 import sys
 
-# --- Mirrors of proxy/swap_addon.py (kept byte-faithful; the tripwire pins) --
+# --- Shared matcher (issue #261): import, not mirror ----------------------
 
-def host_in_list(host, entries):
-    """Mirror of proxy/swap_addon.py::_host_in_list: match host against exact
-    names or leading-dot subdomain entries. Trailing dots are stripped on
-    both sides. IP literals (v4 and v6) are compared as normalized addresses
-    (issue #257): a single bracket pair is stripped first, hostname entries
-    never match an IP-literal host, and CIDR entries never match here."""
-    h = (host or "").lower()
-    if h.startswith("["):
-        end = h.find("]")
-        if end != -1 and (end == len(h) - 1 or h[end + 1] == ":"):
-            h = h[1:end]
-    if h.count(":") == 1:
-        # Single-colon host: a :port suffix, never an IPv6 literal.
-        # Strip it BEFORE the literal parse so "127.0.0.1:8080" takes
-        # the IP path like "127.0.0.1" does (multi-colon strings such
-        # as "::1:8080" are parsed as addresses, not host:port).
-        h = h.split(":")[0]
-    # Dot-strip AFTER the port strip: "example.com.:8080" -> "example.com"
-    # (before, it reintroduced a trailing-dot bypass of ssrf.deny name
-    # entries for the host:port form).
-    h = h.rstrip(".")
-    try:
-        h_ip = ipaddress.ip_address(h)
-    except ValueError:
-        h_ip = None
-    if h_ip is None:
-        # Hostname path: an IPv6 literal that failed parsing has no
-        # port to strip and simply falls through to a (non-)match
-        # below. (Single-colon hosts were already stripped above.)
-        h = h.split(":")[0]
-    for entry in entries or []:
-        e = str(entry).lower()
-        if e.startswith("["):
-            end = e.find("]")
-            if end != -1 and (end == len(e) - 1 or e[end + 1] == ":"):
-                e = e[1:end]
-        e = e.rstrip(".")
-        if h_ip is not None:
-            try:
-                e_ip = ipaddress.ip_address(e)
-            except ValueError:
-                continue
-            if h_ip == e_ip:
-                return True
-            continue
-        if h == e or (e.startswith(".") and h.endswith(e)):
-            return True
-    return False
-
-
-def parse_ssrf_allow(text):
-    """Mirror of proxy/swap_addon.py::_parse_ssrf_allow: split the ssrf allow
-    file into (hosts, nets). Lines are hostnames (exact or leading-dot,
-    lowercased) or CIDR literals (bare IPs promoted to /32 or /128)."""
-    hosts, nets = [], []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "/" in line:
-            try:
-                nets.append(ipaddress.ip_network(line, strict=False))
-                continue
-            except ValueError:
-                pass  # fall through to hostname treatment below
-        try:
-            ipaddress.ip_address(line)
-            nets.append(ipaddress.ip_network(line + "/32"
-                                             if ":" not in line
-                                             else line + "/128"))
-            continue
-        except ValueError:
-            pass
-        hosts.append(line.lower())
-    return hosts, nets
+# host_in_list / parse_ssrf_allow are the proxy's own functions, imported
+# from the stdlib-only shared module proxy/host_match.py (proxy/swap_addon.py
+# imports the same module). Divergence between enforcement and this echo
+# detection is impossible by construction -- the old mirror + tripwire are
+# gone. LOAD-BEARING ASSUMPTION: the provision bundle ships proxy/ as a
+# sibling of harness/ (same baked checkout); inject-provision-state.sh's
+# require_proxy_match refuses when it is not. A broken/missing import fails
+# LOUDLY here at startup (exit 2: unverifiable, never "clean") -- a Python
+# traceback alone would mislead the injector's diagnostics.
+_PROXY_DIR = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "proxy"))
+_HOST_MATCH_PATH = os.path.join(_PROXY_DIR, "host_match.py")
+if _PROXY_DIR not in sys.path:
+    sys.path.insert(0, _PROXY_DIR)
+try:
+    from host_match import host_in_list, parse_ssrf_allow
+except ImportError:
+    print("proxy_match.py: refusing: cannot import the shared matcher "
+          "(%s is missing or broken) -- the provision bundle must ship "
+          "proxy/host_match.py as a sibling of harness/ (issue #261)"
+          % _HOST_MATCH_PATH, file=sys.stderr)
+    sys.exit(2)
 
 
 # --- Echo-alias layer (the injector's question, not the proxy's) -------------
