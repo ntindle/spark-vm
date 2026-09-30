@@ -243,6 +243,7 @@ def start_session(
     view_cursor = result.get("viewCursor")
     return session, view_cursor
 
+
 def resume_session(host, session_id):
     """Load a stored session on this host; return the full result dict.
 
