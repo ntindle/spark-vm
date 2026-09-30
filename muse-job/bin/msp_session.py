@@ -36,6 +36,23 @@ guessing. MSPHost's schema-fingerprint pin (``verify_schema_on_open``)
 is the drift tripwire -- pass ``expected_schema_fingerprint`` from the
 deployment binary when opening the host.
 
+Fixture provenance (what the hermetic test fixture invents)
+----------------------------------------------------------
+The fake ``muse serve`` in ``muse-job/tests/test_msp_session.py`` stands
+in for wire shapes the transcripts are silent on. Three of its details
+are fixture-invented, NOT wire-verified:
+- ``pendingRequests: []`` on the ``notLoaded`` record ``session/read``
+  returns for an unknown session id;
+- the ``{"type": "resumed", "sessionId": ...}`` shape of the history
+  entries ``session/resume`` returns;
+- ``"source": "approvalReconfigure"`` on the
+  ``session/approvalModeChanged`` view event fired when approvalMode is
+  set on ``session/start``.
+Everything else the fixture serves mirrors the wire shapes above. The
+client only asserts the parts it documents (the session record's
+presence, the history's presence, the event's method/mode/sessionId),
+so the invented details can be wrong without the client noticing.
+
 Approval modes spell differently on the wire than on the CLI:
 ``allowAll | promptUnmatched | onRequest | denyUnmatched``. ``--yolo``
 (the standing muse-job posture) is ``allowAll`` on the wire
@@ -180,6 +197,12 @@ def start_session(
     equivalent. command_id defaults to a fresh UUIDv7 per call (an applied
     command id may not be reused -- pass your own only for retry-after-
     unacknowledged semantics, #223's territory).
+
+    ``modelId`` is the only model-related knob: no reasoning-effort
+    parameter appears in the verified v1 ``session/start`` shape, so this
+    client neither sends nor strips one -- effort control, if the wire
+    exposes it (as tiers inside modelId strings or a separate param), is
+    a later discovery; #222 stays open for it.
 
     Returns (session_dict, view_cursor_or_None). Raises ValueError for
     client-side validation failures, SessionIdConflictError when the
