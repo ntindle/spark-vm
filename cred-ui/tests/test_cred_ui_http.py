@@ -520,11 +520,12 @@ def test_api_set_one_byte_over_cap_after_chomp_refused(monkeypatch):
 # --- post-chomp emptiness check (#708) --------------------------------------
 
 
-@pytest.mark.parametrize("paste", ["\n", "\r\n"])
+@pytest.mark.parametrize("paste", ["\n", "\r\n", "\r"])
 def test_api_set_all_newline_paste_is_400_not_500(monkeypatch, paste):
     """#708: an all-newline paste that chomps to "" is truthy pre-chomp,
     so the old check let it through to 500 on the writer's empty-refusal.
     It must be a clean ValueError (400) here, before any writer call.
+    #710 extends the chomp to a lone "\r" paste (same 400 shape).
     (A "\\n\\n" paste chomps only one newline and stores "\\n" — not the
     500 path, and unchanged by this fix.)"""
     calls = []
@@ -568,5 +569,16 @@ def test_api_set_chomp_semantics_unchanged(monkeypatch):
     assert stored and stored[0] == b"tok\n"
     stored.clear()
     out = cred_ui.api_set(_set_body("tok\n"))
+    assert out == {"ok": True, "name": "gh"}
+    assert stored and stored[0] == b"tok"
+
+
+def test_api_set_lone_cr_paste_chomped(monkeypatch):
+    """#710: a trailing lone \\r (classic-Mac clipboard paste) is chomped
+    like \\n/\\r\\n — stored bytes are the intended value, not b"tok\\r"."""
+    stored = []
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: stored.append(inp) or (0, "", ""))
+    out = cred_ui.api_set(_set_body("tok\r"))
     assert out == {"ok": True, "name": "gh"}
     assert stored and stored[0] == b"tok"

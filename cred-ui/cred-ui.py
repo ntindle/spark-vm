@@ -376,10 +376,15 @@ def api_set(data):
         raise ValueError("empty secret value")
     # Strip at most one trailing newline -- pastes from password managers
     # and textareas commonly include one. (rstrip would silently alter a
-    # secret that legitimately ends in several newlines.)
+    # secret that legitimately ends in several newlines.) The lone-\r
+    # branch covers classic-Mac-style pastes (#710): without it a "\r"-only
+    # paste was truthy pre-chomp, stored a literal "\r" as the secret, and
+    # never reached the emptiness check below.
     if value.endswith("\r\n"):
         value = value[:-2]
     elif value.endswith("\n"):
+        value = value[:-1]
+    elif value.endswith("\r"):
         value = value[:-1]
     # Emptiness is checked AFTER the chomp (#708): a "\n"-only paste is
     # truthy pre-chomp, chomps to "", and would otherwise sail past this

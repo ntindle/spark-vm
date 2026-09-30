@@ -302,13 +302,45 @@ class TestIsolation:
         assert "ResolvConf=off" in active
 
     def test_nftables_drops_jail_egress(self, active):
-        assert 'iifname "ve-jail" log prefix "jail-fwd-drop: " drop' in active
+        # #441: the limit is a MATCH, not a log modifier — it must gate
+        # the log only, with the drop in a separate unconditional rule.
+        # With default (until) semantics the limit matches while the rate
+        # is under the limit, so a single rule of the form `limit rate
+        # ... log prefix ... drop` would log+drop the first 5/min but skip
+        # BOTH log and drop for over-limit packets (fail-open on the flood
+        # itself: the chains are policy accept).
+        assert ('iifname "ve-jail" limit rate 5/minute burst 10 packets '
+                'log prefix "jail-fwd-drop: "') in active
+        assert 'iifname "ve-jail" drop' in active
 
     def test_nftables_drops_jail_to_host_services(self, active):
-        assert 'iifname "ve-jail" log prefix "jail-input-drop: " drop' in active
+        assert ('iifname "ve-jail" limit rate 5/minute burst 10 packets '
+                'log prefix "jail-input-drop: "') in active
+        assert 'iifname "ve-jail" drop' in active
 
     def test_nftables_drops_traffic_into_jail(self, active):
-        assert 'oifname "ve-jail" log prefix "jail-fwd-indrop: " drop' in active
+        assert ('oifname "ve-jail" limit rate 5/minute burst 10 packets '
+                'log prefix "jail-fwd-indrop: "') in active
+        assert 'oifname "ve-jail" drop' in active
+
+    def test_nftables_drop_log_rate_limit_shape(self, active):
+        # #441: pin the SAFE two-rule shape, not just the presence of a
+        # limit token. The gated log line must be immediately followed by
+        # the unconditional drop on the same match — a limit AFTER `log`
+        # in one rule would invert the semantics (Security round-1
+        # finding), and a missing/paired-elsewhere drop would fail open.
+        cases = [
+            ('iifname "ve-jail"', "jail-input-drop: "),
+            ('iifname "ve-jail"', "jail-fwd-drop: "),
+            ('oifname "ve-jail"', "jail-fwd-indrop: "),
+        ]
+        lines = active.splitlines()
+        for match, prefix in cases:
+            gated = (match + " limit rate 5/minute burst 10 packets "
+                     'log prefix "' + prefix + '"')
+            idx = next(i for i, l in enumerate(lines) if gated in l)
+            nxt = lines[idx + 1].strip()
+            assert nxt == match + " drop", (gated, nxt)
 
     def test_nftables_accept_head_is_proxy_and_ssh_only(self, active):
         # Pin the allow head, not just the drop tail: these are the ONLY
@@ -635,15 +667,18 @@ table inet jail {
         type filter hook input priority -10; policy accept;
         iifname "ve-jail" tcp dport { 18080, 18081 } accept
         iifname "ve-jail" ct state established,related accept
-        iifname "ve-jail" log prefix "jail-input-drop: " drop
+        iifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-input-drop: "
+        iifname "ve-jail" drop
     }
     chain forward {
         type filter hook forward priority -10; policy accept;
         iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
         iifname "ve-jail" ct state established,related accept
         oifname "ve-jail" ct state established,related accept
-        iifname "ve-jail" log prefix "jail-fwd-drop: " drop
-        oifname "ve-jail" log prefix "jail-fwd-indrop: " drop
+        iifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "
+        iifname "ve-jail" drop
+        oifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-indrop: "
+        oifname "ve-jail" drop
     }
 }
 """
@@ -659,15 +694,18 @@ table inet jail {
 \t\ttype filter hook input priority -10; policy accept;
 \t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept
 \t\tiifname "ve-jail" ct state established,related accept
-\t\tiifname "ve-jail" log prefix "jail-input-drop: " drop
+\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-input-drop: "
+\t\tiifname "ve-jail" drop
 \t}
 \tchain forward {
 \t\ttype filter hook forward priority -10; policy accept;
 \t\tiifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
 \t\tiifname "ve-jail" ct state established,related accept
 \t\toifname "ve-jail" ct state established,related accept
-\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop
-\t\toifname "ve-jail" log prefix "jail-fwd-indrop: " drop
+\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "
+\t\tiifname "ve-jail" drop
+\t\toifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-indrop: "
+\t\toifname "ve-jail" drop
 \t}
 }
 """
@@ -694,9 +732,11 @@ table inet jail {
 # drops. Marker presence alone reported healthy on this; the allow-head
 # pin must not.
 WIDENED_ACCEPT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
+    '\t\tiifname "ve-jail" drop',
     '\t\tiifname "ve-jail" accept\n'
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
+    '\t\tiifname "ve-jail" drop',
 )
 
 # The 2026-09-23 arch case: a rogue DNAT variant — the proxy DNAT's target
@@ -720,9 +760,11 @@ ROGUE_DNAT_READDR_RULESET = HEALTHY_RULESET.replace(
 # Unanchored fingerprint matching alone passes this; the pin must strip
 # quoted strings before matching and fail closed.
 SMUGGLER_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
+    '\t\tiifname "ve-jail" drop',
     '\t\tiifname "ve-jail" log prefix "ct state established,related accept" accept\n'
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
+    '\t\tiifname "ve-jail" drop',
 )
 
 # The 2026-09-23 review case (Security): a DNAT-family verdict spelled
@@ -730,9 +772,11 @@ SMUGGLER_RULESET = HEALTHY_RULESET.replace(
 # substrings. The pin must deny all packet-moving verdicts it does not
 # know, not just dnat/accept spellings.
 REDIRECT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
+    '\t\tiifname "ve-jail" drop',
     '\t\tiifname "ve-jail" tcp dport 9999 redirect to :9999\n'
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
+    '\t\tiifname "ve-jail" drop',
 )
 
 # The 2026-09-23 review case (Engineering A1): a rogue sshd-DNAT
@@ -750,9 +794,11 @@ ROGUE_SSH_DNAT_RULESET = HEALTHY_RULESET.replace(
 # 1. Forward chain: jail sshd accept reachable from anywhere, not just the
 #    tailnet (dropped iifname/oifname/daddr qualifiers).
 BROADENED_SSH_ACCEPT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
+    '\t\tiifname "ve-jail" drop',
     '\t\tiifname "ve-jail" tcp dport 22 ct state established,new accept\n'
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
+    '\t\tiifname "ve-jail" drop',
 )
 # 2. Prerouting: the jail's sshd DNATed from any interface (dropped the
 #    tailscale0 iifname).
