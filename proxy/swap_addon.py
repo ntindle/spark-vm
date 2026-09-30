@@ -766,6 +766,23 @@ except Exception:
 # --- end version stamping ---
 
 
+# --- shared matcher (issue #261) ---
+# host_in_list / parse_ssrf_allow are the single source of truth in
+# proxy/host_match.py, imported by the provision-time injector too --
+# enforcement and the injector's echo detection can no longer diverge
+# (the old harness mirror + drift tripwire are gone). The private
+# aliases keep every internal call site, and test_proxy_match.py's
+# sa._host_in_list references, working unchanged.
+if _SV_HERE not in sys.path:
+    # _SV_HERE may not be on sys.path yet when the repo's scripts/ dir
+    # won the version-stamping branch above (mitmproxy load):
+    # host_match.py sits next to this file in both deployment shapes.
+    sys.path.insert(0, _SV_HERE)
+from host_match import host_in_list as _host_in_list
+from host_match import parse_ssrf_allow as _parse_ssrf_allow
+# --- end shared matcher ---
+
+
 def _totp_code(seed, at=None):
     """Current RFC 6238 TOTP code for a base32 seed: 6 digits, 30s step,
     SHA-1. Raises ValueError/binascii.Error on a bad seed."""
@@ -778,72 +795,6 @@ def _totp_code(seed, at=None):
     offset = digest[-1] & 0x0F
     code = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
     return str(code % 1000000).zfill(6)
-
-
-def _host_in_list(host, entries):
-    """Match host against exact names or leading-dot subdomain entries,
-    the same shape dynamic_credentials.ensure_allowed_url takes.
-
-    Trailing dots are stripped on both sides: DNS treats
-    "example.com." as identical to "example.com", so without this a
-    one-character suffix bypassed the ssrf.deny name entries (the
-    finding-47 self-peer guard).
-
-    IP literals (v4 and v6) are compared as normalized addresses, never
-    run through the hostname rules: splitting "::1" on ":" yields ""
-    and made every IPv6 literal unmatchable (issue #257 -- a "::1"
-    allowed_hosts entry was dead config, and enforcement checks built
-    on this function were blind to ::1). A single bracket pair is
-    stripped first ("[::1]", "[::1]:8080"); a trailing dot is stripped
-    too, so "::1." matches "::1". Hostname entries never match an IP
-    literal host, and CIDR entries never match here (they are
-    _parse_ssrf_allow's nets, not _host_in_list's entries)."""
-    h = (host or "").lower()
-    # Bracketed IPv6 literal, optionally with a :port (urllib's
-    # .hostname already strips these, but the matcher is also called
-    # directly with raw URL hosts).
-    if h.startswith("["):
-        end = h.find("]")
-        if end != -1 and (end == len(h) - 1 or h[end + 1] == ":"):
-            h = h[1:end]
-    if h.count(":") == 1:
-        # Single-colon host: a :port suffix, never an IPv6 literal.
-        # Strip it BEFORE the literal parse so "127.0.0.1:8080" takes
-        # the IP path like "127.0.0.1" does (multi-colon strings such
-        # as "::1:8080" are parsed as addresses, not host:port).
-        h = h.split(":")[0]
-    # Dot-strip AFTER the port strip: "example.com.:8080" -> "example.com".
-    # (Doing it before reintroduced a trailing-dot bypass of ssrf.deny
-    # name entries for the host:port form -- see the finding-47 note
-    # above.)
-    h = h.rstrip(".")
-    try:
-        h_ip = ipaddress.ip_address(h)
-    except ValueError:
-        h_ip = None
-    if h_ip is None:
-        # Hostname path: an IPv6 literal that failed parsing has no
-        # port to strip and simply falls through to a (non-)match
-        # below. (Single-colon hosts were already stripped above.)
-        h = h.split(":")[0]
-    for entry in entries or []:
-        e = str(entry).lower()
-        if e.startswith("["):
-            end = e.find("]")
-            if end != -1 and (end == len(e) - 1 or e[end + 1] == ":"):
-                e = e[1:end]
-        e = e.rstrip(".")
-        if h_ip is not None:
-            try:
-                e_ip = ipaddress.ip_address(e)
-            except ValueError:
-                continue
-            if h_ip == e_ip:
-                return True
-            continue
-        if h == e or (e.startswith(".") and h.endswith(e)):
-            return True
-    return False
 
 
 def _normalize_path(raw):
@@ -940,34 +891,6 @@ def _is_private_ip(ip):
         return False
     return bool(addr.is_unspecified
                 or any(addr in net for net in _PRIVATE_NETS))
-
-
-def _parse_ssrf_allow(text):
-    """Parse the ssrf allow file (finding 29). Lines are hostnames
-    (exact or leading-dot subdomain entries, matched with
-    _host_in_list) or CIDR literals (matched against resolved IPs).
-    A fresh install ships this file empty: default deny."""
-    hosts, nets = [], []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "/" in line:
-            try:
-                nets.append(ipaddress.ip_network(line, strict=False))
-                continue
-            except ValueError:
-                pass  # fall through to hostname treatment below
-        try:
-            ipaddress.ip_address(line)
-            nets.append(ipaddress.ip_network(line + "/32"
-                                             if ":" not in line
-                                             else line + "/128"))
-            continue
-        except ValueError:
-            pass
-        hosts.append(line.lower())
-    return hosts, nets
 
 
 class SwapAddon:

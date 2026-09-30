@@ -493,9 +493,9 @@ safety net firing, then fix the image; never override it.
 
 **Verification — the image does not publish until every check reads
 empty.** Verify with the proxy's own matching semantics
-(`harness/proxy_match.py`, pinned to the real functions by
-`harness/test_proxy_match.py`'s drift tripwire) that **no effective
-echo binding remains** — loopback aliases included (`127.0.0.1`,
+(`harness/proxy_match.py`, importing the shared `proxy/host_match.py`
+module the proxy itself enforces with -- issue #261, so the two cannot
+diverge) that **no effective echo binding remains** — loopback aliases included (`127.0.0.1`,
 `localhost`, `::1`; the fixture used `127.0.0.1` but a surviving alias
 is the same defect). This is the reference implementation from
 `inject-provision-state.sh` step 2 (`echo_bound_hosts` /

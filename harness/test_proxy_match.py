@@ -1,24 +1,19 @@
 """Tests for harness/proxy_match.py (R2 provision-time injector support).
 
-Two halves:
+Issue #261: proxy_match.py no longer mirrors the proxy's matching functions
+-- it imports them from the stdlib-only shared module proxy/host_match.py
+(which proxy/swap_addon.py imports too). The old drift tripwire
+(mirror-vs-real agreement on a fixed corpus) is gone: divergence is
+impossible by construction. What remains is a much smaller contract test --
+the wiring identities plus the behavior corpora pinning the SHARED module's
+documented behavior with explicit expected outcomes (so a future edit to
+host_match.py fails loudly instead of silently changing enforcement and
+injector semantics) -- alongside the unchanged echo-detection and
+injector-CLI suites.
 
-1. Unit tests for the echo-detection layer (is_echo_entry,
-   ssrf_line_is_echo, allow_text_echo_entries) and the three injector
-   CLI subcommands.
-
-2. THE DRIFT TRIPWIRE: harness/inject-provision-state.sh decides, at
-   provision time, whether a binding or allowlist entry is an *effective*
-   echo exemption under the proxy's own matching semantics. proxy_match.py
-   is the single shared mirror of proxy/swap_addon.py::_host_in_list and
-   _parse_ssrf_allow. These tests assert the mirror agrees with the REAL
-   proxy functions on a fixed corpus. If a proxy change (or a mirror
-   change) breaks the agreement, the tripwire fails LOUDLY -- that is the
-   point. Do not "fix" it by editing the corpus: reconcile the two sides
-   deliberately and update both together.
-
-The injector's echo detection treats "::1" as live; since issue #257 the
-proxy agrees, so the two sides match on it again. test_ipv6_literals_match
-pins the fixed behavior on both sides.
+The behavior corpora encode issue #257 (IP-literal normalization), the
+finding-47 trailing-dot-after-port-strip ordering, the leading-dot
+subdomain rule, and the ssrf allow-file parse contract (finding 29).
 """
 
 import json
@@ -36,112 +31,129 @@ import proxy_match as pm  # noqa: E402
 
 sys.path.insert(0, os.path.join(HERE, "..", "proxy"))
 import swap_addon as sa  # noqa: E402
+import host_match as hm  # noqa: E402 -- the shared module both sides import
 
 import logging  # noqa: E402
 sa.log.propagate = False
 sa.log.addHandler(logging.NullHandler())
 
 
-# --- Drift tripwire corpora ------------------------------------------------
+# --- Shared-matcher behavior corpora --------------------------------------
+# (host, entries, expected): the documented semantics of host_match.py,
+# pinned with explicit outcomes. A failure here means host_match.py itself
+# changed -- reconcile deliberately (issue #261: this is the contract
+# both the proxy and the injector run on).
 
-HOST_CORPUS = [
-    # (host, entries)
-    ("api.anthropic.com", ["api.anthropic.com"]),
-    ("API.ANTHROPIC.COM", ["api.anthropic.com"]),
-    ("api.anthropic.com.", ["api.anthropic.com"]),
-    ("api.anthropic.com", ["api.anthropic.com."]),
-    ("foo.api.anthropic.com", [".api.anthropic.com"]),
-    ("api.anthropic.com.evil.com", [".api.anthropic.com"]),
-    ("api.anthropic.com", [".api.anthropic.com"]),  # bare host vs dot entry
-    ("127.0.0.1", ["127.0.0.1"]),
-    ("127.0.0.1:8080", ["127.0.0.1"]),
-    ("127.0.0.1", ["127.0.0.1:8080"]),
-    ("localhost", ["localhost"]),
-    ("LOCALHOST", ["127.0.0.1", "localhost"]),
-    ("::1", ["::1"]),            # issue #257: IP literals match (True)
-    ("::1", ["127.0.0.1"]),
-    ("[::1]", ["::1"]),            # bracketed literal, normalized (True)
-    ("[::1]:8080", ["::1"]),      # bracketed literal with port (True)
-    ("::1", ["[::1]"]),           # bracketed entry, normalized (True)
-    ("::1.", ["::1"]),            # trailing dot on a literal (True)
-    ("fe80::1", ["fe80::1"]),     # non-loopback v6 literal (True)
-    ("0:0:0:0:0:0:0:1", ["::1"]),  # normalized spelling of ::1 (True)
-    ("::1", ["::2"]),             # different literal (False)
-    ("::1", ["localhost"]),       # hostname entry never matches a literal (False)
-    ("127.0.0.1", ["::1"]),       # literal entry never matches a v4 host (False)
-    ("::ffff:127.0.0.1", ["::ffff:127.0.0.1"]),  # v4-mapped v6 (True)
-    ("example.com", []),
-    ("example.com", None),
-    (None, ["example.com"]),
-    ("", ["example.com"]),
-    ("example.com", ["EXAMPLE.COM"]),
-    ("sub.example.com", [".example.com"]),
-    ("example.com.", [".EXAMPLE.com."]),
-    ("a.b.c.d", ["b.c.d"]),
-    ("xn--nxasmq6b.example", ["xn--nxasmq6b.example"]),
-    ("127.1", ["127.0.0.1"]),    # not a match, no normalization
-    ("123", [123]),              # non-string registry entries are str()'d
-    ("127.0.0.1", [" 127.0.0.1 "]),  # entries are NOT whitespace-stripped
-    ("127.0.0.1", [".0.0.1"]),  # issue #257: IP literals never take the
+HOST_CASES = [
+    # (host, entries, expected)
+    ("api.anthropic.com", ["api.anthropic.com"], True),
+    ("API.ANTHROPIC.COM", ["api.anthropic.com"], True),
+    ("api.anthropic.com.", ["api.anthropic.com"], True),
+    ("api.anthropic.com", ["api.anthropic.com."], True),
+    ("foo.api.anthropic.com", [".api.anthropic.com"], True),
+    ("api.anthropic.com.evil.com", [".api.anthropic.com"], False),
+    ("api.anthropic.com", [".api.anthropic.com"], False),  # bare host vs dot entry
+    ("127.0.0.1", ["127.0.0.1"], True),
+    ("127.0.0.1:8080", ["127.0.0.1"], True),
+    ("127.0.0.1", ["127.0.0.1:8080"], False),
+    ("localhost", ["localhost"], True),
+    ("LOCALHOST", ["127.0.0.1", "localhost"], True),
+    ("::1", ["::1"], True),            # issue #257: IP literals match
+    ("::1", ["127.0.0.1"], False),
+    ("[::1]", ["::1"], True),            # bracketed literal, normalized
+    ("[::1]:8080", ["::1"], True),      # bracketed literal with port
+    ("::1", ["[::1]"], True),           # bracketed entry, normalized
+    ("::1.", ["::1"], True),            # trailing dot on a literal
+    ("fe80::1", ["fe80::1"], True),     # non-loopback v6 literal
+    ("0:0:0:0:0:0:0:1", ["::1"], True),  # normalized spelling of ::1
+    ("::1", ["::2"], False),             # different literal
+    ("::1", ["localhost"], False),       # hostname entry never matches a literal
+    ("127.0.0.1", ["::1"], False),       # literal entry never matches a v4 host
+    ("::ffff:127.0.0.1", ["::ffff:127.0.0.1"], True),  # v4-mapped v6
+    ("example.com", [], False),
+    ("example.com", None, False),
+    (None, ["example.com"], False),
+    ("", ["example.com"], False),
+    ("example.com", ["EXAMPLE.COM"], True),
+    ("sub.example.com", [".example.com"], True),
+    ("example.com.", [".EXAMPLE.com."], False),
+    ("a.b.c.d", ["b.c.d"], False),
+    ("xn--nxasmq6b.example", ["xn--nxasmq6b.example"], True),
+    ("127.1", ["127.0.0.1"], False),    # not a match, no normalization
+    ("123", [123], True),              # non-string registry entries are str()'d
+    ("127.0.0.1", [" 127.0.0.1 "], False),  # entries are NOT whitespace-stripped
+    ("127.0.0.1", [".0.0.1"], False),  # issue #257: IP literals never take the
     # leading-dot subdomain rule (the old string-suffix accident) -- a
     # partial-IP entry matches nothing at enforcement, so the injector
-    # must not flag it as an echo exemption either (False, both sides)
-    ("127.0.0.1:8080", [".0.0.1"]),  # port strips before the literal
-    # parse: a port-suffixed literal takes the IP path too (False)
-    ("example.com.:8080", ["example.com"]),  # Security: the dot-strip
+    # must not flag it as an echo exemption either
+    ("127.0.0.1:8080", [".0.0.1"], False),  # port strips before the literal
+    # parse: a port-suffixed literal takes the IP path too
+    ("example.com.:8080", ["example.com"], True),  # Security: the dot-strip
     # runs AFTER the port strip -- a trailing-dot host:port must still
     # match (fail-closed ssrf.deny name entries); regressed once in
-    # e9ff2c7 and pinned here (True)
+    # e9ff2c7 and pinned here
 ]
 
-SSRF_CORPUS = [
-    "",
-    "# just a comment\n",
-    "api.example.com\n",
-    "API.EXAMPLE.COM\n",
-    ".example.com\n",
-    "  api.example.com  \n",
-    "api.example.com\n127.0.0.1\n# comment\n\nlocalhost\n",
-    "10.0.0.0/8\n",
-    "127.0.0.0/8\n",
-    "127.0.0.1/32\n",
-    "::1/128\n",
-    "fe80::/10\n",
-    "2001:db8::/32\n",
-    "999.999.0.0/16\n",      # invalid CIDR -> hostname treatment
-    "example.com:8080\n",    # not an IP -> hostname treatment
-    "2001:db8::1\n",         # bare IPv6 -> /128
-    "127.0.0.1\n",
-    "::1\n",
-    "1.2.3.4\n",
+# (text, expected hosts, expected nets as strings)
+SSRF_CASES = [
+    ("", [], []),
+    ("# just a comment\n", [], []),
+    ("api.example.com\n", ["api.example.com"], []),
+    ("API.EXAMPLE.COM\n", ["api.example.com"], []),
+    (".example.com\n", [".example.com"], []),
+    ("  api.example.com  \n", ["api.example.com"], []),
+    ("api.example.com\n127.0.0.1\n# comment\n\nlocalhost\n",
+     ["api.example.com", "localhost"], ["127.0.0.1/32"]),
+    ("10.0.0.0/8\n", [], ["10.0.0.0/8"]),
+    ("127.0.0.0/8\n", [], ["127.0.0.0/8"]),
+    ("127.0.0.1/32\n", [], ["127.0.0.1/32"]),
+    ("::1/128\n", [], ["::1/128"]),
+    ("fe80::/10\n", [], ["fe80::/10"]),
+    ("2001:db8::/32\n", [], ["2001:db8::/32"]),
+    ("999.999.0.0/16\n", ["999.999.0.0/16"], []),      # invalid CIDR -> hostname
+    ("example.com:8080\n", ["example.com:8080"], []),    # not an IP -> hostname
+    ("2001:db8::1\n", [], ["2001:db8::1/128"]),         # bare IPv6 -> /128
+    ("127.0.0.1\n", [], ["127.0.0.1/32"]),
+    ("::1\n", [], ["::1/128"]),
+    ("1.2.3.4\n", [], ["1.2.3.4/32"]),
 ]
 
 
-class TestDriftTripwire(unittest.TestCase):
-    """proxy_match.py must agree with the real proxy functions. A failure
-    here means one side changed: reconcile deliberately, never by
-    weakening the corpus."""
+class TestSharedMatcherContract(unittest.TestCase):
+    """Issue #261: the matcher is shared by construction -- proxy_match.py
+    and swap_addon.py import the same proxy/host_match.py functions. The
+    contract pins (1) the wiring identities, so no mirror can silently
+    drift back in, and (2) the shared module's documented behavior with
+    explicit expected outcomes, so a future edit to host_match.py fails
+    loudly instead of silently changing enforcement and injector
+    semantics. Do not "fix" a behavior failure by editing the corpus:
+    reconcile the change deliberately in host_match.py."""
+
+    def test_matcher_imports_are_the_shared_module(self):
+        # Divergence-by-construction, proven by identity: the names every
+        # consumer calls are the host_match.py function objects.
+        self.assertIs(pm.host_in_list, hm.host_in_list)
+        self.assertIs(pm.parse_ssrf_allow, hm.parse_ssrf_allow)
+        self.assertIs(sa._host_in_list, hm.host_in_list)
+        self.assertIs(sa._parse_ssrf_allow, hm.parse_ssrf_allow)
 
     def test_corpus_discriminates(self):
-        # The tripwire is vacuous if the corpus never exercises both
-        # outcomes on the real function.
-        results = {sa._host_in_list(h, e) for h, e in HOST_CORPUS}
+        # The behavior pin is vacuous if the corpus never exercises both
+        # outcomes.
+        results = {expected for _, _, expected in HOST_CASES}
         self.assertEqual(results, {True, False})
 
-    def test_host_in_list_agrees_with_proxy(self):
-        for host, entries in HOST_CORPUS:
+    def test_host_in_list_behavior(self):
+        for host, entries, expected in HOST_CASES:
             with self.subTest(host=host, entries=entries):
-                self.assertEqual(pm.host_in_list(host, entries),
-                                 sa._host_in_list(host, entries))
+                self.assertEqual(hm.host_in_list(host, entries), expected)
 
-    def test_parse_ssrf_allow_agrees_with_proxy(self):
-        for text in SSRF_CORPUS:
+    def test_parse_ssrf_allow_behavior(self):
+        for text, exp_hosts, exp_nets in SSRF_CASES:
             with self.subTest(text=text):
-                ph, pn = pm.parse_ssrf_allow(text)
-                sh, sn = sa._parse_ssrf_allow(text)
-                self.assertEqual(ph, sh)
-                self.assertEqual([str(n) for n in pn],
-                                 [str(n) for n in sn])
+                hosts, nets = hm.parse_ssrf_allow(text)
+                self.assertEqual(hosts, exp_hosts)
+                self.assertEqual([str(n) for n in nets], exp_nets)
 
     def test_ipv6_literals_match(self):
         # Issue #257: the proxy used to fumble "::1" (split(":")[0] == ""),

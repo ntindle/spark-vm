@@ -54,7 +54,7 @@ echo "=== spark-vm deploy from $REPO ==="
 
 # --- 0. preflight: validate everything BEFORE touching the box --------
 echo "[0/7] Preflight (no mutations yet)..."
-for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
+for f in proxy/swap_addon.py proxy/host_match.py proxy/grant-writer proxy/cred-grant-revoke \
          proxy/cred-registry-set proxy/cred-registry-set-inference \
          proxy/cred-store-set proxy/cred-store-set-inference \
          proxy/cred-store-verify-inference \
@@ -73,7 +73,7 @@ for f in proxy/swap_addon.py proxy/grant-writer proxy/cred-grant-revoke \
         exit 1
     fi
 done
-python3 -m py_compile proxy/swap_addon.py confirm/confirmd.py confirm/push.py \
+python3 -m py_compile proxy/swap_addon.py proxy/host_match.py confirm/confirmd.py confirm/push.py \
     proxy/safe_install.py proxy/build_ca_bundle.py proxy/privileged_read.py \
     scripts/sparkvm_version.py scripts/bounded_http.py \
     || { echo "ERROR: python syntax check failed — aborting"; exit 1; }
@@ -85,6 +85,11 @@ python3 scripts/sparkvm_version.py --check >/dev/null \
 # --- 1. Python addons and scripts ---------------------------------------
 echo "[1/7] Installing proxy files to /home/swapd..."
 sudo install -o swapd -g swapd -m 0644 proxy/swap_addon.py /home/swapd/swap_addon.py
+# Issue #261: swap_addon.py imports the shared matcher from host_match.py
+# (its own directory is on sys.path in the standalone deploy, exactly
+# like the sparkvm_version.py helper below) -- the shared module must
+# ship with it, or the proxy fails its import loudly at service start.
+sudo install -o swapd -g swapd -m 0644 proxy/host_match.py /home/swapd/host_match.py
 sudo install -o swapd -g swapd -m 0755 proxy/grant-writer /home/swapd/grant-writer
 # Version stamping (docs/VERSIONING.md): the deployed standalone files resolve
 # the repo VERSION by walking up from their own directory, so install the
@@ -309,6 +314,37 @@ else
     echo "  summons-sweep.timer: FAILED"
     sudo systemctl status "summons-sweep.timer" --no-pager | head -20
 fi
+
+# Issue #261: swap_addon.py hard-imports the sibling host_match.py at
+# module load. mitmproxy catches a script import failure, logs it, and
+# keeps running WITHOUT the addon -- a dumb forwarder with no
+# ssrf.deny/hosts.allow enforcement, while the port + is-active checks
+# above stay green. The addon's __init__ logs "swap_addon: spark-vm
+# version ..." on every successful load, so its presence in the journal
+# since the service (re)started proves the addon is actually enforcing.
+# (Positive signal, not an "error in script" grep: a renamed mitmproxy
+# log line fails this check loudly instead of passing silently.)
+# Retry briefly: journald delivery can lag the restart by a second or two.
+for svc in swap-proxy.service swap-inference.service; do
+    start_ts=$(sudo systemctl show "$svc" -p ExecMainStartTimestamp --value 2>/dev/null)
+    if [ -z "$start_ts" ] || [ "$start_ts" = "n/a" ]; then
+        echo "  ERROR: cannot determine start time of $svc -- addon load unverifiable, refusing"
+        exit 1
+    fi
+    loaded=0
+    for attempt in $(seq 1 5); do
+        if sudo journalctl -u "$svc" --since "$start_ts" --no-pager 2>/dev/null | grep -q "swap_addon: spark-vm version"; then
+            loaded=1; break
+        fi
+        sleep 1
+    done
+    if [ "$loaded" = "1" ]; then
+        echo "  $svc: addon loaded (version line in journal since $start_ts)"
+    else
+        echo "  ERROR: $svc shows no swap_addon load signal since $start_ts -- the proxy may be running addon-less (no enforcement). Refusing."
+        exit 1
+    fi
+done
 
 # Warn if ssrf.deny is missing (finding 61).
 if ! sudo test -f /home/swapd/ssrf.deny; then  # 69(e): swapd home is 0700, test under sudo

@@ -840,12 +840,11 @@ def test_proxy_match_single_mirror_invariant():
     # ARCHITECTURE INVARIANT: the injector must not hand-mirror the
     # proxy's matching semantics inline. All three echo-detection call
     # sites (registry teardown, allowlist scan, key assertion) shell out
-    # to harness/proxy_match.py -- the single shared mirror of
-    # proxy/swap_addon.py::_host_in_list and _parse_ssrf_allow. The
-    # behavioral agreement with the real proxy functions is pinned by
-    # harness/test_proxy_match.py's drift tripwire; this test pins the
-    # delegation itself, so a future edit cannot silently reintroduce a
-    # second copy.
+    # to harness/proxy_match.py -- which imports the shared matcher from
+    # proxy/host_match.py (issue #261), the same module the proxy
+    # enforces with. The wiring + behavior contract is pinned by
+    # harness/test_proxy_match.py; this test pins the delegation itself,
+    # so a future edit cannot silently reintroduce a second copy.
     src = open(INJECTOR, encoding="utf-8").read()
     assert "def host_in_list(" not in src, \
         "injector reintroduced an inline _host_in_list mirror"
