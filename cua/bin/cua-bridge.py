@@ -15,7 +15,11 @@ Endpoints:
   POST /api/key         -> {"key":"Enter","modifiers":["ctrl"]}   (foreground)
   POST /api/launch      -> {"app":"xterm"|"terminal"|"chromium"|"blender"} (allowlisted spawn on :98;
                                   the driver's own launch tool is
-                                  permission-denied in standard mode)
+                                  permission-denied in standard mode).
+                                  Optional "singleton": true refuses (409)
+                                  while a bridge-launched instance is still
+                                  alive; GET /api/status exposes the running
+                                  set under "launched" (#491).
 """
 import fcntl
 import json
@@ -26,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _HOME = os.path.expanduser("~")
@@ -161,16 +166,167 @@ LAUNCH_ALLOWLIST = {
 }
 
 
-def launch_app(name):
+class AlreadyRunning(Exception):
+    """Raised by launch_app(singleton=True) while an instance is alive (#491)."""
+
+    def __init__(self, app, pids):
+        super().__init__(f"{app} already running: {pids}")
+        self.app = app
+        self.pids = pids
+
+
+def launch_app(name, singleton=False):
+    """Spawn an allowlisted app on :98 and record its PID (#491).
+
+    With singleton=True the prune → check → spawn → record sequence runs
+    inside ONE _LAUNCHED_LOCK acquisition, so two racing requests (a panel
+    double-tap — the exact failure mode this guards) cannot both observe
+    an empty registry and both spawn; the loser gets AlreadyRunning,
+    which the handler maps to 409. Splitting the check and the spawn
+    across two lock acquisitions would reintroduce the race.
+    Popen-under-lock is safe here: fork+exec is fast and every handler
+    already runs on its own thread."""
     if name not in LAUNCH_ALLOWLIST:
         raise ValueError(f"app not allowlisted: {name!r}")
     argv = LAUNCH_ALLOWLIST[name]
     if not shutil.which(argv[0]) and not os.path.isfile(argv[0]):
         raise RuntimeError(f"{argv[0]} is not installed on spark-vm")
-    subprocess.Popen(argv, env=BASE_ENV,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+    with _LAUNCHED_LOCK:
+        _prune_launched()
+        if singleton:
+            live = _LAUNCHED.get(name, [])
+            if live:
+                raise AlreadyRunning(name, [i["pid"] for i in live])
+        proc = subprocess.Popen(argv, env=BASE_ENV,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        _LAUNCHED.setdefault(name, []).append(
+            {"pid": proc.pid, "launched_at": time.time()})
+        _save_launched_locked()
     return {"launched": name}
+
+
+# Launch registry (#491): /api/launch used to spawn one process per request
+# with no record of what was already running, so a panel double-tap or a
+# retry loop could stack N xterms / N chromiums — each chromium is a heavy
+# process. Every spawned PID is recorded here per app name; dead PIDs are
+# pruned on every read. ThreadingHTTPServer serves requests on threads,
+# so the registry mutates under _LAUNCHED_LOCK; PID reuse is the residual
+# false-positive: a recycled PID can briefly report a dead app as running
+# until the next prune — acceptable on this localhost, single-operator
+# bridge, and it self-heals on the next read.
+_LAUNCHED = {}  # app name -> [{"pid": int, "launched_at": float}]
+_LAUNCHED_LOCK = threading.Lock()
+
+
+def _is_alive(pid):
+    """Liveness probe for a registry PID (#491).
+
+    Our own children are probed with waitpid(WNOHANG): (0, 0) means still
+    running; (pid, _) means it had exited — reaped here, so no zombie
+    lingers. The reap matters: launch_app drops the Popen handle without
+    wait(), so an exited child is a zombie, and os.kill(pid, 0) succeeds
+    on zombies — without the reap, _prune_launched would never drop an
+    exited app and singleton would 409 "already running" forever.
+    PIDs inherited across a bridge restart are NOT our children (they were
+    reparented when the old bridge died), so waitpid raises
+    ChildProcessError for those — fall back to the kill(pid, 0) existence
+    probe. Unreachable counts as dead, which fails toward allowing a
+    duplicate launch (the documented default), never toward a wrongful
+    refusal."""
+    try:
+        rpid, _ = os.waitpid(pid, os.WNOHANG)
+        return rpid == 0
+    except ChildProcessError:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+    except OSError:
+        return False
+
+
+def _prune_launched():
+    """Drop dead PIDs from the launch registry. The lock must be held."""
+    for app, insts in list(_LAUNCHED.items()):
+        live = [inst for inst in insts if _is_alive(inst["pid"])]
+        if live:
+            _LAUNCHED[app] = live
+        else:
+            del _LAUNCHED[app]
+
+
+def launched_instances(app):
+    """Live bridge-launched instances for an app name, dead PIDs pruned
+    (#491). Returns [{"pid": int, "launched_at": float}]."""
+    with _LAUNCHED_LOCK:
+        _prune_launched()
+        return [dict(i) for i in _LAUNCHED.get(app, [])]
+
+
+def all_launched():
+    """The whole launch registry, pruned — the /api/status "launched"
+    payload (#491)."""
+    with _LAUNCHED_LOCK:
+        _prune_launched()
+        return {app: [dict(i) for i in insts]
+                for app, insts in _LAUNCHED.items()}
+
+
+# Registry persistence (#491): the registry above is in-process, but the
+# bridge restarts (the keepalive restarts it on failure), and a singleton
+# 409 answered from an empty post-restart registry would be a silent
+# false negative — the exact retry-after-failure scenario this guards.
+# So every mutation persists the registry to ~/.cache (next to the #495
+# singleton lock — the flock guarantees this process is the only writer)
+# and it is reloaded + pruned at startup. Writes are atomic tmp+rename so
+# a crash can never leave a torn file; a failed save warns on stderr but
+# never breaks the launch (persistence is best-effort, the guard is not).
+# Residual: PID reuse across a reboot can false-positive until the next
+# prune — the same best-effort caveat as the in-memory registry.
+_LAUNCH_REGISTRY_FILE = os.path.join(_HOME, ".cache", "cua-launched.json")
+
+
+def _save_launched_locked():
+    """Persist the launch registry. The lock must be held."""
+    try:
+        tmp = _LAUNCH_REGISTRY_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_LAUNCHED, f)
+        os.replace(tmp, _LAUNCH_REGISTRY_FILE)
+    except OSError as e:
+        print(f"cua-bridge: WARNING: cannot persist launch registry: {e}",
+              file=sys.stderr)
+
+
+def _load_launched():
+    """Reload the persisted registry at startup, pruning dead PIDs (#491).
+    Corrupt or unreadable files are ignored — never fatal."""
+    try:
+        with open(_LAUNCH_REGISTRY_FILE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    with _LAUNCHED_LOCK:
+        _LAUNCHED.clear()
+        for app, insts in data.items():
+            if not isinstance(app, str) or not isinstance(insts, list):
+                continue
+            for inst in insts:
+                if (isinstance(inst, dict)
+                        and isinstance(inst.get("pid"), int)
+                        and isinstance(inst.get("launched_at"),
+                                       (int, float))):
+                    _LAUNCHED.setdefault(app, []).append(
+                        {"pid": inst["pid"],
+                         "launched_at": float(inst["launched_at"])})
+        _prune_launched()
+
+
+_load_launched()
 
 
 def call(tool, args):
@@ -294,7 +450,10 @@ class Handler(BaseHTTPRequestHandler):
                 st = subprocess.run([DRIVER, "status"], capture_output=True,
                                     timeout=10, env=BASE_ENV, text=True)
                 self._json({"ok": st.returncode == 0,
-                            "detail": st.stdout.strip()[:400]})
+                            "detail": st.stdout.strip()[:400],
+                            # #491 (b): the panel reads the running set here
+                            # to decide whether to launch — dead PIDs pruned.
+                            "launched": all_launched()})
             elif self.path == "/api/windows":
                 self._json(call("list_windows", {}))
             elif self.path == "/api/screenshot":
@@ -384,8 +543,17 @@ class Handler(BaseHTTPRequestHandler):
                 app = str(data.get("app", ""))[:80]
                 if not app:
                     return self._json({"error": "empty app"}, 400)
+                # #491 (a-as-opt-in): the caller asked for at most one
+                # instance. Only a literal JSON true opts in — a "false"
+                # string must not silently become a singleton refusal.
+                # The default stays multi-launch: a second xterm is
+                # sometimes wanted.
+                singleton = data.get("singleton") is True
                 try:
-                    res = launch_app(app)
+                    res = launch_app(app, singleton=singleton)
+                except AlreadyRunning as e:
+                    return self._json({"error": "already running",
+                                       "pids": e.pids}, 409)
                 except (ValueError, RuntimeError) as e:
                     return self._json({"error": str(e)[:200]}, 400)
                 self._json({"ok": True, "result": res})
