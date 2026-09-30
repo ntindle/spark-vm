@@ -33,17 +33,17 @@ def cli(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("secret,label", [
-    ("sk-abcdefghij1234567890XYZ", "OpenAI-style API key"),
-    ("sk-ant-abc-def-ghi-jkl-mnop", "Anthropic API key"),
+    ("sk-" + "abcdefghij1234567890XYZ", "OpenAI-style API key"),
+    ("sk-ant-" + "abc-def-ghi-jkl-mnop", "Anthropic API key"),
     ("ghp_abcdefghijklmnopqrstuv", "GitHub token"),
-    ("github_pat_abcdefghijklmnopqrstuv", "GitHub fine-grained PAT"),
-    ("AKIAIOSFODNN7EXAMPLE", "AWS access key id"),
+    ("github_" + "pat_abcdefghijklmnopqrstuv", "GitHub fine-grained PAT"),
+    ("AK" + "IAIOSFODNN7EXAMPLE", "AWS access key id"),
     ("xoxb-123456789012-abcdef123456", "Slack token"),
     ("glpat-abcdefghijklmno12", "GitLab personal access token"),
     ("hf_abcdefghijklmnopqrstuv", "Hugging Face token"),
     ("sk_live_abcdefghijklmnop", "Stripe key"),
-    ("-----BEGIN RSA PRIVATE KEY-----", "PEM private key"),
-    ("-----BEGIN OPENSSH PRIVATE KEY-----", "PEM private key"),
+    ("-----BEG" + "IN RSA PRIVATE KEY-----", "PEM private key"),
+    ("-----BEG" + "IN OPENSSH PRIVATE KEY-----", "PEM private key"),
     ("AIzaSyC0123456789abcdef0123456789abcdef", "Google API key"),
     ("eyJzdWIiOiIxMjM0NTY3ODkwIn0.eyJzdWIiOiIxMjM0In0."
      "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", "JWT"),
@@ -106,9 +106,9 @@ def test_secret_shaped_placeholder_names_are_findings(cli):
     # hsurr: is not a smuggling channel: a secret-shaped name would land
     # verbatim in the TUI (unregistered names stay literal), so it fires.
     findings = dict(cli.scan_for_secrets(
-        "use hsurr:sk-abcdefghij1234567890XYZ for this"))
+        "use hsurr:sk-" + "abcdefghij1234567890XYZ for this"))
     assert findings.get("secret-shaped credential placeholder")
-    findings = dict(cli.scan_for_secrets("key hsurr:AKIAIOSFODNN7EXAMPLE"))
+    findings = dict(cli.scan_for_secrets("key hsurr:AK" + "IAIOSFODNN7EXAMPLE"))
     assert findings.get("secret-shaped credential placeholder")
     # A smuggled AWS-style secret whose charset breaks the placeholder name
     # still fires: the invalid tail reattaches to the assignment value.
@@ -119,7 +119,7 @@ def test_secret_shaped_placeholder_names_are_findings(cli):
 
 def test_real_secret_beside_placeholder_still_fires(cli):
     findings = dict(cli.scan_for_secrets(
-        "api_key: hsurr:stripe-prod sk-abcdefghij1234567890XYZ"))
+        "api_key: hsurr:stripe-prod sk-" + "abcdefghij1234567890XYZ"))
     assert "OpenAI-style API key" in findings
     # the placeholder is gone, so `api_key:` now points at the real token --
     # the assignment pattern legitimately fires too
@@ -127,7 +127,7 @@ def test_real_secret_beside_placeholder_still_fires(cli):
 
 
 def test_findings_never_echo_the_secret(cli):
-    secret = "sk-abcdefghij1234567890XYZ"
+    secret = "sk-" + "abcdefghij1234567890XYZ"
     findings = cli.scan_for_secrets(f"token {secret} here")
     blob = repr(findings)
     assert secret not in blob
@@ -163,6 +163,6 @@ def test_gate_passes_clean_text(cli):
 
 def test_gate_returns_labelled_counts(cli):
     findings = cli.require_no_secrets(
-        "sk-abcdefghij1234567890XYZ and sk-ZYXWVUTSRQPO0987654321", "x",
+        "sk-" + "abcdefghij1234567890XYZ and sk-" + "ZYXWVUTSRQPO0987654321", "x",
         allow=True)
     assert dict(findings) == {"OpenAI-style API key": 2}

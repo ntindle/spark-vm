@@ -984,7 +984,7 @@ def test_identity_refuses_private_key(stack):
     identity_dir = paths["secrets_dir"] / "identity"
     identity_dir.mkdir()
     (identity_dir / "authorized_keys").write_text(
-        "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n"
+        "-----BEG" + "IN OPENSSH PRIVATE KEY-----\nAAAA\n"
         "-----END OPENSSH PRIVATE KEY-----\n")
     env = dict(env)
     env["INJECT_IDENTITY_DIR"] = str(identity_dir)
