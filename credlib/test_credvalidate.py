@@ -188,6 +188,15 @@ class TestCredMirrorParity:
         assert cred.HOST_LABEL_MAX_LEN == HOST_LABEL_MAX_LEN
         assert tuple(cred.RESERVED_ENTRIES) == tuple(RESERVED_ENTRIES)
 
+    def test_reserved_entries_membership_pinned(self):
+        # The finding-34b boundary is the reason this module exists: a
+        # member dropped consistently from the module AND the mirror would
+        # pass every other test green, so the content itself is pinned.
+        expected = ("allowed_hosts", "allowed_methods", "allowed_paths",
+                    "grants")
+        assert tuple(RESERVED_ENTRIES) == expected
+        assert tuple(cred.RESERVED_ENTRIES) == expected
+
     @pytest.mark.parametrize("name", CORPUS_ACCEPT_CANONICAL)
     def test_canonical_agrees_accept(self, name):
         assert _cred_accepts(cred.check_name, name)
@@ -274,6 +283,20 @@ class TestCredUiImportsContract:
                       "_HOST_SHAPE_RE = ", "_HOST_RE = "):
             assert local not in src, \
                 "cred-ui.py reintroduces a local contract copy: %r" % local
+
+
+class TestCredlibImportsContract:
+    """credlib must consume the module, not redefine it (same-dir import)."""
+
+    def test_no_local_contract_definitions(self):
+        src = open(os.path.join(REPO, "credlib", "dynamic_credentials.py"),
+                   encoding="utf-8").read()
+        for local in ('NAME_LEGACY_RE = re.compile',
+                      'NAME_RE = re.compile'):
+            assert local not in src, \
+                "dynamic_credentials.py reintroduces a local contract copy: %r" \
+                % local
+        assert "from credvalidate import NAME_LEGACY_RE" in src
 
 
 class TestWriterImportsContract:

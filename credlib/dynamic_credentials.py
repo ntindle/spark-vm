@@ -37,7 +37,7 @@ class DynamicCredentialError(Exception):
 # no slashes, no dots, no shell. The swapd-side writers enforce
 # charset-only (proxy/cred-store-set: ^[A-Za-z0-9_-]+$, no length cap),
 # and the management/read verbs everywhere else are legacy-tolerant the
-# same way (cred's check_name_legacy, cred-ui's NAME_LEGACY_RE,
+# same way (cred's check_name_legacy, cred-ui's name_ok_legacy,
 # proxy/cred-registry-set's check_legacy) so credentials created before
 # the #150 64-char cap stay usable. This choke point matches them:
 # charset-only, no cap — and carries the NAME_LEGACY_RE identifier so
