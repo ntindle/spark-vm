@@ -1607,3 +1607,81 @@ def test_superseded_confirm_token_stays_retired_across_gc():
     # The live token is untouched.
     row, lookup_status = svc._lookup_token_row(new_token)
     assert lookup_status == "ok"
+
+
+# -- #404: bounded snapshot cache for _refresh_under_lock ------------------
+
+
+def _daemon_row(eid, email):
+    return {
+        "entry_id": eid,
+        "owner_email": email,
+        "status": "pending",
+        "submitted_at": "2026-09-20T12:00:00Z",
+    }
+
+
+def test_refresh_under_lock_skips_unchanged_store():
+    # #404: with no on-disk change between requests, the O(store)
+    # re-parse is skipped — the in-memory view objects are untouched.
+    svc, tmp = make_service()
+    svc._save_row(_daemon_row("e1", "a@example.com"))
+    svc._refresh_under_lock()
+    rows_obj, by_email_obj, consumed_obj = (svc.rows, svc.by_email,
+                                            svc.consumed)
+    svc._refresh_under_lock()
+    assert svc.rows is rows_obj
+    assert svc.by_email is by_email_obj
+    assert svc.consumed is consumed_obj
+
+
+def test_refresh_under_lock_sees_external_mutation():
+    # #404: a separate-process mutation (the lifecycle-job CLI) moves
+    # mtime/size, so the cache invalidates and the new row is picked up.
+    svc, tmp = make_service()
+    svc._save_row(_daemon_row("e1", "a@example.com"))
+    svc._refresh_under_lock()
+    with open(os.path.join(tmp, "rows.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_daemon_row("e2", "b@example.com")) + "\n")
+    svc._refresh_under_lock()
+    assert "e2" in svc.rows
+    assert svc.rows["e2"]["owner_email"] == "b@example.com"
+
+
+def test_refresh_under_lock_sees_daemon_write():
+    # #404: the daemon's own _save_row moves the file, so the next
+    # refresh re-parses (dict identity changes) and the row is live.
+    svc, tmp = make_service()
+    svc._refresh_under_lock()
+    rows_obj = svc.rows
+    svc._save_row(_daemon_row("e1", "a@example.com"))
+    svc._refresh_under_lock()
+    assert svc.rows is not rows_obj
+    assert svc.rows["e1"]["owner_email"] == "a@example.com"
+
+
+def test_refresh_under_lock_preserves_ip_hits_on_cache_hit():
+    # The _ip_hits preservation contract still holds when the parse is
+    # skipped: rate-limit state must not reset on a cache hit.
+    svc, tmp = make_service()
+    svc._refresh_under_lock()
+    svc._ip_hits["1.2.3.4"] = [NOW.timestamp()]
+    svc._refresh_under_lock()
+    assert svc._ip_hits["1.2.3.4"] == [NOW.timestamp()]
+
+
+def test_refresh_under_lock_sees_external_token_mutation():
+    # #404 / QA round-1 blocker: an external process mutating ONLY
+    # consumed_tokens.txt (the second snapshot-key slot) must also
+    # invalidate the cache — the consumed-token set is security-relevant
+    # (single-use / double-confirm prevention), so the slot needs its
+    # own pin.
+    svc, tmp = make_service()
+    svc._refresh_under_lock()
+    consumed_obj = svc.consumed
+    with open(os.path.join(tmp, "consumed_tokens.txt"), "a",
+              encoding="utf-8") as fh:
+        fh.write("forget.abc123\n")
+    svc._refresh_under_lock()
+    assert svc.consumed is not consumed_obj
+    assert "forget.abc123" in svc.consumed
