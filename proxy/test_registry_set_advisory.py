@@ -88,6 +88,23 @@ class AdvisoryTests(unittest.TestCase):
                 self.assertEqual(p.returncode, 0, p.stderr)
                 self.assertNotIn(ADVISORY_MARKER, p.stderr)
 
+    def test_loosening_verbs_fail_quiet_on_missing_targets(self):
+        # FOLLOW-adv4: the advisory fires only when the loosening actually
+        # happened. On the fail-path (no such credential/entry) the writer
+        # must fail WITHOUT the advisory -- an advisory on a no-op would be
+        # noise that trains operators to ignore it.
+        for argv in [
+            ("clear-method-limit", "no-such-credential"),
+            ("clear-path-limit", "no-such-credential"),
+            ("set-scrub", "no-such-credential", "access_token", "false"),
+            # Existing credential, missing entry: same contract.
+            ("set-scrub", "gh", "no_such_entry", "false"),
+        ]:
+            with self.subTest(argv=argv):
+                p = self.run_writer(*argv)
+                self.assertNotEqual(p.returncode, 0, p.stderr)
+                self.assertNotIn(ADVISORY_MARKER, p.stderr)
+
     def test_advisory_never_leaks_values(self):
         # The advisory is a fixed string; no credential/entry names or
         # values may appear in it.

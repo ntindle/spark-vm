@@ -412,6 +412,31 @@ def test_list_limit_bounds(session_serve):
         host.close()
 
 
+def test_list_limit_boundary_values_pass(session_serve):
+    # FOLLOW-msp1: the 1..=200 bound's valid edges must actually work --
+    # test_list_limit_bounds above pins only the rejections.
+    argv, _record, _store = session_serve
+    host = make_host(argv)
+    try:
+        host.open()
+        for _ in range(3):
+            msps.start_session(host, "/w")
+        # client-level: limit=1 returns exactly one; limit=200 (the cap)
+        # returns everything when the store is smaller than the cap.
+        sessions, cursor = msps.list_sessions(host, limit=1)
+        assert len(sessions) == 1
+        assert cursor is None
+        sessions, cursor = msps.list_sessions(host, limit=200)
+        assert len(sessions) == 3
+        assert cursor is None
+        # wire-level: the fixture mirrors the real bound server-side too.
+        for good in (1, 200):
+            result = host.call("session/list", {"limit": good})
+            assert isinstance(result["sessions"], list)
+    finally:
+        host.close()
+
+
 # -- session/resume ---------------------------------------------------------
 
 def test_resume_returns_history(session_serve):
