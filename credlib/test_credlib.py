@@ -147,5 +147,121 @@ class ReadValueVerbatimTests(unittest.TestCase):
         self.assertIn("cred set gh", str(ctx.exception))
 
 
+class HumanContextGuardTests(unittest.TestCase):
+    """#671: fill_secret's human-context boundary must be code, not a
+    docstring. The guard refuses when the process is neither on a real
+    terminal nor explicitly opted in."""
+
+    class _NonTty:
+        def isatty(self):
+            return False
+
+    class _Tty:
+        def isatty(self):
+            return True
+
+    def _guard_without_tty_or_optin(self):
+        real_stdin, real_env = sys.stdin, os.environ.pop(
+            fill_secret._FILL_SECRET_HUMAN_OVERRIDE, None)
+        sys.stdin = self._NonTty()
+        try:
+            with self.assertRaises(DynamicCredentialError) as ctx:
+                fill_secret._require_human_context()
+        finally:
+            sys.stdin = real_stdin
+            if real_env is not None:
+                os.environ[fill_secret._FILL_SECRET_HUMAN_OVERRIDE] = real_env
+        return str(ctx.exception)
+
+    def test_refuses_agent_context(self):
+        """No terminal + no opt-in: refuse, and point at the swap-proxy
+        path and the opt-in so a human operator knows both exits."""
+        msg = self._guard_without_tty_or_optin()
+        self.assertIn("SPARKVM_FILL_SECRET_HUMAN_OVERRIDE=1", msg)
+        self.assertIn("hsurr:<name>", msg)
+        self.assertIn("#671", msg)
+
+    def test_refuses_when_stdin_is_none(self):
+        real_stdin, real_env = sys.stdin, os.environ.pop(
+            fill_secret._FILL_SECRET_HUMAN_OVERRIDE, None)
+        sys.stdin = None
+        try:
+            with self.assertRaises(DynamicCredentialError):
+                fill_secret._require_human_context()
+        finally:
+            sys.stdin = real_stdin
+            if real_env is not None:
+                os.environ[fill_secret._FILL_SECRET_HUMAN_OVERRIDE] = real_env
+
+    def test_tty_stdin_is_human_context(self):
+        """A real terminal on stdin is the human-driven case."""
+        real_stdin, real_env = sys.stdin, os.environ.pop(
+            fill_secret._FILL_SECRET_HUMAN_OVERRIDE, None)
+        sys.stdin = self._Tty()
+        try:
+            fill_secret._require_human_context()  # must not raise
+        finally:
+            sys.stdin = real_stdin
+            if real_env is not None:
+                os.environ[fill_secret._FILL_SECRET_HUMAN_OVERRIDE] = real_env
+
+    def test_env_optin_allows_isolated_automation(self):
+        """SPARKVM_FILL_SECRET_HUMAN_OVERRIDE=1 is the explicit opt-in for
+        isolated (non-interactive) automation that owns the HONEST LIMIT."""
+        real_stdin, real_env = sys.stdin, os.environ.get(
+            fill_secret._FILL_SECRET_HUMAN_OVERRIDE)
+        sys.stdin = self._NonTty()
+        os.environ[fill_secret._FILL_SECRET_HUMAN_OVERRIDE] = "1"
+        try:
+            fill_secret._require_human_context()  # must not raise
+        finally:
+            sys.stdin = real_stdin
+            if real_env is None:
+                os.environ.pop(fill_secret._FILL_SECRET_HUMAN_OVERRIDE, None)
+            else:
+                os.environ[fill_secret._FILL_SECRET_HUMAN_OVERRIDE] = real_env
+
+    class _RaisingTty:
+        """isatty() itself blows up (embedded interpreters, stdin-replacing
+        harnesses) — the guard must still refuse with ITS error, not leak
+        the unexpected exception type."""
+        def isatty(self):
+            raise AttributeError("no isatty here")
+
+    def test_isatty_exception_still_refuses(self):
+        """An isatty() that raises (e.g. AttributeError from an
+        isatty-less stdin) must produce the guard's DynamicCredentialError
+        refusal, not the raw exception — the gate refuses uniformly."""
+        real_stdin, real_env = sys.stdin, os.environ.pop(
+            fill_secret._FILL_SECRET_HUMAN_OVERRIDE, None)
+        sys.stdin = self._RaisingTty()
+        try:
+            with self.assertRaises(DynamicCredentialError) as ctx:
+                fill_secret._require_human_context()
+        finally:
+            sys.stdin = real_stdin
+            if real_env is not None:
+                os.environ[fill_secret._FILL_SECRET_HUMAN_OVERRIDE] = real_env
+        self.assertIn("fill_secret refused", str(ctx.exception))
+
+    def test_fill_secret_entry_point_enforces_the_guard(self):
+        """The guard sits at the top of fill_secret, not in the
+        docstring — an agent-context call never reaches the read. The
+        message marker proves the GUARD refused: without it, the same
+        call would raise DynamicCredentialError with "credential 'gh'
+        not set" from the read path instead."""
+        real_stdin, real_env = sys.stdin, os.environ.pop(
+            fill_secret._FILL_SECRET_HUMAN_OVERRIDE, None)
+        sys.stdin = self._NonTty()
+        try:
+            with self.assertRaises(DynamicCredentialError) as ctx:
+                fill_secret.fill_secret(None, "#x", "gh")
+        finally:
+            sys.stdin = real_stdin
+            if real_env is not None:
+                os.environ[fill_secret._FILL_SECRET_HUMAN_OVERRIDE] = real_env
+        self.assertIn("fill_secret refused", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
