@@ -3,10 +3,10 @@
 **Status:** designed (the hardening bar), not built. Resolves G20
 (#661), the residual of the G13 trust-model design
 (`TENANT_UPDATE_TRUST_MODEL.md` §3 T3 / §5). Closes the last open
-G-number of the update-channel series: G11/G12 shipped; G13/G14/G15/
-G16/G17/G18/G19 designed; G20 designed here.
+G-number of the update-channel series: G11 decided, G12 specified;
+G13/G14/G15/G16/G17/G18/G19 designed; G20 designed here.
 
-**The question (§13's leftover):** the reimage path runs migration from
+**The question (HOSTED_GAP_ANALYSIS.md §13's leftover):** the reimage path runs migration from
 the *new* image's tooling, forward-only (G11). Tenant *code* does not
 execute during the maintenance window — but the migration's *input* is
 tenant *data*, and the tenant holds root inside the guest (H11). What
@@ -21,9 +21,11 @@ attacker-influenced input?
   here: the migration contract must define version-skipping (N→N+2),
   failed-migration semantics, and snapshot-retention policy. This doc
   answers the first two; snapshot-retention policy stays with G11's S2.
-- **G12** (`UPDATE_CHANNEL_POLICY.md` §2): the failure code is
-  `maintenance-failed` — a maintenance that breaks the box is a broken
-  box, on the record. The enter/exit/failure writes belong to the
+- **G12** (`UPDATE_CHANNEL_POLICY.md` §2): the failure detail is
+  `maintenance-failed: <check>` — a maintenance that breaks the box is
+  a broken box, on the record. The endpoint code is `box-unhealthy`
+  per G12 §2; `maintenance-failed` is a `detail` string, never a 14th
+  status code. The enter/exit/failure writes belong to the
   control-plane update scheduler — never the provider driver, never the
   Muse, and never the migration tooling itself: the migration emits a
   result-report; the scheduler consumes it and owns the status
@@ -44,9 +46,11 @@ attacker-influenced input?
 
 ## 2. The hardening bar
 
-A migration is shippable only if it meets every rule below. The rules
-are checkable at the image gate — most reduce to "the migration
-manifest declares X" plus a harness behavior.
+A migration is shippable only if it meets every rule below. The bar
+is checkable, with the check site varying by rule: manifest-declared
+items (schemas, jumps, bounds) are image-gate checks; the no-eval
+parser rule is S2-harness enforcement plus gate code review; fleet-
+spread coverage is a registration-time admission check (see B4).
 
 ### Inputs: parse, don't trust
 
@@ -61,34 +65,49 @@ manifest declares X" plus a harness behavior.
   are bounded — max input size, max nesting depth, max wall-clock —
   declared in the manifest, so a hostile payload can fail the migration
   but cannot hang or OOM the maintenance window into an unbounded one.
-- **B3 — the layout-version marker is validated first.** The claimed
-  state-layout version is itself attacker-controlled. It is validated
-  against the set of source layouts the new image declares it can
-  migrate *from* before anything else reads tenant data. An unknown or
-  future version fails closed — the migration never attempts a
-  guess-migration from a layout it does not know.
+  Check site: the bounds are manifest/gate checks; the no-eval
+  discipline is enforced by the S2 harness plus gate code review (the
+  B1 "reviewed at the gate like code" treatment).
+- **B3 — the layout-version marker is validated first.** The layout
+  version — the version of the tenant-state layout on the data disk,
+  declared per image in the gate-checked image manifest — is itself
+  attacker-controlled as read from the disk. It is validated first,
+  against the set of source layout versions the new image's migration
+  manifest declares it can read, before anything else touches tenant
+  data. An unknown or future version fails closed — the migration
+  never attempts a guess-migration from a layout it does not know.
+  (The layout version is the migration's axis: which image carries
+  which layout version comes from the image manifest, so image-version
+  coverage reduces to layout-version coverage via the provisioner's
+  per-box `image_version`, G11 S1.)
 - **B4 — version skipping is declared, not improvised.** The manifest
-  declares exactly which N→M jumps the migration supports. An
-  undeclared jump (N→N+2 with no direct path) fails closed rather than
-  attempting a two-hop guess. The supported-jump set is
-  gate-checkable: a release whose manifest cannot cover the fleet's
-  actual N spread fails the gate before it ever reaches a wave.
+  declares exactly which layout-version jumps L_a→L_b the migration
+  supports. An undeclared jump (L_1→L_3 with no direct path) fails
+  closed rather than attempting a two-hop guess. Coverage is *not* an
+  image-gate check: the golden-image gate is build-time and per-image,
+  while the fleet's actual spread is G16 runtime state. The coverage
+  check is a registration-time admission check (G13 S2: deployability
+  comes only from the registry) against G16 inventory — a release
+  whose manifest cannot cover the fleet's actual layout spread,
+  derived from per-box `image_version` via the image→layout map, is
+  refused registration; G15 wave assignment enforces the per-box
+  remainder at wave time.
 
 ### Failure: fail closed, never half-migrate
 
 - **B5 — two-phase migration: validate-all-then-commit.** Phase 1
   validates every input against its schema with *zero writes* to tenant
   state. Phase 2 applies the transform. A failure in either phase —
-  validation, transform, or crash — lands the box in
-  `maintenance-failed` with a `detail` reason, never in a
-  half-migrated state. The G11 rollback primitive (reimage to the
-  previous gate-checked image + snapshot restore) is the recovery, not
-  a blind retry of the failed transform.
+  validation, transform, or crash — lands the box in `box-unhealthy`
+  with `detail: maintenance-failed: migration:<reason>` (G12's failure
+  contract), never in a half-migrated state. The G11 rollback primitive
+  (reimage to the previous gate-checked image + snapshot restore) is
+  the recovery, not a blind retry of the failed transform.
 - **B6 — no double-apply.** Migration steps are idempotent or
   guarded: re-running a migration against already-migrated state is a
-  no-op or a detected-refusal, never corruption. A retry of a failed
-  migration starts from the pre-migration snapshot (B5), not from the
-  half-written output.
+  no-op or a detected-refusal, never corruption. If Q2 ever permits an
+  operator-declared retry of the same migration, it starts from the
+  pre-migration snapshot (B5), not from the half-written output.
 - **B7 — execution boundary.** Migration runs inside the *new guest*
   only — never on the provisioner host (G13 §3 T3). Migration tooling
   processing attacker-influenced tenant data on the provisioner host
@@ -107,8 +126,8 @@ manifest declares X" plus a harness behavior.
   migration to another tenant's box or to the control plane. This is
   why the whole bar is defense-in-depth: hardening converts "tenant
   bricks their own box with hostile data" from a fleet-wide incident
-  into a per-box `maintenance-failed` the operator can reimage or roll
-  back. A design that treated migration hardening as the trust boundary
+  into a per-box `box-unhealthy` with `detail: maintenance-failed:
+  migration:<reason>` the operator can reimage or roll back. A design that treated migration hardening as the trust boundary
   would be upside down — the boundary is the per-box primitive; the
   hardening is the honesty layer on top of it.
 
@@ -122,21 +141,31 @@ manifest declares X" plus a harness behavior.
   (the timer-exclusion guard): the day an undeclared migration lands in
   an image, the no-guess-migration decision dies silently.
 - **B10 — no tenant data in logs.** Validation failures log the input
-  class, the reason, and the offending *field name* — never the
-  offending bytes. Tenant data stays tenant data; the operator's
-  failure diagnosis does not need it.
+  class, the reason, and the schema field *path from the declared
+  schema* (trusted) — never the offending bytes. If the offending key
+  is not in the schema, log a truncated, escaped form (≤64 chars,
+  non-printables escaped). Tenant data stays tenant data; the
+  operator's failure diagnosis does not need it.
 
 ## 3. Failure classes and what each one does
 
-| Failure | Detection | Outcome |
+Every row ends in the same endpoint state — `box-unhealthy` per G12
+§2 — with the `detail` string shown; `maintenance-failed` is the
+detail, never a 14th status code. The `<check>` namespace for migration
+failures is `migration:<subcheck>`; the crash row is the migration-
+phase specialization of G14 D7's watchdog `maintenance-failed:
+timeout` (D7's bare `timeout` remains the watchdog's own check for
+non-migration overruns).
+
+| Failure | Detection | Outcome (`detail:`) |
 |---|---|---|
-| Input fails schema validation (B1) | Phase-1 validator | Abort before any write; `maintenance-failed: migration: validation:<class>` |
-| Layout version unknown/future (B3) | Marker check, first | Abort before any read beyond the marker; `maintenance-failed: migration: unknown-layout` |
-| Undeclared N→M jump (B4) | Manifest lookup | Abort; `maintenance-failed: migration: unsupported-jump` |
-| Transform failure mid-Phase-2 | Harness | Abort; pre-migration snapshot intact (B5); `maintenance-failed: migration: transform:<step>` |
-| Crash mid-migration | Result-report absent at watchdog | Watchdog (G14's bounded-`maintenance` family): treat as transform failure; `maintenance-failed: migration: crashed` |
-| Resource bound exceeded (B2) | Parser/harness limits | Abort; `maintenance-failed: migration: resource-bound` |
-| Result-report lost/unattested (B7) | Scheduler timeout / attestation check | Unattested: logged, never consumed; the box does not advance — it stays `maintenance` until the watchdog fires, then `maintenance-failed` |
+| Input fails schema validation (B1) | Phase-1 validator | `maintenance-failed: migration: validation:<class>` |
+| Layout version unknown/future (B3) | Marker check, first | `maintenance-failed: migration: unknown-layout` |
+| Undeclared layout-version jump (B4) | Manifest jump-set lookup | `maintenance-failed: migration: unsupported-jump` |
+| Transform failure mid-Phase-2 | Harness | `maintenance-failed: migration: transform:<step>` |
+| Crash mid-migration | Result-report absent at watchdog | `maintenance-failed: migration: crashed` |
+| Resource bound exceeded (B2) | Parser/harness limits | `maintenance-failed: migration: resource-bound` |
+| Result-report lost/unattested (B7) | Scheduler timeout / attestation check | Unattested: logged, never consumed; the box does not advance — it stays `maintenance` until the watchdog fires, then `box-unhealthy` with `detail: maintenance-failed: migration: crashed` |
 
 Every row ends the same way: the box is broken *on the record*
 (G12), the control-plane journal's `reimage` record carries the
@@ -151,9 +180,9 @@ through the G19 read surface, never a box-side journal.
   (still owed by its S2); this doc consumes the reimage primitive and
   answers the migration-contract halves G11 deferred (version-skipping,
   failed-migration semantics).
-- **G12** — owns the `maintenance-failed` code and the producer rule;
-  the migration's result-report is the *input* the scheduler consumes
-  to write the code, not a status write itself.
+- **G12** — owns the `maintenance-failed` detail and the producer
+  rule; the migration's result-report is the *input* the scheduler
+  consumes to write the failure detail, not a status write itself.
 - **G13 §3 T3** — the threat; this doc is the bar it filed for. The
   trust ruling (defense-in-depth, per-box primitive) is not re-argued.
 - **G14** — the bounded-`maintenance` watchdog is the crash-detection
@@ -194,16 +223,24 @@ through the G19 read surface, never a box-side journal.
 ## 6. Build slices (for the feature/distribution track, not this doc)
 
 1. **S1 — migration manifest + contract.** The declared-schema manifest
-   format (schemas, supported N→M jumps, resource bounds), shipped in
-   the image, consumed by the golden-image gate (B9). Answers Q1 and
-   Q4's manifest half.
+   format (schemas, supported layout-version jumps, resource bounds),
+   shipped in the image, consumed by the golden-image gate (B9).
+   Answers Q1 and Q4's manifest half.
 2. **S2 — hardened migration harness.** The two-phase
    validate-then-commit runner that image migrations plug into;
    implements B1–B7 and B10, emits the declared result-report, refuses
    double-apply (B6).
 3. **S3 — scheduler integration.** Consume the result-report, write
-   `maintenance-failed` per the G12 producer rule, wire G11 rollback
-   on failure, land the outcome in the control-plane journal (G19).
+   `box-unhealthy` with `detail: maintenance-failed: migration:<reason>`
+   per the G12 producer rule, wire G11 rollback on failure, land the
+   outcome in the control-plane journal (G19).
+
+**Cross-lane ordering:** S2/S3 are ordered after Q5's attested
+result-report channel (the G17/G18 lane). Until that channel exists,
+B7's rule stands as the designed behavior: result-reports that cannot
+be attested are logged, never consumed, and the box holds in
+`maintenance` until the watchdog fires (§3 row 7) — fail-closed by
+design, not by accident.
 
 **Both-supported note:** the same manifest, harness, and failure
 semantics serve the self-hosted operator's N-box estate — the
