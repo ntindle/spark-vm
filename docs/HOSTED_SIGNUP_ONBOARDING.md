@@ -220,7 +220,8 @@ VM's host-key fingerprint, which the control plane attests over the
 authenticated provisioning channel — the Muse pins it in the connection
 bundle (no blind TOFU).
 
-**Provisioning sequence** (all code, no human):
+**Provisioning sequence** (all code, no human on the primary relay path;
+optional BYO-tailnet step 3 is human-gated):
 
 1. `provision()` → VM boots from cloud-init (MVP; §7) that installs
    dependencies and clones the pinned spark-vm release.
@@ -231,16 +232,24 @@ bundle (no blind TOFU).
    muse-job setup, cred-ui service, CUA desktop stack; write tenant config
    (`tenant_id`, control-plane callback URL, the Muse's public key, per-
    tenant swapd allowlists, audit shipping config from §10).
-3. Optional: join a per-tenant Tailscale tailnet for Muses whose hosts
-   support it — the control plane mints a per-tenant auth key (tagged,
-   short-expiry, single-use) and injects it at first boot
-   (`tailscale up --auth-key=…`). A fresh `tailscale up` cannot complete
-   unattended otherwise (device approval is human-gated); the auth key is
-   what makes "all code, no human" literally true. Per-tenant tailnets
-   (not one tailnet + ACL tags): separate key material fails closed on
-   misconfiguration, whereas a bad ACL tag rule fails open into
-   cross-tenant visibility. Tailnet join is an optimization, not a
-   requirement — the relay in step 5 is the primary path.
+3. Optional: join the box to the tenant's own tailnet (BYO Tailscale).
+   The tenant box joins the *human's* tailnet — the account holder's own
+   Tailscale network — never a control-plane-minted per-tenant tailnet,
+   and the control plane mints no Tailscale auth keys. Enrolling the box
+   needs a human step by Tailscale's design: the device appears in the
+   human's tailnet admin as pending and the human approves it there, so
+   the "all code, no human" claim does not apply to this path — the
+   relay in step 5 is the primary path and stays fully unattended.
+   Network posture: the box lives on the tenant's own tailnet — never a
+   shared tenant-to-tenant network — so a misconfigured tailnet rule
+   cannot expose one tenant to another, and the control plane holds no
+   cross-tenant key material to misconfigure. Tenant isolation on the
+   relay path is the H11 multi-tenancy audit's call. (Decided
+   2026-09-19 hosted unblock pass, P11: BYO Tailscale supersedes the
+   earlier per-tenant-tailnet recommendation. The exact enrollment
+   handshake — join intent at provision time vs the human running
+   `tailscale up` post-handoff — is the identity-service turn's call,
+   H9.)
 4. Health check: proxy responds, confirmd responds, muse-job accepts a
    no-op job. The check SSHes as the tenant user with a just-issued
    tenant cert (proving the cert path works end-to-end), then —
@@ -384,9 +393,13 @@ operator or for later loop runs.
 
 1. **(NEEDS_USER.md) Provider**: Neo confirmed? API credentials for the
    H4 driver.
-2. **Tailnet shape**: per-tenant tailnets recommended (§6.3) — operator
-   confirms; who holds tailnet admin and the device-approval UX per
-   tenant follows from the choice.
+2. **Tailnet shape**: DECIDED (2026-09-19 hosted unblock pass, P11):
+   BYO Tailscale — the tenant box joins the account holder's own
+   tailnet; the control plane mints no auth keys and no per-tenant
+   tailnets. The earlier per-tenant-tailnet recommendation (§6.3,
+   pre-decision) is superseded. Device-approval UX lives in the human's
+   own tailnet admin, not the signup UI; the identity-service turn (H9)
+   owns the exact enrollment handshake.
 3. **(NEEDS_USER.md) Sentinel host + API**: where it runs, how the
    control plane and the sentinel talk (blocks H5 implementation).
 4. **(NEEDS_USER.md) Push**: VAPID keypair + self-hosted vs provider
