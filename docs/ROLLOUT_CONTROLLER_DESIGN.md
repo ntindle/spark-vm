@@ -146,9 +146,11 @@ transport; G15 states the interface the controller needs:
 - **Cadence is decoupled from the update tick.** The box-side hook polls
   gate state on a short, cheap interval (60–120s), *independent* of the
   10-minute update tick; the update tick re-checks immediately before any
-  deploy. Freeze propagation is then bounded by the gate interval, not the
-  update tick — this is what makes the pull model deliver §3's sub-tick
-  freeze bound while G18's transport choice stays free.
+  deploy. Freeze propagation follows the two-part contract in
+  `RELEASE_GATE_CHANNEL_DESIGN.md` §4 — delivery within the sync cadence,
+  effectuation within sync_cadence + tick_interval (the tick-time re-query
+  is the enforcement point; the hook interval is the latency optimizer,
+  not the bound) — while G18's transport choice stays free.
 - **The gate answer carries a max-permitted commit, per channel.** The box
   asks: *for my box_id, what is the newest commit I may converge to, and
   is the fleet frozen?* Boxes in waves not yet reached stay on the old
