@@ -9,12 +9,15 @@ import contextlib
 import io
 import json
 import os
+import stat
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -1945,6 +1948,130 @@ class ConfirmdTests(unittest.TestCase):
         leftovers = [p for p in (self.approvals / "pending").iterdir()
                      if p.name.endswith(".tmp")]
         self.assertEqual(leftovers, [], "tmp residue after atomic write")
+
+
+class ConfirmRequestFloodTests(unittest.TestCase):
+    """Issue #76: confirm-request files at most 5 pending per credential
+    and at most one per credential per 60 seconds (the Finding-58 bar
+    mirrored from the swap proxy's filer); filed items land 0600.
+
+    Run with:
+        python3 -m unittest confirm.test_confirmd -v
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.approvals = Path(self.tmp.name) / "approvals"
+        (self.approvals / "pending").mkdir(parents=True)
+        self.script = os.path.join(os.path.dirname(os.path.abspath(
+            __file__)), "confirm-request")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _plant(self, credential, created=None, expires=None,
+               corrupt=False, name=None):
+        """Plant a pending file; return its aid (or name for corrupt)."""
+        aid = name or uuid.uuid4().hex[:16]
+        p = self.approvals / "pending" / (aid + ".json")
+        if corrupt:
+            p.write_text("{torn")
+            return aid
+        now = datetime.now(timezone.utc)
+        item = {"id": aid,
+                "credential": credential,
+                "created": (created or now).isoformat(),
+                "expires": (expires or (now + timedelta(seconds=3600)))
+                .isoformat(),
+                "summary": "x"}
+        p.write_text(json.dumps(item))
+        return aid
+
+    def _file(self, credential):
+        env = dict(os.environ, CONFIRM_DIR=str(self.approvals))
+        return subprocess.run(
+            [sys.executable, self.script, "--kind", "first-use",
+             "--credential", credential, "--host", "api.github.com"],
+            capture_output=True, text=True, env=env, timeout=30)
+
+    def _pending_jsons(self):
+        return [p for p in (self.approvals / "pending").iterdir()
+                if p.name.endswith(".json")]
+
+    def test_76_fifth_allowed_sixth_refused(self):
+        """The 6th pending filing for a credential refuses with exit 2."""
+        now = datetime.now(timezone.utc)
+        for i in range(5):
+            self._plant("github",
+                        created=now - timedelta(seconds=300 + 60 * i))
+        r = self._file("github")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("flood cap", r.stderr)
+        self.assertEqual(r.stdout.strip(), "",
+                         "a refused filing prints no aid")
+        self.assertEqual(len(self._pending_jsons()), 5,
+                         "a refused filing writes nothing")
+
+    def test_76_cap_is_per_credential(self):
+        """A full cap on one credential does not block another."""
+        now = datetime.now(timezone.utc)
+        for i in range(5):
+            self._plant("github",
+                        created=now - timedelta(seconds=300 + 60 * i))
+        r = self._file("openai")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout.strip(), r"^[0-9a-f]{16}$")
+
+    def test_76_expired_does_not_consume_cap(self):
+        """Expired-but-unreaped items do not burn a cap slot."""
+        now = datetime.now(timezone.utc)
+        for i in range(5):
+            self._plant("github",
+                        created=now - timedelta(seconds=300 + 60 * i),
+                        expires=now - timedelta(seconds=10))
+        r = self._file("github")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_76_corrupt_files_do_not_consume_cap(self):
+        """A planted corrupt file is the loader's business, not the
+        cap's — it must not deny a filing."""
+        now = datetime.now(timezone.utc)
+        for i in range(4):
+            self._plant("github",
+                        created=now - timedelta(seconds=300 + 60 * i))
+        self._plant("github", corrupt=True, name="garbagebeef012345")
+        r = self._file("github")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_76_rate_limit_refuses_second_filing(self):
+        """Two filings 60s apart for a credential: the second refuses."""
+        self._plant("github")
+        r = self._file("github")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("rate limited", r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_76_rate_limit_window_passes(self):
+        """A filing older than 60s does not rate-limit a new one."""
+        self._plant("github",
+                    created=datetime.now(timezone.utc)
+                    - timedelta(seconds=61))
+        r = self._file("github")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_76_filed_item_is_0600_despite_umask(self):
+        """The filed file is owner-only even under a permissive umask."""
+        old = os.umask(0o027)
+        try:
+            r = self._file("github")
+        finally:
+            os.umask(old)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        aid = r.stdout.strip()
+        mode = stat.S_IMODE(os.stat(
+            self.approvals / "pending" / (aid + ".json")).st_mode)
+        self.assertEqual(mode, 0o600,
+                         "file mode must be 0600, not umask-inherited")
 
 
 class ReopenTests(unittest.TestCase):
