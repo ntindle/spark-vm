@@ -77,19 +77,16 @@ manually — using that user's existing sudo rights. No new privilege is granted
    Components sharing an `install_unit` (proxy+confirm share `deploy.sh`,
    which installs both unconditionally) deploy together so the snapshot always
    covers everything the install touches.
-3. **Gate** each changed component's test suite, plus checkout-sync
-   preconditions. Fail → abort, audit, alert. Watermark untouched.
-4. **Snapshot** every installed file the deploy would touch (plus the
-   checkout subtree for `checkout_sync` components).
+3. **Gate** each changed component's test suite. Fail → abort, audit, alert.
+   Watermark untouched.
+4. **Snapshot** every installed file the deploy would touch.
 5. **Install**: each component's `install` command from the mirror
-   (`proxy/deploy.sh --no-restart` for the proxy-confirm unit); `cred-ui`
-   syncs its subtree from the mirror into the working checkout. The
-   checkout-sync preconditions are re-verified immediately before the
-   destructive `rm -rf` (issue #324): an operator edit to the working
-   checkout in the gate→install window fails the deploy closed instead of
-   being silently clobbered — no blocked commit (the commit is not bad), the
-   next tick retries; components already installed in the same run are
-   rolled back first via the no-block rollback path.
+   (`proxy/deploy.sh --no-restart` for the proxy-confirm unit;
+   `cred-ui/install.sh` stages the runtime set and publishes it atomically
+   into the fixed install dir). No step syncs the operator's working
+   checkout: a dirty checkout neither fails the deploy closed nor feeds
+   anything the services run (issue #85; the old checkout-sync mechanism
+   was retired outright).
 6. **daemon-reload + enable**, then **restart** only the affected services
    (system + user units). The reload matters: restarting without it runs the
    stale in-memory unit definition after a unit-file change.
@@ -194,7 +191,7 @@ fix, clear it by hand — `status` prints the exact `rm` command.
 | `cred-ui` | `cred-ui/` | cred-ui (user unit) | py_compile + pytest (http, version, install) | `cred-ui/install.sh` → fixed dir + user unit | tcp 127.0.0.1:18740 |
 
 Add a component by extending `deploy/components.conf` (paths, services, gate,
-health, install command or checkout_sync, install paths) — then re-run `init`
+health, install command, install paths) — then re-run `init`
 so the installed copy picks it up.
 
 ## Known limitations

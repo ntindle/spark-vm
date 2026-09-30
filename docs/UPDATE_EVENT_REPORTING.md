@@ -106,7 +106,7 @@ emits (audit lines without a `trigger` field canonicalize to
 | `{"event":"deploy","result":"precheck-fail","from","to"}` | `deploy`, `precheck-fail` |
 | `{"event":"deploy","result":"gate-fail","from","to","component"}` | `deploy`, `precheck-fail` (pre-deploy gates refused before any mutation) |
 | `{"event":"deploy","result":"snapshot-fail","from","to"}` | `deploy`, `precheck-fail` (pre-mutation; no mutation occurred) |
-| `{"event":"deploy","result":"checkout-dirty","from","to","component"}` | `deploy`, `precheck-fail` (aborted; any partial mutation rolled back) |
+| `{"event":"deploy","result":"checkout-dirty","from","to","component"}` | `deploy`, `precheck-fail` (**retired** — no longer emitted; the checkout-sync mechanism it guarded was removed outright. Historical audit lines only: aborted, any partial mutation rolled back.) |
 | `{"event":"deploy","result":"deploy-fail","from","to","phase"}` | `deploy`, `failed` |
 | `{"event":"deploy","result":"reload-fail","from","to"}` | `deploy`, `failed` — mutation occurred, rollback follows; the line carries no `component` or `phase`, so `phase` is synthesized as `"reload"` (noted as synthesized, not box-emitted) |
 | `{"event":"deploy","result":"rollback-failed","from","to","phase"}` | `deploy`, `rollback-failed` |
@@ -178,7 +178,7 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
      healthy idle estate, since check-`noop`s stay local-only by design.)
   4. **Stuck precheck:** ≥N `precheck-fail` events on one box inside the
      window → operator alert. The precheck class (gate-fail,
-     snapshot-fail, checkout-dirty) emits non-noop events forever, so no
+     snapshot-fail, and the retired checkout-dirty) emits non-noop events forever, so no
      other rule catches a box stuck failing pre-deployment — and a
      perpetually un-updated box is #608's pain in a quieter key.
   Alert transport, honestly staged: S1 writes the alert into the
