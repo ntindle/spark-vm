@@ -95,8 +95,11 @@ def _clean_text(s):
 # the operator passes --allow-secrets (explicit confirmation).
 #
 # This is a tripwire for the most common accidental pastes, NOT a
-# guarantee: prefix-less entropy-only blobs (AWS secret access keys, raw
-# hex/base64 tokens, Azure keys) cannot be caught by regex. And the control
+# guarantee: unpadded prefix-less entropy-only blobs (AWS secret access
+# keys, raw hex tokens, unpadded base64) cannot be caught by regex --
+# padded base64 blobs of 32+ chars (including 88-char padded Azure
+# storage keys) ARE caught by the "long base64 credential blob" pattern
+# below. And the control
 # guards only the TUI/session-store funnel: the spawn prompt FILE lives on
 # the box (readable by the same-user agent regardless of this scan), and
 # the steer message travels via ssh argv, visible in `ps` for a moment
