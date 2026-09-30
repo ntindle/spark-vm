@@ -160,9 +160,12 @@ trap 'rm -f "$allow_tmp" "$ERR_TMP"' EXIT
 # One find expression shared by the content and name walks: anchored prunes
 # for the top-level pseudo-filesystems (a real subdir named e.g. "dev"
 # deeper in the tree is still scanned) plus any-depth __pycache__ prune.
+# ${TARGET_C%/} keeps the prunes correct when TARGET is / ("/proc", not
+# "//proc" — find -path does string matching, so "//proc" never matches).
+PSEUDO_PRUNES=( -path "${TARGET_C%/}/proc" -o -path "${TARGET_C%/}/sys" -o -path "${TARGET_C%/}/dev" )
 walk_files() {  # prints NUL-delimited regular-file/symlink paths
   find "$TARGET_C" \
-    \( -path "$TARGET_C/proc" -o -path "$TARGET_C/sys" -o -path "$TARGET_C/dev" \) -prune -o \
+    \( "${PSEUDO_PRUNES[@]}" \) -prune -o \
     \( -type d \( -name __pycache__ -o -name .pytest_cache \) \) -prune -o \
     \( -type f -o -type l \) -print0 2>>"$ERR_TMP"
 }
@@ -197,7 +200,7 @@ if ((${#NAME_RULES[@]})); then
     done
     hit "$rid" "$f"
   done < <(find "$TARGET_C" \
-             \( -path "$TARGET_C/proc" -o -path "$TARGET_C/sys" -o -path "$TARGET_C/dev" \) -prune -o \
+             \( "${PSEUDO_PRUNES[@]}" \) -prune -o \
              \( -type d \( -name __pycache__ -o -name .pytest_cache \) \) -prune -o \
              \( -type f -o -type l \) \( -false "${find_expr[@]}" \) -print 2>>"$ERR_TMP" || true)
 fi
