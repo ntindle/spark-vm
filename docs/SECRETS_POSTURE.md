@@ -140,6 +140,47 @@ Vendor documentation: [E2B internet access](https://e2b.dev/docs/network/interne
   which the swap path checks separately. Loosening registry verbs now print
   a one-line stderr advisory to keep this honest.
 
+## The human-context boundary on direct secret reads (#671)
+
+The swap-proxy pattern handles *agent* traffic: code carries placeholders,
+the proxy swaps them at egress, and the agent process never holds a real
+value. But the operator still has one tool that *does* read a real value
+into a process's memory: the Playwright secret-filler
+(`credlib/fill_secret.py`), which types an operator's credential into a
+browser field for human-driven automation. A real value in a process's
+memory is a secret the policy can't unsee — so a boundary, enforced in code
+since PR #732, decides *who* may call it:
+
+- **A real terminal on stdin** — the common case: a person driving a shell
+  types a command and the value lives in that person's session.
+- **An explicit opt-in**, `SPARKVM_FILL_SECRET_HUMAN_OVERRIDE=1` — for
+  isolated, non-interactive automation that *owns* the tradeoff below. This
+  is per-invocation intent, not a persistent grant: exporting it in a shell
+  profile or a systemd unit defeats the control.
+
+Everything else — pipes, cron, daemons, agent exec runs — fails closed with
+a loud refusal that names the intended path: agent-driven browser work
+belongs on the swap proxy with `hsurr:<name>` placeholders, never in this
+function. The read below the guard is narrow too: values come through
+`cred-store-get`, the sudoers-allowlisted, name-validating reader that
+exec-cats the fixed store path — a raw `cat` of the store is not in sudoers
+and is denied on the deployed box (issue #669).
+
+**The honest limit.** `isatty()` is a property of the file descriptor, not
+a proof of human presence: pseudo-terminal sessions — including tmux, which
+agent coding jobs run inside — present a terminal and pass the guard. The
+never-see-secrets guarantee for *agents* therefore still rests on agent
+policy plus the swap-proxy path plus store auditing, not on this guard.
+What the guard buys is different: it converts what used to be silent
+docstring violations into a loud refusal wherever headless execution would
+otherwise quietly proceed.
+
+**Residuals (open).** #730 — plaintext still lingers in the process's
+memory after the fill completes (post-fill memory hygiene is unsolved);
+#731 — reaching past the public entry point to the internal reader is a
+policy violation, not a supported use, and the boundary is now code rather
+than discipline.
+
 ## Committed, unbuilt: deny-style billing guard for sandbox cred-forwarding
 
 When spark-vm forwards operator credentials into a sandbox — the hosted
