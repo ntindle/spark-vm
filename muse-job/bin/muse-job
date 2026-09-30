@@ -7,7 +7,9 @@ Same vocabulary as the other agents this operator manages:
   status - inspect one job (like subagent.list, single)
   list   - all jobs
   log    - recent terminal output
-  kill   - kill the tmux session and reap its process tree (recoverable via resume)
+  kill   - kill the tmux session and reap its process tree; records the
+           terminal-ish "killed" state (the watchdog will not auto-revive
+           it -- deliberate re-activation is `resume`)
   resume - recover a dead tmux session via `muse resume`
   close  - terminal: archive the job, remove its worktree
   watch  - watchdog pass over active jobs (cron: JSON lines)
@@ -2122,6 +2124,28 @@ def cmd_kill(args):
     if leaked:
         print("muse-job: warning: %d process(es) survived kill: %s"
               % (len(leaked), ",".join(map(str, leaked))), file=sys.stderr)
+    # Issue #5: kill is an explicit operator act and must be terminal-ish.
+    # A killed job kept state "active", so the next `watch` pass treated the
+    # dead tmux as a crash and auto-resumed it -- the operator's deliberate
+    # kill was undone within one cron period. Record "killed": watch only
+    # acts on active/blocked jobs, so it leaves a killed job alone, and
+    # `resume` is the deliberate re-activation that returns it to "active".
+    # Unknown slugs (no job.json) keep the old permissive behavior: kill's
+    # tmux/process semantics are unchanged for them.
+    if os.path.isfile(job_json_path(args.slug)):
+        try:
+            job = load_job(args.slug)
+            job["state"] = "killed"
+            save_job(job, args.slug)
+            out["state"] = "killed"
+        except Exception as e:
+            # QA review: the state mark is advisory, never load-bearing.
+            # A corrupt or unreadable job.json is exactly when the operator
+            # most needs kill to work -- kill's process/tree semantics must
+            # stay never-raises (per _kill_process_tree's contract), so a
+            # failed mark warns on stderr and keeps rc=0.
+            print(f"muse-job: warning: could not record killed state: {e}",
+                  file=sys.stderr)
     print(json.dumps(out))
     return 0
 
@@ -2167,9 +2191,18 @@ def _answer_trust_prompt(slug, timeout=20):
     return False
 
 
-def cmd_resume(args):
+def cmd_resume(args, _from_watch=False):
     job = load_job(args.slug)
     if tmux_alive(args.slug):
+        # QA review: a live session means the job is running. A stale
+        # "killed" record -- reachable because kill's session-kill runs
+        # check=False and can fail silently while the state mark lands --
+        # would otherwise leave the job permanently invisible to the
+        # watchdog (watch skips non-active/blocked; every resume refuses).
+        # Heal the record to the truth, then refuse as before.
+        if job.get("state") == "killed":
+            job["state"] = "active"
+            save_job(job, args.slug)
         raise RuntimeError("tmux session already alive")
     uuid, _malformed = _session_uuid_ok(job)
     if not uuid:
@@ -2239,6 +2272,26 @@ def cmd_resume(args):
         print(json.dumps({"slug": args.slug, "resumed": "fallback-fresh"}))
     else:
         print(json.dumps({"slug": args.slug, "resumed": uuid}))
+    # Issue #5: a watch pass can be mid-recovery when the operator kills
+    # (or closes) the job -- cmd_resume takes minutes (sleeps, pane
+    # probes, up to 90s of session re-discovery). In the auto path only,
+    # re-read the record before re-activating and refuse to revive a job
+    # that left the monitored states: the operator's mid-recovery decision
+    # stands. Tear down the session we just created so "killed => no live
+    # session" holds. The operator path (_from_watch=False) keeps
+    # unconditional activation: resume is the sanctioned undo of a kill,
+    # which is why the provenance flag is required.
+    if _from_watch:
+        fresh = load_job(args.slug)
+        if fresh.get("state") not in ("active", "blocked"):
+            run("tmux", "kill-session", "-t", f"mjob-{args.slug}", check=False)
+            raise RuntimeError(
+                f"job {args.slug} left the monitored states during "
+                "auto-recovery (operator may have killed or closed it); "
+                "tore down the recovery session and left the job alone")
+    if job.get("state") != "active":
+        job["state"] = "active"
+        save_job(job, args.slug)
     return 0
 
 
@@ -2310,8 +2363,24 @@ def cmd_watch(args):
 
         if not st["tmux_alive"]:
             # One recovery attempt.
+            # Issue #5: the gate above was checked before the (slow)
+            # job_status probes -- re-check immediately before recovering.
+            # A watch pass already inside watch_one when `kill` (or `close`)
+            # lands must not start a multi-minute auto-recovery of a
+            # deliberately killed job.
             try:
-                cmd_resume(argparse.Namespace(slug=slug))
+                fresh = load_job(slug)
+            except Exception:
+                fresh = None
+            if fresh is None or fresh.get("state") not in ("active", "blocked"):
+                events.append({"job": slug, "signal": "needs-attention",
+                               "detail": "tmux dead and the job left the "
+                               "monitored states during this pass (operator "
+                               "may have killed or closed it); not "
+                               "auto-recovering"})
+                return
+            try:
+                cmd_resume(argparse.Namespace(slug=slug), _from_watch=True)
                 events.append({"job": slug, "signal": "recovered",
                                "detail": "tmux was dead; resumed session"})
             except Exception as e:
@@ -2541,7 +2610,7 @@ def main():
     s.add_argument("-n", type=int, default=60)
     s.set_defaults(fn=cmd_log)
 
-    s = sub.add_parser("kill", help="kill the tmux session and reap its process tree")
+    s = sub.add_parser("kill", help="kill the tmux session and reap its process tree; marks the job 'killed' (watchdog won't revive it)")
     s.add_argument("slug")
     s.set_defaults(fn=cmd_kill)
 
