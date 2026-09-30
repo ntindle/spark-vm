@@ -52,6 +52,10 @@ import argparse, json, os, sys, uuid
 ap = argparse.ArgumentParser()
 ap.add_argument("--record", default=None)
 ap.add_argument("--store-dir", required=True)
+ap.add_argument("--drift-list", action="store_true",
+                help="test-only: session/list returns a malformed result "
+                     "(FOLLOW-msp3 drift extension; the real wire never "
+                     "sends this)")
 args = ap.parse_args()
 
 os.makedirs(args.store_dir, exist_ok=True)
@@ -103,6 +107,28 @@ def err(rid, code, message, data=None):
         e["data"] = data
     send({"jsonrpc": "2.0", "id": rid, "error": e})
 
+def check_drift(rid, params):
+    # Test-only extension for FOLLOW-msp3: a "drift:<case>" sessionId
+    # sentinel (the client validates it as a non-empty string, the real
+    # wire never sees it) makes the fixture answer with a malformed
+    # result so the client's fail-loud handling is exercised end to end,
+    # through the fixture and the transport. Returns True when it sent
+    # the drifted result.
+    sid = params.get("sessionId")
+    if not (isinstance(sid, str) and sid.startswith("drift:")):
+        return False
+    case = sid[len("drift:"):]
+    if case == "notdict":
+        send({"jsonrpc": "2.0", "id": rid, "result": "not-a-dict"})
+    elif case == "no-session":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"ok": True}})
+    elif case == "no-sessionid":
+        send({"jsonrpc": "2.0", "id": rid,
+              "result": {"session": {"status": "idle"}}})
+    else:
+        return False
+    return True
+
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -130,6 +156,8 @@ for line in sys.stdin:
         continue
     store = load_store()
     if method == "session/start":
+        if check_drift(rid, params):
+            continue
         cid = params.get("commandId")
         if not isinstance(cid, str) or not UUID7_RE.match(cid):
             err(rid, -32602,
@@ -176,6 +204,8 @@ for line in sys.stdin:
                              "mode": params["approvalMode"],
                              "source": "approvalReconfigure"}})
     elif method == "session/resume":
+        if check_drift(rid, params):
+            continue
         sid = params.get("sessionId")
         recd = store.get(sid) if isinstance(sid, str) else None
         if recd is None:
@@ -187,6 +217,10 @@ for line in sys.stdin:
                          "history": [{"type": "resumed",
                                       "sessionId": sid}]}})
     elif method == "session/list":
+        if args.drift_list:
+            send({"jsonrpc": "2.0", "id": rid,
+                  "result": {"sessions": "not-a-list"}})
+            continue
         limit = params.get("limit")
         if (isinstance(limit, bool) or not isinstance(limit, int)
                 or not 1 <= limit <= 200):
@@ -198,6 +232,8 @@ for line in sys.stdin:
               "result": {"sessions": list(store.values())[:limit],
                          "nextCursor": None}})
     elif method == "session/read":
+        if check_drift(rid, params):
+            continue
         sid = params.get("sessionId")
         recd = store.get(sid) if isinstance(sid, str) else None
         if recd is None:
@@ -210,8 +246,7 @@ for line in sys.stdin:
 ''')
 
 
-@pytest.fixture()
-def session_serve(tmp_path):
+def _write_session_serve(tmp_path, extra_argv=()):
     """Write the session-plane fixture; return (argv, record, store_dir)."""
     path = tmp_path / "fake_session_serve.py"
     path.write_text(FAKE_SESSION_SERVE)
@@ -219,9 +254,15 @@ def session_serve(tmp_path):
     record = tmp_path / "record.jsonl"
     store_dir = tmp_path / "store"
     store_dir.mkdir()
-    argv = [sys.executable, str(path), "--record", str(record),
-            "--store-dir", str(store_dir)]
+    argv = [sys.executable, str(path), *extra_argv,
+            "--record", str(record), "--store-dir", str(store_dir)]
     return argv, record, store_dir
+
+
+@pytest.fixture()
+def session_serve(tmp_path):
+    """Write the session-plane fixture; return (argv, record, store_dir)."""
+    return _write_session_serve(tmp_path)
 
 
 def read_record(record):
@@ -518,6 +559,91 @@ def test_require_session_fails_loud_on_drift():
                 {"session": {"noId": 1}}, {"result": {}}):
         with pytest.raises(msps.MSPSessionError):
             msps._require_session(bad, "session/read")
+
+
+# -- shape drift, end to end ------------------------------------------------
+
+@pytest.mark.parametrize("case", ["notdict", "no-session", "no-sessionid"])
+def test_session_plane_fails_loud_on_drift_end_to_end(session_serve, case):
+    # FOLLOW-msp3: the fail-loud paths were unit-level only
+    # (test_require_session_fails_loud_on_drift above). Drive them through
+    # the fixture and the transport instead: the "drift:<case>" sessionId
+    # sentinel is a test-only fixture extension (the real wire never
+    # sends it), so the MSPSessionError must come from the client's own
+    # result parsing, not from a server error.
+    argv, _record, _store = session_serve
+    host = make_host(argv)
+    sentinel = "drift:" + case
+    try:
+        host.open()
+        with pytest.raises(msps.MSPSessionError):
+            msps.start_session(host, "/w", session_id=sentinel)
+        with pytest.raises(msps.MSPSessionError):
+            msps.resume_session(host, sentinel)
+        with pytest.raises(msps.MSPSessionError):
+            msps.read_session(host, sentinel)
+    finally:
+        host.close()
+
+
+def test_list_fails_loud_on_drift_end_to_end(tmp_path):
+    # session/list's drift check lives in list_sessions, not
+    # _require_session; pin it end to end with a fixture running in
+    # --drift-list mode (returns {"sessions": "not-a-list"}).
+    argv, _record, _store = _write_session_serve(tmp_path, ("--drift-list",))
+    host = make_host(argv)
+    try:
+        host.open()
+        with pytest.raises(msps.MSPSessionError):
+            msps.list_sessions(host)
+    finally:
+        host.close()
+
+
+# -- smoke CLI: resume and read --------------------------------------------
+
+def _run_cli(*args):
+    return subprocess.run(
+        [sys.executable, str(BIN_PATH), *args],
+        capture_output=True, text=True, timeout=60)
+
+
+def _cli_start_session(argv):
+    p = _run_cli("start", "--workspace-root", "/w", "--", *argv)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout)["session"]["sessionId"]
+
+
+def test_smoke_cli_resume(session_serve):
+    # FOLLOW-msp4: the smoke CLI's resume path was untested. Create the
+    # session through the CLI itself (the store is shared across
+    # invocations) and resume it: the result carries the session record
+    # and render history, and stdout stays clean parseable JSON.
+    argv, _record, _store = session_serve
+    sid = _cli_start_session(argv)
+    p = _run_cli("resume", "--session-id", sid, "--", *argv)
+    assert p.returncode == 0, p.stderr
+    doc = json.loads(p.stdout)
+    assert doc["session"]["sessionId"] == sid
+    assert doc["history"], "resume must return render history"
+    assert "NOT redacted" in p.stderr
+
+
+def test_smoke_cli_read(session_serve):
+    # FOLLOW-msp4: the smoke CLI's read path was untested. A known id
+    # returns the record without attaching; an unknown id returns the
+    # notLoaded record instead of an error.
+    argv, _record, _store = session_serve
+    sid = _cli_start_session(argv)
+    p = _run_cli("read", "--session-id", sid, "--", *argv)
+    assert p.returncode == 0, p.stderr
+    doc = json.loads(p.stdout)
+    assert doc["session"]["sessionId"] == sid
+    assert doc["session"]["status"] == "idle"
+    p = _run_cli("read", "--session-id", "sess-never-existed", "--", *argv)
+    assert p.returncode == 0, p.stderr
+    doc = json.loads(p.stdout)
+    assert doc["session"]["status"] == "notLoaded"
 
 
 # -- smoke CLI --------------------------------------------------------------
