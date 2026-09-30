@@ -9,19 +9,54 @@ an argument — only bdrive and swapd may file.
 In production swapd files the item itself when it refuses a swap for
 lack of a grant; this CLI is for testing the page end to end.
 
+Flood control (issue #76): at most 5 pending filings per
+(filer, credential) and at most one filing per filer per 60 seconds —
+the Finding-58 bar, adapted for a CLI. A refused filing exits 2 with
+a one-line stderr explanation (the `flood cap:` / `rate limited:` /
+`invalid --ttl:` prefixes are the stable machine-parseable contract;
+exit 2 is shared with argparse usage errors) and prints no aid.
+
+This deliberately differs from the swap proxy's `_file_approval` in
+two places, and the divergences are the point:
+- The proxy keys by credential because its key comes from the *real
+  refused request* (server-derived). Here `--credential` is
+  caller-minted CLI input, so keying by credential alone is defeated
+  by name rotation; the filer (os.geteuid()) is part of the key, and
+  the rate limit is per filer regardless of credential name. Finding
+  50 already establishes the file owner as the requester identity.
+- The proxy coalesces duplicate filings; the CLI does not — a refused
+  filing simply explains itself on stderr. Each CLI invocation is
+  deliberate human intent to file a distinct item; the per-filer rate
+  limit bounds the spam the lack of coalescing permits.
+
 Operator contract (issue #76):
 - ``<APPROVALS>/pending`` must be a setgid directory owned by the
   filing principals' shared group, so the filed file's owner
   identifies the requester (Finding 50). ``os.makedirs`` below only
-  *creates* the directory when it does not exist; deploy must pre-create
-  it with the setgid bit (``chmod g+s``), because makedirs cannot make
-  a setgid directory on its own.
+  *creates* the directory when it does not exist — and makedirs
+  cannot make a setgid directory on its own (mkdir(2) drops S_ISGID
+  even as root; only a later ``chmod g+s`` sets it). **No current
+  repo deploy step creates this directory** (known gap — the
+  browser-driver round-8 note); until one does, the operator runs,
+  e.g.: ``sudo install -d -o root -g <shared-group> -m 2770
+  /home/swapd/approvals/pending && sudo chmod g+s
+  /home/swapd/approvals/pending``. When the setgid bit is absent the
+  CLI warns on stderr (the Finding-50 invariant is not in effect) but
+  still files — warn, never refuse, so CONFIRM_DIR test/demo mode
+  keeps working.
 - Filed items are written owner-only (mode 0600, not umask-inherited),
   atomically (tmp + fsync + os.replace — issue #232).
-- Flood control: at most 5 pending filings per credential, and at most
-  one filing per credential per 60 seconds — the same bar as the swap
-  proxy's Finding-58 filer (proxy/swap_addon.py). A refused filing
-  exits 2 with a one-line stderr explanation and prints no aid.
+- Mutual exclusion for the flood check comes from an flock(2)
+  lockfile, ``pending/.flood.lock`` (created 0660 so the setgid
+  shared group can lock it too), held from before the flood check
+  through the rename. The kernel releases it on crash; if it cannot
+  be opened the CLI warns and files unlocked (loud degradation — the
+  check is a guardrail, see below).
+- ``--ttl`` is clamped to 1..86400 seconds; out-of-range is refused
+  loudly rather than silently clamped.
+- Honest limit: anyone able to write ``pending/`` directly bypasses
+  every CLI-side check — this is a guardrail for buggy or honest
+  filers, not a hard boundary against a malicious direct writer.
 
 Usage:
   confirm-request --kind first-use --credential github \
@@ -29,19 +64,24 @@ Usage:
       --scope read --job test-job --ttl 3600
 """
 import argparse
+import fcntl
 import json
 import os
+import stat
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
 APPROVALS = os.environ.get("CONFIRM_DIR", "/home/swapd/approvals")
 
-# Issue #76: the Finding-58 flood bar, mirrored from the swap proxy's
-# _file_approval (coalesce-by-tuple + cap + rate limit). The CLI does
-# not coalesce — a refused filing simply explains itself on stderr.
-_PENDING_CAP = 5          # max pending filings per credential
-_RATE_LIMIT_S = 60        # min seconds between filings per credential
+# Issue #76: the Finding-58 flood bar, adapted for a caller-minted key
+# (see the module docstring for why the filer is part of the key).
+_PENDING_CAP = 5          # max live pending filings per (filer, credential)
+_RATE_LIMIT_S = 60        # min seconds between filings per filer
+_TTL_MIN_S = 1
+_TTL_MAX_S = 86400        # 24h — a cap slot must stay time-bounded
+_SCAN_MAX_BYTES = 1048576  # bound the per-file read in the scan
+_FLOOD_LOCK_NAME = ".flood.lock"
 
 
 def _parse_iso(value):
@@ -62,59 +102,132 @@ def _parse_iso(value):
     return ts
 
 
-def _pending_stats(pending_dir, credential, now):
-    """Scan pending/ for filings under this credential.
+def _one_line(value):
+    """Sanitize an argv-derived value for a one-line stderr message."""
+    return str(value).replace("\n", " ").replace("\r", " ")
 
-    Returns (live_count, newest_created): live_count is the number of
-    pending items filed for `credential` that are not yet expired;
-    newest_created is the newest parseable "created" among them (None
-    when none parse). Unparseable files are skipped — the confirmd
-    loader owns corrupt items (#232); a planted garbage file must not
-    be able to burn a cap slot or pin the rate limiter.
+
+def _pending_stats(pending_dir, euid, credential, now):
+    """Scan pending/ for live filings by this filer.
+
+    Returns (per_cred_live, newest_live_any): per_cred_live is the
+    number of live (unexpired, fully parseable) items filed by `euid`
+    for `credential`; newest_live_any is the newest `created` (clamped
+    to `now`) over all live items filed by `euid` under any credential
+    — the per-filer rate limiter; None when there are none.
+
+    Fail-open accounting, deliberately: an item is counted only when
+    its `expires` parses and is in the future — a planted file with
+    garbage/missing `expires` must not be able to burn a cap slot
+    (the confirmd loader is the authority on file validity; the CLI
+    must not deny honest filings over foreign files it cannot
+    interpret). Symlinks are never followed (O_NOFOLLOW), non-regular
+    files are skipped (a planted FIFO must not hang the scan), and
+    only files owned by `euid` count (Finding 50: the owner is the
+    requester — another filer's items are not this filer's flood).
     """
-    live_count = 0
-    newest_created = None
+    per_cred_live = 0
+    newest_live_any = None
     try:
         names = os.listdir(pending_dir)
     except OSError:
-        return live_count, newest_created
+        return per_cred_live, newest_live_any
     for name in names:
         if not name.endswith(".json"):
             continue
+        path = os.path.join(pending_dir, name)
         try:
-            with open(os.path.join(pending_dir, name)) as f:
-                item = json.load(f)
-        except (OSError, ValueError):
+            fd = os.open(path,
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            continue  # symlink, vanished, or unreadable
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != euid:
+                continue
+            with os.fdopen(fd, "rb") as f:
+                raw = f.read(_SCAN_MAX_BYTES)
+        except OSError:
+            continue
+        try:
+            item = json.loads(raw)
+        except ValueError:
             continue  # torn/corrupt — confirmd's quarantine business
         if not isinstance(item, dict):
             continue
-        if item.get("credential") != credential:
-            continue
         expires = _parse_iso(item.get("expires"))
-        if expires is not None and expires < now:
-            continue  # expired — the daemon's reap owns these
-        live_count += 1
+        if expires is None or expires < now:
+            continue  # unparseable or expired: not a live slot
         created = _parse_iso(item.get("created"))
-        if created is not None and (newest_created is None
-                                    or created > newest_created):
-            newest_created = created
-    return live_count, newest_created
+        if created is None:
+            continue  # live-expires but no usable created: uninterpretable
+        if created > now:
+            created = now  # future-dated: clamp, don't let it pin the limiter
+        if item.get("credential") == credential:
+            per_cred_live += 1
+        if newest_live_any is None or created > newest_live_any:
+            newest_live_any = created
+    return per_cred_live, newest_live_any
 
 
-def _flood_refusal(pending_dir, credential, now):
+def _flood_refusal(pending_dir, euid, credential, now):
     """Return a refusal message, or None when filing is allowed."""
-    live_count, newest_created = _pending_stats(pending_dir, credential,
-                                                now)
-    if live_count >= _PENDING_CAP:
-        return ("flood cap: %d pending approvals for credential %r "
-                "(max %d) — answer or let them expire first"
-                % (live_count, credential, _PENDING_CAP))
-    if (newest_created is not None
-            and (now - newest_created).total_seconds() < _RATE_LIMIT_S):
-        return ("rate limited: an approval for credential %r was filed "
-                "less than %d seconds ago — wait before filing again"
-                % (credential, _RATE_LIMIT_S))
+    per_cred_live, newest_live_any = _pending_stats(pending_dir, euid,
+                                                   credential, now)
+    cred = _one_line(credential)
+    if per_cred_live >= _PENDING_CAP:
+        return ("flood cap: %d pending approvals filed by you for "
+                "credential '%s' (max %d) — answer or let them expire "
+                "first" % (per_cred_live, cred, _PENDING_CAP))
+    if (newest_live_any is not None
+            and (now - newest_live_any).total_seconds() < _RATE_LIMIT_S):
+        return ("rate limited: you filed an approval less than %d "
+                "seconds ago — wait before filing again"
+                % _RATE_LIMIT_S)
     return None
+
+
+def _warn_no_setgid(d):
+    """Warn when the Finding-50 setgid invariant is not in effect."""
+    try:
+        mode = os.stat(d).st_mode
+    except OSError:
+        return
+    if not mode & stat.S_ISGID:
+        print("confirm-request: warning: %r lacks the setgid bit — "
+              "the Finding-50 owner-identifies-requester invariant is "
+              "not in effect; deploy must pre-create it setgid "
+              "(chmod g+s)" % _one_line(d), file=sys.stderr)
+
+
+class _FloodLock:
+    """The pending/ flood-check lock, held across check + file."""
+
+    def __init__(self, pending_dir):
+        self._fd = None
+        path = os.path.join(pending_dir, _FLOOD_LOCK_NAME)
+        try:
+            # 0660: the setgid shared group must be able to lock too.
+            self._fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o660)
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
+        except OSError:
+            if self._fd is not None:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+                self._fd = None
+            print("confirm-request: warning: cannot lock %r — filing "
+                  "without flood-check mutual exclusion"
+                  % _one_line(path), file=sys.stderr)
+
+    def release(self):
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+            self._fd = None
 
 
 def main():
@@ -131,65 +244,80 @@ def main():
     ap.add_argument("--purpose", default="",
                     help="free text, shown labeled as untrusted")
     ap.add_argument("--ttl", type=int, default=3600,
-                    help="seconds until the request expires")
+                    help="seconds until the request expires (1..86400)")
     args = ap.parse_args()
 
-    now = datetime.now(timezone.utc)
-    d = os.path.join(APPROVALS, "pending")
-    os.makedirs(d, exist_ok=True)
-    # Issue #76: flood control — the same bar as the Finding-58 filer.
-    refusal = _flood_refusal(d, args.credential, now)
-    if refusal is not None:
-        print("confirm-request: %s" % refusal, file=sys.stderr)
+    # Issue #76 B3: an unbounded --ttl lets the caller burn a
+    # credential's cap slots for decades. Refuse loudly, don't clamp.
+    if not _TTL_MIN_S <= args.ttl <= _TTL_MAX_S:
+        print("confirm-request: invalid --ttl %d: must be %d..%d seconds"
+              % (args.ttl, _TTL_MIN_S, _TTL_MAX_S), file=sys.stderr)
         return 2
 
-    aid = uuid.uuid4().hex[:16]
-    item = {
-        "id": aid,
-        "created": now.isoformat(),
-        "expires": (now + timedelta(seconds=args.ttl)).isoformat(),
-        "kind": args.kind,
-        # Finding 49: structured, bound to the would-be grant.
-        "credential": args.credential,
-        "host": args.host,
-        "method": args.method,
-        "path_prefix": args.path_prefix,
-        "scope": args.scope,
-        "amount": args.amount,
-        "job": args.job,
-        # Free text is purpose only, rendered as untrusted.
-        "detail": args.purpose,
-        "summary": "%s %s%s for %s" % (args.method, args.host,
-                                       args.path_prefix, args.credential),
-    }
-    # Finding 50: the file owner is the requester; the dir is setgid
-    # so group stays consistent. No --requester argument exists.
-    # Issue #232: write atomically (tmp + os.replace, the same idiom as
-    # proxy/swap_addon.py's filer) — a kill or ENOSPC mid-write must never
-    # leave a torn pending file. `aid` is a fresh uuid per invocation, so
-    # the tmp name cannot collide with another writer's; O_EXCL still
-    # refuses to clobber rather than overwrite, fail-closed.
-    # Issue #76: the filed item is owner-only (0600) regardless of umask.
-    # os.open with 0600 can't add bits umask strips, but a pathological
-    # umask could still remove owner bits — so fchmod pins exactly 0600
-    # after the write, on the open fd (no name race).
-    tmp = os.path.join(d, aid + ".json.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    now = datetime.now(timezone.utc)
+    euid = os.geteuid()
+    d = os.path.join(APPROVALS, "pending")
+    os.makedirs(d, exist_ok=True)
+    _warn_no_setgid(d)
+
+    lock = _FloodLock(d)
     try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(item, f, indent=2)
-            f.flush()
-            os.fchmod(f.fileno(), 0o600)
-            os.fsync(f.fileno())
-    except BaseException:
+        # Issue #76: flood control — held under the lock so parallel
+        # invocations cannot both pass the check (check-then-act race).
+        refusal = _flood_refusal(d, euid, args.credential, now)
+        if refusal is not None:
+            print("confirm-request: %s" % refusal, file=sys.stderr)
+            return 2
+
+        aid = uuid.uuid4().hex[:16]
+        item = {
+            "id": aid,
+            "created": now.isoformat(),
+            "expires": (now + timedelta(seconds=args.ttl)).isoformat(),
+            "kind": args.kind,
+            # Finding 49: structured, bound to the would-be grant.
+            "credential": args.credential,
+            "host": args.host,
+            "method": args.method,
+            "path_prefix": args.path_prefix,
+            "scope": args.scope,
+            "amount": args.amount,
+            "job": args.job,
+            # Free text is purpose only, rendered as untrusted.
+            "detail": args.purpose,
+            "summary": "%s %s%s for %s" % (args.method, args.host,
+                                           args.path_prefix, args.credential),
+        }
+        # Finding 50: the file owner is the requester; the dir is setgid
+        # so group stays consistent. No --requester argument exists.
+        # Issue #232: write atomically (tmp + os.replace, the same idiom as
+        # proxy/swap_addon.py's filer) — a kill or ENOSPC mid-write must never
+        # leave a torn pending file. `aid` is a fresh uuid per invocation, so
+        # the tmp name cannot collide with another writer's; O_EXCL still
+        # refuses to clobber rather than overwrite, fail-closed.
+        # Issue #76: the filed item is owner-only (0600) regardless of umask.
+        # os.open with 0600 can't add bits umask strips, but a pathological
+        # umask could still remove owner bits — so fchmod pins exactly 0600
+        # after the write, on the open fd (no name race).
+        tmp = os.path.join(d, aid + ".json.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    os.replace(tmp, os.path.join(d, aid + ".json"))
-    print(aid)
-    return 0
+            with os.fdopen(fd, "w") as f:
+                json.dump(item, f, indent=2)
+                f.flush()
+                os.fchmod(f.fileno(), 0o600)
+                os.fsync(f.fileno())
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, os.path.join(d, aid + ".json"))
+        print(aid)
+        return 0
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":
