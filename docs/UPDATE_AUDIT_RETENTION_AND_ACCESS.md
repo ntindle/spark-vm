@@ -77,7 +77,7 @@ an auditable operator event: each prune run appends an operator-only line
 (window pruned, policy ref, per-type counts) to the control-plane journal
 itself — visibility-scoped operator-only, never served to a tenant
 (there is no second journal; the line lives in the journal G13 §2
-defines). And the tenant's read path discloses the boundary honestly — the response
+defines), and it consumes no tenant-visible seq number (§2.1). And the tenant's read path discloses the boundary honestly — the response
 names the window it covers ("history available from `<date>` per the
 retention policy"), so a tenant never mistakes pruning for silence. Never
 invent entries; never leave a silent gap. A box with zero retained records
@@ -120,7 +120,12 @@ history is paged and unbounded; the status poll stays fixed-shape.
 ### 2.1. Verifiable completeness — no silent gaps on the read path either
 
 Each journal line carries a **per-tenant monotonic sequence number**,
-assigned in append order. The response envelope carries `first_seq` and
+assigned in append order **to tenant-visible records only**: operator-only
+lines (the prune-honesty lines from §1) are appended to the same
+per-tenant journal but consume no seq number. The seq stream is therefore
+exactly the tenant's served history — a missing seq number inside the
+served window can never be explained by an operator-only line the tenant
+cannot see. The response envelope carries `first_seq` and
 `last_seq` bounding the **served window** — the oldest and newest retained
 records *within the hot tier window* — and the tenant can verify
 contiguity across that range. This is the #16 lesson applied to the read
@@ -159,7 +164,7 @@ nothing that names another tenant:
   live-served — still honest under the window disclosure.
 - the retention-window disclosure (history available from `<date>`)
 
-**Operator-only, never in the tenant view:** canary flags, fleet totals,
+**Operator-only, never in the tenant view:** fleet canary flags, fleet totals,
 wave sizes and membership, other tenants' identifiers, controller internal
 instance ids, gate-evidence refs that enumerate fleet composition. The
 privacy boundary is one sentence: **a tenant's history never names another
@@ -187,7 +192,8 @@ journal has a single appender; sequence numbers are assigned **at durable
 append, never pre-issued** — a writer crash between submission and append
 consumes no seq number, so there are no phantom holes. On appender
 failover it resumes from durable state; un-acknowledged controller
-submissions are safe to resubmit (idempotent). An invented gap is as
+submissions carry a submission id and are safe to resubmit (idempotent by
+dedupe on the submission id — S2 pins the key). An invented gap is as
 much an honesty violation as a silent absence.
 
 ---
