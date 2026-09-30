@@ -130,6 +130,15 @@ Vendor documentation: [E2B internet access](https://e2b.dev/docs/network/interne
   preserved otherwise. swapd, as a transparent egress proxy, sees TLS in
   transit by design; that is the trade the pattern demands, and the operator
   should understand it.
+- **Registry grant scoping is advisory for the operator** (issue #87):
+  host bindings, method/path limits, and scrub flags in the credential
+  registry are enforced against the proxied agent processes on every swap,
+  but the operator holds NOPASSWD `cred-registry-set` and can lift any of
+  them unilaterally (e.g. `set-scrub github access_token false` re-exposes
+  echoed secrets) — no confirmation, no second control. The one scoping
+  control the operator cannot lift is the root-managed `hosts.allow` file,
+  which the swap path checks separately. Loosening registry verbs now print
+  a one-line stderr advisory to keep this honest.
 
 ## Committed, unbuilt: deny-style billing guard for sandbox cred-forwarding
 

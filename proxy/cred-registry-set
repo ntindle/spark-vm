@@ -18,6 +18,21 @@
 # under an exclusive flock on a dedicated lock file, so concurrent
 # invocations cannot lose each other's updates.
 # Root-owned 0755; ntindle can only execute it via the sudoers entry.
+#
+# TRUST MODEL (#87): everything this script writes -- host bindings
+# (allowed_hosts), method/path limits (allowed_methods/allowed_paths),
+# and scrub flags -- is a SELF-SERVICE control for the same-uid operator,
+# not a constraint on that operator. ntindle holds NOPASSWD cred-registry-set,
+# so any "approved" restriction can be lifted by the very party it constrains
+# (e.g. set-scrub github access_token false re-exposes echoed secrets).
+# The controls ARE enforced where it matters: against the proxied agent
+# processes (which cannot touch the registry at all) the addon enforces the
+# registry scoping on every swap, and the one control the operator cannot
+# lift unilaterally is the root-managed hosts.allow file in the swap path.
+# Loosening verbs (clear-method-limit, clear-path-limit, set-scrub false)
+# print a one-line stderr advisory to keep this honest; tightening verbs
+# (add/remove-host, add/remove-method, add/remove-path, set-scrub true)
+# stay quiet.
 set -euo pipefail
 
 # Issue #90: CRED_REGISTRY_FILE / CRED_REGISTRY_LOCK exist ONLY for tests.
@@ -53,6 +68,19 @@ import atexit
 def fail(msg):
     sys.stderr.write("cred-registry-set: %s\n" % msg)
     sys.exit(1)
+
+# Issue #87: registry scoping (host bindings, method/path limits, scrub
+# flags) is self-service for the same-uid operator -- advisory, not a
+# constraint -- so every verb that LOOSENS it says so on stderr. The
+# advisory is informational only: exit code and registry behavior are
+# unchanged. The enforced boundary the operator cannot lift unilaterally
+# is the root-managed hosts.allow file in the swap path.
+def advisory(msg):
+    sys.stderr.write("cred-registry-set: advisory: %s\n" % msg)
+
+_ADVISORY_TEXT = ("registry scoping is self-service/advisory for this "
+                  "operator (#87); the enforced boundary is the "
+                  "root-managed hosts.allow")
 
 args = sys.argv[1:]
 ACTIONS = ("set", "set-with-hosts", "remove", "add-host", "remove-host",
@@ -402,6 +430,7 @@ elif action == "clear-method-limit":
         fail("no such credential '%s'" % (name,))
     entry.pop("allowed_methods", None)
     print("cleared method limit for '%s'; now unrestricted" % (name,))
+    advisory(_ADVISORY_TEXT)
     save()
 elif action in ("add-path", "remove-path"):
     # Grant scoping, approved half: static per-credential path prefixes.
@@ -452,6 +481,7 @@ elif action == "clear-path-limit":
         fail("no such credential '%s'" % (name,))
     entry.pop("allowed_paths", None)
     print("cleared path limit for '%s'; now unrestricted" % (name,))
+    advisory(_ADVISORY_TEXT)
     save()
 elif action == "set-scrub":
     # Finding 36: opt an entry (usernames, emails) out of response
@@ -474,4 +504,6 @@ elif action == "set-scrub":
     entry_spec["scrub"] = (flag == "true")
     save()
     print("set scrub=%s for '%s' entry '%s'" % (flag, name, entry))
+    if flag == "false":
+        advisory(_ADVISORY_TEXT)
 PYEOF

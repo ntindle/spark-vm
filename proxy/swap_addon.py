@@ -1888,7 +1888,15 @@ class SwapAddon:
 
         Issue #562: a grant whose remaining validity is under
         SWAP_GRANT_MIN_VALIDITY_S seconds is skipped — swaps are never
-        initiated on a grant expiring within the window."""
+        initiated on a grant expiring within the window.
+
+        Trust model (#87): these registry scoping checks are enforced
+        against the proxied processes on every swap, but they are
+        SELF-SERVICE (advisory) for the same-uid operator, who holds
+        NOPASSWD cred-registry-set and can lift any of them unilaterally.
+        The one scoping control the operator cannot lift is the
+        root-managed hosts.allow file, which the swap path checks
+        separately."""
         reg = getattr(self, "registry", None) or {}
         spec = reg.get(name)
         if not isinstance(spec, dict):

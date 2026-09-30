@@ -19,7 +19,13 @@ This CLI reaches that store ONLY through narrow sudo helpers:
                       and bind it to the hosts it may be swapped for
                       (repeatable; a credential with no host binding never
                       swaps). The swapping proxy additionally requires the
-                      host in hosts.allow.
+                      host in hosts.allow. Note (#87): these registry
+                      scoping controls (host bindings, method/path limits,
+                      scrub flags) are self-service for this operator --
+                      advisory, not constraints -- since the operator runs
+                      this CLI with the same uid that may lift them. The
+                      root-managed hosts.allow file is the boundary the
+                      operator cannot lift unilaterally.
   cred unregister <name> [--entry <entry>]
                       remove a credential's registry entry
   cred run -- <cmd> [args...]
@@ -216,6 +222,12 @@ USAGE = """usage: cred <command> [args]
                                url_path_segment. --host binds the credential
                                to a host it may be swapped for (repeatable;
                                a credential with no host binding never swaps).
+                               Note (#87): host bindings, method/path limits,
+                               and scrub flags are self-service controls for
+                               this operator -- advisory, not constraints
+                               (the operator may lift them via sudo); the
+                               root-managed hosts.allow is the boundary that
+                               cannot be lifted unilaterally.
   cred unregister <name> [--entry <entry>]
                                remove a credential's registry entry
   cred run -- <cmd> [args...]  exec cmd with traffic routed through the
