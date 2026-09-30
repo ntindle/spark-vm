@@ -170,7 +170,15 @@ table inet jail {
         iifname "ve-jail" tcp dport { 18080, 18081 } accept
         iifname "ve-jail" ct state established,related accept
         # The jail may not touch any other host service (host sshd, ...).
-        iifname "ve-jail" log prefix "jail-input-drop: " drop
+        # Rate-limited logging (#441): anything in the jail can generate
+        # dropped packets at line rate (UDP flood to blocked ports, SYN
+        # scan of the tailnet) — unconditional logging appends every one
+        # to the host's kern.log, turning the forensic signal into host
+        # disk pressure. The limit statement rate-limits only the log
+        # EMISSION; the drop verdict itself is unaffected (every packet
+        # still drops). 5/minute burst 10 keeps a recognizable forensic
+        # trail while bounding the write rate.
+        iifname "ve-jail" log prefix "jail-input-drop: " limit rate over 5/minute burst 10 packets drop
     }
     chain forward {
         type filter hook forward priority -10; policy accept;
@@ -180,11 +188,13 @@ table inet jail {
         oifname "ve-jail" ct state established,related accept
         # No other egress for the jail: no direct internet, no tailnet,
         # no lan. (Runs before ts-forward, so the tailnet accept there
-        # cannot re-allow jail traffic.)
-        iifname "ve-jail" log prefix "jail-fwd-drop: " drop
+        # cannot re-allow jail traffic.) Log emission is rate-limited
+        # (#441) so a line-rate drop storm cannot flood the host's
+        # kern.log; the drop verdict itself is not rate-limited.
+        iifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop
         # Nothing may route INTO the jail either, except the sshd DNAT
         # above (and its return traffic).
-        oifname "ve-jail" log prefix "jail-fwd-indrop: " drop
+        oifname "ve-jail" log prefix "jail-fwd-indrop: " limit rate over 5/minute burst 10 packets drop
     }
 }
 NFT_EOF

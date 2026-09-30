@@ -302,13 +302,19 @@ class TestIsolation:
         assert "ResolvConf=off" in active
 
     def test_nftables_drops_jail_egress(self, active):
-        assert 'iifname "ve-jail" log prefix "jail-fwd-drop: " drop' in active
+        # #441: log emission is rate-limited so a line-rate drop storm
+        # cannot flood the host's kern.log; the drop verdict itself is
+        # unaffected (every packet still drops).
+        assert ('iifname "ve-jail" log prefix "jail-fwd-drop: " '
+                'limit rate over 5/minute burst 10 packets drop') in active
 
     def test_nftables_drops_jail_to_host_services(self, active):
-        assert 'iifname "ve-jail" log prefix "jail-input-drop: " drop' in active
+        assert ('iifname "ve-jail" log prefix "jail-input-drop: " '
+                'limit rate over 5/minute burst 10 packets drop') in active
 
     def test_nftables_drops_traffic_into_jail(self, active):
-        assert 'oifname "ve-jail" log prefix "jail-fwd-indrop: " drop' in active
+        assert ('oifname "ve-jail" log prefix "jail-fwd-indrop: " '
+                'limit rate over 5/minute burst 10 packets drop') in active
 
     def test_nftables_accept_head_is_proxy_and_ssh_only(self, active):
         # Pin the allow head, not just the drop tail: these are the ONLY
@@ -635,15 +641,15 @@ table inet jail {
         type filter hook input priority -10; policy accept;
         iifname "ve-jail" tcp dport { 18080, 18081 } accept
         iifname "ve-jail" ct state established,related accept
-        iifname "ve-jail" log prefix "jail-input-drop: " drop
+            iifname "ve-jail" log prefix "jail-input-drop: " limit rate over 5/minute burst 10 packets drop
     }
     chain forward {
         type filter hook forward priority -10; policy accept;
         iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
         iifname "ve-jail" ct state established,related accept
         oifname "ve-jail" ct state established,related accept
-        iifname "ve-jail" log prefix "jail-fwd-drop: " drop
-        oifname "ve-jail" log prefix "jail-fwd-indrop: " drop
+        iifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop
+        oifname "ve-jail" log prefix "jail-fwd-indrop: " limit rate over 5/minute burst 10 packets drop
     }
 }
 """
@@ -659,15 +665,15 @@ table inet jail {
 \t\ttype filter hook input priority -10; policy accept;
 \t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept
 \t\tiifname "ve-jail" ct state established,related accept
-\t\tiifname "ve-jail" log prefix "jail-input-drop: " drop
+\t\tiifname "ve-jail" log prefix "jail-input-drop: " limit rate over 5/minute burst 10 packets drop
 \t}
 \tchain forward {
 \t\ttype filter hook forward priority -10; policy accept;
 \t\tiifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
 \t\tiifname "ve-jail" ct state established,related accept
 \t\toifname "ve-jail" ct state established,related accept
-\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop
-\t\toifname "ve-jail" log prefix "jail-fwd-indrop: " drop
+\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop
+\t\toifname "ve-jail" log prefix "jail-fwd-indrop: " limit rate over 5/minute burst 10 packets drop
 \t}
 }
 """
@@ -694,9 +700,9 @@ table inet jail {
 # drops. Marker presence alone reported healthy on this; the allow-head
 # pin must not.
 WIDENED_ACCEPT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop',
     '\t\tiifname "ve-jail" accept\n'
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop',
 )
 
 # The 2026-09-23 arch case: a rogue DNAT variant — the proxy DNAT's target
@@ -720,9 +726,9 @@ ROGUE_DNAT_READDR_RULESET = HEALTHY_RULESET.replace(
 # Unanchored fingerprint matching alone passes this; the pin must strip
 # quoted strings before matching and fail closed.
 SMUGGLER_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop',
     '\t\tiifname "ve-jail" log prefix "ct state established,related accept" accept\n'
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop',
 )
 
 # The 2026-09-23 review case (Security): a DNAT-family verdict spelled
@@ -730,9 +736,9 @@ SMUGGLER_RULESET = HEALTHY_RULESET.replace(
 # substrings. The pin must deny all packet-moving verdicts it does not
 # know, not just dnat/accept spellings.
 REDIRECT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop',
     '\t\tiifname "ve-jail" tcp dport 9999 redirect to :9999\n'
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop',
 )
 
 # The 2026-09-23 review case (Engineering A1): a rogue sshd-DNAT
@@ -750,9 +756,9 @@ ROGUE_SSH_DNAT_RULESET = HEALTHY_RULESET.replace(
 # 1. Forward chain: jail sshd accept reachable from anywhere, not just the
 #    tailnet (dropped iifname/oifname/daddr qualifiers).
 BROADENED_SSH_ACCEPT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop',
     '\t\tiifname "ve-jail" tcp dport 22 ct state established,new accept\n'
-    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " drop',
+    '\t\tiifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop',
 )
 # 2. Prerouting: the jail's sshd DNATed from any interface (dropped the
 #    tailscale0 iifname).
