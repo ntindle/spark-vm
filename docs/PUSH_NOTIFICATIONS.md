@@ -9,6 +9,16 @@ runs it wherever the deployment lives (self-hosted box or hosted
 service). The VAPID keypair is operator-generated during setup; no real
 secrets ever live in the repo.
 
+**Operator identity:** every `sudo` command in this doc runs from a
+**root shell**. `sudo -u swapd` here is root's unrestricted hop down to
+the secrets owner — not a narrow-grant escalation. Under `ntindle`'s
+narrow sudoers grants (`proxy/sudoers-swapd`) the same commands are
+**denied by design**: the sudoers file deliberately carries no `python3`
+rule, because a `python3`-as-`swapd` grant would be arbitrary code
+execution as the secrets owner. Don't drop the `-u swapd` hop either —
+`--gen-keys` and the queue writes must land swapd-owned (0600), or the
+swapd-run `push-worker.service` can't read them.
+
 ## How it works
 
 1. **Setup (operator, once):**
@@ -45,7 +55,9 @@ secrets ever live in the repo.
    ```
    `--test-push` sends a real push through the configured keys to every
    stored subscription and reports how many the push service accepted —
-   the same supported path as a real approval, no grant involved.
+   the same supported path as a real approval. Run it from a root shell
+   like the other operator commands: there is deliberately no narrow
+   sudoers grant that lets the narrow identity run `push.py` as `swapd`.
 
 3. **Subscribe (human, once per browser):** open the confirmd pending
    page → "Enable notifications". The browser's PushManager subscribes
@@ -171,6 +183,13 @@ created with the default umask and carry no data.
   `$CONFIRM_DIR/push-subscriptions.json` (mode 0600, atomic writes).
   Per-tenant queues (H10) will need per-tenant subscription scoping —
   that is follow-up work, not this slice.
+- **Operator access model:** the push operator commands (`--gen-keys`,
+  `--test-push`, `--worker-once`, `--requeue`) need swapd's identity —
+  the key, queue, and subscription files are 0600 swapd-owned — and
+  deliberately have no narrow sudoers grant. A `python3`-as-`swapd` rule
+  would hand the narrow identity arbitrary code as the secrets owner, so
+  these run from a root shell; the `sudo -u swapd` hop only drops
+  privileges down to swapd.
 
 ## Configuration reference
 
