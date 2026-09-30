@@ -44,8 +44,15 @@ def load_bridge():
 
 
 @pytest.fixture()
-def bridge():
-    return load_bridge()
+def bridge(tmp_path):
+    mod = load_bridge()
+    # hermetic registry: the bridge module persists its launch registry to
+    # ~/.cache on every spawn (#491) — redirect it to a per-test tmp file
+    # and start from an empty registry, so tests never touch (or inherit)
+    # real bridge state on machines where the bridge has run.
+    mod._LAUNCHED.clear()
+    mod._LAUNCH_REGISTRY_FILE = str(tmp_path / "cua-launched.json")
+    return mod
 
 
 WINDOWS = [
@@ -328,7 +335,10 @@ class TestEndpoints:
                                            stderr=""))
         status, body = req(port, "GET", "/api/status")
         assert status == 200
-        assert body == {"ok": True, "detail": "ok"}
+        assert body["ok"] is True
+        assert body["detail"] == "ok"
+        # #491: the running-launch set rides along (empty here)
+        assert body["launched"] == {}
 
     def test_get_windows(self, live):
         bridge, driver, port = live
@@ -428,7 +438,7 @@ class TestEndpoints:
     def test_launch_allowlisted_app_200(self, live, monkeypatch):
         bridge, driver, port = live
         monkeypatch.setattr(bridge, "launch_app",
-                            lambda name: {"launched": name})
+                            lambda name, singleton=False: {"launched": name})
         status, body = req(port, "POST", "/api/launch", {"app": "xterm"})
         assert status == 200
         assert body["result"] == {"launched": "xterm"}
@@ -810,3 +820,282 @@ class TestSingletonLock:
             bridge.acquire_singleton_lock(str(blocker / "bridge.lock"))
         assert e.value.code == 1
         assert "cannot open singleton lock" in capsys.readouterr().err
+
+
+# ------------------------------------------------- #491 launch registry
+
+
+class FakePopen:
+    """Popen stand-in: records argv, returns a chosen pid."""
+
+    instances = []
+
+    def __init__(self, argv, **kw):
+        self.argv = argv
+        self.kw = kw
+        self.pid = kw.pop("_pid", 999001)
+        FakePopen.instances.append(self)
+
+
+def _child_states(monkeypatch, bridge, states):
+    """Stub process liveness: states maps pid -> "running" | "zombie";
+    missing pids are dead. waitpid(WNOHANG) reaps zombies (like the real
+    thing — a second waitpid on a reaped pid raises ChildProcessError);
+    kill(pid, 0) probes existence."""
+    def fake_waitpid(pid, options):
+        st = states.get(pid)
+        if st == "running":
+            return (0, 0)
+        if st == "zombie":
+            states[pid] = None  # reaped
+            return (pid, 0)
+        raise ChildProcessError(10, "No child processes")
+
+    def fake_kill(pid, sig):
+        if sig == 0 and states.get(pid) in ("running", "zombie"):
+            return None
+        raise OSError(3, "No such process")
+
+    monkeypatch.setattr(bridge.os, "waitpid", fake_waitpid)
+    monkeypatch.setattr(bridge.os, "kill", fake_kill)
+
+
+def _alive_kill(monkeypatch, bridge, live_pids):
+    """waitpid/kill stub: pids in live_pids are running, all else dead."""
+    _child_states(monkeypatch, bridge, {p: "running" for p in live_pids})
+
+
+class TestLaunchRegistry:
+    APP = {"demo": [sys.executable, "-c", "pass"]}
+
+    def _bridge(self, bridge, monkeypatch, live_pids=(999001,)):
+        monkeypatch.setattr(bridge, "LAUNCH_ALLOWLIST", dict(self.APP))
+        monkeypatch.setattr(bridge.shutil, "which", lambda p: p)
+        monkeypatch.setattr(bridge.subprocess, "Popen", FakePopen)
+        _alive_kill(monkeypatch, bridge, set(live_pids))
+
+    def test_launch_records_pid_in_registry(self, bridge, monkeypatch):
+        self._bridge(bridge, monkeypatch)
+        before = bridge.time.time()
+        assert bridge.launch_app("demo") == {"launched": "demo"}
+        insts = bridge.launched_instances("demo")
+        assert len(insts) == 1
+        assert insts[0]["pid"] == 999001
+        assert before <= insts[0]["launched_at"] <= bridge.time.time()
+
+    def test_dead_pids_are_pruned_on_read(self, bridge, monkeypatch):
+        self._bridge(bridge, monkeypatch, live_pids=())
+        bridge.launch_app("demo")
+        # the spawn recorded a pid, but nothing is alive -> pruned
+        assert bridge.launched_instances("demo") == []
+        assert bridge.all_launched() == {}
+
+    def test_prune_keeps_live_and_drops_dead(self, bridge, monkeypatch):
+        self._bridge(bridge, monkeypatch, live_pids={100, 300})
+
+        def popen_seq(argv, **kw):
+            return FakePopen(argv, **dict(kw, _pid=popen_seq.next()))
+
+        popen_seq.next = iter([100, 200, 300]).__next__
+        monkeypatch.setattr(bridge.subprocess, "Popen", popen_seq)
+        for _ in range(3):
+            bridge.launch_app("demo")
+        insts = bridge.launched_instances("demo")
+        assert [i["pid"] for i in insts] == [100, 300]
+
+    def test_unknown_app_still_rejected(self, bridge, monkeypatch):
+        # the allowlist rules regardless of the singleton flag
+        self._bridge(bridge, monkeypatch)
+        with pytest.raises(ValueError, match="not allowlisted"):
+            bridge.launch_app("evil-app")
+
+    def _live_launch(self, bridge, monkeypatch, live_pids, popen_pid=4242):
+        """Stub the spawn path for endpoint tests: allowlisted demo app,
+        counting fake Popen, controllable liveness."""
+        monkeypatch.setattr(bridge, "LAUNCH_ALLOWLIST", dict(self.APP))
+        monkeypatch.setattr(bridge.shutil, "which", lambda p: p)
+        calls = []
+
+        def fake_popen(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(pid=popen_pid)
+
+        monkeypatch.setattr(bridge.subprocess, "Popen", fake_popen)
+        _alive_kill(monkeypatch, bridge, set(live_pids))
+        return calls
+
+    def test_singleton_second_launch_409(self, live, monkeypatch):
+        bridge, driver, port = live
+        calls = self._live_launch(bridge, monkeypatch, live_pids={4242})
+        status, body = req(port, "POST", "/api/launch",
+                           {"app": "demo", "singleton": True})
+        assert status == 200
+        status, body = req(port, "POST", "/api/launch",
+                           {"app": "demo", "singleton": True})
+        assert status == 409
+        assert body["error"] == "already running"
+        assert body["pids"] == [4242]
+        assert len(calls) == 1  # the refused launch never spawned
+
+    def test_singleton_allows_relaunch_after_death(self, live, monkeypatch):
+        bridge, driver, port = live
+        calls = self._live_launch(bridge, monkeypatch, live_pids=set())
+        status, _ = req(port, "POST", "/api/launch",
+                        {"app": "demo", "singleton": True})
+        assert status == 200
+        # the recorded pid is dead, so the guard prunes it and spawns again
+        status, _ = req(port, "POST", "/api/launch",
+                        {"app": "demo", "singleton": True})
+        assert status == 200
+        assert len(calls) == 2
+
+    def test_singleton_string_false_does_not_opt_in(self, live, monkeypatch):
+        # only a literal JSON true opts in — a "false" string is a normal
+        # multi-launch, not a silent singleton refusal
+        bridge, driver, port = live
+        calls = self._live_launch(bridge, monkeypatch, live_pids={4242})
+        for _ in range(2):
+            status, _ = req(port, "POST", "/api/launch",
+                            {"app": "demo", "singleton": "false"})
+            assert status == 200
+        assert len(calls) == 2
+
+    def test_singleton_race_spawns_exactly_once(self, live, monkeypatch):
+        # the panel double-tap, the exact failure mode #491 exists to fix:
+        # two threads racing through the real handler must yield one spawn
+        bridge, driver, port = live
+        calls = self._live_launch(bridge, monkeypatch, live_pids={4242})
+        results = []
+
+        def one():
+            results.append(req(port, "POST", "/api/launch",
+                               {"app": "demo", "singleton": True}))
+
+        threads = [threading.Thread(target=one) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        assert sorted(s for s, _ in results) == [200, 409]
+        assert len(calls) == 1
+        loser = [b for s, b in results if s == 409][0]
+        assert loser["pids"] == [4242]
+
+    def test_registry_survives_reload(self, bridge, monkeypatch):
+        self._bridge(bridge, monkeypatch, live_pids={555})
+        monkeypatch.setattr(
+            bridge.subprocess, "Popen",
+            lambda argv, **kw: SimpleNamespace(pid=555))
+        bridge.launch_app("demo")
+        assert os.path.exists(bridge._LAUNCH_REGISTRY_FILE)
+        # simulate a bridge restart: wipe memory, reload from disk
+        bridge._LAUNCHED.clear()
+        bridge._load_launched()
+        insts = bridge.launched_instances("demo")
+        assert [i["pid"] for i in insts] == [555]
+
+    def test_reload_prunes_dead_pids(self, bridge, monkeypatch):
+        self._bridge(bridge, monkeypatch, live_pids=set())
+        with open(bridge._LAUNCH_REGISTRY_FILE, "w") as f:
+            json.dump({"demo": [{"pid": 111, "launched_at": 1.0},
+                                {"pid": 222, "launched_at": 2.0}]}, f)
+        bridge._load_launched()
+        assert bridge.launched_instances("demo") == []
+
+    def test_reload_ignores_corrupt_file(self, bridge, monkeypatch):
+        self._bridge(bridge, monkeypatch)
+        with open(bridge._LAUNCH_REGISTRY_FILE, "w") as f:
+            f.write("not json{{{")
+        bridge._load_launched()  # must not raise
+        assert bridge.all_launched() == {}
+
+    def test_reload_ignores_wrong_shape(self, bridge, monkeypatch):
+        self._bridge(bridge, monkeypatch)
+        with open(bridge._LAUNCH_REGISTRY_FILE, "w") as f:
+            json.dump({"demo": [{"pid": "not-an-int", "launched_at": 1.0},
+                                {"nope": True}], "bad": 42}, f)
+        bridge._load_launched()
+        assert bridge.all_launched() == {}
+
+    def test_zombie_is_reaped_and_pruned(self, bridge, monkeypatch):
+        # Security review finding: launch_app drops the Popen handle
+        # without wait(), so an exited app is a zombie — and kill(pid, 0)
+        # succeeds on zombies. Without the waitpid reap, the entry would
+        # never prune and singleton would 409 "already running" forever.
+        states = {4242: "zombie"}
+        _child_states(monkeypatch, bridge, states)
+        monkeypatch.setattr(bridge, "LAUNCH_ALLOWLIST", dict(self.APP))
+        monkeypatch.setattr(bridge.shutil, "which", lambda p: p)
+        monkeypatch.setattr(bridge.subprocess, "Popen",
+                            lambda argv, **kw: SimpleNamespace(pid=4242))
+        bridge.launch_app("demo")
+        assert bridge.launched_instances("demo") == []
+        assert states[4242] is None  # reaped, not left a zombie
+
+    def test_singleton_launch_after_app_exit(self, live, monkeypatch):
+        # the regression: once the app exits, a singleton launch must
+        # spawn fresh instead of 409ing forever on the zombie
+        bridge, driver, port = live
+        states = {4242: "running"}
+        _child_states(monkeypatch, bridge, states)
+        monkeypatch.setattr(bridge, "LAUNCH_ALLOWLIST", dict(self.APP))
+        monkeypatch.setattr(bridge.shutil, "which", lambda p: p)
+        calls = []
+
+        def fake_popen(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(pid=4242)
+
+        monkeypatch.setattr(bridge.subprocess, "Popen", fake_popen)
+        assert req(port, "POST", "/api/launch",
+                   {"app": "demo", "singleton": True})[0] == 200
+        states[4242] = "zombie"  # the app exits
+        assert req(port, "POST", "/api/launch",
+                   {"app": "demo", "singleton": True})[0] == 200
+        assert len(calls) == 2
+
+    def test_default_launch_still_spawns_duplicates(self, live, monkeypatch):
+        # no "singleton" flag -> the old behavior: spawn again, no refusal
+        bridge, driver, port = live
+        spawned = []
+        monkeypatch.setattr(
+            bridge, "launch_app",
+            lambda name, singleton=False:
+                spawned.append(name) or {"launched": name})
+        for _ in range(2):
+            status, _ = req(port, "POST", "/api/launch", {"app": "xterm"})
+            assert status == 200
+        assert spawned == ["xterm", "xterm"]
+
+    def test_status_exposes_launched_set(self, live, monkeypatch):
+        bridge, driver, port = live
+        monkeypatch.setattr(bridge, "LAUNCH_ALLOWLIST", dict(self.APP))
+        monkeypatch.setattr(bridge.shutil, "which", lambda p: p)
+        _alive_kill(monkeypatch, bridge, {777})
+        monkeypatch.setattr(
+            bridge.subprocess, "Popen",
+            lambda argv, **kw: FakePopen(argv, **dict(kw, _pid=777)))
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: SimpleNamespace(returncode=0, stdout="ok\n",
+                                           stderr=""))
+        bridge.launch_app("demo")
+        status, body = req(port, "GET", "/api/status")
+        assert status == 200
+        assert list(body["launched"]) == ["demo"]
+        assert body["launched"]["demo"][0]["pid"] == 777
+
+    def test_status_launched_prunes_dead(self, live, monkeypatch):
+        bridge, driver, port = live
+        monkeypatch.setattr(bridge, "LAUNCH_ALLOWLIST", dict(self.APP))
+        monkeypatch.setattr(bridge.shutil, "which", lambda p: p)
+        monkeypatch.setattr(bridge.subprocess, "Popen", FakePopen)
+        _alive_kill(monkeypatch, bridge, set())  # nothing alive
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: SimpleNamespace(returncode=0, stdout="ok\n",
+                                           stderr=""))
+        bridge.launch_app("demo")
+        status, body = req(port, "GET", "/api/status")
+        assert status == 200
+        assert body["launched"] == {}

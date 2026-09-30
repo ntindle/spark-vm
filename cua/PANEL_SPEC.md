@@ -64,6 +64,23 @@ key names follow the driver's `press_key` vocabulary (`Return`, `Tab`,
 To add an app, extend `LAUNCH_ALLOWLIST` in `cua-bridge.py` — it must be
 an absolute argv, never a shell string.
 
+Duplicate-launch guard (#491): the bridge records every PID it spawns per
+app name (dead PIDs pruned on every read), so a panel double-tap or a
+retry loop no longer silently stacks N chromiums. Pass
+`"singleton": true` (a literal JSON `true` — anything else, including the
+string `"false"`, is a normal multi-launch) to refuse with 409
+(`{"error": "already running", "pids": [...]}`) while an instance is
+still alive — the default stays multi-launch (a second xterm is sometimes
+wanted). The running set is always visible in `GET /api/status` under
+`"launched"` (`{"xterm": [{"pid": 1234, "launched_at": <unix time>}], ...}`)
+so the panel can decide for itself. The registry survives bridge restarts
+(persisted under the user's own `~/.cache`, reloaded and re-pruned at
+startup), so the 409 contract holds across the keepalive's restarts too.
+Best-effort by construction: tracking is per bridge-spawned PID, so an
+app that daemonizes (its launcher PID exits while the app keeps running)
+can read as dead, and a recycled PID can briefly read as alive — the
+bridge prunes on every read and self-heals.
+
 ## Suggested panel features (pick what you like)
 
 - Live screenshot with click-to-act (map the tap point to desktop coords).
