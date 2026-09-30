@@ -118,6 +118,25 @@ def _claim_code_hash(code: str) -> str:
     return "sha256:" + digest
 
 
+def _new_claim_code() -> str:
+    """Mint a fresh claim code whose first character is never ``-``.
+
+    ``secrets.token_urlsafe`` draws from the base64url alphabet, which
+    includes ``-`` — a code starting with ``-`` breaks the CLI's
+    positional ``claim-redeem <code>`` form (argparse reads the token as
+    an option flag; GH CI run 36692398265 failed
+    ``test_claim_cli_round_trip`` exactly this way, ~1/64 of runs).
+    Regenerating on a leading ``-`` keeps the positional form working
+    for every issued code; ``--code-stdin`` remains the
+    /proc-visibility-safe path. Entropy cost is one extra draw with
+    probability 1/64 — negligible against 144 bits.
+    """
+    code = secrets.token_urlsafe(CLAIM_CODE_ENTROPY_BYTES)
+    while code.startswith("-"):
+        code = secrets.token_urlsafe(CLAIM_CODE_ENTROPY_BYTES)
+    return code
+
+
 class RegistryError(Exception):
     """The registry cannot be read or written safely. Fail loud."""
 
@@ -542,7 +561,7 @@ class KeyRegistry:
             raise RegistryError("issue_claim needs ttl_hours > 0 (finite)")
         now_dt = _utcnow()
         now = _iso(now_dt)
-        code = secrets.token_urlsafe(CLAIM_CODE_ENTROPY_BYTES)
+        code = _new_claim_code()
         code_hash = _claim_code_hash(code)
         expires_at = _iso(now_dt + datetime.timedelta(hours=ttl_hours))
         issued: dict = {}

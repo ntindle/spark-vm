@@ -803,6 +803,28 @@ def test_redeem_claim_reclaim_restamps(reg, monkeypatch):
     assert rec["claimed_by"] == "second"
 
 
+def test_new_claim_code_never_starts_with_dash(monkeypatch):
+    # Regression: GH CI run 36692398265 — token_urlsafe drew a leading
+    # '-', argparse read the positional as an option flag, and
+    # test_claim_cli_round_trip failed (~1/64 of runs). _new_claim_code
+    # must skip leading-dash draws so every ISSUED code survives the
+    # positional claim-redeem form.
+    draws = iter(["-Lf3QulEWD54O3lf3F8ksJFv", "ok" + "A" * 22])
+    monkeypatch.setattr(
+        key_registry.secrets, "token_urlsafe", lambda n: next(draws)
+    )
+    assert key_registry._new_claim_code() == "ok" + "A" * 22
+
+
+def test_new_claim_code_shape_bulk():
+    # 256 draws: no leading dash, 24 chars each (the full entropy +
+    # shape contract the CLI positional form relies on).
+    for _ in range(256):
+        code = key_registry._new_claim_code()
+        assert len(code) == 24
+        assert not code.startswith("-")
+
+
 def test_claim_cli_round_trip(tmp_path):
     root = str(tmp_path / "cli-claim")
     r = _cli("register", "--key-line", ED25519_LINE, root=root)
