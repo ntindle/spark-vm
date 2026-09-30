@@ -102,12 +102,17 @@ fi
 # Canonicalize for the self-exclusion check below: the scan must not flag
 # its own pattern definitions when the target tree contains them (e.g. a
 # future bare-word pattern would match this file's own comment lines).
-# ${TARGET_C%/} keeps the "under target" test correct when TARGET is /.
+# TARGET_UNDER is computed in a separate step on purpose: "${TARGET_C%/}"/*
+# written inline in the case pattern silently NEVER matches when the %-
+# removal consumes the whole value (TARGET_C="/" -> the pattern is dead and
+# the gate's documented `scan-baked-secrets.sh /` invocation loses its
+# self-exclusion). The intermediate variable keeps the pattern well-formed.
 TARGET_C="$(realpath -m "$TARGET")"
 PATTERNS_C="$(realpath -m "$PATTERNS")"
+TARGET_UNDER="${TARGET_C%/}"  # "" when TARGET_C is "/"; "$TARGET_UNDER"/* still matches
 SELF=""
 case "$PATTERNS_C" in
-  "${TARGET_C%/}"/*) SELF="$PATTERNS_C" ;;
+  "$TARGET_UNDER"/*) SELF="$PATTERNS_C" ;;
 esac
 
 CONTENT_RULES=()  # "id:regex"
