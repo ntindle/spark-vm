@@ -66,12 +66,22 @@ import json
 import math
 import os
 import sys
+import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 
 RECORD_SCHEMA = "fleet-inventory-record/1"
 SNAPSHOT_SCHEMA = "fleet-inventory-snapshot/1"
 JOURNAL_NAME = "journal.jsonl"
 SNAPSHOT_NAME = "snapshot.json"
+
+# Per-rebuild temp-file prefix (issue #716): rebuild_snapshot() publishes
+# through a process-unique `snapshot.json.tmp.<random>.<pid>` path so
+# concurrent collects never share the tmp name. Crash-orphaned tmps are
+# swept by _sweep_stale_snapshot_tmps() once they are older than
+# _SNAPSHOT_TMP_MAX_AGE_S.
+_SNAPSHOT_TMP_PREFIX = SNAPSHOT_NAME + ".tmp."
+_SNAPSHOT_TMP_MAX_AGE_S = 3600
 
 # Box-side generated_at may be this far in the future before the record is
 # flagged (design section 4 open question 4: flag, don't drop).
@@ -400,11 +410,41 @@ def append_journal(store_dir, records):
     return rebuild_snapshot(store_dir)
 
 
+def _sweep_stale_snapshot_tmps(store_dir):
+    """Remove crash-orphaned snapshot tmp files older than one hour.
+
+    With per-rebuild unique tmp paths (issue #716), a crash between the
+    tmp write and os.replace() leaves a stale `snapshot.json.tmp.*` file
+    behind instead of a torn snapshot. Sweep only names carrying the tmp
+    prefix (plus the pre-#716 shared `snapshot.json.tmp` legacy name) AND
+    older than _SNAPSHOT_TMP_MAX_AGE_S — a rebuild runs in seconds, so
+    anything this old cannot be a live writer; the age gate is what makes
+    the unlink safe under concurrent collects. Best effort: never fails
+    the rebuild.
+    """
+    cutoff = time.time() - _SNAPSHOT_TMP_MAX_AGE_S
+    legacy = SNAPSHOT_NAME + ".tmp"
+    try:
+        names = os.listdir(store_dir)
+    except OSError:
+        return
+    for name in names:
+        if name != legacy and not name.startswith(_SNAPSHOT_TMP_PREFIX):
+            continue
+        path = os.path.join(store_dir, name)
+        try:
+            if os.path.isfile(path) and os.stat(path).st_mtime < cutoff:
+                os.unlink(path)
+        except OSError:
+            pass
+
+
 def rebuild_snapshot(store_dir):
     """Rebuild snapshot.json from journal.jsonl. Returns (count, error)."""
     err = _ensure_store(store_dir)
     if err:
         return None, err
+    _sweep_stale_snapshot_tmps(store_dir)
     journal_path = os.path.join(store_dir, JOURNAL_NAME)
     boxes = {}
     total = 0
@@ -454,20 +494,34 @@ def rebuild_snapshot(store_dir):
         "boxes": boxes,
     }
     snapshot_path = os.path.join(store_dir, SNAPSHOT_NAME)
-    tmp_path = snapshot_path + ".tmp"
+    # Issue #716: overlapping `collect` runs share the store, so the tmp
+    # file must not be a shared name. Every rebuild writes to a
+    # process-unique tmp path (pid is in the name; tempfile adds the
+    # random suffix) — two publishers never share the tmp name, so one
+    # collect's os.replace() can no longer pull the path out from under
+    # another collect's still-open write and fail it with "cannot write
+    # snapshot". The atomic-rename publication itself is unchanged.
+    tmp_path = None
     try:
-        with open(tmp_path, "w", encoding="utf-8") as fh:
+        with tempfile.NamedTemporaryFile(mode="w", dir=store_dir,
+                                         prefix=_SNAPSHOT_TMP_PREFIX,
+                                         suffix=".%d" % os.getpid(),
+                                         delete=False,
+                                         encoding="utf-8") as fh:
             json.dump(snapshot, fh, indent=2, sort_keys=True)
             fh.write("\n")
+            tmp_path = fh.name
         # Atomic publish: a crash mid-write leaves the previous good
         # snapshot in place instead of a torn file that reads as "no
         # snapshot" to every consumer.
         os.replace(tmp_path, snapshot_path)
+        tmp_path = None  # replaced away; nothing to clean up
     except OSError as exc:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         return None, "cannot write snapshot: %s" % exc
     return total, None
 

@@ -18,6 +18,7 @@ import hashlib
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -906,3 +907,64 @@ def test_rollback_unhealthy_claim_counts_as_state(env):
     record = _journal(store)[0]
     assert record["suspect"] is False
     assert record["versions"]["repo_commit"] == COMMIT_A
+
+
+# --- issue #716: concurrent rebuilds must not share the snapshot tmp ---
+
+
+def test_concurrent_rebuilds_all_succeed(env):
+    """Issue #716: overlapping rebuilds on one store must all succeed.
+
+    With the old shared `snapshot.json.tmp` name, overlapping collects
+    raced: one collect's os.replace() pulled the tmp path out from under
+    another collect's still-open write, failing it with "cannot write
+    snapshot" (~18% of rebuilds with 16 concurrent publishers on this
+    box). Every rebuild now publishes through a process-unique tmp path,
+    so 16 concurrent rebuilds all exit 0 and the final snapshot is valid.
+    """
+    estate, store = _collect(
+        env, {"tower": {"snapshot": _snapshot_json(COMMIT_A)}})
+    procs = [subprocess.Popen(
+        [sys.executable, INVENTORY, "rebuild", "--store", store],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(16)]
+    for proc in procs:
+        _out, err = proc.communicate(timeout=120)
+        assert proc.returncode == 0, \
+            "concurrent rebuild failed: %s" % err.strip()
+    snap = _snapshot(store)
+    assert set(snap["boxes"]) == {"tower"}
+    assert snap["boxes"]["tower"]["versions"]["repo_commit"] == COMMIT_A
+    # Successful publishes consume their tmp via os.replace(): no
+    # `snapshot.json.tmp*` files may be left behind.
+    leftovers = [n for n in os.listdir(store)
+                 if n.startswith("snapshot.json.tmp")]
+    assert leftovers == []
+
+
+def test_rebuild_sweeps_only_stale_snapshot_tmps(env):
+    """Issue #716: crash-orphaned snapshot tmps are swept, live ones kept.
+
+    Per-rebuild unique tmp paths mean a crash between the tmp write and
+    os.replace() leaves a stale `snapshot.json.tmp.*` file instead of a
+    torn snapshot. Rebuilds sweep tmp files older than one hour; a young
+    tmp — a live writer's — is never touched.
+    """
+    estate, store = _collect(
+        env, {"tower": {"snapshot": _snapshot_json(COMMIT_A)}})
+    stale = os.path.join(store, "snapshot.json.tmp.424242.12345")
+    fresh = os.path.join(store, "snapshot.json.tmp.31337.999")
+    legacy = os.path.join(store, "snapshot.json.tmp")
+    for path in (stale, fresh, legacy):
+        with open(path, "w") as fh:
+            fh.write("{}\n")
+    old = time.time() - 7200  # 2h: past the 1h sweep gate
+    os.utime(stale, (old, old))
+    os.utime(legacy, (old, old))
+    proc = run_inventory("rebuild", "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert not os.path.exists(stale)
+    assert not os.path.exists(legacy)  # pre-#716 shared-name orphan
+    assert os.path.exists(fresh)  # young: a live writer's tmp, untouched
+    assert _snapshot(store)["boxes"]["tower"]["versions"][
+        "repo_commit"] == COMMIT_A
