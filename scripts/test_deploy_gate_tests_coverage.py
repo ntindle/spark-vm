@@ -17,9 +17,9 @@ This test fails loudly, naming the file and the fix site (the component's
   2. a `<c>_tests` string names a `.py` file that no longer exists on disk
      (stale registration — a gate command that would fail outright).
 
-Registered tokens must be repo-relative paths with no `..` segments or
-absolute forms: anything else escapes the tree the pin walks, so it fails
-loudly instead of walking the wrong tree. Every gate-enumerated component
+Registered test-module tokens must be repo-relative paths with no `..`
+segments or absolute forms: anything else escapes the tree the pin walks,
+so it fails loudly instead of walking the wrong tree. Every gate-enumerated component
 also carries an exact registered-file count in EXPECTED_REGISTERED_COUNTS,
 and the enumerated set itself is pinned exactly — adding a gate is a
 deliberate gate-policy change that must extend the pin, not slip through a
@@ -67,9 +67,11 @@ def _gate_tests_vars():
 
     Only <c>_tests variables that register individual .py files; a gate
     that runs a whole directory (cred_ui_tests) cannot drift this way.
-    Tokens must be repo-relative paths with no `..` segments: anything
-    else escapes the walk root the pin derives from the tokens, so it
-    fails loudly instead of walking the wrong tree.
+    Test-module tokens must be repo-relative paths with no `..` segments
+    or absolute forms: anything else escapes the walk root the pin derives
+    from the tokens, so it fails loudly instead of walking the wrong tree.
+    (Non-test tokens in the gate command string are never walked and are
+    not checked.)
     """
     text = COMPONENTS_CONF.read_text(encoding="utf-8")
     if not text.strip():
