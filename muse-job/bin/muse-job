@@ -1009,12 +1009,26 @@ def _steer(slug, message, verify=True):
     # dead pane would execute the pasted text (multi-line text can even
     # execute at paste time, newline by newline). Do NOT send Enter into a
     # dead pane: pasted-but-unsubmitted text is inert. Report failure.
-    if not _pane_shows_live_tui(*_capture_pane_state(target)):
+    pane, pane_cmd = _capture_pane_state(target)
+    if not _pane_shows_live_tui(pane, pane_cmd):
         return False
+    needle = message.strip().splitlines()[0][:60] if message.strip() else ""
+    if verify and needle and not _input_box_has_text(pane, needle):
+        # Issue #12 L9 -- arrival check. The clearance check below reports
+        # "delivered" when the input box no longer holds the steer needle,
+        # but a box the paste never reached is equally clear of it: a
+        # silently failed paste (or agent output echoing the steer text into
+        # the pane) would read as a delivery that never happened. Fail
+        # closed: the needle must be seen in the box at least once before
+        # the box going clear can count as delivered.
+        time.sleep(2)
+        pane, pane_cmd = _capture_pane_state(target)
+        if (not _pane_shows_live_tui(pane, pane_cmd)
+                or not _input_box_has_text(pane, needle)):
+            return False
     run("tmux", "send-keys", "-t", target, "Enter")
     if not verify:
         return True
-    needle = message.strip().splitlines()[0][:60] if message.strip() else ""
     # The TUI can swallow Enters while it settles (observed after a resume:
     # the paste rendered in the box but several Enters never submitted).
     # Be patient here rather than declaring failure fast: the loop only
