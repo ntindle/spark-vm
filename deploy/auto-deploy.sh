@@ -804,11 +804,15 @@ proxy_addon_loaded() {
     # addon's load signal since the service (re)started. Retry briefly:
     # journald delivery can lag the restart by a second or two.
     # PROXY_ADDON_LOAD_RETRIES overrides the retry count (tests).
-    local svc="$1" start_ts attempt retries="${PROXY_ADDON_LOAD_RETRIES:-5}"
+    local svc="$1" start_ts attempt journal_out retries="${PROXY_ADDON_LOAD_RETRIES:-5}"
     start_ts=$(systemctl show "$svc" -p ExecMainStartTimestamp --value 2>/dev/null)
     [ -n "$start_ts" ] && [ "$start_ts" != "n/a" ] || return 1
     for attempt in $(seq 1 "$retries"); do
-        if journalctl -u "$svc" --since "$start_ts" --no-pager 2>/dev/null | grep -q "swap_addon: spark-vm version"; then
+        # Capture-then-grep (no pipe): `journalctl | grep -q` under
+        # pipefail races SIGPIPE (141) when grep -q exits on first match,
+        # false-reporting "not loaded" on a healthy box.
+        journal_out=$(journalctl -u "$svc" --since "$start_ts" --no-pager 2>/dev/null) || true
+        if grep -q "swap_addon: spark-vm version" <<< "$journal_out"; then
             return 0
         fi
         sleep 1

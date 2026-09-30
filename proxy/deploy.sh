@@ -333,7 +333,11 @@ for svc in swap-proxy.service swap-inference.service; do
     fi
     loaded=0
     for attempt in $(seq 1 5); do
-        if sudo journalctl -u "$svc" --since "$start_ts" --no-pager 2>/dev/null | grep -q "swap_addon: spark-vm version"; then
+        # Capture-then-grep (no pipe): `journalctl | grep -q` under
+        # pipefail races SIGPIPE (141) when grep -q exits on first match,
+        # false-reporting "not loaded" on a healthy box.
+        journal_out=$(sudo journalctl -u "$svc" --since "$start_ts" --no-pager 2>/dev/null) || true
+        if grep -q "swap_addon: spark-vm version" <<< "$journal_out"; then
             loaded=1; break
         fi
         sleep 1
