@@ -173,10 +173,14 @@ def read_registry():
     rc, out, err = run(REGISTRY_CAT)
     if rc != 0:
         # A genuinely absent store (fresh box, nothing registered yet) is
-        # the one honest-empty case; cat names it on stderr. Any other
-        # read failure (sudo misconfiguration, permission loss) is a
-        # loud error, not an empty rendering.
-        if "No such file or directory" in err:
+        # the one honest-empty case; cat names it on stderr with its
+        # path-specific prefix. Anchor the match on that prefix *and* the
+        # errno phrase instead of the bare "No such file or directory"
+        # substring: locale drift is already safe-biased to loud, and the
+        # anchor rules out false positives from other tools' stderr naming
+        # the same phrase — while other errors on THIS path (permission
+        # denied, is-a-directory) stay loud (#672), never silent {}.
+        if "cat: %s: No such file or directory" % REGISTRY_CAT[-1] in err:
             return {}
         raise RegistryCorruptError("registry read failed")
     try:

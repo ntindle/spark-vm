@@ -311,6 +311,32 @@ def test_read_registry_sudo_failure_raises(monkeypatch):
         cred_ui.read_registry()
 
 
+def test_read_registry_bare_missing_phrase_on_other_path_raises(monkeypatch):
+    """PR #696 follow-up: the honest-empty match is anchored on cat's
+    path-specific prefix — the bare "No such file or directory" phrase
+    from another path must stay loud, not degrade to {}."""
+    monkeypatch.setattr(
+        cred_ui, "run",
+        lambda argv, inp=None: (
+            1, "",
+            "/usr/bin/cat: /home/swapd/some-other-file: No such file or directory\n"))
+    with pytest.raises(cred_ui.RegistryCorruptError):
+        cred_ui.read_registry()
+
+
+def test_read_registry_permission_denied_on_store_path_raises(monkeypatch):
+    """Engineering review (PR #751): the honest-empty anchor is
+    path-AND-errno-phrase, not path-only — a permission error on the
+    registry path itself must stay loud, never degrade to silent {}."""
+    monkeypatch.setattr(
+        cred_ui, "run",
+        lambda argv, inp=None: (
+            1, "",
+            "/usr/bin/cat: /home/swapd/credentials.json: Permission denied\n"))
+    with pytest.raises(cred_ui.RegistryCorruptError):
+        cred_ui.read_registry()
+
+
 def test_read_registry_corrupt_json_raises(monkeypatch):
     """A present-but-corrupt registry raises instead of degrading to {} —
     the UI must not render every credential as `registered: false`."""

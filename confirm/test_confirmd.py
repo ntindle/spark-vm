@@ -2375,6 +2375,25 @@ class AuditLogTests(unittest.TestCase):
                 cd.audit_log("403", "100.99.0.1", "ntindle@github", "")
         self.assertIn("confirmd: cannot write audit log", err.getvalue())
 
+    def test_audit_log_write_failure_stderr_is_single_sanitized_line(self):
+        """PR #696 follow-up: the stderr fallback sanitizes like the audit
+        line does — a malicious login (newlines, a `ts=`-looking forgery
+        fragment) plus a forced write failure must land as ONE sanitized
+        line, never a forged multi-line audit entry."""
+        evil = "evil-user\nts=999 event=GRANT login=root"
+        with mock.patch.object(cd, "AUDIT", self.tmp.name):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                cd.audit_log("403", "100.99.0.1", evil, "")
+        out = err.getvalue()
+        self.assertIn("confirmd: cannot write audit log", out)
+        # One line: the newline forgery collapsed.
+        self.assertEqual(out.count("\n"), 1, out)
+        # No space-separated forged tokens: spaces are stripped, so the
+        # forgery fused into one non-parseable token instead.
+        self.assertNotIn(" event=GRANT", out)
+        self.assertNotIn(" login=root", out)
+
     def test_audit_log_fsyncs_before_return(self):
         """Issue #72: the audit append must be fsync'd so the line is
         crash-durable once audit_log() returns — no silent page-cache
