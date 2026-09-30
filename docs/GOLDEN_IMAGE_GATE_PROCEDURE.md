@@ -125,6 +125,21 @@ Operational notes:
   operator private key baked into a tenant-facing image is a leak — so
   build with an ephemeral key and remove operator keys before this step.
   If the image is a subtree, mount only the subtree as the target.
+- The scan prunes the top-level pseudo-filesystems (`proc`, `sys`,
+  `dev`) and every `__pycache__` / `.pytest_cache` directory, and it
+  never flags its own pattern definitions when the target tree contains
+  them — so scanning the repo checkout itself, or an image that ships
+  the harness, does not false-refuse on the pattern file or on
+  regenerated test artifacts. If the scan's own report would be the
+  thing under review, note the exclusion; the exclusion is exactly one
+  file (the pattern file used for the run), never a directory.
+- Unreadable entries are skipped **loudly, not silently**: a directory
+  the walk cannot descend warns on stderr and is skipped fail-open —
+  the gate runs as root, which moots it on a healthy image. A file
+  whose listing is readable but whose *contents* cannot be read is
+  skipped silently by the content-pattern pass; treat any permission
+  anomaly found elsewhere in the gate as a reason to re-run this scan
+  after fixing it.
 - The public-dummy allowlist exists for the re-run case: an image whose
   build already ran the fixture installer carries the dummy in the
   inference store, and Step 5b re-runs this same scan. The allowlist is
@@ -518,8 +533,15 @@ mutated it. Re-run the scan now — this is the verdict on the artifact
 that actually ships:
 
 ```bash
+# same target you scanned in Step 0b — / below is the image-box case
 harness/scan-baked-secrets.sh /
 ```
+
+The `/` above is the image box itself (the normal case — the box holds
+only the image). For a subtree image, re-scan the subtree mount you used
+in Step 0b, not a literal `/`: scanning the build box's own root here
+false-refuses on the build box's keys — true positives in the wrong
+tree. A refused gate is only actionable when the target is the image.
 
 At this point the fixture is torn down, so the secrets dirs are empty
 and the public-dummy allowlist is inert: any hit is real baked material.

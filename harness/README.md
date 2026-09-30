@@ -54,7 +54,13 @@ Implements the executable half of the R2 pre-seeded-harness contract
   non-empty value except the allowlisted public gate-fixture dummy.
   Pattern list in `baked-secrets-patterns.txt` (reviewed like code).
   Exit 0 clean, exit 1 gate refusal with per-hit report, exit 2 bad
-  invocation. Wired as Step 0b of `docs/GOLDEN_IMAGE_GATE_PROCEDURE.md`.
+  invocation. Wired as Steps 0b (pre-fixture refusal) and 5b
+  (post-teardown pre-publish verdict) of
+  `docs/GOLDEN_IMAGE_GATE_PROCEDURE.md`; Step 5b re-scans the same
+  target as Step 0b. Prunes the top-level pseudo-filesystems and
+  `__pycache__` / `.pytest_cache` dirs, never flags its own pattern
+  file when the target contains it, and warns loudly on stderr about
+  unreadable walk entries (skipped fail-open).
 
 - **`install-gate-fixture.sh`** — installs the gate fixture the `gate`-mode
   probe asserts against: the public dummy inference credential under the
