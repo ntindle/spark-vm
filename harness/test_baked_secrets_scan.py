@@ -58,7 +58,7 @@ def test_pseudo_filesystems_excluded(tmp_path):
     # At gate time the target is the image root (/); /proc, /sys, /dev
     # must not be scanned (unreadable entries, device nodes).
     write(tmp_path / "proc" / "evil",
-          "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n")
+          "-----BEG" + "IN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n")
     p = run_scan(tmp_path)
     assert p.returncode == 0, p.stdout + p.stderr
 
@@ -67,7 +67,7 @@ def test_pseudo_filesystems_excluded(tmp_path):
 
 def test_pem_private_key_refused(tmp_path):
     write(tmp_path / "home" / "swapd" / "ca-key.pem",
-          "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----\n")
+          "-----BEG" + "IN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----\n")
     p = run_scan(tmp_path)
     assert p.returncode == 1, p.stdout + p.stderr
     assert "HIT pem-private-key" in p.stdout
@@ -75,14 +75,14 @@ def test_pem_private_key_refused(tmp_path):
 
 def test_pkcs8_private_key_refused(tmp_path):
     write(tmp_path / "etc" / "skel" / "key",
-          "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2Vw...\n-----END PRIVATE KEY-----\n")
+          "-----BEG" + "IN PRIVATE KEY-----\nMC4CAQAwBQYDK2Vw...\n-----END PRIVATE KEY-----\n")
     p = run_scan(tmp_path)
     assert p.returncode == 1, p.stdout + p.stderr
     assert "HIT pem-private-key" in p.stdout
 
 
 def test_aws_access_key_refused(tmp_path):
-    write(tmp_path / "root" / "notes.txt", "deploy with AKIAIOSFODNN7EXAMPLE\n")
+    write(tmp_path / "root" / "notes.txt", "deploy with AK" + "IAIOSFODNN7EXAMPLE\n")
     p = run_scan(tmp_path)
     assert p.returncode == 1, p.stdout + p.stderr
     assert "HIT aws-access-key-id" in p.stdout
@@ -225,8 +225,110 @@ def test_patterns_file_self_exclusion(tmp_path):
 
 
 def test_refusal_report_shape(tmp_path):
-    write(tmp_path / "leak.txt", "key: " + "AKIAIOSFODNN7EXAMPLE" + "\n")
+    write(tmp_path / "leak.txt", "key: " + "AK" + "IAIOSFODNN7EXAMPLE" + "\n")
     p = run_scan(tmp_path)
     assert p.returncode == 1
     assert "baked-secrets-scan: HIT aws-access-key-id" in p.stdout
     assert "REFUSED" in p.stderr
+
+
+# --- fix-round tests (review blockers + nits) -------------------------------
+
+def test_crlf_patterns_still_match(tmp_path):
+    # A CRLF-edited patterns file must not silently weaken the rules
+    # (Security B2: trailing CR used to bake into every regex).
+    src = os.path.join(HARNESS, "baked-secrets-patterns.txt")
+    pat = tmp_path / "patterns-crlf.txt"
+    with open(src, "rb") as f:
+        data = f.read().replace(b"\n", b"\r\n")
+    pat.write_bytes(data)
+    write(tmp_path / "leak.txt", "-----BEGIN " + "RSA PRIVATE KEY-----\n")
+    p = run_scan(tmp_path, "--patterns", str(pat))
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "HIT pem-private-key" in p.stdout
+
+
+def test_empty_patterns_exit_2(tmp_path):
+    # Zero checkable rules is a misconfiguration, not a clean scan.
+    pat = tmp_path / "empty-patterns.txt"
+    pat.write_text("# no rules\n\n")
+    p = run_scan(tmp_path, "--patterns", str(pat))
+    assert p.returncode == 2, p.stdout + p.stderr
+
+
+def test_patterns_missing_arg_exit_2(tmp_path):
+    p = subprocess.run([SCAN, str(tmp_path), "--patterns"],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 2, p.stdout + p.stderr
+
+
+def test_secrets_dir_itself_symlink_refused(tmp_path):
+    d = tmp_path / "home" / "swapd"
+    d.mkdir(parents=True)
+    real = tmp_path / "realdir"
+    real.mkdir()
+    (d / "secrets").symlink_to(real)
+    p = run_scan(tmp_path)
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "HIT secret-store-symlink" in p.stdout
+
+
+def test_symlink_named_like_key_refused(tmp_path):
+    (tmp_path / "real").write_text("benign\n")
+    (tmp_path / "id_rsa").symlink_to(tmp_path / "real")
+    p = run_scan(tmp_path)
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "HIT ssh-private-key" in p.stdout
+
+
+def test_p12_filename_refused(tmp_path):
+    write(tmp_path / "opt" / "app" / "bundle.p12", "binary-ish\n")
+    p = run_scan(tmp_path)
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "HIT pkcs12-bundle" in p.stdout
+
+
+def test_dotenv_variant_refused(tmp_path):
+    write(tmp_path / "srv" / "app" / ".env.production", "K=V\n")
+    p = run_scan(tmp_path)
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "HIT dotenv-file" in p.stdout
+
+
+def test_pycache_pruned(tmp_path):
+    # .pyc files are byte-compilations of the .py sources the scan already
+    # covers (CPython constant-folds even dynamically-constructed fixtures
+    # into .pyc literals); scanning them would false-refuse on the repo's
+    # own test vectors.
+    cachedir = tmp_path / "__pycache__"
+    cachedir.mkdir()
+    (cachedir / "x.pyc").write_bytes(
+        b"\x00" + b"-----BEGIN " + b"RSA PRIVATE KEY-----\n")
+    p = run_scan(tmp_path)
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_allowlist_multiword_value(tmp_path):
+    # The allowlist compare must not word-split multi-word entries.
+    pat = tmp_path / "patterns.txt"
+    pat.write_text("allow: two-words: two words\n")
+    d = tmp_path / "home" / "swapd" / "secrets"
+    d.mkdir(parents=True)
+    (d / "note").write_text("two words")
+    p = run_scan(tmp_path, "--patterns", str(pat))
+    assert p.returncode == 2, p.stdout + p.stderr  # zero checkable rules
+    pat.write_text("allow: two-words: two words\ncontent: canary: CANARYNONE\n")
+    p = run_scan(tmp_path, "--patterns", str(pat))
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_scan_repo_tree_itself_clean():
+    # Regression test for the gate's documented invocation: the scan must
+    # be clean against the repo tree itself, or Step 0b could never pass
+    # on an image built from a checkout. Keeps literal secret-shaped
+    # strings out of the repo permanently — test vectors are constructed
+    # dynamically (constant-folded literals live only in __pycache__,
+    # which the scan prunes).
+    repo = os.path.dirname(HARNESS)
+    p = run_scan(repo)
+    assert p.returncode == 0, p.stdout + p.stderr

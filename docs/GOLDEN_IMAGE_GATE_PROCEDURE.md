@@ -114,6 +114,23 @@ code — extend it when new secret shapes matter.
 - **Exit 2** is an **invocation error**: fix the command and re-run — it
   is not a verdict on the image.
 
+Operational notes:
+
+- The scan descends into every mount under the target (no `-xdev`), so
+  run it with only image filesystems mounted — a data disk or NFS share
+  under the target can false-refuse or hang the walk.
+- The scan flags the build box's own keys too (`/root/.ssh/id_rsa`,
+  operator `~/.ssh`, a `.env` in an operator home). If the image is a
+  whole-disk snapshot of the build box, that is a *true* positive — an
+  operator private key baked into a tenant-facing image is a leak — so
+  build with an ephemeral key and remove operator keys before this step.
+  If the image is a subtree, mount only the subtree as the target.
+- The public-dummy allowlist exists for the re-run case: an image whose
+  build already ran the fixture installer carries the dummy in the
+  inference store, and Step 5b re-runs this same scan. The allowlist is
+  value-exact (byte compare), never name-based — a real secret filed
+  under the name `llm-api` is still refused.
+
 ## Step 1 — install the gate fixture
 
 ```bash
@@ -494,6 +511,27 @@ an unreadable registry (exit 2) or an unparsable allow file (exit 1)
 must never read as "entry absent" — treat them as refusals and fail
 the gate.
 
+## Step 5b — baked-secrets re-scan (pre-publish verdict)
+
+The Step 0b scan ran before the gate touched the image; steps 1–5 then
+mutated it. Re-run the scan now — this is the verdict on the artifact
+that actually ships:
+
+```bash
+harness/scan-baked-secrets.sh /
+```
+
+At this point the fixture is torn down, so the secrets dirs are empty
+and the public-dummy allowlist is inert: any hit is real baked material.
+The gate's own writes are all public-by-design (the fixture dummy, echo
+logs, approvals carrying only the dummy), so a hit here means
+operator-introduced material — a key pasted during step-3 debugging
+landing in `~/.bash_history`, a stray file in `/tmp` or `/root`, any
+out-of-band write. Exit 1 is a gate refusal: find how it got baked,
+remove it at the image build, rebuild. Snapshot the image promptly
+after this step and touch nothing on the box until the snapshot lands —
+material introduced between this scan and the snapshot is unscanned.
+
 ## Step 6 — record the gate outcome
 
 Record, alongside the image's manifest, one gate record per image:
@@ -511,6 +549,9 @@ Record, alongside the image's manifest, one gate record per image:
 - **teardown attestation**: each removal performed (registry unbinds,
   allowlist-line removals, credential-file deletions, fixture kill) and
   the verification command results
+- **baked-secrets scans**: the Step 0b and Step 5b exit codes, targets,
+  and hit counts (a skipped scan is recorded as skipped — the record is
+  what makes a skipped step visible at audit time)
 - the §6 item-6 interface-gap note (while unlanded: "round trip
   exercised through confirmd directly; pending-signal interface not yet
   shipped") and the activation-script gap note (while unlanded: "task
