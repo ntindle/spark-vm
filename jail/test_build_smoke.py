@@ -303,10 +303,12 @@ class TestIsolation:
 
     def test_nftables_drops_jail_egress(self, active):
         # #441: the limit is a MATCH, not a log modifier — it must gate
-        # the log only, with the drop in a separate unconditional rule. A
-        # single rule of the form `log prefix ... limit rate ... drop`
-        # would skip the drop for under-limit packets (fail-open: the
-        # chains are policy accept) while logging every packet.
+        # the log only, with the drop in a separate unconditional rule.
+        # With default (until) semantics the limit matches while the rate
+        # is under the limit, so a single rule of the form `limit rate
+        # ... log prefix ... drop` would log+drop the first 5/min but skip
+        # BOTH log and drop for over-limit packets (fail-open on the flood
+        # itself: the chains are policy accept).
         assert ('iifname "ve-jail" limit rate 5/minute burst 10 packets '
                 'log prefix "jail-fwd-drop: "') in active
         assert 'iifname "ve-jail" drop' in active

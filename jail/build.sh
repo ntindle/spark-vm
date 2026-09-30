@@ -174,14 +174,14 @@ table inet jail {
         # dropped packets at line rate (UDP flood to blocked ports, SYN
         # scan of the tailnet) — unconditional logging appends every one
         # to the host's kern.log, turning the forensic signal into host
-        # disk pressure. nft's `limit` is a MATCH, not a log modifier: when
-        # the rate is not exceeded the rule aborts and the rest of the rule
-        # is skipped — so a single rule of the form `log prefix ... limit
-        # rate ... drop` would skip the drop for under-limit packets
-        # (fail-open: the chains are policy accept) while logging every
-        # packet. The safe shape is therefore two rules: the limit gates
-        # only the log emission, and the drop is a separate unconditional
-        # rule on the very next line. Default (until) limit semantics, not
+        # disk pressure. nft's `limit` is a MATCH, not a log modifier: with
+        # default (until) semantics it matches while the rate is UNDER the
+        # limit, so a single rule of the form `limit rate ... log prefix
+        # ... drop` would log+drop the first 5/min but skip BOTH log and
+        # drop for over-limit packets (fail-open on the flood itself: the
+        # chains are policy accept). The safe shape is therefore two rules:
+        # the limit gates only the log emission, and the drop is a separate
+        # unconditional rule on the very next line. Default (until) limit
         # `over`: the first 5/min of drops are logged (the isolated
         # incidents are the forensic signal worth keeping) and only flood
         # spam is suppressed; `over` would invert that — silent on
