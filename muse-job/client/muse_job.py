@@ -70,10 +70,15 @@ def _job(*args, timeout=180):
 
 # --- dispatch / steer --------------------------------------------------------
 
-def spawn(slug, repo, prompt_file, budget_hours=8, branch=None, base=None):
+def spawn(slug, repo, prompt_file, budget_hours=8, branch=None, base=None,
+          allow_secrets=False):
     """Start a job. Returns {"slug","session_uuid","worktree"}.
 
     Note: prompt_file must be a path ON THE BOX (the CLI reads it there).
+
+    allow_secrets: the box-side CLI scans the prompt for secret-shaped text
+    (issue #9) and refuses unless this is set -- set it only when the
+    prompt really carries values the agent may see.
     """
     check_slug(slug)
     args = ["spawn", slug, "--repo", repo, "--prompt-file", prompt_file,
@@ -82,13 +87,23 @@ def spawn(slug, repo, prompt_file, budget_hours=8, branch=None, base=None):
         args += ["--branch", branch]
     if base:
         args += ["--base", base]
+    if allow_secrets:
+        args += ["--allow-secrets"]
     return _job(*args, timeout=300)
 
 
-def steer(slug, message):
-    """Send a message into the job (queues if mid-turn). Returns delivered."""
+def steer(slug, message, allow_secrets=False):
+    """Send a message into the job (queues if mid-turn). Returns delivered.
+
+    allow_secrets: the box-side CLI scans the message for secret-shaped
+    text (issue #9) and refuses unless this is set -- set it only when the
+    message really carries values the agent may see.
+    """
     check_slug(slug)
-    return _job("steer", slug, message, timeout=120)
+    args = ["steer", slug, message]
+    if allow_secrets:
+        args += ["--allow-secrets"]
+    return _job(*args, timeout=120)
 
 
 def interrupt(slug):
