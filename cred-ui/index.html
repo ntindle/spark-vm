@@ -125,7 +125,13 @@ async function refresh() {
     lastOk = Date.now();
     $('refresh-note').textContent = 'updated just now';
   } catch (e) {
-    $('list').innerHTML = '<p class="bad">couldn\u2019t load the credential list — the credential store may be damaged or unreadable. Nothing was changed; retrying\u2026</p>';
+    // render()'s typing guard applies here too: a failed poll must not
+    // rebuild the table mid-typing and destroy the in-flight "add host"
+    // input — the error text only replaces the list when no input inside
+    // it is focused. (PR #696 review follow-up.)
+    if (!(document.activeElement && $('list').contains(document.activeElement))) {
+      $('list').innerHTML = '<p class="bad">couldn\u2019t load the credential list — the credential store may be damaged or unreadable. Nothing was changed; retrying\u2026</p>';
+    }
     $('refresh-note').textContent = 'refresh failed — retrying…';
   }
 }

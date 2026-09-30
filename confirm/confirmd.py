@@ -644,8 +644,9 @@ def _sanitize_audit_field(value):
     Same shape as the swap-proxy fix for #17 (PR #682,
     `proxy/swap_addon.py::_sanitize_audit_field`) — sanitize on write,
     one choke point every interpolated field routes through. Well-formed
-    values pass through unchanged. None renders as "-"; other non-str
-    values are coerced.
+    values pass through unchanged except that spaces are stripped too
+    (necessarily: spaces are the `k=v` token separator, so a space is a
+    forgery vector). None renders as "-"; other non-str values are coerced.
     """
     if value is None:
         return "-"
