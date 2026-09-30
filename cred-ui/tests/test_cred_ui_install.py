@@ -63,6 +63,12 @@ def test_install_populates_fixed_location(tmp_path):
     assert unit.is_file(), "unit not installed"
     assert unit.read_bytes() == open(
         os.path.join(REPO, "cred-ui", "cred-ui.service"), "rb").read()
+    # Exact-set pin that also runs as root (the mid-copy test's twin pin
+    # self-skips as root — the stale `== 5` count rotted through exactly
+    # that hole): the install dir must contain exactly the declared
+    # runtime set, no more, no less.
+    assert sorted(p.name for p in install_dir.iterdir()) == sorted(RUNTIME_FILES), \
+        "runtime set drift: %s" % sorted(p.name for p in install_dir.iterdir())
 
 
 def test_install_fails_closed_on_missing_file(tmp_path):
