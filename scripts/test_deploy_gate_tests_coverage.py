@@ -9,12 +9,22 @@ new tests. This is exactly the tripwire that fired on the G4 S1
 implementation PR (a new test file not registered in `proxy_tests` — CI
 failed, and the registration was added).
 
-This test fails loudly, naming the file, in either drift direction:
+This test fails loudly, naming the file and the fix site (the component's
+`<c>_tests` string in `deploy/components.conf`), in either drift direction:
 
   1. a `test_*.py` exists on disk under a gate-enumerated directory but is
      not named in that component's `<c>_tests` string (the CI-failing class);
   2. a `<c>_tests` string names a `.py` file that no longer exists on disk
      (stale registration — a gate command that would fail outright).
+
+Registered tokens must be repo-relative paths with no `..` segments or
+absolute forms: anything else escapes the tree the pin walks, so it fails
+loudly instead of walking the wrong tree. Every gate-enumerated component
+also carries an exact registered-file count in EXPECTED_REGISTERED_COUNTS,
+and the enumerated set itself is pinned exactly — adding a gate is a
+deliberate gate-policy change that must extend the pin, not slip through a
+count floor. The on-disk tree is walked once per component and the
+inventory shared by the two direction checks (no duplicate walks).
 
 A component gate that names a whole directory (e.g. `cred_ui_tests` runs
 `pytest cred-ui/tests/`) cannot drift this way, so only `<c>_tests`
@@ -57,6 +67,9 @@ def _gate_tests_vars():
 
     Only <c>_tests variables that register individual .py files; a gate
     that runs a whole directory (cred_ui_tests) cannot drift this way.
+    Tokens must be repo-relative paths with no `..` segments: anything
+    else escapes the walk root the pin derives from the tokens, so it
+    fails loudly instead of walking the wrong tree.
     """
     text = COMPONENTS_CONF.read_text(encoding="utf-8")
     if not text.strip():
@@ -64,16 +77,24 @@ def _gate_tests_vars():
     found = {}
     for match in re.finditer(r'^([A-Za-z][\w]*)_tests="([^"]*)"', text, re.M):
         component, value = match.group(1), match.group(2)
-        # Only .py tokens that are test modules: a gate like cred_ui_tests
-        # registers a source file (py_compile cred-ui/cred-ui.py) and runs
-        # the whole directory — that form cannot drift this way, so it is
-        # excluded from the pin, not pinned.
-        py_files = {
-            PurePosixPath(tok).as_posix()
-            for tok in value.split()
-            if tok.endswith(".py")
-            and PurePosixPath(tok).name.startswith("test_")
-        }
+        py_files = set()
+        for tok in value.split():
+            # Only .py tokens that are test modules: a gate like cred_ui_tests
+            # registers a source file (py_compile cred-ui/cred-ui.py) and runs
+            # the whole directory — that form cannot drift this way, so it is
+            # excluded from the pin, not pinned.
+            if not (tok.endswith(".py")
+                    and PurePosixPath(tok).name.startswith("test_")):
+                continue
+            pp = PurePosixPath(tok)
+            if pp.is_absolute() or ".." in pp.parts:
+                raise AssertionError(
+                    f"registered token {tok!r} is not a repo-relative path — "
+                    f"gate tokens in {component}_tests "
+                    "(deploy/components.conf) must be repo-relative with "
+                    "no '..' segments"
+                )
+            py_files.add(pp.as_posix())
         if py_files:
             found[component] = py_files
     return found
@@ -108,6 +129,20 @@ def _expected_dirs(registered):
 
 
 class TestDeployGateTestsCoverage(unittest.TestCase):
+    # One on-disk walk per component, computed once and shared by the two
+    # drift-direction tests: walking the same tree twice per suite run is
+    # pure duplicate cost. (The textual parse in _gate_tests_vars is cheap;
+    # the other tests keep calling it directly.)
+    _registered = None
+    _on_disk = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls._registered = _gate_tests_vars()
+        cls._on_disk = {
+            component: _on_disk_test_files(_expected_dirs(registered))
+            for component, registered in cls._registered.items()
+        }
     def test_gate_vars_are_enumerable(self):
         gate_vars = _gate_tests_vars()
         if not gate_vars:
@@ -142,32 +177,50 @@ class TestDeployGateTestsCoverage(unittest.TestCase):
                 "deploy/components.conf together",
             )
 
-    def test_every_on_disk_test_file_is_gate_registered(self):
+    def test_enumerated_components_match_pin_exactly(self):
+        # The pin covers the exact enumerated-component set, not just a
+        # floor: a new <c>_tests variable appearing in components.conf is a
+        # deliberate gate-policy change, so it must extend
+        # EXPECTED_REGISTERED_COUNTS with its exact registered-file count
+        # (this pin), not slip through the >= 2 floor in the test above.
         gate_vars = _gate_tests_vars()
+        self.assertEqual(
+            set(gate_vars), set(EXPECTED_REGISTERED_COUNTS),
+            "gate-enumerated components drifted from the pin — add the new "
+            "<component>_tests variable's exact registered-file count to "
+            "EXPECTED_REGISTERED_COUNTS in "
+            "scripts/test_deploy_gate_tests_coverage.py (this pin), or "
+            "remove the stale pin entry",
+        )
+
+    def test_every_on_disk_test_file_is_gate_registered(self):
         missing = []
-        for component, registered in gate_vars.items():
-            on_disk = _on_disk_test_files(_expected_dirs(registered))
+        for component, registered in self._registered.items():
+            on_disk = self._on_disk[component]
             exclusions = _INTENTIONAL_EXCLUSIONS.get(component, set())
             for path in sorted(on_disk - registered - exclusions):
                 missing.append(f"{component}: {path}")
         self.assertEqual(
             missing, [],
             "test file(s) exist on disk but are NOT registered in the "
-            "pre-deploy gate — the gate will not exercise them:\n"
-            + "\n".join(missing),
+            "pre-deploy gate — the gate will not exercise them. Fix: add "
+            "each file to that component's *_tests string in "
+            "deploy/components.conf (or register a reviewed entry in "
+            "_INTENTIONAL_EXCLUSIONS in this pin):\n" + "\n".join(missing),
         )
 
     def test_no_stale_registrations(self):
-        gate_vars = _gate_tests_vars()
         stale = []
-        for component, registered in gate_vars.items():
-            on_disk = _on_disk_test_files(_expected_dirs(registered))
+        for component, registered in self._registered.items():
+            on_disk = self._on_disk[component]
             for path in sorted(registered - on_disk):
                 stale.append(f"{component}: {path}")
         self.assertEqual(
             stale, [],
             "gate registration(s) point at .py files that do not exist on "
-            "disk — the gate command would fail outright:\n" + "\n".join(stale),
+            "disk — the gate command would fail outright. Fix: remove the "
+            "stale name from that component's *_tests string in "
+            "deploy/components.conf:\n" + "\n".join(stale),
         )
 
     def test_registered_floor(self):

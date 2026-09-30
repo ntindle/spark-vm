@@ -56,6 +56,9 @@ file under a gate-enumerated component directory (`proxy/`, `confirm/`)
 is not registered in that component's pre-deploy gate command in
 `deploy/components.conf` — or if a registration points at a deleted file
 (a new test must be exercised before deploys, not just in CI).
+Registrations must be repo-relative paths (no `..` escapes), and each
+gate-enumerated component's registered-file count is pinned exactly, so a
+new gate component has to declare its count before it counts as covered.
 All suites pass on `main`; your PR should keep them green.
 
 Install the test dependencies first:
