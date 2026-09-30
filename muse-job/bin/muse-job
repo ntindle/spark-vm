@@ -1138,8 +1138,12 @@ def head_info(uuid):
 # a genuine event pushed past the tail window is INVISIBLE to the scan, and
 # no in-repo mechanism recovers it -- so truncation is a per-pass LOUD
 # signal (events-scan-truncated), never a silent condition. The 2 MB cap is
-# containment, not correctness; bounded event-file growth/rotation on the
-# manager side is the real fix (issue #27).
+# containment, not correctness; the real fix is manager-owned rotation at
+# 2x the window (issue #27, rotate_event_file below), which archives the
+# oversized file and re-seeds its terminal done claims into the fresh file
+# so a rotated-out genuine done keeps paging instead of becoming a silent
+# burial. The 30-day disk sweep prunes rotated archives by mtime (they never
+# match an active uuid's skip name), so rotation and the sweep compose.
 _EVENT_SCAN_MAX_BYTES = 2 * 1024 * 1024
 
 # Discovery-grace window for the liveness signals (issue #23): an absent
@@ -1216,6 +1220,123 @@ def _event_scan_truncated(uuid, max_bytes=_EVENT_SCAN_MAX_BYTES):
         return os.lstat(p).st_size > max_bytes
     except OSError:
         return False
+
+
+# Issue #27: manager-owned bounded growth for hook event files. Hooks append
+# with O_APPEND by name on every event (plugin/hooks/stop.py,
+# session-end.py), so a rename-based rotate is atomic w.r.t. concurrent hook
+# writes: a hook that opened its fd before the rename lands its line in the
+# archive, one that opens after lands in the fresh file -- every line ends up
+# in exactly one file, never lost, never duplicated. The threshold sits at
+# 2x the scan window so the 2 MB tail-scan containment only ever fires on
+# files the rotation hasn't caught up with yet.
+_EVENT_ROTATE_BYTES = 4 * 1024 * 1024
+
+
+def _done_lines_of(path):
+    """Raw byte lines of the file whose parsed JSON is a dict with
+    state == "done", in file order.
+
+    Same predicate as done_events() (state == "done" on a dict). Raw lines
+    are preserved byte-identical so the re-seeded claims triage exactly as
+    they did pre-rotation. Non-dict / malformed / non-done lines are left
+    out -- they live on in the archive.
+    """
+    lines = []
+    with open(path, "rb") as f:
+        for raw in f:
+            if not raw.strip():
+                continue
+            try:
+                obj = json.loads(raw.decode("utf-8", errors="replace"))
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and obj.get("state") == "done":
+                lines.append(raw if raw.endswith(b"\n") else raw + b"\n")
+    return lines
+
+
+def rotate_event_file(uuid):
+    """Rotate an oversized hook event file. Manager-owned (issue #27).
+
+    The trigger is size only, evaluated by the manager (the watch pass calls
+    this; the agent's hooks never do). The agent's only lever is appending
+    lines, and rotation archives rather than deletes, so flooding to force a
+    rotate buries nothing -- and terminal `done` claims are re-seeded into
+    the fresh file (first, in the uncontended case) so a rotated-out genuine
+    done keeps paging every pass instead of becoming a silent burial (the
+    #23 B1/B3 class).
+
+    Ordering (rename first, extract from the archive, then write the fresh
+    file) closes the race window: a hook appending between the rename and
+    the fresh-file write opens by name and lands in the fresh file -- the
+    archive read cannot see it, so it is never duplicated, and the done
+    extraction only ever reads the archive. The fresh file is created with
+    O_CREAT (a hook that raced in between created the same empty file first)
+    and the re-seed writes use O_APPEND exactly like the hooks, so a racing
+    hook append and the re-seed serialize the way hook appends serialize
+    among themselves.
+
+    Refuses: non-regular event file (symlink/FIFO/device -- tampering, the
+    watch pass pages events-tampered), a symlinked EVENTS_DIR (the hooks
+    refuse the same way). Fail-closed: any failure returns False with the
+    original file untouched -- the events-scan-truncated signal keeps
+    firing, which is the honest state. Returns True when a rotation
+    happened.
+    """
+    p = _event_path(uuid)
+    if p is None:
+        return False
+    try:
+        if os.path.islink(EVENTS_DIR):
+            return False
+        st = os.lstat(p)
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        if st.st_size <= _EVENT_ROTATE_BYTES:
+            return False
+        archived = "%s.%d.rot" % (p, st.st_mtime_ns)
+        os.rename(p, archived)
+        try:
+            done_lines = _done_lines_of(archived)
+        except OSError:
+            # The rename already happened: restore it rather than leave a
+            # fresh file whose done claims were silently dropped.
+            try:
+                os.rename(archived, p)
+            except OSError:
+                pass
+            return False
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            # O_APPEND like the hooks: a hook appending concurrently and
+            # these re-seed writes serialize the same way hook appends
+            # serialize among themselves (a non-append fd here would
+            # clobber a racing hook's line mid-file).
+            for line in done_lines:
+                os.write(fd, line)
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+    return True
+
+
+def _maybe_rotate_event_file(uuid, slug, events):
+    """Watch-pass hook for issue #27: rotate the job's event file when it
+    exceeds _EVENT_ROTATE_BYTES and report it as an `events-rotated`
+    signal. Separated from watch_one so the emission contract is pinned
+    at runtime (cf. _emit_tui_swap_event): the caller passes a uuid that
+    already cleared the events-tampered checks. Returns True when a
+    rotation happened."""
+    if rotate_event_file(uuid):
+        events.append({"job": slug, "signal": "events-rotated",
+                       "detail": "hook event file exceeded the 4 MB "
+                                 "rotation threshold; archived and "
+                                 "re-seeded with its preserved done "
+                                 "claims"})
+        return True
+    return False
 
 
 def event_file_tampered(uuid):
@@ -2196,6 +2317,14 @@ def cmd_watch(args):
         if liv is not None:
             liv["job"] = slug
             events.append(liv)
+
+        # Issue #27: manager-owned bounded growth, before the truncated
+        # signal so a freshly rotated file doesn't page both signals in one
+        # pass. Rotation is size-triggered by the manager only -- the agent
+        # cannot force it, and terminal done claims are re-seeded into the
+        # fresh file so nothing genuine is buried.
+        if uuid and not event_file_tampered(uuid):
+            _maybe_rotate_event_file(uuid, slug, events)
 
         # Final review: the 2 MB scan window is containment, not correctness.
         # A genuine event pushed past the tail is invisible to the scan, so
