@@ -33,7 +33,10 @@ Modes:
               at the provider through the inference proxy with the tenant's
               injected placeholder (hsurr:llm-api). There is no echo log on
               the real provider, so the assertion is the CLI call succeeding:
-              the provider accepted the swapped real key.
+              the provider accepted the swapped real key. The vehicle runs
+              under a fresh empty HOME (GitHub #156): only the injected
+              META_API_KEY + proxy env can authenticate it, so a baked-in
+              credential file can never mask a broken injected path.
               Failure classes are distinguishable by design: exit 3 is an
               environment/fixture-install problem (CLI missing, fixture
               absent, echo log unreadable); a gate-mode exit 1 is an
@@ -81,6 +84,7 @@ import signal
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -175,14 +179,20 @@ def child_env(proxy, key_name):
     return env
 
 
-def run_cli(muse_bin, base_url, proxy, key_name, cli_timeout):
-    """Run the CLI vehicle. Returns (returncode, stdout_tail, stderr_tail, timed_out)."""
+def run_cli(muse_bin, base_url, proxy, key_name, cli_timeout, env=None):
+    """Run the CLI vehicle. Returns (returncode, stdout_tail, stderr_tail, timed_out).
+
+    env overrides the child environment; the default is child_env()
+    (gate mode). Provision mode passes a scrubbed environment (GitHub #156).
+    """
     cmd = [muse_bin, "exec", "--provider", "meta",
            "--base-url", base_url,
            "--reasoning-effort", "minimal", "ping"]
+    if env is None:
+        env = child_env(proxy, key_name)
     try:
         proc = subprocess.run(
-            cmd, env=child_env(proxy, key_name),
+            cmd, env=env,
             stdin=subprocess.DEVNULL,          # contract: stdin closed
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=cli_timeout, check=False, text=True,
@@ -265,13 +275,69 @@ def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped,
     return EXIT_OK
 
 
+def _scrubbed_vehicle_env(proxy, key_name):
+    """Build the provision vehicle's environment (GitHub #156).
+
+    The vehicle must authenticate ONLY through the injected env
+    placeholder (META_API_KEY) plus the forced proxy routing — never
+    through ambient filesystem credentials. A credential baked into the
+    image at a CLI-visible path (e.g. ~/.config/muse/auth.json, the
+    static-key path per docs/CLI_KEY_AUTH_VALIDATION.md F1) would
+    otherwise let the vehicle exit 0 while the injected placeholder path
+    is broken, and the provision check would certify the broken box.
+
+    So the vehicle runs under a fresh empty HOME with the XDG base-dir
+    variables unset (they default back under the scrubbed HOME). No
+    CLI-visible credential path needs enumerating — the legitimate
+    provision auth is env-only: META_API_KEY always takes priority over
+    the account login (docs/CLI_KEY_AUTH_VALIDATION.md F5), and the
+    validation experiment itself ran the CLI under a throwaway HOME.
+
+    Gate mode is deliberately unchanged: its exact wire-shape assertion
+    (every origin-received header == "Bearer <expected swapped value>",
+    the placeholder never reaching the origin) already rejects any baked
+    credential — a baked real key can never equal the gate fixture's
+    dummy swapped value. Provision mode has no echo log, so it needs the
+    structural guarantee.
+
+    Returns (env, vehicle_home); the caller tears vehicle_home down.
+    Raises OSError when the temp dir cannot be created — the caller must
+    fail closed (exit 3) rather than run the vehicle under the ambient
+    HOME.
+    """
+    vehicle_home = tempfile.mkdtemp(prefix="harness-auth-probe-home-")
+    env = child_env(proxy, key_name)
+    env["HOME"] = vehicle_home
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME",
+                "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        env.pop(var, None)
+    return env, vehicle_home
+
+
 def check_provision(muse_bin, base_url, proxy, key_name, cli_timeout):
     # Known limitation: provision mode has no echo log (the real provider),
     # so it trusts the CLI's exit code. A CLI that exited 0 without sending
     # anything would pass here; gate mode is protected against that class by
     # the echo-log assertion. The failure message below keeps the ambiguity
     # explicit rather than claiming more than the signal supports.
-    rc, out, err, timed_out = run_cli(muse_bin, base_url, proxy, key_name, cli_timeout)
+    #
+    # GitHub #156: the exit code is only meaningful when the vehicle could
+    # NOT have authenticated through baked-in credential material — hence
+    # the scrubbed-HOME vehicle above. Creation failure is exit 3
+    # (environment): never fall back to the ambient HOME.
+    try:
+        env, vehicle_home = _scrubbed_vehicle_env(proxy, key_name)
+    except OSError as e:
+        return die(EXIT_ENV,
+                   f"cannot create the CLI vehicle's scrubbed HOME: {e} — "
+                   "refusing to run the vehicle under the ambient HOME, "
+                   "where baked credential material could mask a broken "
+                   "injected path (GitHub #156).")
+    try:
+        rc, out, err, timed_out = run_cli(muse_bin, base_url, proxy, key_name,
+                                          cli_timeout, env=env)
+    finally:
+        shutil.rmtree(vehicle_home, ignore_errors=True)
     if timed_out:
         # Distinct from the rejection below: slowness is not proof of a bad
         # credential (TLS, a cold model endpoint, or inference latency can

@@ -14,6 +14,12 @@ muse CLI:
     denial shape (HTTP 403 + "forbidden: <reason>" body + "confirmd/1"
     Server header), in lockstep with confirm/confirmd.py _auth/_deny;
     PROBE_CONFIRMD_URL is scheme-agnostic in tests (production uses https).
+
+Two extra fake-muse modes pin the provision vehicle's filesystem isolation
+(GitHub #156): `baked-key-only` authenticates from a baked
+~/.config/muse/auth.json under HOME (the masked failure the scrubbed HOME
+closes), and `dump-env` records the environment the vehicle actually ran in
+so the tests can assert the scrubbed-HOME contract and the teardown.
 """
 
 import http.client
@@ -50,6 +56,38 @@ if mode == "hang-after-request":
     pass  # falls through to send requests, then sleeps below
 if mode == "cli-fails":
     sys.exit(3)
+if mode == "dump-env":
+    # Observability hook for the #156 vehicle-env contract: records the
+    # environment the probe actually handed the vehicle, then exits 0.
+    import json as _json
+    home = os.environ.get("HOME", "")
+    with open(os.environ["FAKE_MUSE_ENV_DUMP"], "w") as f:
+        _json.dump({
+            "HOME": home,
+            "XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME"),
+            "XDG_DATA_HOME": os.environ.get("XDG_DATA_HOME"),
+            "XDG_STATE_HOME": os.environ.get("XDG_STATE_HOME"),
+            "XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME"),
+            "home_exists": os.path.isdir(home),
+            "home_empty": os.path.isdir(home) and not os.listdir(home),
+            "META_API_KEY": os.environ.get("META_API_KEY"),
+        }, f)
+    sys.exit(0)
+if mode == "baked-key-only":
+    # GitHub #156: simulates a CLI that authenticates from a credential
+    # file baked into the image (~/.config/muse/auth.json) instead of the
+    # injected env placeholder. The placeholder path is broken here on
+    # purpose (META_API_KEY is unset): if the vehicle can see the ambient
+    # HOME, this exits 0 and the probe certifies a broken injected path.
+    import json as _json
+    auth = os.path.join(os.environ.get("HOME", "/nonexistent"),
+                        ".config", "muse", "auth.json")
+    try:
+        with open(auth) as f:
+            _json.load(f)["providers"]["meta"]["api_key"]
+    except Exception:
+        sys.exit(3)  # no baked credential visible: cannot authenticate
+    sys.exit(0)      # baked credential present: the masked failure
 # env contract the probe promises its child
 assert os.environ.get("META_API_KEY", "").startswith("hsurr:"), "no placeholder key"
 assert os.environ.get("HTTPS_PROXY", "").startswith("http://127.0.0.1"), "no proxy routing"
@@ -473,6 +511,62 @@ def test_provision_cli_timeout_is_slowness_not_rejection(fixtures, tmp_path):
     assert "not proof" in proc.stderr
     assert "did not accept the swapped credential" not in proc.stderr
     assert dt < 15
+
+
+def test_provision_vehicle_cannot_ride_a_baked_credential(fixtures, tmp_path):
+    # GitHub #156 regression: the ambient HOME carries a baked
+    # ~/.config/muse/auth.json and the injected placeholder path is broken
+    # (the fake CLI authenticates from the file only). Pre-fix the vehicle
+    # inherited HOME and the probe certified the box; now the vehicle runs
+    # under a fresh empty HOME, sees no credential, and the check fails.
+    ambient = tmp_path / "ambient-home"
+    (ambient / ".config" / "muse").mkdir(parents=True)
+    (ambient / ".config" / "muse" / "auth.json").write_text(
+        '{"providers": {"meta": {"api_key": "sk-baked-leak"}}}')
+    proc, _ = run_probe(fixtures, tmp_path, mode="provision",
+                        extra_env={"FAKE_MUSE_MODE": "baked-key-only",
+                                   "HOME": str(ambient)})
+    assert proc.returncode == 1
+    assert "did not accept the swapped credential" in proc.stderr
+
+
+def test_provision_vehicle_runs_under_scrubbed_home(fixtures, tmp_path):
+    # GitHub #156: the provision vehicle must authenticate ONLY through
+    # the injected env placeholder — never through ambient filesystem
+    # credentials. The fake CLI dumps the environment it actually ran in;
+    # the test pins the scrubbed-HOME contract and the teardown.
+    dump = tmp_path / "env-dump.json"
+    ambient = tmp_path / "ambient-home"
+    (ambient / ".config").mkdir(parents=True)
+    proc, _ = run_probe(fixtures, tmp_path, mode="provision",
+                        extra_env={"FAKE_MUSE_MODE": "dump-env",
+                                   "FAKE_MUSE_ENV_DUMP": str(dump),
+                                   "HOME": str(ambient),
+                                   "XDG_CONFIG_HOME": str(ambient / ".config")})
+    assert proc.returncode == 0, proc.stderr
+    info = json.loads(dump.read_text())
+    assert info["HOME"] != str(ambient), "vehicle inherited the ambient HOME"
+    assert info["home_exists"] and info["home_empty"]
+    for var in ("XDG_CONFIG_HOME", "XDG_DATA_HOME",
+                "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        assert info[var] is None, f"{var} leaked into the vehicle env"
+    assert info["META_API_KEY"] == "hsurr:llm-api"
+    # the scrubbed dir is torn down after the vehicle runs
+    assert not os.path.exists(info["HOME"])
+
+
+def test_provision_scrubbed_home_creation_failure_fails_closed(monkeypatch):
+    # If the scrubbed HOME cannot be created, the probe must fail closed
+    # (exit 3, environment) — never run the vehicle under the ambient HOME.
+    mod = _load_probe_module()
+
+    def _boom(proxy, key_name):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(mod, "_scrubbed_vehicle_env", _boom)
+    rc = mod.check_provision("muse", "http://127.0.0.1:9",
+                             "http://127.0.0.1:18081", "llm-api", 5)
+    assert rc == 3
 
 
 def test_budget_env_rejects_nonfinite_and_nonpositive(monkeypatch):
