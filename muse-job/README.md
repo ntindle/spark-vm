@@ -47,8 +47,8 @@ Redeploy: copy the files over, then reinstall the plugin with `--force`
 
 Hook event files (`~/.local/share/muse-job/events/<sid>.jsonl`) grow without
 bound: the watch pass only ever scans the last 2 MB (a RAM/CPU DoS guard, not
-a correctness mechanism). `muse-job watch` owns rotation, not the hooks and
-not the job agent (issue #27):
+a correctness mechanism). Each `muse-job watch` run owns rotation, not the
+hooks and not the job agent (issue #27):
 
 - **Trigger is size only**: when a job's event file passes 4 MB, the watch
   pass renames it to `<sid>.jsonl.<mtime-ns>.rot` and starts a fresh file.
@@ -58,12 +58,16 @@ not the job agent (issue #27):
 - **Atomic w.r.t. hook writes**: hooks append with `O_APPEND` by name on
   every event, so a hook that opened its file descriptor before the rename
   lands its line in the archive, and one that opens after lands in the fresh
-  file. Every line ends up in exactly one file -- never lost, never
-  duplicated.
+  file. Every non-done line ends up in exactly one file -- never lost,
+  never duplicated. (Done claims are intentionally present in both: the
+  archive keeps them and the fresh file re-seeds them, so they keep paging
+  fail-loud.)
 - **Done claims survive**: terminal `done` lines are copied verbatim into
   the fresh file, so a rotated-out genuine `done` keeps paging every pass
   (a forged trailing `idle` still cannot bury a claim, per the Gotchas
-  section below). Malformed and non-done lines live on in the archive only.
+  section below). A hook that wrote into the archive after the initial
+  extraction is caught by a tail re-scan before the rotation completes.
+  Malformed and non-done lines live on in the archive only.
 - **Composes with the sweep**: rotated archives keep their original mtime,
   so `muse-job-sweep`'s 30-day prune ages them out like any old file (they
   never match an active job's skip name).

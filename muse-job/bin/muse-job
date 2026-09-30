@@ -1226,34 +1226,98 @@ def _event_scan_truncated(uuid, max_bytes=_EVENT_SCAN_MAX_BYTES):
 # with O_APPEND by name on every event (plugin/hooks/stop.py,
 # session-end.py), so a rename-based rotate is atomic w.r.t. concurrent hook
 # writes: a hook that opened its fd before the rename lands its line in the
-# archive, one that opens after lands in the fresh file -- every line ends up
-# in exactly one file, never lost, never duplicated. The threshold sits at
-# 2x the scan window so the 2 MB tail-scan containment only ever fires on
-# files the rotation hasn't caught up with yet.
-_EVENT_ROTATE_BYTES = 4 * 1024 * 1024
+# archive, one that opens after lands in the fresh file -- every non-done
+# line ends up in exactly one file, never lost, never duplicated (done
+# claims are intentionally present in both: the archive keeps them and the
+# fresh file re-seeds them, fail-loud). The threshold sits at 2x the scan
+# window so the 2 MB tail-scan containment only ever fires on files the
+# rotation hasn't caught up with yet.
+_EVENT_ROTATE_BYTES = 2 * _EVENT_SCAN_MAX_BYTES
+# Straggler tail-sweep passes after the initial done extraction (see
+# rotate_event_file): a hook that opened its fd before the rename but wrote
+# while extraction was running lands in the archive after the read cursor.
+_ROTATE_TAIL_SWEEPS = 5
+# Grace for a hook caught mid-write at the final tail read (a single
+# write() lands in microseconds; 50ms is enormous margin).
+_ROTATE_TAIL_GRACE_S = 0.05
 
 
-def _done_lines_of(path):
-    """Raw byte lines of the file whose parsed JSON is a dict with
-    state == "done", in file order.
+def _rotate_threshold_label():
+    """Human rendering of _EVENT_ROTATE_BYTES for operator-facing text."""
+    if _EVENT_ROTATE_BYTES % (1024 * 1024) == 0:
+        return "%d MB" % (_EVENT_ROTATE_BYTES // (1024 * 1024))
+    return "%d bytes" % _EVENT_ROTATE_BYTES
+
+
+def _done_lines_of(path, start=0):
+    """(done_lines, end_offset): raw byte lines of the file from `start`
+    whose parsed JSON is a dict with state == "done", in file order.
 
     Same predicate as done_events() (state == "done" on a dict). Raw lines
     are preserved byte-identical so the re-seeded claims triage exactly as
     they did pre-rotation. Non-dict / malformed / non-done lines are left
     out -- they live on in the archive.
+
+    Fragment handling: if `start` lands mid-line (a racing hook's partial
+    write), the leading fragment is skipped -- only whole lines are ever
+    returned. A trailing fragment (no terminating newline: a hook caught
+    mid-write) is NOT returned; instead end_offset is backed up to the
+    fragment's start so the next tail pass re-reads it whole. end_offset is
+    the read cursor at EOF for tail re-scans.
     """
-    lines = []
     with open(path, "rb") as f:
-        for raw in f:
-            if not raw.strip():
-                continue
-            try:
-                obj = json.loads(raw.decode("utf-8", errors="replace"))
-            except ValueError:
-                continue
-            if isinstance(obj, dict) and obj.get("state") == "done":
-                lines.append(raw if raw.endswith(b"\n") else raw + b"\n")
-    return lines
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        if start > size:
+            return [], start
+        f.seek(start)
+        if start > 0:
+            # The byte before the cursor tells whether it sits on a line
+            # boundary: anything else means a racing hook's partial line.
+            f.seek(start - 1)
+            if f.read(1) != b"\n":
+                f.readline()  # discard the fragment (or the whole tail)
+        chunk_start = f.tell()
+        data = f.read()
+    if data and not data.endswith(b"\n"):
+        # Trailing fragment: back the cursor up so the next tail pass
+        # re-reads it whole instead of skipping it as malformed.
+        cut = data.rfind(b"\n") + 1
+        data = data[:cut]
+    end_offset = chunk_start + len(data)
+    lines = []
+    for raw in data.split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            obj = json.loads(raw.decode("utf-8", errors="replace"))
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(obj, dict) and obj.get("state") == "done":
+            lines.append(raw + b"\n")
+    return lines, end_offset
+
+
+def _reserve_archive_name(p, mtime_ns):
+    """Reserve a collision-free archive name via O_EXCL.
+
+    Two rotates in the same mtime tick are infeasible on ns-granularity
+    filesystems, but the reservation is cheap and makes the "flooding to
+    force a rotate buries nothing" claim hold by construction: a bare
+    os.rename would silently overwrite a prior archive.
+    """
+    candidate = "%s.%d.rot" % (p, mtime_ns)
+    counter = 0
+    while True:
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                         0o644)
+        except FileExistsError:
+            counter += 1
+            candidate = "%s.%d.%d.rot" % (p, mtime_ns, counter)
+            continue
+        os.close(fd)
+        return candidate
 
 
 def rotate_event_file(uuid):
@@ -1263,26 +1327,35 @@ def rotate_event_file(uuid):
     this; the agent's hooks never do). The agent's only lever is appending
     lines, and rotation archives rather than deletes, so flooding to force a
     rotate buries nothing -- and terminal `done` claims are re-seeded into
-    the fresh file (first, in the uncontended case) so a rotated-out genuine
-    done keeps paging every pass instead of becoming a silent burial (the
-    #23 B1/B3 class).
+    the fresh file so a rotated-out genuine done keeps paging every pass
+    instead of becoming a silent burial (the #23 B1/B3 class).
 
     Ordering (rename first, extract from the archive, then write the fresh
-    file) closes the race window: a hook appending between the rename and
-    the fresh-file write opens by name and lands in the fresh file -- the
-    archive read cannot see it, so it is never duplicated, and the done
-    extraction only ever reads the archive. The fresh file is created with
-    O_CREAT (a hook that raced in between created the same empty file first)
-    and the re-seed writes use O_APPEND exactly like the hooks, so a racing
-    hook append and the re-seed serialize the way hook appends serialize
-    among themselves.
+    file) keeps every line in exactly one file: a hook appending between the
+    rename and the fresh-file write opens by name and lands in the fresh
+    file; the done extraction only ever reads the archive, so nothing is
+    duplicated except the intentional done re-seed. The fresh file is
+    created with O_CREAT (a hook that raced in between created the same
+    empty file first) and the re-seed writes use O_APPEND exactly like the
+    hooks, so a racing hook append and the re-seed serialize the way hook
+    appends serialize among themselves.
+
+    Straggler sweep: a hook that opened its fd BEFORE the rename but wrote
+    while the extraction was running lands its line in the archive after the
+    read cursor passed. After the re-seed, the archive is tail re-scanned
+    from the extraction's end offset until it stops growing (bounded); each
+    pass only sees new lines, so no dedup is needed. A hook caught mid-write
+    at the final read gets a 50ms grace and one last tail pass. Residual: a
+    hook write landing after the final tail read (microsecond window) --
+    the same order of rarity as the accepted tail-scan hole.
 
     Refuses: non-regular event file (symlink/FIFO/device -- tampering, the
     watch pass pages events-tampered), a symlinked EVENTS_DIR (the hooks
-    refuse the same way). Fail-closed: any failure returns False with the
-    original file untouched -- the events-scan-truncated signal keeps
-    firing, which is the honest state. Returns True when a rotation
-    happened.
+    refuse the same way). Fail-closed: any failure after the rename
+    restores the archive over the fresh file (rename replaces atomically)
+    and returns False with the original file byte-identical -- the
+    events-scan-truncated signal keeps firing, which is the honest state.
+    Returns True when a rotation happened.
     """
     p = _event_path(uuid)
     if p is None:
@@ -1295,28 +1368,47 @@ def rotate_event_file(uuid):
             return False
         if st.st_size <= _EVENT_ROTATE_BYTES:
             return False
-        archived = "%s.%d.rot" % (p, st.st_mtime_ns)
+        archived = _reserve_archive_name(p, st.st_mtime_ns)
         os.rename(p, archived)
         try:
-            done_lines = _done_lines_of(archived)
+            done_lines, end = _done_lines_of(archived)
+            # O_NOFOLLOW parity with the hooks: a symlinked fresh path
+            # fails here instead of writing through it.
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                         | os.O_NOFOLLOW, 0o644)
+            try:
+                for line in done_lines:
+                    os.write(fd, line)
+                for _ in range(_ROTATE_TAIL_SWEEPS):
+                    if os.stat(archived).st_size <= end:
+                        break
+                    more, end = _done_lines_of(archived, start=end)
+                    for line in more:
+                        os.write(fd, line)
+                # A hook caught mid-write leaves the archive ending
+                # mid-line; give the single write() 50ms to land and take
+                # one final tail pass from the fragment's start.
+                with open(archived, "rb") as f:
+                    f.seek(-1, os.SEEK_END)
+                    mid_line = f.read(1) != b"\n"
+                if mid_line:
+                    time.sleep(_ROTATE_TAIL_GRACE_S)
+                    more, _end = _done_lines_of(archived, start=end)
+                    for line in more:
+                        os.write(fd, line)
+            finally:
+                os.close(fd)
         except OSError:
-            # The rename already happened: restore it rather than leave a
-            # fresh file whose done claims were silently dropped.
+            # The rename already happened: restore the archive over any
+            # partial fresh file rather than leave done claims silently
+            # dropped (a missing/partial fresh file would also silence
+            # the events-scan-truncated signal -- the exact burial class
+            # this change exists to eliminate).
             try:
                 os.rename(archived, p)
             except OSError:
                 pass
             return False
-        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-        try:
-            # O_APPEND like the hooks: a hook appending concurrently and
-            # these re-seed writes serialize the same way hook appends
-            # serialize among themselves (a non-append fd here would
-            # clobber a racing hook's line mid-file).
-            for line in done_lines:
-                os.write(fd, line)
-        finally:
-            os.close(fd)
     except OSError:
         return False
     return True
@@ -1331,10 +1423,10 @@ def _maybe_rotate_event_file(uuid, slug, events):
     rotation happened."""
     if rotate_event_file(uuid):
         events.append({"job": slug, "signal": "events-rotated",
-                       "detail": "hook event file exceeded the 4 MB "
+                       "detail": "hook event file exceeded the %s "
                                  "rotation threshold; archived and "
                                  "re-seeded with its preserved done "
-                                 "claims"})
+                                 "claims" % _rotate_threshold_label()})
         return True
     return False
 
@@ -2322,20 +2414,23 @@ def cmd_watch(args):
         # signal so a freshly rotated file doesn't page both signals in one
         # pass. Rotation is size-triggered by the manager only -- the agent
         # cannot force it, and terminal done claims are re-seeded into the
-        # fresh file so nothing genuine is buried.
-        if uuid and not event_file_tampered(uuid):
-            _maybe_rotate_event_file(uuid, slug, events)
+        # fresh file so nothing genuine is buried. The tampered lstat is
+        # computed once and shared with the truncated gate below.
+        if uuid:
+            tampered = event_file_tampered(uuid)
+            if not tampered:
+                _maybe_rotate_event_file(uuid, slug, events)
 
-        # Final review: the 2 MB scan window is containment, not correctness.
-        # A genuine event pushed past the tail is invisible to the scan, so
-        # truncation is a LOUD per-pass signal, never a silent condition.
-        if uuid and not event_file_tampered(uuid) \
-                and _event_scan_truncated(uuid):
-            events.append({
-                "job": slug, "signal": "events-scan-truncated",
-                "detail": "hook event file exceeds the 2 MB watch scan "
-                          "window; done claims outside the window are "
-                          "invisible to this pass -- investigate manually"})
+            # Final review: the 2 MB scan window is containment, not
+            # correctness. A genuine event pushed past the tail is invisible
+            # to the scan, so truncation is a LOUD per-pass signal, never a
+            # silent condition.
+            if not tampered and _event_scan_truncated(uuid):
+                events.append({
+                    "job": slug, "signal": "events-scan-truncated",
+                    "detail": "hook event file exceeds the 2 MB watch scan "
+                              "window; done claims outside the window are "
+                              "invisible to this pass -- investigate manually"})
 
         ev = st["last_hook_event"] or {}
         estate = ev.get("state")

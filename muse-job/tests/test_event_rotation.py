@@ -9,11 +9,18 @@ Covers rotate_event_file + _maybe_rotate_event_file in bin/muse-job:
     instead of becoming a silent burial (the #23 B1/B3 class).
   - Rename-based atomicity w.r.t. concurrent O_APPEND hook writes: a hook
     that opened its fd before the rename lands in the archive, one that
-    opens after lands in the fresh file -- every line in exactly one file,
-    never lost, never duplicated.
+    opens after lands in the fresh file -- every non-done line in exactly
+    one file, never lost, never duplicated (dones are intentionally in
+    both: archive + re-seeded fresh, fail-loud).
+  - Straggler tail sweep: a hook that opened pre-rename but wrote during
+    extraction is re-seeded from the archive tail -- the no-burial
+    invariant (every done in any archive is also in the live file) is
+    pinned deterministically.
   - Fail-closed refusals: symlinked event file, symlinked EVENTS_DIR,
-    malformed uuid, missing file; and restore-on-failure when the archive
-    can't be read after the rename.
+    malformed uuid, missing file; restore-on-failure (including
+    post-rename open/write failures) leaves the original byte-identical.
+  - The watch pass itself emits `events-rotated` (end-to-end test through
+    cmd_watch, not just the helper).
   - Composition with the 30-day disk sweep: rotated archives never match
     an active job's skip name and are pruned by mtime like any old file.
 """
@@ -226,19 +233,29 @@ def test_appends_around_rotate_no_loss_no_dup(small_threshold):
 
 
 def test_concurrent_appends_survive_rotates(small_threshold):
-    """Hook-style appends racing rotations: no non-done line is ever lost
-    or duplicated; every done surfaces at least once."""
+    """Hook-style appends racing rotations: every appended non-done line
+    appears exactly once across all files (loss AND duplication both fail
+    this test -- the written set is recorded per worker); every done
+    surfaces at least once (fail-loud re-seeding may duplicate dones)."""
     cli = small_threshold
     stop = threading.Event()
     errors = []
+    written = set()
+    written_lock = threading.Lock()
 
     def worker(base):
         try:
             i = 0
             while not stop.is_set():
-                hook_append(cli, idle_line(base + i))
+                line = idle_line(base + i)
+                hook_append(cli, line)
+                with written_lock:
+                    written.add(("idle", base + i))
                 if i % 10 == 0:
-                    hook_append(cli, done_line(base + i))
+                    dline = done_line(base + i)
+                    hook_append(cli, dline)
+                    with written_lock:
+                        written.add(("done", base + i))
                 i += 1
         except Exception as e:  # pragma: no cover - must not happen
             errors.append(e)
@@ -254,20 +271,93 @@ def test_concurrent_appends_survive_rotates(small_threshold):
         t.join()
     assert not errors
 
-    counts = {}
+    from collections import Counter
+    seen = Counter()
     done_seen = set()
     for p in all_event_files(cli):
         for raw in read_lines(p):
             obj = json.loads(raw)
-            key = (obj["detail"], obj["turn_id"])
+            key = (obj["state"], obj["turn_id"])
             if obj["state"] == "done":
                 done_seen.add(key)
             else:
-                counts[key] = counts.get(key, 0) + 1
-    assert counts, "no lines survived the rotation storm"
-    assert all(c == 1 for c in counts.values()), \
+                seen[key] += 1
+    assert seen, "no lines survived the rotation storm"
+    # Multiset equality against the recorded written set: a lost line is a
+    # missing key, a duplicated line is a count of 2.
+    assert seen == Counter({k: 1 for k in written if k[0] == "idle"}), \
         "a non-done line was lost or duplicated"
-    assert done_seen, "done claims vanished"
+    written_dones = {k for k in written if k[0] == "done"}
+    assert written_dones, "no dones were appended"
+    assert written_dones <= done_seen, "a done claim vanished entirely"
+
+
+def test_no_done_buried_in_archives(small_threshold, monkeypatch):
+    """The no-burial invariant, pinned deterministically: every done line
+    present in any archive must also be present in the live file.
+
+    Simulates the straggler race -- a hook that opened its fd before the
+    rename and lands its done in the archive after the initial extraction
+    passed -- and asserts the tail sweep re-seeds it."""
+    cli = small_threshold
+    write_over_threshold(cli, [done_line(0), idle_line(1)])
+    late = done_line(777)
+    real_extract = cli._done_lines_of
+
+    def extract_then_race(path, start=0):
+        lines, end = real_extract(path, start)
+        if start == 0:
+            # Pre-rename fd, post-extraction write: lands in the archive
+            # after the read cursor passed.
+            with open(path, "ab") as f:
+                f.write(late + b"\n")
+        return lines, end
+
+    monkeypatch.setattr(cli, "_done_lines_of", extract_then_race)
+    assert cli.rotate_event_file(SID) is True
+    live = read_lines(event_path(cli))
+    assert late.rstrip(b"\n") in live
+    # The full invariant over every archive on disk.
+    live_set = set(live)
+    for p in all_event_files(cli):
+        if p == event_path(cli):
+            continue
+        for raw in read_lines(p):
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(obj, dict) and obj.get("state") == "done":
+                assert raw in live_set, \
+                    "done buried in archive %s" % os.path.basename(p)
+
+
+def test_mid_line_fragment_at_cutoff_reseeded(small_threshold, monkeypatch):
+    """A hook caught mid-write at the initial extraction's EOF leaves a
+    trailing fragment; the cursor backs up and the tail sweep re-seeds the
+    completed line (not skipped as malformed)."""
+    cli = small_threshold
+    filler = write_over_threshold(cli, [done_line(0)])
+    real_extract = cli._done_lines_of
+    late = done_line(888)
+    state = {"torn": True}
+
+    def extract_then_torn(path, start=0):
+        lines, end = real_extract(path, start)
+        if start == 0 and state["torn"]:
+            state["torn"] = False
+            # Append a PARTIAL line (no trailing newline): torn write.
+            with open(path, "ab") as f:
+                f.write(late[: len(late) // 2])
+            # Complete it before the tail sweep runs, as a real
+            # write() would within microseconds.
+            with open(path, "ab") as f:
+                f.write(late[len(late) // 2:] + b"\n")
+        return lines, end
+
+    monkeypatch.setattr(cli, "_done_lines_of", extract_then_torn)
+    assert cli.rotate_event_file(SID) is True
+    assert late.rstrip(b"\n") in read_lines(event_path(cli))
 
 
 # --- fail-closed refusals ----------------------------------------------------
@@ -301,10 +391,33 @@ def test_restore_on_unreadable_archive(small_threshold, monkeypatch):
     lines = [done_line(0)] + [idle_line(i) for i in range(30)]
     write_lines(cli, lines)
     monkeypatch.setattr(cli, "_done_lines_of",
-                        lambda path: (_ for _ in ()).throw(OSError("boom")))
+                        lambda path, start=0: (_ for _ in ()).throw(OSError("boom")))
     assert cli.rotate_event_file(SID) is False
     assert all_event_files(cli) == [event_path(cli)]
     assert read_lines(event_path(cli)) == [l.rstrip(b"\n") for l in lines]
+
+
+def test_exact_threshold_does_not_rotate(small_threshold):
+    """The trigger is strictly greater-than: a file exactly at the
+    threshold is left alone (boundary pin)."""
+    cli = small_threshold
+    filler = []
+    size = 0
+    i = 0
+    while size < cli._EVENT_ROTATE_BYTES:
+        line = idle_line(7000 + i)
+        filler.append(line)
+        size += len(line) + 1
+        i += 1
+    # Trim or pad the last line so the file is EXACTLY the threshold.
+    data = b"".join(l + b"\n" for l in filler)
+    data = data[:cli._EVENT_ROTATE_BYTES]
+    assert len(data) == cli._EVENT_ROTATE_BYTES
+    os.makedirs(cli.EVENTS_DIR, exist_ok=True)
+    with open(event_path(cli), "wb") as f:
+        f.write(data)
+    assert cli.rotate_event_file(SID) is False
+    assert all_event_files(cli) == [event_path(cli)]
 
 
 # --- watch emission contract -------------------------------------------------
@@ -324,11 +437,66 @@ def test_maybe_rotate_emission_contract(small_threshold):
     assert len(events) == 1
     assert events[0]["signal"] == "events-rotated"
     assert events[0]["job"] == "job-a"
-    assert "4 MB" in events[0]["detail"]
+    assert cli._rotate_threshold_label() in events[0]["detail"]
     # Second pass: file is small again, nothing appended.
     events2 = []
     assert cli._maybe_rotate_event_file(SID, "job-a", events2) is False
     assert events2 == []
+
+
+def test_rotate_threshold_label_and_coupling(tmp_path, monkeypatch):
+    """The threshold is 2x the scan window by construction (not a magic
+    literal), and the operator-facing label renders from the constant so a
+    threshold change can't silently lie in the signal text."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    mod = load_script("muse_job_rotate_label", CLI_PATH)
+    assert mod._EVENT_ROTATE_BYTES == 2 * mod._EVENT_SCAN_MAX_BYTES
+    assert mod._rotate_threshold_label() == "4 MB"
+
+
+# --- watch-pass end-to-end -----------------------------------------------------
+
+def test_watch_pass_emits_events_rotated(small_threshold, monkeypatch, capsys):
+    """End to end through cmd_watch (not just the helper): a job whose
+    event file exceeds the threshold gets exactly one `events-rotated`
+    signal carrying the job key. Deleting the wiring in cmd_watch breaks
+    this test; the helper-level contract test above does not."""
+    import argparse
+    import time
+    cli = small_threshold
+    slug = "rot-e2e"
+    jd = os.path.join(cli.JOBS_DIR, slug)
+    os.makedirs(jd, exist_ok=True)
+    sid = "rote2esid01"
+    job = {"slug": slug, "state": "active", "budget_hours": 8,
+           "started_at": time.time() - 60,
+           "session_uuid": sid,
+           "session_started_at": time.time() - 60}
+    with open(os.path.join(jd, "job.json"), "w") as f:
+        json.dump(job, f)
+    now = time.time()
+    os.makedirs(cli.EVENTS_DIR, exist_ok=True)
+    with open(os.path.join(cli.EVENTS_DIR, sid + ".jsonl"), "wb") as f:
+        for i in range(30):
+            evt = {"ts": now - 10 + i, "event": "stop", "session_id": sid,
+                   "state": "idle", "detail": "e%d" % i, "cwd": "/w",
+                   "turn_id": i}
+            f.write(json.dumps(evt).encode() + b"\n")
+        done = {"ts": now, "event": "stop", "session_id": sid,
+                "state": "done", "detail": "e2e-done", "cwd": "/w",
+                "turn_id": 999}
+        f.write(json.dumps(done).encode() + b"\n")
+    monkeypatch.setattr(cli, "tmux_alive", lambda slug: True)
+    cli.cmd_watch(argparse.Namespace())
+    lines = [json.loads(l) for l in capsys.readouterr().out.splitlines()
+             if l.strip()]
+    rotated = [e for e in lines if e.get("signal") == "events-rotated"]
+    assert len(rotated) == 1
+    assert rotated[0]["job"] == slug
+    assert cli._rotate_threshold_label() in rotated[0]["detail"]
+    # The done claim survived into the fresh file and still triages.
+    dones = cli.done_events(sid, now + 1)
+    assert len(dones) == 1 and dones[0][0]["detail"] == "e2e-done"
 
 
 # --- sweep composition ---------------------------------------------------------
