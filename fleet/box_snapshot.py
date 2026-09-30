@@ -40,9 +40,12 @@ def _git_head(checkout):
     except (OSError, subprocess.SubprocessError) as exc:
         return None, "git rev-parse failed: %s" % exc
     if proc.returncode != 0:
-        return None, "git rev-parse failed: %s" % (
-            proc.stderr.strip().splitlines()[:1] or ["exit %d"
-                                                     % proc.returncode])
+        # First stderr line, or the exit code when git said nothing
+        # (FOLLOW-fleet2: the old `or ["exit %d"]` rendered the list repr
+        # "['exit 128']" into the note).
+        lines = proc.stderr.strip().splitlines()
+        detail = lines[0] if lines else "exit %d" % proc.returncode
+        return None, "git rev-parse failed: %s" % detail
     return proc.stdout.strip(), None
 
 

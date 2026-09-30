@@ -58,7 +58,10 @@ is auditable at the call site):
     "unknown". Missing artifacts produce null fields plus notes, never
     a skipped box.
 
-Exit 0 on a printed result, 2 on bad input/arguments. Stdlib only.
+Exit 0 on a printed result, 2 on bad input/arguments. An unexpected
+internal failure also exits 2 with a one-line message, never a bare
+traceback (the operator's contract is the exit code, not the stack).
+Stdlib only.
 """
 
 import argparse
@@ -547,6 +550,18 @@ def _is_eligible(record, cutoff_dt):
     return observed is not None and observed >= cutoff_dt
 
 
+def _box_sort_key(box_item):
+    """Sort key for (box_id, record) snapshot entries.
+
+    Total-order by construction: the str() coercion means a hand-poisoned
+    snapshot can never make sorted() raise TypeError here (FOLLOW-fleet1
+    from PR #715's review). JSON object keys are always strings, so on
+    the real store this is the identity on the key — the coercion is
+    belt-and-suspenders, not a behavior change.
+    """
+    return str(box_item[0])
+
+
 def _short_commit(commit):
     if not commit:
         return "(no report)"
@@ -565,7 +580,7 @@ def cmd_inventory(store_dir, staleness_hours, box_id):
     cutoff = datetime.now(timezone.utc) - timedelta(hours=staleness_hours)
     eligible = {}
     stale = []
-    for bid, record in sorted(boxes.items()):
+    for bid, record in sorted(boxes.items(), key=_box_sort_key):
         if _is_eligible(record, cutoff):
             eligible[bid] = record
         else:
@@ -576,10 +591,16 @@ def cmd_inventory(store_dir, staleness_hours, box_id):
         "generated_at", "unknown"))
     lines.append("")
 
+    # Column width follows the longest box id (FOLLOW-fleet4): ids longer
+    # than the old fixed 24-char column used to push the rest of the row
+    # out of alignment.
+    box_w = max(24, max((len(str(bid)) for bid in boxes), default=0))
+    row_fmt = "%%-%ds %%-14s %%-12s %%-8s %%s" % box_w
+
     # Per-box rows.
-    lines.append("%-24s %-14s %-12s %-8s %s" % (
-        "box", "repo_commit", "toolset_tick", "frozen", "flags"))
-    for bid, record in sorted(boxes.items()):
+    lines.append(row_fmt % ("box", "repo_commit", "toolset_tick", "frozen",
+                            "flags"))
+    for bid, record in sorted(boxes.items(), key=_box_sort_key):
         ver = record.get("versions", {}) or {}
         tick = record.get("last_tick_at", {}) or {}
         gate = record.get("gate", {}) or {}
@@ -589,7 +610,7 @@ def cmd_inventory(store_dir, staleness_hours, box_id):
         if record.get("suspect"):
             flags.append("suspect")
         frozen = gate.get("frozen")
-        lines.append("%-24s %-14s %-12s %-8s %s" % (
+        lines.append(row_fmt % (
             bid,
             _short_commit(ver.get("repo_commit")),
             (tick.get("toolset") or "n/a")[:10],
@@ -696,7 +717,7 @@ def cmd_drift(store_dir, expected, staleness_hours):
             expected_source = "none (no eligible boxes)"
 
     rows = []
-    for bid, record in sorted(eligible.items()):
+    for bid, record in sorted(eligible.items(), key=_box_sort_key):
         ver = record.get("versions", {}) or {}
         gate = record.get("gate", {}) or {}
         commit = ver.get("repo_commit")
@@ -722,8 +743,10 @@ def cmd_drift(store_dir, expected, staleness_hours):
              "%s (%s)" % (
                  len(rows), len(eligible), _short_commit(expected),
                  expected_source)]
+    box_w = max(24, max((len(str(bid)) for bid, _, _ in rows), default=0))
+    drift_fmt = "  %%-%ds %%-14s %%s" % box_w
     for bid, commit, reason in rows:
-        lines.append("  %-24s %-14s %s" % (bid, commit, reason))
+        lines.append(drift_fmt % (bid, commit, reason))
     if not rows:
         lines.append("  none")
     print("\n".join(lines))
@@ -771,8 +794,10 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
     total, err = append_journal(store_dir, records)
     if err:
         return err
-    print("collected %d boxes into %s (%s journal lines replayed)"
-          % (len(records), store_dir, total))
+    print("collected %d %s into %s (%d appended this run; %d journal "
+          "lines replayed)"
+          % (len(records), "box" if len(records) == 1 else "boxes",
+             store_dir, len(records), total))
     for f in failed:
         print("warning: collect failed for %s" % f, file=sys.stderr)
     return None
@@ -822,18 +847,26 @@ def main(argv=None):
             print("error: --staleness-hours must be a finite number >= 0, "
                   "got %r" % (window,), file=sys.stderr)
             return 2
-    if args.command == "collect":
-        err = cmd_collect(args.estate, args.store, args.box_id_map)
-    elif args.command == "inventory":
-        err = cmd_inventory(args.store, args.staleness_hours, args.box)
-    elif args.command == "drift":
-        err = cmd_drift(args.store, args.expected, args.staleness_hours)
-    elif args.command == "rebuild":
-        total, err = rebuild_snapshot(args.store)
-        if err is None:
-            print("rebuilt snapshot from %s journal lines" % total)
-    else:
-        err = "unknown command %s" % args.command
+    try:
+        if args.command == "collect":
+            err = cmd_collect(args.estate, args.store, args.box_id_map)
+        elif args.command == "inventory":
+            err = cmd_inventory(args.store, args.staleness_hours, args.box)
+        elif args.command == "drift":
+            err = cmd_drift(args.store, args.expected, args.staleness_hours)
+        elif args.command == "rebuild":
+            total, err = rebuild_snapshot(args.store)
+            if err is None:
+                print("rebuilt snapshot from %s journal lines" % total)
+        else:
+            err = "unknown command %s" % args.command
+    except Exception as exc:
+        # Disciplined failure: the tool's contract is the exit code, so
+        # an unexpected internal error reports as exit 2 with a one-line
+        # message, never a bare traceback (FOLLOW-fleet1's exit-1 half).
+        # KeyboardInterrupt/SystemExit are BaseException and pass through.
+        print("error: unexpected failure: %s" % exc, file=sys.stderr)
+        return 2
     if err:
         print("error: %s" % err, file=sys.stderr)
         return 2
