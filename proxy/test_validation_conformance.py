@@ -45,7 +45,8 @@ TestFrontendManagementLegacyPath below.
 Each implementation is driven through its natural interface:
 - `cred` CLI: check_name / check_host / parse_placement
   (CredentialError = reject)
-- cred-ui: NAME_RE / host_ok / placement_json (False / ValueError = reject)
+- cred-ui: check_name (the shared checker, ValueError = reject) /
+  host_ok / placement_json (False / ValueError = reject)
 - writer: real `cred-registry-set` subprocesses against a temp
   registry file (CRED_REGISTRY_FILE/CRED_REGISTRY_LOCK overrides);
   non-zero exit = reject. The corpus uses the `set`/`add-host` creation
@@ -67,13 +68,18 @@ reject. End-to-end this is unreachable: the UI serializes bare kinds
 without an arg (and clears the arg field when a bare kind is selected),
 so the writer never sees the divergent form.
 
-This test is the executable contract, not a shared module, because the
-components deploy as separate artifacts into different privilege domains
-(userland `cred`, the cred-ui service, the root-owned 0755 sudo writer)
-— a shared import would need a fourth cross-domain artifact with
-atomic-update requirements, where skew fails silently instead of failing
-loudly in CI. #150's preferred end-state (a shared module) remains open;
-until then, this test is the thing that must stay green.
+This test is the end-to-end behavioral backstop, not the contract's
+home: since issue #706 the contract text lives in exactly one source
+file, credlib/credvalidate.py, imported at runtime by cred-ui and the
+writer (each unit ships the module inside its own artifact, atomically
+with itself — no fourth cross-domain artifact whose update could skew one
+unit against another), imported by credlib, and kept as an atom-identical machine-checked mirror
+in the `cred` CLI (which ships as a manual single copy with no installer;
+see credlib/test_credvalidate.py for the atom parity pins). What this test adds over the import structure is driving
+the real CLIs and the real writer subprocess end to end — including the
+`cred` mirror, which has no runtime import — so a broken mirror or a
+broken deploy-unit staging fails here. #150's preferred end-state (a
+shared module) has landed; this test is the thing that proves the wiring.
 
 Non-string inputs are out of scope for the corpus (cred-ui's host_ok
 fail-closes on them; elsewhere non-strings are caller errors — #118 class).
@@ -172,7 +178,14 @@ def _cli_name(name):
 
 
 def _ui_name(name):
-    return bool(ui.NAME_RE.match(name))
+    # cred-ui's natural creation-path interface: the shared check_name
+    # (imported from credlib/credvalidate.py, issue #706) raising
+    # ValueError on reject — the UI's api_set maps that to its 400.
+    try:
+        ui.check_name(name)
+        return True
+    except ValueError:
+        return False
 
 
 def _credlib_name(name):

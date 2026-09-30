@@ -48,6 +48,18 @@ import re
 import subprocess
 import sys
 
+# ---------------------------------------------------------------------------
+# Validation contract — MACHINE-CHECKED MIRROR (issue #706).
+# The canonical contract text lives in credlib/credvalidate.py. This CLI is
+# a single file deployed as a manual copy with no installer, so there is no
+# deploy unit to ship the module with — a runtime import would make the
+# canonical module dead code in production while a fallback copy did the
+# real work. Instead the atoms below (regexes, caps, RESERVED_ENTRIES) are
+# asserted identical to credvalidate.py's by credlib/test_credvalidate.py:
+# DO NOT EDIT the patterns/caps/tuple here — edit credlib/credvalidate.py
+# and let the parity test catch any drift. The check_* wrappers keep this
+# CLI's own CredentialError presentation.
+# ---------------------------------------------------------------------------
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # Legacy-tolerant name check (charset only, no 64-char cap) for
 # management/read verbs (get, delete, unregister): credentials created
@@ -83,14 +95,17 @@ def check_name_legacy(name):
     # Management/read path: accept any pre-#150-cap name the writer's
     # check_legacy accepts (charset only). Creation verbs must NOT use
     # this — they gate on check_name's canonical 64-char form.
-    if not NAME_LEGACY_RE.match(name or ""):
+    # Non-string input is a clean CredentialError, never a TypeError from
+    # re.match (issue #706 parity: credvalidate raises ValueError, not
+    # TypeError, on any input).
+    if not isinstance(name, str) or not NAME_LEGACY_RE.match(name):
         raise CredentialError(
             "invalid credential name %r — use only [A-Za-z0-9_-]" % (name,))
     return name
 
 
 def check_name(name):
-    if not NAME_RE.match(name or ""):
+    if not isinstance(name, str) or not NAME_RE.match(name):
         raise CredentialError(
             "invalid credential name %r \u2014 use only [A-Za-z0-9_-], max 64 chars"
             % (name,)
@@ -138,10 +153,15 @@ def check_host(host):
     """Validate an allowed-host binding: exact hostname or a leading-dot
     subdomain entry (".example.com"), the same shape hosts.allow takes.
 
-    Canonical contract shared with cred-ui's host_ok() and
-    proxy/cred-registry-set's check_host() (see #150): the dotted shape
-    above, total length <= 253, each dot-separated label <= 63 chars."""
-    h = (host or "").lower()
+    Canonical contract — the accept/reject decision matches
+    credlib/credvalidate.py's check_host (issue #706; atom parity pinned
+    by credlib/test_credvalidate.py): the dotted shape above, total
+    length <= 253, each dot-separated label <= 63 chars. Non-string input
+    is a clean CredentialError, never an AttributeError traceback — the
+    old `(host or "").lower()` crashed on truthy non-strings."""
+    if not isinstance(host, str):
+        raise CredentialError("invalid host %r" % (host,))
+    h = host.lower()
     if (len(h) > HOST_MAX_LEN or not HOST_RE.match(h)
             or any(len(label) > HOST_LABEL_MAX_LEN
                    for label in h.lstrip(".").split("."))):

@@ -183,6 +183,9 @@ def test_proxy_install_paths_cover_deploy_sh_writes():
         # swap_addon.py hard-imports at load -- rollback must restore it
         # with the addon, or the box reverts to an addon-less proxy with
         # no enforcement and green health checks.
+        "/usr/local/bin/credvalidate.py",  # issue #706: the shared
+        # validation contract ships next to the writers — rollback must
+        # cover it in lockstep.
     }
     missing = required - listed
     assert not missing, "missing from proxy_install_paths: %s" % sorted(missing)
@@ -261,6 +264,7 @@ def test_cred_ui_install_paths_cover_install_writes():
     expected = {
         "/tmp/x-inst/cred-ui.py",
         "/tmp/x-inst/index.html",
+        "/tmp/x-inst/credvalidate.py",  # issue #706: staged with the UI
         "/tmp/x-inst/bounded_http.py",
         "/tmp/x-inst/sparkvm_version.py",
         "/tmp/x-inst/VERSION",
@@ -296,6 +300,7 @@ def test_cred_ui_install_end_to_end(tmp_path):
     assert r.returncode == 0, r.stderr + r.stdout
     for name, src in (("cred-ui.py", "cred-ui/cred-ui.py"),
                       ("index.html", "cred-ui/index.html"),
+                      ("credvalidate.py", "credlib/credvalidate.py"),
                       ("bounded_http.py", "scripts/bounded_http.py"),
                       ("sparkvm_version.py", "scripts/sparkvm_version.py"),
                       ("VERSION", "VERSION")):

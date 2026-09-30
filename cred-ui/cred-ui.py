@@ -68,6 +68,30 @@ elif _SV_HERE not in sys.path:
 # a missing helper is a broken checkout and must fail loud, not
 # silently fall back to the unbounded server.
 from bounded_http import BoundedThreadingHTTPServer
+# --- credvalidate: single-source validation contract (issue #706) ---
+# The name/entry/host contract lives in credlib/credvalidate.py. The
+# install dir (issue #85) is self-contained — cred-ui/install.sh stages
+# credvalidate.py flat next to cred-ui.py — so _CV_HERE wins when it
+# carries the module; otherwise the checkout layout's ../credlib is used.
+# A missing module is a broken install and must fail at startup, not
+# silently run with a stale or absent contract: the import below stays
+# unconditional and loud (same discipline as bounded_http above).
+_CV_HERE = os.path.dirname(os.path.abspath(__file__))
+_CV_CAND = os.path.normpath(os.path.join(_CV_HERE, "..", "credlib"))
+if os.path.isfile(os.path.join(_CV_HERE, "credvalidate.py")):
+    if _CV_HERE not in sys.path:
+        sys.path.insert(0, _CV_HERE)
+elif os.path.isfile(os.path.join(_CV_CAND, "credvalidate.py")):
+    if _CV_CAND not in sys.path:
+        sys.path.insert(0, _CV_CAND)
+# Unconditional: no local fallback copies — drift died here (issue #706).
+from credvalidate import (
+    check_entry,
+    check_host,
+    check_host_legacy,
+    check_name,
+    check_name_legacy,
+)
 try:
     from sparkvm_version import sparkvm_version as _sv_fn
     SPARKVM_VERSION = _sv_fn(start=_SV_HERE)
@@ -98,47 +122,50 @@ ALLOWED_HOSTS = {"%s:%d" % (BIND, PORT), "localhost:%d" % PORT}
 CSRF_HEADER = "X-Cred-UI"
 CSRF_VALUE = "1"
 
-NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-# Legacy-tolerant name/host checks (charset/shape only, no caps) for
-# management verbs: credentials created before the #150 caps must stay
-# manageable. Creation (api_set) always uses the canonical NAME_RE /
-# host_ok. Mirrors proxy/cred-registry-set's check_legacy /
-# check_host_legacy.
-NAME_LEGACY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_HOST_SHAPE_RE = re.compile(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$")
+# --- Validation contract: single-sourced from credlib/credvalidate.py ---
+# (imported above; issue #706). The functions below are the UI's thin
+# boolean adapters over the shared checkers — no local regexes, caps, or
+# RESERVED_ENTRIES live here anymore, so this file cannot drift from the
+# writer's contract again. The UI must never accept what the writer
+# rejects: it previously did (ports, underscores), producing a confusing
+# post-store "add-host failed" after the secret was already written.
 
 
 def host_ok_legacy(h):
-    return (isinstance(h, str) and bool(h)
-            and bool(_HOST_SHAPE_RE.match(h)))
-ENTRY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-# Structural registry keys that must never become credential entries.
-# Mirrors proxy/cred-registry-set's RESERVED_ENTRIES (finding 34b) and the
-# `cred` CLI's check_entry: the writer rejects all four on creation, so the
-# UI must reject them up front too (#150). The old `entry == "allowed_hosts"`
-# check left grants/allowed_methods/allowed_paths to fail at the writer
-# AFTER the secret was already stored ("register failed (secret IS
-# stored)") — the confusing path this guard exists to prevent.
-RESERVED_ENTRIES = ("allowed_hosts", "allowed_methods", "allowed_paths",
-                    "grants")
-# Canonical host contract shared with the `cred` CLI's check_host() and
-# proxy/cred-registry-set's check_host() (#150): dotted-hostname shape
-# ^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$ -- no underscores, no ports -- with
-# labels capped at 63 chars (DNS) and the whole name at 253. The swap addon
-# strips ports when matching request hosts, so a port in the registry would
-# be dead config anyway. The UI must never accept what the writer rejects:
-# it previously did (ports, underscores), producing a confusing post-store
-# "add-host failed" after the secret was already written.
-_HOST_LABEL = r"[A-Za-z0-9-]{1,63}"
-_HOST_RE = re.compile(r"^\.?%s(\.%s)*$" % (_HOST_LABEL, _HOST_LABEL))
+    # Legacy-tolerant host check for remove-host: shape only, so
+    # over-long legacy bindings stay removable. Any rejection (including
+    # non-string input) fail-closes to False — do_POST answers that with
+    # 400 — and the shared checker raises ValueError, never TypeError, so
+    # no isinstance guard is needed here anymore.
+    try:
+        check_host_legacy(h)
+    except ValueError:
+        return False
+    return True
 
 
 def host_ok(h):
-    # isinstance first: a non-string (int, list, ...) must be a clean
-    # False (do_POST answers ValueError with 400), not a TypeError that
-    # escapes the handler and drops the connection.
-    return (isinstance(h, str) and bool(h) and len(h) <= 253
-            and bool(_HOST_RE.match(h)))
+    # Canonical host check for add-host: dotted-hostname shape (no
+    # underscores, no ports — the swap addon strips ports when matching,
+    # so a port in the registry would be dead config), labels capped at
+    # 63 chars (DNS), whole name at 253. Same fail-closed contract as
+    # host_ok_legacy above.
+    try:
+        check_host(h)
+    except ValueError:
+        return False
+    return True
+
+
+def name_ok_legacy(n):
+    # Legacy-tolerant name check for management verbs: charset only, so
+    # credentials created before the #150 caps stay manageable. Same
+    # fail-closed boolean contract as the host adapters above.
+    try:
+        check_name_legacy(n)
+    except ValueError:
+        return False
+    return True
 HEADER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 PARAM_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
@@ -201,7 +228,7 @@ def list_secret_names():
     # so. The canonical NAME_RE filter here used to drop such names, so a
     # credential `cred get` could read showed has_value=false in the UI
     # (2026-09-23 arch deep-read finding).
-    return {n for n in out.split() if NAME_LEGACY_RE.match(n)}
+    return {n for n in out.split() if name_ok_legacy(n)}
 
 
 def snapshot():
@@ -372,9 +399,13 @@ def api_set(data):
     arg = data.get("placement_arg", "")
     hosts = data.get("hosts", []) or []
 
-    if not NAME_RE.match(name):
+    try:
+        check_name(name)
+    except ValueError:
         raise ValueError("bad credential name (use [A-Za-z0-9_-], max 64 chars)")
-    if not ENTRY_RE.match(entry) or entry in RESERVED_ENTRIES:
+    try:
+        check_entry(entry)
+    except ValueError:
         raise ValueError("bad entry name")
     if not isinstance(value, str):
         raise ValueError("empty secret value")
@@ -425,7 +456,7 @@ def api_set(data):
 def api_delete(data):
     name = data.get("name", "")
     # Management path: legacy names stay deletable.
-    if not NAME_LEGACY_RE.match(name):
+    if not name_ok_legacy(name):
         raise ValueError("bad credential name")
     # Remove the stored value first (the wrapper ignores "no such file" --
     # the registry may exist alone). A real failure must surface: deleting
@@ -446,7 +477,7 @@ def api_host(data, add):
     host = data.get("host", "")
     # Management path: legacy names stay manageable. New bindings are
     # always canonical; removing a legacy over-long binding stays possible.
-    if not NAME_LEGACY_RE.match(name):
+    if not name_ok_legacy(name):
         raise ValueError("bad credential name")
     host_okay = host_ok(host) if add else host_ok_legacy(host)
     if not host_okay:

@@ -14,10 +14,14 @@ The swapping proxy replaces these at request time, for allowlisted hosts only.
 """
 
 import json
-import re
 import subprocess
 import urllib.parse
 import urllib.request
+
+# Issue #706: the name grammar's canonical home is credlib/credvalidate.py
+# (same directory — wherever this module is importable, the contract is
+# too). The local copy is gone; _validate_name keeps its exact message.
+from credvalidate import NAME_LEGACY_RE
 
 REGISTRY_PATH = "/home/swapd/credentials.json"
 SUDO = ["sudo", "-n", "-u", "swapd"]
@@ -42,8 +46,9 @@ class DynamicCredentialError(Exception):
 # for legacy semantics would be identifier drift on a security
 # boundary). A 64-char cap here would reject names the writers and the
 # swapping proxy still serve (finding, 2026-09-23 arch deep-read:
-# surrogate building is a read path, not creation).
-NAME_LEGACY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# surrogate building is a read path, not creation). The regex itself now
+# lives in credlib/credvalidate.py (imported above) — the canonical
+# single source for the contract (issue #706).
 
 
 def _validate_name(value, what):
