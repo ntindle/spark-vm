@@ -683,6 +683,42 @@ def test_restore_absent_empty_path_fails(tmp_path):
     assert "corrupt MANIFEST ABSENT line" in r.stdout + r.stderr
 
 
+def test_restore_legacy_checkout_manifest_line_fails_loud(tmp_path):
+    """A legacy `CHECKOUT ...` manifest line must fail the restore loudly.
+
+    Pre-removal snapshots (cred-ui used checkout_sync before issue #85)
+    wrote `CHECKOUT <component> <subtree>` lines, and the retired
+    restore branch interpreted them. Now the generic branch treats such a
+    line as a plain path — the mangled source doesn't exist, so the copy
+    fails and the restore reports failure instead of silently restoring the
+    wrong thing. Fail closed, never silently half-restored.
+    """
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "MANIFEST").write_text("CHECKOUT cred-ui cred-ui\n")
+    r = source_and("restore_snapshot %s" % snap,
+                   env_extra={"UPDATER_STATE_DIR": str(tmp_path),
+                              "SKIP_SUDO": "1",
+                              "AUTO_DEPLOY_NO_MAIN": "1"})
+    assert r.returncode != 0, r.stdout + r.stderr
+
+
+def test_checkout_sync_machinery_stays_dead():
+    """Anti-regression pin: the checkout-sync mechanism stays removed.
+
+    The machinery was armed-but-unused (an `rm -rf` subtree-sync path with
+    zero production users); a future edit must not quietly re-arm it. The
+    updater script, the component manifest, and the deploy README must
+    carry no checkout-sync key, reader, or writer.
+    """
+    script = open(os.path.join(REPO, "deploy", "auto-deploy.sh")).read()
+    conf = open(os.path.join(REPO, "deploy", "components.conf")).read()
+    for probe in ("checkout_sync", "CHECKOUT ", "CHECKOUT-", "WORKING_CHECKOUT",
+                  "check_checkout_sync_ready", "checkout-dirty"):
+        assert probe not in script, "checkout-sync residue in auto-deploy.sh: %r" % probe
+    assert "checkout_sync" not in conf, "checkout_sync key re-declared in components.conf"
+
+
 def test_snapshot_broken_sudo_fails_loud(tmp_path):
     """snapshot_component must not record ABSENT when sudo itself errors (#107).
 
