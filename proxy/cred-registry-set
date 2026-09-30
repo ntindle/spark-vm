@@ -61,9 +61,65 @@ if [ -n "$_swapd_uid" ] && [ "$EUID" = "$_swapd_uid" ]; then
 fi
 unset _swapd_uid _ov
 
+# Issue #706: resolve the shared validation module from THIS script's own
+# directory — never from caller input. proxy/deploy.sh installs
+# credlib/credvalidate.py next to this writer (/usr/local/bin); in the
+# repo checkout the module lives one tree up in credlib/. The variable is
+# always overwritten here, so a caller-set value is discarded (it cannot
+# redirect the import the way CRED_REGISTRY_FILE could redirect the data
+# path — see the #90 guard above). The bare-name case ($0 without a slash,
+# i.e. PATH lookup) resolves via command -v so a hostile CWD cannot
+# poison the lookup.
+_cv_self="$0"
+case "$_cv_self" in
+    */*) : ;;
+    *) _cv_self="$(command -v -- "$_cv_self" 2>/dev/null || echo "$_cv_self")" ;;
+esac
+_CREDVALIDATE_BASE="$(cd "$(dirname -- "$_cv_self")" && pwd -P)"
+export _CREDVALIDATE_BASE
+unset _cv_self
+
 exec python3 - "$@" <<'PYEOF'
 import fcntl, json, os, pwd, re, sys, tempfile
 import atexit
+
+# Issue #706: the validation contract's single source is
+# credlib/credvalidate.py. It ships next to this script (proxy/deploy.sh
+# installs it atomically with the writer); in the repo checkout the
+# ../credlib fallback below finds it. _CREDVALIDATE_BASE is set by the
+# wrapper above from the script's own path — never caller input.
+# A missing module is a broken install and must fail every invocation
+# loudly, not run with a stale local contract. Two extra guards beyond
+# the plain lookup: (1) `python3 -` puts the caller's CWD on sys.path[0]
+# (as ''), and sudo preserves CWD — without scrubbing, a missing module
+# would silently resolve against a caller-planted credvalidate.py in the
+# invoking directory, running the root writer against a laxer contract;
+# (2) the import's provenance is verified against the directory the
+# lookup chose, so a sys.path shadow cannot substitute another copy.
+_cv_base = os.environ.get("_CREDVALIDATE_BASE") or "/usr/local/bin"
+_cv_dir = next(
+    (d for d in (_cv_base,
+                 os.path.normpath(os.path.join(_cv_base, "..", "credlib")))
+     if os.path.isfile(os.path.join(d, "credvalidate.py"))),
+    None)
+if _cv_dir is None:
+    sys.stderr.write(
+        "cred-registry-set: credvalidate.py not found next to the writer "
+        "(broken install) - refusing to run unvalidated\n")
+    sys.exit(1)
+try:
+    _cv_cwd = os.getcwd()
+except OSError:
+    _cv_cwd = None
+sys.path = [p for p in sys.path if p not in ("", _cv_cwd)]
+sys.path.insert(0, _cv_dir)
+import credvalidate as _cv
+if os.path.dirname(os.path.realpath(_cv.__file__)) != os.path.realpath(_cv_dir):
+    sys.stderr.write(
+        "cred-registry-set: credvalidate resolved from %r, expected %r - "
+        "refusing\n" % (_cv.__file__, _cv_dir))
+    sys.exit(1)
+del _cv_base, _cv_dir, _cv_cwd
 
 def fail(msg):
     sys.stderr.write("cred-registry-set: %s\n" % msg)
@@ -100,12 +156,15 @@ if not args or args[0] not in ACTIONS:
 action = args[0]
 
 def check(s, what):
-    # Canonical contract shared with the `cred` CLI and cred-ui (#150):
-    # credential/entry names are [A-Za-z0-9_-], 1-64 chars. This strict form
-    # gates CREATION (the `set` verb). Pure-management verbs use
+    # Canonical contract — the accept/reject decision lives in
+    # credlib/credvalidate.py (issue #706); this wrapper keeps the
+    # writer's exact message and fail() behavior. This strict form gates
+    # CREATION (the `set` verb). Pure-management verbs use
     # check_legacy/check_entry_legacy below so credentials created before
     # the cap stay manageable without hand-editing the registry as root.
-    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", s or ""):
+    try:
+        _cv.check_name(s)
+    except ValueError:
         fail("invalid %s %r (use only [A-Za-z0-9_-], max 64 chars)" % (what, s))
 
 def check_legacy(s, what):
@@ -117,32 +176,28 @@ def check_legacy(s, what):
     # credentials outright. This script runs as `python3 - "$@"`, argv
     # only, no shell — and entries keep the RESERVED_ENTRIES guard via
     # check_entry_legacy (finding 34b).
-    if not re.match(r"^[A-Za-z0-9_-]+$", s or ""):
+    try:
+        _cv.check_name_legacy(s)
+    except ValueError:
         fail("invalid %s %r (use only [A-Za-z0-9_-])" % (what, s))
 
-HOST_MAX_LEN = 253
-HOST_LABEL_MAX_LEN = 63
-
 def check_host(h):
-    # Canonical contract shared with the `cred` CLI's check_host() and
-    # cred-ui's host_ok() (#150): dotted-hostname shape, total length
-    # <= HOST_MAX_LEN, each dot-separated label <= HOST_LABEL_MAX_LEN.
-    lowered = (h or "").lower()
-    if (len(lowered) > HOST_MAX_LEN
-            or not re.match(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$", lowered)
-            or any(len(label) > HOST_LABEL_MAX_LEN
-                   for label in lowered.lstrip(".").split("."))):
+    # Canonical host check for new bindings (add-host): dotted shape +
+    # DNS length caps. Decision in credvalidate (issue #706); the
+    # writer's exact message and lowercased return are kept.
+    try:
+        return _cv.check_host(h)
+    except ValueError:
         fail("invalid host %r" % (h,))
-    return lowered
 
 def check_host_legacy(h):
     # Shape-only host check for remove-host: an over-long legacy host
     # binding must stay removable. New bindings (add-host) always go
     # through the canonical check_host above.
-    lowered = (h or "").lower()
-    if not re.match(r"^\.?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$", lowered):
+    try:
+        return _cv.check_host_legacy(h)
+    except ValueError:
         fail("invalid host %r" % (h,))
-    return lowered
 
 def _running_as_swapd():
     # Issue #90: the effective UID is the enforcement identity (see the
@@ -209,13 +264,19 @@ if os.path.exists(reg_path):
 # "allowed_hosts" would clobber the host binding with a placement object
 # (finding 34b). allowed_methods/allowed_paths are reserved for the
 # grant-scoping proposal, and grants is reserved before the deferred
-# grant machinery lands (finding 44).
-RESERVED_ENTRIES = ("allowed_hosts", "allowed_methods", "allowed_paths",
-                    "grants")
+# grant machinery lands (finding 44). The tuple itself lives in
+# credlib/credvalidate.py (issue #706) — enforced here through the
+# shared checkers below, never redefined.
 
 def check_entry(s):
-    check(s, "entry")
-    if s in RESERVED_ENTRIES:
+    # Creation path: canonical name + the shared RESERVED_ENTRIES guard
+    # (finding 34b) — the tuple lives in credvalidate (issue #706).
+    try:
+        _cv.check_name(s)
+    except ValueError:
+        fail("invalid %s %r (use only [A-Za-z0-9_-], max 64 chars)"
+             % ("entry", s))
+    if s in _cv.RESERVED_ENTRIES:
         fail("entry name %r is reserved" % (s,))
 
 def check_entry_legacy(s):
@@ -223,8 +284,11 @@ def check_entry_legacy(s):
     # charset-only like check_legacy, but the RESERVED_ENTRIES guard stays —
     # an entry named "allowed_hosts" would clobber the host binding
     # (finding 34b), legacy or not.
-    check_legacy(s, "entry")
-    if s in RESERVED_ENTRIES:
+    try:
+        _cv.check_name_legacy(s)
+    except ValueError:
+        fail("invalid %s %r (use only [A-Za-z0-9_-])" % ("entry", s))
+    if s in _cv.RESERVED_ENTRIES:
         fail("entry name %r is reserved" % (s,))
 
 def parse_placement(pjson):

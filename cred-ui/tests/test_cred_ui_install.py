@@ -21,6 +21,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 RUNTIME_FILES = [
     "cred-ui.py",
     "index.html",
+    "credvalidate.py",
     "bounded_http.py",
     "sparkvm_version.py",
     "VERSION",
@@ -29,6 +30,7 @@ RUNTIME_FILES = [
 REPO_SOURCES = {
     "cred-ui.py": os.path.join("cred-ui", "cred-ui.py"),
     "index.html": os.path.join("cred-ui", "index.html"),
+    "credvalidate.py": os.path.join("credlib", "credvalidate.py"),
     "bounded_http.py": os.path.join("scripts", "bounded_http.py"),
     "sparkvm_version.py": os.path.join("scripts", "sparkvm_version.py"),
     "VERSION": "VERSION",
@@ -61,6 +63,12 @@ def test_install_populates_fixed_location(tmp_path):
     assert unit.is_file(), "unit not installed"
     assert unit.read_bytes() == open(
         os.path.join(REPO, "cred-ui", "cred-ui.service"), "rb").read()
+    # Exact-set pin that also runs as root (the mid-copy test's twin pin
+    # self-skips as root — the stale `== 5` count rotted through exactly
+    # that hole): the install dir must contain exactly the declared
+    # runtime set, no more, no less.
+    assert sorted(p.name for p in install_dir.iterdir()) == sorted(RUNTIME_FILES), \
+        "runtime set drift: %s" % sorted(p.name for p in install_dir.iterdir())
 
 
 def test_install_fails_closed_on_missing_file(tmp_path):
@@ -153,15 +161,20 @@ def test_installed_copy_reports_shipped_version(tmp_path):
 def test_installed_copy_prefers_own_helpers(tmp_path):
     """Security NB4: the install dir is self-contained — its own helpers
     must win over a ../scripts shadow, so nothing outside the install dir
-    can substitute the server the UI runs."""
+    can substitute the server the UI runs. The same holds for the shared
+    validation contract (issue #706): a ../credlib shadow must not win
+    over the staged copy."""
     install_dir = tmp_path / "install"
     unit_dir = tmp_path / "units"
     r = _run_install(REPO, install_dir, unit_dir)
     assert r.returncode == 0, r.stderr + r.stdout
-    # Shadow at the old checkout-relative lookup location.
+    # Shadows at the old checkout-relative lookup locations.
     shadow = install_dir.parent / "scripts"
     shadow.mkdir()
     (shadow / "bounded_http.py").write_text("SHADOW_MARKER = True\n")
+    credlib_shadow = install_dir.parent / "credlib"
+    credlib_shadow.mkdir()
+    (credlib_shadow / "credvalidate.py").write_text("SHADOW_MARKER = True\n")
     probe = (
         "import importlib.util, sys;"
         "path = sys.argv[1];"
@@ -170,7 +183,9 @@ def test_installed_copy_prefers_own_helpers(tmp_path):
         "mod.__dict__['__file__'] = path;"
         "exec(compile(open(path, encoding='utf-8').read(), path, 'exec'), mod.__dict__);"
         "import bounded_http;"
-        "print(bounded_http.__file__)"
+        "import credvalidate;"
+        "print(bounded_http.__file__);"
+        "print(credvalidate.__file__)"
     )
     r2 = subprocess.run(
         [sys.executable, "-c", probe, str(install_dir / "cred-ui.py")],
@@ -178,8 +193,11 @@ def test_installed_copy_prefers_own_helpers(tmp_path):
         env={"PATH": os.environ["PATH"]},
     )
     assert r2.returncode == 0, r2.stderr
-    assert r2.stdout.strip() == str(install_dir / "bounded_http.py"), \
-        "shadow ../scripts/bounded_http.py took precedence: %s" % r2.stdout.strip()
+    lines = r2.stdout.strip().splitlines()
+    assert lines[0] == str(install_dir / "bounded_http.py"), \
+        "shadow ../scripts/bounded_http.py took precedence: %s" % lines[0]
+    assert lines[1] == str(install_dir / "credvalidate.py"), \
+        "shadow ../credlib/credvalidate.py took precedence: %s" % lines[1]
 
 
 def test_install_mid_copy_failure_leaves_live_set_untouched(tmp_path):
@@ -202,10 +220,13 @@ def test_install_mid_copy_failure_leaves_live_set_untouched(tmp_path):
     unit_dir = tmp_path / "units"
     r = _run_install(REPO, install_dir, unit_dir)
     assert r.returncode == 0, r.stderr + r.stdout
-    # Sentinel: the live set we must not disturb.
+    # Sentinel: the live set we must not disturb. It must be exactly the
+    # declared runtime set — no more, no less (issue #706 added
+    # credvalidate.py, so a hard-coded count here would rot; compare
+    # against RUNTIME_FILES instead).
     sentinels = {p: p.read_bytes() for p in install_dir.iterdir()}
-    assert len(sentinels) == 5, "expected the 5 runtime files, got %s" % (
-        sorted(p.name for p in sentinels),)
+    assert sorted(p.name for p in sentinels) == sorted(RUNTIME_FILES), \
+        "runtime set drift: %s" % sorted(p.name for p in sentinels)
     # A fake repo whose sources pass every gate but fail mid-copy:
     # index.html is presence-checked yet never syntax-checked or parsed,
     # so an unreadable index.html aborts the copy after the staged set is
@@ -261,7 +282,7 @@ def test_install_publish_failure_is_recoverable_by_rerun(tmp_path):
     install_dir = tmp_path / "install"
     unit_dir = tmp_path / "units"
     unit_dir.mkdir()
-    # The unit publish fails (unwritable dir); the 5 runtime publishes
+    # The unit publish fails (unwritable dir); the six runtime publishes
     # succeed — the documented mixed state: new runtime, unit pending.
     unit_dir.chmod(0o555)
     try:

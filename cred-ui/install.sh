@@ -6,8 +6,8 @@
 # with checkout access could change the page the human pastes real secrets
 # into, and a dirty checkout failed the auto-deploy closed (blocking the
 # updater from overwriting the injected file). This script copies the
-# runtime set (cred-ui.py + index.html + the shared bounded server + the
-# version reader + VERSION) into a fixed install directory that only the
+# runtime set (cred-ui.py + index.html + the shared validation contract +
+# the shared bounded server + the version reader + VERSION) into a fixed install directory that only the
 # gated deploy path writes, and installs the systemd user unit whose
 # ExecStart points at the installed copy.
 #
@@ -46,6 +46,7 @@ CRED_UI_INSTALL_DIR="${CRED_UI_INSTALL_DIR%/}"
 SOURCES=(
     "cred-ui/cred-ui.py"
     "cred-ui/index.html"
+    "credlib/credvalidate.py"
     "scripts/bounded_http.py"
     "scripts/sparkvm_version.py"
     "VERSION"
@@ -67,6 +68,7 @@ done
 # operator's checkout (PYTHONDONTWRITEBYTECODE does not suppress
 # py_compile's explicit writes — verified).
 for f in "$REPO/cred-ui/cred-ui.py" \
+         "$REPO/credlib/credvalidate.py" \
          "$REPO/scripts/bounded_http.py" \
          "$REPO/scripts/sparkvm_version.py"; do
     python3 -c 'import sys; compile(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1], "exec")' "$f" || {
@@ -123,6 +125,7 @@ trap cleanup_staging EXIT
 cp --remove-destination \
    "$REPO/cred-ui/cred-ui.py" \
    "$REPO/cred-ui/index.html" \
+   "$REPO/credlib/credvalidate.py" \
    "$REPO/scripts/bounded_http.py" \
    "$REPO/scripts/sparkvm_version.py" \
    "$REPO/VERSION" \
@@ -160,7 +163,7 @@ fi
 # Publish: each mv is an atomic rename on the same filesystem — the live
 # file is never observed partially written. Runtime set first, then the
 # unit (the unit is re-read only on daemon-reload, after publication).
-for f in cred-ui.py index.html bounded_http.py sparkvm_version.py VERSION; do
+for f in cred-ui.py index.html credvalidate.py bounded_http.py sparkvm_version.py VERSION; do
     mv -f "$STAGING/$f" "$CRED_UI_INSTALL_DIR/$f" || {
         echo "ERROR: publishing $f failed — live set may be mixed old/new; re-run install.sh to complete" >&2
         exit 1

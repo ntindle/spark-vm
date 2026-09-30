@@ -14,10 +14,14 @@ The swapping proxy replaces these at request time, for allowlisted hosts only.
 """
 
 import json
-import re
 import subprocess
 import urllib.parse
 import urllib.request
+
+# Issue #706: the name grammar's canonical home is credlib/credvalidate.py
+# (same directory — wherever this module is importable, the contract is
+# too). The local copy is gone; _validate_name keeps its exact message.
+from credvalidate import NAME_LEGACY_RE
 
 REGISTRY_PATH = "/home/swapd/credentials.json"
 SUDO = ["sudo", "-n", "-u", "swapd"]
@@ -33,7 +37,7 @@ class DynamicCredentialError(Exception):
 # no slashes, no dots, no shell. The swapd-side writers enforce
 # charset-only (proxy/cred-store-set: ^[A-Za-z0-9_-]+$, no length cap),
 # and the management/read verbs everywhere else are legacy-tolerant the
-# same way (cred's check_name_legacy, cred-ui's NAME_LEGACY_RE,
+# same way (cred's check_name_legacy, cred-ui's name_ok_legacy,
 # proxy/cred-registry-set's check_legacy) so credentials created before
 # the #150 64-char cap stay usable. This choke point matches them:
 # charset-only, no cap — and carries the NAME_LEGACY_RE identifier so
@@ -42,8 +46,9 @@ class DynamicCredentialError(Exception):
 # for legacy semantics would be identifier drift on a security
 # boundary). A 64-char cap here would reject names the writers and the
 # swapping proxy still serve (finding, 2026-09-23 arch deep-read:
-# surrogate building is a read path, not creation).
-NAME_LEGACY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# surrogate building is a read path, not creation). The regex itself now
+# lives in credlib/credvalidate.py (imported above) — the canonical
+# single source for the contract (issue #706).
 
 
 def _validate_name(value, what):

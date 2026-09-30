@@ -104,6 +104,10 @@ sudo install -o root -g root -m 0755 proxy/cred-store-set-inference /usr/local/b
 sudo install -o root -g root -m 0755 proxy/cred-store-verify-inference /usr/local/bin/cred-store-verify-inference
 sudo install -o root -g root -m 0755 proxy/cred-store-get /usr/local/bin/cred-store-get
 sudo install -o root -g root -m 0755 proxy/cred-store-delete /usr/local/bin/cred-store-delete
+# Issue #706: the shared validation contract ships next to the writers it
+# serves (same install step, so the two update atomically). Root-owned
+# 0644: it is imported, never executed.
+sudo install -o root -g root -m 0644 credlib/credvalidate.py /usr/local/bin/credvalidate.py
 # Verify the security-critical writers landed root-owned 0755. Any
 # install failure above aborts via set -e; this guards against silent
 # drift (a stale or tampered /usr/local/bin).
@@ -117,6 +121,14 @@ for f in cred-registry-set cred-registry-set-inference cred-store-set \
         exit 1
     fi
 done
+# The validation module must be root-owned 0644 next to the writers: a
+# missing or tampered copy must fail the deploy here, not a writer
+# invocation later.
+got="$(stat -c '%U:%a' /usr/local/bin/credvalidate.py)"
+if [ "$got" != "root:644" ]; then
+    echo "ERROR: /usr/local/bin/credvalidate.py has owner:mode $got, expected root:644 — aborting before any service restart"
+    exit 1
+fi
 
 # --- 2. confirmd ---------------------------------------------------------
 echo "[2/7] Installing confirmd..."
