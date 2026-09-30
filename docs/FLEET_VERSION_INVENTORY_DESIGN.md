@@ -58,8 +58,10 @@ Before adding anything, name what exists:
   every run to a per-box audit log capped at 10k lines. The event is
   `deploy` (or `check`/`rollback`); the outcome lives in the `result`
   discriminator (`ok`, `rolled-back`, `rollback-failed`, `deploy-fail`,
-  `precheck-fail`, `gate-fail`, `snapshot-fail`, `checkout-dirty`,
-  `pull-only`, `reload-fail`, `manual-rollback`, …) alongside `from`/`to`
+  `precheck-fail`, `gate-fail`, `snapshot-fail`,
+  `pull-only`, `reload-fail`, `manual-rollback`, … — the retired
+  `checkout-dirty` may still appear in older audit tails, where it is a
+  precheck-class outcome) alongside `from`/`to`
   commits, component, and phase. The log says *what happened*; it does
   not carry a standing "what am I running now" snapshot.
 - **Missing entirely:** a per-box `box_id` that survives reimage (the G15

@@ -40,7 +40,7 @@
 #
 # Env overrides (for tests): UPDATER_STATE_DIR, UPDATER_REPO, SWAPD_HOME,
 # BIN_DIR, SYSTEMD_DIR, SYSTEMD_USER_DIR, CRED_UI_INSTALL_DIR,
-# WORKING_CHECKOUT, UPDATER_COMPONENTS_CONF,
+# UPDATER_COMPONENTS_CONF,
 # SKIP_SYSTEMCTL=1 (skip systemctl calls), SKIP_SUDO=1 (run file ops without
 # sudo), PINNED_UPSTREAM.
 
@@ -59,7 +59,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 : "${SWAPD_HOME:=/home/swapd}"
 : "${BIN_DIR:=/usr/local/bin}"
 : "${SYSTEMD_DIR:=/etc/systemd/system}"
-: "${WORKING_CHECKOUT:=/home/ntindle/spark-vm}"
 : "${PINNED_UPSTREAM:=https://github.com/ntindle/spark-vm}"
 : "${SKIP_SYSTEMCTL:=0}"
 : "${SKIP_SUDO:=0}"
@@ -562,44 +561,13 @@ run_gates() {
     return 1
 }
 
-check_checkout_sync_ready() {
-    # check_checkout_sync_ready <component> <subtree> <new> — fail closed if
-    # the working-checkout subtree cannot be safely synced (gate phase: runs
-    # BEFORE any mutation).
-    local c="$1" sub="$2" new="$3"
-    local dest="$WORKING_CHECKOUT/$sub"
-    if [ ! -d "$WORKING_CHECKOUT/.git" ]; then
-        log "  $c: WORKING_CHECKOUT $WORKING_CHECKOUT is not a git checkout — FAIL CLOSED"
-        return 1
-    fi
-    if [ -e "$dest" ] && [ -n "$(git -C "$WORKING_CHECKOUT" status --porcelain -- "$sub")" ]; then
-        log "  $c: uncommitted changes in $dest — refusing to overwrite (commit or stash first)"
-        return 1
-    fi
-    # Version stamping (docs/VERSIONING.md): the root VERSION file travels
-    # with every checkout sync, so it gets the same fail-closed treatment.
-    if [ -e "$WORKING_CHECKOUT/VERSION" ] && [ -n "$(git -C "$WORKING_CHECKOUT" status --porcelain -- VERSION)" ]; then
-        log "  $c: uncommitted changes in $WORKING_CHECKOUT/VERSION — refusing to overwrite (commit or stash first)"
-        return 1
-    fi
-    if ! git -C "$UPDATER_REPO" cat-file -e "$new:$sub" 2>/dev/null; then
-        log "  $c: subtree $sub not present at $new — FAIL CLOSED"
-        return 1
-    fi
-    if ! git -C "$UPDATER_REPO" cat-file -e "$new:VERSION" 2>/dev/null; then
-        log "  $c: VERSION not present at $new — FAIL CLOSED"
-        return 1
-    fi
-    return 0
-}
-
 # --- snapshot / rollback -------------------------------------------------------
 
 snapshot_component() {
     # snapshot_component <component> <snapdir> — copy currently-installed
-    # files and checkout-synced subtrees.
+    # files listed in the component's install_paths.
     local c="$1" snapdir="$2"
-    local p rel sub dest st
+    local p rel st
     while IFS= read -r p; do
         [ -n "$p" ] || continue
         # store under snapdir + absolute path, e.g. <snapdir>/home/swapd/swap_addon.py
@@ -627,32 +595,6 @@ snapshot_component() {
             echo "ABSENT $p" >>"$snapdir/MANIFEST"
         fi
     done < <(get_arr "$c" install_paths)
-    sub="$(get_str "$c" checkout_sync)"
-    if [ -n "$sub" ]; then
-        dest="$WORKING_CHECKOUT/$sub"
-        if [ -e "$dest" ]; then
-            mkdir -p "$snapdir/checkout-$(vpre "$c")" || {
-                log "ERROR: cannot create checkout snapshot dir for $c"; return 1; }
-            cp -a "$dest" "$snapdir/checkout-$(vpre "$c")/" || {
-                log "ERROR: checkout snapshot of $dest failed"; return 1; }
-            echo "CHECKOUT $c $sub" >>"$snapdir/MANIFEST"
-        else
-            echo "CHECKOUT-ABSENT $c $sub" >>"$snapdir/MANIFEST"
-        fi
-        # Version stamping (docs/VERSIONING.md): the root VERSION file is
-        # synced alongside the subtree (see install_component) — snapshot it
-        # too, or a rollback leaves the new VERSION under the old code.
-        vdest="$WORKING_CHECKOUT/VERSION"
-        if [ -e "$vdest" ]; then
-            mkdir -p "$snapdir/checkout-$(vpre "$c")" || {
-                log "ERROR: cannot create checkout snapshot dir for $c"; return 1; }
-            cp -a "$vdest" "$snapdir/checkout-$(vpre "$c")/" || {
-                log "ERROR: checkout VERSION snapshot of $vdest failed"; return 1; }
-            echo "CHECKOUT $c VERSION" >>"$snapdir/MANIFEST"
-        else
-            echo "CHECKOUT-ABSENT $c VERSION" >>"$snapdir/MANIFEST"
-        fi
-    fi
     return 0
 }
 
@@ -668,9 +610,8 @@ restore_snapshot() {
                 local p="${line#ABSENT }"
                 # #103: an empty path is a corrupt manifest line — the
                 # snapshot writer skips empties, so only a hand-edited or
-                # damaged MANIFEST produces one. Fail loud, mirroring the
-                # CHECKOUT-ABSENT guard: the old code silently skipped with
-                # rc=0 since both tests fail on "".
+                # damaged MANIFEST produces one. Fail loud: the old code
+                # silently skipped with rc=0 since both tests fail on "".
                 if [ -z "$p" ]; then
                     log "  corrupt MANIFEST ABSENT line (empty path): $line"
                     rc=1
@@ -703,26 +644,6 @@ restore_snapshot() {
                     log "  $p still absent (or not visible) — nothing to remove"
                 fi
                 ;;
-            CHECKOUT\ *)
-                local c="${line#CHECKOUT }"; c="${c%% *}"
-                local sub="${line#CHECKOUT * }"
-                sub="${sub#* }"
-                local dest="$WORKING_CHECKOUT/$sub"
-                log "  restoring checkout subtree $dest"
-                rm -rf "$dest" || rc=1
-                cp -a "$snapdir/checkout-$(vpre "$c")/$sub" "$dest" || rc=1
-                ;;
-            CHECKOUT-ABSENT\ *)
-                local rest="${line#CHECKOUT-ABSENT }"
-                local sub2="${rest#* }"
-                if [ -z "$sub2" ]; then
-                    log "  corrupt MANIFEST CHECKOUT-ABSENT line (empty subtree): $line"
-                    rc=1
-                    continue
-                fi
-                log "  removing $WORKING_CHECKOUT/$sub2 (was absent at snapshot)"
-                rm -rf "${WORKING_CHECKOUT:?}/${sub2:?}" || rc=1
-                ;;
             *)
                 log "  restoring $line"
                 sudo_run cp -a "$snapdir$line" "$line" || rc=1
@@ -736,14 +657,8 @@ restore_snapshot() {
 
 install_component() {
     # install_component <component> <new-sha> — run the component's install
-    # step (from the updater mirror) and/or sync its checkout subtree.
-    # Return contract: 0 = installed; 1 = install failed (caller rolls back);
-    # 2 = the pre-destruction checkout re-check failed (issue #324). The
-    # caller must fail closed WITHOUT marking the commit blocked (the commit
-    # is not bad; the checkout is dirty) — but anything already installed in
-    # this run, including this component's own install step (which runs
-    # before the re-check below), must still be rolled back; the caller owns
-    # that (see cmd_deploy's no_block rollback).
+    # step (from the updater mirror). Return contract: 0 = installed;
+    # 1 = install failed (caller rolls back).
     local c="$1" new="$2"
     local inst; inst="$(get_str "$c" install)"
     if [ -n "$inst" ]; then
@@ -753,38 +668,6 @@ install_component() {
         # single-flight lock — we hold it.
         if ! ( export AUTO_DEPLOY_HOLDS_LOCK=1; cd "$UPDATER_REPO" && eval "$inst" ); then
             log "  $c install FAILED"
-            return 1
-        fi
-    fi
-    local sub; sub="$(get_str "$c" checkout_sync)"
-    if [ -n "$sub" ]; then
-        log "  $c: syncing subtree $sub from mirror@$new into $WORKING_CHECKOUT"
-        # Issue #324: re-run the checkout-sync preconditions at the moment of
-        # destruction, not just at gate time. The single-flight lock
-        # serializes auto-deploy runs against each other, not against
-        # operators: a manual edit (or another agent job) to the working
-        # checkout in the gate→install window (snapshots run between them)
-        # would otherwise be silently clobbered by the rm -rf below — or land
-        # mid-tar and leave a half-synced subtree under a health-checked
-        # service. The check is two `git status --porcelain` calls plus two
-        # `cat-file -e` lookups — cheap enough to close the window without a
-        # lock protocol operators would also have to learn and take.
-        # Distinct return code 2 (see the docstring contract): the subtree
-        # sync itself has not run, but this component's install step (above)
-        # may already have mutated the box — the caller rolls back on 2.
-        check_checkout_sync_ready "$c" "$sub" "$new" || return 2
-        rm -rf "${WORKING_CHECKOUT:?}/${sub:?}" || return 1
-        if ! git -C "$UPDATER_REPO" archive "$new" "$sub" | tar -x -C "$WORKING_CHECKOUT"; then
-            log "  $c: subtree sync FAILED"
-            return 1
-        fi
-        # Version stamping (docs/VERSIONING.md): the component resolves the
-        # repo VERSION by walking up from the working checkout, so the root
-        # VERSION file must travel with the sync — a version-only deploy
-        # otherwise leaves it reporting the old release.
-        log "  $c: syncing VERSION from mirror@$new into $WORKING_CHECKOUT"
-        if ! git -C "$UPDATER_REPO" archive "$new" VERSION | tar -x -C "$WORKING_CHECKOUT"; then
-            log "  $c: VERSION sync FAILED"
             return 1
         fi
     fi
@@ -916,18 +799,15 @@ do_rollback() {
     # do_rollback <snapdir> <old> <new> <failed-component> <phase> [no_block] [audit-trig]
     # Restore the snapshot, restart + health-check. Unless no_block is set,
     # mark the commit blocked so the next tick does not retry-loop it.
-    # no_block is for aborts where the commit itself is fine (issue #324's
-    # checkout-dirty abort): the audit entries still fire, but BLOCKED_COMMIT
-    # is never written — not even if the rollback itself fails (the alert
-    # already screams for operator intervention; a good commit must not be
-    # blocked). Always returns 1 (deploy failed).
+    # no_block is for aborts where the commit itself is fine: a same-commit
+    # (extra-inputs-forced) deploy failure, or a manual `rollback --no-block`
+    # (issue #325). In those cases the audit entries still fire, but
+    # BLOCKED_COMMIT is never written — not even if the rollback itself fails
+    # (the alert already screams for operator intervention; a good commit must
+    # not be blocked). Always returns 1 (deploy failed).
     local snapdir="$1" old="$2" new="$3" failed_c="$4" phase="$5" no_block="${6:-}" atrig="${7:-}"
     local c
-    if [ "$phase" = "checkout-dirty" ]; then
-        alert "checkout-dirty abort for component $failed_c ($old -> $new) — rolling back already-installed components (commit or stash first)"
-    else
-        alert "deploy $phase failed for component $failed_c ($old -> $new) — rolling back"
-    fi
+    alert "deploy $phase failed for component $failed_c ($old -> $new) — rolling back"
     audit 'deploy' ',"result":"deploy-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$failed_c"'","phase":"'"$phase"'"'"$atrig"
     if ! restore_snapshot "$snapdir"; then
         alert "ROLLBACK FAILED for $new — box may be half-deployed, operator intervention required"
@@ -1214,21 +1094,13 @@ cmd_deploy() {
     # timer never runs `check` or `status`.
     check_updater_drift
 
-    # 1. gates BEFORE any mutation (incl. checkout-sync preconditions)
+    # 1. gates BEFORE any mutation
     for c in "${COMPS[@]}"; do
         run_gates "$c" || {
             alert "pre-deploy gate failed for component $c ($old -> $new)"
             audit 'deploy' ',"result":"gate-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'"$trig"
             return 1
         }
-        local sub; sub="$(get_str "$c" checkout_sync)"
-        if [ -n "$sub" ]; then
-            check_checkout_sync_ready "$c" "$sub" "$new" || {
-                alert "pre-deploy checkout-sync check failed for component $c ($old -> $new)"
-                audit 'deploy' ',"result":"gate-fail","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'"$trig"
-                return 1
-            }
-        fi
     done
 
     # 2. snapshot for rollback
@@ -1263,33 +1135,14 @@ cmd_deploy() {
     ROLLBACK_COMPS=("${COMPS[@]}")
 
     # 3. install; on any failure roll everything back
-    local irc installed_any=0
+    local irc
     for c in "${COMPS[@]}"; do
         log "deploying component: $c"
         # NOTE: plain `install_component ...; irc=$?` is dead code under
         # set -e — the shell exits before irc=$? runs (see cmd_check). The
         # `if` condition suppresses errexit so irc is captured.
         if install_component "$c" "$new"; then irc=0; else irc=$?; fi
-        if [ "$irc" -eq 2 ]; then
-            # Issue #324: the working checkout gained uncommitted changes (or
-            # stopped being a usable git checkout) between the gate phase and
-            # the install phase. The commit is not bad, so it is NEVER marked
-            # blocked — the next tick retries once the operator commits or
-            # stashes. But components already installed in this run (or this
-            # component's own install step, which runs BEFORE the re-check
-            # inside install_component) may have mutated the box, so roll
-            # those back first — otherwise the box drifts half-deployed until
-            # the next tick. do_rollback's no_block mode restores the snapshot
-            # without writing BLOCKED_COMMIT; the watermark stays untouched.
-            alert "checkout changed during deploy for component $c ($old -> $new) — refusing to overwrite (commit or stash first)"
-            audit 'deploy' ',"result":"checkout-dirty","from":"'"$old"'","to":"'"$new"'","component":"'"$c"'"'"$trig"
-            if [ "$installed_any" -eq 1 ] || [ -n "$(get_str "$c" install)" ]; then
-                do_rollback "$snapdir" "$old" "$new" "$c" "checkout-dirty" "no_block" "$trig"
-            fi
-            return 1
-        fi
         [ "$irc" -eq 0 ] || { do_rollback "$snapdir" "$old" "$new" "$c" "install" "$rb_no_block" "$trig"; return 1; }
-        installed_any=1
     done
 
     # 4. daemon-reload + enable BEFORE restarting (else restarts use the stale
@@ -1339,7 +1192,7 @@ cmd_rollback() {
     # retry-loop it (issue #325): the commit being rolled back FROM is the
     # pre-rollback watermark (the deployed head). --no-block skips the mark
     # for the investigate-not-condemn case — the same semantics as
-    # do_rollback's no_block (issue #324: the commit itself is fine).
+    # do_rollback's no_block (the commit itself is fine).
     # The block auto-clears in pending_range once a newer commit supersedes
     # the blocked one; `status` tells the operator how to clear it by hand
     # for the re-deploy-the-same-tree case.

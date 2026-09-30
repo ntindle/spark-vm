@@ -670,7 +670,7 @@ def test_restore_absent_empty_path_fails(tmp_path):
     """An `ABSENT ` line with an empty path is corrupt — fail loud (#103).
 
     The old code silently skipped it (both tests fail on "") and reported
-    success. Matches the CHECKOUT-ABSENT guard's behavior.
+    success.
     """
     snap = tmp_path / "snap"
     snap.mkdir()
@@ -681,6 +681,53 @@ def test_restore_absent_empty_path_fails(tmp_path):
                               "AUTO_DEPLOY_NO_MAIN": "1"})
     assert r.returncode != 0, r.stdout + r.stderr
     assert "corrupt MANIFEST ABSENT line" in r.stdout + r.stderr
+
+
+def test_restore_legacy_checkout_manifest_line_fails_loud(tmp_path):
+    """A legacy `CHECKOUT ...` manifest line must fail the restore loudly.
+
+    Pre-removal snapshots (cred-ui used checkout_sync before issue #85)
+    wrote `CHECKOUT <component> <subtree>` lines alongside a
+    `checkout-<vpre(component)>/` snapshot subtree, and the retired restore
+    branch interpreted them. The fixture here is a REAL legacy snapshot
+    (manifest line + subtree present) — the new generic branch must not
+    partially restore it: the mangled source path doesn't exist, so the
+    copy fails and the restore reports failure instead of silently
+    restoring the wrong thing. Fail closed, never silently half-restored.
+    """
+    snap = tmp_path / "snap"
+    sub = snap / "checkout-cred_ui" / "cred-ui"
+    sub.mkdir(parents=True)
+    (sub / "f.py").write_text("LEGACY")
+    (snap / "MANIFEST").write_text("CHECKOUT cred-ui cred-ui\n")
+    # WORKING_CHECKOUT is dead on the new code (read by nothing), but the
+    # retired restore branch interpreted CHECKOUT lines through it — setting
+    # it to an existing dir is the discrimination check: against code with
+    # the old branch, the restore would succeed (rc=0) and this test would
+    # fail; against the new code the mangled source still doesn't exist and
+    # the restore fails loud either way.
+    r = source_and("restore_snapshot %s" % snap,
+                   env_extra={"UPDATER_STATE_DIR": str(tmp_path),
+                              "SKIP_SUDO": "1",
+                              "WORKING_CHECKOUT": str(tmp_path),
+                              "AUTO_DEPLOY_NO_MAIN": "1"})
+    assert r.returncode != 0, r.stdout + r.stderr
+
+
+def test_checkout_sync_machinery_stays_dead():
+    """Anti-regression pin: the checkout-sync mechanism stays removed.
+
+    The machinery was armed-but-unused (an `rm -rf` subtree-sync path with
+    zero production users); a future edit must not quietly re-arm it. The
+    updater script, the component manifest, and the deploy README must
+    carry no checkout-sync key, reader, or writer.
+    """
+    script = open(os.path.join(REPO, "deploy", "auto-deploy.sh")).read()
+    conf = open(os.path.join(REPO, "deploy", "components.conf")).read()
+    for probe in ("checkout_sync", "CHECKOUT ", "CHECKOUT-", "WORKING_CHECKOUT",
+                  "check_checkout_sync_ready", "checkout-dirty"):
+        assert probe not in script, "checkout-sync residue in auto-deploy.sh: %r" % probe
+    assert "checkout_sync" not in conf, "checkout_sync key re-declared in components.conf"
 
 
 def test_snapshot_broken_sudo_fails_loud(tmp_path):
@@ -823,7 +870,6 @@ def test_reload_and_enable_propagates_daemon_reload_failure(tmp_path):
         'stubc_health=()\n'
         'stubc_install=""\n'
         'stubc_install_unit=""\n'
-        'stubc_checkout_sync=""\n'
         'stubc_install_paths=()\n'
     )
     env = dict(os.environ)
@@ -1009,300 +1055,6 @@ def test_install_component_cred_ui_ships_version_to_install_dir(tmp_path):
     assert (install_dir / "cred-ui.py").is_file()
     assert (install_dir / "index.html").is_file()
     assert (unit_dir / "cred-ui.service").is_file()
-
-
-def test_install_component_rechecks_checkout_before_clobber(tmp_path):
-    """Issue #324: an operator edit to the working checkout between the
-    pre-deploy gate and the install must fail closed, not be silently
-    clobbered. The gate check passes on the clean tree; the operator edit
-    lands; the install must refuse and leave the operator's file untouched.
-    Non-vacuous: the pre-fix install_component had no re-check, so the edit
-    would be clobbered and the sync would succeed (returncode 0).
-
-    The vehicle is a stub component: cred-ui no longer uses checkout_sync
-    (issue #85 moved its runtime out of the checkout); the machinery itself
-    is unchanged and still covered here."""
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    subprocess.run(["git", "init", "-q", "--bare"], cwd=origin, check=True)
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    run = lambda *a: subprocess.run(a, cwd=repo, check=True,
-                                   capture_output=True)
-    run("git", "init", "-q")
-    run("git", "config", "user.email", "t@t")
-    run("git", "config", "user.name", "t")
-    run("git", "config", "commit.gpgsign", "false")
-    (repo / "stubc").mkdir()
-    (repo / "stubc" / "f.py").write_text("v1")
-    (repo / "VERSION").write_text("1.0.0\n")
-    run("git", "add", ".")
-    run("git", "commit", "-qm", "base")
-    run("git", "remote", "add", "origin", str(origin))
-    run("git", "push", "-q", "origin", "HEAD:main")
-    subprocess.run(["git", "--git-dir", str(origin), "symbolic-ref",
-                    "HEAD", "refs/heads/main"], check=True)
-    updater = tmp_path / "updater"
-    subprocess.run(["git", "clone", "-q", str(origin), str(updater)],
-                   check=True)
-    checkout = tmp_path / "checkout"
-    subprocess.run(["git", "clone", "-q", str(origin), str(checkout)],
-                   check=True)
-    (updater / "stubc" / "f.py").write_text("v2")
-    new = _commit_all(updater, "stubc v2")
-    tconf = tmp_path / "t.conf"
-    tconf.write_text(
-        'COMPONENTS=(stubc)\n'
-        'stubc_paths=("stubc/")\n'
-        'stubc_services=()\n'
-        'stubc_user_services=()\n'
-        'stubc_tests="true"\n'
-        'stubc_health=()\n'
-        'stubc_install=""\n'
-        'stubc_install_unit=""\n'
-        'stubc_checkout_sync="stubc"\n'
-        'stubc_install_paths=()\n'
-    )
-    state = tmp_path / "state"
-    state.mkdir()
-    env2 = {"UPDATER_COMPONENTS_CONF": str(tconf),
-            "UPDATER_STATE_DIR": str(state),
-            "UPDATER_REPO": str(updater),
-            "WORKING_CHECKOUT": str(checkout),
-            "SKIP_SUDO": "1",
-            "AUTO_DEPLOY_NO_MAIN": "1"}
-    # the gate phase passes on the clean tree
-    r = source_and("check_checkout_sync_ready stubc stubc %s" % new,
-                   env_extra=env2)
-    assert r.returncode == 0, r.stdout + r.stderr
-    # the operator edits the working checkout in the gate->install window
-    (checkout / "stubc" / "f.py").write_text("# OPERATOR EDIT")
-    r = source_and("install_component stubc %s" % new, env_extra=env2)
-    assert r.returncode == 2, \
-        "must fail closed with the pre-destruction code (2), not install-failure (1): " \
-        + r.stdout + r.stderr
-    # the operator's edit is NOT clobbered; the new commit is NOT installed
-    assert (checkout / "stubc" / "f.py").read_text() == "# OPERATOR EDIT"
-
-
-def test_cmd_deploy_checkout_dirty_rolls_back_without_blocking(tmp_path):
-    """Issue #324, caller branch (QA review blockers 1+2): cmd_deploy with
-    two components. compa installs first — its install step mutates its
-    deployed file AND dirties compb's working subtree, simulating another
-    job editing the checkout in the gate->install window. compb's
-    pre-destruction re-check then fails. The deploy must fail, roll compa's
-    file back from snapshot, NOT write blocked-commit, and audit both
-    checkout-dirty and rolled-back. The box (including the checkout subtree)
-    returns to its exact pre-deploy state.
-    """
-    import json
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    subprocess.run(["git", "init", "-q", "--bare"], cwd=origin, check=True)
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    run = lambda *a: subprocess.run(a, cwd=repo, check=True,
-                                   capture_output=True)
-    run("git", "init", "-q")
-    run("git", "config", "user.email", "t@t")
-    run("git", "config", "user.name", "t")
-    run("git", "config", "commit.gpgsign", "false")
-    (repo / "compa").mkdir()
-    (repo / "compb").mkdir()
-    (repo / "compa" / "f.py").write_text("a1")
-    (repo / "compb" / "f.py").write_text("b1")
-    (repo / "VERSION").write_text("1.0.0\n")
-    run("git", "add", ".")
-    run("git", "commit", "-qm", "base")
-    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
-                          capture_output=True, text=True).stdout.strip()
-    run("git", "remote", "add", "origin", str(origin))
-    run("git", "push", "-q", "origin", "HEAD:main")
-    subprocess.run(["git", "--git-dir", str(origin), "symbolic-ref",
-                    "HEAD", "refs/heads/main"], check=True)
-    updater = tmp_path / "updater"
-    subprocess.run(["git", "clone", "-q", str(origin), str(updater)],
-                   check=True)
-    checkout = tmp_path / "checkout"
-    subprocess.run(["git", "clone", "-q", str(origin), str(checkout)],
-                   check=True)
-    (repo / "compa" / "f.py").write_text("a2")
-    (repo / "compb" / "f.py").write_text("b2")
-    (repo / "VERSION").write_text("1.0.1\n")
-    run("git", "add", ".")
-    run("git", "commit", "-qm", "touch compa+compb")
-    run("git", "push", "-q", "origin", "HEAD:main")
-
-    tconf = tmp_path / "t.conf"
-    tconf.write_text(
-        'COMPONENTS=(compa compb)\n'
-        'compa_paths=("compa/")\n'
-        'compa_services=()\n'
-        'compa_user_services=()\n'
-        'compa_tests="true"\n'
-        'compa_health=()\n'
-        "compa_install='printf \"NEW\" > \"$COMPA_FILE\"; printf \"dirty\" > \"$WORKING_CHECKOUT/compb/f.py\"'\n"
-        'compa_install_unit=""\n'
-        'compa_checkout_sync=""\n'
-        'compa_install_paths=("$COMPA_FILE")\n'
-        'compb_paths=("compb/")\n'
-        'compb_services=()\n'
-        'compb_user_services=()\n'
-        'compb_tests="true"\n'
-        'compb_health=()\n'
-        'compb_install=""\n'
-        'compb_install_unit=""\n'
-        'compb_checkout_sync="compb"\n'
-        'compb_install_paths=()\n'
-    )
-
-    compa_file = tmp_path / "compa.dat"
-    compa_file.write_text("OLD")
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "deployed-commit").write_text(base + "\n")
-
-    env = {
-        "AUTO_DEPLOY_NO_MAIN": "1",
-        "UPDATER_REPO": str(updater),
-        "UPDATER_STATE_DIR": str(state),
-        "UPDATER_COMPONENTS_CONF": str(tconf),
-        "WORKING_CHECKOUT": str(checkout),
-        "COMPA_FILE": str(compa_file),
-        "PINNED_UPSTREAM": str(origin),
-        "SKIP_SYSTEMCTL": "1",
-        "SKIP_SUDO": "1",
-    }
-    r = source_and("cmd_deploy", env_extra=env)
-    assert r.returncode == 1, r.stdout + r.stderr
-
-    # the commit is not blocked, the watermark is untouched ...
-    assert not (state / "blocked-commit").exists()
-    assert (state / "deployed-commit").read_text().strip() == base
-    # ... both audit signals fired, as valid JSON ...
-    audit_lines = (state / "audit.log").read_text().strip().splitlines()
-    assert audit_lines, "audit log must not be empty"
-    events = [json.loads(line) for line in audit_lines]
-    results = [e.get("result") for e in events]
-    assert "checkout-dirty" in results, results
-    assert "rolled-back" in results, results
-    # ... the earlier component's file was restored from snapshot ...
-    assert compa_file.read_text() == "OLD"
-    # ... and the checkout subtree is back to its pre-deploy state
-    # (the rollback restores the snapshot, which predates the mid-window
-    # edit — the box must be exactly pre-deploy so the next tick retries
-    # cleanly).
-    assert (checkout / "compb" / "f.py").read_text() == "b1"
-
-
-def test_install_component_rechecks_version_before_clobber(tmp_path):
-    """Issue #324, VERSION branch of the same re-check: an uncommitted edit
-    to the working checkout's root VERSION (which travels with every sync)
-    must also fail the install closed before the VERSION sync step.
-
-    Stub vehicle: cred-ui no longer uses checkout_sync (issue #85)."""
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    subprocess.run(["git", "init", "-q", "--bare"], cwd=origin, check=True)
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    run = lambda *a: subprocess.run(a, cwd=repo, check=True,
-                                   capture_output=True)
-    run("git", "init", "-q")
-    run("git", "config", "user.email", "t@t")
-    run("git", "config", "user.name", "t")
-    run("git", "config", "commit.gpgsign", "false")
-    (repo / "stubc").mkdir()
-    (repo / "stubc" / "f.py").write_text("v1")
-    (repo / "VERSION").write_text("1.0.0\n")
-    run("git", "add", ".")
-    run("git", "commit", "-qm", "base")
-    run("git", "remote", "add", "origin", str(origin))
-    run("git", "push", "-q", "origin", "HEAD:main")
-    subprocess.run(["git", "--git-dir", str(origin), "symbolic-ref",
-                    "HEAD", "refs/heads/main"], check=True)
-    updater = tmp_path / "updater"
-    subprocess.run(["git", "clone", "-q", str(origin), str(updater)],
-                   check=True)
-    checkout = tmp_path / "checkout"
-    subprocess.run(["git", "clone", "-q", str(origin), str(checkout)],
-                   check=True)
-    (updater / "stubc" / "f.py").write_text("v2")
-    new = _commit_all(updater, "stubc v2")
-    tconf = tmp_path / "t.conf"
-    tconf.write_text(
-        'COMPONENTS=(stubc)\n'
-        'stubc_paths=("stubc/")\n'
-        'stubc_services=()\n'
-        'stubc_user_services=()\n'
-        'stubc_tests="true"\n'
-        'stubc_health=()\n'
-        'stubc_install=""\n'
-        'stubc_install_unit=""\n'
-        'stubc_checkout_sync="stubc"\n'
-        'stubc_install_paths=()\n'
-    )
-    state = tmp_path / "state"
-    state.mkdir()
-    env2 = {"UPDATER_COMPONENTS_CONF": str(tconf),
-            "UPDATER_STATE_DIR": str(state),
-            "UPDATER_REPO": str(updater),
-            "WORKING_CHECKOUT": str(checkout),
-            "SKIP_SUDO": "1",
-            "AUTO_DEPLOY_NO_MAIN": "1"}
-    # operator edits VERSION in the gate->install window
-    (checkout / "VERSION").write_text("0.0.0-operator\n")
-    r = source_and("install_component stubc %s" % new, env_extra=env2)
-    assert r.returncode == 2, \
-        "must fail closed with the pre-destruction code (2): " \
-        + r.stdout + r.stderr
-    assert (checkout / "VERSION").read_text() == "0.0.0-operator\n"
-
-
-def test_snapshot_restores_checkout_version(tmp_path):
-    """The root VERSION file travels with checkout syncs, so it must be
-    snapshotted and restored too — else rollback leaves new-VERSION under
-    old code. Stub vehicle: cred-ui no longer uses checkout_sync
-    (issue #85)."""
-    state = tmp_path / "state"
-    checkout = tmp_path / "checkout"
-    checkout_sub = checkout / "stubc"
-    state.mkdir(); checkout_sub.mkdir(parents=True)
-    (checkout_sub / "f.py").write_text("SUB CODE")
-    (checkout / "VERSION").write_text("1.1.1\n")
-    tconf = tmp_path / "t.conf"
-    tconf.write_text(
-        'COMPONENTS=(stubc)\n'
-        'stubc_paths=("stubc/")\n'
-        'stubc_services=()\n'
-        'stubc_user_services=()\n'
-        'stubc_tests="true"\n'
-        'stubc_health=()\n'
-        'stubc_install=""\n'
-        'stubc_install_unit=""\n'
-        'stubc_checkout_sync="stubc"\n'
-        'stubc_install_paths=()\n'
-    )
-    env = {"UPDATER_COMPONENTS_CONF": str(tconf),
-           "UPDATER_STATE_DIR": str(state),
-           "WORKING_CHECKOUT": str(checkout),
-           "SKIP_SUDO": "1",
-           "AUTO_DEPLOY_NO_MAIN": "1"}
-    snap = tmp_path / "snap"
-    # Production (cmd_deploy) creates the snapshot dir before calling
-    # snapshot_component.
-    snap.mkdir()
-    r = source_and("snapshot_component stubc %s" % snap, env_extra=env)
-    assert r.returncode == 0, r.stdout + r.stderr
-    manifest = (snap / "MANIFEST").read_text()
-    assert "CHECKOUT stubc stubc" in manifest, manifest
-    assert "CHECKOUT stubc VERSION" in manifest, manifest
-    (checkout / "VERSION").write_text("2.2.2\n")
-    (checkout_sub / "f.py").write_text("MUTATED")
-    r = source_and("restore_snapshot %s" % snap, env_extra=env)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert (checkout / "VERSION").read_text() == "1.1.1\n"
-    assert (checkout_sub / "f.py").read_text() == "SUB CODE"
 
 
 def test_version_state_defaults_unknown(tmp_path):
@@ -2372,7 +2124,6 @@ def test_cmd_deploy_successful_forced_deploy_wiring(tmp_path):
         'stub_health=()\n'
         'stub_install="true"\n'
         'stub_install_unit=""\n'
-        'stub_checkout_sync=""\n'
         'stub_install_paths=()\n'
         'stub_extra_paths=("$SWAPD_HOME/.mitmproxy/mitmproxy-ca-cert.pem")\n'
     )
@@ -2429,7 +2180,6 @@ def _forced_stub_fixture(tmp_path, ca_bytes=b"fake-ca"):
         'stub_health=()\n'
         'stub_install="true"\n'
         'stub_install_unit=""\n'
-        'stub_checkout_sync=""\n'
         'stub_install_paths=("$SWAPD_HOME/installed.txt")\n'
         'stub_extra_paths=("$SWAPD_HOME/.mitmproxy/mitmproxy-ca-cert.pem")\n'
     )

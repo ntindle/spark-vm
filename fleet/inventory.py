@@ -178,8 +178,9 @@ def _read_jsonl_file(path):
 #     rewound to `to`; component health degraded separately (the operator
 #     was already alerted). The box's files are at `to`.
 # Everything else (deploy-fail, precheck-fail, gate-fail, snapshot-fail,
-# rollback-failed, checkout-dirty) is an attempt: its `to` says nothing
-# about current state.
+# rollback-failed) is an attempt: its `to` says nothing
+# about current state. (`checkout-dirty` belongs in this class too — it is
+# retired and no longer emitted, but may appear in older audit tails.)
 _STATE_CLAIM_RESULTS = {"ok", "rolled-back", "manual-rollback",
                         "pull-only", "rollback-unhealthy"}
 
