@@ -200,7 +200,9 @@ def pending_question(slug):
 # --- lifecycle -----------------------------------------------------------------
 
 def kill(slug):
-    """Stop the agent's process tree (like subagent.close)."""
+    """Stop the agent's process tree (like subagent.close). Records a
+    terminal-ish 'killed' state: the watchdog will not auto-revive the
+    job; call resume() to deliberately re-activate it."""
     check_slug(slug)
     return _job("kill", slug)
 

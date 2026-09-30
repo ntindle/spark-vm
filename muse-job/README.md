@@ -10,8 +10,8 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 | Path | What it is |
 |---|---|
 | `bin/muse-job` | CLI: `spawn/steer/status/list/log/kill/resume/close/watch`. Single-file Python, stdlib only. |
-| `bin/muse-job-watchdog` | Watchdog pass script (also reachable as `muse-job watch`): emits JSON findings for blocked/question/stuck/over-budget jobs; silent when healthy. |
-| `bin/muse-job-sweep` | Disk sweeper: prunes stale closed job dirs at >=85% disk; at >=93% kills the largest non-closed job (emergency breaker). Always JSON, fails open. |
+| `bin/muse-job-watchdog` | Deprecated ad-hoc watchdog script. NOT equivalent to `muse-job watch`: it emits a different finding set (blocked/question/stuck/over-budget vs the CLI's signal vocabulary) and the event-read hardening that landed in the CLI (session-uuid shape check, non-regular-file tamper refusal) was never ported to it. Use `muse-job watch`; this script stays only for manual ad-hoc runs. |
+| `bin/muse-job-sweep` | Disk sweeper: prunes stale closed job dirs at >=85% disk; at >=93% closes the largest non-closed job (emergency breaker -- close, not kill: kill only ends the tmux session and frees ~0 bytes, the worktree is where the bytes are). Always JSON, fails open. |
 | `bin/msp_host.py` | MSP serve-host client (issue #221, #228 plan): stdlib-only module that spawns/owns one `muse serve` per job, speaks NDJSON JSON-RPC 2.0 over stdio, runs the initialize/initialized handshake, correlates calls, dispatches notifications, routes server→client requests, and pins the schema fingerprint. Imported by `bin/muse-job` as the tmux replacement lands slice by slice. |
 | `bin/msp_session.py` | MSP session-lifecycle client (issue #222, #228 plan): stdlib-only module on top of `msp_host.py` implementing `session/start`, `session/resume`, `session/list`, and `session/read` with client-side validation (UUIDv7 command ids, absolute workspace roots, the wire approval-mode enum, the 1..=200 list bound) and fail-loud result parsing, plus a smoke CLI. |
 | `plugin/` | `muse-job` Muse plugin source (v0.3.1, user-scope, approved): `Stop` hook classifies turn ends (blocked/done/question/idle), `SessionEnd` hook, `PreLLMCall` session-UUID registry. Events land in `~/.local/share/muse-job/events/<uuid>.jsonl`. |
@@ -37,11 +37,12 @@ Redeploy: copy the files over, then reinstall the plugin with `--force`
 - One git worktree + branch per job under `/home/ntindle/muse-jobs/<slug>/`
 - One tmux session `mjob-<slug>` running interactive `muse --yolo`
 - Job prompt at `/home/ntindle/muse-jobs/<slug>/prompt.md`, progress in `PROGRESS.md`
+- Job states (what `status`/`list` print): `active` / `blocked` — the watchdog acts on these (may page or attempt recovery); `killed` — operator-killed, the watchdog leaves it alone, `resume` is the deliberate way back; `closed` — archived, worktree removed, nothing to resume.
 
 ## Crons (operator box, not spark-vm)
 
-- `muse-job-watchdog` every 15m: runs `muse-job watch` via SSH, silent unless findings.
-- `sparkvm-disk-sweeper` every 1h: runs `muse-job-sweep` via SSH, silent unless it pruned/killed.
+- `muse-job watch` every 15m (via SSH): silent unless findings.
+- `sparkvm-disk-sweeper` every 1h: runs `muse-job-sweep` via SSH, silent unless it pruned/closed.
 
 ## Event-file rotation
 
