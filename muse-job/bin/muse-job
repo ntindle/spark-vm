@@ -1803,6 +1803,34 @@ def dir_size(path):
     return total
 
 
+# Issue #12 item L7 (second half): the prune above cut the worst of it, but
+# the walk still ran on EVERY status/watch pass (15s+ per job observed).
+# Cache the measured size on the job record and re-walk at most every
+# 15 minutes. The only consumer is watch's 20 GB "heavy" signal, which
+# tolerates a coarse reading; the cache is a hint, not a boundary (a
+# corrupted or non-numeric stored value fails back to a fresh walk via
+# _num, never to a crash). The walk itself stays un-cached: job.json is
+# agent-writable (#11), so the fresh value is always re-derived from disk.
+_DIR_BYTES_TTL_S = 15 * 60
+
+
+def _cached_dir_bytes(job, slug):
+    now = time.time()
+    cached = _num(job.get("last_dir_bytes"), None)
+    scanned_at = _num(job.get("last_dir_scan_at"), 0)
+    if scanned_at > now:
+        # A future timestamp is clock skew or job.json tamper (#11): fail
+        # to a fresh walk, never serve a cached value past its own clock.
+        scanned_at = 0
+    if cached is not None and now - scanned_at < _DIR_BYTES_TTL_S:
+        return cached
+    total = dir_size(job_dir(slug))
+    job["last_dir_bytes"] = total
+    job["last_dir_scan_at"] = now
+    save_job(job, slug)
+    return total
+
+
 def job_status(job, slug):
     alive = tmux_alive(slug)
     uuid, _malformed = _session_uuid_ok(job)
@@ -1846,7 +1874,7 @@ def job_status(job, slug):
         "bytes_delta": delta,
         "last_hook_event": ev,
         "progress_age_s": progress_age,
-        "dir_bytes": dir_size(job_dir(slug)),
+        "dir_bytes": _cached_dir_bytes(job, slug),
         "elapsed_h": (time.time() - _num(job.get("started_at"), time.time())) / 3600,
         # Issue #23 B6: budget_hours is agent-writable (job.json); coerce at the
         # source so the terminal render below can never carry escapes.
