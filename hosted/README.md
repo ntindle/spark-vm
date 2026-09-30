@@ -36,3 +36,29 @@ an unverified signature.
 Slice boundaries: S2 wires the H4 driver's `BoxStatus` into the tenant
 layer (the `live`-entry AND-combine is the `live_entry_ready` unit); S3
 wires the readers (signup page meta-refresh, Muse poller).
+
+## relay_liveness.py — the relay session-liveness journal (R1)
+
+The passive liveness instrument from `docs/RELAY_LIVENESS_DESIGN.md`:
+the relay daemon emits one §2 session frame per tenant↔VM SSH session
+to a bounded local JSONL journal, and the control plane asks
+`relay_session_liveness(vm_id)` → `{session_id, state, last_bytes_at,
+hostkey_verified}` where state is `active` (bytes within the last
+5 minutes), `idle` (no bytes for over 5 minutes), or `closed` (the
+session ended with a §2 cause).
+
+Frames are metadata only — timing and counters, never payload; the
+schema validator rejects any non-§2 field. Rotation is the journal's
+own contract: the journal plus at most 3 rotated generations are
+capped by a byte bound (worst case 4 × (64 MiB + one row)), so total
+on-disk footprint is bounded regardless of session volume. The bound
+is bytes, not rows — stated plainly so no reader assumes a row count
+the code doesn't enforce. The prober identity marker (R2's
+discriminator) is enforced at the journal: prober-marked frames are
+dropped, never journaled. Unknown boxes return no data — darkness is
+insufficient-observability, never an `ok` (a missing journal directory
+is darkness too, not an error; only the writer fails loud).
+
+Run the tests: `python3 -m pytest hosted/` from the repo root.
+Query smoke test: `python3 hosted/relay_liveness.py --query <vm-id>
+[--journal /path/journal.jsonl]`.
