@@ -36,12 +36,12 @@ notes, in the goal workspace — not part of this repo).
 > now graded against the actual keynote output (vendor evidence:
 > OpenAI's official "DevDay 2026 announcements and developer
 > resources" recap post on community.openai.com, posted 2026-09-29,
-> plus OpenAI's own "Introducing dots" announcement). See the grading
+> plus OpenAI's own "Introducing dots" announcement — whose release specifics the surveyor quoted via PYMNTS' Sept-29 coverage). See the grading
 > table below. The C68 never-file-pre-keynote standing line is
 > retired.
 >
-> **Integrator note — three new corpus entries, all vendor-confirmed.**
-> **C69** (OpenAI Agents API public beta + computer use), **C70**
+> **Integrator note — three new corpus filings, all vendor-confirmed.**
+> **C69** (OpenAI Agents API — DevDay reiteration with new hosted-execution + computer-use details, building on the C9/C30 filing), **C70**
 > (OpenAI Dots), **C71** (OpenAI Codex Cloud) are folded into the
 > corpus (field-table rows + new "Watch update — 2026-09-30 (morning,
 > cycle 57)" section in `docs/COMPETITOR_ANALYSIS.md`) under the C32
@@ -69,16 +69,16 @@ unless otherwise noted.
 
 | # | Pre-keynote prediction | Grade | Evidence |
 |---|---|---|---|
-| 1 | "Dots" | **CONFIRMED** | "**Dots** are persistent agents with connected apps and their own cloud computer." OpenAI's own "Introducing dots" (2026-09-29): built to handle everything, powered by GPT-6 Astra, own cloud computer, learn from feedback, work around the clock, connect to 4,000+ apps. Rollout: Pro and Business Premium in eligible markets; Enterprise/Edu/Healthcare admin-enabled beta. |
+| 1 | "Dots" | **CONFIRMED** | "**Dots** are persistent agents with connected apps and their own cloud computer" (recap, vendor-verified core claim). Release specifics — GPT-6 Astra powering, 4,000+ connected apps, Pro/Business Premium rollout — quoted via PYMNTS' Sept-29 coverage of OpenAI's own "Introducing dots" announcement (2026-09-29). |
 | 2 | "ChatGPT Space" | **CONFIRMED** | "**ChatGPT Space** gives teams and agents a shared place for files and project context." CNBC live blog: Space lets teammates and OpenAI's dots agents work together. |
 | 3 | "GPT-6.1 Sol" | **CONFIRMED** | "**GPT-6.1 Sol** improves coding and computer use, with standard token prices at one-fifth of Astra's." Reuters/CNBC: "major upgrade" across professional work, computer use, and agentic coding, one week after GPT-6 Sol. |
-| 4 | "Agents API" | **CONFIRMED** | "The **Agents API** is in public beta, with hosted execution, memory, tools, and multi-agent support." "**Computer use** in the Agents API lets agents operate software through its UI." Corroborated by `openai/openai-cookbook` sandbox examples (application-managed + webhook-managed sandbox provisioning across docker, digitalocean, cloudflare, modal, vercel, e2b, daytona, blaxel, runloop, OCI). |
+| 4 | "Agents API" | **CONFIRMED** | "The **Agents API** is in public beta, with hosted execution, memory, tools, and multi-agent support." "**Computer use** in the Agents API lets agents operate software through its UI." Corroborated at snippet level by `openai/openai-cookbook` sandbox examples (application-managed + webhook-managed sandbox provisioning across docker, digitalocean, cloudflare, modal, vercel, e2b, daytona, blaxel, runloop, OCI) — a different artifact from the C30 Sept-10 launch-partner list (which names Oracle but not docker/OCI); do not conflate the two. |
 | 5 | "Ultra Fast" | **CONFIRMED** | "**Ultrafast** is a paid speed tier" — up to 8× faster token generation in Codex, 6× in the API (up to 300 tokens/second in Codex). Astra available now; Sol coming soon. |
 | 6 | GPT-6.1 "Astra" cancellation | **CONFIRMED** | Reuters/CNBC (2026-09-29): "On Monday [2026-09-28], OpenAI announced it decided to pull its plans to launch GPT-6.1 Astra because the model did not meet its safety standards." Announced 2026-09-28 (day before the keynote), not on the DevDay stage. |
-| 7 | "o" always-on-agent leak | **PARTIALLY-CONFIRMED** | Substance CONFIRMED (the always-on agent launched — as **Dots**, each with its own cloud computer). The leaked name **"o" is REFUTED** (rumor grading: "the agent is named dots, not o"). |
+| 7 | "o" always-on-agent leak | **PARTIALLY-CONFIRMED** | Substance CONFIRMED (the always-on agent launched — as **Dots**, each with its own cloud computer). The leaked name **"o" is REFUTED** (cellcog rumor grading: "the agent is named dots, not o"). |
 
 **Grade tallies: 6 CONFIRMED, 1 PARTIALLY-CONFIRMED, 0 REFUTED, 0
-UNCONFIRMED. C68 RESOLVED.**
+UNCONFIRMED** (the tally is at prediction level; item 7 contains a refuted name sub-claim). **C68 RESOLVED.**
 
 **Corpus impact:** OpenAI now sells a managed agent runtime with
 hosted execution (Agents API public beta), operates always-on agent
@@ -188,22 +188,22 @@ exception's vendor-confirmed filings).
 
 **CANDIDATES (all vendor-confirmed, filed as C69–C71):**
 
-1. **C69 — OpenAI Agents API (public beta) + computer use.** "The
+1. **C69 — OpenAI Agents API (public beta reiterated) + computer use.** "The
    Agents API is in public beta, with hosted execution, memory,
    tools, and multi-agent support"; "Computer use in the Agents API
    lets agents operate software through its UI" (OpenAI DevDay
-   recap, 2026-09-29). Corroborated by `openai/openai-cookbook`
+   recap, 2026-09-29). The Sept-10 public beta was already in the corpus (C9 tracked item, C30 datapoint); what the DevDay recap adds — the managed-agent-runtime positioning with hosted execution — is the corpus move. Corroborated at snippet level by `openai/openai-cookbook`
    sandbox examples: application-managed and webhook-managed
    sandbox provisioning across docker, digitalocean, cloudflare,
-   modal, vercel, e2b, daytona, blaxel, runloop, and OCI. OpenAI now
+   modal, vercel, e2b, daytona, blaxel, runloop, and OCI (a different artifact from the C30 launch-partner list; do not conflate). OpenAI now
    sells a managed agent runtime with hosted execution environments
    for agents — directly comparable to the tracked sandbox
    providers.
 2. **C70 — OpenAI Dots.** "Dots are persistent agents with connected
-   apps and their own cloud computer" (OpenAI recap, 2026-09-29);
-   OpenAI's "Introducing dots" (2026-09-29): each dot runs on GPT-6
-   Astra, gets its own cloud computer and browser, connects to
-   4,000+ apps; one dot included with Pro/Business Premium. OpenAI
+   apps and their own cloud computer" (OpenAI recap, 2026-09-29 — vendor-verified core claim);
+   release specifics (each dot runs on GPT-6 Astra, own cloud computer and browser,
+   4,000+ apps; one dot included with Pro/Business Premium) quoted via PYMNTS' Sept-29 coverage
+   of OpenAI's "Introducing dots" (2026-09-29). OpenAI
    is now a direct operator of always-on agent compute.
 3. **C71 — OpenAI Codex Cloud.** "Codex Cloud runs tasks while your
    laptop is closed, with access across devices" (OpenAI recap,
