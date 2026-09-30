@@ -174,11 +174,16 @@ table inet jail {
         # dropped packets at line rate (UDP flood to blocked ports, SYN
         # scan of the tailnet) — unconditional logging appends every one
         # to the host's kern.log, turning the forensic signal into host
-        # disk pressure. The limit statement rate-limits only the log
-        # EMISSION; the drop verdict itself is unaffected (every packet
-        # still drops). 5/minute burst 10 keeps a recognizable forensic
-        # trail while bounding the write rate.
-        iifname "ve-jail" log prefix "jail-input-drop: " limit rate over 5/minute burst 10 packets drop
+        # disk pressure. nft's `limit` is a MATCH, not a log modifier: when
+        # the rate is not exceeded the rule aborts and the rest of the rule
+        # is skipped — so a single rule of the form `log prefix ... limit
+        # rate ... drop` would skip the drop for under-limit packets
+        # (fail-open: the chains are policy accept) while logging every
+        # packet. The safe shape is therefore two rules: the limit gates
+        # only the log emission, and the drop is a separate unconditional
+        # rule on the very next line.
+        iifname "ve-jail" limit rate over 5/minute burst 10 packets log prefix "jail-input-drop: "
+        iifname "ve-jail" drop
     }
     chain forward {
         type filter hook forward priority -10; policy accept;
@@ -189,12 +194,16 @@ table inet jail {
         # No other egress for the jail: no direct internet, no tailnet,
         # no lan. (Runs before ts-forward, so the tailnet accept there
         # cannot re-allow jail traffic.) Log emission is rate-limited
-        # (#441) so a line-rate drop storm cannot flood the host's
-        # kern.log; the drop verdict itself is not rate-limited.
-        iifname "ve-jail" log prefix "jail-fwd-drop: " limit rate over 5/minute burst 10 packets drop
+        # (#441) via the two-rule shape — the limit gates the log only,
+        # the drop is a separate unconditional rule (a limit inside the
+        # log rule would invert the semantics and fail open; see the
+        # input-chain comment).
+        iifname "ve-jail" limit rate over 5/minute burst 10 packets log prefix "jail-fwd-drop: "
+        iifname "ve-jail" drop
         # Nothing may route INTO the jail either, except the sshd DNAT
         # above (and its return traffic).
-        oifname "ve-jail" log prefix "jail-fwd-indrop: " limit rate over 5/minute burst 10 packets drop
+        oifname "ve-jail" limit rate over 5/minute burst 10 packets log prefix "jail-fwd-indrop: "
+        oifname "ve-jail" drop
     }
 }
 NFT_EOF
