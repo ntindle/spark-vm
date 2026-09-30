@@ -47,16 +47,19 @@ is:
 > **Chain-safe deletion:** a record is eligible for pruning only when it
 > is older than its tier window **and** no retained record references it.
 > The collector walks from the tail: registrations outlive everything that
-> names their ref; promotions outlive their wave's reimages;
-> `deferred`/`skipped` lines share the retention of the update window
-> they belonged to.
+> names their ref (G13's attribution rule puts the registration ref on
+> every line); as *policy* — not as a chain edge, since the reimage
+> record names no promotion ref — a `promotion` is retained for the tier
+> window of its wave's latest retained reimage, because a promotion is
+> uninterpretable without the reimages it moved; `deferred`/`skipped`
+> lines share the retention of the update window they belonged to.
 
 Three tiers, operator-configurable windows, defaults stated honestly:
 
 | Tier | Default window | Who reads | Contents |
 |------|---------------|-----------|----------|
 | **Hot** | 90 days | Tenant + operator | Full fidelity: every record, including `maintenance` enter/exit pairs. This is the window the tenant read path (§2) serves. |
-| **Warm** | 1 year | Operator only | Full records, except `maintenance` enter/exit pairs compact to one line per maintenance window (attribution preserved — volume reduction without honesty loss). |
+| **Warm** | 1 year | Operator only | Full records, except `maintenance` enter/exit pairs compact to one line per maintenance window carrying enter_ts, exit_ts, and the authorizing fingerprint — volume reduction without honesty loss (G14 D1's freeze accounting uses the set/clear timestamps). |
 | **Cold floor** | 2 years, security channel | Operator only | Security-channel registrations and everything chained to them (wave/promotion/reimage/freeze/failure). Never pruned earlier. Routine channel: the warm 1-year window. |
 
 Rationale for the defaults: a tenant Muse's working memory is measured in
@@ -71,8 +74,10 @@ startup, loud refusal, not a quiet downgrade).
 
 **Prune honesty (the #16 lesson applied to deletion).** Pruning is itself
 an auditable operator event: each prune run appends an operator-only line
-(window pruned, policy ref, per-type counts) to the operator's journal.
-And the tenant's read path discloses the boundary honestly — the response
+(window pruned, policy ref, per-type counts) to the control-plane journal
+itself — visibility-scoped operator-only, never served to a tenant
+(there is no second journal; the line lives in the journal G13 §2
+defines). And the tenant's read path discloses the boundary honestly — the response
 names the window it covers ("history available from `<date>` per the
 retention policy"), so a tenant never mistakes pruning for silence. Never
 invent entries; never leave a silent gap. A box with zero retained records
@@ -82,7 +87,12 @@ shows an empty history with the window stated, not an error.
 governs the authoritative record. Transient working state — the scheduler's
 in-memory wave cursors, the G17 event journal's pre-aggregation lines —
 falls under each component's own retention; when it ages out, the
-authoritative journal remains the answer to "what happened".
+authoritative journal remains the answer to "what happened". Cross-journal
+refs are correlation aids that may dangle by design: `reimage`'s G17
+outcome-event ref and `promotion`'s G17-aggregate/G16-inventory refs point
+at stores with shorter retention than this journal's tiers — each component
+owns its retention, and this journal's line is the authoritative record,
+not a promise the target still exists.
 
 ---
 
@@ -109,13 +119,20 @@ history is paged and unbounded; the status poll stays fixed-shape.
 
 ### 2.1. Verifiable completeness — no silent gaps on the read path either
 
-Each journal line carries a **per-tenant monotonic sequence number**
-(append-order, assigned by the control plane at write time). The response
-envelope carries `first_seq` and `last_seq` for the returned window; the
-tenant can verify contiguity. This is the #16 lesson applied to the read
+Each journal line carries a **per-tenant monotonic sequence number**,
+assigned in append order. The response envelope carries `first_seq` and
+`last_seq` bounding the **served window** — the oldest and newest retained
+records *within the hot tier window* — and the tenant can verify
+contiguity across that range. This is the #16 lesson applied to the read
 path: absence is only signal when the surface says so, and the surface
-here says so — a missing seq number inside the window is an incident, not
-a prune (prunes only ever remove from the tail, §1's chain walk).
+here says so — a missing seq number *inside the served window* is an
+incident, not a prune. Chain-safe retention can leave seq holes *older*
+than the served window (a chain-retained anchor older than the window
+outlives its unreferenced neighbors — §1's walk is not a tail cut), so
+chain-retained anchors older than the hot window are excluded from the
+tenant's served view (operator-visible only); within the served window
+the range is contiguous because hot-tier pruning only removes records
+older than the window.
 
 ### 2.2. The tenant-visible field allowlist
 
@@ -130,10 +147,16 @@ nothing that names another tenant:
   promises — a reimage without a named authorizer is exactly the
   unattributable reimage G13 forbids)
 - wave (role label only — `standard` / `canary`; never wave numbers or
-  membership)
-- migration outcome, G17 outcome-event ref
+  membership — disambiguation: fleet-level canary configuration and
+  population are operator-only; the per-box policy role label describes
+  the caller's own box and is tenant-visible)
+- migration outcome, G17 outcome-event ref (a correlation aid that may
+  dangle — see §1)
 - `deferred`/`skipped` reason, failure detail (`maintenance-failed:
-  <check>`)
+  <check>`). Reconciling with G14 D2 (a suspended box's skip lands in
+  the wave journal, never in the tenant's *live* view): D2 governs the
+  live status poll; the retrospective history may include skips never
+  live-served — still honest under the window disclosure.
 - the retention-window disclosure (history available from `<date>`)
 
 **Operator-only, never in the tenant view:** canary flags, fleet totals,
@@ -152,11 +175,20 @@ not an error, not an absence to misread.
 ### 2.3. The tenant's write surface: none
 
 The tenant Muse writes nothing to the audit journal. The journal's writers
-are the control plane and the controller, exactly as G13 §2 establishes.
-The tenant's update-audit participation is read-only verification: it
-cross-checks the `maintenance` windows it observed against the journal,
-and any reimage present in neither its memory nor the journal is an
-incident to file, not a line to add.
+are the control plane and the controller, as implied by G13 §2's record
+list (which places every record on the control plane and cites G12's
+maintenance producer rule). The tenant's update-audit participation is
+read-only verification: it cross-checks the `maintenance` windows it
+observed against the journal, and any reimage present in neither its
+memory nor the journal is an incident to file, not a line to add.
+
+**The seq linearizer (the S2 implementer's contract):** the per-tenant
+journal has a single appender; sequence numbers are assigned **at durable
+append, never pre-issued** — a writer crash between submission and append
+consumes no seq number, so there are no phantom holes. On appender
+failover it resumes from durable state; un-acknowledged controller
+submissions are safe to resubmit (idempotent). An invented gap is as
+much an honesty violation as a silent absence.
 
 ---
 
@@ -187,8 +219,9 @@ with no second design. Nothing in this doc requires a tenant to exist.
    envelope, the retention-window disclosure, honest empty. **Exit
    criteria:** (a) a two-tenant fixture test proves the negative — tenant
    A's history never names tenant B (no id, no count, no wave population);
-   (b) a contiguity test — a dropped middle record is detected via the
-   seq envelope.
+   (b) a contiguity test — a dropped record *inside the served window* is
+   detected via the seq envelope (records older than the served window,
+   e.g. chain-retained anchors, are not expected contiguous).
 3. **S3 — hosted instantiation:** per-tenant journal layout, a
    privacy-boundary audit over every G17 aggregate ref the tenant view
    could carry, and the operator runbook for retention disputes ("my
@@ -201,10 +234,10 @@ with no second design. Nothing in this doc requires a tenant to exist.
 None answered in this doc; the open questions stay open on the issue:
 
 - **Q1 — hot-window shape:** 90 days, last 10 generations, or both
-  (whichever is longer)? Generations are update-cadence-independent; days
-  are legible. This doc proposes the default as stated (§1: 90 days hot)
-  and leaves the generation-based alternative to the S1 implementation
-  turn if the operator's cadence makes days the wrong unit.
+  (whichever is longer)? This doc's standing default is days (90-day hot
+  window); the generations alternative activates only if the operator
+  documents its reimage cadence in S1's config — the S1 implementer does
+  not pick silently.
 - **Q2 — legal floor by jurisdiction:** some jurisdictions may require
   longer audit retention; that is an operator configuration decision, not
   this doc's — the cold floor is a minimum, never a maximum.
