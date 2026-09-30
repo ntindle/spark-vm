@@ -10,7 +10,6 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 | Path | What it is |
 |---|---|
 | `bin/muse-job` | CLI: `spawn/steer/status/list/log/kill/resume/close/watch`. Single-file Python, stdlib only. |
-| `bin/muse-job-watchdog` | Deprecated ad-hoc watchdog script. NOT equivalent to `muse-job watch`: it emits a different finding set (blocked/question/stuck/over-budget vs the CLI's signal vocabulary) and the event-read hardening that landed in the CLI (session-uuid shape check, non-regular-file tamper refusal) was never ported to it. Use `muse-job watch`; this script stays only for manual ad-hoc runs. |
 | `bin/muse-job-sweep` | Disk sweeper: prunes stale closed job dirs at >=85% disk; at >=93% closes the largest non-closed job (emergency breaker -- close, not kill: kill only ends the tmux session and frees ~0 bytes, the worktree is where the bytes are). Always JSON, fails open. |
 | `bin/msp_host.py` | MSP serve-host client (issue #221, #228 plan): stdlib-only module that spawns/owns one `muse serve` per job, speaks NDJSON JSON-RPC 2.0 over stdio, runs the initialize/initialized handshake, correlates calls, dispatches notifications, routes server→client requests, and pins the schema fingerprint. Imported by `bin/muse-job` as the tmux replacement lands slice by slice. |
 | `bin/msp_session.py` | MSP session-lifecycle client (issue #222, #228 plan): stdlib-only module on top of `msp_host.py` implementing `session/start`, `session/resume`, `session/list`, and `session/read` with client-side validation (UUIDv7 command ids, absolute workspace roots, the wire approval-mode enum, the 1..=200 list bound) and fail-loud result parsing, plus a smoke CLI. |
@@ -23,7 +22,6 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 | Repo path | Deployed to |
 |---|---|
 | `bin/muse-job` | `/home/ntindle/bin/muse-job` (on PATH) |
-| `bin/muse-job-watchdog` | `/home/ntindle/bin/muse-job-watchdog` |
 | `bin/muse-job-sweep` | `/home/ntindle/bin/muse-job-sweep` |
 | `bin/msp_host.py` | `/home/ntindle/bin/msp_host.py` (to be imported by `bin/muse-job` as the #222–#227 cutover slices land) |
 | `bin/msp_session.py` | `/home/ntindle/bin/msp_session.py` (session-lifecycle layer for the cutover; same import path) |
