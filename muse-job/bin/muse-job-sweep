@@ -48,6 +48,10 @@ def disk_pct(path):
         return None
 
 
+# NOTE (issue #12 L7): this dir_size deliberately does NOT prune
+# target//node_modules/.git the way bin/muse-job's display path does.
+# The emergency breaker below closes the largest job to free real disk,
+# so it must measure true on-disk size, not the operator-display size.
 def dir_size(p):
     total = 0
     for dp, _, fns in os.walk(p):

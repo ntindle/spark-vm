@@ -1398,9 +1398,17 @@ def check_events_liveness(job, st, now):
                       "file deleted or hooks blinded?"}
 
 
+# Issue #12 L7: `status`/`watch` size the whole job dir, and a job that
+# built Rust or npm trees (target/, node_modules/) paid 15s+ per pass.
+# Build-output and VCS dirs carry no operator signal, so prune them from
+# the walk instead of sizing files the operator never asked about.
+_DIR_SIZE_SKIP_DIRS = frozenset(("target", "node_modules", ".git"))
+
+
 def dir_size(path):
     total = 0
-    for root, _dirs, files in os.walk(path):
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if d not in _DIR_SIZE_SKIP_DIRS]
         for fn in files:
             try:
                 total += os.path.getsize(os.path.join(root, fn))
