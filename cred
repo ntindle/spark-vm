@@ -282,7 +282,17 @@ def cmd_list(args):
         raise CredentialError("usage: cred list")
     p = run_as_swapd(["/usr/bin/ls", STORE])
     if p.returncode != 0:
-        return  # missing/empty store: no output, not an error
+        err = p.stderr.decode("utf-8", "replace")
+        # No store dir yet is the normal first-run state: stay silent, exit 0.
+        # Any other failure (wrong sudoers entry, unreadable store, a failing
+        # ls) must be loud (#148): it must never present as "no credentials".
+        # The ENOENT match is anchored on our own path and fails closed — a
+        # foreign locale that changes ls's wording lands in the loud branch.
+        if "No such file or directory" in err and STORE in err:
+            return
+        raise CredentialError(
+            "cred list failed: %s"
+            % (err.strip() or "ls exited %d" % p.returncode))
     sys.stdout.write(p.stdout.decode("utf-8", "replace"))
 
 

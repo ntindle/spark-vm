@@ -133,6 +133,17 @@ DEAD_PANE = (
 SHELL_PANE = "ntindle@spark-vm:~/work$ "
 
 
+def _live_pane_with(text):
+    # A live-TUI pane whose input box holds the pasted steer text -- what
+    # the post-paste captures show in the real world (issue #12 L9: the
+    # arrival check needs the needle in the box before clearance counts).
+    return (
+        "some model output\n"
+        "more output\n"
+        "❯ %s" % text
+    )
+
+
 # --- _pane_shows_live_tui -----------------------------------------------------
 
 
@@ -218,8 +229,11 @@ def test_steer_still_refuses_when_tmux_down(cli, monkeypatch):
 
 
 def test_steer_delivers_to_live_tui(cli, monkeypatch):
-    # Pre-check pane live, post-Enter capture shows the box cleared.
-    fr = steer_harness(cli, monkeypatch, [LIVE_PANE, LIVE_PANE])
+    # Pre-check pane live, post-paste capture shows the box holding the
+    # text (the arrival check), post-Enter capture shows the box cleared.
+    fr = steer_harness(cli, monkeypatch,
+                       [LIVE_PANE, LIVE_PANE,
+                        _live_pane_with("status update"), LIVE_PANE])
     assert cli._steer("demo", "status update") is True
     assert len(fr.pasted()) == 1
     assert any("Enter" in c for c in fr.sent_keys())
@@ -228,7 +242,8 @@ def test_steer_delivers_to_live_tui(cli, monkeypatch):
 def test_steer_waits_through_boot_window(cli, monkeypatch):
     # TUI still booting on the first captures, marker appears later.
     fr = steer_harness(
-        cli, monkeypatch, ["starting…\n", "starting…\n", LIVE_PANE, LIVE_PANE]
+        cli, monkeypatch, ["starting…\n", "starting…\n", LIVE_PANE, LIVE_PANE,
+                           _live_pane_with("status update"), LIVE_PANE]
     )
     assert cli._steer("demo", "status update") is True
     assert len(fr.pasted()) == 1
@@ -288,11 +303,13 @@ def test_steer_skips_enter_when_tui_dies_before_enter(cli, monkeypatch):
 
 def test_steer_reports_failure_when_tui_dies_after_enter(cli, monkeypatch):
     # The TUI is alive for the poll, the pre-paste re-check, and the
-    # pre-Enter re-check, then dies. The post-send verify-loop guard must
+    # pre-Enter re-check (the box holds the pasted text -- the arrival
+    # check passes), then dies. The post-send verify-loop guard must
     # refuse to report success: a dead pane swallows the pasted text into a
     # shell, and the old "box is clear" test read that as delivered.
     fr = steer_harness(cli, monkeypatch,
-                       [LIVE_PANE, LIVE_PANE, LIVE_PANE, DEAD_PANE])
+                       [LIVE_PANE, LIVE_PANE,
+                        _live_pane_with("status update"), DEAD_PANE])
     assert cli._steer("demo", "status update") is False
     assert len(fr.pasted()) == 1
     assert len(fr.sent_keys()) == 1, "the Enter went out before the death"
