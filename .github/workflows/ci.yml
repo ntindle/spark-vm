@@ -264,6 +264,15 @@ jobs:
         # URL from two independent egresses, and it passed CI ~35 min
         # earlier on #666 — newly bot-blocking, not a dead link).
         # Runner-egress IP reputation, not a broken link.
+        # lifestyle.independent.mk 403s automated fetchers (bot-block; the
+        # TermSquad launch press-release page hand-verified live 2026-09-30
+        # ~09:35 CDT via real browser — full article loads, headline
+        # "TermSquad Launches an Always-On Cloud Computer for AI Coding
+        # Agents" + EIN Presswire body match the
+        # RESEARCH_AGENT_SANDBOX_ADOPTION.md citation; lychee 403s it from
+        # GitHub egress and curl 403s it from the loop's egress too, while
+        # this PR's round-1 head passed the same check ~10 min earlier with
+        # no URL changes in between — newly bot-blocking, not a dead link).
         # Excluded at host level (not per-URL): new links
         # from these hosts trip the same bot blocks, so the exclusion must
         # cover the whole host. When adding a link from one of these hosts,
@@ -299,7 +308,7 @@ jobs:
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
