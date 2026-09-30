@@ -60,6 +60,7 @@ documents (clientInfo); if the binary demands more, its error response
 says so and the params grow -- fail loud, don't guess.
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -190,14 +191,21 @@ def _open_secret_log(path):
     with fstat on the resulting fd -- the check and the open are one
     syscall path, so there is no check-then-open TOCTOU window in which
     a planted symlink could be swapped in between. A symlink is refused
-    fail-closed (ELOOP). O_NONBLOCK keeps a pre-planted FIFO from hanging
-    the open forever: a reader-less FIFO fails fast with ENXIO (the #23 H5
-    class the muse-job hooks already defend against). A pre-existing
-    regular file that grants any group/other permission is tightened to
-    0o600 (os.open's mode applies only at creation; without this,
-    appending new secret bytes to an old 0644 log would leak them).
-    Permissions are only ever revoked, never granted -- a 0400 file stays
-    0400. Non-regular targets (e.g. /dev/null) are left alone.
+    fail-closed (ELOOP); a hardlinked target (st_nlink > 1) is refused
+    fail-closed too -- a log path with more than one name is a planted
+    shape the tightening below cannot be trusted to close. O_NONBLOCK
+    keeps a pre-planted FIFO from hanging the open forever: a reader-less
+    FIFO fails fast with ENXIO (the #23 H5 class the muse-job hooks
+    already defend against). Once the open succeeds the fd is normalized
+    back to blocking before any write: a reader-bearing FIFO must block
+    on pipe-full, not raise BlockingIOError and silently drop log writes.
+    A pre-existing regular file that grants any group/other permission is
+    tightened to 0o600 (os.open's mode applies only at creation; without
+    this, appending new secret bytes to an old 0644 log would leak them);
+    any setuid/setgid/sticky bits on a pre-existing file are refused
+    fail-closed -- log files never carry special mode bits. Permissions
+    are only ever revoked, never granted -- a 0400 file stays 0400.
+    Non-regular targets (e.g. /dev/null) are left alone.
 
     Returns the binary append-mode file object. Raises MSPError
     fail-closed (never leaves a half-opened fd): the caller must not
@@ -216,24 +224,50 @@ def _open_secret_log(path):
     except OSError as e:
         raise MSPError(
             f"log_path {path!r} refused (missing, unreadable, a symlink, "
-            f"or a reader-less FIFO -- symlinks are never followed): {e}"
+            f"a directory, or a reader-less FIFO -- symlinks are never "
+            f"followed): {e}"
         ) from e
     try:
         st = os.fstat(fd)
-        if stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) & 0o077:
-            os.fchmod(fd, 0o600)
-            print(
-                f"msp_host: WARNING: tightened {path!r} to mode 0o600 "
-                f"(was {stat.S_IMODE(st.st_mode):04o}); serve stderr can "
-                f"carry secret values",
-                file=sys.stderr,
+        if st.st_nlink > 1:
+            raise MSPError(
+                f"log_path {path!r} refused: hardlinked target "
+                f"(link count {st.st_nlink}) -- a log path with more than "
+                f"one name is never trusted"
             )
+        # O_NONBLOCK exists only to dodge the reader-less-FIFO hang at
+        # open(); normalize back to blocking before any write, so a
+        # reader-bearing FIFO blocks on pipe-full instead of raising
+        # BlockingIOError and silently dropping log writes.
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+        if stat.S_ISREG(st.st_mode):
+            mode = stat.S_IMODE(st.st_mode)
+            if mode & 0o7000:
+                raise MSPError(
+                    f"log_path {path!r} refused: special mode bits set "
+                    f"({mode:04o}) -- log files never carry "
+                    f"setuid/setgid/sticky"
+                )
+            if mode & 0o077:
+                os.fchmod(fd, 0o600)
+                print(
+                    f"msp_host: WARNING: tightened {path!r} to mode 0o600 "
+                    f"(was {mode:04o}); serve stderr can "
+                    f"carry secret values",
+                    file=sys.stderr,
+                )
         return os.fdopen(fd, "ab")
     except OSError as e:
         os.close(fd)
         raise MSPError(
             f"log_path {path!r} could not be validated after open: {e}"
         ) from e
+    except MSPError:
+        # Planted-shape refusals above are already MSPError: close the fd
+        # so no half-opened log fd escapes, then re-raise unchanged.
+        os.close(fd)
+        raise
 
 
 class MSPHost:
@@ -364,9 +398,10 @@ class MSPHost:
             )
         try:
             if self._log_path:
-                # Held to 0o600 / symlink-refused by _open_secret_log --
-                # serve stderr can carry secret values (see Security and
-                # trust). Raises MSPError fail-closed: no spawn happens.
+                # Held to 0o600 / symlink-, hardlink-, and special-bit-refused
+                # by _open_secret_log -- serve stderr can carry secret
+                # values (see Security and trust). Raises MSPError
+                # fail-closed: no spawn happens.
                 self._log_fh = _open_secret_log(self._log_path)
             else:
                 self._log_fh = None
