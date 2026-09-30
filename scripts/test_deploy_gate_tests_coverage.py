@@ -43,7 +43,7 @@ COMPONENTS_CONF = ROOT / "deploy" / "components.conf"
 # Registering or removing a test file is a deliberate gate-policy change:
 # it must edit this pin, not slip through a range check.
 EXPECTED_REGISTERED_COUNTS = {
-    "proxy": 13,
+    "proxy": 14,
     "confirm": 4,
 }
 
@@ -172,7 +172,7 @@ class TestDeployGateTestsCoverage(unittest.TestCase):
 
     def test_registered_floor(self):
         # Anti-vacuity across the whole pin: the inventory must keep covering
-        # the shipped gate surface (13 proxy + 4 confirm = 17 today).
+        # the shipped gate surface (14 proxy + 4 confirm = 18 today).
         total = sum(len(reg) for reg in _gate_tests_vars().values())
         self.assertGreaterEqual(
             total, 17,
