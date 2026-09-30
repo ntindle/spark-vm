@@ -214,10 +214,13 @@ def test_install_mid_copy_failure_leaves_live_set_untouched(tmp_path):
     unit_dir = tmp_path / "units"
     r = _run_install(REPO, install_dir, unit_dir)
     assert r.returncode == 0, r.stderr + r.stdout
-    # Sentinel: the live set we must not disturb.
+    # Sentinel: the live set we must not disturb. It must be exactly the
+    # declared runtime set — no more, no less (issue #706 added
+    # credvalidate.py, so a hard-coded count here would rot; compare
+    # against RUNTIME_FILES instead).
     sentinels = {p: p.read_bytes() for p in install_dir.iterdir()}
-    assert len(sentinels) == 5, "expected the 5 runtime files, got %s" % (
-        sorted(p.name for p in sentinels),)
+    assert sorted(p.name for p in sentinels) == sorted(RUNTIME_FILES), \
+        "runtime set drift: %s" % sorted(p.name for p in sentinels)
     # A fake repo whose sources pass every gate but fail mid-copy:
     # index.html is presence-checked yet never syntax-checked or parsed,
     # so an unreadable index.html aborts the copy after the staged set is
@@ -273,7 +276,7 @@ def test_install_publish_failure_is_recoverable_by_rerun(tmp_path):
     install_dir = tmp_path / "install"
     unit_dir = tmp_path / "units"
     unit_dir.mkdir()
-    # The unit publish fails (unwritable dir); the 5 runtime publishes
+    # The unit publish fails (unwritable dir); the six runtime publishes
     # succeed — the documented mixed state: new runtime, unit pending.
     unit_dir.chmod(0o555)
     try:
