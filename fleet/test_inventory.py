@@ -30,6 +30,7 @@ BOX_SNAPSHOT = os.path.join(FLEET, "box_snapshot.py")
 NOW = datetime.now(timezone.utc)
 COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
+COMMIT_C = "c" * 40
 
 
 def run_inventory(*argv):
@@ -1085,9 +1086,14 @@ def test_inventory_long_box_id_keeps_columns_aligned(env):
     assert (row_by_box["tower"].index(COMMIT_A[:12])
             == row_by_box[long_id].index(COMMIT_B[:12]))
 
-    drift = run_inventory("drift", "--store", store, "--expected", COMMIT_A)
+    # Both boxes drift when the expected commit is one neither has: the
+    # reason column must start at the same offset in both rows (a single
+    # drift row would trivially satisfy any offset assertion, so the
+    # two-row form is what pins the fix).
+    drift = run_inventory("drift", "--store", store, "--expected", COMMIT_C)
     assert drift.returncode == 0, drift.stderr
-    drows = [line for line in drift.stdout.splitlines() if long_id in line]
-    assert len(drows) == 1, drift.stdout
-    # the reason column starts past the padded id + commit columns
-    assert drows[0].index("unexplained") > len(long_id) + 14
+    drows = [line for line in drift.stdout.splitlines()
+             if line.startswith("  tower") or line.startswith("  " + long_id)]
+    assert len(drows) == 2, drift.stdout
+    offsets = {line.index("unexplained") for line in drows}
+    assert len(offsets) == 1, drift.stdout
