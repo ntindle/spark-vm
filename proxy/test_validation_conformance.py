@@ -90,6 +90,7 @@ Run from the repo root:  python3 -m pytest proxy/test_validation_conformance.py 
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from importlib.machinery import SourceFileLoader
@@ -668,3 +669,36 @@ class TestFrontendManagementLegacyPath:
     def test_ui_set_still_rejects_legacy_name(self):
         with pytest.raises(ValueError):
             ui.api_set({"name": LEGACY_NAME, "value": "s3cret"})
+
+
+def test_writer_refuses_when_module_missing_despite_cwd_decoy(tmp_path):
+    """The writer must fail loudly when credvalidate.py is missing from both
+    the install location and the ../credlib fallback — even when the
+    invoking CWD contains a decoy credvalidate.py. `python3 -` puts ''
+    (the caller's CWD) on sys.path and sudo preserves CWD, so a silent
+    fall-through would run the root-privileged writer against the decoy
+    (a laxer contract). Non-vacuous: without the CWD scrub, the decoy
+    imports and the writer proceeds to its usage error instead of
+    refusing."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    writer = bindir / "cred-registry-set"
+    shutil.copy(WRITER_PATH, writer)
+    # No credvalidate.py next to the writer, and no ../credlib fallback
+    # (tmp_path/credlib must not exist).
+    assert not (tmp_path / "credlib").exists()
+    decoy_dir = tmp_path / "decoy"
+    decoy_dir.mkdir()
+    (decoy_dir / "credvalidate.py").write_text(
+        "check_name = check_entry = check_name_legacy = lambda n: n\n"
+        "check_host = check_host_legacy = lambda h: h\n"
+        "RESERVED_ENTRIES = ()\n",
+        encoding="utf-8")
+    env = dict(os.environ,
+               CRED_REGISTRY_FILE=str(tmp_path / "credentials.json"),
+               CRED_REGISTRY_LOCK=str(tmp_path / "credentials.json.lock"))
+    p = subprocess.run(["bash", str(writer), "set", "x", "y", "{}"],
+                       env=env, capture_output=True, text=True, timeout=30,
+                       cwd=str(decoy_dir))
+    assert p.returncode != 0
+    assert "refusing" in p.stderr and "credvalidate" in p.stderr, p.stderr

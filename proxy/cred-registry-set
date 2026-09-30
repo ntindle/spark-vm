@@ -88,17 +88,38 @@ import atexit
 # installs it atomically with the writer); in the repo checkout the
 # ../credlib fallback below finds it. _CREDVALIDATE_BASE is set by the
 # wrapper above from the script's own path — never caller input.
-# Unconditional import: a missing module is a broken install and must
-# fail every invocation loudly, not run with a stale local contract.
+# A missing module is a broken install and must fail every invocation
+# loudly, not run with a stale local contract. Two extra guards beyond
+# the plain lookup: (1) `python3 -` puts the caller's CWD on sys.path[0]
+# (as ''), and sudo preserves CWD — without scrubbing, a missing module
+# would silently resolve against a caller-planted credvalidate.py in the
+# invoking directory, running the root writer against a laxer contract;
+# (2) the import's provenance is verified against the directory the
+# lookup chose, so a sys.path shadow cannot substitute another copy.
 _cv_base = os.environ.get("_CREDVALIDATE_BASE") or "/usr/local/bin"
-for _cv_dir in (_cv_base,
-                os.path.normpath(os.path.join(_cv_base, "..", "credlib"))):
-    if os.path.isfile(os.path.join(_cv_dir, "credvalidate.py")):
-        if _cv_dir not in sys.path:
-            sys.path.insert(0, _cv_dir)
-        break
-del _cv_base, _cv_dir
+_cv_dir = next(
+    (d for d in (_cv_base,
+                 os.path.normpath(os.path.join(_cv_base, "..", "credlib")))
+     if os.path.isfile(os.path.join(d, "credvalidate.py"))),
+    None)
+if _cv_dir is None:
+    sys.stderr.write(
+        "cred-registry-set: credvalidate.py not found next to the writer "
+        "(broken install) - refusing to run unvalidated\n")
+    sys.exit(1)
+try:
+    _cv_cwd = os.getcwd()
+except OSError:
+    _cv_cwd = None
+sys.path = [p for p in sys.path if p not in ("", _cv_cwd)]
+sys.path.insert(0, _cv_dir)
 import credvalidate as _cv
+if os.path.dirname(os.path.realpath(_cv.__file__)) != os.path.realpath(_cv_dir):
+    sys.stderr.write(
+        "cred-registry-set: credvalidate resolved from %r, expected %r - "
+        "refusing\n" % (_cv.__file__, _cv_dir))
+    sys.exit(1)
+del _cv_base, _cv_dir, _cv_cwd
 
 def fail(msg):
     sys.stderr.write("cred-registry-set: %s\n" % msg)
