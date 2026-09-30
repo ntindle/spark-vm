@@ -687,18 +687,29 @@ def test_restore_legacy_checkout_manifest_line_fails_loud(tmp_path):
     """A legacy `CHECKOUT ...` manifest line must fail the restore loudly.
 
     Pre-removal snapshots (cred-ui used checkout_sync before issue #85)
-    wrote `CHECKOUT <component> <subtree>` lines, and the retired
-    restore branch interpreted them. Now the generic branch treats such a
-    line as a plain path — the mangled source doesn't exist, so the copy
-    fails and the restore reports failure instead of silently restoring the
-    wrong thing. Fail closed, never silently half-restored.
+    wrote `CHECKOUT <component> <subtree>` lines alongside a
+    `checkout-<vpre(component)>/` snapshot subtree, and the retired restore
+    branch interpreted them. The fixture here is a REAL legacy snapshot
+    (manifest line + subtree present) — the new generic branch must not
+    partially restore it: the mangled source path doesn't exist, so the
+    copy fails and the restore reports failure instead of silently
+    restoring the wrong thing. Fail closed, never silently half-restored.
     """
     snap = tmp_path / "snap"
-    snap.mkdir()
+    sub = snap / "checkout-cred_ui" / "cred-ui"
+    sub.mkdir(parents=True)
+    (sub / "f.py").write_text("LEGACY")
     (snap / "MANIFEST").write_text("CHECKOUT cred-ui cred-ui\n")
+    # WORKING_CHECKOUT is dead on the new code (read by nothing), but the
+    # retired restore branch interpreted CHECKOUT lines through it — setting
+    # it to an existing dir is the discrimination check: against code with
+    # the old branch, the restore would succeed (rc=0) and this test would
+    # fail; against the new code the mangled source still doesn't exist and
+    # the restore fails loud either way.
     r = source_and("restore_snapshot %s" % snap,
                    env_extra={"UPDATER_STATE_DIR": str(tmp_path),
                               "SKIP_SUDO": "1",
+                              "WORKING_CHECKOUT": str(tmp_path),
                               "AUTO_DEPLOY_NO_MAIN": "1"})
     assert r.returncode != 0, r.stdout + r.stderr
 
