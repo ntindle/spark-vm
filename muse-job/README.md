@@ -13,6 +13,7 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 | `bin/muse-job-sweep` | Disk sweeper: prunes stale closed job dirs at >=85% disk; at >=93% closes the largest non-closed job (emergency breaker -- close, not kill: kill only ends the tmux session and frees ~0 bytes, the worktree is where the bytes are). Always JSON, fails open. |
 | `bin/msp_host.py` | MSP serve-host client (issue #221, #228 plan): stdlib-only module that spawns/owns one `muse serve` per job, speaks NDJSON JSON-RPC 2.0 over stdio, runs the initialize/initialized handshake, correlates calls, dispatches notifications, routes server→client requests, and pins the schema fingerprint. Imported by `bin/muse-job` as the tmux replacement lands slice by slice. |
 | `bin/msp_session.py` | MSP session-lifecycle client (issue #222, #228 plan): stdlib-only module on top of `msp_host.py` implementing `session/start`, `session/resume`, `session/list`, and `session/read` with client-side validation (UUIDv7 command ids, absolute workspace roots, the wire approval-mode enum, the 1..=200 list bound) and fail-loud result parsing, plus a smoke CLI. |
+| `bin/msp_turn.py` | MSP turn-plane client (issue #223, #228 plan): stdlib-only module on top of `msp_host.py` implementing `turn/start`, `turn/steer`, `turn/interrupt`, and `turn/cancel` -- the tmux send-keys replacement. Prompts travel as one opaque JSON string (never fragmented, never shell-parsed), and a server-reported not-live session surfaces as `TurnNotLiveError` instead of a silent success; dead-model recovery itself stays on issue #226. Ships a smoke CLI with an event-watch mode. |
 | `plugin/` | `muse-job` Muse plugin source (v0.3.1, user-scope, approved): `Stop` hook classifies turn ends (blocked/done/question/idle), `SessionEnd` hook, `PreLLMCall` session-UUID registry. Events land in `~/.local/share/muse-job/events/<uuid>.jsonl`. |
 | `client/muse_job.py` | Python client presenting the subagent-like API (`spawn/steer/interrupt/status/list_jobs/log/wait_for_turn/pending_question/kill/resume/close`). Runs from the operator box over SSH. |
 | `TOOL_INTERFACE.md` | Interaction map (subagents / browser tasks / exec / cron) and the Muse-Code-as-a-tool spec the client implements. |
@@ -25,6 +26,7 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 | `bin/muse-job-sweep` | `/home/ntindle/bin/muse-job-sweep` |
 | `bin/msp_host.py` | `/home/ntindle/bin/msp_host.py` (to be imported by `bin/muse-job` as the #222–#227 cutover slices land) |
 | `bin/msp_session.py` | `/home/ntindle/bin/msp_session.py` (session-lifecycle layer for the cutover; same import path) |
+| `bin/msp_turn.py` | `/home/ntindle/bin/msp_turn.py` (turn-steering layer for the cutover; same import path) |
 | `plugin/` | `/home/ntindle/muse-job-plugin/` (source) → user-scope plugin: `muse plugins install ./muse-job/plugin` (run from `~/spark-vm`), then `muse plugins approve` (`--force` on reinstall) |
 
 Redeploy: copy the files over, then reinstall the plugin with `--force`
