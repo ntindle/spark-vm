@@ -30,6 +30,7 @@ BOX_SNAPSHOT = os.path.join(FLEET, "box_snapshot.py")
 NOW = datetime.now(timezone.utc)
 COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
+COMMIT_C = "c" * 40
 
 
 def run_inventory(*argv):
@@ -968,3 +969,131 @@ def test_rebuild_sweeps_only_stale_snapshot_tmps(env):
     assert os.path.exists(fresh)  # young: a live writer's tmp, untouched
     assert _snapshot(store)["boxes"]["tower"]["versions"][
         "repo_commit"] == COMMIT_A
+
+
+# --- FOLLOW-fleet1..4 (carried review notes from PR #715) ------------------
+
+
+def _import_fleet_module(name):
+    if FLEET not in sys.path:
+        sys.path.insert(0, FLEET)
+    return __import__(name)
+
+
+def test_box_sort_key_total_order_on_mixed_types():
+    """FOLLOW-fleet1: the snapshot sort key is total-order on any key type
+    (no TypeError), so a hand-poisoned snapshot can never crash the table
+    with a bare traceback. JSON keys are always strings, so this pins the
+    helper's contract rather than a reachable store state."""
+    inventory = _import_fleet_module("inventory")
+    items = list({1: "a", None: "b", "z": "c", (2, 3): "d"}.items())
+    with pytest.raises(TypeError):
+        sorted(items)  # the old key-less sort: not total-order
+    ordered = sorted(items, key=inventory._box_sort_key)
+    # str() coercion order: "(2, 3)" < "1" < "None" < "z"
+    assert [value for _, value in ordered] == ["d", "a", "b", "c"]
+
+
+def test_unexpected_inventory_failure_exits_2_not_traceback(monkeypatch,
+                                                            capsys):
+    """FOLLOW-fleet1 (exit-1 half): an unexpected internal failure in the
+    render path reports exit 2 with a one-line message, never a bare
+    traceback."""
+    inventory = _import_fleet_module("inventory")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(inventory, "cmd_inventory", _boom)
+    rc = inventory.main(["inventory", "--store", "/nonexistent-store"])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "boom" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_box_snapshot_git_failure_note_has_no_list_repr(monkeypatch):
+    """FOLLOW-fleet2: empty git stderr reports the exit code as plain
+    text ("exit 128"), not the list repr "['exit 128']"; non-empty
+    stderr still reports the first line."""
+    box_snapshot = _import_fleet_module("box_snapshot")
+
+    class _Silent:
+        returncode = 128
+        stdout = ""
+        stderr = ""
+
+    class _Loud:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: not a git repository\nsecond line\n"
+
+    monkeypatch.setattr(box_snapshot.subprocess, "run",
+                        lambda *a, **k: _Silent())
+    commit, note = box_snapshot._git_head("/tmp")
+    assert commit is None
+    assert note == "git rev-parse failed: exit 128", note
+
+    monkeypatch.setattr(box_snapshot.subprocess, "run",
+                        lambda *a, **k: _Loud())
+    commit, note = box_snapshot._git_head("/tmp")
+    assert note == "git rev-parse failed: fatal: not a git repository", note
+
+
+def test_collect_message_pluralization_and_run_count(env):
+    """FOLLOW-fleet3: the collect message pluralizes ("1 box" / "2 boxes")
+    and reports this run's appended count separately from the total
+    journal lines replayed."""
+    estate, store = env
+    _write_box(estate, "tower", status=_status_json(),
+               snapshot=_snapshot_json(COMMIT_A))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "collected 1 box into" in proc.stdout, proc.stdout
+    assert "1 appended this run" in proc.stdout, proc.stdout
+    assert "1 journal lines replayed" in proc.stdout, proc.stdout
+
+    _write_box(estate, "spare", status=_status_json(),
+               snapshot=_snapshot_json(COMMIT_B))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "collected 2 boxes into" in proc.stdout, proc.stdout
+    assert "2 appended this run" in proc.stdout, proc.stdout
+    assert "3 journal lines replayed" in proc.stdout, proc.stdout
+
+
+def test_inventory_long_box_id_keeps_columns_aligned(env):
+    """FOLLOW-fleet4: a box id longer than the old fixed 24-char column
+    must not push the other columns out of alignment (inventory and
+    drift alike)."""
+    long_id = "a-much-longer-box-name-that-exceeds-twenty-four-chars"
+    assert len(long_id) > 24
+    estate, store = _collect(env, {
+        "tower": {"status": _status_json(),
+                  "snapshot": _snapshot_json(COMMIT_A)},
+        long_id: {"status": _status_json(),
+                  "snapshot": _snapshot_json(COMMIT_B)},
+    })
+    proc = run_inventory("inventory", "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    row_by_box = {}
+    for line in proc.stdout.splitlines():
+        if line.startswith("tower"):
+            row_by_box["tower"] = line
+        elif line.startswith(long_id):
+            row_by_box[long_id] = line
+    assert set(row_by_box) == {"tower", long_id}, proc.stdout
+    assert (row_by_box["tower"].index(COMMIT_A[:12])
+            == row_by_box[long_id].index(COMMIT_B[:12]))
+
+    # Both boxes drift when the expected commit is one neither has: the
+    # reason column must start at the same offset in both rows (a single
+    # drift row would trivially satisfy any offset assertion, so the
+    # two-row form is what pins the fix).
+    drift = run_inventory("drift", "--store", store, "--expected", COMMIT_C)
+    assert drift.returncode == 0, drift.stderr
+    drows = [line for line in drift.stdout.splitlines()
+             if line.startswith("  tower") or line.startswith("  " + long_id)]
+    assert len(drows) == 2, drift.stdout
+    offsets = {line.index("unexplained") for line in drows}
+    assert len(offsets) == 1, drift.stdout
