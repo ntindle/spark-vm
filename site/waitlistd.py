@@ -533,6 +533,10 @@ class WaitlistService:
         # Serializes the check-then-act sections (dedup on submit, consume
         # on confirm) — the handler runs on ThreadingHTTPServer threads.
         self._lock = threading.Lock()
+        # (#404) bounded snapshot cache for _refresh_under_lock: the
+        # (mtime_ns, size) pair of the two files _load reads. None until
+        # the first parse below.
+        self._store_snapshot_key = None
         self._load()
 
     # -- persistence ------------------------------------------------------
@@ -594,6 +598,9 @@ class WaitlistService:
         if os.path.exists(consumed_path):
             with open(consumed_path, encoding="utf-8") as fh:
                 self.consumed = {ln.strip() for ln in fh if ln.strip()}
+        # (#404) the parse above is the snapshot the cache validates
+        # against — record the file state it was read from.
+        self._store_snapshot_key = self._store_snapshot_key_now()
 
     def reload(self):
         """Re-read the data dir from disk. The lifecycle-job CLI runs as a
@@ -607,6 +614,33 @@ class WaitlistService:
         self._ip_hits_last_sweep = 0.0  # epoch of last bound sweep (#390)
         self._load()
 
+    def _store_snapshot_key_now(self):
+        """(mtime_ns, size) for the two files _load reads (#404).
+
+        All daemon mutations go through _save_row (append) or
+        _rewrite_rows (atomic replace), both of which move mtime and/or
+        size; the lifecycle-job CLI mutates in a separate process and
+        calls reload() on its own instance, so the daemon's in-memory
+        view can only go stale via a file change this key observes.
+        Missing file -> None slot. Known blind spot (documented, not
+        guarded, matching make-style mtime caches): a same-nanosecond
+        same-size rewrite would not invalidate."""
+        parts = []
+        for name in ("rows.jsonl", "consumed_tokens.txt"):
+            path = os.path.join(self.data_dir, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                parts.append(None)
+            else:
+                parts.append((st.st_mtime_ns, st.st_size))
+        return tuple(parts)
+
+    def _store_snapshot_current(self):
+        """True when the on-disk store is unchanged since the last parse."""
+        return (self._store_snapshot_key is not None and
+                self._store_snapshot_key == self._store_snapshot_key_now())
+
     def _refresh_under_lock(self):
         """Re-read persistent rows/tokens under data_lock()+self._lock.
 
@@ -617,7 +651,14 @@ class WaitlistService:
         reminder minted a token the daemon's view doesn't know). Callers
         hold both locks already. _ip_hits is in-process abuse-rate state
         that has no on-disk representation — refreshing it would reset
-        every request's rate window, so it is deliberately preserved."""
+        every request's rate window, so it is deliberately preserved.
+
+        (#404) bounded snapshot cache: when the on-disk store is
+        unchanged since the last parse, the in-memory view is already
+        current and the O(store) re-parse is skipped — every render
+        previously re-parsed the whole append-only file per request."""
+        if self._store_snapshot_current():
+            return
         ip_hits = self._ip_hits
         ip_hits_last_sweep = self._ip_hits_last_sweep
         self.rows = {}
@@ -1441,6 +1482,12 @@ class WaitlistService:
             counts these, alongside the row-bound sends the cap targets).
         Appends are single-line O_APPEND writes; pruning rewrites under
         the caller's data lock.
+
+        (#402) the prune rewrite is atomic (tmp + fsync + os.replace,
+        same discipline as _rewrite_rows): a kill -9 mid-prune leaves
+        either the old ledger or the new one, never a torn one — the
+        3/24h unified cap and the 3/day intake limit can no longer be
+        silently reset by a crash at exactly the wrong moment.
         """
         now = self.clock().timestamp()
         self._append("patha_events.jsonl",
@@ -1462,8 +1509,12 @@ class WaitlistService:
                         kept.append(line)
         except OSError:
             return
-        with open(path, "w", encoding="utf-8") as fh:
+        tmp = path + ".prune-tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
             fh.writelines(kept)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
 
     def _count_patha_events(self, address, kind, window):
         cutoff = self.clock().timestamp() - window

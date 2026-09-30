@@ -682,3 +682,53 @@ def test_triage_inbound_accepts_bytes_and_surrogates():
     name = service.triage_inbound("lone \ud800 surrogate", "surrogate")
     with open(os.path.join(tmp, "triage", name), encoding="utf-8") as fh:
         assert "surrogate" in fh.read()
+
+
+# -- #402: atomic path-A ledger prune ---------------------------------------
+
+
+def _read_ledger(tmp):
+    path = os.path.join(tmp, "patha_events.jsonl")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_patha_prune_drops_old_events_atomically():
+    # #402: entries older than 48h are pruned; the rewrite is atomic
+    # (tmp + fsync + os.replace) — no prune-tmp lingers on success.
+    service, tmp, clock = make_service()
+    old = {"address": "old@example.com", "kind": "submission",
+           "at": "2026-09-10T12:00:00Z"}  # 10 days before NOW
+    with open(os.path.join(tmp, "patha_events.jsonl"), "a",
+              encoding="utf-8") as fh:
+        fh.write(json.dumps(old) + "\n")
+    service._record_patha_event("new@example.com", "submission")
+    body = _read_ledger(tmp)
+    assert "old@example.com" not in body
+    assert "new@example.com" in body
+    assert not os.path.exists(
+        os.path.join(tmp, "patha_events.jsonl.prune-tmp"))
+
+
+def test_patha_prune_crash_leaves_ledger_intact(monkeypatch):
+    # #402: a kill -9 between the tmp write and the replace must never
+    # truncate the ledger — the 3/day intake limit must not reset.
+    service, tmp, clock = make_service()
+    service._record_patha_event("a@example.com", "submission")
+    path = os.path.join(tmp, "patha_events.jsonl")
+    before = _read_ledger(tmp)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated kill -9")
+
+    monkeypatch.setattr(wd.os, "replace", boom)
+    with pytest.raises(RuntimeError, match="simulated kill -9"):
+        service._record_patha_event("b@example.com", "submission")
+    after = _read_ledger(tmp)
+    # The O_APPEND event write landed, but the prune never committed:
+    # the original ledger is a byte-prefix of the file (never torn or
+    # truncated), and the intake cap still counts the old state.
+    assert after.startswith(before)
+    assert "a@example.com" in after
+    assert service._count_patha_events("a@example.com", "submission",
+                                       3 * 86400) == 1
