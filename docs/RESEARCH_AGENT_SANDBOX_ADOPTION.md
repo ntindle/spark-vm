@@ -103,7 +103,7 @@ launched with persistence as the entire pitch:
   24 hours on Pro; compute caps at 1–8 vCPU / 512 MB–8 GB; pause/resume is
   still in beta; no GPU.
   ([sandbox reference](https://github.com/claytonfarr/ralph-playbook/blob/HEAD/references/sandbox-environments.md),
-  [StartupHub 2026 comparison](https://www.startuphub.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026))
+  [StartupHub 2026 comparison](https://web.archive.org/web/20260605034053/https://www.startuphub.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026))
 - **Cloud Run Sandbox** (Jul 2026): "The box has amnesia on purpose. The
   filesystem is a read-only view of your container, and writes land in a
   throwaway overlay that is gone when the box exits."
@@ -249,7 +249,7 @@ is R1.
 ([TermSquad](https://lifestyle.independent.mk/story/785982/termsquad-launches-an-always-on-cloud-computer-for-ai-coding-agents/),
 [E2B SDK](https://github.com/e2b-dev/e2b),
 [Daytona](https://github.com/daytonaio/daytona),
-[2026 sandbox comparison](https://www.startuphub.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026),
+[2026 sandbox comparison](https://web.archive.org/web/20260605034053/https://www.startuphub.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026),
 [sandbox reference](https://github.com/claytonfarr/ralph-playbook/blob/HEAD/references/sandbox-environments.md),
 [Foundry](https://devblogs.microsoft.com/foundry/hosted-agents-build26/),
 [DIY $5.70/mo](https://dev.to/tamizuddin/building-a-570month-autonomous-ai-coding-agent-in-the-cloud-using-open-source-terminal-agent-22nb))
