@@ -899,6 +899,61 @@ def test_stderr_log_nonregular_target_allowed(fake_serve):
         host.close()
 
 
+def test_stderr_log_rejects_hardlink(tmp_path):
+    # FOLLOW-sec1: a hardlinked log path is refused fail-closed. The 0o600
+    # tightening applies to the inode, so the other name would be closed
+    # too -- the explicit refusal is defense-in-depth: a log path that
+    # already has two names is a planted shape.
+    log = tmp_path / "job.log"
+    log.write_bytes(b"old\n")
+    link = tmp_path / "alias.log"
+    os.link(str(log), str(link))
+    with pytest.raises(msp.MSPError, match="hardlink"):
+        msp._open_secret_log(str(link))
+    assert b"old" in log.read_bytes()  # refused before any write
+
+
+def test_stderr_log_refuses_special_mode_bits(tmp_path):
+    # FOLLOW-sec3: a pre-existing log carrying setuid/setgid/sticky bits is
+    # refused fail-closed -- the tighten path covers group/other bits, and
+    # log files never carry special mode bits. The old 0o077 mask left a
+    # 02600 file untouched.
+    log = tmp_path / "job.log"
+    log.write_bytes(b"old\n")
+    os.chmod(str(log), 0o2600)
+    with pytest.raises(msp.MSPError, match="setuid/setgid/sticky"):
+        msp._open_secret_log(str(log))
+    assert stat.S_IMODE(os.stat(str(log)).st_mode) == 0o2600
+
+
+def test_stderr_log_refusal_names_directory(tmp_path):
+    # FOLLOW-sec2: the open-fail refusal message also covers the directory
+    # shape (EISDIR), not just missing/unreadable/symlink/FIFO.
+    with pytest.raises(msp.MSPError, match="a directory, or a reader-less"):
+        msp._open_secret_log(str(tmp_path))
+
+
+def test_stderr_log_fd_normalized_blocking(tmp_path):
+    # FOLLOW-sec4: O_NONBLOCK exists only to dodge the reader-less-FIFO
+    # hang at open(); after a successful open the fd is normalized back to
+    # blocking, so a reader-bearing FIFO blocks on pipe-full instead of
+    # raising BlockingIOError and silently dropping log writes.
+    import fcntl
+
+    fifo = tmp_path / "job.log"
+    os.mkfifo(str(fifo))
+    reader = os.open(str(fifo), os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        fh = msp._open_secret_log(str(fifo))
+        try:
+            flags = fcntl.fcntl(fh.fileno(), fcntl.F_GETFL)
+            assert not flags & os.O_NONBLOCK
+        finally:
+            fh.close()
+    finally:
+        os.close(reader)
+
+
 def test_read_frame_respects_byte_budget():
     # Unit-level: _read_frame caps one frame at max_frame_bytes (the
     # anti-OOM path for a wedged serve host emitting a giant line).
