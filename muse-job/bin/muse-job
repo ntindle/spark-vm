@@ -85,6 +85,151 @@ _ANSI_RE = re.compile(
 def _clean_text(s):
     return _ANSI_RE.sub("", s if isinstance(s, str) else "")
 
+
+# Issue #9: secret scanning on the operator->agent funnel. The spawn prompt
+# is written to prompt.md and typed into the TUI at launch; every steer
+# message is pasted into the TUI and persisted in the agent's session store
+# on disk, same-user readable. The "agent never sees real secrets" standing
+# property rests entirely on operator discipline at exactly these two
+# chokepoints, so both are scanned for secret-shaped text and refused unless
+# the operator passes --allow-secrets (explicit confirmation).
+#
+# This is a tripwire for the most common accidental pastes, NOT a
+# guarantee: prefix-less entropy-only blobs (AWS secret access keys, raw
+# hex/base64 tokens, Azure keys) cannot be caught by regex. And the control
+# guards only the TUI/session-store funnel: the spawn prompt FILE lives on
+# the box (readable by the same-user agent regardless of this scan), and
+# the steer message travels via ssh argv, visible in `ps` for a moment
+# even when the gate refuses it.
+#
+# Findings report only pattern LABELS and counts -- never the matched text --
+# so a refusal message can be pasted anywhere without itself leaking the
+# secret. The hsurr:<name> placeholder is the sanctioned carrier: text that
+# only carries placeholders scans clean. The placeholder name charset is
+# deliberately constrained and placeholder names are themselves scanned --
+# otherwise hsurr: would be a secret-smuggling channel (an unregistered
+# "name" like hsurr:sk-<key> stays literal in the TUI, defeating both the
+# scan and the proxy swap).
+_SECRET_PATTERNS = [
+    ("OpenAI-style API key", re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b")),
+    ("Anthropic API key", re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{20,}\b")),
+    ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
+    ("GitHub fine-grained PAT", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")),
+    ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("AWS temporary access key id", re.compile(r"\bASIA[0-9A-Z]{16}\b")),
+    ("Slack token", re.compile(r"\bxox[bpare]-[A-Za-z0-9\-]{10,}\b")),
+    ("GitLab personal access token", re.compile(r"\bglpat-[A-Za-z0-9\-_]{15,}\b")),
+    ("Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")),
+    ("Stripe key", re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}\b")),
+    ("PEM private key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
+    ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+")),
+    ("database connection string",
+     re.compile(r"://[^/@\s:]+:[^/@\s]+@")),
+    ("long base64 credential blob",
+     re.compile(r"\b[A-Za-z0-9+/]{32,}={1,2}")),
+]
+# Credential-shaped assignments: `password = hunter2`. The leading
+# lookbehind (not \b) catches the canonical paste shapes `db_password=`
+# and `AWS_SECRET_ACCESS_KEY = ...` -- `_` is a word char, so \b fails
+# there -- while `passwords = x` still doesn't match (the char after the
+# keyword must be `:` or `=`). Requires an explicit = or : so prose like
+# "reset your password regularly" does not fire; the value must be >= 8
+# chars and is not a placeholder sentinel (none, null, your-key-here, ...)
+# so docs discussion doesn't train operators to bypass.
+_ASSIGNMENT_RE = re.compile(
+    r"(?<![A-Za-z0-9])(password|passwd|pwd|api[_-]?key|secret|secret[_-]?key|"
+    r"access[_-]?key|token|client[_-]?secret|access[_-]?token|"
+    r"auth[_-]?token|private[_-]?key)\s*[:=]\s*['\"]?(\S{8,})['\"]?",
+    re.IGNORECASE,
+)
+_ASSIGNMENT_DENYLIST = frozenset({
+    "none", "null", "nil", "required", "changeme", "change-me", "change_me",
+    "your-key-here", "your-api-key", "yourkeyhere", "example", "todo",
+    "xxx", "xxxx", "placeholder", "redacted",
+})
+_BEARER_RE = re.compile(r"\b[Bb]earer\s+([A-Za-z0-9\-._~+/]{10,}={0,2})")
+# Placeholder name charset (see the smuggling note above): the proxy only
+# swaps registered names; anything outside this charset is not a placeholder
+# and stays in the scanned text.
+_HSURR_NAME_RE = re.compile(r"hsurr:([A-Za-z0-9_.\-]{1,64})")
+
+
+def _strip_hsurr_placeholders(text):
+    # The sanctioned carrier: a prompt saying `api_key: hsurr:stripe-prod`
+    # hands the agent a lookup name, not a value. Scrub placeholders before
+    # scanning so placeholder-only text never trips a pattern.
+    return _HSURR_NAME_RE.sub("", text)
+
+
+def _bearer_looks_real(token):
+    # "Bearer capability tokens are issued per session" must not fire:
+    # demand length or a digit, the way real bearer tokens look.
+    return len(token) >= 20 or (len(token) >= 12 and any(c.isdigit() for c in token))
+
+
+def scan_for_secrets(text):
+    """Scan text for secret-shaped values.
+
+    Returns a sorted list of (label, count) for each pattern that matched,
+    or []. Labels never contain the matched secret text, so callers can
+    display them without becoming a leak channel themselves.
+    """
+    findings = {}
+    text = text or ""
+    scrubbed = _strip_hsurr_placeholders(text)
+    for label, rx in _SECRET_PATTERNS:
+        n = len(rx.findall(scrubbed))
+        if n:
+            findings[label] = findings.get(label, 0) + n
+    for m in _ASSIGNMENT_RE.finditer(scrubbed):
+        value = m.group(2).strip("'\"").lower()
+        if value in _ASSIGNMENT_DENYLIST:
+            continue
+        findings["credential assignment"] = \
+            findings.get("credential assignment", 0) + 1
+    for m in _BEARER_RE.finditer(scrubbed):
+        if not _bearer_looks_real(m.group(1)):
+            continue
+        findings["bearer token"] = findings.get("bearer token", 0) + 1
+    # The placeholder names themselves: hsurr:sk-<key> is a smuggled secret,
+    # not a lookup -- it would land verbatim in the TUI. Any secret-shaped
+    # name is a finding in its own right.
+    for name in _HSURR_NAME_RE.findall(text):
+        if any(rx.search(name) for _, rx in _SECRET_PATTERNS):
+            findings["secret-shaped credential placeholder"] = \
+                findings.get("secret-shaped credential placeholder", 0) + 1
+    return sorted(findings.items())
+
+
+def require_no_secrets(text, what, allow=False):
+    """Enforce the issue-#9 secret-hygiene property on a funnel text.
+
+    Refuses (RuntimeError) when scan_for_secrets finds anything and the
+    operator did not pass --allow-secrets. The refusal names the matched
+    pattern kinds -- never the secret values -- and points at the
+    hsurr:<name> placeholder discipline. On the explicit-override path the
+    finding is announced on stderr (stdout must stay a single JSON document)
+    so an accidental --allow-secrets is visible, not silent.
+    """
+    findings = scan_for_secrets(text)
+    if not findings:
+        return findings
+    detail = ", ".join(
+        f"{label} x{n}" if n > 1 else label for label, n in findings)
+    if not allow:
+        raise RuntimeError(
+            f"{what} looks like it carries suspected secrets: {detail}. "
+            "Real credentials typed into the job funnel land in the agent's "
+            "session store, same-user readable with zero friction. Replace "
+            "values with hsurr:<name> placeholders (swapped at the proxy for "
+            "allowlisted hosts), or re-run with --allow-secrets to confirm "
+            "you intend to hand this to the agent.")
+    print(f"muse-job: warning: {what} carries suspected secrets ({detail}); "
+          f"proceeding because --allow-secrets was given", file=sys.stderr)
+    return findings
+
+
 PREAMBLE = """You are running as a delegate inside a tmux-managed session. A human
 operator reads your terminal and can send you messages at any time; messages
 sent while you work are queued and delivered at your next turn boundary.
@@ -294,6 +439,10 @@ def _spawn(slug, args):
 
         with open(prompt_file) as f:
             prompt = f.read()
+        # Issue #9: scan BEFORE persisting anything -- a refused prompt never
+        # reaches prompt.md or the TUI. The PREAMBLE is ours and carries no
+        # operator text, so only the user-supplied prompt is scanned.
+        require_no_secrets(prompt, "spawn prompt", args.allow_secrets)
         full_prompt = PREAMBLE.format(jobdir=jd) + prompt
         with open(os.path.join(jd, "prompt.md"), "w") as f:
             f.write(full_prompt)
@@ -889,6 +1038,11 @@ def _steer(slug, message, verify=True):
 
 
 def cmd_steer(args):
+    # Issue #9: the steer message is the second operator->agent funnel.
+    # Refuse before the per-slug lock is even taken -- no partial state
+    # (no steer tmp file, no TUI paste) exists on the refusal path.
+    require_no_secrets(args.message, "steer message", args.allow_secrets)
+
     def go():
         ok = _steer(args.slug, args.message)
         print(json.dumps({"slug": args.slug, "delivered": ok}))
@@ -2119,11 +2273,17 @@ def main():
     s.add_argument("--prompt-file", required=True)
     s.add_argument("--base", default=None)
     s.add_argument("--budget-hours", type=float, default=8)
+    s.add_argument("--allow-secrets", action="store_true",
+                   help="confirm the prompt may carry real secrets; without "
+                   "this the issue-#9 scan refuses secret-shaped prompt text")
     s.set_defaults(fn=cmd_spawn)
 
     s = sub.add_parser("steer", help="send a message into a running job")
     s.add_argument("slug")
     s.add_argument("message")
+    s.add_argument("--allow-secrets", action="store_true",
+                   help="confirm the message may carry real secrets; without "
+                   "this the issue-#9 scan refuses secret-shaped steer text")
     s.set_defaults(fn=cmd_steer)
 
     s = sub.add_parser("status", help="inspect one job")
