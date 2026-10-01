@@ -293,7 +293,21 @@ def cmd_get(args):
     name = check_name_legacy(args[0])
     p = run_as_swapd(["/usr/local/bin/cred-store-get", name])
     if p.returncode != 0:
-        raise CredentialNotFound(name)
+        err = p.stderr.decode("utf-8", "replace")
+        # #147: "not set" is only truthful when the store file is really
+        # absent (ENOENT on the expected path). Every other reader failure
+        # — permission errors, I/O errors, a broken store dir, a sudoers
+        # denial — must be LOUD: the old code mapped all of them to
+        # "credential not set" and told the user to overwrite a secret that
+        # may well exist. Same contract as #148's cred list fix: the ENOENT
+        # match is anchored on our own path and fails closed — a foreign
+        # locale that changes cat's wording lands in the loud branch.
+        expected = STORE + "/" + name
+        if "No such file or directory" in err and expected in err:
+            raise CredentialNotFound(name)
+        raise CredentialError(
+            "cred get failed: %s"
+            % (err.strip() or "cred-store-get exited %d" % p.returncode))
     sys.stdout.buffer.write(p.stdout)
 
 

@@ -608,3 +608,40 @@ def test_api_set_lone_cr_paste_chomped(monkeypatch):
     out = cred_ui.api_set(_set_body("tok\r"))
     assert out == {"ok": True, "name": "gh"}
     assert stored and stored[0] == b"tok"
+
+
+@pytest.mark.parametrize("kind,bad", [
+    ("custom_header", 123),
+    ("custom_header", ["x"]),
+    ("custom_header", {"x": 1}),
+    ("custom_header", None),
+    ("query_param", 123),
+    ("query_param", ["x"]),
+    ("query_param", None),
+])
+def test_placement_json_non_string_arg_is_value_error(kind, bad):
+    """#118: a non-string placement_arg (hand-built JSON) must be a
+    ValueError (do_POST answers 400), never a TypeError from re.match
+    that escapes the handler and drops the connection."""
+    with pytest.raises(ValueError, match="bad (header name|query param name)"):
+        cred_ui.placement_json(kind, bad)
+
+
+@pytest.mark.parametrize("kind,arg,expected", [
+    ("custom_header", "X-Token", '{"custom_header": "X-Token"}'),
+    ("query_param", "api_key", '{"query_param": "api_key"}'),
+    ("bearer_header", "", '"bearer_header"'),
+    ("url_path_segment", None, '"url_path_segment"'),
+])
+def test_placement_json_valid_shapes_unchanged(kind, arg, expected):
+    """The hardening must not change any accepted shape: valid strings
+    still serialize, and the bare kinds still ignore falsy args."""
+    assert cred_ui.placement_json(kind, arg) == expected
+
+
+def test_placement_json_empty_string_arg_rejected():
+    """Empty-string args keep failing the shape check (400), as before."""
+    with pytest.raises(ValueError, match="bad header name"):
+        cred_ui.placement_json("custom_header", "")
+    with pytest.raises(ValueError, match="bad query param name"):
+        cred_ui.placement_json("query_param", "")
