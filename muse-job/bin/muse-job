@@ -438,6 +438,29 @@ def tmux_alive(slug):
     return p.returncode == 0
 
 
+def _phase_concurrency_bars_resume(slug):
+    """True when auto-resuming `slug` would break the one-phase-job-at-a-time rule.
+
+    Issue #804 (user 2026-10-01): the standing rule is one live phase-* job
+    on the box. watch's "one recovery attempt" used to resume every dead
+    active job unconditionally -- resurrecting operator-killed phase-* jobs
+    into four concurrent ultra-reasoning sessions on the user's pay-as-you-go
+    bill. The operator's deployed copy carried this as a hot-patch
+    (2026-10-01) until the loop shipped the repo version; the semantics here
+    match the hot-patch verbatim: phase-* slugs only, barred while any other
+    phase-* job has a live tmux session, OSError on the job-dir scan fails
+    open (pre-hot-patch behavior).
+    """
+    if not slug.startswith("phase-"):
+        return False
+    try:
+        siblings = sorted(os.listdir(JOBS_DIR))
+    except OSError:
+        return False
+    return any(s != slug and s.startswith("phase-") and tmux_alive(s)
+               for s in siblings if not s.startswith("."))
+
+
 def with_lock(slug, fn):
     os.makedirs(JOBS_DIR, exist_ok=True)
     lockp = os.path.join(JOBS_DIR, f".{slug}.lock")
@@ -618,6 +641,44 @@ def _is_main_session(rec):
         return True
 
 
+def _muse_process_in_workdir(workdir):
+    """True iff a live `muse` process currently has `workdir` as its cwd.
+
+    Issue #12 L5: find_session binds from the hook registry, which is
+    same-user writable -- a planted record can name any session_id for any
+    cwd. Corroborate the registry claim against the OS: a genuine discovery
+    happens while the TUI we launched is running in this workdir. A
+    candidate with no live muse process in the workdir fails closed (the
+    caller keeps polling / reports it unbound). This is consistency
+    enforcement, not authentication -- a same-user writer that also runs a
+    real muse process in the workdir still passes -- and is documented as
+    such.
+    """
+    if not os.path.isdir("/proc"):
+        return False
+    try:
+        rwork = os.path.realpath(workdir)
+    except Exception:
+        return False
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(os.path.join("/proc", pid, "cmdline"), "rb") as f:
+                argv0 = f.read().split(b"\x00")[0].decode(errors="replace")
+        except Exception:
+            continue  # raced exit or unreadable: not our process
+        if os.path.basename(argv0)[:4] != "muse":
+            continue  # `muse` launcher and `muse-bin-*` binaries alike
+        try:
+            pcwd = os.path.realpath(os.path.join("/proc", pid, "cwd"))
+        except Exception:
+            continue
+        if pcwd == rwork:
+            return True
+    return False
+
+
 def find_session(workdir, since_ts, exclude=None):
     """Discover the session uuid via the muse-job hook registry.
 
@@ -654,7 +715,17 @@ def find_session(workdir, since_ts, exclude=None):
         # we want. Oldest-first could adopt a stale dead registration --
         # notably on close+respawn of the same slug within the 10s slack,
         # where the old registration still matches.
-        return pool[-1][1] if pool else None
+        if not pool:
+            return None
+        # Issue #12 L5: the registry is same-user writable, so the
+        # candidate is confirmed against the OS rather than trusted --
+        # a genuine discovery happens while a live `muse` process runs in
+        # this workdir. No such process -> fail closed (the caller's poll
+        # loop keeps waiting). Residual, stated plainly: consistency
+        # enforcement, not authentication.
+        if not _muse_process_in_workdir(workdir):
+            return None
+        return pool[-1][1]
     except Exception:
         return None
 
@@ -2476,6 +2547,20 @@ def cmd_watch(args):
                                "monitored states during this pass (operator "
                                "may have killed or closed it); not "
                                "auto-recovering"})
+                return
+            # Issue #804: one-phase-job-at-a-time rule (user 2026-10-01).
+            # Never auto-resume a phase-* job while another phase-* job has
+            # a live tmux session -- this is what resurrected three killed
+            # phase jobs into four concurrent ultra sessions on 2026-10-01.
+            # Checked after the #5 state gate so a job the operator
+            # deliberately killed mid-pass still reports needs-attention
+            # (not deferred). Emits `deferred` (same signal and detail the
+            # 2026-10-01 operator hot-patch emitted): the job is resumed
+            # deliberately (`muse-job resume`) or by a later watch pass
+            # once no sibling phase-* job is live.
+            if _phase_concurrency_bars_resume(slug):
+                events.append({"job": slug, "signal": "deferred",
+                               "detail": "tmux dead; auto-resume deferred — another phase-* job is live (one-at-a-time rule)"})
                 return
             try:
                 cmd_resume(argparse.Namespace(slug=slug), _from_watch=True)

@@ -403,11 +403,15 @@ def test_absent_session_uuid_silent_only_within_discovery_grace(cli):
 
 # --- find_session ------------------------------------------------------------
 
-def test_find_session_excludes_old_uuid(cli, tmp_path):
+def test_find_session_excludes_old_uuid(cli, tmp_path, monkeypatch):
     # Issue #3 round-2 review: the resume fallback must not re-adopt the dead
     # session's registration -- an explicit exclude is robust even within the
     # 10s since_ts slack. Newest-first otherwise: the just-launched session
     # is the one discovery wants.
+    # Issue #12 L5: the OS corroboration is stubbed True here -- this test
+    # pins the registry-selection logic; the corroboration gate itself is
+    # pinned in test_find_session_l5_confirm.py.
+    monkeypatch.setattr(cli, "_muse_process_in_workdir", lambda w: True)
     import time as _time
     sessdir = os.path.join(str(tmp_path), ".local", "share", "muse-job", "sessions")
     os.makedirs(sessdir, exist_ok=True)
