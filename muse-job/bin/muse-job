@@ -316,6 +316,18 @@ def slug_ok(slug):
     return re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,79}", slug) is not None
 
 
+def repo_url_ok(url):
+    # Git-clone option injection (issue #7): a leading dash makes git parse
+    # the URL as flags (`--repo '--upload-pack=<cmd>'` would execute <cmd>
+    # as the operator user; the operator routinely copies repo URLs from
+    # issues/PRs/chat). Reject up-front; the clone call site additionally
+    # passes `--` so the URL is never in option position even if a future
+    # caller skips this check. Scheme whitelisting was considered and
+    # rejected: local-path clones (`/home/.../repo`, `file://`) are
+    # legitimate, and the dash+`--` pair closes the injection class.
+    return isinstance(url, str) and bool(url) and not url.startswith("-")
+
+
 def job_dir(slug):
     return os.path.join(JOBS_DIR, slug)
 
@@ -448,6 +460,13 @@ def cmd_spawn(args):
     slug = args.slug
     if not slug_ok(slug):
         raise RuntimeError(f"bad slug: {slug}")
+    # Issue #7: reject git option-injection before the per-slug lock or any
+    # filesystem work -- a leading-dash --repo would otherwise reach
+    # `git clone` as flags.
+    if not repo_url_ok(args.repo):
+        raise RuntimeError(
+            f"bad repo url: {args.repo!r} (leading dash rejected: "
+            "git option injection)")
 
     def go():
         # Serialized on the per-slug lock (like cmd_steer): the exists
@@ -475,7 +494,10 @@ def _spawn(slug, args):
     pristine = os.path.join(REPOS_DIR, rname)
     if not os.path.isdir(os.path.join(pristine, ".git")):
         print(f"cloning {args.repo} -> {pristine}", flush=True, file=sys.stderr)
-        run("git", "clone", args.repo, pristine, timeout=600)
+        # Issue #7: `--` keeps the URL out of git's option position even if
+        # a future caller bypasses repo_url_ok(); the leading-dash rejection
+        # in cmd_spawn is the primary gate.
+        run("git", "clone", "--", args.repo, pristine, timeout=600)
     else:
         run("git", "-C", pristine, "fetch", "origin", timeout=600)
     base = args.base or "origin/HEAD"
@@ -2703,6 +2725,16 @@ def main():
 
     args = ap.parse_args()
     try:
+        # Issue #7: central slug gate. Only cmd_spawn validated the slug;
+        # status/steer/log/kill/resume/close passed the raw argv slug into
+        # job_dir() path joins (`muse-job close ..` resolved to ~, then the
+        # close path rmtree'd/gzipped outside ~/muse-jobs). Validate once at
+        # the boundary so no subcommand can drift out again. cmd_spawn keeps
+        # its own check as defense in depth for direct callers; cmd_watch's
+        # listdir-derived slugs cannot yield `.`/`..` (listdir never does).
+        slug = getattr(args, "slug", None)
+        if slug is not None and not slug_ok(slug):
+            raise RuntimeError(f"bad slug: {slug}")
         return args.fn(args)
     except RuntimeError as e:
         print(f"muse-job: error: {e}", file=sys.stderr)
