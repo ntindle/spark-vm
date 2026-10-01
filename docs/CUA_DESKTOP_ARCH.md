@@ -51,6 +51,13 @@ The component is in good shape where it counts:
 - #492 `/api/status` reports driver health only; it cannot detect the
   documented XTEST-wedge failure mode (input silently does nothing while
   status says ok) — the health endpoint needs an input-path liveness probe.
+  **Fixed 2026-09-30:** the bridge runs an xev KeyPress-echo probe on :98
+  (xev focused, one harmless XTEST Shift tap via the driver's untargeted
+  global-input route) and reports it in `GET /api/status` as
+  `"input": {"state": "ok"|"wedged"|"unknown"}`; probe failures and budget
+  overruns are "unknown" (inconclusive), never "wedged" — the fail-safe
+  direction. The probe is bounded (~2 s) so a hung driver can't stall
+  status past the keepalive's liveness check.
 - #493 The bridge parses `/tmp/cua-desktop/env` from world-writable /tmp —
   env-injection vector (DISPLAY/PATH) into driver subprocesses if another
   local user exists; the env file should live in a private rundir or be

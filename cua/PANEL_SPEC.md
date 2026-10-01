@@ -34,6 +34,18 @@ All JSON unless noted. Errors are `{"error": "..."}` with an HTTP status.
 ### GET /api/status
 Driver health. → `{"ok": true, "detail": "<driver status text>"}`
 
+Input-path liveness (#492): the XTEST keyboard device can wedge while the
+driver still reports ok (typing silently does nothing). Every status call
+runs a cheap probe — `xev` on `:98` is focused, one harmless XTEST key (a
+bare Shift tap) goes out through the driver's global-input route, and the
+bridge watches for the `KeyPress` echo — and reports it as
+`"input": {"state": "ok"|"wedged"|"unknown", "detail": "<human text>"}`.
+`"wedged"` means restart the desktop stack (`cua-desktop.sh stop`/`start`);
+`"unknown"` means the probe itself couldn't run (xev/stdbuf missing, driver
+down) — inconclusive, never a wedge. The probe is bounded (~2 s) and the
+focus hop is inherent: XTEST keys deliver to the input-focus window, so
+`xev` must briefly hold focus for the echo to land in it.
+
 ### GET /api/windows
 → driver `list_windows` result: array of
 `{pid, window_id, app_name, title, bounds: {x, y, width, height}}`.
