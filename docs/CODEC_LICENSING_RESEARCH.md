@@ -438,8 +438,11 @@ THIRD-PARTY, I = INFERRED.
 - echocell AV1 codec support notes (T) —
   https://github.com/iohzrd/echocell/blob/HEAD/todos/av1-codec-support.md
 - Red5: AV1 WebRTC streaming (T) — https://www.red5.net/blog/av1-webrtc-streaming/
-- aether-premiere AV1 importer README quoting AOM patent license (V) —
-  https://github.com/neohade/aether-premiere-av1-vp9-importer/blob/HEAD/README.md
+- Alliance for Open Media Patent License 1.0 (V — the licensor's own text;
+  replaces the dead aether-premiere AV1 importer README link: the repo is
+  unreachable as of 2026-10-01, and it quoted this license per the 2026-09-20
+  research) —
+  https://aomedia.org/license/patent-license/
 - Selkies-GStreamer component docs — encoder table (T) —
   https://github.com/yarikoptic/selkies-gstreamer/blob/HEAD/docs/component.md
 - NoJitter: 5 factors to consider for your WebRTC project (T) —
