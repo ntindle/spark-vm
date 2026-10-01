@@ -162,3 +162,51 @@ def test_watch_still_recovers_non_phase_job(cli, monkeypatch, capsys):
     by_job = {e["job"]: e for e in events}
     assert by_job["worker-1"]["signal"] == "recovered"
     assert len(resumed) == 1
+
+
+def test_watch_killed_midpass_reports_needs_attention(cli, monkeypatch, capsys):
+    # The #5 state gate runs BEFORE the #804 bar: a job the operator kills
+    # mid-pass reports needs-attention, never deferred -- even with a live
+    # phase sibling that would otherwise bar recovery.
+    slug = "phase-dead"
+    _make_job(cli, slug)
+    _bare_dir(cli, "phase-live")
+    _dead_tmux_watch(cli, monkeypatch, live_slugs=("phase-live",))
+    resumed = []
+    monkeypatch.setattr(cli, "cmd_resume", lambda a, **k: resumed.append(a) or 0)
+    real_load_job = cli.load_job
+    calls = []
+    def load_job_twice(s):
+        calls.append(s)
+        job = real_load_job(s)
+        if len(calls) > 1:
+            job = dict(job, state="killed")  # operator kill lands mid-pass
+        return job
+    monkeypatch.setattr(cli, "load_job", load_job_twice)
+    events = _watch_events(cli, capsys)
+    by_job = {e["job"]: e for e in events}
+    assert by_job[slug]["signal"] == "needs-attention"
+    assert "killed or closed" in by_job[slug]["detail"]
+    assert resumed == []
+
+
+def test_watch_two_dead_phase_jobs_serialize(cli, monkeypatch, capsys):
+    # No live sibling at pass start: the first dead phase job (sorted
+    # order) recovers, and its fresh session bars the second -- the bar
+    # serializes same-pass recovery instead of stampeding.
+    _make_job(cli, "phase-a")
+    _make_job(cli, "phase-b")
+    monkeypatch.setattr(cli, "job_status", lambda job, slug: {"tmux_alive": False})
+    live = set()
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: s in live)
+    resumed = []
+    def fake_resume(a, **k):
+        resumed.append(a.slug)
+        live.add(a.slug)  # resume brings the tmux session up synchronously
+        return 0
+    monkeypatch.setattr(cli, "cmd_resume", fake_resume)
+    events = _watch_events(cli, capsys)
+    by_job = {e["job"]: e for e in events}
+    assert by_job["phase-a"]["signal"] == "recovered"
+    assert by_job["phase-b"]["signal"] == "deferred"
+    assert resumed == ["phase-a"]

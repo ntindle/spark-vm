@@ -450,6 +450,12 @@ def _phase_concurrency_bars_resume(slug):
     match the hot-patch verbatim: phase-* slugs only, barred while any other
     phase-* job has a live tmux session, OSError on the job-dir scan fails
     open (pre-hot-patch behavior).
+
+    Check-then-act race (QA note): a sibling starting between this check
+    and cmd_resume can transiently over-admit; the sibling-dying direction
+    self-heals on the next pass. Narrow window, single-cron reality, and
+    the hot-patch this matches had the same shape -- re-checking inside
+    cmd_resume is follow-up material, not this fix.
     """
     if not slug.startswith("phase-"):
         return False
@@ -642,17 +648,21 @@ def _is_main_session(rec):
 
 
 def _muse_process_in_workdir(workdir):
-    """True iff a live `muse` process currently has `workdir` as its cwd.
+    """True iff a muse-named process currently has `workdir` as its cwd.
 
     Issue #12 L5: find_session binds from the hook registry, which is
     same-user writable -- a planted record can name any session_id for any
     cwd. Corroborate the registry claim against the OS: a genuine discovery
     happens while the TUI we launched is running in this workdir. A
-    candidate with no live muse process in the workdir fails closed (the
-    caller keeps polling / reports it unbound). This is consistency
-    enforcement, not authentication -- a same-user writer that also runs a
-    real muse process in the workdir still passes -- and is documented as
-    such.
+    candidate with no muse-named process in the workdir fails closed (the
+    caller keeps polling / reports it unbound).
+
+    Linux-only (/proc scan); elsewhere this is always False, so discovery
+    degrades to the caller's poll-then-warn path. The name check is
+    argv0-based (`muse` or `muse-bin-*`) -- trivially spoofable by any
+    same-user process via `exec -a` -- so this is consistency enforcement,
+    not authentication: a same-user writer that also runs a muse-named
+    process in the workdir still passes.
     """
     if not os.path.isdir("/proc"):
         return False
@@ -668,7 +678,8 @@ def _muse_process_in_workdir(workdir):
                 argv0 = f.read().split(b"\x00")[0].decode(errors="replace")
         except Exception:
             continue  # raced exit or unreadable: not our process
-        if os.path.basename(argv0)[:4] != "muse":
+        name = os.path.basename(argv0)
+        if name != "muse" and not name.startswith("muse-bin"):
             continue  # `muse` launcher and `muse-bin-*` binaries alike
         try:
             pcwd = os.path.realpath(os.path.join("/proc", pid, "cwd"))
