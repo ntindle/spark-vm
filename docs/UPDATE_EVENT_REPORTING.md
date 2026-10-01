@@ -312,7 +312,7 @@ waits on:
   event↔inventory cross-checks (**shipped** — `fleet events crosscheck`
   evaluates each box's `deploy`/`succeeded` claims against the inventory
   journal: confirmed / violation (flagged, not convicted) / inconclusive;
-  rolled-back/restored claims remain a follow-up; PR (#TBD));
+  rolled-back/restored claims remain a follow-up; PR (#809));
   the 90-day/30-day journal discipline shared with G16.
 - **S3 — hosted endpoint:** control-plane push endpoint on G13's signed
   box→plane channel; `attested` admission rule for gate quorum;
