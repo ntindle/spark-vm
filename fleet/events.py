@@ -413,7 +413,7 @@ def collect_box_events(box_dir, box_id, received_at):
 _JOURNAL_LOCK_NAME = "journal.lock"
 
 
-class _JournalLockError(Exception):
+class JournalLockError(Exception):
     """The store-scoped journal lock could not be acquired."""
 
 
@@ -426,32 +426,32 @@ def _ensure_store_dir(store_dir):
 
 
 @contextlib.contextmanager
-def _journal_lock(store_dir):
+def journal_lock(store_dir):
     """Hold an exclusive flock on <store>/journal.lock.
 
     Fail-closed: if fcntl is unavailable (non-Linux) or the lock file
-    cannot be opened/locked, raise _JournalLockError instead of
+    cannot be opened/locked, raise JournalLockError instead of
     proceeding unsynchronized. Callers translate that into their error
     return shape so a collect fails loudly instead of journaling
     duplicates or losing acks.
     """
     if fcntl is None:
-        raise _JournalLockError(
+        raise JournalLockError(
             "journal lock unavailable: this platform lacks fcntl")
     err = _ensure_store_dir(store_dir)
     if err:
-        raise _JournalLockError(err)
+        raise JournalLockError(err)
     lock_path = os.path.join(store_dir, _JOURNAL_LOCK_NAME)
     try:
         fh = open(lock_path, "a", encoding="utf-8")
     except OSError as exc:
-        raise _JournalLockError(
+        raise JournalLockError(
             "cannot open journal lock %s: %s" % (lock_path, exc))
     with fh:
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         except OSError as exc:
-            raise _JournalLockError("cannot lock journal: %s" % exc)
+            raise JournalLockError("cannot lock journal: %s" % exc)
         try:
             yield
         finally:
@@ -497,7 +497,7 @@ def append_events(store_dir, events):
     both appending it would break the no-op claim with duplicate rows.
     """
     try:
-        with _journal_lock(store_dir):
+        with journal_lock(store_dir):
             existing, err = _load_journal(store_dir, EVENTS_JOURNAL_NAME,
                                          None)
             if err:
@@ -519,7 +519,7 @@ def append_events(store_dir, events):
             except OSError as exc:
                 return None, None, "cannot append to event journal: %s" \
                     % exc
-    except _JournalLockError as exc:
+    except JournalLockError as exc:
         return None, None, str(exc)
     return len(fresh), len(events) - len(fresh), None
 
@@ -703,7 +703,7 @@ def evaluate_alerts(store_dir, fired_at=None):
     if not candidates:
         return [], None
     try:
-        with _journal_lock(store_dir):
+        with journal_lock(store_dir):
             existing, err = _load_journal(store_dir, ALERTS_JOURNAL_NAME,
                                           None)
             if err:
@@ -723,7 +723,7 @@ def evaluate_alerts(store_dir, fired_at=None):
                         os.fsync(fh.fileno())
                 except OSError as exc:
                     return None, "cannot append to alert journal: %s" % exc
-    except _JournalLockError as exc:
+    except JournalLockError as exc:
         return None, str(exc)
     return fresh, None
 
@@ -749,7 +749,7 @@ def ack_alert(store_dir, alert_id):
     if not os.path.isdir(store_dir):
         return False, None
     try:
-        with _journal_lock(store_dir):
+        with journal_lock(store_dir):
             alerts, err = load_alerts(store_dir)
             if err:
                 return None, err
@@ -760,24 +760,401 @@ def ack_alert(store_dir, alert_id):
                     found = True
             if not found:
                 return False, None
-            alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
-            tmp_path = alerts_path + ".tmp.%d" % os.getpid()
-            try:
-                with open(tmp_path, "w", encoding="utf-8") as fh:
-                    for alert in alerts:
-                        fh.write(json.dumps(alert, sort_keys=True) + "\n")
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                os.replace(tmp_path, alerts_path)
-            except OSError as exc:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                return None, "cannot rewrite alert journal: %s" % exc
-    except _JournalLockError as exc:
+            err = rewrite_journal_atomic(
+                os.path.join(store_dir, ALERTS_JOURNAL_NAME),
+                [json.dumps(alert, sort_keys=True) for alert in alerts])
+            if err:
+                return None, err
+    except JournalLockError as exc:
         return None, str(exc)
     return True, None
+
+
+# --- Journal retention (§4 S2) -------------------------------------------------
+# The event journal keeps 90 days of per-event records per box; records
+# older than 30 days are compacted into per-day outcome histograms keyed
+# (box, component, build); records older than 90 days are dropped. Age
+# is measured on emitted_at (when the event happened), never on
+# received_at (when the collector saw it): a late-collected event is as
+# old as it is, and box clocks are never trusted for ordering either
+# (§2). Rows whose emitted_at is missing, unparseable, or in the future
+# are kept and counted — prune never drops what it cannot date, and
+# never prunes the future.
+#
+# Compaction lands in <store>/events_histograms.jsonl, a separate file
+# so the raw journal's readers (list, watch, crosscheck) never see
+# histogram rows. Histogram buckets merge across prunes: two prunes
+# folding different raw rows from the same (day, box_id, component,
+# build) bucket add to its counts rather than appending a second bucket.
+# Non-string outcomes (None for precheck-fail rows) fold under the
+# "unknown" sentinel, because raw None keys would crash the next merge
+# and JSON coerces them to "null" anyway. Only rows carrying our schema
+# are merged; verbatim (blank/malformed) and foreign-schema histogram
+# lines pass through byte-identical. Only buckets that gain counts in a
+# fold are re-stamped folded_at; carried buckets keep their own, and a
+# drop-only prune leaves the histograms file byte-identical.
+# Build is the target build the event is about: the `to` commit, else
+# `to_version`, else null (precheck-fail rows may name no target — the
+# bucket keeps the null honestly rather than inventing one). Day is the
+# UTC calendar day of emitted_at.
+#
+# Bands (age A vs the prune's now):
+#   A < 30d          raw rows kept
+#   30d <= A < 90d   folded into histograms; raw rows dropped
+#   A >= 90d         raw rows dropped (outside the retention window)
+# The exact-boundary behavior is pinned by tests. Rows with a missing
+# or unparseable emitted_at are kept and counted as skipped_undatable;
+# future-dated rows are kept (never prune the future) and counted as
+# kept. Malformed journal lines are preserved verbatim and counted in
+# neither bucket.
+#
+# Alerts: prune drops only acknowledged alerts whose fired_at is >= 90d
+# old. Unacknowledged alerts are NEVER dropped — a prune that silently
+# deletes pending pages is a lie. Acked alerts with missing/
+# unparseable/future fired_at are kept.
+#
+# Both journals are rewritten atomically (tmp sibling + fsync +
+# os.replace) under the store-scoped journal lock; files whose content
+# would not change are left untouched (byte-identical, mtime preserved)
+# so a no-op prune is observable as one. Commit order inside a folding
+# prune is journal-first, histograms-second: a journal-rewrite failure
+# leaves nothing folded (a retry is clean), and a histogram-rewrite
+# failure after a successful journal rewrite returns a LOUD error —
+# the fold is lost in that window (under-count, never re-folded),
+# which beats the silent double-count the reverse order produced.
+HISTOGRAM_SCHEMA = "fleet-event-histogram/1"
+HISTOGRAMS_JOURNAL_NAME = "events_histograms.jsonl"
+RETENTION_RAW_DAYS = 30
+RETENTION_HISTOGRAM_DAYS = 90
+
+
+def rewrite_journal_atomic(path, row_texts):
+    """Replace the file at path with row_texts (each a full line; the
+    writer newline-terminates any line missing its "\n") atomically:
+    tmp sibling on the same fs, fsync, os.replace. Returns an error
+    string or None. A crash leaves the old file or the tmp behind,
+    never a torn journal."""
+    tmp_path = path + ".tmp.%d" % os.getpid()
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            for text in row_texts:
+                fh.write(text if text.endswith("\n") else text + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return "cannot rewrite %s: %s" % (os.path.basename(path), exc)
+    return None
+
+
+def read_journal_raw(path):
+    """Read a JSONL journal as raw lines. Returns (items, error) where
+    each item is (text, obj, verbatim): text is the line without its
+    trailing newline, obj the parsed dict, verbatim True for blank
+    lines and malformed/non-dict lines. Callers that rewrite must keep
+    verbatim items byte-identical — they cannot be dated, so they
+    cannot be pruned; they are never counted or banded."""
+    items = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                text = line.rstrip("\n")
+                if not text.strip():
+                    items.append((text, None, True))
+                    continue
+                try:
+                    obj = json.loads(text)
+                except ValueError:
+                    obj = None
+                if not isinstance(obj, dict):
+                    items.append((text, None, True))
+                    continue
+                items.append((text, obj, False))
+    except FileNotFoundError:
+        return [], None
+    except OSError as exc:
+        return None, "cannot read %s: %s" % (os.path.basename(path), exc)
+    return items, None
+
+
+def _retention_band(emitted_dt, now):
+    """The retention band for one event time: "keep", "compact", or
+    "drop". Undatable (None) and future times return "keep": prune never
+    drops what it cannot date and never prunes the future."""
+    if emitted_dt is None or emitted_dt > now:
+        return "keep"
+    if emitted_dt > now - timedelta(days=RETENTION_RAW_DAYS):
+        return "keep"
+    if emitted_dt > now - timedelta(days=RETENTION_HISTOGRAM_DAYS):
+        return "compact"
+    return "drop"
+
+
+def _histogram_key(event):
+    """The (day, box_id, component, build) bucket for one event. Day is
+    the UTC calendar day of emitted_at; the caller guarantees a
+    parseable, non-future emitted_at."""
+    day = _parse_ts(event.get("emitted_at")).astimezone(
+        timezone.utc).date().isoformat()
+    to = event.get("to")
+    build = to if isinstance(to, str) else None
+    if build is None:
+        ver = event.get("to_version")
+        build = ver if isinstance(ver, str) else None
+    return (day, event.get("box_id"), event.get("component"), build)
+
+
+def _histogram_outcome_key(outcome):
+    """The counts key for one event outcome. Outcomes are keyed by
+    string; a non-string outcome (None for precheck-fail rows, or
+    anything else hand-fed) folds under the "unknown" sentinel. Raw
+    None keys are forbidden: dict(sorted(...)) raises TypeError
+    comparing None with str on the next prune's merge, and JSON would
+    coerce the key to the string "null" anyway — a collision, not a
+    category."""
+    return outcome if isinstance(outcome, str) else "unknown"
+
+
+def _fold_histograms(existing, events_to_fold, folded_at):
+    """Merge existing histogram rows with newly compacted events.
+    Returns the full bucket list sorted by
+    (day, box_id, component, build) for a deterministic file layout.
+
+    Only rows carrying our schema are merged — foreign-schema rows are
+    not understood and must never be absorbed (the caller passes them
+    through byte-identical). Non-string outcomes fold under "unknown"
+    (see _histogram_outcome_key). Only buckets that gained counts in
+    this fold are stamped folded_at=now; carried buckets keep their own
+    folded_at so an unrelated prune never rewrites their evidence."""
+    buckets = {}
+
+    def _acc(key):
+        return buckets.setdefault(
+            key, {"counts": {}, "folded_at": None, "touched": False})
+
+    for row in existing:
+        if not isinstance(row, dict) or row.get("schema") != HISTOGRAM_SCHEMA:
+            continue
+        key = (row.get("day"), row.get("box_id"), row.get("component"),
+               row.get("build"))
+        counts = row.get("counts")
+        if not isinstance(counts, dict):
+            counts = {}
+        acc = _acc(key)
+        if acc["folded_at"] is None:
+            acc["folded_at"] = row.get("folded_at")
+        for outcome, n in counts.items():
+            if isinstance(n, int) and n > 0:
+                okey = _histogram_outcome_key(outcome)
+                acc["counts"][okey] = acc["counts"].get(okey, 0) + n
+    for event in events_to_fold:
+        key = _histogram_key(event)
+        acc = _acc(key)
+        okey = _histogram_outcome_key(event.get("outcome"))
+        acc["counts"][okey] = acc["counts"].get(okey, 0) + 1
+        acc["touched"] = True
+        acc["folded_at"] = folded_at
+    rows = []
+    for (day, box_id, component, build), acc in sorted(
+            buckets.items(), key=lambda kv: tuple(
+                "" if v is None else str(v) for v in kv[0])):
+        rows.append({
+            "schema": HISTOGRAM_SCHEMA,
+            "day": day,
+            "box_id": box_id,
+            "component": component,
+            "build": build,
+            "counts": dict(sorted(acc["counts"].items())),
+            "folded_at": acc["folded_at"],
+        })
+    return rows
+
+
+def _count_histogram_buckets(hist_items):
+    """Count our-schema histogram bucket rows among raw journal items
+    (verbatim, foreign-schema, and non-dict lines are not buckets)."""
+    return sum(
+        1 for _, obj, verb in hist_items
+        if (obj and not verb and isinstance(obj, dict)
+            and obj.get("schema") == HISTOGRAM_SCHEMA))
+
+
+def prune_events(store_dir, now=None):
+    """Apply the §4 S2 retention policy to the event + alert journals.
+    Returns (summary, error); summary is a dict with kept / compacted /
+    dropped / skipped_undatable (event rows), histogram_buckets (total
+    buckets after the fold), and alerts_dropped / alerts_kept.
+
+    The whole prune runs under the store-scoped journal lock: the
+    load -> rewrite sequences would otherwise race an overlapping
+    collect's appends or acks (the same class #813 closed). `now`
+    defaults to the current UTC time and exists so tests pin the
+    banding deterministically.
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    folded_at = now.isoformat()
+    try:
+        with journal_lock(store_dir):
+            items, err = read_journal_raw(
+                os.path.join(store_dir, EVENTS_JOURNAL_NAME))
+            if err:
+                return None, err
+            kept_texts = []
+            to_fold = []
+            summary = {"kept": 0, "compacted": 0, "dropped": 0,
+                       "skipped_undatable": 0, "histogram_buckets": 0,
+                       "alerts_dropped": 0, "alerts_kept": 0}
+            for text, obj, verbatim in items:
+                if verbatim:
+                    kept_texts.append(text)
+                    continue
+                emitted = _parse_ts(obj.get("emitted_at"))
+                if emitted is None:
+                    kept_texts.append(text)
+                    summary["skipped_undatable"] += 1
+                    continue
+                band = _retention_band(emitted, now)
+                if band == "keep":
+                    kept_texts.append(text)
+                    summary["kept"] += 1
+                elif band == "compact":
+                    to_fold.append(obj)
+                    summary["compacted"] += 1
+                else:
+                    summary["dropped"] += 1
+            if to_fold:
+                # The journal is rewritten FIRST (before the histogram
+                # fold). If the journal rewrite raises, nothing has been
+                # folded and a retry is clean. If instead the histogram
+                # rewrite fails after the journal was rewritten, the
+                # error is returned LOUDLY: the folded rows are already
+                # gone from the journal, so the fold is lost in that
+                # window — a loud under-count a retry cannot heal, and
+                # that beats the silent double-count the old
+                # histogram-first order produced.
+                err = rewrite_journal_atomic(
+                    os.path.join(store_dir, EVENTS_JOURNAL_NAME),
+                    kept_texts)
+                if err:
+                    return None, err
+                hist_items, err = read_journal_raw(
+                    os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME))
+                if err:
+                    # Same lost-fold window as a histogram-rewrite
+                    # failure: the journal is already rewritten, so the
+                    # folded rows are gone — the fold cannot be retried.
+                    # (err already carries the "cannot read <file>"
+                    # prefix; the wrapper keeps the loud part loud.)
+                    return None, (
+                        "%s — after the event journal was rewritten "
+                        "(the %d compacted row(s) were already dropped "
+                        "from the event journal; the fold is lost — a "
+                        "loud under-count, never re-folded)"
+                        % (err, summary["compacted"]))
+                existing = []
+                passthrough = []
+                for text, obj, verb in hist_items:
+                    # Verbatim lines (blank/malformed) and foreign-schema
+                    # rows are not understood — they pass through
+                    # byte-identical after the bucket rows, never
+                    # absorbed into a fold.
+                    if (verb or not isinstance(obj, dict)
+                            or obj.get("schema") != HISTOGRAM_SCHEMA):
+                        passthrough.append(text)
+                    else:
+                        existing.append(obj)
+                buckets = _fold_histograms(existing, to_fold, folded_at)
+                summary["histogram_buckets"] = len(buckets)
+                hist_rows = [json.dumps(b, sort_keys=True)
+                             for b in buckets] + passthrough
+                err = rewrite_journal_atomic(
+                    os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME),
+                    hist_rows)
+                if err:
+                    # (err already carries the "cannot rewrite <file>"
+                    # prefix; don't double it — keep the loud part loud.)
+                    return None, (
+                        "%s (the %d compacted row(s) were already "
+                        "dropped from the event journal; the fold is "
+                        "lost — a loud under-count, never re-folded)"
+                        % (err, summary["compacted"]))
+            elif summary["dropped"]:
+                # Drop-only prune: nothing was folded, so the histograms
+                # file is left byte-identical (mtime preserved) — a
+                # prune that folds nothing must not rewrite it.
+                err = rewrite_journal_atomic(
+                    os.path.join(store_dir, EVENTS_JOURNAL_NAME),
+                    kept_texts)
+                if err:
+                    return None, err
+                hist_items, err = read_journal_raw(
+                    os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME))
+                if err:
+                    return None, err
+                summary["histogram_buckets"] = \
+                    _count_histogram_buckets(hist_items)
+            else:
+                hist_items, err = read_journal_raw(
+                    os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME))
+                if err:
+                    return None, err
+                summary["histogram_buckets"] = \
+                    _count_histogram_buckets(hist_items)
+            alert_items, err = read_journal_raw(
+                os.path.join(store_dir, ALERTS_JOURNAL_NAME))
+            if err:
+                return None, err
+            alert_cutoff = now - timedelta(days=RETENTION_HISTOGRAM_DAYS)
+            kept_alerts = []
+            drop_alerts = False
+            for text, obj, verbatim in alert_items:
+                fired = _parse_ts(obj.get("fired_at")) \
+                    if obj and not verbatim else None
+                if (obj and not verbatim and obj.get("acked") is True
+                        and fired is not None and fired <= alert_cutoff):
+                    summary["alerts_dropped"] += 1
+                    drop_alerts = True
+                else:
+                    kept_alerts.append(text)
+                    summary["alerts_kept"] += 1
+            if drop_alerts:
+                err = rewrite_journal_atomic(
+                    os.path.join(store_dir, ALERTS_JOURNAL_NAME),
+                    kept_alerts)
+                if err:
+                    return None, err
+    except JournalLockError as exc:
+        return None, str(exc)
+    return summary, None
+
+
+def cmd_events_prune(store_dir):
+    """Prune the event journal per the §4 S2 retention policy; prints a
+    one-line summary. Returns an error string or None (exit-2 class)."""
+    if os.path.lexists(store_dir) and not os.path.isdir(store_dir):
+        return "store path is not a directory: %s" % store_dir
+    if not os.path.isdir(store_dir):
+        return "store not found: %s" % store_dir
+    summary, err = prune_events(store_dir)
+    if err:
+        return err
+    print("fleet events: pruned %d event row(s) (%d compacted into "
+          "%d histogram bucket(s), %d dropped at 90+ days); "
+          "%d kept, %d undatable kept; %d acked alert(s) older than "
+          "%d days dropped, %d alert(s) kept"
+          % (summary["compacted"] + summary["dropped"],
+             summary["compacted"],
+             summary["histogram_buckets"], summary["dropped"],
+             summary["kept"], summary["skipped_undatable"],
+             summary["alerts_dropped"], RETENTION_HISTOGRAM_DAYS,
+             summary["alerts_kept"]))
+    return None
 
 
 # --- CLI readers (called from inventory.py's `events` subcommand) ---------
@@ -1087,12 +1464,13 @@ def main(argv=None):
     can exercise the readers directly."""
     parser = argparse.ArgumentParser(
         description="Fleet update-event journal readers (G17/#608: S1 "
-                    "journal, S2 cross-check).")
+                    "journal, S2 cross-check, S2 retention prune).")
     parser.add_argument("--store", required=True)
     parser.add_argument("--box", default=None)
     parser.add_argument("--wave", default=None)
     parser.add_argument("action", nargs="?", default="list",
-                        choices=["list", "watch", "ack", "crosscheck"])
+                        choices=["list", "watch", "ack", "crosscheck",
+                                 "prune"])
     parser.add_argument("--alert-id", default=None)
     args = parser.parse_args(argv)
     if args.action == "list":
@@ -1122,6 +1500,12 @@ def main(argv=None):
             print("error: %s" % err, file=sys.stderr)
             return 2
         return code
+    if args.action == "prune":
+        err = cmd_events_prune(args.store)
+        if err:
+            print("error: %s" % err, file=sys.stderr)
+            return 2
+        return 0
     return 2
 
 

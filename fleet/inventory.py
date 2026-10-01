@@ -27,6 +27,9 @@ Subcommands:
   rebuild   --store DIR
       Rebuild the snapshot from the journal (the snapshot is derived;
       the journal is the source of truth).
+  prune     --store DIR
+      Drop inventory journal rows older than 90 days (G17 S2 retention
+      discipline); the snapshot is rebuilt from the pruned journal.
   events    --store DIR [--box ID] [--wave WAVE]
       Print the update-event journal (per-box outcome series; G17 S1).
   events watch --store DIR
@@ -39,6 +42,11 @@ Subcommands:
       (event<->inventory cross-check, G17 S2): confirmed, violation
       (flagged, not convicted), or inconclusive (missing evidence);
       exit 1 on any violation, 0 otherwise.
+  events prune --store DIR
+      Apply the event-journal retention policy (G17 S2): rows older
+      than 30 days are compacted into per-day outcome histograms in
+      events_histograms.jsonl, rows older than 90 days are dropped;
+      old acknowledged alerts are dropped, unacknowledged never.
 
 Per-box directory layout (each subdir of --estate is one box; the dir
 name is the box_id unless --box-id-map remaps it):
@@ -419,19 +427,30 @@ def append_journal(store_dir, records):
     positioning under concurrent writers (e.g. overlapping collect
     crons). fsync before returning gives the "crash-safe" guarantee
     the design claims: a collect that exits 0 survives an OS crash.
+
+    The append runs under the store-scoped journal lock (events.py):
+    `prune` rewrites the journal with os.replace, and an append that
+    opened the old inode before the replace would journal into the
+    void. The lock serializes the two; a lock failure fails the
+    collect loudly instead of journaling unsynchronized.
     """
     err = _ensure_store(store_dir)
     if err:
         return None, err
-    journal_path = os.path.join(store_dir, JOURNAL_NAME)
     try:
-        with open(journal_path, "a", encoding="utf-8", buffering=1) as fh:
-            for record in records:
-                fh.write(json.dumps(record, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-    except OSError as exc:
-        return None, "cannot append to journal: %s" % exc
+        with events.journal_lock(store_dir):
+            journal_path = os.path.join(store_dir, JOURNAL_NAME)
+            try:
+                with open(journal_path, "a", encoding="utf-8",
+                          buffering=1) as fh:
+                    for record in records:
+                        fh.write(json.dumps(record, sort_keys=True) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            except OSError as exc:
+                return None, "cannot append to journal: %s" % exc
+    except events.JournalLockError as exc:
+        return None, str(exc)
     return rebuild_snapshot(store_dir)
 
 
@@ -562,6 +581,84 @@ def load_snapshot(store_dir):
         return None, "snapshot at %s is not a fleet inventory snapshot" % (
             snapshot_path,)
     return data, None
+
+
+def prune_journal(store_dir, now=None):
+    """Drop inventory journal rows whose observed_at is >= 90 days old —
+    the G17 S2 retention discipline, shared with the event journal
+    (events.py's RETENTION_HISTOGRAM_DAYS). Rows with missing/
+    unparseable/future observed_at are kept: prune never drops what it
+    cannot date and never prunes the future. Malformed lines are
+    preserved verbatim.
+
+    The snapshot is rebuilt from the pruned journal so snapshot.json
+    stays journal-consistent: a box whose only records expired
+    disappears from the snapshot, honestly — expired evidence is not
+    evidence. The load -> os.replace sequence runs under the
+    store-scoped journal lock (the same lock append_journal takes): it
+    would otherwise race an overlapping collect's append, whose rows
+    could land in the replaced-away inode and be lost. Returns
+    (summary, error); summary holds kept / dropped /
+    skipped_undatable counts.
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    cutoff = now - timedelta(days=events.RETENTION_HISTOGRAM_DAYS)
+    try:
+        with events.journal_lock(store_dir):
+            items, err = events.read_journal_raw(
+                os.path.join(store_dir, JOURNAL_NAME))
+            if err:
+                return None, err
+            kept_texts = []
+            summary = {"kept": 0, "dropped": 0, "skipped_undatable": 0}
+            for text, record, verbatim in items:
+                if verbatim:
+                    kept_texts.append(text)
+                    continue
+                observed = _parse_ts(record.get("observed_at"))
+                if observed is None or observed > now:
+                    kept_texts.append(text)
+                    if observed is None:
+                        summary["skipped_undatable"] += 1
+                    else:
+                        summary["kept"] += 1
+                    continue
+                if observed <= cutoff:
+                    summary["dropped"] += 1
+                else:
+                    kept_texts.append(text)
+                    summary["kept"] += 1
+            if summary["dropped"]:
+                err = events.rewrite_journal_atomic(
+                    os.path.join(store_dir, JOURNAL_NAME), kept_texts)
+                if err:
+                    return None, err
+    except events.JournalLockError as exc:
+        return None, str(exc)
+    if summary["dropped"]:
+        _, err = rebuild_snapshot(store_dir)
+        if err:
+            return None, err
+    return summary, None
+
+
+def cmd_prune(store_dir):
+    """Prune the inventory journal per the retention policy; prints a
+    one-line summary. Returns an error string or None (exit-2 class)."""
+    if os.path.lexists(store_dir) and not os.path.isdir(store_dir):
+        return "store path is not a directory: %s" % store_dir
+    if not os.path.isdir(store_dir):
+        return "store not found: %s" % store_dir
+    summary, err = prune_journal(store_dir)
+    if err:
+        return err
+    print("fleet inventory: pruned %d journal row(s) older than %d days; "
+          "%d kept, %d undatable kept"
+          % (summary["dropped"], events.RETENTION_HISTOGRAM_DAYS,
+             summary["kept"], summary["skipped_undatable"]))
+    return None
 
 
 def _is_eligible(record, cutoff_dt):
@@ -889,6 +986,12 @@ def main(argv=None):
                                help="rebuild the snapshot from the journal")
     p_rebuild.add_argument("--store", required=True)
 
+    p_prune = sub.add_parser("prune",
+                             help="drop inventory journal rows older than "
+                                  "90 days and rebuild the snapshot "
+                                  "(G17 S2 retention)")
+    p_prune.add_argument("--store", required=True)
+
     p_events = sub.add_parser("events", help="fleet update-event journal "
                                              "and alerts (G17/#608 S1)")
     p_events.add_argument("--store", required=True)
@@ -900,12 +1003,15 @@ def main(argv=None):
                                "wave (rollout envelopes are null until "
                                "G15 S2)")
     p_events.add_argument("action", nargs="?", default="list",
-                          choices=["list", "watch", "ack", "crosscheck"],
+                          choices=["list", "watch", "ack", "crosscheck",
+                                   "prune"],
                           help="'watch' lists unacknowledged alerts and "
                                "exits 1 when any are pending; 'ack' marks "
                                "one alert acknowledged; 'crosscheck' checks "
                                "update claims against the inventory "
-                               "(G17 S2) and exits 1 on any violation")
+                               "(G17 S2) and exits 1 on any violation; "
+                               "'prune' applies the event-journal "
+                               "retention policy (G17 S2)")
     p_events.add_argument("--alert-id", default=None,
                           help="with ack: the alert to acknowledge")
 
@@ -929,6 +1035,11 @@ def main(argv=None):
             total, err = rebuild_snapshot(args.store)
             if err is None:
                 print("rebuilt snapshot from %s journal lines" % total)
+        elif args.command == "prune":
+            err = cmd_prune(args.store)
+            if err:
+                print("error: %s" % err, file=sys.stderr)
+                return 2
         elif args.command == "events":
             if args.action == "list":
                 err = events.cmd_events_list(args.store, args.box,
@@ -958,6 +1069,11 @@ def main(argv=None):
                     print("error: %s" % err, file=sys.stderr)
                     return 2
                 return code
+            elif args.action == "prune":
+                err = events.cmd_events_prune(args.store)
+                if err:
+                    print("error: %s" % err, file=sys.stderr)
+                    return 2
             else:
                 err = "unknown events action %s" % args.action
         else:

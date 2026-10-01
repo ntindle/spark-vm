@@ -370,7 +370,10 @@ controller, and this design already has one.
    journal retention policy is named by G17's UPDATE_EVENT_REPORTING.md
    §4 S2 (90 days of per-box records, compacted to per-day outcome
    histograms after 30 days) and covers this journal; S1 keeps everything
-   and says so.
+   and says so. **Delivered:** `fleet inventory prune` drops inventory
+   rows ≥90 days old by `observed_at` and rebuilds the snapshot from the
+   pruned journal (undatable/future rows kept; snapshot stays
+   journal-consistent).
 3. **box_id format**: the G15 doc requires stability across reimage but
    doesn't name the format, and §4 names the S1 interim rule
    (operator-maintained mapping, SSH host alias default) with the

@@ -43,6 +43,10 @@ python3 fleet/inventory.py events --store ~/fleet-store --box tower
 python3 fleet/inventory.py events watch --store ~/fleet-store   # exit 1 on unacked alerts
 python3 fleet/inventory.py events ack --store ~/fleet-store --alert-id <id>
 python3 fleet/inventory.py events crosscheck --store ~/fleet-store   # exit 1 on claim/inventory violations (G17 S2)
+
+# 6. Age the journals out (G17 S2 retention — run on a schedule)
+python3 fleet/inventory.py events prune --store ~/fleet-store   # 30d compact / 90d drop + old acked alerts
+python3 fleet/inventory.py prune --store ~/fleet-store          # inventory journal 90d drop + snapshot rebuild
 ```
 
 ## Update events (G17 / #608, S1)
@@ -73,8 +77,39 @@ translation table in `events.py`, verified against
   cron or the operator's existing paging consumes it.
 - **Known S1 limits** — session_epoch/rollout/window are null (no
   provisioner record, no G15 waves, no G14 windows); `attested` is always
-  false; the event journal has no retention policy yet (the 90-day/30-day
-  discipline is G17 S2's slice, shared with the inventory journal).
+  false.
+
+## Journal retention (G17 S2)
+
+Both journals age out on their own — run `prune` on a schedule (a daily
+cron is plenty; prune is idempotent, and a no-op prune changes no
+bytes):
+
+```bash
+python3 fleet/inventory.py events prune --store ~/fleet-store  # event journal + alerts
+python3 fleet/inventory.py prune --store ~/fleet-store         # inventory journal
+```
+
+- **Event journal:** rows older than 30 days are compacted into
+  per-day outcome histograms keyed (box, component, build) in
+  `events_histograms.jsonl`; rows older than 90 days are dropped.
+  Age is measured on `emitted_at` (when the event happened, never the
+  collector's `received_at`); rows with a missing/unparseable
+  `emitted_at` — and rows dated in the future — are always kept.
+  Malformed lines survive verbatim. The raw journal's readers (list,
+  watch, crosscheck) never see histogram rows.
+- **Alerts:** only acknowledged alerts older than 90 days are dropped.
+  Unacknowledged alerts are never pruned — a prune that silently
+  deletes pending pages would be a lie.
+- **Inventory journal:** rows older than 90 days (by `observed_at`) are
+  dropped and the snapshot is rebuilt from the pruned journal, so a
+  box whose only records expired disappears from the snapshot honestly
+  (expired evidence is not evidence). Undatable/future rows are kept.
+
+Both prunes hold the store's journal lock and rewrite journals
+atomically (tmp + fsync + rename), so an overlapping collect's
+appends are never lost to a prune's rewrite — and the collector's own
+journal appends take the same lock for the same reason.
 
 ## Event<->inventory cross-check (G17 S2)
 

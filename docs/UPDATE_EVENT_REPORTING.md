@@ -213,7 +213,12 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   outcome histograms keyed (box, component, build). This is the fleet
   journal discipline G16 S1's README owed no later than S2 (its design
   doc's OQ2 names S3 — this doc's S2 slice delivers it, and both get
-  updated to match).
+  updated to match). **Delivered:** `fleet events prune` compacts
+  30–90d rows into `events_histograms.jsonl` and drops ≥90d rows
+  (age on `emitted_at`; undatable/future rows kept; only acked alerts
+  ≥90d old are dropped, unacked never); `fleet inventory prune` drops
+  ≥90d inventory rows by `observed_at` and rebuilds the snapshot. Both
+  hold the store's journal lock and rewrite atomically.
 
 ### S3 — control-plane endpoint with attestation (hosted)
 
