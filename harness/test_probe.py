@@ -6,7 +6,11 @@ muse CLI:
     (META_API_KEY placeholder, proxy env forced, NO_PROXY stripped), sends
     GET+POST with an Authorization header through the proxy, exits per
     FAKE_MUSE_MODE.
-  - echo server: records every Authorization header it receives to a JSONL log.
+  - echo server: records the full request it receives (method, raw path,
+    full header set, sha256 of the body) to a JSONL log — the same wire
+    contract as harness/echo-fixture.py; the probe asserts the swapped
+    Authorization shape and that the hsurr: placeholder reached no
+    recorded field (GitHub #157).
   - swap proxy: minimal forward HTTP proxy; in "swap" mode rewrites
     "Bearer hsurr:gate-dummy" -> "Bearer <swapped>" (the proxy's job), in
     "passthrough" mode forwards untouched.
@@ -23,6 +27,7 @@ so the tests can assert the scrubbed-HOME contract and the teardown.
 """
 
 import http.client
+import hashlib
 import importlib.util
 import json
 import os
@@ -96,10 +101,17 @@ key = os.environ["META_API_KEY"]
 argv = sys.argv
 base = argv[argv.index("--base-url") + 1]
 scheme = "Token " if mode == "bad-scheme" else "Bearer "
-headers = {"Authorization": scheme + key}
+headers = {"Authorization": scheme + key, "X-Request-Id": "gate-fixture-benign"}
 paths = ["/muse-code/models", "/responses"]
 if mode == "duplicate":
     paths = [p for p in paths for _ in (0, 1)]  # each request twice, like CLI retries
+if mode == "leak-header":
+    # GitHub #157: the placeholder leaves through a second channel while
+    # the Authorization header is correctly swapped — the gate must fail.
+    headers["X-Api-Key"] = key
+if mode == "leak-query":
+    # GitHub #157: the placeholder leaves in the query string.
+    paths = ["/responses?api_key=" + key]
 if mode != "no-request":
     for path in paths:
         req = urllib.request.Request(base.rstrip("/") + path, headers=headers,
@@ -120,11 +132,26 @@ sys.exit(0)
 
 
 class EchoHandler(BaseHTTPRequestHandler):
+    """Mirror of harness/echo-fixture.py's handler (same wire contract).
+
+    Keep the two in lockstep: the fixture is what the real gate runs,
+    this is what the probe's hermetic tests assert against.
+    """
     log_path = None
 
     def _handle(self):
-        auth = self.headers.get("Authorization", "")
-        rec = {"method": self.command, "path": self.path, "authorization": auth}
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length) if length else b""
+        headers = {}
+        for name, value in self.headers.items():
+            headers.setdefault(name.lower(), value)
+        rec = {
+            "method": self.command,
+            "path": self.path,
+            "authorization": self.headers.get("Authorization", ""),
+            "headers": headers,
+            "body_sha256": hashlib.sha256(body).hexdigest() if body else "",
+        }
         with open(self.log_path, "a") as f:
             f.write(json.dumps(rec) + "\n")
         body = b"{}"
@@ -161,8 +188,14 @@ class SwapHandler(BaseHTTPRequestHandler):
                 v = v.replace(f"Bearer {self.placeholder}", f"Bearer {self.swapped}")
             headers[k] = v
         headers["Host"] = parts.netloc
+        # Forward origin-form incl. the query string (the real forward
+        # proxy does; dropping it here would hide query-channel leaks —
+        # GitHub #157's leak-query vehicle mode depends on this).
+        target = parts.path or "/"
+        if parts.query:
+            target += "?" + parts.query
         conn = http.client.HTTPConnection(target_host, target_port, timeout=5)
-        conn.request(self.command, parts.path or "/", body=body, headers=headers)
+        conn.request(self.command, target, body=body, headers=headers)
         resp = conn.getresponse()
         data = resp.read()
         self.send_response(resp.status)
@@ -336,6 +369,46 @@ def test_gate_no_swap_fails(fixtures, tmp_path):
     assert proc.returncode == 1
     assert "hsurr:gate-dummy" in open(fixtures["echo_log"]).read()
     assert "placeholder" in proc.stderr and "never reach the origin" in proc.stderr
+
+
+def test_gate_placeholder_leak_via_header_fails(fixtures, tmp_path):
+    # GitHub #157: a CLI that swaps Authorization correctly but leaks the
+    # placeholder through a second header must FAIL the gate — the old
+    # Authorization-only assertion passed this.
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"FAKE_MUSE_MODE": "leak-header"})
+    assert proc.returncode == 1
+    assert "never reach the origin in any recorded field" in proc.stderr
+    assert "header 'x-api-key'" in proc.stderr
+
+
+def test_gate_placeholder_leak_via_query_fails(fixtures, tmp_path):
+    # GitHub #157: the placeholder in the query string must fail the gate.
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"FAKE_MUSE_MODE": "leak-query"})
+    assert proc.returncode == 1
+    assert "never reach the origin in any recorded field" in proc.stderr
+    assert "request path" in proc.stderr
+
+
+def test_gate_records_carry_full_request_shape(fixtures, tmp_path):
+    # The echo record is the gate's evidence: the full header set, the raw
+    # path, and the body hash. Pin the shape so a future fixture change
+    # can't silently shrink what the probe asserts on.
+    proc, _ = run_probe(fixtures, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    with open(fixtures["echo_log"]) as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    assert records, "no records in the echo log"
+    get_rec = next(r for r in records if r["method"] == "GET")
+    post_rec = next(r for r in records if r["method"] == "POST")
+    for rec in (get_rec, post_rec):
+        assert rec["headers"]["authorization"] == f"Bearer {SWAPPED}"
+        assert rec["headers"]["x-request-id"] == "gate-fixture-benign"
+        assert rec["authorization"] == f"Bearer {SWAPPED}"
+    assert get_rec["body_sha256"] == ""  # no body on the GET
+    assert post_rec["body_sha256"] == hashlib.sha256(b"{}").hexdigest()
+    assert post_rec["path"] == "/responses"
 
 
 def test_gate_no_records_fails_closed(fixtures, tmp_path):

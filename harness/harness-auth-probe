@@ -21,14 +21,21 @@ order:
 Modes:
   gate      — image-build gate. The CLI is pointed at the gate fixture's
               echo host through the inference proxy with the public dummy
-              placeholder (hsurr:llm-api). The echo server records the
-              Authorization header the origin received; the probe asserts
-              the swapped value arrived with the exact
-              "Authorization: Bearer <...>" wire shape and that the
-              placeholder never reached the origin. The CLI's own exit code
-              is informational only here: the echo fixture is not a model
-              and its response body is not a completion — what matters is
-              the swapped header reaching the origin.
+              placeholder (hsurr:llm-api). The echo server records the full
+              request the origin received — method, raw path (query string
+              included), the complete header set, and a sha256 of the body
+              (GitHub #157). The probe asserts the swapped value arrived
+              with the exact "Authorization: Bearer <...>" wire shape and
+              that the placeholder never reached the origin in ANY recorded
+              field: a future or misbehaving CLI leaking the placeholder
+              through a second header, a query parameter, or the request
+              line fails the gate even when the Authorization header looks
+              right. The body is recorded only as a hash, so the placeholder
+              cannot be scanned there by construction. The CLI's own exit
+              code is informational only here: the echo fixture is not a
+              model and its response body is not a completion — what matters
+              is the swapped header reaching the origin and the placeholder
+              reaching nothing.
   provision — provision-time check on a live tenant box. The CLI is pointed
               at the provider through the inference proxy with the tenant's
               injected placeholder (hsurr:llm-api). There is no echo log on
@@ -228,6 +235,36 @@ def read_new_records(echo_log, since_size):
     return records, None
 
 
+def _placeholder_leak_channels(record, placeholder):
+    """Name the channels through which a record carried the placeholder.
+
+    GitHub #157: the gate's headline guarantee is "the placeholder never
+    reaches the origin" — not "... in the Authorization header". Scan
+    every text-carrying recorded field (method, raw path incl. query,
+    every header name and value). The body is recorded only as a sha256
+    hex digest, which cannot contain the placeholder's non-hex characters,
+    so it is deliberately not scanned. Returns a list of channel names
+    ("request method", "request path", "header '<name>'"), empty when the
+    record is clean. Non-dict records and non-string fields are skipped,
+    never fatal: read_new_records already tolerates them.
+    """
+    if not isinstance(record, dict):
+        return []
+    channels = []
+    for channel, value in (("request method", record.get("method")),
+                           ("request path", record.get("path"))):
+        if isinstance(value, str) and placeholder in value:
+            channels.append(channel)
+    headers = record.get("headers")
+    if isinstance(headers, dict):
+        for name, value in headers.items():
+            if isinstance(name, str) and placeholder in name:
+                channels.append(f"header {name!r}")
+            if isinstance(value, str) and placeholder in value:
+                channels.append(f"header {name!r}")
+    return channels
+
+
 def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped,
                cli_timeout):
     try:
@@ -270,8 +307,26 @@ def check_gate(muse_bin, base_url, proxy, key_name, echo_log, expected_swapped,
                    "headers failed the wire-shape assertion (want exactly "
                    f"{want!r}; placeholder {placeholder!r} "
                    "must never reach the origin).")
+    # GitHub #157: the exact-shape assertion above is not the whole
+    # contract. A CLI that sends a correct Authorization header while
+    # leaking the placeholder through another header, the query string,
+    # or the request line must fail the gate too.
+    leaks = []
+    for r in records:
+        for channel in _placeholder_leak_channels(r, placeholder):
+            leaks.append(channel)
+            break  # one channel per record is enough to fail it
+    if leaks:
+        channels = ", ".join(sorted(set(leaks)))
+        return die(EXIT_CHECK_FAILED,
+                   f"{len(leaks)}/{len(auths)} origin-received request(s) "
+                   f"carried the placeholder {placeholder!r} outside the "
+                   f"Authorization header (channels: {channels}) — the "
+                   "wire-shape contract requires the placeholder never "
+                   "reach the origin in any recorded field.")
     print(f"[gate] auth path ok: {len(auths)} request(s), swapped credential "
-          "reached the origin with the Bearer wire shape.", file=sys.stderr)
+          "reached the origin with the Bearer wire shape; no placeholder "
+          "leak through any recorded channel.", file=sys.stderr)
     return EXIT_OK
 
 

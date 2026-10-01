@@ -18,7 +18,12 @@ Implements the executable half of the R2 pre-seeded-harness contract
   accidental misbinding at the gate, not an adversary who controls the port.
   Two modes: `gate` (image-build gate, against the public echo fixture —
   asserts the exact `Authorization: Bearer` wire shape and that the
-  `hsurr:` placeholder never reaches the origin) and `provision`
+  `hsurr:` placeholder never reaches the origin in any recorded field —
+  the echo fixture records the full request (method, raw path incl.
+  query, complete header set, sha256 of the body), so a placeholder
+  leaking through a second header, a query parameter, or the request
+  line fails the gate even when the Authorization header looks right;
+  GitHub #157) and `provision`
   (live tenant box, against the real provider — asserts the provider
   accepted the swapped key). See the script header for the full env
   contract. Timeouts are mode-aware (GitHub #158, #159): gate keeps the
