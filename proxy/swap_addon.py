@@ -181,10 +181,12 @@ def _env_int(name, default):
 
 # All paths are env-overridable so a second mitmdump instance can run
 # as the inference-only proxy (finding 31) with its own secrets dir,
-# hosts file, registry, and audit log. Contract (issue #709): every
-# override must resolve under /home/swapd — the systemd units sandbox
-# with ReadWritePaths=/home/swapd, so an override outside it fails at
-# runtime (read-only mounts), not at deploy.
+# hosts file, registry, and audit log. Contract (issue #709): keep every
+# override under /home/swapd — _env_path does NOT validate this, and
+# ProtectSystem=strict is read-only, not inaccessible: writes outside
+# /home/swapd fail at the first write (except the service-private /tmp
+# and /var/tmp, writable but ephemeral), while reads outside it still
+# succeed silently. Nothing at deploy checks these.
 SECRETS_DIR = _env_path("SWAP_SECRETS_DIR", "/home/swapd/secrets")
 HOSTS_FILE = _env_path("SWAP_HOSTS_FILE", "/home/swapd/hosts.allow")
 # §3a smoke echo hosts (G6): requests to these hosts may swap ONLY the

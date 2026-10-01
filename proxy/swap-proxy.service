@@ -17,11 +17,16 @@ RestartSec=5
 # approvals/grants — all _env_path defaults under /home/swapd, verified
 # against proxy/swap_addon.py), plus the stdlib. Deploy order note: /home/swapd
 # must exist before the unit starts (a missing ReadWritePaths dir fails
-# service startup; it is not auto-created). Contract (issue #709): any
-# SWAP_*_DIR/_FILE override must resolve under /home/swapd —
-# ProtectSystem=strict mounts the rest of the filesystem read-only
-# (beyond the service's private /tmp), so an override outside it fails at
-# runtime, not at deploy.
+# service startup; it is not auto-created). Contract (issue #709): keep
+# every SWAP_*_DIR/_FILE override under /home/swapd — _env_path does NOT
+# validate this. The unit sandboxes with ProtectSystem=strict +
+# ReadWritePaths=/home/swapd + PrivateTmp=yes, so: writes outside
+# /home/swapd fail at the first write (EROFS) — except in the
+# service-private /tmp and /var/tmp, which are writable but ephemeral;
+# reads outside /home/swapd still succeed (strict is read-only, not
+# inaccessible), so a mispointed hosts/registry/SSRF path silently reads
+# from outside the jail. Nothing at deploy checks these — the failure
+# (or silent misread) happens at runtime.
 #
 # NoNewPrivileges IS set here (unlike cred-ui's #115 unit): the addon never
 # escalates — no sudo, no setuid helpers, no subprocesses at all
