@@ -223,6 +223,10 @@ def test_list_keeps_job_with_corrupt_started_at(cli, capsys):
 def test_watch_adopts_late_session_uuid(cli, monkeypatch, capsys):
     """A job whose spawn missed uuid discovery gets it adopted on the next
     watch pass, and the adoption is paged."""
+    # Issue #12 L5: the OS corroboration is stubbed True -- this test pins
+    # the late-adoption flow; the corroboration gate itself is pinned in
+    # test_find_session_l5_confirm.py.
+    monkeypatch.setattr(cli, "_muse_process_in_workdir", lambda w: True)
     jd, job = make_job_dir(cli)
     assert job.get("session_uuid") is None
     work = os.path.join(jd, "work")
@@ -473,7 +477,11 @@ def test_adoption_refuses_garbage_started_at(cli):
     assert attention and "started_at" in attention
 
 
-def test_adoption_prefers_newest_registration(cli):
+def test_adoption_prefers_newest_registration(cli, monkeypatch):
+    # Issue #12 L5: the OS corroboration is stubbed True -- this test pins
+    # the newest-first selection; the corroboration gate itself is pinned in
+    # test_find_session_l5_confirm.py.
+    monkeypatch.setattr(cli, "_muse_process_in_workdir", lambda w: True)
     jd, job = make_job_dir(cli, started_at=time.time() - 60)
     work = os.path.join(jd, "work")
     os.makedirs(work, exist_ok=True)
