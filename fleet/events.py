@@ -1049,14 +1049,14 @@ def prune_events(store_dir, now=None):
                     # Same lost-fold window as a histogram-rewrite
                     # failure: the journal is already rewritten, so the
                     # folded rows are gone — the fold cannot be retried.
+                    # (err already carries the "cannot read <file>"
+                    # prefix; the wrapper keeps the loud part loud.)
                     return None, (
-                        "cannot read %s after the event journal was "
-                        "rewritten: %s (the %d compacted row(s) were "
-                        "already dropped from the event journal; the "
-                        "fold is lost — a loud under-count, never "
-                        "re-folded)"
-                        % (HISTOGRAMS_JOURNAL_NAME, err,
-                           summary["compacted"]))
+                        "%s — after the event journal was rewritten "
+                        "(the %d compacted row(s) were already dropped "
+                        "from the event journal; the fold is lost — a "
+                        "loud under-count, never re-folded)"
+                        % (err, summary["compacted"]))
                 existing = []
                 passthrough = []
                 for text, obj, verb in hist_items:
@@ -1077,13 +1077,13 @@ def prune_events(store_dir, now=None):
                     os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME),
                     hist_rows)
                 if err:
+                    # (err already carries the "cannot rewrite <file>"
+                    # prefix; don't double it — keep the loud part loud.)
                     return None, (
-                        "cannot rewrite %s: %s (the %d compacted row(s) "
-                        "were already dropped from the event journal; "
-                        "the fold is lost — a loud under-count, never "
-                        "re-folded)"
-                        % (HISTOGRAMS_JOURNAL_NAME, err,
-                           summary["compacted"]))
+                        "%s (the %d compacted row(s) were already "
+                        "dropped from the event journal; the fold is "
+                        "lost — a loud under-count, never re-folded)"
+                        % (err, summary["compacted"]))
             elif summary["dropped"]:
                 # Drop-only prune: nothing was folded, so the histograms
                 # file is left byte-identical (mtime preserved) — a
