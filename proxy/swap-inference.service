@@ -10,7 +10,9 @@ User=swapd
 # ONLY the provider API key, its own hosts file holding ONLY the
 # provider, its own registry, its own audit log, and its own SSRF allow
 # file. The provider must never appear in the main proxy's hosts.allow,
-# and the inference SSRF file must never be the main proxy's shared one:
+# and the inference SSRF allow file must never be the main proxy's
+# shared one (the deny file is the deliberate exception: SWAP_SSRF_DENY_FILE
+# is not overridden here, so both units read /home/swapd/ssrf.deny):
 # the gate fixture (harness/install-gate-fixture.sh) needs a loopback
 # exemption for its echo origin, and that exemption must never weaken
 # the main proxy's finding-29 egress guard.
@@ -28,10 +30,20 @@ Restart=always
 RestartSec=5
 # Issue #95: systemd hardening (mirrors cred-ui's #115 shape, extended).
 # What this process needs: the mitm venv + addon under /home/swapd, and
-# its runtime paths (SWAP_*_DIR/FILE defaults, all under /home/swapd,
-# verified against proxy/swap_addon.py), plus the stdlib. Deploy order
-# note: /home/swapd must exist before the unit starts (a missing
-# ReadWritePaths dir fails service startup; it is not auto-created).
+# its runtime paths (SWAP_*_DIR/FILE values — defaults or Environment=
+# overrides, all under /home/swapd, verified against proxy/swap_addon.py),
+# plus the stdlib. Deploy order note: /home/swapd must exist before the
+# unit starts (a missing ReadWritePaths dir fails service startup; it is
+# not auto-created). Contract (issue #709): keep every SWAP_*_DIR/_FILE
+# override under /home/swapd — _env_path does NOT validate this. The
+# unit sandboxes with ProtectSystem=strict + ReadWritePaths=/home/swapd
+# + PrivateTmp=yes, so: writes outside /home/swapd fail at the first
+# write (EROFS) — except in the service-private /tmp and /var/tmp,
+# which are writable but ephemeral; reads outside /home/swapd still
+# succeed (strict is read-only, not inaccessible), so a mispointed
+# hosts/registry/SSRF path silently reads from outside the jail.
+# Nothing at deploy checks these — the failure (or silent misread)
+# happens at runtime.
 #
 # NoNewPrivileges IS set here (unlike cred-ui's #115 unit): the addon never
 # escalates — no sudo, no setuid helpers, no subprocesses at all
