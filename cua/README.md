@@ -32,7 +32,10 @@ hatch box; the spark-vm side is kept alive by `cua-keepalive.sh` (5 min cron).
 
 ## Bridge API
 
-- `GET  /api/status` — stack health
+- `GET  /api/status` — stack health (driver detail + input-probe verdict)
+- `GET  /api/liveness` — bridge-alive only (cheap: no driver call — this is
+  what the keepalive's restart probe hits, so a slow driver can never
+  false-trip it into a spurious bridge restart)
 - `GET  /api/windows` — window list
 - `GET  /api/screenshot` — fresh PNG of :98
 - `POST /api/click` — `{x, y}` screen coords
