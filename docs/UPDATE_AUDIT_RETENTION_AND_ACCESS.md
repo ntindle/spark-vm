@@ -263,5 +263,4 @@ None answered in this doc; the open questions stay open on the issue:
 G19 is closed by this doc; G20 (migration-tooling input hardening, #661)
 remains the last open G-number and is untouched here. The trust-model
 series' design work is now: G11/G12 shipped, G13/G14/G15/G16/G17/G18/G19
-designed, G20 open — implementation (S1–S3 on each issue) stays on the
-issues.
+designed, G20 open — implementation (S1–S3) stays on #778 (the G19 implementation issue; #660 closed on the design).

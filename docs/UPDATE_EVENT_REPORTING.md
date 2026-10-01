@@ -344,7 +344,7 @@ waits on:
 ---
 *Design for G17 (#608), from the 2026-09-28 fleet-rollout gap analysis
 (`FLEET_UPDATE_ROLLOUT_GAP_ANALYSIS.md`). Implementation (S1–S3) remains —
-tracked on #608. Related: G15 (#606, `ROLLOUT_CONTROLLER_DESIGN.md`), G16
+tracked on #779 (the fleet inventory/event-reporting implementation issue; #608 closed on the design). Related: G15 (#606, `ROLLOUT_CONTROLLER_DESIGN.md`), G16
 (#607, `FLEET_VERSION_INVENTORY_DESIGN.md` + `fleet/`), G18 (#609),
 G11/G12 (`UPDATE_CHANNEL_POLICY.md`), G13 (#555,
 `TENANT_UPDATE_TRUST_MODEL.md`), G14 (#556, `UPDATE_IDLE_SUSPEND_CLOCK.md`),

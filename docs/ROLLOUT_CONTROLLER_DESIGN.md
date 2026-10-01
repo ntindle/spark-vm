@@ -304,5 +304,5 @@ never a bypass:
 ---
 *Design for G15 (#606), from the 2026-09-28 fleet-rollout gap analysis
 (`FLEET_UPDATE_ROLLOUT_GAP_ANALYSIS.md`). Implementation (S1–S3) remains —
-tracked on #606. Related: G16 (#607), G17 (#608), G18 (#609), G11/G12
+tracked on #777 (the G15/G18 implementation issue; #606 closed on the design). Related: G16 (#607), G17 (#608), G18 (#609), G11/G12
 (UPDATE_CHANNEL_POLICY.md), G13 (#555), G14 (#556), H11.*

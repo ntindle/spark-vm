@@ -349,7 +349,7 @@ evaluated on wake against the *current* permitted version.
   incident, and it pages as one. The rule is specified here and reads
   the collector's gate answer-age field (not the event stream); it is
   folded into UPDATE_EVENT_REPORTING's S1 alert set when the S1b slice
-  lands (pointer comment on #608 at ship).
+  lands (pointer comment on #777 — the G15/G18 implementation issue — at ship; #608 closed on the design).
 - **G11–G14**: the `image.max_permitted_image_version` field is the wave
   gate's reimage approval (G15 §5); the `maintenance` code's enter/exit
   stays scheduler-owned (UPDATE_CHANNEL_POLICY.md producer rule); the
@@ -431,6 +431,6 @@ evaluated on wake against the *current* permitted version.
 of the G15/G18 split: G15's rollout-controller design
 (`ROLLOUT_CONTROLLER_DESIGN.md` §5) states the box-side interface; this
 doc specifies how the answer travels. Implementation (S1a–S1b/S2/S3)
-remains — tracked on #609. Related: G15 (#606), G16 (#607, S1 shipped in `fleet/`),
+remains — tracked on #777 (the G15/G18 implementation issue; #609 closed on the design). Related: G15 (#606), G16 (#607, S1 shipped in `fleet/`),
 G17 (#608), G11/G12 (`UPDATE_CHANNEL_POLICY.md`), G13 (#555), G14
 (#556), H11.*
