@@ -81,6 +81,11 @@ Blender GUI on `:98` to view/drive it.
   `XTestFakeKeyEvent` — if xev sees no KeyPress, the Xvfb XTEST keyboard
   device is wedged (XSendEvent and the XTEST mouse still work). Fix:
   `cua-desktop.sh stop` + `start` (fresh Xvfb; only touches `:98`).
+  The bridge now automates this diagnosis on demand: `GET
+  /api/status?probe=1` runs an xev KeyPress-echo probe and reports
+  `"input": {"state": "ok"|"wedged"|"unknown"}`, so the wedge is visible
+  instead of hiding behind a healthy driver report. Plain `/api/status`
+  stays a pure read (it serves the last probe outcome, never spawns xev).
 - **Input routing on XFCE.** `type`/`key` must skip the always-on-top
   `Xfdesktop`/`Xfce4-panel` windows, `bring_to_front` the real target, and
   use `delivery_mode: "foreground"` — background delivery is refused with

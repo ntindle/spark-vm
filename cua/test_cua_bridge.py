@@ -17,6 +17,12 @@ Covers:
     with a loud warning; sane defaults when untrusted/missing)
   - #495: bridge singleton flock (same-process + cross-process exclusion,
     release-on-close, lock file creation)
+- #492: XTEST keyboard-path liveness probe (xev KeyPress echo on :98);
+  GET /api/status reports "input": {"state": "ok"|"wedged"|"unknown",
+  "checked_at", "driver"} — plain status is a pure read serving the cached
+  outcome, GET /api/status?probe=1 runs a fresh probe single-flight;
+  windows matched by child PID (never title), probe failures / budget
+  overruns / late windows are "unknown", never "wedged"
 """
 import importlib.util
 import io
@@ -26,6 +32,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from email.message import Message
 from http.client import HTTPConnection
 from types import SimpleNamespace
@@ -333,12 +340,19 @@ class TestEndpoints:
             subprocess, "run",
             lambda *a, **k: SimpleNamespace(returncode=0, stdout="ok\n",
                                            stderr=""))
+        # hermetic: the real probe spawns xev — stub it, assert it rides along
+        monkeypatch.setattr(bridge, "get_input_liveness",
+                            lambda run_probe=False: ("unknown", "stubbed",
+                                                     None))
         status, body = req(port, "GET", "/api/status")
         assert status == 200
         assert body["ok"] is True
         assert body["detail"] == "ok"
         # #491: the running-launch set rides along (empty here)
         assert body["launched"] == {}
+        # #492: the input-path liveness probe rides along too
+        assert body["input"]["state"] == "unknown"
+        assert body["input"]["detail"] == "stubbed"
 
     def test_get_windows(self, live):
         bridge, driver, port = live
@@ -1080,10 +1094,15 @@ class TestLaunchRegistry:
             lambda *a, **k: SimpleNamespace(returncode=0, stdout="ok\n",
                                            stderr=""))
         bridge.launch_app("demo")
+        # hermetic: the real probe spawns xev — stub it, assert it rides along
+        monkeypatch.setattr(bridge, "get_input_liveness",
+                            lambda run_probe=False: ("unknown", "stubbed",
+                                                     None))
         status, body = req(port, "GET", "/api/status")
         assert status == 200
         assert list(body["launched"]) == ["demo"]
         assert body["launched"]["demo"][0]["pid"] == 777
+        assert body["input"]["state"] == "unknown"
 
     def test_status_launched_prunes_dead(self, live, monkeypatch):
         bridge, driver, port = live
@@ -1096,6 +1115,390 @@ class TestLaunchRegistry:
             lambda *a, **k: SimpleNamespace(returncode=0, stdout="ok\n",
                                            stderr=""))
         bridge.launch_app("demo")
+        # hermetic: the real probe spawns xev — stub it, assert it rides along
+        monkeypatch.setattr(bridge, "get_input_liveness",
+                            lambda run_probe=False: ("unknown", "stubbed",
+                                                     None))
         status, body = req(port, "GET", "/api/status")
         assert status == 200
         assert body["launched"] == {}
+        assert body["input"]["state"] == "unknown"
+
+
+# ------------------------------------------------- #492 input-path liveness probe
+
+
+XEV_WINDOW = {"pid": 4242, "window_id": 505, "app_name": "xev",
+              "title": "Event Tester", "is_on_screen": True, "z_index": 3,
+              "bounds": {"x": 100, "y": 100, "width": 200, "height": 200}}
+# A hostile X client can set any title it likes: this window looks like
+# xev (and wins the z-order) but is not our child — the probe must select
+# by PID, never by title.
+SPOOF_WINDOW = {"pid": 9999, "window_id": 909, "app_name": "spoofer",
+                "title": "Event Tester", "is_on_screen": True, "z_index": 9,
+                "bounds": {"x": 0, "y": 0, "width": 200, "height": 200}}
+
+
+class FakeXevProc:
+    """Stands in for the xev child process: stdout is a real OS pipe the
+    test pre-fills, so the probe's select/os.read loop runs for real."""
+
+    def __init__(self, argv, out_chunks=(), eof=True):
+        self.argv = argv
+        self.killed = False
+        self._w = None
+        r, w = os.pipe()
+        for chunk in out_chunks:
+            os.write(w, chunk)
+        if eof:
+            os.close(w)
+        else:
+            self._w = w  # held open: reads block until the probe's deadline
+        self._stdout = os.fdopen(r, "rb", buffering=0)
+
+    @property
+    def stdout(self):
+        return self._stdout
+
+    @property
+    def pid(self):
+        return 4242
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        try:
+            self._stdout.close()
+        except OSError:
+            pass
+        if self._w is not None:
+            os.close(self._w)
+            self._w = None
+        return 0
+
+
+class RejectingDriver(FakeDriver):
+    """Fails the global input key the way a driver without the untargeted
+    route would — the probe must report "unknown", never "wedged"."""
+
+    def __call__(self, tool, args):
+        self.calls.append((tool, args))
+        if tool == "press_key" and "pid" not in args:
+            raise RuntimeError("press_key needs a target window")
+        if tool == "list_windows":
+            return {"windows": self.windows}
+        return {"ok": True}
+
+
+class AppearingDriver(FakeDriver):
+    """list_windows gains the xev window only after the first call — models
+    reality, where the probe's pre-spawn focus capture cannot see xev."""
+
+    def __call__(self, tool, args):
+        self.calls.append((tool, args))
+        if tool == "list_windows":
+            if not getattr(self, "_seen", False):
+                self._seen = True
+                return {"windows": self.windows}
+            return {"windows": self.windows + [XEV_WINDOW]}
+        return {"ok": True}
+
+
+class LateDriver(FakeDriver):
+    """The xev window appears near the end of the probe budget — the echo
+    wait gets ~zero budget, which is inconclusive, not a wedge."""
+
+    def __init__(self, windows, appear_after):
+        super().__init__(windows)
+        self._t0 = time.monotonic()
+        self._appear_after = appear_after
+
+    def __call__(self, tool, args):
+        self.calls.append((tool, args))
+        if tool == "list_windows":
+            if time.monotonic() - self._t0 >= self._appear_after:
+                return {"windows": self.windows + [XEV_WINDOW]}
+            return {"windows": self.windows}
+        return {"ok": True}
+
+
+class TestInputLiveness:
+    def _patch_binaries(self, bridge, monkeypatch, xev=True, stdbuf=True):
+        def which(p, path=None):
+            if p == "xev":
+                return "/usr/bin/xev" if xev else None
+            if p == "stdbuf":
+                return "/usr/bin/stdbuf" if stdbuf else None
+            return None
+        monkeypatch.setattr(bridge.shutil, "which", which)
+
+    def _patch_popen(self, bridge, monkeypatch, spawned, **proc_kw):
+        def fake_popen(argv, **kw):
+            proc = FakeXevProc(argv, **proc_kw)
+            spawned.append(proc)
+            return proc
+        monkeypatch.setattr(bridge.subprocess, "Popen", fake_popen)
+
+    def test_probe_ok_on_keypress_echo(self, bridge, monkeypatch):
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(
+            bridge, monkeypatch, spawned,
+            out_chunks=(b"KeyPress event, serial 34, synthetic NO\n",))
+        driver = AppearingDriver(WINDOWS)
+        monkeypatch.setattr(bridge, "call", driver)
+        state, detail = bridge._input_probe(timeout=2.0)
+        assert state == "ok"
+        assert "KeyPress" in detail
+        # the xev child is always reaped
+        assert spawned and spawned[0].killed
+        # fixed argv, no shell: stdbuf line-buffers xev's stdout; both
+        # binaries resolved against the bridge's own PATH (absolute)
+        argv = spawned[0].argv
+        assert argv[0] == "/usr/bin/stdbuf"
+        assert any(a.endswith("/xev") for a in argv)
+        assert "-event" in argv and "keyboard" in argv
+        # the probe key goes out untargeted (the XTEST global route) after
+        # the xev window is focused; the pre-probe focus is restored after
+        brings = [c[1] for c in driver.calls if c[0] == "bring_to_front"]
+        assert brings[0] == {"pid": 4242, "window_id": 505}
+        assert brings[-1] == {"pid": 33, "window_id": 303}  # chromium back
+        key = [c[1] for c in driver.calls if c[0] == "press_key"][0]
+        assert key == {"key": "Shift_L", "modifiers": [],
+                       "delivery_mode": "foreground"}
+        assert "pid" not in key and "window_id" not in key
+
+    def test_probe_selects_window_by_pid_not_title(
+            self, bridge, monkeypatch):
+        # the spoof outranks xev on z-order and title — the probe must still
+        # focus OUR xev (pid 4242), never the spoof
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(
+            bridge, monkeypatch, spawned,
+            out_chunks=(b"KeyPress event, serial 34\n",))
+        driver = FakeDriver(WINDOWS + [SPOOF_WINDOW, XEV_WINDOW])
+        monkeypatch.setattr(bridge, "call", driver)
+        state, _ = bridge._input_probe(timeout=2.0)
+        assert state == "ok"
+        brings = [c[1] for c in driver.calls if c[0] == "bring_to_front"]
+        assert brings[0] == {"pid": 4242, "window_id": 505}
+
+    def test_probe_unknown_when_pid_match_missing(
+            self, bridge, monkeypatch):
+        # only the spoof is present: no PID match is inconclusive — a
+        # spoofed title must never manufacture a "wedged" verdict
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned)
+        monkeypatch.setattr(bridge, "call",
+                            FakeDriver(WINDOWS + [SPOOF_WINDOW]))
+        state, detail = bridge._input_probe(timeout=0.5)
+        assert state == "unknown"
+        assert "4242" in detail  # names the pid it looked for
+        assert spawned[0].killed
+
+    def test_probe_wedged_on_echo_deadline(self, bridge, monkeypatch):
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned, eof=False)
+        monkeypatch.setattr(bridge, "call", FakeDriver(WINDOWS + [XEV_WINDOW]))
+        start = time.monotonic()
+        state, detail = bridge._input_probe(timeout=1.0)
+        elapsed = time.monotonic() - start
+        assert state == "wedged"
+        assert "wedged" in detail
+        assert 0.9 <= elapsed < 2.0  # a full echo observation happened
+        assert spawned[0].killed
+
+    def test_probe_unknown_when_window_appears_too_late(
+            self, bridge, monkeypatch):
+        # the window appears with ~no budget left for the echo wait: zero
+        # observation is inconclusive, never "wedged"
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned, eof=False)
+        monkeypatch.setattr(bridge, "call", LateDriver(WINDOWS, 0.6))
+        state, detail = bridge._input_probe(timeout=1.0)
+        assert state == "unknown"
+        assert "too late" in detail
+        assert spawned[0].killed
+
+    def test_probe_unknown_when_xev_exits_silent(self, bridge, monkeypatch):
+        # xev dying tells us nothing about the XTEST device: a probe
+        # failure, not wedge evidence
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned)  # immediate EOF
+        monkeypatch.setattr(bridge, "call", FakeDriver(WINDOWS + [XEV_WINDOW]))
+        state, detail = bridge._input_probe(timeout=2.0)
+        assert state == "unknown"
+        assert "exited before echoing" in detail
+        assert spawned[0].killed
+
+    def test_probe_unknown_without_xev(self, bridge, monkeypatch):
+        self._patch_binaries(bridge, monkeypatch, xev=False)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned)
+        monkeypatch.setattr(bridge, "call", FakeDriver(WINDOWS + [XEV_WINDOW]))
+        state, detail = bridge._input_probe(timeout=1.0)
+        assert state == "unknown"
+        assert "xev" in detail
+        assert not spawned  # nothing spawned when the probe cannot run
+
+    def test_probe_unknown_without_stdbuf(self, bridge, monkeypatch):
+        self._patch_binaries(bridge, monkeypatch, stdbuf=False)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned)
+        monkeypatch.setattr(bridge, "call", FakeDriver(WINDOWS + [XEV_WINDOW]))
+        state, detail = bridge._input_probe(timeout=1.0)
+        assert state == "unknown"
+        assert "stdbuf" in detail
+        assert not spawned
+
+    def test_probe_unknown_when_driver_rejects_global_key(
+            self, bridge, monkeypatch):
+        # a probe failure is never reported as a wedge (fail-safe direction)
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(
+            bridge, monkeypatch, spawned,
+            out_chunks=(b"KeyPress event, serial 34\n",))
+        monkeypatch.setattr(bridge, "call",
+                            RejectingDriver(WINDOWS + [XEV_WINDOW]))
+        state, _ = bridge._input_probe(timeout=2.0)
+        assert state == "unknown"
+        assert spawned[0].killed
+
+    def test_probe_unknown_on_driver_error(self, bridge, monkeypatch):
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned)
+
+        def bad_call(tool, args):
+            raise RuntimeError("driver exploded")
+        monkeypatch.setattr(bridge, "call", bad_call)
+        state, _ = bridge._input_probe(timeout=1.0)
+        assert state == "unknown"
+        assert spawned[0].killed
+
+    def test_probe_cancel_skips_side_effects(self, bridge, monkeypatch):
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned)
+        driver = FakeDriver(WINDOWS + [XEV_WINDOW])
+        monkeypatch.setattr(bridge, "call", driver)
+        cancel = threading.Event()
+        cancel.set()  # budget already blown before the probe starts
+        state, _ = bridge._input_probe(timeout=2.0, cancel=cancel)
+        assert state == "unknown"
+        assert not spawned  # not even spawned
+        assert driver.calls == []  # no focus hop, no key
+
+    def test_bounded_probe_passes_through(self, bridge, monkeypatch):
+        monkeypatch.setattr(bridge, "_input_probe",
+                            lambda timeout, cancel: ("ok", "echo in 0.1s"))
+        assert bridge._bounded_probe() == ("ok", "echo in 0.1s")
+
+    def test_bounded_probe_budget_overrun_is_unknown(
+            self, bridge, monkeypatch):
+        def slow_probe(timeout, cancel):
+            time.sleep(5)
+            return ("ok", "too late")
+        monkeypatch.setattr(bridge, "_input_probe", slow_probe)
+        start = time.monotonic()
+        state, detail = bridge._bounded_probe(timeout=0.2)
+        elapsed = time.monotonic() - start
+        assert state == "unknown"
+        assert "budget" in detail
+        assert elapsed < 2  # the status handler is never held hostage
+
+    def _reset_cache(self, bridge, monkeypatch):
+        monkeypatch.setattr(bridge, "_probe_cache",
+                            {"state": "unknown", "detail": "d0",
+                             "checked_at": None})
+        monkeypatch.setattr(bridge, "_probe_inflight", False)
+
+    def test_get_input_liveness_serves_cache(self, bridge, monkeypatch):
+        self._reset_cache(bridge, monkeypatch)
+
+        def spy():
+            raise AssertionError("probe must not run")
+        monkeypatch.setattr(bridge, "_bounded_probe", spy)
+        assert bridge.get_input_liveness(
+            run_probe=False) == ("unknown", "d0", None)
+
+    def test_get_input_liveness_single_flight(self, bridge, monkeypatch):
+        self._reset_cache(bridge, monkeypatch)
+        monkeypatch.setattr(bridge, "_probe_inflight", True)
+
+        def spy():
+            raise AssertionError("second probe must not start")
+        monkeypatch.setattr(bridge, "_bounded_probe", spy)
+        # a probe is already running: serve the stale cache, don't pile on
+        assert bridge.get_input_liveness(
+            run_probe=True) == ("unknown", "d0", None)
+
+    def test_get_input_liveness_runs_and_caches(self, bridge, monkeypatch):
+        self._reset_cache(bridge, monkeypatch)
+        monkeypatch.setattr(bridge, "_bounded_probe",
+                            lambda: ("ok", "fresh echo"))
+        state, detail, checked_at = bridge.get_input_liveness(run_probe=True)
+        assert state == "ok" and detail == "fresh echo"
+        assert abs(checked_at - time.time()) < 5
+        # the outcome is cached for plain reads
+        assert bridge.get_input_liveness(
+            run_probe=False) == ("ok", "fresh echo", checked_at)
+
+    def test_status_probe_param_runs_probe(self, live, monkeypatch):
+        bridge, _, port = live
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: SimpleNamespace(returncode=0, stdout="ok\n",
+                                           stderr=""))
+        seen = {}
+        monkeypatch.setattr(
+            bridge, "get_input_liveness",
+            lambda run_probe=False: seen.update(run_probe=run_probe)
+            or ("wedged", "fake wedge", 1700000000.0))
+        status, body = req(port, "GET", "/api/status?probe=1")
+        assert status == 200
+        assert seen == {"run_probe": True}
+        assert body["input"] == {"state": "wedged", "detail": "fake wedge",
+                                 "checked_at": 1700000000.0,
+                                 "driver": "cua-driver 0.28.2"}
+
+    def test_status_without_probe_param_is_read_only(self, live, monkeypatch):
+        bridge, _, port = live
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: SimpleNamespace(returncode=0, stdout="ok\n",
+                                           stderr=""))
+        seen = {}
+        monkeypatch.setattr(
+            bridge, "get_input_liveness",
+            lambda run_probe=False: seen.update(run_probe=run_probe)
+            or ("unknown", "cached", None))
+        status, body = req(port, "GET", "/api/status")
+        assert status == 200
+        assert seen == {"run_probe": False}
+        assert body["input"]["state"] == "unknown"
+
+    def test_status_input_unknown_when_driver_down(self, live, monkeypatch):
+        bridge, _, port = live
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: SimpleNamespace(returncode=1, stdout="",
+                                           stderr="boom"))
+
+        def spy(run_probe=False):
+            raise AssertionError("no probe when the driver is down")
+        monkeypatch.setattr(bridge, "get_input_liveness", spy)
+        status, body = req(port, "GET", "/api/status?probe=1")
+        assert status == 200
+        assert body["ok"] is False
+        assert body["input"] == {
+            "state": "unknown",
+            "detail": "driver down — input probe skipped",
+            "checked_at": None, "driver": "cua-driver 0.28.2"}
