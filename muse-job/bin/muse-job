@@ -638,6 +638,16 @@ def _spawn(slug, args):
         launch += "RUSTC_WRAPPER=sccache SCCACHE_CACHE_SIZE=20G "
     launch += _tui_launch_cmd("--yolo", f"\"$(cat {shquote(prompt_md)})\"")
     run("tmux", "send-keys", "-t", f"mjob-{slug}", launch, "Enter")
+    # Issue #791: a fresh workdir is a workspace the TUI has never seen, so
+    # the very first launch can block at the workspace-trust gate -- and
+    # _spawn never answered it (only cmd_resume and the fallback-fresh path
+    # did). The unanswered TUI session ends, the pane drops to a shell, and
+    # the job strands until a human intervenes. Answer now, same posture as
+    # the resume path: the workdir is slug-derived and operator-owned, so
+    # "Trust and continue" grants nothing the job's agent doesn't already
+    # have through its shell.
+    if _answer_trust_prompt(slug):
+        print("answered workspace-trust prompt", file=sys.stderr)
     # Discover the session uuid via the session index.
     uuid = None
     deadline = time.time() + 90
@@ -2034,16 +2044,26 @@ def job_status(job, slug):
     # auto-update shows up as a change in that name across watchdog passes.
     pane_live, pane_banner = False, False
     pane_cmd = ""
+    pane_trust = False
     if alive:
         pane, pane_cmd = _capture_pane_state(f"mjob-{slug}")
         pane_live = _pane_shows_live_tui(pane, pane_cmd)
         pane_banner = (not pane_live) and _pane_shows_resume_banner(pane, pane_cmd)
+        # Issue #791: the TUI is up but parked at the workspace-trust gate
+        # (spawn's post-launch answer missed it, or the gate appeared later).
+        # Trust text in the tail implies not-live (per _pane_shows_live_tui's
+        # own rule); the foreground-process gate is what keeps a dead pane
+        # with stale prompt text in its scrollback from counting (issue #4:
+        # a dead pane is never sent keystrokes).
+        pane_trust = ((not pane_live) and _is_tui_process(pane_cmd)
+                      and _TRUST_PROMPT_TEXT in _pane_tail(pane))
     return {
         "slug": slug,
         "job_state": job.get("state"),
         "tmux_alive": alive,
         "pane_live_tui": pane_live,
         "pane_resume_banner": pane_banner,
+        "pane_trust_prompt": pane_trust,
         "pane_cmd": pane_cmd,
         # Server-side session creation time: the unspoofable anchor for the
         # liveness grace windows (issue #23, sec review). None when tmux is
@@ -2400,6 +2420,39 @@ def _answer_trust_prompt(slug, timeout=20):
     return False
 
 
+def _recover_trust_prompt(slug):
+    """Answer a workspace-trust gate the watchdog found a live TUI parked at.
+
+    Issue #791: spawn's post-launch answer can miss the gate (or the gate
+    appears after a later relaunch), and the old code lumped the aftermath
+    into generic tui-dead while the job stranded. Answer under the same
+    standing --yolo authorization as the resume path (the workdir is
+    slug-derived and operator-owned, so "Trust and continue" grants nothing
+    the job's agent doesn't already have through its shell), then verify the
+    pane actually went live. Returns the watch event: `trust-answered` when
+    the TUI is live again, `blocked-trust` (loud, operator-actionable) when
+    the gate is still showing after the answer attempt. Never raises:
+    _answer_trust_prompt is itself no-raise, and a capture failure reads as
+    still-blocked (fail closed).
+    """
+    _answer_trust_prompt(slug)
+    try:
+        pane, cmd = _capture_pane_state(f"mjob-{slug}")
+        live = _pane_shows_live_tui(pane, cmd)
+    except Exception:
+        live = False
+    if live:
+        return {"job": slug, "signal": "trust-answered",
+                "detail": "TUI was blocked at the workspace-trust prompt; "
+                          "answered under the standing --yolo authorization "
+                          "and the TUI is live again"}
+    return {"job": slug, "signal": "blocked-trust",
+            "detail": "TUI still shows the workspace-trust prompt after "
+                      "the automatic answer attempt -- operator remedy: "
+                      "inspect with muse-job log, answer the prompt manually, "
+                      "or muse-job kill <slug> and spawn a fresh job"}
+
+
 def cmd_resume(args, _from_watch=False):
     job = load_job(args.slug)
     if tmux_alive(args.slug):
@@ -2620,7 +2673,9 @@ def cmd_watch(args):
         # allows several signals per pass), and the recovery attempt only
         # fires on the narrow resume-banner shape.
         if not st["pane_live_tui"]:
-            if st["pane_resume_banner"]:
+            if st["pane_trust_prompt"]:
+                events.append(_recover_trust_prompt(slug))
+            elif st["pane_resume_banner"]:
                 try:
                     if _recover_resume_banner(slug):
                         events.append({"job": slug, "signal": "tui-recovered",

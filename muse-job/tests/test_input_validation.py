@@ -265,6 +265,12 @@ def test_spawn_legit_repo_names_still_work(cli, monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "tmux_alive", lambda slug: False)
+    # Issue #791: _spawn now answers the workspace-trust gate post-launch.
+    # The faked run above returns junk pane text, so the real answerer would
+    # poll its 20s timeout here -- pin it off; the answering contract is
+    # covered in test_tui_banner.py.
+    monkeypatch.setattr(cli, "_answer_trust_prompt",
+                        lambda slug, timeout=20: False)
     # Skip the 90s session-uuid discovery poll: the uuid path is not what
     # this test pins.
     monkeypatch.setattr(cli, "find_session", lambda work, started: "fake-uuid")
@@ -313,6 +319,11 @@ def test_rev_parse_gets_base_without_option_separator(cli, monkeypatch, tmp_path
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "tmux_alive", lambda slug: False)
+    # Issue #791: _spawn now answers the workspace-trust gate post-launch;
+    # the faked run returns junk pane text, so pin the answerer off here
+    # (its contract is covered in test_tui_banner.py).
+    monkeypatch.setattr(cli, "_answer_trust_prompt",
+                        lambda slug, timeout=20: False)
     # Skip the 90s session-uuid discovery poll: the uuid path is not what
     # this test pins.
     monkeypatch.setattr(cli, "find_session", lambda work, started: "fake-uuid")

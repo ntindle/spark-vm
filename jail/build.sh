@@ -428,11 +428,20 @@ if ! PUBKEY="$(validate_pubkey_file "$PUBKEY_FILE")"; then
     exit 1
 fi
 # All guest-side setup runs inside run_guest (heredoc via stdin, quoted
-# so nothing expands on the host; $1/$2 are passed as arguments).
-run_guest /bin/bash -s "$JAIL_USER" "$PUBKEY" <<'GUEST_EOF'
+# so nothing expands on the host; $1/$2/$3 are passed as arguments).
+run_guest /bin/bash -s "$JAIL_USER" "$PUBKEY" "$HOST_VETH_IP" <<'GUEST_EOF'
 set -e
 U="$1"
 KEY="$2"
+# Issue #438: the guest's ~/.ssh/environment must take the proxy address
+# from $HOST_VETH_IP (like every other guest artifact) instead of a
+# hardcoded 10.99.0.1 -- a veth-IP change would otherwise leave non-
+# interactive SSH sessions pointing at a dead proxy while everything else
+# moved. Passed as $3 because the outer heredoc is quoted (host vars do
+# not expand); the inner heredoc below is unquoted so $VETH_IP expands on
+# the guest.
+VETH_IP="$3"
+[ -n "$VETH_IP" ] || { echo "ERROR: guest veth IP missing (arg 3)" >&2; exit 1; }
 id -u "$U" >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo "$U"
 echo "$U ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$U"
 chmod 440 "/etc/sudoers.d/$U"
@@ -445,10 +454,10 @@ chown -R "$U:$U" "/home/$U/.ssh"
 # non-interactive commands (which skip /etc/profile.d). Requires
 # PermitUserEnvironment yes in sshd_config (set above).
 cat > "/home/$U/.ssh/environment" <<EOF
-https_proxy=http://10.99.0.1:18080
-http_proxy=http://10.99.0.1:18080
-HTTPS_PROXY=http://10.99.0.1:18080
-HTTP_PROXY=http://10.99.0.1:18080
+https_proxy=http://$VETH_IP:18080
+http_proxy=http://$VETH_IP:18080
+HTTPS_PROXY=http://$VETH_IP:18080
+HTTP_PROXY=http://$VETH_IP:18080
 EOF
 chmod 600 "/home/$U/.ssh/environment"
 chown "$U:$U" "/home/$U/.ssh/environment"
