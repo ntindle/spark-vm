@@ -2,7 +2,7 @@
 
 **Status:** designed. Resolves the design half of backlog item G14
 (GitHub #556) from the tenant-box update-channel analysis
-(`HOSTED_GAP_ANALYSIS.md` §13). Implementation (S1–S3) remains on #556.
+(`HOSTED_GAP_ANALYSIS.md` §13). Implementation (S1–S3) remains on #776 (the G14 implementation issue; #556 closed on the design).
 
 **The gap:** H13's suspend/wake and G9's stall detector both assume a
 box is either working or stalled. Three questions were unspecified:
@@ -362,8 +362,8 @@ constant, not a per-box negotiation.
   persistence, driver error rules, the `auto_resume` gate.
 - `docs/FIRST_TEN_MINUTES_SPEC.md` §8 — the failure taxonomy the
   detector mechanizes; the 10-minute clock D4 pauses.
-- G17 (#608) — update event reporting: owns the wave-journal and the
-  Q5 wake-attribution questions.
+- G17 (#608 — closed on the design) — update event reporting: the wave-journal and Q5 wake-attribution
+  questions live on #779 (S2–S3) and #776 (Q5) respectively.
 - H13 (backlog) — the suspend/wake design that owns the served-code
   question (Q3), the workload registry, and the exact bounds (Q1);
   #377 — the idle-semantics prerequisite (Q4).

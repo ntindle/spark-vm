@@ -215,7 +215,7 @@ in the layer below (provisioner + control plane). Threat by threat:
   this doc consumes them. The reimage-only renewal model is what makes
   §3 a bounded list: there is no on-box updater authority left to
   design.
-- **G14** (updates vs idle/suspend, #556 — still open) — decided with
+- **G14** (updates vs idle/suspend, #556 — closed on the design; implementation on #776) — decided with
   H13; this doc's one input is the decided half, already given:
   `maintenance` is a trusted signal, a quiet-clock window for G9's
   stall detector, never relabeled `stuck`. The suspended-box half (does

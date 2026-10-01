@@ -41,7 +41,7 @@ identically everywhere they appear:
 - **The 90/30-day journal discipline (G16 OQ2, G17 §4 S2, `fleet/README.md`):**
   90 days of per-box records, compacted to per-day outcome histograms after
   30 days. G16's OQ2 punts to G17's discipline and the S1 README carries it.
-- **Never-interrupt-an-arc (G11, G14 D2, G15 §7):** a tenant box mid-arc
+- **Never-interrupt-an-arc (G11, G15 §7, G18 §3):** a tenant box mid-arc
   defers even a critical CVE until the arc ends; the security channel gets
   compressed parameters, never a bypass.
 - **`maintenance` producer rule (G14 D1/D8, G18 §7):** the window's
@@ -57,6 +57,14 @@ identically everywhere they appear:
    S1 alert set when the S1b slice lands — pointer comment on #608") names a
    closed issue. Redirected: the comment lands on **#777** (G15/G18
    implementation) when S1b ships. This doc §7 line updated accordingly.
+   The same audit then swept the other five design docs for the identical
+   stale pattern and fixed each: ROLLOUT_CONTROLLER_DESIGN.md footer
+   (#606 → #777), RELEASE_GATE_CHANNEL_DESIGN.md footer (#609 → #777),
+   UPDATE_IDLE_SUSPEND_CLOCK.md header (#556 → #776),
+   UPDATE_AUDIT_RETENTION_AND_ACCESS.md §6 (#660 → #778),
+   UPDATE_EVENT_REPORTING.md footer (#608 → #779) — plus two cross-doc
+   stalenesses (TENANT_UPDATE_TRUST_MODEL.md §4 "still open" on #556;
+   UPDATE_IDLE_SUSPEND_CLOCK.md cross-refs owning Q5/#608).
 3. **G17 S3 has a design remainder:** the signed box→plane channel
    *mechanism* is still design work, owned by the G13 residual per G17 §4 S3.
    Carried explicitly on **#775** (G13 implementation).
@@ -72,7 +80,7 @@ identically everywhere they appear:
 | #776 | G14 idle/suspend: scheduler suspend-awareness + wake-path hook + clock-pause guards (S1–S3), plus Q1–Q5 |
 | #777 | G15/G18 rollout controller + gate channel (S1a–S3), incl. the G15 OQ1 concurrent-releases question and S3 hot-standby |
 | #778 | G19 retention GC + tenant read path (S1–S3), plus Q1–Q4 |
-| #779 | G16/G17 S2–S3: push, gate integration, attested ingestion, plus OQ3/OQ5 |
+| #779 | G16 S2–S3 / G17 S1–S3: fleet-side event canonicalizer + alert rules, push endpoint, gate integration, attested ingestion, plus OQ3/OQ5 |
 
 All five are `enhancement` with the slice breakdowns in their bodies. When a
 slice ships, its implementer updates the corresponding design doc's footer —

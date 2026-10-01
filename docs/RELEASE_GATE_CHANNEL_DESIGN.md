@@ -431,6 +431,6 @@ evaluated on wake against the *current* permitted version.
 of the G15/G18 split: G15's rollout-controller design
 (`ROLLOUT_CONTROLLER_DESIGN.md` §5) states the box-side interface; this
 doc specifies how the answer travels. Implementation (S1a–S1b/S2/S3)
-remains — tracked on #609. Related: G15 (#606), G16 (#607, S1 shipped in `fleet/`),
+remains — tracked on #777 (the G15/G18 implementation issue; #609 closed on the design). Related: G15 (#606), G16 (#607, S1 shipped in `fleet/`),
 G17 (#608), G11/G12 (`UPDATE_CHANNEL_POLICY.md`), G13 (#555), G14
 (#556), H11.*
