@@ -10,7 +10,9 @@ service). The VAPID keypair is operator-generated during setup; no real
 secrets ever live in the repo.
 
 **Operator identity:** every `sudo` command in this doc runs from a
-**root shell**. `sudo -u swapd` here is root's unrestricted hop down to
+**root shell** (on the hosted tier, that's the operator's — these
+commands run where confirmd is deployed, not inside your tenant VM).
+`sudo -u swapd` here is root's unrestricted hop down to
 the secrets owner — not a narrow-grant escalation. Under `ntindle`'s
 narrow sudoers grants (`proxy/sudoers-swapd`) the same commands are
 **denied by design**: the sudoers file deliberately carries no `python3`
