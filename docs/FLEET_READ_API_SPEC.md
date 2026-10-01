@@ -62,29 +62,36 @@ event_id)` order — exactly the CLI's `_sort_key`).
 
 | Method + path | CLI counterpart | Response content |
 |---|---|---|
-| `GET /fleet/boxes?staleness_hours=N` | `inventory --store --staleness-hours` | `boxes[]`: `{box_id, repo_commit` (full + 12-char short, exactly the census bucketing), `toolset_tick`, `frozen` (`true`/`false`/`null` — null is "n/a", never "unknown"), `flags[]` (`stale`, `suspect`), `eligible` bool`}; `census`: `{eligible, total, stale, per_commit[]: {commit, count, pct}}` — the denominator and the exclusions travel with every percentage, exactly as the CLI prints them; `snapshot_generated_at`; `staleness_hours` echo |
-| `GET /fleet/boxes/{id}` | `inventory --store --box ID` | `history[]` newest-first: `{observed_at, repo_commit, tick, suspect}` — `tick` follows the CLI's deploy-first rule (`last_tick_at.deploy`, falling back to `last_tick_at.toolset`); unknown id → 404 with `{"error": "box <id> has no records in the journal"}` — the CLI's message verbatim, as JSON |
-| `GET /fleet/drift?expected=<commit>&staleness_hours=N` | `drift --store --expected` | `rows[]`: `{box_id, repo_commit, reason}` where reason is one of `policy-held (frozen)`, `deferred (active tenant arc)`, `suspect report (...)`, `unexplained`; `expected`: `{commit, source}` — source is `--expected`, `fleet majority`, the deterministic-tie wording, or `none (no eligible boxes)`; short-form comparison (12-char prefixes, same as the CLI) stated in the response as `commit_matching: "12-char prefix, same as the inventory census"` |
-| `GET /fleet/events?box=&wave=` | `events --store [--box] [--wave]` | `events[]` — the full canonical journal records (a superset of what the CLI's event printer renders: the response carries every journal field, not just the rendered subset); `box` filters on `box_id`; `wave` is accepted and answered honestly: while the `rollout` envelope is null (G15 S2 unlanded) the response carries `"wave_filter": "unavailable until G15 S2 (rollout envelope null)"` and returns unfiltered events rather than an empty list — an empty list would be a fiction |
-| `GET /fleet/alerts` | `events watch --store` | `{status: "pending" \| "clear", pending_count, alerts[]}` — the alert journal rows with `acked: false` first, then the acked ones the CLI omits, clearly marked; the exit-code contract is explicit: `status: "pending"` ⇔ the CLI would exit 1 |
-| `GET /fleet/crosscheck?box=` | `events crosscheck --store [--box]` | `{status: "violations" \| "clean", violation_count, verdicts[]}` — each `{claim, verdict: confirmed \| violation \| inconclusive, evidence}`; the exit-1-on-violation contract stated as `status` |
+| `GET /fleet/boxes?staleness_hours=N` | `inventory --store --staleness-hours` | `boxes[]`: `{box_id, repo_commit` (full + 12-char short, exactly the census bucketing), `toolset_tick`, `frozen` (`true`/`false`/`null` — null is "n/a", never "unknown"), `flags[]` (`stale`, `suspect`), `eligible` bool`}; `census`: `{eligible, total, stale, per_commit[]: {commit, count, pct}}` — the denominator and the exclusions travel with every percentage, exactly as the CLI prints them; `per_commit` sorted count-descending per the CLI; the missing-commit bucket key is `(no report)` exactly as the CLI renders it; `snapshot_generated_at`; `staleness_hours` echo |
+| `GET /fleet/boxes/{id}` | `inventory --store --box ID` | `history[]` newest-first: `{observed_at, repo_commit, tick, suspect}` — `tick` follows the CLI's deploy-first rule (`last_tick_at.deploy`,
+falling back to `last_tick_at.toolset`, 19-char truncation — the
+inventory table uses `toolset` only with 10-char truncation, so the
+two shapes name their rules separately); unknown id → 404 with `{"error": "box <id> has no records in the journal"}` — the CLI's message verbatim, as JSON |
+| `GET /fleet/drift?expected=<commit>&staleness_hours=N` | `drift --store --expected` | `rows[]`: `{box_id, repo_commit, reason}` where reason is one of `policy-held (frozen)`, `deferred (active tenant arc)`, `suspect report (...)`, `unexplained` — precedence pinned as frozen > arc > suspect > unexplained, exactly the CLI's; rows are eligible-only (stale boxes excluded, same as the CLI); `expected`: `{commit, source}` — source is `--expected`, `fleet majority`, the deterministic-tie wording, or `none (no eligible boxes)`; `commit` echoes the comparison form (12-char short) alongside the verbatim input; the short-form comparison rule (12-char prefixes, same as the census) is stated in the response as `commit_matching: "12-char prefix, same as the inventory census"` |
+| `GET /fleet/events?box=&wave=` | `events --store [--box] [--wave]` | Two shapes, mirroring the CLI: unfiltered returns the per-box outcome-series summary the CLI prints (`series[]`: `{box_id, event_count, last_outcome, last_emitted_at, outcome_histogram, last_note}`); `?box=` returns that box's event rows in `(emitted_at, event_id)` ascending order — the full canonical journal records (a superset of what the CLI's event printer renders: the response carries every journal field, not just the rendered subset). `?wave=` is accepted and answered honestly: while the `rollout` envelope is null (G15 S2 unlanded) the response carries `"wave_filter": "unavailable until G15 S2 (rollout envelope null)"` and returns the unfiltered shape rather than an empty list — a deliberate divergence from the CLI (the CLI's empty wave-filter result on a null-rollout fleet is the honest answer; the API keeps the shape so consumers don't code against an empty array that later gains rows). `?box=` with no events → 404 with `{"error": "box <id> has no events in the journal"}` — the CLI's message verbatim, as JSON |
+| `GET /fleet/alerts` | `events watch --store` | `{status: "pending" \| "clear", pending_count, alerts[]}` — pending alerts in `fired_at`-ascending order per the CLI, then the acked ones the CLI omits (ordering unspecified, clearly marked as outside the CLI's baseline — the §4 conformance test covers the pending portion only); the exit-code contract is explicit: `status: "pending"` ⇔ the CLI would exit 1 |
+| `GET /fleet/crosscheck?box=` | `events crosscheck --store [--box]` | `{status: "violations" \| "no-violations", confirmed, violations, inconclusive, verdicts[]}` — verdicts keep the CLI's field names and ordering: `{box_id, event_id, received_at, claim_to, verdict, detail}`, sorted by `(box_id, received_at)`; the CLI's summary line's three counts travel verbatim; the exit-1-on-violation contract stated as `status` |
 | `GET /fleet/waves` | *(none — reserved shape)* | 200 with `{"waves": [], "wave_assignments": "unavailable until G15 S2 (rollout envelope null on all journaled events)"}` — the endpoint exists so consumers can code against the path, but it names its own unavailability rather than returning an empty array that reads as "no waves" |
 
-Common freshness on every response: `data_current_as_of` — the
-newest collector clock across the journals the endpoint reads
-(same rule as the G22 S1 feed spec, which covers the event and alert
-journals). Per-endpoint definition, because the stores carry
-different clock fields: inventory-surface endpoints
-(`/fleet/boxes`, `/fleet/boxes/{id}`, `/fleet/drift`) use the newest
-`observed_at` across the inventory records they read (falling back to
-the snapshot's `generated_at`); `/fleet/events`, `/fleet/alerts`, and
-`/fleet/crosscheck` use the newest `received_at` across the event and
-alert journals. The inventory journal carries no `received_at` field
-at all — the spec names the real fields rather than pretending one
-rule covers both stores. A store with no journal rows renders
+Common freshness on every response: `data_current_as_of`. The rule
+follows what the endpoint actually serves, not what the journal
+knows — a stamp drawn from a newer source than the served data is a
+fiction, and this doc's own no-fiction contract forbids it:
+snapshot-sourced endpoints (`/fleet/boxes`, `/fleet/drift`) use the
+snapshot's `generated_at` (the snapshot can lag the journal — a
+collect that appends then fails the rebuild, a concurrent read
+mid-collect); the box history (`/fleet/boxes/{id}`) uses the newest
+`observed_at` across the served inventory records; `/fleet/events`,
+`/fleet/alerts`, and `/fleet/crosscheck` use the newest `received_at`
+across the event and alert journals. The inventory journal carries no
+`received_at` field at all — the spec names the real fields rather
+than pretending one rule covers both stores. A store with no journal
+rows renders
 `{"data": "no data"}` semantics — per-endpoint empty arrays plus the
 explicit note `"no journaled records; run collect first"`, never a
-clean-fleet fiction. Errors are JSON: `{"error": ..., "detail": ...}`.
+clean-fleet fiction. Errors are JSON: `{"error": ..., "detail": ...}`
+— missing store dir → 404 (the CLI exits 2: `"store directory %r not
+found"`), unreadable journal → 500, unknown box → 404.
 
 ## 3. What is deliberately NOT API'd in S1
 
@@ -121,17 +128,21 @@ the truncation rule is documented in the response schema, not hidden.
 
 - Stdlib `http.server` only (the repo's established convention). No
   new dependencies.
-- Binds `127.0.0.1` by default; `--bind` and `--port` flags with a
-  suggested default port of **18760**. No auth in S1 — the operator's
-  own box is the trust boundary, same as the CLI today. Binding to a
-  non-loopback address without an auth story is out of scope for S1
-  (and a review blocker if proposed).
+- Binds `127.0.0.1` — hardcoded, not a flag. A `--bind` flag is
+  deferred to the S2 auth story: binding a non-loopback address with
+  no auth story is a review blocker, so S1 ships no way to do it.
+  `--port` stays configurable (suggested default **18760**). No auth
+  in S1 — the operator's own box is the trust boundary, same as the
+  CLI today.
 - `--store DIR` is required; the API never writes to the store (reads
   take the same read-only posture as the inventory/event journal
   readers — pure readers stay unlocked per the #817 flock discipline).
-- No path-version prefix in S1 (`/fleet/*`, not `/v1/fleet/*`): the
-  surface is operator-local and the hosted control plane (H15) fronts
-  it with its own versioning. Versioning is an S2 decision.
+- No path-version prefix in S1 (`/fleet/*`, not `/v1/fleet/*`) — and
+  S1's unversioned contract is scoped to same-repo consumers only
+  (the G21 S2 console). The hosted control plane (H15) fronts it with
+  its own versioning; any out-of-repo consumer (the OQ1 third-party
+  consoles) ships only on a versioned path — that is the S2
+  versioning trigger.
 - Errors never leak box-controlled bytes raw: alert `detail` and
   record `note` fields pass through the same control-char stripping
   the alert journal synthesis applies (a crafted audit line can never
@@ -159,18 +170,27 @@ the truncation rule is documented in the response schema, not hidden.
 - **G15/G17/G18:** the API reads what these designs produce; no API
   endpoint changes a producer contract. The `/fleet/events` response
   is the canonical G17 shape; `/fleet/boxes` is the G16 store.
-- **G22 S2a (operator page, issue #796):** the operator page consumes
-  this API (it is the P7 formal home's operator surface), not raw
-  journals. The G22 S1 feed spec stays a direct journal projection —
-  the status page's no-fiction contract is hosted/tenant-facing and
-  must not inherit this API's operator-wide scope by accident.
-- **H14 push:** G23's intake reads `alerts.jsonl` today; `/fleet/alerts`
-  is the natural intake once the push daemon exists. The `watch`
-  exit-code path stays as the cron fallback (the analysis's S2), not
-  the primary.
-- **H15 dashboard:** the H15 Boxes panel stays per-box; this API is the
-  fleet-era surface the hosted control plane fronts. The two compose,
-  not compete.
+- **G22 S2a (operator page, issue #796):** the S2a operator page
+  consumes the collector journals directly (the G22 S1 feed spec's
+  §9 decision — this API does not interpose on the page's intake).
+  This API is the operator's machine-readable surface and the G21 S2
+  console's contract; a future page revision could consume the API,
+  but that is not S2a as designed. The feed spec stays a direct
+  journal projection — the status page's no-fiction contract is
+  hosted/tenant-facing and must not inherit this API's operator-wide
+  scope by accident.
+- **H14 push:** G23's decided intake reads `alerts.jsonl` (the
+  analysis's S1). `/fleet/alerts` is a candidate intake for the S2
+  enqueue path — the analysis's decision stands unless a future turn
+  re-litigates it with rationale. The `watch` exit-code path stays as
+  the cron fallback (the analysis's S2), not the primary.
+- **H15 dashboard:** the H15 Boxes panel stays per-box and is
+  tenant-scoped (the tenant's boxes, fed by the H3 provider contract).
+  This API is operator-wide — there is no tenant field on the stream
+  until G24 — so tenant-facing fronting happens only behind G24's
+  tenant read path; until then the control plane fronts it for
+  operator surfaces only. Operator vs tenant fronting are different
+  gates; the two compose, not compete.
 - **H12 metering:** G26's meter daemon reads the journal; this API is
   operator read tooling, not the metering contract — bounded reads and
   retention alignment belong to G26's S3, not here.
