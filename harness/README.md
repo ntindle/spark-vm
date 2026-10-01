@@ -90,9 +90,12 @@ Implements the executable half of the R2 pre-seeded-harness contract
   installer, never a service).
 - **`echo-fixture.py`** — the echo origin the installer starts: a
   loopback-only HTTP server that appends one
-  `{"method","path","authorization"}` JSONL record per request to the log
-  and answers 200. Same record format as the hermetic echo server in
-  `test_probe.py`.
+  `{"method","path","authorization","headers","body_sha256"}` JSONL record
+  per request to the log and answers 200 — the full request (raw path
+  incl. query, complete lowercased header set with duplicates joined,
+  sha256 of the body), so the probe can fail the image on a placeholder
+  leak through any channel (GitHub #157). Same record format as the
+  hermetic echo server in `test_probe.py`.
 - **`provider_iface.py`** — the H4 provider-agnostic driver contract: the
   six verbs (`provision` / `status` / `suspend` / `dial` / `ssh_info` /
   `destroy`, `snapshot` reserved), the validated lifecycle state machine
