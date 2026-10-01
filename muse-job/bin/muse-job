@@ -474,7 +474,7 @@ def cmd_spawn(args):
     # `git clone` as flags.
     if not repo_url_ok(args.repo):
         raise RuntimeError(
-            f"bad repo url: {args.repo!r} (leading dash rejected: "
+            f"bad repo url: {args.repo!r} (rejected: "
             "git option injection)")
 
     def go():
