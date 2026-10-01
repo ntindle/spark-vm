@@ -62,6 +62,51 @@ SESSION_INDEX = os.path.join(HOME, ".local", "share", "muse", "session-index.db"
 VIEW_DIR = os.path.join(HOME, ".local", "share", "muse", "sessions", ".msp-view-v1")
 MUSE = os.path.join(HOME, ".local", "bin", "muse")
 
+# Issue #699: TUI auto-update policy while a job is active. The `muse`
+# launcher (~/.local/bin/muse on a provisioned box is a bash launcher)
+# stages a new versioned binary in the background at startup: it checks
+# `.muse-update-checked-at` against MUSE_UPDATE_INTERVAL_SECONDS (default
+# 3600) and, when due, downloads the new `muse-bin-<version>` into the
+# shared install dir, flips `.muse-version`, deletes the old binaries, and
+# leaves a `.muse-update-notice` the next run reports. A TUI that notices
+# the staged update restarts itself mid-turn -- the pane's foreground
+# process name changing (muse-bin-1.3.0-R3233.1 -> -R3401.1) is exactly
+# what the watchdog's `tui-updated` event detects (issue #212).
+#
+# The launcher's own source gates the whole check+download on the
+# environment: `[[ "${MUSE_NO_AUTO_UPDATE:-0}" != 1 ]] &&
+# should_check_for_update ...` -- with MUSE_NO_AUTO_UPDATE=1 set, the
+# process tree never stages an update, and a missing binary fails loud
+# ("installed binary is missing; rerun the installer") instead of
+# self-healing. That is the deferral half of #212's policy question,
+# grounded rather than guessed. It is per-process-tree, not per-install:
+# a concurrent `muse` invocation by the same user (another job's TUI, the
+# operator's own shell) can still stage an update into the shared install
+# dir, so the watchdog's `tui-updated` event stays as the diagnostic for
+# the residual case. If a future launcher stops honoring this var, the
+# same event is the canary.
+_TUI_NO_AUTO_UPDATE = "MUSE_NO_AUTO_UPDATE=1"
+
+
+def _tui_launch_prefix():
+    """Env prefix suppressing the muse launcher's auto-update for one TUI.
+
+    Prepended to every TUI launch command muse-job owns (spawn, resume,
+    resume-fallback relaunch): while a job is active its TUI never stages
+    a mid-turn update. See _TUI_NO_AUTO_UPDATE for the grounding and the
+    residual risk.
+    """
+    return _TUI_NO_AUTO_UPDATE + " "
+
+
+def _tui_launch_cmd(*argv):
+    """Build the TUI command line for a tmux pane, update-deferred.
+
+    argv are the muse subcommand words (already shell-quoted where needed);
+    the result is a single shell command string with the #699 env prefix.
+    """
+    return _tui_launch_prefix() + "muse " + " ".join(argv)
+
 # ANSI/OSC escapes + C0 controls. Event `detail` fields are agent-influenced
 # text stored in the event log and echoed into operator-visible output
 # (status, watch pages); a forged line could otherwise erase or spoof the
@@ -503,12 +548,15 @@ def _spawn(slug, args):
     prompt_md = os.path.join(jd, "prompt.md")
     # Launch with the prompt as argv via shell $(cat): no TUI input racing,
     # no quoting hazards (command substitution results are not re-scanned).
+    # Issue #699: the TUI's environment defers launcher auto-updates while
+    # the job is active -- the job's own process tree never stages a mid-turn
+    # update (see _TUI_NO_AUTO_UPDATE).
     launch = (
         f"cd {shquote(work)} && TMPDIR={shquote(os.path.join(jd, 'tmp'))} "
     )
     if shutil.which("sccache"):
         launch += "RUSTC_WRAPPER=sccache SCCACHE_CACHE_SIZE=20G "
-    launch += f"muse --yolo \"$(cat {shquote(prompt_md)})\""
+    launch += _tui_launch_cmd("--yolo", f"\"$(cat {shquote(prompt_md)})\"")
     run("tmux", "send-keys", "-t", f"mjob-{slug}", launch, "Enter")
     # Discover the session uuid via the session index.
     uuid = None
@@ -2250,7 +2298,7 @@ def cmd_resume(args, _from_watch=False):
     run("tmux", "new-session", "-d", "-s", f"mjob-{args.slug}", "-x", "220", "-y", "60",
         "-c", work)
     run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
-        f"cd {shquote(work)} && muse resume {shquote(uuid)}", "Enter")
+        f"cd {shquote(work)} && {_tui_launch_cmd('resume', shquote(uuid))}", "Enter")
     _answer_trust_prompt(args.slug)
     time.sleep(15)
     pane = run("tmux", "capture-pane", "-p", "-t", f"mjob-{args.slug}").stdout.decode(
@@ -2266,7 +2314,7 @@ def cmd_resume(args, _from_watch=False):
         time.sleep(2)
         t0 = time.time()
         run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
-            f"cd {shquote(work)} && muse --yolo", "Enter")
+            f"cd {shquote(work)} && {_tui_launch_cmd('--yolo')}", "Enter")
         _answer_trust_prompt(args.slug)
         time.sleep(8)
         _steer(args.slug, "Continue the job described in ../prompt.md. "
