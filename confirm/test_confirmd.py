@@ -472,6 +472,48 @@ class ConfirmdTests(unittest.TestCase):
                 t.join()
             self.assertEqual(errors, [])
 
+    # --- 70: no stale-literal fallback; fail closed at startup ----------
+
+    def test_70_resolve_bind_env_pin_wins(self):
+        """CONFIRM_BIND pins the bind address; tailscale is not consulted."""
+        with mock.patch.dict(os.environ, {"CONFIRM_BIND": "100.99.9.9"}), \
+             mock.patch.object(cd, "_tailnet_ip4",
+                               side_effect=AssertionError("must not run")):
+            self.assertEqual(cd._resolve_bind(), "100.99.9.9")
+
+    def test_70_resolve_bind_tailscale_when_no_env(self):
+        """No pin: the bind address comes from `tailscale ip -4`."""
+        with mock.patch.dict(os.environ, {"CONFIRM_BIND": ""}), \
+             mock.patch.object(cd, "_tailnet_ip4",
+                               return_value="100.65.241.21"):
+            self.assertEqual(cd._resolve_bind(), "100.65.241.21")
+
+    def test_70_resolve_bind_none_when_unresolvable(self):
+        """No pin and tailscale unreachable: None, never a stale literal."""
+        with mock.patch.dict(os.environ, {"CONFIRM_BIND": ""}), \
+             mock.patch.object(cd, "_tailnet_ip4", return_value=None):
+            self.assertIsNone(cd._resolve_bind())
+
+    def test_70_main_fails_closed_when_bind_none(self):
+        """main() exits non-zero before serving when the bind address
+        is unresolvable — fail closed, not serve-on-guess."""
+        with mock.patch.object(cd, "BIND", None):
+            with self.assertRaises(SystemExit) as ctx:
+                cd.main()
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_70_host_addrs_never_contains_none(self):
+        """The belt-and-braces BIND add must not inject None into the
+        refusal set when import-time resolution failed (main() refuses
+        to serve in that case, but the module must stay sound)."""
+        def fail(cmd, **kwargs):
+            raise FileNotFoundError("no tailscale binary")
+        with mock.patch.object(cd, "BIND", None), \
+             mock.patch("subprocess.run", side_effect=fail):
+            addrs, ok = cd._host_addrs()
+        self.assertFalse(ok)
+        self.assertNotIn(None, addrs)
+
     # --- 535/360: writer-side audit rotation -----------------------------
 
     def test_535_audit_rotates_at_cap(self):

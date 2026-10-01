@@ -127,7 +127,19 @@ def _tailnet_ip4():
         pass
     return None
 
-BIND = os.environ.get("CONFIRM_BIND") or _tailnet_ip4() or "100.65.241.20"
+
+# Issue #70: explicit operator pin wins; otherwise resolve from tailscale.
+# There is deliberately NO stale-literal fallback: serving on a guessed
+# address would invalidate finding 47's self-peer refusal (a wrong self
+# set authenticates a local process as the owner). A None return means
+# "cannot determine the bind address" and main() fails closed (exit 1)
+# instead of serving — systemd Restart=on-failure retries once tailscaled
+# is back, per confirmd.service.
+def _resolve_bind():
+    return os.environ.get("CONFIRM_BIND") or _tailnet_ip4()
+
+
+BIND = _resolve_bind()
 
 # Finding 57: the page's own origins, exact-matched with port.
 # Served at the tailnet IP (BIND) and the ts.net DNS name.
@@ -547,7 +559,8 @@ def _host_addrs():
     """Finding 63(b): try sudo first (same narrow rule as whois). If
     tailscaled is unreachable, warn - the set collapses to BIND only.
     Returns (addrs, ok); ok is False exactly when no tailscale query
-    succeeded."""
+    succeeded. Issue #70: when BIND itself is None (no pin, no resolve),
+    the set is BIND-less here and main() refuses to serve entirely."""
     addrs = set()
     ok = False
     for cmd in (["sudo", "-n", "tailscale", "ip"], ["tailscale", "ip"]):
@@ -568,8 +581,11 @@ def _host_addrs():
         # boundary (finding 47); log it loudly.
         print("confirmd WARNING: cannot get tailscale IPs; self-peer "
               "set is BIND only", flush=True)
-    # Belt and braces: the bind address is always self.
-    addrs.add(BIND)
+    # Belt and braces: the bind address is always self (issue #70: BIND is
+    # None only when no address resolved at import, and main() refuses to
+    # serve in that case — a None must never land in the refusal set).
+    if BIND:
+        addrs.add(BIND)
     return addrs, ok
 
 
@@ -585,7 +601,9 @@ class _SelfAddrs:
     Keeps the module-level ``HOST_ADDRS`` name and its ``in`` shape, so
     callers and tests are unchanged. A failed refresh keeps the last good
     set (the refusal boundary must never silently shrink); the import-time
-    resolve keeps finding 63(b)'s warn-and-collapse-to-BIND semantics.
+    resolve keeps finding 63(b)'s warn-and-collapse-to-BIND semantics
+    (issue #70's exception: no bind address resolved at import means
+    main() refuses to serve at all, fail closed).
     Thread-safe: handler threads share the one instance.
     """
     def __init__(self):
@@ -2672,6 +2690,16 @@ class BoundedThreadingHTTPServer(_BoundedHTTPServer):
         _kill_connection(request, client_address)
 
 def main():
+    # Issue #70: fail closed at startup. No stale-literal fallback exists
+    # anymore: if the bind address cannot be determined (no CONFIRM_BIND
+    # pin and `tailscale ip -4` failed), serving would run finding 47's
+    # self-peer refusal on a guessed address — so refuse to serve.
+    # systemd's Restart=on-failure retries once tailscaled is back.
+    if BIND is None:
+        print("confirmd FATAL: cannot determine the tailnet bind address "
+              "(tailscale ip -4 failed and CONFIRM_BIND is unset); "
+              "refusing to serve", flush=True)
+        sys.exit(1)
     # Finding 67: print the resolved origins at startup so the journal
     # shows them; a missing ts.net name must be visible, not silent.
     print("confirmd PAGE_ORIGINS=%s" % sorted(PAGE_ORIGINS), flush=True)
