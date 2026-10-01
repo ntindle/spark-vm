@@ -484,3 +484,126 @@ def test_missing_audit_tail_is_note(dirs):
     assert proc.returncode == 0, proc.stderr
     assert journal(store, "events.jsonl") == []
     assert "audit-tail.jsonl missing" in proc.stderr
+
+
+# --- Control-character injection (Security B1, PR #794) ---------------------
+# Injected newlines/escapes inside a *field* are the forgery vector
+# (extra cron-log lines, forged alert rows, terminal escape codes).
+# Structural newlines between output rows are legitimate, so the check
+# allows \n and \t but nothing else below 0x20 or DEL.
+def _has_control_chars(text):
+    return any((ord(c) < 0x20 and c not in ("\n", "\t"))
+               or ord(c) == 0x7f for c in text)
+
+
+def test_control_chars_never_reach_journal_or_output(dirs):
+    estate, store = dirs
+    hostile = json.dumps({
+        "ts": "2026-10-01T10:00:00Z",
+        "event": "deploy",
+        "result": "deploy-fail",
+        "from": "a" * 40,
+        "to": "b" * 40 + "\x1b]0;terminal-title-pwn\x07",
+        "component": "proxy\nFAKE cron line",
+        "phase": "install\r\nINJECTED",
+    })
+    write_box(estate, "tower", [
+        hostile,
+        # Unknown shape with control chars in the shape fields: the
+        # fail-closed note must not carry them raw either.
+        json.dumps({"ts": "2026-10-01T10:01:00Z",
+                    "event": "deploy\nFAKE",
+                    "result": "ok\r\nANOTHER"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert not _has_control_chars(proc.stderr), proc.stderr
+    for ev in journal(store, "events.jsonl"):
+        for key, value in ev.items():
+            if isinstance(value, str):
+                assert not _has_control_chars(value), (key, value)
+    # The hostile to-value is stripped, not dropped: the event survives.
+    evs = journal(store, "events.jsonl")
+    assert len(evs) == 1
+    assert evs[0]["outcome"] == "failed"
+    assert "\x1b" not in evs[0]["to"] and "\n" not in evs[0]["subcomponent"]
+    # Strip-not-drop: the payload text remains but cannot break structure.
+    assert "terminal-title-pwn" in evs[0]["to"]
+    assert evs[0]["subcomponent"] == "proxyFAKE cron line"
+
+    proc = run_inventory("events", "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert not _has_control_chars(proc.stdout), proc.stdout
+    assert "\x1b" not in proc.stdout
+    # No forged extra table row: the injected newline is gone, so the
+    # events list prints exactly its structural lines.
+    assert proc.stdout.count("\n") == 3  # header + col header + 1 box row
+
+
+def test_control_chars_in_alert_paths(dirs):
+    estate, store = dirs
+    write_box(estate, "tower", [
+        json.dumps({"ts": "2026-10-01T10:00:00Z", "event": "deploy",
+                    "result": "rollback-failed", "from": "a" * 40,
+                    "to": "b" * 40 + "\nFORGED alert row",
+                    "phase": "x"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    alerts = journal(store, "alerts.jsonl")
+    assert len(alerts) == 1
+    for key, value in alerts[0].items():
+        if isinstance(value, str):
+            assert not _has_control_chars(value), (key, value)
+    proc = run_inventory("events", "watch", "--store", store)
+    assert proc.returncode == 1
+    assert not _has_control_chars(proc.stdout), proc.stdout
+    # The payload text remains (strip-not-drop) but cannot forge an
+    # extra alert row: exactly the structural 4 lines for one alert.
+    assert proc.stdout.count("\n") == 4
+    assert "\n" not in alerts[0]["to"]
+    assert "FORGED alert row" in alerts[0]["to"]
+
+
+# --- Type-confusion hardening (Engineering B1, PR #794) ---------------------
+# A type-confused-but-valid audit line (e.g. `"to":12345`) must never
+# poison alert evaluation: free-form fields coerce to str-or-None at
+# synthesis, so the journal carries `to: None` and every future collect
+# evaluates alerts cleanly.
+def test_numeric_to_coerced_to_none_and_alerts_keep_running(dirs):
+    estate, store = dirs
+    write_box(estate, "tower", [
+        json.dumps({"ts": ts(20), "event": "deploy", "result": "deploy-fail",
+                    "from": "a" * 40, "to": 12345, "component": "proxy",
+                    "phase": "install"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    evs = journal(store, "events.jsonl")
+    assert len(evs) == 1
+    assert evs[0]["to"] is None
+    assert evs[0]["outcome"] == "failed"
+    # Second collect: alert evaluation runs over the journaled event
+    # without the TypeError the poisoned row used to cause.
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "unexpected failure" not in proc.stderr
+
+
+def test_non_string_versions_and_trigger_fall_back(dirs):
+    estate, store = dirs
+    write_box(estate, "tower", [
+        json.dumps({"ts": 12345, "event": "deploy", "result": "ok",
+                    "from": ["not", "a", "string"], "to": "b" * 40,
+                    "components": "proxy", "to_version": 7,
+                    "trigger": ["scheduled"]}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    evs = journal(store, "events.jsonl")
+    assert len(evs) == 1
+    ev = evs[0]
+    assert ev["from"] is None
+    assert ev["to_version"] is None
+    assert ev["emitted_at"] is None
+    assert ev["trigger"] == "scheduled"

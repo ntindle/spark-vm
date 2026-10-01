@@ -162,14 +162,40 @@ _TRANSLATE = {
 _LOCAL_ONLY = {("check", "noop")}
 
 
+def _clean_text(value):
+    """Strip ASCII control characters from a string.
+
+    Audit lines are box-emitted and may carry attacker-influenced bytes
+    (audit() interpolates raw variables into JSON). Raw control bytes
+    must never reach operator-facing output: a newline in an audit field
+    would forge extra lines in cron logs and the alert transport, and
+    escape sequences would inject terminal control codes into the CLI
+    tables. Tab is kept (it cannot break a line); everything else below
+    0x20 plus DEL is dropped. Non-strings pass through unchanged so
+    callers can apply it uniformly at synthesis and display.
+    """
+    if not isinstance(value, str):
+        return value
+    return "".join(ch for ch in value
+                   if ch == "\t" or not (ord(ch) < 0x20 or ord(ch) == 0x7f))
+
+
+def _str_or_none(value):
+    """Coerce a free-form audit field to str-or-None (Engineering B1,
+    PR #794: a type-confused-but-valid audit line like `"to":12345`
+    would otherwise journal a non-string that crashes alert evaluation
+    on every future collect). Mirrors the subcomponent pattern."""
+    return value if isinstance(value, str) else None
+
+
 def _note_for(event, result, line):
     """Synthesize the human/alert note from the audit line itself (§2:
     the box-side alert reason lives in $LAST_FAILURE, which the
     collector does not pull — so the note is a one-line synthesis,
     never a debug dump)."""
-    phase = line.get("phase")
-    to = line.get("to")
-    comps = line.get("components") or line.get("component")
+    phase = _clean_text(line.get("phase"))
+    to = _clean_text(line.get("to"))
+    comps = _clean_text(line.get("components") or line.get("component"))
     if result == "precheck-fail":
         base = "pre-deployment gates refused before any mutation"
     elif result == "gate-fail":
@@ -199,7 +225,7 @@ def _note_for(event, result, line):
         base = "restored %s but post-restore health failed" % (
             to or "unknown")
     else:
-        base = "audit line result=%s" % result
+        base = "audit line result=%s" % _clean_text(result)
     if event == "check" and result == "precheck-fail":
         base = "scheduled check: " + base
     return base
@@ -225,19 +251,24 @@ def _event_id_for(box_id, ts, event, result, frm, to, subcomponent=None):
 
 def _build_event(box_id, received_at, line, kind, outcome,
                  subcomponent=None, subcomponents_verbatim=None):
-    """Build one standard-shape event (§2) from an audit line."""
-    ts = line.get("ts")
-    frm = line.get("from")
-    to = line.get("to")
+    """Build one standard-shape event (§2) from an audit line.
+
+    Free-form audit fields are coerced to str-or-None up front: a
+    type-confused-but-valid line (e.g. `"to":12345`) would otherwise
+    journal a non-string that crashes alert evaluation on every future
+    collect (Engineering B1, PR #794)."""
+    ts = _str_or_none(line.get("ts"))
+    frm = _str_or_none(line.get("from"))
+    to = _str_or_none(line.get("to"))
     # manual-rollback's `from` is the commit the operator restored away
     # from (the audit line carries it as rolled_back_from).
     if line.get("event") == "rollback" and line.get("result") == \
             "manual-rollback" and frm is None:
-        frm = line.get("rolled_back_from")
+        frm = _str_or_none(line.get("rolled_back_from"))
     trigger = line.get("trigger")
     if trigger not in ("scheduled", "extra-inputs"):
         trigger = "scheduled"
-    phase = line.get("phase")
+    phase = _str_or_none(line.get("phase"))
     if (line.get("event"), line.get("result")) == ("deploy", "reload-fail"):
         # The reload-fail line carries no component or phase (§3); the
         # phase is synthesized as "reload" — noted in the note, not
@@ -250,19 +281,20 @@ def _build_event(box_id, received_at, line, kind, outcome,
                                   subcomponent),
         "box_id": box_id,
         "session_epoch": None,      # S1: no provisioner box record (OQ3)
-        "emitted_at": ts if isinstance(ts, str) and ts else None,
+        "emitted_at": _clean_text(ts) if isinstance(ts, str) and ts
+        else None,
         "received_at": received_at,
         "source": "auto-deploy",
         "component": "repo",
-        "subcomponent": subcomponent,
-        "subcomponents": subcomponents_verbatim,
+        "subcomponent": _clean_text(_str_or_none(subcomponent)),
+        "subcomponents": _clean_text(_str_or_none(subcomponents_verbatim)),
         "kind": kind,
         "outcome": outcome,
-        "from": frm if frm is not None else None,
-        "to": to if to is not None else None,
-        "from_version": line.get("from_version"),
-        "to_version": line.get("to_version"),
-        "phase": phase if phase is not None else None,
+        "from": _clean_text(frm) if frm is not None else None,
+        "to": _clean_text(to) if to is not None else None,
+        "from_version": _clean_text(_str_or_none(line.get("from_version"))),
+        "to_version": _clean_text(_str_or_none(line.get("to_version"))),
+        "phase": _clean_text(phase) if phase is not None else None,
         "window": None,            # G14 maintenance windows are future
         "rollout": None,           # G15 S2 assigns waves
         "trigger": trigger,
@@ -303,7 +335,8 @@ def canonicalize_audit_rows(rows, box_id, received_at):
         translated = _TRANSLATE.get(shape)
         if translated is None:
             notes.append("no translation for audit shape %s/%s; "
-                         "kept out of the event journal" % (event, result))
+                         "kept out of the event journal"
+                         % (_clean_text(event), _clean_text(result)))
             continue
         kind, outcome = translated
         if shape == ("deploy", "ok"):
@@ -419,10 +452,13 @@ def _alert(rule, fired_at, detail, box_id=None, subcomponent=None,
         "alert_id": alert_id,
         "rule": rule,
         "fired_at": fired_at,
-        "box_id": box_id,
-        "subcomponent": subcomponent,
-        "to": to,
-        "detail": detail,
+        # Alert fields ride the S1 alert transport (cron logs, paging):
+        # control chars are stripped at synthesis so a crafted audit line
+        # can never forge an alert row.
+        "box_id": _clean_text(box_id),
+        "subcomponent": _clean_text(subcomponent),
+        "to": _clean_text(to),
+        "detail": _clean_text(detail),
         "acked": False,
     }
 
@@ -481,7 +517,7 @@ def _rule_correlated_failure(events, fired_at):
                     "correlated-failure", fired_at,
                     "%d boxes failed/rolled-back on (%s, to=%s) within "
                     "30 min: %s" % (len(boxes), subcomp,
-                                    to[:12] if to else "(no to)",
+                                    str(to)[:12] if to else "(no to)",
                                     ", ".join(boxes)),
                     subcomponent=subcomp,
                     to=to or None,
@@ -634,7 +670,9 @@ def ack_alert(store_dir, alert_id):
 def _short(value, width=12):
     if not value:
         return "-"
-    return str(value)[:width]
+    # Display path: never emit control characters into the operator's
+    # terminal, even from a journal written by an older build.
+    return _clean_text(str(value))[:width]
 
 
 def _sort_key(event):
@@ -668,11 +706,11 @@ def cmd_events_list(store_dir, box_id, wave):
         for e in events:
             frm, to = _short(e.get("from")), _short(e.get("to"))
             lines.append(fmt % (
-                (e.get("emitted_at") or "?")[:19],
+                _clean_text((_str_or_none(e.get("emitted_at")) or "?")[:19]),
                 e.get("kind") or "?", e.get("outcome") or "?",
                 _short(e.get("subcomponent"), 16) or "-",
                 "%s->%s" % (frm, to),
-                (e.get("note") or "")[:60]))
+                _clean_text((_str_or_none(e.get("note")) or "")[:60])))
     else:
         # Per-box outcome series.
         by_box = {}
@@ -694,10 +732,11 @@ def cmd_events_list(store_dir, box_id, wave):
                                for o, c in sorted(outcomes.items(),
                                                   key=lambda kv: str(kv[0])))
             lines.append(fmt % (
-                str(bid)[:24], len(series),
+                _clean_text(str(bid))[:24], len(series),
                 str(last.get("outcome"))[:13],
-                (last.get("emitted_at") or "?")[:19],
-                ("%s (%s)" % (summary, (last.get("note") or "")[:40]))))
+                _clean_text((_str_or_none(last.get("emitted_at")) or "?")[:19]),
+                _clean_text("%s (%s)" % (summary, (_str_or_none(
+                    last.get("note")) or "")[:40]))))
     print("\n".join(lines))
     return None
 
@@ -716,12 +755,13 @@ def cmd_events_watch(store_dir):
     lines = ["UNACKNOWLEDGED ALERTS (%d):" % len(pending)]
     for a in sorted(pending, key=lambda x: str(x.get("fired_at") or "")):
         lines.append("  [%s] box=%s subcomponent=%s to=%s fired=%s" % (
-            a.get("rule"), a.get("box_id") or "-",
-            a.get("subcomponent") or "-",
-            _short(a.get("to")), (a.get("fired_at") or "?")[:19]))
-        lines.append("      %s" % (a.get("detail") or ""))
+            _clean_text(a.get("rule")), _clean_text(a.get("box_id")) or "-",
+            _clean_text(a.get("subcomponent")) or "-",
+            _short(a.get("to")),
+            _clean_text((_str_or_none(a.get("fired_at")) or "?")[:19])))
+        lines.append("      %s" % _clean_text(a.get("detail") or ""))
         lines.append("      alert_id=%s (fleet events ack --alert-id <id>)"
-                     % a.get("alert_id"))
+                     % _clean_text(a.get("alert_id")))
     print("\n".join(lines))
     return None, 1
 
@@ -731,8 +771,8 @@ def cmd_events_ack(store_dir, alert_id):
     if err:
         return err
     if not found:
-        return "no alert with id %s" % alert_id
-    print("acknowledged %s" % alert_id)
+        return "no alert with id %s" % _clean_text(alert_id)
+    print("acknowledged %s" % _clean_text(alert_id))
     return None
 
 
