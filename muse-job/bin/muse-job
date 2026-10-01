@@ -529,8 +529,8 @@ def _spawn(slug, args):
         run("git", "clone", "--", args.repo, pristine, timeout=600)
     else:
         run("git", "-C", pristine, "fetch", "origin", timeout=600)
-    base = args.base or "origin/HEAD"
-    # resolve base to a sha for the record
+    # resolve base to a sha for the record (base was validated above --
+    # no re-derivation needed)
     sha = run("git", "-C", pristine, "rev-parse", base).stdout.decode().strip()
 
     work = os.path.join(jd, "work")
