@@ -13,7 +13,9 @@ later slice; the record schema and the store are unchanged either way.
 Subcommands:
   collect   --estate DIR --store DIR [--box-id-map FILE]
       Read per-box artifacts and append one inventory record per box to
-      the store's journal, then rebuild the snapshot.
+      the store's journal, then rebuild the snapshot. Also canonicalizes
+      each box's audit tail into the update-event journal (G17/#608 S1)
+      and evaluates the fleet alert rules.
   inventory --store DIR [--staleness-hours N] [--box ID]
       Print the fleet version table (per-box versions + % census). With
       --box, print that box's version history instead.
@@ -25,6 +27,13 @@ Subcommands:
   rebuild   --store DIR
       Rebuild the snapshot from the journal (the snapshot is derived;
       the journal is the source of truth).
+  events    --store DIR [--box ID] [--wave WAVE]
+      Print the update-event journal (per-box outcome series; G17 S1).
+  events watch --store DIR
+      List unacknowledged alerts; exit 1 when any are pending, 0 when
+      the queue is clear.
+  events ack --store DIR --alert-id ID
+      Mark one alert acknowledged.
 
 Per-box directory layout (each subdir of --estate is one box; the dir
 name is the box_id unless --box-id-map remaps it):
@@ -72,6 +81,13 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
+
+# Sibling module (fleet/events.py): the G17 S1 update-event canonicalizer,
+# event journal, and alert rules. Imported as a sibling because the fleet
+# modules are script-run (python3 fleet/inventory.py puts fleet/ on
+# sys.path); the hermetic suite exercises the CLIs through subprocess,
+# never through imports.
+import events
 
 RECORD_SCHEMA = "fleet-inventory-record/1"
 SNAPSHOT_SCHEMA = "fleet-inventory-snapshot/1"
@@ -777,6 +793,7 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
     observed_at = _now_iso()
     records = []
     failed = []
+    box_contexts = []  # (box_dir, box_id) for the G17 S1 event pass
     for dirname in box_dirs:
         box_id = mapping.get(dirname, dirname)
         if not isinstance(box_id, str) or not box_id:
@@ -786,15 +803,43 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
             failed.append("%s: box_id map produced non-string box_id %r; "
                           "skipped" % (dirname, box_id))
             continue
+        box_dir = os.path.join(estate_dir, dirname)
         try:
-            records.append(collect_box(os.path.join(estate_dir, dirname),
-                                       box_id, observed_at))
+            records.append(collect_box(box_dir, box_id, observed_at))
         except Exception as exc:  # one bad box must not sink the collect
             failed.append("%s: %s" % (dirname, exc))
+            continue
+        box_contexts.append((box_dir, box_id))
 
     total, err = append_journal(store_dir, records)
     if err:
         return err
+
+    # G17 S1: canonicalize each box's audit tail into the update-event
+    # journal (the design's S1 sink — the same estate dir the collector
+    # already pulls), then evaluate the four fleet alert rules. A failed
+    # event/alert write fails the collect loudly: the operator's
+    # contract is the exit code, and a silently un-journaled event would
+    # be missing evidence masquerading as silence.
+    all_events = []
+    for box_dir, box_id in box_contexts:
+        box_events, _, ev_notes = events.collect_box_events(
+            box_dir, box_id, observed_at)
+        all_events.extend(box_events)
+        for note in ev_notes:
+            print("fleet events note (%s): %s" % (box_id, note),
+                  file=sys.stderr)
+    appended, duplicates, ev_err = events.append_events(store_dir,
+                                                        all_events)
+    if ev_err:
+        return "event journal: %s" % ev_err
+    fired, alert_err = events.evaluate_alerts(store_dir, observed_at)
+    if alert_err:
+        return "alert evaluation: %s" % alert_err
+    if fired:
+        print("fleet events: %d new event(s) journaled, %d duplicate(s) "
+              "skipped; %d alert(s) fired" % (appended, duplicates,
+                                              len(fired)))
     print("collected %d %s into %s (%d appended this run; %d journal "
           "lines replayed)"
           % (len(records), "box" if len(records) == 1 else "boxes",
@@ -839,6 +884,24 @@ def main(argv=None):
                                help="rebuild the snapshot from the journal")
     p_rebuild.add_argument("--store", required=True)
 
+    p_events = sub.add_parser("events", help="fleet update-event journal "
+                                             "and alerts (G17/#608 S1)")
+    p_events.add_argument("--store", required=True)
+    p_events.add_argument("--box", default=None,
+                          help="with list: this box's event series instead "
+                               "of the fleet summary")
+    p_events.add_argument("--wave", default=None,
+                          help="with list: only events in this rollout "
+                               "wave (rollout envelopes are null until "
+                               "G15 S2)")
+    p_events.add_argument("action", nargs="?", default="list",
+                          choices=["list", "watch", "ack"],
+                          help="'watch' lists unacknowledged alerts and "
+                               "exits 1 when any are pending; 'ack' marks "
+                               "one alert acknowledged")
+    p_events.add_argument("--alert-id", default=None,
+                          help="with ack: the alert to acknowledge")
+
     args = parser.parse_args(argv)
     if args.command in ("inventory", "drift"):
         # timedelta(hours=...) blows up on nan/inf; reject non-finite or
@@ -859,6 +922,30 @@ def main(argv=None):
             total, err = rebuild_snapshot(args.store)
             if err is None:
                 print("rebuilt snapshot from %s journal lines" % total)
+        elif args.command == "events":
+            if args.action == "list":
+                err = events.cmd_events_list(args.store, args.box,
+                                             args.wave)
+                if err:
+                    print("error: %s" % err, file=sys.stderr)
+                    return 2
+            elif args.action == "watch":
+                err, code = events.cmd_events_watch(args.store)
+                if err:
+                    print("error: %s" % err, file=sys.stderr)
+                    return 2
+                return code
+            elif args.action == "ack":
+                if not args.alert_id:
+                    print("error: ack requires --alert-id",
+                          file=sys.stderr)
+                    return 2
+                err = events.cmd_events_ack(args.store, args.alert_id)
+                if err:
+                    print("error: %s" % err, file=sys.stderr)
+                    return 2
+            else:
+                err = "unknown events action %s" % args.action
         else:
             err = "unknown command %s" % args.command
     except Exception as exc:
