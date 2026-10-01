@@ -438,3 +438,38 @@ def test_histogram_verbatim_and_foreign_lines_preserved(tmp_path):
     assert lines[3] == foreign
     hist = _read(store, "events_histograms.jsonl")
     assert len(hist) == 2, hist  # bucket + foreign row (both parse)
+
+
+def test_alert_exact_90d_boundary(tmp_path):
+    """Exactly 90d: an acked alert is dropped (fired <= cutoff); 89d
+    is kept. The drops are irreversible, so the edge gets the same
+    pin the event bands have — flipping <= to < escapes the suite."""
+    store = str(tmp_path / "store")
+    _write(store, "events.jsonl", [])
+    _write(store, "alerts.jsonl", [
+        _alert("exact-90", 90, True),
+        _alert("day-89", 89, True),
+    ])
+    summary, err = events.prune_events(store, now=NOW)
+    assert err is None, err
+    assert summary["alerts_dropped"] == 1, summary
+    assert summary["alerts_kept"] == 1, summary
+    rows = _read(store, "alerts.jsonl")
+    assert [r["alert_id"] for r in rows] == ["day-89"]
+
+
+def test_inventory_exact_90d_boundary(tmp_path):
+    """Inventory prune: observed_at exactly 90d old is dropped
+    (observed <= cutoff); 89d is kept. Same irreversible-drop pin as
+    the alert boundary."""
+    store = str(tmp_path / "store")
+    _write(store, "journal.jsonl", [
+        _inv_record("exact90", age_days=90),
+        _inv_record("day89", age_days=89),
+    ])
+    summary, err = inventory.prune_journal(store, now=NOW)
+    assert err is None, err
+    assert summary["dropped"] == 1, summary
+    assert summary["kept"] == 1, summary
+    rows = _read(store, "journal.jsonl")
+    assert [r["box_id"] for r in rows] == ["day89"]
