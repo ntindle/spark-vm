@@ -527,19 +527,25 @@ class TestInputProbeCheck:
     def test_restart_gate_on_restarts_once_with_cooldown(self, guard,
                                                          fake_bridge,
                                                          fake_home):
-        # Gate open: the third consecutive wedge restarts (stop+start);
-        # the counter resets, and a further wedge inside the cooldown does
-        # NOT restart again (no restart storm on a persistently-wedged
-        # Xvfb).
+        # Gate open: the threshold-many-eth consecutive wedge restarts
+        # (stop+start); the counter resets, and a further wedge inside
+        # the cooldown does NOT restart again (no restart storm on a
+        # persistently-wedged Xvfb).
+        #
+        # Threshold is pinned to 1 here so the second run's restart is
+        # blocked by the COOLDOWN check, not the threshold check: with the
+        # default threshold=3 the post-restart counter (reset to 0) never
+        # reaches the cooldown condition, so a deleted/inverted cooldown
+        # would sail through the test unnoticed (found by Engineering's
+        # mutation testing on the review).
         home, calls = fake_home
         url, set_state = fake_bridge
         set_state("wedged")
         env = {"HOME": home, "CALLS_FILE": calls,
-               "CUA_KEEPALIVE_WEDGE_RESTART": "1"}
+               "CUA_KEEPALIVE_WEDGE_RESTART": "1",
+               "CUA_KEEPALIVE_WEDGE_THRESHOLD": "1"}
         with tempfile.TemporaryDirectory() as t:
-            self._run(guard, t, url, env_extra=env)
-            self._run(guard, t, url, env_extra=env)
-            assert not os.path.exists(calls)
+            # Run 1: consecutive=1 >= 1, no prior restart -> restart.
             self._run(guard, t, url, env_extra=env)
             with open(calls) as f:
                 invocations = [ln.strip() for ln in f if ln.strip()]
@@ -547,7 +553,8 @@ class TestInputProbeCheck:
             st = self._state(t)
             assert st["consecutive_wedged"] == "0"
             assert st["last_restart"].isdigit()
-            # Fourth wedge: inside the 1h cooldown — no second restart.
+            # Run 2: consecutive=1 >= 1 again, but inside the 1h cooldown
+            # since run 1's restart -> no second restart.
             self._run(guard, t, url, env_extra=env)
             with open(calls) as f:
                 invocations = [ln.strip() for ln in f if ln.strip()]
