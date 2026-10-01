@@ -28,10 +28,14 @@ Restart=always
 RestartSec=5
 # Issue #95: systemd hardening (mirrors cred-ui's #115 shape, extended).
 # What this process needs: the mitm venv + addon under /home/swapd, and
-# its runtime paths (SWAP_*_DIR/FILE defaults, all under /home/swapd,
-# verified against proxy/swap_addon.py), plus the stdlib. Deploy order
-# note: /home/swapd must exist before the unit starts (a missing
-# ReadWritePaths dir fails service startup; it is not auto-created).
+# its runtime paths (SWAP_*_DIR/FILE values — defaults or Environment=
+# overrides, all under /home/swapd, verified against proxy/swap_addon.py),
+# plus the stdlib. Deploy order note: /home/swapd must exist before the
+# unit starts (a missing ReadWritePaths dir fails service startup; it is
+# not auto-created). Contract (issue #709): any SWAP_*_DIR/_FILE override
+# must resolve under /home/swapd — ProtectSystem=strict mounts the rest
+# of the filesystem read-only (beyond the service's private /tmp), so an
+# override outside it fails at runtime, not at deploy.
 #
 # NoNewPrivileges IS set here (unlike cred-ui's #115 unit): the addon never
 # escalates — no sudo, no setuid helpers, no subprocesses at all
