@@ -52,7 +52,7 @@ SWAPPED = "DUMMY-SWAPPED-PUBLIC"
 
 FAKE_MUSE = r'''#!/usr/bin/env python3
 """Fake muse CLI: mimics the wire contract the probe depends on."""
-import os, sys, time, urllib.request
+import os, sys, time, urllib.parse, urllib.request
 mode = os.environ.get("FAKE_MUSE_MODE", "ok")
 if mode == "sleep":
     time.sleep(30)
@@ -112,6 +112,41 @@ if mode == "leak-header":
 if mode == "leak-query":
     # GitHub #157: the placeholder leaves in the query string.
     paths = ["/responses?api_key=" + key]
+if mode == "leak-query-encoded":
+    # GitHub #157: the placeholder percent-encoded in the query string
+    # (the standard urlencode output every mainstream client produces)
+    # must also fail the gate.
+    paths = ["/responses?api_key=" + urllib.parse.quote(key, safe="")]
+if mode == "leak-dup-header":
+    # GitHub #157: duplicate X-Api-Key headers, the second carrying the
+    # placeholder — the fixture must join them (RFC 9110 section 5.3) so
+    # the probe's scan sees the leak. urllib collapses duplicate headers,
+    # so this mode drives the proxy with http.client directly.
+    import http.client as _httpc
+    from urllib.parse import urlsplit as _urlsplit
+    _proxy = _urlsplit(os.environ.get("HTTPS_PROXY", ""))
+    _target = _urlsplit(base)
+    for _path in ("/muse-code/models", "/responses"):
+        _conn = _httpc.HTTPConnection(_proxy.hostname, _proxy.port or 80,
+                                      timeout=5)
+        _conn.putrequest("POST" if _path == "/responses" else "GET",
+                         base.rstrip("/") + _path,
+                         skip_host=True, skip_accept_encoding=True)
+        _conn.putheader("Host", _target.netloc)
+        _conn.putheader("Authorization", scheme + key)
+        _conn.putheader("X-Request-Id", "gate-fixture-benign")
+        _conn.putheader("X-Api-Key", "benign-first")
+        _conn.putheader("X-Api-Key", key)
+        _body = b"{}" if _path == "/responses" else None
+        if _body is not None:
+            _conn.putheader("Content-Length", str(len(_body)))
+        _conn.endheaders(_body)
+        try:
+            _conn.getresponse().read()
+        except Exception:
+            pass  # the fixture's body is not a completion; delivery counts
+        _conn.close()
+    sys.exit(0)
 if mode != "no-request":
     for path in paths:
         req = urllib.request.Request(base.rstrip("/") + path, headers=headers,
@@ -140,11 +175,20 @@ class EchoHandler(BaseHTTPRequestHandler):
     log_path = None
 
     def _handle(self):
-        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0  # malformed framing: still record headers/path, no body
+        if length < 0:
+            length = 0
         body = self.rfile.read(length) if length else b""
         headers = {}
         for name, value in self.headers.items():
-            headers.setdefault(name.lower(), value)
+            # Join duplicates per RFC 9110 section 5.3 instead of
+            # first-wins: a placeholder in a second same-name header is
+            # still a leak the probe must see (GitHub #157).
+            key = name.lower()
+            headers[key] = headers[key] + ", " + value if key in headers else value
         rec = {
             "method": self.command,
             "path": self.path,
@@ -186,7 +230,9 @@ class SwapHandler(BaseHTTPRequestHandler):
                 continue
             if k.lower() == "authorization" and self.mode == "swap":
                 v = v.replace(f"Bearer {self.placeholder}", f"Bearer {self.swapped}")
-            headers[k] = v
+            # Join duplicates (RFC 9110 section 5.3) — dropping them would
+            # hide a duplicate-header leak from the echo fixture (#157).
+            headers[k] = headers[k] + ", " + v if k in headers else v
         headers["Host"] = parts.netloc
         # Forward origin-form incl. the query string (the real forward
         # proxy does; dropping it here would hide query-channel leaks —
@@ -391,6 +437,26 @@ def test_gate_placeholder_leak_via_query_fails(fixtures, tmp_path):
     assert "request path" in proc.stderr
 
 
+def test_gate_placeholder_leak_via_encoded_query_fails(fixtures, tmp_path):
+    # GitHub #157: the standard percent-encoding (what urlencode produces)
+    # must not evade the scan.
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"FAKE_MUSE_MODE": "leak-query-encoded"})
+    assert proc.returncode == 1
+    assert "never reach the origin in any recorded field" in proc.stderr
+    assert "request path (percent-decoded)" in proc.stderr
+
+
+def test_gate_placeholder_leak_via_duplicate_header_fails(fixtures, tmp_path):
+    # GitHub #157: a placeholder in a second same-name header must fail
+    # the gate — the fixture joins duplicates (RFC 9110 section 5.3).
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"FAKE_MUSE_MODE": "leak-dup-header"})
+    assert proc.returncode == 1
+    assert "never reach the origin in any recorded field" in proc.stderr
+    assert "header 'x-api-key'" in proc.stderr
+
+
 def test_gate_records_carry_full_request_shape(fixtures, tmp_path):
     # The echo record is the gate's evidence: the full header set, the raw
     # path, and the body hash. Pin the shape so a future fixture change
@@ -409,6 +475,37 @@ def test_gate_records_carry_full_request_shape(fixtures, tmp_path):
     assert get_rec["body_sha256"] == ""  # no body on the GET
     assert post_rec["body_sha256"] == hashlib.sha256(b"{}").hexdigest()
     assert post_rec["path"] == "/responses"
+
+
+def test_echo_records_malformed_content_length(fixtures, tmp_path):
+    # Engineering review (PR #818): a malformed or negative Content-Length
+    # must not traceback and silently drop the record — the gate's
+    # evidence recorder still records the headers/path (no body).
+    port = int(fixtures["echo_url"].rsplit(":", 1)[1])
+    for raw_length in ("abc", "-5"):
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            sock.sendall(
+                ("POST /responses HTTP/1.0\r\n"
+                 "Host: gate-fixture\r\n"
+                 f"Content-Length: {raw_length}\r\n"
+                 "Connection: close\r\n\r\n").encode())
+            resp = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        finally:
+            sock.close()
+        assert resp.split(b"\r\n", 1)[0].endswith(b"200 OK"), resp[:60]
+    with open(fixtures["echo_log"]) as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    assert len(records) == 2
+    for rec in records:
+        assert rec["method"] == "POST"
+        assert rec["path"] == "/responses"
+        assert rec["body_sha256"] == ""  # no body read on bad framing
 
 
 def test_gate_no_records_fails_closed(fixtures, tmp_path):

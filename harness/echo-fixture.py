@@ -44,16 +44,27 @@ def _record_request(handler):
     """Build the echo record for one request (GitHub #157 wire contract).
 
     Records the method, the raw path (query string included), the full
-    header set with lowercased names, and a sha256 of the body (empty
-    string when there is no body). "authorization" is also kept as its
-    own field — the probe's exact-Bearer wire-shape assertion reads it
-    directly, and the placeholder scan covers every recorded field.
+    header set with lowercased names (duplicate same-name headers joined
+    with ", " per RFC 9110 section 5.3, so no occurrence is dropped), and
+    a sha256 of the body (empty string when there is no body).
+    "authorization" is also kept as its own field — the probe's
+    exact-Bearer wire-shape assertion reads it directly, and the
+    placeholder scan covers every recorded field.
     """
-    length = int(handler.headers.get("Content-Length", 0) or 0)
+    try:
+        length = int(handler.headers.get("Content-Length", 0) or 0)
+    except ValueError:
+        length = 0  # malformed framing: still record headers/path, no body
+    if length < 0:
+        length = 0
     body = handler.rfile.read(length) if length else b""
     headers = {}
     for name, value in handler.headers.items():
-        headers.setdefault(name.lower(), value)
+        # Join duplicates per RFC 9110 section 5.3 instead of
+        # first-wins: a placeholder in a second same-name header is
+        # still a leak the probe must see (GitHub #157).
+        key = name.lower()
+        headers[key] = headers[key] + ", " + value if key in headers else value
     return {
         "method": handler.command,
         "path": handler.path,
