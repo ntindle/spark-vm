@@ -13,9 +13,11 @@ Group=swapd
 # No CONFIRM_BIND pin here on purpose: confirmd.py resolves the bind address
 # at startup via `tailscale ip -4` (finding 53(f) -- "bind address comes from
 # tailscale, not a literal"), so a tailnet rekey/IP change survives a restart
-# instead of wedging the service on a stale address. If tailscaled is down at
-# start, confirmd falls back to the last-known literal and Restart=on-failure
-# retries until the tailnet is back (the unit already orders After=tailscaled).
+# instead of wedging the service on a stale address. If tailscaled is down
+# at start (or no CONFIRM_BIND pin exists), confirmd exits non-zero instead
+# of serving on a guessed address (fail closed, issue #70 — no stale-literal
+# fallback) and Restart=on-failure retries until the tailnet is back (the
+# unit already orders After=tailscaled).
 Environment=CONFIRM_PORT=8443
 Environment=CONFIRM_CERT=/home/swapd/confirmd/cert.crt
 Environment=CONFIRM_KEY=/home/swapd/confirmd/key.pem

@@ -21,15 +21,16 @@ page never routes through the orchestrator.
 
 Deploy via `./proxy/deploy.sh` (installs confirmd from this directory).
 The unit binds the tailnet address only — resolved at startup from
-`tailscale ip -4`; if tailscaled is unreachable it falls back to the
-last-known literal (`100.65.241.20`). A stale-literal bind that succeeds
-keeps serving — `Restart=on-failure` only retries when the process fails —
-so restart the unit after a tailnet renumber if you suspect staleness.
+`tailscale ip -4`, or pinned via `CONFIRM_BIND`. There is deliberately no
+fallback address: if the bind address cannot be determined, confirmd exits
+non-zero instead of serving on a guessed address (fail closed, issue #70),
+and `Restart=on-failure` retries until the tailnet is back. BIND is frozen
+at import, so restart the unit after a tailnet renumber.
 
 | Env | Default | What it is |
 |---|---|---|
 | `CONFIRM_PORT` | `8443` | Port |
-| `CONFIRM_BIND` | from `tailscale ip -4`, else `100.65.241.20` | Bind address (see note below: a stale-literal bind never self-retries) |
+| `CONFIRM_BIND` | pin, else from `tailscale ip -4`, else fail closed (exit 1) | Bind address (no stale-literal fallback: an unresolvable address fails the process, and systemd retries) |
 | `CONFIRM_CERT` / `CONFIRM_KEY` | `/home/swapd/confirmd/cert.crt` / `key.pem` | TLS cert/key (Tailscale cert for the machine name) |
 | `CONFIRM_OWNER` | `ntindle@github` | Expected Tailscale LoginName — every request is authenticated by Tailscale identity against this |
 | `CONFIRM_DIR` | `/home/swapd/approvals` | Data dir (`pending/`, `answered/`, `consumed/`) |
