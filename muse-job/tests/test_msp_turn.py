@@ -284,15 +284,6 @@ UUID7_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 
-def _live(turn_serve, sid="sess-live"):
-    """Open a host and start one live turn; return (host, turn)."""
-    argv, record = turn_serve
-    host = make_host(argv)
-    host.open()
-    turn, _ = mspt.start_turn(host, sid, "hello")
-    return host, turn, record
-
-
 # -- turn/start -------------------------------------------------------------
 
 def test_start_minimal_wire_shape(turn_serve):
@@ -358,6 +349,18 @@ def test_start_rejects_blank_prompt(turn_serve):
             mspt.start_turn(host, "", "go")
         with pytest.raises(ValueError):
             mspt.start_turn(host, "sess-x", 42)
+
+
+def test_start_rejects_bool_prompt(turn_serve):
+    # True/False are rejected by the isinstance check itself (bool is not a
+    # str subclass) -- no special case needed. Pins the behavior the removed
+    # unreachable `isinstance(text, bool)` branch used to claim.
+    argv, _ = turn_serve
+    with make_host(argv) as host:
+        with pytest.raises(ValueError):
+            mspt.start_turn(host, "sess-x", True)
+        with pytest.raises(ValueError):
+            mspt.steer_turn(host, "sess-x", False)
 
 
 def test_start_rejects_bad_command_id(turn_serve):
@@ -512,6 +515,16 @@ def test_cancel_no_queued_turn_raises_not_live(turn_serve):
             mspt.cancel_turn(host, "sess-cq", turn_id="turn-nope")
 
 
+def test_cancel_running_turn_id_raises_not_live(turn_serve):
+    # cancel only drops QUEUED turns: cancelling the running turn's id is a
+    # not-live refusal, not a silent success.
+    argv, _ = turn_serve
+    with make_host(argv) as host:
+        turn, _ = mspt.start_turn(host, "sess-cr", "go")
+        with pytest.raises(mspt.TurnNotLiveError):
+            mspt.cancel_turn(host, "sess-cr", turn_id=turn["turnId"])
+
+
 # -- fail-loud on drift ---------------------------------------------------------
 
 @pytest.mark.parametrize("case", ["notdict", "no-turn", "no-turnid"])
@@ -526,6 +539,36 @@ def test_turn_plane_fails_loud_on_drift_end_to_end(turn_serve, case):
             mspt.interrupt_turn(host, "drift:" + case)
         with pytest.raises(mspt.MSPTurnError):
             mspt.cancel_turn(host, "drift:" + case)
+
+
+# -- _raise_for_not_live mapping pins --------------------------------------------
+
+def test_raise_for_not_live_none_data_reraises_original():
+    # A server error with data=None is not a not-live reason: the original
+    # error must surface unchanged, never relabeled TurnNotLiveError.
+    orig = mspt.ServerError(-32000, "boom", None)
+    with pytest.raises(mspt.ServerError) as excinfo:
+        mspt._raise_for_not_live(orig, "sess-x", "turn/steer")
+    assert excinfo.value is orig
+
+
+def test_raise_for_not_live_unmapped_data_reraises_original():
+    for data in ({}, {"kind": "x"}, {"reason": "something_else"},
+                 "not-a-dict", ["reason"]):
+        orig = mspt.ServerError(-32000, "boom", data)
+        with pytest.raises(mspt.ServerError) as excinfo:
+            mspt._raise_for_not_live(orig, "sess-x", "turn/steer")
+        assert excinfo.value is orig
+        assert not isinstance(excinfo.value, mspt.TurnNotLiveError)
+
+
+@pytest.mark.parametrize("reason", ["turn_not_live", "no_active_turn",
+                                    "no_queued_turn"])
+def test_raise_for_not_live_mapped_reasons(reason):
+    err = mspt.ServerError(-32030, "nope",
+                           {"kind": "commandRejected", "reason": reason})
+    with pytest.raises(mspt.TurnNotLiveError):
+        mspt._raise_for_not_live(err, "sess-x", "turn/steer")
 
 
 # -- turn events (the #223 acceptance) --------------------------------------------
@@ -575,6 +618,111 @@ def test_watch_turn_events_collects_until_terminal(turn_serve):
     assert terminal[0]["params"]["turnId"] == tid
 
 
+# -- turn events: filter branches (stub host, deterministic) -------------------
+
+class _StubWatchHost:
+    """Minimal host double for watch_turn_events: captures the subscriber.
+
+    Feeding notifications straight to the captured callback pins the
+    filter branches deterministically, without transport timing.
+    """
+    def __init__(self):
+        self.callback = None
+
+    def subscribe(self, prefix, callback):
+        assert prefix == "turn"
+        self.callback = callback
+        return lambda: None
+
+
+def _watch_with_notes(notes, terminal_note, session_id="sess-x",
+                      turn_id="turn-x", timeout=5.0):
+    """Run watch_turn_events against the stub host, feed it `notes` then the
+    terminal note (or none), and return the collected events."""
+    host = _StubWatchHost()
+    box = {}
+
+    def run():
+        box["events"] = mspt.watch_turn_events(
+            host, session_id, turn_id, timeout=timeout)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    assert wait_until(lambda: host.callback is not None), \
+        "watch_turn_events never subscribed"
+    for note in notes:
+        host.callback(note)
+    if terminal_note is not None:
+        host.callback(terminal_note)
+    t.join(timeout + 10)
+    assert not t.is_alive(), "watch_turn_events did not return"
+    return box["events"]
+
+
+def _note(method, params):
+    return {"jsonrpc": "2.0", "method": method, "params": params}
+
+
+def test_watch_filters_other_session_events():
+    notes = [
+        _note("turn/started", {"sessionId": "sess-other", "turnId": "turn-x"}),
+        _note("turn/started", {"sessionId": "sess-x", "turnId": "turn-x"}),
+    ]
+    term = _note("turn/completed", {"sessionId": "sess-x", "turnId": "turn-x"})
+    events = _watch_with_notes(notes, term)
+    got = [(n["method"], n["params"]["sessionId"]) for n in events]
+    assert ("turn/started", "sess-other") not in got
+    assert ("turn/started", "sess-x") in got
+    assert got[-1] == ("turn/completed", "sess-x")
+
+
+def test_watch_without_session_filter_collects_all():
+    # session_id=None disables filtering: every notification is collected.
+    notes = [
+        _note("turn/started", {"sessionId": "sess-a", "turnId": "turn-x"}),
+        _note("turn/steered", {"sessionId": "sess-b", "turnId": "turn-x"}),
+    ]
+    term = _note("turn/cancelled", {"sessionId": "sess-b", "turnId": "turn-x"})
+    events = _watch_with_notes(notes, term, session_id=None)
+    assert [n["method"] for n in events] == [
+        "turn/started", "turn/steered", "turn/cancelled"]
+
+
+def test_watch_ignores_malformed_notification_params():
+    # Missing, null, and non-dict params must not raise on the reader
+    # thread. (Non-vacuous: the old `note.get("params") or {}` idiom raised
+    # AttributeError on the non-dict cases inside the host's dispatcher.)
+    notes = [
+        {"jsonrpc": "2.0", "method": "turn/started"},      # params missing
+        _note("turn/steered", None),                      # params null
+        _note("turn/steered", "oops"),                    # non-dict params
+        _note("turn/steered", ["x"]),                     # non-dict params
+        _note("turn/started", {"sessionId": "sess-x", "turnId": "turn-x"}),
+    ]
+    term = _note("turn/interrupted",
+                {"sessionId": "sess-x", "turnId": "turn-x"})
+    events = _watch_with_notes(notes, term)
+    # The four malformed notes carried no sessionId, so the session filter
+    # dropped them; the point is they were dropped, not raised.
+    assert [n["method"] for n in events] == [
+        "turn/started", "turn/interrupted"]
+    # And with filtering off, malformed notes are collected, still unraised:
+    events = _watch_with_notes(notes, term, session_id=None)
+    assert len(events) == 6
+
+
+def test_watch_ignores_terminal_event_for_other_turn():
+    # A terminal event for a different turnId must not end the watch: the
+    # watch runs to its timeout instead of stopping early.
+    notes = [_note("turn/interrupted",
+                   {"sessionId": "sess-x", "turnId": "turn-other"})]
+    t0 = time.time()
+    events = _watch_with_notes(notes, None, timeout=0.6)
+    elapsed = time.time() - t0
+    assert [n["method"] for n in events] == ["turn/interrupted"]
+    assert elapsed >= 0.5, "watch returned early: %.2fs" % elapsed
+
+
 # -- smoke CLI --------------------------------------------------------------------
 
 def _run_cli(*args):
@@ -621,3 +769,72 @@ def test_smoke_cli_needs_serve_argv():
     out = _run_cli("steer", "--session-id", "s", "--message", "m")
     assert out.returncode != 0
     assert "serve argv" in out.stderr
+
+
+# -- smoke CLI: --watch plumbing (MSPHost doubled) ---------------------------------
+#
+# These two pin main()'s --watch plumbing, which the hermetic fixture cannot
+# reach: interrupt/cancel against the fixture always fail (no pre-existing
+# session survives across fixture processes), so a doubled host stands in
+# for the transport while the real main()/watch_turn_events run.
+
+
+class _NoSubscribeHost:
+    """MSPHost double: interrupt succeeds without a live serve host;
+    subscribe must never be called (no turn id to watch)."""
+
+    def __init__(self, serve, client_name="msp_turn"):
+        self.serve = serve
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def call(self, method, params):
+        assert method == "turn/interrupt"
+        return {"turn": {"turnId": "t-9", "state": "interrupted"}}
+
+    def subscribe(self, prefix, callback):
+        raise AssertionError("subscribe called without a turn id to watch")
+
+
+def test_smoke_cli_watch_without_turn_id_warns(monkeypatch, capsys):
+    # --watch with interrupt/cancel and no --turn-id: the CLI warns on
+    # stderr instead of watching nothing (or hanging).
+    monkeypatch.setattr(mspt, "MSPHost", _NoSubscribeHost)
+    rc = mspt.main(["--watch", "interrupt", "--session-id", "sess-x",
+                    "--", "true"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "require --turn-id to watch" in captured.err
+    assert "watchedEvents" not in captured.out
+
+
+class _SilentWatchHost(_NoSubscribeHost):
+    """Same, but subscribe captures the callback and never fires: the watch
+    must return at its timeout, not hang."""
+
+    def subscribe(self, prefix, callback):
+        assert prefix == "turn"
+        return lambda: None
+
+
+def test_smoke_cli_watch_interrupt_with_turn_id_is_bounded(monkeypatch,
+                                                           capsys):
+    # interrupt --watch --turn-id: the terminal event fired during the call,
+    # before the watcher subscribed, so the watch observes nothing -- but it
+    # must return at the timeout rather than hang. (Pinning the current
+    # honest behavior; see --watch help. Subscribing before the call is a
+    # future #223 follow-up, not this change.)
+    monkeypatch.setattr(mspt, "MSPHost", _SilentWatchHost)
+    t0 = time.time()
+    rc = mspt.main(["--watch", "--watch-timeout", "0.5", "interrupt",
+                    "--session-id", "sess-x", "--turn-id", "t-9",
+                    "--", "true"])
+    elapsed = time.time() - t0
+    assert rc == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["watchedEvents"] == []
+    assert elapsed < 5, "watch did not return at its timeout: %.1fs" % elapsed
