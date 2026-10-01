@@ -42,6 +42,7 @@ python3 fleet/inventory.py events --store ~/fleet-store
 python3 fleet/inventory.py events --store ~/fleet-store --box tower
 python3 fleet/inventory.py events watch --store ~/fleet-store   # exit 1 on unacked alerts
 python3 fleet/inventory.py events ack --store ~/fleet-store --alert-id <id>
+python3 fleet/inventory.py events crosscheck --store ~/fleet-store   # exit 1 on claim/inventory violations (G17 S2)
 ```
 
 ## Update events (G17 / #608, S1)
@@ -74,6 +75,29 @@ translation table in `events.py`, verified against
   provisioner record, no G15 waves, no G14 windows); `attested` is always
   false; the event journal has no retention policy yet (the 90-day/30-day
   discipline is G17 S2's slice, shared with the inventory journal).
+
+## Event<->inventory cross-check (G17 S2)
+
+`fleet events crosscheck --store ~/fleet-store` checks each box's
+`deploy`/`succeeded` claims against the inventory journal — the
+fleet-side half of the design's claim-vs-ground-truth rule
+(`docs/UPDATE_EVENT_REPORTING.md` §2). For each claim it finds inventory
+records for the same box observed at-or-after the claim (collector clocks
+on both sides; box clocks are never trusted for ordering):
+
+- any later record showing the claimed commit → **confirmed**;
+- later records exist but none shows it → **violation** (flagged, not
+  convicted: the inventory wins the tie, the event keeps its journal
+  row, nothing is marked suspect automatically);
+- no later record, or later records report no commit → **inconclusive**
+  (missing evidence is never a violation).
+
+The command exits 1 while any violation is open (cron-consumable, like
+`events watch`), 0 when clean or inconclusive-only. Only
+`deploy`/`succeeded`/`repo` claims are checkable in this slice — the
+design defines only `succeeded` as a claim (rolled-back/restored claims
+are a follow-up), and the toolset/image components have no producers
+yet.
 
 The box dir name is the `box_id`; an operator-maintained remap file can
 rename aliases: `collect --box-id-map box-ids.json` where the file is
@@ -117,6 +141,6 @@ provisioner's per-box record (G15 §8) supersedes it.
 ## What's still S2/S3 (#607 stays open)
 
 Push endpoint with box-identity auth, G15 gate integration (wave-k-did-it-land,
-soak evidence, suspect exclusion), G17 event cross-checks, G13 attestation
+soak evidence, suspect exclusion), G13 attestation
 (`attested: true` admission to the gate quorum), H11 per-tenant slicing,
 P7 status-page projection.

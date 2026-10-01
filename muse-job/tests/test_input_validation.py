@@ -16,6 +16,13 @@ Two gaps, both cheap to exploit by accident and both cheap to fix:
 Tests pin the gate (bad slugs refused at main() for every slug-bearing
 subcommand, home untouched by `close ..`), the repo-URL refusal (leading
 dash and empty), and the `--` separator on the actual clone invocation.
+
+Issue #793 (security, hardening residuals of the #7 review) adds three
+more pins here: `ext::`/`fd::` remote-helper transports are refused as repo
+URLs, a `..`/`.` last URL segment is refused before the pristine path is
+derived, and a leading-dash `--base` is refused before it reaches
+`rev-parse` in option position (rev-parse does not honor `--` before the
+revision, so validation is the gate, not the separator).
 """
 import importlib.machinery
 import importlib.util
@@ -143,6 +150,12 @@ def test_repo_url_ok_unit(cli):
     assert not cli.repo_url_ok("")
     assert not cli.repo_url_ok(None)
     assert not cli.repo_url_ok(123)
+    # Issue #793: remote-helper transports are rejected (spawning an
+    # external command as the operator); case-insensitive.
+    assert not cli.repo_url_ok("ext::sh -c id")
+    assert not cli.repo_url_ok("EXT::sh -c id")
+    assert not cli.repo_url_ok("fd::0")
+    assert not cli.repo_url_ok("FD::0")
     assert cli.repo_url_ok("https://example.com/r.git")
     assert cli.repo_url_ok("git@github.com:ntindle/spark-vm.git")
     assert cli.repo_url_ok("file:///home/ntindle/repos/r")
@@ -194,6 +207,126 @@ def test_spawn_rejects_empty_repo(cli, monkeypatch, tmp_path, capsys):
     ])
     assert cli.main() == 1
     assert "bad repo url" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("repo", ["ext::sh -c id", "EXT::sh -c id", "fd::0"])
+def test_spawn_rejects_remote_helper_transports(cli, monkeypatch, tmp_path, capsys, repo):
+    # Issue #793: ext::/fd:: reach `git clone` as remote-helper transports --
+    # a spawned external command as the operator. Refused at the same gate
+    # as the leading dash, before the lock, clone, or any filesystem work.
+    prompt = tmp_path / "p.md"
+    prompt.write_text("do the thing")
+    monkeypatch.setattr(sys, "argv", [
+        "muse-job", "spawn", "goodslug",
+        f"--repo={repo}",
+        "--prompt-file", str(prompt),
+    ])
+    assert cli.main() == 1
+    assert "bad repo url" in capsys.readouterr().err
+    assert not (tmp_path / "repos").exists()
+    assert not (tmp_path / "muse-jobs").exists()
+
+
+@pytest.mark.parametrize("repo,name", [
+    ("https://example.com/..", ".."),
+    ("https://example.com/.", "."),
+    ("..", ".."),
+])
+def test_spawn_rejects_dotdot_repo_name(cli, monkeypatch, tmp_path, capsys, repo, name):
+    # Issue #793: the derived pristine path is REPOS_DIR/<last URL segment>.
+    # `..` escapes to $HOME itself (where the clone would fail into ~) and
+    # `.` collapses to REPOS_DIR. Both fail fast with no clone and no job
+    # dir; nothing is written outside the containment root.
+    prompt = tmp_path / "p.md"
+    prompt.write_text("do the thing")
+    monkeypatch.setattr(sys, "argv", [
+        "muse-job", "spawn", "dotjob",
+        f"--repo={repo}",
+        "--prompt-file", str(prompt),
+    ])
+    assert cli.main() == 1
+    err = capsys.readouterr().err
+    assert "bad repo name from url" in err
+    assert name in err
+    assert not (tmp_path / "muse-jobs" / "dotjob").exists()
+    assert not list((tmp_path / "repos").iterdir()) if (tmp_path / "repos").exists() else True
+
+
+def test_spawn_legit_repo_names_still_work(cli, monkeypatch, tmp_path, capsys):
+    # The dotdot guard must not false-positive: uppercase and long-but-safe
+    # repo names (slug_ok() would reject these) derive contained paths and
+    # reach the clone call site.
+    calls = []
+
+    def fake_run(*argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            args=list(argv), returncode=0, stdout=b"deadbeef\n", stderr=b"")
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "tmux_alive", lambda slug: False)
+    # Skip the 90s session-uuid discovery poll: the uuid path is not what
+    # this test pins.
+    monkeypatch.setattr(cli, "find_session", lambda work, started: "fake-uuid")
+    prompt = tmp_path / "p.md"
+    prompt.write_text("a perfectly innocent prompt with no secrets in it")
+    args = cli.argparse.Namespace(
+        slug="casejob", repo="https://example.com/SomeOrg/SomeRepo.git",
+        prompt_file=str(prompt), base=None, budget_hours=8, allow_secrets=False)
+    cli._spawn(args.slug, args)  # returns None on success; would raise first
+    clones = [c for c in calls if list(c)[:2] == ["git", "clone"]]
+    assert len(clones) == 1
+    assert clones[0][-1].endswith(os.path.join("repos", "SomeRepo"))
+
+
+@pytest.mark.parametrize("base", ["--verify", "--symbolic-full-name", "-x"])
+def test_spawn_rejects_dash_base_ref(cli, monkeypatch, tmp_path, capsys, base):
+    # Issue #793: --base reaches `rev-parse` in option position. rev-parse
+    # has no command-execution options, but the gate is cheap: refuse the
+    # leading dash before any clone or filesystem work.
+    prompt = tmp_path / "p.md"
+    prompt.write_text("do the thing")
+    monkeypatch.setattr(sys, "argv", [
+        "muse-job", "spawn", "basejob",
+        "--repo", "https://example.com/r.git",
+        f"--base={base}",
+        "--prompt-file", str(prompt),
+    ])
+    assert cli.main() == 1
+    err = capsys.readouterr().err
+    assert "bad base ref" in err
+    assert not (tmp_path / "muse-jobs" / "basejob").exists()
+    assert not (tmp_path / "repos" / "r").exists()
+
+
+def test_rev_parse_gets_base_without_option_separator(cli, monkeypatch, tmp_path):
+    # Pins the deliberate choice: rev-parse does NOT honor `--` before the
+    # revision (post-`--` args echo verbatim, never resolve), so the base is
+    # passed bare as the final arg. A future "add `--`" would silently
+    # resolve every base to its literal string -- this test fails first.
+    calls = []
+
+    def fake_run(*argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            args=list(argv), returncode=0, stdout=b"deadbeef\n", stderr=b"")
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "tmux_alive", lambda slug: False)
+    # Skip the 90s session-uuid discovery poll: the uuid path is not what
+    # this test pins.
+    monkeypatch.setattr(cli, "find_session", lambda work, started: "fake-uuid")
+    prompt = tmp_path / "p.md"
+    prompt.write_text("a perfectly innocent prompt with no secrets in it")
+    args = cli.argparse.Namespace(
+        slug="revjob", repo="https://example.com/r.git",
+        prompt_file=str(prompt), base="v1.2.3",
+        budget_hours=8, allow_secrets=False)
+    cli._spawn(args.slug, args)
+    revs = [c for c in calls if list(c)[:3] == ["git", "-C", os.path.join(
+        str(tmp_path), "repos", "r")] and "rev-parse" in list(c)]
+    assert len(revs) == 1
+    assert list(revs[0][-2:]) == ["rev-parse", "v1.2.3"]
 
 
 def test_clone_passes_option_separator(cli, monkeypatch, tmp_path):

@@ -11,7 +11,10 @@ taste against this contract. This file is the contract.
 - Off-box access goes through the operator's SSH tunnel:
   `127.0.0.1:18732` (operator machine) → `127.0.0.1:18731` (this box).
   Keep it alive with `~/workspace/bin/cua-tunnel-keepalive.sh`-style health
-  checks against `GET /api/status` (any 2xx = healthy).
+  checks against `GET /api/liveness` (any 2xx = healthy). `/api/liveness`
+  answers without touching the driver, so a slow driver can never
+  false-trip a health check into a spurious remediation; use
+  `GET /api/status` when you want driver detail, not for liveness.
 - A panel served from the operator's own machine calls
   `http://127.0.0.1:18732`.
 

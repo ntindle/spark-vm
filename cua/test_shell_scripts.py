@@ -389,6 +389,31 @@ class TestKeepaliveFlockPin:
         assert 'status_out="[down]"' in src or "status_out='[down]'" in src
         assert '[ -z "$status_out" ]' in src
 
+    def test_bridge_liveness_uses_dedicated_endpoint(self):
+        # #784: the bridge-liveness curl must probe /api/liveness — the
+        # cheap endpoint with no driver subprocess — not /api/status,
+        # whose 10s `cua-driver status` budget could false-trip the 5s
+        # curl budget into a spurious bridge restart. The probe-fetch curl
+        # (15s, ?probe=1) legitimately keeps /api/status for its detail.
+        src = open(KEEPALIVE_SH).read()
+        liveness = [ln for ln in src.splitlines()
+                    if "curl" in ln and "max-time 5" in ln
+                    and "18731" in ln
+                    and not ln.lstrip().startswith("#")]
+        assert len(liveness) == 1, f"expected 1 liveness curl, got: {liveness}"
+        assert "/api/liveness" in liveness[0]
+        assert "/api/status" not in liveness[0]
+        # The liveness curl is the keepalive's ONLY bridge-restart decision:
+        # a second restart-branch curl (any budget) hitting /api/status
+        # would reintroduce the false-trip through the back door.
+        restart_branches = [
+            ln for ln in src.splitlines()
+            if "curl" in ln and "18731" in ln
+            and not ln.lstrip().startswith("#")
+            and "probe=1" not in ln]
+        assert len(restart_branches) == 1, \
+            f"expected 1 restart-decision curl, got: {restart_branches}"
+
 
 _FAKE_BRIDGE_PY = r'''
 import http.server, json, os
