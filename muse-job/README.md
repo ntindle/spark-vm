@@ -39,6 +39,37 @@ Redeploy: copy the files over, then reinstall the plugin with `--force`
 - Job prompt at `/home/ntindle/muse-jobs/<slug>/prompt.md`, progress in `PROGRESS.md`
 - Job states (what `status`/`list` print): `active` / `blocked` — the watchdog acts on these (may page or attempt recovery); `killed` — operator-killed, the watchdog leaves it alone, `resume` is the deliberate way back; `closed` — archived, worktree removed, nothing to resume.
 
+### TUI auto-update policy (issue #699)
+
+**Updates are deferred while a job is active.** The `muse` launcher
+stages a new versioned binary in the background at startup (hourly by
+default) and a TUI that notices the staged update restarts itself
+mid-turn -- the pane's foreground process name changing
+(`muse-bin-1.3.0-R3233.1` -> `-R3401.1`) is what the watchdog's
+`tui-updated` event detects (issue #212).
+
+The launcher's own source gates the check+download on
+`MUSE_NO_AUTO_UPDATE=1`; every TUI launch muse-job owns (`spawn`,
+`resume`, and the resume-fallback relaunch) carries it in the launch
+environment, so a job's process tree never stages an update. This is the
+defer half of #212's deliberately-open policy question, now decided with
+the switch confirmed in the launcher source rather than guessed.
+
+- **Box updates still flow**: the var is per-process-tree, not per-box.
+  The operator's own `muse` runs (and the installer/updater cron) stage
+  updates at the normal cadence; job TUIs just don't participate.
+- **Residual risk (honest)**: a concurrent same-user `muse` invocation can
+  still stage an update into the shared install dir while a job runs, and
+  the job's TUI can still bounce on it. The `tui-updated` watchdog event
+  stays as the diagnostic for that case -- it is also the canary if a
+  future launcher ever stops honoring the var.
+- **Fail-loud prerequisite**: with the var set, a missing binary fails the
+  launch ("installed binary is missing; rerun the installer") instead of
+  self-healing. A box must have `muse` installed before the first job
+  spawns (already true everywhere the updater runs); a spawn onto a
+  binary-less box surfaces as a dead-TUI failure, the same class as any
+  other launch failure today.
+
 ## Crons (operator box, not spark-vm)
 
 - `muse-job watch` every 15m (via SSH): silent unless findings.
