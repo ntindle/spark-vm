@@ -351,12 +351,16 @@ class TestKeepaliveFlockPin:
     def test_spawn_lines_close_lock_fd(self):
         # Every long-lived child spawned while the run lock is held must
         # close fd 9 (see TestTakeRunLock.test_spawned_child_does_not_pin_lock
-        # for why this is load-bearing, not cosmetic).
+        # for why this is load-bearing, not cosmetic). The wedge-restart
+        # lines in input_probe_check spawn the desktop lifecycle too, so
+        # they are covered by the same rule.
         src = open(KEEPALIVE_SH).read()
         spawns = [ln for ln in src.splitlines()
                   if not ln.lstrip().startswith("#")
-                  and ("cua-desktop.sh start" in ln or "cua-bridge.py" in ln)]
-        assert len(spawns) == 2, f"expected 2 spawn lines, got: {spawns}"
+                  and (("cua-desktop.sh" in ln
+                        and ("start" in ln or "stop" in ln))
+                       or "cua-bridge.py" in ln)]
+        assert len(spawns) == 4, f"expected 4 spawn lines, got: {spawns}"
         for ln in spawns:
             assert "9>&-" in ln, f"spawn line does not close fd 9: {ln}"
 
@@ -367,3 +371,250 @@ class TestKeepaliveFlockPin:
         src = open(KEEPALIVE_SH).read()
         assert 'status_out="[down]"' in src or "status_out='[down]'" in src
         assert '[ -z "$status_out" ]' in src
+
+
+_FAKE_BRIDGE_PY = r'''
+import http.server, json, os
+STATE_FILE = os.environ["FAKE_BRIDGE_STATE_FILE"]
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            with open(STATE_FILE) as f:
+                state = f.read().strip() or "unknown"
+        except OSError:
+            state = "unknown"
+        body = json.dumps({"ok": True, "detail": "driver ok",
+                           "input": {"state": state, "detail": "test",
+                                     "checked_at": 123,
+                                     "driver": "test"}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+print(srv.server_address[1], flush=True)
+srv.serve_forever()
+'''
+
+
+class TestInputProbeCheck:
+    """Behavioral tests for the keepalive's input-probe supervision (#769).
+
+    The guard is extracted from the real cua-keepalive.sh and run against
+    a fake bridge (a real local HTTP server serving canned /api/status
+    JSON, verdict driven by a file the test rewrites between runs) and a
+    fake HOME whose cua-desktop.sh only records its invocations — the
+    real daemons are never touched.
+    """
+
+    @pytest.fixture()
+    def guard(self):
+        return extract_function(KEEPALIVE_SH, "input_probe_check")
+
+    @pytest.fixture()
+    def fake_bridge(self):
+        # Yields (url, set_state); the server reads its verdict from a
+        # file on every request so one server serves many verdicts.
+        with tempfile.TemporaryDirectory() as t:
+            state_file = os.path.join(t, "verdict")
+            with open(state_file, "w") as f:
+                f.write("unknown")
+            server_py = os.path.join(t, "server.py")
+            with open(server_py, "w") as f:
+                f.write(_FAKE_BRIDGE_PY)
+            proc = subprocess.Popen(
+                ["python3", server_py], stdout=subprocess.PIPE, text=True,
+                env={**os.environ, "FAKE_BRIDGE_STATE_FILE": state_file})
+            try:
+                port = proc.stdout.readline().strip()
+                assert port.isdigit(), f"fake bridge did not print a port: {port!r}"
+                yield (f"http://127.0.0.1:{port}",
+                       lambda v: open(state_file, "w").write(v))
+            finally:
+                proc.terminate()
+                proc.wait(timeout=10)
+
+    @pytest.fixture()
+    def fake_home(self):
+        # A fake HOME with a recording cua-desktop.sh stand-in.
+        with tempfile.TemporaryDirectory() as t:
+            bindir = os.path.join(t, "cua", "bin")
+            os.makedirs(bindir)
+            calls = os.path.join(t, "calls")
+            desktop = os.path.join(bindir, "cua-desktop.sh")
+            with open(desktop, "w") as f:
+                f.write("#!/bin/bash\necho \"$1\" >> \"$CALLS_FILE\"\n")
+            os.chmod(desktop, 0o755)
+            yield t, calls
+
+    def _run(self, guard, tmpdir, url, env_extra=None, state_dir=None):
+        env = {"CUA_KEEPALIVE_PROBE_INTERVAL_S": "0",
+               **(env_extra or {})}
+        call = (f'input_probe_check "{state_dir or tmpdir}" "{url}"; '
+                f'echo "RC=$?"')
+        return run_guard(guard, call, env=env)
+
+    @staticmethod
+    def _state(tmpdir):
+        out = {}
+        with open(os.path.join(tmpdir, "cua-input-probe.state")) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                out[k] = v
+        return out
+
+    @staticmethod
+    def _history(tmpdir):
+        with open(os.path.join(tmpdir, "cua-input-probe.log")) as f:
+            return [ln.strip() for ln in f if ln.strip()]
+
+    def test_records_verdict_state_and_history(self, guard, fake_bridge):
+        url, set_state = fake_bridge
+        set_state("ok")
+        with tempfile.TemporaryDirectory() as t:
+            r = self._run(guard, t, url)
+            assert r.returncode == 0, r.stderr
+            assert "RC=0" in r.stdout
+            hist = self._history(t)
+            assert len(hist) == 1
+            assert hist[0].endswith(" ok consecutive=0"), hist
+            st = self._state(t)
+            assert st["last_state"] == "ok"
+            assert st["consecutive_wedged"] == "0"
+            assert st["last_check"].isdigit()
+
+    def test_wedged_increments_ok_resets_unknown_holds(self, guard,
+                                                       fake_bridge):
+        # wedged increments; ok resets; unknown (inconclusive) leaves the
+        # counter alone — the fail-safe direction per #492.
+        url, set_state = fake_bridge
+        with tempfile.TemporaryDirectory() as t:
+            set_state("wedged")
+            self._run(guard, t, url)
+            self._run(guard, t, url)
+            assert self._state(t)["consecutive_wedged"] == "2"
+            set_state("unknown")
+            self._run(guard, t, url)
+            assert self._state(t)["consecutive_wedged"] == "2"
+            assert self._state(t)["last_state"] == "unknown"
+            set_state("ok")
+            self._run(guard, t, url)
+            assert self._state(t)["consecutive_wedged"] == "0"
+
+    def test_restart_gate_off_by_default(self, guard, fake_bridge,
+                                         fake_home):
+        # Three consecutive wedges with the gate unset must NOT restart
+        # the stack — the probe is new and unproven in production, so the
+        # default only builds history (#769).
+        home, calls = fake_home
+        url, set_state = fake_bridge
+        set_state("wedged")
+        with tempfile.TemporaryDirectory() as t:
+            for _ in range(3):
+                r = self._run(guard, t, url, env_extra={"HOME": home,
+                                                       "CALLS_FILE": calls})
+                assert r.returncode == 0, r.stderr
+            assert not os.path.exists(calls), \
+                "desktop stack restarted with the gate off"
+            assert self._state(t)["consecutive_wedged"] == "3"
+
+    def test_restart_gate_on_restarts_once_with_cooldown(self, guard,
+                                                         fake_bridge,
+                                                         fake_home):
+        # Gate open: the threshold-many-eth consecutive wedge restarts
+        # (stop+start); the counter resets, and a further wedge inside
+        # the cooldown does NOT restart again (no restart storm on a
+        # persistently-wedged Xvfb).
+        #
+        # Threshold is pinned to 1 here so the second run's restart is
+        # blocked by the COOLDOWN check, not the threshold check: with the
+        # default threshold=3 the post-restart counter (reset to 0) never
+        # reaches the cooldown condition, so a deleted/inverted cooldown
+        # would sail through the test unnoticed (found by Engineering's
+        # mutation testing on the review).
+        home, calls = fake_home
+        url, set_state = fake_bridge
+        set_state("wedged")
+        env = {"HOME": home, "CALLS_FILE": calls,
+               "CUA_KEEPALIVE_WEDGE_RESTART": "1",
+               "CUA_KEEPALIVE_WEDGE_THRESHOLD": "1"}
+        with tempfile.TemporaryDirectory() as t:
+            # Run 1: consecutive=1 >= 1, no prior restart -> restart.
+            self._run(guard, t, url, env_extra=env)
+            with open(calls) as f:
+                invocations = [ln.strip() for ln in f if ln.strip()]
+            assert invocations == ["stop", "start"], invocations
+            st = self._state(t)
+            assert st["consecutive_wedged"] == "0"
+            assert st["last_restart"].isdigit()
+            # Run 2: consecutive=1 >= 1 again, but inside the 1h cooldown
+            # since run 1's restart -> no second restart.
+            self._run(guard, t, url, env_extra=env)
+            with open(calls) as f:
+                invocations = [ln.strip() for ln in f if ln.strip()]
+            assert invocations == ["stop", "start"], invocations
+
+    def test_probe_throttled_by_interval(self, guard, fake_bridge):
+        # With a 1h interval, the second immediate run skips the probe —
+        # no second fetch, no second history line.
+        url, set_state = fake_bridge
+        set_state("ok")
+        with tempfile.TemporaryDirectory() as t:
+            env = {"CUA_KEEPALIVE_PROBE_INTERVAL_S": "3600"}
+            self._run(guard, t, url, env_extra=env)
+            self._run(guard, t, url, env_extra=env)
+            assert len(self._history(t)) == 1
+
+    def test_bridge_unreachable_is_quiet(self, guard):
+        # A down bridge belongs to the liveness block above, not to the
+        # probe — the check must fail soft (rc 0, a stderr note, no state
+        # corruption, no history line for a probe that never ran).
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        dead_url = f"http://127.0.0.1:{s.getsockname()[1]}"
+        s.close()
+        with tempfile.TemporaryDirectory() as t:
+            r = self._run(guard, t, dead_url)
+            assert r.returncode == 0, r.stderr
+            assert "RC=0" in r.stdout
+            assert "input probe fetch failed" in r.stderr
+            assert not os.path.exists(
+                os.path.join(t, "cua-input-probe.log"))
+
+    def test_missing_python3_skips_loudly(self, guard, fake_bridge):
+        # A minimal box without python3 must skip the check with a note,
+        # never crash the keepalive run.
+        if not shutil.which("curl"):
+            pytest.skip("curl not installed")
+        url, _ = fake_bridge
+        with tempfile.TemporaryDirectory() as t:
+            bindir = os.path.join(t, "nopython")
+            os.makedirs(bindir)
+            for tool in ("curl", "date", "mktemp", "mv"):
+                src = shutil.which(tool)
+                assert src, f"{tool} not installed"
+                os.symlink(src, os.path.join(bindir, tool))
+            env = {"PATH": bindir}
+            r = self._run(guard, t, url, env_extra=env)
+            assert r.returncode == 0, r.stderr
+            assert "RC=0" in r.stdout
+            assert "python3 missing" in r.stderr
+
+
+class TestDesktopStatusProbeSurface:
+    def test_status_surfaces_input_probe_states(self):
+        # cua-desktop.sh status must surface the bridge's input-probe
+        # verdict (the #769 option-b surfacing), in the existing
+        # [ok]/[down]-style vocabulary.
+        src = open(DESKTOP_SH).read()
+        assert "[ok] input path" in src
+        assert "[wedged] input path" in src
+        assert "[unknown] input path" in src
+        assert "/api/status" in src

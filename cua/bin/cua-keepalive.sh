@@ -79,3 +79,105 @@ if ! curl -s --max-time 5 http://127.0.0.1:18731/api/status >/dev/null 2>&1; the
   # keepalive cron, truncating any victim-writable target as this user).
   setsid $HOME/cua/bin/cua-bridge.py 9>&- >>"$HOME/.cache/cua-bridge.log" 2>&1 < /dev/null &
 fi
+
+# Input-path wedge supervision (#769): the bridge's /api/status "input"
+# field reports the XTEST keyboard-path probe verdict, but nothing ever
+# refreshed it — plain /api/status is a pure read, only ?probe=1 runs the
+# probe, and the liveness check above discards the body anyway. So the
+# keepalive schedules a fresh probe every CUA_KEEPALIVE_PROBE_INTERVAL_S
+# (default 1800 — the probe focus-hops briefly, so not every 5-minute
+# tick), records each verdict in the probe history log, and tracks
+# consecutive wedges in a state file that cua-desktop.sh status surfaces.
+#
+# Acting on the signal (restarting the desktop stack on a sustained wedge)
+# stays OFF by default: the probe is new and unproven in production, so
+# this only builds operational history. Setting CUA_KEEPALIVE_WEDGE_RESTART=1
+# opts in: CUA_KEEPALIVE_WEDGE_THRESHOLD consecutive "wedged" verdicts
+# (default 3) restart the stack once via stop+start (fresh Xvfb is the
+# documented wedge remediation), with at most one restart per
+# CUA_KEEPALIVE_WEDGE_COOLDOWN_S (default 3600). "ok" resets the counter;
+# "unknown" (inconclusive) neither increments nor resets — the fail-safe
+# direction per #492.
+# shellcheck disable=SC2120 # tests (cua/test_shell_scripts.py) call
+# input_probe_check with [state_dir] [bridge_url] overrides; the
+# production call site passes none.
+input_probe_check() { # input_probe_check [state_dir] [bridge_url]
+  local state_dir=${1:-$HOME/.cache}
+  local bridge=${2:-http://127.0.0.1:18731}
+  local state_file="$state_dir/cua-input-probe.state"
+  local hist_file="$state_dir/cua-input-probe.log"
+  local now; now=$(date +%s)
+  local interval=${CUA_KEEPALIVE_PROBE_INTERVAL_S:-1800}
+  local threshold=${CUA_KEEPALIVE_WEDGE_THRESHOLD:-3}
+  local cooldown=${CUA_KEEPALIVE_WEDGE_COOLDOWN_S:-3600}
+  case "$interval" in ''|*[!0-9]*) interval=1800 ;; esac
+  case "$threshold" in ''|*[!0-9]*|0) threshold=3 ;; esac
+  case "$cooldown" in ''|*[!0-9]*) cooldown=3600 ;; esac
+  local last_check=0 consecutive=0 last_state=unknown last_restart=0
+  if [ -f "$state_file" ]; then
+    # The state file is written by this function only; still, parse
+    # defensively — a hand-edited or half-written file must not inject
+    # anything into the shell.
+    while IFS='=' read -r k v; do
+      case "$k" in
+        last_check) case "$v" in ''|*[!0-9]*) ;; *) last_check=$v ;; esac ;;
+        consecutive_wedged) case "$v" in ''|*[!0-9]*) ;; *) consecutive=$v ;; esac ;;
+        last_restart) case "$v" in ''|*[!0-9]*) ;; *) last_restart=$v ;; esac ;;
+        last_state) case "$v" in ok|wedged|unknown) last_state=$v ;; esac ;;
+      esac
+    done < "$state_file"
+  fi
+  if [ "$((now - last_check))" -lt "$interval" ]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "cua-keepalive: python3 missing — skipping input-probe check" >&2
+    return 0
+  fi
+  local body
+  if ! body=$(curl -s --max-time 15 "$bridge/api/status?probe=1" 2>/dev/null) \
+      || [ -z "$body" ]; then
+    # Bridge unreachable: the liveness block above owns that case —
+    # don't double-act on a probe that never ran.
+    echo "cua-keepalive: input probe fetch failed (bridge down?)" >&2
+    return 0
+  fi
+  local verdict
+  verdict=$(printf '%s' "$body" | python3 -c \
+    'import json,sys
+try:
+    print(json.load(sys.stdin).get("input", {}).get("state", "unknown"))
+except Exception:
+    print("unparseable")' 2>/dev/null) || verdict=unparseable
+  case "$verdict" in
+    wedged) consecutive=$((consecutive + 1)) ;;
+    ok) consecutive=0 ;;
+    *) ;; # unknown/unparseable: inconclusive — leave the counter alone
+  esac
+  last_state=$verdict
+  printf '%s %s consecutive=%s\n' "$now" "$verdict" "$consecutive" >>"$hist_file"
+  local gate=${CUA_KEEPALIVE_WEDGE_RESTART:-0}
+  if [ "$gate" = "1" ] && [ "$verdict" = "wedged" ] \
+      && [ "$consecutive" -ge "$threshold" ] \
+      && [ "$((now - last_restart))" -ge "$cooldown" ]; then
+    echo "cua-keepalive: input path wedged ${consecutive}x consecutively; restarting desktop stack" >&2
+    # 9>&-: see above — the restarted stack must not inherit the run lock.
+    "$HOME/cua/bin/cua-desktop.sh" stop 9>&- >/dev/null 2>&1
+    "$HOME/cua/bin/cua-desktop.sh" start 9>&- >/dev/null 2>&1
+    last_restart=$now
+    consecutive=0
+  fi
+  local tmp
+  tmp=$(mktemp "$state_dir/.cua-input-probe.state.XXXXXX") || return 0
+  {
+    printf 'last_check=%s\n' "$now"
+    printf 'last_state=%s\n' "$last_state"
+    printf 'consecutive_wedged=%s\n' "$consecutive"
+    printf 'last_restart=%s\n' "$last_restart"
+  } >"$tmp"
+  mv -f "$tmp" "$state_file"
+}
+
+# Input-path wedge supervision (#769): schedule the probe on a ~30-minute
+# cadence, record the history, and (opt-in) restart on a sustained wedge.
+input_probe_check
