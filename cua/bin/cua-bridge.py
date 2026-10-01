@@ -33,6 +33,7 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 _HOME = os.path.expanduser("~")
 DRIVER = os.path.join(_HOME, "cua/bin/cua-driver")
@@ -375,136 +376,231 @@ def focus_window(w):
     # Activate the window via EWMH _NET_ACTIVE_WINDOW so it genuinely has
     # keyboard focus. This panel is a remote-desktop-style surface, which
     # is bring_to_front's intended use. (Do NOT use delivery_mode
-    # "foreground" for type/key instead: that routes through XTEST global
-    # input, and XTEST keyboard events are not delivered by this Xvfb —
-    # verified with xev. XSendEvent works, but only to a focused window.)
+    # "foreground" for type/key instead of the focus + targeted calls the
+    # /api/type and /api/key handlers make: untargeted, the foreground key
+    # routes through XTEST global input, which delivers to whatever window
+    # happens to hold input focus — XTEST ignores the target and goes to
+    # focus, verified with xev. XSendEvent works, but only to a focused
+    # window.)
+    # The input probe (#492) relies on the other half of this contract:
+    # with xev focused, the untargeted XTEST key lands in xev and echoes.
+    # ASSUMPTION, pinned to cua-driver 0.28.2 (cua/README.md): untargeted
+    # foreground press_key routes through XTestFakeKeyEvent. Re-verify this
+    # routing if the driver is upgraded — if untargeted keys ever route via
+    # XSendEvent instead, the probe will false-report "ok" on a wedged
+    # keyboard, because XSendEvent survives the wedge.
     call("bring_to_front", {"pid": w["pid"], "window_id": w["window_id"]})
 
 
 # Input-path liveness probe (#492): /api/status used to report
 # driver-process health only, so the stack's best-known failure mode — the
 # Xvfb XTEST keyboard device wedging while the driver keeps reporting
-# success — was invisible: a healthy-but-unusable desktop. This probe
-# exercises the exact XTEST path the wedge breaks: it spawns `xev` on :98,
-# focuses its window, sends one harmless XTEST key (a bare Shift tap, which
+# success — was invisible: a healthy-but-unusable desktop. The bridge now
+# exposes the probe in two halves:
+#
+# - Plain GET /api/status is a read-only health check. It serves the last
+#   probe outcome from the cache below — it never spawns xev, never steals
+#   focus, never injects a key. The keepalive's 5-minute poll (which
+#   discards the body) is unaffected.
+# - GET /api/status?probe=1 runs a fresh probe, single-flight: concurrent
+#   callers share the in-flight probe instead of each spawning xev (two
+#   overlapping probes would cross-talk — one's XTEST key landing in the
+#   other's xev — and false-report a wedge).
+#
+# The probe automates the documented manual diagnosis: spawn `xev` on :98,
+# focus its window, send one harmless XTEST key (a bare Shift tap, which
 # does nothing visible anywhere) through the driver's untargeted
-# global-input route, and waits for xev's KeyPress echo.
-INPUT_PROBE_TIMEOUT = 2.0  # seconds; keeps /api/status well under the
-# keepalive's curl --max-time 5 liveness check
+# global-input route, and wait for xev's KeyPress echo.
+INPUT_PROBE_TIMEOUT = 2.0  # seconds; keeps a probing /api/status well under
+# the keepalive's curl --max-time 5 liveness check
 _INPUT_PROBE_KEY = "Shift_L"
+_ECHO_FLOOR_S = 0.5  # minimum echo-wait budget after the key is sent; less
+# than this is not a real observation — a late-appearing xev window must
+# report "unknown", never a zero-observation "wedged"
+# ASSUMPTION (B4), pinned to cua-driver 0.28.2 (cua/README.md): untargeted
+# foreground press_key routes through XTestFakeKeyEvent — see the
+# focus_window contract note. Re-verify on driver upgrades.
+PROBE_DRIVER_VERSION = "cua-driver 0.28.2"
+
+# Serializes probe bodies: XTestFakeKeyEvent delivers to the focus window,
+# not to any xev in particular, so two overlapping probes cross-talk.
+_INPUT_PROBE_LOCK = threading.Lock()
 
 
-def _input_probe(timeout=INPUT_PROBE_TIMEOUT):
+def _input_probe(timeout=INPUT_PROBE_TIMEOUT, cancel=None):
     """One attempt at the XTEST keyboard-path liveness check (#492).
+
+    `cancel` is a threading.Event the budget wrapper sets when the probe
+    overruns: side-effecting steps (focus hop, key injection) are skipped
+    once cancelled, so an orphaned probe thread never mutates the desktop
+    after its request already returned.
 
     Returns (state, detail):
       "ok"      — KeyPress echo seen; the XTEST input path is live.
-      "wedged"  — xev ran, got focus, the XTEST key was sent, but no
-                  KeyPress arrived within the timeout: the XTEST keyboard
-                  device is wedged. Remediation: `cua-desktop.sh stop` +
-                  `start` (fresh Xvfb; only touches :98).
-      "unknown" — the probe itself could not run (xev/stdbuf missing, the
-                  xev window never appeared, the driver rejected the
-                  untargeted key). A probe failure is never reported as a
-                  wedge — that is the fail-safe direction.
+      "wedged"  — xev ran, got focus, the XTEST key was sent, and a full
+                  echo observation window passed with no KeyPress: the
+                  XTEST keyboard device is wedged. Remediation:
+                  `cua-desktop.sh stop` + `start` (fresh Xvfb; only touches
+                  :98).
+      "unknown" — the probe itself could not run or could not observe
+                  (xev/stdbuf missing, the xev window never appeared, the
+                  driver rejected the untargeted key, xev exited before
+                  echoing, the window appeared too late for a real echo
+                  wait, the budget blew). A probe failure is never reported
+                  as a wedge — that is the fail-safe direction.
 
     The focus hop is inherent to the check: XTestFakeKeyEvent delivers to
     the input-focus window, so xev must hold focus for the echo to land in
-    it. xev's stdout is line-buffered through stdbuf — without it, the
-    piped KeyPress line would sit in a 4 KiB block buffer and the probe
-    would false-report a wedge. The probe never shells out: fixed argv only.
+    it. The pre-probe focused window is restored afterwards (best-effort).
+    xev's stdout is line-buffered through stdbuf — without it, the piped
+    KeyPress line would sit in a 4 KiB block buffer and the probe would
+    false-report a wedge. The probe never shells out: fixed argv only, both
+    binaries resolved to absolute paths against the bridge's own PATH so
+    the check and the exec cannot diverge.
     """
-    xev = shutil.which("xev")
-    if xev is None:
-        return ("unknown",
-                "xev is not installed — cannot run the input-path probe")
-    if shutil.which("stdbuf") is None:
-        return ("unknown",
-                "stdbuf is not installed — xev output would be block-buffered "
-                "and the probe could false-report a wedge")
-    deadline = time.monotonic() + timeout
-    try:
-        proc = subprocess.Popen(
-            ["stdbuf", "-oL", "-eL", xev, "-event", "keyboard"],
-            env=BASE_ENV, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            start_new_session=True)
-    except OSError as e:
-        return ("unknown", f"cannot spawn xev: {e}"[:200])
-    try:
-        win = None
-        while time.monotonic() < deadline:
-            wins = call("list_windows", {}).get("windows", [])
-            cands = [w for w in wins
-                     if w.get("is_on_screen") and w.get("pid")
-                     and (w.get("app_name", "").lower() == "xev"
-                          or "event tester" in w.get("title", "").lower())]
-            if cands:
-                win = max(cands, key=lambda w: w.get("z_index", 0))
-                break
-            time.sleep(0.1)
-        if win is None:
-            return ("unknown", "xev ran but its window never appeared in "
-                               "list_windows — probe inconclusive")
-        focus_window(win)
-        time.sleep(0.2)  # let the WM grant focus before the XTEST key
-        # No pid/window_id: the untargeted foreground key routes through
-        # XTEST global input and lands in the focused window (xev). A bare
-        # modifier tap is harmless wherever it lands.
-        try:
-            call("press_key", {"key": _INPUT_PROBE_KEY, "modifiers": [],
-                               "delivery_mode": "foreground"})
-        except Exception as e:
+    with _INPUT_PROBE_LOCK:
+        if cancel is not None and cancel.is_set():
             return ("unknown",
-                    f"driver rejected the global input key: {e}"[:200])
-        fd = proc.stdout.fileno()
-        os.set_blocking(fd, False)
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            r, _, _ = select.select([fd], [], [], remaining)
-            if not r:
-                break
-            try:
-                chunk = os.read(fd, 65536)
-            except BlockingIOError:
-                continue
-            if not chunk:
-                break  # xev exited without echoing
-            if b"KeyPress" in chunk:
-                elapsed = timeout - max(remaining, 0)
-                return ("ok",
-                        f"XTEST KeyPress echo observed in {elapsed:.1f}s")
-        return ("wedged",
-                "no KeyPress echo from the XTEST key within "
-                f"{timeout:.0f}s — the XTEST keyboard device is wedged; "
-                "restart the desktop stack (cua-desktop.sh stop/start)")
-    except Exception as e:
-        return ("unknown", f"input probe error: {e}"[:200])
-    finally:
+                    "input probe cancelled before start — inconclusive")
+        path = BASE_ENV.get("PATH", "")
+        xev = shutil.which("xev", path=path)
+        if xev is None:
+            return ("unknown",
+                    "xev is not installed — cannot run the input-path probe")
+        stdbuf = shutil.which("stdbuf", path=path)
+        if stdbuf is None:
+            return ("unknown",
+                    "stdbuf is not installed — xev output would be "
+                    "block-buffered and the probe could false-report a wedge")
+        # Best-effort focus restore: remember what had focus before the
+        # probe's own focus hop, so the net effect is ~neutral.
+        prev = None
         try:
-            proc.kill()
-            proc.wait(timeout=5)
+            prev = top_window()
         except Exception:
-            pass
+            prev = None
+        deadline = time.monotonic() + timeout
+        try:
+            proc = subprocess.Popen(
+                [stdbuf, "-oL", "-eL", xev, "-event", "keyboard"],
+                env=BASE_ENV, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            return ("unknown", f"cannot spawn xev: {e}"[:200])
+        focused = False
+        try:
+            win = None
+            while time.monotonic() < deadline:
+                if cancel is not None and cancel.is_set():
+                    return ("unknown",
+                            "input probe cancelled — inconclusive")
+                wins = call("list_windows", {}).get("windows", [])
+                # Match on the exact child PID: window titles and app names
+                # are free-form and settable by any X client, so a spoofed
+                # "Event Tester" window could otherwise steal the focus and
+                # the key and false-report a wedge. No PID match is
+                # inconclusive, never a wedge.
+                hits = [w for w in wins
+                        if w.get("is_on_screen") and w.get("pid") == proc.pid]
+                if hits:
+                    win = max(hits, key=lambda w: w.get("z_index", 0))
+                    break
+                time.sleep(0.1)
+            if win is None:
+                return ("unknown",
+                        f"xev (pid {proc.pid}) never appeared in "
+                        "list_windows — probe inconclusive")
+            if cancel is not None and cancel.is_set():
+                return ("unknown",
+                        "input probe cancelled before the focus hop — "
+                        "inconclusive")
+            focus_window(win)
+            focused = True
+            if cancel is not None:
+                if cancel.wait(0.2):  # let the WM grant focus; abort early
+                    return ("unknown",
+                            "input probe cancelled — inconclusive")
+            else:
+                time.sleep(0.2)
+            if cancel is not None and cancel.is_set():
+                return ("unknown",
+                        "input probe cancelled before the key — inconclusive")
+            # No pid/window_id: the untargeted foreground key routes through
+            # XTEST global input and lands in the focused window (xev). A
+            # bare modifier tap is harmless wherever it lands.
+            try:
+                call("press_key", {"key": _INPUT_PROBE_KEY, "modifiers": [],
+                                   "delivery_mode": "foreground"})
+            except Exception as e:
+                return ("unknown",
+                        f"driver rejected the global input key: {e}"[:200])
+            if deadline - time.monotonic() < _ECHO_FLOOR_S:
+                return ("unknown",
+                        "xev appeared too late in the probe budget for a "
+                        "meaningful echo wait — inconclusive")
+            fd = proc.stdout.fileno()
+            os.set_blocking(fd, False)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                r, _, _ = select.select([fd], [], [], remaining)
+                if not r:
+                    break
+                try:
+                    chunk = os.read(fd, 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    # xev exited before echoing: a probe failure, not wedge
+                    # evidence — the fail-safe direction.
+                    return ("unknown",
+                            "xev exited before echoing a KeyPress — probe "
+                            "inconclusive")
+                if b"KeyPress" in chunk:
+                    elapsed = timeout - max(remaining, 0)
+                    return ("ok",
+                            "XTEST KeyPress echo observed in "
+                            f"{elapsed:.1f}s")
+            return ("wedged",
+                    "no KeyPress echo from the XTEST key within "
+                    f"{timeout:.0f}s — the XTEST keyboard device is wedged; "
+                    "restart the desktop stack (cua-desktop.sh stop/start)")
+        except Exception as e:
+            return ("unknown", f"input probe error: {e}"[:200])
+        finally:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            if focused and prev is not None:
+                try:
+                    focus_window(prev)
+                except Exception:
+                    pass
 
 
-def input_liveness(timeout=INPUT_PROBE_TIMEOUT):
-    """Bounded wrapper around _input_probe (#492).
+def _bounded_probe(timeout=INPUT_PROBE_TIMEOUT):
+    """Run _input_probe on a daemon thread with a hard budget (#492).
 
-    The probe makes several driver calls (list_windows poll, bring_to_front,
-    press_key), each with the driver's own long timeout — a hung driver must
-    not stall /api/status past the keepalive's curl --max-time 5 liveness
-    check, or the keepalive would restart a healthy bridge. So the probe
-    runs on a daemon thread and a blown budget is reported as "unknown"
-    (inconclusive), never as a wedge. A stuck thread finishes on its own
-    (driver calls self-timeout) and its finally still reaps the xev child.
+    The probe makes several driver calls, each with the driver's own long
+    timeout — a hung driver must not stall /api/status past the keepalive's
+    curl --max-time 5 liveness check, or the keepalive would restart a
+    healthy bridge. A blown budget is reported as "unknown" (inconclusive),
+    never as a wedge, and the cancel event keeps the orphaned thread from
+    performing focus/key side effects after its request already returned.
     """
+    cancel = threading.Event()
     result = {}
 
     def run():
         try:
-            result["outcome"] = _input_probe(timeout)
+            result["outcome"] = _input_probe(timeout, cancel)
         except Exception as e:  # never let the probe crash the status handler
             result["outcome"] = ("unknown", f"input probe crashed: {e}"[:200])
 
@@ -512,11 +608,48 @@ def input_liveness(timeout=INPUT_PROBE_TIMEOUT):
     t.start()
     t.join(timeout)
     if t.is_alive():
+        cancel.set()
         return ("unknown",
                 "input probe exceeded its "
                 f"{timeout:.0f}s budget — inconclusive")
     return result.get("outcome",
                       ("unknown", "input probe produced no result"))
+
+
+# Last probe outcome, served by plain GET /api/status (read-only).
+_probe_lock = threading.Lock()
+_probe_cache = {"state": "unknown",
+                "detail": "input probe has not run yet — "
+                          "request /api/status?probe=1",
+                "checked_at": None}
+_probe_inflight = False
+
+
+def get_input_liveness(run_probe=False):
+    """The /api/status "input" field (#492).
+
+    Plain calls serve the cached outcome — a pure read. run_probe=True
+    (GET /api/status?probe=1) runs a fresh probe, single-flight: while one
+    probe is in flight, concurrent callers get the last cached outcome
+    instead of spawning their own xev. Returns (state, detail, checked_at);
+    checked_at is epoch seconds, or None when the probe has never run.
+    """
+    global _probe_inflight
+    with _probe_lock:
+        if not run_probe or _probe_inflight:
+            c = _probe_cache
+            return (c["state"], c["detail"], c["checked_at"])
+        _probe_inflight = True
+    try:
+        state, detail = _bounded_probe()
+    finally:
+        with _probe_lock:
+            _probe_cache.update(state=state, detail=detail,
+                                checked_at=time.time())
+            _probe_inflight = False
+    with _probe_lock:
+        c = _probe_cache
+        return (c["state"], c["detail"], c["checked_at"])
 
 
 # Concurrency: the stock HTTPServer handles one request at a time, so a slow
@@ -585,15 +718,22 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not self._check_csrf():
                 return
-            if self.path == "/api/status":
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/status":
                 st = subprocess.run([DRIVER, "status"], capture_output=True,
                                     timeout=10, env=BASE_ENV, text=True)
                 if st.returncode == 0:
-                    probe_state, probe_detail = input_liveness()
+                    # ?probe=1 runs a fresh input probe (single-flight);
+                    # plain /api/status is a pure read serving the last
+                    # cached probe outcome — never spawns xev.
+                    probe_requested = (parse_qs(parsed.query).get("probe")
+                                       == ["1"])
+                    pstate, pdetail, pchecked = get_input_liveness(
+                        run_probe=probe_requested)
                 else:
                     # driver down: the input path cannot be probed either
-                    probe_state, probe_detail = (
-                        "unknown", "driver down — input probe skipped")
+                    pstate, pdetail, pchecked = (
+                        "unknown", "driver down — input probe skipped", None)
                 self._json({"ok": st.returncode == 0,
                             "detail": st.stdout.strip()[:400],
                             # #491 (b): the panel reads the running set here
@@ -603,9 +743,13 @@ class Handler(BaseHTTPRequestHandler):
                             # the XTEST keyboard wedge (input silently dead
                             # while the driver reports ok) — "input" reports
                             # the XTEST-path liveness probe:
-                            # "ok" | "wedged" | "unknown".
-                            "input": {"state": probe_state,
-                                      "detail": probe_detail}})
+                            # "ok" | "wedged" | "unknown". "driver" pins the
+                            # driver version the probe's XTEST-routing
+                            # assumption was verified against.
+                            "input": {"state": pstate,
+                                      "detail": pdetail,
+                                      "checked_at": pchecked,
+                                      "driver": PROBE_DRIVER_VERSION}})
             elif self.path == "/api/windows":
                 self._json(call("list_windows", {}))
             elif self.path == "/api/screenshot":

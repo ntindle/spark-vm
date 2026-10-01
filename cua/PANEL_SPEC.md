@@ -35,16 +35,24 @@ All JSON unless noted. Errors are `{"error": "..."}` with an HTTP status.
 Driver health. → `{"ok": true, "detail": "<driver status text>"}`
 
 Input-path liveness (#492): the XTEST keyboard device can wedge while the
-driver still reports ok (typing silently does nothing). Every status call
-runs a cheap probe — `xev` on `:98` is focused, one harmless XTEST key (a
+driver still reports ok (typing silently does nothing). The bridge exposes
+an XTEST echo probe — `xev` on `:98` is focused, one harmless XTEST key (a
 bare Shift tap) goes out through the driver's global-input route, and the
-bridge watches for the `KeyPress` echo — and reports it as
-`"input": {"state": "ok"|"wedged"|"unknown", "detail": "<human text>"}`.
+bridge watches for the `KeyPress` echo — as
+`"input": {"state": "ok"|"wedged"|"unknown", "detail": "<human text>",
+"checked_at": <epoch or null>, "driver": "<pinned driver version>"}`.
+
+Plain `/api/status` is a pure read: it serves the last probe outcome from
+the cache, never spawns anything. Pass `?probe=1` to run a fresh probe
+(single-flight — concurrent callers share the in-flight probe instead of
+each spawning `xev`; the pre-probe focused window is restored afterwards).
 `"wedged"` means restart the desktop stack (`cua-desktop.sh stop`/`start`);
-`"unknown"` means the probe itself couldn't run (xev/stdbuf missing, driver
-down) — inconclusive, never a wedge. The probe is bounded (~2 s) and the
-focus hop is inherent: XTEST keys deliver to the input-focus window, so
-`xev` must briefly hold focus for the echo to land in it.
+`"unknown"` means the probe itself couldn't run or couldn't observe
+(xev/stdbuf missing, driver down, inconclusive timing) — never a wedge.
+The probe window is matched by the exact child PID, never by title, so a
+spoofed "Event Tester" window can't manufacture a wedge verdict. The
+untargeted-key→XTEST routing is a pinned-driver assumption (cua-driver
+0.28.2); re-verify on driver upgrades.
 
 ### GET /api/windows
 → driver `list_windows` result: array of
