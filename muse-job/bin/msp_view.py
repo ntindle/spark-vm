@@ -213,9 +213,10 @@ class JobStateTracker:
         falls back to the raw params dict. NOT redacted -- may contain
         real secret values (see Security and trust).
         """
-        if self._blocked is None:
+        blocked = self._blocked
+        if blocked is None:
             return None
-        params = self._blocked.get("params") or {}
+        params = blocked.get("params") or {}
         for key in ("question", "description", "prompt"):
             value = params.get(key)
             if isinstance(value, str) and value:
