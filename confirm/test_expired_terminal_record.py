@@ -183,7 +183,7 @@ class ExpiredTerminalRecordTests(unittest.TestCase):
         and stamped an expiry record; the human's deny then lands and
         must overwrite it."""
         item = _pending_item(expired=False)  # answerable: not expired
-        nonce = cd._mint_csrf_nonce(item)    # mint BEFORE planting
+        nonce = cd._mint_csrf_nonce(AID)    # mint BEFORE planting
         p = self._plant_pending(item)
         with self._ctx():
             # The proxy won the race mid-flight: expiry record stamped.
@@ -465,7 +465,7 @@ class ExpiredHumanSurfaceTests(unittest.TestCase):
               "created": "2026-09-18T10:00:00+00:00",
               "expires": "2020-01-01T00:00:00+00:00",
               "credential": "c", "host": "h", "method": "GET"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         (self.approvals / "pending" / (aid + ".json")).write_text(
             json.dumps(it))
         h = cd.Handler.__new__(cd.Handler)
@@ -522,7 +522,7 @@ class ExpiredHumanSurfaceTests(unittest.TestCase):
               "created": "2026-09-18T10:00:00+00:00",
               "expires": "2020-01-01T00:00:00+00:00",
               "credential": "c", "host": "h", "method": "GET"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         (self.approvals / "pending" / (aid + ".json")).write_text(
             json.dumps(it))
         (self.approvals / "consumed" / (aid + ".json")).write_text(
