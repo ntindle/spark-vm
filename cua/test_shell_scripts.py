@@ -18,6 +18,7 @@ real daemons can never be touched.
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -91,11 +92,25 @@ def run_guard(func_body, call, env=None, prelude=""):
     """Run an extracted shell function body + a call expression in a
     throwaway bash. `env` extra vars are exported first; `prelude` is
     shell sourced before the body (used to provide the shared trust
-    predicate from cua-trust.sh to functions that call it)."""
-    preamble = "".join(f"export {k}={v}\n" for k, v in (env or {}).items())
+    predicate from cua-trust.sh to functions that call it).
+
+    Values are shlex-quoted: an unquoted `export K=V` silently truncates
+    values containing spaces (e.g. a TMPDIR with spaces would chop
+    HOME/PATH mid-word), and breaks on quotes/newlines."""
+    preamble = "".join(f"export {k}={shlex.quote(v)}\n"
+                       for k, v in (env or {}).items())
     script = preamble + prelude + "\n" + func_body + "\n" + call + "\n"
     return subprocess.run(["bash", "-c", script],
                          capture_output=True, text=True, timeout=60)
+
+
+def test_run_guard_quotes_env_values():
+    # A value containing spaces must survive the export intact — the
+    # unquoted form truncated at the first space (silent data loss).
+    r = run_guard("true", 'printf "<%s>" "$DIR_WITH_SPACE"',
+                  env={"DIR_WITH_SPACE": "/tmp/a b"})
+    assert r.returncode == 0, r.stderr
+    assert "</tmp/a b>" in r.stdout, r.stdout
 
 
 def trust_prelude():
@@ -381,6 +396,16 @@ STATE_FILE = os.environ["FAKE_BRIDGE_STATE_FILE"]
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        # The real bridge 404s unknown paths; the fake must too, or a
+        # production typo in the request path (e.g. /api/WRONGPATH)
+        # would still get a 200 and the vocabulary tests would pass
+        # vacuously. Query strings ride on /api/status (?probe=1) and
+        # must keep being served.
+        if self.path.split("?", 1)[0] != "/api/status":
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         try:
             with open(STATE_FILE) as f:
                 content = f.read()
@@ -435,6 +460,71 @@ def fake_bridge():
         finally:
             proc.terminate()
             proc.wait(timeout=10)
+
+
+# Port 1 (tcpmux) is never bound in test environments and unprivileged
+# users cannot bind it, so an HTTP request there is a race-free "dead
+# bridge": unlike a bind-then-close socket, there is no window in which
+# another process can win the port between close and connect.
+_DEAD_BRIDGE_URL = "http://127.0.0.1:1"
+
+# The production bridge address both probe functions default to
+# (${1:-...} in surface_input_probe, ${2:-...} in input_probe_check).
+_DEFAULT_BRIDGE_PORT = 18731
+
+
+def fake_bridge_on_default_port():
+    """Context manager binding the fake bridge on the production bridge
+    port (18731) so the no-arg default-URL call sites can be exercised
+    behaviorally. Raises RuntimeError if the port is taken (e.g. the real
+    bridge is running) — callers skip the test in that case."""
+    import http.server
+    srv = http.server.HTTPServer(
+        ("127.0.0.1", _DEFAULT_BRIDGE_PORT),
+        type("H18731", (http.server.BaseHTTPRequestHandler,), {
+            "do_GET": lambda self: (
+                self.send_response(200),
+                self.send_header("Content-Type", "application/json"),
+                self.end_headers(),
+                self.wfile.write(
+                    b'{"ok": true, "input": {"state": "ok", '
+                    b'"detail": "default-port", "checked_at": 1, '
+                    b'"driver": "test"}}'),
+            ),
+            "log_message": lambda self, *a: None,
+        }))
+    import threading
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    return srv
+
+
+class TestFakeBridge:
+    def test_404s_unknown_paths(self, fake_bridge):
+        # The fake bridge must 404 unknown paths like the real bridge
+        # does: a production typo in the request path must fail loudly
+        # instead of being served a 200 by the fake.
+        import urllib.request
+        import urllib.error
+        url, _ = fake_bridge
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(url + "/api/WRONGPATH", timeout=10)
+        assert excinfo.value.code == 404
+        # ...while the real path keeps serving (query strings included).
+        with urllib.request.urlopen(url + "/api/status?probe=1",
+                                    timeout=10) as r:
+            assert r.status == 200
+
+    def test_serves_probe_path_with_query(self, fake_bridge):
+        # input_probe_check fetches "$bridge/api/status?probe=1" — the
+        # query must not trip the 404 above.
+        import urllib.request
+        url, set_state = fake_bridge
+        set_state("wedged")
+        with urllib.request.urlopen(url + "/api/status?probe=1",
+                                    timeout=10) as r:
+            body = r.read().decode()
+        assert '"wedged"' in body
 
 
 class TestInputProbeCheck:
@@ -518,6 +608,27 @@ class TestInputProbeCheck:
             self._run(guard, t, url)
             assert self._state(t)["consecutive_wedged"] == "0"
 
+    def test_missing_input_key_falls_back_to_unknown(self, guard,
+                                                      fake_bridge):
+        # A bridge body with no "input" key must take the .get("input",
+        # {}).get("state", "unknown") fallback — inconclusive, like an
+        # explicit "unknown": the counter is left alone and the honest
+        # verdict is recorded in state and history.
+        url, set_state = fake_bridge
+        with tempfile.TemporaryDirectory() as t:
+            set_state("wedged")
+            self._run(guard, t, url)
+            assert self._state(t)["consecutive_wedged"] == "1"
+            set_state('RAW:{"ok": true}')
+            r = self._run(guard, t, url)
+            assert r.returncode == 0, r.stderr
+            assert "RC=0" in r.stdout
+            st = self._state(t)
+            assert st["last_state"] == "unknown", st
+            assert st["consecutive_wedged"] == "1", st
+            hist = self._history(t)
+            assert hist[-1].endswith(" unknown consecutive=1"), hist
+
     def test_restart_gate_off_by_default(self, guard, fake_bridge,
                                          fake_home):
         # Three consecutive wedges with the gate unset must NOT restart
@@ -586,13 +697,8 @@ class TestInputProbeCheck:
         # A down bridge belongs to the liveness block above, not to the
         # probe — the check must fail soft (rc 0, a stderr note, no state
         # corruption, no history line for a probe that never ran).
-        import socket
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        dead_url = f"http://127.0.0.1:{s.getsockname()[1]}"
-        s.close()
         with tempfile.TemporaryDirectory() as t:
-            r = self._run(guard, t, dead_url)
+            r = self._run(guard, t, _DEAD_BRIDGE_URL)
             assert r.returncode == 0, r.stderr
             assert "RC=0" in r.stdout
             assert "input probe fetch failed" in r.stderr
@@ -651,6 +757,47 @@ class TestInputProbeCheck:
             assert hist[1].endswith(" unparseable consecutive=1"), hist
             assert not os.path.exists(calls), \
                 "desktop stack restarted on an unparseable verdict"
+
+    def test_bare_call_uses_default_bridge_url(self, guard):
+        # input_probe_check's production call site passes NO bridge URL —
+        # the ${2:-http://127.0.0.1:18731} default must resolve to the
+        # real bridge address, not a typo'd one. Prove it behaviorally:
+        # serve the fake bridge on the default port and call the
+        # function with only the state dir, letting the URL default.
+        try:
+            srv = fake_bridge_on_default_port()
+        except OSError:
+            pytest.skip("port 18731 in use (real bridge running); "
+                        "default-URL test needs the port free")
+        try:
+            with tempfile.TemporaryDirectory() as home:
+                cachedir = os.path.join(home, ".cache")
+                os.makedirs(cachedir)
+                r = run_guard(guard,
+                              f'input_probe_check "{cachedir}"; '
+                              'echo "RC=$?"',
+                              env={"HOME": home})
+                assert r.returncode == 0, r.stderr
+                assert "RC=0" in r.stdout
+                hist = self._history(cachedir)
+                assert len(hist) == 1, hist
+                assert hist[0].endswith(" ok consecutive=0"), hist
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_state_reader_accepts_every_writer_verdict(self):
+        # The writer records last_state=<verdict> for every verdict the
+        # probe classifier produces (ok/wedged/unknown/unparseable); the
+        # state-file reader's allowlist must accept all four, or a
+        # re-read would silently downgrade an honest "unparseable" to
+        # "unknown". The reader's value is always overwritten by the
+        # next probe's verdict before the state is rewritten, so this is
+        # pinned as a source contract, not behaviorally.
+        body = extract_function(KEEPALIVE_SH, "input_probe_check")
+        m = re.search(r'last_state\) case "\$v" in ([^)]*)\)', body)
+        assert m, "last_state reader arm not found in input_probe_check"
+        assert m.group(1) == "ok|wedged|unknown|unparseable", m.group(1)
 
     def test_bare_call_uses_home_cache_defaults(self, guard):
         # The production call site runs input_probe_check with NO args —
@@ -716,7 +863,7 @@ class TestSurfaceInputProbe:
         url, set_state = fake_bridge
         expected = {
             "ok": "[ok] input path (XTEST probe)",
-            "wedged": "[wedged] input path (XTEST probe) \u2014 remediate: "
+            "wedged": "[wedged] input path (XTEST probe) — remediate: "
                       "cua-desktop.sh stop && cua-desktop.sh start",
             "unknown": "[unknown] input path (probe not run yet or "
                        "inconclusive)",
@@ -728,6 +875,17 @@ class TestSurfaceInputProbe:
             assert "RC=0" in r.stdout
             assert line in r.stdout, (verdict, r.stdout)
 
+    def test_missing_input_key_prints_unknown(self, guard, fake_bridge):
+        # A bridge body with no "input" key must render the [unknown]
+        # vocabulary line — the same fallback as an explicit "unknown"
+        # verdict — not silence, and not an [ok]/[wedged] misread.
+        url, set_state = fake_bridge
+        set_state('RAW:{"ok": true}')
+        r = self._run(guard, url)
+        assert r.returncode == 0, r.stderr
+        assert "[unknown] input path (probe not run yet or inconclusive)" \
+            in r.stdout, r.stdout
+
     def test_garbage_body_prints_nothing(self, guard, fake_bridge):
         url, set_state = fake_bridge
         set_state("RAW:not json at all{{{")
@@ -736,14 +894,27 @@ class TestSurfaceInputProbe:
         assert r.stdout.strip() == "RC=0", r.stdout
 
     def test_unreachable_bridge_prints_nothing(self, guard):
-        import socket
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        dead_url = f"http://127.0.0.1:{s.getsockname()[1]}"
-        s.close()
-        r = self._run(guard, dead_url)
+        r = self._run(guard, _DEAD_BRIDGE_URL)
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "RC=0", r.stdout
+
+    def test_bare_call_uses_default_bridge_url(self, guard):
+        # surface_input_probe's production call site (do_status) passes
+        # no URL — the ${1:-http://127.0.0.1:18731} default must resolve
+        # to the real bridge address, not a typo'd one.
+        try:
+            srv = fake_bridge_on_default_port()
+        except OSError:
+            pytest.skip("port 18731 in use (real bridge running); "
+                        "default-URL test needs the port free")
+        try:
+            r = run_guard(guard, 'surface_input_probe; echo "RC=$?"')
+            assert r.returncode == 0, r.stderr
+            assert "RC=0" in r.stdout
+            assert "[ok] input path (XTEST probe)" in r.stdout
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
     def test_do_status_wires_the_surfacing(self):
         # do_status must invoke the surfacing function with no args — the
