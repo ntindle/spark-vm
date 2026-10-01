@@ -395,6 +395,6 @@ controller, and this design already has one.
 controller design (`ROLLOUT_CONTROLLER_DESIGN.md`, G15/#606): the
 controller reads this inventory for its gates (§4) and this inventory
 reads the controller's wave manifests for its "missed the window"
-semantics (§6). S1 shipped 2026-09-29 as the fleet/ component (JSONL journal + rebuildable snapshot, estate-dir pull collector, box-side snapshot emitter, inventory/drift/rebuild CLI, hermetic suite); S2–S3 remain — tracked on #607.
+semantics (§6). S1 shipped 2026-09-29 as the fleet/ component (JSONL journal + rebuildable snapshot, estate-dir pull collector, box-side snapshot emitter, inventory/drift/rebuild CLI, hermetic suite); S2–S3 remain — tracked on #779 (the G16/G17 S2–S3 implementation issue; #607 closed on the design).
 Related: G17 (#608), G18 (#609), G15 (#606), G13 (#555), G11–G12
 (UPDATE_CHANNEL_POLICY.md), P7 (status page).*
