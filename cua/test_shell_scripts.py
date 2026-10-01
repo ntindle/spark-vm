@@ -388,6 +388,16 @@ class TestKeepaliveFlockPin:
         assert len(liveness) == 1, f"expected 1 liveness curl, got: {liveness}"
         assert "/api/liveness" in liveness[0]
         assert "/api/status" not in liveness[0]
+        # The liveness curl is the keepalive's ONLY bridge-restart decision:
+        # a second restart-branch curl (any budget) hitting /api/status
+        # would reintroduce the false-trip through the back door.
+        restart_branches = [
+            ln for ln in src.splitlines()
+            if "curl" in ln and "18731" in ln
+            and not ln.lstrip().startswith("#")
+            and "probe=1" not in ln]
+        assert len(restart_branches) == 1, \
+            f"expected 1 restart-decision curl, got: {restart_branches}"
 
 
 _FAKE_BRIDGE_PY = r'''
