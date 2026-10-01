@@ -35,7 +35,7 @@ the OSS path.
 |---|---|
 | An operator runs a rollout and *sees* it: wave membership, per-wave outcome census, frozen vs failed waves, acked vs firing alerts — beyond one terminal | `fleet events` / `fleet inventory` CLI reads the journals; nothing else |
 
-The G15 rollout controller design reads its gates from §4 of the events doc;
+The G15 rollout controller design reads its gates from §4 of the rollout design (which consumes G17 events);
 the operator reads the same information through a CLI. A rollout with a
 correlated-failure fleet alert (G17 rule 2) currently requires the operator
 to run `fleet events watch` themselves (or page themselves — C3). The
@@ -155,7 +155,7 @@ no tenant-facing surface ships on unattributed data.
 
 | Vision | Current state |
 |---|---|
-| The human watches a signed audit log shipped to the sentinel (`docs/HOSTED_GAP_ANALYSIS.md` vision) | confirmd writes an audit log; fleet journals are unsigned; G17 `attested: false` at S1/S2; the G13 attested box→plane channel is S3 design work; **no sentinel feed spec exists** |
+| The human watches a signed audit log shipped to the sentinel (`docs/HOSTED_GAP_ANALYSIS.md` vision) | confirmd writes an audit log (`docs/SENTINEL_TELEMETRY_SURFACES.md` inventories the four telemetry surfaces as H5 input — surface inventory exists, ingestion/verification contract does not); fleet journals are unsigned; G17 `attested: false` at S1/S2; the G13 attested box→plane channel is S3 design work; **no sentinel feed spec exists** |
 
 The vision's last clause — "the human watches a **signed** audit log
 **shipped to the sentinel**" — decomposes into three unbuilt pieces:
