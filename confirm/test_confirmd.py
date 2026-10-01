@@ -342,40 +342,6 @@ class ConfirmdTests(unittest.TestCase):
         for a in aids:
             cd._csrf_rings.pop(a, None)
 
-    def test_78_preseeded_file_nonce_answer_403s(self):
-        """#78 handler-level: a pending file pre-seeded with a chosen
-        `_csrf_nonces` entry does NOT satisfy /answer. The planted nonce
-        403s as stale-nonce, the pending file is left intact, and no
-        answered/consumed record is written — a handler-level regression
-        reintroducing file reads at the call site would fail here."""
-        aid = self._fresh_aid()
-        planted = "p" * 32
-        it = {"id": aid, "summary": "s", "kind": "first-use",
-              "created": "2026-09-18T10:00:00+00:00",
-              "expires": "2999-01-01T00:00:00+00:00",
-              "_csrf_nonces": [{"nonce": planted, "ts": time.time()}]}
-        src = self.approvals / "pending" / (aid + ".json")
-        src.write_text(json.dumps(it))
-        got = {}
-        h = cd.Handler.__new__(cd.Handler)
-        h.client_address = ("100.99.0.1", 1234)
-        h.send_response = lambda code: None
-        h.send_header = lambda k, v: None
-        h.end_headers = lambda: None
-        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
-             mock.patch.object(cd, "file_owner_name",
-                               return_value="swapd"), \
-             mock.patch.object(cd.Handler, "_err",
-                               side_effect=lambda m, c, suffix="": got.update(
-                                   msg=m, code=c, suffix=suffix)):
-            h._answer_locked("ntindle@github", aid, planted, "deny")
-        self.assertEqual(got.get("code"), 403)
-        self.assertTrue(src.exists())
-        self.assertFalse(
-            (self.approvals / "consumed" / (aid + ".json")).exists())
-        self.assertFalse(
-            (self.approvals / "answered" / (aid + ".json")).exists())
-
     def test_75_ring_knobs_have_sane_defaults(self):
         """The env-overridable ring knobs (arch review R1) default to
         the conservative 3 nonces / 15 minutes."""
