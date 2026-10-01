@@ -12,7 +12,8 @@ Findings 47/48 (round 5) are the trust boundary:
 - 48: per-item CSRF nonce + Sec-Fetch-Site/Origin check on POST.
 
 Config (env):
-  CONFIRM_BIND  tailnet address to bind (default: from `tailscale ip -4`)
+  CONFIRM_BIND  tailnet address to bind (default: from `tailscale ip -4`;
+                unresolvable => fail closed, exit 1, issue #70)
   CONFIRM_PORT  port (default 8443)
   CONFIRM_CERT  TLS cert file (tailscale cert for the machine name)
   CONFIRM_KEY   TLS key file
@@ -177,7 +178,13 @@ def _page_origins():
     env = os.environ.get("CONFIRM_ORIGINS", "")
     if env.strip():
         return {o.strip() for o in env.split(",") if o.strip()}, True
-    origins = {"https://%s:%d" % (BIND, PORT)}
+    origins = set()
+    # Issue #70: when BIND is None the IP-literal origin is skipped — a
+    # "https://None:8443" origin must never exist, even inertly, or a
+    # future import-and-serve path could exact-match it. main() refuses
+    # to serve in this state anyway; this makes the fail-closed total.
+    if BIND:
+        origins.add("https://%s:%d" % (BIND, PORT))
     dns = _tailnet_dnsname()
     if dns:
         origins.add("https://%s:%d" % (dns, PORT))
@@ -2697,7 +2704,7 @@ def main():
     # systemd's Restart=on-failure retries once tailscaled is back.
     if BIND is None:
         print("confirmd FATAL: cannot determine the tailnet bind address "
-              "(tailscale ip -4 failed and CONFIRM_BIND is unset); "
+              "(no usable CONFIRM_BIND pin and `tailscale ip -4` failed); "
               "refusing to serve", flush=True)
         sys.exit(1)
     # Finding 67: print the resolved origins at startup so the journal
