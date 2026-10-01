@@ -852,6 +852,101 @@ def test_forget_token_expires_in_7d():
     assert status == "ok"
 
 
+def test_forget_post_commits_row_before_consuming_forget_token():
+    # #394: the row commit (delete + _rewrite_rows) must run before the
+    # FORGET token is consumed — a kill between the two must never leave
+    # the row alive on disk behind a consumed forget link. (The row's
+    # confirm/invite tokens are still killed before the commit — they are
+    # not the link the user clicked, and the #388 GC prunes them at
+    # rewrite time.)
+    svc, tmp = make_service()
+    row = _submit(svc, "forget10@example.com")
+    docs = spool_docs_newest_first(tmp)
+    forget_token = extract_forget_token(docs[0]["body"])
+    order = []
+    orig_rewrite, orig_consume = svc._rewrite_rows, svc._consume_token
+
+    def rewrite_spy():
+        order.append(("rewrite", None))
+        return orig_rewrite()
+
+    def consume_spy(token):
+        order.append(("consume", token))
+        return orig_consume(token)
+
+    svc._rewrite_rows = rewrite_spy
+    svc._consume_token = consume_spy
+    status, _ = svc.forget_post(forget_token)
+    assert status == 200
+    # The #394 property: the rewrite precedes the FORGET token's consume.
+    # (Auxiliary confirm/invite consumes may precede the rewrite — they
+    # are pruned by the #388 GC inside it.)
+    assert ("rewrite", None) in order
+    assert ("consume", forget_token) in order
+    assert order.index(("rewrite", None)) < order.index(
+        ("consume", forget_token))
+
+
+def test_forget_post_forget_token_stays_consumed_auxiliary_pruned():
+    # #394 + #388: the forget token is consumed after the row commits
+    # and STAYS consumed — the GC keeps forget tokens so the
+    # already-deleted fast path keeps working. The row's confirm token
+    # is killed too, but the #388 GC prunes it at rewrite time (no
+    # surviving row references it), so it does not accumulate.
+    svc, tmp = make_service()
+    row = _submit(svc, "forget11@example.com")
+    docs = spool_docs_newest_first(tmp)
+    forget_token = extract_forget_token(docs[0]["body"])
+    confirm_token = row["active_token"]
+    status, _ = svc.forget_post(forget_token)
+    assert status == 200
+    assert forget_token in svc.consumed
+    assert confirm_token not in svc.consumed
+
+
+def test_forget_crash_window_renders_already_deleted():
+    # #394 crash window: the row committed to disk but the process died
+    # before consuming any tokens. The PII is gone (fail-safe); the
+    # forget link is live but its row is missing. GET and POST must
+    # render the already-deleted page — "expired" would be a lie, and
+    # the user has no other way to learn the deletion succeeded.
+    svc, tmp = make_service()
+    row = _submit(svc, "forget12@example.com")
+    docs = spool_docs_newest_first(tmp)
+    forget_token = extract_forget_token(docs[0]["body"])
+    entry_id = row["entry_id"]
+    del svc.rows[entry_id]
+    svc._rewrite_rows()  # commit without consuming — the crash state
+    svc.reload()  # what a fresh process sees after the kill
+    assert entry_id not in svc.rows
+    status, html = svc.forget_get(forget_token)
+    assert status == 200 and "already deleted" in html
+    status, html = svc.forget_post(forget_token)
+    assert status == 200 and "already deleted" in html
+    # A retry in the crash window must not resurrect anything.
+    svc.reload()
+    assert entry_id not in svc.rows
+    assert row["owner_email"] not in svc.by_email
+
+
+def test_forget_gone_row_expired_token_stays_expired():
+    # TTL precedence: a structurally-valid forget token that is past the
+    # 7-day TTL renders the expired page even when its row is gone —
+    # the #394 honesty path only applies to live links.
+    svc, tmp = make_service()
+    row = _submit(svc, "forget13@example.com")
+    issued_at = NOW - timedelta(seconds=wd.FORGET_TTL_SECONDS + 3600)
+    forget_token = svc.mint_token(row["entry_id"], row["owner_email"],
+                                  issued_at=issued_at, kind="forget")
+    del svc.rows[row["entry_id"]]
+    svc._rewrite_rows()
+    svc.reload()
+    status, html = svc.forget_get(forget_token)
+    assert status == 200 and "last 7 days" in html
+    status, html = svc.forget_post(forget_token)
+    assert status == 200 and "last 7 days" in html
+
+
 def test_cta_selfhost_emits_and_returns_url():
     svc, tmp = make_service()
     url = svc.cta_selfhost("selfhost")
@@ -865,6 +960,22 @@ def test_cta_selfhost_emits_and_returns_url():
     events = read_events(tmp)
     assert [e for e in events if e["event"] == "cta_click"
             and "src" not in e["attrs"]]
+
+
+def test_cta_selfhost_serializes_emit_on_thread_lock():
+    # #403: funnel appends are lock-serialized everywhere else in the
+    # daemon; the CTA path must hold the thread lock while appending.
+    svc, tmp = make_service()
+    held = []
+    orig_append = svc._append
+
+    def append_spy(name, obj):
+        held.append(svc._lock.locked())
+        return orig_append(name, obj)
+
+    svc._append = append_spy
+    svc.cta_selfhost("selfhost")
+    assert held and all(held)
 
 
 def test_forgot_event_parses_in_funnel_metrics():
