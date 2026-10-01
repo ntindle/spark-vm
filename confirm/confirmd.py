@@ -240,6 +240,18 @@ NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 # accepted. Tradeoff (arch review R1): a larger ring keeps more tabs alive
 # but widens the concurrent-live-nonce window for the /answer race (#71) —
 # hence the conservative defaults, and env knobs for the operator.
+#
+# Issue #78: the ring lives SERVER-SIDE, keyed by approval id, in the
+# `_csrf_rings` map below — never in the requester-authored pending file.
+# The old code persisted the ring into the pending item's JSON, and the
+# check was a plain membership test, so a future lower-trust filer could
+# pre-seed `_csrf_nonces` with nonces of its own choosing and then drive
+# /answer from its own browser session with a matching nonce — a
+# CSRF-shaped bypass of the approval-origin binding. File-stored
+# `_csrf_nonces` / `_csrf` entries are now IGNORED ENTIRELY (never read,
+# not even the legacy slot); only the server-minted in-memory ring counts.
+# Stale `_csrf_nonces` keys may linger in old pending files — harmless, and
+# still stripped before items reach answered/ (see _stamp_expired_consumed).
 def _env_int(name, default, minimum):
     try:
         v = int(os.environ.get(name, str(default)))
@@ -280,8 +292,14 @@ def _evict_aid_lock(aid):
     confirm/confirm-request), so reuse is a 2^-64 event. If it ever
     happened, an evicted entry could alias a live item's lock, and
     `_sweep_answered`'s `os.replace` could clobber `consumed/<aid>.json`
-    history — the invariant has teeth, stated once here."""
+    history — the invariant has teeth, stated once here.
+
+    Issue #78: the aid's server-side CSRF ring is evicted here too — the
+    ring shares the pending-item lifecycle exactly (every _evict_aid_lock
+    call site is a terminal state for the item), so one eviction point
+    keeps both maps bounded with no drift between them."""
     _aid_locks.pop(aid, None)
+    _csrf_rings.pop(aid, None)
 
 
 # H20: re-open nonces. A denied approval's answered-history card carries a
@@ -449,43 +467,79 @@ def _push_enqueue_reopen(new_aid, summary):
                      daemon=True).start()
 
 
-def _mint_csrf_nonce(it):
-    """Mint a fresh CSRF nonce for an approval item, keeping a small ring
-    of recent nonces. Migrates the legacy single `_csrf` slot into the
-    ring on first use."""
+# Issue #78: server-side CSRF nonce rings, keyed by approval id. The map
+# shares the pending-item lifecycle: an entry is created on the first GET
+# that mints a nonce for the aid and evicted when the item leaves pending
+# (see _evict_aid_lock). Single-instance scope is honest here — the same
+# caveat as _aid_locks and _reopen_nonces (a multi-replica confirmd would
+# need a shared store — tracked under #69). A daemon restart empties the
+# map: pre-restart forms 403 as stale-nonce and self-heal on the next poll
+# (the page re-GETs and mints fresh), exactly like _reopen_nonces.
+# Map-level cap mirrors _reopen_nonces/_reopened_index (issue #77 L10
+# hygiene); the per-aid ring itself is bounded by _CSRF_RING_SIZE.
+_csrf_rings = {}
+_CSRF_RING_AID_CAP = 4096
+
+
+def _prune_csrf_ring(ring, now):
+    """Drop expired or malformed entries from a ring in place. A well-
+    formed entry is {"nonce": str, "ts": number}; anything else is never
+    legitimate (the ring is server-minted) and is dropped fail-closed —
+    verify-time still double-checks shape before comparing digests."""
+    ring[:] = [e for e in ring
+               if isinstance(e, dict)
+               and isinstance(e.get("nonce"), str)
+               and isinstance(e.get("ts"), (int, float))
+               and now - e["ts"] <= _CSRF_RING_TTL]
+
+
+def _evict_csrf_ring(aid):
+    """Drop the server-side nonce ring for an aid. Always paired with
+    _evict_aid_lock (the item left pending); factored out so tests can
+    exercise it directly."""
+    _csrf_rings.pop(aid, None)
+
+
+def _mint_csrf_nonce(aid):
+    """Mint a fresh CSRF nonce for an approval id, keeping a small ring
+    of recent nonces SERVER-SIDE (issue #78) — nothing is written to the
+    requester-authored pending file. The per-aid lock (held by the GET
+    path) serializes concurrent mints; eviction of the whole ring rides
+    _evict_aid_lock."""
     now = time.time()
-    ring = [e for e in (it.get("_csrf_nonces") or [])
-            if isinstance(e, dict) and isinstance(e.get("ts"), (int, float))
-            and now - e["ts"] <= _CSRF_RING_TTL]
-    legacy = it.pop("_csrf", None)
-    if legacy and legacy not in {e.get("nonce") for e in ring}:
-        ring.append({"nonce": legacy, "ts": now})
+    ring = _csrf_rings.get(aid)
+    if ring is None:
+        ring = []
+        _csrf_rings[aid] = ring
+        # Issue #77 (L10) hygiene: keep the aid map bounded like
+        # _reopen_nonces — evict the oldest aid's ring first.
+        while len(_csrf_rings) > _CSRF_RING_AID_CAP:
+            _csrf_rings.pop(next(iter(_csrf_rings)))
+    else:
+        _prune_csrf_ring(ring, now)
     nonce = secrets.token_urlsafe(24)
     ring.append({"nonce": nonce, "ts": now})
-    it["_csrf_nonces"] = ring[-_CSRF_RING_SIZE:]
+    del ring[:-_CSRF_RING_SIZE]
     return nonce
 
 
-def _csrf_nonce_ok(it, csrf):
-    """True if `csrf` is a well-formed, unexpired nonce in the item's ring
-    (or its legacy single slot). The TTL is enforced at verification time
-    too, not only at mint (security review): a clock-jump-backward or a
-    never-re-GET'd item cannot keep a nonce valid past the TTL."""
+def _csrf_nonce_ok(aid, csrf):
+    """True if `csrf` is a well-formed, unexpired nonce in the aid's
+    SERVER-SIDE ring (issue #78). The requester-authored pending file is
+    never consulted — file-stored `_csrf_nonces` / `_csrf` entries are
+    ignored entirely, so a lower-trust filer cannot mint acceptable
+    entries. The TTL is enforced at verification time too, not only at
+    mint (security review): a clock-jump-backward cannot keep a nonce
+    valid past the TTL."""
     if not NONCE_RE.match(csrf or ""):
         return False
     now = time.time()
-
-    def _fresh(e):
-        ts = e.get("ts")
-        return (isinstance(ts, (int, float))
-                and now - ts <= _CSRF_RING_TTL)
-
-    ring = it.get("_csrf_nonces") or []
-    candidates = {e.get("nonce") for e in ring
-                  if isinstance(e, dict) and _fresh(e)}
-    if it.get("_csrf"):
-        candidates.add(it["_csrf"])
-    return csrf in candidates
+    ring = _csrf_rings.get(aid) or []
+    return any(isinstance(e, dict)
+               and isinstance(e.get("ts"), (int, float))
+               and now - e["ts"] <= _CSRF_RING_TTL
+               and secrets.compare_digest(e.get("nonce") or "", csrf)
+               for e in ring)
 
 # Finding 47: the host's own tailnet addresses. A peer presenting one
 # of these is the host itself (e.g. the swap proxy connecting out) —
@@ -1982,14 +2036,13 @@ class Handler(BaseHTTPRequestHandler):
                     self._err("This approval expired and was removed.", 410,
                               suffix=_expired_record_link_html(aid))
                     return
-                # Finding 48 + issue #75: mint a CSRF nonce, keeping a small
-                # ring of recent nonces in the pending file (a fresh GET in a
-                # second tab must not invalidate the first tab's form).
-                nonce = _mint_csrf_nonce(it)
-                tmp = p + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump(it, f, indent=2)
-                os.replace(tmp, p)
+                # Finding 48 + issue #75: mint a CSRF nonce into the
+                # SERVER-SIDE ring (issue #78 — the ring is keyed by aid
+                # and never written to the requester-authored file, so the
+                # old tmp+replace write-back of the ring is gone; a fresh
+                # GET in a second tab must not invalidate the first tab's
+                # form).
+                nonce = _mint_csrf_nonce(aid)
             body = ("<h1>Approval %s</h1>%s"
                     '<p class="sub">Approving mints a credential grant for '
                     'this request. Denying discards it.</p>'
@@ -2162,7 +2215,8 @@ class Handler(BaseHTTPRequestHandler):
             self._err("not found or already answered", 404)
             return
         # Finding 48 + issue #75: the nonce must be well-formed, unexpired,
-        # and belong to the item's nonce ring. Malformed/missing nonces are
+        # and belong to the aid's SERVER-SIDE nonce ring (issue #78) — the
+        # requester-authored file is never consulted. Malformed/missing nonces are
         # audited as CSRF violations; a well-formed but stale/unknown nonce
         # (second tab, back-button resubmit) is audited under its own event
         # (arch review B1): attacker-shaped probes are exactly
@@ -2171,7 +2225,7 @@ class Handler(BaseHTTPRequestHandler):
         if not csrf or not NONCE_RE.match(csrf):
             self._deny(self.client_address[0], login, "csrf: bad nonce")
             return
-        if not _csrf_nonce_ok(it, csrf):
+        if not _csrf_nonce_ok(aid, csrf):
             audit_log("csrf:stale-nonce", self.client_address[0], login,
                       "id=%s" % aid)
             self._err("This form is stale — reload the page and try "

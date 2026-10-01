@@ -228,65 +228,119 @@ class ConfirmdTests(unittest.TestCase):
         self.assertFalse(cd.NONCE_RE.match("short"))
         self.assertFalse(cd.NONCE_RE.match("x" * 33))
 
-    # --- #75: CSRF nonce ring -------------------------------------------
+    # --- #75/#78: server-side CSRF nonce ring -----------------------------
+
+    def _fresh_aid(self):
+        import uuid
+        return "t" + uuid.uuid4().hex[:15]
 
     def test_75_nonce_ring_accepts_recent(self):
         """The last 3 minted nonces all verify; the 4th mint evicts the
         oldest (a second tab's form stays valid across GETs)."""
-        it = {}
-        n1 = cd._mint_csrf_nonce(it)
-        n2 = cd._mint_csrf_nonce(it)
-        n3 = cd._mint_csrf_nonce(it)
-        self.assertTrue(cd._csrf_nonce_ok(it, n1))
-        self.assertTrue(cd._csrf_nonce_ok(it, n2))
-        self.assertTrue(cd._csrf_nonce_ok(it, n3))
-        n4 = cd._mint_csrf_nonce(it)
-        self.assertTrue(cd._csrf_nonce_ok(it, n4))
-        self.assertTrue(cd._csrf_nonce_ok(it, n2))
-        self.assertTrue(cd._csrf_nonce_ok(it, n3))
-        self.assertFalse(cd._csrf_nonce_ok(it, n1))
-        self.assertEqual(len(it["_csrf_nonces"]), 3)
+        aid = self._fresh_aid()
+        n1 = cd._mint_csrf_nonce(aid)
+        n2 = cd._mint_csrf_nonce(aid)
+        n3 = cd._mint_csrf_nonce(aid)
+        self.assertTrue(cd._csrf_nonce_ok(aid, n1))
+        self.assertTrue(cd._csrf_nonce_ok(aid, n2))
+        self.assertTrue(cd._csrf_nonce_ok(aid, n3))
+        n4 = cd._mint_csrf_nonce(aid)
+        self.assertTrue(cd._csrf_nonce_ok(aid, n4))
+        self.assertTrue(cd._csrf_nonce_ok(aid, n2))
+        self.assertTrue(cd._csrf_nonce_ok(aid, n3))
+        self.assertFalse(cd._csrf_nonce_ok(aid, n1))
+        self.assertEqual(len(cd._csrf_rings[aid]), 3)
 
-    def test_75_nonce_ring_migrates_legacy(self):
-        """A legacy single `_csrf` slot is absorbed into the ring on the
-        next mint, so pre-upgrade items keep working."""
+    def test_78_preseeded_file_ring_never_accepted(self):
+        """#78: a filer pre-seeds `_csrf_nonces` in its own pending file
+        with a nonce of its choosing — the daemon must NOT accept it,
+        even though the file membership matches. This is the whole
+        attack: file-stored entries are ignored entirely."""
+        aid = self._fresh_aid()
+        planted = "a" * 32
+        it = {"_csrf_nonces": [{"nonce": planted, "ts": time.time()}]}
+        self.assertFalse(cd._csrf_nonce_ok(aid, planted))
+        # ... and a nonce minted for a DIFFERENT aid doesn't cross over.
+        other = self._fresh_aid()
+        n = cd._mint_csrf_nonce(other)
+        self.assertFalse(cd._csrf_nonce_ok(aid, n))
+        self.assertTrue(cd._csrf_nonce_ok(other, n))
+
+    def test_78_legacy_file_slot_ignored(self):
+        """#78: the legacy single `_csrf` slot in a filer-authored file is
+        ignored too — no migration path reads requester-authored nonces."""
+        aid = self._fresh_aid()
         it = {"_csrf": "f" * 32}
-        n = cd._mint_csrf_nonce(it)
-        self.assertNotIn("_csrf", it)
-        self.assertTrue(cd._csrf_nonce_ok(it, "f" * 32))
-        self.assertTrue(cd._csrf_nonce_ok(it, n))
+        self.assertFalse(cd._csrf_nonce_ok(aid, "f" * 32))
+        n = cd._mint_csrf_nonce(aid)
+        self.assertTrue(cd._csrf_nonce_ok(aid, n))
+        self.assertNotIn("_csrf_nonces", it)  # mint touches no file state
 
     def test_75_nonce_rejects_malformed_and_unknown(self):
         """Malformed and well-formed-but-unknown nonces are rejected;
-        an empty item accepts nothing."""
-        it = {}
-        n = cd._mint_csrf_nonce(it)
-        self.assertTrue(cd._csrf_nonce_ok(it, n))
-        self.assertFalse(cd._csrf_nonce_ok(it, "short"))
-        self.assertFalse(cd._csrf_nonce_ok(it, ""))
-        self.assertFalse(cd._csrf_nonce_ok(it, None))
-        self.assertFalse(cd._csrf_nonce_ok(it, "g" * 32))
-        self.assertFalse(cd._csrf_nonce_ok({}, n))
+        an aid with no ring accepts nothing."""
+        aid = self._fresh_aid()
+        n = cd._mint_csrf_nonce(aid)
+        self.assertTrue(cd._csrf_nonce_ok(aid, n))
+        self.assertFalse(cd._csrf_nonce_ok(aid, "short"))
+        self.assertFalse(cd._csrf_nonce_ok(aid, ""))
+        self.assertFalse(cd._csrf_nonce_ok(aid, None))
+        self.assertFalse(cd._csrf_nonce_ok(aid, "g" * 32))
+        self.assertFalse(cd._csrf_nonce_ok(self._fresh_aid(), n))
 
     def test_75_nonce_ring_drops_expired(self):
         """Ring entries older than _CSRF_RING_TTL are pruned on mint."""
-        it = {}
-        n1 = cd._mint_csrf_nonce(it)
-        it["_csrf_nonces"][0]["ts"] -= (cd._CSRF_RING_TTL + 1)
-        n2 = cd._mint_csrf_nonce(it)
-        self.assertFalse(cd._csrf_nonce_ok(it, n1))
-        self.assertTrue(cd._csrf_nonce_ok(it, n2))
-        self.assertEqual(len(it["_csrf_nonces"]), 1)
+        aid = self._fresh_aid()
+        n1 = cd._mint_csrf_nonce(aid)
+        cd._csrf_rings[aid][0]["ts"] -= (cd._CSRF_RING_TTL + 1)
+        n2 = cd._mint_csrf_nonce(aid)
+        self.assertFalse(cd._csrf_nonce_ok(aid, n1))
+        self.assertTrue(cd._csrf_nonce_ok(aid, n2))
+        self.assertEqual(len(cd._csrf_rings[aid]), 1)
 
     def test_75_nonce_ttl_enforced_at_verify(self):
         """The TTL is enforced at verification time too, not only at
         mint (security review): an entry backdated past the TTL is
         rejected even if no new mint pruned it."""
-        it = {}
-        n = cd._mint_csrf_nonce(it)
-        self.assertTrue(cd._csrf_nonce_ok(it, n))
-        it["_csrf_nonces"][-1]["ts"] -= (cd._CSRF_RING_TTL + 1)
-        self.assertFalse(cd._csrf_nonce_ok(it, n))
+        aid = self._fresh_aid()
+        n = cd._mint_csrf_nonce(aid)
+        self.assertTrue(cd._csrf_nonce_ok(aid, n))
+        cd._csrf_rings[aid][-1]["ts"] -= (cd._CSRF_RING_TTL + 1)
+        self.assertFalse(cd._csrf_nonce_ok(aid, n))
+
+    def test_75_nonce_malformed_ring_entry_fail_closed(self):
+        """Malformed ring entries (server state can only be malformed
+        through a bug) fail closed: never accepted, pruned on next mint."""
+        aid = self._fresh_aid()
+        cd._csrf_rings[aid] = [{"nonce": "a" * 32, "ts": "not-a-ts"},
+                               {"ts": time.time()},
+                               {"nonce": "b" * 32, "ts": time.time()}]
+        self.assertFalse(cd._csrf_nonce_ok(aid, "a" * 32))
+        self.assertTrue(cd._csrf_nonce_ok(aid, "b" * 32))
+        cd._mint_csrf_nonce(aid)
+        self.assertEqual(len(cd._csrf_rings[aid]), 2)
+
+    def test_78_ring_evicted_with_aid_lock(self):
+        """#78: the ring shares the pending-item lifecycle — evicting the
+        aid lock (every terminal state) drops the ring too, so neither
+        map grows for the daemon's whole lifetime."""
+        aid = self._fresh_aid()
+        n = cd._mint_csrf_nonce(aid)
+        self.assertTrue(cd._csrf_nonce_ok(aid, n))
+        cd._evict_aid_lock(aid)
+        self.assertNotIn(aid, cd._csrf_rings)
+        self.assertFalse(cd._csrf_nonce_ok(aid, n))
+
+    def test_78_aid_map_bounded(self):
+        """The aid->ring map is capped (issue #77 L10 hygiene): minting
+        past the cap evicts the oldest aid's ring."""
+        aids = [self._fresh_aid() for _ in range(cd._CSRF_RING_AID_CAP + 2)]
+        nonces = {a: cd._mint_csrf_nonce(a) for a in aids}
+        self.assertLessEqual(len(cd._csrf_rings), cd._CSRF_RING_AID_CAP)
+        self.assertFalse(cd._csrf_nonce_ok(aids[0], nonces[aids[0]]))
+        self.assertTrue(cd._csrf_nonce_ok(aids[-1], nonces[aids[-1]]))
+        for a in aids:
+            cd._csrf_rings.pop(a, None)
 
     def test_75_ring_knobs_have_sane_defaults(self):
         """The env-overridable ring knobs (arch review R1) default to
@@ -1034,7 +1088,7 @@ class ConfirmdTests(unittest.TestCase):
             it = {"id": aid, "summary": "s", "kind": "first-use",
                   "created": "2026-09-18T10:00:00+00:00",
                   "expires": "2999-01-01T00:00:00+00:00"}
-            nonce = cd._mint_csrf_nonce(it)
+            nonce = cd._mint_csrf_nonce(it["id"])
             (self.approvals / "pending" / (aid + ".json")).write_text(
                 json.dumps(it))
             h._answer_locked("ntindle@github", aid, nonce, "deny")
@@ -1066,7 +1120,7 @@ class ConfirmdTests(unittest.TestCase):
         it = {"id": aid, "summary": "s", "kind": "first-use",
               "created": "2026-09-18T10:00:00+00:00",
               "expires": "2999-01-01T00:00:00+00:00"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         (self.approvals / "pending" / (aid + ".json")).write_text(
             json.dumps(it))
         h = cd.Handler.__new__(cd.Handler)
@@ -1191,7 +1245,7 @@ class ConfirmdTests(unittest.TestCase):
               "created": "2026-09-18T10:00:00+00:00",
               "expires": "2999-01-01T00:00:00+00:00",
               "credential": "c", "host": "h", "method": "GET"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         src = self.approvals / "pending" / (aid + ".json")
         src.write_text(json.dumps(it))
 
@@ -1255,7 +1309,7 @@ class ConfirmdTests(unittest.TestCase):
               "created": "2026-09-18T10:00:00+00:00",
               "expires": exp.isoformat(),
               "credential": "c", "host": "h", "method": "GET"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         src = self.approvals / "pending" / (aid + ".json")
         src.write_text(json.dumps(it))
 
@@ -1354,7 +1408,7 @@ class ConfirmdTests(unittest.TestCase):
               "created": "2026-09-18T10:00:00+00:00",
               "expires": exp.isoformat(),
               "credential": "c", "host": "h", "method": "GET"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         src = self.approvals / "pending" / (aid + ".json")
         src.write_text(json.dumps(it))
 
@@ -1425,7 +1479,7 @@ class ConfirmdTests(unittest.TestCase):
               "created": "2026-09-18T10:00:00+00:00",
               "expires": exp.isoformat(),
               "credential": "c", "host": "h", "method": "GET"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         src = self.approvals / "pending" / (aid + ".json")
         src.write_text(json.dumps(it))
 
@@ -1485,7 +1539,7 @@ class ConfirmdTests(unittest.TestCase):
               "created": "2026-09-18T10:00:00+00:00",
               "expires": exp_str,
               "credential": "c", "host": "h", "method": "GET"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         src = self.approvals / "pending" / (aid + ".json")
         src.write_text(json.dumps(it))
 
@@ -1531,7 +1585,7 @@ class ConfirmdTests(unittest.TestCase):
         it = {"id": aid, "summary": "s", "kind": "first-use",
               "created": "2026-09-18T10:00:00+00:00",
               "credential": "c", "host": "h", "method": "GET"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         src = self.approvals / "pending" / (aid + ".json")
         src.write_text(json.dumps(it))
 
@@ -1582,7 +1636,7 @@ class ConfirmdTests(unittest.TestCase):
               "created": "2026-09-18T10:00:00+00:00",
               "expires": "2999-01-01T00:00:00+00:00",
               "credential": "c", "host": "h", "method": "GET"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         src = self.approvals / "pending" / (aid + ".json")
         src.write_text(json.dumps(it))
 
@@ -1642,7 +1696,7 @@ class ConfirmdTests(unittest.TestCase):
               "created": "2026-09-18T10:00:00+00:00",
               "expires": "2999-01-01T00:00:00+00:00",
               "credential": "c", "host": "h", "method": "GET"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         src = self.approvals / "pending" / (aid + ".json")
         src.write_text(json.dumps(it))
 
@@ -1765,7 +1819,7 @@ class ConfirmdTests(unittest.TestCase):
         it = {"id": aid, "summary": "s", "kind": "first-use",
               "created": "2026-09-18T10:00:00+00:00",
               "expires": "2999-01-01T00:00:00+00:00"}
-        nonce = cd._mint_csrf_nonce(it)
+        nonce = cd._mint_csrf_nonce(it["id"])
         (self.approvals / "pending" / (aid + ".json")).write_text(
             json.dumps(it))
         h = cd.Handler.__new__(cd.Handler)
