@@ -224,7 +224,10 @@ def test_answer_trust_prompt_answers_and_returns_true(cli, monkeypatch):
             if "capture-pane" in argv:
                 stdout = panes[0].encode()
             elif "display-message" in argv:
-                stdout = b"bash"
+                # Security B1 (PR #816 review): the gate fires only while the
+                # foreground process is the TUI -- a dead pane is never sent
+                # keystrokes, even with the prompt text in its scrollback.
+                stdout = b"muse"
             else:
                 stdout = b""
         return P()
@@ -234,6 +237,33 @@ def test_answer_trust_prompt_answers_and_returns_true(cli, monkeypatch):
     sent = [" ".join(c) for c in calls if "send-keys" in c]
     assert any(c.endswith(" 1") for c in sent)
     assert any(c.endswith(" Enter") for c in sent)
+
+
+def test_answer_trust_prompt_refuses_dead_pane_with_stale_text(cli, monkeypatch):
+    # Security B1 (PR #816 review, issue #791): a dead pane whose scrollback
+    # tail still shows the gate text must NOT be answered -- typing "1"+Enter
+    # into that shell is a false answer (issue #4). Zero keys sent.
+    pane = "Do you trust this workspace?\n> 1  Trust and continue\n  2  Quit\n$ "
+    calls = []
+
+    def fake_run(*argv, **kw):
+        calls.append(list(argv))
+
+        class P:
+            returncode = 0
+            stderr = b""
+            if "capture-pane" in argv:
+                stdout = pane.encode()
+            elif "display-message" in argv:
+                stdout = b"bash"
+            else:
+                stdout = b""
+        return P()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    assert cli._answer_trust_prompt("demo", timeout=0.01) is False
+    assert [c for c in calls if "send-keys" in c] == []
 
 
 def test_answer_trust_prompt_no_prompt_returns_false(cli, monkeypatch):

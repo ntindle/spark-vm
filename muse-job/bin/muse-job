@@ -2405,9 +2405,15 @@ def _answer_trust_prompt(slug, timeout=20):
     deadline = time.time() + timeout
     try:
         while time.time() < deadline:
-            pane = run("tmux", "capture-pane", "-p", "-t", target,
-                       timeout=30).stdout.decode(errors="replace")
-            if _TRUST_PROMPT_TEXT in _pane_tail(pane):
+            pane, pane_cmd = _capture_pane_state(target)
+            # Security (PR #816 review, issue #791): never send keystrokes on
+            # content alone. A dead pane can hold the stale prompt text in
+            # its scrollback tail, and typing "1"+Enter into that shell is a
+            # false answer (issue #4: a dead pane is never sent keystrokes).
+            # The gate fires only while the foreground process is the TUI --
+            # the prompt only renders then, so genuine gates still answer.
+            if (_is_tui_process(pane_cmd)
+                    and _TRUST_PROMPT_TEXT in _pane_tail(pane)):
                 run("tmux", "send-keys", "-t", target, "1", timeout=30)
                 time.sleep(1)
                 run("tmux", "send-keys", "-t", target, "Enter", timeout=30)
