@@ -796,6 +796,9 @@ def cmd_events_ack(store_dir, alert_id):
 # Only `deploy/succeeded/repo` claims are checkable at this slice — the
 # doc defines only `succeeded` as a claim (rolled-back/restored claims are
 # a follow-up), and the toolset/image components have no S1 producers.
+# The journals are trusted append-only input: (box_id, event_id) dedup
+# happens at collect time (append_events), not here — a corrupted journal
+# with duplicate claim rows double-counts, honestly.
 
 # inventory.py's journal file, read here for the ground-truth side.
 _INVENTORY_JOURNAL_NAME = "journal.jsonl"
@@ -842,8 +845,9 @@ def crosscheck_events(events, commits_by_box):
 
     Returns (rows, counts). Each row is a dict {box_id, event_id,
     received_at, claim_to, verdict, detail}; verdict is one of
-    "confirmed", "violation", "inconclusive". Never raises for bad input;
-    non-claim events are ignored."""
+    "confirmed", "violation", "inconclusive". Never raises for bad
+    *event* input (commits_by_box must be a dict); non-claim events are
+    ignored."""
     rows = []
     counts = {_VERDICT_CONFIRMED: 0, _VERDICT_VIOLATION: 0,
               _VERDICT_INCONCLUSIVE: 0}
@@ -918,6 +922,8 @@ def cmd_events_crosscheck(store_dir, box_id):
     journal. Exit 1 iff any claim is a violation (cron-consumable, like
     `events watch`); 0 when clean or inconclusive-only. Returns
     (error, exit_code)."""
+    if not os.path.isdir(store_dir):
+        return "store directory %r not found" % (store_dir,), 2
     events, err = load_events(store_dir)
     if err:
         return err, 2
@@ -938,16 +944,17 @@ def cmd_events_crosscheck(store_dir, box_id):
     if not rows:
         lines.append("  no checkable claims "
                      "(deploy/succeeded/repo events) in the journal")
-    fmt = "  %-24s %-12s %-12s %-19s %s"
-    lines.append(fmt % ("box", "verdict", "claim to", "received_at",
-                        "detail"))
-    for r in rows:
-        lines.append(fmt % (
-            _clean_text(str(r["box_id"]))[:24],
-            r["verdict"] or "?",
-            _short(r["claim_to"]) or "-",
-            _clean_text((_str_or_none(r["received_at"]) or "?")[:19]),
-            _clean_text(r["detail"])[:100]))
+    else:
+        fmt = "  %-24s %-12s %-12s %-19s %s"
+        lines.append(fmt % ("box", "verdict", "claim to", "received_at",
+                            "detail"))
+        for r in rows:
+            lines.append(fmt % (
+                _clean_text(str(r["box_id"]))[:24],
+                r["verdict"] or "?",
+                _short(r["claim_to"]) or "-",
+                _clean_text((_str_or_none(r["received_at"]) or "?")[:19]),
+                _clean_text(r["detail"])[:100]))
     lines.append("summary: %d checked — %d confirmed, %d violation(s), "
                  "%d inconclusive (missing evidence)" % (
                      total, n_conf, n_viol, n_incon))

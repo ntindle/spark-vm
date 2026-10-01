@@ -9,15 +9,18 @@ collector-side clocks (event `received_at`, record `observed_at`) —
 box clocks are never trusted — so every fixture stamps both
 explicitly.
 
-Anti-vacuity: the verdict tests pin the exact verdict word and the exit
-code, so an implementation that always-confirms, always-violates, or
-treats silence as a violation fails its counter-test below. The
-"missing evidence is never a violation" rule is pinned by the
+Anti-vacuity: the verdict tests pin the exact verdict word on the verdict
+*row* (anchored `^  box verdict` — the summary's "N confirmed" counts also
+carry the verdict words, so a bare substring match would pass against the
+wrong row) and the exit code, so an implementation that always-confirms,
+always-violates, or treats silence as a violation fails its counter-test
+below. The "missing evidence is never a violation" rule is pinned by the
 inconclusive_* tests.
 """
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -87,6 +90,17 @@ def record(box, commit, observed):
 
 
 # --- Verdicts ---------------------------------------------------------------
+#
+# Verdict assertions are anchored to the row line (^  box verdict) — the
+# summary's "N confirmed / N violation / N inconclusive" counts also carry
+# the verdict words, so a bare substring match would pass against the
+# wrong row (e.g. "confirmed" matches the summary's "0 confirmed" while
+# the row itself says inconclusive).
+
+def row_verdict(out, box, verdict):
+    return re.search(r"^  %s\s+%s\s" % (re.escape(box), verdict), out,
+                     re.M) is not None
+
 
 def test_confirmed_claim(store):
     received = BASE
@@ -94,8 +108,27 @@ def test_confirmed_claim(store):
     write_records(store, [record("tower", COMMIT_B, received + timedelta(minutes=30))])
     proc = run_cli("--store", store, "crosscheck")
     assert proc.returncode == 0, proc.stderr
-    assert "confirmed" in proc.stdout
-    assert "0 violation" in proc.stdout
+    assert row_verdict(proc.stdout, "tower", "confirmed")
+    assert re.search(r"^summary: .*0 violation\(s\)", proc.stdout, re.M)
+
+
+def test_boundary_observation_at_claim_time_counts(store):
+    # The at-or-after rule is inclusive: an observation at exactly the
+    # claim's received_at is a valid later observation.
+    write_events(store, [claim("tower", COMMIT_B, BASE)])
+    write_records(store, [record("tower", COMMIT_B, BASE),
+                          record("tower", COMMIT_A, BASE + timedelta(minutes=30))])
+    proc = run_cli("--store", store, "crosscheck")
+    assert proc.returncode == 0, proc.stderr
+    assert row_verdict(proc.stdout, "tower", "confirmed")
+
+
+def test_boundary_observation_at_claim_time_can_violate(store):
+    write_events(store, [claim("tower", COMMIT_B, BASE)])
+    write_records(store, [record("tower", COMMIT_A, BASE)])
+    proc = run_cli("--store", store, "crosscheck")
+    assert proc.returncode == 1, proc.stderr
+    assert row_verdict(proc.stdout, "tower", "violation")
 
 
 def test_violation_when_later_inventory_disagrees(store):
@@ -105,7 +138,7 @@ def test_violation_when_later_inventory_disagrees(store):
     proc = run_cli("--store", store, "crosscheck")
     assert proc.returncode == 1, proc.stderr
     out = proc.stdout
-    assert "violation" in out
+    assert row_verdict(out, "tower", "violation")
     assert "tower" in out
     assert "VIOLATIONS are flags, not convictions" in out
 
@@ -118,7 +151,7 @@ def test_inconclusive_when_inventory_is_older_than_claim(store):
     write_records(store, [record("tower", COMMIT_B, received - timedelta(hours=1))])
     proc = run_cli("--store", store, "crosscheck")
     assert proc.returncode == 0, proc.stderr
-    assert "inconclusive" in proc.stdout
+    assert row_verdict(proc.stdout, "tower", "inconclusive")
 
 
 def test_inconclusive_when_later_record_reports_no_commit(store):
@@ -127,12 +160,22 @@ def test_inconclusive_when_later_record_reports_no_commit(store):
     write_records(store, [record("tower", None, received + timedelta(minutes=30))])
     proc = run_cli("--store", store, "crosscheck")
     assert proc.returncode == 0, proc.stderr
-    assert "inconclusive" in proc.stdout
+    assert row_verdict(proc.stdout, "tower", "inconclusive")
 
 
 def test_inconclusive_when_box_has_no_records(store):
     write_events(store, [claim("tower", COMMIT_B, BASE)])
     write_records(store, [record("other", COMMIT_B, BASE + timedelta(minutes=30))])
+    proc = run_cli("--store", store, "crosscheck")
+    assert proc.returncode == 0, proc.stderr
+    assert row_verdict(proc.stdout, "tower", "inconclusive")
+
+
+def test_inconclusive_when_claim_is_unattributable(store):
+    ev = claim("tower", COMMIT_B, BASE)
+    ev["box_id"] = None
+    write_events(store, [ev])
+    write_records(store, [record("tower", COMMIT_B, BASE + timedelta(minutes=30))])
     proc = run_cli("--store", store, "crosscheck")
     assert proc.returncode == 0, proc.stderr
     assert "inconclusive" in proc.stdout
@@ -153,8 +196,8 @@ def test_violation_and_later_confirmation_both_reported(store):
     proc = run_cli("--store", store, "crosscheck")
     assert proc.returncode == 1, proc.stderr
     out = proc.stdout
-    assert out.count("violation") >= 1
-    assert "confirmed" in out
+    assert row_verdict(out, "tower", "violation")
+    assert row_verdict(out, "tower", "confirmed")
     assert "1 checked" not in out  # both claims evaluated, not rolled up
 
 
@@ -171,7 +214,7 @@ def test_box_filter_scopes_verdicts(store):
     assert proc_all.returncode == 1, proc_all.stderr
     proc_shed = run_cli("--store", store, "--box", "shed", "crosscheck")
     assert proc_shed.returncode == 0, proc_shed.stderr
-    assert "confirmed" in proc_shed.stdout
+    assert row_verdict(proc_shed.stdout, "shed", "confirmed")
 
 
 def test_non_claim_events_are_ignored(store):
@@ -196,7 +239,7 @@ def test_claim_without_to_is_inconclusive(store):
     write_records(store, [record("tower", COMMIT_B, BASE + timedelta(minutes=30))])
     proc = run_cli("--store", store, "crosscheck")
     assert proc.returncode == 0, proc.stderr
-    assert "inconclusive" in proc.stdout
+    assert row_verdict(proc.stdout, "tower", "inconclusive")
 
 
 def test_claim_with_unparseable_received_at_is_inconclusive(store):
@@ -205,7 +248,7 @@ def test_claim_with_unparseable_received_at_is_inconclusive(store):
     write_records(store, [record("tower", COMMIT_A, BASE + timedelta(minutes=30))])
     proc = run_cli("--store", store, "crosscheck")
     assert proc.returncode == 0, proc.stderr
-    assert "inconclusive" in proc.stdout
+    assert row_verdict(proc.stdout, "tower", "inconclusive")
 
 
 def test_malformed_journal_lines_do_not_crash(store):
@@ -221,13 +264,30 @@ def test_malformed_journal_lines_do_not_crash(store):
                                    BASE + timedelta(minutes=30))) + "\n")
     proc = run_cli("--store", store, "crosscheck")
     assert proc.returncode == 0, proc.stderr
-    assert "confirmed" in proc.stdout
+    assert row_verdict(proc.stdout, "tower", "confirmed")
 
 
 def test_empty_store_reports_no_claims(store):
     proc = run_cli("--store", store, "crosscheck")
     assert proc.returncode == 0, proc.stderr
     assert "no checkable claims" in proc.stdout
+    assert "verdict" not in proc.stdout  # no dangling column header
+
+
+def test_nonexistent_store_exits_2(store):
+    # A typo'd or unmounted store path must fail loudly, never report
+    # a clean bill of health after reading nothing.
+    missing = os.path.join(store, "does-not-exist")
+    proc = run_cli("--store", missing, "crosscheck")
+    assert proc.returncode == 2, proc.stderr
+    assert "not found" in proc.stderr
+
+
+def test_nonexistent_store_exits_2_wired(store):
+    missing = os.path.join(store, "does-not-exist")
+    proc = run_wired("events", "crosscheck", "--store", missing)
+    assert proc.returncode == 2, proc.stderr
+    assert "not found" in proc.stderr
 
 
 def test_wired_into_inventory_events_cli(store):
@@ -235,8 +295,16 @@ def test_wired_into_inventory_events_cli(store):
     write_records(store, [record("tower", COMMIT_A, BASE + timedelta(minutes=30))])
     proc = run_wired("events", "crosscheck", "--store", store)
     assert proc.returncode == 1, proc.stderr
-    assert "violation" in proc.stdout
+    assert row_verdict(proc.stdout, "tower", "violation")
     assert "tower" in proc.stdout
+
+
+def test_box_filter_wired_into_inventory_cli(store):
+    write_events(store, [claim("shed", COMMIT_B, BASE)])
+    write_records(store, [record("shed", COMMIT_B, BASE + timedelta(minutes=30))])
+    proc = run_wired("events", "crosscheck", "--store", store, "--box", "shed")
+    assert proc.returncode == 0, proc.stderr
+    assert row_verdict(proc.stdout, "shed", "confirmed")
 
 
 def test_violation_summary_counts(store):
