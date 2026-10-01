@@ -1046,7 +1046,17 @@ def prune_events(store_dir, now=None):
                 hist_items, err = read_journal_raw(
                     os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME))
                 if err:
-                    return None, err
+                    # Same lost-fold window as a histogram-rewrite
+                    # failure: the journal is already rewritten, so the
+                    # folded rows are gone — the fold cannot be retried.
+                    return None, (
+                        "cannot read %s after the event journal was "
+                        "rewritten: %s (the %d compacted row(s) were "
+                        "already dropped from the event journal; the "
+                        "fold is lost — a loud under-count, never "
+                        "re-folded)"
+                        % (HISTOGRAMS_JOURNAL_NAME, err,
+                           summary["compacted"]))
                 existing = []
                 passthrough = []
                 for text, obj, verb in hist_items:

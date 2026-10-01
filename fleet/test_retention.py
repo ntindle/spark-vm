@@ -473,3 +473,51 @@ def test_inventory_exact_90d_boundary(tmp_path):
     assert summary["kept"] == 1, summary
     rows = _read(store, "journal.jsonl")
     assert [r["box_id"] for r in rows] == ["day89"]
+
+
+def test_loud_fold_lost_on_histogram_read_failure(tmp_path, monkeypatch):
+    """The journal is rewritten before the histograms file is read: if
+    that read fails, the fold is already lost (the compacted rows are
+    gone from the journal) — the error must say so LOUDLY, not just
+    report the read failure."""
+    store = str(tmp_path / "store")
+    _write(store, "events.jsonl",
+           [_event("box1", "evt-fold", age_days=45, outcome="succeeded")])
+    orig = events.read_journal_raw
+
+    def _failing(path):
+        if path.endswith("events_histograms.jsonl"):
+            return None, "boom"
+        return orig(path)
+
+    monkeypatch.setattr(events, "read_journal_raw", _failing)
+    summary, err = events.prune_events(store, now=NOW)
+    assert summary is None, (summary, err)
+    assert err is not None and "fold is lost" in err, err
+    assert "boom" in err, err
+    # The compacted row is gone from the journal — that is the point:
+    # the fold can never be retried, so the error must be loud.
+    assert _read(store, "events.jsonl") == []
+
+
+def test_loud_fold_lost_on_histogram_rewrite_failure(tmp_path,
+                                                     monkeypatch):
+    """Same lost-fold window on the write side: if the histograms
+    file cannot be rewritten after the journal was rewritten, the
+    fold is lost — the error must say so LOUDLY."""
+    store = str(tmp_path / "store")
+    _write(store, "events.jsonl",
+           [_event("box1", "evt-fold", age_days=45, outcome="succeeded")])
+    orig = events.rewrite_journal_atomic
+
+    def _failing(path, row_texts):
+        if path.endswith("events_histograms.jsonl"):
+            return "boom"
+        return orig(path, row_texts)
+
+    monkeypatch.setattr(events, "rewrite_journal_atomic", _failing)
+    summary, err = events.prune_events(store, now=NOW)
+    assert summary is None, (summary, err)
+    assert err is not None and "fold is lost" in err, err
+    assert "boom" in err, err
+    assert _read(store, "events.jsonl") == []
