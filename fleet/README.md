@@ -36,7 +36,44 @@ python3 fleet/inventory.py drift --store ~/fleet-store --expected <commit>
 
 # 4. Rebuild a lost/corrupt snapshot (the journal is the source of truth)
 python3 fleet/inventory.py rebuild --store ~/fleet-store
+
+# 5. Read the update-event journal (G17 S1 — needs audit-tail.jsonl per box)
+python3 fleet/inventory.py events --store ~/fleet-store
+python3 fleet/inventory.py events --store ~/fleet-store --box tower
+python3 fleet/inventory.py events watch --store ~/fleet-store   # exit 1 on unacked alerts
+python3 fleet/inventory.py events ack --store ~/fleet-store --alert-id <id>
 ```
+
+## Update events (G17 / #608, S1)
+
+`collect` also canonicalizes each box's `audit-tail.jsonl` into the
+store's `events.jsonl` — the standard event shape from
+`docs/UPDATE_EVENT_REPORTING.md` §2 (`fleet/events.py`, stdlib only).
+No box-side change: the canonicalizer translates the fifteen
+(event, result) audit shapes the updaters already emit (see the
+translation table in `events.py`, verified against
+`deploy/auto-deploy.sh`'s `audit()` calls), with:
+
+- **Fail-closed reads** — unparseable lines and unknown shapes become a
+  collector note on stderr, never events; a gap in the audit tail is
+  missing evidence, never inferred `noop`.
+- **Noise discipline** — check-`noop` events stay local (never journaled).
+- **Deterministic ids** — UUIDv5 over `box_id|ts|event|result|from|to`
+  (per-subcomponent suffix on the plural-`components` success fan-out),
+  so re-collection is a dedup no-op.
+- **Alert rules, evaluated on every collect** — (1) any `rollback-failed`
+  pages immediately; (2) ≥2 boxes `failed`/`rolled-back` on the same
+  (subcomponent, `to`) within 30 min (the bad-release shape; lines with
+  no component correlate on `to` alone as `unknown`); (3) silent wave —
+  **disarmed at S1** (every rollout envelope is null; firing it would
+  page every healthy idle estate); (4) ≥3 `precheck-fail` on one box in
+  6h. Alerts land in the store's `alerts.jsonl` (deduped on `alert_id`);
+  `fleet events watch` exits 1 while any alert is unacknowledged — a
+  cron or the operator's existing paging consumes it.
+- **Known S1 limits** — session_epoch/rollout/window are null (no
+  provisioner record, no G15 waves, no G14 windows); `attested` is always
+  false; the event journal has no retention policy yet (the 90-day/30-day
+  discipline is G17 S2's slice, shared with the inventory journal).
 
 The box dir name is the `box_id`; an operator-maintained remap file can
 rename aliases: `collect --box-id-map box-ids.json` where the file is
