@@ -295,9 +295,13 @@ def _evict_aid_lock(aid):
     history — the invariant has teeth, stated once here.
 
     Issue #78: the aid's server-side CSRF ring is evicted here too — the
-    ring shares the pending-item lifecycle exactly (every _evict_aid_lock
-    call site is a terminal state for the item), so one eviction point
-    keeps both maps bounded with no drift between them."""
+    ring shares the pending-item lifecycle: eviction runs on every path
+    where the item leaves pending (answered, expired-reaped, gone), and
+    the ring is recreated on demand by the next GET mint, so one
+    eviction point keeps both maps bounded with no drift between them.
+    (Two non-terminal paths keep the file — the grant-window refusal
+    and the failed expiry stamp — and both stay correct: the ring is
+    simply re-minted by the next GET if the item is still live.)"""
     _aid_locks.pop(aid, None)
     _csrf_rings.pop(aid, None)
 
@@ -491,13 +495,6 @@ def _prune_csrf_ring(ring, now):
                and isinstance(e.get("nonce"), str)
                and isinstance(e.get("ts"), (int, float))
                and now - e["ts"] <= _CSRF_RING_TTL]
-
-
-def _evict_csrf_ring(aid):
-    """Drop the server-side nonce ring for an aid. Always paired with
-    _evict_aid_lock (the item left pending); factored out so tests can
-    exercise it directly."""
-    _csrf_rings.pop(aid, None)
 
 
 def _mint_csrf_nonce(aid):
@@ -885,10 +882,11 @@ def _quarantine_corrupt_pending(aid, src):
 def _sweep_stale_tmp(d):
     """Issue #232: remove crash-residue *.tmp files from pending/.
 
-    Atomic writers (confirm-request, swap_addon.py's filer, GET's nonce
-    write-back) hold the tmp name only for the write+replace window, so
-    a *.tmp older than _TMP_SWEEP_GRACE_S is residue from a crashed
-    writer, never an in-flight one. Best-effort: races are fail-silent,
+    Atomic writers (confirm-request, swap_addon.py's filer) hold the tmp
+    name only for the write+replace window, so a *.tmp older than
+    _TMP_SWEEP_GRACE_S is residue from a crashed writer, never an
+    in-flight one. (Issue #78 retired the GET path's nonce write-back —
+    the GET render no longer rewrites the pending file at all.) Best-effort: races are fail-silent,
     the next render retries."""
     for fn in sorted(os.listdir(d)):
         if not fn.endswith(".tmp"):
