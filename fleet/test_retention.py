@@ -346,3 +346,95 @@ def test_cli_prune_end_to_end(tmp_path):
     proc = _run_cli(["events", "prune", "--store",
                      str(tmp_path / "no-store")])
     assert proc.returncode == 2, (proc.returncode, proc.stderr)
+
+
+def test_none_outcome_fold_two_prunes(tmp_path):
+    """A None outcome folds under the "unknown" sentinel — a raw None
+    key would crash dict(sorted(...)) on the next prune's merge (None
+    vs str unorderable) and JSON would coerce it to the string "null"."""
+    store = str(tmp_path / "store")
+    day_iso = (NOW - timedelta(days=45)).isoformat()
+    _write(store, "events.jsonl",
+           [_event("box1", "evt-a", emitted=day_iso, outcome=None)])
+    summary, err = events.prune_events(store, now=NOW)
+    assert err is None and summary["compacted"] == 1, (summary, err)
+    hist = _read(store, "events_histograms.jsonl")
+    assert hist[0]["counts"] == {"unknown": 1}, hist
+    # Second prune folds another None-outcome row into the same bucket;
+    # pre-fix this crashed with TypeError comparing None with str.
+    _write(store, "events.jsonl",
+           [_event("box1", "evt-b", emitted=day_iso, outcome=None)])
+    later = NOW + timedelta(days=10)
+    summary, err = events.prune_events(store, now=later)
+    assert err is None and summary["compacted"] == 1, (summary, err)
+    hist = _read(store, "events_histograms.jsonl")
+    assert len(hist) == 1, hist
+    assert hist[0]["counts"] == {"unknown": 2}, hist
+
+
+def test_drop_only_prune_leaves_histograms_untouched(tmp_path):
+    """A prune that folds nothing must not rewrite the histograms file
+    at all: byte-identical and mtime-preserved. And a folding prune
+    that touches a *different* bucket carries the untouched bucket's
+    folded_at forward instead of re-stamping it."""
+    store = str(tmp_path / "store")
+    hist_path = os.path.join(store, "events_histograms.jsonl")
+    old_bucket = {
+        "schema": "fleet-event-histogram/1",
+        "day": (NOW - timedelta(days=200)).date().isoformat(),
+        "box_id": "box1",
+        "component": "repo",
+        "build": "old",
+        "counts": {"succeeded": 5},
+        "folded_at": (NOW - timedelta(days=100)).isoformat(),
+    }
+    os.makedirs(store, exist_ok=True)
+    with open(hist_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(old_bucket, sort_keys=True) + "\n")
+    _write(store, "events.jsonl",
+           [_event("box1", "evt-drop", age_days=100)])
+    before = _read_raw(store, "events_histograms.jsonl")
+    before_mtime = os.stat(hist_path).st_mtime_ns
+    summary, err = events.prune_events(store, now=NOW)
+    assert err is None and summary["dropped"] == 1, (summary, err)
+    assert _read_raw(store, "events_histograms.jsonl") == before
+    assert os.stat(hist_path).st_mtime_ns == before_mtime
+    # Now fold a row into a *different* bucket: the old bucket's
+    # folded_at must be carried forward, the new bucket stamped now.
+    _write(store, "events.jsonl",
+           [_event("box1", "evt-fold", age_days=45, to="new",
+                   outcome="failed")])
+    summary, err = events.prune_events(store, now=NOW)
+    assert err is None and summary["compacted"] == 1, (summary, err)
+    hist = _read(store, "events_histograms.jsonl")
+    by_build = {b["build"]: b for b in hist}
+    assert by_build["old"]["counts"] == {"succeeded": 5}, hist
+    assert by_build["old"]["folded_at"] == old_bucket["folded_at"], hist
+    assert by_build["new"]["folded_at"] == NOW.isoformat(), hist
+
+
+def test_histogram_verbatim_and_foreign_lines_preserved(tmp_path):
+    """Blank/malformed/foreign-schema lines in the histograms file
+    pass through byte-identical after the bucket rows — the fold never
+    absorbs what it does not understand."""
+    store = str(tmp_path / "store")
+    os.makedirs(store, exist_ok=True)
+    foreign = json.dumps({"schema": "something-else/9",
+                          "counts": {"x": 1}}, sort_keys=True)
+    with open(os.path.join(store, "events_histograms.jsonl"), "w",
+              encoding="utf-8") as fh:
+        fh.write("\n")
+        fh.write("{not json\n")
+        fh.write(foreign + "\n")
+    _write(store, "events.jsonl",
+           [_event("box1", "evt-fold", age_days=45, outcome="succeeded")])
+    summary, err = events.prune_events(store, now=NOW)
+    assert err is None and summary["compacted"] == 1, (summary, err)
+    raw = _read_raw(store, "events_histograms.jsonl")
+    lines = raw.split("\n")
+    assert lines[0].startswith('{"box_id"'), lines  # bucket row first
+    assert lines[1] == ""
+    assert lines[2] == "{not json"
+    assert lines[3] == foreign
+    hist = _read(store, "events_histograms.jsonl")
+    assert len(hist) == 2, hist  # bucket + foreign row (both parse)

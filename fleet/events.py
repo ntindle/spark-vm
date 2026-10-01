@@ -786,6 +786,13 @@ def ack_alert(store_dir, alert_id):
 # histogram rows. Histogram buckets merge across prunes: two prunes
 # folding different raw rows from the same (day, box_id, component,
 # build) bucket add to its counts rather than appending a second bucket.
+# Non-string outcomes (None for precheck-fail rows) fold under the
+# "unknown" sentinel, because raw None keys would crash the next merge
+# and JSON coerces them to "null" anyway. Only rows carrying our schema
+# are merged; verbatim (blank/malformed) and foreign-schema histogram
+# lines pass through byte-identical. Only buckets that gain counts in a
+# fold are re-stamped folded_at; carried buckets keep their own, and a
+# drop-only prune leaves the histograms file byte-identical.
 # Build is the target build the event is about: the `to` commit, else
 # `to_version`, else null (precheck-fail rows may name no target — the
 # bucket keeps the null honestly rather than inventing one). Day is the
@@ -809,7 +816,12 @@ def ack_alert(store_dir, alert_id):
 # Both journals are rewritten atomically (tmp sibling + fsync +
 # os.replace) under the store-scoped journal lock; files whose content
 # would not change are left untouched (byte-identical, mtime preserved)
-# so a no-op prune is observable as one.
+# so a no-op prune is observable as one. Commit order inside a folding
+# prune is journal-first, histograms-second: a journal-rewrite failure
+# leaves nothing folded (a retry is clean), and a histogram-rewrite
+# failure after a successful journal rewrite returns a LOUD error —
+# the fold is lost in that window (under-count, never re-folded),
+# which beats the silent double-count the reverse order produced.
 HISTOGRAM_SCHEMA = "fleet-event-histogram/1"
 HISTOGRAMS_JOURNAL_NAME = "events_histograms.jsonl"
 RETENTION_RAW_DAYS = 30
@@ -817,10 +829,11 @@ RETENTION_HISTOGRAM_DAYS = 90
 
 
 def rewrite_journal_atomic(path, row_texts):
-    """Replace the file at path with row_texts (each already a full
-    line, newline-terminated) atomically: tmp sibling on the same fs,
-    fsync, os.replace. Returns an error string or None. A crash leaves
-    the old file or the tmp behind, never a torn journal."""
+    """Replace the file at path with row_texts (each a full line; the
+    writer newline-terminates any line missing its "\n") atomically:
+    tmp sibling on the same fs, fsync, os.replace. Returns an error
+    string or None. A crash leaves the old file or the tmp behind,
+    never a torn journal."""
     tmp_path = path + ".tmp.%d" % os.getpid()
     try:
         with open(tmp_path, "w", encoding="utf-8") as fh:
@@ -844,8 +857,7 @@ def read_journal_raw(path):
     trailing newline, obj the parsed dict, verbatim True for blank
     lines and malformed/non-dict lines. Callers that rewrite must keep
     verbatim items byte-identical — they cannot be dated, so they
-    cannot be pruned (blank lines are normalized away only in that
-    they are never counted or banded)."""
+    cannot be pruned; they are never counted or banded."""
     items = []
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -896,30 +908,58 @@ def _histogram_key(event):
     return (day, event.get("box_id"), event.get("component"), build)
 
 
+def _histogram_outcome_key(outcome):
+    """The counts key for one event outcome. Outcomes are keyed by
+    string; a non-string outcome (None for precheck-fail rows, or
+    anything else hand-fed) folds under the "unknown" sentinel. Raw
+    None keys are forbidden: dict(sorted(...)) raises TypeError
+    comparing None with str on the next prune's merge, and JSON would
+    coerce the key to the string "null" anyway — a collision, not a
+    category."""
+    return outcome if isinstance(outcome, str) else "unknown"
+
+
 def _fold_histograms(existing, events_to_fold, folded_at):
     """Merge existing histogram rows with newly compacted events.
     Returns the full bucket list sorted by
-    (day, box_id, component, build) for a deterministic file layout."""
+    (day, box_id, component, build) for a deterministic file layout.
+
+    Only rows carrying our schema are merged — foreign-schema rows are
+    not understood and must never be absorbed (the caller passes them
+    through byte-identical). Non-string outcomes fold under "unknown"
+    (see _histogram_outcome_key). Only buckets that gained counts in
+    this fold are stamped folded_at=now; carried buckets keep their own
+    folded_at so an unrelated prune never rewrites their evidence."""
     buckets = {}
+
+    def _acc(key):
+        return buckets.setdefault(
+            key, {"counts": {}, "folded_at": None, "touched": False})
+
     for row in existing:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or row.get("schema") != HISTOGRAM_SCHEMA:
             continue
         key = (row.get("day"), row.get("box_id"), row.get("component"),
                row.get("build"))
         counts = row.get("counts")
         if not isinstance(counts, dict):
             counts = {}
-        acc = buckets.setdefault(key, {})
+        acc = _acc(key)
+        if acc["folded_at"] is None:
+            acc["folded_at"] = row.get("folded_at")
         for outcome, n in counts.items():
             if isinstance(n, int) and n > 0:
-                acc[outcome] = acc.get(outcome, 0) + n
+                okey = _histogram_outcome_key(outcome)
+                acc["counts"][okey] = acc["counts"].get(okey, 0) + n
     for event in events_to_fold:
         key = _histogram_key(event)
-        outcome = event.get("outcome")
-        acc = buckets.setdefault(key, {})
-        acc[outcome] = acc.get(outcome, 0) + 1
+        acc = _acc(key)
+        okey = _histogram_outcome_key(event.get("outcome"))
+        acc["counts"][okey] = acc["counts"].get(okey, 0) + 1
+        acc["touched"] = True
+        acc["folded_at"] = folded_at
     rows = []
-    for (day, box_id, component, build), counts in sorted(
+    for (day, box_id, component, build), acc in sorted(
             buckets.items(), key=lambda kv: tuple(
                 "" if v is None else str(v) for v in kv[0])):
         rows.append({
@@ -928,10 +968,19 @@ def _fold_histograms(existing, events_to_fold, folded_at):
             "box_id": box_id,
             "component": component,
             "build": build,
-            "counts": dict(sorted(counts.items())),
-            "folded_at": folded_at,
+            "counts": dict(sorted(acc["counts"].items())),
+            "folded_at": acc["folded_at"],
         })
     return rows
+
+
+def _count_histogram_buckets(hist_items):
+    """Count our-schema histogram bucket rows among raw journal items
+    (verbatim, foreign-schema, and non-dict lines are not buckets)."""
+    return sum(
+        1 for _, obj, verb in hist_items
+        if (obj and not verb and isinstance(obj, dict)
+            and obj.get("schema") == HISTOGRAM_SCHEMA))
 
 
 def prune_events(store_dir, now=None):
@@ -979,32 +1028,74 @@ def prune_events(store_dir, now=None):
                     summary["compacted"] += 1
                 else:
                     summary["dropped"] += 1
-            if to_fold or summary["dropped"]:
-                hist_items, err = read_journal_raw(
-                    os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME))
-                if err:
-                    return None, err
-                existing = [obj for _, obj, verb in hist_items
-                            if obj and not verb]
-                buckets = _fold_histograms(existing, to_fold, folded_at)
-                summary["histogram_buckets"] = len(buckets)
-                err = rewrite_journal_atomic(
-                    os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME),
-                    [json.dumps(b, sort_keys=True) for b in buckets])
-                if err:
-                    return None, err
+            if to_fold:
+                # The journal is rewritten FIRST (before the histogram
+                # fold). If the journal rewrite raises, nothing has been
+                # folded and a retry is clean. If instead the histogram
+                # rewrite fails after the journal was rewritten, the
+                # error is returned LOUDLY: the folded rows are already
+                # gone from the journal, so the fold is lost in that
+                # window — a loud under-count a retry cannot heal, and
+                # that beats the silent double-count the old
+                # histogram-first order produced.
                 err = rewrite_journal_atomic(
                     os.path.join(store_dir, EVENTS_JOURNAL_NAME),
                     kept_texts)
                 if err:
                     return None, err
+                hist_items, err = read_journal_raw(
+                    os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME))
+                if err:
+                    return None, err
+                existing = []
+                passthrough = []
+                for text, obj, verb in hist_items:
+                    # Verbatim lines (blank/malformed) and foreign-schema
+                    # rows are not understood — they pass through
+                    # byte-identical after the bucket rows, never
+                    # absorbed into a fold.
+                    if (verb or not isinstance(obj, dict)
+                            or obj.get("schema") != HISTOGRAM_SCHEMA):
+                        passthrough.append(text)
+                    else:
+                        existing.append(obj)
+                buckets = _fold_histograms(existing, to_fold, folded_at)
+                summary["histogram_buckets"] = len(buckets)
+                hist_rows = [json.dumps(b, sort_keys=True)
+                             for b in buckets] + passthrough
+                err = rewrite_journal_atomic(
+                    os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME),
+                    hist_rows)
+                if err:
+                    return None, (
+                        "cannot rewrite %s: %s (the %d compacted row(s) "
+                        "were already dropped from the event journal; "
+                        "the fold is lost — a loud under-count, never "
+                        "re-folded)"
+                        % (HISTOGRAMS_JOURNAL_NAME, err,
+                           summary["compacted"]))
+            elif summary["dropped"]:
+                # Drop-only prune: nothing was folded, so the histograms
+                # file is left byte-identical (mtime preserved) — a
+                # prune that folds nothing must not rewrite it.
+                err = rewrite_journal_atomic(
+                    os.path.join(store_dir, EVENTS_JOURNAL_NAME),
+                    kept_texts)
+                if err:
+                    return None, err
+                hist_items, err = read_journal_raw(
+                    os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME))
+                if err:
+                    return None, err
+                summary["histogram_buckets"] = \
+                    _count_histogram_buckets(hist_items)
             else:
                 hist_items, err = read_journal_raw(
                     os.path.join(store_dir, HISTOGRAMS_JOURNAL_NAME))
                 if err:
                     return None, err
-                summary["histogram_buckets"] = sum(
-                    1 for _, obj, verb in hist_items if obj and not verb)
+                summary["histogram_buckets"] = \
+                    _count_histogram_buckets(hist_items)
             alert_items, err = read_journal_raw(
                 os.path.join(store_dir, ALERTS_JOURNAL_NAME))
             if err:
@@ -1043,12 +1134,12 @@ def cmd_events_prune(store_dir):
     summary, err = prune_events(store_dir)
     if err:
         return err
-    print("fleet events: pruned %d event row(s) older than %d days "
-          "(%d compacted into %d histogram bucket(s), %d dropped); "
+    print("fleet events: pruned %d event row(s) (%d compacted into "
+          "%d histogram bucket(s), %d dropped at 90+ days); "
           "%d kept, %d undatable kept; %d acked alert(s) older than "
           "%d days dropped, %d alert(s) kept"
           % (summary["compacted"] + summary["dropped"],
-             RETENTION_RAW_DAYS, summary["compacted"],
+             summary["compacted"],
              summary["histogram_buckets"], summary["dropped"],
              summary["kept"], summary["skipped_undatable"],
              summary["alerts_dropped"], RETENTION_HISTOGRAM_DAYS,
