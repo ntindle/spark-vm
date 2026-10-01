@@ -17,9 +17,11 @@ real daemons can never be touched.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 import pytest
 
@@ -381,13 +383,19 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             with open(STATE_FILE) as f:
-                state = f.read().strip() or "unknown"
+                content = f.read()
         except OSError:
-            state = "unknown"
-        body = json.dumps({"ok": True, "detail": "driver ok",
-                           "input": {"state": state, "detail": "test",
-                                     "checked_at": 123,
-                                     "driver": "test"}}).encode()
+            content = ""
+        if content.startswith("RAW:"):
+            # Serve the remainder verbatim — garbage for the
+            # unparseable-path tests.
+            body = content[4:].encode()
+        else:
+            state = content.strip() or "unknown"
+            body = json.dumps({"ok": True, "detail": "driver ok",
+                               "input": {"state": state, "detail": "test",
+                                         "checked_at": 123,
+                                         "driver": "test"}}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -403,6 +411,32 @@ srv.serve_forever()
 '''
 
 
+@pytest.fixture()
+def fake_bridge():
+    # Yields (url, set_state); the server reads its verdict from a
+    # file on every request so one server serves many verdicts. A state
+    # file starting with "RAW:" serves the remainder verbatim instead of
+    # JSON (for the unparseable-path tests).
+    with tempfile.TemporaryDirectory() as t:
+        state_file = os.path.join(t, "verdict")
+        with open(state_file, "w") as f:
+            f.write("unknown")
+        server_py = os.path.join(t, "server.py")
+        with open(server_py, "w") as f:
+            f.write(_FAKE_BRIDGE_PY)
+        proc = subprocess.Popen(
+            ["python3", server_py], stdout=subprocess.PIPE, text=True,
+            env={**os.environ, "FAKE_BRIDGE_STATE_FILE": state_file})
+        try:
+            port = proc.stdout.readline().strip()
+            assert port.isdigit(), f"fake bridge did not print a port: {port!r}"
+            yield (f"http://127.0.0.1:{port}",
+                   lambda v: open(state_file, "w").write(v))
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+
 class TestInputProbeCheck:
     """Behavioral tests for the keepalive's input-probe supervision (#769).
 
@@ -416,29 +450,6 @@ class TestInputProbeCheck:
     @pytest.fixture()
     def guard(self):
         return extract_function(KEEPALIVE_SH, "input_probe_check")
-
-    @pytest.fixture()
-    def fake_bridge(self):
-        # Yields (url, set_state); the server reads its verdict from a
-        # file on every request so one server serves many verdicts.
-        with tempfile.TemporaryDirectory() as t:
-            state_file = os.path.join(t, "verdict")
-            with open(state_file, "w") as f:
-                f.write("unknown")
-            server_py = os.path.join(t, "server.py")
-            with open(server_py, "w") as f:
-                f.write(_FAKE_BRIDGE_PY)
-            proc = subprocess.Popen(
-                ["python3", server_py], stdout=subprocess.PIPE, text=True,
-                env={**os.environ, "FAKE_BRIDGE_STATE_FILE": state_file})
-            try:
-                port = proc.stdout.readline().strip()
-                assert port.isdigit(), f"fake bridge did not print a port: {port!r}"
-                yield (f"http://127.0.0.1:{port}",
-                       lambda v: open(state_file, "w").write(v))
-            finally:
-                proc.terminate()
-                proc.wait(timeout=10)
 
     @pytest.fixture()
     def fake_home(self):
@@ -607,14 +618,137 @@ class TestInputProbeCheck:
             assert "RC=0" in r.stdout
             assert "python3 missing" in r.stderr
 
+    def test_unparseable_verdict_is_inconclusive(self, guard, fake_bridge,
+                                                fake_home):
+        # A bridge that answers with garbage (or a body that dies mid-parse)
+        # must classify as "unparseable" — inconclusive, like "unknown": the
+        # wedge counter neither increments nor resets, the honest verdict is
+        # recorded in state and history, and even with the restart gate open
+        # an unparseable verdict must NOT restart the desktop stack.
+        home, calls = fake_home
+        url, set_state = fake_bridge
+        gate_on = {"HOME": home, "CALLS_FILE": calls,
+                   "CUA_KEEPALIVE_WEDGE_RESTART": "1",
+                   "CUA_KEEPALIVE_WEDGE_THRESHOLD": "1"}
+        gate_off = {"HOME": home, "CALLS_FILE": calls}
+        with tempfile.TemporaryDirectory() as t:
+            # Gate off for the first wedge: build consecutive=1 without
+            # triggering the restart the gate-on threshold=1 would fire.
+            set_state("wedged")
+            self._run(guard, t, url, env_extra=gate_off)
+            assert self._state(t)["consecutive_wedged"] == "1"
+            # Gate on: an unparseable verdict must still not restart, and
+            # must leave the counter alone.
+            set_state("RAW:this is not json{{{")
+            r = self._run(guard, t, url, env_extra=gate_on)
+            assert r.returncode == 0, r.stderr
+            assert "RC=0" in r.stdout
+            st = self._state(t)
+            assert st["consecutive_wedged"] == "1"
+            assert st["last_state"] == "unparseable"
+            hist = self._history(t)
+            assert len(hist) == 2
+            assert hist[1].endswith(" unparseable consecutive=1"), hist
+            assert not os.path.exists(calls), \
+                "desktop stack restarted on an unparseable verdict"
 
-class TestDesktopStatusProbeSurface:
-    def test_status_surfaces_input_probe_states(self):
-        # cua-desktop.sh status must surface the bridge's input-probe
-        # verdict (the #769 option-b surfacing), in the existing
-        # [ok]/[down]-style vocabulary.
-        src = open(DESKTOP_SH).read()
-        assert "[ok] input path" in src
-        assert "[wedged] input path" in src
-        assert "[unknown] input path" in src
-        assert "/api/status" in src
+    def test_bare_call_uses_home_cache_defaults(self, guard):
+        # The production call site runs input_probe_check with NO args —
+        # the defaults ($HOME/.cache for state, the real bridge URL for the
+        # probe) must resolve correctly. Prove it behaviorally: a fresh
+        # $HOME/.cache/cua-input-probe.state throttles the probe, so a bare
+        # call under a temp HOME must never invoke curl — a shim on PATH
+        # logs every curl invocation and then delegates to the real one —
+        # must exit 0, and must write nothing. If the default state dir
+        # broke, the call would miss the state file and reach for the
+        # network: the shim log would be non-empty and the test fails.
+        src = open(KEEPALIVE_SH).read()
+        assert re.search(r"(?m)^input_probe_check$", src), \
+            "production call site must invoke input_probe_check with no args"
+        with tempfile.TemporaryDirectory() as home:
+            cachedir = os.path.join(home, ".cache")
+            os.makedirs(cachedir)
+            with open(os.path.join(cachedir, "cua-input-probe.state"),
+                      "w") as f:
+                f.write(f"last_check={int(time.time())}\n")
+            with tempfile.TemporaryDirectory() as shimdir:
+                curl_log = os.path.join(shimdir, "curl.calls")
+                real_curl = shutil.which("curl")
+                assert real_curl, "curl not installed"
+                with open(os.path.join(shimdir, "curl"), "w") as f:
+                    f.write("#!/bin/bash\n"
+                            f'echo "curl $*" >> "{curl_log}"\n'
+                            f'exec "{real_curl}" "$@"\n')
+                os.chmod(os.path.join(shimdir, "curl"), 0o755)
+                env = {"HOME": home,
+                       "PATH": shimdir + ":" + os.environ["PATH"],
+                       "CUA_KEEPALIVE_PROBE_INTERVAL_S": "3600"}
+                r = run_guard(guard, 'input_probe_check; echo "RC=$?"',
+                              env=env)
+                assert r.returncode == 0, r.stderr
+                assert "RC=0" in r.stdout
+                assert not os.path.exists(curl_log), \
+                    "bare call hit the network despite a fresh state file"
+                assert not os.path.exists(
+                    os.path.join(cachedir, "cua-input-probe.log")), \
+                    "bare call wrote history despite being throttled"
+
+
+class TestSurfaceInputProbe:
+    """Behavioral tests for do_status's input-path surfacing (#769).
+
+    The surfacing logic is extracted as surface_input_probe() from the
+    real cua-desktop.sh (extraction fails loudly if the function goes
+    missing) and run against the fake bridge: every bridge verdict must
+    render in the documented status vocabulary, and a garbage or
+    unreachable bridge must stay silent without breaking the status
+    command.
+    """
+
+    @pytest.fixture()
+    def guard(self):
+        return extract_function(DESKTOP_SH, "surface_input_probe")
+
+    def _run(self, guard, url):
+        return run_guard(guard, f'surface_input_probe "{url}"; echo "RC=$?"')
+
+    def test_maps_verdicts_to_vocabulary(self, guard, fake_bridge):
+        url, set_state = fake_bridge
+        expected = {
+            "ok": "[ok] input path (XTEST probe)",
+            "wedged": "[wedged] input path (XTEST probe) \u2014 remediate: "
+                      "cua-desktop.sh stop && cua-desktop.sh start",
+            "unknown": "[unknown] input path (probe not run yet or "
+                       "inconclusive)",
+        }
+        for verdict, line in expected.items():
+            set_state(verdict)
+            r = self._run(guard, url)
+            assert r.returncode == 0, r.stderr
+            assert "RC=0" in r.stdout
+            assert line in r.stdout, (verdict, r.stdout)
+
+    def test_garbage_body_prints_nothing(self, guard, fake_bridge):
+        url, set_state = fake_bridge
+        set_state("RAW:not json at all{{{")
+        r = self._run(guard, url)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "RC=0", r.stdout
+
+    def test_unreachable_bridge_prints_nothing(self, guard):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        dead_url = f"http://127.0.0.1:{s.getsockname()[1]}"
+        s.close()
+        r = self._run(guard, dead_url)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "RC=0", r.stdout
+
+    def test_do_status_wires_the_surfacing(self):
+        # do_status must invoke the surfacing function with no args — the
+        # behavioral tests above run against the extracted function, so a
+        # deleted call site would otherwise pass them all.
+        body = extract_function(DESKTOP_SH, "do_status")
+        assert re.search(r"(?m)^\s*surface_input_probe\s*$", body), \
+            "do_status no longer calls surface_input_probe"
