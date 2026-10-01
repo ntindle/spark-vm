@@ -55,7 +55,10 @@ console (S2), no mutations, no auth story beyond the host.
 
 The API is a **pure projection of the store**: read-only, computed at
 request time from the estate store's journals + snapshot, no mutable
-server-side state, no new producer, no box-side change. Every endpoint
+server-side state, no new producer, no box-side change. The analysis
+named four endpoints; this spec ships seven — `boxes/{id}`, `drift`,
+and `crosscheck` join because the analysis's own acceptance ("every
+`fleet` CLI command has an API equivalent") demands them. Every endpoint
 names its CLI counterpart; ordering matches the CLI's (box rows in
 `_box_sort_key` order, history newest-first, events in `(emitted_at,
 event_id)` order — exactly the CLI's `_sort_key`).
@@ -68,7 +71,7 @@ falling back to `last_tick_at.toolset`, 19-char truncation — the
 inventory table uses `toolset` only with 10-char truncation, so the
 two shapes name their rules separately); unknown id → 404 with `{"error": "box <id> has no records in the journal"}` — the CLI's message verbatim, as JSON |
 | `GET /fleet/drift?expected=<commit>&staleness_hours=N` | `drift --store --expected` | `rows[]`: `{box_id, repo_commit, reason}` where reason is one of `policy-held (frozen)`, `deferred (active tenant arc)`, `suspect report (...)`, `unexplained` — precedence pinned as frozen > arc > suspect > unexplained, exactly the CLI's; rows are eligible-only (stale boxes excluded, same as the CLI); `expected`: `{commit, source}` — source is `--expected`, `fleet majority`, the deterministic-tie wording, or `none (no eligible boxes)`; `commit` echoes the comparison form (12-char short) alongside the verbatim input; the short-form comparison rule (12-char prefixes, same as the census) is stated in the response as `commit_matching: "12-char prefix, same as the inventory census"` |
-| `GET /fleet/events?box=&wave=` | `events --store [--box] [--wave]` | Two shapes, mirroring the CLI: unfiltered returns the per-box outcome-series summary the CLI prints (`series[]`: `{box_id, event_count, last_outcome, last_emitted_at, outcome_histogram, last_note}`); `?box=` returns that box's event rows in `(emitted_at, event_id)` ascending order — the full canonical journal records (a superset of what the CLI's event printer renders: the response carries every journal field, not just the rendered subset). `?wave=` is accepted and answered honestly: while the `rollout` envelope is null (G15 S2 unlanded) the response carries `"wave_filter": "unavailable until G15 S2 (rollout envelope null)"` and returns the unfiltered shape rather than an empty list — a deliberate divergence from the CLI (the CLI's empty wave-filter result on a null-rollout fleet is the honest answer; the API keeps the shape so consumers don't code against an empty array that later gains rows). `?box=` with no events → 404 with `{"error": "box <id> has no events in the journal"}` — the CLI's message verbatim, as JSON |
+| `GET /fleet/events?box=&wave=` | `events --store [--box] [--wave]` | Two shapes, mirroring the CLI: unfiltered returns the per-box outcome-series summary the CLI prints (`series[]`: `{box_id, event_count, last_outcome, last_emitted_at, outcome_histogram, last_note}`); `?box=` returns that box's event rows in `(emitted_at, event_id)` ascending order — the full canonical journal records (a superset of what the CLI's event printer renders: the response carries every journal field, not just the rendered subset). `?wave=` is accepted and answered honestly: while the `rollout` envelope is null (G15 S2 unlanded) the response is 200 with the empty shape (`events: []` for the row shape, `series: []` for the summary shape) plus `"wave_filter": "unavailable until G15 S2 (rollout envelope null)"` — exactly what the journal contains for that filter, matching the CLI and the `/fleet/waves` row's own-unavailability pattern below. An empty list plus the named reason is the fail-safe answer for the named consumers (the S2 console's wave board); returning everything for a filter would be fail-dangerous. `?box=` with no events (no wave filter) → 404 with `{"error": "box <id> has no events in the journal"}` — the CLI's message verbatim, as JSON |
 | `GET /fleet/alerts` | `events watch --store` | `{status: "pending" \| "clear", pending_count, alerts[]}` — pending alerts in `fired_at`-ascending order per the CLI, then the acked ones the CLI omits (ordering unspecified, clearly marked as outside the CLI's baseline — the §4 conformance test covers the pending portion only); the exit-code contract is explicit: `status: "pending"` ⇔ the CLI would exit 1 |
 | `GET /fleet/crosscheck?box=` | `events crosscheck --store [--box]` | `{status: "violations" \| "no-violations", confirmed, violations, inconclusive, verdicts[]}` — verdicts keep the CLI's field names and ordering: `{box_id, event_id, received_at, claim_to, verdict, detail}`, sorted by `(box_id, received_at)`; the CLI's summary line's three counts travel verbatim; the exit-1-on-violation contract stated as `status` |
 | `GET /fleet/waves` | *(none — reserved shape)* | 200 with `{"waves": [], "wave_assignments": "unavailable until G15 S2 (rollout envelope null on all journaled events)"}` — the endpoint exists so consumers can code against the path, but it names its own unavailability rather than returning an empty array that reads as "no waves" |
@@ -143,6 +146,10 @@ the truncation rule is documented in the response schema, not hidden.
   its own versioning; any out-of-repo consumer (the OQ1 third-party
   consoles) ships only on a versioned path — that is the S2
   versioning trigger.
+- No paging in S1: the endpoints serve full lists exactly like the
+  CLI (field-equivalence). Bounded paging (`?limit=`/`?offset=`) is
+  an S2 decision the console and the page will need — deferred
+  deliberately, not overlooked (OQ5).
 - Errors never leak box-controlled bytes raw: alert `detail` and
   record `note` fields pass through the same control-char stripping
   the alert journal synthesis applies (a crafted audit line can never
@@ -219,6 +226,9 @@ the truncation rule is documented in the response schema, not hidden.
   (G15) will eventually supersede it. When G15 S2 lands, the endpoint
   gains a `wave=`-derived expected and the majority rule becomes the
   fallback — a named future change, not silent drift.
+- OQ5 — bounded paging: S1 serves full lists exactly like the CLI
+  (field-equivalence); the S2 console and the G22 S2a page will need
+  `?limit=`/`?offset=`. Deferred deliberately, not overlooked (§5).
 
 ## 9. Gap inventory delta
 
