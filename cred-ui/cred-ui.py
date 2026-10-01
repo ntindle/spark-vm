@@ -266,11 +266,14 @@ def placement_json(kind, arg):
             raise ValueError("placement takes no argument")
         return json.dumps(kind)
     if kind == "custom_header":
-        if not HEADER_RE.match(arg or ""):
+        # #118: a non-string arg from a hand-built request used to escape as
+        # a TypeError from re.match and drop the connection instead of a
+        # clean 400. Non-strings are bad input, same as a bad string shape.
+        if not isinstance(arg, str) or not HEADER_RE.match(arg):
             raise ValueError("bad header name")
         return json.dumps({"custom_header": arg})
     if kind == "query_param":
-        if not PARAM_RE.match(arg or ""):
+        if not isinstance(arg, str) or not PARAM_RE.match(arg):
             raise ValueError("bad query param name")
         return json.dumps({"query_param": arg})
     raise ValueError("unknown placement")
