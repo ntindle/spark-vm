@@ -1319,7 +1319,7 @@ class TestInputLiveness:
         self._patch_binaries(bridge, monkeypatch)
         spawned = []
         self._patch_popen(bridge, monkeypatch, spawned, eof=False)
-        monkeypatch.setattr(bridge, "call", LateDriver(WINDOWS, 0.75))
+        monkeypatch.setattr(bridge, "call", LateDriver(WINDOWS, 0.6))
         state, detail = bridge._input_probe(timeout=1.0)
         assert state == "unknown"
         assert "too late" in detail
