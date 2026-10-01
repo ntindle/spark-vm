@@ -64,6 +64,35 @@ running() { # running <pidfile>
   [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
 }
 
+# Input-path liveness surfacing (#769): read the bridge's probe-cache
+# verdict and render it in the status vocabulary, so an operator sees the
+# XTEST wedge without reading the bridge log. Best-effort: an unreachable
+# bridge or a missing curl/python3 prints nothing and must never break
+# the status command.
+# shellcheck disable=SC2120 # tests (cua/test_shell_scripts.py) call
+# surface_input_probe with a bridge_url override; the production call site
+# passes none.
+surface_input_probe() { # surface_input_probe [bridge_url] — arg override exists for tests
+  local bridge=${1:-http://127.0.0.1:18731}
+  if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    local probe_body probe_state
+    probe_body=$(curl -s --max-time 5 "$bridge/api/status" 2>/dev/null) || probe_body=""
+    if [ -n "$probe_body" ]; then
+      probe_state=$(printf '%s' "$probe_body" | python3 -c \
+        'import json,sys
+try:
+    print(json.load(sys.stdin).get("input", {}).get("state", "unknown"))
+except Exception:
+    print("unparseable")' 2>/dev/null) || probe_state=""
+      case "$probe_state" in
+        ok) echo "[ok] input path (XTEST probe)" ;;
+        wedged) echo "[wedged] input path (XTEST probe) — remediate: cua-desktop.sh stop && cua-desktop.sh start" ;;
+        unknown) echo "[unknown] input path (probe not run yet or inconclusive)" ;;
+      esac
+    fi
+  fi
+}
+
 do_start() {
   # 1. Xvfb
   if ! running "$RUNDIR/xvfb.pid"; then
@@ -155,24 +184,7 @@ do_status() {
   # Input-path liveness (#769): the bridge's probe cache is refreshed on
   # the keepalive's schedule — surface the last verdict here so an
   # operator sees the XTEST wedge without reading the bridge log.
-  # Best-effort: an unreachable bridge or a missing curl/python3 must
-  # never break status.
-  if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-    probe_body=$(curl -s --max-time 5 http://127.0.0.1:18731/api/status 2>/dev/null) || probe_body=""
-    if [ -n "$probe_body" ]; then
-      probe_state=$(printf '%s' "$probe_body" | python3 -c \
-        'import json,sys
-try:
-    print(json.load(sys.stdin).get("input", {}).get("state", "unknown"))
-except Exception:
-    print("unparseable")' 2>/dev/null) || probe_state=""
-      case "$probe_state" in
-        ok) echo "[ok] input path (XTEST probe)" ;;
-        wedged) echo "[wedged] input path (XTEST probe) — remediate: cua-desktop.sh stop && cua-desktop.sh start" ;;
-        unknown) echo "[unknown] input path (probe not run yet or inconclusive)" ;;
-      esac
-    fi
-  fi
+  surface_input_probe
 }
 
 case "${1:-status}" in
