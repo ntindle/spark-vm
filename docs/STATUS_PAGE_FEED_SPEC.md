@@ -21,7 +21,7 @@ S3 answers the incident-comms question.
   the fleet event journal (canonical shape: `event_id`, `box_id`,
   `session_epoch`, `emitted_at`, `received_at`, `source`, `component`,
   `subcomponent`, `subcomponents`, `kind`, `outcome`, `from`, `to`, `phase`, `rollout`, `trigger`,
-  `attested`, `note`) and   the alert journal (`alerts.jsonl`), with four
+  `attested`, `note`) and the alert journal (`alerts.jsonl`), with four
   alert rules evaluated on every collect: (1) any `rollback-failed` →
   immediate alert; (2) correlated failure (≥2 boxes, same
   `(subcomponent, to)` or `(to)`-alone for audit lines without a
@@ -75,8 +75,8 @@ the single source of truth; the feed keeps no copy and no memory.
 ### 3.1 Alert rows (all four rules)
 
 Every alert in `alerts.jsonl` becomes a row, with its journaled fields:
-`rule`, `fired_at`, `box_id`, `subcomponent`, `to`, `detail`,
-`acked`. The row's lifecycle state (§5) is rendered alongside; the
+`schema`, `alert_id`, `rule`, `fired_at`, `box_id`, `subcomponent`, `to`,
+`detail`, `acked`. The row's lifecycle state (§5) is rendered alongside; the
 state is derived, the fields are journaled.
 
 - Rule 1 (rollback-failed): a box stuck on a known-bad build. Row is a
@@ -189,7 +189,7 @@ per-record with chain-safe deletion), it must preserve per-alert
 resolution evidence — or this contract re-scopes with it. Window
 arithmetic stays implementation detail; the scan bound is contract.
 
-## 6. What stays operator-only (the S1 page is an operator page)
+## 6. What stays operator-only (the S2a page is an operator page)
 
 S1 pins the feed contract; the operator page ships as the first build
 of S2 (§9). Until S2's tenant stage lands there are no tenant-visible
@@ -224,7 +224,7 @@ tenant read path.
 - **G24 (tenant-scoped consumption):** S2's page consumes G24's tenant
   read path. Until then the page is operator-only (§6) — no
   tenant-scoped history rows, no tenant surrogate naming.
-- **G25 (sentinel feed):** the S1 operator page consumes the collector
+- **G25 (sentinel feed):** the S2a operator page consumes the collector
   journals directly. The S2 tenant-visible surface should consume the
   sentinel-signed feed when it exists — tenant-visible rows need
   tamper-evidence the operator journal cannot offer. This is a
