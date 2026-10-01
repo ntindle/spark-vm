@@ -222,7 +222,11 @@ class SwapHandler(BaseHTTPRequestHandler):
     def _handle(self):
         parts = urlsplit(self.path)  # absolute URI from the client
         target_host, target_port = parts.hostname, parts.port or 80
-        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:  # same clamp as the record builders: never die on bad framing
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        length = max(length, 0)
         body = self.rfile.read(length) if length else None
         headers = {}
         for k, v in self.headers.items():
