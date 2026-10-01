@@ -202,8 +202,8 @@ class TestDeployGateTestsCoverage(unittest.TestCase):
             exclusions = _INTENTIONAL_EXCLUSIONS.get(component, set())
             for path in sorted(on_disk - registered - exclusions):
                 missing.append(f"{component}: {path}")
-        self.assertEqual(
-            missing, [],
+        self.assertFalse(
+            missing,
             "test file(s) exist on disk but are NOT registered in the "
             "pre-deploy gate — the gate will not exercise them. Fix: add "
             "each file to that component's *_tests string in "
@@ -217,8 +217,8 @@ class TestDeployGateTestsCoverage(unittest.TestCase):
             on_disk = self._on_disk[component]
             for path in sorted(registered - on_disk):
                 stale.append(f"{component}: {path}")
-        self.assertEqual(
-            stale, [],
+        self.assertFalse(
+            stale,
             "gate registration(s) point at .py files that do not exist on "
             "disk — the gate command would fail outright. Fix: remove the "
             "stale name from that component's *_tests string in "
