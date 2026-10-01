@@ -107,8 +107,8 @@ isolation), because those are where the trust story lives.
 | **Northflank** | Both | microVM/Kata/gVisor, stateful or ephemeral, self-serve BYOC | Lowest published rate: $0.01667/vCPU-hr; free sandbox tier |
 | **E2B** | Task-scoped sandbox | Firecracker microVM per sandbox, SDK-first, templates-as-code | Hobby $0 + $100 one-time credit (1h sessions, 20 concurrent); Pro **$150/mo** + usage (24h sessions); ~$78/mo usage for one continuous 2vCPU/512MB box; $21M Series A **2025-07-28** (Insight Partners lead; dated sources: PRNewswire wire + SiliconANGLE URL) |
 | **Daytona** | Task-scoped sandbox | Containers (+VM/Windows classes), stateful, stop/archive/pause/fork, GPU (ephemeral) | $200 free compute, no plan floor; $0.0504/vCPU-hr + $0.0162/GiB-hr; GPU on request (H100 listed $2.27/hr) |
-| **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team; in talks to raise at ~$15B valuation (2026-09-23, Bloomberg/Reuters THIRD-PARTY; $355M May raise at $4.65B); **2026-09-26 late-morning fold (C61, THIRD-PARTY):** staff engineers detailed rebuilding the sandbox layer off Kubernetes for "millions of concurrent sandboxes and tens of thousands of creations per second" — forcing constraint was scheduling latency at creation time. (C61 source: my2cents.ai digest 2026-09-24; author + talk not directly verified this pass.) **2026-09-27 evening scoped fold (VENDOR-VERIFIED):** network egress billed from **Oct 1, 2026** — 1/10/100 TiB per-cycle allowances (Starter/Team/Enterprise), **$0.04/GiB** overage; usage visible on Usage & Billing since Sep 1 (no September charge), first bill with egress Nov 1, 2026; meters container NIC + inter-container private traffic + Cloud Bucket Mount uploads, excludes Modal Volumes I/O (vendor docs `modal.com/docs/guide/network-egress-billing`, read live 2026-09-27 ~20:05 CDT). Corpus's richest published sandbox-egress datapoint (DO harness-runtime: $0.01/GiB public egress; AgentComputer C12 stays OPEN). |
-| **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots; **64 GB ephemeral NVMe default** (SDK ≥3.0.0/custom image; 32 GB on deprecated runtimes — C32 resolved, see "Watch update — 2026-09-23"); Drives public beta (persistent, ≤16 TiB/drive, usage-based pricing); **2026-09-26 morning fold (VENDOR-VERIFIED):** sandbox memory observability — Memory Usage card (avg/P75/P95 across sandboxes), per-sandbox detail page auto-scales y-axis to the memory limit with a dashed 85% reference line, `memoryUsedBytes` in the Observability query builder (custom queries + alerts), CLI `vercel metrics` under `vercel.sandbox.memory_used_bytes` (C59, in-lane); `vercel/vcr-action/login` GitHub Action — OIDC login to VCR, short-lived token revoked at job end, prepared image usable as custom sandbox image (`<repository>:<tag>`) (C60, adjacent) | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
+| **Modal** | Task-scoped sandbox | gVisor, GPU inside sandbox (T4–B300), memory snapshots | Sandbox tier ≈3x standard rate (arithmetic checks out — standard-rate half corroborated only by secondary sources; the pricing page shows the Sandbox+Notebooks tier only); $0.0710/vCPU-hr equiv; free Starter, $250/mo Team; in talks to raise at ~$15B valuation (2026-09-23, Bloomberg/Reuters THIRD-PARTY; $355M May raise at $4.65B); **2026-09-26 late-morning fold (C61, THIRD-PARTY):** staff engineers detailed rebuilding the sandbox layer off Kubernetes for "millions of concurrent sandboxes and tens of thousands of creations per second" — forcing constraint was scheduling latency at creation time. (C61 source: my2cents.ai digest 2026-09-24; author + talk not directly verified this pass.) **2026-09-27 evening scoped fold (VENDOR-VERIFIED):** network egress billed from **Oct 1, 2026** — 1/10/100 TiB per-cycle allowances (Starter/Team/Enterprise), **$0.04/GiB** overage; usage visible on Usage & Billing since Sep 1 (no September charge), first bill with egress Nov 1, 2026; meters container NIC + inter-container private traffic + Cloud Bucket Mount uploads, excludes Modal Volumes I/O (vendor docs `modal.com/docs/guide/network-egress-billing`, read live 2026-09-27 ~20:05 CDT). Corpus's richest published sandbox-egress datapoint (DO harness-runtime: $0.01/GiB public egress; AgentComputer C12 stays OPEN). **2026-10-01 morning scoped note (VENDOR-VERIFIED):** egress billing now EFFECTIVE (read live on the effective date): the page is verbatim unchanged from the pre-effective posture — still "Starting October 1, 2026, Modal charges for network egress."; 1/10/100 TiB allowances; $0.04/GiB overage; first bill with egress still postured for November 1, 2026. No went-live banner, no usage/billing-posture change — an uneventful go-live; no third-party go-live news. The pre-effective standing line is retired; no new C-number. |
+| **Vercel Sandbox** | Task-scoped sandbox | Firecracker microVM, 45min/24h sessions, snapshots; **64 GB ephemeral NVMe default** (SDK ≥3.0.0/custom image; 32 GB on deprecated runtimes — C32 resolved, see "Watch update — 2026-09-23"); Drives public beta (persistent, ≤16 TiB/drive, usage-based pricing); **2026-09-26 morning fold (VENDOR-VERIFIED):** sandbox memory observability — Memory Usage card (avg/P75/P95 across sandboxes), per-sandbox detail page auto-scales y-axis to the memory limit with a dashed 85% reference line, `memoryUsedBytes` in the Observability query builder (custom queries + alerts), CLI `vercel metrics` under `vercel.sandbox.memory_used_bytes` (C59, in-lane); `vercel/vcr-action/login` GitHub Action — OIDC login to VCR, short-lived token revoked at job end, prepared image usable as custom sandbox image (`<repository>:<tag>`) (C60, adjacent); **2026-10-01 morning fold (VENDOR-VERIFIED):** Vercel Sandbox now supports Secure Compute (first-party dated changelog entry 2026-09-30) — capability addition on the tracked sandbox surface, not a new SKU; Secure Compute is Vercel's private-network-connectivity surface, so sandbox workloads now have a private/egress-postured networking option (C74, in-lane) | Active-CPU billing ($0.128/vCPU-hr); Hobby allotment; Pro credit |
 | **Cloudflare Sandbox** | Task-scoped sandbox | Containers on Workers, sleeps at 10 min idle, disk resets on sleep | Active-CPU billing ($0.072/vCPU-hr); $5/mo Workers Paid floor |
 | **Runloop** | Task-scoped sandbox | Devboxes as "isolated, ephemeral virtual machines" (hypervisor unnamed), Network Policies, SWE-bench focus, suspend/resume (Pro) | $0.108/CPU-hr; free Basic; $250/mo Pro |
 | **Blaxel** | Task-scoped sandbox | Perpetual sandboxes, scale-to-zero ~5s, hibernate — acquired by Baseten (announced 2026-09-10); Baseten's newest "Hosted Tools" blog names Blaxel as its sandbox foundation ("fast, isolated, persistent sandboxes and storage where developers can run their own agentic workflows and tool execution") | Per-second usage; SOC 2 Type II / ISO 27001; HIPAA via $250/mo BAA add-on |
@@ -157,6 +157,9 @@ pricing at $0.00936/vCPU-h (C41, billing since 2026-07-31) |
 | **OpenAI Agents API** (DevDay 2026-09-29: public beta reiterated with new hosted-execution + computer-use details; filed C69) | Managed agent runtime (OpenAI-hosted) | **VENDOR-VERIFIED** (OpenAI's official DevDay 2026 recap, community.openai.com, 2026-09-29): "The Agents API is in public beta, with hosted execution, memory, tools, and multi-agent support"; "Computer use in the Agents API lets agents operate software through its UI." Corroborated on OpenAI's own repo `openai/openai-cookbook` sandbox examples: application-managed + webhook-managed sandbox provisioning across docker, digitalocean, cloudflare, modal, vercel, e2b, daytona, blaxel, runloop, and OCI (the cookbook's provisioning-example list — a different artifact from the C30 Sept-10 launch-partner list, which names Oracle but not docker/OCI; do not conflate the two). OpenAI now sells a managed agent runtime — hosted execution environments for agents, directly comparable to the tracked task-scoped sandbox providers. This is new vendor-verified substance on the existing **C9** tracked item (see the **C30** Sept-10 harness-split analysis — the Sept-10 public beta was already in the corpus; the DevDay recap reiterated it with hosted-execution/memory/tools/multi-agent/computer-use detail), not a new product announcement. spark-vm relevance: the Agents API's application-managed sandbox provisioning is the explicit integration seam for an OpenSandbox adapter (design color for H4's OpenSandbox-adapter discussions); the cookbook's provider list is also the de-facto "blessed provider" set spark-vm's provider comparison must reckon with. Differentiators that survive: real-VM ownership, per-action human approvals (confirmd), credential-proxy (swapd), tailnet-first networking — a vendor-run cloud computer gives the operator none of these. | Beta pricing not yet published (DevDay 2026-09-29 reiteration) |
 | **OpenAI Dots** (announced 2026-09-29, DevDay; filed C70) | Always-on persistent agent compute (OpenAI-operated) | **VENDOR-VERIFIED** (OpenAI's official DevDay 2026 recap, 2026-09-29): "Dots are persistent agents with connected apps and their own cloud computer." OpenAI's own "Introducing dots" (2026-09-29) — release specifics quoted via PYMNTS' Sept-29 coverage: each dot runs on GPT-6 Astra, gets its own cloud computer and browser, learns from feedback over time, works around the clock, connects to 4,000+ apps; one dot included with Pro/Business Premium. Rollout: Pro and Business Premium in eligible markets; Enterprise/Edu/Healthcare admin-enabled beta. (The recap's vendor-verified core claim is "persistent agents with connected apps and their own cloud computer"; the release specifics above are second-order, quoted via coverage.) The pre-keynote "o" always-on-agent leak is REFUTED as a name (rumor grading: "the agent is named dots, not o") — its substance (always-on agent with its own compute) is CONFIRMED as Dots. OpenAI is now a direct operator of always-on agent compute, the segment closest to spark-vm's hosted vision. | Bundled: one dot included with Pro/Business Premium (no standalone PAYG rate card yet) |
 | **OpenAI Codex Cloud** (announced 2026-09-29, DevDay; filed C71) | Developer-agent cloud compute (OpenAI-operated) | **VENDOR-VERIFIED** (OpenAI's official DevDay 2026 recap, 2026-09-29): "Codex Cloud runs tasks while your laptop is closed, with access across devices"; alongside Code Review, Codex Security Cloud, and the CLI `/agents` view. A developer-agent cloud compute surface from OpenAI — coding-agent workloads (the exact workload spark-vm's own improvement loop runs) now have a first-party OpenAI cloud option. Relevant to spark-vm's "where agent coding work runs" positioning; does not change the open-source/self-hosted track. | Included in the Codex surface (no standalone rate card yet) |
+| **MongoDB Atlas Agent Engine** (launched 2026-09-29, Investor Day; filed C72) | Managed agent runtime + memory + governance (MongoDB-operated) | **VENDOR-VERIFIED** (company-issued PR Newswire release, MongoDB, Inc., 2026-09-29): "a unified execution, memory, and governance layer for production AI agents." Launched at its Investor Day at the Nasdaq MarketSite in New York City; "Atlas Agent Engine is available today in public preview. New and existing Atlas customers can get started at agentengine.mongodb.com." Retrieval powered by MongoDB Voyage AI (embedding/reranking); memory and governance layers adoptable independently of the runtime; model- and framework-agnostic. (Corollary color, same release: MongoDB 9.0 launched the same day — adjacent infra, not a filing.) spark-vm relevance: another managed agent runtime in the agent-compute lane; the memory/governance-independence design point is color for spark-vm's own human-approval + audit-separation design. | Consumption-based pricing for Atlas Agent Runtime and Atlas Agent Memory; usage draws on customers' existing Atlas commitments (no standalone rate card in the release) |
+| **Amazon Bedrock Managed Agents** (announced 2026-04-28, re-announced DevDay 2026-09-29; filed C73) | Managed agent runtime (AWS-operated, OpenAI models) | **VENDOR-VERIFIED** (Amazon's own aboutamazon.com announcement page): "April 28, 2026: Today, we are announcing a major expansion of our partnership with OpenAI... three new offerings, all in limited preview: OpenAI models on Amazon Bedrock... Codex on Amazon Bedrock... Amazon Bedrock Managed Agents, powered by OpenAI: an optimized experience for building production-ready AI agents with OpenAI frontier models on AWS." Re-announced in the OpenAI DevDay 2026 keynote (2026-09-29) — the in-window event (OpenAI's own recap + third-party keynote coverage: OpenAI models + Codex harness + Bedrock AgentCore, IAM-role identities, human approval gates, CloudTrail logging, data stays in AWS; Salesforce named as early customer — third-party color). **Caveat:** the original announcement predates the window; the Sept-29 in-window event is the DevDay re-announcement. Filed on the vendor-confirmed service, not the recap alone. spark-vm relevance: AWS-run agent compute with IAM identities and human approval gates — the human-approval-gates detail is confirmd-adjacent design color; CloudTrail logging mirrors the loop's own journaled-audit posture. Carry (not in the fold): a third-party claim of a limited-to-public preview state change needs a first-party AWS developer-guide read before the corpus carries it. | Limited preview at announcement (no public rate card) |
+| **Vercel Sandbox — Secure Compute support** (announced 2026-09-30; filed C74) | Sandbox capability addition (Vercel-operated) | **VENDOR-VERIFIED** (first-party dated Vercel changelog sitemap + index): the 2026-09-30 entry "Vercel Sandbox now supports Secure Compute". Capability addition on the tracked Vercel Sandbox surface, not a new SKU; Secure Compute is Vercel's private-network-connectivity surface, so sandbox workloads now have a private/egress-postured networking option. Details beyond the changelog line were not verified this pass. spark-vm relevance: private-networking posture for sandboxes is directly comparable to the egress-fencing thesis; design color for the live-provider network posture under H4. | Sandbox pricing unchanged (Active-CPU $0.128/vCPU-hr) |
 
 ## TermSquad watch — first pass (R3)
 
@@ -4979,3 +4982,84 @@ delegated by the evening cycle-3 doc's watch-out #5).
   No re-folds.
 - Full evidence in
   `docs/COMPETITOR_WATCH_2026-09-30_MORNING_C57.md`.
+
+## Watch update — 2026-10-01 (morning, cycle 58): Modal egress effectiveness graded; C72–C74 filed
+
+- **Modal egress billing — EFFECTIVE 2026-10-01 (graded this pass, the
+  named exception).** First-party read on the effective date:
+  IN-EFFECT, UNEVENTFUL. The page is verbatim unchanged from the
+  pre-effective posture — "Starting October 1, 2026, Modal charges
+  for network egress."; 1/10/100 TiB allowances; $0.04/GiB overage;
+  first bill with egress still postured for November 1, 2026. No
+  went-live banner, no usage/billing-posture change; no third-party
+  go-live news. The pre-effective standing line is retired; the Modal
+  field-table row carries a dated in-effect note (no new C-number).
+  spark-vm's provider comparison now has a live Modal egress
+  datapoint ($0.04/GiB against DO harness-runtime's $0.01/GiB).
+- **C72 — MongoDB Atlas Agent Engine.** Launched Sept 29, 2026 at
+  Investor Day (company-issued PR Newswire): "a unified execution,
+  memory, and governance layer for production AI agents"; public
+  preview "available today"; agentengine.mongodb.com.
+  Consumption-based pricing drawing on existing Atlas commitments;
+  Voyage AI retrieval; memory/governance adoptable independently;
+  model- and framework-agnostic. Field-table row added above. (MongoDB
+  9.0 launched the same day — adjacent infra color, not filed.)
+- **C73 — Amazon Bedrock Managed Agents (OpenAI-powered).**
+  VENDOR-VERIFIED on Amazon's own announcement page: April 28, 2026
+  launch of "three new offerings, all in limited preview" including
+  Bedrock Managed Agents "powered by OpenAI" — "an optimized
+  experience for building production-ready AI agents with OpenAI
+  frontier models on AWS"; re-announced at the OpenAI DevDay keynote
+  Sept 29 (the in-window event). Caveat carried: the original
+  announcement predates the window. Human approval gates +
+  IAM identities + CloudTrail logging are confirmd-adjacent design
+  color. Field-table row added above. Carry: the third-party
+  limited-to-public preview state-change claim needs a first-party
+  AWS developer-guide read.
+- **C74 — Vercel Sandbox now supports Secure Compute.**
+  VENDOR-VERIFIED on the first-party dated Vercel changelog
+  (2026-09-30 entry). Capability addition on the tracked sandbox
+  surface (private-network-connectivity option for sandbox
+  workloads) — design color for the egress-fencing thesis. The
+  Vercel field-table row carries the dated fold.
+- **Watch-doc deltas (no new C-numbers):** Docker Sandboxes release
+  notes 2026-09-28 (secret-command fresh-temp-dir execution,
+  `--on-timeout restart`, `--kit-arg` passthrough, llmman v0.1.418,
+  Linux arm64 16-CPU cap, guest-kernel crash recovery, writable
+  `/etc/hosts`, experimental outbound UDP gated by sandbox network
+  policy — egress-fencing color); Microsandbox v0.7.5 (gen-two CBOR
+  op parity, `--no-stdin`, denied HTTP/HTTPS egress answered 403 —
+  egress-policy color, fork naming); DigitalOcean limits re-carry
+  refresh ("Last verified 1 Oct 2026": Agent Droplets unlimited
+  agents, 744 h/month session cap, `mars-2vcpu-4gb` default sandbox,
+  50 GiB file max, "Sandbox egress is unrestricted unless the
+  environment spec sets an allowlist" — egress-posture color,
+  excluded from header totals).
+- **Vercel "eve" novelty watch — RETIRED as corpus-known.** Launched
+  June 17, 2026 at Vercel Ship London (Apache-2.0, "Next.js for
+  agents"); the corpus row has carried it since the 2026-09-18 pm
+  watch. First-party dated sitemap mention ("Grok 4.7 now available
+  on AI Gateway, fx, and eve", 2026-09-21) is adoption color only.
+- **Standing items:** C11 FILE ON CLOSE still armed (Modal $750M and
+  Baseten ~$26B both unclosed); C12 OPEN (58th consecutive
+  first-party read — AgentComputer still publishes no egress pricing
+  line); Vercel Drives GA standing tracked item (public beta since
+  2026-09-23; no GA language); NanoCo re-grade bar unmet; Hugo
+  CVE-2026-100690 third-party-only (file on first-party GHSA only);
+  alleged Vercel dark-web credential sale stays watch-only
+  (unconfirmed; fact-checker says breach-confirmed FALSE, and the
+  listing may be recycled information from the earlier incident —
+  the do-not-conflate-with-April-2026 rule holds). Flagged but not
+  filed: the Cloudflare Containers/Sandboxes cross-tenant disk-block
+  disclosure (reported via HackerOne Sept 4, remediated by Sept 19,
+  no CVE, no exploitation evidence — lane-relevant isolation color);
+  a single-source claim of a Modal July customer-data compromise
+  (needs vendor confirmation).
+- **Aging:** no age-outs this pass. Contact resets: agent-O wave,
+  Hugo 100690, Mistral Vibe family, Plugin4Shell, C11 (quiet stays
+  0/3). Aged-out stay out: C29, C45, C56, C66, C67, C62,
+  Heapjack/Overpatch, GitLab CVE-2026-85706, Dextr AI. C26 closed.
+  No re-folds.
+- Full evidence in
+  `docs/COMPETITOR_WATCH_2026-10-01_MORNING_C58.md`.
+
