@@ -128,7 +128,7 @@ input_probe_check() { # input_probe_check [state_dir] [bridge_url]
         last_check) case "$v" in ''|*[!0-9]*) ;; *) last_check=$v ;; esac ;;
         consecutive_wedged) case "$v" in ''|*[!0-9]*) ;; *) consecutive=$v ;; esac ;;
         last_restart) case "$v" in ''|*[!0-9]*) ;; *) last_restart=$v ;; esac ;;
-        last_state) case "$v" in ok|wedged|unknown) last_state=$v ;; esac ;;
+        last_state) case "$v" in ok|wedged|unknown|unparseable) last_state=$v ;; esac ;;
       esac
     done < "$state_file"
   fi
