@@ -234,3 +234,6 @@ def test_lock_fail_closed_when_store_unwritable(tmp_path):
     assert blocker.read_text(encoding="utf-8") == "not a dir"
     fired, err = events.evaluate_alerts(store, "2026-10-01T16:30:00+00:00")
     assert fired is None and err is not None
+    found, err = events.ack_alert(store, "anything")
+    assert found is None and err is not None
+    assert "not a directory" in err, err

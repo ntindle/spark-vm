@@ -741,8 +741,11 @@ def ack_alert(store_dir, alert_id):
     The load -> rewrite sequence runs under the store-scoped journal
     lock: two concurrent acks would otherwise both load the same rows
     and the second os.replace would clobber the first's ack. A missing
-    store dir short-circuits to (False, None) without creating it.
+    store dir short-circuits to (False, None) without creating it; a
+    store path that exists but is not a directory fails loudly.
     """
+    if os.path.lexists(store_dir) and not os.path.isdir(store_dir):
+        return None, "store path is not a directory: %s" % store_dir
     if not os.path.isdir(store_dir):
         return False, None
     try:
