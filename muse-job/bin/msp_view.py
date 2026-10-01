@@ -344,7 +344,14 @@ def subscribe_view(host, session_id, after=None):
             f"(keys: {sorted(result)[:8]})"
         )
     head = result.get("head")
-    _check_cursor(head, "result head")
+    if not isinstance(head, str) or not head:
+        # A missing or malformed head is server-shape drift, not a
+        # client-validation failure: fail loud as MSPViewError (the
+        # docstring's drift taxonomy), never guess the resume point.
+        raise MSPViewError(
+            "view/subscribe result has no usable 'head' cursor "
+            f"(keys: {sorted(result)[:8]})"
+        )
     return head, events
 
 

@@ -131,6 +131,10 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "id": rid,
                   "result": {"head": 42, "events": []}})
             continue
+        if after == "drift:nohead":
+            send({"jsonrpc": "2.0", "id": rid,
+                  "result": {"events": []}})
+            continue
         sid = params.get("sessionId")
         log = log_for(sid)
         start = 0
@@ -236,8 +240,10 @@ def test_subscribe_drift_fails_loud(view_serve):
             mspv.subscribe_view(host, "s1", after="drift:notdict")
         with pytest.raises(mspv.MSPViewError):
             mspv.subscribe_view(host, "s1", after="drift:noevents")
-        with pytest.raises(ValueError):
+        with pytest.raises(mspv.MSPViewError):
             mspv.subscribe_view(host, "s1", after="drift:badhead")
+        with pytest.raises(mspv.MSPViewError):
+            mspv.subscribe_view(host, "s1", after="drift:nohead")
     finally:
         host.close()
 
@@ -515,6 +521,33 @@ def test_tracker_validation():
     tr.push("not-a-dict")
     tr.push({"method": 42, "params": {}})
     assert tr.state == "idle"
+
+
+def test_open_view_replays_into_tracker(view_serve):
+    # The resume path: events that landed BEFORE open_view must drive
+    # the tracker through the replay, not just live delivery.
+    host = open_host(view_serve)
+    try:
+        emit(host, "s1", "item/started",
+             {"sessionId": "s1", "itemId": "i1", "turnId": "t1"})
+        emit(host, "s1", "userInput/request",
+             {"sessionId": "s1", "question": "Ship it?"})
+        tracker, head, unsub = live_tracker(host, "s1")
+        try:
+            # Replay is synchronous: no wait_for needed.
+            assert head == "c2"
+            assert tracker.events_seen == 2
+            assert tracker.state == "blocked"
+            assert tracker.blocked_question == "Ship it?"
+            # Live events continue to flow after the replay.
+            emit(host, "s1", "item/started",
+                 {"sessionId": "s1", "itemId": "i2", "turnId": "t1"})
+            assert wait_for(lambda: tracker.state == "working")
+            assert tracker.events_seen == 3
+        finally:
+            unsub()
+    finally:
+        host.close()
 
 
 def test_telemetry_ring_bounded(view_serve):
