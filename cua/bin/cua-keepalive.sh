@@ -71,7 +71,12 @@ if [ -z "$status_out" ] || printf '%s\n' "$status_out" | grep -q "\[down\]"; the
 fi
 
 # Bridge down => restart it (localhost-only)
-if ! curl -s --max-time 5 http://127.0.0.1:18731/api/status >/dev/null 2>&1; then
+# Liveness (#784) is decoupled from driver health: /api/liveness answers
+# without shelling out to cua-driver, so a slow driver — whose /api/status
+# call carries a 10s timeout — can no longer false-trip the 5s curl budget
+# into a spurious bridge restart. /api/status keeps the full driver detail
+# for panels and operators; the keepalive only needs "is the bridge alive".
+if ! curl -s --max-time 5 http://127.0.0.1:18731/api/liveness >/dev/null 2>&1; then
   # 9>&-: see above — the bridge must not inherit the run lock.
   # Bridge log lives in the user's own ~/.cache (never world-writable
   # /tmp: a planted /tmp/cua-bridge.log symlink would get truncated by
