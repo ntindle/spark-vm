@@ -42,11 +42,17 @@ Key design rules, from the doc (call-site-auditable):
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+
+try:
+    import fcntl
+except ImportError:  # non-Linux platforms; the fleet estate is Linux
+    fcntl = None
 
 EVENT_SCHEMA = "fleet-event/1"
 ALERT_SCHEMA = "fleet-alert/1"
@@ -381,6 +387,80 @@ def collect_box_events(box_dir, box_id, received_at):
     return events, local_noops, notes
 
 
+# --- Store-scoped journal lock --------------------------------------------
+# append_events / evaluate_alerts / ack_alert each run a load -> dedup ->
+# write sequence on the event/alert journals. Two overlapping collects
+# (or a collect racing an operator `fleet events ack`) would otherwise
+# duplicate event rows, duplicate alert rows, or lose an ack to a
+# clobbering os.replace (issue #813). inventory.py's journal path got the
+# same class of hardening in #716 (per-process snapshot tmps + stale
+# sweep); here the fix is a store-scoped exclusive flock, stdlib-only,
+# on the same Linux estate.
+#
+# Scope: only the journal read-modify-write paths take the lock. Pure
+# readers (load_events, load_alerts, the CLI list/watch commands) stay
+# unlocked — a reader racing a writer sees whole lines or not (line-
+# atomic O_APPEND appends), never a torn JSON object, so unlocked reads
+# stay honest. The lock is host-local: it serializes processes on this
+# machine only. A multi-host shared store (G26's fleet event stream)
+# needs its own design; this claims no cross-host exclusion.
+#
+# Blocking, not try-lock: an overlapping collect waits its turn rather
+# than silently skipping work — the dedup/no-op claims depend on every
+# collect seeing every prior collect's rows. flock releases on process
+# death, so there is no stale-lock state to sweep (unlike #716's tmp
+# files); a crashed holder can only delay, never wedge, the next run.
+_JOURNAL_LOCK_NAME = "journal.lock"
+
+
+class _JournalLockError(Exception):
+    """The store-scoped journal lock could not be acquired."""
+
+
+def _ensure_store_dir(store_dir):
+    try:
+        os.makedirs(store_dir, exist_ok=True)
+    except OSError as exc:
+        return "cannot create store dir %s: %s" % (store_dir, exc)
+    return None
+
+
+@contextlib.contextmanager
+def _journal_lock(store_dir):
+    """Hold an exclusive flock on <store>/journal.lock.
+
+    Fail-closed: if fcntl is unavailable (non-Linux) or the lock file
+    cannot be opened/locked, raise _JournalLockError instead of
+    proceeding unsynchronized. Callers translate that into their error
+    return shape so a collect fails loudly instead of journaling
+    duplicates or losing acks.
+    """
+    if fcntl is None:
+        raise _JournalLockError(
+            "journal lock unavailable: this platform lacks fcntl")
+    err = _ensure_store_dir(store_dir)
+    if err:
+        raise _JournalLockError(err)
+    lock_path = os.path.join(store_dir, _JOURNAL_LOCK_NAME)
+    try:
+        fh = open(lock_path, "a", encoding="utf-8")
+    except OSError as exc:
+        raise _JournalLockError(
+            "cannot open journal lock %s: %s" % (lock_path, exc))
+    with fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            raise _JournalLockError("cannot lock journal: %s" % exc)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+
+
 # --- Event journal --------------------------------------------------------
 def _load_journal(store_dir, name, key_fields):
     """Load a JSONL journal; returns (lines, error). Malformed lines are
@@ -410,29 +490,37 @@ def append_events(store_dir, events):
     """Append events to the store's event journal with (box_id,
     event_id) dedup (§4 S1): a re-pulled tail re-canonicalizes to
     identical ids, so double-collection is a no-op. Returns
-    (appended, duplicates, error)."""
+    (appended, duplicates, error).
+
+    The load -> dedup -> append sequence runs under the store-scoped
+    journal lock: two overlapping collects both seeing a missing id and
+    both appending it would break the no-op claim with duplicate rows.
+    """
     try:
-        os.makedirs(store_dir, exist_ok=True)
-    except OSError as exc:
-        return None, None, "cannot create store dir %s: %s" % (store_dir,
-                                                                exc)
-    existing, err = _load_journal(store_dir, EVENTS_JOURNAL_NAME, None)
-    if err:
-        return None, None, err
-    seen = {(e.get("box_id"), e.get("event_id")) for e in existing
-            if isinstance(e.get("box_id"), str)
-            and isinstance(e.get("event_id"), str)}
-    fresh = [e for e in events
-             if (e.get("box_id"), e.get("event_id")) not in seen]
-    journal_path = os.path.join(store_dir, EVENTS_JOURNAL_NAME)
-    try:
-        with open(journal_path, "a", encoding="utf-8", buffering=1) as fh:
-            for event in fresh:
-                fh.write(json.dumps(event, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-    except OSError as exc:
-        return None, None, "cannot append to event journal: %s" % exc
+        with _journal_lock(store_dir):
+            existing, err = _load_journal(store_dir, EVENTS_JOURNAL_NAME,
+                                         None)
+            if err:
+                return None, None, err
+            seen = {(e.get("box_id"), e.get("event_id"))
+                    for e in existing
+                    if isinstance(e.get("box_id"), str)
+                    and isinstance(e.get("event_id"), str)}
+            fresh = [e for e in events
+                     if (e.get("box_id"), e.get("event_id")) not in seen]
+            journal_path = os.path.join(store_dir, EVENTS_JOURNAL_NAME)
+            try:
+                with open(journal_path, "a", encoding="utf-8",
+                          buffering=1) as fh:
+                    for event in fresh:
+                        fh.write(json.dumps(event, sort_keys=True) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            except OSError as exc:
+                return None, None, "cannot append to event journal: %s" \
+                    % exc
+    except _JournalLockError as exc:
+        return None, None, str(exc)
     return len(fresh), len(events) - len(fresh), None
 
 
@@ -594,7 +682,15 @@ def evaluate_alerts(store_dir, fired_at=None):
     """Run the four S1 alert rules over the store's event journal and
     append newly fired alerts (deduped on alert_id — re-firing an
     already-journaled alert, acked or not, is a no-op). Returns
-    (fired_alerts, error)."""
+    (fired_alerts, error).
+
+    Rule evaluation reads the event journal unlocked (a snapshot is
+    fine — rules reason about what was true when they ran); the
+    load-alerts -> dedup -> append sequence runs under the store-scoped
+    journal lock so two overlapping evaluators cannot append the same
+    alert twice. The store dir is created when any rule fires (the lock
+    needs a home), even if every candidate then dedups.
+    """
     fired_at = fired_at or _now_iso()
     events, err = load_events(store_dir)
     if err:
@@ -604,28 +700,31 @@ def evaluate_alerts(store_dir, fired_at=None):
     candidates.extend(_rule_correlated_failure(events, fired_at))
     candidates.extend(_rule_silent_wave(events, fired_at))
     candidates.extend(_rule_stuck_precheck(events, fired_at))
-
-    existing, err = _load_journal(store_dir, ALERTS_JOURNAL_NAME, None)
-    if err:
-        return None, err
-    seen = {a.get("alert_id") for a in existing
-            if isinstance(a.get("alert_id"), str)}
-    fresh = [a for a in candidates if a["alert_id"] not in seen]
-    if fresh:
-        try:
-            os.makedirs(store_dir, exist_ok=True)
-        except OSError as exc:
-            return None, "cannot create store dir %s: %s" % (store_dir, exc)
-        alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
-        try:
-            with open(alerts_path, "a", encoding="utf-8",
-                      buffering=1) as fh:
-                for alert in fresh:
-                    fh.write(json.dumps(alert, sort_keys=True) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-        except OSError as exc:
-            return None, "cannot append to alert journal: %s" % exc
+    if not candidates:
+        return [], None
+    try:
+        with _journal_lock(store_dir):
+            existing, err = _load_journal(store_dir, ALERTS_JOURNAL_NAME,
+                                          None)
+            if err:
+                return None, err
+            seen = {a.get("alert_id") for a in existing
+                    if isinstance(a.get("alert_id"), str)}
+            fresh = [a for a in candidates if a["alert_id"] not in seen]
+            if fresh:
+                alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
+                try:
+                    with open(alerts_path, "a", encoding="utf-8",
+                              buffering=1) as fh:
+                        for alert in fresh:
+                            fh.write(json.dumps(alert, sort_keys=True)
+                                     + "\n")
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                except OSError as exc:
+                    return None, "cannot append to alert journal: %s" % exc
+    except _JournalLockError as exc:
+        return None, str(exc)
     return fresh, None
 
 
@@ -637,32 +736,44 @@ def load_alerts(store_dir):
 def ack_alert(store_dir, alert_id):
     """Mark an alert acknowledged. Returns (found, error): the alert
     journal is rewritten atomically (tmp + os.replace) so a crash never
-    tears it."""
-    alerts, err = load_alerts(store_dir)
-    if err:
-        return None, err
-    found = False
-    for alert in alerts:
-        if alert.get("alert_id") == alert_id:
-            alert["acked"] = True
-            found = True
-    if not found:
+    tears it.
+
+    The load -> rewrite sequence runs under the store-scoped journal
+    lock: two concurrent acks would otherwise both load the same rows
+    and the second os.replace would clobber the first's ack. A missing
+    store dir short-circuits to (False, None) without creating it.
+    """
+    if not os.path.isdir(store_dir):
         return False, None
-    alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
-    tmp_path = alerts_path + ".tmp.%d" % os.getpid()
     try:
-        with open(tmp_path, "w", encoding="utf-8") as fh:
+        with _journal_lock(store_dir):
+            alerts, err = load_alerts(store_dir)
+            if err:
+                return None, err
+            found = False
             for alert in alerts:
-                fh.write(json.dumps(alert, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_path, alerts_path)
-    except OSError as exc:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        return None, "cannot rewrite alert journal: %s" % exc
+                if alert.get("alert_id") == alert_id:
+                    alert["acked"] = True
+                    found = True
+            if not found:
+                return False, None
+            alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
+            tmp_path = alerts_path + ".tmp.%d" % os.getpid()
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as fh:
+                    for alert in alerts:
+                        fh.write(json.dumps(alert, sort_keys=True) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, alerts_path)
+            except OSError as exc:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                return None, "cannot rewrite alert journal: %s" % exc
+    except _JournalLockError as exc:
+        return None, str(exc)
     return True, None
 
 
