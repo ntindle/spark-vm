@@ -8,6 +8,9 @@ shell: only the allowlisted desktop actions.
 
 Endpoints:
   GET  /api/status      -> stack + driver state
+  GET  /api/liveness    -> bridge-alive probe (no driver call; the restart
+                           signal for keepalives — a slow driver can never
+                           false-trip it)
   GET  /api/windows     -> list_windows
   GET  /api/screenshot  -> PNG bytes of the full desktop
   POST /api/click       -> {"x":screen_x,"y":screen_y,"button":"left"|"right"|"middle"}
