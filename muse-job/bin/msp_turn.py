@@ -130,7 +130,9 @@ def _check_text(text, what):
     into a live turn is always a caller bug, and the wire has no honest
     reading of it.
     """
-    if not isinstance(text, str) or isinstance(text, bool):
+    # No special case for bool: bool is not a subclass of str, so this
+    # isinstance check already rejects True/False.
+    if not isinstance(text, str):
         raise ValueError(f"{what} must be a string, got {text!r}")
     if not text.strip():
         raise ValueError(f"{what} must not be blank (whitespace-only)")
@@ -266,13 +268,23 @@ def watch_turn_events(host, session_id, turn_id, timeout=30.0):
     start via events". The callback runs on the transport's reader
     thread -- it appends and returns; callers must not call
     call()/notify() from it (see MSPHost.subscribe).
+
+    Malformed notifications (params missing or not a dict) are ignored, not
+    raised: one bad event must not kill the watcher on the reader thread.
     """
     seen = []
     done = {"hit": False}
     terminal = {"turn/completed", "turn/interrupted", "turn/cancelled"}
 
     def on_note(note):
-        params = note.get("params") or {}
+        params = note.get("params")
+        if not isinstance(params, dict):
+            # Missing or non-dict params carry nothing to filter on. Ignore
+            # the event rather than raising AttributeError here: the host
+            # records subscriber exceptions and drops the event, which
+            # would silently lose a terminal event and turn the watch into
+            # a full-timeout wait.
+            params = {}
         if session_id is not None and params.get("sessionId") != session_id:
             return
         seen.append(note)
@@ -308,7 +320,11 @@ def main(argv):
     ap.add_argument("--client-name", default="msp_turn")
     ap.add_argument("--watch", action="store_true",
                     help="after the call, observe the turn's events until "
-                         "it terminates (the #223 acceptance)")
+                         "it terminates (the #223 acceptance). Caveat: for "
+                         "interrupt/cancel the terminal event fires during "
+                         "the call itself -- before the watcher subscribes "
+                         "-- so --watch usually observes nothing there; it "
+                         "is meant for start/steer of still-running turns.")
     ap.add_argument("--watch-timeout", type=float, default=30.0)
     sub = ap.add_subparsers(dest="action", required=True)
 
