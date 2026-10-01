@@ -776,17 +776,202 @@ def cmd_events_ack(store_dir, alert_id):
     return None
 
 
+# --- Event<->inventory cross-check (G17 S2, #779) ---------------------------
+#
+# The fleet-side half of the design's claim-vs-ground-truth rule
+# (docs/UPDATE_EVENT_REPORTING.md §2): a `deploy/succeeded/repo` event is a
+# *claim* about what is running ("to=X"); the inventory journal is ground
+# truth (point-in-time reads). For each claim the cross-check finds
+# inventory records for the same box observed at-or-after the claim's
+# `received_at` — collector clocks on both sides, because box clocks are
+# never trusted for ordering:
+#   - any later record showing the claimed commit  -> confirmed;
+#   - later records exist but none shows the claim -> VIOLATION (flagged,
+#     not convicted: the inventory wins the tie, the event keeps its
+#     journal row, nothing is marked suspect automatically);
+#   - no later record, or later records report no commit -> inconclusive
+#     (missing evidence is never a violation).
+#
+# Read-only: this consumes the store's two journals and prints a report.
+# Only `deploy/succeeded/repo` claims are checkable at this slice — the
+# doc defines only `succeeded` as a claim (rolled-back/restored claims are
+# a follow-up), and the toolset/image components have no S1 producers.
+
+# inventory.py's journal file, read here for the ground-truth side.
+_INVENTORY_JOURNAL_NAME = "journal.jsonl"
+
+_VERDICT_CONFIRMED = "confirmed"
+_VERDICT_VIOLATION = "violation"
+_VERDICT_INCONCLUSIVE = "inconclusive"
+
+
+def _is_checkable_claim(event):
+    return (isinstance(event, dict)
+            and event.get("kind") == "deploy"
+            and event.get("outcome") == "succeeded"
+            and event.get("component") == "repo")
+
+
+def _inventory_commits_by_box(store_dir):
+    """Load the inventory journal's per-box (observed_at, repo_commit)
+    series. Returns (dict, error). Malformed lines are skipped by the
+    journal loader; records with unparseable observed_at are kept with
+    observed_at=None (they can never confirm or contradict — see
+    crosscheck_events). Never raises."""
+    rows, err = _load_journal(store_dir, _INVENTORY_JOURNAL_NAME, None)
+    if err:
+        return None, err
+    by_box = {}
+    for row in rows:
+        box_id = row.get("box_id")
+        if not isinstance(box_id, str) or not box_id:
+            continue
+        commit = None
+        versions = row.get("versions")
+        if isinstance(versions, dict):
+            candidate = versions.get("repo_commit")
+            if isinstance(candidate, str) and candidate:
+                commit = candidate
+        by_box.setdefault(box_id, []).append(
+            (_parse_ts(row.get("observed_at")), commit))
+    return by_box, None
+
+
+def crosscheck_events(events, commits_by_box):
+    """Evaluate every checkable claim against the inventory series.
+
+    Returns (rows, counts). Each row is a dict {box_id, event_id,
+    received_at, claim_to, verdict, detail}; verdict is one of
+    "confirmed", "violation", "inconclusive". Never raises for bad input;
+    non-claim events are ignored."""
+    rows = []
+    counts = {_VERDICT_CONFIRMED: 0, _VERDICT_VIOLATION: 0,
+              _VERDICT_INCONCLUSIVE: 0}
+    if not isinstance(events, list):
+        return rows, counts
+    for event in events:
+        if not _is_checkable_claim(event):
+            continue
+        box_id = event.get("box_id")
+        to = event.get("to")
+        event_id = event.get("event_id")
+        received_at = event.get("received_at")
+        if not isinstance(event_id, str):
+            event_id = None
+        row = {"box_id": box_id, "event_id": event_id,
+               "received_at": received_at,
+               "claim_to": to if isinstance(to, str) else None,
+               "verdict": None, "detail": ""}
+        if not isinstance(box_id, str) or not box_id:
+            row["verdict"] = _VERDICT_INCONCLUSIVE
+            row["detail"] = ("claim is unattributable (no box_id) — "
+                             "cannot be checked")
+        elif not isinstance(to, str) or not to:
+            row["verdict"] = _VERDICT_INCONCLUSIVE
+            row["detail"] = "claim carries no to version — nothing to check"
+        else:
+            received = _parse_ts(received_at)
+            if received is None:
+                row["verdict"] = _VERDICT_INCONCLUSIVE
+                row["detail"] = ("claim has no parseable received_at — "
+                                 "cannot be ordered against inventory")
+            else:
+                series = commits_by_box.get(box_id, [])
+                later = [(obs, commit) for (obs, commit) in series
+                         if obs is not None and obs >= received]
+                observed = [commit for (_, commit) in later
+                            if commit is not None]
+                if not later:
+                    row["verdict"] = _VERDICT_INCONCLUSIVE
+                    row["detail"] = ("no inventory observation at-or-after "
+                                     "the claim — missing evidence, not a "
+                                     "contradiction")
+                elif not observed:
+                    row["verdict"] = _VERDICT_INCONCLUSIVE
+                    row["detail"] = ("later observations report no commit "
+                                     "(not reported, never 'unknown') — "
+                                     "missing evidence, not a contradiction")
+                elif any(commit == to for commit in observed):
+                    row["verdict"] = _VERDICT_CONFIRMED
+                    row["detail"] = ("inventory shows the claimed commit "
+                                     "in a later observation")
+                else:
+                    latest = max(later, key=lambda pair: pair[0])
+                    shown = latest[1] if latest[1] else \
+                        "(no commit reported)"
+                    row["verdict"] = _VERDICT_VIOLATION
+                    row["detail"] = ("claimed succeeded-to=%s but no later "
+                                     "inventory shows it; latest observation "
+                                     "at %s shows %s — flagged, not "
+                                     "convicted" % (_short(to),
+                                                    latest[0].isoformat(),
+                                                    _short(shown)))
+        rows.append(row)
+        counts[row["verdict"]] += 1
+    rows.sort(key=lambda r: (str(r["box_id"]),
+                             str(r["received_at"] or "")))
+    return rows, counts
+
+
+def cmd_events_crosscheck(store_dir, box_id):
+    """Print the claim-vs-inventory verdict series for the store's event
+    journal. Exit 1 iff any claim is a violation (cron-consumable, like
+    `events watch`); 0 when clean or inconclusive-only. Returns
+    (error, exit_code)."""
+    events, err = load_events(store_dir)
+    if err:
+        return err, 2
+    commits_by_box, err = _inventory_commits_by_box(store_dir)
+    if err:
+        return err, 2
+    rows, _ = crosscheck_events(events, commits_by_box)
+    if box_id:
+        rows = [r for r in rows if r["box_id"] == box_id]
+    total = len(rows)
+    n_conf = sum(1 for r in rows if r["verdict"] == _VERDICT_CONFIRMED)
+    n_viol = sum(1 for r in rows if r["verdict"] == _VERDICT_VIOLATION)
+    n_incon = sum(1 for r in rows if r["verdict"] == _VERDICT_INCONCLUSIVE)
+    title = "event<->inventory cross-check"
+    if box_id:
+        title += " for box %s" % _clean_text(box_id)
+    lines = ["%s (%d claims checked):" % (title, total)]
+    if not rows:
+        lines.append("  no checkable claims "
+                     "(deploy/succeeded/repo events) in the journal")
+    fmt = "  %-24s %-12s %-12s %-19s %s"
+    lines.append(fmt % ("box", "verdict", "claim to", "received_at",
+                        "detail"))
+    for r in rows:
+        lines.append(fmt % (
+            _clean_text(str(r["box_id"]))[:24],
+            r["verdict"] or "?",
+            _short(r["claim_to"]) or "-",
+            _clean_text((_str_or_none(r["received_at"]) or "?")[:19]),
+            _clean_text(r["detail"])[:100]))
+    lines.append("summary: %d checked — %d confirmed, %d violation(s), "
+                 "%d inconclusive (missing evidence)" % (
+                     total, n_conf, n_viol, n_incon))
+    if n_viol:
+        lines.append("VIOLATIONS are flags, not convictions: the inventory "
+                     "(point-in-time read) wins the tie; the event keeps "
+                     "its journal row. Investigate on the box before "
+                     "treating a violation as a lie.")
+    print("\n".join(lines))
+    return None, (1 if n_viol else 0)
+
+
 def main(argv=None):
     """Standalone entry (mostly for the hermetic suite): `fleet events`
     is a subcommand of inventory.py; this parser mirrors it so tests
     can exercise the readers directly."""
     parser = argparse.ArgumentParser(
-        description="Fleet update-event journal readers (G17/#608 S1).")
+        description="Fleet update-event journal readers (G17/#608: S1 "
+                    "journal, S2 cross-check).")
     parser.add_argument("--store", required=True)
     parser.add_argument("--box", default=None)
     parser.add_argument("--wave", default=None)
     parser.add_argument("action", nargs="?", default="list",
-                        choices=["list", "watch", "ack"])
+                        choices=["list", "watch", "ack", "crosscheck"])
     parser.add_argument("--alert-id", default=None)
     args = parser.parse_args(argv)
     if args.action == "list":
@@ -810,6 +995,12 @@ def main(argv=None):
             print("error: %s" % err, file=sys.stderr)
             return 2
         return 0
+    if args.action == "crosscheck":
+        err, code = cmd_events_crosscheck(args.store, args.box)
+        if err:
+            print("error: %s" % err, file=sys.stderr)
+            return 2
+        return code
     return 2
 
 
