@@ -325,7 +325,16 @@ def repo_url_ok(url):
     # caller skips this check. Scheme whitelisting was considered and
     # rejected: local-path clones (`/home/.../repo`, `file://`) are
     # legitimate, and the dash+`--` pair closes the injection class.
-    return isinstance(url, str) and bool(url) and not url.startswith("-")
+    # Issue #793: `ext::`/`fd::` are remote-helper transports -- modern git
+    # refuses ext:: by default, but an old-git box could still honor them
+    # (spawning an external command as the operator). Reject the prefixes
+    # up-front; no legitimate URL starts with either.
+    return (
+        isinstance(url, str)
+        and bool(url)
+        and not url.startswith("-")
+        and not url.lower().startswith(("ext::", "fd::"))
+    )
 
 
 def job_dir(slug):
@@ -494,7 +503,7 @@ def cmd_spawn(args):
     # `git clone` as flags.
     if not repo_url_ok(args.repo):
         raise RuntimeError(
-            f"bad repo url: {args.repo!r} (leading dash rejected: "
+            f"bad repo url: {args.repo!r} (rejected: "
             "git option injection)")
 
     def go():
@@ -520,6 +529,26 @@ def _spawn(slug, args):
 
     os.makedirs(REPOS_DIR, exist_ok=True)
     rname = repo_name_from_url(args.repo)
+    # Issue #793: the last URL segment is attacker-influenced (copied from
+    # issues/chat). `..` would escape ~/repos (pristine = $HOME itself) and
+    # `.` would collapse to ~/repos -- both are derived-path escapes, so
+    # fail fast before any filesystem work. Deliberately NOT slug_ok():
+    # legitimate repo names may be uppercase or longer than 80 chars;
+    # `..`/`.` are the only names that escape the containment root, and
+    # every other segment stays inside it.
+    if rname in ("..", "."):
+        raise RuntimeError(f"bad repo name from url: {rname!r}")
+    base = args.base or "origin/HEAD"
+    # Issue #793: --base reaches `rev-parse` in option position (hardening,
+    # not a hole: rev-parse has no command-execution options). The `--`
+    # separator is NOT available here -- rev-parse does not honor it before
+    # the revision (post-`--` args are echoed verbatim, never resolved;
+    # verified: `git rev-parse -- HEAD` prints a literal `--`) -- so the
+    # gate is validation, checked before any clone/fetch work.
+    if base.startswith("-"):
+        raise RuntimeError(
+            f"bad base ref: {base!r} (leading dash rejected: "
+            "git option injection)")
     pristine = os.path.join(REPOS_DIR, rname)
     if not os.path.isdir(os.path.join(pristine, ".git")):
         print(f"cloning {args.repo} -> {pristine}", flush=True, file=sys.stderr)
@@ -529,8 +558,8 @@ def _spawn(slug, args):
         run("git", "clone", "--", args.repo, pristine, timeout=600)
     else:
         run("git", "-C", pristine, "fetch", "origin", timeout=600)
-    base = args.base or "origin/HEAD"
-    # resolve base to a sha for the record
+    # resolve base to a sha for the record (base was validated above --
+    # no re-derivation needed)
     sha = run("git", "-C", pristine, "rev-parse", base).stdout.decode().strip()
 
     work = os.path.join(jd, "work")
