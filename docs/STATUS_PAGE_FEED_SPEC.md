@@ -1,6 +1,8 @@
 # Status-page feed spec (G22 S1)
 
-Doc-first; honesty rules apply (`docs/POSITIONING.md`): everything below is
+Doc-first; the honesty rule is G17 S1's (quoted in §1, from
+`docs/UPDATE_EVENT_REPORTING.md` §4), extended to the page itself by the
+G21–G26 analysis's no-fiction contract: everything below is
 **current state and work to do**, not promises. Statuses are pinned to the
 repo as of this commit. This doc is the S1 slice of G22 (tracked on issue
 #796): the feed contract for the P7 status page — which journal records
@@ -18,8 +20,8 @@ S3 answers the incident-comms question.
 - **G17 S1** (`fleet/events.py` + `docs/UPDATE_EVENT_REPORTING.md` §4):
   the fleet event journal (canonical shape: `event_id`, `box_id`,
   `session_epoch`, `emitted_at`, `received_at`, `source`, `component`,
-  `kind`, `outcome`, `from`, `to`, `phase`, `rollout`, `trigger`,
-  `attested`, `note`) and the alert journal (`alerts.jsonl`), with four
+  `subcomponent`, `subcomponents`, `kind`, `outcome`, `from`, `to`, `phase`, `rollout`, `trigger`,
+  `attested`, `note`) and   the alert journal (`alerts.jsonl`), with four
   alert rules evaluated on every collect: (1) any `rollback-failed` →
   immediate alert; (2) correlated failure (≥2 boxes, same
   `(subcomponent, to)` or `(to)`-alone for audit lines without a
@@ -58,8 +60,9 @@ the single source of truth; the feed keeps no copy and no memory.
    to a journaled record does not exist — no synthesized availability,
    no marketing uptime, no "estimated" rows.
 3. **The feed shows its own freshness.** Each render carries
-   `data_current_as_of` = the newest `received_at` across the event
-   journal (collector clocks only). Absence of alerts is rendered as
+   `data_current_as_of` = the newest `received_at` across the event and
+   alert journals (collector clocks only; the alert journal can lag
+   independently, so the freshness stamp must cover both). Absence of alerts is rendered as
    "no journaled alerts in the window", never as "all systems
    operational".
 4. **Silence is missing-evidence, not health.** A store with no journal
@@ -94,8 +97,12 @@ Rollout rows come from two journaled sources only:
 - The `rollout` envelope on event records (`release_id`, `wave`): while
   the envelope is null on every event (today), the page shows "no
   active rollout" — honestly, not as a gap in the page.
-- `kind: freeze-hold` events (G15 S3 producer): the freeze flip/clear
-  records, rendered as "fleet frozen / freeze cleared at <received_at>".
+- `kind: freeze-hold` events (G15 S3 producer, tracked on #777): the
+  freeze flip/clear records, rendered as "fleet frozen / freeze cleared
+  at <received_at>". No freeze-hold rows until G15 S3 ships the
+  controller producer — read-time derivation means nothing appears
+  before it lands, and the prose must not imply the source exists
+  today.
 
 Until G15 S2 lands, there are no per-wave census rows. The page does not
 invent waves.
@@ -159,9 +166,9 @@ window arithmetic is implementation detail):
 | Rule | Resolves when the journal shows… |
 |---|---|
 | 1 — rollback-failed | a later same-`(box_id, subcomponent)` event with outcome `succeeded` or `rolled-back` (the box is off the known-bad build) |
-| 2 — correlated failure | every correlated box has a subsequent deploy whose `to` supersedes the flagged build (recovery), or a newer `release_id` covers those boxes (the bad release is superseded) |
+| 2 — correlated failure | every correlated box has a subsequent same-`(box_id, subcomponent)` deploy whose `to` differs from the flagged build's `to` (recovery), or a newer `release_id` covers those boxes (the bad release is superseded — not evaluable until G15 S2 assigns waves; the S2 design pins the "covers" semantics) |
 | 3 — silent wave | the box emits non-noop events inside the window again (not live until G15 S2) |
-| 4 — stuck precheck | a later same-`box_id` event with a non-`precheck-fail` outcome (the box proceeded past pre-deployment) |
+| 4 — stuck precheck | a later same-`box_id` event with a non-`precheck-fail` outcome (the box proceeded past pre-deployment) — per-`box_id`, matching rule 4's own box-keyed grouping (the alert's `dedup_key` is the window anchor, `subcomponent` unset) |
 
 Resolution never requires the ack; resolution never follows from it.
 When journals disagree with each other (event journal claims success,
@@ -170,12 +177,23 @@ the verdict — the feed renders journaled rows and, once that slice
 lands, surfaces cross-check violations as rows. It never synthesizes a
 reconciliation.
 
+**Derivation discipline (the scan bound).** Resolution scans are
+forward-only: only records with `received_at` ≥ the alert's
+`fired_at` can resolve it — no earlier record can clear a later alert,
+and the collector journals are append-ordered in `received_at` (the
+collector stamps it at ingest). A feed read therefore scans forward
+from the alert's journal position, never the whole journal from its
+head. Tractability rests on that append order. If a journal
+rotation/pruning design lands later (G19's retention design is
+per-record with chain-safe deletion), it must preserve per-alert
+resolution evidence — or this contract re-scopes with it. Window
+arithmetic stays implementation detail; the scan bound is contract.
+
 ## 6. What stays operator-only (the S1 page is an operator page)
 
-S1 of G22 ships the feed as a **P7 operator surface** — the read-only
-ops archetype's formal home for "alert feed exists". Tenant visibility
-waits on G24's tenant read path; until then **there are no
-tenant-visible rows**, and the page says so.
+S1 pins the feed contract; the operator page ships as the first build
+of S2 (§9). Until S2's tenant stage lands there are no tenant-visible
+rows, and the page says so.
 
 What is operator-only, and why:
 
@@ -242,10 +260,18 @@ tenant read path.
 ## 9. Build slices (for the feature/distribution track, not this doc)
 
 - **S1 — this spec.** Issue #796 stays open for S2/S3.
-- **S2 — the page.** Wave/incident feed + tenant-scoped history, per
-  §6: consumes G24's tenant read path; prefers the G25 signed feed
-  for tenant-visible rows; ack stays an operator action; no tenant
-  ack through the feed.
+- **S2 — the page.** Two stages; #796 stays open across both.
+  - **S2a — the operator page.** Wave/incident feed from the collector
+    journals, operator-only rows, no G24 required. The self-hosted
+    N-box operator sees their own box ids — no surrogates needed. This
+    is the P7 read-only ops surface, the formal home the G17 S1
+    honesty rule names.
+  - **S2b — tenant-scoped history.** Layered on G24's tenant read path;
+    prefers the G25 signed feed for tenant-visible rows; tenant rows
+    get curated summaries and box-id surrogates per §6. Until S2b
+    lands there are no tenant-visible rows, and the page says so.
+  - Ack stays an operator action throughout; no tenant ack through the
+    feed.
 - **S3 — the incident-comms question (#368).** What notifies users when
   the status page is the paid surface: the page is the feed, the pager
   is G23 — but #368's "who tells the user, and in what words" is
