@@ -40,7 +40,7 @@
 #
 # Env overrides (for tests): UPDATER_STATE_DIR, UPDATER_REPO, SWAPD_HOME,
 # BIN_DIR, SYSTEMD_DIR, SYSTEMD_USER_DIR, CRED_UI_INSTALL_DIR,
-# UPDATER_COMPONENTS_CONF,
+# UPDATER_COMPONENTS_CONF, SPARKVM_LEGACY_OPERATOR_CHECKOUT,
 # SKIP_SYSTEMCTL=1 (skip systemctl calls), SKIP_SUDO=1 (run file ops without
 # sudo), PINNED_UPSTREAM.
 
@@ -71,6 +71,10 @@ LOCK_FILE="$UPDATER_STATE_DIR/auto-deploy.lock"
 SNAPSHOT_DIR="$UPDATER_STATE_DIR/snapshots"
 LAST_FAILURE="$UPDATER_STATE_DIR/last-failure"
 INSTALLED_BIN="$UPDATER_STATE_DIR/bin"
+# One-shot legacy migration state (BACKLOG follow-up (3) from the #85
+# security turn): set when the pre-#85 cred-ui checkout artifact has been
+# evaluated once, so the migration never re-runs.
+LEGACY_ARTIFACT_STATE="$UPDATER_STATE_DIR/legacy-cred-ui-artifact-cleaned"
 # Issue #302: recorded digests of components' host-side (non-repo) change
 # inputs (<component>_extra_paths in components.conf). A digest change
 # forces that component to redeploy on the next tick.
@@ -1021,8 +1025,66 @@ cmd_check() {
     check_updater_drift
 }
 
+# One-shot migration (BACKLOG follow-up (3) from the #85 security turn).
+#
+# The pre-#85 cred-ui install step managed a copy of bounded_http.py inside
+# the operator's working checkout on every deploy
+#   mkdir -p "$WORKING_CHECKOUT/scripts" &&
+#   cp scripts/bounded_http.py "$WORKING_CHECKOUT/scripts/bounded_http.py"
+# (run from the updater mirror at the new commit). The runtime now installs
+# from the mirror into $CRED_UI_INSTALL_DIR and nothing maintains that
+# copy — a deploy-written file can be left git-dirty in the operator's
+# checkout, where it confuses future "dirty checkout" checks and masks the
+# real source tree.
+#
+# On the first deploy with this code, restore the artifact iff it is
+# provably deploy-written: the old step copied a committed version, so a
+# deploy-written file's bytes are a blob in the repo's own object DB.
+# Anything else is the operator's own work and is never touched (logged
+# loudly instead). Runs once per box (state-gated); never blocks the
+# deploy — any failure skips without writing state, so the next tick
+# retries.
+migrate_legacy_cred_ui_checkout_artifact() {
+    [ -f "$LEGACY_ARTIFACT_STATE" ] && return 0
+    local checkout="${SPARKVM_LEGACY_OPERATOR_CHECKOUT:-/home/ntindle/spark-vm}"
+    local rel="scripts/bounded_http.py"
+    local target="$checkout/$rel"
+    # Terminal no-ops: no checkout, not a git repo, or no artifact file.
+    if [ ! -d "$checkout/.git" ] || [ ! -f "$target" ]; then
+        : > "$LEGACY_ARTIFACT_STATE" || return 1
+        return 0
+    fi
+    local porcelain blob st
+    porcelain="$(git -C "$checkout" status --porcelain -- "$rel" 2>/dev/null)" || return 1
+    if [ -z "$porcelain" ]; then
+        : > "$LEGACY_ARTIFACT_STATE" || return 1
+        return 0
+    fi
+    blob="$(git -C "$checkout" hash-object "$target" 2>/dev/null)" || return 1
+    if git -C "$checkout" cat-file -e "$blob" 2>/dev/null; then
+        st="${porcelain:0:2}"
+        if [ "$st" = " M" ] || [ "$st" = "M " ] || [ "$st" = "MM" ]; then
+            git -C "$checkout" checkout HEAD -- "$rel" || return 1
+            log "legacy cleanup: restored deploy-written $rel to HEAD in $checkout"
+        elif [ "$st" = "??" ]; then
+            rm -f "$target" || return 1
+            log "legacy cleanup: removed untracked deploy-written $rel in $checkout"
+        else
+            log "legacy cleanup: unexpected status '$st' for $rel in $checkout — leaving alone"
+        fi
+    else
+        log "legacy cleanup: $rel in $checkout has non-historical content — operator-owned, leaving alone"
+    fi
+    : > "$LEGACY_ARTIFACT_STATE" || return 1
+    return 0
+}
+
 cmd_deploy() {
     mkdir -p "$UPDATER_STATE_DIR" "$SNAPSHOT_DIR"
+    # One-shot legacy migration (see above): never blocks the deploy — a
+    # failure just retries on the next tick.
+    migrate_legacy_cred_ui_checkout_artifact || \
+        log "legacy cred-ui checkout artifact migration failed; will retry next tick"
     local range rc old new range_synthesized=0 FORCED_LIST=""
     # Same set -e trap as in cmd_check: the `if` captures the return code.
     if range="$(pending_range)"; then rc=0; else rc=$?; fi

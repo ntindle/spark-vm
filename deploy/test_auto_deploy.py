@@ -730,9 +730,32 @@ def test_checkout_sync_machinery_stays_dead():
     zero production users); a future edit must not quietly re-arm it. The
     updater script, the component manifest, and the deploy README must
     carry no checkout-sync key, reader, or writer.
+
+    Sanctioned exception: the one-shot legacy migration
+    (migrate_legacy_cred_ui_checkout_artifact, BACKLOG follow-up (3)) names
+    the historical path in its own docstring only to clean up the old
+    machinery's last artifact — it adds no key, reader, or writer. Its
+    block is stripped before probing so the pin stays sharp everywhere
+    else; the strip anchors fail loud if the block ever moves.
     """
     script = open(os.path.join(REPO, "deploy", "auto-deploy.sh")).read()
     conf = open(os.path.join(REPO, "deploy", "components.conf")).read()
+    start = script.index("# One-shot migration (BACKLOG follow-up (3)")
+    end = script.index("\ncmd_deploy() {", start)
+    removed = script[start:end]
+    assert "migrate_legacy_cred_ui_checkout_artifact" in removed, \
+        "migration block moved — the strip anchors are stale"
+    assert "WORKING_CHECKOUT" in removed, \
+        "expected the historical path reference inside the migration block"
+    # The carve-out covers ONLY the sanctioned WORKING_CHECKOUT mention: the
+    # five non-sanctioned probes must stay absent from the stripped block
+    # too, or a future edit could smuggle machinery inside the carve-out
+    # and this pin would pass silently (Security review B1).
+    for probe in ("checkout_sync", "CHECKOUT ", "CHECKOUT-",
+                  "check_checkout_sync_ready", "checkout-dirty"):
+        assert probe not in removed, \
+            "non-sanctioned checkout-sync probe inside the migration carve-out: %r" % probe
+    script = script[:start] + script[end:]
     for probe in ("checkout_sync", "CHECKOUT ", "CHECKOUT-", "WORKING_CHECKOUT",
                   "check_checkout_sync_ready", "checkout-dirty"):
         assert probe not in script, "checkout-sync residue in auto-deploy.sh: %r" % probe
@@ -2558,3 +2581,134 @@ def test_cmd_deploy_all_deploy_audit_lines_carry_trigger_tag():
     assert not missing_trig, (
         "do_rollback call sites not passing \"$trig\":\n"
         + "\n".join(missing_trig))
+
+# --- legacy cred-ui checkout artifact migration (BACKLOG follow-up (3)) ---
+
+def _make_legacy_checkout(tmp_path, name="legacy-co"):
+    """Fake operator working checkout whose HEAD tracks v1 of
+    scripts/bounded_http.py while v2's blob also exists in the object DB
+    (what the pre-#85 deploy's `cp` left behind: a deploy-written file
+    whose bytes are a committed version)."""
+    co = tmp_path / name
+    (co / "scripts").mkdir(parents=True)
+    (co / "scripts" / "bounded_http.py").write_text("v1\n")
+    run = lambda *a: subprocess.run(
+        a, cwd=co, check=True, capture_output=True, text=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    run("git", "config", "commit.gpgsign", "false")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "v1")
+    (co / "scripts" / "bounded_http.py").write_text("v2\n")
+    run("git", "commit", "-qam", "v2")
+    v1 = run("git", "rev-parse", "HEAD~1").stdout.strip()
+    run("git", "reset", "--hard", "-q", v1)
+    return co
+
+
+def _porcelain(co):
+    return subprocess.run(
+        ["git", "-C", str(co), "status", "--porcelain",
+         "--", "scripts/bounded_http.py"],
+        capture_output=True, text=True).stdout
+
+
+def _run_migration(tmp_path, co):
+    state = tmp_path / "state"
+    state.mkdir(exist_ok=True)
+    r = source_and(
+        "migrate_legacy_cred_ui_checkout_artifact",
+        env_extra={"UPDATER_STATE_DIR": str(state),
+                   "SPARKVM_LEGACY_OPERATOR_CHECKOUT": str(co)})
+    assert r.returncode == 0, r.stderr + r.stdout
+    return state
+
+
+def test_legacy_artifact_cleanup_restores_deploy_written_file(tmp_path):
+    """A git-dirty scripts/bounded_http.py whose bytes are a historical blob
+    (the pre-#85 deploy's signature) is restored to HEAD."""
+    co = _make_legacy_checkout(tmp_path)
+    (co / "scripts" / "bounded_http.py").write_text("v2\n")  # the old deploy's write
+    assert _porcelain(co).startswith(" M"), "fixture must start dirty"
+    state = _run_migration(tmp_path, co)
+    assert (co / "scripts" / "bounded_http.py").read_text() == "v1\n"
+    assert _porcelain(co) == "", "restored file must be clean"
+    assert (state / "legacy-cred-ui-artifact-cleaned").is_file()
+
+
+def test_legacy_artifact_cleanup_leaves_operator_content(tmp_path):
+    """A dirty file whose bytes are NOT in the repo's history is the
+    operator's own work — never touched, but the migration still records
+    its one-shot evaluation."""
+    co = _make_legacy_checkout(tmp_path)
+    (co / "scripts" / "bounded_http.py").write_text("operator edit\n")
+    assert _porcelain(co).startswith(" M")
+    state = _run_migration(tmp_path, co)
+    assert (co / "scripts" / "bounded_http.py").read_text() == "operator edit\n"
+    assert _porcelain(co).startswith(" M"), "operator content must stay dirty"
+    assert (state / "legacy-cred-ui-artifact-cleaned").is_file()
+
+
+def test_legacy_artifact_cleanup_removes_untracked_historical(tmp_path):
+    """An untracked scripts/bounded_http.py with historical bytes (the old
+    deploy's `mkdir -p` + `cp` on a checkout predating the file) is removed."""
+    co = _make_legacy_checkout(tmp_path)
+    run = lambda *a: subprocess.run(
+        a, cwd=co, check=True, capture_output=True, text=True)
+    run("git", "rm", "-q", "--cached", "scripts/bounded_http.py")
+    run("git", "commit", "-qm", "untrack")
+    (co / "scripts" / "bounded_http.py").write_text("v2\n")
+    assert _porcelain(co).startswith("??")
+    state = _run_migration(tmp_path, co)
+    assert not (co / "scripts" / "bounded_http.py").exists()
+    assert (state / "legacy-cred-ui-artifact-cleaned").is_file()
+
+
+def test_legacy_artifact_cleanup_noop_when_clean(tmp_path):
+    """A clean checkout is a pure no-op (aside from recording the check)."""
+    co = _make_legacy_checkout(tmp_path)
+    assert _porcelain(co) == ""
+    state = _run_migration(tmp_path, co)
+    assert (co / "scripts" / "bounded_http.py").read_text() == "v1\n"
+    assert (state / "legacy-cred-ui-artifact-cleaned").is_file()
+
+
+def test_legacy_artifact_cleanup_noop_without_checkout(tmp_path):
+    """No legacy checkout at all (fresh box) is a no-op."""
+    state = _run_migration(tmp_path, tmp_path / "does-not-exist")
+    assert (state / "legacy-cred-ui-artifact-cleaned").is_file()
+
+
+def test_legacy_artifact_cleanup_runs_once(tmp_path):
+    """The state gate is load-bearing: with the state file present, a
+    deploy-written dirty file is NOT touched (proves the one-shot)."""
+    co = _make_legacy_checkout(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "legacy-cred-ui-artifact-cleaned").write_text("")
+    (co / "scripts" / "bounded_http.py").write_text("v2\n")
+    r = source_and(
+        "migrate_legacy_cred_ui_checkout_artifact",
+        env_extra={"UPDATER_STATE_DIR": str(state),
+                   "SPARKVM_LEGACY_OPERATOR_CHECKOUT": str(co)})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert (co / "scripts" / "bounded_http.py").read_text() == "v2\n", \
+        "state-gated run must not restore the file"
+
+
+def test_legacy_artifact_migration_wired_into_cmd_deploy():
+    """Wiring pin: cmd_deploy must invoke the one-shot migration — all six
+    migration tests call the function directly, so deleting the hook would
+    leave the suite green while the migration becomes dead code and the
+    "first deploy runs it" claim goes unproven (QA review B3)."""
+    script = open(os.path.join(REPO, "deploy", "auto-deploy.sh")).read()
+    start = script.index("cmd_deploy() {")
+    end = script.index("\ncmd_rollback() {", start)
+    body = script[start:end]
+    assert "migrate_legacy_cred_ui_checkout_artifact" in body, \
+        "cmd_deploy no longer invokes the legacy artifact migration"
+    # The hook must not be able to fail the deploy: a migration failure
+    # retries next tick instead of aborting cmd_deploy.
+    assert "migrate_legacy_cred_ui_checkout_artifact ||" in body, \
+        "migration hook must tolerate failure (|| log), never abort the deploy"
