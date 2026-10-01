@@ -86,6 +86,13 @@ Blender GUI on `:98` to view/drive it.
   `"input": {"state": "ok"|"wedged"|"unknown"}`, so the wedge is visible
   instead of hiding behind a healthy driver report. Plain `/api/status`
   stays a pure read (it serves the last probe outcome, never spawns xev).
+  The keepalive schedules a fresh probe every ~30 minutes and records each
+  verdict in the probe history, so the wedge accumulates operational
+  history in production; `cua-desktop.sh status` shows the last probe
+  verdict. Automatic restart of the desktop stack on a sustained wedge
+  (3 consecutive wedged verdicts, at most once per hour) is implemented
+  but off by default — opt in with `CUA_KEEPALIVE_WEDGE_RESTART=1` once
+  the history justifies it (see #769).
 - **Input routing on XFCE.** `type`/`key` must skip the always-on-top
   `Xfdesktop`/`Xfce4-panel` windows, `bring_to_front` the real target, and
   use `delivery_mode: "foreground"` — background delivery is refused with

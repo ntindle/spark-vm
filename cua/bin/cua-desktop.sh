@@ -152,6 +152,27 @@ do_status() {
   if [ -x "$DRIVER_BIN" ]; then
     DISPLAY=:$DISPLAY_NUM "$DRIVER_BIN" status 2>&1 | head -4
   fi
+  # Input-path liveness (#769): the bridge's probe cache is refreshed on
+  # the keepalive's schedule — surface the last verdict here so an
+  # operator sees the XTEST wedge without reading the bridge log.
+  # Best-effort: an unreachable bridge or a missing curl/python3 must
+  # never break status.
+  if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    probe_body=$(curl -s --max-time 5 http://127.0.0.1:18731/api/status 2>/dev/null) || probe_body=""
+    if [ -n "$probe_body" ]; then
+      probe_state=$(printf '%s' "$probe_body" | python3 -c \
+        'import json,sys
+try:
+    print(json.load(sys.stdin).get("input", {}).get("state", "unknown"))
+except Exception:
+    print("unparseable")' 2>/dev/null) || probe_state=""
+      case "$probe_state" in
+        ok) echo "[ok] input path (XTEST probe)" ;;
+        wedged) echo "[wedged] input path (XTEST probe) — remediate: cua-desktop.sh stop && cua-desktop.sh start" ;;
+        unknown) echo "[unknown] input path (probe not run yet or inconclusive)" ;;
+      esac
+    fi
+  fi
 }
 
 case "${1:-status}" in
