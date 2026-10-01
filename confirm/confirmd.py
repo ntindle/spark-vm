@@ -476,11 +476,12 @@ def _push_enqueue_reopen(new_aid, summary):
 # that mints a nonce for the aid and evicted when the item leaves pending
 # (see _evict_aid_lock). Single-instance scope is honest here — the same
 # caveat as _aid_locks and _reopen_nonces (a multi-replica confirmd would
-# need a shared store — tracked under #69). A daemon restart empties the
-# map: pre-restart forms 403 as stale-nonce and self-heal on the next poll
-# (the page re-GETs and mints fresh), exactly like _reopen_nonces.
+# need a shared store — tracked under #69).
 # Map-level cap mirrors _reopen_nonces/_reopened_index (issue #77 L10
 # hygiene); the per-aid ring itself is bounded by _CSRF_RING_SIZE.
+# A daemon restart empties the map: pre-restart forms 403 as
+# stale-nonce and self-heal on manual reload (the 403 message says so),
+# exactly like _reopen_nonces.
 _csrf_rings = {}
 _CSRF_RING_AID_CAP = 4096
 
@@ -533,9 +534,10 @@ def _csrf_nonce_ok(aid, csrf):
     now = time.time()
     ring = _csrf_rings.get(aid) or []
     return any(isinstance(e, dict)
+               and isinstance(e.get("nonce"), str)
                and isinstance(e.get("ts"), (int, float))
                and now - e["ts"] <= _CSRF_RING_TTL
-               and secrets.compare_digest(e.get("nonce") or "", csrf)
+               and secrets.compare_digest(e["nonce"], csrf)
                for e in ring)
 
 # Finding 47: the host's own tailnet addresses. A peer presenting one
