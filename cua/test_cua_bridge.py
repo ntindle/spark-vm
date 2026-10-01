@@ -365,6 +365,40 @@ class TestEndpoints:
         status, body = req(port, "GET", "/nope")
         assert status == 404
 
+
+class TestLiveness:
+    """#784: /api/liveness is the keepalive's restart probe — it must answer
+    without shelling out to cua-driver, so a slow driver can never
+    false-trip the keepalive's 5s curl budget into a spurious restart."""
+
+    def test_liveness_answers_alive(self, live):
+        _, _, port = live
+        status, body = req(port, "GET", "/api/liveness")
+        assert status == 200
+        assert body == {"alive": True}
+
+    def test_liveness_never_shells_out(self, live, monkeypatch):
+        # The regression this endpoint exists for: /api/status runs
+        # `cua-driver status` with a 10s budget, which exceeded the
+        # keepalive's 5s liveness curl and restarted a healthy bridge.
+        # If liveness ever touches a subprocess, fail loudly — instantly.
+        bridge, _, port = live
+
+        def _forbidden(*a, **k):
+            raise AssertionError(
+                "liveness must not spawn a subprocess (keepalive 5s budget)")
+
+        monkeypatch.setattr(subprocess, "run", _forbidden)
+        status, body = req(port, "GET", "/api/liveness")
+        assert status == 200
+        assert body == {"alive": True}
+
+    def test_liveness_ignores_query_string(self, live):
+        _, _, port = live
+        status, body = req(port, "GET", "/api/liveness?probe=1")
+        assert status == 200
+        assert body == {"alive": True}
+
     def test_post_without_csrf_header_403(self, live):
         _, _, port = live
         status, _ = req(port, "POST", "/api/click", {"x": 1, "y": 1},
