@@ -1807,6 +1807,39 @@ class WaitlistService:
 
     # -- forget ----------------------------------------------------------
 
+    def _gone_row_but_live_link(self, token):
+        """Best-effort honesty for the #394 crash window.
+
+        The commit-before-consume order in forget_post means a kill between
+        the row rewrite and the token consumes leaves the row gone from the
+        store with the forget token still live — the deletion DID happen.
+        In that state a structurally valid, unexpired forget token for a
+        missing row must render as already-deleted, not expired (the
+        expired page would be a lie, and the user has no other way to
+        learn the deletion succeeded). The signature cannot be
+        re-verified without the row's owner email, so this is a
+        best-effort render: a structurally-valid token for a nonexistent
+        entry_id renders the same static, PII-free page — no information
+        is disclosed either way. Malformed tokens and tokens past the
+        7-day TTL stay on the expired path.
+        """
+        try:
+            tkind, entry_id, issued_s, nonce, sig = (token or "").split(
+                ".", 4)
+            if tkind != "forget":
+                return False
+            issued = int(issued_s)
+            b64url_decode(sig)  # structural check
+        except (ValueError, AttributeError, TypeError):
+            return False
+        if self.clock().timestamp() - issued > FORGET_TTL_SECONDS:
+            return False
+        if token in self.consumed:
+            # Already handled by the consumed fast path; never re-render
+            # a consumed token as anything else.
+            return False
+        return entry_id not in self.rows
+
     def forget_get(self, token):
         """GET /waitlist/forget — renders only. Never changes state.
 
@@ -1815,17 +1848,28 @@ class WaitlistService:
         state rule holds here too). A consumed token renders the
         already-deleted page (the consumed set is checked before the row
         lookup: the row is gone by the time the token is consumed, so a
-        row-first lookup would misreport it as merely invalid); an
-        expired token, or a token for a gone row, renders the expired
-        page. Read-only, but rendered under the data lock with a fresh
-        view for the same reasons as confirm_get.
+        row-first lookup would misreport it as merely invalid). #394: a
+        structurally-valid, unexpired token for a gone row also renders
+        the already-deleted page — the commit-before-consume order makes
+        that state mean "the deletion committed but the consumes never
+        ran", and "expired" would be a lie. An expired token, or a
+        malformed token, renders the expired page. Read-only, but rendered
+        under the data lock with a fresh view for the same reasons as
+        confirm_get.
         """
         with data_lock(self.data_dir), self._lock:
             self._refresh_under_lock()
             if token and token.startswith("forget.") and token in self.consumed:
                 return 200, page_already_deleted()
             row, status = self._lookup_token_row(token or "", kind="forget")
+            # #394 crash window: row committed, forget token's consume
+            # never ran — capture the best-effort signal under the lock
+            # so the render below stays honest.
+            gone_but_live = (status == "invalid"
+                             and self._gone_row_but_live_link(token))
         if status == "invalid":
+            if gone_but_live:
+                return 200, page_already_deleted()
             return 200, page_forget_expired()
         if status == "consumed":
             return 200, page_already_deleted()
@@ -1849,6 +1893,21 @@ class WaitlistService:
 
         The lookup-then-delete is check-then-act — serialized under the
         data lock + thread lock, like every other mutating path.
+
+        Crash ordering (#394): the row commit (delete + _rewrite_rows)
+        runs BEFORE the forget token is consumed. A kill between the
+        rewrite and the consume leaves the row gone on disk with the
+        forget token still live — fail-safe: the PII is deleted, never
+        retained behind an "already deleted" lie. The reverse order
+        (consume-then-commit) would leave the row alive while the link
+        rendered already-deleted. The row's confirm/invite tokens are
+        still killed before the commit — they are not the link the user
+        clicked (a crash there leaves the forget link live and the row
+        deletable), and the #388 GC inside _rewrite_rows prunes them so
+        they do not accumulate. The residual windows (rewrite-then-emit,
+        emit-then-spool) are documented in #394/#397 — a lost `forgot`
+        event or confirmation email after a committed deletion, same as
+        every other path here.
         """
         with data_lock(self.data_dir), self._lock:
             self._refresh_under_lock()
@@ -1857,7 +1916,19 @@ class WaitlistService:
                 # is single-use by construction). Say so honestly.
                 return 200, page_already_deleted()
             row, status = self._lookup_token_row(token or "", kind="forget")
+            # #394 crash window: row committed, forget token's consume
+            # never ran — capture the best-effort signal under the lock
+            # so the render below stays honest.
+            gone_but_live = (status == "invalid"
+                             and self._gone_row_but_live_link(token))
             if status == "invalid":
+                # #394 crash window: the row committed but the forget
+                # token's consume never ran. _gone_row_but_live_link is
+                # best-effort (a forged token for a never-existed row
+                # renders the same static page) — the honest render for
+                # the case where the deletion did happen.
+                if gone_but_live:
+                    return 200, page_already_deleted()
                 return 200, page_forget_expired()
             if status == "consumed":
                 # Unreachable in practice (the fast path above catches
@@ -1869,6 +1940,13 @@ class WaitlistService:
             entry_id = row["entry_id"]
             owner = row["owner_email"]
             live_token = row.get("active_token")
+            live_invite = row.get("active_invite_token")
+            # The auxiliary kills (the dying row's confirm/invite tokens)
+            # stay BEFORE the row commit: the #388 GC inside _rewrite_rows
+            # prunes them (no surviving row references them), and they are
+            # not the link the user clicked — a crash here leaves the
+            # forget link live and the row still deletable, so #394's lie
+            # cannot arise from them.
             # Kill the confirm token too — the row is gone, so its entry_id
             # lookup would fail anyway, but mark it consumed explicitly.
             if live_token:
@@ -1876,14 +1954,17 @@ class WaitlistService:
             # Same for a live invite token (invited rows can be
             # forget-deleted now that the forget link validates for
             # them) — a deleted row's claim link must die with it.
-            live_invite = row.get("active_invite_token")
             if live_invite:
                 self._consume_token(live_invite)
-            self._consume_token(token)
+            # #394: the row commit runs BEFORE the forget token is
+            # consumed. Only after the row is off disk does the
+            # user-facing token die — a kill anywhere past this point can
+            # never leave the row alive behind a consumed forget token.
             del self.rows[entry_id]
             if self.by_email.get(owner) == entry_id:
                 del self.by_email[owner]
             self._rewrite_rows()
+            self._consume_token(token)
             self._emit("forgot", entry_id)
             self._queue_deleted_email(owner, entry_id)
             return 200, page_deleted()
@@ -2624,7 +2705,15 @@ class WaitlistService:
         never silently open a new rollup bucket. CTA_SRCS mirrors
         KNOWN_SRCS in scripts/funnel_metrics.py — keep the two in sync."""
         attrs = {"src": src} if src in CTA_SRCS else {}
-        self._emit("cta_click", "selfhost", attrs)
+        # #403: funnel appends are lock-serialized everywhere else in the
+        # daemon (the torn-tail reader tolerates torn lines but assumes
+        # serialized writes). The CTA handler runs on the thread pool with
+        # no lock held, so serialize the append on the thread lock. The
+        # cross-process data_lock stays off this hot GET — concurrent
+        # processes do single O_APPEND writes, and the torn-tail reader
+        # recovers those loudly.
+        with self._lock:
+            self._emit("cta_click", "selfhost", attrs)
         return SELFHOST_URL
 
 
@@ -2819,6 +2908,9 @@ def page_forget_button(token, masked):
 def page_forget_expired():
     # §5: the forget link is honored ≤7d. A token past that, or a token for
     # a row that no longer exists, lands here — never an error dump.
+    # (Exception: #394 — a structurally-valid, unexpired forget token for
+    # a gone row renders already-deleted, because that state means the
+    # deletion committed and "expired" would be a lie.)
     return PAGE_SHELL.format(
         title="Link expired",
         body=(
