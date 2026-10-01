@@ -8,6 +8,9 @@ shell: only the allowlisted desktop actions.
 
 Endpoints:
   GET  /api/status      -> stack + driver state
+  GET  /api/liveness    -> bridge-alive probe (no driver call; the restart
+                           signal for keepalives — a slow driver can never
+                           false-trip it)
   GET  /api/windows     -> list_windows
   GET  /api/screenshot  -> PNG bytes of the full desktop
   POST /api/click       -> {"x":screen_x,"y":screen_y,"button":"left"|"right"|"middle"}
@@ -719,7 +722,21 @@ class Handler(BaseHTTPRequestHandler):
             if not self._check_csrf():
                 return
             parsed = urlparse(self.path)
-            if parsed.path == "/api/status":
+            if parsed.path == "/api/liveness":
+                # #784: liveness is decoupled from driver health. The
+                # keepalive's restart decision must answer "is the BRIDGE
+                # alive?" — not "is the DRIVER fast?". /api/status shells
+                # out to `cua-driver status` with a 10s budget, so a slow
+                # driver used to false-trip the keepalive's 5s curl budget
+                # into a spurious bridge restart; restarting the bridge
+                # can't fix a slow driver anyway. This endpoint never
+                # spawns a subprocess, never touches the probe cache —
+                # it answers in microseconds, so the keepalive's budget
+                # can only expire when the bridge is genuinely down.
+                # /api/status keeps the full driver detail for panels
+                # and operators.
+                self._json({"alive": True})
+            elif parsed.path == "/api/status":
                 st = subprocess.run([DRIVER, "status"], capture_output=True,
                                     timeout=10, env=BASE_ENV, text=True)
                 if st.returncode == 0:

@@ -34,6 +34,11 @@ Subcommands:
       the queue is clear.
   events ack --store DIR --alert-id ID
       Mark one alert acknowledged.
+  events crosscheck --store DIR [--box ID]
+      Check deploy/succeeded claims against the inventory journal
+      (event<->inventory cross-check, G17 S2): confirmed, violation
+      (flagged, not convicted), or inconclusive (missing evidence);
+      exit 1 on any violation, 0 otherwise.
 
 Per-box directory layout (each subdir of --estate is one box; the dir
 name is the box_id unless --box-id-map remaps it):
@@ -895,10 +900,12 @@ def main(argv=None):
                                "wave (rollout envelopes are null until "
                                "G15 S2)")
     p_events.add_argument("action", nargs="?", default="list",
-                          choices=["list", "watch", "ack"],
+                          choices=["list", "watch", "ack", "crosscheck"],
                           help="'watch' lists unacknowledged alerts and "
                                "exits 1 when any are pending; 'ack' marks "
-                               "one alert acknowledged")
+                               "one alert acknowledged; 'crosscheck' checks "
+                               "update claims against the inventory "
+                               "(G17 S2) and exits 1 on any violation")
     p_events.add_argument("--alert-id", default=None,
                           help="with ack: the alert to acknowledge")
 
@@ -944,6 +951,13 @@ def main(argv=None):
                 if err:
                     print("error: %s" % err, file=sys.stderr)
                     return 2
+            elif args.action == "crosscheck":
+                err, code = events.cmd_events_crosscheck(args.store,
+                                                         args.box)
+                if err:
+                    print("error: %s" % err, file=sys.stderr)
+                    return 2
+                return code
             else:
                 err = "unknown events action %s" % args.action
         else:
