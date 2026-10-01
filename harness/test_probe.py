@@ -6,7 +6,11 @@ muse CLI:
     (META_API_KEY placeholder, proxy env forced, NO_PROXY stripped), sends
     GET+POST with an Authorization header through the proxy, exits per
     FAKE_MUSE_MODE.
-  - echo server: records every Authorization header it receives to a JSONL log.
+  - echo server: records the full request it receives (method, raw path,
+    full header set, sha256 of the body) to a JSONL log — the same wire
+    contract as harness/echo-fixture.py; the probe asserts the swapped
+    Authorization shape and that the hsurr: placeholder reached no
+    recorded field (GitHub #157).
   - swap proxy: minimal forward HTTP proxy; in "swap" mode rewrites
     "Bearer hsurr:gate-dummy" -> "Bearer <swapped>" (the proxy's job), in
     "passthrough" mode forwards untouched.
@@ -23,6 +27,7 @@ so the tests can assert the scrubbed-HOME contract and the teardown.
 """
 
 import http.client
+import hashlib
 import importlib.util
 import json
 import os
@@ -47,7 +52,7 @@ SWAPPED = "DUMMY-SWAPPED-PUBLIC"
 
 FAKE_MUSE = r'''#!/usr/bin/env python3
 """Fake muse CLI: mimics the wire contract the probe depends on."""
-import os, sys, time, urllib.request
+import os, sys, time, urllib.parse, urllib.request
 mode = os.environ.get("FAKE_MUSE_MODE", "ok")
 if mode == "sleep":
     time.sleep(30)
@@ -96,10 +101,52 @@ key = os.environ["META_API_KEY"]
 argv = sys.argv
 base = argv[argv.index("--base-url") + 1]
 scheme = "Token " if mode == "bad-scheme" else "Bearer "
-headers = {"Authorization": scheme + key}
+headers = {"Authorization": scheme + key, "X-Request-Id": "gate-fixture-benign"}
 paths = ["/muse-code/models", "/responses"]
 if mode == "duplicate":
     paths = [p for p in paths for _ in (0, 1)]  # each request twice, like CLI retries
+if mode == "leak-header":
+    # GitHub #157: the placeholder leaves through a second channel while
+    # the Authorization header is correctly swapped — the gate must fail.
+    headers["X-Api-Key"] = key
+if mode == "leak-query":
+    # GitHub #157: the placeholder leaves in the query string.
+    paths = ["/responses?api_key=" + key]
+if mode == "leak-query-encoded":
+    # GitHub #157: the placeholder percent-encoded in the query string
+    # (the standard urlencode output every mainstream client produces)
+    # must also fail the gate.
+    paths = ["/responses?api_key=" + urllib.parse.quote(key, safe="")]
+if mode == "leak-dup-header":
+    # GitHub #157: duplicate X-Api-Key headers, the second carrying the
+    # placeholder — the fixture must join them (RFC 9110 section 5.3) so
+    # the probe's scan sees the leak. urllib collapses duplicate headers,
+    # so this mode drives the proxy with http.client directly.
+    import http.client as _httpc
+    from urllib.parse import urlsplit as _urlsplit
+    _proxy = _urlsplit(os.environ.get("HTTPS_PROXY", ""))
+    _target = _urlsplit(base)
+    for _path in ("/muse-code/models", "/responses"):
+        _conn = _httpc.HTTPConnection(_proxy.hostname, _proxy.port or 80,
+                                      timeout=5)
+        _conn.putrequest("POST" if _path == "/responses" else "GET",
+                         base.rstrip("/") + _path,
+                         skip_host=True, skip_accept_encoding=True)
+        _conn.putheader("Host", _target.netloc)
+        _conn.putheader("Authorization", scheme + key)
+        _conn.putheader("X-Request-Id", "gate-fixture-benign")
+        _conn.putheader("X-Api-Key", "benign-first")
+        _conn.putheader("X-Api-Key", key)
+        _body = b"{}" if _path == "/responses" else None
+        if _body is not None:
+            _conn.putheader("Content-Length", str(len(_body)))
+        _conn.endheaders(_body)
+        try:
+            _conn.getresponse().read()
+        except Exception:
+            pass  # the fixture's body is not a completion; delivery counts
+        _conn.close()
+    sys.exit(0)
 if mode != "no-request":
     for path in paths:
         req = urllib.request.Request(base.rstrip("/") + path, headers=headers,
@@ -120,11 +167,35 @@ sys.exit(0)
 
 
 class EchoHandler(BaseHTTPRequestHandler):
+    """Mirror of harness/echo-fixture.py's handler (same wire contract).
+
+    Keep the two in lockstep: the fixture is what the real gate runs,
+    this is what the probe's hermetic tests assert against.
+    """
     log_path = None
 
     def _handle(self):
-        auth = self.headers.get("Authorization", "")
-        rec = {"method": self.command, "path": self.path, "authorization": auth}
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0  # malformed framing: still record headers/path, no body
+        if length < 0:
+            length = 0
+        body = self.rfile.read(length) if length else b""
+        headers = {}
+        for name, value in self.headers.items():
+            # Join duplicates per RFC 9110 section 5.3 instead of
+            # first-wins: a placeholder in a second same-name header is
+            # still a leak the probe must see (GitHub #157).
+            key = name.lower()
+            headers[key] = headers[key] + ", " + value if key in headers else value
+        rec = {
+            "method": self.command,
+            "path": self.path,
+            "authorization": self.headers.get("Authorization", ""),
+            "headers": headers,
+            "body_sha256": hashlib.sha256(body).hexdigest() if body else "",
+        }
         with open(self.log_path, "a") as f:
             f.write(json.dumps(rec) + "\n")
         body = b"{}"
@@ -151,7 +222,11 @@ class SwapHandler(BaseHTTPRequestHandler):
     def _handle(self):
         parts = urlsplit(self.path)  # absolute URI from the client
         target_host, target_port = parts.hostname, parts.port or 80
-        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:  # same clamp as the record builders: never die on bad framing
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            length = 0
+        length = max(length, 0)
         body = self.rfile.read(length) if length else None
         headers = {}
         for k, v in self.headers.items():
@@ -159,10 +234,18 @@ class SwapHandler(BaseHTTPRequestHandler):
                 continue
             if k.lower() == "authorization" and self.mode == "swap":
                 v = v.replace(f"Bearer {self.placeholder}", f"Bearer {self.swapped}")
-            headers[k] = v
+            # Join duplicates (RFC 9110 section 5.3) — dropping them would
+            # hide a duplicate-header leak from the echo fixture (#157).
+            headers[k] = headers[k] + ", " + v if k in headers else v
         headers["Host"] = parts.netloc
+        # Forward origin-form incl. the query string (the real forward
+        # proxy does; dropping it here would hide query-channel leaks —
+        # GitHub #157's leak-query vehicle mode depends on this).
+        target = parts.path or "/"
+        if parts.query:
+            target += "?" + parts.query
         conn = http.client.HTTPConnection(target_host, target_port, timeout=5)
-        conn.request(self.command, parts.path or "/", body=body, headers=headers)
+        conn.request(self.command, target, body=body, headers=headers)
         resp = conn.getresponse()
         data = resp.read()
         self.send_response(resp.status)
@@ -336,6 +419,97 @@ def test_gate_no_swap_fails(fixtures, tmp_path):
     assert proc.returncode == 1
     assert "hsurr:gate-dummy" in open(fixtures["echo_log"]).read()
     assert "placeholder" in proc.stderr and "never reach the origin" in proc.stderr
+
+
+def test_gate_placeholder_leak_via_header_fails(fixtures, tmp_path):
+    # GitHub #157: a CLI that swaps Authorization correctly but leaks the
+    # placeholder through a second header must FAIL the gate — the old
+    # Authorization-only assertion passed this.
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"FAKE_MUSE_MODE": "leak-header"})
+    assert proc.returncode == 1
+    assert "never reach the origin in any recorded field" in proc.stderr
+    assert "header 'x-api-key'" in proc.stderr
+
+
+def test_gate_placeholder_leak_via_query_fails(fixtures, tmp_path):
+    # GitHub #157: the placeholder in the query string must fail the gate.
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"FAKE_MUSE_MODE": "leak-query"})
+    assert proc.returncode == 1
+    assert "never reach the origin in any recorded field" in proc.stderr
+    assert "request path" in proc.stderr
+
+
+def test_gate_placeholder_leak_via_encoded_query_fails(fixtures, tmp_path):
+    # GitHub #157: the standard percent-encoding (what urlencode produces)
+    # must not evade the scan.
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"FAKE_MUSE_MODE": "leak-query-encoded"})
+    assert proc.returncode == 1
+    assert "never reach the origin in any recorded field" in proc.stderr
+    assert "request path (percent-decoded)" in proc.stderr
+
+
+def test_gate_placeholder_leak_via_duplicate_header_fails(fixtures, tmp_path):
+    # GitHub #157: a placeholder in a second same-name header must fail
+    # the gate — the fixture joins duplicates (RFC 9110 section 5.3).
+    proc, _ = run_probe(fixtures, tmp_path,
+                        extra_env={"FAKE_MUSE_MODE": "leak-dup-header"})
+    assert proc.returncode == 1
+    assert "never reach the origin in any recorded field" in proc.stderr
+    assert "header 'x-api-key'" in proc.stderr
+
+
+def test_gate_records_carry_full_request_shape(fixtures, tmp_path):
+    # The echo record is the gate's evidence: the full header set, the raw
+    # path, and the body hash. Pin the shape so a future fixture change
+    # can't silently shrink what the probe asserts on.
+    proc, _ = run_probe(fixtures, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    with open(fixtures["echo_log"]) as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    assert records, "no records in the echo log"
+    get_rec = next(r for r in records if r["method"] == "GET")
+    post_rec = next(r for r in records if r["method"] == "POST")
+    for rec in (get_rec, post_rec):
+        assert rec["headers"]["authorization"] == f"Bearer {SWAPPED}"
+        assert rec["headers"]["x-request-id"] == "gate-fixture-benign"
+        assert rec["authorization"] == f"Bearer {SWAPPED}"
+    assert get_rec["body_sha256"] == ""  # no body on the GET
+    assert post_rec["body_sha256"] == hashlib.sha256(b"{}").hexdigest()
+    assert post_rec["path"] == "/responses"
+
+
+def test_echo_records_malformed_content_length(fixtures, tmp_path):
+    # Engineering review (PR #818): a malformed or negative Content-Length
+    # must not traceback and silently drop the record — the gate's
+    # evidence recorder still records the headers/path (no body).
+    port = int(fixtures["echo_url"].rsplit(":", 1)[1])
+    for raw_length in ("abc", "-5"):
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            sock.sendall(
+                ("POST /responses HTTP/1.0\r\n"
+                 "Host: gate-fixture\r\n"
+                 f"Content-Length: {raw_length}\r\n"
+                 "Connection: close\r\n\r\n").encode())
+            resp = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+        finally:
+            sock.close()
+        assert resp.split(b"\r\n", 1)[0].endswith(b"200 OK"), resp[:60]
+    with open(fixtures["echo_log"]) as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    assert len(records) == 2
+    for rec in records:
+        assert rec["method"] == "POST"
+        assert rec["path"] == "/responses"
+        assert rec["body_sha256"] == ""  # no body read on bad framing
 
 
 def test_gate_no_records_fails_closed(fixtures, tmp_path):

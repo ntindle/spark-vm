@@ -2,15 +2,24 @@
 """echo-fixture.py — the gate fixture's echo origin (R2).
 
 A tiny HTTP server for harness/install-gate-fixture.sh. For every request
-it appends one JSONL record {"method","path","authorization"} to the log
-at ECHO_FIXTURE_LOG and answers 200 with an empty JSON object. It exists
-only to prove the swap path: the canonical probe
-(harness/harness-auth-probe, gate mode) asserts the swapped Authorization
-header reached the origin and the hsurr:<name> placeholder never did.
+it appends one JSONL record {"method","path","authorization","headers",
+"body_sha256"} to the log at ECHO_FIXTURE_LOG and answers 200 with an
+empty JSON object. It exists only to prove the swap path: the canonical
+probe (harness/harness-auth-probe, gate mode) asserts the swapped
+Authorization header reached the origin and the hsurr:<name> placeholder
+never did — in ANY recorded field, not just the Authorization header
+(GitHub #157). The full header set (names lowercased) and the raw path
+(incl. the query string) are recorded so a placeholder leaking through a
+second header, a query parameter, or the request line fails the gate;
+the body is recorded only as a sha256 hex digest (never the content —
+bodies can carry the swapped dummy value legitimately, and hashing keeps
+the log free of secret-shaped material).
 
 The record format matches the hermetic echo server in
 harness/test_probe.py, so the fixture's production behavior and the
-probe's tested behavior are the same wire contract.
+probe's tested behavior are the same wire contract. "authorization" is
+kept as its own field (the exact-Bearer wire-shape assertion's canonical
+field); "headers" is the full set including it.
 
 Env:
   ECHO_FIXTURE_LOG   required — the JSONL log path (created if missing;
@@ -24,10 +33,45 @@ fixture must never be reachable off-box. It is started and killed by the
 installer; it is not a service.
 """
 
+import hashlib
 import json
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def _record_request(handler):
+    """Build the echo record for one request (GitHub #157 wire contract).
+
+    Records the method, the raw path (query string included), the full
+    header set with lowercased names (duplicate same-name headers joined
+    with ", " per RFC 9110 section 5.3, so no occurrence is dropped), and
+    a sha256 of the body (empty string when there is no body).
+    "authorization" is also kept as its own field — the probe's
+    exact-Bearer wire-shape assertion reads it directly, and the
+    placeholder scan covers every recorded field.
+    """
+    try:
+        length = int(handler.headers.get("Content-Length", 0) or 0)
+    except ValueError:
+        length = 0  # malformed framing: still record headers/path, no body
+    if length < 0:
+        length = 0
+    body = handler.rfile.read(length) if length else b""
+    headers = {}
+    for name, value in handler.headers.items():
+        # Join duplicates per RFC 9110 section 5.3 instead of
+        # first-wins: a placeholder in a second same-name header is
+        # still a leak the probe must see (GitHub #157).
+        key = name.lower()
+        headers[key] = headers[key] + ", " + value if key in headers else value
+    return {
+        "method": handler.command,
+        "path": handler.path,
+        "authorization": handler.headers.get("Authorization", ""),
+        "headers": headers,
+        "body_sha256": hashlib.sha256(body).hexdigest() if body else "",
+    }
 
 
 def main():
@@ -43,9 +87,7 @@ def main():
 
     class EchoHandler(BaseHTTPRequestHandler):
         def _handle(self):
-            auth = self.headers.get("Authorization", "")
-            rec = {"method": self.command, "path": self.path,
-                   "authorization": auth}
+            rec = _record_request(self)
             with open(log_path, "a") as f:
                 f.write(json.dumps(rec) + "\n")
             body = b"{}"
