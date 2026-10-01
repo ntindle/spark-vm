@@ -101,6 +101,14 @@ Concurrency: deploy and rollback take a `flock` on the state dir; an
 overlapping timer tick exits quietly, a manual `rollback` during a deploy
 fails fast, and a manual `proxy/deploy.sh` during a deploy fails fast.
 
+One-shot legacy migration: the pre-#85 cred-ui install step copied
+`scripts/bounded_http.py` into the operator's working checkout on every
+deploy, which could leave that file git-dirty there. The first deploy with
+this code restores it to the checkout's tracked state — but only when its
+bytes exactly match a version from the repo's own history (the old step's
+signature); anything you edited yourself is left alone and logged. Runs
+once per box (state file in the state dir); it never blocks the deploy.
+
 ## Host-side change inputs (`extra_inputs`)
 
 The repo-diff mapping names changed components, but it cannot see files that
