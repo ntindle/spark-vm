@@ -588,6 +588,7 @@ def poll_session_view(
     replay_wait=2.0,
     stale_after=900.0,
     now=None,
+    sink=None,
 ):
     """One poll: seed from session/read, replay (after, head], derive state.
 
@@ -598,6 +599,10 @@ def poll_session_view(
       it never calls back into the host, so no reader-thread deadlock).
     - Folds the ``session/read`` seed first, then the replay in arrival
       order, persists the newest cursor, and returns the JobView.
+
+    ``sink`` (optional) is called with each classified JobSignal in
+    arrival order -- the CLI uses it to journal the redacted signal
+    stream for `muse-job log`.
 
     Raises MSPEventsError on transport/wire failures; a session the
     server does not know surfaces as STATE_UNKNOWN (fail-soft: polling a
@@ -654,6 +659,14 @@ def poll_session_view(
         notes = list(collected)
     for msg in notes:
         signal = classify_notification(msg)
+        if sink is not None:
+            # Issue #227: the muse-job CLI journals every replayed signal
+            # (redacted JobSignal) for `muse-job log`. The sink runs on the
+            # calling thread after unsubscribe; it must not raise.
+            try:
+                sink(signal)
+            except Exception:
+                pass
         if signal.kind == SIG_STATUS:
             params = msg.get("params") or {}
             view.fold_status(params.get("status"), params.get("attention"))
