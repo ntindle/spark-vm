@@ -19,7 +19,7 @@ Two fleet-side producer stacks have shipped:
 
 Both read surfaces stop at **journals on the operator's disk plus a CLI**.
 Every consumer the hosted vision names is either named-but-unfunded or
-absent. This doc names the six consumption gaps (C1–C6), each with vision,
+absent. This doc names the six consumption gaps (G21–G26), each with vision,
 current state, decision, and build slices. Nothing here re-litigates the
 G11–G20 update-channel series (PR #780 close-out) — these gaps are what sits
 *downstream* of it.
@@ -29,7 +29,7 @@ self-hosted operator's N-box estate first where the primitive is
 layer-identical; hosted-only layers are marked `[HOSTED]` and never block
 the OSS path.
 
-## C1 — Operator fleet console (no designed surface)
+## G21 — Operator fleet console (no designed surface)
 
 | Vision | Current state |
 |---|---|
@@ -38,7 +38,7 @@ the OSS path.
 The G15 rollout controller design reads its gates from §4 of the rollout design (which consumes G17 events);
 the operator reads the same information through a CLI. A rollout with a
 correlated-failure fleet alert (G17 rule 2) currently requires the operator
-to run `fleet events watch` themselves (or page themselves — C3). The
+to run `fleet events watch` themselves (or page themselves — G23). The
 dashboard era (H15, `docs/HOSTED_SIGNUP_WEB_UI.md`) has a **Boxes panel**,
 but it is per-box and human-dashboard-scoped; the fleet view — waves,
 soak evidence, toll/freeze state — is a different surface and is
@@ -61,7 +61,7 @@ operator; the hosted control plane reuses it.
   (events' `rollout` envelope is null until then; the console shows
   un-waved boxes honestly).
 
-## C2 — P7 status page (named, never designed)
+## G22 — P7 status page (named, never designed)
 
 | Vision | Current state |
 |---|---|
@@ -76,7 +76,7 @@ tenant/public-facing and is a separate surface.
 
 **Decision:** `[HOSTED]` the status page is a designed tenant/public
 surface fed by the alert journal and the tenant-scoped read paths
-(C4), with an explicit "no fiction" contract: every row it shows is
+(G24), with an explicit "no fiction" contract: every row it shows is
 traceable to a journaled event (no synthesized availability, no
 marketing uptime). Until the feed exists, the page does not ship — the
 G17 S1 honesty rule extends to the page itself.
@@ -86,13 +86,13 @@ G17 S1 honesty rule extends to the page itself.
   the dedup/idempotency rule, the ack→resolve lifecycle, what stays
   operator-only (raw notes, box ids in the OSS sense → tenant-visible
   surrogates in hosted).
-- S2 — page: wave/incident feed + tenant-scoped history (consumes C4's
+- S2 — page: wave/incident feed + tenant-scoped history (consumes G24's
   tenant read path; until then, operator-only rows).
 - S3 — the incident-comms question (#368): what notifies users when the
   status page is the paid surface — the page is the feed, not the
-  pager; who pages the operator is C3.
+  pager; who pages the operator is G23.
 
-## C3 — Alert fan-out into the H14 push plane
+## G23 — Alert fan-out into the H14 push plane
 
 | Vision | Current state |
 |---|---|
@@ -119,10 +119,10 @@ operator is the same consumer class.
   suppresses the page), operator subscription surface.
 - S2 — enqueue path from the alert journal; the `watch` exit-code path
   stays as the cron fallback, not the primary.
-- S3 — tenant-visible incidents (C2's feed) get a tenant push variant —
-  gated on C4's tenant read path, never before.
+- S3 — tenant-visible incidents (G22's feed) get a tenant push variant —
+  gated on G24's tenant read path, never before.
 
-## C4 — Tenant-scoped fleet consumption (no tenant field on the stream)
+## G24 — Tenant-scoped fleet consumption (no tenant field on the stream)
 
 | Vision | Current state |
 |---|---|
@@ -151,7 +151,7 @@ no tenant-facing surface ships on unattributed data.
   field (issue #778 stays the build home; this issue is the
   fleet-side dependency).
 
-## C5 — Sentinel feed (the signed audit log has no ship path)
+## G25 — Sentinel feed (the signed audit log has no ship path)
 
 | Vision | Current state |
 |---|---|
@@ -182,9 +182,9 @@ never claims attested coverage before the keys exist.
   `attested: false` — labeled as operator-attested-only, never as
   box-attested.
 - S3 — attested feed on the G13 channel; the key-custody open question
-  (G17 §4 S3 OQ5) is this slice's entry ticket, not a deferrable.
+  (G17 §4 S3 open question 5) is this slice's entry ticket, not a deferrable.
 
-## C6 — The fleet event stream as a metering source
+## G26 — The fleet event stream as a metering source
 
 | Vision | Current state |
 |---|---|
@@ -221,38 +221,38 @@ note, not a consumer.
 ## Composition with the sibling designs
 
 - **G15/G17/G18:** the consumers read what these designs produce; no
-  consumer here changes a producer contract. C1's API is byte-equivalent
-  to the CLI; C3's intake reads `alerts.jsonl`, never the alert
+  consumer here changes a producer contract. G21's API is byte-equivalent
+  to the CLI; G23's intake reads `alerts.jsonl`, never the alert
   evaluation path.
-- **G13/G19:** C4 is the fleet-side dependency of the G19 read path;
-  C5's attested slice rides G13's channel. Neither invents a second
+- **G13/G19:** G24 is the fleet-side dependency of the G19 read path;
+  G25's attested slice rides G13's channel. Neither invents a second
   trust story.
-- **H14 push:** C3 extends the push plane to a new producer class
+- **H14 push:** G23 extends the push plane to a new producer class
   (operator paging) — the intake is the design, not a confirmd patch.
-- **H15 dashboard:** C1's console is the fleet-era surface; the H15
+- **H15 dashboard:** G21's console is the fleet-era surface; the H15
   Boxes panel stays per-box. The two compose, not compete.
-- **H12 metering:** C6 is metering's fourth source, gated on the
+- **H12 metering:** G26 is metering's fourth source, gated on the
   existing prerequisites (#376–#378).
-- **P7 ops:** C2's status page is the page the read-only ops archetype
+- **P7 ops:** G22's status page is the page the read-only ops archetype
   is framed around — the archetype monitors; this doc designs what it
   monitors.
 
 ## Open questions
 
-- OQ1 — Does the operator console (C1) belong in the repo's OSS
+- OQ1 — Does the operator console (G21) belong in the repo's OSS
   surface, or does a read-only API plus third-party consoles serve
   self-hosted estates better? (Both-supported says API first; the
   console is S2, revisitable.)
 - OQ2 — Status-page "no fiction" contract: is tenant-visible incident
-  history a launch requirement, or does operator-only alerting (C3)
+  history a launch requirement, or does operator-only alerting (G23)
   carry the hosted launch and the page follows? (P3's marketing gate
   constrains launch *copy*, not this — but the page is user-visible,
   so its honesty contract is launch-relevant.)
-- OQ3 — C5's sentinel feed: is the sentinel a distinct service with
+- OQ3 — G25's sentinel feed: is the sentinel a distinct service with
   its own ingestion API, or a view over the control-plane journal?
   (The vision says "shipped to the sentinel" — shipment implies a
   boundary; the spec must name it.)
-- OQ4 — C4's tenant field: operator-declared mapping (G16 interim)
+- OQ4 — G24's tenant field: operator-declared mapping (G16 interim)
   vs provisioner-authoritative (G13). The interim rule exists; the
   question is when the fleet stops trusting the interim.
 
@@ -260,9 +260,9 @@ note, not a consumer.
 
 | ID | Gap | State | Track |
 |---|---|---|---|
-| C1 | Operator fleet console (read API + console) — #795 | Undesigned | open-source |
-| C2 | P7 status page (alert feed formal home) — #796 | Named, undesigned | hosted-product |
-| C3 | Alert fan-out into H14 push plane — #797 | Undesigned | hosted-product |
-| C4 | Tenant-scoped fleet consumption (tenant field + per-tenant alerts) — #798 | Partial design (G19), unimplemented | hosted-product |
-| C5 | Sentinel feed spec + attested channel consumption — #799 | Unspec'd | hosted-product |
-| C6 | Fleet event stream as metering source (S4) — #800 | Unmapped | hosted-product |
+| G21 | Operator fleet console (read API + console) — #795 | Undesigned | open-source |
+| G22 | P7 status page (alert feed formal home) — #796 | Named, undesigned | hosted-product |
+| G23 | Alert fan-out into H14 push plane — #797 | Undesigned | hosted-product |
+| G24 | Tenant-scoped fleet consumption (tenant field + per-tenant alerts) — #798 | Partial design (G19), unimplemented | hosted-product |
+| G25 | Sentinel feed spec + attested channel consumption — #799 | Unspec'd | hosted-product |
+| G26 | Fleet event stream as metering source (S4) — #800 | Unmapped | hosted-product |
