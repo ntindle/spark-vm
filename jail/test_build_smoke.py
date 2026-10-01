@@ -1322,3 +1322,63 @@ class TestPubkeyValidation:
         assert "refusing to build the jail with an invalid agent pubkey" in tail
         # The raw `cat` read is gone — nothing bypasses the validator.
         assert 'PUBKEY="$(cat "$PUBKEY_FILE")"' not in active
+
+
+# ---------------------------------------------------------------------------
+# Issue #438: guest ~/.ssh/environment hardcoded 10.99.0.1 instead of
+# $HOST_VETH_IP. Every other guest artifact takes the proxy address from the
+# host variable; this block now receives it as a guest-side argument ($3)
+# because the outer heredoc is quoted (host vars do not expand there) and
+# the inner environment heredoc is unquoted (the guest var expands there).
+# ---------------------------------------------------------------------------
+
+def _guest_setup_block(src):
+    """Lines of the quoted GUEST_EOF heredoc that builds the guest user."""
+    lines = src.splitlines()
+    start = next(i for i, l in enumerate(lines)
+                 if 'run_guest /bin/bash -s' in l and "<<'GUEST_EOF'" in l)
+    end = next(i for i in range(start + 1, len(lines))
+               if lines[i] == "GUEST_EOF")
+    return lines[start:end + 1]
+
+
+def _ssh_environment_body(src):
+    """Lines of the inner (unquoted) heredoc writing ~/.ssh/environment."""
+    block = _guest_setup_block(src)
+    start = next(i for i, l in enumerate(block)
+                 if ".ssh/environment" in l and "<<EOF" in l)
+    end = next(i for i in range(start + 1, len(block)) if block[i] == "EOF")
+    return block[start:end + 1]
+
+
+class TestSshEnvironmentVethIP:
+    def test_guest_setup_receives_veth_ip(self, src):
+        # The host splices its $HOST_VETH_IP into the guest as an argument
+        # (the outer heredoc is quoted, so it cannot expand there).
+        line = next(l for l in src.splitlines()
+                    if 'run_guest /bin/bash -s' in l and "<<'GUEST_EOF'" in l)
+        assert '"$HOST_VETH_IP"' in line
+
+    def test_veth_ip_bound_to_named_var_with_fail_closed_guard(self, active):
+        block = "\n".join(_guest_setup_block(active))
+        assert 'VETH_IP="$3"' in block
+        # An empty $3 must fail the build loudly, never write a proxy URL
+        # with an empty host.
+        assert '[ -n "$VETH_IP" ]' in block
+
+    def test_environment_heredoc_uses_guest_var_not_literal(self, src):
+        body = "\n".join(_ssh_environment_body(src))
+        assert "$VETH_IP" in body
+        assert "10.99.0.1" not in body
+
+    def test_environment_renders_with_non_default_veth(self, src):
+        # Render the inner (unquoted) heredoc exactly the way the guest
+        # shell does, with a non-default address: the drift is caught only
+        # if no literal address survives.
+        inner = "\n".join(_ssh_environment_body(src)[1:-1])
+        script = "VETH_IP=203.0.113.7\ncat <<EOF\n%s\nEOF\n" % inner
+        r = subprocess.run(["bash", "-c", script],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert "http://203.0.113.7:18080" in r.stdout
+        assert "10.99.0.1" not in r.stdout

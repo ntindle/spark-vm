@@ -224,7 +224,10 @@ def test_answer_trust_prompt_answers_and_returns_true(cli, monkeypatch):
             if "capture-pane" in argv:
                 stdout = panes[0].encode()
             elif "display-message" in argv:
-                stdout = b"bash"
+                # Security B1 (PR #816 review): the gate fires only while the
+                # foreground process is the TUI -- a dead pane is never sent
+                # keystrokes, even with the prompt text in its scrollback.
+                stdout = b"muse"
             else:
                 stdout = b""
         return P()
@@ -234,6 +237,33 @@ def test_answer_trust_prompt_answers_and_returns_true(cli, monkeypatch):
     sent = [" ".join(c) for c in calls if "send-keys" in c]
     assert any(c.endswith(" 1") for c in sent)
     assert any(c.endswith(" Enter") for c in sent)
+
+
+def test_answer_trust_prompt_refuses_dead_pane_with_stale_text(cli, monkeypatch):
+    # Security B1 (PR #816 review, issue #791): a dead pane whose scrollback
+    # tail still shows the gate text must NOT be answered -- typing "1"+Enter
+    # into that shell is a false answer (issue #4). Zero keys sent.
+    pane = "Do you trust this workspace?\n> 1  Trust and continue\n  2  Quit\n$ "
+    calls = []
+
+    def fake_run(*argv, **kw):
+        calls.append(list(argv))
+
+        class P:
+            returncode = 0
+            stderr = b""
+            if "capture-pane" in argv:
+                stdout = pane.encode()
+            elif "display-message" in argv:
+                stdout = b"bash"
+            else:
+                stdout = b""
+        return P()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    assert cli._answer_trust_prompt("demo", timeout=0.01) is False
+    assert [c for c in calls if "send-keys" in c] == []
 
 
 def test_answer_trust_prompt_no_prompt_returns_false(cli, monkeypatch):
@@ -355,3 +385,201 @@ def test_recover_resume_banner_requires_tui_process(cli, monkeypatch):
     fr = _recover_harness(cli, monkeypatch, [shell_pane], pane_cmd="bash")
     assert cli._recover_resume_banner("demo", timeout=60) is False
     assert fr.sent_keys()
+
+
+# ---------------------------------------------------------------------------
+# Issue #791: trust prompts kill jobs despite --yolo.
+#
+# _spawn launched the TUI with --yolo in a brand-new workdir but never
+# answered the workspace-trust gate (only cmd_resume and the fallback-fresh
+# path did). The unanswered TUI session ends, the pane drops to a shell, and
+# the job strands until a human intervenes. Fix: _spawn answers the gate
+# post-launch; the watchdog exposes a trust-prompt pane as its own signal
+# (pane_trust_prompt) and recovers it via _recover_trust_prompt.
+# ---------------------------------------------------------------------------
+import argparse as _argparse
+import json as _json
+import subprocess as _subprocess
+import time as _time
+
+TRUST_GATE_PANE = ("Do you trust this workspace?\n"
+                   "Workspace: /home/ntindle/muse-jobs/demo/work\n"
+                   "> 1  Trust and continue\n"
+                   "  2  Quit\n")
+
+
+def _trust_status(**kw):
+    st = {
+        "slug": "demo", "job_state": "active", "tmux_alive": True,
+        "pane_live_tui": False, "pane_resume_banner": False,
+        "pane_trust_prompt": True, "pane_cmd": "muse",
+        "session_created": _time.time(), "session_uuid": None,
+        "session_status": None, "bytes_total": 0, "bytes_delta": 0,
+        "last_hook_event": None, "progress_age_s": None,
+        "dir_bytes": 0, "elapsed_h": 0.1, "budget_hours": 8,
+    }
+    st.update(kw)
+    return st
+
+
+def _job_status_harness(cli, monkeypatch, pane, pane_cmd):
+    # job_status's subprocess/OS surface, faked at the helper boundary.
+    monkeypatch.setattr(cli, "tmux_alive", lambda slug: True)
+    monkeypatch.setattr(cli, "_capture_pane_state",
+                        lambda target: (pane, pane_cmd))
+    monkeypatch.setattr(cli, "head_info", lambda uuid: (None, 0))
+    monkeypatch.setattr(cli, "last_event", lambda uuid: None)
+    monkeypatch.setattr(cli, "_tmux_session_created",
+                        lambda slug: _time.time())
+    monkeypatch.setattr(cli, "_cached_dir_bytes", lambda job, slug: 0)
+
+
+def test_pane_trust_prompt_set_when_tui_blocked_at_gate(cli, monkeypatch):
+    _job_status_harness(cli, monkeypatch, TRUST_GATE_PANE, "muse")
+    job = {"slug": "demo", "session_uuid": None, "state": "active",
+           "started_at": _time.time()}
+    st = cli.job_status(job, "demo")
+    assert st["pane_trust_prompt"] is True
+    # The gate implies not-live (the trust text vetoes the live check).
+    assert st["pane_live_tui"] is False
+    assert st["pane_resume_banner"] is False
+
+
+def test_pane_trust_prompt_clear_when_shell_holds_stale_text(cli, monkeypatch):
+    # The TUI died at the gate and the pane dropped to a shell; the prompt
+    # text lingers in the scrollback tail. Issue #4: a dead pane must never
+    # be sent keystrokes, so the signal stays clear.
+    _job_status_harness(cli, monkeypatch, TRUST_GATE_PANE + "\n$ ", "bash")
+    job = {"slug": "demo", "session_uuid": None, "state": "active",
+           "started_at": _time.time()}
+    st = cli.job_status(job, "demo")
+    assert st["pane_trust_prompt"] is False
+    assert st["pane_live_tui"] is False
+
+
+def test_pane_trust_prompt_clear_on_live_tui(cli, monkeypatch):
+    _job_status_harness(cli, monkeypatch, LIVE_PANE, "muse")
+    job = {"slug": "demo", "session_uuid": None, "state": "active",
+           "started_at": _time.time()}
+    st = cli.job_status(job, "demo")
+    assert st["pane_trust_prompt"] is False
+    assert st["pane_live_tui"] is True
+
+
+def _spawn_harness(cli, monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(*argv, **kwargs):
+        calls.append(argv)
+        return _subprocess.CompletedProcess(
+            args=list(argv), returncode=0, stdout=b"deadbeef\n", stderr=b"")
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "tmux_alive", lambda slug: False)
+    # Skip the 90s session-uuid discovery poll: the uuid path is not what
+    # these tests pin.
+    monkeypatch.setattr(cli, "find_session",
+                        lambda work, started: "fake-uuid")
+    prompt = tmp_path / "p.md"
+    prompt.write_text("a perfectly innocent prompt with no secrets in it")
+    args = cli.argparse.Namespace(
+        slug="trustjob", repo="https://example.com/SomeOrg/SomeRepo.git",
+        prompt_file=str(prompt), base=None, budget_hours=8,
+        allow_secrets=False)
+    return args
+
+
+def test_spawn_answers_trust_prompt_post_launch(cli, monkeypatch, tmp_path):
+    # Issue #791: the root fix -- _spawn answers the workspace-trust gate
+    # after launching the TUI, exactly like the resume path already did.
+    answered = []
+    monkeypatch.setattr(cli, "_answer_trust_prompt",
+                        lambda slug, timeout=20: answered.append(slug) or True)
+    args = _spawn_harness(cli, monkeypatch, tmp_path)
+    cli._spawn(args.slug, args)  # returns None on success; would raise first
+    assert answered == ["trustjob"]
+
+
+def test_recover_trust_prompt_reports_answered_when_live(cli, monkeypatch):
+    answered = []
+    monkeypatch.setattr(cli, "_answer_trust_prompt",
+                        lambda slug, timeout=20: answered.append(slug) or True)
+    monkeypatch.setattr(cli, "_capture_pane_state",
+                        lambda target: ("❯ \n", "muse"))
+    ev = cli._recover_trust_prompt("demo")
+    assert answered == ["demo"]  # the answer attempt is the point
+    assert ev["job"] == "demo"
+    assert ev["signal"] == "trust-answered"
+
+
+def test_recover_trust_prompt_pages_when_still_blocked(cli, monkeypatch):
+    # The gate is still showing (or the capture failed): loud, actionable,
+    # with the exact operator remedy -- never lumped into tui-dead.
+    monkeypatch.setattr(cli, "_answer_trust_prompt", lambda slug, timeout=20: False)
+    monkeypatch.setattr(cli, "_capture_pane_state",
+                        lambda target: ("", "bash"))
+    ev = cli._recover_trust_prompt("demo")
+    assert ev["signal"] == "blocked-trust"
+    assert "muse-job log" in ev["detail"]
+
+
+def _make_watch_job(cli, slug):
+    jd = cli.job_dir(slug)
+    os.makedirs(jd, exist_ok=True)
+    job = {"slug": slug, "state": "active", "started_at": _time.time(),
+           "session_uuid": None}
+    with open(cli.job_json_path(slug), "w") as f:
+        _json.dump(job, f)
+
+
+def _watch_events(cli, capsys):
+    rc = cli.cmd_watch(_argparse.Namespace())
+    assert rc == 0
+    return [_json.loads(l) for l in capsys.readouterr().out.splitlines()
+            if l.strip()]
+
+
+def test_watch_emits_trust_answered_for_blocked_pane(cli, monkeypatch, capsys):
+    # End to end through cmd_watch: a live tmux whose TUI sits at the trust
+    # gate yields the distinct trust-answered signal, not generic tui-dead.
+    _make_watch_job(cli, "trustjob")
+    monkeypatch.setattr(cli, "job_status",
+                        lambda job, slug: _trust_status(slug=slug))
+    answered = []
+    monkeypatch.setattr(cli, "_answer_trust_prompt",
+                        lambda slug, timeout=20: answered.append(slug) or True)
+    monkeypatch.setattr(cli, "_capture_pane_state",
+                        lambda target: ("❯ \n", "muse"))
+    monkeypatch.setattr(cli, "_emit_tui_swap_event",
+                        lambda job, slug, pane_cmd, events: None)
+    monkeypatch.setattr(cli, "maybe_adopt_session",
+                        lambda job, slug: (None, None))
+    monkeypatch.setattr(cli, "git_diffstat", lambda path: "")
+    events = _watch_events(cli, capsys)
+    by_sig = {}
+    for e in events:
+        by_sig.setdefault(e["signal"], []).append(e)
+    assert answered == ["trustjob"]
+    assert "trust-answered" in by_sig
+    assert by_sig["trust-answered"][0]["job"] == "trustjob"
+    assert "tui-dead" not in by_sig  # distinct signal, not the generic lump
+
+
+def test_watch_emits_blocked_trust_when_gate_persists(cli, monkeypatch, capsys):
+    # The answer attempt did not clear the gate: the loud blocked-trust
+    # page fires instead of a silent strand.
+    _make_watch_job(cli, "trustjob")
+    monkeypatch.setattr(cli, "job_status",
+                        lambda job, slug: _trust_status(slug=slug))
+    monkeypatch.setattr(cli, "_answer_trust_prompt",
+                        lambda slug, timeout=20: False)
+    monkeypatch.setattr(cli, "_capture_pane_state",
+                        lambda target: (TRUST_GATE_PANE, "muse"))
+    monkeypatch.setattr(cli, "_emit_tui_swap_event",
+                        lambda job, slug, pane_cmd, events: None)
+    monkeypatch.setattr(cli, "maybe_adopt_session",
+                        lambda job, slug: (None, None))
+    monkeypatch.setattr(cli, "git_diffstat", lambda path: "")
+    events = _watch_events(cli, capsys)
+    sigs = [e["signal"] for e in events if e["job"] == "trustjob"]
+    assert "blocked-trust" in sigs
