@@ -462,10 +462,10 @@ def fake_bridge():
             proc.wait(timeout=10)
 
 
-# Port 1 (tcpmux) is never bound in test environments and unprivileged
-# users cannot bind it, so an HTTP request there is a race-free "dead
-# bridge": unlike a bind-then-close socket, there is no window in which
-# another process can win the port between close and connect.
+# Port 1 (tcpmux) is never bound in test environments, so an HTTP
+# request there is a race-free "dead bridge": unlike a bind-then-close
+# socket, there is no window in which another process can win the port
+# between close and connect.
 _DEAD_BRIDGE_URL = "http://127.0.0.1:1"
 
 # The production bridge address both probe functions default to
@@ -474,26 +474,37 @@ _DEFAULT_BRIDGE_PORT = 18731
 
 
 def fake_bridge_on_default_port():
-    """Context manager binding the fake bridge on the production bridge
-    port (18731) so the no-arg default-URL call sites can be exercised
-    behaviorally. Raises RuntimeError if the port is taken (e.g. the real
-    bridge is running) — callers skip the test in that case."""
+    """Bind the fake bridge on the production bridge port (18731) so the
+    no-arg default-URL call sites can be exercised behaviorally. Returns
+    the server (caller must shutdown()/server_close()); raises OSError
+    if the port is taken (e.g. the real bridge is running) — callers
+    skip the test in that case."""
     import http.server
-    srv = http.server.HTTPServer(
-        ("127.0.0.1", _DEFAULT_BRIDGE_PORT),
-        type("H18731", (http.server.BaseHTTPRequestHandler,), {
-            "do_GET": lambda self: (
-                self.send_response(200),
-                self.send_header("Content-Type", "application/json"),
-                self.end_headers(),
-                self.wfile.write(
-                    b'{"ok": true, "input": {"state": "ok", '
-                    b'"detail": "default-port", "checked_at": 1, '
-                    b'"driver": "test"}}'),
-            ),
-            "log_message": lambda self, *a: None,
-        }))
     import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        # Like the fixture fake bridge, unknown paths 404 — a production
+        # typo in the request path must fail loudly here too, or the
+        # default-URL tests would pass vacuously on the wrong path.
+        def do_GET(self):
+            if self.path.split("?", 1)[0] != "/api/status":
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = (b'{"ok": true, "input": {"state": "ok", '
+                    b'"detail": "default-port", "checked_at": 1, '
+                    b'"driver": "test"}}')
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", _DEFAULT_BRIDGE_PORT), H)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     return srv
