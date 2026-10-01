@@ -308,8 +308,12 @@ waits on:
   No box-side change. #608's acceptance sketch is this slice.
 - **S2 — box-side journal + gate aggregation:** `update-events.jsonl`
   emitted in-shape by both updaters; per-wave outcome census, failure-rate
-  baseline inputs, per-(box,session,build) soak windows; event↔inventory
-  cross-checks; the 90-day/30-day journal discipline shared with G16.
+  baseline inputs, per-(box,session,build) soak windows;
+  event↔inventory cross-checks (**shipped** — `fleet events crosscheck`
+  evaluates each box's `deploy`/`succeeded` claims against the inventory
+  journal: confirmed / violation (flagged, not convicted) / inconclusive;
+  rolled-back/restored claims remain a follow-up; PR (#809));
+  the 90-day/30-day journal discipline shared with G16.
 - **S3 — hosted endpoint:** control-plane push endpoint on G13's signed
   box→plane channel; `attested` admission rule for gate quorum;
   per-tenant attribution and slicing (H11); tenant-fleet alert routing.
