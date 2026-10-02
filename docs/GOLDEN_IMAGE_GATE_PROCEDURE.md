@@ -99,21 +99,66 @@ harness/sign-image-manifest.sh --gen-key /secure/path/image-mf   # once per oper
 harness/sign-image-manifest.sh <manifest.json> --key /secure/path/image-mf.priv.pem
 # Bake <manifest.json> AND <manifest.json>.sig into the image
 # (default sig path is the manifest path + ".sig").
+```
 
+**Pre-publish:** run the signed check against the *baked* image before
+publishing — a forgotten `.sig` fails loudly at provision time (fail
+closed, safe) but late; catch it here:
+
+```bash
+harness/check-image-manifest.sh /etc/sparkvm/image-manifest.json \
+    --expect-version <SHA> --pubkey "20261002a=/path/to/image-mf.pub.pem"
+```
+
+```bash
 # At gate / provision time (verification key ships with the injector config):
 harness/check-image-manifest.sh <manifest.json> --expect-version <SHA> \
-    --pubkey /path/to/image-mf.pub.pem
+    --pubkey "20261002a=/path/to/image-mf.pub.pem"
 ```
 
 The signature is verified over the manifest's exact bytes **before any
 JSON is parsed**, and the preflight fails closed on a missing, malformed,
 or mismatched signature. The provision-time injector enables this with
-`INJECT_MANIFEST_PUBKEY=<pubkey.pem>` in its environment. The drift check
-still runs after the signature: the signature proves the bytes were
+`INJECT_MANIFEST_PUBKEY="20261002a=/path/to/image-mf.pub.pem"` in its
+environment (repeatable `--pubkey` flags join the same window). The drift
+check still runs after the signature: the signature proves the bytes were
 authorized by the key holder, the drift check proves they name the code
 you reviewed. An unsigned preflight (no `--pubkey`) is the weaker,
 self-attestation claim — name it as such in the gate record while
 unsigned images remain in service.
+
+Scope, stated plainly: a signed manifest plus an unsigned image is the
+#155 scope — the signature defeats a lying manifest from a tampered
+registry or build host, but a tampered image carrying the *original*
+signed manifest still passes. Image-byte attestation is a separate
+problem, not this one.
+
+The injector's provision report records the mode as
+`steps.manifest: "ok-signed"` vs `"ok-unsigned-legacy"`, so the migration
+is observable fleet-wide: the day every box reports `ok-signed`, the
+unsigned path can be retired.
+
+**Prerequisite:** the signed path needs `pip install cryptography` on the
+image-build host and on the provisioner (the unsigned check is stdlib-only).
+
+### Key rotation
+
+`--pubkey` takes a rotation window in the fleet's `key_id=/path`
+convention (comma-separated, or repeatable `--pubkey` flags); the
+signature verifies if **any** window key matches, and the check logs the
+`key_id` that verified. Rotate without a flag day:
+
+1. `sign-image-manifest.sh --gen-key /secure/path/image-mf-next` and
+   record its printed `SHA256:` fingerprint; compare it out-of-band when
+   configuring the provisioner (trust-on-first-use).
+2. Add the new key to the window:
+   `INJECT_MANIFEST_PUBKEY="20261002a=/path/to/image-mf.pub.pem,20261002b=/path/to/image-mf-next.pub.pem"`.
+3. Bake new images signed with the new key; retire the old images.
+4. Drop the old `key_id` from the window.
+
+A stolen signing key is answered by rotating forward — old images keep
+verifying under the old `key_id` until they are retired, and the verify
+log shows which key each preflight used.
 
 ## Step 0b — baked-secrets negative scan (pre-publish refusal)
 
