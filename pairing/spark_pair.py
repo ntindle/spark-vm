@@ -76,6 +76,24 @@ def _read_json_file(path):
         return json.load(f)
 
 
+# Marker _http sets on the *synthesized* 404 fallback payload only: the
+# plane answered 404 with no JSON body at all, i.e. the endpoint is not
+# implemented yet. The "endpoint not implemented" classification keys on
+# this marker — never on the "http=404" error string, which a JSON plane
+# can legitimately return for some *other* failure (#882).
+_TRANSPORT_404 = "_transport_404"
+
+
+def _plane_missing(resp):
+    """True when resp is _http's synthesized 404 fallback (the control
+    plane has no JSON body at this path). A hostile or buggy plane cannot
+    forge it: _http strips the marker from plane-returned bodies and sets
+    it only on the payloads it synthesizes itself. One predicate for all
+    three call sites (rotate/revoke/heartbeat), so the classification rule
+    lands once (#880, #882)."""
+    return isinstance(resp, dict) and resp.get(_TRANSPORT_404) is True
+
+
 def _http(method, url, body=None, headers=None):
     data = json.dumps(body).encode() if body is not None else None
     hdrs = {"User-Agent": USER_AGENT, **(headers or {})}
@@ -95,18 +113,34 @@ def _http(method, url, body=None, headers=None):
                 return resp.status, {
                     "ok": False,
                     "error": "malformed plane response (non-object body)"}
+            # A hostile plane cannot smuggle the fallback marker into a
+            # 2xx body either: only _http may set it, and it never does
+            # here. Strip it to keep that invariant global.
+            payload.pop(_TRANSPORT_404, None)
             return resp.status, payload
     except urllib.error.HTTPError as e:
         try:
             payload = json.loads(e.read().decode())
         except Exception:
-            payload = {"ok": False, "error": f"http={e.code}"}
+            payload = None  # not a JSON body at all
         if not isinstance(payload, dict):
             # Mirror the 2xx normalization above: a JSON list/string/null
             # error body would otherwise AttributeError at the first
             # resp.get(). Keep the http=NNN marker so the 404
             # endpoint-detection (rotate/revoke/heartbeat) keeps working.
             payload = {"ok": False, "error": f"http={e.code}"}
+            if e.code == 404:
+                # Mark the synthesized fallback (#882): the "endpoint not
+                # implemented" classification keys on this marker, not on
+                # the error string, which a JSON plane can legitimately
+                # return for some other failure.
+                payload[_TRANSPORT_404] = True
+        else:
+            # A hostile or buggy plane must not be able to forge the
+            # fallback marker: strip it from plane-returned bodies, so
+            # _plane_missing only ever fires on payloads _http synthesized
+            # itself.
+            payload.pop(_TRANSPORT_404, None)
         return e.code, payload
     except Exception as e:  # network down, DNS, TLS...
         return 0, {"ok": False, "error": f"transport: {e}"}
@@ -403,6 +437,9 @@ def cmd_rotate(args):
     # T2 lands last).
     lock_path = os.path.join(d, ".rotate.lock")
     lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    # 0600 at creation is not enough: a pre-existing lock file keeps its
+    # wider mode through the open. Force it every time (#883).
+    os.fchmod(lock_fd, 0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         return _cmd_rotate_locked(args, d, enroll_path, box_id, token,
@@ -420,10 +457,10 @@ def _cmd_rotate_locked(args, d, enroll_path, box_id, token, control,
         "POST", control.rstrip("/") + "/v1/boxes/token/rotate",
         {"signature": sig_b64},
         {"Authorization": "Bearer " + token})
-    if status == 404 and resp.get("error") == "http=404":
-        # The _http fallback payload (no JSON body): the plane does not
-        # implement the endpoint yet — do NOT report this as any other
-        # failure class.
+    if status == 404 and _plane_missing(resp):
+        # _http's synthesized 404 fallback (no JSON body at all): the
+        # plane does not implement the endpoint yet — do NOT report this
+        # as any other failure class.
         print("rotation failed: this control plane does not implement "
               "POST /v1/boxes/token/rotate yet (shipped on the hosted plane "
               "2026-10-02 — verify your control plane is current) — "
@@ -488,16 +525,16 @@ def cmd_revoke(args):
         "POST", control.rstrip("/") + "/v1/boxes/"
         + urllib.parse.quote(box_id, safe="") + "/revoke", None,
         {"Authorization": "Bearer " + _owner_key(args)})
+    if status == 404 and _plane_missing(resp):
+        # _http's synthesized 404 fallback (no JSON body at all): the
+        # plane does not implement the endpoint yet — not "no such box".
+        print("revoke failed: this control plane does not implement "
+              "POST /v1/boxes/{id}/revoke yet (shipped on the hosted plane "
+              "2026-10-02 — verify your control plane is current) — "
+              "nothing was revoked")
+        return 1
     if status == 404:
-        if resp.get("error") == "http=404":
-            # The _http fallback payload (no JSON body): the plane does not
-            # implement the endpoint yet — not "no such box".
-            print("revoke failed: this control plane does not implement "
-                  "POST /v1/boxes/{id}/revoke yet (shipped on the hosted plane "
-                  "2026-10-02 — verify your control plane is current) — "
-                  "nothing was revoked")
-        else:
-            print(f"no such box: {box_id}")
+        print(f"no such box: {box_id}")
         return 1
     if status != 200 or not resp.get("ok"):
         print(f"revoke failed: {resp.get('error', status)}")
@@ -601,9 +638,9 @@ def _heartbeat_result(d, box_id, token, sent_at, status, resp):
                  "re-pair the box (`request` + `redeem`)",
               redact=(token,))
         return 1
-    if status == 404 and resp.get("error") == "http=404":
-        # The _http fallback payload (no JSON body): the plane does not
-        # implement the endpoint yet — not "no such box".
+    if status == 404 and _plane_missing(resp):
+        # _http's synthesized 404 fallback (no JSON body at all): the
+        # plane does not implement the endpoint yet — not "no such box".
         _fail(d, "heartbeat failed: this control plane does not implement "
                  "POST /v1/boxes/{id}/heartbeat yet — nothing was changed",
               redact=(token,))
@@ -651,6 +688,9 @@ def cmd_heartbeat(args):
     lock_path = os.path.join(d, ".heartbeat.lock")
     try:
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        # 0600 at creation is not enough: a pre-existing lock file keeps
+        # its wider mode through the open. Force it every time (#883).
+        os.fchmod(lock_fd, 0o600)
     except OSError as e:
         _fail(d, f"heartbeat FAILED: cannot open lock file ({e}) — "
                  "check state-dir permissions")
