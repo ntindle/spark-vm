@@ -171,6 +171,12 @@ INVITE_TTL_SECONDS = 14 * 86400  # invite claim window (WAITLIST_OPERATIONS §7)
 REMINDER_LEAD_SECONDS = 7 * 86400
 DROP_TTL_SECONDS = 14 * 86400
 PURGE_TTL_SECONDS = 30 * 86400
+# #400: triage/ raw-mail retention — files older than this are purged on
+# every triage write (WAITLIST_OPERATIONS.md §5). 48h mirrors the patha
+# ledger's abuse-detection window: triage exists for the operator to
+# eyeball recent unprocessable mail, and 48h bounds the PII a triaged
+# "forget me" reply can linger for.
+TRIAGE_RETENTION_SECONDS = 2 * 86400
 
 # Path-A (email) intake: max submissions per sender address per 24h
 # (WAITLIST_OPERATIONS.md §6 — "a Muse fleet *can* spray"; the confirm
@@ -463,6 +469,32 @@ def normalize_email(addr: str):
         return None
     domain = domain.lower()
     return f"{local}@{domain}"
+
+
+def _forget_matchers(address):
+    """Byte matchers for the #400 forget scrubs.
+
+    Returns (needle, variant_re): the canonical lowercased address as
+    bytes, plus a bytes regex for plus-tagged variants
+    (`local+tag@domain`). Raw inbound mail and quarantined bytes carry
+    the UN-normalized form — the triaged "forget me" reply #400 names
+    is usually plus-tagged or cased differently from the canonical
+    form, so the canonical needle alone would miss it. Both matchers
+    run against case-folded bytes; callers fold once.
+    """
+    needle = address.lower().encode("utf-8", errors="replace")
+    local, _, domain = address.partition("@")
+    variant_re = re.compile(
+        re.escape(local.encode("utf-8")) + rb"\+[^@\s]+@"
+        + re.escape(domain.encode("utf-8"))
+    )
+    return needle, variant_re
+
+
+def _blob_holds_address(blob, needle, variant_re):
+    """True when the (already case-folded) bytes hold the canonical
+    address or a plus-tagged variant of it."""
+    return needle in blob or variant_re.search(blob) is not None
 
 
 def masked_owner(normalized: str) -> str:
@@ -1640,6 +1672,10 @@ class WaitlistService:
         """
         triage_dir = os.path.join(self.data_dir, "triage")
         os.makedirs(triage_dir, exist_ok=True)
+        # #400: purge triage files older than TRIAGE_RETENTION_SECONDS on
+        # every write — raw inbound mail (addresses included) used to
+        # accumulate here with no retention policy at all.
+        self._sweep_stale_triage()
         name = (f"{int(self.clock().timestamp())}-"
                 f"{secrets.token_hex(4)}.eml")
         if isinstance(raw, bytes):
@@ -1656,6 +1692,40 @@ class WaitlistService:
             fh.write(f"X-Waitlist-Triage-Reason: {reason}\n\n")
             fh.write(text)
         return name
+
+    def _sweep_stale_triage(self):
+        """#400: triage/ previously had no retention policy — raw inbound
+        mail (with addresses) accumulated forever. Every triage write
+        first purges files older than TRIAGE_RETENTION_SECONDS, keyed on
+        the daemon-clock timestamp in the filename (the same clock that
+        wrote it, so the sweep stays deterministic under test clocks).
+        Files that do not match the `{ts}-{hex}.eml` naming pattern are
+        left alone — operator hand-placed files are not ours to reap.
+        Opportunistic like the patha ledger's prune-on-append: no cron,
+        no new moving parts. Best-effort under concurrency: triage_inbound
+        is also called from the lockless single-message patha CLI, so two
+        racing sweeps may attempt the same unlink — the loser's
+        FileNotFoundError is swallowed, and filenames are unique per
+        write, so no write is ever lost to the sweep.
+        """
+        triage_dir = os.path.join(self.data_dir, "triage")
+        cutoff = self.clock().timestamp() - TRIAGE_RETENTION_SECONDS
+        try:
+            names = os.listdir(triage_dir)
+        except OSError:
+            return
+        for name in names:
+            if not name.endswith(".eml"):
+                continue
+            try:
+                ts = int(name.split("-", 1)[0])
+            except ValueError:
+                continue  # not our naming pattern — leave it alone
+            if ts < cutoff:
+                try:
+                    os.unlink(os.path.join(triage_dir, name))
+                except OSError:
+                    pass
 
     def _spool_patha_email(self, to, subject, body, kind, entry_id=None):
         """Spool a path-A transactional email (clarification reply or
@@ -1942,6 +2012,185 @@ class WaitlistService:
         return 200, page_forget_button(
             token, masked_owner(row["owner_email"]))
 
+    # -- forget erasure (#400) ------------------------------------------------
+    # "Forget me" means the address becomes unrecoverable from every
+    # operator-controlled store — not just rows.jsonl. The four helpers
+    # below scrub the auxiliary stores that key on the address; they run
+    # under the data lock + thread lock, like every other mutating path
+    # (forget_post calls them after the row commit).
+
+    def _scrub_patha_ledger(self, address):
+        """Drop every patha_events.jsonl line keyed by `address` (exact
+        match, plus a re-normalized match as belt-and-braces — the
+        writer always records the normalized form). The rewrite is
+        atomic (tmp + fsync + os.replace, the #402 discipline): a
+        kill -9 mid-scrub leaves the old ledger or the new one, never a
+        torn one. Returns the number of lines dropped."""
+        path = os.path.join(self.data_dir, "patha_events.jsonl")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError:
+            return 0
+        kept = []
+        dropped = 0
+        for line in lines:
+            try:
+                rec = json.loads(line).get("address")
+            except (ValueError, AttributeError):
+                # Garbled line: drop, like the prune in
+                # _record_patha_event. A line we cannot parse we cannot
+                # prove address-free, and erasure must be complete.
+                dropped += 1
+                continue
+            # A non-string address (externally-tampered ledger) must not
+            # crash the scrub: normalize_email expects a str.
+            if isinstance(rec, str) and (
+                rec == address or normalize_email(rec) == address
+            ):
+                dropped += 1
+                continue
+            kept.append(line)
+        if not dropped:
+            return 0
+        tmp = path + ".scrub-tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.writelines(kept)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return dropped
+
+    def _scrub_triage_for(self, address):
+        """Delete triage/*.eml files holding the forgotten address.
+
+        Matching is case-insensitive on the canonical address plus
+        plus-tagged variants (see _forget_matchers) — raw inbound mail
+        carries the un-normalized From, so the triaged "forget me"
+        reply with no matching row is usually plus-tagged or cased
+        differently from the canonical form. Raw forms a byte scan
+        cannot attribute (display names, encoded-word splits) are
+        bounded by the 48h _sweep_stale_triage retention instead
+        (WAITLIST_OPERATIONS.md §5). Returns the number of files
+        removed.
+        """
+        triage_dir = os.path.join(self.data_dir, "triage")
+        needle, variant_re = _forget_matchers(address)
+        try:
+            names = os.listdir(triage_dir)
+        except OSError:
+            return 0
+        removed = 0
+        for name in names:
+            if not name.endswith(".eml"):
+                continue
+            try:
+                with open(os.path.join(triage_dir, name), "rb") as fh:
+                    blob = fh.read().lower()
+            except OSError:
+                continue
+            if _blob_holds_address(blob, needle, variant_re):
+                try:
+                    os.unlink(os.path.join(triage_dir, name))
+                except OSError:
+                    continue
+                removed += 1
+        return removed
+
+    def _scrub_quarantine_sidecars(self, address):
+        """Filter rows.jsonl.skipped.*.jsonl sidecars: quarantined bytes
+        the loader could not parse may carry the forgotten address
+        (WAITLIST_OPERATIONS.md §5 — forget previously could not see
+        them). Lines containing the address (case-insensitive) are
+        dropped and the sidecar rewritten atomically (tmp + fsync +
+        os.replace); a sidecar with nothing surviving is removed. The
+        operator's hand-review contract for surviving lines stands.
+        Matching is case-insensitive on the canonical address plus
+        plus-tagged variants (see _forget_matchers); raw forms a byte
+        scan cannot attribute are caught only opportunistically at
+        hand-review (WAITLIST_OPERATIONS.md §5).
+        Returns the number of lines dropped."""
+        needle, variant_re = _forget_matchers(address)
+        try:
+            names = os.listdir(self.data_dir)
+        except OSError:
+            return 0
+        dropped_total = 0
+        for name in names:
+            if not (name.startswith("rows.jsonl.skipped.")
+                    and name.endswith(".jsonl")):
+                continue
+            path = os.path.join(self.data_dir, name)
+            try:
+                with open(path, "rb") as fh:
+                    lines = fh.read().splitlines(keepends=True)
+            except OSError:
+                continue
+            kept = [ln for ln in lines
+                    if not _blob_holds_address(ln.lower(), needle,
+                                               variant_re)]
+            dropped = len(lines) - len(kept)
+            if not dropped:
+                continue
+            if kept:
+                tmp = path + ".scrub-tmp"
+                try:
+                    with open(tmp, "wb") as fh:
+                        fh.writelines(kept)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                    os.replace(tmp, path)
+                except OSError:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    continue
+            else:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    continue
+            dropped_total += dropped
+        return dropped_total
+
+    def _purge_spool_for(self, address):
+        """Delete pending spool docs addressed to the forgotten owner
+        (parsed "to" == address) so the operator's external sender never
+        mails a forgotten address. Runs BEFORE the deletion confirmation
+        is queued — the confirmation is the last mail ever sent to that
+        address. Unparseable spool files are left alone: their ownership
+        cannot be proven, and _write_spool never leaves torn files.
+        Returns the number of spool files purged.
+        (Matching is exact `==`, not re-normalized: every spool writer
+        records the normalized form — `row["owner_email"]`, or `sender`
+        normalized at the patha intake boundary — so a case/plus-tag
+        variant can never be a spool "to".)
+        """
+        try:
+            names = os.listdir(self.spool_dir)
+        except OSError:
+            return 0
+        purged = 0
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(self.spool_dir, name)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    doc = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(doc, dict):
+                continue  # valid JSON, not a doc — ownership unprovable
+            if doc.get("to") == address:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    continue
+                purged += 1
+        return purged
+
     def forget_post(self, token):
         """POST /waitlist/forget — token as form field. Deletes the row.
 
@@ -1969,9 +2218,17 @@ class WaitlistService:
         clicked (a crash there leaves the forget link live and the row
         deletable), and the #388 GC inside _rewrite_rows prunes them so
         they do not accumulate. The residual windows (rewrite-then-emit,
-        emit-then-spool) are documented in #394/#397 — a lost `forgot`
-        event or confirmation email after a committed deletion, same as
-        every other path here.
+        emit-then-spool — and, since #400, commit-then-scrub for the
+        auxiliary stores: a kill between the row commit and the
+        ledger/triage/sidecar/spool scrub leaves the row deleted but the
+        auxiliary copies behind. Each half has its own bound: triage by
+        the 48h sweep, the ledger by its own 48h prune-on-append, spool
+        by drain latency (a crash there can deliver older pending mail
+        after the confirmation — ordering violated, no third-party
+        leak), sidecars by the operator's hand-review only. See
+        WAITLIST_OPERATIONS.md §5 for the recovery procedure.) are
+        documented in #394/#397 — a lost `forgot` event or confirmation
+        email after a committed deletion, same as every other path here.
         """
         with data_lock(self.data_dir), self._lock:
             self._refresh_under_lock()
@@ -2029,6 +2286,18 @@ class WaitlistService:
                 del self.by_email[owner]
             self._rewrite_rows()
             self._consume_token(token)
+            # #400: forget is full erasure from every operator-controlled
+            # store — the row is gone (above); now scrub the auxiliary
+            # stores that still key on the address. A crash past the row
+            # commit can leave these unrun (#394-style residual: the PII
+            # is deleted from rows first, fail-safe; the scrub is
+            # best-effort after). The spool purge runs BEFORE the deletion
+            # confirmation is queued, so the confirmation is the last mail
+            # ever sent to that address.
+            self._scrub_patha_ledger(owner)
+            self._scrub_triage_for(owner)
+            self._scrub_quarantine_sidecars(owner)
+            self._purge_spool_for(owner)
             self._emit("forgot", entry_id)
             self._queue_deleted_email(owner, entry_id)
             return 200, page_deleted()

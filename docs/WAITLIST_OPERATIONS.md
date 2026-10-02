@@ -236,24 +236,95 @@ confirmation email containing the signed forget link, and the row is
 deleted only after the link is clicked (proving inbox access), within 7
 days, with a confirmation sent.
 
+**Deletion policy — what "forget" erases (#400):** a honored forget makes
+the address unrecoverable from the live data stores the daemon manages,
+not just the row store. (Backups are outside this guarantee — see
+**Backups** below.) On `POST /waitlist/forget`, after the row leaves
+`rows.jsonl` via the atomic rewrite, the daemon scrubs, under the same
+locks: (1) `patha_events.jsonl` — every ledger line keyed by the address
+is dropped (atomic rewrite; the address's rate-limit history dies with
+it, so a re-signup starts with fresh caps — that is the honest
+post-erasure semantic); (2) `triage/*.eml` — any triage file holding the
+address is deleted (this is what removes the triaged "forget me" reply
+with no matching row); (3) `rows.jsonl.skipped.*.jsonl` quarantine
+sidecars — quarantined lines holding the address are filtered out
+(atomically; empty sidecars removed); (4) `spool/` — any *pending* spool
+doc addressed to the owner is deleted before the deletion confirmation
+is queued, so the confirmation is the last mail ever sent to that
+address. Funnel events carry only the pseudonymous `entry_id`, never
+the address — nothing to scrub. `consumed_tokens.txt` holds HMAC tokens,
+not PII.
+
+**Matching scope (honest residual):** the triage/sidecar scrubs match the
+canonical address (lowercased, plus-tag-stripped — the form every writer
+records) case-insensitively, *plus* plus-tagged variants
+(`local+tag@domain`), because raw inbound mail carries the
+un-normalized From and the triaged "forget me" reply is usually
+plus-tagged or cased differently. Raw forms a byte scan cannot
+attribute — display names without the address, encoded-word splits
+across line boundaries — are missed by the targeted scrub: for triage
+they are bounded by the 48h retention sweep; for sidecars they are
+caught only opportunistically at the operator's hand-review.
+
+**Crash residual and recovery:** a kill between the row commit and the
+scrub leaves the row deleted (fail-safe) with auxiliary copies behind.
+Each half has its own bound: triage by the 48h sweep, the ledger by its
+own 48h prune-on-append, spool by drain latency, sidecars by the
+operator's hand-review only. Detection: the row is gone from
+`rows.jsonl` but `funnel_events.jsonl` has no matching `forgot` event
+and no `deleted`-kind spool doc was queued — while the user sees
+"already deleted" and cannot re-trigger the scrub. (Precision: a crash
+between the row commit and the forget-token consume leaves the forget
+link *live*, not consumed — re-clicking it then runs the full forget
+path, scrubs included. Only a crash *after* the consume strands the
+scrub.) Recovery, by hand, in the data dir: (1) confirm the row is gone;
+(2) delete `patha_events.jsonl` lines whose `"address"` is the forgotten
+address (or wait out the ledger's 48h prune); (3) delete `triage/*.eml`
+files containing the address (case-insensitive, plus-tag variants
+included); (4) filter `rows.jsonl.skipped.*.jsonl` lines containing it;
+(5) delete pending `spool/*.json` docs with `"to"` equal to the address;
+(6) if no deletion confirmation was ever queued, send one manually —
+the user was promised it.
+
+**Backups:** snapshots or backups of the data dir taken *before* the
+forget still contain the address, and no code change can erase them.
+The forget guarantee covers the live stores only. The operator must
+rotate/destroy pre-forget backups under their own backup retention —
+until that happens, a restored backup reintroduces the address.
+
 **Retention:** unconfirmed → dropped at 14d, row deleted 30d after drop —
 a dropped row with no recorded drop date is never auto-purged (the 30
 days cannot be proven); the operator removes it by hand;
 confirmed → kept until launch + 90 days (the invite window), then
 anonymized to counts; invited-but-expired → returns to `confirmed` with
 `confirmed_at` reset to the expiry time (back of the queue, no
-re-confirmation needed — the address is already verified).
+re-confirmation needed — the address is already verified);
+triage → 48h: every triage write purges files older than 48h (the
+daemon-clock timestamp in the filename; non-conforming filenames are
+left alone). 48h is the operator's review-cadence bound, not a
+borrowed window: unprocessable mail is eyeballed within a day or two
+or it never will be, and raw inbound mail is the highest-PII-density
+store outside the row store — anything older is either handled or
+stale, and keeping it only extends the exposure.
+
+**Spool-drain contract (operator's sender):** spool files are drained as
+JSON by the operator's external sender; the contract is now stated, not
+implied — the sender MUST delete each spool file after a successful
+send. A spool file is the only copy of its email; retention is bounded
+by drain latency, and a forgotten address's deletion confirmation is
+deleted on send like any other. The operator MUST NOT retain spool
+files beyond successful delivery.
 
 **Quarantined skipped lines:** when the service finds a torn or malformed
 line while loading the waiting list, the unreadable bytes are quarantined
 to a `rows.jsonl.skipped.<timestamp>.jsonl` sidecar in the data directory
 before any rewrite — never silently destroyed. Those sidecars may contain
 `owner_email` PII from lines the loader could not parse; they inherit the
-data directory's encrypted-at-rest property but are NOT covered by the
-automatic retention timers above (a quarantined line never entered the
-row store, so forget/purge cannot see it either — see #400). The operator
-must review each sidecar and delete it after hand-repair or deliberate
-retirement.
+data directory's encrypted-at-rest property. Since #400, a honored forget
+automatically filters the forgotten address out of these sidecars (see
+Deletion policy above); lines for other addresses keep the operator's
+hand-review contract — the operator must review each sidecar and delete
+it after hand-repair or deliberate retirement.
 
 ## 6. Abuse model
 
@@ -493,6 +564,11 @@ criterion:
   position lookup.
 - [ ] **Invite sender**: fills pricing + trial terms at send time; 14d
   expiry; signed position line in emails.
+- [ ] **Spool-draining sender**: the external sender that drains `spool/`
+  deletes each spool file after successful send and never retains them
+  (the §5 spool-drain contract — a spool file is the only copy of its
+  email, and a forgotten address's deletion confirmation is deleted on
+  send like any other).
 - [ ] **Forget-me handler**: signed footer link honored ≤7d,
   confirmation sent; reply-"forget me" → confirmation email with the
   signed link (never direct deletion).
