@@ -125,7 +125,13 @@ def test_manifest_shape_and_fields():
     assert m["vm_endpoint"] == "10.0.0.7:22"
     assert m["box_id"] == "box-1"
     assert "comment" not in json.dumps(m)  # operator comments never leak in
-    assert m["policy"]["rotation"].startswith("not-implemented")
+    # #826: the policy map describes the SHIPPED mechanics (rotation
+    # lineage-recorded, claim protocol live) — "not-implemented" was the
+    # pre-S2.5/S3 truth.
+    assert "not-implemented" not in m["policy"]["rotation"]
+    assert "lineage" in m["policy"]["rotation"]
+    assert "claim" in m["policy"]
+    assert "single-use" in m["policy"]["claim"]
 
 
 def test_manifest_expiry_defaults_to_none():

@@ -69,7 +69,10 @@ tests). The root dir is `0700`, the store `0600`.
   itself is slice S3 (#446) and is shipped (see "Claim protocol" below).
   `remove` is a deliberate
   deprovisioning operation (account teardown / key retirement), not an
-  undo button — it has no audit trail by design at this slice; deleting a
+  undo button — since #825 it appends to the bounded `deletions` journal
+  (lineage context + `deleted_at`, capped at 1000, oldest-first
+  eviction), so a deleted account stays distinguishable from a
+  never-registered one; deleting a
   record means the same key re-registers as a new account on next connect.
 
 ## What is NOT stored
@@ -99,8 +102,9 @@ preserving the id. Atomically, under one lock and one store write:
 - the new key registers as a new account with the box binding inherited,
   so "same key -> same box" continuity survives the rotation;
 - a lineage entry (`old/new fingerprint + account id, key type, box,
-  timestamp`) appends to the `rotations` journal — the audit trail S2
-  noted `remove` lacks, scoped to rotation. The journal is bounded at
+  timestamp`) appends to the `rotations` journal — scoped to rotation
+  (deletions have their own bounded journal since #825, `deletions()`).
+  The journal is bounded at
   1000 entries (oldest-first eviction); the per-record `rotated_to`
   pointer is never evicted, so lineage survives journal roll.
 

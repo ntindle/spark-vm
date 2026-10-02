@@ -45,7 +45,8 @@ new key and want this box to know it's me". Rotation registers the new key
 as a NEW account (the S1 policy stands: identity is the key), marks the
 old record with ``rotated_to``/``rotated_at``, inherits the box binding,
 and appends an entry to the bounded ``rotations`` journal — the audit
-trail S2 noted ``remove`` lacks, scoped to rotation. Lost-key rotation
+trail ``remove`` lacked before #825 (which gave deletions their own
+bounded journal), so this one stays scoped to rotation. Lost-key rotation
 (no old key to attest with) is NOT this slice; it needs the claim
 protocol (S3).
 """
@@ -92,6 +93,21 @@ _LOCK_POLL_S = 0.05
 # Sane range: 1..2**31 — 0 would silently empty the journal on every
 # rotate (degenerate config, not guarded against by design).
 ROTATIONS_CAP = 1000
+# Bounded deletion journal (#825): the same #376 lesson as ROTATIONS_CAP —
+# unbounded = fail. `remove()` is the most identity-destructive operation
+# the registry offers; before S2.5's journal landed it was also the only
+# one with no audit trail at all. The journal bounds audit history, never
+# lineage: a deleted record's lineage context (rotated_to/rotated_at,
+# claimed_at/claimed_by) is copied into the deletion entry, so "never
+# registered" and "registered and deleted" stay distinguishable.
+DELETIONS_CAP = 1000
+# Stale-tmp sweep (#824, the #716 class): _save() publishes via mkstemp +
+# os.replace, and a writer killed between the two leaves a
+# registry.json.tmp.* orphan no code path ever swept (verified on main).
+# Tmps younger than this are assumed live (a writer mid-publish is always
+# younger); older ones are crash litter. Fleet's #716 fix uses the same
+# 1h rule — one shared convention across the journal stores.
+STALE_TMP_AGE_S = 3600.0
 # Claim protocol (slice S3, #446): single-use claim codes. 144 bits of
 # entropy (18 bytes -> 24 base64url chars) keeps brute force infeasible
 # even at bot scale. Default TTL 7 days: long enough for a human to
@@ -217,6 +233,7 @@ class KeyRegistry:
             os.chmod(self.root, 0o700)
         except OSError:
             pass  # best effort; perms verified by tests on fresh dirs
+        self._sweep_stale_tmps()
         deadline = time.monotonic() + LOCK_TIMEOUT_S
         while True:
             if time.monotonic() >= deadline:
@@ -253,6 +270,36 @@ class KeyRegistry:
                 pass  # another reclaimer got there first; lock is free anyway
 
     # -- store IO ----------------------------------------------------------
+    def _sweep_stale_tmps(self) -> None:
+        """Unlink crash-orphaned ``registry.json.tmp.*`` files older than
+        ``STALE_TMP_AGE_S`` (#824, the #716 class).
+
+        Called at lock entry (from ``_locked``, before the lock is
+        acquired): the 1h age threshold is what makes this safe without
+        holding the lock — a live writer's tmp is always younger than
+        the threshold, so a tmp this sweep touches can belong to no
+        running writer. Concurrent sweepers race safely —
+        ``missing_ok`` absorbs the lost race. A tmp that cannot be
+        stat'ed or unlinked is left alone; the sweep is best-effort
+        litter control, never a correctness gate.
+        """
+        prefix = STORE_NAME + ".tmp."
+        now = time.time()
+        try:
+            names = os.listdir(self.root)
+        except OSError:
+            return
+        for name in names:
+            if not name.startswith(prefix):
+                continue
+            path = self.root / name
+            try:
+                if now - path.stat().st_mtime < STALE_TMP_AGE_S:
+                    continue
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+
     def _load(self) -> dict:
         """Read the store. Missing file -> empty store. Corrupt -> raise."""
         try:
@@ -262,6 +309,7 @@ class KeyRegistry:
                 "schema_version": SCHEMA_VERSION,
                 "accounts": {},
                 "rotations": [],
+                "deletions": [],
             }
         try:
             data = json.loads(text)
@@ -293,6 +341,15 @@ class KeyRegistry:
                 f"refusing to proceed: {self.store_path}"
             )
         data["rotations"] = rotations  # normalize: missing key -> empty journal
+        deletions = data.get("deletions", [])
+        if not isinstance(deletions, list) or not all(
+            isinstance(entry, dict) for entry in deletions
+        ):
+            raise RegistryError(
+                f"registry deletions journal has unexpected shape, "
+                f"refusing to proceed: {self.store_path}"
+            )
+        data["deletions"] = deletions  # normalize: missing key -> empty journal
         return data
 
     def _save(self, data: dict) -> None:
@@ -443,7 +500,8 @@ class KeyRegistry:
         the new key registers as a NEW account (new ``acct_`` id per S1),
         the box binding is inherited so "same box" continuity survives the
         rotation, and a lineage entry lands in the bounded ``rotations``
-        journal (the audit trail S2 noted ``remove`` lacks, scoped to
+        journal (the audit trail ``remove`` lacked before #825 gave it its
+        own bounded ``deletions`` journal, so this one stays scoped to
         rotation; capped at ``ROTATIONS_CAP``, oldest-first eviction).
 
         Trust boundary: ``rotate()`` performs NO cryptographic proof that
@@ -664,15 +722,45 @@ class KeyRegistry:
         return redeemed
 
     def remove(self, fp: str) -> bool:
-        """Delete an account record. Returns False when unknown."""
+        """Delete an account record. Returns False when unknown.
+
+        The deletion is journaled (#825): the most identity-destructive
+        operation the registry offers used to be the only one with no
+        audit trail. The entry copies the deleted record's lineage
+        context (rotated_to/rotated_at, claimed_at/claimed_by) so a
+        deleted account stays distinguishable from a never-registered
+        one. The journal is bounded at ``DELETIONS_CAP`` (oldest-first
+        eviction), like ``rotations``.
+        """
         fp = normalize_fingerprint(fp)
         found = False
 
         def _do(data: dict) -> None:
             nonlocal found
-            if fp in data["accounts"]:
-                del data["accounts"][fp]
-                found = True
+            accounts = data["accounts"]
+            rec = accounts.get(fp)
+            if rec is None:
+                return
+            now = _iso(_utcnow())
+            journal = data["deletions"]
+            journal.append(
+                {
+                    "fingerprint": fp,
+                    "account_id": rec.get("account_id"),
+                    "key_type": rec.get("key_type"),
+                    "box_ref": rec.get("box_ref"),
+                    "created_at": rec.get("created_at"),
+                    "last_seen_at": rec.get("last_seen_at"),
+                    "rotated_to": rec.get("rotated_to"),
+                    "rotated_at": rec.get("rotated_at"),
+                    "claimed_at": rec.get("claimed_at"),
+                    "claimed_by": rec.get("claimed_by"),
+                    "deleted_at": now,
+                }
+            )
+            del journal[: max(0, len(journal) - DELETIONS_CAP)]
+            del accounts[fp]
+            found = True
 
         self._mutate(_do)
         return found
@@ -690,6 +778,18 @@ class KeyRegistry:
         with self._locked():
             data = self._load()
             return [dict(e) for e in data["rotations"]]
+
+    def deletions(self) -> list[dict]:
+        """Deletion audit journal, oldest first (bounded at DELETIONS_CAP).
+
+        Each entry carries the deleted record's lineage context
+        (rotated_to/rotated_at, claimed_at/claimed_by) plus deleted_at,
+        so "registered and deleted" is never confusable with
+        "never registered" (#825).
+        """
+        with self._locked():
+            data = self._load()
+            return [dict(e) for e in data["deletions"]]
 
 
 # -- CLI ---------------------------------------------------------------------

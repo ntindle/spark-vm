@@ -145,6 +145,7 @@ the one row per group marked that way.
 | [VERSIONING.md](VERSIONING.md) | How versions are cut, what the changelog ritual demands, and release mechanics. |
 | [OSS_CONTRIBUTOR_GAP_ANALYSIS.md](OSS_CONTRIBUTOR_GAP_ANALYSIS.md) | What a contributor hits on day one vs what the repo offers — the contributor-UX gap list. |
 | [CUA_DESKTOP_ARCH.md](CUA_DESKTOP_ARCH.md) | Architecture deep-read (2026-09-26) of the cua/ desktop stack: the bridge, the supervisor scripts, and the panel contract that drive the operator's XFCE desktop on Xvfb :98 — structural strengths and findings. |
+| [HARNESS_ARCH_DEEP_READ.md](HARNESS_ARCH_DEEP_READ.md) | Architecture deep-read (2026-10-01) of the harness/ pre-seeded tooling: image manifest, provision-time injector, gate fixture, baked-secrets scan, H4 provider contract, and the SSH-key-as-account identity stack — structural strengths and findings. |
 
 ## Hosted-product design (the roadmap, in spec form)
 

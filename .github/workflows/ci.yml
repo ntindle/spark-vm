@@ -231,6 +231,23 @@ jobs:
         # UA — 301 to a live page, HTTP 200, matches the
         # CODEC_LICENSING_RESEARCH citation). Runner-egress IP reputation,
         # not a broken link.
+        # gamingonlinux.com 523s automated fetchers on GitHub Actions
+        # runner egress (Cloudflare bot-block; the Sunshine Vulkan-encoding
+        # article hand-verified live 2026-10-01 ~21:5x CDT via the text
+        # browser — page loads, headline "Sunshine game streaming tool adds
+        # Vulkan encoding plus XDG, Pipewire, and KWin direct screencast
+        # capture" matches the REMOTE_DESKTOP_TRANSPORT_RESEARCH citation).
+        # Runner-egress IP reputation, not a broken link.
+        # web.archive.org throttles one specific snapshot URL with
+        # 500/503s on automated fetches (2026-10-01 ~22:0x CDT: the
+        # startuphub.ai 2026 sandbox-comparison snapshot
+        # web/20260605034053/...; archive.org root and other snapshots
+        # serve fine, so this is per-URL throttling, not a host block).
+        # The underlying live article is verified HTTP 200 at its original
+        # URL, so the citation is not broken — only the pinned snapshot
+        # wrapper is throttled. Single-URL carve-out (not a host exclude):
+        # if the snapshot itself ever dies, this exclusion must be
+        # revisited, not silently kept.
         # pocketnews.com.my 403s/blocks automated fetchers on GitHub
         # Actions runner egress (bot-block; the Huawei Cloud CodeArts
         # Agent Malaysia launch article hand-verified live 2026-09-27
@@ -308,7 +325,7 @@ jobs:
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?gamingonlinux\\.com/.*' --exclude 'https?://web\\.archive\\.org/web/20260605034053/https://www\\.startuphub\\.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
