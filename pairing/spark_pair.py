@@ -309,8 +309,9 @@ def _cmd_rotate_locked(args, d, enroll_path, box_id, token, control,
         # implement the endpoint yet — do NOT report this as any other
         # failure class.
         print("rotation failed: this control plane does not implement "
-              "POST /v1/boxes/token/rotate yet (it ships with the plane "
-              "update closing #846) — nothing was changed locally")
+              "POST /v1/boxes/token/rotate yet (shipped on the hosted plane "
+              "2026-10-02 — verify your control plane is current) — "
+              "nothing was changed locally")
         return 1
     if status == 401:
         print(f"rotation rejected ({resp.get('error', status)}): this box "
@@ -373,8 +374,9 @@ def cmd_revoke(args):
             # The _http fallback payload (no JSON body): the plane does not
             # implement the endpoint yet — not "no such box".
             print("revoke failed: this control plane does not implement "
-                  "POST /v1/boxes/{id}/revoke yet (it ships with the plane "
-                  "update closing #846) — nothing was revoked")
+                  "POST /v1/boxes/{id}/revoke yet (shipped on the hosted plane "
+                  "2026-10-02 — verify your control plane is current) — "
+                  "nothing was revoked")
         else:
             print(f"no such box: {box_id}")
         return 1
