@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -699,16 +700,19 @@ class ConfirmdTests(unittest.TestCase):
         """Answered JSON exposes only id/summary/kind/decision/
         answered_by/answered_at (+ the S3 expired_at/expired_by for
         expired records — the expiry's own stamp fields, never the
-        answer fields reused)."""
+        answer fields reused; + the #73 grant_ttl_hours, the lifetime
+        the owner authorized)."""
         it = dict(self._evil_item())
         it.update({"decision": "approve", "answered_by": "ntindle@github",
-                   "answered_at": "2026-09-18T10:05:00+00:00"})
+                   "answered_at": "2026-09-18T10:05:00+00:00",
+                   "grant_ttl_hours": 24})
         out = cd._answered_api_item(it)
         self.assertEqual(set(out),
                          {"id", "summary", "kind", "decision",
                           "answered_by", "answered_at",
-                          "expired_at", "expired_by"})
+                          "expired_at", "expired_by", "grant_ttl_hours"})
         self.assertEqual(out["decision"], "approve")
+        self.assertEqual(out["grant_ttl_hours"], "24")
 
     def test_1_pending_sorted_oldest_first(self):
         """Longest-waiting request renders first; items with
@@ -3204,6 +3208,367 @@ class ConnDeadlineTests(unittest.TestCase):
                         "completed request left its deadline timer armed")
         self.assertEqual(timer.interval, 60)
         handle_error.assert_not_called()
+class GrantTtlChoiceTests(unittest.TestCase):
+    """Issue #73: the approval page offers a bounded per-approval
+    grant-lifetime choice (1h default / 24h) and the choice reaches
+    grant-writer as --ttl-hours."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.approvals = Path(self.tmp.name) / "approvals"
+        self.approvals.mkdir()
+        for sub in ("pending", "answered", "consumed"):
+            (self.approvals / sub).mkdir()
+        # Issue #620: housekeeping is cadence-gated on module state —
+        # each test starts with it due so answer-path behavior is
+        # deterministic regardless of test order.
+        cd._reset_housekeeping_for_tests()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run_answer(self, aid, decision, ttl_hours=cd.GRANT_TTL_DEFAULT):
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00",
+              "credential": "c", "host": "h", "method": "GET"}
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+        nonce = cd._mint_csrf_nonce(aid)
+        mint_calls = []
+        events = []
+        got = {}
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                mint_calls.append(cmd)
+
+                class R:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        h.send_response = lambda c: got.update(code=c)
+        h.send_header = lambda *a: None
+        h.end_headers = lambda: None
+        cd._aid_lock(aid)  # ensure the entry exists pre-answer
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch("subprocess.run", side_effect=fake_run) as \
+                 run_mock, \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda *a: events.append(a)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._answer_locked("ntindle@github", aid, nonce, decision,
+                             ttl_hours=ttl_hours)
+        return {"mint": mint_calls, "run_mock": run_mock,
+                "events": events, "got": got, "src": src}
+
+    def _answered_record(self, aid):
+        p = self.approvals / "consumed" / (aid + ".json")
+        self.assertTrue(p.exists(), "no consumed record for %s" % aid)
+        return json.loads(p.read_text())
+
+    def test_73_parse_allowlist(self):
+        """_parse_grant_ttl: missing/empty means the default (shortest);
+        the offered choices parse; anything else is refused, never
+        coerced."""
+        self.assertEqual(cd._parse_grant_ttl(None), 1)
+        self.assertEqual(cd._parse_grant_ttl(""), 1)
+        self.assertEqual(cd._parse_grant_ttl("1"), 1)
+        self.assertEqual(cd._parse_grant_ttl("24"), 24)
+        self.assertEqual(cd._parse_grant_ttl(24), 24)
+        for bad in ("168", "0", "-1", "abc", "1.5", "0x18", 168):
+            with self.assertRaises(ValueError,
+                                   msg="ttl=%r must be refused" % (bad,)):
+                cd._parse_grant_ttl(bad)
+
+    def test_73_default_ttl_is_1h(self):
+        """Approve with no explicit choice mints --ttl-hours 1 (the
+        shortest), records it, and audits it. Without the feature this
+        test fails: the writer got no --ttl-hours and the record/audit
+        carried no lifetime."""
+        r = self._run_answer("ttl-default-1", "approve")
+        self.assertEqual(r["got"].get("code"), 303)
+        self.assertEqual(len(r["mint"]), 1)
+        cmd = r["mint"][0]
+        self.assertIn("--ttl-hours", cmd)
+        self.assertEqual(cmd[cmd.index("--ttl-hours") + 1], "1",
+                         "writer argv: %r" % (cmd,))
+        rec = self._answered_record("ttl-default-1")
+        self.assertEqual(rec.get("grant_ttl_hours"), 1)
+        answer = [e for e in r["events"] if e[0] == "answer"]
+        self.assertEqual(len(answer), 1)
+        self.assertIn("ttl=1h", answer[0][3], "audit detail: %r"
+                      % (answer[0][3],))
+
+    def test_73_chosen_ttl_24h(self):
+        """The owner-chosen 24h reaches the writer, the record, and the
+        audit."""
+        r = self._run_answer("ttl-24h-1", "approve", ttl_hours=24)
+        self.assertEqual(r["got"].get("code"), 303)
+        cmd = r["mint"][0]
+        self.assertEqual(cmd[cmd.index("--ttl-hours") + 1], "24",
+                         "writer argv: %r" % (cmd,))
+        rec = self._answered_record("ttl-24h-1")
+        self.assertEqual(rec.get("grant_ttl_hours"), 24)
+        answer = [e for e in r["events"] if e[0] == "answer"]
+        self.assertIn("ttl=24h", answer[0][3], "audit detail: %r"
+                      % (answer[0][3],))
+
+    def test_73_crafted_ttl_is_refused(self):
+        """A crafted TTL (168h) is refused with 400 — never coerced —
+        the mint never starts and the pending file stays in place."""
+        r = self._run_answer("ttl-craft-1", "approve", ttl_hours="168")
+        self.assertEqual(r["got"].get("code"), 400)
+        self.assertEqual(r["run_mock"].call_count, 0,
+                         "the mint must not start on a refused TTL")
+        self.assertTrue(r["src"].exists(),
+                        "refused answer must leave the pending file")
+        self.assertFalse(
+            (self.approvals / "consumed" / "ttl-craft-1.json").exists())
+
+    def _do_post_answer(self, aid, fields):
+        """Drive Handler.do_POST /answer end to end (the production
+        entry point — form parse, TTL validation, lock, mint). Returns
+        (got, events, mint_calls, run_mock)."""
+        body = urllib.parse.urlencode(fields).encode()
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        h.path = "/answer"
+        h.headers = {"Content-Length": str(len(body))}
+        h.rfile = io.BytesIO(body)
+        got = {}
+        events = []
+        mint_calls = []
+        h.send_response = lambda c: got.update(code=c)
+        h.send_header = lambda *a: None
+        h.end_headers = lambda: None
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                mint_calls.append(cmd)
+
+                class R:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        with mock.patch.object(cd.Handler, "_auth",
+                               return_value="ntindle@github"), \
+             mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch("subprocess.run",
+                        side_effect=fake_run) as run_mock, \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda *a: events.append(a)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h.do_POST()
+        return got, events, mint_calls, run_mock
+
+    def _file_pending(self, aid):
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            json.dumps({"id": aid, "summary": "s", "kind": "first-use",
+                        "created": "2026-09-18T10:00:00+00:00",
+                        "expires": "2999-01-01T00:00:00+00:00",
+                        "credential": "c", "host": "h", "method": "GET"}))
+        return cd._mint_csrf_nonce(aid)
+
+    def test_73_do_post_crafted_ttl_refused_pre_lock(self):
+        """Engineering blocker: the do_POST TTL-validation branch is the
+        production entry point — a crafted ttl=168 must 400 before the
+        aid lock is even acquired, the mint must never start, and the
+        pending file stays in place. Deleting the do_POST branch must
+        fail this test."""
+        aid = "dopost-ttl-168-1"
+        nonce = self._file_pending(aid)
+        got, events, mint_calls, run_mock = self._do_post_answer(
+            aid, {"id": aid, "csrf": nonce, "decision": "approve",
+                  "ttl": "168"})
+        self.assertEqual(got.get("code"), 400)
+        self.assertEqual(run_mock.call_count, 0,
+                         "the mint must not start on a refused TTL")
+        self.assertEqual(len(mint_calls), 0)
+        self.assertTrue(
+            (self.approvals / "pending" / (aid + ".json")).exists(),
+            "refused answer must leave the pending file")
+        # The refusal fires before _aid_lock: no registry entry is
+        # created for a value that never became an answer attempt.
+        self.assertNotIn(aid, cd._aid_locks)
+
+    def test_73_do_post_missing_ttl_defaults_1h(self):
+        """The mirror case: a form with no ttl field (old cached page,
+        non-browser client) approves with the shortest lifetime —
+        --ttl-hours 1 — end to end through do_POST."""
+        aid = "dopost-ttl-missing-1"
+        nonce = self._file_pending(aid)
+        got, events, mint_calls, run_mock = self._do_post_answer(
+            aid, {"id": aid, "csrf": nonce, "decision": "approve"})
+        self.assertEqual(got.get("code"), 303)
+        self.assertEqual(len(mint_calls), 1)
+        cmd = mint_calls[0]
+        self.assertEqual(cmd[cmd.index("--ttl-hours") + 1], "1",
+                         "writer argv: %r" % (cmd,))
+        rec = self._answered_record("dopost-ttl-missing-1")
+        self.assertEqual(rec.get("grant_ttl_hours"), 1)
+
+    def test_73_do_post_ttl_24h(self):
+        """The owner-chosen 24h flows from the form through do_POST to
+        the writer, the record, and the audit."""
+        aid = "dopost-ttl-24h-1"
+        nonce = self._file_pending(aid)
+        got, events, mint_calls, run_mock = self._do_post_answer(
+            aid, {"id": aid, "csrf": nonce, "decision": "approve",
+                  "ttl": "24"})
+        self.assertEqual(got.get("code"), 303)
+        cmd = mint_calls[0]
+        self.assertEqual(cmd[cmd.index("--ttl-hours") + 1], "24",
+                         "writer argv: %r" % (cmd,))
+        rec = self._answered_record("dopost-ttl-24h-1")
+        self.assertEqual(rec.get("grant_ttl_hours"), 24)
+        answer = [e for e in events if e[0] == "answer"]
+        self.assertIn("ttl=24h", answer[0][3])
+
+    def test_73_deny_ignores_ttl(self):
+        """A deny mints nothing: no writer call, and the consumed record
+        carries no grant lifetime — even if the requester planted one
+        (belt-and-braces pop), and the deny audit carries no ttl=."""
+        aid = "ttl-deny-1"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00",
+              "credential": "c", "host": "h", "method": "GET",
+              "grant_ttl_hours": 24}
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+        nonce = cd._mint_csrf_nonce(aid)
+        mint_calls = []
+        events = []
+        got = {}
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == cd.GRANT_WRITER:
+                mint_calls.append(cmd)
+
+                class R:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return R()
+            return _fake_run(cmd, **kwargs)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        h.send_response = lambda c: got.update(code=c)
+        h.send_header = lambda *a: None
+        h.end_headers = lambda: None
+        cd._aid_lock(aid)
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch("subprocess.run",
+                        side_effect=fake_run) as run_mock, \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda *a: events.append(a)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._answer_locked("ntindle@github", aid, nonce, "deny",
+                             ttl_hours=24)
+        self.assertEqual(got.get("code"), 303)
+        self.assertEqual(run_mock.call_count, 0)
+        rec = self._answered_record("ttl-deny-1")
+        self.assertNotIn("grant_ttl_hours", rec,
+                         "a requester-planted lifetime must not survive "
+                         "a denial")
+        answer = [e for e in events if e[0] == "answer"]
+        self.assertEqual(len(answer), 1)
+        self.assertNotIn("ttl=", answer[0][3])
+
+    def test_73_detail_page_renders_ttl_choice(self):
+        """The approval detail page renders the bounded TTL choice with
+        1h checked by default — the owner sees the grant's lifetime at
+        decision time."""
+        aid = "ttl-page-1"
+        (self.approvals / "pending" / (aid + ".json")).write_text(
+            json.dumps({"id": aid, "summary": "s", "kind": "first-use",
+                        "created": "2026-09-18T10:00:00+00:00",
+                        "expires": "2999-01-01T00:00:00+00:00",
+                        "credential": "c", "host": "h", "method": "GET"}))
+        h = cd.Handler.__new__(cd.Handler)
+        h.path = "/approval/" + aid
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        with mock.patch.object(cd.Handler, "_auth",
+                               return_value="ntindle@github"), \
+             mock.patch.object(cd.Handler, "_send_html",
+                               side_effect=lambda body, code=200,
+                               title="", script="": got.update(
+                                   body=body, code=code)), \
+             mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            h.do_GET()
+        body = got.get("body", "")
+        self.assertEqual(got.get("code"), 200)
+        self.assertIn("Grant lifetime", body)
+        self.assertIn('name="ttl"', body)
+        self.assertIn('value="1" checked', body,
+                      "the shortest lifetime must be the default")
+        self.assertIn('value="24"', body)
+        # Design B1: the fieldset carries the 52px-tap-row styling.
+        self.assertIn('class="ttl"', body)
+        # Design B4: the armed confirm button restates the chosen
+        # lifetime from the checked radio at tap time.
+        self.assertIn('querySelector(', body)
+        self.assertIn('Tap again to confirm approval ("+t+"h grant)',
+                      body)
+
+    def test_73_server_answered_card_shows_ttl(self):
+        """Design B2: the server-rendered answered card (first paint,
+        JS-disabled fallback) carries the grant lifetime with the same
+        vocabulary as the JS card; pre-#73 records render as before."""
+        with_ttl = cd._render_answered_list([{
+            "id": "srv-ttl-1", "summary": "s", "kind": "k",
+            "decision": "approve", "answered_by": "b",
+            "answered_at": "2026-09-18T10:05:00+00:00",
+            "grant_ttl_hours": 24}])
+        self.assertIn("grant 24h", with_ttl)
+        legacy = cd._render_answered_list([{
+            "id": "srv-ttl-2", "summary": "s", "kind": "k",
+            "decision": "approve", "answered_by": "b",
+            "answered_at": "2026-09-18T10:05:00+00:00"}])
+        self.assertNotIn("grant", legacy)
+        deny = cd._render_answered_list([{
+            "id": "srv-ttl-3", "summary": "s", "kind": "k",
+            "decision": "deny", "answered_by": "b",
+            "answered_at": "2026-09-18T10:05:00+00:00",
+            "grant_ttl_hours": 24}])
+        self.assertNotIn("grant", deny)
+
+    def test_73_answered_api_carries_ttl(self):
+        """_answered_api_item allowlists grant_ttl_hours so the answered
+        feed (and the card's meta line) can show the authorized
+        lifetime."""
+        base = {"id": "x-1", "summary": "s", "kind": "k",
+                "decision": "approve", "answered_by": "b",
+                "answered_at": "t"}
+        self.assertEqual(
+            cd._answered_api_item(dict(base, grant_ttl_hours=24))
+            ["grant_ttl_hours"], "24")
+        self.assertEqual(cd._answered_api_item(base)["grant_ttl_hours"],
+                         "")
+
 
 if __name__ == "__main__":
     unittest.main()

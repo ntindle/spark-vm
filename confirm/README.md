@@ -96,6 +96,11 @@ can never be re-answered.
 - **Approve**: the daemon mints the grant (30-second worst-case mint
   window — see Expiry) and writes the record to `answered/`, then to
   `consumed/`. The proxy never re-derives grants from these files.
+  Approving also takes the owner's grant-lifetime choice: the page
+  offers 1 hour (default, shortest) or 24 hours, passed to grant-writer
+  as `--ttl-hours`; any value outside the offered choices is refused,
+  never coerced. The chosen lifetime is recorded in the answered
+  record and the audit trail.
 - **Deny**: the record is written to `answered/`/`consumed/`; the agent gets
   nothing.
 - **Re-open a mis-tapped Deny** (POST `/reopen`): files the denied item again

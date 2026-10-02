@@ -848,6 +848,33 @@ def consumed_dir():
 # Finding 60: the single writer for grants.json.
 GRANT_WRITER = os.environ.get("GRANT_WRITER", "/home/swapd/grant-writer")
 
+# Issue #73: the grant lifetime is the owner's per-approval choice, not a
+# hidden 24h default. The approval page offers a bounded radio — 1 hour
+# (default, the shortest) or 24 hours — and the choice is passed to
+# grant-writer as --ttl-hours. The allowlist is the authority: a value
+# outside the offered choices is refused by the caller, never coerced
+# into something the owner didn't pick, so the minted grant can only
+# ever match what the page displayed.
+GRANT_TTL_CHOICES = (1, 24)
+GRANT_TTL_DEFAULT = 1
+
+
+def _parse_grant_ttl(value):
+    """Issue #73: parse the owner-chosen grant TTL into validated hours.
+
+    Missing/empty means the default (shortest). Anything outside the
+    offered choices raises ValueError — the caller refuses it, never
+    clamps it into a lifetime the page never showed."""
+    if value is None or (isinstance(value, str) and value == ""):
+        return GRANT_TTL_DEFAULT
+    try:
+        ttl = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("bad ttl: %r" % (value,))
+    if ttl not in GRANT_TTL_CHOICES:
+        raise ValueError("bad ttl: %r" % (value,))
+    return ttl
+
 
 # Issue #232: grace periods for the pending-file lifecycle fix. A corrupt
 # file younger than the quarantine grace may be a torn mid-write from the
@@ -1166,6 +1193,18 @@ approval (green) nor a denial (red). */
 .reopen{margin:10px 0 2px}
 /* Design review #4: armed confirm state for the approve button. */
 .btn-approve.armed{background:#8a5200}
+/* Issue #73: the grant-lifetime choice is the most
+security-consequential control on the page — it gets 52px tap rows
+like the decision buttons, so the owner's actual tap target matches
+the page's thumb convention. */
+.ttl{border:1px solid #dcdfe3;border-radius:10px;padding:6px 14px 10px;margin:16px 0}
+.ttl legend{font-size:.85rem;font-weight:700;color:#555;padding:0 8px}
+.ttl label{display:flex;align-items:center;gap:12px;min-height:52px;font-size:1.05rem;cursor:pointer}
+.ttl input[type=radio]{width:24px;height:24px;accent-color:#1a7f37;flex:none}
+.ttl input[type=radio]:focus-visible{outline:3px solid #1a73e8;outline-offset:2px}
+@media(prefers-color-scheme:dark){
+.ttl{border-color:#3a3d42}
+.ttl legend{color:#aaa}}
 /* Design review: visible keyboard focus; language-appropriate link. */
 a.card:focus-visible,.btn:focus-visible{outline:3px solid #1a73e8;outline-offset:2px}
 @media(prefers-color-scheme:dark){
@@ -1306,7 +1345,11 @@ function answeredCard(it){
   }else{
     metaLine(c,[it.answered_by?("by "+String(it.answered_by)):"",
       it.answered_at?fmtTime(it.answered_at):"",
-      String(it.kind||"")]);
+      String(it.kind||""),
+      // Issue #73: the answered history shows the grant lifetime the
+      // owner authorized on the approval page.
+      (dec==="approve"&&it.grant_ttl_hours)?
+        ("grant "+String(it.grant_ttl_hours)+"h"):""]);
   }
   // H20: re-open form for denied items (mirrors the server-rendered card).
   if(dec==="deny"&&validId(id)&&it.reopen_csrf){
@@ -1689,6 +1732,9 @@ def _answered_api_item(it):
         "answered_at": str(it.get("answered_at", "")),
         "expired_at": str(it.get("expired_at", "")),
         "expired_by": str(it.get("expired_by", "")),
+        # Issue #73: the answered history shows the grant lifetime the
+        # owner authorized on the approval page (1h default, 24h chosen).
+        "grant_ttl_hours": str(it.get("grant_ttl_hours", "")),
     }
     if out["decision"] == "deny" and ID_RE.match(out["id"]):
         out["reopen_csrf"] = _mint_reopen_nonce(out["id"])
@@ -1772,7 +1818,12 @@ def _render_answered_list(items):
                 ("by %s" % it.get("answered_by"))
                 if it.get("answered_by") else "",
                 it.get("answered_at") or "",
-                it.get("kind") or ""])
+                it.get("kind") or "",
+                # Issue #73: the grant lifetime the owner authorized,
+                # in the JS card's vocabulary — pre-#73 records carry
+                # no grant_ttl_hours and render exactly as before.
+                ("grant %sh" % it.get("grant_ttl_hours"))
+                if dec == "approve" and it.get("grant_ttl_hours") else ""])
         # H20: a denied approval can be re-filed from its card (the
         # mis-tapped-Deny recovery). The nonce is minted per deny item
         # and verified one-shot on POST /reopen.
@@ -2074,6 +2125,22 @@ class Handler(BaseHTTPRequestHandler):
                     '<form method="post" action="/answer">'
                     '<input type="hidden" name="id" value="%s">'
                     '<input type="hidden" name="csrf" value="%s">'
+                    # Issue #73: the grant lifetime is the owner's
+                    # per-approval choice, not a hidden default — the
+                    # radio makes the minted grant's lifetime visible at
+                    # decision time. Default shortest (1h); the server
+                    # refuses any value outside the offered choices.
+                    # Design B1: 52px tap rows like the decision buttons;
+                    # B3: the hint states what the lifetime governs.
+                    '<fieldset class="ttl">'
+                    '<legend>Grant lifetime</legend>'
+                    '<p class="sub">How long the minted credential grant '
+                    'stays valid (approve only).</p>'
+                    '<label><input type="radio" name="ttl" value="1" '
+                    'checked> 1 hour (default)</label>'
+                    '<label><input type="radio" name="ttl" value="24"> '
+                    '24 hours</label>'
+                    '</fieldset>'
                     '<div class="btnrow">'
                     '<button class="btn btn-approve" id="approveBtn" '
                     'name="decision" value="approve">Approve</button>'
@@ -2083,6 +2150,10 @@ class Handler(BaseHTTPRequestHandler):
                     '<p class="nav"><a href="/">back to pending</a></p>'
                     # Design review #4: a single large tap must not mint a
                     # credential grant. First tap arms, second confirms.
+                    # Issue #73 (Design B4): the armed text restates the
+                    # chosen lifetime, so the confirm step shows exactly
+                    # what the owner is minting even if the fieldset has
+                    # scrolled off-view.
                     '<script>'
                     '"use strict";'
                     'var b=document.getElementById("approveBtn");'
@@ -2091,7 +2162,10 @@ class Handler(BaseHTTPRequestHandler):
                     'e.preventDefault();'
                     'b.dataset.armed="1";'
                     'b.classList.add("armed");'
-                    'b.textContent="Tap again to confirm approval";'
+                    'var t=(document.querySelector(\'input[name="ttl"]:checked\')'
+                    '||{}).value||"1";'
+                    'b.textContent="Tap again to confirm approval ("+t+'
+                    '"h grant)";'
                     '}});'
                     "</script>"
                     # Design review: format filed/expires in the same short
@@ -2207,6 +2281,15 @@ class Handler(BaseHTTPRequestHandler):
         if not ID_RE.match(aid) or decision not in ("approve", "deny"):
             self._err("bad request", 400)
             return
+        # Issue #73: the grant lifetime is the owner's per-approval
+        # choice. The value is refused (400), never coerced, when it
+        # falls outside the page's offered choices — a crafted value
+        # must not widen the mint beyond what the page displayed.
+        try:
+            ttl_hours = _parse_grant_ttl(form.get("ttl", [""])[0])
+        except ValueError:
+            self._err("bad request", 400)
+            return
         # Arch review B2: serialize the whole check->mint->consume
         # section per approval id. Concurrent POSTs with two valid ring
         # nonces must not both enter the grant path (#71); the loser of
@@ -2218,9 +2301,10 @@ class Handler(BaseHTTPRequestHandler):
         # delete the pending file out from under _answer_locked, and
         # GET's nonce write-back can no longer resurrect a reaped file.
         with _aid_lock(aid):
-            return self._answer_locked(login, aid, csrf, decision)
+            return self._answer_locked(login, aid, csrf, decision, ttl_hours)
 
-    def _answer_locked(self, login, aid, csrf, decision):
+    def _answer_locked(self, login, aid, csrf, decision,
+                       ttl_hours=GRANT_TTL_DEFAULT):
         """POST /answer body. The caller holds _aid_lock(aid); every
         early return inside is a normal handler response."""
         src = os.path.join(pending_dir(), aid + ".json")
@@ -2255,6 +2339,15 @@ class Handler(BaseHTTPRequestHandler):
                       "id=%s" % aid)
             self._err("This form is stale — reload the page and try "
                       "again.", 403)
+            return
+        # Issue #73: re-validate the owner-chosen grant TTL here (do_POST
+        # validates the form first, but this method is the unit under
+        # test and may be reached with any value). A bad value is
+        # refused, never coerced into a lifetime the page never offered.
+        try:
+            ttl_hours = _parse_grant_ttl(ttl_hours)
+        except ValueError:
+            self._err("bad request", 400)
             return
         # Finding 53(a): expired items are refused, not silently denied.
         # S3 (#546): link to the answered history when a terminal expired
@@ -2303,6 +2396,12 @@ class Handler(BaseHTTPRequestHandler):
         it["answered_at"] = datetime.now(timezone.utc).isoformat()
         it["answered_by"] = login
         it["requester"] = requester
+        if decision == "deny":
+            # Issue #73: belt-and-braces — a requester-planted
+            # grant_ttl_hours must not survive into the answered
+            # record of a denial (deny mints nothing, so the record
+            # must not claim a lifetime).
+            it.pop("grant_ttl_hours", None)
         # Finding 60: on approve, mint the grant via the single writer
         # BEFORE moving to consumed/. Finding 64: validate the tuple.
         # Issue #294: whether the writer refused at mint time for a
@@ -2352,7 +2451,12 @@ class Handler(BaseHTTPRequestHandler):
                          "--path-prefix", it.get("path_prefix") or "/",
                          "--approval-id", aid,
                          "--scope", it.get("scope") or "",
-                         "--job", it.get("job") or ""]
+                         "--job", it.get("job") or "",
+                         "--ttl-hours", str(ttl_hours)]
+            # Issue #73: record the lifetime the owner chose, so the
+            # answered history and the audit trail show the exact grant
+            # lifetime that was authorized (not the writer's default).
+            it["grant_ttl_hours"] = ttl_hours
             approval_expires = it.get("expires")
             if approval_expires:
                 mint_argv += ["--approval-expires", str(approval_expires)]
@@ -2463,9 +2567,13 @@ class Handler(BaseHTTPRequestHandler):
         # eligibility on the grace cadence anyway, and the prune's count
         # gate keeps the cap without the per-answer stat storm.
         _housekeeping_if_due()
-        audit_log("answer", self.client_address[0], login,
-                  "id=%s decision=%s requester=%s"
-                  % (aid, decision, requester))
+        # Issue #73: the answer audit carries the granted lifetime, so
+        # the trail shows exactly what the owner authorized.
+        detail = "id=%s decision=%s requester=%s" % (aid, decision,
+                                                     requester)
+        if decision == "approve":
+            detail += " ttl=%dh" % ttl_hours
+        audit_log("answer", self.client_address[0], login, detail)
         self.send_response(303)
         self.send_header("Location", "/")
         self.end_headers()
