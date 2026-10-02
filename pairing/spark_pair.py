@@ -37,6 +37,7 @@ import argparse
 import base64
 import fcntl
 import getpass
+import ipaddress
 import json
 import os
 import sys
@@ -77,22 +78,111 @@ def _read_json_file(path):
 
 def _http(method, url, body=None, headers=None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={"User-Agent": USER_AGENT,
-                 "Content-Type": "application/json",
-                 **(headers or {})})
+    hdrs = {"User-Agent": USER_AGENT, **(headers or {})}
+    if data is not None:
+        # Content-Type describes the body; a bodyless GET must not claim one.
+        hdrs["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status, json.loads(resp.read().decode())
+        with _HTTP_OPENER.open(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode())
+            if not isinstance(payload, dict):
+                # A 2xx with a non-object body cannot carry the plane's
+                # contract; every call site assumes dict, so normalize here
+                # instead of guarding at each site (the heartbeat path's
+                # bespoke non-dict guard stays as defense in depth for
+                # callers that bypass _http, e.g. tests).
+                return resp.status, {
+                    "ok": False,
+                    "error": "malformed plane response (non-object body)"}
+            return resp.status, payload
     except urllib.error.HTTPError as e:
         try:
             payload = json.loads(e.read().decode())
         except Exception:
             payload = {"ok": False, "error": f"http={e.code}"}
+        if not isinstance(payload, dict):
+            # Mirror the 2xx normalization above: a JSON list/string/null
+            # error body would otherwise AttributeError at the first
+            # resp.get(). Keep the http=NNN marker so the 404
+            # endpoint-detection (rotate/revoke/heartbeat) keeps working.
+            payload = {"ok": False, "error": f"http={e.code}"}
         return e.code, payload
     except Exception as e:  # network down, DNS, TLS...
         return 0, {"ok": False, "error": f"transport: {e}"}
+
+
+class _RedirectAuthStripper(urllib.request.HTTPRedirectHandler):
+    """urllib forwards manually-set Authorization headers across redirects —
+    including to a DIFFERENT origin. On this credential-bearing client that
+    is a token leak (box bearer token, owner API key): a compromised or
+    misconfigured plane, or a redirect chain the box didn't expect, would
+    harvest them. Strip Authorization whenever the redirect leaves the
+    original origin (scheme/host/port); same-origin redirects keep it."""
+
+    @staticmethod
+    def _origin(parsed):
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return (parsed.scheme, (parsed.hostname or "").lower(), port)
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old_origin = self._origin(urllib.parse.urlparse(req.full_url))
+        new_origin = self._origin(
+            urllib.parse.urlparse(urllib.parse.urljoin(req.full_url, newurl)))
+        new_req = super().redirect_request(req, fp, code, msg, headers,
+                                           newurl)
+        if new_req is not None and new_origin != old_origin:
+            new_req.remove_header("Authorization")
+        return new_req
+
+
+# The client-wide opener: same as the default plus the cross-origin
+# credential-strip above. urlopen's default opener is NOT used on purpose.
+_HTTP_OPENER = urllib.request.build_opener(_RedirectAuthStripper)
+
+
+def _check_control_url(control):
+    """Fail closed on cleartext control planes.
+
+    Bearer tokens and owner API keys travel in Authorization headers; an
+    http:// control URL would send them in the clear. Loopback hosts stay
+    allowed (local dev, loop-VM testing); any other http:// host needs
+    explicit opt-in via SVM_PAIR_ALLOW_HTTP=1.
+    Returns (ok, message)."""
+    u = urllib.parse.urlparse(control)
+    if u.scheme == "https":
+        return True, ""
+    if u.scheme != "http":
+        return False, f"control URL scheme must be https (got {u.scheme!r})"
+    host = (u.hostname or "").lower()
+    if host == "localhost":
+        return True, ""
+    try:
+        # A real loopback test: "127.evil.com".startswith("127.") is True,
+        # but it is a public DNS name, not loopback — never trust the
+        # prefix. (Note: "127.1" shorthand raises ValueError in ipaddress
+        # and is therefore refused — same as the old prefix test; no
+        # behavior change.)
+        if ipaddress.ip_address(host).is_loopback:
+            return True, ""
+    except ValueError:
+        pass  # not an IP literal: fall through to the refusal below
+    if os.environ.get("SVM_PAIR_ALLOW_HTTP") == "1":
+        return True, ""
+    return False, (f"refusing cleartext http:// control plane ({control}) — "
+                   "bearer tokens and owner keys would travel in the clear "
+                   "(use https://, a loopback host, or SVM_PAIR_ALLOW_HTTP=1)")
+
+
+def _resolve_control(args, stored=None):
+    """Resolve the control URL (argv > stored file > env > default) and fail
+    closed on cleartext. Returns (control, "") or (None, msg): the caller
+    reports msg its own way (print vs _fail) and returns 1. A single
+    resolution path, so a new command cannot forget the cleartext check."""
+    control = (args.control or (stored.get("control") if stored else None)
+               or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL)
+    ok, msg = _check_control_url(control)
+    return (control, "") if ok else (None, msg)
 
 
 def _key_paths(d):
@@ -126,7 +216,10 @@ def cmd_request(args):
     if ed25519.publickey_from_seed(seed) != pub:
         print("key/pub mismatch — refusing to request (re-run init --force)")
         return 1
-    control = args.control or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL
+    control, msg = _resolve_control(args)
+    if control is None:
+        print(msg)
+        return 1
     status, resp = _http("POST", control.rstrip("/") + "/v1/pairing/request",
                          {"name": args.name,
                           "pubkey": base64.b64encode(pub).decode(),
@@ -161,13 +254,34 @@ def cmd_redeem(args):
         print("need `init` + `request` first")
         return 1
     seed = base64.b64decode(open(key_path, "rb").read())
-    pairing = _read_json_file(pairing_path)
-    control = (args.control or pairing.get("control")
-               or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL)
-    pid = pairing["pairing_id"]
+    try:
+        pairing = _read_json_file(pairing_path)
+    except (OSError, ValueError) as e:
+        # Corrupt state file: the same clean failure the enrollment
+        # paths give, not a traceback.
+        print(f"pairing.json is unreadable ({e}) — run `request` again "
+              "for a fresh code")
+        return 1
+    if not isinstance(pairing, dict):
+        # Valid JSON but not an object (a list, string, null): ["pairing_id"]
+        # below would TypeError with a bare traceback — same loud failure
+        # the enrollment paths got, applied to pairing.json too.
+        print("pairing.json is not an object — run `request` again for a "
+              "fresh code")
+        return 1
+    control, msg = _resolve_control(args, pairing)
+    if control is None:
+        print(msg)
+        return 1
+    pid = pairing.get("pairing_id")
+    deadline = pairing.get("expires_at")
+    if (not pid or not isinstance(deadline, (int, float))
+            or isinstance(deadline, bool)):
+        print("pairing.json is corrupt or incomplete — run `request` again "
+              "for a fresh code")
+        return 1
     base = control.rstrip("/") + f"/v1/pairing/{pid}"
 
-    deadline = pairing["expires_at"]
     print("Waiting for owner approval (Ctrl-C to stop, re-run to resume)...")
     challenge = None
     while True:
@@ -262,8 +376,10 @@ def cmd_rotate(args):
         # Corrupt/legacy expiry: treat like grandfathered (unknown bound)
         # so --auto rotates now instead of crashing on the arithmetic.
         expires_at = None
-    control = (args.control or enroll.get("control")
-               or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL)
+    control, msg = _resolve_control(args, enroll)
+    if control is None:
+        print(msg)
+        return 1
     now = int(time.time())
     if args.auto:
         # Cron-friendly: stay quiet unless the token is actually near expiry.
@@ -363,7 +479,10 @@ def _cmd_rotate_locked(args, d, enroll_path, box_id, token, control,
 
 
 def cmd_revoke(args):
-    control = args.control or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL
+    control, msg = _resolve_control(args)
+    if control is None:
+        print(msg)
+        return 1
     box_id = args.box_id
     status, resp = _http(
         "POST", control.rstrip("/") + "/v1/boxes/"
@@ -517,8 +636,10 @@ def cmd_heartbeat(args):
         _fail(d, "enrollment.json is missing box_id/token — "
                  "run `request` + `redeem` first")
         return 1
-    control = (args.control or enroll.get("control")
-               or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL)
+    control, msg = _resolve_control(args, enroll)
+    if control is None:
+        _fail(d, msg)
+        return 1
     url = (control.rstrip("/") + "/v1/boxes/"
            + urllib.parse.quote(box_id, safe="") + "/heartbeat")
     body = _status_body(box_id, enroll.get("token_expires_at"))
@@ -545,7 +666,10 @@ def cmd_heartbeat(args):
 
 
 def cmd_approve(args):
-    control = args.control or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL
+    control, msg = _resolve_control(args)
+    if control is None:
+        print(msg)
+        return 1
     base = control.rstrip("/") + "/v1/pairing"
     if args.bootstrap:
         # One-shot fresh-database bootstrap: no owner key exists yet, so the

@@ -229,7 +229,12 @@ decided with the #847 S5 box WSS client, not here.
   State in `~/.config/spark-pair` (`--dir` / `SVM_PAIR_DIR` override);
   key and token files are mode 0600; secrets are never printed.
   Control-plane URL defaults to `https://api.sparkvm.dev`
-  (`--control` / `SVM_CONTROL` override). Owner key via `SVM_OWNER_KEY`
+  (`--control` / `SVM_CONTROL` override). The client refuses cleartext
+  `http://` control planes (credentials would travel unencrypted) — loopback
+  hosts stay allowed for local testing, and `SVM_PAIR_ALLOW_HTTP=1` opts in
+  explicitly for other hosts. Redirects that leave the original origin have
+  the `Authorization` header stripped, so a redirect chain can never carry
+  the box bearer token or owner key to another host. Owner key via `SVM_OWNER_KEY`
   or an interactive prompt (never argv).
 
 ## Control-plane endpoints (see control-plane/worker.py)

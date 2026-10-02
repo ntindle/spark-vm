@@ -87,11 +87,34 @@ codified as rule 6 so future watch bullets arrive compliant.)
   and the box-to-plane filing upload that creates the record (#876). (#875)
 
 ### Security
+- The box pairing client (`spark-pair.py`) no longer leaks its credentials on
+  redirects: Python's HTTP library forwards `Authorization` headers even
+  across redirects to a different origin, so a misconfigured or compromised
+  control plane could have bounced a request elsewhere and harvested the box
+  bearer token or the owner's API key — the client now strips the header
+  whenever a redirect leaves the original origin (same-origin redirects keep
+  working). Separately, the client refuses cleartext `http://` control-plane
+  URLs outright (loopback hosts stay allowed for local testing, and an
+  explicit opt-out environment variable covers other cases), so a typo or a
+  misconfigured URL can no longer send bearer tokens over the wire
+  unencrypted. (#884)
 - The swap proxy now refuses credential-smuggling navigations beyond `Location` redirects: a `Refresh` response header whose `url=` target carries a known secret value — raw or percent-encoded, which the header scrubber cannot see — to a non-allowlisted host has its target neutralized in the header and the attempt recorded on the audit trail (the page still loads; only the navigation is neutered), and an HTML or XHTML `<meta http-equiv="refresh">` tag with the same kind of secret-bearing target has its URL neutralized in the page the same way. Navigations to allowlisted hosts keep today's scrub-in-place behavior, and bare same-page refreshes are unaffected. (#870)
 - The swap proxy now kills redirects that would smuggle a real credential off the allowlist: a 301/302/303/307/308 response from an allowlisted host whose `Location` carries a known secret value — raw or percent-encoded, which the header scrubber cannot see — to a non-allowlisted host is refused at headers time and recorded on the audit trail, instead of letting the browser's follow-up request carry the real secret to the attacker host. Redirects to allowlisted hosts keep today's scrub-in-place behavior, and relative redirects are unaffected. (#862)
 - The waitlist's one-click "forget me" now erases the address from the live data stores the daemon manages, not just the row store: the abuse-detection ledger, the raw-mail triage folder, the quarantined malformed-line sidecars, and any still-queued outgoing mail for that address are all scrubbed when the forget link is honored, and triage files now expire after 48 hours instead of accumulating forever. The deletion confirmation remains the last mail ever sent to a forgotten address, and the stated contract is that the operator's mail sender deletes each queued mail after delivery. (Backups taken before the forget are outside this guarantee — the operator rotates them under their own retention.) (#840)
 - Egress guard now refuses the 6to4 (`2002::/16`) and Teredo (`2001::/32`) IPv6 transition ranges by default: both embed an IPv4 address inside a v6 literal, so a transition literal for a private IPv4 (e.g. 6to4's `2002:7f00:1::1` for 127.0.0.1) previously judged as a public v6 address and passed the SSRF guard — the same fail-open class the IPv4-mapped unwrapping already closed. These are deprecated transition mechanisms with no legitimate destination on the proxy's egress path, so the ranges are refused wholesale rather than unwrapped; the SSRF allow file can still admit them explicitly (hostname or CIDR) when an operator genuinely needs one. Separately, NAT64 well-known-prefix literals (`64:ff9b::/96`) are now unwrapped to their embedded IPv4 before the range judgment — a literal embedding a private IPv4 is refused, while one embedding a public IPv4 still passes, because NAT64 is a live mechanism (on DNS64 networks it is the legitimate path to v4 upstreams) and must not be refused wholesale. (#839)
 - Signed golden-image manifests (#155): the provision-time injector's manifest preflight no longer trusts the manifest's self-asserted version alone — once the operator enables the signed path (sign the manifest at image-build time with an Ed25519 key and configure the injector with the verification key), the preflight verifies the signature over the manifest's exact bytes before parsing anything, failing closed on a missing, malformed, or mismatched signature, so a tampered image registry can no longer serve a lying manifest that names the pinned version. The verification side takes a rotation window (`key_id=/path` pairs, mirroring the fleet release gate) so a stolen signing key rotates forward without a flag day, and the provision report records `ok-signed` vs `ok-unsigned-legacy` so the migration off unsigned preflights is observable. The signing key never enters the repo or the image; the verification keys ship with the injector's own configuration. Unsigned preflights keep working while older images are in service. (#831)
+
+### Fixed
+- The box pairing client's HTTP layer now normalizes non-object JSON
+  response bodies at the choke point instead of guarding at individual call
+  sites: only the heartbeat path checked that a 2xx body was actually an
+  object, so a plane returning a list, string, or null died with a bare
+  `AttributeError`/`KeyError` traceback everywhere else — every command now
+  gets a clean "malformed plane response" failure. The `redeem` path also
+  got the same clean-error treatment for a corrupt, non-object, or
+  incomplete `pairing.json` (the enrollment paths already had it), and GET
+  requests no longer send a `Content-Type: application/json` header with no
+  body. (#884)
 
 ### Added
 - Published a vision-vs-state gap analysis for the planned per-box Durable Object phone-home channel: what exists today (HTTPS heartbeat polling, human-approved pairing, short-lived Bearer <redacted>), the missing pieces (no box-side long-lived process — the plane's heartbeat contract has no in-repo sender — no plane WebSocket surface, no wire protocol, and the token rotation endpoints the socket's auth will depend on), and the dependency-ordered plan for building it without shipping a socket whose auth can't be revoked. (#865)
