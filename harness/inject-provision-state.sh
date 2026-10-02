@@ -104,6 +104,13 @@
 #                          INJECT_MANIFEST explicitly)
 #   INJECT_MANIFEST_CHECK  manifest preflight script (default alongside
 #                          this script)
+#   INJECT_MANIFEST_PUBKEY Ed25519 public key (PEM) enabling the signed
+#                          manifest preflight (#155): when set, the check
+#                          verifies the manifest's detached signature
+#                          (<manifest>.sig, from harness/sign-image-manifest.sh)
+#                          over the manifest's exact bytes before parsing,
+#                          failing closed on missing/malformed/mismatch.
+#                          Unset keeps the legacy self-attestation check.
 #   CRED_STORE_VERIFY_INFERENCE
 #                          inference store blind-compare writer (default
 #                          /usr/local/bin/cred-store-verify-inference;
@@ -345,8 +352,21 @@ allowlist_echo_entries() {
 }
 
 # --- Step 1: manifest preflight -------------------------------------------
+# INJECT_MANIFEST_PUBKEY (optional): Ed25519 public key (PEM) for the #155
+# signed-manifest path. When set, the preflight verifies the manifest's
+# detached signature (harness/sign-image-manifest.sh, <manifest>.sig) over
+# the manifest's exact bytes BEFORE any parse, and fails closed on a
+# missing/malformed/mismatched signature. When unset, the preflight runs the
+# legacy self-attestation check (image_version vs pinned SHA) — the
+# manifest's own bytes are the only witness, so name the weaker claim in
+# the provision record. The verification key ships with the injector's
+# operator config, never in the image.
 echo "inject-provision-state: preflighting image manifest against pinned $IMAGE_VERSION" >&2
-if ! "$MANIFEST_CHECK" "$MANIFEST" --expect-version "$IMAGE_VERSION" >&2; then
+MANIFEST_CHECK_ARGS=("$MANIFEST" --expect-version "$IMAGE_VERSION")
+if [ -n "${INJECT_MANIFEST_PUBKEY:-}" ]; then
+    MANIFEST_CHECK_ARGS+=(--pubkey "$INJECT_MANIFEST_PUBKEY")
+fi
+if ! "$MANIFEST_CHECK" "${MANIFEST_CHECK_ARGS[@]}" >&2; then
     echo "inject-provision-state: refusing: manifest preflight failed (image drift -- the box is not the pinned image)" >&2
     exit 1
 fi

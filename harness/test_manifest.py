@@ -207,3 +207,175 @@ def test_generate_refuses_dirty_checkout(tmp_path):
     assert p.returncode == 2
     assert "uncommitted changes" in p.stderr
     assert not (tmp_path / "m4.json").exists()
+
+
+# --- #155: Ed25519 manifest signing ---------------------------------------
+
+SIGN = os.path.join(HARNESS, "sign-image-manifest.sh")
+
+
+def _gen_keys(tmp_path, name="op"):
+    priv = tmp_path / f"{name}.priv.pem"
+    pub = tmp_path / f"{name}.pub.pem"
+    p = subprocess.run([SIGN, "--gen-key", str(tmp_path / name)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert priv.exists() and pub.exists()
+    return priv, pub
+
+
+def _signed_manifest(tmp_path, name="m"):
+    out = tmp_path / f"{name}.json"
+    subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
+                   capture_output=True)
+    priv, pub = _gen_keys(tmp_path)
+    p = subprocess.run([SIGN, str(out), "--key", str(priv)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    sig = out.with_suffix(".json.sig")
+    assert sig.exists()
+    return out, sig, priv, pub
+
+
+def test_sign_verify_roundtrip(tmp_path):
+    out, sig, priv, pub = _signed_manifest(tmp_path)
+    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert "signature OK" in p.stderr and "check-image-manifest: OK" in p.stderr
+
+
+def test_verify_fails_on_single_byte_tamper(tmp_path):
+    # Non-vacuity pin for the signature gate: one flipped byte must fail,
+    # even though image_version and the schema still parse.
+    out, sig, priv, pub = _signed_manifest(tmp_path)
+    raw = bytearray(out.read_bytes())
+    raw[len(raw) // 2] ^= 0x01
+    out.write_bytes(bytes(raw))
+    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "SIGNATURE MISMATCH" in p.stderr
+
+
+def test_verify_fails_on_wrong_key(tmp_path):
+    # Signed by key A, verified against key B's pubkey: fail closed.
+    out, sig, priv, pub = _signed_manifest(tmp_path)
+    _, other_pub = _gen_keys(tmp_path, name="other")
+    p = subprocess.run([CHECK, str(out), "--pubkey", str(other_pub)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "SIGNATURE MISMATCH" in p.stderr
+
+
+def test_verify_fails_when_sig_missing(tmp_path):
+    # --pubkey with no signature file: fail closed, not "unsigned is fine".
+    out, sig, priv, pub = _signed_manifest(tmp_path)
+    sig.unlink()
+    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "SIGNATURE MISSING" in p.stderr
+
+
+def test_verify_fails_on_malformed_sig(tmp_path):
+    out, sig, priv, pub = _signed_manifest(tmp_path)
+    sig.write_text("not-valid-base64!!!\n")
+    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "failing closed" in p.stderr
+    # Right shape, wrong length: also refused.
+    sig.write_text("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\n")
+    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "64 bytes" in p.stderr
+
+
+def test_check_without_pubkey_keeps_legacy_behavior(tmp_path):
+    # Backward compat while unsigned images are in service: no --pubkey
+    # means the old self-attestation check, sig or no sig.
+    out, sig, priv, pub = _signed_manifest(tmp_path)
+    p = subprocess.run([CHECK, str(out)], capture_output=True, text=True,
+                       timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert "signature OK" not in p.stderr
+    sig.unlink()
+    p = subprocess.run([CHECK, str(out)], capture_output=True, text=True,
+                       timeout=30)
+    assert p.returncode == 0, p.stderr
+
+
+def test_verify_runs_before_parse(tmp_path):
+    # Garbage bytes + --pubkey: the failure is the missing signature, not a
+    # JSON error — trust is established on bytes before any parse. An
+    # attacker-shaped document never reaches the parser untrusted.
+    junk = tmp_path / "junk.json"
+    junk.write_text("{not json at all\x00\x01")
+    p = subprocess.run([CHECK, str(junk), "--pubkey", str(tmp_path / "k.pub.pem")],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "SIGNATURE MISSING" in p.stderr
+    assert "invalid JSON" not in p.stderr
+
+
+def test_gen_key_refuses_overwrite(tmp_path):
+    _gen_keys(tmp_path)
+    p = subprocess.run([SIGN, "--gen-key", str(tmp_path / "op")],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "refusing to overwrite" in p.stderr
+
+
+def test_gen_key_private_is_0600(tmp_path):
+    priv, pub = _gen_keys(tmp_path)
+    assert (priv.stat().st_mode & 0o777) == 0o600
+
+
+def test_sign_refuses_group_readable_key(tmp_path):
+    # The signing key is a capability: group/other-readable refuses,
+    # mirroring fleet/gate_query.py's 0600 key discipline.
+    out = tmp_path / "m.json"
+    subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
+                   capture_output=True)
+    priv, pub = _gen_keys(tmp_path)
+    priv.chmod(0o640)
+    p = subprocess.run([SIGN, str(out), "--key", str(priv)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "group/other readable" in p.stderr
+    assert not out.with_suffix(".json.sig").exists()
+
+
+def test_sign_refuses_symlink_manifest(tmp_path):
+    # TOCTOU discipline: signing through a symlink would bind the signature
+    # to bytes the caller didn't name.
+    out = tmp_path / "real.json"
+    subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
+                   capture_output=True)
+    priv, pub = _gen_keys(tmp_path)
+    link = tmp_path / "link.json"
+    link.symlink_to(out)
+    p = subprocess.run([SIGN, str(link), "--key", str(priv)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "symlinks refused" in p.stderr
+    p = subprocess.run([CHECK, str(link), "--pubkey", str(pub)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "symlinks refused" in p.stderr
+
+
+def test_sign_refuses_non_ed25519_key(tmp_path):
+    # An RSA key in the same PEM envelope must not silently sign.
+    subprocess.run(["openssl", "genrsa", "-out", str(tmp_path / "rsa.pem"),
+                    "2048"], capture_output=True, timeout=30)
+    (tmp_path / "rsa.pem").chmod(0o600)
+    out = tmp_path / "m.json"
+    subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
+                   capture_output=True)
+    p = subprocess.run([SIGN, str(out), "--key", str(tmp_path / "rsa.pem")],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "not Ed25519" in p.stderr
