@@ -79,7 +79,10 @@ BEFORE the upstream TCP connect (finding 38), so a refused host never
 gets even a SYN — the old `request`-hook check ran after mitmproxy had
 already connected. Refused ranges (RFC 1918, loopback, link-local,
 CGNAT/tailnet space, 0.0.0.0/8, IETF/benchmark/reserved space,
-ULA/link-local/multicast v6; finding 37 adds IPv4-mapped unwrapping)
+ULA/link-local/multicast v6, the 6to4 and Teredo transition ranges;
+finding 37 adds IPv4-mapped unwrapping, and NAT64 well-known-prefix
+(64:ff9b::/96) literals are unwrapped to their embedded IPv4 before
+the range judgment)
 are killed via data.server.error unless the host is explicitly
 allowlisted in the SSRF allow file (hostnames or CIDR literals).
 Fresh installs default to deny. On allow, the server address is pinned
@@ -858,13 +861,31 @@ def _auth_location(value):
 # Ranges refused by default (findings 29, 37): RFC 1918 private,
 # loopback, link-local, CGNAT and other carrier space, 0.0.0.0/8,
 # IETF protocol assignments, benchmarking space, reserved space, and
-# ULA/link-local/multicast v6.
+# ULA/link-local/multicast v6. Finding 37 adds IPv4-mapped unwrapping;
+# the 6to4 (2002::/16) and Teredo (2001::/32) transition ranges are
+# refused wholesale: both embed an IPv4 address inside a v6 literal, so
+# without this a 6to4/Teredo literal for a private IPv4 (e.g.
+# 2002:7f00:1::1 for 127.0.0.1) judges as a public v6 address — the
+# same fail-open class finding 37 closed for ::ffff:/96. These are
+# deprecated transition mechanisms with no legitimate destination on
+# this proxy's egress path; the ssrf allow file can still admit them
+# explicitly (host or CIDR) when an operator really needs one.
+# Stated residual: embeddings with no fixed prefix — ISATAP
+# interface-ID forms and operator-configured (non-well-known) NAT64
+# prefixes — cannot be refused by range and are not unwrapped.
 _PRIVATE_NETS = tuple(ipaddress.ip_network(c) for c in (
     "0.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
     "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
     "192.0.0.0/24", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
     "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
+    "2002::/16", "2001::/32",
 ))
+# NAT64 well-known prefix (RFC 6052): a live translation mechanism, not
+# a deprecated one, so it is unwrapped in _normalize_ip rather than
+# refused — see there for the rationale. Kept separate from
+# _PRIVATE_NETS because membership means "judge the embedded IPv4",
+# not "refuse".
+_NAT64_WKP = ipaddress.ip_network("64:ff9b::/96")
 _DNS_TTL = 60
 # Response scrubbing floor (finding 36): values under this length are
 # never scrubbed, because short secrets mangle pages.
@@ -878,16 +899,28 @@ _MAX_SWAP_BODY_BYTES = 5 * 1024 * 1024
 
 
 def _normalize_ip(ip):
-    """Parse an IP literal, unwrapping IPv4-mapped IPv6 (finding 37):
-    ::ffff:127.0.0.1 reaches localhost on Linux and must be judged as
-    127.0.0.1, not as a global unicast v6 address. Returns None for
-    garbage."""
+    """Parse an IP literal, unwrapping IPv4-mapped IPv6 (finding 37)
+    and the NAT64 well-known prefix: ::ffff:127.0.0.1 reaches localhost
+    on Linux and must be judged as 127.0.0.1, not as a global unicast v6
+    address; likewise 64:ff9b::/96 (RFC 6052) embeds a full IPv4 address
+    in its last 32 bits, so 64:ff9b::7f00:1 must be judged as 127.0.0.1.
+    Unlike the deprecated 6to4/Teredo ranges (refused wholesale above),
+    NAT64 is a live mechanism — on a DNS64 network the well-known prefix
+    is the legitimate path to v4 upstreams — so it is unwrapped, not
+    refused: a public embedded IPv4 still passes. Operator-configured
+    NAT64 prefixes (variable, not well-known) and ISATAP interface-ID
+    embeddings cannot be judged by prefix and remain a stated residual.
+    Returns None for garbage."""
     try:
         addr = ipaddress.ip_address(ip.split("%")[0])
     except ValueError:
         return None
     mapped = getattr(addr, "ipv4_mapped", None)
-    return mapped if mapped is not None else addr
+    if mapped is not None:
+        return mapped
+    if addr.version == 6 and addr in _NAT64_WKP:
+        return ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+    return addr
 
 
 def _is_private_ip(ip):
