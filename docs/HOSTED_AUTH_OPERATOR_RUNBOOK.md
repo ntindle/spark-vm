@@ -51,6 +51,11 @@ both close permanently at the first owner key:
 **Save the minted key immediately.** It is returned exactly once and the
 plane stores only its hash. There is no "show me my key" endpoint.
 
+Operator gotcha: on a fresh database the very first pairing approval is
+CLI-only (`spark_pair.py approve --bootstrap`) — the dashboard can't sign
+in until that first owner key exists, so don't reach for the dashboard
+first.
+
 ## Owner keys, day-to-day
 
 - `GET /v1/owner/keys` → key metadata (ids, names, created times) — never

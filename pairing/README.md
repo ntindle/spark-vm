@@ -256,9 +256,10 @@ SVM_OWNER_KEY=... python3 pairing/spark_pair.py approve --pairing-id pair_...
 python3 pairing/spark_pair.py redeem
 
 # keep the token fresh (cron/systemd runs `rotate --auto` hourly):
-# NOTE: rotate/revoke need the control-plane endpoints closing #846 — verify
-# with a manual `rotate` before installing the cron line (see Token rotation
-# in this README).
+# NOTE: rotate/revoke need the control-plane endpoints that closed #846
+# (live on the hosted plane since 2026-10-02; self-hosted planes need the
+# update) — verify with a manual `rotate` before installing the cron line
+# (see Token rotation in this README).
 python3 pairing/spark_pair.py rotate --auto
 # owner revokes a lost/compromised box immediately:
 SVM_OWNER_KEY=... python3 pairing/spark_pair.py revoke --box-id box_...
