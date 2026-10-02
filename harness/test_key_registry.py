@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -951,3 +952,135 @@ def test_claim_issue_cli_unknown_fingerprint_fails_clean(tmp_path):
     assert r.returncode == 2
     assert "error:" in r.stderr
     assert "Traceback" not in r.stderr
+
+
+# -- stale tmp sweep (#824, the #716 class) ----------------------------------
+
+def _plant_tmp(reg, name, age_s):
+    path = reg.root / name
+    reg.root.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}")
+    old = time.time() - age_s
+    os.utime(path, (old, old))
+    return path
+
+
+def test_sweep_removes_stale_tmps_but_keeps_fresh(reg):
+    stale = _plant_tmp(reg, "registry.json.tmp.12345.999", 7200)
+    fresh = _plant_tmp(reg, "registry.json.tmp.12345.1000", 60)
+    reg.register(key_line=ROT_LINE_1)  # any op triggers the sweep
+    assert not stale.exists()
+    assert fresh.exists()
+
+
+def test_sweep_sweeps_any_stale_name_with_prefix(reg):
+    # the sweep keys on the mkstemp prefix, not on exact mkstemp shape:
+    # anything registry.json.tmp.* older than the threshold is crash litter
+    keeper = reg.root / "registry.json.tmp.keepme"
+    stranger = reg.root / "unrelated.txt"
+    reg.root.mkdir(parents=True, exist_ok=True)
+    keeper.write_text("{}")
+    stranger.write_text("{}")
+    old = time.time() - 7200
+    os.utime(keeper, (old, old))
+    os.utime(stranger, (old, old))
+    reg.register(key_line=ROT_LINE_1)
+    assert not keeper.exists()
+    assert stranger.exists()
+
+
+def test_sweep_survives_concurrent_reclaim(reg):
+    # a tmp unlinked between listdir and stat is a lost race, not an error
+    stale = _plant_tmp(reg, "registry.json.tmp.12345.4242", 7200)
+    stale.unlink()
+    reg.register(key_line=ROT_LINE_1)  # must not raise
+
+
+# -- deletion audit journal (#825) --------------------------------------------
+
+def test_remove_journals_deletion_with_lineage(reg, monkeypatch):
+    _frozen(monkeypatch, "2026-10-01T10:00:00+00:00")
+    old_fp = _rot_fp_of(1)
+    reg.register(key_line=ROT_LINE_1, box_ref="box-1")
+    _frozen(monkeypatch, "2026-10-01T11:00:00+00:00")
+    reg.rotate(old_fp, key_line=ROT_LINE_2)
+    new_fp = _rot_fp_of(2)
+    _frozen(monkeypatch, "2026-10-01T12:00:00+00:00")
+    issued = reg.issue_claim(new_fp)
+    reg.redeem_claim(issued["claim_code"], claimed_by="op@example.com")
+    _frozen(monkeypatch, "2026-10-01T13:00:00+00:00")
+    assert reg.remove(new_fp) is True
+    entries = reg.deletions()
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["fingerprint"] == new_fp
+    assert entry["account_id"] == key_registry.account_id_for(new_fp)
+    assert entry["key_type"] == "ssh-ed25519"
+    assert entry["box_ref"] == "box-1"
+    assert entry["created_at"] == "2026-10-01T11:00:00+00:00"
+    assert entry["claimed_by"] == "op@example.com"
+    assert entry["deleted_at"] == "2026-10-01T13:00:00+00:00"
+    # lineage context of the DELETED record: the rotated-out old record's
+    # pointer is preserved in the journal entry, not followed
+    assert reg.lookup(old_fp)["rotated_to"] == new_fp
+    assert reg.lookup(new_fp) is None  # deleted
+    assert [r["fingerprint"] for r in reg.accounts()] == [old_fp]  # rotated-out record stays
+    # copies, not aliases into the store
+    entry["fingerprint"] = "mutated"
+    assert reg.deletions()[0]["fingerprint"] == new_fp
+
+
+def test_remove_unknown_returns_false_and_journals_nothing(reg):
+    assert reg.remove(_rot_fp_of(1)) is False
+    assert reg.deletions() == []
+
+
+def test_deletions_journal_bounded(reg, monkeypatch):
+    # monkeypatch the cap small: the bound must be enforced by the code,
+    # not by the size of the fixture set.
+    monkeypatch.setattr(key_registry, "DELETIONS_CAP", 2)
+    monkeypatch.setattr(key_registry, "_utcnow",
+                        lambda: datetime.datetime.now(datetime.timezone.utc))
+    fps = [_rot_fp_of(n) for n in range(1, 4)]
+    for n in range(1, 4):
+        reg.register(key_line=_ROT_LINES[n - 1])
+    for fp in fps:
+        assert reg.remove(fp) is True
+    journal = reg.deletions()
+    # 3 deletions happened; the journal keeps the newest 2, oldest first
+    assert len(journal) == 2
+    assert [e["fingerprint"] for e in journal] == fps[1:3]
+
+
+def test_deletions_persist_across_reload(reg, tmp_path):
+    fp = _rot_fp_of(1)
+    rec = reg.register(key_line=ROT_LINE_1, box_ref="box-9")
+    reg.remove(fp)
+    reloaded = KeyRegistry(root=tmp_path / "registry")
+    entries = reloaded.deletions()
+    assert len(entries) == 1
+    assert entries[0]["fingerprint"] == fp
+    assert entries[0]["account_id"] == rec["account_id"]
+    assert entries[0]["box_ref"] == "box-9"
+
+
+def test_deletions_journal_missing_key_normalizes(reg):
+    # stores written before #825 have no "deletions" key: they load, and
+    # the first remove persists the journal without touching anything else
+    reg.register(key_line=ROT_LINE_1)
+    data = json.loads(reg.store_path.read_text())
+    data.pop("deletions", None)  # simulate a pre-#825 store
+    reg.store_path.write_text(json.dumps(data))
+    assert reg.remove(_rot_fp_of(1)) is True
+    assert len(reg.deletions()) == 1
+
+
+def test_deletions_journal_misshapen_fails_closed(reg):
+    reg.register(key_line=ROT_LINE_1)
+    data = json.loads(reg.store_path.read_text())
+    data["deletions"] = {"not": "a list"}
+    reg.store_path.write_text(json.dumps(data))
+    with pytest.raises(RegistryError):
+        reg.deletions()
+    with pytest.raises(RegistryError):
+        reg.remove(_rot_fp_of(1))

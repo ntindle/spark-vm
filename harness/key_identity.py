@@ -13,8 +13,9 @@ account. This module provides the stateless identity half of that contract:
   expiry, claim link, policy) as JSON.
 
 Persistence — the fingerprint -> account registry, "same key resumes the
-same box" state, key rotation, and the claim/upgrade escape hatch — is a
-later slice (see #446). This module deliberately keeps no state: no disk
+same box" state, key rotation, and the claim/upgrade escape hatch — now
+lives in ``harness/key_registry.py`` (slices S2/S2.5/S3, #446). This module
+deliberately keeps no state: no disk
 writes, no network, no subprocesses, stdlib only, so it can run unchanged on
 the self-hosted box, the hosted control plane, and the operator laptop.
 
@@ -271,10 +272,28 @@ def first_connect_manifest(
         "box_id": box_id,
         "claim_url": claim_url,
         "policy": {
-            # One key = one identity. Rotating the key creates a NEW
-            # account; there is no linking yet — the claim/upgrade escape
-            # hatch (later slice) is the answer to key loss / rotation.
-            "rotation": "not-implemented: a new key is a new account",
+            # One key = one identity. Rotating the key registers a NEW
+            # account; lineage is recorded, not linking: the old record is
+            # stamped rotated_to/rotated_at and a bounded entry lands in
+            # the registry's rotations journal (harness/key_registry.py:
+            # rotate, slice S2.5). Identity is still the key — rotation
+            # never merges two existing accounts.
+            "rotation": (
+                "lineage-recorded: a new key is a new account; the old "
+                "record keeps rotated_to/rotated_at and the lineage is "
+                "journaled (registry rotate)"
+            ),
+            # Key loss: the claim/upgrade escape hatch (slice S3, also in
+            # harness/key_registry.py). The operator is shown a single-use
+            # claim code once at issue time (the registry stores only its
+            # SHA-256 hash); redeeming it stamps the account claimed_at /
+            # claimed_by. Codes expire (7-day default TTL). A claimed
+            # account is still the key's account — claim is the upgrade
+            # path, not a re-registration.
+            "claim": (
+                "single-use claim codes (registry issue_claim / "
+                "redeem_claim): key-loss upgrade path, 7-day default TTL"
+            ),
             # Multiple keys = multiple identities. Accepted for
             # self-hosted and agent-created accounts; the hosted sybil
             # policy is an open question (see #446).
