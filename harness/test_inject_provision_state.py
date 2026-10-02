@@ -69,6 +69,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -569,7 +570,7 @@ def test_happy_path_no_fixture(stack):
     assert proc.returncode == 0, proc.stderr.decode()
     report = _report(proc)
     assert report["image_version"] == IMAGE_SHA
-    assert report["steps"]["manifest"] == "ok"
+    assert report["steps"]["manifest"] == "ok-unsigned-legacy"
     assert report["steps"]["fixture_teardown"] == "ok"
     assert report["fixture_teardown_detail"] == "absent"
     assert report["steps"]["inference_key"] == "ok"
@@ -938,6 +939,81 @@ def test_refuses_manifest_drift(stack):
     proc = _run_injector(env)
     assert proc.returncode == 1
     assert b"manifest preflight failed" in proc.stderr
+    # Nothing was touched: the key and registry are exactly as seeded.
+    assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+    assert _registry(paths["registry_file"])[KEY_NAME]["allowed_hosts"] == \
+        [PROVIDER_HOST]
+
+
+_SIGN_MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "sign-image-manifest.sh")
+
+
+def _gen_signing_keys(prefix):
+    p = subprocess.run([_SIGN_MANIFEST, "--gen-key", prefix],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+
+
+def _sign_fixture_manifest(paths, prefix):
+    p = subprocess.run([_SIGN_MANIFEST, str(paths["manifest_file"]),
+                        "--key", prefix + ".priv.pem"],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+
+
+def _with_test_python_on_path(env, tmp_path, name):
+    # The fixture's PATH (fake bin + /usr/bin:/bin) gives the preflight a
+    # system python3 without the `cryptography` package the --pubkey path
+    # needs. Shim a python3 -> the test interpreter (which carries
+    # requirements-test.txt, cryptography included) ahead of it — scoped
+    # to these tests; the shared fixture is untouched.
+    # A plain symlink won't do: venv interpreters resolve pyvenv.cfg from
+    # the resolved binary path, so a symlinked venv python loses its
+    # site-packages. Exec through a wrapper script instead.
+    pybin = tmp_path / name
+    pybin.mkdir()
+    shim = pybin / "python3"
+    shim.write_text("#!/bin/sh\nexec %s \"$@\"\n"
+                    % shlex.quote(sys.executable))
+    os.chmod(shim, 0o755)
+    env = dict(env)
+    env["PATH"] = str(pybin) + os.pathsep + env["PATH"]
+    return env
+
+
+def test_signed_manifest_preflight_ok(stack, tmp_path):
+    # #155 signed path, end to end: the injector's INJECT_MANIFEST_PUBKEY
+    # seam reaches the real preflight, which verifies the signature over
+    # the manifest bytes before parsing.
+    env, paths = stack
+    _seed_real_key(paths)
+    prefix = str(tmp_path / "op")
+    _gen_signing_keys(prefix)
+    _sign_fixture_manifest(paths, prefix)
+    env = _with_test_python_on_path(env, tmp_path, "pybin-ok")
+    env["INJECT_MANIFEST_PUBKEY"] = "op=" + prefix + ".pub.pem"
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert _report(proc)["steps"]["manifest"] == "ok-signed"
+
+
+def test_signed_manifest_wrong_key_refuses(stack, tmp_path):
+    # Signed with key A, injector configured with key B: refuse at the
+    # preflight, before touching anything.
+    env, paths = stack
+    _seed_real_key(paths)
+    prefix_a = str(tmp_path / "a")
+    prefix_b = str(tmp_path / "b")
+    _gen_signing_keys(prefix_a)
+    _gen_signing_keys(prefix_b)
+    _sign_fixture_manifest(paths, prefix_a)
+    env = _with_test_python_on_path(env, tmp_path, "pybin-bad")
+    env["INJECT_MANIFEST_PUBKEY"] = "b=" + prefix_b + ".pub.pem"
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"manifest preflight failed" in proc.stderr
+    assert b"SIGNATURE MISMATCH" in proc.stderr
     # Nothing was touched: the key and registry are exactly as seeded.
     assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
     assert _registry(paths["registry_file"])[KEY_NAME]["allowed_hosts"] == \
