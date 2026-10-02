@@ -2404,6 +2404,258 @@ class StreamRefusalTests(unittest.TestCase):
         self.assertIsNone(sa.SwapAddon._stream_refusal_reason(r4))
 
 
+class RedirectSecretTests(unittest.TestCase):
+    """Issue #94: a redirect whose Location carries a known secret value
+    to a non-allowlisted host is refused in `responseheaders` — the
+    client's follow-up request would otherwise carry the real secret
+    off-allowlist. Detection runs on the raw Location (the verbatim
+    scrubber is blind to percent-/form-encoding); the Location is then
+    neutralized with a constant before the shared scrub loop, so the
+    killed flow's records carry no secret and a scrubber exception
+    cannot resurrect the exfil path."""
+
+    def _flow(self, status, location, host="github.com"):
+        a = make_addon()
+        resp = FakeResponse(b"", "text/html", status_code=status)
+        resp.headers.set_all("location", [location])
+        flow = Flow(Request(host, "/login"))
+        flow.response = resp
+        return a, flow, resp
+
+    def test_redirect_secret_to_non_allowlisted_host_killed(self):
+        a, flow, resp = self._flow(
+            302, "https://evil.example/cb?token=" + SECRETS["github"])
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)  # killed: nothing is forwarded
+        self.assertIn(("github.com", "redirect-secret-refused",
+                       "evil.example"), a.audit_notes)
+        # the audit note names the target host, never the secret value
+        for _, _, reason in a.audit_notes:
+            self.assertNotIn(SECRETS["github"], reason)
+
+    def test_percent_encoded_secret_in_redirect_killed(self):
+        # An open redirector percent-encodes the value: the verbatim
+        # header scrubber misses it, but the client decodes it on the
+        # follow-up request.
+        a = make_addon()
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        resp = FakeResponse(b"", "text/html", status_code=302)
+        loc = "https://evil.example/cb?next=" + enc
+        self.assertNotIn(SECRETS["pw"], loc)  # encoded: scrubber is blind
+        resp.headers.set_all("location", [loc])
+        flow = Flow(Request("github.com", "/login"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("github.com", "redirect-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_307_and_308_also_killed(self):
+        for status in (301, 303, 307, 308):
+            a, flow, _ = self._flow(
+                status, "https://evil.example/cb?k=" + SECRETS["sess"])
+            a.responseheaders(flow)
+            self.assertIsNotNone(flow.error, "status %d" % status)
+
+    def test_protocol_relative_redirect_killed(self):
+        a, flow, _ = self._flow(
+            302, "//evil.example/cb?k=" + SECRETS["sess"])
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+
+    def test_redirect_to_allowlisted_host_scrubbed_not_killed(self):
+        # Same secret, allowlisted target: today's scrub-in-place
+        # behaviour is preserved.
+        a, flow, resp = self._flow(
+            302, "https://api.github.com/cb?token=" + SECRETS["github"])
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        loc = resp.headers.get("location")
+        self.assertNotIn(SECRETS["github"], loc)
+        self.assertIn("hsurr:github", loc)
+
+    def test_relative_redirect_with_secret_not_killed(self):
+        a, flow, resp = self._flow(
+            302, "/cb?token=" + SECRETS["github"])
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertNotIn(SECRETS["github"],
+                         resp.headers.get("location"))
+
+    def test_non_redirect_location_with_secret_not_killed(self):
+        # Browsers don't follow Location on a 200: no exfil path.
+        a, flow, _ = self._flow(
+            200, "https://evil.example/cb?token=" + SECRETS["github"])
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertEqual(a.audit_notes, [])
+
+    def test_redirect_without_secret_not_killed(self):
+        a, flow, _ = self._flow(
+            302, "https://evil.example/cb?x=1")
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertEqual(a.audit_notes, [])
+
+    def test_redirect_target_host_unit(self):
+        t = sa.SwapAddon._redirect_target_host
+        self.assertEqual(t("https://evil.example:8443/cb?x=1"),
+                         "evil.example")
+        self.assertEqual(t("//evil.example/cb"), "evil.example")
+        self.assertIsNone(t("/relative/path?x=1"))
+        self.assertIsNone(t(""))
+        self.assertIsNone(t("https://[::1"))  # unparseable: no kill
+
+    def test_redirect_target_host_whatwg_units(self):
+        # WHATWG/browser semantics, not urlsplit semantics: backslash
+        # is a slash on special schemes; scheme:host (no slashes)
+        # navigates off-host and must fail closed, never read as
+        # same-host.
+        t = sa.SwapAddon._redirect_target_host
+        self.assertEqual(t("https:\\\\evil.example\\cb"), "evil.example")
+        self.assertEqual(t("https://evil.example\\@allowlisted.example/cb"),
+                         "evil.example")
+        self.assertEqual(t("\\\\evil.example\\cb"), "evil.example")
+        # Special-scheme `scheme:host` (no slashes) navigates to
+        # //host per WHATWG — the host is extracted, not guessed.
+        self.assertEqual(t("http:evil.example/cb"), "evil.example")
+        # Non-special schemes never carry an HTTP-navigable host:
+        # fail closed ("") rather than treating as same-host.
+        self.assertEqual(t("mailto:foo@bar.com"), "")
+        self.assertIsNone(t("?x=1"))
+        self.assertIsNone(t("#frag"))
+
+    def test_plus_encoded_secret_in_redirect_killed(self):
+        # An open redirector form-encodes spaces as `+` (urlencode /
+        # quote_plus output); unquote alone leaves `+` untouched, so
+        # the check must also try the form-decoded form.
+        a = make_addon()
+        secret = SECRETS["acme"]["password"]  # "correct horse"
+        enc = urllib.parse.quote_plus(secret)
+        self.assertNotIn(secret, enc)  # `+`-form: scrubber is blind
+        resp = FakeResponse(b"", "text/html", status_code=302)
+        resp.headers.set_all(
+            "location", ["https://evil.example/cb?next=" + enc])
+        flow = Flow(Request("github.com", "/login"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("github.com", "redirect-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_double_encoded_secret_in_redirect_killed(self):
+        # Two encoding layers (redirector + template): the check
+        # decodes to a fixpoint, so the second layer is caught too.
+        a = make_addon()
+        secret = SECRETS["acme"]["password"]
+        twice = urllib.parse.quote(urllib.parse.quote(secret, safe=""),
+                                   safe="")
+        self.assertNotIn(secret, twice)
+        self.assertNotIn(secret, urllib.parse.unquote(twice))
+        resp = FakeResponse(b"", "text/html", status_code=302)
+        resp.headers.set_all(
+            "location", ["https://evil.example/cb?next=" + twice])
+        flow = Flow(Request("github.com", "/login"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+
+    def test_backslash_host_desync_killed(self):
+        # urlsplit sees no host (treats as relative); browsers follow
+        # to evil.example. Both shapes must be killed when secret-bearing.
+        for loc in ("https:\\\\evil.example\\cb?k=" + SECRETS["sess"],
+                    "https://evil.example\\@allowlisted.example/cb?k="
+                    + SECRETS["sess"]):
+            a, flow, _ = self._flow(302, loc)
+            a.responseheaders(flow)
+            self.assertIsNotNone(flow.error, loc)
+
+    def test_schemeless_mixed_slash_backslash_killed(self):
+        # S1 residual: scheme-less mixed shapes. WHATWG resolves them
+        # against the http(s) request URL, so backslash counts as
+        # slash and the browser navigates off-host — the check must
+        # agree instead of reading them as same-host.
+        for loc in ("\\/evil.example\\cb?k=" + SECRETS["sess"],
+                    "/\\evil.example\\cb?k=" + SECRETS["sess"],
+                    "/\\/evil.example\\cb?k=" + SECRETS["sess"]):
+            a, flow, _ = self._flow(302, loc)
+            a.responseheaders(flow)
+            self.assertIsNotNone(flow.error, loc)
+
+    def test_lone_leading_backslash_stays_same_host(self):
+        # `\evil.example\cb` becomes `/evil.example/cb`: a same-host
+        # path, not an authority — browsers agree, so no kill (the
+        # verbatim scrubber still cleans the secret in place).
+        a, flow, resp = self._flow(
+            302, "\\evil.example\\cb?k=" + SECRETS["sess"])
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertNotIn(SECRETS["sess"],
+                         resp.headers.get("location"))
+
+    def test_scheme_only_redirect_killed(self):
+        # `http:evil.example/cb` has no // authority; browsers still
+        # navigate off-host. Fail closed, never same-host.
+        a, flow, _ = self._flow(
+            302, "http:evil.example/cb?k=" + SECRETS["sess"])
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+
+    def test_secret_in_hostname_audit_scrubbed(self):
+        # Token-subdomain pattern: the secret sits in the host part.
+        # The audit reason must carry the scrubbed placeholder, never
+        # the value — "Values are NEVER logged".
+        a = make_addon(secrets={"tok": "abc123token"})
+        resp = FakeResponse(b"", "text/html", status_code=302)
+        resp.headers.set_all(
+            "location", ["https://abc123token.evil.example/cb"])
+        flow = Flow(Request("github.com", "/login"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertTrue(a.audit_notes)
+        for _, _, reason in a.audit_notes:
+            self.assertNotIn("abc123token", reason)
+        self.assertTrue(any("hsurr:tok" in reason
+                            for _, _, reason in a.audit_notes))
+
+    def test_secret_in_hostname_case_mangled_audit_redacted(self):
+        # urlsplit lowercases hostnames: a mixed-case secret would
+        # survive the case-sensitive scrubber, so the audit fails over
+        # to a constant instead of logging the case-mangled value.
+        secret = SECRETS["sess"]  # "sess-SECRET"
+        a, flow, _ = self._flow(
+            302, "https://" + secret + ".evil.example/cb")
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertTrue(a.audit_notes)
+        for _, _, reason in a.audit_notes:
+            self.assertNotIn(secret, reason)
+            self.assertNotIn(secret.lower(), reason)
+
+    def test_killed_redirect_location_neutralized(self):
+        # The killed flow's records must carry no secret: the Location
+        # is overwritten with a constant before the kill.
+        a, flow, resp = self._flow(
+            302, "https://evil.example/cb?token=" + SECRETS["github"])
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        loc = resp.headers.get("location")
+        self.assertEqual(loc, "hsurr:redirect-secret-refused")
+        self.assertNotIn(SECRETS["github"], loc)
+
+    def test_check_error_fails_closed(self):
+        # A detection-path exception must kill, never forward: the
+        # redirect is refused and the check failure is audited.
+        a, flow, _ = self._flow(302, "https://evil.example/cb?x=1")
+        with mock.patch.object(a, "_secret_replacements",
+                               side_effect=RuntimeError("boom")):
+            a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("github.com", "redirect-secret-refused",
+                       "check-error"), a.audit_notes)
+
+
 class AuditLogDiskGuardTests(unittest.TestCase):
     """Finding 198: swap.log must be bounded, and the no-swap-without-
     trail invariant must hold when the disk fills. The addon guards the

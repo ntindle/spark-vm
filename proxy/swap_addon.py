@@ -69,7 +69,12 @@ refused outright — the flow is killed in `responseheaders` — because
 their bodies never finish and the scrubber can never see them; a
 replacement body synthesized at headers time would be overwritten by
 mitmproxy's post-hook body buffering, so killing is the only sound
-refusal (finding 40e, issue #92). Stated residuals: never-ending
+refusal (finding 40e, issue #92). Redirects (301/302/303/307/308) whose
+Location carries a known secret value — raw, percent-encoded at any
+depth, or form-encoded (`+` for space) — to a
+non-allowlisted host are likewise refused at headers time (issue #94):
+the client's follow-up request would otherwise carry the real secret
+off-allowlist. Stated residuals: never-ending
 chunked streams with an ordinary content type (indistinguishable from
 finite chunked bodies at headers time), HTTP/2 extended-CONNECT
 websockets (answer 200, no 101), images and binary bodies.
@@ -2831,6 +2836,133 @@ class SwapAddon:
             return "protocol-upgrade"
         return None
 
+    # Issue #94: redirect statuses whose Location a client follows.
+    _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+    # Schemes whose URLs browsers parse per WHATWG (a backslash counts
+    # as a slash; ASCII tab/newline is stripped). Other schemes never
+    # carry an HTTP-navigable host.
+    _REDIRECT_SPECIAL_SCHEMES = frozenset(
+        {"http", "https", "ws", "wss", "ftp", "file"})
+
+    # Constant written over a killed redirect's Location so the flow's
+    # records carry no secret (finding 40e / issue #92 invariant).
+    # Never attacker-influenced; the flow is killed right after.
+    _REDIRECT_KILLED_LOCATION = "hsurr:redirect-secret-refused"
+
+    @staticmethod
+    def _redirect_target_host(location):
+        """Host a redirect Location points at, else None.
+
+        Parsed with browser (WHATWG) semantics, because the check must
+        agree with what the client actually follows: ASCII tab/newline
+        is stripped everywhere, and a backslash counts as a slash on
+        special schemes and on scheme-less references — the request
+        URL (http/https) is the base relative references resolve
+        against, so WHATWG applies the backslash rule there too
+        (``\/evil.example\cb`` navigates off-host; a lone leading
+        ``\evil.example\cb`` stays a same-host path). urllib.parse
+        does neither, which used to desync the check from the browser.
+
+        Relative references (no scheme) stay on the request host —
+        already allowlisted by the caller — so they return None. A
+        present-but-hostless special scheme (``http:evil.example/cb``)
+        is rewritten per WHATWG to extract the real host — browsers
+        navigate off-host there, so it must never be treated as
+        same-host. Other schemes with no host (``mailto:``) fail
+        closed as "": no HTTP-navigable host exists to allowlist.
+        Unparseable input is None.
+        """
+        loc = (location or "").replace("\t", "").replace("\n", "").replace("\r", "")
+        m = re.match(r"([A-Za-z][A-Za-z0-9+.-]*):", loc)
+        scheme = m.group(1).lower() if m else ""
+        if scheme in SwapAddon._REDIRECT_SPECIAL_SCHEMES or not scheme:
+            loc = loc.replace("\\", "/")
+            if m and not loc[m.end():].startswith("//"):
+                # WHATWG special-scheme rule: `http:host/path` and
+                # `http:/host/path` both navigate to //host — urlsplit
+                # needs the slashes to find the authority.
+                loc = loc[:m.end()] + "//" + loc[m.end():].lstrip("/")
+            elif not m and loc.startswith("//"):
+                # WHATWG "ignore slashes": against an http(s) base,
+                # 3+ leading slashes still introduce an authority
+                # (`/\/evil.example/cb` → //evil.example/cb) —
+                # urlsplit honors exactly two.
+                loc = "//" + loc.lstrip("/")
+        try:
+            parts = urllib.parse.urlsplit(loc)
+        except ValueError:
+            return None
+        host = parts.hostname
+        if host is not None:
+            return host
+        if parts.scheme:
+            return ""  # fail closed: scheme:opaque navigates off-host
+        return None  # truly relative reference
+
+    def _redirect_carries_secret(self, location, triples):
+        """True when `location` contains a known secret value under any
+        decoding the client or the redirect target may apply.
+
+        The header scrubber rewrites verbatim secrets in Location, but
+        an open redirector percent-encodes the value — verbatim
+        matching misses it, and the client decodes it on the follow-up
+        request. Every decode stage is checked: the raw value, then
+        `unquote` to a fixpoint (finding 42's `_normalize_path`
+        discipline, so double-encoded values are caught), each stage
+        tried both as-is and form-decoded (`unquote_plus`: `+` is a
+        space in query strings — the `urlencode`/`quote_plus` output an
+        open redirector emits). Comparing the scrubbed rendering
+        (never the value itself) keeps whole-token TOTP semantics and
+        the smoke-test exclusion in one place. Stages only widen
+        detection in the fail-closed direction.
+        """
+        seen = set()
+        stage = location or ""
+        while stage not in seen:
+            seen.add(stage)
+            for cand in (stage, urllib.parse.unquote_plus(stage)):
+                if self._scrub_text_value(cand, triples) != cand:
+                    return True
+            stage = urllib.parse.unquote(stage)
+        return False
+
+    def _redirect_leak_target(self, resp, triples):
+        """Issue #94: the non-allowlisted host a redirect leaks a
+        known secret to, else None. The follow-up request would carry
+        the real secret off-allowlist through the proxy, so the
+        caller neutralizes the Location and kills the flow. Allowlisted
+        targets keep the scrub-in-place behaviour; relative Locations
+        stay on the allowlisted request host."""
+        if getattr(resp, "status_code", 0) not in self._REDIRECT_STATUSES:
+            return None
+        locations = resp.headers.get_all("location") or []
+        if not locations:
+            return None
+        for loc in locations:
+            target = self._redirect_target_host(loc)
+            if target is not None and not self._host_allowed(target):
+                if self._redirect_carries_secret(loc, triples):
+                    return target
+        return None
+
+    def _audit_target_host(self, target, triples):
+        """Scrub any known secret out of an audit-bound redirect target.
+
+        The target comes from urlsplit, which lowercases hostnames —
+        a mixed-case secret reflected into a token-subdomain would
+        survive the case-sensitive scrubber, so a case-insensitive
+        containment check fails over to a constant. Values are NEVER
+        logged.
+        """
+        scrubbed = self._scrub_text_value(target, triples)
+        if scrubbed != target:
+            return scrubbed
+        low = target.lower()
+        if any(v.lower() in low for v, _, _ in triples):
+            return "secret-in-host-redacted"
+        return target
+
     def responseheaders(self, flow):
         """Scrub response headers as soon as they arrive.
 
@@ -2856,7 +2988,27 @@ class SwapAddon:
         resp = flow.response
         if resp is None:
             return
-        triples = self._secret_replacements()
+        # Issue #94: a redirect whose Location carries a known secret
+        # to a non-allowlisted host is refused — the follow-up request
+        # would otherwise carry the real secret off-allowlist.
+        # Detection runs on the raw headers; the Location is then
+        # neutralized outright (the verbatim scrubber cannot see the
+        # percent-encoded form) BEFORE the shared scrub loop, so a
+        # scrubber exception cannot resurrect the exfil path, and the
+        # killed flow's records carry no secret (finding 40e). The
+        # audit reason names the scrubbed target host, never the value.
+        # Detection-path exceptions fail closed: kill, don't forward.
+        try:
+            triples = self._secret_replacements()
+            leak_target = self._redirect_leak_target(resp, triples)
+        except Exception:
+            log.exception("swap: redirect-secret check failed; failing closed")
+            self._audit_note(host, "redirect-secret-refused", "check-error")
+            flow.kill()
+            return
+        if leak_target is not None:
+            resp.headers.set_all(
+                "location", [self._REDIRECT_KILLED_LOCATION])
         for key in list(resp.headers.keys()):
             if key.lower() in self._NEVER_SCRUB_RESPONSE_HEADERS:
                 continue
@@ -2864,6 +3016,11 @@ class SwapAddon:
             new_vals = [self._scrub_text_value(v, triples) for v in vals]
             if new_vals != vals:
                 resp.headers.set_all(key, new_vals)
+        if leak_target is not None:
+            self._audit_note(host, "redirect-secret-refused",
+                             self._audit_target_host(leak_target, triples))
+            flow.kill()
+            return
         # H18 (#133): client-visible approval signal. The agent that made
         # the refused request learns the approval id ("pending") or the
         # terminal decision ("approved"/"denied"/"expired") from these
