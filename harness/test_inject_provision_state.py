@@ -944,6 +944,61 @@ def test_refuses_manifest_drift(stack):
         [PROVIDER_HOST]
 
 
+_SIGN_MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "sign-image-manifest.sh")
+
+
+def _gen_signing_keys(prefix):
+    p = subprocess.run([_SIGN_MANIFEST, "--gen-key", prefix],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+
+
+def _sign_fixture_manifest(paths, prefix):
+    p = subprocess.run([_SIGN_MANIFEST, str(paths["manifest_file"]),
+                        "--key", prefix + ".priv.pem"],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+
+
+def test_signed_manifest_preflight_ok(stack, tmp_path):
+    # #155 signed path, end to end: the injector's INJECT_MANIFEST_PUBKEY
+    # seam reaches the real preflight, which verifies the signature over
+    # the manifest bytes before parsing.
+    env, paths = stack
+    _seed_real_key(paths)
+    prefix = str(tmp_path / "op")
+    _gen_signing_keys(prefix)
+    _sign_fixture_manifest(paths, prefix)
+    env = dict(env)
+    env["INJECT_MANIFEST_PUBKEY"] = prefix + ".pub.pem"
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert _report(proc)["steps"]["manifest"] == "ok"
+
+
+def test_signed_manifest_wrong_key_refuses(stack, tmp_path):
+    # Signed with key A, injector configured with key B: refuse at the
+    # preflight, before touching anything.
+    env, paths = stack
+    _seed_real_key(paths)
+    prefix_a = str(tmp_path / "a")
+    prefix_b = str(tmp_path / "b")
+    _gen_signing_keys(prefix_a)
+    _gen_signing_keys(prefix_b)
+    _sign_fixture_manifest(paths, prefix_a)
+    env = dict(env)
+    env["INJECT_MANIFEST_PUBKEY"] = prefix_b + ".pub.pem"
+    proc = _run_injector(env)
+    assert proc.returncode == 1
+    assert b"manifest preflight failed" in proc.stderr
+    assert b"SIGNATURE MISMATCH" in proc.stderr
+    # Nothing was touched: the key and registry are exactly as seeded.
+    assert (paths["secrets_dir"] / KEY_NAME).read_text() == REAL_KEY
+    assert _registry(paths["registry_file"])[KEY_NAME]["allowed_hosts"] == \
+        [PROVIDER_HOST]
+
+
 def test_refuses_missing_ca(stack):
     env, paths = stack
     _seed_real_key(paths)
