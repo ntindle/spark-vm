@@ -296,8 +296,10 @@ that read, not to a repo commit). Honesty rules apply as before.
 ### What still holds (open, referenced not duplicated)
 
 - #69 (p1): per-tenant approval routing — confirmd is still
-  single-owner/single-tenant; the tenant dimension stays the standing
-  blocker for any hosted approval leg.
+  single-owner/single-tenant. #69 gates the *multi-tenant extension*;
+  the owner-scoped #849 leg below (G49.1–G49.4) builds on #843
+  (owner keys) + #844 (box↔owner binding) identity and does not wait
+  for #69.
 - #74: push retry for un-notified approvals (H14a).
 - #428: first-approval summons implementation (G4 S1–S3).
 - #797/G23: alert fan-out into the H14 push plane — the phone-delivery
@@ -306,26 +308,55 @@ that read, not to a repo commit). Honesty rules apply as before.
 - Phone delivery substrate: `docs/PUSH_NOTIFICATIONS.md`,
   `docs/ALERT_PUSH_FANOUT_SPEC.md`, `docs/FIRST_APPROVAL_SUMMONS.md`.
 
-### New gaps for #849 (filed this turn)
+### New gaps for #849 (filed this turn; G49.4 on review)
 
-- **`[HOSTED]` G49.1 — no plane-side approval record.** Approvals
-  exist in exactly two places: box-local confirmd files
-  (single-tenant, #69) and plane pairing approvals (one-shot
-  enrollment, a different object). The hosted #849 flow — agent action
+- **`[BUILD]` G49.1 (+HOSTED tenant scope) — no plane-side approval
+  record.** Approvals exist in exactly two places: box-local confirmd
+  files (single-tenant, #69) and plane pairing approvals (one-shot
+  enrollment — not extended here because it is a one-shot identity
+  object, while action approvals need a long-lived record with
+  expiry and decision legs). The hosted #849 flow — agent action
   on a box → owner taps phone → decision back to the box — has nowhere
   on the plane to hold an action-approval with owner identity, expiry,
-  and an idempotent decision. Filed as #872.
+  and an idempotent decision. #872 owns the record, not the upload:
+  the box→plane filing leg that *creates* the record is G49.4.
+  Filed as #872.
 - **`[DESIGN]` G49.2 — no approval-decision command type on the
   durable channel.** #848 delivers plane→box (seq/acks), but no command
-  type carries approve/deny/expire with (box_id, aid, decision,
-  decision epoch). The decision leg currently ends at the human's
-  browser; nothing defines its plane→box wire shape. Filed as #873.
+  type carries approve/deny/expire. The work is defining the *first*
+  honored `kind` (the plane is opaque to payloads and kinds today —
+  the box-side executor decides what it honors, so this sets the
+  precedent for the whole command vocabulary) and making the plane a
+  command *producer* (enqueue on owner tap; today enqueue is
+  owner-only via API). Wire shape (provisional): (box_id, aid,
+  decision, decision_seq) — `decision_seq` is a per-approval decision
+  sequence (write-once record; approve-then-expire races resolve
+  first-write-wins), explicitly *not* the channel's incarnation epoch
+  (reprovision semantics don't apply to decisions). The decision leg
+  currently ends at the human's browser; nothing defines its plane→box
+  wire shape. Filed as #873.
 - **`[BUILD]` G49.3 — no box-side ingest of plane decisions into
   confirmd.** Even with G49.1/G49.2 built, confirmd is a local server
-  with local files; a box-side consumer must stamp plane decisions
-  into confirmd's answered store with proof of plane origin (never
-  locally forgeable), so the parked agent sees the same Decision legs
-  it sees for local approvals. Filed as #874.
+  with local files — and the durable channel's box half doesn't exist
+  yet either: #848 shipped the plane half only, so this gap *includes*
+  the box-side fetch loop (`GET /commands/pending`, acked-watermark
+  cursor, idempotent acks) that pulls decision commands down. A
+  box-side consumer must then stamp plane decisions into confirmd's
+  answered store with proof of plane origin (never locally forgeable),
+  so the parked agent sees the same Decision legs it sees for local
+  approvals. Design pin: channel-authenticated fetch (box Bearer <redacted>
+  #846 over TLS) — no new crypto; plane-signed decisions verified by
+  the box are the named alternative if the channel can't be trusted
+  for this payload. Filed as #874.
+- **`[BUILD]` G49.4 — no box→plane filing upload.** The decision
+  direction (G49.1→G49.3) is only half the loop: the *request*
+  direction is unowned — the proxy's `_file_approval` files locally
+  only, the #864 heartbeat is liveness-only, and the plane has no
+  approval-creation endpoint, so nothing creates the G49.1 record when
+  the proxy refuses. Writer identity (the box, never the agent),
+  box-Bearer <redacted>, idempotency against the local flood-control,
+  and plane-unreachable degradation (local filing keeps working;
+  uploads queue and retry) all need owning. Filed as #876.
 
 ### Non-overlap (what this refresh is not)
 
