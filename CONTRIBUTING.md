@@ -62,8 +62,10 @@ pinned exactly, so a new gate component has to declare its count before
 it counts as covered. Finally, `scripts/test_basename_uniqueness.py`
 fails if two `test_*.py` files anywhere in the repo would import under
 the same pytest module name (pytest's `prepend` import mode imports
-rootless suites by basename, and this repo's test trees have no
-`__init__.py` — see the "Two conventions" paragraph below), naming every
+rootless suites by basename; this repo's test trees are rootless (no
+`__init__.py`) — except `browser-driver/bdrive/`, the one real package,
+which imports as `bdrive.<name>` — see the "Two conventions" paragraph
+below), naming every
 colliding file and the fix. This pin walks the whole tree, not just the
 directories `testpaths` collects, so the uniqueness contract holds even
 for test files no suite currently wires in.
