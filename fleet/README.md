@@ -17,6 +17,98 @@ box. No new box-side daemon, no new inbound port, no control plane.
 - `box_snapshot.py` — box-side emitter producing the per-box
   `snapshot.json` the collector reads. Stdlib only.
 - `test_inventory.py` — hermetic suite (run with `python3 -m pytest fleet`).
+- `gate_publish.py` — controller side of the G18 release-gating channel:
+  registry + wave manifest + freeze flag → signed `gate.json`. Stdlib only.
+- `gate_query.py` — box side of the G18 channel: verifies `gate.json`
+  and answers the box's self-evaluated state (`state` / `permitted`).
+  Stdlib only.
+- `gate_sync.sh` — the operator sync loop (G18 §4): copies the published
+  `gate.json` to every box's `/var/lib/sparkvm/gate/`. Run from the
+  operator's cron at ≤ TTL/2.
+- `test_gate.py` — hermetic suite for the gating channel, including the
+  §4 freeze drill (run with `python3 -m pytest fleet/test_gate.py`).
+
+## Release gating (G18 / #777, S1a)
+
+Design: `docs/RELEASE_GATE_CHANNEL_DESIGN.md`. One fleet-wide signed
+document, published by the controller and synced to every box, tells each
+box the maximum permitted versions per component, the live rollout wave,
+and an orthogonal fleet-wide freeze. The box self-evaluates its wave from
+its `box_id` (assignment pins, else `hash_mod_4`) and the repo updater caps
+its deploy range at the gate's maximum permitted commit — an unregistered
+commit never deploys on a gated box. Fail-closed: a missing, tampered, or
+expired document freezes the box loudly; a missed sync loop is a visible
+incident, not a silent rollout. The MAC (HMAC-SHA256, controller key)
+stops on-path tampering and misconfiguration — the cross-box forgery
+barrier is delivery-path ownership: the only writer of a box's gate dir is
+the operator's sync loop. Key rotation is a document field (`key_id`);
+during a rotation window the box accepts current + next, logging which
+verified.
+
+S1a enforces the **repo updater only** (the `pending_range()` cap). The
+toolset `_read_pin` cap, the hook-loop status writer, and the `fleet
+status` gate-stale line land in S1b (design §8).
+
+### Provisioning (operator runbook)
+
+```bash
+# 0a. Estate layout: one dir per box; ssh-target names the scp destination
+#     host (defaults to the dir name). Hostnames only — ports and extra
+#     flags go in SSH_OPTS.
+mkdir -p ~/fleet-estate/box-07
+echo box-07.example > ~/fleet-estate/box-07/ssh-target
+
+# 0b. Controller key: >=32 bytes, mode 0600 (gate_publish refuses the rest)
+mkdir -p ~/fleet-keys
+umask 077
+head -c 32 /dev/urandom | base64 > ~/fleet-keys/ctl-2026-09.key
+
+# 0c. Per box (the G18 §5 install step): box identity, the controller key
+#     (0600, root-owned — gate_query refuses anything looser), and the gate
+#     dir the sync loop requires to exist before it writes.
+ssh root@box-07.example 'mkdir -p /etc/sparkvm /var/lib/sparkvm/gate && echo box-07 > /etc/sparkvm/box-id'
+scp ~/fleet-keys/ctl-2026-09.key root@box-07.example:/var/lib/sparkvm/gate/ctl.key
+ssh root@box-07.example 'chmod 600 /var/lib/sparkvm/gate/ctl.key'
+
+# 0d. On the box's auto-deploy systemd unit, set:
+#       Environment=SPARKVM_BOX_ID=box-07
+#       Environment=SPARKVM_GATE_KEYS=ctl-2026-09=/var/lib/sparkvm/gate/ctl.key
+#     (systemctl --system edit sparkvm-auto-deploy, then daemon-reload and
+#     restart the timer)
+
+# 1. Publish (controller machine; registry/manifest shapes: fleet/gate_publish.py --help)
+python3 fleet/gate_publish.py --registry registry.json --manifest waves.json \
+    --key-id ctl-2026-09 --key-file ~/fleet-keys/ctl-2026-09.key --out gate.json
+
+# 2. Distribute (operator cron, <=5 min for the 600s S1 TTL)
+GATE=gate.json ESTATE=~/fleet-estate fleet/gate_sync.sh
+# Point your cron alerting at gate_sync.sh's exit code: a failed sync is
+# the fleet-freeze signal, and a missed loop freezes the fleet by design.
+
+# 3. Box side (tick-time query — the enforcement point)
+python3 fleet/gate_query.py state --box-id box-07        # key=value answer
+python3 fleet/gate_query.py permitted repo               # exit 0/1/2
+```
+
+Boxes without provisioned gate keys are gate-unmanaged: the updater
+proceeds uncapped (pre-G18 behavior) — silently when the box was never
+enrolled, with a warning when a gate document is present but no keys are
+(the half-enrolled case: the operator forgot the install step). Run
+`./deploy/auto-deploy.sh init` from a checkout carrying
+`fleet/gate_query.py` to install the query side.
+
+### Key rotation & retirement
+
+1. Generate the next key and provision it to every box *alongside* the
+   current one:
+   `SPARKVM_GATE_KEYS=ctl-2026-09=/path/old,ctl-2026-10=/path/new`.
+2. Publish with `--key-id ctl-2026-10`.
+3. Confirm the fleet reports the new key: `gate_query.py state` shows
+   `key_id=ctl-2026-10` on every box.
+4. **Retire the old key**: remove its `key_id=/path` entry from every
+   box's `SPARKVM_GATE_KEYS`. Until you do, the old key still signs
+   fleet-accepted documents — rotation without retirement is a permanent
+   second signing key.
 
 ## Quick start (operator estate)
 
