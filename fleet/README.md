@@ -158,8 +158,12 @@ translation table in `events.py`, verified against
 - **Deterministic ids** — UUIDv5 over `box_id|ts|event|result|from|to`
   (per-subcomponent suffix on the plural-`components` success fan-out),
   so re-collection is a dedup no-op.
-- **Alert rules, evaluated on every collect** — (1) any `rollback-failed`
-  pages immediately; (2) ≥2 boxes `failed`/`rolled-back` on the same
+- **Alert rules, evaluated on every collect** — (1) `rollback-failed`
+  within the evaluation scan window pages immediately (the scanner reads
+  only the tail the armed rules can reason about — the longest armed
+  rule window, six hours — so per-collect cost stays flat as the journal
+  grows; a `rollback-failed` older than the window that never fired no
+  longer pages); (2) ≥2 boxes `failed`/`rolled-back` on the same
   (subcomponent, `to`) within 30 min (the bad-release shape; lines with
   no component correlate on `to` alone as `unknown`); (3) silent wave —
   **disarmed at S1** (every rollout envelope is null; firing it would

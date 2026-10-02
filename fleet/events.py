@@ -80,6 +80,18 @@ _STUCK_PRECHECK_WINDOW_S = 6 * 3600
 # envelope is null and no max-wait exists, so the rule cannot fire).
 _SILENT_WAVE_MAX_WAIT_S = None
 
+# Alert-evaluation scan window (§4 S2, #814 slice 1): evaluate_alerts
+# only needs the event-journal tail the armed rules can reason about —
+# a bounded scan instead of re-reading the whole journal on every
+# collect. Rule 2's clusters span at most _CORRELATED_FAILURE_WINDOW_S
+# and rule 4's window is _STUCK_PRECHECK_WINDOW_S; rule 3 is disarmed at
+# S1, and when it arms its max-wait joins this max automatically.
+def _alert_scan_window_s():
+    horizons = [_CORRELATED_FAILURE_WINDOW_S, _STUCK_PRECHECK_WINDOW_S]
+    if _SILENT_WAVE_MAX_WAIT_S is not None:
+        horizons.append(_SILENT_WAVE_MAX_WAIT_S)
+    return max(horizons)
+
 # Outcome vocabulary closed by the design (§2). The S1 producer emits
 # only the subset with a legacy producer; started/superseded/deferred-arc/
 # skipped-frozen are S2/S3-forward outcomes with no legacy producer.
@@ -528,6 +540,30 @@ def load_events(store_dir):
     return _load_journal(store_dir, EVENTS_JOURNAL_NAME)
 
 
+def load_recent_events(store_dir, since):
+    """Returns (events, error): only event-journal rows the alert rules
+    can reason about — rows with emitted_at >= `since` (an aware
+    datetime) plus rows whose emitted_at is missing or unparseable
+    (they cannot be placed in time; rule 1 still fires on undatable
+    rollback-failed rows, rules 2/4 exclude them themselves, and the
+    retention policy keeps undatable rows forever — so excluding them
+    here would silently change rule 1).
+
+    This is the bounded-scan loader for evaluate_alerts (#814 slice 1):
+    per-collect cost is O(scan window), not O(journal). Full-journal
+    consumers (CLI list/watch, funnel metrics) keep using load_events.
+    """
+    rows, err = _load_journal(store_dir, EVENTS_JOURNAL_NAME)
+    if err:
+        return None, err
+    recent = []
+    for event in rows:
+        emitted = _parse_ts(event.get("emitted_at"))
+        if emitted is None or emitted >= since:
+            recent.append(event)
+    return recent, None
+
+
 # --- Alert rules (§4 S1) ----------------------------------------------------
 def _alert(rule, fired_at, detail, box_id=None, subcomponent=None,
            to=None, dedup_key=""):
@@ -683,6 +719,19 @@ def evaluate_alerts(store_dir, fired_at=None):
     already-journaled alert, acked or not, is a no-op). Returns
     (fired_alerts, error).
 
+    The rule evaluation reads only the bounded scan window
+    (_alert_scan_window_s() before fired_at) instead of the whole
+    journal (#814 slice 1): rule 4's own cutoff equals the window, rule
+    2's clusters span at most 30 minutes, and rule 3 is disarmed. One
+    deliberate behavior delta: rule 1 (rollback-failed) is windowless
+    by design, so a rollback-failed event older than the window that
+    never fired an alert no longer fires. That state requires the
+    operator to have skipped evaluation for longer than the window —
+    evaluate_alerts runs on every collect per the operator contract —
+    and persistent stuck-box states stay covered by stuck-precheck and
+    drift. The alert journal's at-most-once dedup within the window is
+    unchanged.
+
     Rule evaluation reads the event journal unlocked (a snapshot is
     fine — rules reason about what was true when they ran); the
     load-alerts -> dedup -> append sequence runs under the store-scoped
@@ -691,7 +740,14 @@ def evaluate_alerts(store_dir, fired_at=None):
     needs a home), even if every candidate then dedups.
     """
     fired_at = fired_at or _now_iso()
-    events, err = load_events(store_dir)
+    fired_dt = _parse_ts(fired_at)
+    if fired_dt is None:
+        # Defensive: an unparseable fired_at must never silently narrow
+        # the scan — fall back to the full journal (the old behavior).
+        events, err = load_events(store_dir)
+    else:
+        cutoff = fired_dt - timedelta(seconds=_alert_scan_window_s())
+        events, err = load_recent_events(store_dir, cutoff)
     if err:
         return None, err
     candidates = []

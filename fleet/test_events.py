@@ -375,6 +375,120 @@ def test_rule3_silent_wave_disarmed(dirs):
     assert silent == []
 
 
+# --- Bounded alert-evaluation scan window (§4 S2, #814 slice 1) ------------
+def test_scan_window_rule1_ancient_rollback_failed_does_not_fire(dirs):
+    # #814 slice 1's deliberate behavior delta: a rollback-failed older
+    # than the scan window that never fired an alert no longer fires
+    # (non-vacuous: the pre-change evaluate_alerts fired this).
+    estate, store = dirs
+    write_box(estate, "tower", [
+        audit_line("deploy", "rollback-failed", ts=ts(7 * 60 + 5),
+                   **{"from": COMMIT_A, "to": COMMIT_B, "phase": "x"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert journal(store, "alerts.jsonl") == []
+
+
+def test_scan_window_rule1_recent_rollback_failed_fires(dirs):
+    # The window does not break rule 1 inside the horizon: a 30-min-old
+    # rollback-failed still fires (passes on old code too — this pins
+    # the window's lower edge, not the delta).
+    estate, store = dirs
+    write_box(estate, "tower", [
+        audit_line("deploy", "rollback-failed", ts=ts(30),
+                   **{"from": COMMIT_A, "to": COMMIT_B, "phase": "x"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    alerts = journal(store, "alerts.jsonl")
+    assert len(alerts) == 1
+    assert alerts[0]["rule"] == "rollback-failed"
+
+
+def test_scan_window_rule1_undatable_rollback_failed_fires(dirs):
+    # Undatable rows pass through the windowed loader: rule 1's "any
+    # rollback-failed" keeps its old behavior for events that cannot be
+    # placed in time (non-vacuous: fails if the loader dropped them).
+    estate, store = dirs
+    write_box(estate, "tower", [
+        audit_line("deploy", "rollback-failed", ts=12345,
+                   **{"from": COMMIT_A, "to": COMMIT_B, "phase": "x"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    alerts = journal(store, "alerts.jsonl")
+    assert len(alerts) == 1
+    assert alerts[0]["rule"] == "rollback-failed"
+
+
+def test_scan_window_rule2_ancient_pair_does_not_fire(dirs):
+    # Two failed boxes 8h ago within 30 min of each other: old code
+    # fired a correlated-failure alert; the bounded scan does not
+    # (non-vacuous: fails pre-change).
+    estate, store = dirs
+    write_box(estate, "tower", [
+        audit_line("deploy", "deploy-fail", ts=ts(8 * 60),
+                   **{"from": COMMIT_A, "to": COMMIT_B,
+                      "component": "proxy", "phase": "install"}),
+    ])
+    write_box(estate, "cabin", [
+        audit_line("deploy", "deploy-fail", ts=ts(8 * 60 + 10),
+                   **{"from": COMMIT_A, "to": COMMIT_B,
+                      "component": "proxy", "phase": "install"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    corr = [a for a in journal(store, "alerts.jsonl")
+            if a["rule"] == "correlated-failure"]
+    assert corr == []
+
+
+def test_scan_window_rule2_recent_pair_still_fires(dirs):
+    # In-window correlated pair still fires with ancient noise present
+    # beyond the window (pins rule 2's behavior under the new loader).
+    estate, store = dirs
+    write_box(estate, "tower", [
+        audit_line("deploy", "deploy-fail", ts=ts(20),
+                   **{"from": COMMIT_A, "to": COMMIT_B,
+                      "component": "proxy", "phase": "install"}),
+        audit_line("deploy", "deploy-fail", ts=ts(8 * 60),
+                   **{"from": COMMIT_A, "to": COMMIT_B,
+                      "component": "proxy", "phase": "install"}),
+    ])
+    write_box(estate, "cabin", [
+        audit_line("deploy", "deploy-fail", ts=ts(10),
+                   **{"from": COMMIT_A, "to": COMMIT_B,
+                      "component": "proxy", "phase": "install"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    corr = [a for a in journal(store, "alerts.jsonl")
+            if a["rule"] == "correlated-failure"]
+    assert len(corr) == 1
+    assert "tower" in corr[0]["detail"] and "cabin" in corr[0]["detail"]
+
+
+def test_scan_window_rule4_boundary_pins(dirs):
+    # Rule 4's own 6h cutoff equals the scan window: 3 precheck-fails
+    # inside the window still fire (pins exactness at the shared edge).
+    estate, store = dirs
+    write_box(estate, "tower", [
+        audit_line("deploy", "gate-fail", ts=ts(60),
+                   **{"from": COMMIT_A, "to": COMMIT_B,
+                      "component": "proxy"}),
+        audit_line("deploy", "snapshot-fail", ts=ts(5 * 60 + 50),
+                   **{"from": COMMIT_A, "to": COMMIT_B}),
+        audit_line("check", "precheck-fail", ts=ts(5 * 60 + 55)),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    stuck = [a for a in journal(store, "alerts.jsonl")
+             if a["rule"] == "stuck-precheck"]
+    assert len(stuck) == 1
+    assert stuck[0]["box_id"] == "tower"
+
+
 # --- CLI readers ------------------------------------------------------------
 def test_events_list_and_box_filter(dirs):
     estate, store = dirs
@@ -543,7 +657,7 @@ def test_control_chars_never_reach_journal_or_output(dirs):
 def test_control_chars_in_alert_paths(dirs):
     estate, store = dirs
     write_box(estate, "tower", [
-        json.dumps({"ts": "2026-10-01T10:00:00Z", "event": "deploy",
+        json.dumps({"ts": ts(30), "event": "deploy",
                     "result": "rollback-failed", "from": "a" * 40,
                     "to": "b" * 40 + "\nFORGED alert row",
                     "phase": "x"}),
