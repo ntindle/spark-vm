@@ -105,6 +105,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Signed golden-image manifests (#155): the provision-time injector's manifest preflight no longer trusts the manifest's self-asserted version alone — once the operator enables the signed path (sign the manifest at image-build time with an Ed25519 key and configure the injector with the verification key), the preflight verifies the signature over the manifest's exact bytes before parsing anything, failing closed on a missing, malformed, or mismatched signature, so a tampered image registry can no longer serve a lying manifest that names the pinned version. The verification side takes a rotation window (`key_id=/path` pairs, mirroring the fleet release gate) so a stolen signing key rotates forward without a flag day, and the provision report records `ok-signed` vs `ok-unsigned-legacy` so the migration off unsigned preflights is observable. The signing key never enters the repo or the image; the verification keys ship with the injector's own configuration. Unsigned preflights keep working while older images are in service. (#831)
 
 ### Fixed
+- The box pairing client's "endpoint not implemented" detection no longer
+  keys on an error string the control plane itself can return: the HTTP
+  layer now marks the 404 payloads it synthesizes itself with an explicit
+  marker (stripping any forged copy from plane-returned bodies), and the
+  rotate, revoke, and heartbeat paths all classify on that one marker — a
+  JSON error body from the plane can no longer be misread as a missing
+  endpoint. Separately, the client's two lock files are now forced to
+  0600 on every acquisition, not just at creation, so a pre-existing lock
+  file with wider permissions no longer stays wide. (#886)
 - The box pairing client's HTTP layer now normalizes non-object JSON
   response bodies at the choke point instead of guarding at individual call
   sites: only the heartbeat path checked that a 2xx body was actually an

@@ -396,10 +396,13 @@ def test_revoke_unknown_box(ctx, monkeypatch, capsys):
 
 def test_revoke_endpoint_missing_says_plane_pending(ctx, monkeypatch, capsys):
     # A bare transport 404 (the _http non-JSON fallback) means the plane
-    # does not implement the endpoint — never "no such box".
+    # does not implement the endpoint — never "no such box". The stub
+    # carries _http's synthesized marker: that is what the real _http
+    # returns for this class.
     monkeypatch.setattr(spark_pair, "_http",
                         lambda *a, **k: (404, {"ok": False,
-                                              "error": "http=404"}))
+                                              "error": "http=404",
+                                              spark_pair._TRANSPORT_404: True}))
     ctx.box_id = "box_xyz"
     assert spark_pair.cmd_revoke(ctx) == 1
     out = capsys.readouterr().out
@@ -410,9 +413,12 @@ def test_revoke_endpoint_missing_says_plane_pending(ctx, monkeypatch, capsys):
 def test_rotate_endpoint_missing_says_plane_pending(ctx, monkeypatch, capsys):
     _run_init(ctx)
     _enroll(ctx)
+    # The stub carries _http's synthesized marker: that is what the real
+    # _http returns for the transport-404 class.
     monkeypatch.setattr(spark_pair, "_http",
                         lambda *a, **k: (404, {"ok": False,
-                                              "error": "http=404"}))
+                                              "error": "http=404",
+                                              spark_pair._TRANSPORT_404: True}))
     ctx.auto = False
     ctx.within = spark_pair.AUTO_ROTATE_WITHIN
     assert spark_pair.cmd_rotate(ctx) == 1
@@ -660,9 +666,12 @@ def test_heartbeat_endpoint_missing_says_plane_pending(ctx, monkeypatch,
                                                        capsys):
     _run_init(ctx)
     _enroll(ctx)
+    # The stub carries _http's synthesized marker: that is what the real
+    # _http returns for the transport-404 class.
     monkeypatch.setattr(spark_pair, "_http",
                         lambda *a, **k: (404, {"ok": False,
-                                              "error": "http=404"}))
+                                              "error": "http=404",
+                                              spark_pair._TRANSPORT_404: True}))
     assert spark_pair.cmd_heartbeat(ctx) == 1
     err = capsys.readouterr().err
     assert "does not implement" in err
@@ -701,6 +710,45 @@ def test_heartbeat_lock_open_failure_is_clean_error(ctx, monkeypatch,
     err = capsys.readouterr().err
     assert "heartbeat FAILED" in err and "lock file" in err
     assert "Traceback" not in err
+
+
+def test_heartbeat_lock_forces_0600_on_existing_lock(ctx, monkeypatch):
+    # 0600 at creation is not enough: a pre-existing lock file keeps its
+    # wider mode through os.open (#883). A stale 0644 lock must come out
+    # 0600 after acquisition. Non-vacuous: the assertion fails without
+    # the os.fchmod fix (verified by reverting the one-liner).
+    _run_init(ctx)
+    _enroll(ctx)
+    lock_path = os.path.join(ctx.dir, ".heartbeat.lock")
+    # os.open's mode is masked by the umask; chmod guarantees the
+    # pre-existing wide mode this test needs regardless of it.
+    open(lock_path, "w").close()
+    os.chmod(lock_path, 0o644)
+    assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o644
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (0, {"ok": False,
+                                             "error": "transport: down"}))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o600
+
+
+def test_rotate_lock_forces_0600_on_existing_lock(ctx, monkeypatch):
+    # Same 0600-force class as the heartbeat lock (#883), on rotate's
+    # lock path. The transport failure makes _cmd_rotate_locked exit
+    # before any state change; the lock was still acquired first.
+    _run_init(ctx)
+    _enroll(ctx)
+    lock_path = os.path.join(ctx.dir, ".rotate.lock")
+    open(lock_path, "w").close()
+    os.chmod(lock_path, 0o644)
+    assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o644
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (0, {"ok": False,
+                                             "error": "transport: down"}))
+    ctx.auto = False
+    ctx.within = spark_pair.AUTO_ROTATE_WITHIN
+    assert spark_pair.cmd_rotate(ctx) == 1
+    assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o600
 
 
 def test_heartbeat_non_object_enrollment_is_clean_error(ctx, monkeypatch,
@@ -926,6 +974,94 @@ def test_http_keeps_dict_error_bodies(monkeypatch):
                         _FakeErrorOpener(404, b'{"ok": false, "e": 1}'))
     status, resp = spark_pair._http("GET", "https://control.test/x")
     assert (status, resp) == (404, {"ok": False, "e": 1})
+
+
+def test_http_marks_synthesized_404_fallback(monkeypatch):
+    # A 404 with no JSON body is the "endpoint not implemented" class:
+    # _http marks the payload it synthesizes itself (#882).
+    monkeypatch.setattr(spark_pair, "_HTTP_OPENER",
+                        _FakeErrorOpener(404, b"<html>not here</html>"))
+    status, resp = spark_pair._http("GET", "https://control.test/x")
+    assert status == 404
+    assert resp[spark_pair._TRANSPORT_404] is True
+    assert spark_pair._plane_missing(resp)
+
+
+def test_http_does_not_mark_non_404_fallbacks(monkeypatch):
+    # The marker is the 404 endpoint-detection class only: a synthesized
+    # 500 payload keeps today's exact shape (no marker key).
+    monkeypatch.setattr(spark_pair, "_HTTP_OPENER",
+                        _FakeErrorOpener(500, b"internal error"))
+    status, resp = spark_pair._http("GET", "https://control.test/x")
+    assert (status, resp) == (500, {"ok": False, "error": "http=500"})
+    assert not spark_pair._plane_missing(resp)
+
+
+def test_http_plane_json_error_string_is_not_endpoint_missing(monkeypatch):
+    # The conflation #882 closes: a JSON plane legitimately returning
+    # {"error": "http=404"} for some *other* failure used to be classified
+    # as "endpoint not implemented". The string is still there (it is the
+    # plane's real error), but the classification now ignores it.
+    monkeypatch.setattr(spark_pair, "_HTTP_OPENER",
+                        _FakeErrorOpener(
+                            404, b'{"ok": false, "error": "http=404"}'))
+    status, resp = spark_pair._http("GET", "https://control.test/x")
+    assert status == 404
+    assert resp.get("error") == "http=404"  # the old rule keyed on this
+    assert spark_pair._TRANSPORT_404 not in resp
+    assert not spark_pair._plane_missing(resp)
+
+
+def test_http_strips_forged_marker_from_plane_body(monkeypatch):
+    # A hostile or buggy plane cannot forge the fallback marker: _http
+    # strips it from plane-returned bodies, so _plane_missing only fires
+    # on payloads _http synthesized itself.
+    body = json.dumps({"ok": False, "_transport_404": True,
+                       "error": "no such box"}).encode()
+    monkeypatch.setattr(spark_pair, "_HTTP_OPENER",
+                        _FakeErrorOpener(404, body))
+    status, resp = spark_pair._http("GET", "https://control.test/x")
+    assert status == 404
+    assert spark_pair._TRANSPORT_404 not in resp
+    assert not spark_pair._plane_missing(resp)
+    assert resp.get("error") == "no such box"  # the real error survives
+
+
+def test_http_strips_marker_from_2xx_dict_body(monkeypatch):
+    # The "only _http sets it" invariant is global: a 2xx dict carrying
+    # the marker key is cleaned too (it is inert at 2xx, but the plane
+    # must not be able to plant it anywhere).
+    monkeypatch.setattr(spark_pair, "_HTTP_OPENER",
+                        _FakeOpener(b'{"ok": true, "_transport_404": true}'))
+    status, resp = spark_pair._http("GET", "https://control.test/x")
+    assert (status, resp) == (200, {"ok": True})
+
+
+def test_plane_missing_rejects_non_dict_and_non_true():
+    # The predicate must never fire on anything but the exact marker.
+    assert not spark_pair._plane_missing(None)
+    assert not spark_pair._plane_missing([1])
+    assert not spark_pair._plane_missing("http=404")
+    assert not spark_pair._plane_missing({})
+    assert not spark_pair._plane_missing({"ok": False, "error": "http=404"})
+    assert not spark_pair._plane_missing(
+        {spark_pair._TRANSPORT_404: "yes"})  # truthy is not True
+    assert spark_pair._plane_missing({spark_pair._TRANSPORT_404: True})
+
+
+def test_revoke_404_json_error_string_says_no_such_box(ctx, monkeypatch,
+                                                       capsys):
+    # Behavioral proof of the #882 fix at the call site: a 404 whose body
+    # is real JSON (the plane's own error) is "no such box" — the old
+    # string-keyed classification said "does not implement".
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (404, {"ok": False,
+                                              "error": "http=404"}))
+    ctx.box_id = "box_xyz"
+    assert spark_pair.cmd_revoke(ctx) == 1
+    out = capsys.readouterr().out
+    assert "no such box" in out
+    assert "does not implement" not in out
 
 
 def test_check_control_url_matrix(monkeypatch):
