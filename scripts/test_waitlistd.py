@@ -947,6 +947,171 @@ def test_forget_gone_row_expired_token_stays_expired():
     assert status == 200 and "last 7 days" in html
 
 
+def test_forget_post_scrubs_patha_ledger():
+    # #400: the address-keyed abuse ledger must not survive a forget.
+    svc, tmp = make_service()
+    row = _submit(svc, "forget14@example.com")
+    entry_id = row["entry_id"]
+    owner = row["owner_email"]
+    # Seed ledger events for the forgotten address and a bystander.
+    svc._record_patha_event(owner, "submission")
+    svc._record_patha_event(owner, "email")
+    svc._record_patha_event("bystander@example.com", "submission")
+    ledger = os.path.join(tmp, "patha_events.jsonl")
+    pre = [json.loads(ln) for ln in open(ledger, encoding="utf-8")]
+    assert [e for e in pre if e["address"] == owner], \
+        "precondition: the forgotten address has ledger events"
+    forget_token = svc.mint_forget_token(entry_id, owner)
+    status, _ = svc.forget_post(forget_token)
+    assert status == 200
+    post = [json.loads(ln) for ln in open(ledger, encoding="utf-8")]
+    assert not [e for e in post if e["address"] == owner], \
+        "forget must drop every ledger line keyed by the address"
+    assert [e for e in post
+            if e["address"] == "bystander@example.com"], \
+        "bystander ledger lines must survive the scrub"
+
+
+def test_forget_post_scrubs_triage_and_purges_spool():
+    # #400: triage files holding the address are deleted; pending spool
+    # docs for the address are purged BEFORE the deletion confirmation
+    # is queued, so the confirmation is the last mail ever sent.
+    svc, tmp = make_service()
+    row = _submit(svc, "forget15@example.com")
+    entry_id = row["entry_id"]
+    owner = row["owner_email"]
+    # _submit already spooled a confirm email for the owner (the pending
+    # spool the purge must remove).
+    pending = [d for d in spool_docs_newest_first(tmp)
+               if d.get("to") == owner and d.get("kind") != "deleted"]
+    assert pending, "precondition: a pending spool doc exists for the owner"
+    svc.triage_inbound(f"From: {owner}\n\nforget me please", "forget_no_row")
+    svc.triage_inbound("From: other@example.com\n\nunrelated", "test")
+    triage_dir = os.path.join(tmp, "triage")
+    pre_files = set(os.listdir(triage_dir))
+    assert len(pre_files) == 2
+    forget_token = svc.mint_forget_token(entry_id, owner)
+    status, _ = svc.forget_post(forget_token)
+    assert status == 200
+    post_files = set(os.listdir(triage_dir))
+    assert len(post_files) == 1, \
+        "only the triage file holding the address is removed"
+    surviving = open(os.path.join(triage_dir, post_files.pop()),
+                     encoding="utf-8").read()
+    assert "other@example.com" in surviving
+    docs = spool_docs_newest_first(tmp)
+    kinds_to_owner = [(d.get("kind"), d.get("to")) for d in docs]
+    assert not [k for k, to in kinds_to_owner
+                if to == owner and k != "deleted"], \
+        "no pending (non-deletion) spool doc may remain for the owner"
+    deleted = [d for d in docs if d.get("kind") == "deleted"]
+    assert deleted and deleted[0]["to"] == owner, \
+        "the deletion confirmation is still queued — it is the last mail"
+
+
+def test_triage_inbound_sweeps_stale_files():
+    # #400: triage/ had no retention policy. Every write purges files
+    # older than TRIAGE_RETENTION_SECONDS; non-conforming filenames are
+    # left alone (operator hand-placed files are not ours to reap).
+    svc, tmp = make_service()
+    triage_dir = os.path.join(tmp, "triage")
+    os.makedirs(triage_dir, exist_ok=True)
+    old_ts = int(NOW.timestamp()) - 3 * 86400  # 3d > 48h retention
+    old_name = f"{old_ts}-deadbeef.eml"
+    with open(os.path.join(triage_dir, old_name), "w") as fh:
+        fh.write("stale raw mail with old@example.com")
+    hand_name = "operator-note.eml"
+    with open(os.path.join(triage_dir, hand_name), "w") as fh:
+        fh.write("operator's own file")
+    new_name = svc.triage_inbound("fresh body", "test reason")
+    remaining = set(os.listdir(triage_dir))
+    assert old_name not in remaining, "stale triage file must be swept"
+    assert hand_name in remaining, "non-conforming file must be left alone"
+    assert new_name in remaining, "the just-written triage file survives"
+
+
+def test_forget_scrub_survives_malformed_stores():
+    # #400 hardening: externally-tampered auxiliary stores must not
+    # crash the forget — a ledger line with a non-string address and a
+    # spool file holding valid non-dict JSON are left alone, not fatal.
+    svc, tmp = make_service()
+    row = _submit(svc, "forget17@example.com")
+    entry_id = row["entry_id"]
+    owner = row["owner_email"]
+    ledger = os.path.join(tmp, "patha_events.jsonl")
+    with open(ledger, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"address": 12345, "kind": "submission",
+                             "at": "2026-09-20T12:00:00Z"}) + "\n")
+    weird_spool = os.path.join(tmp, "spool", "weird.json")
+    with open(weird_spool, "w", encoding="utf-8") as fh:
+        fh.write("[1, 2, 3]")
+    forget_token = svc.mint_forget_token(entry_id, owner)
+    status, _ = svc.forget_post(forget_token)
+    assert status == 200
+    assert entry_id not in svc.rows  # the forget itself still landed
+    assert os.path.exists(weird_spool)
+    assert json.load(open(weird_spool)) == [1, 2, 3]
+
+
+def test_forget_scrub_matches_plus_tag_variants():
+    # #400: raw mail carries the un-normalized From — a plus-tagged or
+    # differently-cased address must be caught by the targeted scrub,
+    # not only by the 48h sweep.
+    svc, tmp = make_service()
+    row = _submit(svc, "forget18@example.com")
+    entry_id = row["entry_id"]
+    owner = row["owner_email"]
+    assert owner == "forget18@example.com"
+    svc.triage_inbound("From: Forget18+promo@Example.com\n\nforget me",
+                       "forget_no_row")
+    svc.triage_inbound("From: other@example.com\n\nunrelated", "test")
+    triage_dir = os.path.join(tmp, "triage")
+    assert len(os.listdir(triage_dir)) == 2
+    sidecar = os.path.join(tmp, "rows.jsonl.skipped.333.jsonl")
+    with open(sidecar, "wb") as fh:
+        fh.write(b'{"owner_email": "forget18+newsletter@example.com"}\n')
+        fh.write(b'{"owner_email": "other@example.com"}\n')
+    forget_token = svc.mint_forget_token(entry_id, owner)
+    status, _ = svc.forget_post(forget_token)
+    assert status == 200
+    remaining = os.listdir(triage_dir)
+    assert len(remaining) == 1, \
+        "the plus-tagged triage file must be caught by the scrub"
+    assert "other@example.com" in open(
+        os.path.join(triage_dir, remaining[0]), encoding="utf-8").read()
+    blob = open(sidecar, "rb").read()
+    assert b"forget18+newsletter" not in blob, \
+        "the plus-tagged sidecar line must be filtered out"
+    assert b"other@example.com" in blob
+
+
+def test_forget_post_filters_quarantine_sidecars():
+    # #400: rows.jsonl.skipped.*.jsonl sidecars could keep the address in
+    # quarantined bytes forget could not see. The forget filters the
+    # address's lines out (atomically); a sidecar left empty is removed.
+    svc, tmp = make_service()
+    row = _submit(svc, "forget16@example.com")
+    entry_id = row["entry_id"]
+    owner = row["owner_email"]
+    mixed = os.path.join(tmp, "rows.jsonl.skipped.111.jsonl")
+    with open(mixed, "wb") as fh:
+        fh.write(b'{"owner_email": "forget16@example.com", "broken": \n')
+        fh.write(b'{"owner_email": "other@example.com", "broken": \n')
+    solo = os.path.join(tmp, "rows.jsonl.skipped.222.jsonl")
+    with open(solo, "wb") as fh:
+        fh.write(b'{"owner_email": "FORGET16@EXAMPLE.COM", "broken": \n')
+    forget_token = svc.mint_forget_token(entry_id, owner)
+    status, _ = svc.forget_post(forget_token)
+    assert status == 200
+    blob = open(mixed, "rb").read()
+    assert b"forget16@example.com" not in blob.lower(), \
+        "the address's quarantined line must be filtered out"
+    assert b"other@example.com" in blob, \
+        "other quarantined lines survive the filter"
+    assert not os.path.exists(solo), \
+        "a sidecar left with no surviving lines is removed"
+
+
 def test_cta_selfhost_emits_and_returns_url():
     svc, tmp = make_service()
     url = svc.cta_selfhost("selfhost")
