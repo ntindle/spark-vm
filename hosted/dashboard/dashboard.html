@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>spark-vm fleet</title>
+<style>
+  :root { color-scheme: light dark;
+    --ok: #1a7a1a; --err: #b3261e; --warn: #8a5a00; --muted: #5f5f5f; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ok: #7dd87d; --err: #ff8a8a; --warn: #e6a817; --muted: #aaa; }
+  }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         margin: 0; padding: 0 16px 48px; max-width: 960px;
+         background: Canvas; color: CanvasText; }
+  header { display: flex; align-items: baseline; gap: 12px;
+           border-bottom: 1px solid #8884; padding: 16px 0; flex-wrap: wrap; }
+  header h1 { font-size: 1.3rem; margin: 0; }
+  header .spacer { flex: 1; }
+  .muted { color: var(--muted); font-size: .85rem; }
+  .card { border: 1px solid #8884; border-radius: 10px; padding: 14px 16px;
+          margin: 14px 0; background: Canvas; }
+  .boxrow { display: flex; align-items: center; gap: 10px; padding: 10px 4px;
+            border-bottom: 1px solid #8883; cursor: pointer; }
+  .boxrow:last-child { border-bottom: none; }
+  .boxrow:hover { background: #8881; }
+  .boxrow:focus-visible { outline: 2px solid #26c; outline-offset: -2px; }
+  button:focus-visible { outline: 2px solid #26c; outline-offset: 2px; }
+  .boxrow .grow { min-width: 0; }
+  .boxrow .name { font-weight: 600; }
+  .boxrow .id { font-family: monospace; font-size: .8rem; color: #888; }
+  .chip { font-size: .75rem; padding: 2px 10px; border-radius: 999px;
+          border: 1px solid #8886; white-space: nowrap; }
+  .chip.ok { border-color: var(--ok); color: var(--ok); }
+  .chip.stale { border-color: var(--warn); color: var(--warn); font-weight: 700; }
+  .chip.down { border-color: var(--err); color: var(--err); }
+  .chip.pending { border-color: var(--muted); color: var(--muted); }
+  .grow { flex: 1; }
+  button { font: inherit; padding: 8px 16px; border-radius: 8px; cursor: pointer;
+           border: 1px solid #8886; background: #8882; color: CanvasText; }
+  button.primary { background: #26c; border-color: #26c; color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=password], input[type=text] { font: inherit; padding: 8px 10px;
+           border-radius: 8px; border: 1px solid #8886; background: Canvas;
+           color: CanvasText; width: 100%; box-sizing: border-box; }
+  .mono { font-family: ui-monospace, monospace; }
+  .err { color: var(--err); font-size: .9rem; margin-top: 8px; }
+  .okmsg { color: var(--ok); font-size: .9rem; margin-top: 8px; }
+  dl.detail { display: grid; grid-template-columns: 160px 1fr; gap: 6px 12px;
+              margin: 0; font-size: .92rem; }
+  dl.detail dt { color: #888; }
+  dl.detail dd { margin: 0; overflow-wrap: anywhere; }
+  pre.raw { font-size: .8rem; max-height: 300px; overflow: auto;
+            background: #8881; padding: 10px; border-radius: 8px; }
+  .svc { display: inline-block; margin: 2px 6px 2px 0; }
+  .fp { font-family: ui-monospace, monospace; font-size: .82rem;
+        overflow-wrap: break-word; background: #8881; padding: 6px 8px;
+        border-radius: 6px; line-height: 1.7; letter-spacing: .03em; }
+  .approve-row { display: flex; gap: 8px; margin-top: 8px; }
+  .approve-row input { flex: 1; min-width: 0; }
+  .approve-row .approve-btn { flex-shrink: 0; }
+  @media (max-width: 480px) {
+    dl.detail { grid-template-columns: 1fr; }
+    dl.detail dd { margin-bottom: 8px; }
+  }
+  h2 { font-size: 1.1rem; margin: 26px 0 6px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>spark-vm fleet</h1>
+  <span class="muted" id="plane-label">control plane</span>
+  <span class="spacer"></span>
+  <span class="muted hidden" id="updated-label"></span>
+  <button id="refresh-btn" class="hidden" title="Refresh now">Refresh</button>
+  <button id="logout-btn" class="hidden">Sign out</button>
+</header>
+<div id="refresh-err" class="err hidden" role="alert" style="margin-top:10px"></div>
+
+<!-- login -->
+<section id="login-view" class="card">
+  <h2 style="margin-top:0">Owner sign-in</h2>
+  <p class="muted">Paste an owner API key. It is kept only in this tab's
+  session storage — never in a cookie, localStorage, or a URL — and is
+  cleared when you sign out or close the tab.</p>
+  <form id="login-form">
+    <input type="password" id="key-input" placeholder="svm_…" autocomplete="off"
+           spellcheck="false" aria-label="Owner API key">
+    <div style="margin-top:10px">
+      <button type="submit" class="primary">Sign in</button>
+    </div>
+  </form>
+  <div id="login-err" class="err hidden"></div>
+</section>
+
+<!-- app -->
+<main id="app-view" class="hidden">
+  <h2>Fleet <span class="muted" id="fleet-count"></span></h2>
+  <div id="fleet-list" class="card"><p class="muted">Loading…</p></div>
+
+  <section id="detail-card" class="card hidden">
+    <h2 style="margin-top:0" id="detail-name"></h2>
+    <dl class="detail" id="detail-dl"></dl>
+    <h3 class="muted" style="font-size:.9rem">Services</h3>
+    <div id="detail-services"></div>
+    <h3 class="muted" style="font-size:.9rem">Fingerprint</h3>
+    <div class="fp" id="detail-fp"></div>
+    <p><button id="raw-toggle">Show raw status JSON</button></p>
+    <pre class="raw hidden" id="detail-raw"></pre>
+    <p><button id="detail-close">Back to fleet</button></p>
+  </section>
+
+  <h2>Pending pairings</h2>
+  <p class="muted">Boxes waiting for your approval. Compare the fingerprint
+  below with the one shown on the box screen, then type the pairing code
+  the box displays.</p>
+  <div id="pairing-list"><p class="muted">Loading…</p></div>
+  <p class="muted">Enrolling a new box? Run
+  <span class="mono">pairing/spark_pair.py</span> on the box —
+  <a href="https://github.com/ntindle/spark-vm/tree/main/pairing">pairing client README</a>.</p>
+</main>
+
+<script>
+"use strict";
+/* ---- pure helpers (unit-tested in node via test_dashboard.py) ---- */
+var STALE_AFTER_S = 300; // box heartbeats every ~60s; 5 min of silence = stale
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+  });
+}
+function relTime(ts, now) {
+  if (ts == null) return "never";
+  var d = Math.max(0, (now | 0) - (ts | 0));
+  if (d < 60) return d + "s ago";
+  if (d < 3600) return Math.floor(d / 60) + "m ago";
+  if (d < 86400) return Math.floor(d / 3600) + "h ago";
+  return Math.floor(d / 86400) + "d ago";
+}
+function isStale(ts, now) {
+  if (ts == null) return true;
+  return ((now | 0) - (ts | 0)) > STALE_AFTER_S;
+}
+function until(ts, now) {
+  // human "in Xs/Xm" for future timestamps (pairing code expiry)
+  if (ts == null) return "unknown";
+  var d = Math.max(0, (ts | 0) - (now | 0));
+  if (d < 60) return "in " + d + "s";
+  if (d < 3600) return "in " + Math.floor(d / 60) + "m";
+  return "in " + Math.floor(d / 3600) + "h";
+}
+function fmtUptime(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600),
+      m = Math.floor(sec % 3600 / 60);
+  if (d) return d + "d " + h + "h";
+  if (h) return h + "h " + m + "m";
+  return m + "m";
+}
+function fmtClock(ts) {
+  if (ts == null) return "—";
+  return new Date(ts * 1000).toLocaleString();
+}
+function statusChip(box, now) {
+  if (box.last_heartbeat_at == null) return '<span class="chip pending">No heartbeat</span>';
+  if (isStale(box.last_heartbeat_at, now)) return '<span class="chip stale">Stale</span>';
+  return '<span class="chip ok">Live</span>';
+}
+function shortId(id) {
+  id = String(id || "");
+  return id.length > 14 ? id.slice(0, 14) + "…" : id;
+}
+
+/* ---- app state ---- */
+var KEY = null;
+var boxes = [];
+var pairings = [];
+var refreshTimer = null;
+
+function api(path, opts) {
+  opts = opts || {};
+  var headers = { "Authorization": "Bearer " + KEY };
+  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  return fetch(path, {
+    method: opts.method || "GET",
+    headers: headers,
+    body: opts.body === undefined ? undefined : JSON.stringify(opts.body)
+  }).then(function (resp) {
+    if (resp.status === 401) { logout(true); throw new Error("unauthorized"); }
+    return resp.text().then(function (text) {
+      var data;
+      try { data = JSON.parse(text); }
+      catch (e) { throw new Error("control plane returned non-JSON (HTTP " + resp.status + ")"); }
+      return { status: resp.status, data: data };
+    });
+  });
+}
+function showLogin(msg) {
+  document.getElementById("app-view").classList.add("hidden");
+  document.getElementById("refresh-btn").classList.add("hidden");
+  document.getElementById("logout-btn").classList.add("hidden");
+  document.getElementById("login-view").classList.remove("hidden");
+  var e = document.getElementById("login-err");
+  if (msg) { e.textContent = msg; e.classList.remove("hidden"); }
+  else e.classList.add("hidden");
+}
+function login(key) {
+  KEY = key;
+  return api("/v1/boxes").then(function (r) {
+    if (r.status !== 200 || !r.data.ok) throw new Error("bad key");
+    // The key lives in sessionStorage only — drop it from the DOM input
+    // so the password field doesn't retain it for the whole session.
+    document.getElementById("key-input").value = "";
+    try { sessionStorage.setItem("svm_owner_key", key); } catch (e) { /* private mode */ }
+    boxes = r.data.boxes || [];
+    document.getElementById("login-view").classList.add("hidden");
+    document.getElementById("app-view").classList.remove("hidden");
+    document.getElementById("refresh-btn").classList.remove("hidden");
+    document.getElementById("logout-btn").classList.remove("hidden");
+    renderFleet();
+    loadPairings();
+    markUpdated();
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(refreshAll, 30000);
+  }).catch(function (err) {
+    if (String(err && err.message) === "unauthorized") return;
+    KEY = null;
+    showLogin("Sign-in failed: " + (err && err.message ? err.message : err));
+  });
+}
+function logout(expired) {
+  KEY = null;
+  try { sessionStorage.removeItem("svm_owner_key"); } catch (e) {}
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  boxes = []; pairings = [];
+  showLogin(expired ? "Session expired — sign in again." : "");
+}
+function markUpdated() {
+  var lbl = document.getElementById("updated-label");
+  lbl.textContent = "updated " + new Date().toLocaleTimeString();
+  lbl.classList.remove("hidden");
+}
+function refreshAll() {
+  if (!KEY) return;
+  var banner = document.getElementById("refresh-err");
+  api("/v1/boxes").then(function (r) {
+    if (r.status === 200 && r.data.ok) {
+      boxes = r.data.boxes || []; renderFleet();
+      banner.classList.add("hidden");
+      markUpdated();
+    }
+  }).catch(function () {
+    banner.textContent = "Refresh failed — showing last good data.";
+    banner.classList.remove("hidden");
+  });
+  loadPairings();
+}
+function renderFleet() {
+  var now = Math.floor(Date.now() / 1000);
+  var el = document.getElementById("fleet-list");
+  if (el.contains(document.activeElement)) return; // keep keyboard focus on refresh
+  document.getElementById("fleet-count").textContent =
+    boxes.length ? "(" + boxes.length + ")" : "";
+  if (!boxes.length) { el.innerHTML = '<p class="muted">No boxes enrolled.</p>'; return; }
+  el.innerHTML = boxes.map(function (b) {
+    var age = b.last_heartbeat_at == null ? "—" : relTime(b.last_heartbeat_at, now);
+    return '<div class="boxrow" tabindex="0" role="button" data-id="' + esc(b.id) + '"' +
+      ' aria-label="Box ' + esc(b.name) + ', open details">' +
+      '<span class="grow"><span class="name">' + esc(b.name) + '</span> ' +
+      '<span class="id">' + esc(shortId(b.id)) + '</span></span>' +
+      statusChip(b, now) +
+      '<span class="muted">' + esc(age) + '</span>' +
+      '</div>';
+  }).join("");
+  Array.prototype.forEach.call(el.querySelectorAll(".boxrow"), function (row) {
+    var open = function () { showDetail(row.getAttribute("data-id")); };
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); }
+    });
+  });
+}
+function showDetail(boxId) {
+  var card = document.getElementById("detail-card");
+  document.getElementById("detail-name").textContent = "Loading…";
+  card.classList.remove("hidden");
+  card.scrollIntoView();
+  api("/v1/boxes/" + encodeURIComponent(boxId)).then(function (r) {
+    if (r.status !== 200 || !r.data.ok) {
+      document.getElementById("detail-name").textContent = "Box not found";
+      return;
+    }
+    var b = r.data.box;
+    document.getElementById("detail-name").textContent = b.name || b.id;
+    var st = b.last_status || {};
+    var host = st.host || {};
+    var tokenNote = b.token_expires_at == null
+      ? "no expiry (grandfathered pre-rotation token)"
+      : "expires " + fmtClock(b.token_expires_at);
+    document.getElementById("detail-dl").innerHTML =
+      row("Box id", '<span class="mono">' + esc(b.id) + "</span>") +
+      row("Status", esc(b.status || "—")) +
+      row("Hostname", esc(host.hostname || "—")) +
+      row("Uptime", host.uptime_seconds != null ? esc(fmtUptime(host.uptime_seconds)) : "—") +
+      row("Last heartbeat", esc(relTime(b.last_heartbeat_at, Math.floor(Date.now()/1000))) +
+        " (" + esc(fmtClock(b.last_heartbeat_at)) + ")") +
+      row("Box token", esc(tokenNote)) +
+      row("Enrolled", esc(fmtClock(b.created_at)));
+    document.getElementById("detail-fp").textContent = b.fingerprint || "—";
+    var svcs = st.services || {};
+    var names = Object.keys(svcs);
+    document.getElementById("detail-services").innerHTML = names.length
+      ? names.map(function (n) {
+          var up = svcs[n] === "up";
+          return '<span class="chip svc ' + (up ? "ok" : "down") + '">' +
+                 esc(n) + ": " + esc(svcs[n]) + "</span>";
+        }).join("")
+      : '<span class="muted">no service data</span>';
+    document.getElementById("detail-raw").textContent =
+      JSON.stringify(b.last_status, null, 2) || "null";
+    document.getElementById("detail-raw").classList.add("hidden");
+    document.getElementById("raw-toggle").textContent = "Show raw status JSON";
+  }).catch(function () {
+    document.getElementById("detail-name").textContent = "Failed to load box";
+  });
+}
+function row(k, vHtml) { return "<dt>" + esc(k) + "</dt><dd>" + vHtml + "</dd>"; }
+function loadPairings() {
+  if (!KEY) return;
+  api("/v1/pairing").then(function (r) {
+    if (r.status === 200 && r.data.ok) { pairings = r.data.pairings || []; renderPairings(); }
+  }).catch(function () {});
+}
+function renderPairings() {
+  var now = Math.floor(Date.now() / 1000);
+  var el = document.getElementById("pairing-list");
+  // Never wipe a pairing code mid-typing on auto-refresh.
+  var inputs = el.querySelectorAll(".code-input");
+  for (var i = 0; i < inputs.length; i++) {
+    if (inputs[i] === document.activeElement || inputs[i].value) return;
+  }
+  if (!pairings.length) { el.innerHTML = '<p class="muted">None pending.</p>'; return; }
+  el.innerHTML = pairings.map(function (p) {
+    var pending = p.status === "pending";
+    return '<div class="card" data-pid="' + esc(p.id) + '">' +
+      '<div><strong>' + esc(p.box_name) + '</strong> ' +
+      '<span class="chip ' + (pending ? "pending" : "ok") + '">' +
+        esc(pending ? "Pending" : "Approved") + '</span> ' +
+      '<span class="muted">code expires ' + esc(until(p.expires_at, now)) + '</span></div>' +
+      '<div class="fp" style="margin-top:8px">' + esc(p.fingerprint) + '</div>' +
+      (pending
+        ? '<div class="approve-row">' +
+          '<input type="text" class="code-input" placeholder="Pairing code from the box screen" ' +
+          'aria-label="Pairing code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">' +
+          '<button class="primary approve-btn">Approve</button>' +
+          '</div><div class="err hidden"></div><div class="okmsg hidden"></div>'
+        : '<p class="muted">Approved — waiting for the box to redeem its token.</p>') +
+      '</div>';
+  }).join("");
+  Array.prototype.forEach.call(el.querySelectorAll(".card"), function (card) {
+    var btn = card.querySelector(".approve-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      approvePairing(card, card.getAttribute("data-pid"));
+    });
+  });
+}
+function approvePairing(card, pid) {
+  var input = card.querySelector(".code-input");
+  var err = card.querySelector(".err"), ok = card.querySelector(".okmsg");
+  err.classList.add("hidden"); ok.classList.add("hidden");
+  var btn = card.querySelector(".approve-btn");
+  btn.disabled = true;
+  api("/v1/pairing/" + encodeURIComponent(pid) + "/approve",
+      { method: "POST", body: { code: input.value.trim() } }).then(function (r) {
+    btn.disabled = false;
+    if (r.status === 200 && r.data.ok) {
+      ok.textContent = "Approved — the box can now redeem its first token.";
+      ok.classList.remove("hidden");
+      input.value = "";
+      setTimeout(loadPairings, 1500);
+    } else {
+      err.textContent = "Approval failed: " + (r.data.error || ("HTTP " + r.status));
+      err.classList.remove("hidden");
+    }
+  }).catch(function (e) {
+    btn.disabled = false;
+    err.textContent = "Approval failed: " + (e && e.message || e);
+    err.classList.remove("hidden");
+  });
+}
+
+document.getElementById("login-form").addEventListener("submit", function (ev) {
+  ev.preventDefault();
+  var btn = this.querySelector('button[type="submit"]');
+  var v = document.getElementById("key-input").value.trim();
+  if (!v || btn.disabled) return;
+  btn.disabled = true;
+  login(v).then(function () { btn.disabled = false; });
+});
+document.getElementById("logout-btn").addEventListener("click", function () { logout(false); });
+document.getElementById("refresh-btn").addEventListener("click", refreshAll);
+document.getElementById("detail-close").addEventListener("click", function () {
+  document.getElementById("detail-card").classList.add("hidden");
+});
+document.getElementById("raw-toggle").addEventListener("click", function () {
+  var pre = document.getElementById("detail-raw");
+  var hidden = pre.classList.toggle("hidden");
+  this.textContent = hidden ? "Show raw status JSON" : "Hide raw status JSON";
+});
+(function init() {
+  var saved = null;
+  try { saved = sessionStorage.getItem("svm_owner_key"); } catch (e) {}
+  if (saved) login(saved);
+})();
+</script>
+</body>
+</html>
