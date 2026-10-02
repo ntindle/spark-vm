@@ -98,7 +98,7 @@ notes, in the goal workspace — not part of this repo).
 > "Microsoft AI models are now available on AI Gateway" — none
 > sandbox-adjacent; no Drives GA anywhere in the dated index).
 
-Delta-only against the cycle-58 pass (PR #857's
+Delta-only against the cycle-58 pass (PR #807's
 `docs/COMPETITOR_WATCH_2026-10-01_MORNING_C58.md`). Read-only, no
 logins, no writes.
 

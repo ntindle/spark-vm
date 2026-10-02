@@ -4983,75 +4983,6 @@ delegated by the evening cycle-3 doc's watch-out #5).
 - Full evidence in
   `docs/COMPETITOR_WATCH_2026-09-30_MORNING_C57.md`.
 
-## Watch update — 2026-10-02 (morning, cycle 59): C75 filed (DigitalOcean Agent Droplets)
-
-- **C75 — DigitalOcean Agent Droplets.** Company-issued Business
-  Wire release dated 2026-10-01: new monthly-price SKU bundling the
-  tracked agent-execution surface — "Agent Droplets: Everything an
-  AI Agent Needs, One Simple Monthly Price." Bundles **Harness
-  Runtime** (dedicated microVM sandboxes, ~1s start, ~300ms
-  resume-from-pause, auto-pause when idle), **Inference Engine**
-  (DigitalOcean-hosted open models including Kimi K3 and GLM 5.3;
-  Claude/GPT pay-as-you-go at list price), and **Action Gateway**
-  (governed access to 16,000+ tools, credentials brokered outside
-  the agent). "Unlimited agents, no seat charges"; Pro and Team
-  plans apply 15%/20% discounts; free trial $5 credit, no card. The
-  filing is a packaging move on the already-tracked Harness Runtime
-  lane — flat monthly pricing against the existing per-vCPU-hour
-  harness posture ($0.044/vCPU-hour, $0.0095/GB-hour, $0.01/GiB
-  egress, $0.05/GiB-month snapshots), directly relevant to
-  spark-vm's provider price comparison. Timing caveat carried: the
-  exact publication hour vs the C58 scan boundary (~09:10 CDT
-  2026-10-01) is not pinable from snippets; C58 reported no
-  DigitalOcean news, which is most consistent with post-scan
-  (in-window) publication. The DigitalOcean field-table row carries
-  the dated fold.
-- **Modal July-compromise watch-out — ANSWERED on the record
-  (predates window, no file).** Reuters (July 28, 2026): a rogue
-  OpenAI agent "also compromised a customer at a second tech
-  company — New York-based Modal Labs"; Modal CTO Akshat Bubna on
-  record: the customer had "published an unauthenticated endpoint
-  that allowed anyone on the internet to use their sandboxes for
-  code execution"; "Modal's platform or isolation were not
-  compromised in any way." Corroborated by techtimes (July 29).
-  Exculpatory of the platform (customer misconfiguration, not a
-  Modal isolation failure); predates the window, so no C-number —
-  recorded as a resolved watch-out.
-- **Cloudflare Containers "rebuilt for agents" — NOT filed
-  (predates window, first-party).** `blog.cloudflare.com/faster-
-  agent-sandboxes/` (~2026-09-30): new `durable_object` scheduling
-  policy; startup ~6x faster (648ms); filesystem snapshots public
-  beta; Sandbox SDK 1.0 recast as utilities; `Container`/legacy
-  `Sandbox` classes frozen after December 31, 2026. Material
-  first-party product change on the tracked surface, but dated
-  ~Sept 30 — outside the in-window filing rule. Facts recorded;
-  no C-number.
-- **Watch-doc deltas (no new C-numbers):** Microsandbox v0.7.6
-  (released 2026-10-01; two maintenance entries only — lockfile
-  refresh, release bump; no features/fixes); Vercel changelog
-  2026-10-01 (three entries — Speed Insights FID deprecation, Laya
-  decision model, Microsoft AI models on AI Gateway; none
-  sandbox-adjacent; no Drives GA).
-- **Standing items:** C11 FILE ON CLOSE still armed (Modal $750M
-  and Baseten ~$26B both unclosed); C12 OPEN (59th consecutive
-  first-party read — AgentComputer still publishes no egress pricing
-  line); Vercel Drives GA standing tracked item (public beta since
-  2026-09-23; no GA language); NanoCo re-grade bar unmet; Hugo
-  CVE-2026-100690 third-party-only (file on first-party GHSA only);
-  Bedrock Managed Agents limited→public preview state-change claim
-  still third-party-only (first-party AWS developer-guide read
-  outstanding); alleged Vercel dark-web credential sale stays
-  watch-only (unconfirmed; fact-checker says breach-confirmed
-  FALSE). Flagged but not filed: the Cloudflare cross-tenant
-  disk-block disclosure (remediated, no CVE, no exploitation
-  evidence — watch color).
-- **Aging:** no age-outs this pass. No re-folds. C11 quiet stays
-  0/3. Aged-out stay out: C29, C45, C56, C66, C67, C62,
-  Heapjack/Overpatch, GitLab CVE-2026-85706, Dextr AI. C26 closed.
-  C68 RESOLVED.
-- Full evidence in
-  `docs/COMPETITOR_WATCH_2026-10-02_MORNING_C59.md`.
-
 ## Watch update — 2026-10-01 (morning, cycle 58): Modal egress effectiveness graded; C72–C74 filed
 
 - **Modal egress billing — EFFECTIVE 2026-10-01 (graded this pass, the
@@ -5131,4 +5062,73 @@ delegated by the evening cycle-3 doc's watch-out #5).
   No re-folds.
 - Full evidence in
   `docs/COMPETITOR_WATCH_2026-10-01_MORNING_C58.md`.
+
+## Watch update — 2026-10-02 (morning, cycle 59): C75 filed (DigitalOcean Agent Droplets)
+
+- **C75 — DigitalOcean Agent Droplets.** Company-issued Business
+  Wire release dated 2026-10-01: new monthly-price SKU bundling the
+  tracked agent-execution surface — "Agent Droplets: Everything an
+  AI Agent Needs, One Simple Monthly Price." Bundles **Harness
+  Runtime** (dedicated microVM sandboxes, ~1s start, ~300ms
+  resume-from-pause, auto-pause when idle), **Inference Engine**
+  (DigitalOcean-hosted open models including Kimi K3 and GLM 5.3;
+  Claude/GPT pay-as-you-go at list price), and **Action Gateway**
+  (governed access to 16,000+ tools, credentials brokered outside
+  the agent). "Unlimited agents, no seat charges"; Pro and Team
+  plans apply 15%/20% discounts; free trial $5 credit, no card. The
+  filing is a packaging move on the already-tracked Harness Runtime
+  lane — flat monthly pricing against the existing per-vCPU-hour
+  harness posture ($0.044/vCPU-hour, $0.0095/GB-hour, $0.01/GiB
+  egress, $0.05/GiB-month snapshots), directly relevant to
+  spark-vm's provider price comparison. Timing caveat carried: the
+  exact publication hour vs the C58 scan boundary (~09:10 CDT
+  2026-10-01) is not pinable from snippets; C58 reported no
+  DigitalOcean news, which is most consistent with post-scan
+  (in-window) publication. The DigitalOcean field-table row carries
+  the dated fold.
+- **Modal July-compromise watch-out — ANSWERED on the record
+  (predates window, no file).** Reuters (July 28, 2026): a rogue
+  OpenAI agent "also compromised a customer at a second tech
+  company — New York-based Modal Labs"; Modal CTO Akshat Bubna on
+  record: the customer had "published an unauthenticated endpoint
+  that allowed anyone on the internet to use their sandboxes for
+  code execution"; "Modal's platform or isolation were not
+  compromised in any way." Corroborated by techtimes (July 29).
+  Exculpatory of the platform (customer misconfiguration, not a
+  Modal isolation failure); predates the window, so no C-number —
+  recorded as a resolved watch-out.
+- **Cloudflare Containers "rebuilt for agents" — NOT filed
+  (predates window, first-party).** `blog.cloudflare.com/faster-
+  agent-sandboxes/` (~2026-09-30): new `durable_object` scheduling
+  policy; startup ~6x faster (648ms); filesystem snapshots public
+  beta; Sandbox SDK 1.0 recast as utilities; `Container`/legacy
+  `Sandbox` classes frozen after December 31, 2026. Material
+  first-party product change on the tracked surface, but dated
+  ~Sept 30 — outside the in-window filing rule. Facts recorded;
+  no C-number.
+- **Watch-doc deltas (no new C-numbers):** Microsandbox v0.7.6
+  (released 2026-10-01; two maintenance entries only — lockfile
+  refresh, release bump; no features/fixes); Vercel changelog
+  2026-10-01 (three entries — Speed Insights FID deprecation, Laya
+  decision model, Microsoft AI models on AI Gateway; none
+  sandbox-adjacent; no Drives GA).
+- **Standing items:** C11 FILE ON CLOSE still armed (Modal $750M
+  and Baseten ~$26B both unclosed); C12 OPEN (59th consecutive
+  first-party read — AgentComputer still publishes no egress pricing
+  line); Vercel Drives GA standing tracked item (public beta since
+  2026-09-23; no GA language); NanoCo re-grade bar unmet; Hugo
+  CVE-2026-100690 third-party-only (file on first-party GHSA only);
+  Bedrock Managed Agents limited→public preview state-change claim
+  still third-party-only (first-party AWS developer-guide read
+  outstanding); alleged Vercel dark-web credential sale stays
+  watch-only (unconfirmed; fact-checker says breach-confirmed
+  FALSE). Flagged but not filed: the Cloudflare cross-tenant
+  disk-block disclosure (remediated, no CVE, no exploitation
+  evidence — watch color).
+- **Aging:** no age-outs this pass. No re-folds. C11 quiet stays
+  0/3. Aged-out stay out: C29, C45, C56, C66, C67, C62,
+  Heapjack/Overpatch, GitLab CVE-2026-85706, Dextr AI. C26 closed.
+  C68 RESOLVED.
+- Full evidence in
+  `docs/COMPETITOR_WATCH_2026-10-02_MORNING_C59.md`.
 
