@@ -115,10 +115,12 @@ def cmd_request(args):
     if status != 201 or not resp.get("ok"):
         print(f"request failed: {resp.get('error', status)}")
         return 1
-    with open(os.path.join(d, "pairing.json"), "w") as f:
-        json.dump({"pairing_id": resp["pairing_id"], "code": resp["code"],
-                   "expires_at": resp["expires_at"],
-                   "control": control}, f, indent=2)
+    # The single-use code lives here until redeem: 0600 like the key.
+    _write_private(os.path.join(d, "pairing.json"),
+                   json.dumps({"pairing_id": resp["pairing_id"],
+                               "code": resp["code"],
+                               "expires_at": resp["expires_at"],
+                               "control": control}, indent=2).encode())
     mins = max(1, int((resp["expires_at"] - time.time()) // 60))
     print()
     print("  Give this pairing code to the box owner:")

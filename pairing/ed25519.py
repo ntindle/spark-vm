@@ -10,8 +10,9 @@ Used by:
     below): signature verification of the pairing challenge
 
 Reference: Daniel J. Bernstein's ref10 Python implementation (public
-domain), adapted. Validated against the RFC 8032 Section 7 test vectors
-in test_ed25519.py.
+domain), adapted. test_ed25519.py cross-validates sign/verify against the
+`cryptography` library in both directions over multiple seeds and message
+lengths (plus one hardcoded RFC 8032 TEST 1 vector).
 
 WORKER COPY: the control-plane Worker is deployed as a single file, so it
 carries this same code inline (marked "BEGIN ed25519 / END ed25519").

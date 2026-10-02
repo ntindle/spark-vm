@@ -20,6 +20,10 @@ request --name mybox ──POST /v1/pairing/request──▶  stores: code_hash,
 box prints CODE + FINGERPRINT ──────────────────────────────────▶ owner reads
                                                                    them off
                                                                    the box
+
+(The server computes the fingerprint from the pubkey itself and ignores
+the client-sent value — the fingerprint the owner compares is always the
+true fingerprint of the submitted key.)
                                               GET /v1/pairing ──▶ owner lists
                                               (owner key)          pending
                                               GET /v1/pairing/{id}
@@ -48,7 +52,9 @@ box saves token (0600), heartbeats as before
 - **Proof of possession.** Redeem requires an ed25519 signature over a
   server-issued 32-byte challenge, verified against the pubkey submitted at
   request time. Requesting a pairing for someone else's box name gains
-  nothing: the fingerprint won't match what the real box displays.
+  nothing: the server fingerprints the submitted pubkey itself, so the
+  attacker's key shows a different fingerprint than the real box displays —
+  and the owner compares the fingerprint out-of-band before approving.
 - **Human binding.** Approval requires the owner to type the pairing code
   shown on the box's screen, and to verify the key fingerprint out-of-band
   (read it off the box). An attacker who can request pairings cannot
@@ -60,8 +66,7 @@ box saves token (0600), heartbeats as before
   tokens and owner keys as SHA-256 hashes; the box private key never leaves
   the box; the token is shown exactly once at redeem. List/detail endpoints
   never return code hashes or challenges.
-- **Pre-#844 tokens** (`box_7dccb3da`, the live box) carry NULL
-  `token_expires_at` — grandfathered until #846 migrates them to rotation.
+- **Pre-#844 tokens** carry NULL `token_expires_at` — grandfathered until #846 migrates them to rotation.
 
 ## Files
 
