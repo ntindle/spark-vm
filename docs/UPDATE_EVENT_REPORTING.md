@@ -187,6 +187,24 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   it. The P7 status page's alert feed is the formal home when it exists;
   nothing in S1 pretends the feed exists before it does.
 
+  **Bounded evaluation scan (#814 slice 1):** each evaluation reasons
+  only about the event-journal tail the armed rules can act on — the
+  longest armed rule window (six hours at S1). Slice 1 bounds the
+  rule-evaluation candidate set to that window; the journal file itself
+  is still read and parsed in full on every collect (bounding the read
+  is a later #814 slice; retention caps the file at 90d). Rule 4's own
+  cutoff equals the window, so its behavior is exact; rules 2 and 3
+  reason only about recent pairs/windows, so nothing inside the window
+  changes; rows that cannot be dated pass through the scanner (rule 1
+  still fires on an undatable `rollback-failed`). Events older than the
+  scan window are invisible to every rule — two deliberate edges:
+  rule 1's "any `rollback-failed`" is now "any `rollback-failed`
+  inside the scan window", and a rule-2 correlated-failure cluster
+  straddling the window edge is no longer detectable. Both require the
+  operator to have skipped evaluation for longer than the window
+  (evaluation runs on every collect), and a box that stays broken stays
+  covered by the stuck-precheck rule.
+
 ### S2 — box-side event journal; gate-ready aggregation
 
 - **Sink:** a dedicated box-side journal both updaters append directly in

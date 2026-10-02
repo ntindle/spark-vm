@@ -158,10 +158,17 @@ translation table in `events.py`, verified against
 - **Deterministic ids** — UUIDv5 over `box_id|ts|event|result|from|to`
   (per-subcomponent suffix on the plural-`components` success fan-out),
   so re-collection is a dedup no-op.
-- **Alert rules, evaluated on every collect** — (1) any `rollback-failed`
-  pages immediately; (2) ≥2 boxes `failed`/`rolled-back` on the same
-  (subcomponent, `to`) within 30 min (the bad-release shape; lines with
-  no component correlate on `to` alone as `unknown`); (3) silent wave —
+- **Alert rules, evaluated on every collect** — (1) `rollback-failed`
+  within the evaluation scan window pages immediately (evaluation
+  reasons only about the tail the armed rules can act on — the longest
+  armed rule window, six hours; the journal file itself is still read
+  in full, a later slice bounds the read; a `rollback-failed` older
+  than the window that never fired no longer pages); (2) ≥2 boxes
+  `failed`/`rolled-back` on the same (subcomponent, `to`) within
+  30 min (the bad-release shape; lines with no component correlate on
+  `to` alone as `unknown`) — both members must sit inside the scan
+  window, so a cluster straddling the window edge is not detectable;
+  (3) silent wave —
   **disarmed at S1** (every rollout envelope is null; firing it would
   page every healthy idle estate); (4) ≥3 `precheck-fail` on one box in
   6h. Alerts land in the store's `alerts.jsonl` (deduped on `alert_id`);

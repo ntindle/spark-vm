@@ -190,6 +190,9 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - The swap proxy's audit log now strips control characters and whitespace from every client-influenced field before writing: a hostile or buggy local client can no longer smuggle newlines or forged entries into the audit trail. Well-formed hosts, IP addresses, and credential names are written exactly as before. (#682)
 - The approvals daemon no longer keeps its anti-forgery nonces in the approval file the requester wrote: the nonce ring now lives in the daemon's own memory, keyed by approval id, and nonces pre-seeded into a pending file are ignored entirely — a lower-trust approval filer can't mint its own entries and then drive an approval from its own browser session. The multi-tab behavior is unchanged (the last few rendered forms all stay valid), and a daemon restart just means pre-restart forms reload and mint fresh. (#78) (#764)
 
+### Fixed
+- Fleet alert evaluation now reasons about a bounded window instead of the whole journal (#814 slice 1): each evaluation's rule logic sees only the tail the armed alert rules can act on (the longest rule window, six hours), so the per-collect rule-evaluation work stays bounded as the journal grows — the journal file itself is still read in full on every collect (bounding the read is a later slice; retention caps the file at 90 days). Behavior is unchanged for every event inside that window — including events that can't be dated, which the scanner still passes through — and the at-most-once alert dedup is unchanged. Two deliberate edges, both requiring the operator to have skipped evaluation for longer than the window: a failed-rollback older than the window that was never evaluated no longer pages (evaluation runs on every collect, and the stuck-box rules still cover a box that stays broken), and a correlated-failure cluster straddling the window edge is no longer detectable. (#832)
+
 ## [0.5.0] - 2026-09-29
 
 ### Added
