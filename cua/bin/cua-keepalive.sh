@@ -147,13 +147,23 @@ input_probe_check() { # input_probe_check [state_dir] [bridge_url]
     echo "cua-keepalive: input probe fetch failed (bridge down?)" >&2
     return 0
   fi
+  # Vocabulary normalization: the classifier accepts only the documented
+  # verdicts (ok/wedged/unknown/unparseable). A null or non-dict "input"
+  # section, and a null or non-vocabulary "state", are inconclusive like
+  # a missing key — "unknown", not a new verdict class and not the
+  # AttributeError-accidental "unparseable". A body that does not parse at
+  # all stays "unparseable". Either way the wedge counter is untouched and
+  # no restart fires (fail-safe per #492).
   local verdict
   verdict=$(printf '%s' "$body" | python3 -c \
     'import json,sys
+_VERDICTS = ("ok", "wedged", "unknown", "unparseable")
 try:
-    print(json.load(sys.stdin).get("input", {}).get("state", "unknown"))
+    section = json.load(sys.stdin).get("input") or {}
+    state = section.get("state", "unknown") if isinstance(section, dict) else "unknown"
 except Exception:
-    print("unparseable")' 2>/dev/null) || verdict=unparseable
+    state = "unparseable"
+print(state if state in _VERDICTS else "unknown")' 2>/dev/null) || verdict=unparseable
   case "$verdict" in
     wedged) consecutive=$((consecutive + 1)) ;;
     ok) consecutive=0 ;;
