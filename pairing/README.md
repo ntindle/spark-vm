@@ -134,12 +134,13 @@ bounded. The client sends `signature: null` when no `box.key` exists.
 Re-pairing (`request` + `redeem`) gives the box a keypair and full
 proof-of-possession rotation.
 
-**Status.** This client implements the rotation/revocation contract
-above. The control-plane half (the two endpoints, the `revoked_at`
-column, the heartbeat expiry stamping) ships with the plane update that
-closes #846 — until then the endpoints 404 and `rotate`/`revoke` say
-exactly that ("this control plane does not implement … yet") without
-touching local state. Do not install the cron line below until your
+**Status.** The control-plane half is live on the hosted control
+plane (deployed 2026-10-02): `POST /v1/boxes/token/rotate` and
+`POST /v1/boxes/{id}/revoke` serve, the `revoked_at` / `prev_token_hash` /
+`prev_token_valid_until` columns are migrated, and heartbeats stamp the
+24 h expiry on grandfathered tokens. This client implements the full
+contract above — verify with a manual `rotate` before installing the
+cron line below. Do not install the cron line below until your
 control plane serves the endpoints — verify with a manual `rotate` first.
 
 **Automation.** Once the plane serves the endpoints, a box operator keeps
