@@ -676,7 +676,17 @@ class SwapAddonTests(unittest.TestCase):
         now = time.time()
         for literal in ("0.0.0.0", "::ffff:127.0.0.1", "127.0.0.1",
                         "10.9.9.9", "192.0.0.7", "198.18.0.1",
-                        "240.0.0.1", "::1"):
+                        "240.0.0.1", "::1",
+                        # 6to4/Teredo literals embedding a private IPv4
+                        # judge as public v6 without the transition-range
+                        # refusal: 2002:7f00:1::1 is 6to4 for 127.0.0.1
+                        "2002:7f00:1::1",
+                        "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+                        # NAT64 well-known prefix embedding a private
+                        # IPv4: unwrapped to the embedded address, then
+                        # refused like the literal itself
+                        "64:ff9b::7f00:1",
+                        "64:ff9b::a00:1"):
             a = make_addon(hosts=["h.example"],
                            registry={"h": {"allowed_hosts": ["h.example"]}},
                            secrets={"h": "h-SECRET"})
@@ -691,6 +701,68 @@ class SwapAddonTests(unittest.TestCase):
         a._dns_cache["h.example"] = (now + 3600, ["93.184.216.34"])
         data = FakeServerConnectData("h.example")
         asyncio.run(a.server_connect(data))
+        self.assertIsNone(data.server.error)
+        self.assertEqual(data.server.address, ("93.184.216.34", 443))
+
+    def test_transition_ranges_refused_wholesale(self):
+        """6to4 (2002::/16) and Teredo (2001::/32) are refused by
+        default even when the EMBEDDED IPv4 is public — the range is
+        refused wholesale, not unwrapped, because these deprecated
+        transition mechanisms have no legitimate destination on this
+        proxy's egress path. The ssrf allow file still admits them
+        explicitly (CIDR), so the operator keeps an escape hatch."""
+        now = time.time()
+        # Transition literals embedding even a PUBLIC IPv4 are still
+        # refused: the range is refused wholesale, not unwrapped —
+        # 2002:5db8:d822::1 is 6to4 for 93.184.216.34, the second is a
+        # Teredo literal.
+        for literal in ("2002:5db8:d822::1",
+                        "2001:0:4136:e378:8000:63bf:3fff:fdd2"):
+            a = make_addon(hosts=["h.example"],
+                           registry={"h": {"allowed_hosts": ["h.example"]}},
+                           secrets={"h": "h-SECRET"})
+            a._dns_cache["h.example"] = (now + 3600, [literal])
+            data = FakeServerConnectData("h.example")
+            asyncio.run(a.server_connect(data))
+            self.assertIsNotNone(data.server.error, literal)
+            self.assertEqual(data.server.address, ("h.example", 443))
+        # escape hatch: an explicit ssrf.allow CIDR admits the range
+        a = make_addon(hosts=["h.example"],
+                       registry={"h": {"allowed_hosts": ["h.example"]}},
+                       secrets={"h": "h-SECRET"})
+        a.ssrf_nets = [ipaddress.ip_network("2002::/16")]
+        a._dns_cache["h.example"] = (now + 3600, ["2002:5db8:d822::1"])
+        data = FakeServerConnectData("h.example")
+        asyncio.run(a.server_connect(data))
+        self.assertIsNone(data.server.error)
+        self.assertEqual(data.server.address, ("2002:5db8:d822::1", 443))
+
+    def test_nat64_wkp_unwrapped(self):
+        """NAT64 well-known prefix (64:ff9b::/96, RFC 6052) is unwrapped
+        to its embedded IPv4 before the range judgment — not refused
+        wholesale, because on a DNS64 network it is the legitimate path
+        to v4 upstreams. A private embedded IPv4 is refused; a public
+        one is allowed and pinned to the EMBEDDED address, so genuine
+        NAT64 egress keeps working."""
+        now = time.time()
+
+        def connect(ip):
+            a = make_addon(hosts=["h.example"],
+                           registry={"h": {"allowed_hosts": ["h.example"]}},
+                           secrets={"h": "h-SECRET"})
+            a._dns_cache["h.example"] = (now + 3600, [ip])
+            data = FakeServerConnectData("h.example")
+            asyncio.run(a.server_connect(data))
+            return a, data
+
+        # private embedded IPv4 -> refused, never pinned
+        for literal in ("64:ff9b::7f00:1", "64:ff9b::a00:1"):
+            a, data = connect(literal)
+            self.assertIsNotNone(data.server.error, literal)
+            self.assertEqual(data.server.address, ("h.example", 443))
+        # public embedded IPv4 (93.184.216.34) -> allowed, pinned to the
+        # embedded v4 address, not the v6 literal
+        a, data = connect("64:ff9b::5db8:d822")
         self.assertIsNone(data.server.error)
         self.assertEqual(data.server.address, ("93.184.216.34", 443))
 
