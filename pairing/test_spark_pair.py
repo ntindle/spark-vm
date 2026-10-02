@@ -761,3 +761,257 @@ def test_heartbeat_log_never_contains_token(ctx, monkeypatch, capsys):
     log = open(os.path.join(ctx.dir, "heartbeat.log")).read()
     assert "SUPERSECRETT0KEN" not in log
     assert "<redacted>" in log
+
+
+# ---- 20261002-1659 arch turn: HTTP-layer hardening ---------------------------
+# Redirect auth-strip (Security), cleartext-http refusal (Security),
+# _http response-shape normalization (Architecture), redeem pairing.json
+# guards (Architecture). Local servers only — no network access.
+
+import threading
+import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def _serve(handler_cls):
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    return srv
+
+
+class _Quiet(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+
+class _EchoAuth(_Quiet):
+    """Answers {"saw_auth": <whether an Authorization header arrived>}."""
+
+    def do_GET(self):
+        body = json.dumps(
+            {"saw_auth": "Authorization" in self.headers}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _CrossOriginRedirect(_Quiet):
+    """302s to a different ORIGIN (different port on the same host)."""
+    target = ""
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.target)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+class _SameOriginRedirectEcho(_EchoAuth):
+    """/go 302s to /echo on the SAME origin; every GET echoes auth sight."""
+
+    def do_GET(self):
+        if self.path == "/go":
+            self.send_response(302)
+            self.send_header("Location", "/echo")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        return super().do_GET()
+
+
+def test_http_strips_authorization_on_cross_origin_redirect():
+    # urllib's default opener forwards manually-set Authorization headers
+    # across redirects, even cross-origin: on this credential-bearing
+    # client that is a token leak. Regression test for the stripper.
+    echo = _serve(_EchoAuth)
+    redir = _serve(type("R", (_CrossOriginRedirect,), {
+        "target": f"http://127.0.0.1:{echo.server_address[1]}/x"}))
+    try:
+        url = f"http://127.0.0.1:{redir.server_address[1]}/go"
+        status, resp = spark_pair._http(
+            "GET", url, headers={"Authorization": "Bearer s3cr3t"})
+        assert status == 200
+        assert resp == {"saw_auth": False}
+    finally:
+        redir.shutdown()
+        echo.shutdown()
+
+
+def test_http_keeps_authorization_on_same_origin_redirect():
+    # Same-origin redirects (e.g. a trailing-slash bounce) must keep
+    # working: only the cross-origin strip is new behavior.
+    srv = _serve(_SameOriginRedirectEcho)
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/go"
+        status, resp = spark_pair._http(
+            "GET", url, headers={"Authorization": "Bearer s3cr3t"})
+        assert status == 200
+        assert resp == {"saw_auth": True}
+    finally:
+        srv.shutdown()
+
+
+class _FakeOpener:
+    """Stands in for spark_pair._HTTP_OPENER with a canned body."""
+
+    def __init__(self, body):
+        self._body = body
+
+    def open(self, req, timeout=None):
+        body = self._body
+
+        class _Resp:
+            status = 200
+
+            def read(self):
+                return body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return _Resp()
+
+
+def test_http_normalizes_non_object_body_to_failure(monkeypatch):
+    # A 2xx with a JSON list/string/null body used to flow to call sites
+    # that all assume dict (AttributeError/KeyError). _http now normalizes
+    # at the choke point instead of guarding at each site.
+    monkeypatch.setattr(spark_pair, "_HTTP_OPENER",
+                        _FakeOpener(b"[1, 2]"))
+    status, resp = spark_pair._http("GET", "https://control.test/x")
+    assert status == 200
+    assert resp == {"ok": False,
+                    "error": "malformed plane response (non-object body)"}
+
+
+def test_http_passes_object_bodies_through(monkeypatch):
+    monkeypatch.setattr(spark_pair, "_HTTP_OPENER",
+                        _FakeOpener(b'{"ok": true}'))
+    status, resp = spark_pair._http("GET", "https://control.test/x")
+    assert (status, resp) == (200, {"ok": True})
+
+
+class _FakeErrorOpener:
+    """Stands in for spark_pair._HTTP_OPENER, raising HTTPError with a
+    canned body."""
+
+    def __init__(self, code, body):
+        self._code = code
+        self._body = body
+
+    def open(self, req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, self._code, "err", {},
+                                     io.BytesIO(self._body))
+
+
+def test_http_normalizes_non_object_error_body_to_failure(monkeypatch):
+    # The HTTPError branch must mirror the 2xx normalization: a JSON list
+    # error body must not AttributeError at the first resp.get(). The
+    # http=NNN marker is kept so the 404 endpoint-detection still works.
+    monkeypatch.setattr(spark_pair, "_HTTP_OPENER",
+                        _FakeErrorOpener(500, b"[1, 2]"))
+    status, resp = spark_pair._http("GET", "https://control.test/x")
+    assert status == 500
+    assert resp == {"ok": False, "error": "http=500"}
+
+
+def test_http_keeps_dict_error_bodies(monkeypatch):
+    monkeypatch.setattr(spark_pair, "_HTTP_OPENER",
+                        _FakeErrorOpener(404, b'{"ok": false, "e": 1}'))
+    status, resp = spark_pair._http("GET", "https://control.test/x")
+    assert (status, resp) == (404, {"ok": False, "e": 1})
+
+
+def test_check_control_url_matrix(monkeypatch):
+    assert spark_pair._check_control_url("https://api.sparkvm.dev") == (
+        True, "")
+    assert spark_pair._check_control_url("http://127.0.0.1:8080/x")[0]
+    assert spark_pair._check_control_url("http://localhost/x")[0]
+    ok, msg = spark_pair._check_control_url("http://control.test/x")
+    assert not ok and "cleartext" in msg
+    ok, msg = spark_pair._check_control_url("ftp://control.test/x")
+    assert not ok and "https" in msg
+    # Fail-open bypass regression: "127.evil.com" is a public DNS name,
+    # not loopback — a prefix test ("127.") would wrongly admit it and
+    # send bearer tokens in cleartext to an attacker host.
+    assert not spark_pair._check_control_url("http://127.evil.com/x")[0]
+    assert not spark_pair._check_control_url("http://127.0.0.1.evil.com/x")[0]
+    assert spark_pair._check_control_url("http://[::1]/x")[0]
+    # Explicit opt-in unblocks non-loopback http (local dev against a
+    # non-loopback test host).
+    monkeypatch.setenv("SVM_PAIR_ALLOW_HTTP", "1")
+    assert spark_pair._check_control_url("http://control.test/x")[0]
+
+
+def test_request_refuses_cleartext_control(ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    ctx.control = "http://control.test"
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no HTTP")))
+    assert spark_pair.cmd_request(ctx) == 1
+    assert "cleartext" in capsys.readouterr().out
+    assert not os.path.exists(os.path.join(ctx.dir, "pairing.json"))
+
+
+def test_heartbeat_refuses_cleartext_control_loud(ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    _enroll(ctx)
+    ctx.control = "http://control.test"
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no HTTP")))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    err = capsys.readouterr().err
+    assert "heartbeat FAILED" in err and "cleartext" in err
+    log = open(os.path.join(ctx.dir, "heartbeat.log")).read()
+    assert "cleartext" in log
+
+
+def _write_pairing(ctx, text):
+    os.makedirs(ctx.dir, mode=0o700, exist_ok=True)
+    with open(os.path.join(ctx.dir, "pairing.json"), "w") as f:
+        f.write(text)
+
+
+def test_redeem_non_object_pairing_json_is_clean_error(ctx, capsys):
+    _run_init(ctx)
+    _write_pairing(ctx, "[1, 2]")
+    assert spark_pair.cmd_redeem(ctx) == 1
+    out = capsys.readouterr().out
+    assert "run `request` again" in out
+    assert "Traceback" not in out
+
+
+def test_redeem_corrupt_pairing_json_is_clean_error(ctx, capsys):
+    _run_init(ctx)
+    _write_pairing(ctx, "{not json")
+    assert spark_pair.cmd_redeem(ctx) == 1
+    out = capsys.readouterr().out
+    assert "unreadable" in out and "run `request` again" in out
+    assert "Traceback" not in out
+
+
+def test_redeem_incomplete_pairing_json_is_clean_error(ctx, capsys):
+    _run_init(ctx)
+    _write_pairing(ctx, json.dumps({"pairing_id": "pair_x"}))
+    assert spark_pair.cmd_redeem(ctx) == 1
+    out = capsys.readouterr().out
+    assert "corrupt or incomplete" in out
+    assert "Traceback" not in out
+
+
+def test_redeem_non_numeric_expiry_is_clean_error(ctx, capsys):
+    _run_init(ctx)
+    _write_pairing(ctx, json.dumps({"pairing_id": "pair_x",
+                                    "expires_at": "soon"}))
+    assert spark_pair.cmd_redeem(ctx) == 1
+    out = capsys.readouterr().out
+    assert "corrupt or incomplete" in out
+    assert "Traceback" not in out
