@@ -1908,3 +1908,27 @@ def test_smoke_visudo_failure_fails_closed(stack):
     assert b"visudo validation" in proc.stderr
     assert not paths["sudoers_file"].exists()
     assert list(paths["sudoers_file"].parent.glob(".swapd-smoke.*")) == []
+
+
+def test_sweeps_stale_smoke_hosts_tmps(stack):
+    # #827: step 8b's mktemp tmp has no crash backstop — a SIGKILL/OOM
+    # between mktemp and mv leaves .smoke-hosts.XXXXXX orphans in the
+    # live proxy config dir forever. The step sweeps orphans older than
+    # 1h before creating its tmp (mirroring the key_registry #824 sweep
+    # shape); a live writer's seconds-old tmp is never touched.
+    import time
+    env, paths = stack
+    _seed_real_key(paths)
+    cfg_dir = paths["smoke_hosts_file"].parent
+    stale = cfg_dir / ".smoke-hosts.aaaaaa"
+    stale.write_text("orphan\n")
+    old = time.time() - 2 * 3600
+    os.utime(stale, (old, old))
+    fresh = cfg_dir / ".smoke-hosts.bbbbbb"
+    fresh.write_text("live writer\n")
+    proc = _run_injector(env)
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert not stale.exists(), "stale .smoke-hosts.* orphan must be swept"
+    assert fresh.exists(), "a live writer's fresh tmp must never be touched"
+    # The step still wrote the host list around the sweep.
+    assert SMOKE_HOST in paths["smoke_hosts_file"].read_text().split()

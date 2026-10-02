@@ -877,6 +877,14 @@ else
     # host lingers there; dropping it from this list (e.g. across a
     # proxy restart) would silently un-restrict it and reopen the
     # echo read oracle. This file is the durable restriction set.
+    # #827: crash-orphaned .smoke-hosts.XXXXXX tmps have no backstop — a
+    # SIGKILL/OOM between mktemp and mv leaves them in the live proxy
+    # config dir forever. Sweep orphans older than 1h before creating
+    # the new tmp (mirroring the key_registry #824 sweep shape); a live
+    # writer's seconds-old tmp is never touched. Best-effort: a
+    # vanished dir or a concurrent unlink must not fail the provision.
+    find "$(dirname "$SMOKE_HOSTS_PATH")" -maxdepth 1 \
+        -name '.smoke-hosts.*' -mmin +60 -delete 2>/dev/null || true
     SMOKE_HOSTS_TMP="$(mktemp "$(dirname "$SMOKE_HOSTS_PATH")/.smoke-hosts.XXXXXX")"
     {
         if [ -f "$SMOKE_HOSTS_PATH" ]; then
