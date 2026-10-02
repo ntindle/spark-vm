@@ -321,11 +321,32 @@ jobs:
         # these (2026-09-26); main was green ~40 min earlier with no URL
         # changes in between, so this is a newly bot-blocking egress, not
         # a docs regression.
+        # GitHub file-view (`blob`) pages 503/429 automated fetchers on
+        # GitHub Actions runner egress (rate-limit; verified 2026-10-02:
+        # on the CI run that red-lit PRs #833/#834, all 46 failing
+        # github.com URLs were `/<owner>/<repo>/blob/` HTML views —
+        # repo roots and /compare/ links passed — and curl from two
+        # independent egresses returned 503/429 on the same URLs, so this
+        # is rate-limiting, not broken links). The exclude pattern stays
+        # narrow (only the blob-view path class) so a genuinely broken
+        # link elsewhere on github.com still fails the check; when adding
+        # a github.com blob link, open it in a real browser and confirm
+        # the page loads.
+        # docs.ascii.dev (legacy ASCII docs domain) refuses connections on
+        # GitHub Actions runner egress (bot-block; verified 2026-10-02:
+        # `docs.ascii.dev/box/api/v1` 301s to `docs.boat.dev/box/api/v1`,
+        # final HTTP 200 rendering "Boat Public API v1" — the domain is
+        # live, the block is runner-egress IP reputation). The two cited
+        # URLs keep their ascii.dev form on purpose: the citations'
+        # evidence was read on the legacy domain when the ASCII→Boat
+        # rename was verified, and the corpus already documents the
+        # redirect — the exclude preserves citation integrity instead of
+        # rewriting history.
         # SHA-pinned (e7477775783ea5526144ba13e8db5eec57747ce8, v2.9.0) so a
         # tag drift can't widen what this step can do.
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8
         with:
-          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?gamingonlinux\\.com/.*' --exclude 'https?://web\\.archive\\.org/web/20260605034053/https://www\\.startuphub\\.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' '**/*.md'"
+          args: "--no-progress --exclude-loopback --exclude 'https?://github\\.com/ntindle/spark-vm/compare/.*' --exclude 'https?://(www\\.)?medium\\.com/.*' --exclude 'https?://(www\\.)?businesswire\\.com/.*' --exclude 'https?://(www\\.)?globenewswire\\.com/.*' --exclude 'https?://(www\\.)?daytona\\.io/.*' --exclude 'https?://(www\\.)?fourweekmba\\.com/.*' --exclude 'https?://(www\\.)?tvgreport\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?boat\\.dev/.*' --exclude 'https?://(www\\.)?producthunt\\.com/.*' --exclude 'https?://(www\\.)?openai\\.com/.*' --exclude 'https?://(www\\.)?itbrief\\.com\\.au/.*' --exclude 'https?://(www\\.)?itbrief\\.asia/.*' --exclude 'https?://cloud\\.google\\.com/.*' --exclude 'https?://automaid\\.it\\.com/.*' --exclude 'https?://(www\\.)?epho\\.io/.*' --exclude 'https?://(www\\.)?wowza\\.com/.*' --exclude 'https?://(www\\.)?termsquad\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?perplexity\\.ai/.*' --exclude 'https?://(www\\.)?dev\\.to/.*' --exclude 'https?://(www\\.)?mactech\\.com/.*' --exclude 'https?://(www\\.)?financialcontent\\.com/.*' --exclude 'https?://([a-z0-9-]+\\.)?marketminute\\.com/.*' --exclude 'https?://(www\\.)?red5\\.net/.*' --exclude 'https?://(www\\.)?theregister\\.com/.*' --exclude 'https?://(www\\.)?pocketnews\\.com\\.my/.*' --exclude 'https?://(www\\.)?gamingonlinux\\.com/.*' --exclude 'https?://web\\.archive\\.org/web/20260605034053/https://www\\.startuphub\\.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026' --exclude 'https?://(www\\.)?huawei\\.com/.*' --exclude 'https?://e2b\\.dev/.*' --exclude 'https?://(www\\.)?agentcomputer\\.ai/.*' --exclude 'https?://boxd\\.sh/.*' --exclude 'https?://docs\\.docker\\.com/.*' --exclude 'https?://(www\\.)?cdm\\.link/.*' --exclude 'https?://(www\\.)?lifestyle\\.thepointnews\\.com/.*' --exclude 'https?://lifestyle\\.independent\\.mk/.*' --exclude 'https?://github\\.com/[^/]+/[^/]+/blob/.*' --exclude 'https?://([a-z0-9-]+\\.)?ascii\\.dev/.*' '**/*.md'"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
