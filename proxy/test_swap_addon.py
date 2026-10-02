@@ -2963,6 +2963,8 @@ class MetaRefreshSecretTests(unittest.TestCase):
         self.assertNotIn("evil.example/cb", resp.text)
         self.assertIn(("github.com", "meta-refresh-secret-refused",
                        "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_gt_inside_quoted_attr_still_scanned(self):
         # A `>` inside a quoted attribute BEFORE content must not
         # truncate the tag: the browser parses (and follows) the full
         # tag, so the scan must see it too.
