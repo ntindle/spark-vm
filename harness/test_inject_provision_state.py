@@ -961,6 +961,20 @@ def _sign_fixture_manifest(paths, prefix):
     assert p.returncode == 0, p.stderr
 
 
+def _with_test_python_on_path(env, tmp_path, name):
+    # The fixture's PATH (fake bin + /usr/bin:/bin) gives the preflight a
+    # system python3 without the `cryptography` package the --pubkey path
+    # needs. Shim a python3 -> the test interpreter (which carries
+    # requirements-test.txt, cryptography included) ahead of it — scoped
+    # to these tests; the shared fixture is untouched.
+    pybin = tmp_path / name
+    pybin.mkdir()
+    (pybin / "python3").symlink_to(sys.executable)
+    env = dict(env)
+    env["PATH"] = str(pybin) + os.pathsep + env["PATH"]
+    return env
+
+
 def test_signed_manifest_preflight_ok(stack, tmp_path):
     # #155 signed path, end to end: the injector's INJECT_MANIFEST_PUBKEY
     # seam reaches the real preflight, which verifies the signature over
@@ -970,7 +984,7 @@ def test_signed_manifest_preflight_ok(stack, tmp_path):
     prefix = str(tmp_path / "op")
     _gen_signing_keys(prefix)
     _sign_fixture_manifest(paths, prefix)
-    env = dict(env)
+    env = _with_test_python_on_path(env, tmp_path, "pybin-ok")
     env["INJECT_MANIFEST_PUBKEY"] = prefix + ".pub.pem"
     proc = _run_injector(env)
     assert proc.returncode == 0, proc.stderr.decode()
@@ -987,7 +1001,7 @@ def test_signed_manifest_wrong_key_refuses(stack, tmp_path):
     _gen_signing_keys(prefix_a)
     _gen_signing_keys(prefix_b)
     _sign_fixture_manifest(paths, prefix_a)
-    env = dict(env)
+    env = _with_test_python_on_path(env, tmp_path, "pybin-bad")
     env["INJECT_MANIFEST_PUBKEY"] = prefix_b + ".pub.pem"
     proc = _run_injector(env)
     assert proc.returncode == 1
