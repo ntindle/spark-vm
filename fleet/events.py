@@ -462,7 +462,7 @@ def journal_lock(store_dir):
 
 
 # --- Event journal --------------------------------------------------------
-def _load_journal(store_dir, name, key_fields):
+def _load_journal(store_dir, name):
     """Load a JSONL journal; returns (lines, error). Malformed lines are
     skipped (counted in the caller's domain via len check)."""
     path = os.path.join(store_dir, name)
@@ -498,8 +498,7 @@ def append_events(store_dir, events):
     """
     try:
         with journal_lock(store_dir):
-            existing, err = _load_journal(store_dir, EVENTS_JOURNAL_NAME,
-                                         None)
+            existing, err = _load_journal(store_dir, EVENTS_JOURNAL_NAME)
             if err:
                 return None, None, err
             seen = {(e.get("box_id"), e.get("event_id"))
@@ -526,7 +525,7 @@ def append_events(store_dir, events):
 
 def load_events(store_dir):
     """Returns (events, error)."""
-    return _load_journal(store_dir, EVENTS_JOURNAL_NAME, None)
+    return _load_journal(store_dir, EVENTS_JOURNAL_NAME)
 
 
 # --- Alert rules (§4 S1) ----------------------------------------------------
@@ -704,8 +703,7 @@ def evaluate_alerts(store_dir, fired_at=None):
         return [], None
     try:
         with journal_lock(store_dir):
-            existing, err = _load_journal(store_dir, ALERTS_JOURNAL_NAME,
-                                          None)
+            existing, err = _load_journal(store_dir, ALERTS_JOURNAL_NAME)
             if err:
                 return None, err
             seen = {a.get("alert_id") for a in existing
@@ -730,7 +728,7 @@ def evaluate_alerts(store_dir, fired_at=None):
 
 def load_alerts(store_dir):
     """Returns (alerts, error)."""
-    return _load_journal(store_dir, ALERTS_JOURNAL_NAME, None)
+    return _load_journal(store_dir, ALERTS_JOURNAL_NAME)
 
 
 def ack_alert(store_dir, alert_id):
@@ -1312,7 +1310,7 @@ def _inventory_commits_by_box(store_dir):
     journal loader; records with unparseable observed_at are kept with
     observed_at=None (they can never confirm or contradict — see
     crosscheck_events). Never raises."""
-    rows, err = _load_journal(store_dir, _INVENTORY_JOURNAL_NAME, None)
+    rows, err = _load_journal(store_dir, _INVENTORY_JOURNAL_NAME)
     if err:
         return None, err
     by_box = {}
