@@ -285,8 +285,8 @@ def test_verify_fails_on_malformed_sig(tmp_path):
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
     assert "failing closed" in p.stderr
-    # Right shape, wrong length: also refused.
-    sig.write_text("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\n")
+    # Right shape, wrong length: also refused (decodes to 3 bytes, not 64).
+    sig.write_text("AAAA\n")
     p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
