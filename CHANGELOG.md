@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   re-syncing fails the byte-identity test wherever a worker checkout is
   reachable, and the test's worker path is overridable via an
   environment variable (documented in the dashboard README) so
-  contributors can point it at their own checkout. (#TBD)
+  contributors can point it at their own checkout. (#877)
 
 - The weekly toolset self-updater now converges the apt-based toolset too (#532): docker, node, and gh are upgraded in place on the weekly run — only packages the box already has are touched, never a bare system-wide upgrade, and the run still defers while agent jobs are active. (#871)
 
