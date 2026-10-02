@@ -252,6 +252,10 @@ expiry produces no record the waiter can read. #133/H18 names the build;
 G1 names its expiry-shaped sibling. Everything else is the tenant
 dimension (H10/H11) or retry plumbing (H14a).
 
+*(2026-10-02: this check's return-leg verdict is superseded — see the
+2026-10-02 refresh below: the client signal (#133/H18) and the expired
+terminal record (G1, #511/#546) both shipped.)*
+
 ## 2026-10-02 refresh — the control-plane primitives and the #849 shape
 
 §1–§8 above are the 2026-09-21 read (pinned to tree `5b8f773`). Every
@@ -289,8 +293,8 @@ that read, not to a repo commit). Honesty rules apply as before.
   401 without), #844 (pairing-code box enrollment — box↔owner identity
   binding on the plane, fingerprint-verified), #846 (24h rotating box
   Bearer <redacted>, revoke, 15-min grace), #848 (durable command queue —
-  plane→box channel with seq/acks/leases/epochs,
-  `docs/DURABLE_COMMANDS.md`), #864 (interim box-side heartbeat sender,
+  plane-half contract pinned in `docs/DURABLE_COMMANDS.md`; issue open
+  pending the box half), #864 (interim box-side heartbeat sender,
   `pairing/spark_pair.py heartbeat`).
 
 ### What still holds (open, referenced not duplicated)
@@ -336,10 +340,8 @@ that read, not to a repo commit). Honesty rules apply as before.
   currently ends at the human's browser; nothing defines its plane→box
   wire shape. Filed as #873.
 - **`[BUILD]` G49.3 — no box-side ingest of plane decisions into
-  confirmd.** Even with G49.1/G49.2 built, confirmd is a local server
-  with local files — and the durable channel's box half doesn't exist
-  yet either: #848 shipped the plane half only, so this gap *includes*
-  the box-side fetch loop (`GET /commands/pending`, acked-watermark
+  confirmd.** #848's plane-half contract is pinned (issue still
+  open), so this gap *includes* the box-side fetch loop (`GET /commands/pending`, acked-watermark
   cursor, idempotent acks) that pulls decision commands down. A
   box-side consumer must then stamp plane decisions into confirmd's
   answered store with proof of plane origin (never locally forgeable),
