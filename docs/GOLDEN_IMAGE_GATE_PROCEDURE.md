@@ -86,6 +86,35 @@ the gate record.
 - **Exit 2** is an **invocation error** (bad arguments, bad flags):
   fix the command and re-run — it is not a verdict on the image.
 
+### Step 0a — signed manifest (when the operator pins a verification key)
+
+Step 0 as written compares the manifest's *self-asserted* `image_version`
+against the expected SHA — a lying manifest served with a tampered image
+(#155) passes it. The signed path binds the manifest bytes to an
+operator-held Ed25519 key:
+
+```bash
+# At image-build time (signing key NEVER enters the repo or the image):
+harness/sign-image-manifest.sh --gen-key /secure/path/image-mf   # once per operator
+harness/sign-image-manifest.sh <manifest.json> --key /secure/path/image-mf.priv.pem
+# Bake <manifest.json> AND <manifest.json>.sig into the image
+# (default sig path is the manifest path + ".sig").
+
+# At gate / provision time (verification key ships with the injector config):
+harness/check-image-manifest.sh <manifest.json> --expect-version <SHA> \
+    --pubkey /path/to/image-mf.pub.pem
+```
+
+The signature is verified over the manifest's exact bytes **before any
+JSON is parsed**, and the preflight fails closed on a missing, malformed,
+or mismatched signature. The provision-time injector enables this with
+`INJECT_MANIFEST_PUBKEY=<pubkey.pem>` in its environment. The drift check
+still runs after the signature: the signature proves the bytes were
+authorized by the key holder, the drift check proves they name the code
+you reviewed. An unsigned preflight (no `--pubkey`) is the weaker,
+self-attestation claim — name it as such in the gate record while
+unsigned images remain in service.
+
 ## Step 0b — baked-secrets negative scan (pre-publish refusal)
 
 The manifest's `baked[]` claims "empty credential stores with fixed
