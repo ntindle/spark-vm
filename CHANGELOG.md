@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Durable owner-to-box command queue on the control plane: per-box
   sequential commands with short leases, idempotent acks, and
   incarnation epochs that safely expire in-flight commands on
-  reboot/reprovision — pinned in the durable-commands protocol doc.
+  reboot/reprovision — pinned in the durable-commands protocol doc. (#867)
 
 ### Security
 - The swap proxy now kills redirects that would smuggle a real credential off the allowlist: a 301/302/303/307/308 response from an allowlisted host whose `Location` carries a known secret value — raw or percent-encoded, which the header scrubber cannot see — to a non-allowlisted host is refused at headers time and recorded on the audit trail, instead of letting the browser's follow-up request carry the real secret to the attacker host. Redirects to allowlisted hosts keep today's scrub-in-place behavior, and relative redirects are unaffected. (#862)
