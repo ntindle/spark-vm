@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   only owner-key minting path — plus corrected the stale "plane update
   pending" claims in the pairing README and the box client's CLI messages,
   which now point at the endpoints the hosted plane has served since
-  2026-10-02. (#TBD)
+  2026-10-02. (#879)
 
 - The fleet dashboard's control-plane copy is now re-inlined by a small
   sync tool instead of manual copy-paste: editing the page without
