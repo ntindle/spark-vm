@@ -123,10 +123,11 @@ def _validate_manifest(manifest: dict) -> dict:
             sys.exit(f"ERROR: manifest {comp}.live must be a non-negative int.")
         assignments = wave.get("assignments", {})
         if (not isinstance(assignments, dict)
-                or any(not isinstance(k, str) or not isinstance(v, int)
+                or any(not isinstance(k, str) or type(v) is not int
                        for k, v in assignments.items())):
             sys.exit(f"ERROR: manifest {comp}.assignments must be "
-                     "{box_id: wave_number}.")
+                     "{box_id: wave_number} (plain ints — true/false are not "
+                     "wave numbers).")
         if wave.get("default", "hash_mod_4") != "hash_mod_4":
             sys.exit(f"ERROR: manifest {comp}.default must be 'hash_mod_4' "
                      "in S1 (the only supported default).")

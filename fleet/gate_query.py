@@ -48,6 +48,7 @@ import hashlib
 import hmac
 import json
 import os
+import stat
 import sys
 from datetime import datetime, timezone
 
@@ -99,6 +100,17 @@ def resolve_keys(args) -> dict:
             raise NoSignal(f"bad --keys entry (want key_id=/path): {item!r}")
         key_id, path = item.split("=", 1)
         key_id, path = key_id.strip(), path.strip()
+        try:
+            st = os.stat(path)
+        except OSError as exc:
+            raise NoSignal(f"cannot read key for {key_id}: {exc}")
+        if st.st_mode & (stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP |
+                         stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH):
+            # Same refusal as gate_publish._load_key: the MAC is symmetric,
+            # so every box holds the fleet *signing* key — a group/other-
+            # readable key file hands minting power to any local user.
+            raise NoSignal(f"key file for {key_id} is readable by "
+                           "group/other — gate keys must be mode 0600")
         try:
             with open(path, "rb") as fh:
                 # Exact bytes are the key; one trailing newline is tolerated

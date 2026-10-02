@@ -149,6 +149,15 @@ evaluates, and prints one machine-readable line:
 state=<permitted|frozen|stale|no-signal> [permitted=<v>] reason=<token> age=<s>
 ```
 
+**S1a implementation note:** the shipped CLI is `gate_query.py state
+--box-id <id>` (key=value answer: `state=frozen|live`, `freeze=`,
+`reason=`, `answer_age_s=`, plus per-component `<comp>_permitted` /
+`<comp>_max` / `<comp>_my_wave`) and `gate_query.py permitted <comp>`
+(exit 0 = permitted, 1 = wave not live, 2 = frozen/no-signal). The
+`pending_range()` cap refuses the deploy outright on a frozen gate rather
+than emitting an empty range — the fail-closed direction is the same, the
+mechanism is refusal, not a no-op range.
+
 Evaluation order, per (box, component):
 
 1. No file / unreadable / bad MAC / unknown key_id → `state=no-signal`

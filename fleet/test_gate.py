@@ -374,7 +374,8 @@ def fixture_repo(tmp_path):
 
 
 def gate_env(tmp_path, repo, permitted_commit, box="box-01", freeze=False,
-             keys=True):
+             keys=True, wave_state="complete", wave_live=4,
+             wave_assignments=None):
     """Publish a gate whose repo max is `permitted_commit`; return env."""
     key = tmp_path / "ctl.key"
     key.write_bytes(binascii.hexlify(os.urandom(32)))
@@ -386,7 +387,8 @@ def gate_env(tmp_path, repo, permitted_commit, box="box-01", freeze=False,
                      "channel": "stable"}}
     rp = tmp_path / "registry.json"
     rp.write_text(json.dumps(reg))
-    man = {c: {"live": 4, "state": "complete", "assignments": {},
+    man = {c: {"live": wave_live, "state": wave_state,
+               "assignments": wave_assignments or {},
                "default": "hash_mod_4"} for c in ("repo", "toolset", "image")}
     mp = tmp_path / "waves.json"
     mp.write_text(json.dumps(man))
@@ -443,3 +445,201 @@ def test_gate_cap_unrelated_max_refuses(tmp_path):
     r = bash_source(f'gate_cap "{one}" "{three}"', env_extra=env)
     assert r.returncode == 2
     assert "not a commit" in r.stderr
+
+
+def test_gate_cap_wave_not_live_returns_nothing_to_do(tmp_path):
+    # Security B1: the wave permit bit is the rollout control — a box whose
+    # wave is not live must not deploy up to the ceiling. Pinned to wave 3
+    # while only wave 1 is live: gate_cap returns 1, not a capped range.
+    repo, one, two, three = fixture_repo(tmp_path)
+    env = gate_env(tmp_path, repo, two, box="pinned-box", wave_state="wave-2",
+                   wave_live=1, wave_assignments={"pinned-box": 3})
+    r = bash_source(f'gate_cap "{one}" "{three}"', env_extra=env)
+    assert r.returncode == 1
+    assert "not live" in r.stderr
+
+
+def test_gate_cap_rollback_refuses_downgrade(tmp_path):
+    # Security B2: the gate is a ceiling, not a downgrade order. A
+    # max_permitted_commit at or behind the deployed watermark must not
+    # rewind the mirror — gate_cap returns 1 (nothing to do), never a
+    # backwards range.
+    repo, one, two, three = fixture_repo(tmp_path)
+    env = gate_env(tmp_path, repo, two)
+    r = bash_source(f'gate_cap "{three}" "{three}"', env_extra=env)
+    assert r.returncode == 1
+    assert "downgrade" in r.stderr
+    env = gate_env(tmp_path, repo, one)
+    r = bash_source(f'gate_cap "{three}" "{three}"', env_extra=env)
+    assert r.returncode == 1
+    assert "downgrade" in r.stderr
+
+
+def test_gate_cap_silent_when_fully_unmanaged(tmp_path):
+    # Product B3: a box that was never enrolled gets no per-tick nag — the
+    # unmanaged warning fires only on partial provisioning (a gate document
+    # present but no keys), which the previous test covers.
+    repo, one, two, three = fixture_repo(tmp_path)
+    env = gate_env(tmp_path, repo, one, keys=False)
+    env["SPARKVM_GATE_JSON"] = str(tmp_path / "nope.json")  # no doc either
+    r = bash_source(f'gate_cap "{one}" "{three}"', env_extra=env)
+    assert r.returncode == 0
+    assert r.stdout.strip() == three  # uncapped
+    assert "unmanaged" not in r.stderr
+
+
+def test_query_rejects_group_readable_key(tmp_path, keyfile, registry,
+                                         manifest):
+    # Security B4: the MAC is symmetric — every box holds the fleet signing
+    # key — so a group/other-readable key file is a minting-capability leak,
+    # refused loudly (fail-closed) like the publish side.
+    out = publish(tmp_path, keyfile, registry, manifest)
+    p = tmp_path / "loose.key"
+    p.write_bytes(binascii.hexlify(os.urandom(32)))
+    os.chmod(p, 0o640)
+    ans = query_state(out, "box-01", f"{KEY_ID}={p}")
+    assert ans["state"] == "frozen"
+    assert "0600" in ans["reason"]
+
+
+# --- gate_sync.sh: the operator loop actually executes -----------------------
+
+SYNC = os.path.join(REPO, "fleet", "gate_sync.sh")
+
+# Hermetic ssh/scp stand-ins: they map the remote absolute path into a
+# per-host directory under FAKE_SSH_ROOT and emulate exactly the two remote
+# commands gate_sync.sh sends (test -d probe, install -m 600 delivery).
+FAKE_SSH = """#!/usr/bin/env python3
+import os, shlex, subprocess, sys
+root = os.environ["FAKE_SSH_ROOT"]
+log = os.environ.get("FAKE_SSH_LOG")
+args = sys.argv[1:]
+tgt = next(a for a in args if "@" in a)
+host = tgt.split("@", 1)[1]
+cmd = args[args.index(tgt) + 1:]
+if log:
+    with open(log, "a") as fh:
+        fh.write(tgt + " :: " + " ".join(cmd) + "\\n")
+def R(p):
+    return os.path.join(root, host, p.lstrip("/"))
+parts = shlex.split(" ".join(cmd))
+try:
+    if parts[:2] == ["test", "-d"]:
+        sys.exit(0 if os.path.isdir(R(parts[2])) else 1)
+    if parts[:3] == ["install", "-m", "600"] and "&&" in parts:
+        src, dst = parts[3], parts[4]
+        subprocess.run(["install", "-m", "600", "-D", R(src), R(dst)],
+                       check=True)
+        os.remove(R(src))
+        sys.exit(0)
+except (OSError, subprocess.CalledProcessError, IndexError):
+    sys.exit(1)
+sys.exit(0)
+"""
+
+FAKE_SCP = """#!/usr/bin/env python3
+import os, shutil, sys
+root = os.environ["FAKE_SSH_ROOT"]
+args = [a for a in sys.argv[1:] if not a.startswith("-")]
+src, dest = args[-2], args[-1]
+host, path = dest.split(":", 1)
+host = host.split("@", 1)[1]
+full = os.path.join(root, host, path.lstrip("/"))
+os.makedirs(os.path.dirname(full), exist_ok=True)
+shutil.copyfile(src, full)
+"""
+
+
+@pytest.fixture()
+def sync_harness(tmp_path):
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    (bindir / "ssh").write_text(FAKE_SSH)
+    (bindir / "scp").write_text(FAKE_SCP)
+    os.chmod(bindir / "ssh", 0o755)
+    os.chmod(bindir / "scp", 0o755)
+    return str(bindir)
+
+
+def sync_env(tmp_path, sync_harness, estate, extra=None):
+    env = {"GATE": "", "ESTATE": str(estate),
+           "FAKE_SSH_ROOT": str(tmp_path / "fakeroot"),
+           "FAKE_SSH_LOG": str(tmp_path / "ssh.log"),
+           "PATH": sync_harness + os.pathsep + os.environ["PATH"]}
+    env.update(extra or {})
+    return env
+
+
+def test_shell_scripts_parse():
+    # Engineering: gate_sync.sh shipped with a parse error (an apostrophe
+    # inside ${ESTATE:?...}) that no test caught — smoke every shipped .sh.
+    for sh in ("fleet/gate_sync.sh", "deploy/auto-deploy.sh"):
+        r = run("bash", "-n", os.path.join(REPO, sh))
+        assert r.returncode == 0, r.stderr
+
+
+def test_gate_sync_dry_run(tmp_path, sync_harness, keyfile, registry,
+                           manifest):
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    (estate / "box-01" / "ssh-target").write_text("box-01\n")
+    (estate / "box-02").mkdir(parents=True)  # no ssh-target: dir name
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
+    r = run("bash", SYNC, "--dry-run", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.count("would sync") == 2
+    assert "root@box-01:" in r.stdout and "root@box-02:" in r.stdout
+
+
+def test_gate_sync_delivers_atomically_mode_600(tmp_path, sync_harness,
+                                                keyfile, registry, manifest):
+    # The publisher's 0600 must survive the trip (Security B3): plain scp
+    # would land the file at the remote umask. Delivery is via temp name +
+    # install -m 600, so a concurrent gate_query never sees a half-written
+    # document either.
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    fakeroot = tmp_path / "fakeroot"
+    (fakeroot / "box-01" / "var" / "lib" / "sparkvm" / "gate").mkdir(
+        parents=True)
+    env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
+    r = run("bash", SYNC, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    landed = (fakeroot / "box-01" / "var" / "lib" / "sparkvm" / "gate"
+              / "gate.json")
+    assert landed.exists()
+    assert stat.S_IMODE(os.stat(landed).st_mode) == 0o600
+    assert landed.read_bytes() == open(gate, "rb").read()
+    assert "install -m 600" in open(tmp_path / "ssh.log").read()
+    assert "synced box-01" in r.stdout
+
+
+def test_gate_sync_provisioning_gap_fails_loud(tmp_path, sync_harness, keyfile,
+                                              registry, manifest):
+    # A missing remote gate dir is a provisioning gap, not a sync gap:
+    # loud failure (exit 1), and no other box is affected.
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    fakeroot = tmp_path / "fakeroot"
+    (fakeroot / "box-01").mkdir(parents=True)  # no gate dir underneath
+    env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
+    r = run("bash", SYNC, env_extra=env)
+    assert r.returncode == 1
+    assert "provision it first" in r.stderr
+
+
+def test_gate_sync_rejects_option_injection(tmp_path, sync_harness, keyfile,
+                                           registry, manifest):
+    # Estate data becomes a command line: an ssh-target smuggling ssh/scp
+    # options (e.g. -oProxyCommand=...) must be refused, not interpolated.
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    (estate / "box-01" / "ssh-target").write_text("-oProxyCommand=evil\n")
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
+    r = run("bash", SYNC, env_extra=env)
+    assert r.returncode == 1
+    assert "invalid ssh-target" in r.stderr

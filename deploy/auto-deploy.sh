@@ -969,7 +969,15 @@ gate_cap() {
         return 0
     fi
     if [ -z "${SPARKVM_GATE_KEYS:-}" ]; then
-        log "gate unmanaged: SPARKVM_GATE_KEYS unset — no controller keys provisioned (G18 §5 install step); proceeding uncapped"
+        # Unmanaged has two flavors: a box that was never enrolled (silent,
+        # pre-G18 behavior — the default self-hosted single box gets no
+        # per-tick nag for a feature it never asked for), and a box that
+        # looks half-enrolled (a gate document is present but no keys — the
+        # operator forgot the G18 §5 install step). Only the second warns.
+        gate_file="${SPARKVM_GATE_JSON:-/var/lib/sparkvm/gate/gate.json}"
+        if [ -f "$gate_file" ]; then
+            log "gate unmanaged: $gate_file exists but SPARKVM_GATE_KEYS is unset — partial provisioning (G18 §5 install step); proceeding uncapped until keys are provisioned"
+        fi
         echo "$new"
         return 0
     fi
@@ -994,6 +1002,24 @@ gate_cap() {
         || ! git -C "$UPDATER_REPO" cat-file -e "$repo_max" 2>/dev/null; then
         log "ERROR: gate's max_permitted_commit $repo_max is not a commit in the updater repo — refusing to deploy"
         return 2
+    fi
+    repo_permitted="$(printf '%s\n' "$state" | sed -n 's/^repo_permitted=//p')"
+    if [ "$repo_permitted" != "true" ]; then
+        # G18 §2: a box whose wave is not live gets no version at all —
+        # gate_query's permit bit is the wave control, and the cap must
+        # honor it, not just the ceiling. Staging is a normal state, not an
+        # incident: return 1 (nothing to do), not 2. A missing permit bit
+        # fails safe the same way.
+        log "gate: this box's wave is not live for repo (repo_permitted=${repo_permitted:-missing}) — nothing to do"
+        return 1
+    fi
+    if [ -n "$old" ] && git -C "$UPDATER_REPO" merge-base --is-ancestor "$repo_max" "$old" 2>/dev/null; then
+        # The gate is a ceiling, not a downgrade order: a
+        # max_permitted_commit at or behind the deployed watermark
+        # (operator error, or a compromised controller key) must not rewind
+        # the mirror through pending_range's backwards range — nothing to do.
+        log "gate: max_permitted_commit $repo_max is at or behind the deployed watermark $old — refusing downgrade (nothing to do)"
+        return 1
     fi
     if [ "$repo_max" = "$new" ]; then
         echo "$new"
@@ -1044,7 +1070,7 @@ pending_range() {
         [ "$rc" -eq 1 ] && return 1
         [ "$rc" -eq 2 ] && return 2
         new="$capped"
-        log "no watermark yet — first run will deploy everything at $new"
+        log "no watermark yet — first run will deploy everything the gate permits at $new"
         # deploy everything on first run: diff against the empty tree
         echo "4b825dc642cb6eb9a060e54bf8d69288fbee4904 $new"
         return 0
