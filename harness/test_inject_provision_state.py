@@ -967,9 +967,15 @@ def _with_test_python_on_path(env, tmp_path, name):
     # needs. Shim a python3 -> the test interpreter (which carries
     # requirements-test.txt, cryptography included) ahead of it — scoped
     # to these tests; the shared fixture is untouched.
+    # A plain symlink won't do: venv interpreters resolve pyvenv.cfg from
+    # the resolved binary path, so a symlinked venv python loses its
+    # site-packages. Exec through a wrapper script instead.
     pybin = tmp_path / name
     pybin.mkdir()
-    (pybin / "python3").symlink_to(sys.executable)
+    shim = pybin / "python3"
+    shim.write_text("#!/bin/sh\nexec %s \"$@\"\n"
+                    % shlex.quote(sys.executable))
+    os.chmod(shim, 0o755)
     env = dict(env)
     env["PATH"] = str(pybin) + os.pathsep + env["PATH"]
     return env
