@@ -553,3 +553,211 @@ def test_write_private_rechmods_existing_file(ctx):
     os.chmod(p, 0o644)
     spark_pair._write_private(p, b"y")
     assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+
+
+# ---- #864: interim heartbeat sender ----------------------------------------
+
+
+def test_heartbeat_success_is_quiet_and_records_last_ok(ctx, monkeypatch,
+                                                        capsys):
+    _run_init(ctx)
+    _enroll(ctx)
+    seen = {}
+
+    def fake_http(method, url, body=None, headers=None):
+        seen["method"] = method
+        seen["url"] = url
+        seen["body"] = body
+        seen["auth"] = (headers or {}).get("Authorization")
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    capsys.readouterr()  # discard init's own output; heartbeat must add none
+    assert spark_pair.cmd_heartbeat(ctx) == 0
+    # quiet success: the every-minute cron line stays silent
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
+    assert seen["method"] == "POST"
+    assert seen["url"] == "https://control.test/v1/boxes/box_xyz/heartbeat"
+    assert seen["auth"] == "Bearer OLDSECRET"
+    body = seen["body"]
+    assert body["box_id"] == "box_xyz"
+    assert isinstance(body["sent_at"], int)
+    assert body["client"] == spark_pair.USER_AGENT
+    assert "OLDSECRET" not in json.dumps(body)  # token never in the payload
+    last = json.load(open(os.path.join(ctx.dir, "last_heartbeat.json")))
+    assert last["box_id"] == "box_xyz" and last["plane_ok"] is True
+    assert isinstance(last["last_ok_at"], int)
+
+
+def test_heartbeat_transport_failure_is_loud(ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    _enroll(ctx)
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (0, {"ok": False,
+                                            "error": "transport: boom"}))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    err = capsys.readouterr().err
+    assert "heartbeat FAILED" in err and "boom" in err
+    log = open(os.path.join(ctx.dir, "heartbeat.log")).read()
+    assert "heartbeat FAILED" in log
+    # a missed heartbeat never fabricates an ok
+    assert not os.path.exists(os.path.join(ctx.dir, "last_heartbeat.json"))
+
+
+def test_heartbeat_401_says_repair(ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    _enroll(ctx)
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (401, {"ok": False,
+                                              "error": "revoked"}))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    err = capsys.readouterr().err
+    assert "re-pair" in err
+    assert not os.path.exists(os.path.join(ctx.dir, "last_heartbeat.json"))
+
+
+def test_heartbeat_200_without_ok_is_failure(ctx, monkeypatch, capsys):
+    # The plane answered but did not say ok: that is NOT a heartbeat.
+    _run_init(ctx)
+    _enroll(ctx)
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (200, {"ok": False}))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    assert "heartbeat FAILED" in capsys.readouterr().err
+    assert not os.path.exists(os.path.join(ctx.dir, "last_heartbeat.json"))
+
+
+def test_heartbeat_200_non_object_body_is_failure(ctx, monkeypatch, capsys):
+    # _http returns json.loads() of ANY 2xx body — a list/string/null must
+    # not AttributeError its way to a bare traceback with no log entry.
+    _run_init(ctx)
+    _enroll(ctx)
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (200, ["ok", True]))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    err = capsys.readouterr().err
+    assert "heartbeat FAILED" in err and "malformed" in err
+    assert "Traceback" not in err
+    log = open(os.path.join(ctx.dir, "heartbeat.log")).read()
+    assert "malformed" in log
+    assert not os.path.exists(os.path.join(ctx.dir, "last_heartbeat.json"))
+
+
+def test_heartbeat_500_is_loud_and_fabricates_nothing(ctx, monkeypatch,
+                                                      capsys):
+    _run_init(ctx)
+    _enroll(ctx)
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (500, {"ok": False,
+                                              "error": "http=500"}))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    assert "http=500" in capsys.readouterr().err
+    assert not os.path.exists(os.path.join(ctx.dir, "last_heartbeat.json"))
+
+
+def test_heartbeat_endpoint_missing_says_plane_pending(ctx, monkeypatch,
+                                                       capsys):
+    _run_init(ctx)
+    _enroll(ctx)
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (404, {"ok": False,
+                                              "error": "http=404"}))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    err = capsys.readouterr().err
+    assert "does not implement" in err
+    assert "no such box" not in err
+
+
+def test_heartbeat_missing_enrollment_is_clean_error(ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no HTTP yet")))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    err = capsys.readouterr().err
+    assert "heartbeat FAILED" in err and "redeem" in err
+
+
+def test_heartbeat_lock_open_failure_is_clean_error(ctx, monkeypatch,
+                                                        capsys):
+    # Lock acquisition failure must fail loud, not traceback. (Root-safe:
+    # monkeypatches os.open rather than chmod, since the suite may run as
+    # root where chmod-based read-only dirs are still writable.)
+    _run_init(ctx)
+    _enroll(ctx)
+    real_open = os.open
+
+    def fake_open(path, *a, **k):
+        if os.path.basename(os.fspath(path)) == ".heartbeat.lock":
+            raise OSError(13, "Permission denied")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(os, "open", fake_open)
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("no HTTP yet")))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    err = capsys.readouterr().err
+    assert "heartbeat FAILED" in err and "lock file" in err
+    assert "Traceback" not in err
+
+
+def test_heartbeat_non_object_enrollment_is_clean_error(ctx, monkeypatch,
+                                                          capsys):
+    # Valid JSON but not an object: must fail loud, not AttributeError with
+    # a bare traceback and no log entry.
+    _run_init(ctx)
+    os.makedirs(ctx.dir, mode=0o700, exist_ok=True)
+    open(os.path.join(ctx.dir, "enrollment.json"), "w").write('["not", "an", "object"]')
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no HTTP yet")))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    err = capsys.readouterr().err
+    assert "heartbeat FAILED" in err and "not an object" in err
+    assert "Traceback" not in err
+    assert "not an object" in \
+        open(os.path.join(ctx.dir, "heartbeat.log")).read()
+
+
+def test_heartbeat_corrupt_enrollment_is_clean_error(ctx, monkeypatch, capsys):
+    _run_init(ctx)
+    os.makedirs(ctx.dir, mode=0o700, exist_ok=True)
+    open(os.path.join(ctx.dir, "enrollment.json"), "w").write("{not json")
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no HTTP yet")))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    assert "unreadable" in capsys.readouterr().err
+
+
+def test_heartbeat_url_encodes_box_id(ctx, monkeypatch):
+    _run_init(ctx)
+    _enroll(ctx, box_id="box/a b")
+    seen = {}
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda m, u, body=None, headers=None: (
+            seen.update(url=u), (200, {"ok": True}))[1])
+    assert spark_pair.cmd_heartbeat(ctx) == 0
+    assert seen["url"].endswith("/v1/boxes/box%2Fa%20b/heartbeat")
+
+
+def test_heartbeat_log_never_contains_token(ctx, monkeypatch, capsys):
+    # The loud failure path must not leak the Bearer <redacted> into stderr or the
+    # log file — even if the plane echoes the token back inside an error
+    # string, the sender redacts it rather than logging it.
+    _run_init(ctx)
+    _enroll(ctx, token="SUPERSECRETT0KEN")
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda *a, **k: (0, {"ok": False,
+                             "error": "transport: SUPERSECRETT0KEN"}))
+    assert spark_pair.cmd_heartbeat(ctx) == 1
+    err = capsys.readouterr().err
+    assert "SUPERSECRETT0KEN" not in err
+    assert "<redacted>" in err  # the class is still reported, not swallowed
+    log = open(os.path.join(ctx.dir, "heartbeat.log")).read()
+    assert "SUPERSECRETT0KEN" not in log
+    assert "<redacted>" in log

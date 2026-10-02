@@ -150,6 +150,46 @@ the token fresh with a cron line or systemd timer, e.g. hourly:
 0 * * * * /path/to/spark-pair.py rotate --auto >>/var/log/spark-rotate.log 2>&1
 ```
 
+## Heartbeat (#864)
+
+The control plane's liveness contract is a single box-side call — the
+fleet dashboard's staleness chips are honest only if something actually
+sends it:
+
+```bash
+spark-pair.py heartbeat   # one POST /v1/boxes/{id}/heartbeat, then exit
+```
+
+One invocation sends exactly one heartbeat with the box's current Bearer <redacted>
+(from `enrollment.json`, so `rotate --auto` keeps this working with no
+changes) and a small JSON status body (`box_id`, `sent_at`, the client
+identity, box uptime, 1-minute load, and the token's own expiry as a
+self-report — the plane enforces expiry from its own store). The contract
+with the operator:
+
+- **Exit 0 only on the plane's own `{ok:true}`.** A missed heartbeat never
+  fabricates an ok — every other outcome (transport error, HTTP error, a
+  200 that doesn't say ok) exits 1.
+- **Failures are loud.** Every failure prints to stderr AND is appended to
+  `heartbeat.log` in the state dir. Success is quiet: a healthy box emits
+  nothing, so the every-minute cron line stays silent.
+- **The token never reaches a log.** Failure messages redact the Bearer <redacted>
+  before they touch stderr or `heartbeat.log`.
+- **Last success is checkable locally:** `last_heartbeat.json` records the
+  last tick the plane confirmed, so an operator can see freshness without
+  asking the dashboard.
+
+Cron-acceptable (like `rotate --auto`), with a lock file so a slow plane
+can't stack overlapping invocations:
+
+```
+* * * * * /path/to/spark-pair.py heartbeat >>/var/log/spark-heartbeat.log 2>&1
+```
+
+This is the *interim* sender: no box long-lived process, no reconnect
+loop. The persistent box-side process for the phone-home WebSocket is
+decided with the #847 S5 box WSS client, not here.
+
 ## Security properties
 
 - **No self-registration.** The old register endpoint is gone (404). A box
@@ -202,6 +242,7 @@ the token fresh with a cron line or systemd timer, e.g. hourly:
 | POST | /v1/pairing/{id}/approve | owner | `{code}` typed by the human |
 | GET | /v1/pairing/{id}/status | none | box polls; `{challenge}` only when approved |
 | POST | /v1/pairing/{id}/redeem | none | `{signature(b64)}` → `{box_id, token, token_expires_at}` |
+| POST | /v1/boxes/{id}/heartbeat | box Bearer <redacted> | `{box_id, sent_at, client, uptime_s?, load_1?, token_expires_at?}` → `{ok:true}` — box liveness (~60 s cadence; dashboard marks stale after 300 s). Sent by `spark-pair.py heartbeat` (#864). |
 | POST | /v1/boxes/token/rotate | box Bearer <redacted> | `{"signature": b64|null}` → `{token, token_expires_at, proof}` — proof-of-possession rotation (#846; plane update pending) |
 | POST | /v1/boxes/{id}/revoke | owner | revoke the box's Bearer <redacted> immediately (#846; plane update pending) |
 
@@ -221,6 +262,9 @@ python3 pairing/spark_pair.py redeem
 python3 pairing/spark_pair.py rotate --auto
 # owner revokes a lost/compromised box immediately:
 SVM_OWNER_KEY=... python3 pairing/spark_pair.py revoke --box-id box_...
+# box liveness (~every minute, quiet on success, loud on failure):
+# * * * * * /path/to/spark-pair.py heartbeat >>/var/log/spark-heartbeat.log 2>&1
+python3 pairing/spark_pair.py heartbeat
 ```
 
 ## First-owner-key bootstrap

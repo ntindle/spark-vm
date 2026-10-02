@@ -8,6 +8,8 @@ Implements issue #844's box side and the human-approval side:
     spark-pair.py request --name mybox       # ask control plane for a code
     spark-pair.py redeem                     # wait for approval, prove key
                                              # possession, save the box token
+    spark-pair.py heartbeat                  # send one liveness heartbeat to
+                                             # the control plane (cron ~1/min)
 
   Owner (any machine; needs an owner API key):
     spark-pair.py approve --pairing-id <id>  # verify fingerprint, approve
@@ -384,6 +386,162 @@ def cmd_revoke(args):
     return 0
 
 
+# ---- #864: interim box-side heartbeat sender ----------------------------------
+# The control plane's heartbeat contract (POST /v1/boxes/{id}/heartbeat,
+# box Bearer <redacted>, JSON status -> {ok:true}) had no in-repo producer —
+# the fleet dashboard's staleness chips were only as honest as a sender
+# that did not exist. This is the interim sender: one-shot, cron-acceptable
+# (like `rotate --auto`), no box long-lived process. The persistent
+# box-side process for #847's phone-home WebSocket lives with the S5 box
+# WSS client, not here.
+#
+# Contract with the operator:
+#   * exit 0 ONLY when the plane actually answered 200 {ok:true}. A missed
+#     heartbeat never fabricates an ok — every other outcome exits 1.
+#   * failures are loud: every failure prints to stderr AND is appended to
+#     heartbeat.log in the state dir (cron mails stderr; the log survives
+#     even when it doesn't).
+#   * success is quiet: a healthy box emits nothing per tick, so the
+#     every-minute cron line stays silent.
+#   * the token is never printed and never written to the log; the log
+#     carries only timestamps, box ids, and failure classes.
+#   * concurrent invocations (slow plane vs 60 s cron cadence) serialize on
+#     a lock file rather than doubling heartbeats.
+
+
+def _fail(d, msg, redact=()):
+    """Fail loud: stderr + appended to heartbeat.log in the state dir.
+
+    `redact` lists secret values that must never reach either channel: any
+    occurrence is replaced with <redacted> (defense in depth — the failure
+    classes above never include the token themselves, but an error string
+    echoed back by a misbehaving plane must not become a credential leak
+    in a local log).
+    """
+    for secret in redact:
+        if secret:
+            msg = msg.replace(secret, "<redacted>")
+    line = (f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} heartbeat FAILED: "
+            f"{msg}")
+    print(line, file=sys.stderr)
+    try:
+        with open(os.path.join(d, "heartbeat.log"), "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass  # stderr is the loud channel; a broken log must not mask it
+
+
+def _box_uptime_s():
+    try:
+        with open("/proc/uptime") as f:
+            return int(float(f.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return None  # non-Linux box: omit rather than fail the heartbeat
+
+
+def _status_body(box_id, token_expires_at):
+    # Small, honest, bounded: identity + when this tick was sent + the
+    # box's own view of its health. No secrets, no chat transcripts, no
+    # unbounded fields — the plane is free to ignore unknown keys.
+    body = {"box_id": box_id, "sent_at": int(time.time()),
+            "client": USER_AGENT}
+    up = _box_uptime_s()
+    if up is not None:
+        body["uptime_s"] = up
+    try:
+        body["load_1"] = round(os.getloadavg()[0], 2)
+    except OSError:
+        pass
+    if isinstance(token_expires_at, int) and not isinstance(
+            token_expires_at, bool):
+        # Self-report only: the plane enforces expiry from its own store.
+        body["token_expires_at"] = token_expires_at
+    return body
+
+
+def _heartbeat_result(d, box_id, token, sent_at, status, resp):
+    if not isinstance(resp, dict):
+        # _http returns json.loads() of any 2xx body — it can be a list,
+        # string, or null. Anything that isn't an object cannot carry the
+        # plane's {ok:true}; treat it as malformed, not as success.
+        _fail(d, f"heartbeat failed: malformed plane response "
+                 f"(http={status}, non-object body) — will retry at the "
+                 "next cron tick", redact=(token,))
+        return 1
+    if status == 200 and resp.get("ok"):
+        # The plane's own ok — nothing else counts as a delivered heartbeat.
+        _write_private(os.path.join(d, "last_heartbeat.json"), json.dumps(
+            {"box_id": box_id, "last_ok_at": sent_at,
+             "plane_ok": True}, indent=2).encode())
+        return 0
+    if status == 401:
+        _fail(d, f"heartbeat rejected ({resp.get('error', status)}): this "
+                 "box token is dead (expired, revoked, or never valid) — "
+                 "re-pair the box (`request` + `redeem`)",
+              redact=(token,))
+        return 1
+    if status == 404 and resp.get("error") == "http=404":
+        # The _http fallback payload (no JSON body): the plane does not
+        # implement the endpoint yet — not "no such box".
+        _fail(d, "heartbeat failed: this control plane does not implement "
+                 "POST /v1/boxes/{id}/heartbeat yet — nothing was changed",
+              redact=(token,))
+        return 1
+    _fail(d, f"heartbeat failed: {resp.get('error', status)} "
+             f"(http={status}) — will retry at the next cron tick",
+          redact=(token,))
+    return 1
+
+
+def cmd_heartbeat(args):
+    d = _state_dir(args)
+    enroll_path = os.path.join(d, "enrollment.json")
+    try:
+        enroll = _read_json_file(enroll_path)
+    except (OSError, ValueError) as e:
+        # The cron path must never die with a traceback on a corrupted
+        # state file.
+        _fail(d, f"enrollment.json is unreadable ({e}) — "
+                 "run `request` + `redeem` first")
+        return 1
+    if not isinstance(enroll, dict):
+        # Valid JSON but not an object (a list, string, null): .get() below
+        # would AttributeError with no log entry — same loud failure instead.
+        _fail(d, "enrollment.json is not an object — "
+                 "run `request` + `redeem` first")
+        return 1
+    box_id, token = enroll.get("box_id"), enroll.get("token")
+    if not box_id or not token:
+        _fail(d, "enrollment.json is missing box_id/token — "
+                 "run `request` + `redeem` first")
+        return 1
+    control = (args.control or enroll.get("control")
+               or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL)
+    url = (control.rstrip("/") + "/v1/boxes/"
+           + urllib.parse.quote(box_id, safe="") + "/heartbeat")
+    body = _status_body(box_id, enroll.get("token_expires_at"))
+    # Serialize the network call under a lock: a slow plane plus a 60 s
+    # cron cadence can otherwise overlap two invocations, and an
+    # overlapped retry doubles the load on an already-struggling plane.
+    # Reads enrollment.json only — rotate's atomic temp+rename save means
+    # we can never read a half-written token.
+    lock_path = os.path.join(d, ".heartbeat.lock")
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as e:
+        _fail(d, f"heartbeat FAILED: cannot open lock file ({e}) — "
+                 "check state-dir permissions")
+        return 1
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        status, resp = _http(
+            "POST", url, body, {"Authorization": "Bearer " + token})
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    return _heartbeat_result(d, box_id, token, body["sent_at"], status, resp)
+
+
 def cmd_approve(args):
     control = args.control or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL
     base = control.rstrip("/") + "/v1/pairing"
@@ -468,6 +626,12 @@ def main(argv=None):
 
     s = sub.add_parser("redeem", help="wait for approval, redeem box token")
     s.set_defaults(fn=cmd_redeem)
+
+    s = sub.add_parser("heartbeat", help="box: send one liveness heartbeat "
+                                      "to the control plane (cron-friendly: "
+                                      "exit 0 only on the plane's ok, loud "
+                                      "on failure, quiet on success)")
+    s.set_defaults(fn=cmd_heartbeat)
 
     s = sub.add_parser("approve", help="owner: verify fingerprint + approve")
     s.add_argument("--pairing-id", help="pairing id (lists pending if omitted)")
