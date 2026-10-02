@@ -1796,3 +1796,101 @@ def test_refresh_under_lock_sees_external_token_mutation():
     svc._refresh_under_lock()
     assert svc.consumed is not consumed_obj
     assert "forget.abc123" in svc.consumed
+
+
+# -- #395: skipped loader lines must never be silently destroyed ----------
+
+
+def _rows_path(tmp):
+    return os.path.join(tmp, "rows.jsonl")
+
+
+def _seed_two_rows(tmp):
+    svc, _ = make_service()
+    with open(_rows_path(tmp), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_daemon_row("e1", "a@example.com")) + "\n")
+        fh.write(json.dumps(_daemon_row("e2", "b@example.com")) + "\n")
+    return svc
+
+
+def _skipped_sidecars(tmp):
+    return sorted(n for n in os.listdir(tmp)
+                  if n.startswith("rows.jsonl.skipped."))
+
+
+def test_rewrite_quarantines_skipped_torn_line():
+    # #395: a kill -9-torn line that the loader skips must be
+    # quarantined to a sidecar before _rewrite_rows, not silently
+    # destroyed — the rewrite serializes only self.rows.
+    svc, tmp = make_service()
+    svc._save_row(_daemon_row("e1", "a@example.com"))
+    svc._save_row(_daemon_row("e2", "b@example.com"))
+    torn = '{"entry_id": "e3", "owner_emai'  # torn mid-line
+    with open(_rows_path(tmp), "a", encoding="utf-8") as fh:
+        fh.write(torn + "\n")
+    svc.reload()
+    assert svc._load_skipped == [(3, torn)]
+    svc._rewrite_rows()
+    sidecars = _skipped_sidecars(tmp)
+    assert len(sidecars) == 1
+    lines = open(os.path.join(tmp, sidecars[0]),
+                 encoding="utf-8").read().splitlines()
+    meta = json.loads(lines[0])
+    assert meta["_quarantine"] is True
+    assert meta["source"] == "rows.jsonl"
+    assert meta["skipped_lines"] == [3]
+    assert lines[1:] == [torn]  # the skipped bytes, verbatim
+    # rows.jsonl itself holds only the two parseable rows.
+    rows = [json.loads(l) for l in
+            open(_rows_path(tmp), encoding="utf-8") if l.strip()]
+    assert sorted(r["entry_id"] for r in rows) == ["e1", "e2"]
+    # The in-memory skip list is cleared: a second rewrite must not
+    # quarantine the same bytes twice.
+    svc._rewrite_rows()
+    assert _skipped_sidecars(tmp) == sidecars
+
+
+def test_rewrite_quarantines_skipped_malformed_line():
+    # #395: a parseable-JSON line missing entry_id (malformed) takes the
+    # same quarantine path as a torn line.
+    svc, tmp = make_service()
+    svc._save_row(_daemon_row("e1", "a@example.com"))
+    malformed = json.dumps({"owner_email": "ghost@example.com"})
+    with open(_rows_path(tmp), "a", encoding="utf-8") as fh:
+        fh.write(malformed + "\n")
+    svc.reload()
+    assert svc._load_skipped == [(2, malformed)]
+    svc._rewrite_rows()
+    sidecars = _skipped_sidecars(tmp)
+    assert len(sidecars) == 1
+    body = open(os.path.join(tmp, sidecars[0]),
+                encoding="utf-8").read().splitlines()
+    assert body[1:] == [malformed]
+    assert svc._load_skipped == []
+
+
+def test_load_skip_list_resets_on_clean_reload():
+    # #395: the skip list always describes the latest load — after the
+    # operator hand-repairs the file, a reload must not quarantine
+    # anything on the next rewrite.
+    svc, tmp = make_service()
+    svc._save_row(_daemon_row("e1", "a@example.com"))
+    with open(_rows_path(tmp), "a", encoding="utf-8") as fh:
+        fh.write('{"entry_id": "e2", "owner_emai' + "\n")
+    svc.reload()
+    assert len(svc._load_skipped) == 1
+    with open(_rows_path(tmp), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(_daemon_row("e1", "a@example.com")) + "\n")
+    svc.reload()
+    assert svc._load_skipped == []
+    svc._rewrite_rows()
+    assert _skipped_sidecars(tmp) == []
+
+
+def test_rewrite_with_no_skips_writes_no_sidecar():
+    # #395 pin: a clean store's rewrite produces zero sidecar files.
+    svc, tmp = make_service()
+    svc._save_row(_daemon_row("e1", "a@example.com"))
+    svc.reload()
+    svc._rewrite_rows()
+    assert _skipped_sidecars(tmp) == []

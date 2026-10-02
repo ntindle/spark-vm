@@ -537,6 +537,11 @@ class WaitlistService:
         # (mtime_ns, size) pair of the two files _load reads. None until
         # the first parse below.
         self._store_snapshot_key = None
+        # (#395) rows.jsonl lines the latest _load skipped (torn or
+        # malformed), as (lineno, raw_line) pairs. _rewrite_rows
+        # quarantines them to a sidecar before rewriting so a skip is
+        # never silently converted into a permanent delete.
+        self._load_skipped = []
         self._load()
 
     # -- persistence ------------------------------------------------------
@@ -548,6 +553,10 @@ class WaitlistService:
 
     def _load(self):
         rows_path = os.path.join(self.data_dir, "rows.jsonl")
+        # (#395) reset per parse: the list always describes the most
+        # recent load, so a _rewrite_rows after a fresh reload sees the
+        # current skips, not stale ones.
+        self._load_skipped = []
         if os.path.exists(rows_path):
             with open(rows_path, encoding="utf-8") as fh:
                 for lineno, line in enumerate(fh, 1):
@@ -556,18 +565,22 @@ class WaitlistService:
                         continue
                     # A kill -9 can tear the last append mid-line; a single
                     # torn line must never brick a restart — skip it loudly
-                    # and load everything else.
+                    # and load everything else. The skipped bytes are
+                    # quarantined to a sidecar by _rewrite_rows before any
+                    # rewrite, never destroyed silently (#395).
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
                         sys.stderr.write(
                             "waitlistd: skipping torn rows.jsonl line "
-                            f"{lineno}\n")
+                            f"{lineno} (quarantined before next rewrite)\n")
+                        self._load_skipped.append((lineno, line))
                         continue
                     if not isinstance(row, dict) or not row.get("entry_id"):
                         sys.stderr.write(
                             "waitlistd: skipping malformed rows.jsonl line "
-                            f"{lineno}\n")
+                            f"{lineno} (quarantined before next rewrite)\n")
+                        self._load_skipped.append((lineno, line))
                         continue
                     if "drop_at" not in row and row.get("submitted_at"):
                         # Rows written before the lifecycle jobs existed have
@@ -1229,6 +1242,51 @@ class WaitlistService:
             # whole --purge run and every retry until hand-fixed.
             return False
 
+    def _quarantine_skipped_rows(self):
+        """Quarantine bytes the latest _load skipped (#395).
+
+        A torn or malformed rows.jsonl line that the loader skips would
+        otherwise be silently destroyed by the next _rewrite_rows: the
+        rewrite serializes only self.rows, so the skipped line vanishes
+        from disk with no trace. Before any rewrite, spill the skipped
+        bytes into a timestamped sidecar
+        (rows.jsonl.skipped.<ts>.jsonl) so the operator can inspect or
+        hand-repair them; the rewrite then proceeds on the parseable
+        rows only. The sidecar is written with the same tmp + fsync +
+        os.replace discipline as the rows rewrite (same filesystem —
+        atomic), and the in-memory skip list is cleared so a second
+        rewrite in the same process lifetime cannot quarantine the same
+        bytes twice. The caller holds data_lock() + the thread lock (the
+        _rewrite_rows contract), so no live writer can interleave.
+
+        Sidecar layout: one JSON metadata line first (source file, time,
+        skip count, offending line numbers), then each skipped line
+        verbatim. The bytes are never trusted as rows — only stored for
+        the operator.
+        """
+        if not self._load_skipped:
+            return
+        stamp = iso_z(self.clock()).replace(":", "")
+        name = f"rows.jsonl.skipped.{stamp}.jsonl"
+        path = os.path.join(self.data_dir, name)
+        tmp = path + ".quarantine-tmp"
+        meta = {"_quarantine": True, "source": "rows.jsonl",
+                "at": iso_z(self.clock()),
+                "skipped_lines": [lineno for lineno, _ in
+                                  self._load_skipped]}
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(meta, sort_keys=True) + "\n")
+            for _, raw in self._load_skipped:
+                fh.write(raw + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        n = len(self._load_skipped)
+        self._load_skipped = []
+        sys.stderr.write(
+            f"waitlistd: quarantined {n} skipped rows.jsonl line(s) to "
+            f"{name}\n")
+
     def _rewrite_rows(self):
         """Atomically rewrite rows.jsonl from the in-memory rows — the
         purge path (this is the rewrite slice 3a's docstring deferred for
@@ -1246,8 +1304,14 @@ class WaitlistService:
         stays append-only and untouched — the `dropped`/`purged` events
         are the audit trail; the PII leaves with the row.
 
+        (#395) Before the rewrite, any rows.jsonl lines the latest
+        _load skipped are quarantined to a
+        rows.jsonl.skipped.<ts>.jsonl sidecar — a skip must never become
+        a silent permanent delete.
+
         The same pass garbage-collects consumed_tokens.txt (#388) — see
         _gc_consumed_tokens."""
+        self._quarantine_skipped_rows()
         path = os.path.join(self.data_dir, "rows.jsonl")
         tmp = path + ".purge-tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
