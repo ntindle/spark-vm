@@ -46,7 +46,7 @@ python3 -m pytest
 ```
 
 `pytest.ini`'s `testpaths` is the authoritative suite inventory — one
-directory per component. Three pins keep it honest:
+directory per component. Four pins keep it honest:
 `scripts/test_pytest_ini_covers_all.py` fails if a `test_*.py` file lands
 outside the listed directories (no silently unwired suites),
 `scripts/test_contributing_suites.py` fails if the component table below
@@ -59,7 +59,14 @@ is not registered in that component's pre-deploy gate command in
 Registrations must be repo-relative paths (no `..` segments or absolute
 paths), and each gate-enumerated component's registered-file count is
 pinned exactly, so a new gate component has to declare its count before
-it counts as covered.
+it counts as covered. Finally, `scripts/test_basename_uniqueness.py`
+fails if two `test_*.py` files anywhere in the repo would import under
+the same pytest module name (pytest's `prepend` import mode imports
+rootless suites by basename, and this repo's test trees have no
+`__init__.py` — see the "Two conventions" paragraph below), naming every
+colliding file and the fix. This pin walks the whole tree, not just the
+directories `testpaths` collects, so the uniqueness contract holds even
+for test files no suite currently wires in.
 All suites pass on `main`; your PR should keep them green.
 
 Install the test dependencies first:
