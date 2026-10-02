@@ -2862,8 +2862,8 @@ class SwapAddon:
     # header or tag would be a disproportionate denial). The #94
     # Location kill is unchanged: a 3xx carries no page worth
     # preserving. Detection-path failures still kill (fail closed).
-    _REFRESH_KILLED_VALUE = "hsurr:refresh-secret-refused"
-    _META_REFRESH_KILLED_URL = "hsurr:meta-refresh-secret-refused"
+    _REFRESH_NEUTRALIZED_VALUE = "hsurr:refresh-secret-refused"
+    _META_REFRESH_NEUTRALIZED_URL = "hsurr:meta-refresh-secret-refused"
 
     # HTML-ish content types whose bodies may carry meta-refresh
     # tags. Browsers honor http-equiv=refresh in XHTML too, so the
@@ -2903,26 +2903,33 @@ class SwapAddon:
         if m is None:
             m = re.search(r"url\s*=\s*'([^']*)'", v, re.IGNORECASE)
         if m is None:
-            # Unquoted: the target runs to the end of the value (a
-            # client navigates to everything after url=, including any
-            # `;` — stopping at `;` would miss a secret smuggled after
-            # one, e.g. `url=https://x/cb;token=<secret>`). One
-            # optional opening quote is consumed OUTSIDE the capture
-            # group: browsers strip a lone opening quote
-            # (`url="https://x/cb?k=<secret>` with no closing quote
-            # still navigates), so without this the leading quote
-            # would poison the scheme parse and the check would read
-            # the target as a harmless relative reference.
-            m = re.search(r'url\s*=\s*["\']?(\S+)', v, re.IGNORECASE)
+            # Unquoted: per the HTML Standard's shared declarative
+            # refresh steps, the target is the substring from after
+            # `url=` TO THE END of the input — whitespace included. A
+            # `(\S+)` capture would stop at a space while the client
+            # navigates past it, missing a secret smuggled after one
+            # (e.g. `url=https://x/cb?pad=x token=<secret>`); `;`
+            # likewise belongs to the target. One optional opening
+            # quote is consumed OUTSIDE the capture group: browsers
+            # strip a lone opening quote (`url="https://x/cb?k=<secret>`
+            # with no closing quote still navigates), so without this
+            # the leading quote would poison the scheme parse and the
+            # check would read the target as a harmless relative
+            # reference.
+            m = re.search(r'url\s*=\s*["\']?(.+)', v, re.IGNORECASE)
         return m
 
     @staticmethod
     def _refresh_url(value):
-        """Navigation target of a Refresh-style value, else None."""
+        """Navigation target of a Refresh-style value, else None.
+
+        Leading/trailing whitespace is stripped: the URL parser
+        discards it before navigation, so it is never part of the
+        target the check must agree with."""
         m = SwapAddon._refresh_url_match(value)
         if m is None:
             return None
-        return m.group(1) or None
+        return m.group(1).strip() or None
 
     def _nav_leak_target(self, target_urls, triples):
         """Shared leak gate for navigation vectors (issue #94
@@ -2935,7 +2942,11 @@ class SwapAddon:
         decode-stage secret check live here, in exactly one place, so
         the gate cannot fork across vectors. Allowlisted targets and
         relative references are not leaks — callers keep their
-        scrub-in-place behaviour for those."""
+        scrub-in-place behaviour for those. Non-HTTP schemes
+        (`data:`, `javascript:`) fail closed as hostless (no
+        HTTP-navigable host to allowlist): a secret-bearing one is
+        neutralized even though it cannot exfiltrate to a remote
+        host — a fail-closed false positive, accepted deliberately."""
         for target_url in target_urls:
             target = self._redirect_target_host(target_url)
             if target is not None and not self._host_allowed(target):
@@ -3021,7 +3032,7 @@ class SwapAddon:
                      + um.start(1))
             end = start + len(um.group(1))
             out.append(text[pos:start])
-            out.append(self._META_REFRESH_KILLED_URL)
+            out.append(self._META_REFRESH_NEUTRALIZED_URL)
             pos = end
             refused.append(
                 self._audit_target_host(target, triples)
@@ -3206,7 +3217,7 @@ class SwapAddon:
                 "location", [self._REDIRECT_KILLED_LOCATION])
         if refresh_leak is not None:
             resp.headers.set_all(
-                "refresh", [self._REFRESH_KILLED_VALUE])
+                "refresh", [self._REFRESH_NEUTRALIZED_VALUE])
         for key in list(resp.headers.keys()):
             if key.lower() in self._NEVER_SCRUB_RESPONSE_HEADERS:
                 continue
@@ -3223,6 +3234,14 @@ class SwapAddon:
         if leak_target is not None:
             flow.kill()
             return
+        # A secret-bearing Refresh is neutralized, NOT killed — so
+        # execution FALLS THROUGH here deliberately (no early return):
+        # the H18 approval signals must still ride the delivered
+        # response, and the finding-40e stream refusal below must
+        # still run. A never-ending stream (SSE / 101 upgrade) can
+        # never be body-scrubbed, so a stream carrying a
+        # secret-bearing Refresh is killed there — the neutralization
+        # above must not become a stream bypass.
         # H18 (#133): client-visible approval signal. The agent that made
         # the refused request learns the approval id ("pending") or the
         # terminal decision ("approved"/"denied"/"expired") from these
