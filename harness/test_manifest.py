@@ -491,3 +491,25 @@ def test_unsigned_mode_names_self_attested(tmp_path):
                        timeout=30)
     assert p.returncode == 0, p.stderr
     assert "manifest-trust=self-attested" in p.stderr
+
+
+def test_verify_before_parse_on_success_path(tmp_path):
+    # Ordering pin: a manifest that is validly signed but schema-invalid
+    # must report "signature OK" BEFORE the schema failure — the signature
+    # is established on bytes, then the parse is judged.
+    out = tmp_path / "m.json"
+    subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
+                   capture_output=True)
+    priv, pub = _gen_keys(tmp_path, name="ord")
+    m = json.loads(out.read_text())
+    m["schema"] = "sparkvm/golden-image-manifest@999"
+    out.write_text(json.dumps(m))
+    p = subprocess.run([SIGN, str(out), "--key", str(priv)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    p = subprocess.run([CHECK, str(out), "--pubkey", _spec(pub)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "signature OK (key_id op)" in p.stderr
+    assert "schema" in p.stderr
+    assert p.stderr.index("signature OK") < p.stderr.index("schema '")

@@ -177,10 +177,16 @@ if not isinstance(priv, ed25519.Ed25519PrivateKey):
     print("sign-image-manifest: key is not Ed25519; refusing", file=sys.stderr)
     sys.exit(1)
 sig = priv.sign(data)
-tmp = opath + ".tmp"
-with open(tmp, "wb") as f:
-    f.write(base64.b64encode(sig) + b"\n")
-    f.flush(); os.fsync(f.fileno())
+# Unique tmp name + no-follow + exclusive create: a pre-planted symlink at
+# the tmp path can neither be followed nor clobbered (the signing dir is
+# the operator's, but the hardening is cheap).
+tmp = "%s.tmp.%d" % (opath, os.getpid())
+tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+try:
+    os.write(tfd, base64.b64encode(sig) + b"\n")
+    os.fsync(tfd)
+finally:
+    os.close(tfd)
 os.replace(tmp, opath)
 print(f"sign-image-manifest: signed {len(data)} bytes -> {opath}", file=sys.stderr)
 EOF

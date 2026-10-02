@@ -12,7 +12,9 @@
 #   --pubkey enables the #155 signed path. <key-spec> is a rotation window
 #   mirroring the fleet's SPARKVM_GATE_KEYS convention:
 #       "key_id=/path/to/key.pub.pem[,key_id2=/path2 ...]"
-#   (repeatable: multiple --pubkey flags join into one window). The
+#   (repeatable: multiple --pubkey flags join into one window). Key paths
+#   must not contain commas (the window splits on "," — same constraint as
+#   the fleet convention). The
 #   manifest's Ed25519 signature (written by harness/sign-image-manifest.sh,
 #   default <manifest.json>.sig) is verified over the manifest's EXACT BYTES
 #   before any JSON is parsed; the signature verifies if ANY window key
