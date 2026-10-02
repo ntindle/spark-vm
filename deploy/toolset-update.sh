@@ -43,13 +43,27 @@
 #                  release's checksums.txt before install. Never restarts the
 #                  CUA daemon — the new binary takes effect at the next
 #                  daemon restart, which the updater does not perform.
+#   apt          — converge the toolset's apt packages (docker, node, gh): the
+#                  installed packages among the APT_*_PKGS candidate lists
+#                  are upgraded with `apt-get install --only-upgrade` (-y,
+#                  noninteractive, conffile keep-local). Never a bare
+#                  `apt upgrade` — only the allowlisted names are passed, so
+#                  unrelated and held packages are untouched. `--only-upgrade`
+#                  never installs a missing package, so an absent tool stays
+#                  absent. List freshness comes from the os-security layer's
+#                  daily refresh — this layer never runs `apt-get update`
+#                  itself. Maintainer-script service restarts (e.g.
+#                  docker-ce's dockerd restart) can occur, so the layer runs
+#                  only behind the idle gate in the weekly quiet-hours window.
 #
 # Env overrides (for tests): TOOLSET_STATE_DIR, APT_CONF_DIR, SYSTEMD_DIR,
 # OPTOUT_FILE, SKIP_SYSTEMCTL=1 (skip systemctl calls), SKIP_SUDO=1 (run
 # file ops without sudo), TMUX_BIN (idle-gate probe), TOOLSET_UPDATE_NO_MAIN=1
 # (source functions only, for tests), TOOLSET_INSTALL_OWNER/GROUP (owner for
 # installed files; default root — tests run non-root, e.g. CI, set these to
-# the current uid/gid since `install -o root` requires privilege).
+# the current uid/gid since `install -o root` requires privilege),
+# APT_DOCKER_PKGS / APT_NODE_PKGS / APT_GH_PKGS (space-separated candidate
+# package names per tool; tests override to fixture packages).
 # PINS_FILE (pin file; default $TOOLSET_STATE_DIR/self_update_pins.conf —
 # refreshed only by the privileged `install` step, never read from the live
 # checkout), CUA_DRIVER_BIN (default /home/ntindle/cua/bin/cua-driver),
@@ -63,10 +77,11 @@
 #     refreshes it. Treat `install` (reinstall) as a privileged step: review
 #     the checkout diff first. The timer automates the operator's existing
 #     root maintenance — it does not grant new privilege to anyone.
-#   - v0 only ever writes inside $APT_CONF_DIR (the 20auto-upgrades config,
-#     staged then renamed into place) and its own state dir. It runs no
-#     package manager itself; unattended-upgrades does the installing on
-#     its own schedule.
+#   - The script runs apt-get itself ONLY in the `apt` layer (`install
+#     --only-upgrade` on the allowlisted, already-installed packages, from
+#     the box's configured, signature-verified apt sources). All other
+#     package installation remains the unattended-upgrades pipeline the
+#     os-security layer arms.
 #   - The script executes no code fetched over the network and has no bespoke
 #     update channel to poison — EXCEPT the cua-driver layer, which downloads
 #     the pinned release tarball from github.com/trycua/cua and SHA256-verifies
@@ -449,6 +464,98 @@ _cua_driver_layer() {
     return 0
 }
 
+# --- component: apt (docker, node, gh) -------------------------------------
+# Issue #532: the apt-based half of the default toolset — docker engine +
+# compose (apt), node/npm (nodesource), gh (apt). Scope is the
+# spark-vm-provisioned defaults only; a box that never provisioned one of
+# these tools simply no-ops for it.
+: "${APT_DOCKER_PKGS:=docker-ce docker-ce-cli containerd.io docker-compose-plugin docker.io}"
+: "${APT_NODE_PKGS:=nodejs}"
+: "${APT_GH_PKGS:=gh}"
+
+_apt_toolset_packages() {
+    # Print the managed apt packages that are actually installed (one per
+    # line), or nothing. Detection is by installed-package presence via
+    # `dpkg -l` (status line `ii`), never by probing PATH — the timer runs
+    # as root, so executing a PATH-resolved binary to decide what to upgrade
+    # would invite PATH hijacking, and the layer converges installed
+    # packages, not executables. Candidate names per tool are overridable
+    # (APT_DOCKER_PKGS / APT_NODE_PKGS / APT_GH_PKGS) so boxes provisioned
+    # from different apt repos (docker.io from Ubuntu vs docker-ce from
+    # docker's own repo) are both covered. Fail-closed when dpkg is missing:
+    # with no dpkg we cannot know what is installed, so the layer refuses
+    # instead of guessing.
+    local tool cand p
+    command -v dpkg >/dev/null 2>&1 \
+        || { log "apt: dpkg not found — cannot inventory installed packages; refusing"; return 1; }
+    for tool in docker node gh; do
+        case "$tool" in
+            docker) cand="${APT_DOCKER_PKGS:-}" ;;
+            node)   cand="${APT_NODE_PKGS:-}" ;;
+            gh)     cand="${APT_GH_PKGS:-}" ;;
+        esac
+        # shellcheck disable=SC2086
+        for p in $cand; do
+            if dpkg -l "$p" 2>/dev/null | grep -q '^ii'; then
+                printf '%s\n' "$p"
+            fi
+        done
+    done
+    return 0
+}
+
+_apt_layer() {
+    # _apt_layer <dry:0|1> — converge the toolset's apt packages: the
+    # already-installed packages among the APT_*_PKGS candidates are upgraded
+    # in place with `apt-get install --only-upgrade`. Idempotent: apt itself
+    # no-ops when everything is current, and `--only-upgrade` never installs
+    # a package that is not already there, so an absent tool stays absent
+    # (scope: provisioned defaults, per #532). Never a bare `apt upgrade` —
+    # only the allowlisted package names are passed, so unrelated packages
+    # and held packages are untouched.
+    #
+    # Non-interactive by construction: -y, DEBIAN_FRONTEND=noninteractive,
+    # conffile-confdef/confold (keep the box's existing config on conflicts —
+    # this runs unattended). Maintainer-script service restarts (e.g.
+    # docker-ce's dockerd restart) can occur: the layer runs only behind the
+    # idle gate (defer while agent jobs are live) in the weekly quiet-hours
+    # window, per the trust model.
+    local dry="$1"
+    if ! command -v apt-get >/dev/null 2>&1; then
+        log "apt: apt-get not found — refusing (fail-closed)"
+        return 1
+    fi
+    local pkgs
+    pkgs="$(_apt_toolset_packages)" || return 1
+    if [ -z "$pkgs" ]; then
+        log "apt: no managed apt packages installed — no-op"
+        return 0
+    fi
+    local count
+    count="$(printf '%s\n' "$pkgs" | grep -c .)"
+    log "apt: converging $count package(s): $(printf '%s' "$pkgs" | tr '\n' ' ')"
+    # List freshness comes from the os-security layer's daily
+    # unattended-upgrades refresh — this layer never runs `apt-get update`
+    # itself.
+    local mode="-y" why="install --only-upgrade"
+    if [ "$dry" = "1" ]; then
+        mode="-s"
+        why="DRY-RUN simulate"
+        log "apt: DRY-RUN — simulating the converge"
+    fi
+    # One call site for both modes, so the trust-model pin
+    # (test_script_never_fetches_code) keeps counting exactly two apt-get
+    # invocations in the whole script.
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive _sudo apt-get "$mode" install \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold" \
+        --only-upgrade $pkgs \
+        || { log "apt: $why failed"; return 1; }
+    log "apt: converged $count package(s)"
+    return 0
+}
+
 # --- status probes (read-only, informational) -----------------------------------
 _probe_version() {
     # _probe_version <name> <cmd...> — "name<TAB>present|absent<TAB>version-or-dash"
@@ -537,11 +644,15 @@ cmd_update() {
         rc=1
         failed_comps="${failed_comps:+$failed_comps }cua-driver"
     fi
+    if ! _apt_layer "$dry"; then
+        rc=1
+        failed_comps="${failed_comps:+$failed_comps }apt"
+    fi
 
     if [ "$dry" = "1" ]; then
         audit 'toolset-update' ',"result":"dry-run"'
     elif [ "$rc" = "0" ]; then
-        audit 'toolset-update' ',"result":"ok","components":"os-security cua-driver"'
+        audit 'toolset-update' ',"result":"ok","components":"os-security cua-driver apt"'
     else
         audit 'toolset-update' ',"result":"failed","failed":"'"$failed_comps"'"'
         log "update: FAILED ($failed_comps); see audit log"

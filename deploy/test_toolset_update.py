@@ -329,23 +329,44 @@ def test_optout_optin_roundtrip(env):
 
 def test_script_never_fetches_code():
     # Trust-model pin (#532): the script's only network surface is the
-    # cua-driver layer's pinned release fetch. apt-get appears exactly once:
-    # the unattended-upgrades bootstrap. curl appears exactly twice: the
-    # checksums.txt + tarball fetch inside _cua_driver_layer, both against
-    # "$base/$tag/..." (base defaults to the single https:// constant
-    # CUA_RELEASE_BASE). A future slice adding network or package-manager
-    # surface must update this pin and docs/TOOLSET_UPDATE.md.
-    # (Matches command invocations only — the "apt-get install failed" log
-    # string is not a second call site.)
+    # cua-driver layer's pinned release fetch, plus the apt layer's weekly
+    # --only-upgrade. apt-get appears exactly twice: the unattended-upgrades
+    # bootstrap and the apt layer's `install --only-upgrade` (simulate in
+    # dry-run). curl appears exactly twice: the checksums.txt + tarball fetch
+    # inside _cua_driver_layer, both against "$base/$tag/..." (base defaults
+    # to the single https:// constant CUA_RELEASE_BASE). A future slice
+    # adding network or package-manager surface must update this pin and
+    # docs/TOOLSET_UPDATE.md. (Matches command invocations only — the
+    # "apt-get install failed" log strings are not call sites; the
+    # DEBIAN_FRONTEND= prefix on the apt-layer calls is part of the
+    # non-interactive contract.)
     import re
     text = open(SCRIPT).read()
     for banned in ("wget ", "git clone", "pip install", "npm install",
                    "http://"):
         assert banned not in text, f"must not contain: {banned}"
-    invocations = [l for l in text.splitlines()
-                   if re.search(r"^\s*(_sudo\s+)?apt-get\b", l)]
-    assert len(invocations) == 1, invocations
-    assert "install -y unattended-upgrades" in invocations[0]
+    invocation_re = re.compile(
+        r"^\s*(DEBIAN_FRONTEND=noninteractive\s+)?(_sudo\s+)?apt-get\b")
+    # Join backslash continuations: the apt-layer flags (--only-upgrade,
+    # -o Dpkg::Options) live on the invocation's continuation lines.
+    logical = re.sub(r"\\\n\s*", " ", text).splitlines()
+    invocations = [l for l in logical if invocation_re.search(l)]
+    assert len(invocations) == 2, invocations
+    bootstrap = [l for l in invocations if "install -y unattended-upgrades" in l]
+    assert len(bootstrap) == 1, invocations
+    apt_layer = [l for l in invocations if l not in bootstrap]
+    assert len(apt_layer) == 1, invocations
+    line = apt_layer[0]
+    assert "--only-upgrade" in line, line
+    assert '-o Dpkg::Options::="--force-confdef"' in line, line
+    assert '-o Dpkg::Options::="--force-confold"' in line, line
+    # One call site serves both modes via $mode (-y real, -s dry-run).
+    assert 'apt-get "$mode" install' in line, line
+    assert 'mode="-y"' in text and 'mode="-s"' in text, "dry/real modes"
+    # Never a bare `apt upgrade` / `apt-get upgrade` (would touch everything).
+    for l in logical:
+        if invocation_re.search(l):
+            assert "--only-upgrade" in l or "unattended-upgrades" in l, l
     curls = [l for l in text.splitlines() if "curl -fsSL" in l]
     assert len(curls) == 2, curls
     for line in curls:
@@ -889,3 +910,146 @@ def test_install_copies_pins_file(env):
     pins = env["state"] / "self_update_pins.conf"
     assert pins.exists()
     assert "cua-driver = 0.28.2" in pins.read_text()
+
+
+# --- apt layer (issue #532) --------------------------------------------------
+
+def apt_env(env, tmp_path, installed=(), rc_state=(), apt_exit=0):
+    """Env for apt-layer tests: dpkg stub answering `ii` for `installed`
+    (and `rc` for `rc_state`), apt-get stub recording its argv + DEBIAN_FRONTEND
+    and exiting apt_exit. os-security repair is disarmed via GOOD_CONF, and
+    the cua-driver layer no-ops at the fixture pin."""
+    e = dict(env["env"])
+    (env["apt"] / "20auto-upgrades").write_text(GOOD_CONF)
+    aptlog = tmp_path / "apt-argv.log"
+    e["APT_ARGV_LOG"] = str(aptlog)
+    e["APT_INSTALLED"] = " ".join(installed)
+    e["APT_RC"] = " ".join(rc_state)
+    e["APT_EXIT"] = str(apt_exit)
+    bindir = make_stub_bin(tmp_path / "aptlayerbin", {
+        "dpkg": (
+            'pkg="$2"; '
+            'case " $APT_INSTALLED " in'
+            ' *" $pkg "*) echo "ii  $pkg  1:99.0-test amd64 fake pkg"; exit 0;;'
+            'esac; '
+            'case " $APT_RC " in'
+            ' *" $pkg "*) echo "rc  $pkg  1:99.0-test amd64 fake pkg"; exit 0;;'
+            'esac; '
+            'exit 1'
+        ),
+        "tmux": "exit 1",
+        "apt-get": (
+            f'echo "argv: $@" >> "{aptlog}"; '
+            f'echo "DEBIAN_FRONTEND=$DEBIAN_FRONTEND" >> "{aptlog}"; '
+            'exit "$APT_EXIT"'
+        ),
+        # cua-driver at the pin: the layer no-ops so these tests stay about
+        # the apt layer.
+        "cua-driver": 'echo "cua-driver 0.28.2"',
+    })
+    e["PATH"] = bindir + os.pathsep + make_realtools(tmp_path)
+    return e, aptlog
+
+
+def test_apt_layer_noop_when_nothing_installed(env, tmp_path):
+    e, aptlog = apt_env(env, tmp_path, installed=())
+    r = source_and('_apt_layer 0', e)
+    assert r.returncode == 0, r.stderr
+    assert not aptlog.exists(), "no installed packages: apt-get must not run"
+    assert "no managed apt packages installed" in \
+        (env["state"] / "toolset-update.log").read_text()
+
+
+def test_apt_layer_converges_installed_candidates_only(env, tmp_path):
+    e, aptlog = apt_env(env, tmp_path, installed=("docker.io", "gh"))
+    r = source_and('_apt_layer 0', e)
+    assert r.returncode == 0, r.stderr
+    calls = aptlog.read_text()
+    assert "argv: -y install" in calls
+    assert "--only-upgrade" in calls
+    assert "-o Dpkg::Options::=--force-confdef" in calls
+    assert "-o Dpkg::Options::=--force-confold" in calls
+    # Installed candidates are passed...
+    assert "docker.io" in calls and "gh" in calls
+    # ...but a candidate that is not installed is never passed — no stray
+    # upgrades, no new installs.
+    assert "docker-ce" not in calls and "nodejs" not in calls
+    # Non-interactive by construction.
+    assert "DEBIAN_FRONTEND=noninteractive" in calls
+
+
+def test_apt_layer_dry_run_simulates(env, tmp_path):
+    e, aptlog = apt_env(env, tmp_path, installed=("gh",))
+    r = source_and('_apt_layer 1', e)
+    assert r.returncode == 0, r.stderr
+    calls = aptlog.read_text()
+    # Simulate (-s), never the real -y.
+    assert "argv: -s install" in calls
+    assert "-y" not in calls.replace("DEBIAN_FRONTEND=noninteractive", "")
+    assert "--only-upgrade" in calls and "gh" in calls
+
+
+def test_apt_layer_fail_closed_without_apt_get(env, tmp_path):
+    e, _ = apt_env(env, tmp_path, installed=("gh",))
+    nobin = make_stub_bin(tmp_path / "noaptget", {"dpkg": "exit 0"})
+    e["PATH"] = nobin + os.pathsep + make_realtools(tmp_path)
+    r = source_and('_apt_layer 0', e)
+    assert r.returncode != 0
+    assert "apt-get not found" in \
+        (env["state"] / "toolset-update.log").read_text()
+
+
+def test_apt_layer_fail_closed_without_dpkg(env, tmp_path):
+    e, aptlog = apt_env(env, tmp_path, installed=("gh",))
+    nobin = make_stub_bin(tmp_path / "nodpkg", {
+        "apt-get": f'echo "$@" >> "{aptlog}"; exit 0',
+    })
+    e["PATH"] = nobin + os.pathsep + make_realtools(tmp_path)
+    r = source_and('_apt_layer 0', e)
+    assert r.returncode != 0
+    assert not aptlog.exists(), "dpkg missing: must refuse before apt-get"
+
+
+def test_apt_layer_ignores_rc_state_packages(env, tmp_path):
+    # A package in `rc` (removed, conffiles left) is not installed — it must
+    # not be passed to apt-get, which would reinstall it.
+    e, aptlog = apt_env(env, tmp_path, installed=(), rc_state=("docker.io",))
+    r = source_and('_apt_layer 0', e)
+    assert r.returncode == 0, r.stderr
+    assert not aptlog.exists()
+
+
+def test_apt_layer_candidate_lists_overridable(env, tmp_path):
+    e, aptlog = apt_env(env, tmp_path, installed=("fake-docker",))
+    e["APT_DOCKER_PKGS"] = "fake-docker"
+    r = source_and('_apt_layer 0', e)
+    assert r.returncode == 0, r.stderr
+    assert "fake-docker" in aptlog.read_text()
+
+
+def test_update_names_apt_on_layer_failure(env, tmp_path):
+    # apt-get stub fails: the full update fails loud and the audit names apt.
+    e, _ = apt_env(env, tmp_path, installed=("gh",), apt_exit=1)
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "apt" in lines[-1]["failed"]
+
+
+def test_update_audit_lists_apt_when_green(env, tmp_path):
+    e, _ = apt_env(env, tmp_path, installed=("gh",))
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+    assert "apt" in lines[-1]["components"]
+
+
+def test_update_dry_run_simulates_apt(env, tmp_path):
+    e, aptlog = apt_env(env, tmp_path, installed=("gh",))
+    r = run_bash("./deploy/toolset-update.sh update --dry-run", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert "argv: -s install" in aptlog.read_text()
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "dry-run"
