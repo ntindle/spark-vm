@@ -2891,7 +2891,11 @@ class SwapAddon:
         if m is None:
             m = re.search(r"url\s*=\s*'([^']*)'", v, re.IGNORECASE)
         if m is None:
-            m = re.search(r"url\s*=\s*([^\s;,]+)", v, re.IGNORECASE)
+            # Unquoted: the target runs to the end of the value (a
+            # client navigates to everything after url=, including any
+            # `;` — stopping at `;` would miss a secret smuggled after
+            # one, e.g. `url=https://x/cb;token=<secret>`).
+            m = re.search(r"url\s*=\s*(\S+)", v, re.IGNORECASE)
         return m
 
     @staticmethod

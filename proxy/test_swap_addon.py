@@ -2740,6 +2740,10 @@ class RefreshSecretTests(unittest.TestCase):
                          "https://evil.example/cb")
         self.assertEqual(t("0; URL = https://evil.example/cb ;"),
                          "https://evil.example/cb")
+        # Unquoted target runs to end of value: a `;` inside it is
+        # part of what the client navigates to, so the check sees it.
+        self.assertEqual(t("0;url=https://evil.example/cb;token=1"),
+                         "https://evil.example/cb;token=1")
         self.assertIsNone(t("5"))
         self.assertIsNone(t("0; url="))
         self.assertIsNone(t(""))
