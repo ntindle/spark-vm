@@ -3217,11 +3217,11 @@ class SwapAddon:
         if leak_target is not None:
             self._audit_note(host, "redirect-secret-refused",
                              self._audit_target_host(leak_target, triples))
-            flow.kill()
-            return
         if refresh_leak is not None:
             self._audit_note(host, "refresh-secret-refused",
                              self._audit_target_host(refresh_leak, triples))
+        if leak_target is not None:
+            flow.kill()
             return
         # H18 (#133): client-visible approval signal. The agent that made
         # the refused request learns the approval id ("pending") or the
