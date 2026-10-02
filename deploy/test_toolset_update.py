@@ -347,14 +347,15 @@ def test_script_never_fetches_code():
         assert banned not in text, f"must not contain: {banned}"
     invocation_re = re.compile(
         r"^\s*(?!#)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
-        r"(?:_sudo\s+|command\s+|env\s+)?"
+        r"(?:_sudo\s+|sudo\s+|command\s+|env\s+)?"
         r"(?:/usr/bin/|/bin/)?apt-get\b")
     # Bare `apt` (the interactive frontend) must never be used — it would
     # evade the apt-get-only assertions above. `apt-get` is excluded via
     # lookahead; the comment guard keeps prose/docs out of the match.
     bare_apt_re = re.compile(
         r"^\s*(?!#)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
-        r"(?:_sudo\s+|command\s+|env\s+)?apt(?![-\w])")
+        r"(?:_sudo\s+|sudo\s+|command\s+|env\s+)?"
+        r"(?:/usr/bin/|/bin/)?apt(?![-\w])")
     # Join backslash continuations: the apt-layer flags (--only-upgrade,
     # -o Dpkg::Options) live on the invocation's continuation lines.
     logical = re.sub(r"\\\n\s*", " ", text).splitlines()
