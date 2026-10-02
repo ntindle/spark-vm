@@ -2906,8 +2906,14 @@ class SwapAddon:
             # Unquoted: the target runs to the end of the value (a
             # client navigates to everything after url=, including any
             # `;` — stopping at `;` would miss a secret smuggled after
-            # one, e.g. `url=https://x/cb;token=<secret>`).
-            m = re.search(r"url\s*=\s*(\S+)", v, re.IGNORECASE)
+            # one, e.g. `url=https://x/cb;token=<secret>`). One
+            # optional opening quote is consumed OUTSIDE the capture
+            # group: browsers strip a lone opening quote
+            # (`url="https://x/cb?k=<secret>` with no closing quote
+            # still navigates), so without this the leading quote
+            # would poison the scheme parse and the check would read
+            # the target as a harmless relative reference.
+            m = re.search(r'url\s*=\s*["\']?(\S+)', v, re.IGNORECASE)
         return m
 
     @staticmethod
@@ -2974,7 +2980,11 @@ class SwapAddon:
         inside a `<script>` block (a JS string literal) is matched and
         rewritten the same way. That is fail-closed and harmless —
         no secret reaches the client either way — so the scan does
-        not try to be HTML-structure-aware.
+        not try to be HTML-structure-aware. Likewise the
+        http-equiv/content searches run over the whole tag string, so
+        those words inside another attribute's value can over-match;
+        again fail-closed (the page still loads), inherent to the
+        regex approach.
         """
         out = []
         pos = 0
