@@ -243,8 +243,8 @@ decided with the #847 S5 box WSS client, not here.
 | GET | /v1/pairing/{id}/status | none | box polls; `{challenge}` only when approved |
 | POST | /v1/pairing/{id}/redeem | none | `{signature(b64)}` → `{box_id, token, token_expires_at}` |
 | POST | /v1/boxes/{id}/heartbeat | box Bearer <redacted> | `{box_id, sent_at, client, uptime_s?, load_1?, token_expires_at?}` → `{ok:true}` — box liveness (~60 s cadence; dashboard marks stale after 300 s). Sent by `spark-pair.py heartbeat` (#864). |
-| POST | /v1/boxes/token/rotate | box Bearer <redacted> | `{"signature": b64|null}` → `{token, token_expires_at, proof}` — proof-of-possession rotation (#846; plane update pending) |
-| POST | /v1/boxes/{id}/revoke | owner | revoke the box's Bearer <redacted> immediately (#846; plane update pending) |
+| POST | /v1/boxes/token/rotate | box Bearer <redacted> | `{"signature": b64|null}` → `{token, token_expires_at, proof}` — proof-of-possession rotation (#846; live on the hosted plane since 2026-10-02) |
+| POST | /v1/boxes/{id}/revoke | owner | revoke the box's Bearer <redacted> immediately (#846; live on the hosted plane since 2026-10-02) |
 
 ## Trying it
 
@@ -256,7 +256,7 @@ SVM_OWNER_KEY=... python3 pairing/spark_pair.py approve --pairing-id pair_...
 python3 pairing/spark_pair.py redeem
 
 # keep the token fresh (cron/systemd runs `rotate --auto` hourly):
-# NOTE: rotate/revoke need the control-plane update closing #846 — verify
+# NOTE: rotate/revoke need the control-plane endpoints closing #846 — verify
 # with a manual `rotate` before installing the cron line (see Token rotation
 # in this README).
 python3 pairing/spark_pair.py rotate --auto

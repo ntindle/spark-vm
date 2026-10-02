@@ -53,6 +53,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Published an operator runbook for the hosted control plane's auth stack: a
+  single page naming the credential inventory (owner API keys, box Bearer <redacted>,
+  box keypairs, pairing codes), the day-0 bootstrap, the owner-key lifecycle,
+  the box keep-alive cron lines, incident response (revoke-then-repair, the
+  401-vs-403 meaning table), and the known limitation that bootstrap is the
+  only owner-key minting path — plus corrected the stale "plane update
+  pending" claims in the pairing README and the box client's CLI messages,
+  which now point at the endpoints the hosted plane has served since
+  2026-10-02. (#TBD)
+
 - The fleet dashboard's control-plane copy is now re-inlined by a small
   sync tool instead of manual copy-paste: editing the page without
   re-syncing fails the byte-identity test wherever a worker checkout is
