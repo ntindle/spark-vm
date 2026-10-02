@@ -469,6 +469,14 @@ def test_scan_window_rule2_recent_pair_still_fires(dirs):
     assert "tower" in corr[0]["detail"] and "cabin" in corr[0]["detail"]
 
 
+def _ts_now(minutes_ago):
+    # Execution-time timestamp (not the module-import NOW): the full
+    # suite runs ~9 min before fleet tests execute, so a near-window-edge
+    # ts() frozen at import would age past the 6h edge by test time.
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def test_scan_window_rule4_boundary_pins(dirs):
     # Rule 4's own 6h cutoff equals the scan window: 3 precheck-fails
     # inside the window still fire. Pinned at 5h55m (5 min slack against
@@ -477,12 +485,12 @@ def test_scan_window_rule4_boundary_pins(dirs):
     # same inclusive comparison on the same parsed fired_at.
     estate, store = dirs
     write_box(estate, "tower", [
-        audit_line("deploy", "gate-fail", ts=ts(60),
+        audit_line("deploy", "gate-fail", ts=_ts_now(60),
                    **{"from": COMMIT_A, "to": COMMIT_B,
                       "component": "proxy"}),
-        audit_line("deploy", "snapshot-fail", ts=ts(5 * 60 + 50),
+        audit_line("deploy", "snapshot-fail", ts=_ts_now(5 * 60 + 50),
                    **{"from": COMMIT_A, "to": COMMIT_B}),
-        audit_line("check", "precheck-fail", ts=ts(5 * 60 + 55)),
+        audit_line("check", "precheck-fail", ts=_ts_now(5 * 60 + 55)),
     ])
     proc = run_inventory("collect", "--estate", estate, "--store", store)
     assert proc.returncode == 0, proc.stderr
