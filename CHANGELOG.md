@@ -117,7 +117,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Job liveness from the session's own event stream, first slice (#224): the operator tooling gains a view-plane client for the `muse serve` protocol — subscribing at a cursor replays a session's recent events and then follows them live, deriving a working / blocked / idle / stalled state (a pending approval or question is surfaced when blocked; a session silent with no live turn for ten minutes reads as stalled). This is the pane-scraping replacement that `muse-job status` and `watch` will read once the transport cutover lands; the old TUI probes stay until then. (#772)
 
 ### Changed
-- Contributor DX: the fleet journal loader no longer carries a dead parameter every caller passed as empty — the five load sites read plainly now; no behavior change. (#TBD)
+- Contributor DX: the fleet journal loader no longer carries a dead parameter every caller passed as empty — the five load sites read plainly now; no behavior change. (#823)
 
 ### Fixed
 - The repo's component table is complete again: the README now lists `fleet/` (fleet management — version inventory, event and alert journals, retention pruning) and `hosted/` (the hosted control plane's tenant layer — the machine-readable onboarding status at `GET /tenant/status`), two shipped components the table had been missing. (#822)
