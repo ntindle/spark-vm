@@ -104,12 +104,17 @@
 #                          INJECT_MANIFEST explicitly)
 #   INJECT_MANIFEST_CHECK  manifest preflight script (default alongside
 #                          this script)
-#   INJECT_MANIFEST_PUBKEY Ed25519 public key (PEM) enabling the signed
-#                          manifest preflight (#155): when set, the check
-#                          verifies the manifest's detached signature
+#   INJECT_MANIFEST_PUBKEY Ed25519 public key(s) enabling the signed
+#                          manifest preflight (#155): a rotation window in
+#                          the fleet's key_id=/path convention
+#                          ("20261002a=/etc/keys/mf-a.pub.pem,20261002b=..."),
+#                          repeatable --pubkey equivalent. When set, the
+#                          check verifies the manifest's detached signature
 #                          (<manifest>.sig, from harness/sign-image-manifest.sh)
 #                          over the manifest's exact bytes before parsing,
-#                          failing closed on missing/malformed/mismatch.
+#                          failing closed on missing/malformed/mismatch, and
+#                          the provision report records steps.manifest as
+#                          "ok-signed" (vs "ok-unsigned-legacy" without it).
 #                          Unset keeps the legacy self-attestation check.
 #   CRED_STORE_VERIFY_INFERENCE
 #                          inference store blind-compare writer (default
@@ -363,13 +368,21 @@ allowlist_echo_entries() {
 # operator config, never in the image.
 echo "inject-provision-state: preflighting image manifest against pinned $IMAGE_VERSION" >&2
 MANIFEST_CHECK_ARGS=("$MANIFEST" --expect-version "$IMAGE_VERSION")
+MANIFEST_TRUST="ok-unsigned-legacy"
 if [ -n "${INJECT_MANIFEST_PUBKEY:-}" ]; then
     MANIFEST_CHECK_ARGS+=(--pubkey "$INJECT_MANIFEST_PUBKEY")
+    MANIFEST_TRUST="ok-signed"
 fi
 if ! "$MANIFEST_CHECK" "${MANIFEST_CHECK_ARGS[@]}" >&2; then
     echo "inject-provision-state: refusing: manifest preflight failed (image drift -- the box is not the pinned image)" >&2
     exit 1
 fi
+# The provision record names the preflight's trust mode: ok-signed means the
+# manifest's signature verified against the INJECT_MANIFEST_PUBKEY window
+# before any parse; ok-unsigned-legacy is the weaker self-attestation claim
+# (manifest's own bytes as the only witness). Both are "ok"-prefixed so the
+# box-live gating rule (every gated step reads ok*) holds; fleet-wide, the
+# split answers "when do I know all images are signed?" (#155 migration).
 
 # --- Step 2: gate-fixture teardown -----------------------------------------
 # Remove every llm-api echo-host binding through the narrow writer
@@ -984,14 +997,15 @@ echo "inject-provision-state: smoke-test bound to '$SMOKE_HOST' in the main regi
 # One JSON document on stdout, like the probe's contract. The
 # fixture_teardown step reads "ok" with the absent/removed detail in
 # fixture_teardown_detail, so the documented box-live gating rule (every
-# gated step reads "ok") holds for the machine consumer; the `deferred`
-# list names the interface points still owned by unlanded mechanics.
+# gated step reads ok*, with the manifest step reading ok-signed or
+# ok-unsigned-legacy per the preflight mode) holds for the machine consumer;
+# the `deferred` list names the interface points still owned by unlanded mechanics.
 TEARDOWN="$TEARDOWN" IDENTITY="$IDENTITY" ATTRIBUTION="$ATTRIBUTION" \
-IMAGE_VERSION="$IMAGE_VERSION" python3 -c '
+IMAGE_VERSION="$IMAGE_VERSION" MANIFEST_TRUST="$MANIFEST_TRUST" python3 -c '
 import json, os
 deferred = []
 steps = {
-    "manifest": "ok",
+    "manifest": os.environ["MANIFEST_TRUST"],
     "fixture_teardown": "ok",
     "inference_key": "ok",
     "swapd_ca": "ok",

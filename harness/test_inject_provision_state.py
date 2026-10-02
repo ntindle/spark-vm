@@ -570,7 +570,7 @@ def test_happy_path_no_fixture(stack):
     assert proc.returncode == 0, proc.stderr.decode()
     report = _report(proc)
     assert report["image_version"] == IMAGE_SHA
-    assert report["steps"]["manifest"] == "ok"
+    assert report["steps"]["manifest"] == "ok-unsigned-legacy"
     assert report["steps"]["fixture_teardown"] == "ok"
     assert report["fixture_teardown_detail"] == "absent"
     assert report["steps"]["inference_key"] == "ok"
@@ -992,10 +992,10 @@ def test_signed_manifest_preflight_ok(stack, tmp_path):
     _gen_signing_keys(prefix)
     _sign_fixture_manifest(paths, prefix)
     env = _with_test_python_on_path(env, tmp_path, "pybin-ok")
-    env["INJECT_MANIFEST_PUBKEY"] = prefix + ".pub.pem"
+    env["INJECT_MANIFEST_PUBKEY"] = "op=" + prefix + ".pub.pem"
     proc = _run_injector(env)
     assert proc.returncode == 0, proc.stderr.decode()
-    assert _report(proc)["steps"]["manifest"] == "ok"
+    assert _report(proc)["steps"]["manifest"] == "ok-signed"
 
 
 def test_signed_manifest_wrong_key_refuses(stack, tmp_path):
@@ -1009,7 +1009,7 @@ def test_signed_manifest_wrong_key_refuses(stack, tmp_path):
     _gen_signing_keys(prefix_b)
     _sign_fixture_manifest(paths, prefix_a)
     env = _with_test_python_on_path(env, tmp_path, "pybin-bad")
-    env["INJECT_MANIFEST_PUBKEY"] = prefix_b + ".pub.pem"
+    env["INJECT_MANIFEST_PUBKEY"] = "b=" + prefix_b + ".pub.pem"
     proc = _run_injector(env)
     assert proc.returncode == 1
     assert b"manifest preflight failed" in proc.stderr

@@ -237,9 +237,14 @@ def _signed_manifest(tmp_path, name="m"):
     return out, sig, priv, pub
 
 
+def _spec(pub, key_id="op"):
+    # --pubkey takes the fleet's key_id=/path rotation-window convention.
+    return f"{key_id}={pub}"
+
+
 def test_sign_verify_roundtrip(tmp_path):
     out, sig, priv, pub = _signed_manifest(tmp_path)
-    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+    p = subprocess.run([CHECK, str(out), "--pubkey", _spec(pub)],
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 0, p.stderr
     assert "signature OK" in p.stderr and "check-image-manifest: OK" in p.stderr
@@ -252,7 +257,7 @@ def test_verify_fails_on_single_byte_tamper(tmp_path):
     raw = bytearray(out.read_bytes())
     raw[len(raw) // 2] ^= 0x01
     out.write_bytes(bytes(raw))
-    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+    p = subprocess.run([CHECK, str(out), "--pubkey", _spec(pub)],
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
     assert "SIGNATURE MISMATCH" in p.stderr
@@ -262,7 +267,7 @@ def test_verify_fails_on_wrong_key(tmp_path):
     # Signed by key A, verified against key B's pubkey: fail closed.
     out, sig, priv, pub = _signed_manifest(tmp_path)
     _, other_pub = _gen_keys(tmp_path, name="other")
-    p = subprocess.run([CHECK, str(out), "--pubkey", str(other_pub)],
+    p = subprocess.run([CHECK, str(out), "--pubkey", _spec(other_pub, "other")],
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
     assert "SIGNATURE MISMATCH" in p.stderr
@@ -272,7 +277,7 @@ def test_verify_fails_when_sig_missing(tmp_path):
     # --pubkey with no signature file: fail closed, not "unsigned is fine".
     out, sig, priv, pub = _signed_manifest(tmp_path)
     sig.unlink()
-    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+    p = subprocess.run([CHECK, str(out), "--pubkey", _spec(pub)],
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
     assert "SIGNATURE MISSING" in p.stderr
@@ -281,13 +286,13 @@ def test_verify_fails_when_sig_missing(tmp_path):
 def test_verify_fails_on_malformed_sig(tmp_path):
     out, sig, priv, pub = _signed_manifest(tmp_path)
     sig.write_text("not-valid-base64!!!\n")
-    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+    p = subprocess.run([CHECK, str(out), "--pubkey", _spec(pub)],
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
     assert "failing closed" in p.stderr
     # Right shape, wrong length: also refused (decodes to 3 bytes, not 64).
     sig.write_text("AAAA\n")
-    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+    p = subprocess.run([CHECK, str(out), "--pubkey", _spec(pub)],
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
     assert "64 bytes" in p.stderr
@@ -313,7 +318,7 @@ def test_verify_runs_before_parse(tmp_path):
     # attacker-shaped document never reaches the parser untrusted.
     junk = tmp_path / "junk.json"
     junk.write_text("{not json at all\x00\x01")
-    p = subprocess.run([CHECK, str(junk), "--pubkey", str(tmp_path / "k.pub.pem")],
+    p = subprocess.run([CHECK, str(junk), "--pubkey", _spec(tmp_path / "k.pub.pem", "k")],
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
     assert "SIGNATURE MISSING" in p.stderr
@@ -361,7 +366,7 @@ def test_sign_refuses_symlink_manifest(tmp_path):
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
     assert "symlinks refused" in p.stderr
-    p = subprocess.run([CHECK, str(link), "--pubkey", str(pub)],
+    p = subprocess.run([CHECK, str(link), "--pubkey", _spec(pub)],
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
     assert "symlinks refused" in p.stderr
@@ -379,3 +384,110 @@ def test_sign_refuses_non_ed25519_key(tmp_path):
                        capture_output=True, text=True, timeout=30)
     assert p.returncode == 1
     assert "not Ed25519" in p.stderr
+
+
+# --- #155: rotation window + key-spec discipline ---------------------------
+
+
+def test_rotation_window_verifies_with_either_key(tmp_path):
+    # The window accepts key_id=/path pairs; a signature from any window
+    # key verifies, and the check names the key_id that verified.
+    out, sig, priv_a, pub_a = _signed_manifest(tmp_path, name="w")
+    _, pub_b = _gen_keys(tmp_path, name="wb")
+    window = f"a={pub_a},b={pub_b}"
+    p = subprocess.run([CHECK, str(out), "--pubkey", window],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert "signature OK (key_id a)" in p.stderr
+    assert "manifest-trust=signed" in p.stderr
+    # Order-independent: the matching key need not be first.
+    p = subprocess.run([CHECK, str(out), "--pubkey", f"b={pub_b},a={pub_a}"],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert "signature OK (key_id a)" in p.stderr
+
+
+def test_rotation_window_two_wrong_keys_fails(tmp_path):
+    out, sig, priv_a, pub_a = _signed_manifest(tmp_path, name="x")
+    _, pub_b = _gen_keys(tmp_path, name="xb")
+    _, pub_c = _gen_keys(tmp_path, name="xc")
+    p = subprocess.run([CHECK, str(out), "--pubkey", f"b={pub_b},c={pub_c}"],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "SIGNATURE MISMATCH" in p.stderr
+
+
+def test_pubkey_flag_is_repeatable(tmp_path):
+    # Multiple --pubkey flags join into one window (same as commas).
+    out, sig, priv_a, pub_a = _signed_manifest(tmp_path, name="r")
+    _, pub_b = _gen_keys(tmp_path, name="rb")
+    p = subprocess.run([CHECK, str(out),
+                        "--pubkey", f"b={pub_b}", "--pubkey", f"a={pub_a}"],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert "signature OK (key_id a)" in p.stderr
+
+
+def test_bare_path_pubkey_is_rejected(tmp_path):
+    # Strict like the fleet: a bare path without key_id= is a config
+    # error, not a guess.
+    out, sig, priv, pub = _signed_manifest(tmp_path, name="bp")
+    p = subprocess.run([CHECK, str(out), "--pubkey", str(pub)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "bad --pubkey entry" in p.stderr
+
+
+def test_duplicate_key_id_rejected(tmp_path):
+    out, sig, priv, pub = _signed_manifest(tmp_path, name="dq")
+    p = subprocess.run([CHECK, str(out), "--pubkey", f"a={pub},a={pub}"],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "duplicate key_id" in p.stderr
+
+
+def test_custom_sig_path_roundtrip(tmp_path):
+    out, sig, priv, pub = _signed_manifest(tmp_path, name="cs")
+    custom = tmp_path / "elsewhere.sig"
+    sig.rename(custom)
+    p = subprocess.run([CHECK, str(out), "--pubkey", _spec(pub),
+                        "--sig", str(custom)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert "signature OK" in p.stderr
+    # ...and the default sibling path now fails closed (sig moved away).
+    p = subprocess.run([CHECK, str(out), "--pubkey", _spec(pub)],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 1
+    assert "SIGNATURE MISSING" in p.stderr
+
+
+def test_sig_without_pubkey_is_invocation_error(tmp_path):
+    out = tmp_path / "m.json"
+    subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
+                   capture_output=True)
+    p = subprocess.run([CHECK, str(out), "--sig", str(tmp_path / "m.json.sig")],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 2
+    assert "meaningless without --pubkey" in p.stderr
+
+
+def test_gen_key_prints_fingerprint(tmp_path):
+    # Trust-on-first-use anchor: the operator compares this out-of-band
+    # when configuring the provisioner.
+    p = subprocess.run([SIGN, "--gen-key", str(tmp_path / "fp")],
+                       capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert "SHA256:" in p.stderr
+
+
+def test_unsigned_mode_names_self_attested(tmp_path):
+    # The provision record's trust mode is observable: unsigned preflights
+    # say so on their final line.
+    out = tmp_path / "m.json"
+    subprocess.run([GEN, "--out", str(out)], check=True, timeout=30,
+                   capture_output=True)
+    p = subprocess.run([CHECK, str(out)], capture_output=True, text=True,
+                       timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert "manifest-trust=self-attested" in p.stderr

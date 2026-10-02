@@ -30,7 +30,9 @@
 # Usage:
 #   harness/sign-image-manifest.sh --gen-key <key-prefix>
 #       Write <key-prefix>.priv.pem (mode 0600; refuses if it already
-#       exists) and <key-prefix>.pub.pem. Hand the .pub.pem to whoever
+#       exists) and <key-prefix>.pub.pem, and print the pubkey's
+#       SHA256 fingerprint — compare it out-of-band when configuring the
+#       provisioner (trust-on-first-use). Hand the .pub.pem to whoever
 #       configures the injector; keep the .priv.pem off every image.
 #   harness/sign-image-manifest.sh <manifest.json> --key <priv.pem>
 #       [--out <sig-path>]
@@ -40,11 +42,17 @@
 #       by group/other. Exit 2 is an invocation error.
 set -euo pipefail
 
-usage() { echo "usage: $0 --gen-key <key-prefix> | $0 <manifest.json> --key <priv.pem> [--out <sig-path>]" >&2; exit 2; }
+USAGE="usage: $0 --gen-key <key-prefix> | $0 <manifest.json> --key <priv.pem> [--out <sig-path>]"
+need_arg() { # $1 = flag name; $2 = the value (maybe empty)
+  if [[ -z "${2:-}" ]]; then echo "sign-image-manifest: $1 needs a value" >&2; echo "$USAGE" >&2; exit 2; fi
+  printf '%s' "$2"
+}
+
+usage() { echo "$USAGE" >&2; exit 2; }
 
 MODE=""
 if [[ "${1:-}" == "--gen-key" ]]; then
-  MODE="gen"; PREFIX="${2:?--gen-key needs a key prefix}"; shift 2
+  MODE="gen"; PREFIX="$(need_arg --gen-key "${2:-}")"; shift 2
 elif [[ $# -ge 1 && "${1:-}" != "-h" && "${1:-}" != "--help" ]]; then
   MODE="sign"; MANIFEST="$1"; shift
 else
@@ -53,8 +61,8 @@ fi
 KEY=""; OUT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --key) KEY="${2:?--key needs a path}"; shift 2 ;;
-    --out) OUT="${2:?--out needs a path}"; shift 2 ;;
+    --key) KEY="$(need_arg --key "${2:-}")"; shift 2 ;;
+    --out) OUT="$(need_arg --out "${2:-}")"; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -72,7 +80,7 @@ if [[ "$MODE" == "gen" ]]; then
     exit 1
   fi
   PRIV_PATH="$PRIV" PUB_PATH="$PUB" python3 - <<'EOF'
-import os, stat, sys
+import base64, hashlib, os, stat, sys
 try:
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -99,6 +107,11 @@ if stat.S_IMODE(os.stat(priv_path).st_mode) != 0o600:
     print("sign-image-manifest: key file did not land 0600; removed both files", file=sys.stderr)
     sys.exit(1)
 print(f"sign-image-manifest: wrote {priv_path} (0600) + {pub_path}", file=sys.stderr)
+# Trust-on-first-use anchor: the operator compares this fingerprint
+# out-of-band when configuring the provisioner's INJECT_MANIFEST_PUBKEY,
+# so a swapped .pub.pem is caught before it matters.
+fp = base64.b64encode(hashlib.sha256(pub_pem).digest()).decode().rstrip("=")
+print(f"sign-image-manifest: pubkey fingerprint SHA256:{fp}", file=sys.stderr)
 EOF
   exit 0
 fi
