@@ -251,3 +251,88 @@ the agent. Refusal produces no signal, answers produce no delivery, and
 expiry produces no record the waiter can read. #133/H18 names the build;
 G1 names its expiry-shaped sibling. Everything else is the tenant
 dimension (H10/H11) or retry plumbing (H14a).
+
+## 2026-10-02 refresh — the control-plane primitives and the #849 shape
+
+§1–§8 above are the 2026-09-21 read (pinned to tree `5b8f773`). Every
+claim in this section was re-verified against the repo tree at `4eb14eb`
+(2026-10-02) and a 2026-10-02 read of the `sparkvm-control` Cloudflare
+Worker (the plane lives outside this repo; plane claims are pinned to
+that read, not to a repo commit). Honesty rules apply as before.
+
+### What's closed since 2026-09-21
+
+- **#133/H18 — the client pending signal: IMPLEMENTED.** The proxy
+  emits `X-Spark-Approval-Pending: <aid>` and
+  `X-Spark-Approval-Decision: <state>:<aid>[, ...]` response headers
+  (verified in `proxy/swap_addon.py`; coalesced to one pending id per
+  tuple; `state` ∈ approved/denied/expired);
+  `docs/APPROVAL_CLIENT_SIGNAL.md` is marked "Status: implemented".
+  The §1 "agent sees a dead end" leg and the §6 return leg are **closed
+  for the box-local plane**: the agent parks on the pending id and
+  reads terminal decisions off re-issued gated requests.
+- **G1 — expired terminal record: IMPLEMENTED.** #511 (S1–S3) and #546
+  are closed: expired approvals are a stamped third terminal decision
+  (`confirm/confirmd.py` — expired 410 pages, badges), and the proxy
+  appends an `expired:<aid>` decision leg inside its delivery window
+  (verified `proxy/swap_addon.py` reap code). The old honesty check's
+  "expiry produces no record the waiter can read" line is stale.
+- **#213 — superseded, closed this turn.** Its premise ("no terminal
+  record is left for an agent-side waiter to read — and none could be
+  read anyway, because #133 means the agent was never told the approval
+  id") is contradicted by #511/#546 and the Decision header above.
+  Closing comment carries the pointers; no replacement issue — the leg
+  exists.
+- **New primitives the old doc predates** (all shipped after the
+  2026-09-21 pin; none touches approvals yet, but #849 now has a
+  transport to build on): #843 (owner API keys gate fleet endpoints,
+  401 without), #844 (pairing-code box enrollment — box↔owner identity
+  binding on the plane, fingerprint-verified), #846 (24h rotating box
+  Bearer <redacted>, revoke, 15-min grace), #848 (durable command queue —
+  plane→box channel with seq/acks/leases/epochs,
+  `docs/DURABLE_COMMANDS.md`), #864 (interim box-side heartbeat sender,
+  `pairing/spark_pair.py heartbeat`).
+
+### What still holds (open, referenced not duplicated)
+
+- #69 (p1): per-tenant approval routing — confirmd is still
+  single-owner/single-tenant; the tenant dimension stays the standing
+  blocker for any hosted approval leg.
+- #74: push retry for un-notified approvals (H14a).
+- #428: first-approval summons implementation (G4 S1–S3).
+- #797/G23: alert fan-out into the H14 push plane — the phone-delivery
+  leg for #849 rides this design.
+- #798–#800: the audit leg (§8) → sentinel feed.
+- Phone delivery substrate: `docs/PUSH_NOTIFICATIONS.md`,
+  `docs/ALERT_PUSH_FANOUT_SPEC.md`, `docs/FIRST_APPROVAL_SUMMONS.md`.
+
+### New gaps for #849 (filed this turn)
+
+- **`[HOSTED]` G49.1 — no plane-side approval record.** Approvals
+  exist in exactly two places: box-local confirmd files
+  (single-tenant, #69) and plane pairing approvals (one-shot
+  enrollment, a different object). The hosted #849 flow — agent action
+  on a box → owner taps phone → decision back to the box — has nowhere
+  on the plane to hold an action-approval with owner identity, expiry,
+  and an idempotent decision. Filed as #872.
+- **`[DESIGN]` G49.2 — no approval-decision command type on the
+  durable channel.** #848 delivers plane→box (seq/acks), but no command
+  type carries approve/deny/expire with (box_id, aid, decision,
+  decision epoch). The decision leg currently ends at the human's
+  browser; nothing defines its plane→box wire shape. Filed as #873.
+- **`[BUILD]` G49.3 — no box-side ingest of plane decisions into
+  confirmd.** Even with G49.1/G49.2 built, confirmd is a local server
+  with local files; a box-side consumer must stamp plane decisions
+  into confirmd's answered store with proof of plane origin (never
+  locally forgeable), so the parked agent sees the same Decision legs
+  it sees for local approvals. Filed as #874.
+
+### Non-overlap (what this refresh is not)
+
+- Transport: the WSS phone-home channel is
+  `docs/PHONE_HOME_GAP_ANALYSIS.md` (#847); the durable command
+  contract is `docs/DURABLE_COMMANDS.md` (#848). This refresh names
+  only the approvals-shaped holes above them.
+- Phone delivery: `docs/PUSH_NOTIFICATIONS.md`,
+  `docs/ALERT_PUSH_FANOUT_SPEC.md`, `docs/FIRST_APPROVAL_SUMMONS.md`
+  (#428); plane fan-out is #797/G23.

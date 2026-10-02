@@ -60,6 +60,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   sequential commands with short leases, idempotent acks, and
   incarnation epochs that safely expire in-flight commands on
   reboot/reprovision — pinned in the durable-commands protocol doc. (#867)
+- The approvals-plane gap analysis is refreshed to the control-plane
+  reality: the box-local return leg is closed (the approval signal
+  headers and the expired terminal record both shipped), the stale
+  expired-approvals issue is closed as superseded, and the three
+  hosted-approval gaps the new primitives expose are filed —
+  plane-side approval records (#872), an approval-decision command
+  type on the durable channel (#873), and box-side ingest of plane
+  decisions into the approvals daemon (#874). (#TBD)
 
 ### Security
 - The swap proxy now refuses credential-smuggling navigations beyond `Location` redirects: a `Refresh` response header whose `url=` target carries a known secret value — raw or percent-encoded, which the header scrubber cannot see — to a non-allowlisted host has its target neutralized in the header and the attempt recorded on the audit trail (the page still loads; only the navigation is neutered), and an HTML or XHTML `<meta http-equiv="refresh">` tag with the same kind of secret-bearing target has its URL neutralized in the page the same way. Navigations to allowlisted hosts keep today's scrub-in-place behavior, and bare same-page refreshes are unaffected. (#870)
