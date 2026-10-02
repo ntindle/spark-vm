@@ -99,11 +99,12 @@ Bearer <redacted> 401s *immediately* — heartbeats, rotation, and bootstrap
 all refuse it from that moment. Revocation is one-way: the box comes back
 only by re-pairing (`request` + `redeem`).
 
-**Owner key leaked → delete it, mint a replacement.** Revoke the leaked key
-(`DELETE /v1/owner/keys/{id}`); the last-active-key guard prevents locking
-yourself out. (Until the minting gap above is closed, keep at least one
-working key somewhere safe — preferably two, via the key you saved at
-creation; there is exactly one minting event per database lifetime.)
+**Owner key leaked → revoke it, fall back to the saved backup key.**
+Revoke the leaked key (`DELETE /v1/owner/keys/{id}`) using the backup you
+saved at creation; the last-active-key guard prevents locking yourself
+out. There is **no mint-a-replacement path today** (the #878 gap above):
+the saved backup key is your only spare, which is exactly why day-0 says
+to store it like infrastructure.
 
 **A 401 on the box → re-pair, don't fight it.** 401 means the token is dead
 (expired, revoked, or never valid): `request` + `redeem` again.
