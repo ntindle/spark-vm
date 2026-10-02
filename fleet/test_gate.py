@@ -245,21 +245,24 @@ def test_wave_assignment_pin_beats_default(tmp_path, keyfile, registry):
 def test_wave_default_hash_mod_4(tmp_path, keyfile, registry):
     man = wave_manifest(tmp_path, "wave-4", 4, {})
     out = publish(tmp_path, keyfile, registry, man)
-    box = "some-box-99"
-    expect = int(hashlib.sha256(box.encode()).hexdigest(), 16) % 4
-    ans = query_state(out, box, keys_spec(keyfile))
-    assert ans["repo_my_wave"] == str(expect)
+    # Golden values: the formula sha256(box_id) % 4 is pinned here, not
+    # recomputed — a formula change must fail this test, not follow it.
+    for box, wave in (("some-box-99", 0), ("box-01", 1), ("box-07", 3)):
+        ans = query_state(out, box, keys_spec(keyfile))
+        assert ans["repo_my_wave"] == str(wave), box
     # live=4: every wave 0..3 is at or before the live wave.
+    ans = query_state(out, "some-box-99", keys_spec(keyfile))
     assert ans["repo_permitted"] == "true"
 
 
 def test_wave_not_yet_live_is_not_permitted(tmp_path, keyfile, registry):
     man = wave_manifest(tmp_path, "wave-2", 1, {})
     out = publish(tmp_path, keyfile, registry, man)
-    box = "some-box-99"
-    my_wave = int(hashlib.sha256(box.encode()).hexdigest(), 16) % 4
-    ans = query_state(out, box, keys_spec(keyfile))
-    assert ans["repo_permitted"] == ("true" if my_wave <= 1 else "false")
+    # some-box-99 is wave 0 (golden, see test_wave_default_hash_mod_4).
+    ans = query_state(out, "some-box-99", keys_spec(keyfile))
+    assert ans["repo_permitted"] == "true"  # wave 0 <= live 1
+    ans = query_state(out, "box-07", keys_spec(keyfile))
+    assert ans["repo_permitted"] == "false"  # wave 3 > live 1
 
 
 def test_canary_is_pin_only(tmp_path, keyfile, registry):
@@ -296,42 +299,51 @@ def test_permitted_exit_codes(tmp_path, keyfile, registry, manifest):
 
 # --- freeze drill (§4 acceptance) -------------------------------------------
 
-def test_freeze_drill_two_boxes(tmp_path, keyfile, registry, manifest):
-    """Publish a freeze; every box reports state=frozen within
-    sync_cadence + ε. The drill tests *delivery*; effectuation is bounded
-    by §4's contract (sync_cadence + tick_interval), not by the drill."""
+def test_freeze_drill_two_boxes(tmp_path, sync_harness, keyfile, registry,
+                              manifest):
+    """§4 acceptance: publish a freeze; every box reports state=frozen within
+    sync_cadence + ε. Delivery runs through the real gate_sync.sh (hermetic
+    ssh/scp stand-ins), and each box is asserted live BEFORE the freeze —
+    the drill proves a live→frozen transition, not a permanently-frozen
+    fixture."""
     sync_cadence, eps = 2.0, 5.0
     boxes = ["box-01", "box-02"]
-    box_dirs = {}
+    estate = tmp_path / "estate"
+    fakeroot = tmp_path / "fakeroot"
     for box in boxes:
-        d = tmp_path / box / "gate"
-        d.mkdir(parents=True)
-        box_dirs[box] = str(d / "gate.json")
+        (estate / box).mkdir(parents=True)
+        (fakeroot / box / "var" / "lib" / "sparkvm" / "gate").mkdir(
+            parents=True)
+    env = sync_env(tmp_path, sync_harness, estate)
 
+    def sync(gate):
+        e = dict(env)
+        e["GATE"] = gate
+        r = run("bash", SYNC, env_extra=e)
+        assert r.returncode == 0, r.stderr
+
+    def states():
+        return {box: query_state(
+            str(fakeroot / box / "var" / "lib" / "sparkvm" / "gate"
+                / "gate.json"),
+            box, keys_spec(keyfile))["state"] for box in boxes}
+
+    # Baseline: a live gate delivers through the sync loop and every box
+    # reports live. Without this, "frozen" afterwards proves nothing.
+    sync(publish(tmp_path, keyfile, registry, manifest))
+    assert states() == {box: "live" for box in boxes}
+
+    # The freeze: publish, deliver, measure wall-clock until all frozen.
     t0 = time.monotonic()
-    gate = publish(tmp_path, keyfile, registry, manifest, freeze=True)
-    # Simulated delivery: the operator sync loop copies the document to
-    # each box. The copy itself is fast; the bound under test is the
-    # delivery latency (here: immediate) plus the query cadence.
-    time.sleep(0.5)  # delivery latency < sync_cadence
-    for box in boxes:
-        with open(gate, "rb") as fh:
-            data = fh.read()
-        with open(box_dirs[box], "wb") as fh:
-            fh.write(data)
-
+    sync(publish(tmp_path, keyfile, registry, manifest, freeze=True))
     deadline = t0 + sync_cadence + eps
-    frozen = set()
-    while time.monotonic() < deadline and len(frozen) < len(boxes):
-        for box in boxes:
-            if box in frozen:
-                continue
-            ans = query_state(box_dirs[box], box, keys_spec(keyfile))
-            if ans["state"] == "frozen":
-                frozen.add(box)
+    while time.monotonic() < deadline:
+        if all(s == "frozen" for s in states().values()):
+            break
         time.sleep(0.2)
     elapsed = time.monotonic() - t0
-    assert frozen == set(boxes), f"only {frozen} froze before the deadline"
+    assert all(s == "frozen" for s in states().values()), \
+        "not all boxes reported frozen before the deadline"
     assert elapsed <= sync_cadence + eps, f"freeze took {elapsed:.1f}s"
 
 
@@ -643,3 +655,105 @@ def test_gate_sync_rejects_option_injection(tmp_path, sync_harness, keyfile,
     r = run("bash", SYNC, env_extra=env)
     assert r.returncode == 1
     assert "invalid ssh-target" in r.stderr
+
+
+def test_gate_cap_nonancestor_divergence_refuses(tmp_path):
+    # QA M3: a max_permitted_commit that exists in the repo but is not an
+    # ancestor of the deploy head (registry disagrees with upstream) must
+    # refuse — silently deploying it would converge on a foreign history.
+    repo, one, two, three = fixture_repo(tmp_path)
+    base = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                          cwd=repo, capture_output=True, text=True,
+                          check=True).stdout.strip()
+    run = lambda *a: subprocess.run(a, cwd=repo, check=True,
+                                   capture_output=True)
+    run("git", "checkout", "-qb", "div", one)
+    with open(os.path.join(repo, "g"), "w") as fh:
+        fh.write("diverged")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "diverged")
+    div = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                         capture_output=True, text=True,
+                         check=True).stdout.strip()
+    run("git", "checkout", "-q", base)
+    env = gate_env(tmp_path, repo, div)
+    r = bash_source(f'gate_cap "{one}" "{three}"', env_extra=env)
+    assert r.returncode == 2
+    assert "not an ancestor" in r.stderr
+
+
+def test_gate_cap_query_invocation_failure_refuses(tmp_path):
+    # QA M5: gate_query failing to execute is not a gate verdict — the cap
+    # must refuse (fail closed), never deploy blind.
+    repo, one, two, three = fixture_repo(tmp_path)
+    bad = tmp_path / "bad-query.py"
+    bad.write_text("#!/usr/bin/env python3\nimport sys; sys.exit(1)\n")
+    os.chmod(bad, 0o755)
+    env = gate_env(tmp_path, repo, two)
+    env["GATE_QUERY"] = str(bad)
+    r = bash_source(f'gate_cap "{one}" "{three}"', env_extra=env)
+    assert r.returncode == 2
+    assert "failed to run" in r.stderr
+
+
+def test_gate_cap_missing_query_file_unmanaged(tmp_path):
+    # QA M4: no installed gate_query.py means the box predates G18 gating —
+    # warn and proceed uncapped (pre-G18 behavior), not refuse.
+    repo, one, two, three = fixture_repo(tmp_path)
+    env = gate_env(tmp_path, repo, two)
+    env["GATE_QUERY"] = str(tmp_path / "nope.py")
+    r = bash_source(f'gate_cap "{one}" "{three}"', env_extra=env)
+    assert r.returncode == 0
+    assert r.stdout.strip() == three  # uncapped
+    assert "unmanaged" in r.stderr
+
+
+def test_gate_cap_permitted_equals_new(tmp_path):
+    repo, one, two, three = fixture_repo(tmp_path)
+    env = gate_env(tmp_path, repo, three)
+    r = bash_source(f'gate_cap "{two}" "{three}"', env_extra=env)
+    assert r.returncode == 0
+    assert r.stdout.strip() == three
+
+
+def test_permitted_bad_component_is_usage_error(tmp_path, keyfile, registry,
+                                               manifest):
+    out = publish(tmp_path, keyfile, registry, manifest)
+    r = run(sys.executable, QUERY, "--box-id", "box-07",
+            "--keys", keys_spec(keyfile), "--gate", out,
+            "permitted", "nope")
+    assert r.returncode == 2
+
+
+def pending_range_env(tmp_path, repo, permitted_commit, freeze=False):
+    """Hermetic pending_range env: a local 'origin' so fetch_main needs no
+    network, and an isolated state dir so no real watermark is read."""
+    run = lambda *a: subprocess.run(a, cwd=repo, check=True,
+                                   capture_output=True)
+    run("git", "remote", "add", "origin", repo)
+    run("git", "branch", "-f", "main", "HEAD")  # origin needs a main ref
+    env = gate_env(tmp_path, repo, permitted_commit, freeze=freeze)
+    env["PINNED_UPSTREAM"] = repo
+    env["UPDATER_STATE_DIR"] = str(tmp_path / "state")
+    return env
+
+
+def test_pending_range_first_run_capped_by_gate(tmp_path):
+    # Integration: with no watermark, pending_range deploys from the empty
+    # tree — but the gate caps the target at max_permitted_commit, so the
+    # first run converges on the permitted commit, not origin/main's head.
+    repo, one, two, three = fixture_repo(tmp_path)
+    env = pending_range_env(tmp_path, repo, two)
+    r = bash_source("pending_range", env_extra=env)
+    assert r.returncode == 0, r.stderr
+    old, new = r.stdout.strip().split()
+    assert old == "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    assert new == two
+
+
+def test_pending_range_first_run_frozen_refuses(tmp_path):
+    repo, one, two, three = fixture_repo(tmp_path)
+    env = pending_range_env(tmp_path, repo, two, freeze=True)
+    r = bash_source("pending_range", env_extra=env)
+    assert r.returncode == 2
+    assert "frozen" in r.stderr
