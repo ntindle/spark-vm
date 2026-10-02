@@ -11,9 +11,21 @@ Implements issue #844's box side and the human-approval side:
 
   Owner (any machine; needs an owner API key):
     spark-pair.py approve --pairing-id <id>  # verify fingerprint, approve
+    spark-pair.py revoke --box-id <id>       # revoke a box token immediately
+
+  Box token rotation (issue #846):
+    spark-pair.py rotate                     # new short-lived token, proof of
+                                             # possession (ed25519 signature)
+    spark-pair.py rotate --auto              # cron-friendly: rotate only when
+                                             # the token expires within 6 h
 
 The private key never leaves the box. The pairing code expires (15 min).
-The bearer token issued at redeem is short-lived (24 h); rotation is #846.
+The bearer token issued at redeem is short-lived (24 h); `rotate` replaces
+it before expiry so heartbeats never drop. The server half of rotation
+(POST /v1/boxes/token/rotate, POST /v1/boxes/{id}/revoke) is specified in
+pairing/README.md; this client implements that contract. The plane update
+implementing the endpoints is still pending — `rotate`/`revoke` report
+that honestly instead of failing opaquely.
 
 Stdlib only. State lives in ~/.config/spark-pair (override with --dir or
 SVM_PAIR_DIR). Key/token files are written mode 0600. Nothing secret is
@@ -21,11 +33,13 @@ ever printed.
 """
 import argparse
 import base64
+import fcntl
 import getpass
 import json
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -46,6 +60,9 @@ def _state_dir(args):
 def _write_private(path, data):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
+        # 0600 at creation is not enough: a pre-existing file keeps its
+        # wider mode through the write. Force it every time.
+        os.fchmod(fd, 0o600)
         os.write(fd, data)
     finally:
         os.close(fd)
@@ -183,18 +200,188 @@ def cmd_redeem(args):
     print(f"enrolled as {resp['box_id']} — token saved to {enroll_path} (0600)")
     exp = time.strftime("%Y-%m-%d %H:%M %Z",
                         time.localtime(resp["token_expires_at"]))
-    print(f"token expires {exp} (rotation: issue #846)")
+    print(f"token expires {exp} (rotate before then: spark-pair.py rotate --auto)")
     return 0
 
 
 def _owner_key(args):
     key = args.owner_key or os.environ.get("SVM_OWNER_KEY")
     if not key:
-        key = getpass.getpass("Owner API key: ").strip()
+        try:
+            key = getpass.getpass("Owner API key: ").strip()
+        except EOFError:
+            key = ""  # no tty and no env/argv key: fall through to the error
     if not key:
         print("owner API key required (SVM_OWNER_KEY or --owner-key)")
         sys.exit(1)
     return key
+
+
+# ---- #846: token rotation -------------------------------------------------
+# Signature message: b"spark-rotate-v1|<box_id>|<window>" where window =
+# floor(now/300). The server accepts the current window ± 1 (clock skew +
+# in-flight requests) and verifies the signature against the box's stored
+# pubkey — proof of possession, so a stolen Bearer <redacted> alone cannot rotate
+# the box out. The server rotates atomically (old token dies on success)
+# and keeps the previous token valid for a short grace so a box that
+# crashes between the POST and the local save is not locked out.
+
+ROTATE_WINDOW = 300
+AUTO_ROTATE_WITHIN = 6 * 3600  # --auto rotates when expiry is this near
+# #846's short-lived-token goal, client-enforced: the plane mints 24 h
+# tokens; anything beyond 48 h is a misconfigured plane, not a token.
+MAX_TOKEN_LIFETIME = 48 * 3600
+
+
+def _rotate_message(box_id, window):
+    return f"spark-rotate-v1|{box_id}|{window}".encode()
+
+
+def cmd_rotate(args):
+    d = _state_dir(args)
+    key_path, _ = _key_paths(d)
+    enroll_path = os.path.join(d, "enrollment.json")
+    if not os.path.exists(enroll_path):
+        print("not enrolled yet — run `spark-pair.py init`, `request`, `redeem` first")
+        return 1
+    try:
+        enroll = _read_json_file(enroll_path)
+    except (OSError, ValueError) as e:
+        # The --auto cron path must never die with a traceback on a
+        # corrupted state file.
+        print(f"enrollment.json is unreadable ({e}) — re-run `redeem`")
+        return 1
+    box_id, token = enroll.get("box_id"), enroll.get("token")
+    if not box_id or not token:
+        print("enrollment.json is missing box_id/token — re-run `redeem`")
+        return 1
+    expires_at = enroll.get("token_expires_at")  # None = grandfathered
+    if not isinstance(expires_at, int) or isinstance(expires_at, bool):
+        # Corrupt/legacy expiry: treat like grandfathered (unknown bound)
+        # so --auto rotates now instead of crashing on the arithmetic.
+        expires_at = None
+    control = (args.control or enroll.get("control")
+               or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL)
+    now = int(time.time())
+    if args.auto:
+        # Cron-friendly: stay quiet unless the token is actually near expiry.
+        # Grandfathered tokens (no expiry) always rotate: they are the
+        # unbounded-lifetime case #846 exists to eliminate.
+        if expires_at is not None and expires_at - now > args.within:
+            return 0
+    sig_b64 = None
+    if os.path.exists(key_path):
+        try:
+            seed = base64.b64decode(open(key_path, "rb").read())
+        except (OSError, ValueError) as e:
+            print(f"box.key is unreadable ({e}) — re-run `init --force` "
+                  "and re-pair the box")
+            return 1
+        sig = ed25519.sign(seed, _rotate_message(box_id, now // ROTATE_WINDOW))
+        sig_b64 = base64.b64encode(sig).decode()
+    # Serialize the network call + the save under a lock: a manual `rotate`
+    # racing the --auto cron job could otherwise leave a dead token on disk
+    # (A rotates → T2, B rotates with graced T1 → T3 killing T2, A's save of
+    # T2 lands last).
+    lock_path = os.path.join(d, ".rotate.lock")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return _cmd_rotate_locked(args, d, enroll_path, box_id, token,
+                                  control, sig_b64, now)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def _cmd_rotate_locked(args, d, enroll_path, box_id, token, control,
+                       sig_b64, now):
+    # signature: null when the box has no keypair (pre-#844 enrollment) —
+    # the server may accept Bearer <redacted>-only rotation for those boxes.
+    status, resp = _http(
+        "POST", control.rstrip("/") + "/v1/boxes/token/rotate",
+        {"signature": sig_b64},
+        {"Authorization": "Bearer " + token})
+    if status == 404 and resp.get("error") == "http=404":
+        # The _http fallback payload (no JSON body): the plane does not
+        # implement the endpoint yet — do NOT report this as any other
+        # failure class.
+        print("rotation failed: this control plane does not implement "
+              "POST /v1/boxes/token/rotate yet (it ships with the plane "
+              "update closing #846) — nothing was changed locally")
+        return 1
+    if status == 401:
+        print(f"rotation rejected ({resp.get('error', status)}): this box "
+              "token is dead (expired, revoked, or never valid) — re-pair "
+              "the box (`request` + `redeem`)")
+        return 1
+    if status == 403:
+        # Bearer <redacted> accepted but the proof was rejected: do NOT re-pair —
+        # the enrollment is fine, the proof or the plane is at fault.
+        print(f"rotation refused ({resp.get('error', status)}): the plane "
+              "rejected the proof-of-possession signature — check the box "
+              "clock (window is ±300 s) and the plane, then retry; the "
+              "current token is untouched")
+        return 1
+    if status != 200 or not resp.get("ok") or not resp.get("token"):
+        print(f"rotation failed: {resp.get('error', status)}")
+        return 1
+    new_exp = resp.get("token_expires_at")
+    if (not isinstance(new_exp, int) or isinstance(new_exp, bool)
+            or new_exp <= now or new_exp - now > MAX_TOKEN_LIFETIME):
+        # Never persist a token the plane did not bound: a missing, past,
+        # or absurdly long expiry defeats #846's short-lived-token goal.
+        # The old enrollment.json is untouched; the plane's previous-token
+        # grace keeps the old token usable for the retry.
+        print("rotation failed: plane returned an unusable token expiry — "
+              "nothing was saved, re-run `rotate`")
+        return 1
+    if sig_b64 is not None and resp.get("proof") != "ed25519":
+        # Fail closed on proof-of-possession: we sent a signature, so the
+        # plane skipping its verification would make the headline property
+        # ("a stolen Bearer <redacted> alone cannot rotate the box out") theater.
+        print(f"rotation failed: plane did not verify the proof-of-possession "
+              f"signature (proof={resp.get('proof')!r}) — refusing to save; "
+              "fix the plane or re-pair the box")
+        return 1
+    tmp = enroll_path + ".tmp"
+    _write_private(tmp, json.dumps(
+        {"box_id": box_id, "token": resp["token"],
+         "token_expires_at": new_exp, "control": control},
+        indent=2).encode())
+    os.replace(tmp, enroll_path)
+    exp = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(new_exp))
+    print(f"rotated box token for {box_id} "
+          f"(proof: {resp.get('proof', 'unknown')}); new token expires {exp}")
+    if resp.get("rekey_recommended"):
+        print("note: the plane has no keypair for this box — re-pair "
+              "(`request` + `redeem`) to get proof-of-possession rotation")
+    return 0
+
+
+def cmd_revoke(args):
+    control = args.control or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL
+    box_id = args.box_id
+    status, resp = _http(
+        "POST", control.rstrip("/") + "/v1/boxes/"
+        + urllib.parse.quote(box_id, safe="") + "/revoke", None,
+        {"Authorization": "Bearer " + _owner_key(args)})
+    if status == 404:
+        if resp.get("error") == "http=404":
+            # The _http fallback payload (no JSON body): the plane does not
+            # implement the endpoint yet — not "no such box".
+            print("revoke failed: this control plane does not implement "
+                  "POST /v1/boxes/{id}/revoke yet (it ships with the plane "
+                  "update closing #846) — nothing was revoked")
+        else:
+            print(f"no such box: {box_id}")
+        return 1
+    if status != 200 or not resp.get("ok"):
+        print(f"revoke failed: {resp.get('error', status)}")
+        return 1
+    print(f"revoked the box token for {box_id} — its heartbeats are "
+          "rejected immediately")
+    return 0
 
 
 def cmd_approve(args):
@@ -290,6 +477,24 @@ def main(argv=None):
                         "typed pairing code alone approves (requires "
                         "--pairing-id)")
     s.set_defaults(fn=cmd_approve)
+
+    s = sub.add_parser("rotate", help="box: rotate the Bearer <redacted> "
+                                     "(proof of possession; plane update "
+                                     "pending — see pairing/README.md)")
+    s.add_argument("--auto", action="store_true",
+                   help="cron-friendly: rotate only when the token expires "
+                        "within --within seconds (quiet success otherwise)")
+    s.add_argument("--within", type=int, default=AUTO_ROTATE_WITHIN,
+                   help=f"auto-rotate threshold in seconds "
+                        f"(default {AUTO_ROTATE_WITHIN})")
+    s.set_defaults(fn=cmd_rotate)
+
+    s = sub.add_parser("revoke", help="owner: revoke a box's Bearer <redacted> "
+                                     "immediately (plane update pending — "
+                                     "see pairing/README.md)")
+    s.add_argument("--box-id", required=True, help="box id to revoke")
+    s.add_argument("--owner-key", help="owner API key (else SVM_OWNER_KEY)")
+    s.set_defaults(fn=cmd_revoke)
 
     args = ap.parse_args(argv)
     return args.fn(args)
