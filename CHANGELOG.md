@@ -53,6 +53,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The weekly toolset self-updater now converges the apt-based toolset too (#532): docker, node, and gh are upgraded in place on the weekly run — only packages the box already has are touched, never a bare system-wide upgrade, and the run still defers while agent jobs are active. (#871)
+
 - The box now ships an in-repo heartbeat sender (`spark-pair.py heartbeat`, #864): the control plane's liveness contract finally has a producer — one cron-friendly call per minute sends the box Bearer <redacted> plus a small status payload, exits non-zero and logs loudly on any failure (a missed heartbeat never fabricates an ok), and the fleet dashboard's staleness chips are honest end-to-end.
 - Durable owner-to-box command queue on the control plane: per-box
   sequential commands with short leases, idempotent acks, and

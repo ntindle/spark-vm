@@ -1,15 +1,15 @@
 # Toolset update (`deploy/toolset-update.sh`)
 
-**Status: framework + two real layers.** Partial implementation of issue
+**Status: framework + three real layers.** Partial implementation of issue
 #532 ("Self-update system: keep the box and its default toolset current").
 This ships the framework — trust model, scheduling, audit, idle gate,
-opt-out — and two real updater layers: `os-security`
-(unattended-upgrades) and `cua-driver` (pinned reinstall from the upstream
-GitHub release). The remaining #532 slices (further component updaters,
-snapshots/rollback, failure freeze, independent backup path) are explicitly
-follow-ups. Reconciled with #542's read-only status plane — this script is
-the *update* plane; see "Two planes" in `docs/SELF_UPDATE.md` for the
-canonical architecture.
+opt-out — and three real updater layers: `os-security`
+(unattended-upgrades), `cua-driver` (pinned reinstall from the upstream
+GitHub release), and `apt` (docker / node / gh converged via apt). The
+remaining #532 slices (Playwright updater, snapshots/rollback, failure
+freeze, independent backup path) are explicitly follow-ups. Reconciled with
+#542's read-only status plane — this script is the *update* plane; see "Two
+planes" in `docs/SELF_UPDATE.md` for the canonical architecture.
 
 ## What it does
 
@@ -23,7 +23,7 @@ Commands:
 | Command | Effect |
 | ------- | ------ |
 | `status` | TSV per-component *update state* (`ok` / `repair-needed` for `os-security`; `present` / `absent` for layers without an updater yet); operator-readable, no root needed. For installed-version drift against the pin list, read the status plane instead: `python3 scripts/self_update.py status` (see "Two planes" in `docs/SELF_UPDATE.md`) |
-| `update [--force] [--dry-run] [--now]` | Repair `os-security` and enforce the `cua-driver` pin (fail-loud, idempotent); `--now` is informational-only — the timer owns the weekly schedule, the flag only logs intent |
+| `update [--force] [--dry-run] [--now]` | Repair `os-security`, enforce the `cua-driver` pin, and apt-converge docker / node / gh (fail-loud, idempotent); `--now` is informational-only — the timer owns the weekly schedule, the flag only logs intent |
 | `install` / `uninstall` | Install the systemd units and backfill the installed script copy **plus the installed pins file** / remove the units only (the installed copy and state dir — including audit history — are left in place) |
 | `optout` / `optin` | Machine-wide opt-out via `/etc/sparkvm/toolset-update.optout` (or `TOOLSET_UPDATE_OPTOUT=1` in the environment) |
 | `version` | Print the framework version |
@@ -83,6 +83,46 @@ Overrides (environment): `PINS_FILE` (installed pins path),
 `CUA_DRIVER_OWNER`/`CUA_DRIVER_GROUP` (default `ntindle`),
 `CUA_RELEASE_BASE` (default `https://github.com/trycua/cua/releases/download`).
 
+## The `apt` layer (issue #532)
+
+The `apt` layer converges the toolset's **apt-based** defaults — docker
+engine + compose, node/npm (nodesource), gh — to the newest versions the
+box's apt sources offer, once a week, behind the idle gate. On every
+`update`:
+
+- **Detection is by installed package, never by PATH.** For each tool the
+  layer holds a candidate package list (`docker-ce`, `docker-ce-cli`,
+  `containerd.io`, `docker-compose-plugin`, `docker.io` for docker —
+  covering boxes provisioned from Docker's own repo *and* from Ubuntu's;
+  `nodejs` for node/npm; `gh` for gh) and upgrades only the candidates that
+  are actually installed (`dpkg -l` status `ii`). A tool the box never
+  provisioned simply no-ops — the layer installs nothing new.
+- **Only the allowlisted names are passed to apt.** It is always
+  `apt-get install --only-upgrade <names>` — never a bare `apt upgrade` —
+  so unrelated packages and held packages are untouched.
+- **Non-interactive by construction:** `-y`, `DEBIAN_FRONTEND=noninteractive`,
+  and conffile `confdef`/`confold` (keep the box's existing config on
+  conflicts — this runs unattended). Accepted tradeoff, stated here: `confold`
+  silently skips upstream security-hardening conffile *defaults*, so a package
+  that ships a tighter default config won't apply it until the operator
+  intervenes. `--dry-run` maps to `apt-get -s
+  install`, a true simulation that changes nothing.
+- **List freshness comes from the `os-security` layer's daily refresh**
+  (`unattended-upgrades` runs `apt-get update` daily) — the `apt` layer
+  never runs `apt-get update` itself.
+- A missing `apt-get`, a missing `dpkg`, or a failed upgrade all
+  **fail closed**: `update` exits non-zero and the audit line names `apt`.
+- **Service restarts are possible.** Maintainer scripts (e.g. `docker-ce`'s
+  `dockerd` restart) may restart services — unlike the v0 layers, the `apt`
+  layer does not promise otherwise. The protection is the **idle gate**
+  (defer while agent jobs are live) plus the weekly quiet-hours window; the
+  gate's known blind spots (per-uid tmux sockets) are now load-bearing for
+  this layer, and making the gate uid-aware is the follow-up that tightens
+  it.
+
+Overrides (environment): `APT_DOCKER_PKGS` / `APT_NODE_PKGS` / `APT_GH_PKGS`
+(space-separated candidate package names per tool).
+
 ## Trust model
 
 - The systemd **timer runs the installed copy**
@@ -93,11 +133,14 @@ Overrides (environment): `PINS_FILE` (installed pins path),
   gate); `--force` bypasses. **Known limitation:** tmux sockets are per-uid,
   so the gate (running as root) only sees root's tmux server — `mjob-*`
   sessions owned by another uid (e.g. `ntindle`) are invisible to it, and a
-  missing/broken tmux probe also reads as "no jobs". In v0 the blind gate is
-  acceptable because `update` never restarts services, and its only package
-  install is the one-time `unattended-upgrades` bootstrap via the box's apt
-  sources (not a running-workload change) — but the gate must not be relied on
-  as a hard exclusion until it is made uid-aware (follow-up slice).
+  missing/broken tmux probe also reads as "no jobs". The blind gate was
+  acceptable for the v0 layers (they never restarted services), but the `apt`
+  layer can trigger maintainer-script service restarts — the gate plus the
+  weekly quiet-hours window are the protection there, so making the gate
+  uid-aware is now a real follow-up rather than hygiene (see "Follow-ups").
+  The muse-job v2 cutover (issue #228 — jobs move off tmux entirely) will
+  blind the tmux-only gate permanently, so the uid-aware/registry-check
+  follow-up must land before or with v2.
 - The `os-security` repair **overwrites** `/etc/apt/apt.conf.d/20auto-upgrades`
   with exactly the two required lines. Any operator tuning in that file
   (e.g. `Unattended-Upgrade::Allowed-Origins`) is discarded on repair — on a
@@ -114,24 +157,38 @@ Overrides (environment): `PINS_FILE` (installed pins path),
   under `$CUA_RELEASE_BASE/cua-driver-rs-v<pin>/`), with SHA-256 verification
   against the release's own checksums file before anything is executed or
   installed — see "The `cua-driver` layer" for the fail-closed rules. The
-  only package-manager call remains the one-time
+  package-manager call sites are the one-time
   `apt-get install -y unattended-upgrades` bootstrap (downloads from the
   box's configured, signature-verified apt sources, only if the package is
-  missing). The suite pins exactly that shape — no `wget`/`git clone`/`pip
-  install`/`npm install`, one `apt-get` call site, two `curl` call sites.
+  missing) and the `apt` layer's weekly
+  `apt-get install --only-upgrade <allowlisted names>` (same sources, never
+  installs anything not already present). The suite pins exactly that shape —
+  no `wget`/`git clone`/`pip install`/`npm install`, two `apt-get` call
+  sites, two `curl` call sites.
 
 ## Component status
 
 `os-security` reports `ok` / `repair-needed`; `cua-driver` is enforced
-against the installed pins file (on-pin, absent→install, drift→reinstall).
-Docker, node, npm, gh, and Playwright remain **status probes only**
-(`present` / `absent`) until their updater layers land.
+against the installed pins file (on-pin, absent→install, drift→reinstall);
+docker / node / gh are converged via the `apt` layer (installed packages
+only). npm rides with the nodesource `nodejs` package. Playwright remains
+a **status probe only** (`present` / `absent`) until its updater layer
+lands.
 
 ## Follow-ups (issue #532, not in this slice)
 
-- Real updater layers for docker / node / npm / gh / Playwright
+- Real updater layer for Playwright (pip + browsers + system libs)
   (adopt `scripts/self_update_pins.conf` as the canonical pin file per the
   reconciliation contract in `docs/SELF_UPDATE.md` "Two planes")
+- Make the idle gate uid-aware (it now protects the `apt` layer's
+  service-restart surface, not just hygiene); land before/with the muse-job
+  v2 cutover (#228), which blinds the tmux-only probe permanently
+- Validate `APT_*_PKGS` candidates against the Debian package-name pattern
+  (defense in depth against glob expansion / option injection via root-set
+  env; currently the only setter with privilege is root, so no boundary is
+  crossed today)
+- Verify `needrestart`'s behavior under `DEBIAN_FRONTEND=noninteractive` on
+  the target box (it can restart services beyond maintainer scripts)
 - Status-plane wiring: consult `self_update.py` drift output when deciding
   what to update
 - Pre-update snapshots and rollback
@@ -142,5 +199,5 @@ Docker, node, npm, gh, and Playwright remain **status probes only**
 
 ## Tests
 
-`deploy/test_toolset_update.py` — 42 hermetic tests (stub PATH, real-tool
+`deploy/test_toolset_update.py` — 52 hermetic tests (stub PATH, real-tool
 symlinks, no root assumptions). Wired into CI alongside the deploy tests.
