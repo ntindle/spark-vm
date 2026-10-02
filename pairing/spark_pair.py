@@ -198,7 +198,17 @@ def _owner_key(args):
 def cmd_approve(args):
     control = args.control or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL
     base = control.rstrip("/") + "/v1/pairing"
-    auth = {"Authorization": "Bearer " + _owner_key(args)}
+    if args.bootstrap:
+        # One-shot fresh-database bootstrap: no owner key exists yet, so the
+        # server accepts the typed pairing code with no Authorization
+        # header (see pairing/README.md). Requires --pairing-id: there is
+        # no owner key to list with.
+        if not args.pairing_id:
+            print("--bootstrap requires --pairing-id (no owner key to list with)")
+            return 1
+        auth = {}
+    else:
+        auth = {"Authorization": "Bearer " + _owner_key(args)}
 
     if args.pairing_id:
         pid = args.pairing_id
@@ -273,6 +283,10 @@ def main(argv=None):
     s = sub.add_parser("approve", help="owner: verify fingerprint + approve")
     s.add_argument("--pairing-id", help="pairing id (lists pending if omitted)")
     s.add_argument("--owner-key", help="owner API key (else SVM_OWNER_KEY)")
+    s.add_argument("--bootstrap", action="store_true",
+                   help="fresh-database bootstrap: no owner key yet; the "
+                        "typed pairing code alone approves (requires "
+                        "--pairing-id)")
     s.set_defaults(fn=cmd_approve)
 
     args = ap.parse_args(argv)

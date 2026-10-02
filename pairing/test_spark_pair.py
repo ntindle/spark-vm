@@ -27,6 +27,7 @@ class Ctx:
         self.name = "testbox"
         self.pairing_id = None
         self.owner_key = "svm_owner_test"
+        self.bootstrap = False
         for k, v in kw.items():
             setattr(self, k, v)
 
@@ -161,6 +162,38 @@ def test_approve_requires_code_match(ctx, monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda *a: "abcd efgh")
     assert spark_pair.cmd_approve(ctx) == 0
     assert seen.get("code") == "abcd efgh"
+
+
+def test_approve_bootstrap_sends_no_auth_header(ctx, monkeypatch, capsys):
+    fp = "SHA256:abcd efgh"
+    seen = {}
+
+    def fake_http(method, url, body=None, headers=None):
+        seen["auth"] = (headers or {}).get("Authorization")
+        if url.endswith("/pair_1") and method == "GET":
+            return 200, {"ok": True, "pairing": {
+                "id": "pair_1", "box_name": "b1", "fingerprint": fp,
+                "status": "pending"}}
+        if url.endswith("/approve"):
+            return 200, {"ok": True, "approved": "pair_1"}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    ctx.pairing_id = "pair_1"
+    ctx.bootstrap = True
+    monkeypatch.setattr("builtins.input", lambda *a: "ABCD-EFGH")
+    assert spark_pair.cmd_approve(ctx) == 0
+    assert seen["auth"] is None  # no Authorization header on bootstrap
+
+
+def test_approve_bootstrap_requires_pairing_id(ctx, monkeypatch, capsys):
+    ctx.pairing_id = None
+    ctx.bootstrap = True
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no HTTP yet")))
+    assert spark_pair.cmd_approve(ctx) == 1
+    assert "requires --pairing-id" in capsys.readouterr().out
 
 
 def test_approve_lists_pending_when_no_id(ctx, monkeypatch, capsys):

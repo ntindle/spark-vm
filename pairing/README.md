@@ -42,7 +42,9 @@ box saves token (0600), heartbeats as before
 ## Security properties
 
 - **No self-registration.** The old register endpoint is gone (404). A box
-  becomes enrolled only after an owner-key holder approves its pairing.
+  becomes enrolled only after a human approves its pairing — normally an
+  owner-key holder; on a fresh database only, the first-claim bootstrap
+  (see below) until the first owner key exists.
 - **Proof of possession.** Redeem requires an ed25519 signature over a
   server-issued 32-byte challenge, verified against the pubkey submitted at
   request time. Requesting a pairing for someone else's box name gains
@@ -101,8 +103,17 @@ python3 pairing/spark_pair.py redeem
 On a fresh database there are no owner keys yet, so the approve call cannot
 carry one. While `owner_keys` is empty, `POST /v1/pairing/{id}/approve`
 accepts the correct typed pairing code with no `Authorization` header and
-records the approval as `approved_by='bootstrap'` — the pairing id
-(128-bit) and code (40-bit, hashed) are known only to whoever requested the
-pairing, so this cannot be driven by anyone else. The path closes the
-moment the first owner key exists; the normal bootstrap
-(`POST /v1/owner/bootstrap` with a box bearer token) then mints it.
+records the approval as `approved_by='bootstrap'`; `GET /v1/pairing/{id}`
+is likewise readable so the human can verify the fingerprint first. The
+client spells this `approve --pairing-id pair_... --bootstrap`.
+
+Honest threat model: `/v1/pairing/request` is public, so on a fresh
+database anyone who can reach the Worker can request a pairing and
+self-approve it — the first party to complete
+request → approve → redeem → owner-bootstrap becomes the owner
+(first-claim race). The pairing id is 64-bit (`pair_` + 16 hex chars) and
+the code 40-bit (hashed): not guessable, but not a secret either. The
+operator wins the race by enrolling immediately after deploy on a trusted
+network; the window closes permanently at the first owner key. There is no
+better answer without a setup secret (deliberately removed in #843); the
+alternative is an unenrollable fresh database.
