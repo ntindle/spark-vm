@@ -13,7 +13,8 @@ unchanged).
 ## Features
 
 - **Owner sign-in.** Paste an owner API key (`svm_…`, minted via
-  `POST /v1/owner/bootstrap` or the keys endpoints). The key is held in the
+  `POST /v1/owner/bootstrap` — the only minting path; the `/v1/owner/keys`
+  endpoints list and revoke, they cannot mint). The key is held in the
   tab's `sessionStorage` only — the page never puts it in a cookie,
   `localStorage`, or a URL. Sign out (or close the tab) drops it.
 - **Fleet list.** Box name, id, status, and last-heartbeat age. Boxes with
