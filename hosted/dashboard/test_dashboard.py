@@ -124,16 +124,21 @@ def test_sync_check_detects_drift_without_writing(tmp_path):
 def test_byte_identity_fails_when_html_drifts(tmp_path, monkeypatch):
     # Acceptance pin for #858: with a worker reachable, an edit to
     # dashboard.html that skips the re-inline must fail the assertion.
+    canonical = _html()
     w = _scratch_worker(str(tmp_path / "worker.py"))
+    assert _inline_html(w) == canonical  # control: in sync before the edit
     mutated = str(tmp_path / "mutated.html")
     with open(mutated, "w", encoding="utf-8") as f:
-        f.write(_html() + "\n<!-- un-synced edit -->\n")
+        f.write(canonical + "\n<!-- un-synced edit -->\n")
     monkeypatch.setattr(_THIS, "HTML_PATH", mutated)
     with pytest.raises(AssertionError):
         assert _inline_html(w) == _html()
     # And the sync path restores it.
-    real = _scratch_worker(str(tmp_path / "worker2.py"))
-    assert _inline_html(real) == _html()
+    monkeypatch.undo()
+    stale = _scratch_worker(str(tmp_path / "worker2.py"),
+                            html="<!-- stale copy -->\n" + canonical)
+    assert sync_dashboard.sync(stale) is False  # rewrote
+    assert _inline_html(stale) == canonical
 
 
 def test_sync_refuses_missing_markers(tmp_path):
