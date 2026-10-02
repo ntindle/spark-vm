@@ -244,6 +244,17 @@ anonymized to counts; invited-but-expired → returns to `confirmed` with
 `confirmed_at` reset to the expiry time (back of the queue, no
 re-confirmation needed — the address is already verified).
 
+**Quarantined skipped lines:** when the service finds a torn or malformed
+line while loading the waiting list, the unreadable bytes are quarantined
+to a `rows.jsonl.skipped.<timestamp>.jsonl` sidecar in the data directory
+before any rewrite — never silently destroyed. Those sidecars may contain
+`owner_email` PII from lines the loader could not parse; they inherit the
+data directory's encrypted-at-rest property but are NOT covered by the
+automatic retention timers above (a quarantined line never entered the
+row store, so forget/purge cannot see it either — see #400). The operator
+must review each sidecar and delete it after hand-repair or deliberate
+retirement.
+
 ## 6. Abuse model
 
 Per path, because the defenses differ:

@@ -71,6 +71,13 @@ LOCK_FILE="$UPDATER_STATE_DIR/auto-deploy.lock"
 SNAPSHOT_DIR="$UPDATER_STATE_DIR/snapshots"
 LAST_FAILURE="$UPDATER_STATE_DIR/last-failure"
 INSTALLED_BIN="$UPDATER_STATE_DIR/bin"
+# G18 §5: path to the installed gate_query.py the pending_range gate cap
+# shells out to. Env-overridable for tests. The updater answers the gate as
+# this box: keys arrive via SPARKVM_GATE_KEYS (key_id=/path,...), box
+# identity via SPARKVM_BOX_ID — both set on the box's systemd unit by the
+# operator's install step, never in the repo. Unset keys = gate-unmanaged
+# box (pre-G18 behavior, see gate_cap).
+: "${GATE_QUERY:=$INSTALLED_BIN/gate_query.py}"
 # One-shot legacy migration state (BACKLOG follow-up (3) from the #85
 # security turn): set when the pre-#85 cred-ui checkout artifact has been
 # evaluated once, so the migration never re-runs.
@@ -902,6 +909,10 @@ cmd_init() {
     # digest read fails outright and the tick retries without converging.
     install -m 0644 "$SCRIPT_DIR/extra_inputs_hash_read.py" "$INSTALLED_BIN/extra_inputs_hash_read.py"
     install -m 0644 "$UPDATER_COMPONENTS_CONF" "$INSTALLED_BIN/components.conf"
+    # G18 S1a: the pending_range gate cap shells out to the installed copy of
+    # fleet/gate_query.py (the timer's $INSTALLED_BIN, not the checkout —
+    # same trust model as the updater script itself: re-run init to refresh).
+    install -m 0644 "$SCRIPT_DIR/../fleet/gate_query.py" "$INSTALLED_BIN/gate_query.py"
     record_updater_source
     log "installed updater to $INSTALLED_BIN (timer ExecStart must point here)"
     log "init done. Next: install the systemd unit + timer (see README.md)."
@@ -929,14 +940,104 @@ check_updater_drift() {
     cur="$(git -C "$UPDATER_REPO" rev-parse origin/main 2>/dev/null || echo unknown)"
     [ "$src" != "unknown" ] && [ "$cur" != "unknown" ] && [ "$src" != "$cur" ] || return 0
     git -C "$UPDATER_REPO" merge-base --is-ancestor "$src" "$cur" 2>/dev/null || return 0
-    git -C "$UPDATER_REPO" diff --quiet "$src" "$cur" -- deploy/ 2>/dev/null && return 0
+    git -C "$UPDATER_REPO" diff --quiet "$src" "$cur" -- deploy/ 2>/dev/null && \
+        git -C "$UPDATER_REPO" diff --quiet "$src" "$cur" -- fleet/gate_query.py 2>/dev/null && return 0
     log "WARNING: updater code is stale: installed copy came from $src,"
-    log "WARNING: origin/main $cur carries newer deploy/ changes that are NOT live."
+    log "WARNING: origin/main $cur carries newer deploy/ or fleet/gate_query.py changes that are NOT live."
     log "WARNING: re-run './deploy/auto-deploy.sh init' from an updated checkout."
 }
 
 # pending_range return codes: 0 = range ready on stdout; 1 = nothing to do
 # (up-to-date, or head is blocked after a rollback); 2 = error, do not proceed.
+#
+# gate_cap: G18 §4 — cap the deploy target at the gate's max_permitted_commit.
+# Prints the (possibly capped) sha on stdout. Return codes: 0 = range may
+# proceed (capped or unmanaged); 1 = nothing to do (the permitted max is
+# already deployed); 2 = frozen/refusal, do not proceed.
+# A box with no gate keys provisioned is gate-UNMANAGED (pre-G18 behavior,
+# warns once per tick): the fail-closed contract binds boxes the operator
+# provisioned (box_id + keys, G18 §5 install step), not boxes that never
+# got the install. Never print key material here — gate_query.py never does.
+gate_cap() {
+    # $1 = old (watermark, may be empty on first run), $2 = new (head).
+    # Prints the capped sha on stdout. NOTE: often runs inside $( ) — stdout
+    # is machine-readable, everything else goes through log() (stderr).
+    local old="$1" new="$2"
+    if [ ! -f "$GATE_QUERY" ]; then
+        log "gate unmanaged: $GATE_QUERY not installed — re-run '$0 init' from a checkout carrying fleet/gate_query.py to enable G18 gating"
+        echo "$new"
+        return 0
+    fi
+    if [ -z "${SPARKVM_GATE_KEYS:-}" ]; then
+        # Unmanaged has two flavors: a box that was never enrolled (silent,
+        # pre-G18 behavior — the default self-hosted single box gets no
+        # per-tick nag for a feature it never asked for), and a box that
+        # looks half-enrolled (a gate document is present but no keys — the
+        # operator forgot the G18 §5 install step). Only the second warns.
+        gate_file="${SPARKVM_GATE_JSON:-/var/lib/sparkvm/gate/gate.json}"
+        if [ -f "$gate_file" ]; then
+            log "gate unmanaged: $gate_file exists but SPARKVM_GATE_KEYS is unset — partial provisioning (G18 §5 install step); proceeding uncapped until keys are provisioned"
+        fi
+        echo "$new"
+        return 0
+    fi
+    local state gstate repo_max
+    if ! state="$(python3 "$GATE_QUERY" state)"; then
+        # gate_query exits 0 even on no-signal (it prints state=frozen); a
+        # nonzero exit is an invocation failure, not a gate verdict.
+        log "ERROR: gate_query failed to run — refusing to deploy (fail closed)"
+        return 2
+    fi
+    gstate="$(printf '%s\n' "$state" | sed -n 's/^state=//p')"
+    repo_max="$(printf '%s\n' "$state" | sed -n 's/^repo_max=//p')"
+    if [ "$gstate" != "live" ]; then
+        log "ERROR: gate state is '${gstate:-unknown}' — fleet frozen, refusing deploy (fail closed, G18 §4)"
+        return 2
+    fi
+    if [ -z "$repo_max" ]; then
+        log "ERROR: gate is live but names no repo max_permitted_commit — refusing to deploy"
+        return 2
+    fi
+    if ! [[ "$repo_max" =~ ^[0-9a-f]{40}$ ]] \
+        || ! git -C "$UPDATER_REPO" cat-file -e "$repo_max" 2>/dev/null; then
+        log "ERROR: gate's max_permitted_commit $repo_max is not a commit in the updater repo — refusing to deploy"
+        return 2
+    fi
+    repo_permitted="$(printf '%s\n' "$state" | sed -n 's/^repo_permitted=//p')"
+    if [ "$repo_permitted" != "true" ]; then
+        # G18 §2: a box whose wave is not live gets no version at all —
+        # gate_query's permit bit is the wave control, and the cap must
+        # honor it, not just the ceiling. Staging is a normal state, not an
+        # incident: return 1 (nothing to do), not 2. A missing permit bit
+        # fails safe the same way.
+        log "gate: this box's wave is not live for repo (repo_permitted=${repo_permitted:-missing}) — nothing to do"
+        return 1
+    fi
+    if [ -n "$old" ] && git -C "$UPDATER_REPO" merge-base --is-ancestor "$repo_max" "$old" 2>/dev/null; then
+        # The gate is a ceiling, not a downgrade order: a
+        # max_permitted_commit at or behind the deployed watermark
+        # (operator error, or a compromised controller key) must not rewind
+        # the mirror through pending_range's backwards range — nothing to do.
+        log "gate: max_permitted_commit $repo_max is at or behind the deployed watermark $old — refusing downgrade (nothing to do)"
+        return 1
+    fi
+    if [ "$repo_max" = "$new" ]; then
+        echo "$new"
+        return 0
+    fi
+    if git -C "$UPDATER_REPO" merge-base --is-ancestor "$repo_max" "$new" 2>/dev/null; then
+        if [ -n "$old" ] && [ "$repo_max" = "$old" ]; then
+            log "gate: max_permitted_commit $repo_max already deployed — nothing to do"
+            return 1
+        fi
+        log "gate: capping deploy target $new at max_permitted_commit $repo_max"
+        echo "$repo_max"
+        return 0
+    fi
+    log "ERROR: gate's max_permitted_commit $repo_max is not an ancestor of $new (registry disagrees with upstream?) — refusing to deploy"
+    return 2
+}
+
 pending_range() {
     # Prints "old new" commit shas on stdout.
     # Returns 0 = range ready; 1 = nothing to do; 2 = error, do not proceed.
@@ -962,7 +1063,14 @@ pending_range() {
         fi
     fi
     if [ -z "$old" ]; then
-        log "no watermark yet — first run will deploy everything at $new"
+        # G18 §4: the gate caps even the first run — "deploy everything"
+        # means everything the gate permits, not everything upstream has.
+        local capped rc
+        if capped="$(gate_cap "" "$new")"; then rc=0; else rc=$?; fi
+        [ "$rc" -eq 1 ] && return 1
+        [ "$rc" -eq 2 ] && return 2
+        new="$capped"
+        log "no watermark yet — first run will deploy everything the gate permits at $new"
         # deploy everything on first run: diff against the empty tree
         echo "4b825dc642cb6eb9a060e54bf8d69288fbee4904 $new"
         return 0
@@ -980,6 +1088,16 @@ pending_range() {
             return 2
         fi
     done
+    # G18 §4: cap the deploy target at the gate's max_permitted_commit
+    # (fail-closed when the gate says frozen).
+    # NOTE: plain `new="$(gate_cap ...)"; rc=$?` is dead code under set -e —
+    # the `if` condition suppresses errexit so rc is captured (same pattern
+    # as pending_range's own callers).
+    local capped rc
+    if capped="$(gate_cap "$old" "$new")"; then rc=0; else rc=$?; fi
+    [ "$rc" -eq 1 ] && return 1
+    [ "$rc" -eq 2 ] && return 2
+    new="$capped"
     echo "$old $new"
 }
 
