@@ -196,7 +196,6 @@ def _owner_key(args):
 
 
 def cmd_approve(args):
-    d = _state_dir(args)
     control = args.control or os.environ.get("SVM_CONTROL") or DEFAULT_CONTROL
     base = control.rstrip("/") + "/v1/pairing"
     auth = {"Authorization": "Bearer " + _owner_key(args)}
@@ -214,7 +213,9 @@ def cmd_approve(args):
             return 0
         print("Pending pairings:")
         for p in pairs:
-            print(f"  {p['code']}  {p['box_name']}  {p['fingerprint']}")
+            # The server never returns pairing codes (stored hashed);
+            # match by the id the box printed at request time.
+            print(f"  {p['id']}  {p['box_name']}  {p['fingerprint']}")
         print()
         pid = input("Pairing id to approve: ").strip()
     if not pid:
@@ -232,15 +233,18 @@ def cmd_approve(args):
     print()
     print(f"  Box name:    {p['box_name']}")
     print(f"  Fingerprint: {p['fingerprint']}")
-    print(f"  Code:        {p['code']}")
     print()
     print("Compare the fingerprint above with what the BOX displays.")
-    confirm = input("Type the pairing code to approve (or anything else to abort): ").strip()
-    if confirm.replace(" ", "").replace("-", "").upper() != \
-            p["code"].replace(" ", "").replace("-", "").upper():
-        print("code mismatch — approval aborted")
+    print("They must match exactly — otherwise someone is enrolling")
+    print("a different key under this box's name.")
+    code = input("Type the pairing code shown on the box to approve: ").strip()
+    if not code:
+        print("approval aborted")
         return 1
-    status, resp = _http("POST", f"{base}/{pid}/approve", {}, headers=auth)
+    # The server normalizes (case/spacing/dashes) and compares against the
+    # stored code hash; a mismatch is a 403 and nothing is approved.
+    status, resp = _http("POST", f"{base}/{pid}/approve", {"code": code},
+                         headers=auth)
     if status != 200 or not resp.get("ok"):
         print(f"approve failed: {resp.get('error', status)}")
         return 1

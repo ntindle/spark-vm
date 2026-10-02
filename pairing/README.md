@@ -95,3 +95,14 @@ python3 pairing/spark_pair.py request --name garage-box
 SVM_OWNER_KEY=... python3 pairing/spark_pair.py approve --pairing-id pair_...
 python3 pairing/spark_pair.py redeem
 ```
+
+## First-owner-key bootstrap
+
+On a fresh database there are no owner keys yet, so the approve call cannot
+carry one. While `owner_keys` is empty, `POST /v1/pairing/{id}/approve`
+accepts the correct typed pairing code with no `Authorization` header and
+records the approval as `approved_by='bootstrap'` — the pairing id
+(128-bit) and code (40-bit, hashed) are known only to whoever requested the
+pairing, so this cannot be driven by anyone else. The path closes the
+moment the first owner key exists; the normal bootstrap
+(`POST /v1/owner/bootstrap` with a box bearer token) then mints it.

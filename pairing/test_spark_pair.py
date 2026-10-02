@@ -126,20 +126,27 @@ def test_redeem_aborts_when_fingerprint_would_mismatch(ctx, monkeypatch):
 
 
 def test_approve_requires_code_match(ctx, monkeypatch, capsys):
+    # The server NEVER returns the pairing code (stored as a hash); the
+    # client must POST the human-typed code and let the server compare.
     fp = "SHA256:abcd efgh"
     seen = {}
 
     def fake_http(method, url, body=None, headers=None):
         assert headers.get("Authorization") == "Bearer svm_owner_test"
-        if url.endswith("/v1/pairing") and method == "GET":
-            return 200, {"ok": True, "pairings": []}
         if url.endswith("/pair_1") and method == "GET":
-            return 200, {"ok": True, "pairing": {
+            payload = {"ok": True, "pairing": {
                 "id": "pair_1", "box_name": "b1", "fingerprint": fp,
-                "code": "ABCD-EFGH", "status": "pending"}}
+                "status": "pending"}}
+            assert "code" not in json.dumps(payload)  # real contract
+            return 200, payload
         if url.endswith("/approve"):
-            seen["approved"] = True
-            return 200, {"ok": True, "approved": "pair_1"}
+            seen["code"] = (body or {}).get("code")
+            # the real server normalizes case/spacing/dashes before hashing
+            norm = "".join(c for c in (seen["code"] or "").upper()
+                           if c in "ABCDEFGHJKMNPQRSTUVWXYZ23456789")
+            if norm == "ABCDEFGH":
+                return 200, {"ok": True, "approved": "pair_1"}
+            return 403, {"ok": False, "error": "code mismatch"}
         raise AssertionError(url)
 
     monkeypatch.setattr(spark_pair, "_http", fake_http)
@@ -147,32 +154,32 @@ def test_approve_requires_code_match(ctx, monkeypatch, capsys):
 
     monkeypatch.setattr("builtins.input", lambda *a: "WRONGCODE")
     assert spark_pair.cmd_approve(ctx) == 1
-    assert "approved" not in seen
+    assert seen.get("code") == "WRONGCODE"  # typed code reaches the server
     out = capsys.readouterr().out
     assert fp in out  # the fingerprint is shown for verification
 
-    monkeypatch.setattr("builtins.input", lambda *a: "abcd-efgh")
+    monkeypatch.setattr("builtins.input", lambda *a: "abcd efgh")
     assert spark_pair.cmd_approve(ctx) == 0
-    assert seen.get("approved") is True
+    assert seen.get("code") == "abcd efgh"
 
 
 def test_approve_lists_pending_when_no_id(ctx, monkeypatch, capsys):
     def fake_http(method, url, body=None, headers=None):
         if url.endswith("/v1/pairing"):
-            return 200, {"ok": True, "pairings": [
-                {"code": "AAAA-BBBB", "box_name": "b1",
-                 "fingerprint": "SHA256:x"}]}
+            payload = {"ok": True, "pairings": [
+                {"id": "pair_9", "box_name": "b1",
+                 "fingerprint": "SHA256:x", "status": "pending"}]}
+            assert "code" not in json.dumps(payload)  # real contract
+            return 200, payload
         raise AssertionError(url)
 
     monkeypatch.setattr(spark_pair, "_http", fake_http)
     inputs = iter(["pair_9"])
     monkeypatch.setattr("builtins.input", lambda *a: next(inputs))
-    # detail fetch for pair_9 will 404 via the fake -> covered by fake raising;
-    # instead point the flow at list output only:
     ctx.pairing_id = None
     try:
         spark_pair.cmd_approve(ctx)
     except AssertionError:
         pass  # detail fetch not stubbed; list display is what we assert
     out = capsys.readouterr().out
-    assert "AAAA-BBBB" in out and "b1" in out
+    assert "pair_9" in out and "b1" in out and "SHA256:x" in out
