@@ -17,6 +17,50 @@ box. No new box-side daemon, no new inbound port, no control plane.
 - `box_snapshot.py` — box-side emitter producing the per-box
   `snapshot.json` the collector reads. Stdlib only.
 - `test_inventory.py` — hermetic suite (run with `python3 -m pytest fleet`).
+- `gate_publish.py` — controller side of the G18 release-gating channel:
+  registry + wave manifest + freeze flag → signed `gate.json`. Stdlib only.
+- `gate_query.py` — box side of the G18 channel: verifies `gate.json`
+  and answers the box's self-evaluated state (`state` / `permitted`).
+  Stdlib only.
+- `gate_sync.sh` — the operator sync loop (G18 §4): copies the published
+  `gate.json` to every box's `/var/lib/sparkvm/gate/`. Run from the
+  operator's cron at ≤ TTL/2.
+- `test_gate.py` — hermetic suite for the gating channel, including the
+  §4 freeze drill (run with `python3 -m pytest fleet/test_gate.py`).
+
+## Release gating (G18 / #777, S1a)
+
+Design: `docs/RELEASE_GATE_CHANNEL_DESIGN.md`. One fleet-wide signed
+document, published by the controller and synced to every box, tells each
+box the maximum permitted versions per component, the live rollout wave,
+and an orthogonal fleet-wide freeze. The box self-evaluates its wave from
+its `box_id` (assignment pins, else `hash_mod_4`) and the repo updater caps
+its deploy range at the gate's maximum permitted commit — an unregistered
+commit never deploys on a gated box. Fail-closed: a missing, tampered, or
+expired document freezes the box loudly; a missed sync loop is a visible
+incident, not a silent rollout. The MAC (HMAC-SHA256, controller key)
+stops on-path tampering and misconfiguration — the cross-box forgery
+barrier is delivery-path ownership: the only writer of a box's gate dir is
+the operator's sync loop. Key rotation is a document field (`key_id`);
+during a rotation window the box accepts current + next, logging which
+verified.
+
+```bash
+# 1. Publish (controller machine; key file must be mode 0600)
+python3 fleet/gate_publish.py --registry registry.json --manifest waves.json \
+    --key-id ctl-2026-09 --key-file ~/fleet-keys/ctl.key --out gate.json
+
+# 2. Distribute (operator cron, <=5 min for the 600s S1 TTL)
+GATE=gate.json ESTATE=~/fleet-estate fleet/gate_sync.sh
+
+# 3. Box side (tick-time query — the enforcement point)
+python3 fleet/gate_query.py state --box-id box-07        # key=value answer
+python3 fleet/gate_query.py permitted repo               # exit 0/1/2
+```
+
+Boxes without provisioned gate keys are gate-unmanaged: the updater logs a
+warning and proceeds uncapped (pre-G18 behavior) until the operator's
+install step provisions `box_id` + keys (G18 §5).
 
 ## Quick start (operator estate)
 
