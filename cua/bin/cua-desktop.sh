@@ -78,12 +78,22 @@ surface_input_probe() { # surface_input_probe [bridge_url] — arg override exis
     local probe_body probe_state
     probe_body=$(curl -s --max-time 5 "$bridge/api/status" 2>/dev/null) || probe_body=""
     if [ -n "$probe_body" ]; then
+      # Vocabulary normalization (mirrors input_probe_check in
+      # cua-keepalive.sh — keep the classifiers in sync): only the
+      # documented verdicts are admitted; null/non-dict "input" and
+      # null/non-vocabulary "state" render [unknown], one surface for
+      # the inconclusive class. A body that does not parse at all is
+      # "unparseable" and stays silent (pinned by
+      # test_garbage_body_prints_nothing).
       probe_state=$(printf '%s' "$probe_body" | python3 -c \
         'import json,sys
+_VERDICTS = ("ok", "wedged", "unknown", "unparseable")
 try:
-    print(json.load(sys.stdin).get("input", {}).get("state", "unknown"))
+    section = json.load(sys.stdin).get("input") or {}
+    state = section.get("state", "unknown") if isinstance(section, dict) else "unknown"
 except Exception:
-    print("unparseable")' 2>/dev/null) || probe_state=""
+    state = "unparseable"
+print(state if state in _VERDICTS else "unknown")' 2>/dev/null) || probe_state=""
       case "$probe_state" in
         ok) echo "[ok] input path (XTEST probe)" ;;
         wedged) echo "[wedged] input path (XTEST probe) — remediate: cua-desktop.sh stop && cua-desktop.sh start" ;;

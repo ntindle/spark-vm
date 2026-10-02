@@ -418,9 +418,18 @@ class TestKeepaliveFlockPin:
 _FAKE_BRIDGE_PY = r'''
 import http.server, json, os
 STATE_FILE = os.environ["FAKE_BRIDGE_STATE_FILE"]
+# Optional request-path log (FAKE_BRIDGE_PATH_LOG): when set, every
+# request's raw path (query string included) is appended, so tests can
+# pin WHICH endpoint the scripts hit — e.g. that the keepalive's probe
+# fetch carries ?probe=1 while the status surfacing stays a plain
+# /api/status read. Off by default: existing tests never read it.
+PATH_LOG = os.environ.get("FAKE_BRIDGE_PATH_LOG")
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if PATH_LOG:
+            with open(PATH_LOG, "a") as f:
+                f.write(self.path + "\n")
         # The real bridge 404s unknown paths; the fake must too, or a
         # production typo in the request path (e.g. /api/WRONGPATH)
         # would still get a 200 and the vocabulary tests would pass
@@ -466,22 +475,35 @@ def fake_bridge():
     # Yields (url, set_state); the server reads its verdict from a
     # file on every request so one server serves many verdicts. A state
     # file starting with "RAW:" serves the remainder verbatim instead of
-    # JSON (for the unparseable-path tests).
+    # JSON (for the unparseable-path tests). Every request's raw path is
+    # also appended to a per-fixture paths log, exposed as
+    # set_state.paths_file (for the ?probe=1 vs plain-read tests).
     with tempfile.TemporaryDirectory() as t:
         state_file = os.path.join(t, "verdict")
         with open(state_file, "w") as f:
             f.write("unknown")
+        paths_file = os.path.join(t, "paths")
         server_py = os.path.join(t, "server.py")
         with open(server_py, "w") as f:
             f.write(_FAKE_BRIDGE_PY)
         proc = subprocess.Popen(
             ["python3", server_py], stdout=subprocess.PIPE, text=True,
-            env={**os.environ, "FAKE_BRIDGE_STATE_FILE": state_file})
+            env={**os.environ, "FAKE_BRIDGE_STATE_FILE": state_file,
+                 "FAKE_BRIDGE_PATH_LOG": paths_file})
         try:
             port = proc.stdout.readline().strip()
             assert port.isdigit(), f"fake bridge did not print a port: {port!r}"
-            yield (f"http://127.0.0.1:{port}",
-                   lambda v: open(state_file, "w").write(v))
+
+            def set_state(v):
+                with open(state_file, "w") as f:
+                    f.write(v)
+
+            # Request-path log for the ?probe=1 vs plain-read
+            # distinction tests. Attached to the callable (not a third
+            # yielded value) so the existing `url, set_state =`
+            # unpacking in every other test keeps working unchanged.
+            set_state.paths_file = paths_file
+            yield (f"http://127.0.0.1:{port}", set_state)
         finally:
             proc.terminate()
             proc.wait(timeout=10)
@@ -664,6 +686,67 @@ class TestInputProbeCheck:
             assert st["consecutive_wedged"] == "1", st
             hist = self._history(t)
             assert hist[-1].endswith(" unknown consecutive=1"), hist
+
+    def test_null_input_section_falls_back_to_unknown(self, guard,
+                                                       fake_bridge):
+        # {"input": null} used to take the AttributeError path and
+        # classify as "unparseable" — an accident of the .get() chain,
+        # not a deliberate verdict. A null input section is missing
+        # input data: inconclusive like a missing key, i.e. "unknown".
+        # The counter is left alone and the honest verdict is recorded
+        # in state and history.
+        url, set_state = fake_bridge
+        with tempfile.TemporaryDirectory() as t:
+            set_state("wedged")
+            self._run(guard, t, url)
+            assert self._state(t)["consecutive_wedged"] == "1"
+            set_state('RAW:{"ok": true, "input": null}')
+            r = self._run(guard, t, url)
+            assert r.returncode == 0, r.stderr
+            assert "RC=0" in r.stdout
+            st = self._state(t)
+            assert st["last_state"] == "unknown", st
+            assert st["consecutive_wedged"] == "1", st
+            hist = self._history(t)
+            assert hist[-1].endswith(" unknown consecutive=1"), hist
+
+    @pytest.mark.parametrize("foreign", ["42", '"bogus"', "null"])
+    def test_foreign_state_normalizes_to_unknown(self, guard, fake_bridge,
+                                                 foreign):
+        # A state outside the documented vocabulary — non-string (42),
+        # unknown string ("bogus"), explicit null — is inconclusive, not
+        # a new verdict class: it normalizes to "unknown" at
+        # classification time. Before, the raw value was recorded
+        # verbatim in state/history while the surfacing stayed silent —
+        # two surfaces for the same inconclusive class.
+        url, set_state = fake_bridge
+        with tempfile.TemporaryDirectory() as t:
+            set_state("wedged")
+            self._run(guard, t, url)
+            set_state(f'RAW:{{"ok": true, "input": {{"state": {foreign}}}}}')
+            r = self._run(guard, t, url)
+            assert r.returncode == 0, r.stderr
+            assert "RC=0" in r.stdout
+            st = self._state(t)
+            assert st["last_state"] == "unknown", st
+            assert st["consecutive_wedged"] == "1", st
+            hist = self._history(t)
+            assert hist[-1].endswith(" unknown consecutive=1"), hist
+
+    def test_probe_fetch_runs_a_fresh_probe(self, guard, fake_bridge):
+        # input_probe_check must fetch "$bridge/api/status?probe=1" —
+        # the query is what runs a fresh probe on the bridge; plain
+        # /api/status is a pure cache read. A dropped query would
+        # silently turn wedge supervision into a stale read, so the
+        # request path the function actually issued is pinned
+        # behaviorally (not just as a source string).
+        url, set_state = fake_bridge
+        with tempfile.TemporaryDirectory() as t:
+            self._run(guard, t, url)
+            with open(set_state.paths_file) as f:
+                paths = [ln.strip() for ln in f if ln.strip()]
+            assert paths, "fake bridge saw no requests"
+            assert paths[-1] == "/api/status?probe=1", paths
 
     def test_restart_gate_off_by_default(self, guard, fake_bridge,
                                          fake_home):
@@ -921,6 +1004,43 @@ class TestSurfaceInputProbe:
         assert r.returncode == 0, r.stderr
         assert "[unknown] input path (probe not run yet or inconclusive)" \
             in r.stdout, r.stdout
+
+    def test_null_input_section_prints_unknown(self, guard, fake_bridge):
+        # {"input": null} is missing input data — it must render the
+        # [unknown] vocabulary line, not silence and not a misread.
+        url, set_state = fake_bridge
+        set_state('RAW:{"ok": true, "input": null}')
+        r = self._run(guard, url)
+        assert r.returncode == 0, r.stderr
+        assert "[unknown] input path (probe not run yet or inconclusive)" \
+            in r.stdout, r.stdout
+
+    @pytest.mark.parametrize("foreign", ["42", '"bogus"', "null"])
+    def test_foreign_state_prints_unknown(self, guard, fake_bridge,
+                                          foreign):
+        # A state outside the documented vocabulary normalizes to
+        # "unknown" at classification time — one surface for the
+        # inconclusive class, instead of the old split (recorded
+        # verbatim in state/history, silent in the status line).
+        url, set_state = fake_bridge
+        set_state(f'RAW:{{"ok": true, "input": {{"state": {foreign}}}}}')
+        r = self._run(guard, url)
+        assert r.returncode == 0, r.stderr
+        assert "[unknown] input path (probe not run yet or inconclusive)" \
+            in r.stdout, r.stdout
+
+    def test_surface_fetch_is_a_plain_read(self, guard, fake_bridge):
+        # surface_input_probe must fetch plain "$bridge/api/status" —
+        # the status surfacing is a pure cache read; it must never
+        # trigger a probe (?probe=1) on every status call. The request
+        # path the function actually issued is pinned behaviorally.
+        url, set_state = fake_bridge
+        r = self._run(guard, url)
+        assert r.returncode == 0, r.stderr
+        with open(set_state.paths_file) as f:
+            paths = [ln.strip() for ln in f if ln.strip()]
+        assert paths, "fake bridge saw no requests"
+        assert paths[-1] == "/api/status", paths
 
     def test_garbage_body_prints_nothing(self, guard, fake_bridge):
         url, set_state = fake_bridge
