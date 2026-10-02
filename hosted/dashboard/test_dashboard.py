@@ -2,8 +2,14 @@
 """Tests for the #845 fleet dashboard.
 
 - byte-identity: the control-plane worker.py inlines dashboard.html
-  (single-file deploy); the copies must match byte-for-byte. Skipped
-  when the worker source is not reachable (e.g. CI on a fork).
+  (single-file deploy); the copies must match byte-for-byte. The worker
+  path resolves as SPARKVM_WORKER_PATH (env) or the loop VM's
+  control-plane checkout default — set the env to point the test at a
+  real worker instead of relying on the skip. Skipped only when no
+  worker source is reachable (e.g. CI on a fork).
+- sync: sync_dashboard.py mechanically rewrites the inlined block; the
+  sync tests pin its contract (idempotent, --check detects drift,
+  refusals are loud).
 - static: the page carries the required views/ids, keeps the owner key
   out of localStorage/URLs, and contains no '\"\"\"' (it would break the
   inlined Python string in worker.py).
@@ -19,14 +25,15 @@ import tempfile
 
 import pytest
 
+from sync_dashboard import BEGIN, END, SyncError, resolve_worker_path
+import sync_dashboard
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 HTML_PATH = os.path.join(HERE, "dashboard.html")
-WORKER_PATH = ("/home/hatch/workspace/goals/"
-               "sparkvm-dev-website-v2-cloudflare-management-infra/"
-               "control-plane/worker.py")
+WORKER_PATH = resolve_worker_path()
 
-BEGIN = "# --- BEGIN dashboard (#845 authenticated fleet dashboard) ---"
-END = "# --- END dashboard ---"
+_SKIP_MSG = ("worker source not reachable here "
+             "(set SPARKVM_WORKER_PATH to run this test)")
 
 
 def _html():
@@ -36,8 +43,8 @@ def _html():
 
 # --- byte-identity -----------------------------------------------------
 
-def _inline_html():
-    src = open(WORKER_PATH, encoding="utf-8").read()
+def _inline_html(worker_path=WORKER_PATH):
+    src = open(worker_path, encoding="utf-8").read()
     assert BEGIN in src, "dashboard block missing from worker.py"
     block = src.split(BEGIN)[1].split(END)[0]
     # Block shape: comment lines, then DASHBOARD_HTML = """<html>"""
@@ -48,7 +55,7 @@ def _inline_html():
 
 def test_worker_inline_copy_byte_identical():
     if not os.path.exists(WORKER_PATH):
-        pytest.skip("worker source not reachable here")
+        pytest.skip(_SKIP_MSG)
     assert _inline_html() == _html(), \
         "worker.py's inlined dashboard.html has drifted"
 
@@ -60,12 +67,107 @@ def test_fleet_rows_keyboard_accessible():
 
 def test_worker_serves_dashboard_at_root():
     if not os.path.exists(WORKER_PATH):
-        pytest.skip("worker source not reachable here")
+        pytest.skip(_SKIP_MSG)
     src = open(WORKER_PATH, encoding="utf-8").read()
     assert 'path == "/" and method == "GET"' in src
     assert '"Content-Type": "text/html' in src
     assert '"X-Content-Type-Options": "nosniff"' in src
     assert '"X-Frame-Options": "DENY"' in src
+
+
+# --- sync --------------------------------------------------------------
+
+import sys as _sys
+
+_THIS = _sys.modules[__name__]
+
+
+def _scratch_worker(path, html=None):
+    """Write a minimal worker.py with a canonical dashboard block."""
+    html = _html() if html is None else html
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("#!/usr/bin/env python3\n# synthetic worker\n")
+        f.write(sync_dashboard.BEGIN + "\n")
+        f.write("\n".join(sync_dashboard.HEADER_LINES) + "\n")
+        f.write('DASHBOARD_HTML = """' + html + '"""\n')
+        f.write(sync_dashboard.END + "\n")
+        f.write("SENTINEL = 1\n")
+    return path
+
+
+def test_resolve_worker_path_honors_env(monkeypatch):
+    monkeypatch.setenv("SPARKVM_WORKER_PATH", "/tmp/some-worker.py")
+    assert resolve_worker_path() == "/tmp/some-worker.py"
+    monkeypatch.delenv("SPARKVM_WORKER_PATH", raising=False)
+    assert resolve_worker_path() == sync_dashboard.DEFAULT_WORKER_PATH
+
+
+def test_sync_is_idempotent(tmp_path):
+    w = _scratch_worker(str(tmp_path / "worker.py"))
+    assert sync_dashboard.sync(w) is True  # already canonical
+    before = open(w, encoding="utf-8").read()
+    assert sync_dashboard.sync(w) is True
+    assert open(w, encoding="utf-8").read() == before
+
+
+def test_sync_check_detects_drift_without_writing(tmp_path):
+    w = _scratch_worker(str(tmp_path / "worker.py"),
+                        html="<!-- stale copy -->\n" + _html())
+    before = open(w, encoding="utf-8").read()
+    assert sync_dashboard.sync(w, check=True) is False
+    assert open(w, encoding="utf-8").read() == before  # --check wrote nothing
+    assert sync_dashboard.sync(w) is False  # rewrote
+    assert sync_dashboard.sync(w, check=True) is True
+    assert _inline_html(w) == _html()
+
+
+def test_byte_identity_fails_when_html_drifts(tmp_path, monkeypatch):
+    # Acceptance pin for #858: with a worker reachable, an edit to
+    # dashboard.html that skips the re-inline must fail the assertion.
+    canonical = _html()
+    w = _scratch_worker(str(tmp_path / "worker.py"))
+    assert _inline_html(w) == canonical  # control: in sync before the edit
+    mutated = str(tmp_path / "mutated.html")
+    with open(mutated, "w", encoding="utf-8") as f:
+        f.write(canonical + "\n<!-- un-synced edit -->\n")
+    monkeypatch.setattr(_THIS, "HTML_PATH", mutated)
+    with pytest.raises(AssertionError):
+        assert _inline_html(w) == _html()
+    # And the sync path restores it.
+    monkeypatch.undo()
+    stale = _scratch_worker(str(tmp_path / "worker2.py"),
+                            html="<!-- stale copy -->\n" + canonical)
+    assert sync_dashboard.sync(stale) is False  # rewrote
+    assert _inline_html(stale) == canonical
+
+
+def test_sync_refuses_missing_markers(tmp_path):
+    w = str(tmp_path / "worker.py")
+    with open(w, "w", encoding="utf-8") as f:
+        f.write("# no markers here\n")
+    with pytest.raises(SyncError):
+        sync_dashboard.sync(w)
+    assert open(w, encoding="utf-8").read() == "# no markers here\n"
+
+
+def test_sync_refuses_duplicated_markers(tmp_path):
+    w = _scratch_worker(str(tmp_path / "worker.py"))
+    with open(w, "a", encoding="utf-8") as f:
+        f.write(sync_dashboard.BEGIN + "\n")
+    with pytest.raises(SyncError):
+        sync_dashboard.sync(w)
+
+
+def test_sync_refuses_triple_quote_html(tmp_path, monkeypatch):
+    bad = str(tmp_path / "bad.html")
+    with open(bad, "w", encoding="utf-8") as f:
+        f.write('<!DOCTYPE html>\n""" boom """\n')
+    monkeypatch.setattr(sync_dashboard, "HTML_PATH", bad)
+    w = _scratch_worker(str(tmp_path / "worker.py"))
+    with pytest.raises(SyncError):
+        sync_dashboard.sync(w)
+    # The worker is untouched — the refusal happened before any write.
+    assert _inline_html(w) == _html()
 
 
 # --- static ------------------------------------------------------------
