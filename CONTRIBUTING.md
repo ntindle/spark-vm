@@ -98,6 +98,7 @@ before running that component's suite:
 | `jail/` | `python3 -m pytest jail` | none (`build.sh --help` executes the real script's arg parsing and exits before any side effect; full builds need root + systemd-nspawn on the box) |
 | `credlib/` | `python3 -m pytest credlib` | none (name-validation + stdin-cap unit tests only; the `/home/swapd/secrets` store is a string constant, never touched) |
 | `fleet/` | `python3 -m pytest fleet` | none (stdlib-only — the operator-estate collector and its hermetic suite) |
+| `pairing/` | `python3 -m pytest pairing` | none (stdlib-only by design — pure-Python ed25519 + box client; runs on the box, in the Cloudflare Python Worker, and in CI) |
 
 Two conventions keep the one-liner working: keep every `test_*.py`
 basename unique across the repo (pytest imports test modules by basename),
