@@ -102,7 +102,10 @@ box's apt sources offer, once a week, behind the idle gate. On every
   so unrelated packages and held packages are untouched.
 - **Non-interactive by construction:** `-y`, `DEBIAN_FRONTEND=noninteractive`,
   and conffile `confdef`/`confold` (keep the box's existing config on
-  conflicts — this runs unattended). `--dry-run` maps to `apt-get -s
+  conflicts — this runs unattended). Accepted tradeoff, stated here: `confold`
+  silently skips upstream security-hardening conffile *defaults*, so a package
+  that ships a tighter default config won't apply it until the operator
+  intervenes. `--dry-run` maps to `apt-get -s
   install`, a true simulation that changes nothing.
 - **List freshness comes from the `os-security` layer's daily refresh**
   (`unattended-upgrades` runs `apt-get update` daily) — the `apt` layer
@@ -135,6 +138,9 @@ Overrides (environment): `APT_DOCKER_PKGS` / `APT_NODE_PKGS` / `APT_GH_PKGS`
   layer can trigger maintainer-script service restarts — the gate plus the
   weekly quiet-hours window are the protection there, so making the gate
   uid-aware is now a real follow-up rather than hygiene (see "Follow-ups").
+  The muse-job v2 cutover (issue #228 — jobs move off tmux entirely) will
+  blind the tmux-only gate permanently, so the uid-aware/registry-check
+  follow-up must land before or with v2.
 - The `os-security` repair **overwrites** `/etc/apt/apt.conf.d/20auto-upgrades`
   with exactly the two required lines. Any operator tuning in that file
   (e.g. `Unattended-Upgrade::Allowed-Origins`) is discarded on repair — on a
@@ -175,7 +181,14 @@ lands.
   (adopt `scripts/self_update_pins.conf` as the canonical pin file per the
   reconciliation contract in `docs/SELF_UPDATE.md` "Two planes")
 - Make the idle gate uid-aware (it now protects the `apt` layer's
-  service-restart surface, not just hygiene)
+  service-restart surface, not just hygiene); land before/with the muse-job
+  v2 cutover (#228), which blinds the tmux-only probe permanently
+- Validate `APT_*_PKGS` candidates against the Debian package-name pattern
+  (defense in depth against glob expansion / option injection via root-set
+  env; currently the only setter with privilege is root, so no boundary is
+  crossed today)
+- Verify `needrestart`'s behavior under `DEBIAN_FRONTEND=noninteractive` on
+  the target box (it can restart services beyond maintainer scripts)
 - Status-plane wiring: consult `self_update.py` drift output when deciding
   what to update
 - Pre-update snapshots and rollback

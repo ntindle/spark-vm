@@ -8,9 +8,14 @@ Type=oneshot
 # Runs as root: the updater repairs /etc/apt/apt.conf.d (unattended-upgrades
 # config) and manages system services. This is the box's own scheduled root
 # maintenance, not a privilege granted to anyone new — same trust as a manual
-# `sudo apt` run by the operator. The updater's only package-manager call is a
-# one-time `apt-get install -y unattended-upgrades` bootstrap (missing package
-# only); unattended-upgrades performs installs on its own schedule.
+# `sudo apt` run by the operator. Package-manager calls: a one-time
+# `apt-get install -y unattended-upgrades` bootstrap (missing package only;
+# unattended-upgrades performs installs on its own schedule) plus the weekly
+# `apt-get install --only-upgrade` on the allowlisted, already-installed
+# toolset packages (docker, node, gh — never a bare system upgrade). The
+# weekly converge can trigger maintainer-script service restarts (e.g.
+# dockerd); those run only behind the idle gate (defer while agent jobs are
+# live) in the weekly quiet-hours window.
 #
 # CRITICAL: ExecStart points at the INSTALLED COPY in
 # /home/ntindle/.sparkvm-toolset/bin/ — never at the repo checkout. A writer

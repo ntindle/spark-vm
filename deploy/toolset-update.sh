@@ -16,7 +16,10 @@
 #
 # Behavior contract:
 #   - Never disrupts running agent work: `update` defers (exit 0, loud log)
-#     when agent jobs are active, unless --force. v0 never restarts services.
+#     when agent jobs are active, unless --force. The apt layer may trigger
+#     maintainer-script service restarts (e.g. dockerd); the idle gate plus
+#     the weekly quiet-hours window bound that surface (see
+#     docs/TOOLSET_UPDATE.md).
 #   - Fail-closed: unknown/missing state is reported, never silently skipped.
 #   - Idempotent: safe to run on an already-current box (no-op).
 #   - --dry-run changes nothing. --now is informational-only in v0: the

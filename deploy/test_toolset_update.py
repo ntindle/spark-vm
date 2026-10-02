@@ -346,10 +346,20 @@ def test_script_never_fetches_code():
                    "http://"):
         assert banned not in text, f"must not contain: {banned}"
     invocation_re = re.compile(
-        r"^\s*(DEBIAN_FRONTEND=noninteractive\s+)?(_sudo\s+)?apt-get\b")
+        r"^\s*(?!#)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+        r"(?:_sudo\s+|command\s+|env\s+)?"
+        r"(?:/usr/bin/|/bin/)?apt-get\b")
+    # Bare `apt` (the interactive frontend) must never be used — it would
+    # evade the apt-get-only assertions above. `apt-get` is excluded via
+    # lookahead; the comment guard keeps prose/docs out of the match.
+    bare_apt_re = re.compile(
+        r"^\s*(?!#)(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+        r"(?:_sudo\s+|command\s+|env\s+)?apt(?![-\w])")
     # Join backslash continuations: the apt-layer flags (--only-upgrade,
     # -o Dpkg::Options) live on the invocation's continuation lines.
     logical = re.sub(r"\\\n\s*", " ", text).splitlines()
+    for l in logical:
+        assert not bare_apt_re.search(l), f"bare `apt` binary must not be used: {l}"
     invocations = [l for l in logical if invocation_re.search(l)]
     assert len(invocations) == 2, invocations
     bootstrap = [l for l in invocations if "install -y unattended-upgrades" in l]
