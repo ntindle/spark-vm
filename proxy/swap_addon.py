@@ -2850,6 +2850,137 @@ class SwapAddon:
     # Never attacker-influenced; the flow is killed right after.
     _REDIRECT_KILLED_LOCATION = "hsurr:redirect-secret-refused"
 
+    # Issue #860: the same exfil class one step sideways of #94.
+    # `Refresh: 0; url=<target>` response headers are followed by
+    # clients like redirects, and HTML
+    # `<meta http-equiv="refresh" content="0;url=<target>">` bodies
+    # are followed by browsers — the verbatim header/body scrubbers
+    # are blind to the percent-encoded form in both. The Refresh
+    # header half is refused at headers time exactly like a
+    # secret-bearing Location (neutralize + kill + audit); the
+    # meta-refresh half is neutralized in the body (the URL is
+    # rewritten in place, so the page still loads — killing the whole
+    # page over one tag would be a disproportionate denial).
+    _REFRESH_KILLED_VALUE = "hsurr:refresh-secret-refused"
+    _META_REFRESH_KILLED_URL = "hsurr:meta-refresh-secret-refused"
+
+    # A whole <meta ...> tag; attribute order and quoting vary, so
+    # the tag is matched loosely and the http-equiv/content
+    # attributes are pulled out inside.
+    _META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+    _META_HTTP_EQUIV_RE = re.compile(
+        r'http-equiv\s*=\s*(?:"refresh"|\'refresh\'|refresh(?=[\s>/]))',
+        re.IGNORECASE)
+    _META_CONTENT_RE = re.compile(
+        r'content\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))',
+        re.IGNORECASE)
+
+    @staticmethod
+    def _refresh_url_match(value):
+        """The regex match for the navigation target of a Refresh
+        header value or a meta-refresh content value, else None.
+
+        Accepts `0; url=<target>` and `5, url=<target>` (the separator
+        may be a semicolon or a comma), a case-insensitive `url=`, and
+        a quoted or bare target. A bare `Refresh: 5` (same-page
+        refresh, no navigation target) yields None — no evidence of
+        an off-host navigation, so no fail-closed verdict.
+        """
+        v = value or ""
+        m = re.search(r'url\s*=\s*"([^"]*)"', v, re.IGNORECASE)
+        if m is None:
+            m = re.search(r"url\s*=\s*'([^']*)'", v, re.IGNORECASE)
+        if m is None:
+            m = re.search(r"url\s*=\s*([^\s;,]+)", v, re.IGNORECASE)
+        return m
+
+    @staticmethod
+    def _refresh_url(value):
+        """Navigation target of a Refresh-style value, else None."""
+        m = SwapAddon._refresh_url_match(value)
+        if m is None:
+            return None
+        return m.group(1) or None
+
+    def _refresh_leak_target(self, resp, triples):
+        """Issue #860: the non-allowlisted host a Refresh header's
+        url= target leaks a known secret to, else None.
+
+        Same machinery as the #94 Location check — WHATWG target-host
+        parse plus the decode-stage secret check — because the client
+        follows the URL exactly like a redirect. Allowlisted targets
+        keep the shared scrub-in-place behaviour below; relative and
+        absent targets are not leaks."""
+        for v in resp.headers.get_all("refresh") or []:
+            target_url = self._refresh_url(v)
+            if not target_url:
+                continue
+            target = self._redirect_target_host(target_url)
+            if target is not None and not self._host_allowed(target):
+                if self._redirect_carries_secret(target_url, triples):
+                    return target
+        return None
+
+    def _meta_refresh_neutralized(self, text, triples):
+        """Issue #860: neutralize secret-bearing meta-refresh targets
+        in an HTML body.
+
+        Returns (new_text, refused_targets): every
+        `<meta http-equiv="refresh" content="...;url=<target>">`
+        whose target points at a non-allowlisted host AND carries a
+        known secret (decode-stage check, like #94) has its URL
+        rewritten in place to a constant — the follow-up navigation
+        can no longer carry the real secret off-allowlist, and the
+        page otherwise loads unchanged. refused_targets are the
+        scrubbed target hosts for the audit trail. Allowlisted
+        targets are left for the verbatim scrubber; tags without a
+        secret-bearing off-allowlist target pass through untouched.
+        """
+        out = []
+        pos = 0
+        refused = []
+        for tag_m in self._META_TAG_RE.finditer(text):
+            tag = tag_m.group(0)
+            if not self._META_HTTP_EQUIV_RE.search(tag):
+                continue
+            c_m = self._META_CONTENT_RE.search(tag)
+            if c_m is None:
+                continue
+            content = c_m.group(c_m.lastindex)
+            um = self._refresh_url_match(content)
+            if um is None:
+                continue
+            target_url = um.group(1)
+            if not target_url or not target_url.strip():
+                continue
+            try:
+                target = self._redirect_target_host(target_url)
+                carries = (target is not None
+                           and not self._host_allowed(target)
+                           and self._redirect_carries_secret(
+                               target_url, triples))
+            except Exception:
+                # Fail closed: neutralize when the check itself errors
+                # rather than forward a possibly secret-bearing URL.
+                log.exception("swap: meta-refresh check failed; "
+                              "neutralizing")
+                target, carries = None, True
+            if not carries:
+                continue
+            start = (tag_m.start() + c_m.start(c_m.lastindex)
+                     + um.start(1))
+            end = start + len(um.group(1))
+            out.append(text[pos:start])
+            out.append(self._META_REFRESH_KILLED_URL)
+            pos = end
+            refused.append(
+                self._audit_target_host(target, triples)
+                if target is not None else "meta-refresh-check-error")
+        if not out:
+            return text, []
+        out.append(text[pos:])
+        return "".join(out), refused
+
     @staticmethod
     def _redirect_target_host(location):
         """Host a redirect Location points at, else None.
@@ -2998,9 +3129,14 @@ class SwapAddon:
         # killed flow's records carry no secret (finding 40e). The
         # audit reason names the scrubbed target host, never the value.
         # Detection-path exceptions fail closed: kill, don't forward.
+        # Issue #860: the Refresh half runs through the same gate — a
+        # Refresh header's url= target is followed by clients exactly
+        # like a redirect Location, and the verbatim scrubber is blind
+        # to its encoded form too.
         try:
             triples = self._secret_replacements()
             leak_target = self._redirect_leak_target(resp, triples)
+            refresh_leak = self._refresh_leak_target(resp, triples)
         except Exception:
             log.exception("swap: redirect-secret check failed; failing closed")
             self._audit_note(host, "redirect-secret-refused", "check-error")
@@ -3009,6 +3145,9 @@ class SwapAddon:
         if leak_target is not None:
             resp.headers.set_all(
                 "location", [self._REDIRECT_KILLED_LOCATION])
+        if refresh_leak is not None:
+            resp.headers.set_all(
+                "refresh", [self._REFRESH_KILLED_VALUE])
         for key in list(resp.headers.keys()):
             if key.lower() in self._NEVER_SCRUB_RESPONSE_HEADERS:
                 continue
@@ -3019,6 +3158,10 @@ class SwapAddon:
         if leak_target is not None:
             self._audit_note(host, "redirect-secret-refused",
                              self._audit_target_host(leak_target, triples))
+        if refresh_leak is not None:
+            self._audit_note(host, "refresh-secret-refused",
+                             self._audit_target_host(refresh_leak, triples))
+        if leak_target is not None or refresh_leak is not None:
             flow.kill()
             return
         # H18 (#133): client-visible approval signal. The agent that made
@@ -3103,6 +3246,40 @@ class SwapAddon:
             text = resp.text
         except Exception:
             return  # undecodable: skip
+        # Issue #860: meta-refresh exfil — an HTML
+        # <meta http-equiv="refresh" content="0;url=<target>"> whose
+        # target carries a known secret (raw or percent-encoded) to a
+        # non-allowlisted host. The client's follow-up navigation
+        # would carry the real secret off-allowlist (the request side
+        # has no outbound check, #855), and the verbatim scrubber
+        # below is blind to the encoded form. Detection runs on the
+        # raw text BEFORE the verbatim scrub, mirroring the #94
+        # discipline; secret-bearing targets are neutralized in place
+        # (the page still loads, one tag neutered) and audited. This
+        # runs only on HTML bodies — meta-refresh is an HTML
+        # construct, and there is no reason to regex-scan JSON.
+        ctype = (resp.headers.get("content-type", "") or "").split(
+            ";")[0].strip().lower()
+        if ctype == "text/html":
+            neutralized, refused = self._meta_refresh_neutralized(
+                text, triples)
+            if refused:
+                for target in refused:
+                    self._audit_note(host, "meta-refresh-secret-refused",
+                                     target)
+                # Assign immediately: the shared verbatim-scrub
+                # comparison below reuses `new_text`, so deferring the
+                # assignment here would silently drop the
+                # neutralization (the scrub of already-neutralized
+                # text is a no-op, making new_text == text).
+                resp.text = neutralized
+                try:
+                    if "content-length" in resp.headers:
+                        resp.headers["content-length"] = str(
+                            len(resp.content))
+                except Exception:
+                    pass
+                text = neutralized
         new_text = self._scrub_text_value(text, triples)
         if new_text != text:
             resp.text = new_text
