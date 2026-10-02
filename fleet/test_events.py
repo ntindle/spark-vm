@@ -471,7 +471,10 @@ def test_scan_window_rule2_recent_pair_still_fires(dirs):
 
 def test_scan_window_rule4_boundary_pins(dirs):
     # Rule 4's own 6h cutoff equals the scan window: 3 precheck-fails
-    # inside the window still fire (pins exactness at the shared edge).
+    # inside the window still fire. Pinned at 5h55m (5 min slack against
+    # clock skew); exactness at the 6h edge holds structurally — the
+    # loader's `emitted >= since` and rule 4's `ts >= cutoff` are the
+    # same inclusive comparison on the same parsed fired_at.
     estate, store = dirs
     write_box(estate, "tower", [
         audit_line("deploy", "gate-fail", ts=ts(60),
