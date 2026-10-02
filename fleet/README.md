@@ -59,13 +59,14 @@ mkdir -p ~/fleet-estate/box-07
 echo box-07.example > ~/fleet-estate/box-07/ssh-target
 
 # 0b. Controller key: >=32 bytes, mode 0600 (gate_publish refuses the rest)
+mkdir -p ~/fleet-keys
 umask 077
 head -c 32 /dev/urandom | base64 > ~/fleet-keys/ctl-2026-09.key
 
 # 0c. Per box (the G18 §5 install step): box identity, the controller key
 #     (0600, root-owned — gate_query refuses anything looser), and the gate
 #     dir the sync loop requires to exist before it writes.
-ssh root@box-07.example 'mkdir -p /var/lib/sparkvm/gate && echo box-07 > /etc/sparkvm/box-id'
+ssh root@box-07.example 'mkdir -p /etc/sparkvm /var/lib/sparkvm/gate && echo box-07 > /etc/sparkvm/box-id'
 scp ~/fleet-keys/ctl-2026-09.key root@box-07.example:/var/lib/sparkvm/gate/ctl.key
 ssh root@box-07.example 'chmod 600 /var/lib/sparkvm/gate/ctl.key'
 
@@ -77,7 +78,7 @@ ssh root@box-07.example 'chmod 600 /var/lib/sparkvm/gate/ctl.key'
 
 # 1. Publish (controller machine; registry/manifest shapes: fleet/gate_publish.py --help)
 python3 fleet/gate_publish.py --registry registry.json --manifest waves.json \
-    --key-id ctl-2026-09 --key-file ~/fleet-keys/ctl.key --out gate.json
+    --key-id ctl-2026-09 --key-file ~/fleet-keys/ctl-2026-09.key --out gate.json
 
 # 2. Distribute (operator cron, <=5 min for the 600s S1 TTL)
 GATE=gate.json ESTATE=~/fleet-estate fleet/gate_sync.sh
