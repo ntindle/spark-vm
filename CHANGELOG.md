@@ -131,7 +131,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   its event: a new repair pass scans the row store and re-appends exactly
   the missing events (marked as reconciled), so invite-to-claim
   conversion stops under-reporting after a crash. The pass is idempotent
-  and sends nothing. (#TBD, #898)
+  and sends nothing. (#900, #898)
 
 ### Security
 - The proxy's refresh/navigation-target scan now matches past literal newlines:
@@ -166,7 +166,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   external clients arriving through the proxy while the on-box operator
   keeps access both direct and via the proxy. A forged forwarding header
   from a direct client is ignored, so it can neither dodge the rate limit
-  nor claim loopback. (#TBD, #896)
+  nor claim loopback. (#900, #896)
 
 ### Fixed
 - The dashboard sync tool now refuses two more ways to produce a broken
