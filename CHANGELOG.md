@@ -193,6 +193,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The desktop bridge's launch registry no longer trusts persisted process IDs
+  blindly: a stored `0` (or boolean `true`, which is `1` in disguise) can
+  never be pruned as dead, so a corrupted registry could refuse to start an
+  app forever with a stale "already running" verdict — those entries are
+  now dropped when the registry loads. The registry file is also written
+  exclusively at 0600: the save can no longer follow a planted symlink or
+  land in a world-readable temp file. (#910)
 - The weekly toolset self-updater's idle gate now sees agent jobs no matter
   which user owns them: it checks every agent user's own tmux sessions and
   their muse-job job registry for live jobs, instead of only root's tmux
