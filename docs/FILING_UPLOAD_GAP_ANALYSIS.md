@@ -57,7 +57,7 @@ and the owner can only reach the decision endpoint via raw API.
   `detail` opaque JSON ≤ 4 KB; `expires_in_secs` clamped to [60, 3600].
   Server-side expiry is enforced at read.
 - **The upload leg has no auth path.** All four approvals endpoints go
-  through `_require_owner_for_approvals`; a box Bearer <redacted> gets
+  through `_require_owner_for_approvals`; a box token gets
   `401 "a box cannot decide its own approvals"` — a box can never
   decide, read, **or create** its own approvals. The #876 acceptance
   ("upload authenticated as the box, never as the agent") therefore has
@@ -83,7 +83,7 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
   owner-only by deliberate design (the 401 rule is a security boundary,
   not an oversight). **Decision: a dedicated
   `POST /v1/boxes/{box_id}/approvals/file`, authenticated by the box
-  Bearer <redacted> (#846), scoped to the token's own `box_id`,
+  token (#846), scoped to the token's own `box_id`,
   create-only.** Response is write-only — `201 {ok, aid, deduped}` —
   never the record body: the "a box cannot read its own approvals"
   invariant stays intact. **Rejected:** relaxing the existing create
@@ -173,7 +173,7 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
 - **S1 (this doc):** vision-vs-state + the seven decisions above.
   Non-goals: record schema (#872), decision wire (#873), ingest
   (#874), tenant routing (#69), phone UX (#428 / #797).
-- **S2:** plane `POST /v1/boxes/{box_id}/approvals/file` — box-Bearer <redacted>
+- **S2:** plane `POST /v1/boxes/{box_id}/approvals/file` — box-token
   scoped to own `box_id`, write-only response, idempotent on
   `(box_id, aid)`. (No expiry trigger: #873 B2 already drives box-side
   expiry from the command fetch — G76.5 withdrawn.) Box-auth accepts
@@ -183,8 +183,10 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
   `TEXT NOT NULL` today and the migration's own comment says "#876's
   box-filing leg will allow NULL here with box-filed provenance
   (forward ALTER, not this migration)" — S2 ships that forward
-  migration (`owner_id` nullable, box-filed provenance marker);
-  `owner_id` NULL means box-filed (the box Bearer <redacted> is the
+  migration (`owner_id` nullable, box-filed provenance marker — D1/SQLite
+  cannot flip column nullability in place, so this is the table-rebuild
+  pattern, not a bare ALTER);
+  `owner_id` NULL means box-filed (the box token is the
   provenance), and owner decisions stay owner-keyed.
   Filed as #952.
 - **S3:** `spark_pair.py upload-filings` — periodic scan of
