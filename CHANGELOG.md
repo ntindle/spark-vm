@@ -53,6 +53,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Pinned the hosted credential-vending contract: the control-plane vend
+  endpoint and its auth, the tenant-scoping decision (one box per tenant,
+  so the box-side credential stack stays flat), lease-wrapped
+  short-lived credentials with a RAM-only box cache, and where secret
+  values rest on the plane — the design the vend endpoint and box-side
+  fetcher will implement. (#931)
 - Published a consolidated control-plane API reference for the spark-vm
   control plane: every real endpoint across the owner, pairing, box,
   action-approval, and durable-command namespaces with its auth class and
