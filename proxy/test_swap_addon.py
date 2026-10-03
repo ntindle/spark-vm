@@ -1471,9 +1471,10 @@ class JsonSwapValidityTests(unittest.TestCase):
     """Issue #838: a JSON-escaped substitution only holds in string
     positions. A placeholder in an unquoted position gets the raw value,
     so a non-numeric secret breaks the document. The fix re-parses the
-    substituted body: when the document parsed before the swap but no
-    longer does, the swap is refused (placeholders left in place) and
-    the refusal is audited."""
+    substituted RESULT: when it doesn't parse, the swap is refused
+    (placeholders left in place) and the refusal is audited. The refusal
+    is two-pass — no `swapped=` audit line and no `approved:` signal may
+    exist for credentials that were never released."""
 
     def test_unquoted_non_numeric_secret_refuses_swap(self):
         """The core #838 case: {"port": hsurr:github} must NOT go out as
@@ -1538,6 +1539,63 @@ class JsonSwapValidityTests(unittest.TestCase):
         body = json.loads(req.content.decode())
         self.assertEqual(body["password"], SECRETS["pw"])
         self.assertEqual(a.audit_notes, [])
+
+    def test_refused_swap_leaves_no_audit_trail_and_no_signal(self):
+        """Round-1 Architecture finding: a refused swap must not leave
+        `swapped=` audit lines (they would assert a release that never
+        happened) nor `approved:` approval signals for unreleased
+        credentials. The two-pass structure defers both side effects to
+        the validated real pass."""
+        a = make_addon()
+        audits = []
+        a._audit = lambda host, matched: audits.append(
+            (host, matched)) or True
+        real_resolve = a._resolve
+
+        def resolve_with_aid(name, entry, host, method, path, location):
+            v, _ = real_resolve(name, entry, host, method, path, location)
+            return v, ("grantaid1" if v is not None else None)
+
+        a._resolve = resolve_with_aid
+        flow = Flow(Request("api.github.com", "/cfg",
+                            [("Content-Type", "application/json")],
+                            b'{"port": hsurr:github}'))
+        a.request(flow)
+        # the refusal itself
+        self.assertEqual(flow.request.content, b'{"port": hsurr:github}')
+        self.assertIn(("api.github.com", "json-swap",
+                       "invalid-json-after-swap"), a.audit_notes)
+        # no per-credential audit line for the unreleased swap
+        self.assertEqual(audits, [])
+        # no client-visible approval signal either
+        self.assertIsNone(a._approval_signal)
+        self.assertNotIn("spark_approval_signal", flow.metadata)
+
+    def test_valid_swap_still_audits_and_signals(self):
+        """Positive control for the test above: a swap that passes the
+        validity check still writes its `swapped=` audit line and its
+        `approved:` signal."""
+        a = make_addon()
+        audits = []
+        a._audit = lambda host, matched: audits.append(
+            (host, matched)) or True
+        real_resolve = a._resolve
+
+        def resolve_with_aid(name, entry, host, method, path, location):
+            v, _ = real_resolve(name, entry, host, method, path, location)
+            return v, ("grantaid1" if v is not None else None)
+
+        a._resolve = resolve_with_aid
+        flow = Flow(Request("api.github.com", "/cfg",
+                            [("Content-Type", "application/json")],
+                            b'{"k": "hsurr:github"}'))
+        a.request(flow)
+        self.assertEqual(json.loads(flow.request.content.decode())["k"],
+                         "ghp_TOKEN")
+        self.assertEqual(audits, [("api.github.com", "hsurr:github")])
+        self.assertIsNone(a._approval_signal)  # stashed onto the flow
+        self.assertEqual(flow.metadata["spark_approval_signal"],
+                         [("grantaid1", "approved")])
 
 
 class SmokeHostRestrictionTests(unittest.TestCase):

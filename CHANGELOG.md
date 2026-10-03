@@ -250,7 +250,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   request with no audit line explaining why. The proxy now re-parses the
   body after substitution — if it no longer parses, the whole swap is
   refused, the placeholders are left in place, and the refusal is
-  logged and audited. (#TBD)
+  logged and audited. (#932)
 - The fleet's correlated-failure alert no longer fires on failures that
   carry no target build: previously two unrelated failures with no
   recorded target could be grouped on an empty key and page a

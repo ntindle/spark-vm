@@ -2276,7 +2276,7 @@ class SwapAddon:
         return True
 
     def _swap_text(self, text, host, method=None, path=None, encode=None,
-                   allow=None, location=None):
+                   allow=None, location=None, defer_audit=False):
         """Substitute placeholders in text.
 
         method/path: the request's method and path, for the registry's
@@ -2288,6 +2288,10 @@ class SwapAddon:
         location: (area, detail) where the placeholder was found, for
             registry placement enforcement — ("header", name),
             ("query", None), ("path", None), ("body", None).
+        defer_audit: when True, substitute without writing audit lines or
+            recording approval signals — the audit write is part of
+            authorization, so a deferred pass must never release its
+            output. Only _swap_json_text's validity probe uses this.
         """
         def repl(m):
             name, entry = m.group(1), m.group(2) or "access_token"
@@ -2297,6 +2301,11 @@ class SwapAddon:
                                            path, location)
             if v is None:
                 return m.group(0)  # unknown name/entry or refused request
+            if defer_audit:
+                # Validity probe (#838): substitute only — no audit line,
+                # no approval signal. Nothing from this pass may be
+                # released or observed.
+                return encode(v) if encode else v
             if not self._audit(host, m.group(0)):
                 # The audit write is part of authorization: never release
                 # a secret without a durable trail.
@@ -2327,18 +2336,38 @@ class SwapAddon:
         refusal is audited — a silently broken body must never go out.
         Note the check is on the substituted RESULT, not a before/after
         comparison: a placeholder in an unquoted position is never valid
-        JSON before the swap either."""
-        new_text = self._swap_text(
+        JSON before the swap either.
+
+        Two-pass structure: pass 1 substitutes with audit lines and
+        approval signals deferred, so a refused swap leaves no `swapped=`
+        trail and no `approved:` signal for credentials that were never
+        released. Pass 2 is the real swap; if it diverges from the
+        validated probe (an audit write failed, or resolution changed
+        between passes) the whole body is refused rather than releasing a
+        document the probe did not validate."""
+        probe = self._swap_text(
             text, host, method, path, encode=lambda v: json.dumps(v)[1:-1],
-            location=location)
-        if new_text == text:
+            location=location, defer_audit=True)
+        if probe == text:
             return text  # nothing swapped: the proxy broke nothing
         try:
-            json.loads(new_text)
+            json.loads(probe)
         except ValueError:
             log.warning("swap: JSON swap for %s produced invalid JSON; "
                         "refusing swap, leaving placeholders", host)
             self._audit_note(host, "json-swap", "invalid-json-after-swap")
+            return text
+        # The signals recorded so far (headers/query/path) must survive a
+        # body refusal, so snapshot and restore them on the abort path.
+        signals_before = list(self._approval_signal or [])
+        new_text = self._swap_text(
+            text, host, method, path, encode=lambda v: json.dumps(v)[1:-1],
+            location=location)
+        if new_text != probe:
+            self._approval_signal = signals_before
+            log.warning("swap: JSON swap for %s diverged from validated "
+                        "probe; refusing swap, leaving placeholders", host)
+            self._audit_note(host, "json-swap", "probe-diverged")
             return text
         return new_text
 
