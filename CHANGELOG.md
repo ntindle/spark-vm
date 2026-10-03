@@ -120,6 +120,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   box-side ingest of plane decisions into the approvals daemon (#874),
   and the box-to-plane filing upload that creates the record (#876). (#875)
 
+- Documented a pre-deployment constraint for the waitlist signup service:
+  its per-IP rate limit and its operator-only status route see only the
+  socket peer address, so the service must not sit behind a same-host
+  reverse proxy until an explicit trusted-proxy mechanism exists (filed
+  #896). (#TBD)
+
 ### Security
 - The proxy's refresh/navigation-target scan now matches past literal newlines:
   a line break inside a meta-refresh `url=` value is legal HTML — browsers
