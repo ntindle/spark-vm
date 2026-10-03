@@ -58,6 +58,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   chips are built by single-copy pure renderers, and the test suite
   renders them in Node with hostile box-controlled strings — so a
   template that ever drops an escaper fails the suite. (#TBD)
+- Competitor watch, 2026-10-03 (morning): DigitalOcean's own pricing
+  page now confirms the Oct-1 Agent Droplets monthly-price plans with
+  dollar figures (Pro $50 with 15% usage discount, Team $200 with
+  20%), folded into the corpus entry; all tracked vendor baselines
+  re-verified, no new competitor launches. (#924)
 - The toolset self-updater now freezes after repeated failures: after
   three consecutive failed update runs it stops attempting updates and
   surfaces a single "box needs attention" state (visible in the status
