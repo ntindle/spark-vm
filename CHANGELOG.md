@@ -96,6 +96,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   and the box-to-plane filing upload that creates the record (#876). (#875)
 
 ### Security
+- The proxy's refresh/navigation-target scan now matches past literal newlines:
+  a line break inside a meta-refresh `url=` value is legal HTML — browsers
+  strip it and navigate to the joined URL — so a secret smuggled after the
+  newline previously escaped detection. The wider match is fail-closed-safe
+  (it can only detect more, never less). (#888, #869)
 - The box pairing client (`spark-pair.py`) no longer leaks its credentials on
   redirects: Python's HTTP library forwards `Authorization` headers even
   across redirects to a different origin, so a misconfigured or compromised
