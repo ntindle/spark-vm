@@ -2215,14 +2215,18 @@ def test_rollback_and_unblock_refuse_while_update_locked(env):
         # Hold the lock the way cmd_update does, then run the recovery
         # commands as child processes (which inherit the exported
         # TOOLSET_UPDATE_NO_MAIN=1, so unset it for the child).
+        # NOTE: child stderr goes to files under $TOOLSET_STATE_DIR, never
+        # the repo checkout — stray files in the working tree break
+        # harness/test_manifest.py in CI (generate-image-manifest.sh
+        # refuses on uncommitted changes).
         'exec 8>"$TOOLSET_STATE_DIR/toolset-update.lock"; '
         'flock -n 8 || { echo "SETUP-LOCK-FAILED"; exit 99; }; '
         'rb_rc=0; '
-        'env -u TOOLSET_UPDATE_NO_MAIN ./deploy/toolset-update.sh rollback --layer os-security 2>rb.err || rb_rc=$?; '
-        'echo "rb_rc=$rb_rc"; cat rb.err; '
+        'env -u TOOLSET_UPDATE_NO_MAIN ./deploy/toolset-update.sh rollback --layer os-security 2>"$TOOLSET_STATE_DIR/rb.err" || rb_rc=$?; '
+        'echo "rb_rc=$rb_rc"; cat "$TOOLSET_STATE_DIR/rb.err"; '
         'ub_rc=0; '
-        'env -u TOOLSET_UPDATE_NO_MAIN ./deploy/toolset-update.sh unblock apt 2>ub.err || ub_rc=$?; '
-        'echo "ub_rc=$ub_rc"; cat ub.err'
+        'env -u TOOLSET_UPDATE_NO_MAIN ./deploy/toolset-update.sh unblock apt 2>"$TOOLSET_STATE_DIR/ub.err" || ub_rc=$?; '
+        'echo "ub_rc=$ub_rc"; cat "$TOOLSET_STATE_DIR/ub.err"'
     )
     r = source_and(code, env_extra=e)
     assert "rb_rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
