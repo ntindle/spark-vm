@@ -663,6 +663,15 @@ def _sanitize_audit_field(value):
     return _AUDIT_FIELD_ALLOW_RE.sub("", str(value))
 
 
+def _reject_nonstandard_constant(value):
+    """parse_constant hook for the #838 JSON validity gate: Python's
+    json.loads accepts NaN/Infinity/-Infinity by default, but RFC 8259
+    does not — a strict server would 400 the body, which is exactly the
+    silently-broken outcome the gate exists to prevent. Raising
+    ValueError folds into the gate's refusal path."""
+    raise ValueError("non-standard JSON constant: %r" % (value,))
+
+
 def _open_audit_log():
     """Open the audit log for append, creating it 0600 if missing.
 
@@ -2276,7 +2285,7 @@ class SwapAddon:
         return True
 
     def _swap_text(self, text, host, method=None, path=None, encode=None,
-                   allow=None, location=None):
+                   allow=None, location=None, defer_audit=False):
         """Substitute placeholders in text.
 
         method/path: the request's method and path, for the registry's
@@ -2288,6 +2297,10 @@ class SwapAddon:
         location: (area, detail) where the placeholder was found, for
             registry placement enforcement — ("header", name),
             ("query", None), ("path", None), ("body", None).
+        defer_audit: when True, substitute without writing audit lines or
+            recording approval signals — the audit write is part of
+            authorization, so a deferred pass must never release its
+            output. Only _swap_json_text's validity probe uses this.
         """
         def repl(m):
             name, entry = m.group(1), m.group(2) or "access_token"
@@ -2297,6 +2310,11 @@ class SwapAddon:
                                            path, location)
             if v is None:
                 return m.group(0)  # unknown name/entry or refused request
+            if defer_audit:
+                # Validity probe (#838): substitute only — no audit line,
+                # no approval signal. Nothing from this pass may be
+                # released or observed.
+                return encode(v) if encode else v
             if not self._audit(host, m.group(0)):
                 # The audit write is part of authorization: never release
                 # a secret without a durable trail.
@@ -2316,10 +2334,58 @@ class SwapAddon:
     def _swap_json_text(self, text, host, method=None, path=None,
                         location=("body", None)):
         """Substitute placeholders in a JSON body, JSON-escaping each value
-        so quotes/backslashes in a secret can't break the document."""
-        return self._swap_text(
+        so quotes/backslashes in a secret can't break the document.
+
+        Issue #838: the escaping only holds in STRING positions. A
+        placeholder in an unquoted position (e.g. "port": hsurr:acme:port)
+        gets the raw value: a numeric secret still yields valid JSON, but
+        a non-numeric secret breaks the document. After substitution the
+        result is re-parsed: when it no longer parses, the swap is refused
+        (the placeholders are left in place), a warning is logged, and the
+        refusal is audited — a silently broken body must never go out.
+        Note the check is on the substituted RESULT, not a before/after
+        comparison: a placeholder in an unquoted position is never valid
+        JSON before the swap either.
+
+        Two-pass structure: pass 1 substitutes with audit lines and
+        approval signals deferred, so a refused swap leaves no `swapped=`
+        trail and no `approved:` signal for credentials that were never
+        released. Pass 2 is the real swap; if it diverges from the
+        validated probe (an audit write failed, or resolution changed
+        between passes) the whole body is refused rather than releasing a
+        document the probe did not validate.
+
+        The probe parse is strict: `RecursionError` fails closed like
+        invalid JSON (deep nesting under the size cap must not crash the
+        hook), and non-standard constants (NaN/Infinity) are rejected —
+        Python accepts them, RFC 8259 does not, and a strict server would
+        400 the body, which is exactly the silently-broken outcome this
+        gate exists to prevent."""
+        probe = self._swap_text(
+            text, host, method, path, encode=lambda v: json.dumps(v)[1:-1],
+            location=location, defer_audit=True)
+        if probe == text:
+            return text  # nothing swapped: the proxy broke nothing
+        try:
+            json.loads(probe, parse_constant=_reject_nonstandard_constant)
+        except (ValueError, RecursionError):
+            log.warning("swap: JSON swap for %s produced invalid JSON; "
+                        "refusing swap, leaving placeholders", host)
+            self._audit_note(host, "json-swap", "invalid-json-after-swap")
+            return text
+        # The signals recorded so far (headers/query/path) must survive a
+        # body refusal, so snapshot and restore them on the abort path.
+        signals_before = list(self._approval_signal or [])
+        new_text = self._swap_text(
             text, host, method, path, encode=lambda v: json.dumps(v)[1:-1],
             location=location)
+        if new_text != probe:
+            self._approval_signal = signals_before
+            log.warning("swap: JSON swap for %s diverged from validated "
+                        "probe; refusing swap, leaving placeholders", host)
+            self._audit_note(host, "json-swap", "probe-diverged")
+            return text
+        return new_text
 
     def _swap_urlencoded(self, text, host, method=None, path=None,
                          location=("body", None)):
