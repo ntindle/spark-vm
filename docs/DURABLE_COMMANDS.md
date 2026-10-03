@@ -110,11 +110,18 @@ Payload (all required):
   command. Reserved for future multi-decision flows.
 - `idempotency_key`: `approval_decision:<box_id>:<aid>:<decision_seq>`.
   The box dedupes on this key (#874): redelivery after a crashed box
-  re-delivers the *same* decision, never a contradictory one, and a
-  replayed owner tap never double-enqueues (the plane checks for an
-  existing command with this key before enqueueing).
+  re-delivers the *same* decision, never a contradictory one. A
+  *sequential* replayed owner tap never double-enqueues (the plane
+  checks for an existing command with this key before enqueueing);
+  two *concurrent* replays can both miss the check and enqueue
+  distinct seqs with the same key — the box-side key dedupe is the
+  backstop, and the payloads are identical.
+- `box_id` is not in the payload: it rides the command row's `box_id`
+  column (and is embedded in the key). Both carriers (the per-box
+  HTTPS pending endpoint, the per-box socket) are box-scoped, so the
+  box never needs it in the payload.
 
-Exactly-once enqueue: the decision record's write-once UPDATE is the
+Exactly-once enqueue (sequential): the decision record's write-once UPDATE is the
 gate — only the winning decider enqueues; idempotent replays find the
 existing command and enqueue nothing. Server-side expiry uses a
 per-aid conditional UPDATE for the same guarantee: a raced expiry
