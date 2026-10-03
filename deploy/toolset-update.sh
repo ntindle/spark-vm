@@ -16,10 +16,19 @@
 #
 # Behavior contract:
 #   - Never disrupts running agent work: `update` defers (exit 0, loud log)
-#     when agent jobs are active, unless --force. The apt layer may trigger
-#     maintainer-script service restarts (e.g. dockerd); the idle gate plus
-#     the weekly quiet-hours window bound that surface (see
-#     docs/TOOLSET_UPDATE.md).
+#     when agent jobs are active, unless --force. The gate is uid-aware:
+#     for every user in $TOOLSET_AGENT_USERS (default: ntindle) it checks
+#     that user's own tmux server for live `mjob-*` sessions AND scans
+#     their muse-job registry (~/muse-jobs/*/job.json) for non-terminal
+#     job records — the registry half survives the muse-job v2 cutover
+#     (#228), which moves jobs off tmux. Both probes are read-only. An
+#     identity-switch failure defers loudly (fail-closed); a tmux probe
+#     that fails for other reasons (missing binary, broken server) reads
+#     as no-sessions for that half, with the registry probe as the
+#     independent backstop.
+#     The apt layer may trigger maintainer-script service restarts (e.g.
+#     dockerd); the idle gate plus the weekly quiet-hours window bound
+#     that surface (see docs/TOOLSET_UPDATE.md).
 #   - Fail-closed: unknown/missing state is reported, never silently skipped.
 #   - Idempotent: safe to run on an already-current box (no-op).
 #   - --dry-run changes nothing. --now is informational-only in v0: the
@@ -81,10 +90,12 @@
 #
 # Env overrides (for tests): TOOLSET_STATE_DIR, APT_CONF_DIR, SYSTEMD_DIR,
 # OPTOUT_FILE, SKIP_SYSTEMCTL=1 (skip systemctl calls), SKIP_SUDO=1 (run
-# file ops without sudo), TMUX_BIN (idle-gate probe), TOOLSET_UPDATE_NO_MAIN=1
-# (source functions only, for tests), TOOLSET_INSTALL_OWNER/GROUP (owner for
-# installed files; default root — tests run non-root, e.g. CI, set these to
-# the current uid/gid since `install -o root` requires privilege),
+# file ops without sudo), TMUX_BIN (tmux binary for the idle-gate probe),
+# TOOLSET_AGENT_USERS (space-separated agent uids whose activity blocks
+# updates; default ntindle), TOOLSET_UPDATE_NO_MAIN=1 (source functions
+# only, for tests), TOOLSET_INSTALL_OWNER/GROUP (owner for installed
+# files; default root — tests run non-root, e.g. CI, set these to the
+# current uid/gid since `install -o root` requires privilege),
 # APT_DOCKER_PKGS / APT_NODE_PKGS / APT_GH_PKGS (space-separated candidate
 # package names per tool; tests override to fixture packages).
 # PINS_FILE (pin file; default $TOOLSET_STATE_DIR/self_update_pins.conf —
@@ -147,8 +158,19 @@ VERSION_FILE="$(dirname "$SCRIPT_DIR")/VERSION"
 : "${SKIP_SYSTEMCTL:=0}"
 : "${SKIP_SUDO:=0}"
 : "${TMUX_BIN:=tmux}"
+# Agent users whose live jobs block `update` (space-separated). The updater
+# runs as root; agent jobs run as these users, on their own tmux servers
+# and with their own muse-job registries. Default ntindle when unset; an
+# explicitly empty value means "no users" — the gate stays open but says
+# so loudly in the run log (operator's explicit choice, not a default).
+: "${TOOLSET_AGENT_USERS-ntindle}"
 : "${TOOLSET_INSTALL_OWNER:=root}"
 : "${TOOLSET_INSTALL_GROUP:=root}"
+# Resolve the probe tmux to an absolute path once: the per-user probe
+# executes it as another uid, where a PATH-relative name would invite PATH
+# hijacking. Falls back to the name itself when unresolvable (the probe
+# then degrades to the registry half, documented below).
+TMUX_RESOLVED="$(command -v "$TMUX_BIN" 2>/dev/null || printf '%s' "$TMUX_BIN")"
 # Pin file: read from the installed/backfilled copy refreshed only by the
 # privileged `install` step — never from the live repo checkout (see
 # docs/SELF_UPDATE.md "Two planes" contract).
@@ -177,9 +199,35 @@ _log_dest_init() {
     LOG_FILE="$STATE_RUN_LOG"
 }
 
+_sanitize_log_line() {
+    # Strip terminal-injection bytes from a log line: ASCII C0 controls
+    # (except tab) and DEL. CR and LF become spaces so one call is one
+    # line — a CR would otherwise let a crafted slug overwrite the visible
+    # head of the line in a terminal viewer (log forgery). The gate
+    # interpolates user-influenced data (user names, job slugs, job states
+    # from ~/muse-jobs records) into log lines that land in the journal
+    # and the run log; raw ESC/CSI bytes would let a lower-privilege
+    # writer inject terminal sequences into a privileged operator's
+    # viewer. Pure bash (no external commands): log() must work on minimal
+    # PATHs — a missing helper here must never kill the run before the
+    # loud audit line.
+    # Residual (documented): C1 controls (0x80-0x9F) are NOT stripped —
+    # they are UTF-8 continuation bytes too, and telling a lone 0x9B from
+    # a valid multibyte sequence needs a decoder, which the pure-bash
+    # design rules out. The universal ESC vector is dead; only
+    # xterm-in-UTF-8-mode interprets C1, and every other mainstream
+    # terminal ignores them.
+    local s="$1"
+    s="${s//$'\n'/ }"
+    s="${s//$'\r'/ }"
+    s="${s//[$'\001'-$'\010'$'\013'$'\014'$'\016'-$'\037'$'\177']/}"
+    printf '%s' "$s"
+}
+
 log() {
     # log <msg> — timestamped line to the run log; best-effort, never fatal.
     local msg="$1"
+    msg="$(_sanitize_log_line "$msg")"
     _log_dest_init
     if [ -n "${LOG_FILE:-}" ]; then
         ( mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null \
@@ -224,16 +272,227 @@ _sudo() {
     fi
 }
 
-# --- idle gate ----------------------------------------------------------------
+# --- idle gate (uid-aware, #532) --------------------------------------------------
+# The weekly `update` must not restart services (apt maintainer scripts,
+# e.g. dockerd) while agent jobs are live. Two independent probes, both
+# read-only, OR-ed together — idle only when both are clean for every
+# agent user:
+#   1. tmux: live `mjob-*` sessions on each agent user's OWN tmux server.
+#      tmux sockets are per-uid — probing as root saw only root's server,
+#      so the v0 gate never saw any agent jobs at all.
+#   2. muse-job registry: ~/muse-jobs/<slug>/job.json records whose state
+#      is non-terminal (active/blocked). This is the v2-proof half: when
+#      the muse-job v2 cutover (#228) moves jobs off tmux, the registry
+#      keeps the same state contract and the gate keeps working.
+# The probes never execute user code: tmux is asked only for session names
+# (`ls -F '#S'`, no pane content, fixed argv, absolute binary path), and
+# job.json records are parsed as JSON data (stdlib parser, never
+# executed). Unknown job states are busy — fail-closed against a future
+# state the gate does not recognize. A user that does not exist has no
+# jobs (skipped, logged). An identity-switch failure defers loudly
+# (fail-closed); a tmux probe that fails for other reasons reads as
+# no-sessions for that half, with the registry probe as the independent
+# backstop.
+_user_home() {
+    # _user_home <user> — print the user's home dir, or nothing when the
+    # user does not exist. The home comes from the system passwd DB
+    # (getent), never from env.
+    local user="$1" line
+    line="$(getent passwd "$user" 2>/dev/null || true)"
+    [ -n "$line" ] || return 0
+    printf '%s' "$line" | cut -d: -f6
+}
+
+_as_user() {
+    # _as_user <user> -- cmd... — run a command as <user> for read-only
+    # probes. Returns 2 when the identity switch itself is impossible
+    # (fail-closed upstream); otherwise the command's own status. Never
+    # drops into the user's shell — the command is executed directly, no
+    # shell involved. 2 is reserved for the switch-impossible path, so a
+    # command that itself exits 2 is reported as 3 and the two are never
+    # confused.
+    local user="$1"; shift
+    [ "${1:-}" = "--" ] && shift
+    local me target rc=0
+    me="$(id -u 2>/dev/null || true)"
+    target="$(id -u "$user" 2>/dev/null || true)"
+    if [ -n "$me" ] && [ -n "$target" ] && [ "$me" = "$target" ]; then
+        "$@" || rc=$?
+        [ "$rc" = "2" ] && rc=3
+        return "$rc"
+    fi
+    if [ "${me:-}" != "0" ]; then
+        return 2
+    fi
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$user" -- "$@" || rc=$?
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo -u "$user" -- "$@" || rc=$?
+    else
+        return 2
+    fi
+    [ "$rc" = "2" ] && rc=3
+    return "$rc"
+}
+
+_tmux_sessions_for_user() {
+    # Print the user's tmux session names (one per line), or nothing.
+    # Returns 2 when the identity switch itself is impossible (fail-closed
+    # upstream). Any other non-zero tmux exit (e.g. "no server running")
+    # is the idle state for this probe — the registry probe is the
+    # independent backstop for a broken tmux.
+    local user="$1"
+    local out rc=0
+    out="$(_as_user "$user" -- "$TMUX_RESOLVED" ls -F '#S' 2>/dev/null)" || rc=$?
+    if [ "$rc" = "2" ]; then
+        return 2
+    fi
+    printf '%s\n' "$out"
+    return 0
+}
+
+_registry_busy() {
+    # _registry_busy <jobsdir> — print one `slug:state` line per live job
+    # record in <jobsdir>/*/job.json. Returns 0 when at least one record
+    # is non-terminal, 1 when the estate is idle, 2 when the scan itself
+    # failed (fail-closed upstream). Non-terminal: active, blocked.
+    # Terminal: killed, closed, done. Anything else — missing state,
+    # unparseable value, an unrecognized future state — is busy
+    # (fail-closed). Read-only: records are parsed as data, never executed.
+    # The scan runs as the invoking uid (root under the timer) — the parse
+    # is data-only, so no user content executes with privilege; the only
+    # output is the busy/idle bit plus slug:state lines in the (sanitized)
+    # run log.
+    local jobsdir="$1"
+    [ -d "$jobsdir" ] || return 1
+    if command -v python3 >/dev/null 2>&1; then
+        local out rc=0
+        out="$(python3 -c '
+import json, os, sys
+jobsdir = sys.argv[1]
+try:
+    names = sorted(os.listdir(jobsdir))
+except OSError:
+    sys.exit(2)
+for name in names:
+    p = os.path.join(jobsdir, name, "job.json")
+    if not os.path.isfile(p):
+        continue
+    try:
+        with open(p) as fh:
+            d = json.load(fh)
+    except OSError:
+        # Vanished between listdir and open (the tmp+rename write pattern
+        # means readers never see a torn file) — not evidence of a live job.
+        continue
+    except ValueError:
+        # Unparseable record: fail closed — a corrupt job.json for a live
+        # job must never read as idle.
+        print("%s:unparseable" % name)
+        continue
+    state = d.get("state") if isinstance(d, dict) else None
+    if state not in ("killed", "closed", "done"):
+        print("%s:%s" % (name, state))
+' "$jobsdir" 2>/dev/null)" || rc=$?
+        if [ "$rc" = "2" ]; then
+            return 2
+        fi
+        if [ -n "$out" ]; then
+            printf '%s\n' "$out"
+            return 0
+        fi
+        return 1
+    fi
+    # No python3: grep fallback — extract every "state" value from each
+    # job.json. Busy if ANY value is non-terminal (a nested/history "done"
+    # must never mask a live top-level state); a file with no parseable
+    # state at all is busy too (fail-closed, matching the python path).
+    # Cruder than the JSON parse (first textual match per value) but still
+    # read-only. Known residual, fail-OPEN direction: a record with NO
+    # top-level state but a nested terminal one ({"a":{"state":"done"}})
+    # reads idle here (the nested "done" is all grep can see) while the
+    # python path reads busy on state=None — the fallback cannot see JSON
+    # structure. The primary python path is fail-closed; this fallback
+    # only runs when python3 is absent.
+    local d slug states rest first busy=0
+    for d in "$jobsdir"/*/; do
+        [ -d "$d" ] || continue
+        [ -f "${d}job.json" ] || continue
+        slug="$(basename "$d")"
+        states="$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            "${d}job.json" 2>/dev/null | cut -d'"' -f4 || true)"
+        # No parseable state at all: fail closed (a corrupt record must
+        # never read as idle). NB: command substitution strips trailing
+        # newlines, so an empty $states would otherwise vanish here.
+        if [ -z "$states" ]; then
+            printf '%s:unparseable\n' "$slug"
+            busy=1
+            continue
+        fi
+        # Strip the terminal states; whatever survives — a non-terminal
+        # value — is busy. (A nested "done" can never mask a live
+        # top-level state: ANY non-terminal value defers.)
+        rest="$(printf '%s\n' "$states" | grep -Ev '^(killed|closed|done)$' || true)"
+        if [ -n "$rest" ]; then
+            first="$(printf '%s' "$rest" | grep -v '^$' | head -n 1 || true)"
+            printf '%s:%s\n' "$slug" "${first:-unparseable}"
+            busy=1
+        fi
+    done
+    [ "$busy" = "1" ] && return 0
+    return 1
+}
+
 _jobs_active() {
-    # v0 idle heuristic: any live `mjob-*` tmux session means an agent job is
-    # running. Documented limitation (docs/TOOLSET_UPDATE.md): the muse-job
-    # registry check arrives in a later slice; the tmux check is conservative
-    # (false positives defer, never disrupt).
-    local sessions
-    sessions="$("$TMUX_BIN" ls -F '#S' 2>/dev/null || true)"
-    [ -n "$sessions" ] || return 1
-    printf '%s\n' "$sessions" | grep -q '^mjob-'
+    # UID-aware idle probe (#532): for every user in TOOLSET_AGENT_USERS,
+    # check (1) their tmux server for live mjob-* sessions and (2) their
+    # muse-job registry for non-terminal job records. Returns 0 (busy)
+    # when any user has either; 1 when the whole estate is idle.
+    local user home probed=0
+    # Split the user list on whitespace WITHOUT pathname expansion: a glob
+    # token in the root-set list must fail the allowlist check literally,
+    # never expand against the cwd (`read -ra` does not glob).
+    local -a users
+    IFS=$' \t\n' read -ra users <<< "${TOOLSET_AGENT_USERS:-}" || true
+    for user in "${users[@]}"; do
+        probed=1
+        case "$user" in
+            ''|-*|.*|*[!A-Za-z0-9_.-]*)
+                log "idle gate: refusing unsafe agent user name: $user"
+                return 0 ;;
+        esac
+        home="$(_user_home "$user")"
+        if [ -z "$home" ]; then
+            log "idle gate: no such user $user — skipping (no jobs possible)"
+            continue
+        fi
+        # Probe 1: tmux sessions on the user's own server.
+        local sessions rc=0
+        sessions="$(_tmux_sessions_for_user "$user")" || rc=$?
+        if [ "$rc" = "2" ]; then
+            log "idle gate: cannot probe tmux as $user — deferring (fail-closed)"
+            return 0
+        fi
+        if printf '%s\n' "$sessions" | grep -q '^mjob-'; then
+            log "idle gate: live mjob-* tmux session for $user"
+            return 0
+        fi
+        # Probe 2: muse-job registry (v2-proof: survives the #228 cutover).
+        local reg rc2=0
+        reg="$(_registry_busy "$home/muse-jobs")" || rc2=$?
+        if [ "$rc2" = "2" ]; then
+            log "idle gate: cannot scan muse-job registry for $user — deferring (fail-closed)"
+            return 0
+        fi
+        if [ -n "$reg" ]; then
+            log "idle gate: live job record(s) for $user: $(printf '%s' "$reg" | tr '\n' ' ')"
+            return 0
+        fi
+    done
+    if [ "$probed" = "0" ]; then
+        log "idle gate: TOOLSET_AGENT_USERS is empty — no users probed, the gate is open"
+    fi
+    return 1
 }
 
 _idle_gate() {
@@ -244,7 +503,9 @@ _idle_gate() {
         return 0
     fi
     if _jobs_active; then
-        log "deferred: agent jobs active (mjob-* tmux session); retry next window"
+        # _jobs_active already logged which probe saw the live job; this
+        # line stays generic.
+        log "deferred: agent jobs active; retry next window"
         return 2
     fi
     return 0
