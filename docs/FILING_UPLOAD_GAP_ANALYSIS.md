@@ -23,6 +23,10 @@ self-hosted reality until the hosted product exists.
   owns none of those.
 - Transport choices (WSS phone-home vs HTTPS) are
   `docs/PHONE_HOME_GAP_ANALYSIS.md` (#847). This leg rides HTTPS only.
+- The summons outbox journal (`summons-outbox.jsonl`, G4 S1 / #428) is
+  append-only and serves the summons observer — the uploader scans
+  `confirm/pending/` instead (G76.2), and this doc does not change the
+  journal.
 
 ## 1. The loop this leg completes
 
@@ -30,9 +34,10 @@ A sensitive agent action travels: proxy refusal → local filing
 (`_file_approval`, Finding 49) → **filing upload (this leg)** →
 plane-side pending record (#872) → owner sees/taps → decision enqueued
 on the durable channel (#873) → box ingest stamps the grant into
-confirmd (#874) → the parked agent unparks. Four of the five legs are
-built and shipped. The upload leg is not: the plane record exists but
-nothing creates it from the box side.
+confirmd (#874) → the parked agent unparks. Four of the six legs are
+built and shipped. The upload leg and the owner see/tap surface are
+not: the plane record exists but nothing creates it from the box side,
+and the owner can only reach the decision endpoint via raw API.
 
 ## 2. State (main `5dc1d93`)
 
@@ -86,6 +91,9 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
   endpoints share one auth helper; mixing token classes on one endpoint
   is exactly the confusion the explicit 401 was built to prevent. A
   separate endpoint keeps the file leg's rule explicit and auditable.
+  Box-auth accepts `current` **and** `grace` token states — #846's
+  15-minute rotation grace must never stall uploads (mirror
+  `_commands_pending`'s token classifier).
 - **`[DESIGN]` G76.2 — uploader placement.** Two candidates: inline in
   `_file_approval` (the filing write POSTs to the plane immediately) or
   a periodic `spark_pair.py upload-filings` that scans
@@ -97,6 +105,13 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
   design naturally. An inline first attempt is deferred, not
   forbidden — it buys one cron-interval of latency at the cost of a
   synchronous network call in the hot path; measure before adding.
+  **Journal decision:** `upload-filings` scans `confirm/pending/`,
+  not the summons outbox journal — the journal (`summons-outbox.jsonl`,
+  G4 S1 / #428) is append-only and serves the summons observer, while
+  G76.4's pending-only semantics fall out naturally from scanning the
+  pending store itself. **Cron wiring:** a separate `* * * * *` cron
+  line with its own flock lock file and log, mirroring heartbeat and
+  ingest (`_INGEST_LOCK_FILE` pattern) — not folded into `ingest`.
 - **`[DESIGN]` G76.3 — payload mapping.** `aid`: the local 16-hex id is
   already the plane's idempotency key — retries return `deduped: true`,
   so the local flood-control caps never multiply into duplicates.
@@ -118,10 +133,17 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
   confirmd store stays the authority for the agent-facing signal; the
   plane record is owner-facing. A record denied locally *after* upload
   stays plane-pending until TTL — the divergence window is bounded by
-  the 3600 s plane TTL and needs no extra machinery (an owner tapping
-  decide on a locally-dead record gets the write-once 409/410 and the
-  box never acts on it, since ingest only stamps plane decisions into
-  confirmd's answered store, which the local scan reaps).
+  the 3600 s plane TTL and needs no extra machinery. The protection is
+  **box-side, not the plane's write-once gate**: an owner tapping
+  decide on a plane-pending-but-locally-dead record gets a 200 and an
+  `approval_decision` command is enqueued — the plane has no way to
+  know the local state. The actual gate is ingest's first-terminal-wins
+  check (`consumed/<aid>.json` exists → "already terminal locally —
+  plane decision superseded, not stamped", `spark_pair.py`). Same
+  mitigation covers the uploader's own read-then-POST window (record
+  denied between the `pending/` scan and the POST): the upload is
+  harmless, the local terminal state wins at ingest, and TTL bounds
+  the plane-side ghost.
 - **`[WITHDRAWN — not a gap]` G76.5 — expiry for unattended boxes.**
   Withdrawn in Product review: #873 B2 already drives box-side expiry
   from the box's own box-authenticated command fetch (see §2) — the
@@ -135,13 +157,16 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
   this, the uploaded record is visible only via raw API — the phone
   tap the #849 vision names has no screen.
 - **`[POLICY]` G76.7 — writer identity and display hygiene.** The
-  uploader must read from swapd's root-owned `confirm/pending/` —
+  uploader must read from the box-service-owned `confirm/pending/` —
   never from an agent-writable path (the "writer identity is the box,
-  never the agent" acceptance). The box token lives in the existing
-  enrollment store. In the other direction: the summary is
-  **box-controlled display data** shown to the owner — the dashboard
-  must neutralize it (control characters, terminal escapes) per the
-  #902/#915 hostile-display discipline, applied in reverse.
+  never the agent" acceptance). The enforced discipline is the DAC-owner
+  one ingest uses (`_ingest_file_owner`: owner ∈ {bdrive, swapd}), not
+  literally root. The box token lives in the existing 0600 enrollment
+  store. In the other direction: the summary is **box-controlled
+  display data** shown to the owner — the dashboard must neutralize it
+  through its existing `esc()` (plus control-character stripping) —
+  unescaped owner-visible strings are a test-gated template rule in
+  `dashboard.html`, and box-supplied summaries get no exemption.
 
 ## 4. Slices
 
@@ -151,13 +176,24 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
 - **S2:** plane `POST /v1/boxes/{box_id}/approvals/file` — box-Bearer <redacted>
   scoped to own `box_id`, write-only response, idempotent on
   `(box_id, aid)`. (No expiry trigger: #873 B2 already drives box-side
-  expiry from the command fetch — G76.5 withdrawn.)
+  expiry from the command fetch — G76.5 withdrawn.) Box-auth accepts
+  `current` **and** `grace` token states (#846: rotation must never
+  stall uploads — mirror `_commands_pending`). **Needs the forward D1
+  migration `migrate_872.sql` already names**: `owner_id` is
+  `TEXT NOT NULL` today and the migration's own comment says "#876's
+  box-filing leg will allow NULL here with box-filed provenance
+  (forward ALTER, not this migration)" — S2 ships that forward
+  migration (`owner_id` nullable, box-filed provenance marker);
+  `owner_id` NULL means box-filed (the box Bearer <redacted> is the
+  provenance), and owner decisions stay owner-keyed.
   Filed as #952.
 - **S3:** `spark_pair.py upload-filings` — periodic scan of
-  `confirm/pending/`, payload mapping per G76.3 (incl. summary AND
+  `confirm/pending/` (not the summons journal — G76.2 decision),
+  payload mapping per G76.3 (incl. summary AND
   `detail.path_prefix` truncation), pending-only upload per G76.4,
-  root-owned paths per G76.7, cron wiring alongside heartbeat/ingest.
-  Filed as #953.
+  box-service-owned paths (bdrive/swapd DAC discipline) per G76.7,
+  separate `* * * * *` cron line with its own flock lock + log
+  (heartbeat/ingest pattern). Filed as #953.
 - **S4:** dashboard action-approval pending list + decide buttons
   (owner session), display-neutralized per G76.7. Filed as #954.
 - **S5 (acceptance, stays on #876):** a proxy refusal creates the plane
