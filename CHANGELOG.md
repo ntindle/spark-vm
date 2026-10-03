@@ -262,6 +262,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The waitlist event-repair tool (`--reconcile` / `--reconcile-claimed`)
+  no longer crashes when a funnel event carries a timestamp that isn't a
+  string: a corrupted-but-readable event used to raise an error and kill
+  the whole repair run; it is now treated as uncovered and re-derived
+  from the row records, same as a torn log line. (#939)
 - The fleet's correlated-failure alert no longer fires on failures that
   carry no target build: previously two unrelated failures with no
   recorded target could be grouped on an empty key and page a
