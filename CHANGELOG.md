@@ -190,7 +190,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   which user owns them: it checks every agent user's own tmux sessions and
   their muse-job job registry for live jobs, instead of only root's tmux
   server — previously a job running as another user was invisible and the
-  weekly update could restart services underneath it. (#TBD)
+  weekly update could restart services underneath it. (#904)
 - The dashboard sync tool now refuses two more ways to produce a broken
   control-plane file: a page ending in an odd number of backslashes (the
   last one would escape the closing quotes of the inlined string) and a
