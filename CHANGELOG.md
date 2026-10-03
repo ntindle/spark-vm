@@ -242,7 +242,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   recorded target could be grouped on an empty key and page a
   "bad release" fleet alert together. Correlation now requires the
   shared target build the inference is actually about.
-  (#TBD)
+  (#929)
 - The credential proxy now notices when a secret file's contents are
   rewritten in place: previously it only watched the secrets directory
   for additions and removals, so a secret rotated by editing the file
