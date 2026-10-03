@@ -285,8 +285,8 @@ put it to work.
 | `jail/` | Sandboxing bits |
 | `deploy/` | Release automation: unattended redeploys + branch/tag protection rulesets-as-code |
 | `harness/` | Pre-seeded harness tooling (R2): golden-image manifest, gate fixture, auth probe, and provision-time injector ([research](docs/PRE_SEEDED_HARNESS_RESEARCH.md)) |
-| `fleet/` | Fleet management: version inventory, event/alert journals, retention pruning ([README](fleet/README.md)) |
-| `hosted/` | Hosted control-plane tenant layer: machine-readable onboarding status via `GET /tenant/status` ([README](hosted/README.md)) |
+| `fleet/` | Fleet management: version inventory, event journal + alerts, retention pruning ([README](fleet/README.md)) |
+| `hosted/` | Hosted control-plane tenant layer: machine-readable onboarding status via `GET /tenant/status`; relay session-liveness journal ([README](hosted/README.md)) |
 | `site/` | Waitlist web surface: landing page + waitlist signup backend + invite operator tooling (reconcile, reinstate, and diagnose invite state) |
 | `assets/` | Demo assets + hero art (marketing visuals, regenerated in place) |
 | `VERSION` / `CHANGELOG.md` / `CONTRIBUTING.md` | Versioning, the changelog ritual, and the contributor process |
