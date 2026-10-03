@@ -141,7 +141,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   a bare traceback instead of the tool's loud refusal). It also keeps an
   indented END marker line byte-for-byte instead of silently dedenting
   it, and its command-line exit codes (`--check` drift → 1, refusals → 2)
-  are now covered by tests. (#TBD)
+  are now covered by tests. (#894)
 - The box pairing client's "endpoint not implemented" detection no longer
   keys on an error string the control plane itself can return: the HTTP
   layer now marks the 404 payloads it synthesizes itself with an explicit
