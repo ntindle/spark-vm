@@ -70,13 +70,24 @@ proof-of-possession over the server-issued challenge.
 | `GET /v1/pairing/{id}/status` | none | Box polls; `{challenge}` only when approved |
 | `POST /v1/pairing/{id}/redeem` | none | `{signature(b64)}` over the challenge → `{box_id, token, token_expires_at}`; the first 24 h Bearer <redacted> issued |
 
+### Fleet read endpoints (`/v1/boxes*`) — auth: owner key
+
+(Grounded in ntindle's #843 ship comment, 2026-10-02 — these endpoints
+live in the ops checkout's `worker.py`, not this repo; the shipped
+dashboard's calls below are the repo-side witness.)
+
+| Method & path | Purpose |
+|---|---|
+| `GET /v1/boxes` | Fleet list → `{ok, boxes}`. The dashboard's fleet view calls it on sign-in and every 30 s auto-refresh (`r.data.boxes`). Unauthenticated → `401 {"ok": false, "error": "unauthorized"}`. |
+| `GET /v1/boxes/{id}` | Box detail → `{ok, box}` (hostname, uptime, services, key fingerprint, token expiry, last-status). Unauthenticated → 401. |
+
 ### Box endpoints (`/v1/boxes/*`) — auth: box Bearer <redacted> unless noted
 
 | Method & path | Purpose |
 |---|---|
-| `POST /v1/boxes/{id}/heartbeat` | Box liveness: JSON status body (`box_id`, `sent_at`, client, uptime, load, `token_expires_at`). The plane's own `200 {ok:true}` is the only "ok" — a missed heartbeat never fabricates one. Boxes with no heartbeat in 5 min are **STALE** on the dashboard; a never-heartbeated box shows "no heartbeat". (#864) |
-| `POST /v1/boxes/token/rotate` | ed25519 proof-of-possession (`{"signature"}` in the body) rotates the box token: atomic self-referential swap, 24 h expiry, 15-min previous-token grace, null-signature MUST-reject. A `403` here means the Bearer <redacted> was accepted but the signature was rejected — check the box clock (±300 s window), don't re-pair. (#846) |
-| `POST /v1/boxes/{id}/revoke` | **Owner key.** Stamps `revoked_at`; the box's Bearer <redacted> 401s *immediately* (heartbeats, rotation, bootstrap all refuse). Idempotent. One-way — the box comes back only by re-pairing. (#846) |
+| `POST /v1/boxes/{id}/heartbeat` | Box liveness: JSON status body (`box_id`, `sent_at`, `client`, `uptime_s?`, `load_1?`, `token_expires_at?`). The plane's own `200 {ok:true}` is the only "ok" — a missed heartbeat never fabricates one. Boxes with no heartbeat in 5 min are **STALE** on the dashboard; a never-heartbeated box shows "no heartbeat". (#864) |
+| `POST /v1/boxes/token/rotate` | ed25519 proof-of-possession (`{"signature"}` in the body) rotates the box token: atomic self-referential swap, 24 h expiry, 15-min previous-token grace, null-signature MUST-reject for boxes with a keypair on record — while keyless pre-#844 boxes rotate with `signature: null` (`"proof": "Bearer"`, `"rekey_recommended": true`). A `403` here means the Bearer <redacted> was accepted but the signature was rejected — check the box clock (±300 s window), don't re-pair. (#846) |
+| `POST /v1/boxes/{id}/revoke` | **Owner key.** Stamps `revoked_at`; the box's Bearer <redacted> 401s *immediately* (heartbeats, rotation, bootstrap all refuse). One-way — the box comes back only by re-pairing. (#846) |
 
 ### Durable-command endpoints (`/v1/boxes/{box_id}/commands*`)
 
@@ -101,7 +112,7 @@ the plane→box wire shape (#873), and box-side ingest into confirmd
 
 | Method & path | Purpose |
 |---|---|
-| `POST /v1/boxes/{box_id}/approvals` | Create a pending record. Body: `{aid, summary, detail?, expires_in_secs?}` (aid: client-chosen idempotency key, 1–64 chars; `(box_id, aid)` primary key — a retried create returns the existing record with `deduped: true`) → `201 {ok, approval}`. |
+| `POST /v1/boxes/{box_id}/approvals` | Create a pending record. Body: `{aid, summary, detail?, expires_in_secs?}` (`aid`: client-chosen idempotency key, 1–64 chars in `[A-Za-z0-9._-]`; `summary`: 1–256 chars; `detail`: opaque JSON object ≤ 4 KB. The `(box_id, aid)` primary key makes create retries safe: a retried create returns the existing record with `200 {ok, approval, deduped: true}` instead of a duplicate) → `201 {ok, approval}`. |
 | `GET /v1/boxes/{box_id}/approvals` | List records (`?status=pending\|approved\|denied\|expired`, `?limit=` ≤ 200, default 50). Server-side expiry applied before listing. |
 | `GET /v1/boxes/{box_id}/approvals/{aid}` | One record; server-side expiry applied. |
 | `POST /v1/boxes/{box_id}/approvals/{aid}/decision` | Record the decision: `{decision: "approve"\|"deny"}` → `200 {ok, approval}`. First decision wins (conditional update on `pending` rows only); re-deciding with the same decision is a `200` replay (`deduped: true`); a conflicting decision on a decided record is `409 "approval already decided"`; deciding an expired record is `410` (expiry is terminal). |
@@ -117,7 +128,7 @@ rewrites the decision.
 | Method & path | Purpose |
 |---|---|
 | `GET /` | The authenticated fleet dashboard (`hosted/dashboard/` is the canonical copy, inlined into the deployed worker). Owner sign-in (key held in the tab's `sessionStorage` only); fleet list with STALE marking; box detail; pairing approvals; every API call carries the owner key as a `Bearer` token and a 401 anywhere returns the UI to the sign-in screen. |
-| *(health)* | A public health check exists on the plane (`docs/PRODUCTION_DEPLOY_CONTRACT.md` live-verification checklist: "the plane answers on the public endpoint") but its path is not pinned in any repo doc — consult the control-plane checkout's `worker.py` module docstring. This row is a placeholder until a turn pins it. |
+| `GET /v1/health` | Public health check — "stays public" per ntindle's #843 ship comment (2026-10-02). Path pinned by that comment; consult the control-plane checkout's `worker.py` module docstring for the response shape. |
 
 ## Failure codes
 
@@ -130,6 +141,9 @@ rewrites the decision.
 | 404 without JSON body | Plane doesn't implement the endpoint | Update the plane (self-hosted) before concluding the box is missing |
 | 409 `seq conflict` | Concurrent enqueue lost the sequence race | Retry the enqueue |
 | 409 `stale epoch` | Fetch claimed a lower epoch than current | Adopt the current epoch; the older commands are expired |
+| 409 `"approval already decided"` | Conflicting decision on an already-decided approval record | Create a new approval instead of rewriting history |
+| 410 | Deciding an expired approval record | The decision was not recorded; the record stays expired |
+| 400 | Validation: malformed aid, out-of-range cursor/seq/epoch, limit over clamp | Fix the request fields; never a server error |
 | 429 | Pairing cap (50 pending) | Approve the real pairings or wait out the 15-min expiry |
 
 ## Deliberately NOT in this reference
@@ -156,6 +170,10 @@ rewrites the decision.
 - Durable-command queue, epochs, cursors, acks: `docs/DURABLE_COMMANDS.md`
 - Action-approval records: `docs/APPROVALS_PLANE_PROTOCOL.md`
 - Dashboard page, canonical-copy rule, sync: `hosted/dashboard/README.md`
+- Fleet-read endpoints (`GET /v1/boxes*`) + `GET /v1/health`: ntindle's
+  #843 ship comment (2026-10-02) — these endpoints live in the ops
+  checkout's `worker.py`, not this repo; the shipped dashboard's calls
+  (`hosted/dashboard/dashboard.html`) are the repo-side witness
 - Production deploy posture for plane changes:
   `docs/PRODUCTION_DEPLOY_CONTRACT.md`
 
