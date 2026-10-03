@@ -121,6 +121,33 @@ def test_sync_check_detects_drift_without_writing(tmp_path):
     assert _inline_html(w) == _html()
 
 
+def test_main_check_exit_codes(tmp_path):
+    in_sync = _scratch_worker(str(tmp_path / "worker.py"))
+    drifted = _scratch_worker(str(tmp_path / "drifted.py"),
+                              html="<!-- stale copy -->\n" + _html())
+    # In sync: --check exits 0. Drifted: --check exits 1 and writes
+    # nothing; a plain run repairs it and exits 0.
+    assert sync_dashboard.main(["--worker", in_sync, "--check"]) == 0
+    before = open(drifted, encoding="utf-8").read()
+    assert sync_dashboard.main(["--worker", drifted, "--check"]) == 1
+    assert open(drifted, encoding="utf-8").read() == before
+    assert sync_dashboard.main(["--worker", drifted]) == 0
+    assert sync_dashboard.main(["--worker", drifted, "--check"]) == 0
+    assert _inline_html(drifted) == _html()
+
+
+def test_main_refusals_exit_2(tmp_path):
+    # Missing markers and an unreadable worker are both SyncError — both
+    # must exit 2, never a traceback exit code.
+    no_markers = str(tmp_path / "worker.py")
+    with open(no_markers, "w", encoding="utf-8") as f:
+        f.write("# no markers here\n")
+    assert sync_dashboard.main(["--worker", no_markers]) == 2
+    assert sync_dashboard.main(
+        ["--worker", str(tmp_path / "does-not-exist.py")]) == 2
+    assert open(no_markers, encoding="utf-8").read() == "# no markers here\n"
+
+
 def test_byte_identity_fails_when_html_drifts(tmp_path, monkeypatch):
     # Acceptance pin for #858: with a worker reachable, an edit to
     # dashboard.html that skips the re-inline must fail the assertion.
@@ -156,6 +183,59 @@ def test_sync_refuses_duplicated_markers(tmp_path):
         f.write(sync_dashboard.BEGIN + "\n")
     with pytest.raises(SyncError):
         sync_dashboard.sync(w)
+
+
+def test_sync_refuses_odd_trailing_backslash(tmp_path, monkeypatch):
+    # An odd trailing backslash escapes the closing """ of the inlined
+    # string — the worker would come out syntactically broken.
+    bad = str(tmp_path / "bad.html")
+    with open(bad, "w", encoding="utf-8") as f:
+        f.write("<!DOCTYPE html>\n<p>x</p>\\")
+    monkeypatch.setattr(sync_dashboard, "HTML_PATH", bad)
+    w = _scratch_worker(str(tmp_path / "worker.py"))
+    with pytest.raises(SyncError, match="backslashes"):
+        sync_dashboard.sync(w)
+    # The worker is untouched — the refusal happened before any write.
+    assert _inline_html(w) == _html()
+
+
+def test_sync_accepts_even_trailing_backslashes(tmp_path, monkeypatch):
+    # Escaped pairs can't touch the closing quotes — safe to inline.
+    ok = str(tmp_path / "ok.html")
+    with open(ok, "w", encoding="utf-8") as f:
+        f.write("<!DOCTYPE html>\n<p>x</p>\\\\")
+    monkeypatch.setattr(sync_dashboard, "HTML_PATH", ok)
+    w = _scratch_worker(str(tmp_path / "worker.py"))
+    assert sync_dashboard.sync(w) is False  # rewrote
+    assert _inline_html(w).endswith("\\\\")
+
+
+def test_sync_refuses_begin_on_last_line(tmp_path):
+    # BEGIN on the final line with no newline after it: the old code died
+    # with a bare ValueError from str.index instead of a loud SyncError.
+    w = str(tmp_path / "worker.py")
+    with open(w, "w", encoding="utf-8") as f:
+        f.write("#!/usr/bin/env python3\n" + sync_dashboard.END + "\n"
+                + sync_dashboard.BEGIN)
+    with pytest.raises(SyncError, match="last line"):
+        sync_dashboard.sync(w)
+
+
+def test_sync_preserves_end_marker_indentation(tmp_path):
+    # The END marker line is kept byte-for-byte (indentation included),
+    # symmetric with the BEGIN side — an indented END used to be silently
+    # dedented by the rewrite.
+    w = str(tmp_path / "worker.py")
+    with open(w, "w", encoding="utf-8") as f:
+        f.write("#!/usr/bin/env python3\n")
+        f.write(sync_dashboard.BEGIN + "\n")
+        f.write("\n".join(sync_dashboard.HEADER_LINES) + "\n")
+        f.write('DASHBOARD_HTML = """' + _html() + '"""\n')
+        f.write("    " + sync_dashboard.END + "\n")
+        f.write("SENTINEL = 1\n")
+    before = open(w, encoding="utf-8").read()
+    assert sync_dashboard.sync(w) is True  # already in sync
+    assert open(w, encoding="utf-8").read() == before  # nothing rewritten
 
 
 def test_sync_refuses_triple_quote_html(tmp_path, monkeypatch):

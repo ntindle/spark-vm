@@ -134,6 +134,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Signed golden-image manifests (#155): the provision-time injector's manifest preflight no longer trusts the manifest's self-asserted version alone — once the operator enables the signed path (sign the manifest at image-build time with an Ed25519 key and configure the injector with the verification key), the preflight verifies the signature over the manifest's exact bytes before parsing anything, failing closed on a missing, malformed, or mismatched signature, so a tampered image registry can no longer serve a lying manifest that names the pinned version. The verification side takes a rotation window (`key_id=/path` pairs, mirroring the fleet release gate) so a stolen signing key rotates forward without a flag day, and the provision report records `ok-signed` vs `ok-unsigned-legacy` so the migration off unsigned preflights is observable. The signing key never enters the repo or the image; the verification keys ship with the injector's own configuration. Unsigned preflights keep working while older images are in service. (#831)
 
 ### Fixed
+- The dashboard sync tool now refuses two more ways to produce a broken
+  control-plane file: a page ending in an odd number of backslashes (the
+  last one would escape the closing quotes of the inlined string) and a
+  BEGIN marker stranded on the worker's last line (which used to die with
+  a bare traceback instead of the tool's loud refusal). It also keeps an
+  indented END marker line byte-for-byte instead of silently dedenting
+  it, and its command-line exit codes (`--check` drift → 1, refusals → 2)
+  are now covered by tests. (#TBD)
 - The box pairing client's "endpoint not implemented" detection no longer
   keys on an error string the control plane itself can return: the HTTP
   layer now marks the 404 payloads it synthesizes itself with an explicit

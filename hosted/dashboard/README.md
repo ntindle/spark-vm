@@ -40,8 +40,9 @@ unchanged).
 ## Canonical-copy rule
 
 The Worker deploys as a single file, so it carries this page inline
-(between `# --- BEGIN dashboard ---` / `# --- END dashboard ---` markers
-in the control-plane `worker.py`). **This file is the canonical copy** —
+(between `# --- BEGIN dashboard (#845 authenticated fleet dashboard) ---`
+/ `# --- END dashboard ---` markers in the control-plane `worker.py`).
+**This file is the canonical copy** —
 edit here, then run `./sync_dashboard.py` to re-inline it into
 `worker.py`; `test_dashboard.py` asserts the two are byte-identical when
 the worker source is reachable. The inlined HTML must not contain a
@@ -52,8 +53,12 @@ the sync script both enforce this.
 
 `sync_dashboard.py` mechanically rewrites the inlined block between the
 BEGIN/END markers — no manual copy-paste. It only touches the marked
-region, writes atomically, refuses loudly when the markers are missing
-or duplicated, and is idempotent (a second run changes nothing).
+region, writes atomically, keeps the END marker line byte-for-byte
+(indentation included), and refuses loudly on missing or duplicated
+markers, a BEGIN marker stranded on the file's last line, a `"""`
+sequence in the HTML, or an odd number of trailing backslashes in the
+HTML (either would break the inlined Python string). It is idempotent
+(a second run changes nothing).
 
     ./sync_dashboard.py                          # default worker checkout
     SPARKVM_WORKER_PATH=/path/to/worker.py ./sync_dashboard.py
