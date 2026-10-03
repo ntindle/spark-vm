@@ -3329,7 +3329,12 @@ class WaitlistService:
         duplicate archive lines, never lose events. Duplicates are then
         avoided on re-run: before appending a month's lines, the pass
         checks the archive's tail — if it already ends with exactly
-        those lines (the crash-retry shape), the append is skipped.
+        those lines (the crash-retry shape), the append is skipped. (If
+        the kill tore a line mid-append, the torn bytes are quarantined
+        by _terminate_partial_tail and the tail check mismatches, so
+        the re-run appends the batch again — archive-only duplicates,
+        never a loss; pinned events never enter archive batches, so
+        reconcile coverage is unaffected.)
 
         Concurrent-append safety: the cta_click hot path appends to the
         funnel file WITHOUT the data lock (#403), so the read→rewrite
