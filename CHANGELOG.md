@@ -182,7 +182,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   credentials into logs; and the interactive approve path now validates the
   pairing records it prints, so a malformed or hostile control plane gets a
   clean error instead of a crash — and an approval can never proceed
-  without a fingerprint to verify. (#TBD, #881, #885)
+  without a fingerprint to verify. (#903, #881, #885)
 
 ### Fixed
 - The dashboard sync tool now refuses two more ways to produce a broken
