@@ -966,6 +966,11 @@ class SwapAddon:
         self.deny_hosts = []
         self.deny_nets = []
         self._store_mtime = None
+        # Finding 199: per-file (mtime_ns, size) signature of the secrets
+        # dir, built by _load(). _maybe_reload() compares it so in-place
+        # secret rotations (which never move the directory mtime) are
+        # picked up. Initialized here so the attribute always exists.
+        self._secret_file_sig = {}
         self._hosts_mtime = None
         self._smoke_hosts_mtime = None
         self._registry_mtime = None
@@ -1131,6 +1136,17 @@ class SwapAddon:
             log.warning("swap: cannot read registry: %s", e)
         self.registry = registry
         secrets = {}
+        # Finding 199: per-file (mtime_ns, size) signature, rebuilt with
+        # every load. The directory-mtime gate below never fires for
+        # in-place content changes (POSIX: rewriting a file's bytes
+        # updates the file's mtime, not its directory's), so a secret
+        # rotated in place — shell redirect, vi, tee — was never picked
+        # up and the proxy kept swapping the pre-rotation value silently.
+        # The sanctioned narrow writers use atomic rename (which trips
+        # the directory gate), but nothing enforces that path; the
+        # per-file signature closes the hole in the fail-safe
+        # direction (a spurious difference only costs one _load()).
+        secret_sig = {}
         self._check_secrets_dir_mode()
         try:
             if SECRETS_DIR.is_dir():
@@ -1139,6 +1155,14 @@ class SwapAddon:
                         v = self._load_secret_file(p)
                         if v is not None:
                             secrets[p.name] = v
+                        try:
+                            st = p.stat()
+                            secret_sig[p.name] = (st.st_mtime_ns, st.st_size)
+                        except OSError:
+                            # A stat failure drops the file from the
+                            # signature; the next successful stat then
+                            # differs and forces a reload — fail-safe.
+                            pass
         except OSError as e:
             log.warning("swap: cannot list secrets dir: %s", e)
         # Finding 36: values under _MIN_SCRUB_LEN are never scrubbed
@@ -1204,6 +1228,7 @@ class SwapAddon:
         self.deny_hosts = deny_hosts
         self.deny_nets = deny_nets
         self._store_mtime = self._mtime(SECRETS_DIR)
+        self._secret_file_sig = secret_sig
         self._hosts_mtime = self._mtime(HOSTS_FILE)
         self._smoke_hosts_mtime = self._mtime(SMOKE_HOSTS_FILE)
         self._registry_mtime = self._mtime(REGISTRY_FILE)
@@ -1230,13 +1255,43 @@ class SwapAddon:
         # without a restart. Finding 60: grants are read from grants.json
         # (single writer is proxy/grant-writer); the proxy never writes.
         # Finding 59's mtime gate lives in _grants().
+        # Finding 199: the per-file signature is the LAST disjunct, so
+        # the O(n) stat walk runs only when every cheaper gate passed —
+        # off the hot path in the common case.
         if (self._mtime(SECRETS_DIR) != self._store_mtime
                 or self._mtime(HOSTS_FILE) != self._hosts_mtime
                 or self._mtime(SMOKE_HOSTS_FILE) != self._smoke_hosts_mtime
                 or self._mtime(REGISTRY_FILE) != self._registry_mtime
                 or self._mtime(SSRF_ALLOW_FILE) != self._ssrf_mtime
-                or self._mtime(SSRF_DENY_FILE) != self._deny_mtime):
+                or self._mtime(SSRF_DENY_FILE) != self._deny_mtime
+                or self._secret_files_signature() != self._secret_file_sig):
             self._load()
+
+    @staticmethod
+    def _secret_files_signature():
+        """Per-file (mtime_ns, size) signature of the secrets dir.
+
+        Finding 199's check half: recomputes the signature _load()
+        stored, so _maybe_reload() notices in-place content changes the
+        directory mtime never reflects. Same inclusion rule as _load()
+        (every NAME_RE-matching file, whether or not its content
+        loaded) so a statable-but-unreadable file has a stable entry
+        and never forces a reload on every request. OSError-tolerant:
+        a failed stat drops the file, which can only add a reload.
+        """
+        sig = {}
+        try:
+            if SECRETS_DIR.is_dir():
+                for p in SECRETS_DIR.iterdir():
+                    if p.is_file() and NAME_RE.match(p.name):
+                        try:
+                            st = p.stat()
+                            sig[p.name] = (st.st_mtime_ns, st.st_size)
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+        return sig
 
     def _load_smoke_hosts(self, secrets=None):
         """Load the §3a smoke-only host list; return the loaded hosts.

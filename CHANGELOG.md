@@ -193,6 +193,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The credential proxy now notices when a secret file's contents are
+  rewritten in place: previously it only watched the secrets directory
+  for additions and removals, so a secret rotated by editing the file
+  directly (instead of through the atomic writers) was never picked up
+  and the old value kept being swapped silently. (#912)
 - The desktop bridge's launch registry no longer trusts persisted process IDs
   blindly: a stored `0` (or boolean `true`, which is `1` in disguise) can
   never be pruned as dead, so a corrupted registry could refuse to start an
