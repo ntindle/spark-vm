@@ -225,7 +225,9 @@ codified as rule 6 so future watch bullets arrive compliant.)
   characters from the plane-supplied proof value before printing: on
   keyless boxes the success line could otherwise render escape sequences
   from a hostile control plane. A sweep of every pairing-client print
-  site confirms this was the last unscrubbed channel. (#917)
+  site confirms this was the last unscrubbed channel. The scrub also
+  strips C1 control characters (U+0080–U+009F), closing a residual the
+  adversarial review caught. (#917)
 
 - The desktop bridge's launch registry no longer trusts persisted process IDs
   blindly: a stored `0` (or boolean `true`, which is `1` in disguise) can

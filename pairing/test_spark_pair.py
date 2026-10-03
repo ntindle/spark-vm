@@ -568,6 +568,29 @@ def test_rotate_scrubs_hostile_proof_in_success_print(ctx, monkeypatch, capsys):
     assert "T4" not in out  # the new token is never printed
 
 
+def test_rotate_scrubs_c1_controls_in_proof(ctx, monkeypatch, capsys):
+    # #915 review (Security): _plane_text must also strip C1 controls
+    # (U+0080-U+009F). The HTTP layer decodes JSON to str, so these are
+    # unambiguous control characters -- a hostile plane's U+009B (C1 CSI)
+    # would otherwise reach the terminal, and xterm-in-UTF-8-mode
+    # interprets it. Stripping them cannot corrupt legitimate multibyte
+    # text (unlike the byte-level bash case).
+    _enroll(ctx)  # no keypair on disk: keyless path
+    hostile = "proof\u009b0mRED\u0098"
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda m, u, body=None, headers=None: (
+            200, {"ok": True, "token": "T4",
+                  "token_expires_at": int(time.time()) + 24 * 3600,
+                  "proof": hostile}))
+    ctx.auto = False
+    ctx.within = spark_pair.AUTO_ROTATE_WITHIN
+    assert spark_pair.cmd_rotate(ctx) == 0
+    out = capsys.readouterr().out
+    assert "\u009b" not in out and "\u0098" not in out
+    assert "(proof: proof0mRED)" in out
+
+
 def test_revoke_url_encodes_box_id(ctx, monkeypatch):
     seen = {}
     monkeypatch.setattr(

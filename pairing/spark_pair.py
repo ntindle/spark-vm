@@ -784,21 +784,24 @@ def cmd_heartbeat(args):
 
 
 # Plane-supplied pairing fields are printed for the owner's visual
-# verification; control characters (CR, ANSI escapes, DEL) would let a
-# hostile plane make the terminal RENDER the expected fingerprint while
-# the underlying string differs, defeating the comparison (B2). Rows
-# carrying them are malformed.
-_PAIRING_FIELD_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# verification; control characters (CR, ANSI escapes, DEL, C1 controls)
+# would let a hostile plane make the terminal RENDER the expected
+# fingerprint while the underlying string differs, defeating the
+# comparison (B2). Rows carrying them are malformed. C1 (U+0080-U+009F)
+# is included: the HTTP layer decodes JSON to str, so these are
+# unambiguous control characters here — unlike the byte-level bash case,
+# stripping them cannot corrupt legitimate multibyte text (#915 review).
+_PAIRING_FIELD_CONTROL = re.compile(r"[\x00-\x1f\x7f\x80-\x9f]")
 
 
 def _plane_text(v):
     """Strip terminal control characters from a plane-supplied value
     (#902). Display-only scrub: a hostile plane could embed ANSI escapes
-    / carriage returns in any string it returns, and several commands
-    print those values to the operator's terminal. Non-strings pass
-    through unchanged; total, never raises. Stored values and
-    control-flow comparisons always use the raw value — this is for
-    terminal display only."""
+    / carriage returns / C1 controls in any string it returns, and
+    several commands print those values to the operator's terminal.
+    Non-strings pass through unchanged; total, never raises. Stored
+    values and control-flow comparisons always use the raw value — this
+    is for terminal display only."""
     if isinstance(v, str):
         return _PAIRING_FIELD_CONTROL.sub("", v)
     return v
