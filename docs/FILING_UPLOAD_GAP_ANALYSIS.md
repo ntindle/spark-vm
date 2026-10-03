@@ -1,4 +1,4 @@
-# Filing-upload gap analysis: from proxy refusal to the owner's phone
+# Filing-upload gap analysis: from proxy refusal to the plane-side record
 
 **Status: analysis, not a commitment.** Code-state claims below were
 verified against the repo tree at main `5dc1d93` (2026-10-03 ~23:3x CDT)
@@ -57,9 +57,12 @@ nothing creates it from the box side.
   decide, read, **or create** its own approvals. The #876 acceptance
   ("upload authenticated as the box, never as the agent") therefore has
   no endpoint to talk to today.
-- **Expiry only fires on owner-authenticated calls.** `_expire_approvals`
-  runs at owner call sites; an unattended box whose owner never opens
-  the dashboard leaves its records pending until someone polls.
+- **Expiry is driven from both sides.** `_expire_approvals` fires on
+  owner-authenticated reads (list/get/decide) *and* on the box's own
+  box-authenticated command fetch (`_commands_pending`, #873 B2: "the
+  box drives approval expiry" — an unattended box learns of expiry on
+  its every-minute `ingest` poll, so its records reach terminal expiry
+  on schedule without an owner polling).
 - **The owner has no action-approval surface.** `hosted/dashboard/`
   shows pairing approvals only (line 115's "Boxes waiting for your
   approval" is enrollment); the decision endpoint exists but the owner
@@ -102,7 +105,12 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
   truncates to 250 + "…", keeping the full tuple in `detail`.
   `detail`: `{credential, host, method, path_prefix, reason, filed_at,
   expires}` — Finding-49 discipline preserved (no free text, tuple from
-  the real request), far under 4 KB. `expires_in_secs`: 3600 (the
+  the real request), and the same truncation discipline applies to
+  detail's `path_prefix`: `host` and `path_prefix` are unbounded on the
+  local side and the plane 400s a detail over `MAX_DETAIL_BYTES` (4096)
+  with no uploader recovery — truncate `path_prefix` with "…" (keep the
+  full host) so a pathological filing can never breach the cap.
+  `expires_in_secs`: 3600 (the
   plane's max; matches the local 1-hour expiry).
 - **`[DESIGN]` G76.4 — local/plane divergence.** The uploader uploads
   only filings still in `pending/` at upload time — a locally denied,
@@ -114,13 +122,11 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
   decide on a locally-dead record gets the write-once 409/410 and the
   box never acts on it, since ingest only stamps plane decisions into
   confirmd's answered store, which the local scan reaps).
-- **`[DESIGN]` G76.5 — expiry for unattended boxes.** `_expire_approvals`
-  fires on owner-authenticated calls only. **Decision: the
-  box-authenticated file endpoint also triggers
-  `_expire_approvals(box_id)` (no record data returned)** — the
-  uploader's cadence then drives server-side expiry for unattended
-  boxes on schedule, instead of waiting for an owner who may never
-  poll.
+- **`[WITHDRAWN — not a gap]` G76.5 — expiry for unattended boxes.**
+  Withdrawn in Product review: #873 B2 already drives box-side expiry
+  from the box's own box-authenticated command fetch (see §2) — the
+  new file endpoint needs no `_expire_approvals` trigger. Numbering
+  kept stable for the filed issues.
 - **`[BUILD]` G76.6 — no owner action-approval surface.** The dashboard
   (`hosted/dashboard/`, inlined into the deployed worker) shows
   pairing approvals only. Slice: a pending-action-approvals section on
@@ -144,12 +150,14 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
   (#874), tenant routing (#69), phone UX (#428 / #797).
 - **S2:** plane `POST /v1/boxes/{box_id}/approvals/file` — box-Bearer <redacted>
   scoped to own `box_id`, write-only response, idempotent on
-  `(box_id, aid)`, `_expire_approvals` trigger on the box-auth path.
+  `(box_id, aid)`. (No expiry trigger: #873 B2 already drives box-side
+  expiry from the command fetch — G76.5 withdrawn.)
   Filed as #952.
 - **S3:** `spark_pair.py upload-filings` — periodic scan of
-  `confirm/pending/`, payload mapping per G76.3 (incl. summary
-  truncation), pending-only upload per G76.4, root-owned paths per
-  G76.7, cron wiring alongside heartbeat/ingest. Filed as #953.
+  `confirm/pending/`, payload mapping per G76.3 (incl. summary AND
+  `detail.path_prefix` truncation), pending-only upload per G76.4,
+  root-owned paths per G76.7, cron wiring alongside heartbeat/ingest.
+  Filed as #953.
 - **S4:** dashboard action-approval pending list + decide buttons
   (owner session), display-neutralized per G76.7. Filed as #954.
 - **S5 (acceptance, stays on #876):** a proxy refusal creates the plane
