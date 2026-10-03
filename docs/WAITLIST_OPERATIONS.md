@@ -323,7 +323,10 @@ The rotation runs as `waitlist_jobs.py --rotate-funnel-events`
 (weekly cron; `--dry-run` reports the partition); it holds the data
 lock, appends archives before the atomic hot rewrite (a kill between
 the two can only duplicate archive lines, and the re-run skips
-already-landed lines — the pass is idempotent), and runs the
+already-landed lines — the pass is idempotent for cleanly-landed
+appends; a kill that tore a line mid-append may leave a quarantined
+partial plus a duplicate batch in the archive, audit-only, never a
+loss), and runs the
 read→rewrite as a compare-and-swap loop: the `cta_click` hot path
 appends without the data lock, so if the hot file grows mid-partition
 the tmp is discarded and the partition recomputed (10 tries, then fail

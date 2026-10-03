@@ -18,6 +18,8 @@ wiring, ephemeral port, torn down after).
 
 import importlib.util
 import json
+import hashlib
+import hmac
 import os
 import re
 import sys
@@ -2319,11 +2321,29 @@ class TestRotateFunnelEvents:
         # The property that matters: after rotation, the reconcile passes
         # find nothing to re-emit. If pinning were wrong, the claimed or
         # invite pass would re-derive a duplicate event here.
+        #
+        # QA B1 note: the invited fixture row carries a LIVE invite token
+        # (minted below) — without it the invite pass skips the row at
+        # the token-liveness gate and the invite half of this test is
+        # vacuous. invited_at stays old (100d): the boundary shape the
+        # pin condition implements (old invite_sent at == invited_at,
+        # live token).
         service, tmp = make_service()
         service.rows["e1"] = {"entry_id": "e1", "status": "signed_up",
                               "signed_up_at": _iso(200)}
+        issued = int(NOW.timestamp()) - 3600
+        nonce = "testnonce1"
+        payload = (f"invite.e2.{issued}.{nonce}."
+                   "owner2@example.com").encode()
+        sig = wd.b64url_encode(
+            hmac.new(KEY, payload, hashlib.sha256).digest())
+        token = f"invite.e2.{issued}.{nonce}.{sig}"
         service.rows["e2"] = {"entry_id": "e2", "status": "invited",
-                              "invited_at": _iso(100)}
+                              "invited_at": _iso(100),
+                              "owner_email": "owner2@example.com",
+                              "active_invite_token": token}
+        _, status = service.lookup_invite_token(token)
+        assert status == "ok"  # the invite half is really armed
         _write_funnel_lines(tmp, [
             _funnel_event("claimed", "e1", 200),
             _funnel_event("invite_sent", "e2", 100),
