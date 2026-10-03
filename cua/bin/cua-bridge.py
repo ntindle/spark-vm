@@ -24,6 +24,7 @@ Endpoints:
                                   alive; GET /api/status exposes the running
                                   set under "launched" (#491).
 """
+import errno
 import fcntl
 import json
 import os
@@ -293,12 +294,62 @@ def all_launched():
 _LAUNCH_REGISTRY_FILE = os.path.join(_HOME, ".cache", "cua-launched.json")
 
 
-def _save_launched_locked():
-    """Persist the launch registry. The lock must be held."""
+def _valid_registry_pid(pid):
+    """A registry PID must be a genuine positive pid.
+
+    Bools are ints in Python (True == 1), and pid 0 is special to
+    waitpid()/kill(): _is_alive(0) always reports alive (the process
+    group itself is non-empty), so a persisted {"pid": 0} — or
+    {"pid": True}, which is 1 = init — would never prune and the
+    singleton guard would 409 "already running" forever. Reject them
+    here: corrupt/malicious entries are dropped, never fatal.
+    """
+    return type(pid) is int and pid > 0
+
+
+def _open_tmp_exclusive(path):
+    """Create path exclusively (O_EXCL|O_NOFOLLOW, 0600); return fd or None.
+
+    A pre-existing path — a stale tmp from a crash, or a planted
+    symlink (O_NOFOLLOW refuses to follow it) — is unlinked once and
+    the file re-created exclusively. Anything else failing (unwritable
+    dir, double race) returns None; the caller warns and continues.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     try:
-        tmp = _LAUNCH_REGISTRY_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(_LAUNCHED, f)
+        return os.open(path, flags, 0o600)
+    except OSError as e:
+        if e.errno not in (errno.EEXIST, errno.ELOOP):
+            return None
+    try:
+        os.unlink(path)
+    except OSError:
+        return None
+    try:
+        return os.open(path, flags, 0o600)
+    except OSError:
+        return None
+
+
+def _save_launched_locked():
+    """Persist the launch registry. The lock must be held.
+
+    The tmp file is created with O_EXCL|O_NOFOLLOW at 0600, so the
+    write can never follow a planted symlink or clobber an existing
+    file. Atomic tmp+rename keeps the registry itself tear-free; a
+    failed save warns on stderr but never breaks the launch
+    (persistence is best-effort, the guard is not).
+    """
+    tmp = _LAUNCH_REGISTRY_FILE + ".tmp"
+    payload = json.dumps(_LAUNCHED).encode()
+    fd = _open_tmp_exclusive(tmp)
+    if fd is None:
+        print("cua-bridge: WARNING: cannot persist launch registry: "
+              "exclusive tmp create failed", file=sys.stderr)
+        return
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
         os.replace(tmp, _LAUNCH_REGISTRY_FILE)
     except OSError as e:
         print(f"cua-bridge: WARNING: cannot persist launch registry: {e}",
@@ -322,7 +373,7 @@ def _load_launched():
                 continue
             for inst in insts:
                 if (isinstance(inst, dict)
-                        and isinstance(inst.get("pid"), int)
+                        and _valid_registry_pid(inst.get("pid"))
                         and isinstance(inst.get("launched_at"),
                                        (int, float))):
                     _LAUNCHED.setdefault(app, []).append(

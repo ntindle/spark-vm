@@ -1078,6 +1078,74 @@ class TestLaunchRegistry:
         bridge._load_launched()
         assert bridge.all_launched() == {}
 
+    def test_valid_registry_pid(self, bridge):
+        v = bridge._valid_registry_pid
+        assert v(4242) is True
+        assert v(0) is False       # special to waitpid()/kill()
+        assert v(-5) is False
+        assert v(True) is False   # bool is int in Python (== 1)
+        assert v(False) is False
+        assert v("4242") is False
+        assert v(4242.0) is False
+        assert v(None) is False
+
+    def test_reload_rejects_special_and_non_pids(self, bridge, monkeypatch):
+        # A persisted {"pid": 0} (or True == 1 == init) would never prune:
+        # _is_alive(0) reports alive whenever the process group is
+        # non-empty, so the singleton guard would 409 "already running"
+        # forever. They must be dropped at load, not kept as entries.
+        self._bridge(bridge, monkeypatch)
+        monkeypatch.setattr(bridge, "_is_alive", lambda pid: True)
+        with open(bridge._LAUNCH_REGISTRY_FILE, "w") as f:
+            json.dump({"demo": [{"pid": 0, "launched_at": 1.0},
+                                {"pid": True, "launched_at": 1.0},
+                                {"pid": -5, "launched_at": 1.0},
+                                {"pid": 555, "launched_at": 1.0}]}, f)
+        bridge._load_launched()
+        assert [i["pid"] for i in bridge.launched_instances("demo")] == [555]
+
+    def test_save_never_follows_planted_symlink(self, bridge, monkeypatch,
+                                                tmp_path):
+        # A planted symlink at the tmp path must never be followed: the
+        # exclusive create refuses it, the path is unlinked, and a real
+        # file is created instead — the decoy target is untouched.
+        self._bridge(bridge, monkeypatch)
+        decoy = tmp_path / "decoy.json"
+        decoy.write_text("DECOY")
+        tmp = bridge._LAUNCH_REGISTRY_FILE + ".tmp"
+        os.symlink(decoy, tmp)
+        bridge._LAUNCHED["demo"] = [{"pid": 555, "launched_at": 1.0}]
+        with bridge._LAUNCHED_LOCK:
+            bridge._save_launched_locked()
+        assert decoy.read_text() == "DECOY"
+        assert not os.path.islink(bridge._LAUNCH_REGISTRY_FILE)
+        with open(bridge._LAUNCH_REGISTRY_FILE) as f:
+            assert json.load(f)["demo"][0]["pid"] == 555
+
+    def test_save_replaces_stale_tmp(self, bridge, monkeypatch):
+        # A stale tmp file from a crashed save must not block the next
+        # one: it is dropped and re-created exclusively.
+        self._bridge(bridge, monkeypatch)
+        tmp = bridge._LAUNCH_REGISTRY_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write("stale")
+        bridge._LAUNCHED["demo"] = [{"pid": 555, "launched_at": 1.0}]
+        with bridge._LAUNCHED_LOCK:
+            bridge._save_launched_locked()
+        assert not os.path.exists(tmp)  # renamed into place
+        with open(bridge._LAUNCH_REGISTRY_FILE) as f:
+            assert json.load(f)["demo"][0]["pid"] == 555
+
+    def test_registry_file_is_owner_only(self, bridge, monkeypatch):
+        # The tmp file is created 0600, and os.replace preserves it —
+        # group/other must never gain bits, regardless of umask.
+        self._bridge(bridge, monkeypatch)
+        bridge._LAUNCHED["demo"] = [{"pid": 555, "launched_at": 1.0}]
+        with bridge._LAUNCHED_LOCK:
+            bridge._save_launched_locked()
+        mode = os.stat(bridge._LAUNCH_REGISTRY_FILE).st_mode
+        assert stat.S_IMODE(mode) & 0o077 == 0, oct(mode)
+
     def test_zombie_is_reaped_and_pruned(self, bridge, monkeypatch):
         # Security review finding: launch_app drops the Popen handle
         # without wait(), so an exited app is a zombie — and kill(pid, 0)
