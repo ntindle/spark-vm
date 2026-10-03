@@ -77,6 +77,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   auto-approval design, and spend caps are a decision with no enforcement
   mechanism — filed as new tracked issues. (#TBD)
 
+- Published a vision-vs-state gap analysis for terminal streams and R2 artifact
+  upload: no stream transport exists yet (the per-box Durable Object and
+  phone-home channel are still unbuilt), no box-side terminal producer, no
+  viewer surface, and no R2 bucket or upload path — with the design call that
+  stream bytes must never ride the durable command queue, and that stream
+  viewing is observation while stream input rides a dedicated input frame
+  class (approval as the consent plane, never the approvals decision wire).
+  Filed as new tracked issues. (#TBD)
+
 - spark-vm has a brand logo: a gold spark on a dark terminal badge, with SVG
   source and PNG exports for the site header, app icons, and favicon. The
   landing and waitlist pages now share a brand bar carrying the mark. (#901)
