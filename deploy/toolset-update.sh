@@ -50,10 +50,29 @@
 #     report surfaces the single "box needs attention" state instead of
 #     churning through failing updates. (Post-update health checks, when
 #     they land, feed the same counter.)
+#   - Pre-update snapshots + automatic rollback + blocked marking (#532
+#     Recovery): before any layer changes the box, `update` snapshots
+#     everything the run will touch (managed config files and binaries,
+#     plus a pre-update package-version inventory) under
+#     $TOOLSET_STATE_DIR/snapshots/<UTC-timestamp>-<pid>-<random>/ (MANIFEST with
+#     per-layer FILE/ABSENT/STATE lines; newest
+#     $TOOLSET_SNAPSHOT_KEEP snapshots retained, default 5). When a layer
+#     fails, its snapshot is restored automatically and the layer is
+#     marked blocked in $TOOLSET_STATE_DIR/blocked.state — the next tick
+#     skips that layer (loudly) instead of retry-looping the same failing
+#     convergence; a pin change unblocks implicitly via the key check, or
+#     an operator runs `unblock [layer]`. `rollback [--layer <name>]`
+#     restores the newest snapshot by hand (the recovery-runbook entry
+#     point). The apt/playwright layers converge dpkg/pip-owned state
+#     that is not file-restorable: their snapshot contribution is the
+#     pre-update version inventory (STATE lines) for the operator/audit,
+#     and their rollback path is documented in docs/TOOLSET_UPDATE.md.
 #
 # Usage:
 #   toolset-update.sh status  # machine-readable TSV inventory report
 #   toolset-update.sh update [--dry-run] [--now] [--force]
+#   toolset-update.sh rollback [--layer <name>]  # restore newest snapshot
+#   toolset-update.sh unblock [layer]  # clear blocked-layer state
 #   toolset-update.sh unfreeze  # clear the failure-freeze state
 #   toolset-update.sh install  # backfill onto an existing box
 #   toolset-update.sh uninstall
@@ -114,6 +133,7 @@
 # package names per tool; tests override to fixture packages).
 # TOOLSET_FREEZE_AFTER (consecutive failed update runs before the box
 # freezes; default 3).
+# TOOLSET_SNAPSHOT_KEEP (pre-update snapshots retained; default 5).
 # PINS_FILE (pin file; default $TOOLSET_STATE_DIR/self_update_pins.conf —
 # refreshed only by the privileged `install` step, never read from the live
 # checkout), CUA_DRIVER_BIN (default /home/ntindle/cua/bin/cua-driver),
@@ -1155,6 +1175,26 @@ cmd_status() {
     else
         printf 'freeze\tok\tconsecutive_failures=%s\n' "$_fz_consec"
     fi
+    # Blocked layers (#532 Recovery): `blocked` with layer/key/at detail,
+    # or `ok` when nothing is blocked — the machine-readable "this layer
+    # needs attention" signal for the future `spark-vm health` report.
+    local bl
+    bl="$(_blocked_list)"
+    if [ -n "$bl" ]; then
+        printf 'blocked\tblocked\t%s\n' "$(printf '%s' "$bl" | tr '\n' ';' | tr '\t' ' ' | cut -c1-200 || true)"
+    else
+        printf 'blocked\tok\t-\n'
+    fi
+    # Snapshot inventory (#532 Recovery): retained count + newest name, so
+    # an agent can see what rollback targets exist.
+    local scount snew
+    scount="$(_snapshot_count)"
+    snew="$(_newest_snapshot)"
+    if [ "$scount" -gt 0 ] 2>/dev/null && [ -n "$snew" ]; then
+        printf 'snapshots\tok\t%s\n' "count=$scount newest=$(basename "$snew")"
+    else
+        printf 'snapshots\tnone\t-\n'
+    fi
     return 0
 }
 
@@ -1290,6 +1330,490 @@ _freeze_record_result() {
     esac
 }
 
+# --- pre-update snapshots + rollback (#532 Recovery) ---------------------------------
+# Issue #532 S2: no change without a rollback target. Before any layer
+# runs, `update` snapshots everything the run will touch; a failed layer
+# is rolled back automatically and marked blocked. Mirrors
+# deploy/auto-deploy.sh's snapshot/rollback pattern (per-layer MANIFEST
+# with FILE/ABSENT lines) — the layers here are independent, so one
+# snapshot dir carries per-layer sections and rollback can restore a
+# single layer or the whole run.
+#
+# File-snapshotable layers: os-security ($UNATTENDED_CONF) and cua-driver
+# ($CUA_DRIVER_BIN). The apt and playwright layers converge dpkg/pip-owned
+# package state that cannot be restored by copying files back, so their
+# snapshot contribution is a pre-update version inventory (STATE lines in
+# the MANIFEST) for the operator and the audit log; their rollback path is
+# documented in docs/TOOLSET_UPDATE.md ("Snapshots and rollback").
+: "${TOOLSET_SNAPSHOT_KEEP:=5}"
+case "$TOOLSET_SNAPSHOT_KEEP" in
+    ''|*[!0-9]*|0)
+        # Same fail-safe posture as TOOLSET_FREEZE_AFTER: a bad value must
+        # not silently disable pruning (unbounded disk growth under the
+        # weekly timer) or prune everything (no rollback target left).
+        # Validate once, loudly, and fall back to the default.
+        log "snapshots: invalid TOOLSET_SNAPSHOT_KEEP='$TOOLSET_SNAPSHOT_KEEP' — defaulting to 5"
+        TOOLSET_SNAPSHOT_KEEP=5
+        ;;
+esac
+SNAPSHOT_DIR="$TOOLSET_STATE_DIR/snapshots"
+STATE_BLOCKED="$TOOLSET_STATE_DIR/blocked.state"
+
+_layer_snapshot_paths() {
+    # _layer_snapshot_paths <layer> — print the layer's file-snapshotable
+    # managed paths, one per line. Absolute paths only; the snapshot
+    # writer refuses anything else.
+    case "$1" in
+        os-security) printf '%s\n' "$UNATTENDED_CONF" ;;
+        cua-driver)  printf '%s\n' "$CUA_DRIVER_BIN" ;;
+        # Quoted labels: the trust-model pin test_script_never_fetches_code
+        # scans for bare `apt` binary invocations, and an unquoted
+        # leading `apt)` case label trips it.
+        "apt"|"playwright") return 0 ;;
+        *) log "snapshots: unknown layer '$1'"; return 1 ;;
+    esac
+}
+
+_layer_state_lines() {
+    # _layer_state_lines <layer> — print pre-update version inventory as
+    # `STATE <layer> <key=value ...>` lines (diagnostic only; the restore
+    # path ignores STATE lines). Never fails the snapshot.
+    local layer="$1" ver
+    case "$layer" in
+        os-security)
+            ver="$(dpkg-query -W -f='${Version}' unattended-upgrades 2>/dev/null || true)"
+            [ -n "$ver" ] || ver="absent"
+            printf 'STATE %s unattended-upgrades=%s\n' "$layer" \
+                "$(printf '%s' "$ver" | tr -d ' \t\r\n')"
+            ;;
+        cua-driver)
+            printf 'STATE %s version=%s\n' "$layer" \
+                "$(printf '%s' "$(_cua_driver_current)" | tr -d ' \t\r\n')"
+            ;;
+        "apt")
+            local pkgs line p v
+            pkgs="$(_apt_toolset_packages 2>/dev/null || true)"
+            line="STATE $layer"
+            while IFS= read -r p || [ -n "$p" ]; do
+                [ -n "$p" ] || continue
+                v="$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null || true)"
+                [ -n "$v" ] || v="unknown"
+                line="$line $p=$(printf '%s' "$v" | tr -d ' \t\r\n')"
+            done <<EOF
+$pkgs
+EOF
+            printf '%s\n' "$line"
+            ;;
+        playwright)
+            ver="$(_playwright_current 2>/dev/null || true)"
+            [ -n "$ver" ] || ver="unknown"
+            printf 'STATE %s pip=%s\n' "$layer" \
+                "$(printf '%s' "$ver" | tr -d ' \t\r\n')"
+            ;;
+        *) log "snapshots: unknown layer '$layer'"; return 1 ;;
+    esac
+    return 0
+}
+
+_snap_test() {
+    # _snap_test <path> — 0 exists, 1 absent, 2 stat/privilege error.
+    # The copy in the snapshot writer and the removal in the restore path
+    # run through _sudo; the existence probes must use the same privilege,
+    # or a root-invisible path is recorded ABSENT while a live file sits
+    # there (the #107-class corruption auto-deploy fixed). rc 77 is
+    # _sudo's own "cannot privilege" signal — never read as absent.
+    local st
+    _sudo test -e "$1" >/dev/null 2>&1; st=$?
+    [ "$st" = "0" ] && return 0
+    [ "$st" = "1" ] || return 2
+    _sudo test -L "$1" >/dev/null 2>&1; st=$?
+    [ "$st" = "0" ] && return 0
+    [ "$st" = "1" ] && return 1
+    return 2
+}
+
+_snapshot_run() {
+    # Create a new snapshot dir, snapshot every layer's file paths and
+    # state lines. Prints the snapdir on stdout; log() goes to the run
+    # log, so stdout stays clean for the caller. Returns nonzero on any
+    # failure — the caller refuses to change the box without a snapshot.
+    # The -$RANDOM suffix disambiguates two snapshots taken in the same
+    # second (the prune name-pattern still matches: -[0-9]*).
+    local snapdir layer p rel st
+    snapdir="$SNAPSHOT_DIR/$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM"
+    _sudo mkdir -p "$snapdir" \
+        || { log "snapshots: cannot create $snapdir"; return 1; }
+    printf 'SNAPSHOT at=%s\n' "$(date -u +%FT%TZ)" >"$snapdir/MANIFEST" \
+        || { log "snapshots: cannot write $snapdir/MANIFEST"; return 1; }
+    for layer in os-security cua-driver apt playwright; do
+        printf 'LAYER %s\n' "$layer" >>"$snapdir/MANIFEST" \
+            || { log "snapshots: cannot write MANIFEST"; return 1; }
+        while IFS= read -r p || [ -n "$p" ]; do
+            [ -n "$p" ] || continue
+            case "$p" in
+                /*) ;;
+                *) log "snapshots: refusing non-absolute layer path '$p'"; return 1 ;;
+            esac
+            case "$p" in
+                *..*) log "snapshots: refusing dot-dot layer path '$p'"; return 1 ;;
+            esac
+            rel="$snapdir$p"
+            # Try the copy first, then interpret: copying avoids the
+            # stat/copy TOCTOU (a path that appears between the probe and
+            # the copy would be recorded ABSENT while a live file exists).
+            _sudo mkdir -p "$(dirname "$rel")" 2>/dev/null \
+                || { log "snapshots: cannot create snapshot dir for $p"; return 1; }
+            if _sudo cp -a "$p" "$rel" 2>/dev/null; then
+                printf 'FILE %s\n' "$p" >>"$snapdir/MANIFEST" \
+                    || { log "snapshots: cannot write MANIFEST"; return 1; }
+                continue
+            fi
+            if _snap_test "$p"; then st=0; else st=$?; fi
+            if [ "$st" -eq 2 ]; then
+                log "snapshots: $p exists but cannot be copied or statted — failing loud"
+                return 1
+            elif [ "$st" -eq 0 ]; then
+                log "snapshots: $p exists but the copy failed — failing loud"
+                return 1
+            else
+                printf 'ABSENT %s\n' "$p" >>"$snapdir/MANIFEST" \
+                    || { log "snapshots: cannot write MANIFEST"; return 1; }
+            fi
+        done < <(_layer_snapshot_paths "$layer") \
+            || { log "snapshots: path inventory failed for $layer"; return 1; }
+        _layer_state_lines "$layer" >>"$snapdir/MANIFEST" 2>/dev/null \
+            || log "snapshots: state inventory failed for $layer (continuing)"
+    done
+    printf '%s\n' "$snapdir"
+    return 0
+}
+
+_newest_snapshot() {
+    # Print the newest snapshot dir, or nothing.
+    local d
+    d="$(ls -1d "$SNAPSHOT_DIR"/*/ 2>/dev/null | sort | tail -n 1 || true)"
+    [ -n "$d" ] || return 0
+    printf '%s\n' "${d%/}"
+}
+
+_snapshot_count() {
+    # grep -c exits 1 on an empty input (no snapshots) — the || true
+    # keeps this from killing the caller under set -e; the printed 0
+    # is what matters.
+    ls -1d "$SNAPSHOT_DIR"/*/ 2>/dev/null | grep -c . || true
+}
+
+_prune_snapshots() {
+    # Keep the newest $TOOLSET_SNAPSHOT_KEEP snapshot dirs. Only removes
+    # dirs directly under $SNAPSHOT_DIR whose names match the writer's
+    # timestamp-pid shape — never anything else.
+    local keep="$TOOLSET_SNAPSHOT_KEEP" d base gone=0
+    [ -d "$SNAPSHOT_DIR" ] || return 0
+    while IFS= read -r d; do
+        base="$(basename "$d")"
+        case "$base" in
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9]*)
+                if [ "$keep" -gt 0 ]; then
+                    keep=$((keep - 1))
+                else
+                    _sudo rm -rf "$SNAPSHOT_DIR/$base" 2>/dev/null \
+                        && gone=$((gone + 1)) \
+                        || log "snapshots: cannot prune $base (continuing)"
+                fi
+                ;;
+            *)
+                log "snapshots: not pruning unrecognized entry $base"
+                ;;
+        esac
+    done < <(ls -1 "$SNAPSHOT_DIR" 2>/dev/null | sort -r || true)
+    [ "$gone" -gt 0 ] && log "snapshots: pruned $gone old snapshot(s)"
+    return 0
+}
+
+_manifest_path_ok() {
+    # _manifest_path_ok <path> — the restore path never trusts the
+    # MANIFEST blindly: empty, relative, dot-dot, or bare-root paths fail
+    # loud. (The writer only emits sanitized absolute paths; this guards a
+    # hand-edited or damaged MANIFEST.)
+    local p="$1"
+    [ -n "$p" ] || return 1
+    case "$p" in
+        /) return 1 ;;  # `cp -a $snapdir/ /` would spray the snapshot onto /
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$p" in
+        *..*) return 1 ;;
+    esac
+    return 0
+}
+
+# Actions performed by the last _restore_layer call (same-shell global):
+# lets cmd_rollback distinguish "restored" from "nothing to restore".
+_restore_layer_actions=0
+
+_restore_layer() {
+    # _restore_layer <snapdir> [layer] — restore one layer's snapshot
+    # (or the whole run when layer is empty). Returns nonzero on any
+    # failure — the caller must NOT report success. Sets
+    # _restore_layer_actions to the number of files copied back or removed.
+    local snapdir="$1" layer="${2:-}" cur_layer="" line kind p src rc=0 st
+    _restore_layer_actions=0
+    [ -d "$snapdir" ] || { log "rollback: no such snapshot dir $snapdir"; return 1; }
+    [ -f "$snapdir/MANIFEST" ] || { log "rollback: no MANIFEST in $snapdir"; return 1; }
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            'LAYER '*) cur_layer="${line#LAYER }"; continue ;;
+            'STATE '*|'SNAPSHOT '*) continue ;;
+            'FILE '*) kind=file; p="${line#FILE }" ;;
+            'ABSENT '*) kind=absent; p="${line#ABSENT }" ;;
+            *)
+                log "rollback: corrupt MANIFEST line: $line"; rc=1; continue ;;
+        esac
+        if [ -z "$cur_layer" ]; then
+            log "rollback: MANIFEST entry before any LAYER header: $line"; rc=1; continue
+        fi
+        if [ -n "$layer" ] && [ "$cur_layer" != "$layer" ]; then continue; fi
+        if ! _manifest_path_ok "$p"; then
+            log "rollback: refusing unsafe MANIFEST path: $p"; rc=1; continue
+        fi
+        case "$kind" in
+            file)
+                src="$snapdir$p"
+                if _snap_test "$src"; then st=0; else st=$?; fi
+                if [ "$st" -ne 0 ]; then
+                    log "rollback: snapshot file missing for $p"; rc=1; continue
+                fi
+                log "rollback: restoring $p"
+                # --remove-destination: never write THROUGH an existing
+                # destination symlink (matches the layers' own atomic-mv
+                # publish semantics — replace, don't follow).
+                _sudo cp -a --remove-destination "$src" "$p" \
+                    || { log "rollback: restore of $p failed"; rc=1; continue; }
+                _restore_layer_actions=$((_restore_layer_actions + 1))
+                ;;
+            absent)
+                if _snap_test "$p"; then st=0; else st=$?; fi
+                if [ "$st" -eq 2 ]; then
+                    log "rollback: cannot verify $p — refusing to skip removal silently"; rc=1
+                elif [ "$st" -eq 0 ]; then
+                    log "rollback: removing $p (was absent at snapshot)"
+                    _sudo rm -f "$p" \
+                        || { log "rollback: removal of $p failed"; rc=1; continue; }
+                    _restore_layer_actions=$((_restore_layer_actions + 1))
+                else
+                    log "rollback: $p still absent — nothing to remove"
+                fi
+                ;;
+        esac
+    done <"$snapdir/MANIFEST"
+    return "$rc"
+}
+
+# --- blocked marking (#532 Recovery) ------------------------------------------------
+# A layer that fails and rolls back is marked blocked: the next `update`
+# skips it (loudly) instead of retry-looping the same failing convergence.
+# The block key is what the layer was converging (the pin for pin-driven
+# layers), so bumping the pin unblocks implicitly; `unblock [layer]` is
+# the operator override. One entry per layer; the file is rewritten
+# atomically under the update lock, and malformed lines are ignored by the
+# enforcement check (`_blocked_is`) and logged loudly by the status lister
+# (`_blocked_list`) — the state is availability bookkeeping, never a
+# trust boundary.
+
+_take_recovery_lock() {
+    # _take_recovery_lock <cmdname> — the single-flight lock for the
+    # operator recovery commands (rollback, unblock): they must never run
+    # against a snapshot/blocked state that an in-flight `update` is
+    # still writing (partial-snapshot restore, lost blocked marks).
+    # Non-blocking: refuse loudly instead of waiting on the weekly run.
+    # (cmd_update keeps its own inline lock with its deferral/freeze
+    # semantics; this is the shared shape for the recovery commands.)
+    local cmdname="$1"
+    mkdir -p "$TOOLSET_STATE_DIR" 2>/dev/null \
+        || { echo "ERROR: $cmdname: cannot create state dir $TOOLSET_STATE_DIR" >&2; return 1; }
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: $cmdname: flock not found; cannot take the single-flight lock" >&2
+        return 1
+    fi
+    # Open the lock on fd 9. NOTE: no `2>/dev/null` on this exec line —
+    # `exec 9>... 2>/dev/null` would permanently redirect THIS shell's
+    # stderr to /dev/null (the 2> applies to the shell, not just the open),
+    # silently swallowing every later >&2 diagnostic. On failure bash
+    # prints its own error and the || handler below runs (verified).
+    exec 9>"$STATE_LOCK" || {
+        echo "ERROR: $cmdname: cannot open lock" >&2; return 1; }
+    if ! flock -n 9 2>/dev/null; then
+        echo "ERROR: $cmdname: an update holds the lock — retry after it finishes" >&2
+        return 1
+    fi
+    return 0
+}
+
+_blocked_sanitize() {
+    # _blocked_sanitize — strip tabs/newlines (the TSV field separators)
+    # and cap length, so a hostile pin can never smuggle a second entry
+    # into blocked.state.
+    printf '%s' "$1" | tr '\t\n' '  ' | cut -c1-128
+}
+
+_blocked_mark() {
+    # _blocked_mark <layer> <key> <reason> — record the block. Best-effort
+    # like the freeze counter: a write failure is loud but never fatal —
+    # the failure already landed in the audit log and the freeze counter
+    # still engages.
+    local layer key reason tmp
+    layer="$(_blocked_sanitize "$1")"
+    key="$(_blocked_sanitize "${2:-}")"
+    reason="$(printf '%s' "${3:-}" | tr '\t\n' '  ' | cut -c1-160)"
+    mkdir -p "$TOOLSET_STATE_DIR" 2>/dev/null || true
+    tmp="$STATE_BLOCKED.tmp.$$"
+    if [ -f "$STATE_BLOCKED" ]; then
+        grep -Fv "${layer}	" "$STATE_BLOCKED" >"$tmp" 2>/dev/null || true
+    else
+        : >"$tmp" 2>/dev/null || true
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$layer" "$key" "$(date -u +%FT%TZ)" "$reason" >>"$tmp" \
+        2>/dev/null || { log "blocked: cannot write $tmp"; rm -f "$tmp"; return 0; }
+    if mv -f "$tmp" "$STATE_BLOCKED" 2>/dev/null; then
+        log "blocked: $layer (key: ${key:-unknown}) marked blocked — next update skips it until the pin changes or 'unblock $layer' runs"
+    else
+        log "blocked: WARNING cannot persist $STATE_BLOCKED (continuing)"
+        rm -f "$tmp"
+    fi
+    return 0
+}
+
+_blocked_is() {
+    # _blocked_is <layer> <key> — 0 when this exact layer+key is blocked.
+    # An empty key means the layer could not determine what it was
+    # converging (e.g. unreadable pins file): never treat that as blocked —
+    # the layer's own fail-closed refusal is the correct signal, and the
+    # freeze counter must see the repeated failure. Field-split comparison
+    # (not a case glob): a key containing glob metacharacters must never
+    # match inexactly.
+    local layer key
+    [ -n "${2:-}" ] || return 1
+    layer="$(_blocked_sanitize "$1")"
+    key="$(_blocked_sanitize "$2")"
+    [ -f "$STATE_BLOCKED" ] || return 1
+    local line f_layer f_key rest
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        f_layer="${line%%$'\t'*}"
+        rest="${line#*$'\t'}"
+        f_key="${rest%%$'\t'*}"
+        if [ "$f_layer" = "$layer" ] && [ "$f_key" = "$key" ]; then
+            return 0
+        fi
+    done <"$STATE_BLOCKED" 2>/dev/null
+    return 1
+}
+
+_blocked_clear() {
+    # _blocked_clear [layer] — drop the blocked entry (operator override).
+    # Returns nonzero when the state cannot be persisted — unblock's whole
+    # job is the state change, so a write failure must fail loudly.
+    local layer tmp
+    layer="${1:-}"
+    [ -f "$STATE_BLOCKED" ] || return 0
+    if [ -z "$layer" ]; then
+        rm -f "$STATE_BLOCKED" 2>/dev/null \
+            || { log "unblock: cannot remove $STATE_BLOCKED"; return 1; }
+        return 0
+    fi
+    layer="$(_blocked_sanitize "$layer")"
+    tmp="$STATE_BLOCKED.tmp.$$"
+    grep -Fv "${layer}	" "$STATE_BLOCKED" >"$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$STATE_BLOCKED" 2>/dev/null \
+        || { log "unblock: cannot rewrite $STATE_BLOCKED"; rm -f "$tmp"; return 1; }
+    return 0
+}
+
+_blocked_list() {
+    # Print blocked entries as `layer<TAB>key<TAB>at<TAB>reason` lines, or
+    # nothing. Malformed lines are skipped loudly — never a trust boundary.
+    local line
+    [ -f "$STATE_BLOCKED" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        case "$line" in
+            *$'\t'*$'\t'*$'\t'*) printf '%s\n' "$line" ;;
+            *) log "blocked: skipping malformed line in $STATE_BLOCKED" ;;
+        esac
+    done <"$STATE_BLOCKED" 2>/dev/null
+    return 0
+}
+
+_layer_func() {
+    # Map a layer name to its updater function.
+    case "$1" in
+        os-security) printf '_os_security_repair' ;;
+        cua-driver)  printf '_cua_driver_layer' ;;
+        "apt")        printf '_apt_layer' ;;
+        playwright)  printf '_playwright_layer' ;;
+        *) return 1 ;;
+    esac
+}
+
+_layer_key() {
+    # The convergence key for blocked marking: what the layer was trying
+    # to reach. Pin-driven layers use the pin (a pin bump unblocks
+    # implicitly); the others use a fixed key.
+    case "$1" in
+        os-security) printf 'unattended-config' ;;
+        cua-driver)  _read_pin cua-driver ;;
+        "apt")        printf 'converge' ;;
+        playwright)  _read_pin playwright ;;
+        *) return 1 ;;
+    esac
+}
+
+_run_layer() {
+    # _run_layer <layer> <dry> <snapdir> [func] — run one layer with
+    # snapshot + automatic rollback + blocked marking. func overrides the
+    # layer's updater (tests). Returns 0 on success or blocked-skip, 1 on
+    # failure. In dry-run mode no snapshot is taken and nothing is marked
+    # (a blocked-skip in dry-run still emits the `blocked` audit event —
+    # the guarantee is no blocked.state write and no changes).
+    local layer="$1" dry="$2" snapdir="$3" func="${4:-}"
+    [ -n "$func" ] || func="$(_layer_func "$layer")" || {
+        log "$layer: unknown layer"; return 1; }
+    local key
+    key="$(_layer_key "$layer")"
+    if _blocked_is "$layer" "$key"; then
+        log "$layer: BLOCKED (key: $key) — skipping; investigate, then 'toolset-update.sh unblock $layer' or change the pin"
+        audit 'toolset-update' ",\"result\":\"blocked\",\"layer\":\"$layer\",\"key\":\"$key\""
+        return 0
+    fi
+    if [ "$dry" = "1" ]; then
+        "$func" "$dry"
+        return
+    fi
+    if [ -z "$snapdir" ] || [ ! -d "$snapdir" ]; then
+        # No snapshot, no change: fail the layer loudly (feeds the freeze
+        # counter like any infra failure). The snapshot is taken once per
+        # run in cmd_update; a missing dir here means that step failed.
+        log "$layer: no pre-update snapshot — refusing to change the box without a rollback target"
+        return 1
+    fi
+    if "$func" "$dry"; then
+        return 0
+    fi
+    log "$layer: FAILED — rolling back to the pre-update snapshot"
+    local rb_extra=""
+    if _restore_layer "$snapdir" "$layer"; then
+        log "$layer: rolled back to snapshot $snapdir"
+    else
+        log "$layer: ROLLBACK INCOMPLETE — box may be half-updated; snapshot: $snapdir; operator intervention required"
+        # Audit honesty: "rolled-back" must not claim a restore that failed.
+        rb_extra=',"rollback":"incomplete"'
+    fi
+    _blocked_mark "$layer" "$key" "layer-failed"
+    audit 'toolset-update' ",\"result\":\"rolled-back\",\"layer\":\"$layer\",\"key\":\"$key\",\"snapshot\":\"$snapdir\"$rb_extra"
+    return 1
+}
+
 # --- update ---------------------------------------------------------------------
 cmd_update() {
     # cmd_update [--dry-run] [--now] [--force]
@@ -1350,19 +1874,32 @@ cmd_update() {
     fi
 
     local rc=0 failed_comps=""
-    if ! _os_security_repair "$dry"; then
+    # Pre-update snapshot (#532 Recovery): one snapshot per run, before any
+    # layer changes the box. No snapshot, no change — a failed snapshot
+    # fails the run loudly (feeds the freeze counter like any infra
+    # failure). --dry-run changes nothing, so it takes no snapshot.
+    local snapdir=""
+    if [ "$dry" != "1" ]; then
+        snapdir="$(_snapshot_run)" || {
+            log "update: pre-update snapshot failed — refusing to change the box without a rollback target"
+            _freeze_record_result failed "snapshot"
+            audit 'toolset-update' ',"result":"failed","reason":"snapshot-failed"'
+            return 1
+        }
+    fi
+    if ! _run_layer os-security "$dry" "$snapdir"; then
         rc=1
         failed_comps="os-security"
     fi
-    if ! _cua_driver_layer "$dry"; then
+    if ! _run_layer cua-driver "$dry" "$snapdir"; then
         rc=1
         failed_comps="${failed_comps:+$failed_comps }cua-driver"
     fi
-    if ! _apt_layer "$dry"; then
+    if ! _run_layer apt "$dry" "$snapdir"; then
         rc=1
         failed_comps="${failed_comps:+$failed_comps }apt"
     fi
-    if ! _playwright_layer "$dry"; then
+    if ! _run_layer playwright "$dry" "$snapdir"; then
         rc=1
         failed_comps="${failed_comps:+$failed_comps }playwright"
     fi
@@ -1377,6 +1914,8 @@ cmd_update() {
         audit 'toolset-update' ',"result":"failed","failed":"'"$failed_comps"'"'
         log "update: FAILED ($failed_comps); see audit log"
     fi
+    # Prune old snapshots on real runs (dry-run created none).
+    [ "$dry" = "1" ] || _prune_snapshots
     return "$rc"
 }
 
@@ -1398,6 +1937,74 @@ cmd_unfreeze() {
     log "unfreeze: failure-freeze state cleared (counter reset)"
     audit 'toolset-update' ',"result":"unfrozen"'
     return 0
+}
+
+cmd_rollback() {
+    # cmd_rollback [--layer <name>] — restore the newest snapshot (one
+    # layer, or the whole run). The recovery-runbook entry point: read the
+    # status report, identify the bad layer, roll it back, verify, report.
+    # STATE lines in the MANIFEST are diagnostic only (package-version
+    # inventory) — the restore touches only FILE/ABSENT entries, so the
+    # apt/playwright layers' package state is never "restored" by copying;
+    # see docs/TOOLSET_UPDATE.md "Snapshots and rollback" for their
+    # package-level recovery path.
+    local layer=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --layer)
+                [ $# -ge 2 ] || { echo "ERROR: --layer needs a value" >&2; return 2; }
+                layer="$2"; shift 2 ;;
+            --layer=*) layer="${1#--layer=}"; shift ;;
+            *) echo "ERROR: unknown flag: $1" >&2; return 2 ;;
+        esac
+    done
+    case "$layer" in
+        ""|os-security|cua-driver|apt|playwright) ;;
+        *) echo "ERROR: unknown layer: $layer" >&2; return 2 ;;
+    esac
+    _take_recovery_lock "rollback" || return 1
+    local snapdir
+    snapdir="$(_newest_snapshot)"
+    if [ -z "$snapdir" ]; then
+        echo "ERROR: no snapshots in $SNAPSHOT_DIR" >&2
+        return 1
+    fi
+    log "rollback: restoring ${layer:-all layers} from $snapdir"
+    _restore_layer_actions=0
+    if _restore_layer "$snapdir" "$layer"; then
+        if [ -n "$layer" ] && [ "$_restore_layer_actions" = "0" ]; then
+            # STATE-only layers (apt/playwright) have no file entries: say
+            # so instead of logging a "restored" that restored nothing.
+            log "rollback: no file entries for layer $layer in $snapdir (STATE inventory only) — nothing to restore"
+        else
+            log "rollback: restored ${layer:-all layers} from $snapdir"
+        fi
+        audit 'toolset-update' ",\"result\":\"rolled-back\",\"manual\":true,\"layer\":\"$layer\",\"snapshot\":\"$snapdir\""
+        return 0
+    fi
+    log "rollback: INCOMPLETE — see log; snapshot: $snapdir"
+    audit 'toolset-update' ",\"result\":\"rollback-failed\",\"manual\":true,\"layer\":\"$layer\",\"snapshot\":\"$snapdir\""
+    return 1
+}
+
+cmd_unblock() {
+    # cmd_unblock [layer] — clear blocked-layer state (operator override
+    # after investigating, or after a fix that keeps the same pin — a pin
+    # change unblocks implicitly via the key check). Never runs updates
+    # itself. Truthfulness like cmd_unfreeze: a write failure fails loudly.
+    local layer="${1:-}"
+    case "$layer" in
+        ""|os-security|cua-driver|apt|playwright) ;;
+        *) echo "ERROR: unknown layer: $layer" >&2; return 2 ;;
+    esac
+    _take_recovery_lock "unblock" || return 1
+    if _blocked_clear "$layer"; then
+        log "unblock: cleared blocked state for ${layer:-all layers}"
+        audit 'toolset-update' ",\"result\":\"unblocked\",\"layer\":\"$layer\""
+        return 0
+    fi
+    echo "ERROR: unblock failed: cannot persist $STATE_BLOCKED" >&2
+    return 1
 }
 
 # --- install / uninstall ----------------------------------------------------------
@@ -1480,6 +2087,8 @@ if [ "${TOOLSET_UPDATE_NO_MAIN:-0}" != "1" ]; then
     case "$cmd" in
         status)    cmd_status "$@" ;;
         update)    cmd_update "$@" ;;
+        rollback)  cmd_rollback "$@" ;;
+        unblock)   cmd_unblock "$@" ;;
         unfreeze)  cmd_unfreeze "$@" ;;
         install)   cmd_install "$@" ;;
         uninstall) cmd_uninstall "$@" ;;

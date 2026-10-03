@@ -40,7 +40,10 @@ def make_realtools(tmp_path):
     d.mkdir(parents=True, exist_ok=True)
     for t in ("bash", "sh", "grep", "mktemp", "install", "rm", "flock", "date", "mkdir",
               "wc", "tail", "mv", "chmod", "touch", "cat", "head", "cut",
-              "tr", "ps", "dirname", "basename", "id"):
+              "tr", "ps", "dirname", "basename", "id",
+              # cp/ls/sort: the #532 snapshot/rollback slice copies managed
+              # files into snapshot dirs and lists/prunes them.
+              "cp", "ls", "sort"):
         p = shutil.which(t)
         if p:
             (d / t).symlink_to(p)
@@ -1947,3 +1950,302 @@ def test_freeze_state_as_directory_is_loud_not_silent(env):
     rows = {line.split("\t")[0]: line.split("\t")
             for line in r.stdout.splitlines() if line.strip()}
     assert rows["freeze"][1] == "ok", r.stdout  # reads as clean, not frozen
+
+
+# --- pre-update snapshots + rollback + blocked marking (#532 Recovery) --------
+
+def _snapshot_env(env, cua_bin_name="cua-driver"):
+    # Env copy for snapshot tests: os-security conf materialized, the
+    # cua-driver binary ABSENT (to exercise the ABSENT manifest line), and
+    # a dpkg-query stub (the fixture stubs `dpkg` but the snapshot state
+    # inventory calls `dpkg-query -W`, which would otherwise touch the live
+    # /var/lib/dpkg — read-only and outcome-independent, but the module
+    # docstring promises hermeticity).
+    e = dict(env["env"])
+    (env["apt"] / "20auto-upgrades").write_text(GOOD_CONF)
+    e["CUA_DRIVER_BIN"] = str(env["tmp"] / cua_bin_name)  # absent
+    bindir = make_stub_bin(env["tmp"] / "snapbin", {"dpkg-query": "exit 1"})
+    e["PATH"] = bindir + os.pathsep + e["PATH"]
+    return e
+
+
+def test_snapshot_run_captures_files_and_absent(env):
+    e = _snapshot_env(env)
+    r = source_and('snap="$(_snapshot_run)"; echo "SNAP=$snap"; cat "$snap/MANIFEST"',
+                   env_extra=e)
+    assert r.returncode == 0, r.stderr
+    snap = [l for l in r.stdout.splitlines() if l.startswith("SNAP=")][0][5:]
+    assert os.path.isdir(snap), r.stdout
+    man = (env["state"] / "snapshots" / os.path.basename(snap) / "MANIFEST").read_text()
+    assert f"FILE {env['apt']}/20auto-upgrades" in man
+    assert f"ABSENT {env['tmp']}/cua-driver" in man
+    assert "LAYER os-security" in man and "LAYER playwright" in man
+    assert "STATE apt" in man and "STATE playwright" in man
+    # The snapshotted file bytes are the pre-update bytes.
+    snapfile = os.path.join(snap, str(env["apt"] / "20auto-upgrades").lstrip("/"))
+    assert open(snapfile).read() == GOOD_CONF
+
+
+def test_restore_layer_restores_and_removes_absent(env):
+    e = _snapshot_env(env)
+    code = (
+        'snap="$(_snapshot_run)"; '
+        'printf "CORRUPTED\\n" > "$APT_CONF_DIR/20auto-upgrades"; '
+        'printf "new-binary" > "$CUA_DRIVER_BIN"; '
+        '_restore_layer "$snap" ""; echo "rc=$?"; '
+        'echo "CONF=$(cat "$APT_CONF_DIR/20auto-upgrades")"; '
+        'if [ -e "$CUA_DRIVER_BIN" ]; then echo "BIN=present"; else echo "BIN=absent"; fi'
+    )
+    r = source_and(code, env_extra=e)
+    assert "rc=0" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "CONF=" + GOOD_CONF.strip() in r.stdout, r.stdout
+    assert "BIN=absent" in r.stdout, r.stdout  # created after snapshot -> removed
+
+
+def test_restore_refuses_unsafe_manifest_paths(env):
+    # A hand-edited/damaged MANIFEST must never write outside the intended
+    # tree. Non-vacuity note: the planted files make _manifest_path_ok the
+    # ONLY thing standing between the MANIFEST and the filesystem — with
+    # the guard neutered to `return 0` this test fails (/tmp/pwned gets
+    # written, the canary gets removed). Verified by temporary neutering.
+    # (Single-`..` paths are used so they normalize to the asserted
+    # locations: /tmp/x/../../pwned would land on /pwned, not /tmp/pwned.)
+    e = _snapshot_env(env)
+    code = (
+        'snap="$(_snapshot_run)"; '
+        # Plant what the malicious FILE entries resolve to. NOTE: the `x`
+        # components must exist — the kernel resolves `a/x/../pwned`
+        # component-by-component, so without `$snap/tmp/x/` and `/tmp/x/`
+        # the plant is unreachable and the test would pass with the guard
+        # neutered (vacuous). Without the guard, restore would copy these
+        # over /tmp/pwned and /tmp/pwned3.
+        'mkdir -p "$snap/tmp/x" /tmp/x; '
+        'printf "PWNED\\n" > "$snap/tmp/pwned"; '
+        'printf "PWNED3\\n" > "$snap/tmp/pwned3"; '
+        # Canary for the ABSENT path: without the guard, restore would rm -f it.
+        'printf "canary\\n" > /tmp/pwned2; '
+        # A pre-LAYER entry (inserted before the first LAYER header)...
+        'sed -i "2i FILE /tmp/x/../pwned3" "$snap/MANIFEST"; '
+        # ...plus empty and dot-dot entries after the headers.
+        'printf "FILE \\n" >> "$snap/MANIFEST"; '
+        'printf "FILE /tmp/x/../pwned\\n" >> "$snap/MANIFEST"; '
+        'printf "ABSENT /tmp/x/../pwned2\\n" >> "$snap/MANIFEST"; '
+        '_restore_layer "$snap" "" || echo "rc=$?"; '
+        'echo "CANARY=$(cat /tmp/pwned2 2>/dev/null || echo missing)"; '
+        'rm -f /tmp/pwned2; rmdir /tmp/x 2>/dev/null || true'
+    )
+    r = source_and(code, env_extra=e)
+    assert "rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "CANARY=canary" in r.stdout, r.stdout  # the ABSENT rm never fired
+    assert not os.path.exists("/tmp/pwned"), "guard bypass: wrote /tmp/pwned"
+    assert not os.path.exists("/tmp/pwned3"), "guard bypass: wrote /tmp/pwned3"
+
+
+def test_run_layer_failure_rolls_back_and_blocks(env):
+    e = _snapshot_env(env)
+    code = (
+        'snap="$(_snapshot_run)"; '
+        'stub_fail() { printf "CORRUPTED\\n" > "$APT_CONF_DIR/20auto-upgrades"; return 1; }; '
+        '_run_layer os-security 0 "$snap" stub_fail || echo "rc=$?"; '
+        'echo "CONF=$(cat "$APT_CONF_DIR/20auto-upgrades")"; '
+        'echo "BLOCKED=$(cat "$TOOLSET_STATE_DIR/blocked.state" 2>/dev/null || echo none)"'
+    )
+    r = source_and(code, env_extra=e)
+    assert "rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "CONF=" + GOOD_CONF.strip() in r.stdout, r.stdout  # rolled back
+    assert "os-security\tunattended-config\t" in r.stdout.replace("\\t", "\t"), r.stdout
+    lines = audit_lines({"state": env["state"]})
+    assert any(l.get("result") == "rolled-back" and l.get("layer") == "os-security"
+               for l in lines), lines
+
+
+def test_run_layer_blocked_skip_does_not_rerun(env):
+    e = _snapshot_env(env)
+    code = (
+        'snap="$(_snapshot_run)"; '
+        '_blocked_mark os-security unattended-config "test-block"; '
+        'stub_never() { echo "STUB-RAN"; return 1; }; '
+        '_run_layer os-security 0 "$snap" stub_never; echo "rc=$?"; '
+        '_blocked_is os-security "" && echo "EMPTY-KEY-BLOCKED" || echo "empty-key-not-blocked"'
+    )
+    r = source_and(code, env_extra=e)
+    assert "rc=0" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "STUB-RAN" not in r.stdout, r.stdout  # the failing layer never ran again
+    assert "empty-key-not-blocked" in r.stdout, r.stdout  # empty key never matches
+
+
+def test_run_layer_snapshot_failure_refuses_without_changing(env):
+    # SNAPSHOT_DIR unusable (a file, not a dir): the layer must refuse
+    # BEFORE changing anything — no change without a rollback target.
+    e = _snapshot_env(env)
+    code = (
+        'stub_never() { echo "STUB-RAN"; return 0; }; '
+        '_run_layer os-security 0 "/nonexistent-snapdir" stub_never || echo "rc=$?"; '
+        'echo "CONF=$(cat "$APT_CONF_DIR/20auto-upgrades")"'
+    )
+    r = source_and(code, env_extra=e)
+    # Exact-line match: "rc=1" must not match a "rc=127" (command-not-found)
+    # from a missing implementation — that is the vacuity this guards.
+    assert "rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "STUB-RAN" not in r.stdout, r.stdout
+    assert "CONF=" + GOOD_CONF.strip() in r.stdout, r.stdout
+
+
+def test_update_refuses_when_snapshot_dir_unusable(env):
+    # The real no-snapshot-no-change path: SNAPSHOT_DIR is a file, so the
+    # pre-update snapshot cannot be taken — the run must refuse BEFORE any
+    # layer runs, feed the freeze counter, and leave the box untouched.
+    e = dict(env["env"])
+    (env["apt"] / "20auto-upgrades").write_text(GOOD_CONF)
+    (env["state"] / "snapshots").write_text("not-a-dir")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    runlog = (env["state"] / "toolset-update.log").read_text()
+    assert "pre-update snapshot failed" in runlog, runlog
+    assert (env["apt"] / "20auto-upgrades").read_text() == GOOD_CONF
+    lines = audit_lines(env)
+    assert lines[-1]["result"] == "failed", lines
+    assert lines[-1]["reason"] == "snapshot-failed", lines
+    assert "consecutive_failures=1" in (env["state"] / "freeze.state").read_text()
+
+
+def test_prune_snapshots_keeps_newest_five(env):
+    e = dict(env["env"])
+    code = (
+        'mkdir -p "$TOOLSET_STATE_DIR/snapshots"; '
+        'for i in 01 02 03 04 05 06 07; do '
+        '  mkdir -p "$TOOLSET_STATE_DIR/snapshots/202601${i}T000000-$$"; '
+        'done; '
+        '_snapshot_run >/dev/null; _snapshot_run >/dev/null; '
+        # Pin the setup: both snapshots must exist before pruning, or the
+        # final "5" could pass with fewer inputs.
+        'echo "before=$(ls "$TOOLSET_STATE_DIR/snapshots" | wc -l)"; '
+        '_prune_snapshots; '
+        'ls "$TOOLSET_STATE_DIR/snapshots" | wc -l'
+    )
+    r = source_and(code, env_extra=e)
+    assert "before=9" in r.stdout, r.stdout + r.stderr
+    assert r.stdout.strip().splitlines()[-1].strip() == "5", r.stdout + r.stderr
+
+
+def test_unblock_clears_layer_and_all(env):
+    e = _snapshot_env(env)
+    code = (
+        '_blocked_mark os-security unattended-config "t"; '
+        '_blocked_mark apt converge "t"; '
+        'env -u TOOLSET_UPDATE_NO_MAIN ./deploy/toolset-update.sh unblock os-security; echo "rc1=$?"; '
+        '_blocked_is os-security unattended-config && echo "STILL-BLOCKED" || echo "cleared"; '
+        '_blocked_is apt converge && echo "apt-still-blocked" || echo "apt-cleared?"; '
+        'env -u TOOLSET_UPDATE_NO_MAIN ./deploy/toolset-update.sh unblock; echo "rc2=$?"; '
+        '[ -f "$TOOLSET_STATE_DIR/blocked.state" ] && echo "file-remains" || echo "file-gone"'
+    )
+    r = source_and(code, env_extra=e)
+    assert "rc1=0" in r.stdout and "rc2=0" in r.stdout, r.stdout + r.stderr
+    assert "cleared" in r.stdout and "STILL-BLOCKED" not in r.stdout, r.stdout
+    assert "apt-still-blocked" in r.stdout, r.stdout  # only the named layer cleared
+    assert "file-gone" in r.stdout, r.stdout
+
+
+def test_status_shows_blocked_and_snapshot_rows(env):
+    e = _snapshot_env(env)
+    source_and('_snapshot_run >/dev/null; _blocked_mark apt converge "test-block"',
+               env_extra=e)
+    r = run_bash("./deploy/toolset-update.sh status", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    rows = {line.split("\t")[0]: line.split("\t")
+            for line in r.stdout.splitlines() if line.strip()}
+    assert rows["blocked"][1] == "blocked", r.stdout
+    assert "apt converge" in rows["blocked"][2], r.stdout
+    assert rows["snapshots"][1] == "ok", r.stdout
+    assert "count=1" in rows["snapshots"][2], r.stdout
+
+
+def test_cmd_rollback_restores_newest_snapshot(env):
+    e = _snapshot_env(env)
+    source_and('_snapshot_run >/dev/null', env_extra=e)
+    (env["apt"] / "20auto-upgrades").write_text("POST-SNAPSHOT-EDIT\n")
+    r = run_bash("./deploy/toolset-update.sh rollback --layer os-security", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert (env["apt"] / "20auto-upgrades").read_text() == GOOD_CONF
+    lines = audit_lines(env)
+    assert any(l.get("result") == "rolled-back" and l.get("manual") is True
+               for l in lines), lines
+    # Unknown layer is a usage error, not a restore attempt.
+    r = run_bash("./deploy/toolset-update.sh rollback --layer bogus", env_extra=e)
+    assert r.returncode == 2, r.stderr
+
+
+def test_update_failure_blocks_layer_and_second_run_skips(env):
+    # Integration: the cua-driver layer fails (drifted binary, unreachable
+    # release base) -> blocked; the next update skips it instead of
+    # retry-looping the download.
+    e = dict(env["env"])
+    (env["apt"] / "20auto-upgrades").write_text(GOOD_CONF)
+    (env["state"] / "self_update_pins.conf").write_text(
+        "# test pins\ncua-driver = 0.28.2\nplaywright = 1.62.0\n")
+    managed = env["tmp"] / "cua-bin2" / "cua-driver"
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    write_version_stub(managed, "9.9.9")  # drifted off the pin
+    e["CUA_DRIVER_BIN"] = str(managed)
+    e["CUA_RELEASE_BASE"] = "file:///nonexistent-release-base"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr  # the layer really failed
+    blocked = (env["state"] / "blocked.state").read_text()
+    assert "cua-driver\t0.28.2\t" in blocked, blocked
+    lines = audit_lines(env)
+    assert any(l.get("result") == "rolled-back" and l.get("layer") == "cua-driver"
+               for l in lines), lines
+    # Second run: the layer is skipped (no second download attempt), the
+    # run succeeds, and the freeze counter is untouched by the skip.
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    lines = audit_lines(env)
+    assert any(l.get("result") == "blocked" and l.get("layer") == "cua-driver"
+               for l in lines), lines
+
+
+def test_rollback_and_unblock_refuse_while_update_locked(env):
+    # The recovery commands take the same single-flight lock as update:
+    # a rollback against a partially-written snapshot (or an unblock
+    # racing _blocked_mark) must refuse loudly, not interleave.
+    e = _snapshot_env(env)
+    source_and('_snapshot_run >/dev/null; _blocked_mark apt converge "t"',
+               env_extra=e)
+    code = (
+        # Hold the lock the way cmd_update does, then run the recovery
+        # commands as child processes (which inherit the exported
+        # TOOLSET_UPDATE_NO_MAIN=1, so unset it for the child).
+        # NOTE: child stderr goes to files under $TOOLSET_STATE_DIR, never
+        # the repo checkout — stray files in the working tree break
+        # harness/test_manifest.py in CI (generate-image-manifest.sh
+        # refuses on uncommitted changes).
+        'exec 8>"$TOOLSET_STATE_DIR/toolset-update.lock"; '
+        'flock -n 8 || { echo "SETUP-LOCK-FAILED"; exit 99; }; '
+        'rb_rc=0; '
+        'env -u TOOLSET_UPDATE_NO_MAIN ./deploy/toolset-update.sh rollback --layer os-security 2>"$TOOLSET_STATE_DIR/rb.err" || rb_rc=$?; '
+        'echo "rb_rc=$rb_rc"; cat "$TOOLSET_STATE_DIR/rb.err"; '
+        'ub_rc=0; '
+        'env -u TOOLSET_UPDATE_NO_MAIN ./deploy/toolset-update.sh unblock apt 2>"$TOOLSET_STATE_DIR/ub.err" || ub_rc=$?; '
+        'echo "ub_rc=$ub_rc"; cat "$TOOLSET_STATE_DIR/ub.err"'
+    )
+    r = source_and(code, env_extra=e)
+    assert "rb_rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "ub_rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "holds the lock" in r.stdout, r.stdout
+    # Nothing was restored or unblocked by the refused commands.
+    assert (env["apt"] / "20auto-upgrades").read_text() == GOOD_CONF
+    assert "apt\tconverge\t" in (env["state"] / "blocked.state").read_text()
+
+
+def test_rollback_layer_without_value_is_usage_error(env):
+    e = _snapshot_env(env)
+    r = run_bash("./deploy/toolset-update.sh rollback --layer", env_extra=e)
+    assert r.returncode == 2, r.stderr
+    assert "needs a value" in r.stderr
+
+
+def test_rollback_with_no_snapshots_fails_clean(env):
+    e = _snapshot_env(env)
+    r = run_bash("./deploy/toolset-update.sh rollback", env_extra=e)
+    assert r.returncode == 1, r.stderr
+    assert "no snapshots" in r.stderr

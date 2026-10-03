@@ -277,6 +277,44 @@ repeated failure" half of #532's Recovery section.
   (Post-update health checks, when they land, feed the same counter —
   today the counter keys off update-run failures.)
 
+## Snapshots and rollback (issue #532)
+
+**Status: shipped.** No change without a rollback target.
+
+- Before any layer changes the box, `update` takes one **pre-update
+  snapshot** of everything the run will touch, under
+  `$TOOLSET_STATE_DIR/snapshots/<UTC-timestamp>-<pid>/` with a per-layer
+  `MANIFEST` (`FILE`/`ABSENT` lines mirroring
+  `deploy/auto-deploy.sh`'s pattern, plus `STATE` lines carrying a
+  pre-update package-version inventory). A failed snapshot fails the run
+  loudly *before* anything changes — it feeds the failure-freeze counter
+  like any infra failure. The newest `$TOOLSET_SNAPSHOT_KEEP` snapshots
+  are retained (default 5).
+- When a layer fails, its snapshot is **restored automatically** and the
+  layer is **marked blocked** in `$TOOLSET_STATE_DIR/blocked.state`: the
+  next tick skips that layer (loudly, with an audit event) instead of
+  retry-looping the same failing convergence. The block key is what the
+  layer was converging (the pin for pin-driven layers), so bumping the
+  pin unblocks implicitly; `toolset-update.sh unblock [layer]` is the
+  operator override. Other layers still run — layers are independent, so a
+  failed `cua-driver` download never reverts a good `os-security` repair.
+- `toolset-update.sh rollback [--layer <name>]` restores the newest
+  snapshot by hand — the recovery-runbook entry point: read the `status`
+  report, identify the bad layer, roll it back, verify, report.
+- `status` gains two rows: `blocked` (`blocked` with layer/key/at
+  detail, or `ok`) and `snapshots` (retained count + newest name), so the
+  future `spark-vm health` report inherits both signals.
+- Honest scope boundary: the `apt` and `playwright` layers converge
+  dpkg/pip-owned package state that cannot be restored by copying files
+  back. Their snapshot contribution is the pre-update version inventory
+  (`STATE` lines) for the operator and the audit log — not a restore
+  path. Recovering a bad `apt` upgrade is the operator's
+  `apt-get install --only-upgrade` downgrade / `apt-get install -f`
+  repair with the `STATE` inventory as the "what changed" record;
+  recovering a bad `playwright` converge is
+  `pip install playwright==<previous-pin>` (from the `STATE` line) as the
+  venv-owning user, then `playwright install chromium`.
+
 ## Follow-ups (issue #532, not in this slice)
 
 - Hash-pin the playwright wheel and browser archives (`--require-hashes`
@@ -290,7 +328,6 @@ repeated failure" half of #532's Recovery section.
   the target box (it can restart services beyond maintainer scripts)
 - Status-plane wiring: consult `self_update.py` drift output when deciding
   what to update
-- Pre-update snapshots and rollback
 - Post-update health checks and machine-readable health
 - Agent recovery runbook
 - Independent backup recovery entry point (outside the update system itself)
