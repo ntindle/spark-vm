@@ -253,14 +253,17 @@ idempotent) via the `playwright` layer. npm rides with the nodesource
 **Status: shipped.** The toolset updater ships with the "freeze on
 repeated failure" half of #532's Recovery section.
 
-- Every **real** `update` run that fails (any layer returns nonzero)
-  increments a consecutive-failure counter in
-  `$TOOLSET_STATE_DIR/freeze.state`. After `TOOLSET_FREEZE_AFTER`
-  consecutive failures (default: 3) the box **freezes**: `update` refuses
-  to run (exit 1, a loud log line, and an audit event) until an operator
-  runs `toolset-update.sh unfreeze` after investigating. No layer work
-  runs while frozen — the box surfaces one "box needs attention" state
-  instead of churning through doomed updates.
+- Every **real** `update` run that fails (any layer returns nonzero,
+  plus pre-layer hard failures like a missing `flock`) increments a
+  consecutive-failure counter in `$TOOLSET_STATE_DIR/freeze.state`.
+  After `TOOLSET_FREEZE_AFTER` consecutive failures (default: 3;
+  non-numeric or zero values fall back to 3 with a loud log line) the
+  box **freezes**: `update` refuses to run (exit 1, a loud log line, and
+  an audit event) until an operator runs `toolset-update.sh unfreeze`
+  after investigating — and `unfreeze` itself fails loudly (exit 1) if
+  the state can't be persisted, so it never reports a recovery that
+  didn't happen. No layer work runs while frozen — the box surfaces one
+  "box needs attention" state instead of churning through doomed updates.
 - The counter is fair: idle-gate and lock deferrals, `--dry-run` runs,
   and opt-outs never move it; a successful run resets it to 0. A corrupt
   or missing state file reads as clean (loudly) — the counter is

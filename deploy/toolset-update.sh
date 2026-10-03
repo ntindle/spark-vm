@@ -1160,20 +1160,32 @@ cmd_status() {
 
 # --- failure freeze (#532 Recovery) -----------------------------------------------
 : "${TOOLSET_FREEZE_AFTER:=3}"
+case "$TOOLSET_FREEZE_AFTER" in
+    ''|*[!0-9]*|0)
+        # A non-numeric threshold would silently defeat the freeze: the
+        # `-ge` comparison below fails (set -e-exempt as a condition) and
+        # the counter increments forever without ever freezing (fail-open).
+        # `0` is rejected too: it would freeze on the very first failure,
+        # while most operators writing `0` mean "disabled" — a footgun.
+        # Validate once, loudly, and fall back to the default.
+        log "freeze: invalid TOOLSET_FREEZE_AFTER='$TOOLSET_FREEZE_AFTER' — defaulting to 3"
+        TOOLSET_FREEZE_AFTER=3
+        ;;
+esac
 STATE_FREEZE="$TOOLSET_STATE_DIR/freeze.state"
 
 _freeze_state_init() {
     # Load the freeze state into _fz_consec / _fz_frozen / _fz_at /
-    # _fz_reason. A missing or MALFORMED state file reads as clean
-    # (consecutive=0, not frozen): freeze.state is root-writable runtime
-    # bookkeeping, not a trust boundary, so a corrupt file must neither
-    # freeze the box spuriously nor brick updates permanently. A parse
-    # failure is logged loudly and the state is reset to clean.
+    # _fz_reason. A missing, unreadable, non-regular, or MALFORMED state
+    # file reads as clean (consecutive=0, not frozen): freeze.state is
+    # root-writable runtime bookkeeping, not a trust boundary, so a bad
+    # file must neither freeze the box spuriously nor brick updates
+    # permanently. Anything but a clean parse is logged loudly.
     _fz_consec=0
     _fz_frozen=0
     _fz_at=""
     _fz_reason=""
-    if [ -f "$STATE_FREEZE" ]; then
+    if [ -f "$STATE_FREEZE" ] && [ -r "$STATE_FREEZE" ]; then
         local line key val ok=1
         while IFS= read -r line || [ -n "$line" ]; do
             case "$line" in
@@ -1200,17 +1212,31 @@ _freeze_state_init() {
             log "freeze: state file $STATE_FREEZE is malformed — resetting to clean (loud, continuing)"
             _fz_consec=0; _fz_frozen=0; _fz_at=""; _fz_reason=""
         fi
+    elif [ -e "$STATE_FREEZE" ]; then
+        # Exists but is not a readable regular file (directory, socket,
+        # unreadable, …): reads as clean, loudly — never bricks, never
+        # freezes spuriously, and the operator sees the signal.
+        log "freeze: $STATE_FREEZE exists but is not a readable regular file — treating as clean (loud, continuing)"
     fi
 }
 
 _freeze_write() {
     # Persist the freeze-state locals. Best-effort: a write failure is
     # logged loudly but never kills the run — the update already happened,
-    # the counter is bookkeeping.
+    # the counter is bookkeeping. Sets _fz_write_ok (1/0) so callers with
+    # a truthfulness obligation (cmd_unfreeze) can report honestly; a bare
+    # nonzero return here would kill update runs under set -e, violating
+    # the best-effort design — hence the flag, not the exit status.
+    _fz_write_ok=1
+    # mv -fT: treat the destination as a normal file. If freeze.state is
+    # a directory, a plain `mv -f` would "succeed" by moving the tmp file
+    # *into* the directory and the counter would be dropped into the void
+    # with zero signal — -T makes that a loud failure instead.
     if ! { printf '# managed by toolset-update.sh — do not hand-edit\nconsecutive_failures=%s\nfrozen=%s\nfrozen_at=%s\nfrozen_reason=%s\n' \
         "$_fz_consec" "$_fz_frozen" "$_fz_at" "$_fz_reason" >"$STATE_FREEZE.tmp" 2>/dev/null \
-        && mv -f "$STATE_FREEZE.tmp" "$STATE_FREEZE" 2>/dev/null; }; then
+        && mv -fT "$STATE_FREEZE.tmp" "$STATE_FREEZE" 2>/dev/null; }; then
         log "freeze: cannot write $STATE_FREEZE — counter not persisted (continuing)"
+        _fz_write_ok=0
     fi
 }
 
@@ -1290,11 +1316,18 @@ cmd_update() {
     if ! command -v flock >/dev/null 2>&1; then
         # A missing flock must not degrade into a silent perpetual no-op:
         # fail loud so the timer's failure is visible in the audit log.
+        # This is a failed update attempt like any other — it feeds the
+        # freeze counter (S1), so a broken box can't churn here either.
         log "update: flock not found; cannot take the single-flight lock"
+        _freeze_record_result failed "infra"
         audit 'toolset-update' ',"result":"failed","reason":"flock-missing"'
         return 1
     fi
-    exec 9>"$STATE_LOCK" 2>/dev/null || { log "update: cannot open lock"; return 1; }
+    exec 9>"$STATE_LOCK" 2>/dev/null || {
+        log "update: cannot open lock"
+        _freeze_record_result failed "infra"
+        return 1
+    }
     if ! flock -n 9 2>/dev/null; then
         log "update: another run holds the lock; no-op"
         audit 'toolset-update' ',"result":"deferred","reason":"lock-held"'
@@ -1351,10 +1384,17 @@ cmd_unfreeze() {
     # Clear the failure-freeze state after the operator/agent has
     # investigated: the next update run starts with a clean
     # consecutive-failure counter. Never runs updates itself.
+    # Truthfulness: unlike the update path (where the counter is
+    # best-effort bookkeeping), unfreeze's whole job is the state change —
+    # a write failure must fail loudly, not report success.
     for a in "$@"; do case "$a" in *) echo "ERROR: unknown flag: $a" >&2; return 2 ;; esac; done
     mkdir -p "$TOOLSET_STATE_DIR" 2>/dev/null || true
     _fz_consec=0; _fz_frozen=0; _fz_at=""; _fz_reason=""
     _freeze_write
+    if [ "${_fz_write_ok:-1}" != "1" ]; then
+        echo "ERROR: unfreeze failed: cannot write $STATE_FREEZE — box is still frozen" >&2
+        return 1
+    fi
     log "unfreeze: failure-freeze state cleared (counter reset)"
     audit 'toolset-update' ',"result":"unfrozen"'
     return 0

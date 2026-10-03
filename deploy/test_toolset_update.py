@@ -1843,3 +1843,107 @@ def test_corrupt_freeze_state_is_treated_as_clean(env):
     assert "consecutive_failures=1" in fz and "frozen=0" in fz
     runlog = (env["state"] / "toolset-update.log").read_text()
     assert "malformed" in runlog
+
+
+def test_unfreeze_fails_loud_when_state_unwritable(env):
+    # B1: unfreeze's whole job is the state change — a write failure must
+    # fail loudly (exit 1), not log "cleared" and return 0 while the box
+    # stays frozen.
+    e = dict(env["env"])
+    e["TOOLSET_STATE_DIR"] = "/proc/1/freeze-test-unwritable"
+    r = run_bash("./deploy/toolset-update.sh unfreeze", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert "still frozen" in r.stderr
+    lines = audit_lines(env)
+    assert not any(l.get("result") == "unfrozen" for l in lines)
+
+
+def test_non_numeric_freeze_after_defaults_loudly(env):
+    # B2: a non-numeric TOOLSET_FREEZE_AFTER must not silently disable the
+    # freeze (fail-open) — it defaults to 3 with a loud log line.
+    e = _pinless_cua_env(env)
+    e["TOOLSET_FREEZE_AFTER"] = "abc"
+    for _ in range(3):
+        r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+        assert r.returncode != 0
+    assert "frozen=1" in _freeze_state_text(env)
+    runlog = (env["state"] / "toolset-update.log").read_text()
+    assert "invalid TOOLSET_FREEZE_AFTER" in runlog
+    # trailing whitespace (plausible in a systemd Environment= override)
+    # is the same class
+    e["TOOLSET_FREEZE_AFTER"] = "3 "
+    r = run_bash("./deploy/toolset-update.sh unfreeze", env_extra=e)
+    assert r.returncode == 0
+    for _ in range(3):
+        run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert "frozen=1" in _freeze_state_text(env)
+
+
+def test_flock_missing_feeds_freeze_counter(env):
+    # S1: pre-layer hard failures are failed update attempts too — the
+    # audit trail and the counter must agree, or a broken box churns
+    # forever without ever freezing.
+    bindir = make_stub_bin(env["tmp"], {"dpkg": "exit 1", "tmux": "exit 1"})
+    tools = env["tmp"] / "flocklesstools2"
+    tools.mkdir(exist_ok=True)
+    for t in ("bash", "mkdir", "date", "wc", "tail", "mv", "dirname"):
+        p = shutil.which(t)
+        if p:
+            (tools / t).symlink_to(p)
+    e = dict(env["env"])
+    e["PATH"] = f"{bindir}{os.pathsep}{tools}"
+    for _ in range(3):
+        r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+        assert r.returncode != 0
+    assert "frozen=1" in _freeze_state_text(env)
+    assert "consecutive_failures=3" in _freeze_state_text(env)
+    lines = audit_lines(env)
+    assert any(l.get("event") == "toolset-update-frozen" for l in lines)
+
+
+def test_force_does_not_bypass_freeze(env):
+    # --force bypasses the idle gate, not the freeze: a frozen box stays
+    # frozen even with --force, and the refusal beats an idle-gate
+    # deferral (loud attention wins over quiet deferral).
+    e = _pinless_cua_env(env)
+    for _ in range(3):
+        run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    r = run_bash("./deploy/toolset-update.sh update --force", env_extra=e)
+    assert r.returncode != 0
+    lines = audit_lines(env)
+    assert lines[-1]["result"] == "frozen"
+    # frozen + busy jobs: still the freeze refusal, not a deferral
+    busybin = make_stub_bin(env["tmp"] / "forcebusybin", {
+        "unattended-upgrades": "exit 0",
+        "dpkg": "exit 1",
+        "tmux": 'echo "mjob-builder-1"; exit 0',
+        "sudo": "exit 1",
+        "apt-get": "exit 1",
+    })
+    d = dict(e)
+    d["PATH"] = busybin + os.pathsep + os.environ["PATH"]
+    d["TMUX_BIN"] = os.path.join(busybin, "tmux")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=d)
+    assert r.returncode != 0
+    lines = audit_lines(env)
+    assert lines[-1]["result"] == "frozen"
+
+
+def test_freeze_state_as_directory_is_loud_not_silent(env):
+    # freeze.state as a directory: the write must fail loudly (not drop
+    # the counter into the void). The `mv -fT` (not plain `mv -f`, which
+    # would "succeed" by moving the tmp file *into* the directory) is
+    # what makes the write failure detectable — assert the write-path
+    # signal specifically.
+    e = _pinless_cua_env(env)
+    fz = env["state"] / "freeze.state"
+    fz.mkdir()
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0  # the layer really fails
+    runlog = (env["state"] / "toolset-update.log").read_text()
+    assert "cannot write" in runlog  # the write path, not just the read path
+    assert "not a readable regular file" in runlog  # the read path too
+    r = run_bash("./deploy/toolset-update.sh status", env_extra=e)
+    rows = {line.split("\t")[0]: line.split("\t")
+            for line in r.stdout.splitlines() if line.strip()}
+    assert rows["freeze"][1] == "ok", r.stdout  # reads as clean, not frozen
