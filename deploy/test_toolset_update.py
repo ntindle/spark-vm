@@ -1956,10 +1956,16 @@ def test_freeze_state_as_directory_is_loud_not_silent(env):
 
 def _snapshot_env(env, cua_bin_name="cua-driver"):
     # Env copy for snapshot tests: os-security conf materialized, the
-    # cua-driver binary ABSENT (to exercise the ABSENT manifest line).
+    # cua-driver binary ABSENT (to exercise the ABSENT manifest line), and
+    # a dpkg-query stub (the fixture stubs `dpkg` but the snapshot state
+    # inventory calls `dpkg-query -W`, which would otherwise touch the live
+    # /var/lib/dpkg — read-only and outcome-independent, but the module
+    # docstring promises hermeticity).
     e = dict(env["env"])
     (env["apt"] / "20auto-upgrades").write_text(GOOD_CONF)
     e["CUA_DRIVER_BIN"] = str(env["tmp"] / cua_bin_name)  # absent
+    bindir = make_stub_bin(env["tmp"] / "snapbin", {"dpkg-query": "exit 1"})
+    e["PATH"] = bindir + os.pathsep + e["PATH"]
     return e
 
 
@@ -1998,20 +2004,41 @@ def test_restore_layer_restores_and_removes_absent(env):
 
 def test_restore_refuses_unsafe_manifest_paths(env):
     # A hand-edited/damaged MANIFEST must never write outside the intended
-    # tree: dot-dot, empty, and pre-LAYER entries fail loudly (rc != 0)
-    # and the unsafe target is never created.
+    # tree. Non-vacuity note: the planted files make _manifest_path_ok the
+    # ONLY thing standing between the MANIFEST and the filesystem — with
+    # the guard neutered to `return 0` this test fails (/tmp/pwned gets
+    # written, the canary gets removed). Verified by temporary neutering.
+    # (Single-`..` paths are used so they normalize to the asserted
+    # locations: /tmp/x/../../pwned would land on /pwned, not /tmp/pwned.)
     e = _snapshot_env(env)
     code = (
         'snap="$(_snapshot_run)"; '
-        'printf "FILE \\n" >> "$snap/MANIFEST"; '            # empty path
-        'printf "FILE /tmp/x/../../pwned\\n" >> "$snap/MANIFEST"; '  # dot-dot
-        'printf "ABSENT /tmp/x/../../pwned2\\n" >> "$snap/MANIFEST"; '
-        '_restore_layer "$snap" "" || echo "rc=$?"'
+        # Plant what the malicious FILE entries resolve to. NOTE: the `x`
+        # components must exist — the kernel resolves `a/x/../pwned`
+        # component-by-component, so without `$snap/tmp/x/` and `/tmp/x/`
+        # the plant is unreachable and the test would pass with the guard
+        # neutered (vacuous). Without the guard, restore would copy these
+        # over /tmp/pwned and /tmp/pwned3.
+        'mkdir -p "$snap/tmp/x" /tmp/x; '
+        'printf "PWNED\\n" > "$snap/tmp/pwned"; '
+        'printf "PWNED3\\n" > "$snap/tmp/pwned3"; '
+        # Canary for the ABSENT path: without the guard, restore would rm -f it.
+        'printf "canary\\n" > /tmp/pwned2; '
+        # A pre-LAYER entry (inserted before the first LAYER header)...
+        'sed -i "2i FILE /tmp/x/../pwned3" "$snap/MANIFEST"; '
+        # ...plus empty and dot-dot entries after the headers.
+        'printf "FILE \\n" >> "$snap/MANIFEST"; '
+        'printf "FILE /tmp/x/../pwned\\n" >> "$snap/MANIFEST"; '
+        'printf "ABSENT /tmp/x/../pwned2\\n" >> "$snap/MANIFEST"; '
+        '_restore_layer "$snap" "" || echo "rc=$?"; '
+        'echo "CANARY=$(cat /tmp/pwned2 2>/dev/null || echo missing)"; '
+        'rm -f /tmp/pwned2; rmdir /tmp/x 2>/dev/null || true'
     )
     r = source_and(code, env_extra=e)
     assert "rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
-    assert not os.path.exists("/tmp/pwned"), "unsafe restore wrote outside the tree"
-    assert not os.path.exists("/tmp/pwned2"), "unsafe removal probe touched outside"
+    assert "CANARY=canary" in r.stdout, r.stdout  # the ABSENT rm never fired
+    assert not os.path.exists("/tmp/pwned"), "guard bypass: wrote /tmp/pwned"
+    assert not os.path.exists("/tmp/pwned3"), "guard bypass: wrote /tmp/pwned3"
 
 
 def test_run_layer_failure_rolls_back_and_blocks(env):
@@ -2051,7 +2078,6 @@ def test_run_layer_snapshot_failure_refuses_without_changing(env):
     # SNAPSHOT_DIR unusable (a file, not a dir): the layer must refuse
     # BEFORE changing anything — no change without a rollback target.
     e = _snapshot_env(env)
-    (env["state"] / "snapshots").write_text("not-a-dir")
     code = (
         'stub_never() { echo "STUB-RAN"; return 0; }; '
         '_run_layer os-security 0 "/nonexistent-snapdir" stub_never || echo "rc=$?"; '
@@ -2065,6 +2091,24 @@ def test_run_layer_snapshot_failure_refuses_without_changing(env):
     assert "CONF=" + GOOD_CONF.strip() in r.stdout, r.stdout
 
 
+def test_update_refuses_when_snapshot_dir_unusable(env):
+    # The real no-snapshot-no-change path: SNAPSHOT_DIR is a file, so the
+    # pre-update snapshot cannot be taken — the run must refuse BEFORE any
+    # layer runs, feed the freeze counter, and leave the box untouched.
+    e = dict(env["env"])
+    (env["apt"] / "20auto-upgrades").write_text(GOOD_CONF)
+    (env["state"] / "snapshots").write_text("not-a-dir")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    runlog = (env["state"] / "toolset-update.log").read_text()
+    assert "pre-update snapshot failed" in runlog, runlog
+    assert (env["apt"] / "20auto-upgrades").read_text() == GOOD_CONF
+    lines = audit_lines(env)
+    assert lines[-1]["result"] == "failed", lines
+    assert lines[-1]["reason"] == "snapshot-failed", lines
+    assert "consecutive_failures=1" in (env["state"] / "freeze.state").read_text()
+
+
 def test_prune_snapshots_keeps_newest_five(env):
     e = dict(env["env"])
     code = (
@@ -2072,12 +2116,15 @@ def test_prune_snapshots_keeps_newest_five(env):
         'for i in 01 02 03 04 05 06 07; do '
         '  mkdir -p "$TOOLSET_STATE_DIR/snapshots/202601${i}T000000-$$"; '
         'done; '
-        'sleep 1.1; '  # the two snapdirs below must sort newest
         '_snapshot_run >/dev/null; _snapshot_run >/dev/null; '
+        # Pin the setup: both snapshots must exist before pruning, or the
+        # final "5" could pass with fewer inputs.
+        'echo "before=$(ls "$TOOLSET_STATE_DIR/snapshots" | wc -l)"; '
         '_prune_snapshots; '
         'ls "$TOOLSET_STATE_DIR/snapshots" | wc -l'
     )
     r = source_and(code, env_extra=e)
+    assert "before=9" in r.stdout, r.stdout + r.stderr
     assert r.stdout.strip().splitlines()[-1].strip() == "5", r.stdout + r.stderr
 
 
@@ -2155,3 +2202,46 @@ def test_update_failure_blocks_layer_and_second_run_skips(env):
     lines = audit_lines(env)
     assert any(l.get("result") == "blocked" and l.get("layer") == "cua-driver"
                for l in lines), lines
+
+
+def test_rollback_and_unblock_refuse_while_update_locked(env):
+    # The recovery commands take the same single-flight lock as update:
+    # a rollback against a partially-written snapshot (or an unblock
+    # racing _blocked_mark) must refuse loudly, not interleave.
+    e = _snapshot_env(env)
+    source_and('_snapshot_run >/dev/null; _blocked_mark apt converge "t"',
+               env_extra=e)
+    code = (
+        # Hold the lock the way cmd_update does, then run the recovery
+        # commands as child processes (which inherit the exported
+        # TOOLSET_UPDATE_NO_MAIN=1, so unset it for the child).
+        'exec 8>"$TOOLSET_STATE_DIR/toolset-update.lock"; '
+        'flock -n 8 || { echo "SETUP-LOCK-FAILED"; exit 99; }; '
+        'rb_rc=0; '
+        'env -u TOOLSET_UPDATE_NO_MAIN ./deploy/toolset-update.sh rollback --layer os-security 2>rb.err || rb_rc=$?; '
+        'echo "rb_rc=$rb_rc"; cat rb.err; '
+        'ub_rc=0; '
+        'env -u TOOLSET_UPDATE_NO_MAIN ./deploy/toolset-update.sh unblock apt 2>ub.err || ub_rc=$?; '
+        'echo "ub_rc=$ub_rc"; cat ub.err'
+    )
+    r = source_and(code, env_extra=e)
+    assert "rb_rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "ub_rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "holds the lock" in r.stdout, r.stdout
+    # Nothing was restored or unblocked by the refused commands.
+    assert (env["apt"] / "20auto-upgrades").read_text() == GOOD_CONF
+    assert "apt\tconverge\t" in (env["state"] / "blocked.state").read_text()
+
+
+def test_rollback_layer_without_value_is_usage_error(env):
+    e = _snapshot_env(env)
+    r = run_bash("./deploy/toolset-update.sh rollback --layer", env_extra=e)
+    assert r.returncode == 2, r.stderr
+    assert "needs a value" in r.stderr
+
+
+def test_rollback_with_no_snapshots_fails_clean(env):
+    e = _snapshot_env(env)
+    r = run_bash("./deploy/toolset-update.sh rollback", env_extra=e)
+    assert r.returncode == 1, r.stderr
+    assert "no snapshots" in r.stderr
