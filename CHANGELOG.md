@@ -52,6 +52,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Pinned the `approval_decision` command kind (#873): the first
+  plane-produced command on the durable queue — an owner's approve/deny
+  tap (and server-side expiry) now travels to the box as a command
+  carrying the approval id, decision, and idempotency key, so the box
+  learns of decisions through the queue instead of never. (#TBD)
+
 - Pinned the phone-home wire-protocol spec (#847's S3 contract): the
   box↔plane WebSocket contract the Durable Object and box client will
   build against — auth at the upgrade handshake (the Bearer <redacted> never

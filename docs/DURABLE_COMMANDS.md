@@ -70,3 +70,52 @@ seq) so the box can reconcile its cursor after a restart.
   `dead` state, skipped by fetch, and surfaced to the owner.
 - The same table/seq/epoch semantics are transport-agnostic: when the
   box's persistent command channel lands, it drives off this queue.
+
+## Command kinds
+
+The plane is opaque to payloads and kinds — except for the kinds it
+produces itself. This registry pins the plane-produced kinds; a new
+plane-produced kind needs a row here before the plane may enqueue it.
+
+| `kind` | Producer | Payload | Owner |
+|---|---|---|---|
+| `approval_decision` | plane (#873) | `aid`, `decision`, `decision_seq`, `idempotency_key` | #849 |
+
+### `approval_decision` (#873, #849)
+
+The first honored kind — the plane is a command *producer* here, not
+just a store. Enqueued when an owner decision lands
+(`POST /v1/boxes/{id}/approvals/{aid}/decision`) and when a pending
+approval expires server-side. The box learns of decisions *only*
+through this command: it cannot read approvals itself (#872).
+
+Payload (all required):
+
+```json
+{
+  "aid": "<approval id>",
+  "decision": "approve|deny|expire",
+  "decision_seq": 1,
+  "idempotency_key": "approval_decision:<box_id>:<aid>:1"
+}
+```
+
+- `decision`: `approve` or `deny` from the owner's tap; `expire` when
+  the approval's window passes with no decision. A `deny` is terminal
+  for the parked task (mirrors the box-local `denied:<aid>` leg in
+  `docs/APPROVAL_CLIENT_SIGNAL.md`); `expire` mirrors `expired:<aid>`.
+- `decision_seq`: per-approval decision sequence. Always `1` today —
+  the approval record is write-once (approve-then-expire races resolve
+  first-write-wins), so an approval produces at most one decision
+  command. Reserved for future multi-decision flows.
+- `idempotency_key`: `approval_decision:<box_id>:<aid>:<decision_seq>`.
+  The box dedupes on this key (#874): redelivery after a crashed box
+  re-delivers the *same* decision, never a contradictory one, and a
+  replayed owner tap never double-enqueues (the plane checks for an
+  existing command with this key before enqueueing).
+
+Exactly-once enqueue: the decision record's write-once UPDATE is the
+gate — only the winning decider enqueues; idempotent replays find the
+existing command and enqueue nothing. Server-side expiry uses a
+per-aid conditional UPDATE for the same guarantee: a raced expiry
+transitions the row once, so at most one `expire` command per aid.
