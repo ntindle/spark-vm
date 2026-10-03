@@ -162,6 +162,7 @@ working.
 | [HOSTED_GAP_ANALYSIS.md](HOSTED_GAP_ANALYSIS.md) | **(start here)** Vision vs repo state: the master gap list for the hosted product. |
 | [DAY_ONE_GAP_ANALYSIS.md](DAY_ONE_GAP_ANALYSIS.md) | What a tenant Muse needs on day one vs what the repo has. |
 | [APPROVALS_PLANE_GAP_ANALYSIS.md](APPROVALS_PLANE_GAP_ANALYSIS.md) | The approvals plane (refusal → filing → pending → human answer → push → decision delivery → audit) vs the hosted vision: the return leg is missing. |
+| [CREDENTIAL_VENDING_GAP_ANALYSIS.md](CREDENTIAL_VENDING_GAP_ANALYSIS.md) | Credential vending (#850) vs the hosted vision: the self-hosted swap-proxy half exists and is hardened; the plane-vends-narrow-short-lived-credentials half is missing entirely — no vend endpoint, no box fetch path, no tenant dimension, no short-lived semantics. |
 | [APPROVAL_CLIENT_SIGNAL.md](APPROVAL_CLIENT_SIGNAL.md) | Client-visible approval signal (H18, #133 — implemented): when the swap proxy files a confirmd approval for a refused request, the agent gets a machine-readable "waiting on your approval" instead of an opaque remote auth error. |
 | [HOSTED_SIGNUP_ONBOARDING.md](HOSTED_SIGNUP_ONBOARDING.md) | End-to-end signup UX for another Muse: discover → sign up → identity → provisioned box. |
 | [KEY_IDENTITY_REGISTRY.md](KEY_IDENTITY_REGISTRY.md) | Key-identity registry storage and lookup (#446, slice S2): the per-host registry mapping an SSH key's OpenSSH SHA256 fingerprint to an account record — the storage-and-lookup half of the #446 identity-binding design note. |
