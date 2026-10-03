@@ -3131,6 +3131,11 @@ class WaitlistService:
           its own parseable line instead of gluing onto the torn
           partial — without this, one physical line would be
           unparseable and a second pass would re-emit.
+        - Corrupted `at` values are fail-closed (issue #934): a funnel
+          event whose `at` is not a string is never trusted and never
+          counts as covering — exactly like a torn line — so a corrupt
+          event can neither crash the pass (TypeError on the
+          comparison) nor suppress a re-derivation.
         - Idempotent and crash-safe: check-then-append with no other
           mutation; re-running (or dying mid-pass) emits each missing
           event exactly once. Deterministic order (entry_id).
@@ -3175,7 +3180,14 @@ class WaitlistService:
                 # not live, so there is no event this pass may claim.
                 continue
             invited_at = row.get("invited_at") or ""
-            if any(ref == entry_id and (at or "") >= invited_at
+            # Issue #934: a corrupted funnel event can carry a non-string
+            # `at` (e.g. a number). The unguarded `(at or "") >=
+            # invited_at` comparison raises TypeError and kills the whole
+            # pass. Non-string `at` is fail-closed: it never counts as
+            # covering, exactly like a torn line — the event is
+            # re-derived, not trusted.
+            if any(ref == entry_id and isinstance(at, str) and
+                   (at or "") >= invited_at
                    for ref, at in covered):
                 continue
             if not dry_run:
@@ -3237,6 +3249,11 @@ class WaitlistService:
           its own parseable line instead of gluing onto the torn
           partial — without this, one physical line would be
           unparseable and a second pass would re-emit.
+        - Corrupted `at` values are fail-closed (issue #934): a funnel
+          event whose `at` is not a string is never trusted and never
+          counts as covering — exactly like a torn line — so a corrupt
+          event can neither crash the pass (TypeError on the
+          comparison) nor suppress a re-derivation.
         - Idempotent and crash-safe: check-then-append with no other
           mutation; re-running (or dying mid-pass) emits each missing
           event exactly once. Deterministic order (entry_id).
@@ -3271,7 +3288,11 @@ class WaitlistService:
             if row.get("status") != "signed_up":
                 continue
             signed_up_at = row.get("signed_up_at") or ""
-            if any(ref == entry_id and (at or "") >= signed_up_at
+            # Issue #934: same non-string-`at` fail-closed posture as the
+            # invite pass above — a corrupted `claimed` event never counts
+            # as covering.
+            if any(ref == entry_id and isinstance(at, str) and
+                   (at or "") >= signed_up_at
                    for ref, at in covered):
                 continue
             if not dry_run:

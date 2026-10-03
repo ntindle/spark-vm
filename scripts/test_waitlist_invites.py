@@ -1028,6 +1028,42 @@ def test_reconcile_skips_healthy_invite():
     assert service.reconcile_invite_events() == []
 
 
+def _corrupt_funnel_event_at(tmp, event, ref, bad_at):
+    """Hand-edit the funnel hot file: corrupt one event's `at` to a
+    non-string value (simulating a corrupted-but-parseable line)."""
+    path = os.path.join(tmp, "funnel_events.jsonl")
+    lines = []
+    hit = 0
+    with open(path, encoding="utf-8") as fh:
+        for line in fh.read().splitlines():
+            obj = json.loads(line)
+            if obj.get("event") == event and obj.get("ref") == ref:
+                obj["at"] = bad_at
+                hit += 1
+            lines.append(json.dumps(obj))
+    assert hit == 1, f"expected one {event} line for {ref}, got {hit}"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def test_reconcile_invite_treats_non_string_at_as_non_covering():
+    # Issue #934: a corrupted funnel event with a non-string `at` must
+    # neither crash the pass (TypeError on the coverage comparison) nor
+    # count as covering — it is re-derived, fail-closed like a torn line.
+    service, tmp, clock = make_service()
+    row = confirm_row(service, "a@example.com", clock)
+    wave(service, count=1, wave="wave1")
+    entry_id = row["entry_id"]
+    _corrupt_funnel_event_at(tmp, "invite_sent", entry_id, 12345)
+    assert service.reconcile_invite_events() == [entry_id]
+    events = [e for e in funnel_events(tmp)
+              if e["event"] == "invite_sent" and e["ref"] == entry_id]
+    assert any(isinstance(e["at"], str) and e["attrs"].get("reconciled")
+               for e in events)
+    # The re-derived event covers; nothing re-emits.
+    assert service.reconcile_invite_events() == []
+
+
 def test_reconcile_skips_rolled_back_invite(monkeypatch):
     # Crash window, then the invite expires and rolls back to confirmed:
     # the dead invite can't convert, so there is no event to claim —
@@ -1931,6 +1967,27 @@ def test_reconcile_claimed_skips_healthy_claim():
     row = service.rows[row["entry_id"]]
     status, _ = service.claim_post(row["active_invite_token"])
     assert status == 200
+    assert service.reconcile_claimed_events() == []
+
+
+def test_reconcile_claimed_treats_non_string_at_as_non_covering():
+    # Issue #934, claimed half: same fail-closed posture — a corrupted
+    # `claimed` event's non-string `at` must neither crash the pass nor
+    # count as covering; the event is re-derived.
+    service, tmp, clock = make_service()
+    row = confirm_row(service, "a@example.com", clock)
+    wave(service, count=1, wave="wave1")
+    row = service.rows[row["entry_id"]]
+    entry_id = row["entry_id"]
+    status, _ = service.claim_post(row["active_invite_token"])
+    assert status == 200
+    _corrupt_funnel_event_at(tmp, "claimed", entry_id, 12345)
+    assert service.reconcile_claimed_events() == [entry_id]
+    events = [e for e in funnel_events(tmp)
+              if e["event"] == "claimed" and e["ref"] == entry_id]
+    assert any(isinstance(e["at"], str) and e["attrs"].get("reconciled")
+               for e in events)
+    # The re-derived event covers; nothing re-emits.
     assert service.reconcile_claimed_events() == []
 
 
