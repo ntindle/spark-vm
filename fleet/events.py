@@ -617,7 +617,11 @@ def _rule_correlated_failure(events, fired_at):
     """Rule 2: >=2 boxes reporting failed/rolled-back for the same
     (subcomponent, to) within a 30-minute window -> fleet alert (the
     bad-release shape). Lines that carry no component correlate on (to)
-    alone, labeled subcomponent: unknown."""
+    alone, labeled subcomponent: unknown. Lines that carry no target
+    (`to`) are excluded: the bad-release inference requires a shared
+    target build, and the empty key is the absence of evidence, not
+    evidence (issue #926) — two unrelated target-less failures must
+    never page a fleet alert together."""
     groups = {}
     for e in events:
         if e.get("outcome") not in ("failed", "rolled-back"):
@@ -625,7 +629,16 @@ def _rule_correlated_failure(events, fired_at):
         ts = _parse_ts(e.get("emitted_at"))
         if ts is None:
             continue  # cannot place it in time; excluded from windows
-        key = (e.get("subcomponent") or "unknown", e.get("to") or "")
+        to = e.get("to")
+        if not isinstance(to, str) or not to:
+            # No shared target: unattributable for the bad-release
+            # shape. Grouping these on the empty key paged phantom
+            # clusters (e.g. two independent target-less failed lines 10
+            # min apart — the producer always emits `to`, so these are
+            # hand-fed/legacy tails, never the live writer); they are
+            # excluded, not grouped.
+            continue
+        key = (e.get("subcomponent") or "unknown", to)
         groups.setdefault(key, []).append((ts, e))
     alerts = []
     for (subcomp, to), members in groups.items():
@@ -648,11 +661,10 @@ def _rule_correlated_failure(events, fired_at):
                 alerts.append(_alert(
                     "correlated-failure", fired_at,
                     "%d boxes failed/rolled-back on (%s, to=%s) within "
-                    "30 min: %s" % (len(boxes), subcomp,
-                                    str(to)[:12] if to else "(no to)",
+                    "30 min: %s" % (len(boxes), subcomp, str(to)[:12],
                                     ", ".join(boxes)),
                     subcomponent=subcomp,
-                    to=to or None,
+                    to=to,
                     dedup_key=anchor.isoformat()))
                 break  # one alert per (subcomponent, to) cluster
     return alerts

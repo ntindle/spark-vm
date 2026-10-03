@@ -318,6 +318,53 @@ def test_rule2_no_component_correlates_on_to(dirs):
     assert corr[0]["subcomponent"] == "unknown"
 
 
+def test_rule2_empty_target_does_not_fire(dirs):
+    # #926: two failed lines that carry no target (`to`) carry no
+    # shared-release evidence — they must not correlate on the empty
+    # key, whether or not their subcomponents agree.
+    estate, store = dirs
+    write_box(estate, "tower", [
+        audit_line("deploy", "reload-fail", ts=ts(20),
+                   **{"from": COMMIT_A}),  # no `to`, no component
+    ])
+    write_box(estate, "cabin", [
+        audit_line("deploy", "deploy-fail", ts=ts(10),
+                   **{"from": COMMIT_A, "component": "proxy",
+                      "phase": "install"}),  # no `to`, component set
+    ])
+    write_box(estate, "shed", [
+        audit_line("deploy", "reload-fail", ts=ts(5),
+                   **{"from": COMMIT_A}),  # no `to`, matches tower's key
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    corr = [a for a in journal(store, "alerts.jsonl")
+            if a["rule"] == "correlated-failure"]
+    assert corr == []
+
+
+def test_rule2_different_targets_do_not_correlate(dirs):
+    # The #926 guard in the other direction: correlation is
+    # target-scoped — same subcomponent, different targets within the
+    # window -> no fleet alert.
+    estate, store = dirs
+    write_box(estate, "tower", [
+        audit_line("deploy", "deploy-fail", ts=ts(20),
+                   **{"from": COMMIT_A, "to": COMMIT_B,
+                      "component": "proxy", "phase": "install"}),
+    ])
+    write_box(estate, "cabin", [
+        audit_line("deploy", "deploy-fail", ts=ts(10),
+                   **{"from": COMMIT_A, "to": COMMIT_C,
+                      "component": "proxy", "phase": "install"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    corr = [a for a in journal(store, "alerts.jsonl")
+            if a["rule"] == "correlated-failure"]
+    assert corr == []
+
+
 def test_rule2_single_box_does_not_fire(dirs):
     estate, store = dirs
     write_box(estate, "tower", [

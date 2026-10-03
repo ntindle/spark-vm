@@ -169,6 +169,11 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
      alert (this is the bad-release shape). Audit lines that carry no
      component (`reload-fail`, the deploy-side `rollback-failed`) are
      correlated on (`to`) alone, labeled `subcomponent: unknown`.
+     Conversely, audit lines that carry no target (`to`) are *excluded*
+     from the rule (#926): the bad-release inference requires a shared
+     target build, and the empty key is the absence of evidence, not
+     evidence — two unrelated target-less failures must never page a
+     fleet alert together.
   3. **Silent wave (live at G15 S2):** boxes with a non-null `rollout`
      envelope and zero non-noop events over the armed max-wait window →
      operator alert (feeds G15 §4's max-wait page). At S1 the envelope is
