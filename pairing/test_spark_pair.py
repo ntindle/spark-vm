@@ -1151,3 +1151,238 @@ def test_redeem_non_numeric_expiry_is_clean_error(ctx, capsys):
     out = capsys.readouterr().out
     assert "corrupt or incomplete" in out
     assert "Traceback" not in out
+
+
+# ---- #881: approve-path response-shape guards --------------------------------
+# cmd_approve used to trust the plane's response shape (resp["pairing"],
+# p["id"]/p["box_name"]/p["fingerprint"]): a malformed or hostile plane
+# produced KeyError/TypeError tracebacks on the owner's machine. Every
+# test below asserts a clean error and no traceback.
+
+
+def test_approve_fetch_missing_pairing_key_is_clean_error(ctx, monkeypatch,
+                                                          capsys):
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (200, {"ok": True}))
+    ctx.pairing_id = "pair_1"
+    assert spark_pair.cmd_approve(ctx) == 1
+    out = capsys.readouterr().out
+    assert "malformed" in out and "not an object" in out
+    assert "Traceback" not in out
+
+
+def test_approve_fetch_non_object_pairing_is_clean_error(ctx, monkeypatch,
+                                                        capsys):
+    monkeypatch.setattr(spark_pair, "_http",
+                        lambda *a, **k: (200, {"ok": True,
+                                              "pairing": ["pair_1"]}))
+    ctx.pairing_id = "pair_1"
+    assert spark_pair.cmd_approve(ctx) == 1
+    out = capsys.readouterr().out
+    assert "malformed" in out and "not an object" in out
+    assert "Traceback" not in out
+
+
+def test_approve_fetch_missing_fingerprint_is_clean_error(ctx, monkeypatch,
+                                                          capsys):
+    # The fingerprint comparison is the security check of this command: a
+    # pairing record without one cannot be approved, and the owner gets a
+    # clean error rather than a KeyError.
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda *a, **k: (200, {"ok": True, "pairing": {
+            "id": "pair_1", "box_name": "b1", "status": "pending"}}))
+    ctx.pairing_id = "pair_1"
+    assert spark_pair.cmd_approve(ctx) == 1
+    out = capsys.readouterr().out
+    assert "no fingerprint" in out
+    assert "Traceback" not in out
+
+
+def test_approve_fetch_non_pending_status_reports_status(ctx, monkeypatch,
+                                                         capsys):
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda *a, **k: (200, {"ok": True, "pairing": {
+            "id": "pair_1", "box_name": "b1", "status": "approved",
+            "fingerprint": "SHA256:x"}}))
+    ctx.pairing_id = "pair_1"
+    assert spark_pair.cmd_approve(ctx) == 1
+    out = capsys.readouterr().out
+    assert "pairing is approved" in out and "nothing to approve" in out
+    assert "Traceback" not in out
+
+
+def test_approve_fetch_missing_status_is_clean_error(ctx, monkeypatch,
+                                                     capsys):
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda *a, **k: (200, {"ok": True, "pairing": {
+            "id": "pair_1", "box_name": "b1",
+            "fingerprint": "SHA256:x"}}))
+    ctx.pairing_id = "pair_1"
+    assert spark_pair.cmd_approve(ctx) == 1
+    out = capsys.readouterr().out
+    assert "pairing is unknown" in out
+    assert "Traceback" not in out
+
+
+def test_approve_list_non_list_pairings_is_clean_error(ctx, monkeypatch,
+                                                       capsys):
+    # "pairings": "nope" used to iterate the string's characters and
+    # TypeError on p["id"].
+    def fake_http(method, url, body=None, headers=None):
+        if url.endswith("/v1/pairing"):
+            return 200, {"ok": True, "pairings": "nope"}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    ctx.pairing_id = None
+    assert spark_pair.cmd_approve(ctx) == 1
+    out = capsys.readouterr().out
+    assert "malformed" in out and "not a list" in out
+    assert "Traceback" not in out
+
+
+def test_approve_list_malformed_entry_is_clean_error(ctx, monkeypatch,
+                                                     capsys):
+    # An entry missing box_name/fingerprint, and a non-object entry:
+    # both get a clean error naming the expected fields.
+    for bad in ({"id": "pair_9"},
+                ["pair_9"]):
+        def fake_http(method, url, body=None, headers=None):
+            if url.endswith("/v1/pairing"):
+                return 200, {"ok": True, "pairings": [bad]}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(spark_pair, "_http", fake_http)
+        ctx.pairing_id = None
+        capsys.readouterr()
+        assert spark_pair.cmd_approve(ctx) == 1
+        out = capsys.readouterr().out
+        assert "malformed" in out and "id/box_name/fingerprint" in out
+        assert "Traceback" not in out
+
+
+def test_approve_missing_box_name_still_shows_fingerprint(ctx, monkeypatch,
+                                                          capsys):
+    # box_name is informational; the fingerprint is the security check. A
+    # record with a valid fingerprint but no name still approves cleanly.
+    def fake_http(method, url, body=None, headers=None):
+        if url.endswith("/pair_1") and method == "GET":
+            return 200, {"ok": True, "pairing": {
+                "id": "pair_1", "status": "pending",
+                "fingerprint": "SHA256:xyz"}}
+        if url.endswith("/approve"):
+            return 200, {"ok": True, "approved": "pair_1"}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    ctx.pairing_id = "pair_1"
+    monkeypatch.setattr("builtins.input", lambda *a: "ABCD-EFGH")
+    assert spark_pair.cmd_approve(ctx) == 0
+    out = capsys.readouterr().out
+    assert "SHA256:xyz" in out and "approved pair_1" in out
+
+
+# ---- #885: redirect-target and echo hardening --------------------------------
+# 1. https->http downgrade redirects are refused outright.
+# 2. userinfo is scrubbed before a URL is echoed into errors/logs.
+# 3. unparseable redirect targets fail closed with a clean error class.
+
+import urllib.request
+
+
+def test_redirect_downgrade_https_to_http_refused():
+    # Non-vacuous: before the fix, redirect_request returned the new
+    # request (after stripping Authorization) instead of raising.
+    h = spark_pair._RedirectAuthStripper()
+    req = urllib.request.Request("https://control.test/start")
+    with pytest.raises(spark_pair._InsecureRedirectRefused):
+        h.redirect_request(req, None, 302, "Found", {},
+                           "http://control.test/other")
+
+
+def test_redirect_downgrade_refusal_scrubs_userinfo():
+    # The refusal message echoes the target: a hostile plane's Location
+    # must not smuggle userinfo into our logs through it.
+    h = spark_pair._RedirectAuthStripper()
+    req = urllib.request.Request("https://control.test/start")
+    with pytest.raises(spark_pair._InsecureRedirectRefused) as ei:
+        h.redirect_request(req, None, 302, "Found", {},
+                           "http://user:s3cr3t@evil.test/")
+    assert "s3cr3t" not in str(ei.value)
+    assert "user:s3cr3t@" not in str(ei.value)
+    assert "evil.test" in str(ei.value)
+
+
+def test_redirect_http_to_https_upgrade_still_allowed():
+    # Only the downgrade is refused; an http->https upgrade (or http->http)
+    # still flows through the normal strip logic.
+    h = spark_pair._RedirectAuthStripper()
+    req = urllib.request.Request("http://control.test/start",
+                                 headers={"Authorization": "Bearer x"})
+    new = h.redirect_request(req, None, 302, "Found", {},
+                             "https://control.test/other")
+    assert new is not None
+    assert new.get_full_url() == "https://control.test/other"
+
+
+def test_redirect_garbage_port_in_location_is_clean_error():
+    # Non-vacuous: before the fix, parsed.port raised a bare ValueError
+    # that _http could only report as a generic transport failure.
+    h = spark_pair._RedirectAuthStripper()
+    req = urllib.request.Request("https://control.test/start")
+    with pytest.raises(spark_pair._BadRedirectTarget) as ei:
+        h.redirect_request(req, None, 302, "Found", {}, "http://h:abc/")
+    assert "abc" in str(ei.value)
+
+
+def test_http_surfaces_downgrade_refusal_without_traceback(monkeypatch):
+    # The exception the stripper raises propagates out of opener.open();
+    # _http must report it as a transport failure, not crash.
+    class _Boom:
+        def open(self, req, timeout=None):
+            raise spark_pair._InsecureRedirectRefused(
+                "refusing https->http downgrade redirect to http://x/")
+
+    monkeypatch.setattr(spark_pair, "_HTTP_OPENER", _Boom())
+    status, resp = spark_pair._http("GET", "https://control.test/x")
+    assert status == 0
+    assert resp["ok"] is False
+    assert "downgrade" in resp["error"]
+
+
+def test_scrub_url_userinfo_matrix():
+    f = spark_pair._scrub_url_userinfo
+    # No userinfo: byte-identical no-op.
+    assert f("https://api.sparkvm.dev/x") == "https://api.sparkvm.dev/x"
+    assert f("http://h.test:8080/p?q=1") == "http://h.test:8080/p?q=1"
+    # userinfo removed, everything else preserved.
+    assert f("http://user:pass@h.test:8080/p?q=1") == \
+        "http://h.test:8080/p?q=1"
+    assert f("http://user@h.test/") == "http://h.test/"
+    assert f("http://u:p@[::1]:8080/x") == "http://[::1]:8080/x"
+    # Garbage port: the crude cut still removes the credentials instead
+    # of raising ValueError.
+    assert f("http://u:p@h:abc/") == "http://h:abc/"
+
+
+def test_check_control_url_scrubs_userinfo_in_refusal(monkeypatch):
+    # Non-vacuous: the old message interpolated the raw control URL, so
+    # "s3cr3t" echoed to stdout / heartbeat.log.
+    ok, msg = spark_pair._check_control_url(
+        "http://user:s3cr3t@control.test/x")
+    assert not ok
+    assert "cleartext" in msg
+    assert "s3cr3t" not in msg
+    assert "user:s3cr3t@" not in msg
+    assert "control.test" in msg  # the host is still named, credentials gone
+
+
+def test_check_control_url_refusal_keeps_loopback_behavior(monkeypatch):
+    # The scrub is a no-op for ordinary URLs: existing accept/refuse
+    # semantics are unchanged.
+    assert spark_pair._check_control_url("https://api.sparkvm.dev")[0]
+    assert spark_pair._check_control_url("http://127.0.0.1:8080/x")[0]
+    assert not spark_pair._check_control_url("http://control.test/x")[0]

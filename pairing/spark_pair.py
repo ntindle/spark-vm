@@ -146,13 +146,57 @@ def _http(method, url, body=None, headers=None):
         return 0, {"ok": False, "error": f"transport: {e}"}
 
 
+class _InsecureRedirectRefused(Exception):
+    """The plane (or something shaping its responses) asked for a
+    https->http downgrade redirect. Authorization is stripped at the new
+    origin, but the request would still talk cleartext to it — bearer
+    tokens and owner keys must never travel in the clear. Raised from the
+    redirect handler; _http reports it as a transport failure, never a
+    traceback (#885)."""
+
+
+class _BadRedirectTarget(Exception):
+    """A redirect target the client cannot parse (e.g. a garbage port in
+    the Location header). Fail closed with a clean error class instead of
+    a ValueError traceback (#885)."""
+
+
+def _scrub_url_userinfo(url):
+    """Remove embedded credentials (user:pass@) from a URL before it is
+    echoed into error messages or logs (#885). A control URL carrying
+    userinfo would otherwise leak into stdout / heartbeat.log through the
+    cleartext-refusal message; the same holds for a hostile plane's
+    Location header echoed in the downgrade refusal."""
+    u = urllib.parse.urlparse(url)
+    if "@" not in u.netloc:
+        return url
+    try:
+        host = u.hostname or ""
+        port = f":{u.port}" if u.port else ""
+        if ":" in host:  # IPv6 literal: urlparse strips the brackets
+            host = f"[{host}]"
+        netloc = host + port
+    except ValueError:
+        # Garbage port: crude cut still removes the credentials; the URL
+        # is unusable anyway and refused on other grounds.
+        netloc = u.netloc.rsplit("@", 1)[1]
+    return urllib.parse.urlunparse(
+        (u.scheme, netloc, u.path, u.params, u.query, u.fragment))
+
+
 class _RedirectAuthStripper(urllib.request.HTTPRedirectHandler):
     """urllib forwards manually-set Authorization headers across redirects —
     including to a DIFFERENT origin. On this credential-bearing client that
     is a token leak (box bearer token, owner API key): a compromised or
     misconfigured plane, or a redirect chain the box didn't expect, would
     harvest them. Strip Authorization whenever the redirect leaves the
-    original origin (scheme/host/port); same-origin redirects keep it."""
+    original origin (scheme/host/port); same-origin redirects keep it.
+
+    A https->http downgrade redirect is refused outright: the header strip
+    is safe, but the follow-up request would talk cleartext to the new
+    origin — credentials in the clear either way. Unparseable redirect
+    targets (e.g. a garbage port in the Location header) fail closed with
+    a clean error instead of a ValueError traceback."""
 
     @staticmethod
     def _origin(parsed):
@@ -160,9 +204,26 @@ class _RedirectAuthStripper(urllib.request.HTTPRedirectHandler):
         return (parsed.scheme, (parsed.hostname or "").lower(), port)
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        old_origin = self._origin(urllib.parse.urlparse(req.full_url))
-        new_origin = self._origin(
-            urllib.parse.urlparse(urllib.parse.urljoin(req.full_url, newurl)))
+        try:
+            old_parsed = urllib.parse.urlparse(req.full_url)
+            new_parsed = urllib.parse.urlparse(
+                urllib.parse.urljoin(req.full_url, newurl))
+            old_origin = self._origin(old_parsed)
+            new_origin = self._origin(new_parsed)
+        except ValueError as e:
+            # A garbage port (or other unparseable component) in the
+            # request URL or the Location header: fail closed, clean.
+            raise _BadRedirectTarget(
+                f"refusing redirect with unparseable target {newurl!r}: {e}")
+        if old_parsed.scheme == "https" and new_parsed.scheme == "http":
+            # Downgrade: the Authorization strip at the new origin is not
+            # enough — the request itself would go out in the clear.
+            # Scrub the target before echoing: a hostile plane's Location
+            # may carry userinfo it wants echoed back into our logs.
+            raise _InsecureRedirectRefused(
+                "refusing https->http downgrade redirect to "
+                f"{_scrub_url_userinfo(new_parsed.geturl())} — credentials "
+                "would travel in the clear")
         new_req = super().redirect_request(req, fp, code, msg, headers,
                                            newurl)
         if new_req is not None and new_origin != old_origin:
@@ -203,7 +264,10 @@ def _check_control_url(control):
         pass  # not an IP literal: fall through to the refusal below
     if os.environ.get("SVM_PAIR_ALLOW_HTTP") == "1":
         return True, ""
-    return False, (f"refusing cleartext http:// control plane ({control}) — "
+    # Scrub before echoing: a control URL with embedded user:pass@ would
+    # otherwise leak the credentials into stdout / heartbeat.log (#885).
+    return False, (f"refusing cleartext http:// control plane "
+                   f"({_scrub_url_userinfo(control)}) — "
                    "bearer tokens and owner keys would travel in the clear "
                    "(use https://, a loopback host, or SVM_PAIR_ALLOW_HTTP=1)")
 
@@ -705,6 +769,20 @@ def cmd_heartbeat(args):
     return _heartbeat_result(d, box_id, token, body["sent_at"], status, resp)
 
 
+def _pairing_row(p):
+    """Extract (id, box_name, fingerprint) from a plane pairing row, or
+    None when the row is malformed (#881). The approve/list path is
+    interactive, so the bar is "never traceback on plane shape": a
+    malformed or hostile plane's rows get a clean error, not silence and
+    not a KeyError traceback."""
+    if not isinstance(p, dict):
+        return None
+    pid, name, fp = p.get("id"), p.get("box_name"), p.get("fingerprint")
+    if not all(isinstance(v, str) for v in (pid, name, fp)):
+        return None
+    return pid, name, fp
+
+
 def cmd_approve(args):
     control, msg = _resolve_control(args)
     if control is None:
@@ -731,6 +809,11 @@ def cmd_approve(args):
             print(f"list failed: {resp.get('error', status)}")
             return 1
         pairs = resp.get("pairings", [])
+        if not isinstance(pairs, list):
+            # A malformed or hostile plane: loud, not a traceback.
+            print("list failed: malformed plane response "
+                  "(pairings is not a list)")
+            return 1
         if not pairs:
             print("no pending pairings")
             return 0
@@ -738,7 +821,13 @@ def cmd_approve(args):
         for p in pairs:
             # The server never returns pairing codes (stored hashed);
             # match by the id the box printed at request time.
-            print(f"  {p['id']}  {p['box_name']}  {p['fingerprint']}")
+            row = _pairing_row(p)
+            if row is None:
+                print("list failed: malformed plane response "
+                      "(pairing entry is missing id/box_name/fingerprint)")
+                return 1
+            pid, name, fp = row
+            print(f"  {pid}  {name}  {fp}")
         print()
         pid = input("Pairing id to approve: ").strip()
     if not pid:
@@ -749,13 +838,28 @@ def cmd_approve(args):
     if status != 200 or not resp.get("ok"):
         print(f"fetch failed: {resp.get('error', status)}")
         return 1
-    p = resp["pairing"]
-    if p["status"] != "pending":
-        print(f"pairing is {p['status']} — nothing to approve")
+    p = resp.get("pairing")
+    if not isinstance(p, dict):
+        # resp["pairing"] used to KeyError here on a malformed plane.
+        print("fetch failed: malformed plane response "
+              "(pairing is not an object)")
         return 1
+    if p.get("status") != "pending":
+        print(f"pairing is {p.get('status') or 'unknown'} — nothing to approve")
+        return 1
+    fp = p.get("fingerprint")
+    if not isinstance(fp, str) or not fp:
+        # The fingerprint comparison is the security check of this whole
+        # command; a pairing record without one cannot be approved.
+        print("fetch failed: malformed plane response "
+              "(pairing has no fingerprint)")
+        return 1
+    box_name = p.get("box_name")
+    if not isinstance(box_name, str) or not box_name:
+        box_name = "<unnamed>"
     print()
-    print(f"  Box name:    {p['box_name']}")
-    print(f"  Fingerprint: {p['fingerprint']}")
+    print(f"  Box name:    {box_name}")
+    print(f"  Fingerprint: {fp}")
     print()
     print("Compare the fingerprint above with what the BOX displays.")
     print("They must match exactly — otherwise someone is enrolling")
