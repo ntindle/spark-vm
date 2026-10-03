@@ -56,7 +56,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   plane-produced command on the durable queue — an owner's approve/deny
   tap (and server-side expiry) now travels to the box as a command
   carrying the approval id, decision, and idempotency key, so the box
-  learns of decisions through the queue instead of never. (#TBD)
+  learns of decisions through the queue instead of never. (#943)
 
 - Pinned the phone-home wire-protocol spec (#847's S3 contract): the
   box↔plane WebSocket contract the Durable Object and box client will
