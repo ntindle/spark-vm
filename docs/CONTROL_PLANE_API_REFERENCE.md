@@ -78,7 +78,7 @@ dashboard's calls below are the repo-side witness.)
 
 | Method & path | Purpose |
 |---|---|
-| `GET /v1/boxes` | Fleet list → `{ok, boxes}`. The dashboard's fleet view calls it on sign-in and every 30 s auto-refresh (`r.data.boxes`). Unauthenticated → `401 {"ok": false, "error": "unauthorized"}`. |
+| `GET /v1/boxes` | Fleet list → `{ok, boxes}`. The dashboard's fleet view calls it on sign-in and every 30 s auto-refresh (`r.data.boxes`). Unauthenticated → 401. |
 | `GET /v1/boxes/{id}` | Box detail → `{ok, box}` (hostname, uptime, services, key fingerprint, token expiry, last-status). Unauthenticated → 401. |
 
 ### Box endpoints (`/v1/boxes/*`) — auth: box Bearer <redacted> unless noted
@@ -128,7 +128,7 @@ rewrites the decision.
 | Method & path | Purpose |
 |---|---|
 | `GET /` | The authenticated fleet dashboard (`hosted/dashboard/` is the canonical copy, inlined into the deployed worker). Owner sign-in (key held in the tab's `sessionStorage` only); fleet list with STALE marking; box detail; pairing approvals; every API call carries the owner key as a `Bearer` token and a 401 anywhere returns the UI to the sign-in screen. |
-| `GET /v1/health` | Public health check — "stays public" per ntindle's #843 ship comment (2026-10-02). Path pinned by that comment; consult the control-plane checkout's `worker.py` module docstring for the response shape. |
+| `GET /v1/health` | Public health check — the plane answers on the public endpoint (per `docs/PRODUCTION_DEPLOY_CONTRACT.md`'s live-verification checklist). The `/v1/health` path itself is asserted only on ntindle's #843 ship comment (2026-10-02) and the control-plane checkout's `worker.py` module docstring (the endpoint table — the source of truth); no repo doc pins that path. If this reference disagrees with `worker.py`, `worker.py` wins and this doc owes a fix-up turn. |
 
 ## Failure codes
 
@@ -170,10 +170,16 @@ rewrites the decision.
 - Durable-command queue, epochs, cursors, acks: `docs/DURABLE_COMMANDS.md`
 - Action-approval records: `docs/APPROVALS_PLANE_PROTOCOL.md`
 - Dashboard page, canonical-copy rule, sync: `hosted/dashboard/README.md`
-- Fleet-read endpoints (`GET /v1/boxes*`) + `GET /v1/health`: ntindle's
+- Fleet-read endpoints (`GET /v1/boxes*`): ntindle's
   #843 ship comment (2026-10-02) — these endpoints live in the ops
   checkout's `worker.py`, not this repo; the shipped dashboard's calls
   (`hosted/dashboard/dashboard.html`) are the repo-side witness
+- `GET /v1/health`: the *public* claim is grounded in-repo
+  (`docs/PRODUCTION_DEPLOY_CONTRACT.md`, live-verification checklist:
+  "the plane answers on the public endpoint"); the `/v1/health` path is
+  asserted only on the off-repo #843 comment and the control-plane
+  checkout's `worker.py` — no repo doc pins that path, and the dashboard
+  never calls it, so there is no repo-side witness for it
 - Production deploy posture for plane changes:
   `docs/PRODUCTION_DEPLOY_CONTRACT.md`
 
