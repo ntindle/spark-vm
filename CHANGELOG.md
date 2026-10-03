@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   forward-fix plan, no down-migrations), a recorded deployment id with
   redeploy-as-rollback, live verification (auth taxonomy, test-row cleanup,
   stated limits), and recorded credential provenance. Codifies how the
-  #846/#848 production deploys were done. (#TBD)
+  #846/#848 production deploys were done. (#895)
 
 - Published a vision-vs-state gap analysis for hosted credential vending:
   the self-hosted localhost swap-proxy half (placeholders, allowlists,
