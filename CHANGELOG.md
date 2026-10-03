@@ -198,6 +198,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   for additions and removals, so a secret rotated by editing the file
   directly (instead of through the atomic writers) was never picked up
   and the old value kept being swapped silently. (#912)
+
+- A mistyped entry on a multi-value secret file now leaves the same
+  audit trail as a mistyped entry on a single-value file: previously the
+  swap was silently skipped with no record, so typos were invisible to
+  the credential owner. The entry is still left untouched — only the
+  audit line is new. (#911)
 - The desktop bridge's launch registry no longer trusts persisted process IDs
   blindly: a stored `0` (or boolean `true`, which is `1` in disguise) can
   never be pruned as dead, so a corrupted registry could refuse to start an
