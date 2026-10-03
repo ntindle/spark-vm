@@ -37,10 +37,24 @@
 #     --force).
 #   - Opt-out: /etc/sparkvm/toolset-update.optout (or $TOOLSET_UPDATE_OPTOUT=1)
 #     makes `update` a no-op.
+#   - Failure freeze (#532 Recovery): update runs that FAIL (any layer
+#     returns nonzero) increment a consecutive-failure counter in
+#     $TOOLSET_STATE_DIR/freeze.state. After 3 consecutive failures
+#     (env: TOOLSET_FREEZE_AFTER) the box freezes: `update` refuses to run
+#     (exit 1, loud log + audit line) until an operator runs `unfreeze`.
+#     Deferrals (idle gate, lock held), --dry-run runs, and opt-outs never
+#     touch the counter; a successful run resets it to 0. `update
+#     --dry-run` is still permitted while frozen as a diagnostic (it
+#     changes nothing and never touches the counter). The freeze state is
+#     machine-readable: `status` prints a `freeze` row, so the health
+#     report surfaces the single "box needs attention" state instead of
+#     churning through failing updates. (Post-update health checks, when
+#     they land, feed the same counter.)
 #
 # Usage:
 #   toolset-update.sh status  # machine-readable TSV inventory report
 #   toolset-update.sh update [--dry-run] [--now] [--force]
+#   toolset-update.sh unfreeze  # clear the failure-freeze state
 #   toolset-update.sh install  # backfill onto an existing box
 #   toolset-update.sh uninstall
 #   toolset-update.sh optout | optin
@@ -98,6 +112,8 @@
 # current uid/gid since `install -o root` requires privilege),
 # APT_DOCKER_PKGS / APT_NODE_PKGS / APT_GH_PKGS (space-separated candidate
 # package names per tool; tests override to fixture packages).
+# TOOLSET_FREEZE_AFTER (consecutive failed update runs before the box
+# freezes; default 3).
 # PINS_FILE (pin file; default $TOOLSET_STATE_DIR/self_update_pins.conf —
 # refreshed only by the privileged `install` step, never read from the live
 # checkout), CUA_DRIVER_BIN (default /home/ntindle/cua/bin/cua-driver),
@@ -1128,7 +1144,124 @@ cmd_status() {
         printf 'playwright\tabsent\t-\n'
     fi
     _probe_version "cua-driver" cua-driver --version
+    # Failure-freeze state (#532 Recovery): the single machine-readable
+    # "box needs attention" signal. STATE is `frozen` | `ok`; DETAIL is the
+    # freeze since/reason, or the current consecutive-failure count when
+    # not frozen. A missing/corrupt state file reads as ok/0 — the counter
+    # is availability bookkeeping, never a trust boundary.
+    _freeze_state_init
+    if [ "$_fz_frozen" = "1" ]; then
+        printf 'freeze\tfrozen\t%s\n' "$(printf '%s' "since=$_fz_at reason=$_fz_reason" | tr '\t' ' ' | cut -c1-160 || true)"
+    else
+        printf 'freeze\tok\tconsecutive_failures=%s\n' "$_fz_consec"
+    fi
     return 0
+}
+
+# --- failure freeze (#532 Recovery) -----------------------------------------------
+: "${TOOLSET_FREEZE_AFTER:=3}"
+STATE_FREEZE="$TOOLSET_STATE_DIR/freeze.state"
+
+_freeze_state_init() {
+    # Load the freeze state into _fz_consec / _fz_frozen / _fz_at /
+    # _fz_reason. A missing or MALFORMED state file reads as clean
+    # (consecutive=0, not frozen): freeze.state is root-writable runtime
+    # bookkeeping, not a trust boundary, so a corrupt file must neither
+    # freeze the box spuriously nor brick updates permanently. A parse
+    # failure is logged loudly and the state is reset to clean.
+    _fz_consec=0
+    _fz_frozen=0
+    _fz_at=""
+    _fz_reason=""
+    if [ -f "$STATE_FREEZE" ]; then
+        local line key val ok=1
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                \#*|"") continue ;;
+            esac
+            key="${line%%=*}"; val="${line#*=}"
+            case "$key" in
+                consecutive_failures)
+                    case "$val" in
+                        ''|*[!0-9]*) ok=0 ;;
+                        *) _fz_consec="$val" ;;
+                    esac ;;
+                frozen)
+                    case "$val" in
+                        0|1) _fz_frozen="$val" ;;
+                        *) ok=0 ;;
+                    esac ;;
+                frozen_at) _fz_at="$(printf '%s' "$val" | tr -dc '0-9T:Z-' || true)" ;;
+                frozen_reason) _fz_reason="$(printf '%s' "$val" | tr '\t' ' ' | cut -c1-120 || true)" ;;
+                *) ok=0 ;;
+            esac
+        done <"$STATE_FREEZE"
+        if [ "$ok" != "1" ]; then
+            log "freeze: state file $STATE_FREEZE is malformed — resetting to clean (loud, continuing)"
+            _fz_consec=0; _fz_frozen=0; _fz_at=""; _fz_reason=""
+        fi
+    fi
+}
+
+_freeze_write() {
+    # Persist the freeze-state locals. Best-effort: a write failure is
+    # logged loudly but never kills the run — the update already happened,
+    # the counter is bookkeeping.
+    if ! { printf '# managed by toolset-update.sh — do not hand-edit\nconsecutive_failures=%s\nfrozen=%s\nfrozen_at=%s\nfrozen_reason=%s\n' \
+        "$_fz_consec" "$_fz_frozen" "$_fz_at" "$_fz_reason" >"$STATE_FREEZE.tmp" 2>/dev/null \
+        && mv -f "$STATE_FREEZE.tmp" "$STATE_FREEZE" 2>/dev/null; }; then
+        log "freeze: cannot write $STATE_FREEZE — counter not persisted (continuing)"
+    fi
+}
+
+_freeze_refuse_if_frozen() {
+    # Returns 1 (refuse) when the box is frozen: log + audit loudly, no
+    # layers run. Callers exit nonzero so the timer unit surfaces the
+    # "box needs attention" state instead of churning.
+    _freeze_state_init
+    if [ "$_fz_frozen" = "1" ]; then
+        log "update: FROZEN since $_fz_at (reason: $_fz_reason) — box needs attention; run 'toolset-update.sh unfreeze' after investigating (no update attempted)"
+        audit 'toolset-update' ",\"result\":\"frozen\",\"since\":\"$_fz_at\",\"reason\":\"$_fz_reason\""
+        return 1
+    fi
+    return 0
+}
+
+_freeze_record_result() {
+    # _freeze_record_result <ok|failed> [failed-components] — update the
+    # consecutive-failure counter after an update run. Deferrals (idle
+    # gate, lock held), --dry-run runs, and opt-outs never reach here:
+    # only real update attempts move the counter.
+    local outcome="$1" comps="${2:-}"
+    _freeze_state_init
+    case "$outcome" in
+        ok)
+            if [ "$_fz_consec" != "0" ]; then
+                _fz_consec=0
+                _freeze_write
+                log "freeze: update succeeded — consecutive-failure counter reset"
+            fi
+            ;;
+        failed)
+            _fz_consec=$((_fz_consec + 1))
+            if [ "$_fz_frozen" = "1" ]; then
+                # Defensive: a frozen box refuses updates before the layers
+                # run, so this path should not occur. If it ever does, keep
+                # the freeze and say so loudly.
+                _freeze_write
+                log "freeze: update failed again while frozen (consecutive=$_fz_consec) — box still needs attention; run 'toolset-update.sh unfreeze' after investigating"
+            elif [ "$_fz_consec" -ge "${TOOLSET_FREEZE_AFTER:-3}" ]; then
+                _fz_frozen=1
+                _fz_at="$(date -u +%FT%TZ)"
+                _fz_reason="$comps"
+                _freeze_write
+                log "freeze: ENGAGED after $_fz_consec consecutive failed update runs (failed: $comps) — updates halted; box needs attention; run 'toolset-update.sh unfreeze' after investigating"
+                audit 'toolset-update-frozen' ",\"consecutive\":\"$_fz_consec\",\"failed\":\"$comps\""
+            else
+                _freeze_write
+            fi
+            ;;
+    esac
 }
 
 # --- update ---------------------------------------------------------------------
@@ -1168,6 +1301,14 @@ cmd_update() {
         return 0
     fi
 
+    # Failure freeze (#532 Recovery): a frozen box surfaces "box needs
+    # attention" instead of churning through doomed updates. --dry-run is
+    # still permitted while frozen as a diagnostic — it changes nothing
+    # and never touches the counter.
+    if [ "$dry" != "1" ] && ! _freeze_refuse_if_frozen; then
+        return 1
+    fi
+
     if ! _idle_gate "$force"; then
         # Deferral is not a failure: exit 0 keeps the timer quiet; the run
         # log and the audit line below carry the loud record.
@@ -1196,12 +1337,27 @@ cmd_update() {
     if [ "$dry" = "1" ]; then
         audit 'toolset-update' ',"result":"dry-run"'
     elif [ "$rc" = "0" ]; then
+        _freeze_record_result ok
         audit 'toolset-update' ',"result":"ok","components":"os-security cua-driver apt playwright"'
     else
+        _freeze_record_result failed "$failed_comps"
         audit 'toolset-update' ',"result":"failed","failed":"'"$failed_comps"'"'
         log "update: FAILED ($failed_comps); see audit log"
     fi
     return "$rc"
+}
+
+cmd_unfreeze() {
+    # Clear the failure-freeze state after the operator/agent has
+    # investigated: the next update run starts with a clean
+    # consecutive-failure counter. Never runs updates itself.
+    for a in "$@"; do case "$a" in *) echo "ERROR: unknown flag: $a" >&2; return 2 ;; esac; done
+    mkdir -p "$TOOLSET_STATE_DIR" 2>/dev/null || true
+    _fz_consec=0; _fz_frozen=0; _fz_at=""; _fz_reason=""
+    _freeze_write
+    log "unfreeze: failure-freeze state cleared (counter reset)"
+    audit 'toolset-update' ',"result":"unfrozen"'
+    return 0
 }
 
 # --- install / uninstall ----------------------------------------------------------
@@ -1284,6 +1440,7 @@ if [ "${TOOLSET_UPDATE_NO_MAIN:-0}" != "1" ]; then
     case "$cmd" in
         status)    cmd_status "$@" ;;
         update)    cmd_update "$@" ;;
+        unfreeze)  cmd_unfreeze "$@" ;;
         install)   cmd_install "$@" ;;
         uninstall) cmd_uninstall "$@" ;;
         optout)    cmd_optout "$@" ;;

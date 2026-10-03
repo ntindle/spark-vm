@@ -53,6 +53,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The toolset self-updater now freezes after repeated failures: after
+  three consecutive failed update runs it stops attempting updates and
+  surfaces a single "box needs attention" state (visible in the status
+  report and the timer logs) until an operator clears it with the new
+  `unfreeze` command. Deferrals, dry-runs, and opt-outs never count
+  toward the streak; a successful run resets it. (#TBD)
+
 - Published the control-plane protocol for phone-approval records: the
   plane now holds a per-box action-approval record (owner-created, with a
   client-chosen action id, a server-clamped expiry window, and a

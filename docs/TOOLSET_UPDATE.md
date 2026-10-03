@@ -3,12 +3,12 @@
 **Status: framework + four real layers.** Partial implementation of issue
 #532 ("Self-update system: keep the box and its default toolset current").
 This ships the framework — trust model, scheduling, audit, idle gate,
-opt-out — and four real updater layers: `os-security`
+opt-out, failure freeze — and four real updater layers: `os-security`
 (unattended-upgrades), `cua-driver` (pinned reinstall from the upstream
 GitHub release), `apt` (docker / node / gh converged via apt), and
 `playwright` (pinned pip package + Chromium browser builds + system
-libraries). The remaining #532 slices (snapshots/rollback, failure
-freeze, independent backup path) are explicitly follow-ups. Reconciled with
+libraries). The remaining #532 slices (snapshots/rollback, independent
+backup path) are explicitly follow-ups. Reconciled with
 #542's read-only status plane — this script is the *update* plane; see "Two
 planes" in `docs/SELF_UPDATE.md` for the canonical architecture.
 
@@ -248,6 +248,32 @@ Chromium browser builds and system libraries converge every run (both
 idempotent) via the `playwright` layer. npm rides with the nodesource
 `nodejs` package.
 
+## Failure freeze (issue #532)
+
+**Status: shipped.** The toolset updater ships with the "freeze on
+repeated failure" half of #532's Recovery section.
+
+- Every **real** `update` run that fails (any layer returns nonzero)
+  increments a consecutive-failure counter in
+  `$TOOLSET_STATE_DIR/freeze.state`. After `TOOLSET_FREEZE_AFTER`
+  consecutive failures (default: 3) the box **freezes**: `update` refuses
+  to run (exit 1, a loud log line, and an audit event) until an operator
+  runs `toolset-update.sh unfreeze` after investigating. No layer work
+  runs while frozen — the box surfaces one "box needs attention" state
+  instead of churning through doomed updates.
+- The counter is fair: idle-gate and lock deferrals, `--dry-run` runs,
+  and opt-outs never move it; a successful run resets it to 0. A corrupt
+  or missing state file reads as clean (loudly) — the counter is
+  availability bookkeeping, never a trust boundary, so it can never
+  brick updates or freeze the box spuriously.
+- `update --dry-run` is still permitted while frozen as a diagnostic: it
+  changes nothing and never touches the counter.
+- The freeze is machine-readable: `status` prints a `freeze` row
+  (`frozen` with the since/reason detail, or `ok` with the current
+  streak), so the future `spark-vm health` report inherits the signal.
+  (Post-update health checks, when they land, feed the same counter —
+  today the counter keys off update-run failures.)
+
 ## Follow-ups (issue #532, not in this slice)
 
 - Hash-pin the playwright wheel and browser archives (`--require-hashes`
@@ -263,7 +289,6 @@ idempotent) via the `playwright` layer. npm rides with the nodesource
   what to update
 - Pre-update snapshots and rollback
 - Post-update health checks and machine-readable health
-- Repeated-failure freeze and blocking
 - Agent recovery runbook
 - Independent backup recovery entry point (outside the update system itself)
 
