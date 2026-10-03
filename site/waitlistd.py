@@ -185,6 +185,11 @@ TRIAGE_RETENTION_SECONDS = 2 * 86400
 # correctness, so the horizon is a pure ops bound. Overridable via
 # WAITLIST_FUNNEL_RETENTION_SECONDS (int seconds, fail loud on garbage).
 FUNNEL_EVENT_RETENTION_SECONDS = 90 * 86400
+# #897: bound on the rotate_funnel_events compare-and-swap loop — a
+# concurrent append mid-partition (the cta_click hot path, #403)
+# discards tmp and re-partitions; past this many consecutive races the
+# pass fails loud instead of spinning.
+_ROTATE_MAX_ATTEMPTS = 10
 
 
 def _funnel_retention_seconds():
@@ -3324,14 +3329,28 @@ class WaitlistService:
         duplicate archive lines, never lose events. Duplicates are then
         avoided on re-run: before appending a month's lines, the pass
         checks the archive's tail — if it already ends with exactly
-        those lines (the crash-retry shape), the append is skipped. The
-        pass is idempotent; a second run with nothing due rewrites
-        nothing.
+        those lines (the crash-retry shape), the append is skipped.
+
+        Concurrent-append safety: the cta_click hot path appends to the
+        funnel file WITHOUT the data lock (#403), so the read→rewrite
+        window is not covered by the lock contract. Rotation is a
+        compare-and-swap loop: it stats the hot file before reading,
+        and after the tmp write + archive appends it re-stats — if the
+        file grew (or was replaced), the tmp is discarded and the
+        partition recomputed, so the new lines are classified too
+        instead of being silently dropped by the replace. Bounded
+        retries (10), then fail loud. The pass is idempotent; a second
+        run with nothing due rewrites nothing. (A kill between the tmp
+        write and the replace leaves funnel_events.jsonl.rotate-tmp
+        behind; the next run truncates it harmlessly.)
 
         Contract: the caller holds data_lock() across reload() +
         rotate — the same convention as the reconcile passes and
-        _rewrite_rows (every daemon mutation takes the data lock too).
-        dry_run reports the partition without writing anything.
+        _rewrite_rows. The data lock serializes rotation against the
+        cron jobs and the lock-taking daemon paths; it does NOT cover
+        the cta_click hot GET (#403), which is why the compare-and-swap
+        loop above exists. dry_run reports the partition without
+        writing anything.
 
         Returns {"kept": n, "archived": n, "archives": {basename: n},
         "unparseable_kept": n, "dry_run": bool}.
@@ -3352,87 +3371,133 @@ class WaitlistService:
                 invited_at[entry_id] = row.get("invited_at") or ""
             elif status == "signed_up":
                 signed_up_at[entry_id] = row.get("signed_up_at") or ""
+        zero = {"kept": 0, "archived": 0, "archives": {},
+                "unparseable_kept": 0, "dry_run": dry_run}
+        for _attempt in range(_ROTATE_MAX_ATTEMPTS):
+            try:
+                st = os.stat(events_path)
+            except FileNotFoundError:
+                return dict(zero)  # no hot file yet: nothing to do
+            kept, archive, unparseable = self._partition_funnel_events(
+                events_path, cutoff, invited_at, signed_up_at)
+            result = {"kept": len(kept), "archived": 0, "archives": {},
+                      "unparseable_kept": unparseable, "dry_run": dry_run}
+            if dry_run:
+                for month in sorted(archive):
+                    name = f"funnel_events-archive-{month}.jsonl"
+                    result["archives"][name] = len(archive[month])
+                    result["archived"] += len(archive[month])
+                return result
+            if not archive:
+                return result  # nothing due: the hot file is untouched
+            tmp = events_path + ".rotate-tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.writelines(kept)
+                fh.flush()
+                os.fsync(fh.fileno())
+            # Archives first (crash-safe order), then the hot rewrite.
+            for month in sorted(archive):
+                name = f"funnel_events-archive-{month}.jsonl"
+                apath = os.path.join(self.data_dir, name)
+                lines = archive[month]
+                # Tolerate a torn tail left by a killed rotation, then
+                # skip the append when this exact run already landed
+                # (crash-retry idempotency) — a re-run never duplicates
+                # archive lines.
+                self._terminate_partial_tail(apath)
+                if _read_tail_lines(apath, len(lines)) != lines:
+                    with open(apath, "a", encoding="utf-8") as fh:
+                        fh.writelines(lines)
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                result["archives"][name] = len(lines)
+                result["archived"] += len(lines)
+            if self._hot_file_changed(events_path, st):
+                # A concurrent append landed mid-partition (the
+                # cta_click hot path, #403): discard tmp and
+                # re-partition so the new lines are classified too —
+                # replacing now would silently drop them. The archive
+                # tail-check above keeps the retry from duplicating
+                # archive lines.
+                os.unlink(tmp)
+                continue
+            os.replace(tmp, events_path)
+            return result
+        raise RuntimeError(
+            "waitlistd: rotate_funnel_events: the hot funnel file "
+            f"changed {_ROTATE_MAX_ATTEMPTS} times mid-rotation; "
+            "failing loud — re-run the cron job")
+
+    def _partition_funnel_events(self, events_path, cutoff, invited_at,
+                                 signed_up_at):
+        """Split the hot funnel file into kept lines, archive lines by
+        month, and the unparseable-line count. Pure read — no writes.
+
+        kept: raw lines staying in the hot file (coverage-pinned, fresh,
+        blank, or fail-closed unparseable — verbatim, byte-preserving).
+        archive: {YYYY-MM: [raw lines]} for parseable events older than
+        the retention horizon that no live row's reconcile coverage can
+        consult.
+        """
         kept = []
         archive = {}
         unparseable = 0
-        if os.path.exists(events_path):
-            with open(events_path, encoding="utf-8") as fh:
-                for line in fh:
-                    if not line.strip():
-                        kept.append(line)  # blank lines: inert, verbatim
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        unparseable += 1
-                        kept.append(line)  # torn: fail-closed, stays
-                        continue
-                    if not isinstance(obj, dict):
-                        unparseable += 1
-                        kept.append(line)
-                        continue
-                    event = obj.get("event")
-                    at = obj.get("at")
-                    ref = obj.get("ref")
-                    pinned = (
-                        isinstance(at, str) and (
-                            (event == "invite_sent" and ref in invited_at
-                             and at >= invited_at[ref]) or
-                            (event == "claimed" and ref in signed_up_at
-                             and at >= signed_up_at[ref])))
-                    if pinned:
-                        kept.append(line)
-                        continue
-                    try:
-                        at_dt = datetime.fromisoformat(
-                            (at or "").replace("Z", "+00:00"))
-                    except (ValueError, AttributeError, TypeError):
-                        at_dt = None
-                    if at_dt is None or at_dt.tzinfo is None:
-                        # No provable date (or a naive one we refuse to
-                        # anchor — purge_due precedent): fail-closed.
-                        unparseable += 1
-                        kept.append(line)
-                        continue
-                    if at_dt >= cutoff:
-                        kept.append(line)
-                        continue
-                    month = at_dt.strftime("%Y-%m")
-                    archive.setdefault(month, []).append(
-                        line if line.endswith("\n") else line + "\n")
-        result = {"kept": len(kept), "archived": 0, "archives": {},
-                  "unparseable_kept": unparseable, "dry_run": dry_run}
-        if dry_run:
-            for month in sorted(archive):
-                name = f"funnel_events-archive-{month}.jsonl"
-                result["archives"][name] = len(archive[month])
-                result["archived"] += len(archive[month])
-            return result
-        if not archive:
-            return result  # nothing due: the hot file is untouched
-        # Archives first (crash-safe order), then the atomic hot rewrite.
-        for month in sorted(archive):
-            name = f"funnel_events-archive-{month}.jsonl"
-            apath = os.path.join(self.data_dir, name)
-            lines = archive[month]
-            # Tolerate a torn tail left by a killed rotation, then skip
-            # the append when this exact run already landed (crash-retry
-            # idempotency) — a re-run never duplicates archive lines.
-            self._terminate_partial_tail(apath)
-            if _read_tail_lines(apath, len(lines)) != lines:
-                with open(apath, "a", encoding="utf-8") as fh:
-                    fh.writelines(lines)
-                    fh.flush()
-                    os.fsync(fh.fileno())
-            result["archives"][name] = len(lines)
-            result["archived"] += len(lines)
-        tmp = events_path + ".rotate-tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.writelines(kept)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, events_path)
-        return result
+        with open(events_path, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    kept.append(line)  # blank lines: inert, verbatim
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    unparseable += 1
+                    kept.append(line)  # torn: fail-closed, stays
+                    continue
+                if not isinstance(obj, dict):
+                    unparseable += 1
+                    kept.append(line)
+                    continue
+                event = obj.get("event")
+                at = obj.get("at")
+                ref = obj.get("ref")
+                pinned = (
+                    isinstance(at, str) and (
+                        (event == "invite_sent" and ref in invited_at
+                         and at >= invited_at[ref]) or
+                        (event == "claimed" and ref in signed_up_at
+                         and at >= signed_up_at[ref])))
+                if pinned:
+                    kept.append(line)
+                    continue
+                try:
+                    at_dt = datetime.fromisoformat(
+                        (at or "").replace("Z", "+00:00"))
+                except (ValueError, AttributeError, TypeError):
+                    at_dt = None
+                if at_dt is None or at_dt.tzinfo is None:
+                    # No provable date (or a naive one we refuse to
+                    # anchor — purge_due precedent): fail-closed.
+                    unparseable += 1
+                    kept.append(line)
+                    continue
+                if at_dt >= cutoff:
+                    kept.append(line)
+                    continue
+                month = at_dt.strftime("%Y-%m")
+                archive.setdefault(month, []).append(
+                    line if line.endswith("\n") else line + "\n")
+        return kept, archive, unparseable
+
+    def _hot_file_changed(self, events_path, st):
+        """True iff the hot funnel file grew or was replaced since st
+        (an os.stat snapshot). Test seam for the concurrent-append
+        regression test (#897 Security B1): the cta_click hot path
+        appends without the data lock (#403), so rotation must detect
+        a mid-partition append and retry rather than silently dropping
+        the new lines on replace.
+        """
+        st2 = os.stat(events_path)
+        return (st2.st_ino, st2.st_size) != (st.st_ino, st.st_size)
 
     # -- self-host CTA -----------------------------------------------------
 

@@ -2402,6 +2402,51 @@ class TestRotateFunnelEvents:
         assert _read_funnel_lines(tmp) == before
         assert not os.path.exists(path + ".rotate-tmp")
 
+    def test_concurrent_append_mid_partition_survives(self, monkeypatch):
+        # Security B1: the cta_click hot path appends without the data
+        # lock (#403). A line landing between the partition read and the
+        # hot rewrite must survive — the CAS loop discards tmp and
+        # re-partitions instead of silently dropping it on replace.
+        service, tmp = make_service()
+        hot_path = os.path.join(tmp, "funnel_events.jsonl")
+        _write_funnel_lines(tmp, [_funnel_event("purged", "e-old", 120)])
+        concurrent = _funnel_event("cta_click", "selfhost", 0)
+        real_changed = service._hot_file_changed
+        calls = {"n": 0}
+
+        def changed_with_race(path, st):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # First pre-replace check: the race lands first.
+                with open(path, "a", encoding="utf-8") as fh:
+                    fh.write(concurrent)
+            return real_changed(path, st)
+
+        monkeypatch.setattr(service, "_hot_file_changed", changed_with_race)
+        result = service.rotate_funnel_events()
+        assert calls["n"] == 2  # first attempt retried, second committed
+        assert result["archived"] == 1
+        hot = _read_funnel_lines(tmp)
+        assert concurrent in hot  # the concurrent append survived
+        assert len(hot) == 1
+        # And the archive holds the rotated line exactly once.
+        may = _read_funnel_lines(tmp, "funnel_events-archive-2026-05.jsonl")
+        assert len(may) == 1
+
+    def test_exhausted_retries_fail_loud(self, monkeypatch):
+        # Ten consecutive mid-partition changes -> RuntimeError, hot file
+        # untouched, no half-replace. The operator re-runs the cron.
+        service, tmp = make_service()
+        hot_path = os.path.join(tmp, "funnel_events.jsonl")
+        before = [_funnel_event("purged", "e-old", 120)]
+        _write_funnel_lines(tmp, before)
+        monkeypatch.setattr(service, "_hot_file_changed",
+                            lambda path, st: True)
+        with pytest.raises(RuntimeError, match="failing loud"):
+            service.rotate_funnel_events()
+        assert _read_funnel_lines(tmp) == before
+        assert not os.path.exists(hot_path + ".rotate-tmp")
+
     def test_retention_env_override(self, monkeypatch):
         service, tmp = make_service()
         _write_funnel_lines(tmp, [_funnel_event("purged", "e-old", 10)])
