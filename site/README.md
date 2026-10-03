@@ -68,6 +68,22 @@ The markup carries placeholders the operator fills when §10 goes live:
   (`docs/WAITLIST_OPERATIONS.md` §10) at launch.
 - The pricing-teaser link points at the public thinking doc
   (`docs/PRICING_THINKING.md`); it becomes the pricing page when one exists.
+- **Do not front `waitlistd` with a reverse proxy on the same host until
+  a trusted-proxy mechanism lands (#896).** `waitlistd` terminates no TLS
+  itself, so a same-host proxy (nginx, Caddy, Cloudflare Tunnel) makes
+  every external client arrive as the socket peer `127.0.0.1` — and
+  `waitlistd` keys two security surfaces on that peer address: the
+  per-IP submit rate limit (`_ip_limited`) and the operator-only
+  `/waitlist/status` loopback gate (`_is_loopback`). Behind a proxy the
+  rate limit becomes one global bucket shared by all signups (one
+  aggressive client trips it for everyone), and the status route —
+  spool backlog + row counts, built to never leak onto a public
+  listener — evaluates loopback-true for every proxied request. The fix
+  is explicit operator config (which proxy hop's forwarding header to
+  trust), fail-closed — not blindly trusting `X-Forwarded-For` (clients
+  can spoof it). Until that lands, the public listener must reach
+  `waitlistd` directly (default `WAITLIST_BIND=127.0.0.1`); any
+  TLS-terminating or header-adding middlebox waits for the mechanism.
 
 `/go/selfhost?src=selfhost` is page-build code the loop owns, not operator
 packet: on Pages it needs the static redirect shim
