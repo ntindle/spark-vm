@@ -166,7 +166,12 @@ SSH access), not a human at a console. Requirements and their slice mapping:
   (no retry loop into a worse state), and go loud.
 - **Freeze on repeated failure** (S2): if health checks fail N consecutive
   runs, stop attempting updates entirely and surface a single "box needs
-  attention" state instead of churning.
+  attention" state instead of churning. **Shipped (partial):**
+  `deploy/toolset-update.sh` implements the freeze on update-run failures
+  (consecutive-failure counter, refuse-when-frozen, `unfreeze` command,
+  machine-readable `status` row) — see `docs/TOOLSET_UPDATE.md`
+  "Failure freeze". The health-check feed into the same counter is still
+  future work.
 - **Machine-readable `spark-vm health` report** (S2): one shot for an agent —
   last update run + result, per-component current vs pinned versions, failing
   checks with log pointers, snapshot inventory available for rollback.
