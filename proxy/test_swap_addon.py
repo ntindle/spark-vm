@@ -1597,6 +1597,42 @@ class JsonSwapValidityTests(unittest.TestCase):
         self.assertEqual(flow.metadata["spark_approval_signal"],
                          [("grantaid1", "approved")])
 
+    def test_deeply_nested_body_refuses_without_crash(self):
+        """Round-1 Security/Engineering finding: json.loads raises
+        RecursionError (not ValueError) on deep nesting — a body far
+        under the size cap. The gate must fail closed (refuse + audit),
+        not propagate the exception out of request()."""
+        a = make_addon()
+        depth = 15000
+        body = (b'{"k": "hsurr:github", "deep": '
+                + b"[" * depth + b"]" * depth + b"}")
+        req = Request("api.github.com", "/cfg",
+                      [("Content-Type", "application/json")], body)
+        a.request(Flow(req))  # must not raise
+        self.assertEqual(req.content, body)
+        self.assertIn(("api.github.com", "json-swap",
+                       "invalid-json-after-swap"), a.audit_notes)
+
+    def test_nonstandard_constants_refuse_swap(self):
+        """Round-1 Security finding: Python's json.loads accepts
+        NaN/Infinity, but RFC 8259 does not — a strict server 400s the
+        body. A credential whose value is exactly such a constant, in an
+        unquoted position, must be refused, not released."""
+        for value in ("NaN", "Infinity", "-Infinity"):
+            secrets = dict(SECRETS)
+            secrets["constcred"] = value
+            registry = {k: dict(v) for k, v in REGISTRY.items()}
+            registry["constcred"] = {"allowed_hosts": ["api.github.com"]}
+            a = make_addon(secrets=secrets, registry=registry)
+            body = b'{"k": hsurr:constcred}'
+            req = Request("api.github.com", "/cfg",
+                          [("Content-Type", "application/json")], body)
+            a.request(Flow(req))
+            self.assertEqual(req.content, body,
+                             "constant %r was released" % value)
+            self.assertIn(("api.github.com", "json-swap",
+                           "invalid-json-after-swap"), a.audit_notes)
+
 
 class SmokeHostRestrictionTests(unittest.TestCase):
     """§3a smoke echo hosts (G6): the proxy swaps ONLY the public
