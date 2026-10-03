@@ -2915,8 +2915,15 @@ class SwapAddon:
             # with no closing quote still navigates), so without this
             # the leading quote would poison the scheme parse and the
             # check would read the target as a harmless relative
-            # reference.
-            m = re.search(r'url\s*=\s*["\']?(.+)', v, re.IGNORECASE)
+            # reference. A literal newline does NOT terminate the
+            # target either: HTML allows newlines inside the quoted
+            # content attribute (issue #869), and the browser strips
+            # them before navigating — the check must see the whole
+            # value. `[\s\S]+` is a fail-closed-safe superset: a
+            # newline inside the netloc is stripped per WHATWG by
+            # `_redirect_target_host` (hostless fails closed in
+            # `_nav_leak_target`).
+            m = re.search(r'url\s*=\s*["\']?([\s\S]+)', v, re.IGNORECASE)
         return m
 
     @staticmethod
