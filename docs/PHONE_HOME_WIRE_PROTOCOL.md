@@ -34,16 +34,33 @@ differ — the sketch was reserved shape, this is the contract.
   header of the upgrade request** — the same credential the heartbeat
   path uses (#844/#846). The credential **never travels in a message
   frame** and is **never written to any log or journal** (G47.3).
-- The plane validates the token *before* completing the upgrade:
-  unknown token → `401`; expired token → `401`; revoked token
-  (`revoked_at` set, #846) → `403`. These are plain HTTP responses, not
-  socket closes — no socket ever exists for an unauthenticated box.
+- The plane MUST NOT redirect the upgrade path, and the box MUST NOT
+  follow redirects for the upgrade — any 3xx is an upgrade failure (fall
+  back to HTTPS, §8). A redirect-following client could otherwise forward
+  the `Authorization` header cross-origin.
+- The plane validates the token *before* completing the upgrade, and
+  routes on the verified identity: **the Worker MUST derive the DO stub
+  name via `idFromName` from the token's `box_id`; the URL `{box_id}` is
+  a routing hint only and MUST NOT select the stub** (G47.5 — the stub
+  name comes from the verified identity, never a client-supplied path
+  id; path/token disagreement therefore cannot mistarget a DO).
+- Token states at upgrade, aligned with the runbook's failure-code
+  table (`docs/HOSTED_AUTH_OPERATOR_RUNBOOK.md` — one code, one operator
+  action, and no token-state oracle for unauthenticated probers):
+  unknown, expired, or revoked (`revoked_at` set, #846) → `401`. The
+  #846 15-minute previous-token grace is honored at the upgrade exactly
+  as on the heartbeat path. These are plain HTTP responses, not socket
+  closes — no socket ever exists for an unauthenticated box.
+- **Box behavior on upgrade `401`:** the box MUST NOT reconnect-loop.
+  If it holds no live token it MAY attempt one
+  `POST /v1/boxes/token/rotate`; rotate-`401` → print re-pair guidance
+  and exit (re-pair is the human path); rotate-`403` → check clock skew
+  (±300 s, do NOT re-pair), per the runbook.
 - **Identity binding:** the handshake identity (token → box_id) is
   authoritative. The `hello` frame's `box_id` self-assertion MUST equal
   it; mismatch → the DO closes the socket with the control frame
-  `{"type":"close","code":"identity-mismatch"}` and journals the event.
-  A `box_id` in the URL path that disagrees with the token is ignored in
-  favor of the token.
+  `{"type":"close","generation":N,"code":"identity-mismatch"}` and
+  journals the event.
 
 ## 3. Frames
 
@@ -57,8 +74,9 @@ none do today.
 |---|---|---|
 | `hello` | box→DO | `box_id`, `generation` |
 | `welcome` | DO→box | `box_id`, `accepted_generation`, `server_time` |
-| `ping` / `pong` | both | `ts` (unix seconds) |
-| `close` | both | `code`, `reason` (human-readable, never a secret) |
+| `ping` / `pong` | both | `generation`, `ts` (unix seconds) |
+| `close` | both | `generation`, `code`, `reason` (human-readable, never a secret; optional) |
+| `command_ack` | box→DO | `generation`, `seq`, `epoch` — reserved; S4/S5 choose socket vs HTTPS acks per §3.3 |
 
 Control frames MUST be ≤ 4 KB. Unknown `type` values are ignored
 (forward compatibility), except `hello` shape violations, which close
@@ -72,7 +90,7 @@ new class needs a row here before any frame of its type may be sent.
 
 | Class | `type` values | Owner | Notes |
 |---|---|---|---|
-| control | `hello`, `welcome`, `ping`, `pong`, `close` | #847 (this doc) | §3.1 |
+| control | `hello`, `welcome`, `ping`, `pong`, `close`, `command_ack` | #847 (this doc) | §3.1; `command_ack` reserved — S4/S5 choose socket vs HTTPS per §3.3 |
 | command | `command` | #848 | Reserved shape §3.3; payload semantics are #848's lane |
 | terminal stream | `stream_open`, `stream_data`, `stream_close` | #853 / #919 | Real-time, lossy, ordered-per-session, never acked; stream bytes MUST NEVER ride the at-least-once command queue (G53.2) |
 | input | `input` | #853 / #919 | Dedicated input frame class (G53.2(a)): owner-typed bytes and programmatic input; approval is the consent plane (#849), the bytes ride here |
@@ -91,9 +109,13 @@ never inject bytes into a live session.
   payloads are opaque to the plane (≤ 16 KB, verbatim).
 - The same table/seq/epoch semantics as `docs/DURABLE_COMMANDS.md` are
   transport-agnostic: the socket is a faster carrier for the same queue,
-  not a second queue. Acks still flow (as `command_ack` control-class
-  frames or the existing HTTPS ack endpoint — S4/S5 choose; the queue
-  contract is unchanged either way).
+  not a second queue. Acks still flow (as `command_ack` frames — now a
+  registered control type, §3.1 — or the existing HTTPS ack endpoint;
+  S4/S5 choose; the queue contract is unchanged either way).
+- **Re-drive rendezvous:** on (re)bind the DO re-drives from the durable
+  queue's `acked_watermark` — it owns the queue, so it knows where to
+  resume pushing; the box dedupes redeliveries by `(box_id, seq)` per
+  #848. No cursor travels in `hello`.
 
 ## 4. Keepalive
 
@@ -112,13 +134,23 @@ counters** with separate semantics:
 
 - **`generation`** — the *network-session* fence. Box-chosen monotonic
   counter, bumped on **every fresh connect** (never on resume — there is
-  no resume, §9). The box MUST persist it in durable local storage so a
-  reboot never reuses a value. The DO keeps `last_generation` in **DO
-  durable storage** (hibernation/eviction wipes memory; a restarted DO
-  must not accept stale generations). Frames with
-  `generation < last_generation` are dropped and journaled; a connect
-  with `generation > last_generation` binds the new socket and the DO
-  sends `close`/`superseded-generation` to the old one.
+  no resume; see §11 item 3). Sharing one field would conflate a
+  transport reconnect with a command-incarnation change, and a plain
+  reconnect must never kill in-flight commands — hence two counters.
+  The box MUST persist it in durable local storage so a reboot never
+  reuses a value. The DO keeps `last_generation` in **DO durable
+  storage** (hibernation/eviction wipes memory; a restarted DO must not
+  accept stale generations).
+- Fence rules: frames with `generation < last_generation` are dropped
+  and journaled; **the DO MUST drop frames arriving on any socket other
+  than the currently bound socket**. A `hello` with
+  `generation > last_generation` binds the new socket, and the DO sends
+  `close`/`superseded-generation` to the old one. A `hello` with
+  `generation <= last_generation` (counter loss, or a reconnect that
+  forgot to bump) gets `close`/`stale-generation` carrying
+  `last_generation` — never `protocol-error` (which would wedge the box):
+  the box MUST adopt `last_generation + 1`, treat it as counter loss
+  (bump epoch per the rule below), and reconnect.
 - **`epoch`** — the *command-incarnation* fence (#848). Bumped on
   reboot, reprovision, or counter loss — **not** on a plain transport
   reconnect. Rides command frames only; kills stale commands per
@@ -135,28 +167,32 @@ The `close` control frame's `code`:
 
 | `code` | Meaning | Box behavior |
 |---|---|---|
-| `revoked` | box token revoked mid-socket (#846 `revoked_at`) | Fall back to HTTPS (§8); do NOT reconnect-loop — HTTPS will 401 → re-pair guidance (same as #864) |
-| `expired` | box token expired mid-socket | Rotate via `POST /v1/boxes/token/rotate` (#846), then reconnect with a fresh generation |
-| `superseded-generation` | a newer generation bound this DO | Normal: the old socket is dead by design; the box keeps the new one |
-| `identity-mismatch` | `hello`'s `box_id` ≠ handshake identity | Bug — fix the client; journal the event |
-| `protocol-error` | malformed control frame | Bug — fix the client |
+| `revoked` | box token revoked mid-socket (#846 `revoked_at`) | Fall back to HTTPS (§8); MUST NOT reconnect-loop — HTTPS will 401 → print re-pair guidance and exit (re-pair is the human path) |
+| `expired` | box token expired mid-socket | Reconnect with the box's current token (a post-rotation socket riding the previous token lands here once the 15-min grace lapses — do NOT rotate again, just use the current token); if the box holds no live token, attempt one rotate; rotate-`401` → follow the `revoked` row; rotate-`403` → check clock skew (±300 s), do NOT re-pair |
+| `superseded-generation` | a newer generation bound this DO | Normal: the old socket is dead by design; the box keeps the new one and MUST NOT reconnect the old one |
+| `stale-generation` | `hello` arrived with `generation <= last_generation`; carries `last_generation` | Adopt `last_generation + 1`, treat as counter loss (bump epoch, §5), reconnect |
+| `identity-mismatch` | `hello`'s `box_id` ≠ handshake identity | Bug — fix the client; MUST NOT auto-reconnect |
+| `protocol-error` | malformed control frame | Bug — fix the client; MUST NOT retry the malformed frame in a loop |
 | `going-away` | plane shedding or shutting down | Back off ≥ 60 s before reconnecting (§10) |
 
 Plain WebSocket `1000`/`1001` closes without a control frame are
 transport-level only and carry no protocol meaning.
 
-**Revocation latency bound:** the DO closes `revoked` on the next
-inbound frame or hibernate wake — whichever comes first. Worst case is
-the wake interval; this is the documented ceiling (same discipline as
-the input-lease revocation bound in the #854 analysis), not a hole.
+**Revocation latency bound:** for a compliant box the bound is the 30 s
+ping interval — the next inbound frame closes `revoked`. The DO MUST
+also wake on a bounded interval via alarm (S4-chosen, ≤ 15 min
+recommended, recorded in the S4 design) and re-verify the bound token's
+`revoked_at`/`token_expires_at` on every wake: a hibernated socket is
+re-verified before any further frame is accepted (G47.3). The
+revocation-latency ceiling for a silent socket is that wake interval.
 
 ## 7. One DO per box, no leakage (G47.5)
 
-- DO id is derived from the box id only: `phone-home:<box_id>`.
+- DO id is derived from the box id only: `phone-home:<box_id>`, where
+  the box id is the **token's** `box_id` — the worker verifies the token
+  before routing and derives the stub name via `idFromName` from it (§2).
 - A DO binds exactly one box: the handshake identity at first connect.
-  It never routes a frame to another stub and never accepts a second
-  box's token (a token for a different `box_id` fails the binding check
-  → `403` at upgrade).
+  It never routes a frame to another stub.
 - Defense in depth: every frame's effective identity is the bound
   handshake identity, never a frame field.
 
@@ -187,11 +223,17 @@ frame contents):
 
 - `phone_home.connect` — `box_id`, `generation`, `server_time`
 - `phone_home.disconnect` — `box_id`, `generation`, close `code`
+- `phone_home.hibernate_wake` — `box_id`, `generation`, wake cause
+  (alarm tick vs inbound frame); S6 observes hibernation through this
 - `phone_home.generation_fence` — dropped stale-generation frames
   (`box_id`, `seen_generation`, `last_generation`)
 - `phone_home.revoked_kill` / `phone_home.expired_close` —
   credential-lifecycle closes
 - `phone_home.identity_mismatch` — handshake/frame identity conflict
+
+Pre-handshake upgrade `401`s are not DO journal events — no DO exists
+yet and the prober is unattributable; upgrade auth failures are the
+Worker entrypoint's lane (S4 may keep an unattributed counter there).
 
 Staleness chips stay heartbeat-driven (§8); these events are the
 operational trail, not the liveness signal.
@@ -233,6 +275,6 @@ S6 verifies, against a live plane, on this contract:
 ## 12. Open questions for S4/S5 (not blocking this contract)
 
 - Exact upgrade path spelling (plane workspace).
-- Whether acks ride the socket (`command_ack` frames) or stay HTTPS —
-  the queue contract is identical either way (§3.3).
-- DO hibernate wake interval (sets the §6 revocation-latency ceiling).
+- Whether acks ride the socket (`command_ack` frames, now a registered
+  control type) or stay HTTPS — the queue contract is identical either
+  way (§3.3).
