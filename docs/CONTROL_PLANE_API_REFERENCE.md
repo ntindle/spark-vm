@@ -117,7 +117,7 @@ rewrites the decision.
 | Method & path | Purpose |
 |---|---|
 | `GET /` | The authenticated fleet dashboard (`hosted/dashboard/` is the canonical copy, inlined into the deployed worker). Owner sign-in (key held in the tab's `sessionStorage` only); fleet list with STALE marking; box detail; pairing approvals; every API call carries the owner key as a `Bearer` token and a 401 anywhere returns the UI to the sign-in screen. |
-| *(health)* | A public health check exists on the plane (#843: "health public") but its path is not pinned in any repo doc — consult the control-plane checkout's `worker.py` module docstring. This row is a placeholder until a turn pins it. |
+| *(health)* | A public health check exists on the plane (`docs/PRODUCTION_DEPLOY_CONTRACT.md` live-verification checklist: "the plane answers on the public endpoint") but its path is not pinned in any repo doc — consult the control-plane checkout's `worker.py` module docstring. This row is a placeholder until a turn pins it. |
 
 ## Failure codes
 
@@ -127,7 +127,7 @@ rewrites the decision.
 | 403 | Bearer <redacted> ok, proof-of-possession rejected (`rotate`) | Fix the box clock (±300 s window) and retry; do NOT re-pair |
 | 403 `"bootstrap closed"` | An owner key already exists | Use the owner key; bootstrap is one-shot |
 | 404 with JSON body | No such box / key id | Check the id; don't invent one |
-| 404 without JSON body | Plane doesn't implement the endpoint | Verify with a manual call before concluding the box is missing |
+| 404 without JSON body | Plane doesn't implement the endpoint | Update the plane (self-hosted) before concluding the box is missing |
 | 409 `seq conflict` | Concurrent enqueue lost the sequence race | Retry the enqueue |
 | 409 `stale epoch` | Fetch claimed a lower epoch than current | Adopt the current epoch; the older commands are expired |
 | 429 | Pairing cap (50 pending) | Approve the real pairings or wait out the 15-min expiry |
