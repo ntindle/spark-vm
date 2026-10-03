@@ -1,12 +1,13 @@
 # Toolset update (`deploy/toolset-update.sh`)
 
-**Status: framework + three real layers.** Partial implementation of issue
+**Status: framework + four real layers.** Partial implementation of issue
 #532 ("Self-update system: keep the box and its default toolset current").
 This ships the framework — trust model, scheduling, audit, idle gate,
-opt-out — and three real updater layers: `os-security`
+opt-out — and four real updater layers: `os-security`
 (unattended-upgrades), `cua-driver` (pinned reinstall from the upstream
-GitHub release), and `apt` (docker / node / gh converged via apt). The
-remaining #532 slices (Playwright updater, snapshots/rollback, failure
+GitHub release), `apt` (docker / node / gh converged via apt), and
+`playwright` (pinned pip package + Chromium browser builds + system
+libraries). The remaining #532 slices (snapshots/rollback, failure
 freeze, independent backup path) are explicitly follow-ups. Reconciled with
 #542's read-only status plane — this script is the *update* plane; see "Two
 planes" in `docs/SELF_UPDATE.md` for the canonical architecture.
@@ -22,8 +23,8 @@ Commands:
 
 | Command | Effect |
 | ------- | ------ |
-| `status` | TSV per-component *update state* (`ok` / `repair-needed` for `os-security`; `present` / `absent` for layers without an updater yet); operator-readable, no root needed. For installed-version drift against the pin list, read the status plane instead: `python3 scripts/self_update.py status` (see "Two planes" in `docs/SELF_UPDATE.md`) |
-| `update [--force] [--dry-run] [--now]` | Repair `os-security`, enforce the `cua-driver` pin, and apt-converge docker / node / gh (fail-loud, idempotent); `--now` is informational-only — the timer owns the weekly schedule, the flag only logs intent |
+| `status` | TSV per-component *update state* (`ok` / `repair-needed` for `os-security`; `present` / `absent` per tool, with the managed install's version as detail — the Playwright probe senses the managed venv, not system python); operator-readable, no root needed. For installed-version drift against the pin list, read the status plane instead: `python3 scripts/self_update.py status` (see "Two planes" in `docs/SELF_UPDATE.md`) |
+| `update [--force] [--dry-run] [--now]` | Repair `os-security`, enforce the `cua-driver` pin, apt-converge docker / node / gh, and converge Playwright (pip package, Chromium browsers, system libraries) onto the pin (fail-loud, idempotent); `--now` is informational-only — the timer owns the weekly schedule, the flag only logs intent |
 | `install` / `uninstall` | Install the systemd units and backfill the installed script copy **plus the installed pins file** / remove the units only (the installed copy and state dir — including audit history — are left in place) |
 | `optout` / `optin` | Machine-wide opt-out via `/etc/sparkvm/toolset-update.optout` (or `TOOLSET_UPDATE_OPTOUT=1` in the environment) |
 | `version` | Print the framework version |
@@ -123,6 +124,44 @@ box's apt sources offer, once a week, behind the idle gate. On every
 Overrides (environment): `APT_DOCKER_PKGS` / `APT_NODE_PKGS` / `APT_GH_PKGS`
 (space-separated candidate package names per tool).
 
+## The `playwright` layer (issue #532)
+
+The `playwright` layer converges Playwright onto the canonical pin
+(`scripts/self_update_pins.conf`, `playwright = …` — the version the agent
+smoke tests were validated against). One version governs three artifacts,
+all locked together by the `playwright` package version:
+
+1. the `playwright` **pip package** inside the managed venv (`$PLAYWRIGHT_VENV`,
+   default `/home/ntindle/.venvs/pw`),
+2. the **Chromium browser builds** (`playwright install chromium`),
+3. the **system libraries** (`playwright install-deps chromium`, apt-based).
+
+- **Exact pin, never a floating upgrade.** The specifier is always
+  `playwright==<pin>`; the pins file is the version authority, not PyPI's
+  latest. On-pin is a no-op — the layer touches the network only on drift.
+- **User-space work runs as the user.** The venv and the browser cache are
+  owned by `$PLAYWRIGHT_USER` (default `ntindle`), so the pip install and
+  the browser install run as that user (via `runuser`/`sudo` when the timer
+  runs as root) — a root-installed venv or root-owned
+  `~/.cache/ms-playwright` would break the agent's own Playwright use. Only
+  the system-library install runs as root.
+- **The probe senses the managed venv only** — never PATH — so a stray
+  PATH copy of Playwright cannot mask drift of the managed install (same
+  rationale as the `cua-driver` layer's managed-binary probe).
+- **Fail-closed:** a missing pin, an unsafe pin, a missing venv, an
+  unparseable installed version, a missing `bin/playwright` after the pip
+  install, or any failed step all refuse loudly and name `playwright` in
+  the audit line.
+- **Trust residual (stated, not hidden):** unlike the `cua-driver` layer's
+  SHA-256-verified tarball, the pip install and the browser download are
+  TLS-only with no hash pinning — `pip install playwright==<pin>` trusts
+  PyPI's index and TLS, `playwright install chromium` trusts the Playwright
+  CDN and TLS, and `install-deps` runs apt internally. Hash-pinning the
+  wheel and the browser archives is the follow-up slice that closes this
+  (see "Follow-ups").
+
+Overrides (environment): `PLAYWRIGHT_VENV`, `PLAYWRIGHT_USER`.
+
 ## Trust model
 
 - The systemd **timer runs the installed copy**
@@ -162,24 +201,29 @@ Overrides (environment): `APT_DOCKER_PKGS` / `APT_NODE_PKGS` / `APT_GH_PKGS`
   box's configured, signature-verified apt sources, only if the package is
   missing) and the `apt` layer's weekly
   `apt-get install --only-upgrade <allowlisted names>` (same sources, never
-  installs anything not already present). The suite pins exactly that shape —
-  no `wget`/`git clone`/`pip install`/`npm install`, two `apt-get` call
-  sites, two `curl` call sites.
+  installs anything not already present). The `playwright` layer adds one
+  `pip install playwright==<pin>` call site (exact pin only, run as the
+  venv-owning user), one `playwright install chromium` browser fetch, and
+  one `playwright install-deps chromium` (which runs apt internally for the
+  system libraries) — TLS-only, no hash pinning, the documented residual.
+  The suite pins exactly that shape — no `wget`/`git clone`/`npm install`,
+  two `apt-get` call sites, two `curl` call sites, one exact-pin `pip
+  install` call site.
 
 ## Component status
 
 `os-security` reports `ok` / `repair-needed`; `cua-driver` is enforced
 against the installed pins file (on-pin, absent→install, drift→reinstall);
 docker / node / gh are converged via the `apt` layer (installed packages
-only). npm rides with the nodesource `nodejs` package. Playwright remains
-a **status probe only** (`present` / `absent`) until its updater layer
-lands.
+only); Playwright's pip package, Chromium browser builds, and system
+libraries are converged onto the canonical pin via the `playwright` layer
+(on-pin is a no-op). npm rides with the nodesource `nodejs` package.
 
 ## Follow-ups (issue #532, not in this slice)
 
-- Real updater layer for Playwright (pip + browsers + system libs)
-  (adopt `scripts/self_update_pins.conf` as the canonical pin file per the
-  reconciliation contract in `docs/SELF_UPDATE.md` "Two planes")
+- Hash-pin the playwright wheel and browser archives (`--require-hashes`
+  / Sigstore) — closes the TLS-only residual of the `playwright` layer's
+  pip install and browser fetch
 - Make the idle gate uid-aware (it now protects the `apt` layer's
   service-restart surface, not just hygiene); land before/with the muse-job
   v2 cutover (#228), which blinds the tmux-only probe permanently
@@ -199,5 +243,5 @@ lands.
 
 ## Tests
 
-`deploy/test_toolset_update.py` — 52 hermetic tests (stub PATH, real-tool
+`deploy/test_toolset_update.py` — 64 hermetic tests (stub PATH, real-tool
 symlinks, no root assumptions). Wired into CI alongside the deploy tests.

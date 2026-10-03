@@ -11,6 +11,7 @@ systemd, or /etc.
 
 import json
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -98,7 +99,7 @@ def env(tmp_path):
     # the state dir the same way `install` would)
     statedir.mkdir(parents=True, exist_ok=True)
     (statedir / "self_update_pins.conf").write_text(
-        "# test pins\ncua-driver = 0.28.2\n"
+        "# test pins\ncua-driver = 0.28.2\nplaywright = 1.62.0\n"
     )
     e = {
         "TOOLSET_STATE_DIR": str(statedir),
@@ -124,6 +125,12 @@ def env(tmp_path):
     e["CUA_DRIVER_BIN"] = str(managed)
     e["CUA_DRIVER_OWNER"] = str(os.getuid())
     e["CUA_DRIVER_GROUP"] = str(os.getgid())
+    # The playwright probe senses the managed venv only (never PATH), so the
+    # fixture materializes one at the pin — otherwise every full `update`
+    # test would refuse fail-closed on the missing pin.
+    venv = stage_pw_venv(tmp_path, "1.62.0")
+    e["PLAYWRIGHT_VENV"] = str(venv)
+    e["PLAYWRIGHT_USER"] = pwd.getpwuid(os.getuid()).pw_name
     return {"env": e, "tmp": tmp_path, "apt": aptdir, "state": statedir,
             "sys": sysdir, "optout": optout}
 
@@ -328,13 +335,16 @@ def test_optout_optin_roundtrip(env):
 # --- safety pins ---------------------------------------------------------------
 
 def test_script_never_fetches_code():
-    # Trust-model pin (#532): the script's only network surface is the
-    # cua-driver layer's pinned release fetch, plus the apt layer's weekly
-    # --only-upgrade. apt-get appears exactly twice: the unattended-upgrades
+    # Trust-model pin (#532): the script's network surface is the
+    # cua-driver layer's pinned release fetch, the apt layer's weekly
+    # --only-upgrade, and the playwright layer's pinned pip + browser
+    # fetch. apt-get appears exactly twice: the unattended-upgrades
     # bootstrap and the apt layer's `install --only-upgrade` (simulate in
     # dry-run). curl appears exactly twice: the checksums.txt + tarball fetch
     # inside _cua_driver_layer, both against "$base/$tag/..." (base defaults
-    # to the single https:// constant CUA_RELEASE_BASE). A future slice
+    # to the single https:// constant CUA_RELEASE_BASE). `pip install`
+    # appears exactly once: the playwright layer's exact-pin
+    # `"playwright==$pin"` (never a floating upgrade). A future slice
     # adding network or package-manager surface must update this pin and
     # docs/TOOLSET_UPDATE.md. (Matches command invocations only — the
     # "apt-get install failed" log strings are not call sites; the
@@ -342,7 +352,7 @@ def test_script_never_fetches_code():
     # non-interactive contract.)
     import re
     text = open(SCRIPT).read()
-    for banned in ("wget ", "git clone", "pip install", "npm install",
+    for banned in ("wget ", "git clone", "npm install",
                    "http://"):
         assert banned not in text, f"must not contain: {banned}"
     invocation_re = re.compile(
@@ -374,6 +384,18 @@ def test_script_never_fetches_code():
     # One call site serves both modes via $mode (-y real, -s dry-run).
     assert 'apt-get "$mode" install' in line, line
     assert 'mode="-y"' in text and 'mode="-s"' in text, "dry/real modes"
+    # The playwright layer is the single `pip install` call site: exact pin
+    # only (`"playwright==$pin"`), never a floating upgrade. Matched on the
+    # `-m pip install` invocation shape so the log strings mentioning
+    # "pip install" are not counted as call sites.
+    pip_invocations = [l for l in logical
+                       if re.search(r"-m\s+pip\s+install\b", l)
+                       and not l.lstrip().startswith("#")]
+    assert len(pip_invocations) == 1, pip_invocations
+    pip_line = pip_invocations[0]
+    assert '"playwright==$pin"' in pip_line, pip_line
+    assert "--upgrade" not in pip_line, pip_line
+    assert "-U" not in pip_line.split(), pip_line
     # Never a bare `apt upgrade` / `apt-get upgrade` (would touch everything).
     for l in logical:
         if invocation_re.search(l):
@@ -568,7 +590,7 @@ def cua_env(env, tmp_path, pin="0.28.2", cur_version="0.28.2",
     for hermetic downloads."""
     e = dict(env["env"])
     (env["state"] / "self_update_pins.conf").write_text(
-        f"# test pins\ncua-driver = {pin}\n")
+        f"# test pins\ncua-driver = {pin}\nplaywright = 1.62.0\n")
     bindir = make_stub_bin(tmp_path / "cuabin", {
         "cua-driver": f'echo "cua-driver {cur_version}"',
         "tmux": "exit 1",
@@ -583,6 +605,61 @@ def cua_env(env, tmp_path, pin="0.28.2", cur_version="0.28.2",
     if release_base is not None:
         e["CUA_RELEASE_BASE"] = f"file://{release_base}"
     return e
+
+
+def stage_pw_venv(tmp_path, version, piplog=None, pwlog=None, pip_exit=0):
+    """Materialize a managed-Playwright-venv stub under tmp.
+
+    bin/python answers the `-c 'import playwright; ...'` probe with
+    `version` and logs `-m pip ...` invocations to piplog (if given),
+    exiting pip_exit for them; bin/playwright logs every invocation to
+    pwlog (if given). Returns the venv dir. Production shape: the update
+    plane converges exactly these two binaries, never PATH.
+    """
+    venv = tmp_path / "pw-venv"
+    bind = venv / "bin"
+    bind.mkdir(parents=True, exist_ok=True)
+    py = bind / "python"
+    py.write_text(
+        "#!/bin/sh\n"
+        f'VER="{version}"\n'
+        f'PIPLOG="{piplog or ""}"\n'
+        # The import probe (`-c 'import playwright'`) must stay silent —
+        # cmd_status runs it in an `if` condition, whose stdout flows to the
+        # script's own stdout; only the version query prints.
+        'if [ "$1" = "-c" ]; then\n'
+        '  case "$2" in *__version__*) echo "$VER";; esac\n'
+        '  exit 0\n'
+        'fi\n'
+        'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+        '  [ -n "$PIPLOG" ] && echo "$@" >> "$PIPLOG"\n'
+        f'  exit {pip_exit}\n'
+        'fi\n'
+        'exit 0\n')
+    py.chmod(py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    cli = bind / "playwright"
+    cli.write_text(
+        "#!/bin/sh\n"
+        f'PWLOG="{pwlog or ""}"\n'
+        '[ -n "$PWLOG" ] && echo "$@" >> "$PWLOG"\n'
+        'exit 0\n')
+    cli.chmod(cli.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return venv
+
+
+def pw_env(env, tmp_path, pin="1.62.0", cur_version="1.62.0"):
+    """Env for playwright layer tests: pins file, hermetic managed venv at
+    cur_version, PLAYWRIGHT_USER = the invoking user (so the user-switch
+    runs directly), and pip/browser invocation logs."""
+    e = dict(env["env"])
+    (env["state"] / "self_update_pins.conf").write_text(
+        f"# test pins\ncua-driver = 0.28.2\nplaywright = {pin}\n")
+    piplog = tmp_path / "pip.log"
+    pwlog = tmp_path / "playwright.log"
+    venv = stage_pw_venv(tmp_path, cur_version, piplog=piplog, pwlog=pwlog)
+    e["PLAYWRIGHT_VENV"] = str(venv)
+    e["PLAYWRIGHT_USER"] = pwd.getpwuid(os.getuid()).pw_name
+    return e, piplog, pwlog
 
 
 def test_read_pin_parses_pins_file(env):
@@ -677,7 +754,7 @@ def test_cua_driver_absent_installs_pin(env, tmp_path):
     base = make_pinned_release(tmp_path, "0.28.2", new_body)
     e = dict(env["env"])
     (env["state"] / "self_update_pins.conf").write_text(
-        "cua-driver = 0.28.2\n")
+        "cua-driver = 0.28.2\nplaywright = 1.62.0\n")
     fixture_bin = e["PATH"].split(os.pathsep)[0]
     nobin = tmp_path / "nobin"
     nobin.mkdir()
@@ -750,7 +827,7 @@ def test_cua_driver_installs_managed_when_absent_despite_path_at_pin(env, tmp_pa
     new_body = b"FAKE-CUA-DRIVER-FRESH"
     base = make_pinned_release(tmp_path, "0.28.2", new_body)
     e = dict(env["env"])
-    (env["state"] / "self_update_pins.conf").write_text("cua-driver = 0.28.2\n")
+    (env["state"] / "self_update_pins.conf").write_text("cua-driver = 0.28.2\nplaywright = 1.62.0\n")
     # Hermetic PATH like test_cua_driver_absent_installs_pin (fixture stubs
     # minus cua-driver, plus real tools), with a PATH cua-driver stub at the
     # pin — which the probe must ignore.
@@ -793,7 +870,7 @@ def test_cua_driver_noop_senses_managed_binary_not_path(env, tmp_path):
     curlbin = make_stub_bin(tmp_path / "curlbin3",
                             {"curl": f"echo \"$@\" >> {curlog}; exit 0"})
     e = dict(env["env"])
-    (env["state"] / "self_update_pins.conf").write_text("cua-driver = 0.28.2\n")
+    (env["state"] / "self_update_pins.conf").write_text("cua-driver = 0.28.2\nplaywright = 1.62.0\n")
     fixture_bin = e["PATH"].split(os.pathsep)[0]
     nobin = tmp_path / "nobin1"
     nobin.mkdir()
@@ -1064,3 +1141,159 @@ def test_update_dry_run_simulates_apt(env, tmp_path):
     assert "argv: -s install" in aptlog.read_text()
     lines = audit_lines(env)
     assert lines and lines[-1]["result"] == "dry-run"
+
+
+# --- playwright layer -----------------------------------------------------------
+
+def test_playwright_noop_when_at_pin(env, tmp_path):
+    # venv already on pin: no pip, no browser install, no install-deps.
+    e, piplog, pwlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert not piplog.exists(), "no pip call when already on pin"
+    assert not pwlog.exists(), "no browser/deps install when already on pin"
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+    assert "playwright" in lines[-1]["components"]
+
+
+def test_playwright_installs_pin_on_drift(env, tmp_path):
+    # Drifted venv: exact-pin pip install, then browsers, then system deps.
+    e, piplog, pwlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    pip_calls = piplog.read_text().splitlines()
+    assert len(pip_calls) == 1, pip_calls
+    assert "install" in pip_calls[0] and "playwright==1.62.0" in pip_calls[0], \
+        pip_calls
+    # Never a floating upgrade: the specifier is exactly the pin.
+    assert "playwright==" in pip_calls[0]
+    pw_calls = pwlog.read_text().splitlines()
+    assert "install chromium" in pw_calls, pw_calls
+    assert "install-deps chromium" in pw_calls, pw_calls
+    assert pw_calls.index("install chromium") < pw_calls.index(
+        "install-deps chromium"), pw_calls
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+
+
+def test_playwright_refuses_when_venv_absent(env, tmp_path):
+    # No managed venv: fail-closed (the venv is provisioned by setup, not
+    # this layer) — nothing is fetched.
+    e, piplog, pwlog = pw_env(env, tmp_path)
+    empty = tmp_path / "no-venv"
+    empty.mkdir()
+    e["PLAYWRIGHT_VENV"] = str(empty)
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call on absent venv"
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "playwright" in lines[-1]["failed"]
+
+
+def test_playwright_fail_closed_without_pin(env, tmp_path):
+    e, piplog, _ = pw_env(env, tmp_path)
+    (env["state"] / "self_update_pins.conf").write_text(
+        "# no playwright pin\ncua-driver = 0.28.2\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call without a pin"
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "playwright" in lines[-1]["failed"]
+
+
+def test_playwright_refuses_unsafe_pin(env, tmp_path):
+    e, piplog, _ = pw_env(env, tmp_path, pin="1.62.0;evil")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call on unsafe pin"
+
+
+def test_playwright_version_unknown_refuses(env, tmp_path):
+    # Installed but unparseable version: refuse rather than guess.
+    e, piplog, _ = pw_env(env, tmp_path, cur_version="not-a-version")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call on unparseable version"
+    lines = audit_lines(env)
+    assert "playwright" in lines[-1]["failed"]
+
+
+def test_playwright_dry_run_changes_nothing(env, tmp_path):
+    e, piplog, pwlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    r = run_bash("./deploy/toolset-update.sh update --dry-run", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert not piplog.exists(), "dry-run must not pip install"
+    assert not pwlog.exists(), "dry-run must not touch browsers/deps"
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "dry-run"
+
+
+def test_playwright_browser_cli_missing_refuses(env, tmp_path):
+    # pip succeeded but the venv has no playwright CLI: the browser/deps
+    # steps would be meaningless — refuse before touching the network.
+    e, piplog, pwlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    (tmp_path / "pw-venv" / "bin" / "playwright").unlink()
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert piplog.exists(), "pip runs before the CLI check"
+    assert not pwlog.exists(), "no browser/deps install without the CLI"
+    lines = audit_lines(env)
+    assert "playwright" in lines[-1]["failed"]
+
+
+def test_playwright_pip_failure_fails_loud(env, tmp_path):
+    e, piplog, pwlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    # Re-stage the venv with a pip stub that fails.
+    shutil.rmtree(tmp_path / "pw-venv")
+    stage_pw_venv(tmp_path, "1.61.0", piplog=piplog, pwlog=pwlog, pip_exit=1)
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not pwlog.exists(), "no browser/deps install after pip failure"
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "playwright" in lines[-1]["failed"]
+
+
+def test_playwright_senses_managed_venv_not_path(env, tmp_path):
+    # A PATH-resolved `python` reporting the pin must not mask drift of the
+    # managed venv: the probe senses the venv, never PATH.
+    e, piplog, _ = pw_env(env, tmp_path, cur_version="1.61.0")
+    bindir = make_stub_bin(tmp_path / "pathbin", {
+        "python": 'echo "1.62.0"',
+        "python3": 'echo "1.62.0"',
+    })
+    e["PATH"] = bindir + os.pathsep + e["PATH"]
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert piplog.exists(), "managed-venv drift must still converge"
+
+
+def test_status_reports_playwright_from_managed_venv(env, tmp_path):
+    # status probes the managed venv (not system python): present + version
+    # when the venv has playwright, absent when the venv is gone.
+    e, _, _ = pw_env(env, tmp_path, cur_version="1.62.0")
+    r = run_bash("./deploy/toolset-update.sh status", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    rows = {line.split("\t")[0]: line.split("\t")
+            for line in r.stdout.splitlines() if line.strip()}
+    assert rows["playwright"][1] == "present", rows["playwright"]
+    assert "1.62.0" in rows["playwright"][2], rows["playwright"]
+    empty = tmp_path / "no-venv"
+    empty.mkdir()
+    e["PLAYWRIGHT_VENV"] = str(empty)
+    r = run_bash("./deploy/toolset-update.sh status", env_extra=e)
+    rows = {line.split("\t")[0]: line.split("\t")
+            for line in r.stdout.splitlines() if line.strip()}
+    assert rows["playwright"][1] == "absent", rows["playwright"]
+
+
+def test_update_audit_lists_playwright_when_green(env, tmp_path):
+    e, _, _ = pw_env(env, tmp_path)
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+    assert "playwright" in lines[-1]["components"]
