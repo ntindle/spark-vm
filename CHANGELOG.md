@@ -53,6 +53,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Published the vision-vs-state gap analysis for the interactive desktop
+  lane: the box publishes its Xvfb desktop through the Cloudflare Realtime
+  SFU and the owner views/interacts from the dashboard (#854). Names what
+  is missing — a box-side capture+encode publisher, the session/presence
+  plane (the SFU defines no rooms), the dashboard viewer with the #47
+  mobile gestures — and the load-bearing calls: media transits Cloudflare
+  (trust boundary, documented), input is an action on its own channel
+  class, the capture pipeline stays transport-agnostic for self-hosted
+  parity, and the Realtime app provisioning is an operator step. Slices
+  filed as #935 (session plane), #936 (box publisher), #937 (viewer).
 - Bounded the waitlist funnel-event store: events older than 90 days now
   rotate out of the hot `funnel_events.jsonl` into dated monthly
   archives (never deleted — the audit trail stays on disk), while
