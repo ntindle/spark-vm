@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   and the browser system libraries are all brought onto the operator's
   pinned version each weekly run (installed as the agent user, so the
   browser cache lands where the agent's smoke tests look), instead of only
-  reporting Playwright present or absent. (#532)
+  reporting Playwright present or absent. (#532, #889)
 
 - The hosted control plane now mints additional owner API keys on demand
   (`POST /v1/owner/keys`, owner-authenticated): the plaintext key is
