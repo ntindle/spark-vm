@@ -18,7 +18,7 @@ class buys nothing in the other.
 
 | Credential | Format | Plane stores | Operator/box holds | TTL |
 |---|---|---|---|---|
-| Owner API key | `svm_` + 43 urlsafe chars | SHA-256 hash only (`owner_keys.key_hash`) | Operator: the plaintext once, at creation; the dashboard keeps it only in the tab's `sessionStorage` (never cookie, `localStorage`, or URL) | **None** — long-lived; see the minting gap below |
+| Owner API key | `svm_` + 43 urlsafe chars | SHA-256 hash only (`owner_keys.key_hash`) | Operator: the plaintext once, at creation; the dashboard keeps it only in the tab's `sessionStorage` (never cookie, `localStorage`, or URL) | **None** — long-lived; mint a replacement with `POST /v1/owner/keys` before revoking |
 | Box bearer token | opaque | SHA-256 hash only (`boxes.token_hash`) | Box: `enrollment.json`, mode 0600 | 24 h (`token_expires_at`); the previous token stays valid 15 min on heartbeats and `/rotate` after a rotation (crash recovery) |
 | Box ed25519 keypair | RFC 8032 | Public key only (`boxes.pubkey`) | Box: private key in the state dir, mode 0600 — **never leaves the box** | Lives with the enrollment |
 | Pairing code | 8 chars, shown once | SHA-256 hash only (`pairings.code_hash`) | Operator: reads it off the box screen | 15 min (lazy expiry on read); at most 50 pairings pending at once (429 beyond) |
@@ -64,10 +64,18 @@ first.
   lives *inside* the UPDATE, so two concurrent revokes can't both pass it:
   the plane always keeps at least one active owner key. 404 means the id
   is unknown or already revoked.
-- **Known limitation (gap, #878):** bootstrap is the *only* minting path.
-  Once the first owner key exists there is no endpoint to mint a second
-  one — if the single key is lost, the only recovery is a fresh database.
-  The operator guards that key like infrastructure until #878 closes.
+- **Minting additional keys (#878, shipped):** `POST /v1/owner/keys` with
+  an owner key mints a new one — JSON `{"name": "..."}` is optional
+  (1–64 chars; absent defaults to the key id). 201 returns
+  `{id, key, warning}` with the plaintext exactly once; it is never
+  stored and `GET /v1/owner/keys` still shows metadata only. A box token
+  presented here 401s — owner keys and box tokens are separate namespaces.
+- **Safe owner-key rotation (the #878 story):** mint a second key with
+  the current one → verify the new key authenticates (`GET /v1/owner/keys`
+  with it) → revoke the old key. The last-active-key guard keeps at least
+  one active key, so this is two-step by construction and you can never
+  lock yourself out. A second operator gets a second key the same way
+  (name it for them); a lost key now costs a mint, not a fresh database.
 - Owner keys have **no expiry** (`owner_keys` carries no `expires_at`;
   validity is `revoked_at IS NULL`). The box-side tokens they authorize are
   the short-lived ones.
@@ -104,12 +112,12 @@ Bearer <redacted> 401s *immediately* — heartbeats, rotation, and bootstrap
 all refuse it from that moment. Revocation is one-way: the box comes back
 only by re-pairing (`request` + `redeem`).
 
-**Owner key leaked → revoke it, fall back to the saved backup key.**
-Revoke the leaked key (`DELETE /v1/owner/keys/{id}`) using the backup you
-saved at creation; the last-active-key guard prevents locking yourself
-out. There is **no mint-a-replacement path today** (the #878 gap above):
-the saved backup key is your only spare, which is exactly why day-0 says
-to store it like infrastructure.
+**Owner key leaked → mint a replacement, then revoke the leaked one.**
+Mint a new key (`POST /v1/owner/keys`) with the key you still hold,
+verify it authenticates, then revoke the leaked key
+(`DELETE /v1/owner/keys/{id}`); the last-active-key guard prevents
+locking yourself out. Keep a saved backup key regardless — two live
+keys is the minimum sane posture.
 
 **A 401 on the box → re-pair, don't fight it.** 401 means the token is dead
 (expired, revoked, or never valid): `request` + `redeem` again.

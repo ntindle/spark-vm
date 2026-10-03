@@ -53,6 +53,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The hosted control plane now mints additional owner API keys on demand
+  (`POST /v1/owner/keys`, owner-authenticated): the plaintext key is
+  returned exactly once and never stored, a box token presented there
+  401s, and the bootstrap closed-gate ordering is untouched. This closes
+  the "single key per database lifetime" gap — safe owner-key rotation
+  is now mint-second → verify → revoke-first, a second operator gets a
+  second named key, and a lost key costs a mint instead of a fresh
+  database. (#887, #878)
+
 - Published an operator runbook for the hosted control plane's auth stack: a
   single page naming the credential inventory (owner API keys, box Bearer <redacted>,
   box keypairs, pairing codes), the day-0 bootstrap, the owner-key lifecycle,
