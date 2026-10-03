@@ -53,6 +53,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Published a vision-vs-state gap analysis for hosted box provisioning
+  (signup → claim → provision → auto-pair → dashboard): the provider
+  interface ships but no Fly driver implements it, the invite-claim stream
+  has no provision consumer, plane-provisioned boxes have no pairing
+  auto-approval design, and spend caps are a decision with no enforcement
+  mechanism — filed as new tracked issues. (#TBD)
+
 - spark-vm has a brand logo: a gold spark on a dark terminal badge, with SVG
   source and PNG exports for the site header, app icons, and favicon. The
   landing and waitlist pages now share a brand bar carrying the mark. (#901)

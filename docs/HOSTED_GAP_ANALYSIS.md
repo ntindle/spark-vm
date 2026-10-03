@@ -56,7 +56,7 @@ even if those stay unmerged. **Verdict: no gap.**
 | Vision | Current state |
 |---|---|
 | Pick a box size, get a box | Nothing. Backlog H4 is BLOCKED on the user: provider choice + API credentials |
-| Provider-agnostic interface (provision/status/dial/ssh_info/destroy) | Not drafted; H4's draft was supposed to precede the driver |
+| Provider-agnostic interface (provision/status/dial/ssh_info/destroy) | Not drafted; H4's draft was supposed to precede the driver *(2026-10-03: superseded — the interface shipped as the executable `harness/provider_iface.py`; see `docs/BOX_PROVISIONING_GAP_ANALYSIS.md` §2 for the current row)* |
 | Getting merged code onto the live fleet | Design exists: auto-deploy updater, PR #29 (open, fixes #22). Not merged, not enabled |
 
 **Gaps:**
