@@ -172,6 +172,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
   from a direct client is ignored, so it can neither dodge the rate limit
   nor claim loopback. (#900, #896)
 
+- The box pairing client closes three redirect and response-shape gaps: a
+  redirect that downgrades a secure connection to plain HTTP is now refused
+  outright (the earlier header-stripping fix was safe, but the follow-up
+  request would still have talked to the new address in the clear);
+  unparseable redirect targets (like a garbage port in a Location header)
+  fail closed with a clean error instead of an internal exception; the
+  control-plane refusal message no longer echoes embedded username/password
+  credentials into logs; and the interactive approve path now validates the
+  pairing records it prints, so a malformed or hostile control plane gets a
+  clean error instead of a crash — and an approval can never proceed
+  without a fingerprint to verify. (#903, #881, #885)
+
 ### Fixed
 - The dashboard sync tool now refuses two more ways to produce a broken
   control-plane file: a page ending in an odd number of backslashes (the
