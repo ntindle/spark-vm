@@ -115,11 +115,9 @@ box's apt sources offer, once a week, behind the idle gate. On every
   **fail closed**: `update` exits non-zero and the audit line names `apt`.
 - **Service restarts are possible.** Maintainer scripts (e.g. `docker-ce`'s
   `dockerd` restart) may restart services — unlike the v0 layers, the `apt`
-  layer does not promise otherwise. The protection is the **idle gate**
-  (defer while agent jobs are live) plus the weekly quiet-hours window; the
-  gate's known blind spots (per-uid tmux sockets) are now load-bearing for
-  this layer, and making the gate uid-aware is the follow-up that tightens
-  it.
+  layer does not promise otherwise. The protection is the **uid-aware idle
+  gate** (defer while agent jobs are live, across agent uids) plus the
+  weekly quiet-hours window.
 
 Overrides (environment): `APT_DOCKER_PKGS` / `APT_NODE_PKGS` / `APT_GH_PKGS`
 (space-separated candidate package names per tool).
@@ -188,18 +186,17 @@ Overrides (environment): `PLAYWRIGHT_VENV`, `PLAYWRIGHT_USER`.
   (`/home/ntindle/.sparkvm-toolset/bin/toolset-update.sh`), not the repo
   checkout — a compromised or half-written checkout cannot inject code into
   the update path.
-- Updates **defer while any `mjob-*` tmux session exists** (conservative idle
-  gate); `--force` bypasses. **Known limitation:** tmux sockets are per-uid,
-  so the gate (running as root) only sees root's tmux server — `mjob-*`
-  sessions owned by another uid (e.g. `ntindle`) are invisible to it, and a
-  missing/broken tmux probe also reads as "no jobs". The blind gate was
-  acceptable for the v0 layers (they never restarted services), but the `apt`
-  layer can trigger maintainer-script service restarts — the gate plus the
-  weekly quiet-hours window are the protection there, so making the gate
-  uid-aware is now a real follow-up rather than hygiene (see "Follow-ups").
-  The muse-job v2 cutover (issue #228 — jobs move off tmux entirely) will
-  blind the tmux-only gate permanently, so the uid-aware/registry-check
-  follow-up must land before or with v2.
+- Updates **defer while any agent job is live** (conservative idle gate);
+  `--force` bypasses. The gate is uid-aware: for every user in
+  `TOOLSET_AGENT_USERS` (default: `ntindle`) it probes that user's own tmux
+  server for live `mjob-*` sessions *and* scans their muse-job registry
+  (`~/muse-jobs/*/job.json`) for non-terminal job records
+  (`active`/`blocked`; unrecognized states fail closed as busy). Both probes
+  are read-only — tmux is asked only for session names, job records are
+  parsed as data and never executed — and a probe that cannot run defers
+  loudly rather than reading as idle. The registry half is the v2-proof
+  half: when the muse-job v2 cutover (issue #228) moves jobs off tmux, the
+  registry keeps the same state contract and the gate keeps working.
 - The `os-security` repair **overwrites** `/etc/apt/apt.conf.d/20auto-upgrades`
   with exactly the two required lines. Any operator tuning in that file
   (e.g. `Unattended-Upgrade::Allowed-Origins`) is discarded on repair — on a
@@ -249,9 +246,6 @@ idempotent) via the `playwright` layer. npm rides with the nodesource
 - Hash-pin the playwright wheel and browser archives (`--require-hashes`
   / Sigstore) — closes the TLS-only residual of the `playwright` layer's
   pip install and browser fetch
-- Make the idle gate uid-aware (it now protects the `apt` layer's
-  service-restart surface, not just hygiene); land before/with the muse-job
-  v2 cutover (#228), which blinds the tmux-only probe permanently
 - Validate `APT_*_PKGS` candidates against the Debian package-name pattern
   (defense in depth against glob expansion / option injection via root-set
   env; currently the only setter with privilege is root, so no boundary is

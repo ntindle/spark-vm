@@ -80,6 +80,18 @@ def env(tmp_path):
     sysdir = tmp_path / "systemd"
     aptdir.mkdir()
     optout = tmp_path / "optout"
+    me = pwd.getpwuid(os.getuid()).pw_name
+    # Fake agent-user home: the idle gate resolves homes via getent, so a
+    # getent stub answers the invoking user with this dir. Nothing here
+    # reads the real $HOME — the registry probe stays hermetic even on a
+    # box whose real home holds live muse-job records.
+    fakehome = tmp_path / "fakehome"
+    fakehome.mkdir(parents=True, exist_ok=True)
+    getent_body = (
+        f'if [ "$1" = "passwd" ] && [ "$2" = "{me}" ]; then '
+        f'echo "{me}:x:{os.getuid()}:{os.getgid()}:{me}:{fakehome}:/bin/sh"; '
+        f'exit 0; fi; exit 2'
+    )
     bindir = make_stub_bin(tmp_path, {
         # unattended-upgrades "installed" via PATH presence
         "unattended-upgrades": "exit 0",
@@ -88,6 +100,8 @@ def env(tmp_path):
         "dpkg": "exit 1",
         # tmux: no sessions (idle) by default
         "tmux": "exit 1",
+        # getent: the invoking user resolves to the fake home above
+        "getent": getent_body,
         # sudo stub: fails loudly when invoked (no passwordless sudo in tests)
         "sudo": "echo STUB-SUDO-CALLED >&2; exit 1",
         "apt-get": "echo STUB-APT-GET-CALLED >&2; exit 1",
@@ -114,6 +128,9 @@ def env(tmp_path):
         "TOOLSET_INSTALL_OWNER": str(os.getuid()),
         "TOOLSET_INSTALL_GROUP": str(os.getgid()),
         "TMUX_BIN": os.path.join(bindir, "tmux"),
+        # The idle gate's agent-user list: pin to the invoking user so the
+        # per-uid probes run hermetically (getent stub -> fake home above).
+        "TOOLSET_AGENT_USERS": me,
         "PATH": bindir + os.pathsep + os.environ["PATH"],
     }
     # The probe senses the managed binary only (never PATH), so the fixture
@@ -132,7 +149,7 @@ def env(tmp_path):
     e["PLAYWRIGHT_VENV"] = str(venv)
     e["PLAYWRIGHT_USER"] = pwd.getpwuid(os.getuid()).pw_name
     return {"env": e, "tmp": tmp_path, "apt": aptdir, "state": statedir,
-            "sys": sysdir, "optout": optout}
+            "sys": sysdir, "optout": optout, "fakehome": fakehome, "me": me}
 
 
 def audit_lines(env):
@@ -261,6 +278,82 @@ def test_force_bypasses_idle_gate(env):
     r = run_bash("./deploy/toolset-update.sh update --force", env_extra=e)
     assert r.returncode == 0, r.stderr
     assert (env["apt"] / "20auto-upgrades").read_text() == GOOD_CONF
+
+
+def _write_job(home, slug, state):
+    d = home / "muse-jobs" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "job.json").write_text(json.dumps({"slug": slug, "state": state}))
+
+
+def test_idle_gate_skips_agent_user_that_does_not_exist(env):
+    # A configured agent user with no passwd entry has no jobs: skipped,
+    # logged, never a deferral.
+    e = dict(env["env"])
+    e["TOOLSET_AGENT_USERS"] = "no-such-user-zzz"
+    r = source_and("set +e; _jobs_active; echo rc=$?", env_extra=e)
+    assert "rc=1" in r.stdout, r.stdout + r.stderr
+
+
+def test_idle_gate_rejects_unsafe_agent_user_name(env):
+    # Fail-closed: a user name that could smuggle flags into id/getent
+    # defers instead of probing.
+    e = dict(env["env"])
+    e["TOOLSET_AGENT_USERS"] = "-u"
+    r = source_and("set +e; _jobs_active; echo rc=$?", env_extra=e)
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+
+
+def test_registry_busy_detects_active_and_blocked(env):
+    home = env["tmp"] / "reghome1"
+    _write_job(home, "alpha", "active")
+    _write_job(home, "beta", "blocked")
+    _write_job(home, "gamma", "closed")
+    r = source_and(f"set +e; _registry_busy {home}/muse-jobs; echo rc=$?",
+                   env_extra=env["env"])
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    assert "alpha:active" in r.stdout, r.stdout
+    assert "beta:blocked" in r.stdout, r.stdout
+    assert "gamma" not in r.stdout, r.stdout
+
+
+def test_registry_busy_idle_when_all_terminal(env):
+    home = env["tmp"] / "reghome2"
+    _write_job(home, "a", "closed")
+    _write_job(home, "b", "killed")
+    _write_job(home, "c", "done")
+    r = source_and(f"set +e; _registry_busy {home}/muse-jobs; echo rc=$?",
+                   env_extra=env["env"])
+    assert "rc=1" in r.stdout, r.stdout + r.stderr
+
+
+def test_registry_busy_fail_closed_on_unknown_state(env):
+    # A future/unrecognized job state must defer, never read as idle.
+    home = env["tmp"] / "reghome3"
+    _write_job(home, "zeta", "migrating")
+    r = source_and(f"set +e; _registry_busy {home}/muse-jobs; echo rc=$?",
+                   env_extra=env["env"])
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    assert "zeta:migrating" in r.stdout, r.stdout
+
+
+def test_registry_busy_missing_dir_is_idle(env):
+    r = source_and(f"set +e; _registry_busy {env['tmp']}/nope; echo rc=$?",
+                   env_extra=env["env"])
+    assert "rc=1" in r.stdout, r.stdout + r.stderr
+
+
+def test_idle_gate_defers_on_registry_record_with_idle_tmux(env):
+    # The v2-proof half: tmux shows no sessions, but the muse-job registry
+    # holds a live record — the update must still defer. (Against the v0
+    # tmux-only gate this test fails: the update proceeds and repairs.)
+    _write_job(env["fakehome"], "live-one", "active")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=env["env"])
+    assert r.returncode == 0, r.stderr  # deferral is quiet, not a failure
+    assert not (env["apt"] / "20auto-upgrades").exists()  # nothing repaired
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "deferred"
+    assert lines[-1]["reason"] == "jobs-active"
 
 
 def test_optout_is_noop(env):

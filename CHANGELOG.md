@@ -185,6 +185,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   without a fingerprint to verify. (#903, #881, #885)
 
 ### Fixed
+
+- The weekly toolset self-updater's idle gate now sees agent jobs no matter
+  which user owns them: it checks every agent user's own tmux sessions and
+  their muse-job job registry for live jobs, instead of only root's tmux
+  server — previously a job running as another user was invisible and the
+  weekly update could restart services underneath it. (#TBD)
 - The dashboard sync tool now refuses two more ways to produce a broken
   control-plane file: a page ending in an odd number of backslashes (the
   last one would escape the closing quotes of the inlined string) and a
