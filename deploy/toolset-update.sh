@@ -201,16 +201,25 @@ _log_dest_init() {
 
 _sanitize_log_line() {
     # Strip terminal-injection bytes from a log line: ASCII C0 controls
-    # (except tab) and DEL. Newlines become spaces so one call is one line.
-    # The gate interpolates user-influenced data (user names, job slugs, job
-    # states from ~/muse-jobs records) into log lines that land in the
-    # journal and the run log; raw ESC/CSI bytes would let a
-    # lower-privilege writer inject terminal sequences into a privileged
-    # operator's viewer. Pure bash (no external commands): log() must work
-    # on minimal PATHs — a missing helper here must never kill the run
-    # before the loud audit line.
+    # (except tab) and DEL. CR and LF become spaces so one call is one
+    # line — a CR would otherwise let a crafted slug overwrite the visible
+    # head of the line in a terminal viewer (log forgery). The gate
+    # interpolates user-influenced data (user names, job slugs, job states
+    # from ~/muse-jobs records) into log lines that land in the journal
+    # and the run log; raw ESC/CSI bytes would let a lower-privilege
+    # writer inject terminal sequences into a privileged operator's
+    # viewer. Pure bash (no external commands): log() must work on minimal
+    # PATHs — a missing helper here must never kill the run before the
+    # loud audit line.
+    # Residual (documented): C1 controls (0x80-0x9F) are NOT stripped —
+    # they are UTF-8 continuation bytes too, and telling a lone 0x9B from
+    # a valid multibyte sequence needs a decoder, which the pure-bash
+    # design rules out. The universal ESC vector is dead; only
+    # xterm-in-UTF-8-mode interprets C1, and every other mainstream
+    # terminal ignores them.
     local s="$1"
     s="${s//$'\n'/ }"
+    s="${s//$'\r'/ }"
     s="${s//[$'\001'-$'\010'$'\013'$'\014'$'\016'-$'\037'$'\177']/}"
     printf '%s' "$s"
 }
@@ -407,9 +416,17 @@ for name in names:
         slug="$(basename "$d")"
         states="$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' \
             "${d}job.json" 2>/dev/null | cut -d'"' -f4 || true)"
+        # No parseable state at all: fail closed (a corrupt record must
+        # never read as idle). NB: command substitution strips trailing
+        # newlines, so an empty $states would otherwise vanish here.
+        if [ -z "$states" ]; then
+            printf '%s:unparseable\n' "$slug"
+            busy=1
+            continue
+        fi
         # Strip the terminal states; whatever survives — a non-terminal
-        # value, or the printf-added empty line when nothing parsed — is
-        # busy.
+        # value — is busy. (A nested "done" can never mask a live
+        # top-level state: ANY non-terminal value defers.)
         rest="$(printf '%s\n' "$states" | grep -Ev '^(killed|closed|done)$' || true)"
         if [ -n "$rest" ]; then
             first="$(printf '%s' "$rest" | grep -v '^$' | head -n 1 || true)"

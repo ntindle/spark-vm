@@ -383,12 +383,51 @@ def test_log_sanitizes_control_characters(env):
     # (user names, job slugs, job states) must not reach the journal/run
     # log raw.
     code = ("log \"job $(printf '\\033[2J\\033[31m') done\"; "
+            "log \"forged$(printf '\\r')clean\"; "
             "cat \"$TOOLSET_STATE_DIR/toolset-update.log\"")
     r = source_and(code, env_extra=env["env"])
     out = r.stdout
     assert "\x1b" not in out, repr(out)
+    assert "\r" not in out, repr(out)
     # ESC is stripped; the inert CSI parameter text remains visible.
     assert "job [2J[31m done" in out, repr(out)
+    # CR becomes a space: no line-overwrite forgery in terminal viewers.
+    assert "forged clean" in out, repr(out)
+
+
+def test_registry_busy_fallback_fail_closed_on_unparseable(env):
+    # No python3 on PATH: the grep fallback must still fail closed on a
+    # corrupt job.json (busy, never idle).
+    home = env["tmp"] / "reghome5"
+    d = home / "muse-jobs" / "corrupt"
+    d.mkdir(parents=True)
+    (d / "job.json").write_text("{not json")
+    tbin = make_stub_bin(env["tmp"] / "nopybin", {})
+    realtools = make_realtools(env["tmp"])
+    e = dict(env["env"])
+    # Deliberately no system PATH: python3 must be unresolvable here.
+    e["PATH"] = tbin + os.pathsep + realtools
+    r = source_and(f"set +e; _registry_busy {home}/muse-jobs; echo rc=$?",
+                   env_extra=e)
+    assert r.stdout.strip().endswith("rc=0"), r.stdout + r.stderr
+    assert "corrupt:unparseable" in r.stdout, r.stdout
+
+
+def test_registry_busy_fallback_busy_on_any_nonterminal(env):
+    # No python3 on PATH: a nested "done" must not mask a live top-level
+    # state in the grep fallback.
+    home = env["tmp"] / "reghome6"
+    d = home / "muse-jobs" / "mixed"
+    d.mkdir(parents=True)
+    (d / "job.json").write_text('{"history": [{"state": "done"}], "state": "active"}')
+    tbin = make_stub_bin(env["tmp"] / "nopybin2", {})
+    realtools = make_realtools(env["tmp"])
+    e = dict(env["env"])
+    e["PATH"] = tbin + os.pathsep + realtools
+    r = source_and(f"set +e; _registry_busy {home}/muse-jobs; echo rc=$?",
+                   env_extra=e)
+    assert r.stdout.strip().endswith("rc=0"), r.stdout + r.stderr
+    assert "mixed:active" in r.stdout, r.stdout
 
 
 def test_registry_busy_missing_dir_is_idle(env):
