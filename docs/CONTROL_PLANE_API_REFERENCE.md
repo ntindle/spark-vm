@@ -32,7 +32,7 @@ never matches.
 |---|---|---|---|
 | Owner API key | `svm_` + 43 urlsafe chars | `Authorization: Bearer <key>` | None — long-lived; rotate by mint + revoke |
 | Box bearer token | opaque | `Authorization: Bearer <token>` | 24 h (`token_expires_at`); the previous token stays valid 15 min on heartbeats and `/rotate` after a rotation |
-| None (pairing flow) | pairing code (8 chars, shown once) + ed25519 proof-of-possession | request/redeem bodies | Pairing code 15 min (lazy expiry on read); at most 50 pairings pending (429 beyond) |
+| None (pairing flow) | pairing code (8 chars, shown once) + ed25519 proof-of-possession | request response + approve body; signature in redeem body | Pairing code 15 min (lazy expiry on read); at most 50 pairings pending (429 beyond) |
 
 The plane stores only SHA-256 hashes of all three secret classes
 (`owner_keys.key_hash`, `boxes.token_hash`, `pairings.code_hash`). A box's
@@ -51,7 +51,7 @@ ed25519 keypair never leaves the box (public key only on the plane).
 
 Fresh-database bootstrap is two-legged (the pairing first-claim path is
 the usual one): on a fresh database with no owner keys yet, the very
-first pairing approval is CLI-only (`spark_pair.py approve --bootstrap`) —
+first pairing approval is CLI-only (`spark_pair.py approve --pairing-id pair_... --bootstrap`) —
 the dashboard can't sign in until that first owner key exists.
 
 ### Pairing endpoints (`/v1/pairing/*`) — enrollment, bounded human approval
@@ -85,8 +85,8 @@ dashboard's calls below are the repo-side witness.)
 
 | Method & path | Purpose |
 |---|---|
-| `POST /v1/boxes/{id}/heartbeat` | Box liveness: JSON status body (`box_id`, `sent_at`, `client`, `uptime_s?`, `load_1?`, `token_expires_at?`). The plane's own `200 {ok:true}` is the only "ok" — a missed heartbeat never fabricates one. Boxes with no heartbeat in 5 min are **STALE** on the dashboard; a never-heartbeated box shows "no heartbeat". (#864) |
-| `POST /v1/boxes/token/rotate` | ed25519 proof-of-possession (`{"signature"}` in the body) rotates the box token: atomic self-referential swap, 24 h expiry, 15-min previous-token grace, null-signature MUST-reject for boxes with a keypair on record — while keyless pre-#844 boxes rotate with `signature: null` (`"proof": "Bearer"`, `"rekey_recommended": true`). A `403` here means the Bearer <redacted> was accepted but the signature was rejected — check the box clock (±300 s window), don't re-pair. (#846) |
+| `POST /v1/boxes/{id}/heartbeat` | Box liveness: JSON status body (`box_id`, `sent_at`, `client`, `uptime_s?`, `load_1?`, `token_expires_at?`). The plane's own `200 {ok:true}` is the only "ok" — a missed heartbeat never fabricates one. Boxes with no heartbeat in 5 min are **STALE** on the dashboard; a never-heartbeated box shows "No heartbeat". (#864) |
+| `POST /v1/boxes/token/rotate` | ed25519 proof-of-possession (`{"signature"}` in the body) rotates the box token: atomic self-referential swap, 24 h expiry, 15-min previous-token grace, null-signature MUST-reject for boxes with a keypair on record — while keyless pre-#844 boxes rotate with `signature: null` (`"proof": "Bearer <redacted>"`, `"rekey_recommended": true`). A `403` here means the Bearer <redacted> was accepted but the signature was rejected — check the box clock (±300 s window), don't re-pair. (#846) |
 | `POST /v1/boxes/{id}/revoke` | **Owner key.** Stamps `revoked_at`; the box's Bearer <redacted> 401s *immediately* (heartbeats, rotation, bootstrap all refuse). One-way — the box comes back only by re-pairing. (#846) |
 
 ### Durable-command endpoints (`/v1/boxes/{box_id}/commands*`)
@@ -143,7 +143,7 @@ rewrites the decision.
 | 409 `stale epoch` | Fetch claimed a lower epoch than current | Adopt the current epoch; the older commands are expired |
 | 409 `"approval already decided"` | Conflicting decision on an already-decided approval record | Create a new approval instead of rewriting history |
 | 410 | Deciding an expired approval record | The decision was not recorded; the record stays expired |
-| 400 | Validation: malformed aid, out-of-range cursor/seq/epoch, limit over clamp | Fix the request fields; never a server error |
+| 400 | Validation: malformed aid, out-of-range cursor/seq/epoch (`limit` is clamped to 200, not rejected) | Fix the request fields; never a server error |
 | 429 | Pairing cap (50 pending) | Approve the real pairings or wait out the 15-min expiry |
 
 ## Deliberately NOT in this reference
