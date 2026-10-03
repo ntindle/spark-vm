@@ -60,7 +60,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the "single key per database lifetime" gap — safe owner-key rotation
   is now mint-second → verify → revoke-first, a second operator gets a
   second named key, and a lost key costs a mint instead of a fresh
-  database. (#TBD, #878)
+  database. (#887, #878)
 
 - Published an operator runbook for the hosted control plane's auth stack: a
   single page naming the credential inventory (owner API keys, box Bearer <redacted>,
