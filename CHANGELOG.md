@@ -53,6 +53,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Published the control-plane protocol for phone-approval records: the
+  plane now holds a per-box action-approval record (owner-created, with a
+  client-chosen action id, a server-clamped expiry window, and a
+  write-once approve/deny decision) behind owner-key-authenticated
+  endpoints — a box can never decide its own approvals. Expiry is
+  enforced server-side (an expired record reads terminal), repeat taps
+  replay the same decision, and conflicting decisions are rejected. The
+  box-side filing, plane-to-box delivery, and ingest legs are separate
+  follow-ups. (#TBD)
+
 - Published a vision-vs-state gap analysis for hosted box provisioning
   (signup → claim → provision → auto-pair → dashboard): the provider
   interface ships but no Fly driver implements it, the invite-claim stream
