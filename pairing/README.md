@@ -190,6 +190,59 @@ This is the *interim* sender: no box long-lived process, no reconnect
 loop. The persistent box-side process for the phone-home WebSocket is
 decided with the #847 S5 box WSS client, not here.
 
+## Command ingest (#874)
+
+The other half of the approvals return leg: the plane enqueues owner
+decisions as `approval_decision` commands on the durable queue (#848,
+#873), and the box has to consume them — otherwise a parked agent never
+learns the owner tapped approve/deny on the plane dashboard:
+
+```bash
+spark-pair.py ingest   # one fetch-execute-ack pass, then exit
+```
+
+One invocation fetches due commands (`GET /v1/boxes/{id}/commands/pending`
+with the box Bearer), executes the ones it honors, acks them, and advances
+its cursor — the cursor is the highest *acked* seq (never highest-fetched),
+persisted in `commands_cursor.json`, healed from the plane's
+`acked_watermark` when the file is missing or corrupt. The contract with
+the operator mirrors `heartbeat`:
+
+- **Exit 0 only when every due command was consumed.** A command the ingest
+  could not execute is *not* acked — it redelivers on the next tick — and
+  the run stops at it, so the cursor can never advance past an unacked
+  command and skip its redelivery.
+- **Failures are loud.** Every failure prints to stderr AND is appended to
+  `ingest.log` in the state dir; the token is redacted from both channels.
+  A 401 names re-pairing; a plane without the commands endpoints says so
+  honestly instead of failing opaquely.
+- **Lock file** (`.ingest.lock`) serializes overlapping cron ticks.
+
+`approval_decision` is the only honored command kind today; unknown kinds
+are acked-and-logged so one unknown kind cannot wedge the queue. Each
+decision is validated (aid shape, decision word, `decision_seq`, and the
+idempotency key bound to `box_id`+`aid`+`seq`), then stamped into
+confirmd's answered/consumed store exactly like a local tap — `deny` and
+`expire` land the terminal records the proxy's Decision legs read, and
+`approve` mints the grant through confirmd's single writer
+(`proxy/grant-writer`, which dedupes on approval id, so a crash between
+mint and stamp cannot double-mint on redelivery). Every stamped record
+carries `decision_origin: "plane"` plus the plane's `(seq,
+idempotency_key)` as the receipt, and a decision is stamped only for an
+aid the box itself filed — a decision for an unknown aid is rejected,
+never stamped, and a tenant-scoped item fails closed (this client
+predates multi-tenant confirmd).
+
+Cron-acceptable:
+
+```
+* * * * * /path/to/spark-pair.py ingest >>/var/log/spark-ingest.log 2>&1
+```
+
+The approvals store is located via `SVM_APPROVALS_DIR` (default
+`/home/swapd/approvals`, the proxy's default); the grant writer via
+`GRANT_WRITER` (default `/home/swapd/grant-writer`, confirmd's default).
+
 ## Security properties
 
 - **No self-registration.** The old register endpoint is gone (404). A box
@@ -225,7 +278,9 @@ decided with the #847 S5 box WSS client, not here.
   (signature verification; the Worker deploys as a single file).
   `test_ed25519.py` asserts the two copies stay byte-identical.
 - `spark_pair.py` — box client + owner approval CLI (stdlib only):
-  `init`, `request --name`, `redeem`, `approve [--pairing-id]`.
+  `init`, `request --name`, `redeem`, `approve [--pairing-id]`,
+  `heartbeat`, `rotate [--auto]`, `revoke --box-id`,
+  `ingest` (durable-command consumer, #874).
   State in `~/.config/spark-pair` (`--dir` / `SVM_PAIR_DIR` override);
   key and token files are mode 0600; secrets are never printed.
   Control-plane URL defaults to `https://api.sparkvm.dev`
@@ -250,6 +305,8 @@ decided with the #847 S5 box WSS client, not here.
 | POST | /v1/boxes/{id}/heartbeat | box Bearer <redacted> | `{box_id, sent_at, client, uptime_s?, load_1?, token_expires_at?}` → `{ok:true}` — box liveness (~60 s cadence; dashboard marks stale after 300 s). Sent by `spark-pair.py heartbeat` (#864). |
 | POST | /v1/boxes/token/rotate | box Bearer <redacted> | `{"signature": b64|null}` → `{token, token_expires_at, proof}` — proof-of-possession rotation (#846; live on the hosted plane since 2026-10-02) |
 | POST | /v1/boxes/{id}/revoke | owner | revoke the box's Bearer <redacted> immediately (#846; live on the hosted plane since 2026-10-02) |
+| GET | /v1/boxes/{id}/commands/pending | box Bearer <redacted> | `?since=&limit=` → `{commands, acked_watermark, lease_secs}` — due durable commands, current epoch, `seq > since` (#848; consumed by `spark-pair.py ingest`, #874) |
+| POST | /v1/boxes/{id}/commands/ack | box Bearer <redacted> | `{seqs:[...]}` — idempotent ack of executed commands (#848; consumed by `spark-pair.py ingest`, #874) |
 
 ## Trying it
 
@@ -270,6 +327,8 @@ python3 pairing/spark_pair.py rotate --auto
 SVM_OWNER_KEY=... python3 pairing/spark_pair.py revoke --box-id box_...
 # box liveness (~every minute, quiet on success, loud on failure):
 # * * * * * /path/to/spark-pair.py heartbeat >>/var/log/spark-heartbeat.log 2>&1
+# plane approval decisions -> confirmd's store (~every minute):
+# * * * * * /path/to/spark-pair.py ingest >>/var/log/spark-ingest.log 2>&1
 python3 pairing/spark_pair.py heartbeat
 ```
 

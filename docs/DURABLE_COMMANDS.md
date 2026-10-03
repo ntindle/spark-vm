@@ -56,6 +56,23 @@ seq) so the box can reconcile its cursor after a restart.
   be delivered again — but acking them still returns success so the
   box's retry loop terminates.
 
+## Box executor policy (reference implementation: `spark-pair.py ingest`, #874)
+
+The plane is opaque to payloads and kinds — the *box executor* decides
+what it honors, and that decision is a security boundary:
+
+- The executor honors an explicit allowlist of kinds (today: only
+  `approval_decision`). Unknown kinds are **acked-and-logged**: the box
+  must not execute what it does not understand, but it must not let one
+  unknown kind wedge the queue either.
+- A command the executor cannot execute safely is **not acked**, and the
+  run stops at it: the cursor (highest *acked* seq) can never advance
+  past an unacked command, so the command redelivers on the next pass.
+- Malformed rows (no valid seq/kind/payload) are skipped loudly — there
+  is no seq to ack and nothing safe to execute.
+- Executor implementations must document their honored-kinds allowlist
+  and their ack-and-log policy where operators can find it.
+
 ## Limits
 
 - Payloads ≤ 16 KB, stored verbatim, never executed by the plane.

@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The box now ingests the control plane's approval decisions (#874): a new
+  `spark-pair.py ingest` command (cron-friendly, ~1/min) pulls durable
+  commands from the plane and stamps owner approve/deny/expire decisions
+  into the box's approval store, so a parked agent sees the same decision
+  signal as for a locally-tapped approval — with proof of plane origin on
+  every stamped record, idempotent stamping across redeliveries, and
+  fail-closed handling of unknown or tenant-scoped approvals. (#TBD)
+
 - Pinned the `approval_decision` command kind (#873): the first
   plane-produced command on the durable queue — an owner's approve/deny
   tap (and server-side expiry) now travels to the box as a command
