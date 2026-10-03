@@ -633,8 +633,10 @@ def _rule_correlated_failure(events, fired_at):
         if not isinstance(to, str) or not to:
             # No shared target: unattributable for the bad-release
             # shape. Grouping these on the empty key paged phantom
-            # clusters (e.g. two independent reload-fails 10 min
-            # apart); they are excluded, not grouped.
+            # clusters (e.g. two independent target-less failed lines 10
+            # min apart — the producer always emits `to`, so these are
+            # hand-fed/legacy tails, never the live writer); they are
+            # excluded, not grouped.
             continue
         key = (e.get("subcomponent") or "unknown", to)
         groups.setdefault(key, []).append((ts, e))
