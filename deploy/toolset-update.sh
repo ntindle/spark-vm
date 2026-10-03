@@ -852,11 +852,17 @@ cmd_status() {
     _probe_version "gh" gh --version
     # Probe the MANAGED venv (PLAYWRIGHT_VENV), not system python: Playwright
     # is provisioned inside the venv (SETUP.md), so a system-python probe
-    # reports absent on a healthy box. Read-only: runs the venv's python with
+    # reports absent on a healthy box. The probe runs as $PLAYWRIGHT_USER
+    # (never as root): it executes the venv interpreter, which imports a
+    # user-writable package tree. Read-only: runs the venv's python with
     # -c, installs nothing.
     local _pwpy="${PLAYWRIGHT_VENV:-/home/ntindle/.venvs/pw}/bin/python"
-    if [ -x "$_pwpy" ] && "$_pwpy" -c 'import playwright' 2>/dev/null; then
-        _probe_version "playwright" "$_pwpy" -c "import playwright; print(playwright.__version__)"
+    local _pwver=""
+    if [ -x "$_pwpy" ]; then
+        _pwver="$(_as_playwright_user "$_pwpy" -c 'import playwright; print(playwright.__version__)' 2>/dev/null | head -n 1 || true)"
+    fi
+    if [ -n "$_pwver" ]; then
+        printf 'playwright\tpresent\t%s\n' "$(printf '%s' "$_pwver" | tr '\t' ' ' | cut -c1-120)"
     else
         printf 'playwright\tabsent\t-\n'
     fi

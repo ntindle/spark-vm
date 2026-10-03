@@ -1413,6 +1413,20 @@ def test_status_reports_playwright_from_managed_venv(env, tmp_path):
     assert rows["playwright"][1] == "absent", rows["playwright"]
 
 
+def test_status_probe_runs_as_playwright_user(env, tmp_path):
+    # Regression: the status probe executes the venv interpreter, so it
+    # must go through the user-switch — with an impossible PLAYWRIGHT_USER
+    # the probe refuses and the row reads absent even though the venv is
+    # healthy (a direct exec would have reported present).
+    e, _, _, _ = pw_env(env, tmp_path, cur_version="1.62.0")
+    e["PLAYWRIGHT_USER"] = "no-such-user-pw-qa"
+    r = run_bash("./deploy/toolset-update.sh status", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    rows = {line.split("\t")[0]: line.split("\t")
+            for line in r.stdout.splitlines() if line.strip()}
+    assert rows["playwright"][1] == "absent", rows["playwright"]
+
+
 def test_update_audit_lists_playwright_when_green(env, tmp_path):
     e, _, _, _ = pw_env(env, tmp_path)
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)

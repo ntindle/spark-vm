@@ -162,7 +162,10 @@ all locked together by the `playwright` package version:
   real `install-deps` would — we deliberately don't call it).
 - **The probe senses the managed venv only** — never PATH — so a stray
   PATH copy of Playwright cannot mask drift of the managed install (same
-  rationale as the `cua-driver` layer's managed-binary probe).
+  rationale as the `cua-driver` layer's managed-binary probe), and it runs
+  as `$PLAYWRIGHT_USER`, never as root: the probe executes the venv
+  interpreter, which imports a user-writable package tree, so root must
+  never run it directly.
 - **Fail-closed:** a missing pin, an unsafe pin, a missing venv, an
   unparseable installed version, a missing `bin/playwright`, an
   impossible user-switch, or any unexpected `--dry-run` output shape
@@ -265,5 +268,5 @@ idempotent) via the `playwright` layer. npm rides with the nodesource
 
 ## Tests
 
-`deploy/test_toolset_update.py` — 70 hermetic tests (stub PATH, real-tool
+`deploy/test_toolset_update.py` — 71 hermetic tests (stub PATH, real-tool
 symlinks, no root assumptions). Wired into CI alongside the deploy tests.
