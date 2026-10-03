@@ -285,6 +285,7 @@ _as_user() {
     target="$(id -u "$user" 2>/dev/null || true)"
     if [ -n "$me" ] && [ -n "$target" ] && [ "$me" = "$target" ]; then
         "$@" || rc=$?
+        [ "$rc" = "2" ] && rc=3
         return "$rc"
     fi
     if [ "${me:-}" != "0" ]; then
@@ -343,7 +344,14 @@ for name in names:
     try:
         with open(p) as fh:
             d = json.load(fh)
-    except (OSError, ValueError):
+    except OSError:
+        # Vanished between listdir and open (the tmp+rename write pattern
+        # means readers never see a torn file) — not evidence of a live job.
+        continue
+    except ValueError:
+        # Unparseable record: fail closed — a corrupt job.json for a live
+        # job must never read as idle.
+        print("%s:unparseable" % name)
         continue
     state = d.get("state") if isinstance(d, dict) else None
     if state not in ("killed", "closed", "done"):
@@ -434,7 +442,9 @@ _idle_gate() {
         return 0
     fi
     if _jobs_active; then
-        log "deferred: agent jobs active (mjob-* tmux session); retry next window"
+        # _jobs_active already logged which probe saw the live job; this
+        # line stays generic.
+        log "deferred: agent jobs active; retry next window"
         return 2
     fi
     return 0

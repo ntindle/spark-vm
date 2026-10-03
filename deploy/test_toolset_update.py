@@ -337,6 +337,47 @@ def test_registry_busy_fail_closed_on_unknown_state(env):
     assert "zeta:migrating" in r.stdout, r.stdout
 
 
+def test_registry_busy_fail_closed_on_unparseable_record(env):
+    # A corrupt job.json must defer, never read as idle.
+    home = env["tmp"] / "reghome4"
+    d = home / "muse-jobs" / "corrupt"
+    d.mkdir(parents=True)
+    (d / "job.json").write_text("{not json")
+    r = source_and(f"set +e; _registry_busy {home}/muse-jobs; echo rc=$?",
+                   env_extra=env["env"])
+    assert "rc=0" in r.stdout, r.stdout + r.stderr
+    assert "corrupt:unparseable" in r.stdout, r.stdout
+
+
+def test_as_user_fail_closed_when_switch_impossible(env):
+    # Non-root, target is another uid, no runuser/sudo on PATH: _as_user
+    # must return 2 (switch impossible -> defer upstream).
+    tbin = make_stub_bin(env["tmp"] / "asuserbin", {
+        "id": "if [ $# -eq 1 ]; then echo 1000; else echo 1001; fi",
+    })
+    realtools = make_realtools(env["tmp"])
+    e = dict(env["env"])
+    # Deliberately no system PATH: runuser/sudo must be unresolvable here.
+    e["PATH"] = tbin + os.pathsep + realtools
+    r = source_and("set +e; _as_user someuser -- true; echo rc=$?",
+                   env_extra=e)
+    assert "rc=2" in r.stdout, r.stdout + r.stderr
+
+
+def test_as_user_remaps_command_exit_2(env):
+    # Same-uid shortcut: a command exiting 2 must be reported as 3 so it is
+    # never confused with the switch-impossible code.
+    tbin = make_stub_bin(env["tmp"] / "asuserbin2", {
+        "id": "echo 1000",
+    })
+    realtools = make_realtools(env["tmp"])
+    e = dict(env["env"])
+    e["PATH"] = tbin + os.pathsep + realtools
+    r = source_and("set +e; _as_user anyuser -- sh -c 'exit 2'; echo rc=$?",
+                   env_extra=e)
+    assert "rc=3" in r.stdout, r.stdout + r.stderr
+
+
 def test_registry_busy_missing_dir_is_idle(env):
     r = source_and(f"set +e; _registry_busy {env['tmp']}/nope; echo rc=$?",
                    env_extra=env["env"])
