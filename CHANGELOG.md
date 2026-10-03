@@ -55,7 +55,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - spark-vm has a brand logo: a gold spark on a dark terminal badge, with SVG
   source and PNG exports for the site header, app icons, and favicon. The
-  landing and waitlist pages now share a brand bar carrying the mark. (#TBD)
+  landing and waitlist pages now share a brand bar carrying the mark. (#901)
 
 - Published a standing production deploy contract for the hosted control
   plane: every production deploy now requires unanimous SHIP IT from the
