@@ -65,6 +65,11 @@ def _load_html():
     if '"""' in html:
         raise SyncError('dashboard.html contains """ — it would terminate '
                         "the inlined Python string in worker.py")
+    trailing_bs = len(html) - len(html.rstrip("\\"))
+    if trailing_bs % 2 == 1:
+        raise SyncError("dashboard.html ends with an odd number of "
+                        "backslashes — the last one would escape the closing "
+                        '""" of the inlined string in worker.py')
     if not html.startswith("<!DOCTYPE html>"):
         raise SyncError("dashboard.html does not start with <!DOCTYPE html> "
                         "— refusing to inline the wrong file")
@@ -85,13 +90,21 @@ def _rewrite(src, html):
         raise SyncError("END marker found %d times (want exactly 1)"
                         % src.count(END))
     begin_at = src.index(BEGIN)
-    begin_eol = src.index("\n", begin_at)
+    try:
+        begin_eol = src.index("\n", begin_at)
+    except ValueError:
+        raise SyncError("BEGIN marker is the last line of worker.py with no "
+                        "newline after it — refusing to inline")
     end_at = src.index(END)
     if not begin_eol < end_at:
-        raise SyncError("END marker precedes BEGIN marker — refusing")
+        raise SyncError("END marker is not on a later line than BEGIN "
+                        "— refusing")
+    # Keep the whole END line (indentation included) — symmetric with the
+    # BEGIN side, which keeps everything up to the BEGIN line's newline.
+    end_line_start = src.rfind("\n", 0, end_at) + 1
     inner = ("\n".join(HEADER_LINES) + "\n"
              + 'DASHBOARD_HTML = """' + html + '"""')
-    return src[:begin_eol] + "\n" + inner + "\n" + src[end_at:]
+    return src[:begin_eol] + "\n" + inner + "\n" + src[end_line_start:]
 
 
 def sync(worker_path, check=False):
