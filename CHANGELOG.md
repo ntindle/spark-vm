@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Pinned the phone-home wire-protocol spec (#847's S3 contract): the
+  box↔plane WebSocket contract the Durable Object and box client will
+  build against — auth at the upgrade handshake (the Bearer <redacted> never
+  travels in a frame), a frame-class registry so control/command/stream/input
+  frames never collide, the decision that connection-generation and
+  command-epochs are separate counters, keepalive and close-code rules, and
+  the fallback/liveness-precedence rule (the HTTPS heartbeat stays the
+  only liveness signal; the socket never fabricates it). (#941)
 - Published the vision-vs-state gap analysis for the interactive desktop
   lane (#854): the lane's vision is that the box publishes its Xvfb desktop
   through the Cloudflare Realtime SFU and the owner views/interacts from
