@@ -53,6 +53,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The box self-updater now converges Playwright the same way it holds the
+  CUA driver: the pinned Playwright package, its Chromium browser builds,
+  and the browser system libraries are all brought onto the operator's
+  pinned version each weekly run (installed as the agent user, so the
+  browser cache lands where the agent's smoke tests look), instead of only
+  reporting Playwright present or absent. (#532, #889)
+
 - The hosted control plane now mints additional owner API keys on demand
   (`POST /v1/owner/keys`, owner-authenticated): the plaintext key is
   returned exactly once and never stored, a box token presented there

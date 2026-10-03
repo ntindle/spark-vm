@@ -58,6 +58,26 @@
 #                  itself. Maintainer-script service restarts (e.g.
 #                  docker-ce's dockerd restart) can occur, so the layer runs
 #                  only behind the idle gate in the weekly quiet-hours window.
+#   playwright   — converge Playwright onto the pins.conf pin (issue #532):
+#                  the `playwright` pip package inside the managed venv
+#                  ($PLAYWRIGHT_VENV) is held on the exact pin
+#                  (`playwright==<pin>`, never a floating upgrade); the
+#                  Chromium browser builds (`playwright install chromium`)
+#                  and the system libraries converge on every run
+#                  (idempotent — `install` skips present builds, the deps
+#                  step no-ops when nothing is missing). Venv and browser
+#                  work runs as $PLAYWRIGHT_USER so the venv and browser
+#                  cache stay user-owned. The system-library step never
+#                  executes venv code as root: the missing-package list is
+#                  computed as the user (`install-deps --dry-run`,
+#                  read-only), each name is validated against the Debian
+#                  package-name pattern, and root installs the validated
+#                  names with apt-get itself. Fail-closed: missing/unsafe
+#                  pin, missing venv, unparseable installed version,
+#                  missing browser CLI, or any unexpected --dry-run output
+#                  shape all refuse loudly. The pip install and the browser
+#                  download are TLS-only without hash pinning (follow-up:
+#                  hash-pinned wheel + browser archives).
 #
 # Env overrides (for tests): TOOLSET_STATE_DIR, APT_CONF_DIR, SYSTEMD_DIR,
 # OPTOUT_FILE, SKIP_SYSTEMCTL=1 (skip systemctl calls), SKIP_SUDO=1 (run
@@ -72,7 +92,9 @@
 # checkout), CUA_DRIVER_BIN (default /home/ntindle/cua/bin/cua-driver),
 # CUA_DRIVER_OWNER/GROUP (default ntindle — the daemon runs as ntindle, not
 # root), CUA_RELEASE_BASE (release download base; tests point it at a local
-# dir).
+# dir), PLAYWRIGHT_VENV (managed Playwright venv; default
+# /home/ntindle/.venvs/pw), PLAYWRIGHT_USER (owner of that venv and of the
+# browser cache; default ntindle).
 #
 # Trust model (read docs/TOOLSET_UPDATE.md before enabling):
 #   - THE TIMER RUNS THE INSTALLED COPY at $TOOLSET_STATE_DIR/bin/, NOT the
@@ -93,6 +115,18 @@
 #     never executed and never extracted wholesale — only a single member
 #     named `cua-driver` is extracted, after the member list is screened for
 #     unsafe entries (symlinks/hardlinks/devices, `..`, absolute paths)). The
+#     playwright layer's `pip install playwright==<pin>` (exact pin, never a
+#     floating upgrade, run as the venv-owning user) plus `playwright install
+#     chromium` (browser binaries from the Playwright CDN, run as the user)
+#     are TLS-only without hash pinning — the documented residual for a
+#     follow-up slice; the version the layer may install is bounded by the
+#     operator-owned pins file. The system-library step does NOT execute
+#     venv code as root: `install-deps --dry-run` (a read-only simulation)
+#     runs as the user, root validates each reported package name against
+#     the Debian package-name pattern, and root installs the validated
+#     names itself from the box's configured, signature-verified apt
+#     sources — the same pipeline as the `apt` layer. The version probe
+#     (`_playwright_current`) also runs as the user, never as root. The
 #     one-time `apt-get install -y
 #     unattended-upgrades` bootstrap uses the box's configured,
 #     signature-verified apt sources.
@@ -123,6 +157,12 @@ VERSION_FILE="$(dirname "$SCRIPT_DIR")/VERSION"
 : "${CUA_DRIVER_OWNER:=ntindle}"
 : "${CUA_DRIVER_GROUP:=ntindle}"
 : "${CUA_RELEASE_BASE:=https://github.com/trycua/cua/releases/download}"
+# Playwright: the managed venv holding the playwright package, and the user
+# that owns it (pip installs and browser installs run as this user, never as
+# root — the timer runs as root, and a root-owned venv or browser cache
+# would break the agent's own Playwright use).
+: "${PLAYWRIGHT_VENV:=/home/ntindle/.venvs/pw}"
+: "${PLAYWRIGHT_USER:=ntindle}"
 
 STATE_AUDIT_LOG="$TOOLSET_STATE_DIR/audit.log"
 STATE_RUN_LOG="$TOOLSET_STATE_DIR/toolset-update.log"
@@ -559,6 +599,231 @@ _apt_layer() {
     return 0
 }
 
+# --- component: playwright (pip + browsers + system libs) ---------------------
+# Issue #532: converge Playwright onto the pins.conf pin. Three artifacts,
+# all version-locked together by the playwright package version:
+#   1. the `playwright` pip package inside the managed venv,
+#   2. the Chromium browser builds (`playwright install chromium`),
+#   3. the system libraries (apt packages).
+# The pip package is held on the exact pin; the browsers and the system
+# libraries converge on every run (both steps are idempotent — `install`
+# skips present builds, and the deps step no-ops when nothing is missing),
+# so an on-pin pip package with an emptied browser cache or missing system
+# libs still heals.
+# The venv and browser cache are owned by $PLAYWRIGHT_USER (the agent user),
+# so the pip and browser installs run as that user, never as root: a
+# root-installed venv or browser cache would break the agent's own Playwright
+# smoke tests. The system-library step never executes venv code as root:
+# the missing-package list is computed as the user
+# (`install-deps --dry-run`, read-only), each name is validated against the
+# Debian package-name pattern, and root installs the validated names with
+# apt-get itself (signature-verified sources, same as the `apt` layer).
+# Probe the MANAGED venv only — never PATH — for the same PATH-hijacking
+# reason as the cua-driver layer (the timer runs as root).
+_as_playwright_user() {
+    # _as_playwright_user cmd... — run a command as $PLAYWRIGHT_USER.
+    # Fail-closed when user-switching is impossible.
+    local user="${PLAYWRIGHT_USER:-ntindle}"
+    local me
+    me="$(id -un 2>/dev/null || true)"
+    if [ "$me" = "$user" ]; then
+        "$@"
+        return
+    fi
+    if [ "$me" != "root" ]; then
+        log "playwright: not $user and not root — refusing (fail-closed)"
+        return 1
+    fi
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$user" -- "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo -u "$user" -- "$@"
+    else
+        log "playwright: cannot switch to $user (no runuser/sudo) — refusing"
+        return 1
+    fi
+}
+
+_playwright_current() {
+    # Print the managed venv's installed playwright version, or:
+    # absent | version-unknown. The probe runs as $PLAYWRIGHT_USER — the
+    # layer never executes venv code as root.
+    local py ver out
+    py="${PLAYWRIGHT_VENV:-}/bin/python"
+    [ -n "${PLAYWRIGHT_VENV:-}" ] && [ -x "$py" ] \
+        || { printf 'absent'; return 0; }
+    out="$(_as_playwright_user "$py" -c 'import playwright; print(playwright.__version__)' 2>/dev/null || true)"
+    ver="$(printf '%s' "$out" | grep -oE '[0-9][A-Za-z0-9._-]*' | head -n 1 || true)"
+    # A bare number is not a version — demand at least one dot, mirroring
+    # _cua_driver_current.
+    case "$ver" in
+        *.*) printf '%s' "$ver" ;;
+        *) printf 'version-unknown' ;;
+    esac
+}
+
+_playwright_dep_names() {
+    # _playwright_dep_names <cli> — print the missing Chromium system
+    # dependencies, one per line, or nothing when all are installed.
+    # The list is computed as $PLAYWRIGHT_USER (`install-deps --dry-run`
+    # only simulates via `apt-get install -s` — it changes nothing); root
+    # never executes the venv CLI. Fail-closed: any output that is not
+    # exactly the dry-run's "all installed" message or its
+    # "Missing system dependencies (N):" block refuses, and every name is
+    # validated against the Debian package-name pattern
+    # (^[a-z0-9][a-z0-9+.-]*$) before it is printed.
+    local cli="$1"
+    local out rc=0
+    out="$(_as_playwright_user "$cli" install-deps --dry-run chromium 2>/dev/null)" || rc=$?
+    if [ "$rc" = "0" ]; then
+        case "$out" in
+            *"All system dependencies are installed."*) return 0 ;;
+        esac
+        log "playwright: unexpected install-deps --dry-run output (exit 0) — refusing"
+        return 1
+    fi
+    local want="" have=0 pkgs="" line pkg
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            'Missing system dependencies ('*'):')
+                want="$(printf '%s\n' "$line" | grep -oE '[0-9]+' | head -n 1 || true)" ;;
+            '  '*)
+                pkg="${line#  }"
+                # Debian package-name pattern: ^[a-z0-9][a-z0-9+.-]*$
+                # (the trailing `-` in the bracket class is literal).
+                case "$pkg" in
+                    ''|*[!a-z0-9+.-]*)
+                        log "playwright: refusing unsafe dep name from --dry-run: $pkg"
+                        return 1 ;;
+                esac
+                case "$pkg" in
+                    [a-z0-9]*) ;;
+                    *)
+                        log "playwright: refusing dep name with non-alnum start: $pkg"
+                        return 1 ;;
+                esac
+                pkgs="${pkgs:+$pkgs }$pkg"
+                have=$((have + 1)) ;;
+            '') ;;
+            *)
+                log "playwright: unexpected install-deps --dry-run line: $line — refusing"
+                return 1 ;;
+        esac
+    done < <(printf '%s\n' "$out")
+    case "$want" in
+        ''|0)
+            log "playwright: no missing-deps header in --dry-run output — refusing"
+            return 1 ;;
+    esac
+    if [ "$have" -ne "$want" ]; then
+        log "playwright: --dry-run header said $want missing, parsed $have — refusing"
+        return 1
+    fi
+    printf '%s\n' "$pkgs" | tr ' ' '\n'
+    return 0
+}
+
+_playwright_install_deps() {
+    # _playwright_install_deps <cli> — converge the Chromium system
+    # libraries. Root installs only validated package names via apt-get
+    # (non-interactive, conffile keep-local, no recommends — mirroring the
+    # `apt` layer); the venv CLI is never executed as root. Idempotent:
+    # no-op when the dry-run reports everything installed. List freshness
+    # comes from the os-security layer's daily refresh, same as the `apt`
+    # layer — this step never runs `apt-get update` itself.
+    local cli="$1"
+    local pkgs
+    pkgs="$(_playwright_dep_names "$cli")" || return 1
+    if [ -z "$pkgs" ]; then
+        log "playwright: system deps already installed"
+        return 0
+    fi
+    local count
+    count="$(printf '%s\n' "$pkgs" | grep -c .)"
+    log "playwright: installing $count missing system dep(s)"
+    # One call site: validated names only, word-splitting intentional.
+    # Non-interactive by construction, mirroring the `apt` layer.
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive _sudo apt-get install -y --no-install-recommends \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
+            $pkgs \
+        || { log "playwright: system-deps install failed"; return 1; }
+    log "playwright: installed $count system dep(s)"
+    return 0
+}
+
+_playwright_layer() {
+    # _playwright_layer <dry:0|1> — converge Playwright onto the pins.conf
+    # pin. Idempotent: the pip install is skipped on-pin, but the browser
+    # and system-library steps still run (both no-op when satisfied).
+    # Fail-closed: missing/unsafe pin, missing venv, unparseable installed
+    # version, missing browser CLI, or any deps-step refusal all fail the
+    # layer loudly. The pip specifier is the exact pin
+    # (`playwright==<pin>`), never a floating upgrade — the pins file is the
+    # version authority, not PyPI's latest.
+    local dry="$1"
+    local pin cur py cli
+    pin="$(_read_pin playwright)"
+    if [ -z "$pin" ]; then
+        log "playwright: no pin for playwright in $PINS_FILE — refusing (fail-closed)"
+        return 1
+    fi
+    if ! _pin_ok "$pin"; then
+        log "playwright: pin '$pin' is not version-safe — refusing"
+        return 1
+    fi
+    py="$PLAYWRIGHT_VENV/bin/python"
+    cli="$PLAYWRIGHT_VENV/bin/playwright"
+    cur="$(_playwright_current)"
+    local pip_needed=1
+    case "$cur" in
+        "$pin")
+            if [ -x "$cli" ]; then
+                log "playwright: pip package on pin $pin"
+                pip_needed=0
+            else
+                log "playwright: on pin $pin but $cli missing — refusing (fail-closed)"
+                return 1
+            fi ;;
+        version-unknown)
+            log "playwright: installed but version unparseable — refusing to guess (fail-closed)"
+            return 1 ;;
+        absent)
+            # The venv itself is provisioned by setup, not this layer — a
+            # missing venv is a provisioning failure, not package drift, so
+            # the layer refuses rather than trying to recreate the venv.
+            log "playwright: venv python $py absent — refusing (fail-closed)"
+            return 1 ;;
+        *)
+            log "playwright: drift $cur -> $pin" ;;
+    esac
+    if [ "$dry" = "1" ]; then
+        log "playwright: DRY-RUN would converge playwright $pin (pip: $([ "$pip_needed" = "1" ] && echo install || echo skip); browsers + system deps)"
+        return 0
+    fi
+    if [ "$pip_needed" = "1" ]; then
+        if ! _as_playwright_user "$py" -m pip install "playwright==$pin"; then
+            log "playwright: pip install playwright==$pin failed"
+            return 1
+        fi
+        [ -x "$cli" ] \
+            || { log "playwright: $cli missing after pip install — refusing"; return 1; }
+    fi
+    # Browsers as the user (they land in the user's ~/.cache/ms-playwright);
+    # system libraries via the validated-names apt path (root, never the
+    # venv CLI).
+    if ! _as_playwright_user "$cli" install chromium; then
+        log "playwright: browser install failed"
+        return 1
+    fi
+    if ! _playwright_install_deps "$cli"; then
+        return 1
+    fi
+    log "playwright: converged on pin $pin (was: $cur)"
+    return 0
+}
+
 # --- status probes (read-only, informational) -----------------------------------
 _probe_version() {
     # _probe_version <name> <cmd...> — "name<TAB>present|absent<TAB>version-or-dash"
@@ -585,8 +850,19 @@ cmd_status() {
     _probe_version "node" node --version
     _probe_version "npm" npm --version
     _probe_version "gh" gh --version
-    if python3 -c 'import playwright' 2>/dev/null; then
-        _probe_version "playwright" python3 -c "import playwright; print(playwright.__version__)"
+    # Probe the MANAGED venv (PLAYWRIGHT_VENV), not system python: Playwright
+    # is provisioned inside the venv (SETUP.md), so a system-python probe
+    # reports absent on a healthy box. The probe runs as $PLAYWRIGHT_USER
+    # (never as root): it executes the venv interpreter, which imports a
+    # user-writable package tree. Read-only: runs the venv's python with
+    # -c, installs nothing.
+    local _pwpy="${PLAYWRIGHT_VENV:-/home/ntindle/.venvs/pw}/bin/python"
+    local _pwver=""
+    if [ -x "$_pwpy" ]; then
+        _pwver="$(_as_playwright_user "$_pwpy" -c 'import playwright; print(playwright.__version__)' 2>/dev/null | head -n 1 || true)"
+    fi
+    if [ -n "$_pwver" ]; then
+        printf 'playwright\tpresent\t%s\n' "$(printf '%s' "$_pwver" | tr '\t' ' ' | cut -c1-120)"
     else
         printf 'playwright\tabsent\t-\n'
     fi
@@ -651,11 +927,15 @@ cmd_update() {
         rc=1
         failed_comps="${failed_comps:+$failed_comps }apt"
     fi
+    if ! _playwright_layer "$dry"; then
+        rc=1
+        failed_comps="${failed_comps:+$failed_comps }playwright"
+    fi
 
     if [ "$dry" = "1" ]; then
         audit 'toolset-update' ',"result":"dry-run"'
     elif [ "$rc" = "0" ]; then
-        audit 'toolset-update' ',"result":"ok","components":"os-security cua-driver apt"'
+        audit 'toolset-update' ',"result":"ok","components":"os-security cua-driver apt playwright"'
     else
         audit 'toolset-update' ',"result":"failed","failed":"'"$failed_comps"'"'
         log "update: FAILED ($failed_comps); see audit log"

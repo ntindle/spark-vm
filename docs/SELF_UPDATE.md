@@ -93,7 +93,7 @@ complementary planes, not competitors (see "Two planes" below).
   or `--json`. Pure reads, stdlib only, never raises, always exits 0. This is
   the drift-visibility half of the system — it makes "the box rotted" a
   checkable fact before anything is automated.
-- **S2 — update execution + recovery (framework shipped, #551; cua-driver and apt layers follow-on):** per-tool
+- **S2 — update execution + recovery (framework shipped, #551; cua-driver, apt, and playwright layers shipped):** per-tool
   updaters behind `deploy/toolset-update.sh update`, with `--dry-run`, the idle
   guard (defer while agent jobs are live), per-tool pinning enforcement, and
   structured logging. The v0 framework ships the chassis the behavior
@@ -101,7 +101,7 @@ complementary planes, not competitors (see "Two planes" below).
   (quiet-hours), `install` (provisioning path + one-command backfill onto
   existing boxes), `optout`/`optin`, single-flight lock, JSONL audit — plus the
   first real updater layer (`os-security`: unattended-upgrades presence plus
-  `20auto-upgrades` exact). Still to come: the Playwright updater, pre-update snapshots (extending
+  `20auto-upgrades` exact). Still to come: pre-update snapshots (extending
   `deploy/auto-deploy.sh`'s snapshot/rollback pattern), per-component
   post-update health checks (CUA bridge answers, docker hello-world, Playwright
   screenshot smoke, `cred` round-trips), automatic rollback + blocked marking on
