@@ -890,6 +890,54 @@ class SwapAddonTests(unittest.TestCase):
                     sa.SwapAddon._check_secrets_dir_mode()
         self.assertIn("0770", "\n".join(cm.output))
 
+    def test_finding199_inplace_secret_rotation_is_picked_up(self):
+        """Finding 199: rewriting a secret file's bytes in place (same
+        inode, no directory entry change) never moves the directory
+        mtime, so the old _maybe_reload() gate never fired and the
+        proxy kept swapping the pre-rotation value silently and
+        indefinitely. The per-file signature must catch it."""
+        with tempfile.TemporaryDirectory() as d:
+            dp = Path(d)
+            (dp / "tok").write_text("old-value")
+            dir_mtime_before = os.stat(d).st_mtime_ns
+            with mock.patch.object(sa, "SECRETS_DIR", dp), \
+                 mock.patch.object(sa, "HOSTS_FILE", dp / "h"), \
+                 mock.patch.object(sa, "REGISTRY_FILE", dp / "r"), \
+                 mock.patch.object(sa, "SSRF_ALLOW_FILE", dp / "s"), \
+                 mock.patch.object(sa, "SSRF_DENY_FILE", dp / "deny"), \
+                 mock.patch.object(sa, "LOG_FILE", dp / "l"):
+                a = sa.SwapAddon()
+                self.assertEqual(a.secrets.get("tok"), "old-value")
+                # In-place rewrite: same inode, bytes change, dir untouched.
+                with open(dp / "tok", "w", encoding="utf-8") as f:
+                    f.write("new-value")
+                # Force a distinct file mtime deterministically (fast
+                # filesystems may not tick mtime_ns on a quick rewrite).
+                st = os.stat(dp / "tok")
+                os.utime(dp / "tok",
+                         ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))
+                self.assertEqual(os.stat(d).st_mtime_ns, dir_mtime_before)
+                a._maybe_reload()
+                self.assertEqual(a.secrets.get("tok"), "new-value")
+
+    def test_finding199_no_change_means_no_reload(self):
+        """Finding 199: when nothing changed, _maybe_reload() must not
+        rebuild — the per-file signature is a pure addition to the gate,
+        and the O(n) walk stays a check, not a reload."""
+        with tempfile.TemporaryDirectory() as d:
+            dp = Path(d)
+            (dp / "tok").write_text("v")
+            with mock.patch.object(sa, "SECRETS_DIR", dp), \
+                 mock.patch.object(sa, "HOSTS_FILE", dp / "h"), \
+                 mock.patch.object(sa, "REGISTRY_FILE", dp / "r"), \
+                 mock.patch.object(sa, "SSRF_ALLOW_FILE", dp / "s"), \
+                 mock.patch.object(sa, "SSRF_DENY_FILE", dp / "deny"), \
+                 mock.patch.object(sa, "LOG_FILE", dp / "l"):
+                a = sa.SwapAddon()
+                before = a.secrets
+                a._maybe_reload()
+                self.assertIs(a.secrets, before)
+
     def test_bug_scrub_opt_out_and_totp_whole_token(self):
         """REVIEW item 36: an entry with scrub:false (usernames, emails)
         is never scrubbed; TOTP codes match as whole tokens only, so a
