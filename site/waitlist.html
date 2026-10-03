@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Join the waitlist — spark-vm</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png">
+<link rel="apple-touch-icon" href="/assets/logo-180.png">
 <!-- Same head tag set as the landing page (docs/HOSTED_SIGNUP_WEB_UI.md §4.1):
      og:url points at the marketing page — the share target is the product,
      not the form. This page carries no OG identity of its own.
@@ -46,10 +48,31 @@ code{background:#f0f2f5;padding:1px 6px;border-radius:4px;font-size:.9em}
 .fine{font-size:.9rem;color:var(--muted)}
 .back{display:inline-block;margin-top:8px}
 a{color:var(--accent)}
+.brandbar{background:#0d1319;border-bottom:1px solid #232c38}
+.brandbar .wrap{max-width:560px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:#f4f6f8;font-weight:700;font-size:1.05rem}
+.brand img{display:block}
+.brandbar nav{display:flex;gap:18px}
+.brandbar nav a{color:#aeb6c2;text-decoration:none;font-size:.92rem}
+.brandbar nav a:hover{color:#f4f6f8}
 @media (max-width:520px){ main{padding:32px 20px} form{padding:18px} }
 </style>
 </head>
 <body>
+<!-- Brand bar: shared with the landing page (index.html). The mark is the
+     #852 logo: site/assets/logo.svg source, PNG exports beside it. -->
+<div class="brandbar">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <img src="/assets/logo.svg" width="28" height="28" alt="spark-vm logo">
+      <span>spark-vm</span>
+    </a>
+    <nav aria-label="Site">
+      <a href="https://github.com/ntindle/spark-vm">GitHub</a>
+      <a href="/waitlist" aria-current="page">Waitlist</a>
+    </nav>
+  </div>
+</div>
 <main>
   <h1>Join the waitlist</h1>
   <p class="muted">Your agent can start the signup — the confirmation email
