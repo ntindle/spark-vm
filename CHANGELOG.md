@@ -12,7 +12,6 @@ This changelog only works if entries land with the change, not after it:
 
 1. **Every PR that changes anything user- or operator-visible adds one or
    two bullets under `## [Unreleased]`**, in the right section
-  reboot/reprovision (see `docs/DURABLE_COMMANDS.md`).`**, in the right section
    (`Added` / `Changed` / `Fixed` / `Security`). Write for the person
    running spark-vm, not the person who wrote the diff — no file paths,
    function names, or internal audit numbering — and link the PR number.
@@ -503,9 +502,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - The credential web UI no longer runs from the working checkout: the updater now installs its page and server into a fixed location outside the checkout that only a deploy refreshes, so a stray edit to the checkout can neither change the secret-pasting page your browser loads nor block the updater from refreshing it. (#700)
 - The swap proxy's audit log now strips control characters and whitespace from every client-influenced field before writing: a hostile or buggy local client can no longer smuggle newlines or forged entries into the audit trail. Well-formed hosts, IP addresses, and credential names are written exactly as before. (#682)
 - The approvals daemon no longer keeps its anti-forgery nonces in the approval file the requester wrote: the nonce ring now lives in the daemon's own memory, keyed by approval id, and nonces pre-seeded into a pending file are ignored entirely — a lower-trust approval filer can't mint its own entries and then drive an approval from its own browser session. The multi-tab behavior is unchanged (the last few rendered forms all stay valid), and a daemon restart just means pre-restart forms reload and mint fresh. (#78) (#764)
+- The docs index now maps four recent design docs that landed without index rows: the phone-home and box-provisioning gap analyses (#847, #851), the durable-commands spec (#848), and the plane-side action-approval record protocol (#872). The root README's repo-layout table now also names the relay session-liveness journal and matches the fleet README's "event journal + alerts" wording. (#940)
 
 ### Fixed
 - Fleet alert evaluation now reasons about a bounded window instead of the whole journal (#814 slice 1): each evaluation's rule logic sees only the tail the armed alert rules can act on (the longest rule window, six hours), so the per-collect rule-evaluation work stays bounded as the journal grows — the journal file itself is still read in full on every collect (bounding the read is a later slice; retention caps the file at 90 days). Behavior is unchanged for every event inside that window — including events that can't be dated, which the scanner still passes through — and the at-most-once alert dedup is unchanged. Two deliberate edges, both requiring the operator to have skipped evaluation for longer than the window: a failed-rollback older than the window that was never evaluated no longer pages (evaluation runs on every collect, and the stuck-box rules still cover a box that stays broken), and a correlated-failure cluster straddling the window edge is no longer detectable. (#832)
+- Restored the changelog ritual's own rule 1 text: a botched insertion from the October 2 durable-commands docs PR had left a fragment of a changelog bullet inside the standing merge-gate wording, so the ritual no longer read as written. (#940)
 
 ## [0.5.0] - 2026-09-29
 
