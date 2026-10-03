@@ -193,10 +193,17 @@ Overrides (environment): `PLAYWRIGHT_VENV`, `PLAYWRIGHT_USER`.
   (`~/muse-jobs/*/job.json`) for non-terminal job records
   (`active`/`blocked`; unrecognized states fail closed as busy). Both probes
   are read-only — tmux is asked only for session names, job records are
-  parsed as data and never executed — and a probe that cannot run defers
-  loudly rather than reading as idle. The registry half is the v2-proof
-  half: when the muse-job v2 cutover (issue #228) moves jobs off tmux, the
-  registry keeps the same state contract and the gate keeps working.
+  parsed as data and never executed. An identity-switch failure defers
+  loudly (fail-closed); a tmux probe that fails for other reasons (missing
+  binary, broken server) reads as no-sessions for that half, with the
+  registry probe as the independent backstop. The registry half is the
+  v2-proof half: when the muse-job v2 cutover (issue #228) moves jobs off
+  tmux, the registry keeps the same state contract and the gate keeps
+  working. Residual: the gate is point-in-time — a job starting after the
+  gate passes, or during the `apt` layer before a maintainer-script
+  restart, is unprotected; the weekly quiet-hours window bounds this, and
+  the service unit must not set `PrivateTmp=true` (the gate needs the real
+  `/tmp` to see per-uid tmux sockets).
 - The `os-security` repair **overwrites** `/etc/apt/apt.conf.d/20auto-upgrades`
   with exactly the two required lines. Any operator tuning in that file
   (e.g. `Unattended-Upgrade::Allowed-Origins`) is discarded on repair — on a

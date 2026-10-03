@@ -24,10 +24,12 @@ Type=oneshot
 # (see docs/TOOLSET_UPDATE.md).
 User=root
 ExecStart=/home/ntindle/.sparkvm-toolset/bin/toolset-update.sh update
-# Harden the root service: no privilege escalation from the updater itself,
-# private /tmp so staged files are invisible to other users.
+# Harden the root service: no privilege escalation from the updater itself.
+# No PrivateTmp: the idle gate must observe the real /tmp to see per-uid
+# tmux sockets (/tmp/tmux-<uid>/); a private /tmp would blind the tmux half
+# of the gate under the timer. Staged files stay invisible to other users
+# by mode instead (mktemp -d is 0700, umask 077).
 NoNewPrivileges=true
-PrivateTmp=true
 # A failed run must be loud in the journal and in the state dir.
 StandardOutput=journal
 StandardError=journal

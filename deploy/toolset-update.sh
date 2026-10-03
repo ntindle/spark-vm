@@ -21,8 +21,11 @@
 #     that user's own tmux server for live `mjob-*` sessions AND scans
 #     their muse-job registry (~/muse-jobs/*/job.json) for non-terminal
 #     job records — the registry half survives the muse-job v2 cutover
-#     (#228), which moves jobs off tmux. Both probes are read-only and
-#     fail closed (an unprobable user defers loudly, never reads as idle).
+#     (#228), which moves jobs off tmux. Both probes are read-only. An
+#     identity-switch failure defers loudly (fail-closed); a tmux probe
+#     that fails for other reasons (missing binary, broken server) reads
+#     as no-sessions for that half, with the registry probe as the
+#     independent backstop.
 #     The apt layer may trigger maintainer-script service restarts (e.g.
 #     dockerd); the idle gate plus the weekly quiet-hours window bound
 #     that surface (see docs/TOOLSET_UPDATE.md).
@@ -157,8 +160,10 @@ VERSION_FILE="$(dirname "$SCRIPT_DIR")/VERSION"
 : "${TMUX_BIN:=tmux}"
 # Agent users whose live jobs block `update` (space-separated). The updater
 # runs as root; agent jobs run as these users, on their own tmux servers
-# and with their own muse-job registries.
-: "${TOOLSET_AGENT_USERS:=ntindle}"
+# and with their own muse-job registries. Default ntindle when unset; an
+# explicitly empty value means "no users" — the gate stays open but says
+# so loudly in the run log (operator's explicit choice, not a default).
+: "${TOOLSET_AGENT_USERS-ntindle}"
 : "${TOOLSET_INSTALL_OWNER:=root}"
 : "${TOOLSET_INSTALL_GROUP:=root}"
 # Resolve the probe tmux to an absolute path once: the per-user probe
@@ -194,9 +199,26 @@ _log_dest_init() {
     LOG_FILE="$STATE_RUN_LOG"
 }
 
+_sanitize_log_line() {
+    # Strip terminal-injection bytes from a log line: ASCII C0 controls
+    # (except tab) and DEL. Newlines become spaces so one call is one line.
+    # The gate interpolates user-influenced data (user names, job slugs, job
+    # states from ~/muse-jobs records) into log lines that land in the
+    # journal and the run log; raw ESC/CSI bytes would let a
+    # lower-privilege writer inject terminal sequences into a privileged
+    # operator's viewer. Pure bash (no external commands): log() must work
+    # on minimal PATHs — a missing helper here must never kill the run
+    # before the loud audit line.
+    local s="$1"
+    s="${s//$'\n'/ }"
+    s="${s//[$'\001'-$'\010'$'\013'$'\014'$'\016'-$'\037'$'\177']/}"
+    printf '%s' "$s"
+}
+
 log() {
     # log <msg> — timestamped line to the run log; best-effort, never fatal.
     local msg="$1"
+    msg="$(_sanitize_log_line "$msg")"
     _log_dest_init
     if [ -n "${LOG_FILE:-}" ]; then
         ( mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null \
@@ -258,8 +280,10 @@ _sudo() {
 # job.json records are parsed as JSON data (stdlib parser, never
 # executed). Unknown job states are busy — fail-closed against a future
 # state the gate does not recognize. A user that does not exist has no
-# jobs (skipped, logged); any probe that cannot run defers loudly rather
-# than reading as idle.
+# jobs (skipped, logged). An identity-switch failure defers loudly
+# (fail-closed); a tmux probe that fails for other reasons reads as
+# no-sessions for that half, with the registry probe as the independent
+# backstop.
 _user_home() {
     # _user_home <user> — print the user's home dir, or nothing when the
     # user does not exist. The home comes from the system passwd DB
@@ -326,6 +350,10 @@ _registry_busy() {
     # Terminal: killed, closed, done. Anything else — missing state,
     # unparseable value, an unrecognized future state — is busy
     # (fail-closed). Read-only: records are parsed as data, never executed.
+    # The scan runs as the invoking uid (root under the timer) — the parse
+    # is data-only, so no user content executes with privilege; the only
+    # output is the busy/idle bit plus slug:state lines in the (sanitized)
+    # run log.
     local jobsdir="$1"
     [ -d "$jobsdir" ] || return 1
     if command -v python3 >/dev/null 2>&1; then
@@ -366,20 +394,28 @@ for name in names:
         fi
         return 1
     fi
-    # No python3: grep fallback — extract the first "state": "<value>"
-    # from each job.json. Cruder (first match wins) but still read-only
-    # and fail-closed on unrecognized values.
-    local d slug state busy=0
+    # No python3: grep fallback — extract every "state" value from each
+    # job.json. Busy if ANY value is non-terminal (a nested/history "done"
+    # must never mask a live top-level state); a file with no parseable
+    # state at all is busy too (fail-closed, matching the python path).
+    # Cruder than the JSON parse (first textual match per value) but still
+    # read-only.
+    local d slug states rest first busy=0
     for d in "$jobsdir"/*/; do
         [ -d "$d" ] || continue
         [ -f "${d}job.json" ] || continue
         slug="$(basename "$d")"
-        state="$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' \
-            "${d}job.json" 2>/dev/null | head -n 1 | cut -d'"' -f4 || true)"
-        case "$state" in
-            killed|closed|done) ;;
-            *) printf '%s:%s\n' "$slug" "$state"; busy=1 ;;
-        esac
+        states="$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            "${d}job.json" 2>/dev/null | cut -d'"' -f4 || true)"
+        # Strip the terminal states; whatever survives — a non-terminal
+        # value, or the printf-added empty line when nothing parsed — is
+        # busy.
+        rest="$(printf '%s\n' "$states" | grep -Ev '^(killed|closed|done)$' || true)"
+        if [ -n "$rest" ]; then
+            first="$(printf '%s' "$rest" | grep -v '^$' | head -n 1 || true)"
+            printf '%s:%s\n' "$slug" "${first:-unparseable}"
+            busy=1
+        fi
     done
     [ "$busy" = "1" ] && return 0
     return 1
@@ -391,9 +427,12 @@ _jobs_active() {
     # muse-job registry for non-terminal job records. Returns 0 (busy)
     # when any user has either; 1 when the whole estate is idle.
     local user home probed=0
-    # Word-splitting the user list is intentional.
-    # shellcheck disable=SC2086
-    for user in $TOOLSET_AGENT_USERS; do
+    # Split the user list on whitespace WITHOUT pathname expansion: a glob
+    # token in the root-set list must fail the allowlist check literally,
+    # never expand against the cwd (`read -ra` does not glob).
+    local -a users
+    IFS=$' \t\n' read -ra users <<< "${TOOLSET_AGENT_USERS:-}" || true
+    for user in "${users[@]}"; do
         probed=1
         case "$user" in
             ''|-*|.*|*[!A-Za-z0-9_.-]*)
