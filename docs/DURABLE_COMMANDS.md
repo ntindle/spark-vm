@@ -56,6 +56,72 @@ seq) so the box can reconcile its cursor after a restart.
   be delivered again — but acking them still returns success so the
   box's retry loop terminates.
 
+## Box executor policy (reference implementation: `spark-pair.py ingest`, #874)
+
+The plane is opaque to payloads and kinds — the *box executor* decides
+what it honors, and that decision is a security boundary. Stated
+plainly: the ingest promotes the plane from relay to **grant-issuing
+authority** — a compromised plane can mint arbitrary local grants
+through the approve path. That is the feature's purpose (the owner's
+tap moved to the plane dashboard), not an accident: the box already
+trusts the plane for pairing, token rotation, and liveness, and
+approvals now join that trust set.
+
+Command outcomes come in three classes — the executor must
+distinguish them, because confusing them either wedges the queue or
+hides a dropped decision:
+
+- **Transient (not acked, run stops):** the command may succeed on a
+  later tick — local I/O failed, the grant writer failed, the grant
+  window is live but the mint did not complete. The cursor (highest
+  *acked* seq) can never advance past an unacked command, so the
+  command redelivers on the next pass.
+- **Permanently unprocessable (acked-and-logged loudly, run exits
+  1):** the command can never succeed for this client — e.g. a
+  tenant-scoped item on a pre-H10 box, or a decision for an aid the
+  box never filed. Acking advances the queue past it (no wedge), but
+  the loud log + exit code flag the operator: a decision was dropped
+  on the floor and only an upgraded client can recover it.
+- **Plane bugs (reference implementation: acked-and-logged, no
+  stamp):** malformed payloads are never executed. Unknown kinds —
+  kinds with no row in the registry below — are acked-and-logged by
+  the reference implementation: the box must not execute what it does
+  not understand, and a single unknown kind must not wedge the queue
+  behind a version skew. But note the version-skew hazard: the box
+  *silently skips the semantics*, not just the execution. Ack-and-log
+  is therefore a **reference-implementation liveness choice, not a
+  universal security policy**: the kind registry declares per-kind
+  behavior, and any kind with security effects (grant revocation,
+  kill-switches, future authorization verbs) MUST declare fail-closed
+  handling (not acked, run stops loudly) — an old client that does not
+  know a security-effect kind must never silently skip it. The plane
+  owns the registry: it must not enqueue a kind for a box whose
+  executor does not list it (plane-side gating; future hook — until it
+  lands, the dead-letter hook below is the designed backpressure
+  answer, and the ack-and-log stays operator-visible via the loud log
+  + exit code).
+- Executor implementations must document their honored-kinds allowlist
+  and their ack-and-log policy where operators can find it.
+
+### Residual race posture (cross-process answer writers)
+
+The ingest is the first cross-process answer writer: it does not hold
+confirmd's per-aid lock (in-process only). The mitigations are
+write-if-absent O_EXCL stamping (first writer wins among stampers),
+the approve path's pre- and post-mint terminal re-checks, and the
+grant-writer's approval-id dedupe. The residual: a near-simultaneous
+contradictory owner tap on both surfaces can last-writer-win through
+the local path's clobbering `os.replace` — e.g. plane-approve mints a
+live grant, then a local deny overwrites `consumed/` → live grant +
+denial-suppressed tuple for up to the grant TTL. Both decisions are
+owner-authentic, the window is tiny, and there is no non-owner
+injection — but the two surfaces can disagree, and the grant outlives
+the denial. The structural fix (a cross-process stamp lock shared by
+`_answer_locked`, both reapers, and the ingest — and/or a
+per-approval-id grant revoke) is tracked in #945; until it lands,
+the post-mint race journals loudly with the `grant-writer revoke
+--job` runbook instead of failing silently.
+
 ## Limits
 
 - Payloads ≤ 16 KB, stored verbatim, never executed by the plane.
@@ -77,9 +143,9 @@ The plane is opaque to payloads and kinds — except for the kinds it
 produces itself. This registry pins the plane-produced kinds; a new
 plane-produced kind needs a row here before the plane may enqueue it.
 
-| `kind` | Producer | Payload | Owner |
-|---|---|---|---|
-| `approval_decision` | plane (#873) | `aid`, `decision`, `decision_seq`, `idempotency_key` | #849 |
+| `kind` | Producer | Payload | Owner | Unknown-client behavior |
+|---|---|---|---|---|
+| `approval_decision` | plane (#873) | `aid`, `decision`, `decision_seq`, `idempotency_key` | #849 | n/a (honored kind) |
 
 ### `approval_decision` (#873, #849)
 
@@ -126,3 +192,18 @@ gate — only the winning decider enqueues; idempotent replays find the
 existing command and enqueue nothing. Server-side expiry uses a
 per-aid conditional UPDATE for the same guarantee: a raced expiry
 transitions the row once, so at most one `expire` command per aid.
+
+**Mode split (self-hosted vs vend):** the reference executor's approve
+path shells to `proxy/grant-writer`, which records a grant against the
+box's **local secrets dir** — this is the self-hosted mode, and it is
+the only mode the reference implementation supports. On a vend-mode
+box (#891: RAM-only, plane-vended short-lived credentials, "no real
+secret material on the box filesystem" per #850) the ingest would mint
+a grant authorizing nothing usable (swap fails closed on the unknown
+credential) — worse, the box would hold two divergent authorization
+artifacts for one owner decision (local grant at the default TTL +
+vended lease at minutes-to-hours TTL). **Vend-mode boxes must not run
+the local-mint approve path**; the dual-mode seam (config-time source
+selection) is tracked in #948 (within #891's scope). Until it lands,
+approve→local-mint is documented as self-hosted-only, not as
+mode-independent reference behavior.

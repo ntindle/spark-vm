@@ -21,6 +21,14 @@ Implements issue #844's box side and the human-approval side:
     spark-pair.py rotate --auto              # cron-friendly: rotate only when
                                              # the token expires within 6 h
 
+  Durable-command ingest (issue #874):
+    spark-pair.py ingest                     # pull plane commands
+                                             # (GET /v1/boxes/{id}/commands/
+                                             # pending), ack them, and stamp
+                                             # approval_decision commands into
+                                             # confirmd's answered/consumed
+                                             # store (cron ~1/min)
+
 The private key never leaves the box. The pairing code expires (15 min).
 The bearer token issued at redeem is short-lived (24 h); `rotate` replaces
 it before expiry so heartbeats never drop. The server half of rotation
@@ -645,23 +653,24 @@ def cmd_revoke(args):
 #     a lock file rather than doubling heartbeats.
 
 
-def _fail(d, msg, redact=()):
-    """Fail loud: stderr + appended to heartbeat.log in the state dir.
+def _fail(d, msg, redact=(), tag="heartbeat", log="heartbeat.log"):
+    """Fail loud: stderr + appended to <log> in the state dir.
 
     `redact` lists secret values that must never reach either channel: any
     occurrence is replaced with <redacted> (defense in depth — the failure
     classes above never include the token themselves, but an error string
     echoed back by a misbehaving plane must not become a credential leak
-    in a local log).
+    in a local log). `tag`/`log` let the box-side cron commands share the
+    loud-failure shape (heartbeat, ingest) without cross-writing logs.
     """
     for secret in redact:
         if secret:
             msg = msg.replace(secret, "<redacted>")
-    line = (f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} heartbeat FAILED: "
+    line = (f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {tag} FAILED: "
             f"{msg}")
     print(line, file=sys.stderr)
     try:
-        with open(os.path.join(d, "heartbeat.log"), "a") as f:
+        with open(os.path.join(d, log), "a") as f:
             f.write(line + "\n")
     except OSError:
         pass  # stderr is the loud channel; a broken log must not mask it
@@ -938,6 +947,937 @@ def cmd_approve(args):
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Box-side durable-command ingest (issue #874 / G49.3).
+#
+# The plane enqueues owner decisions as `approval_decision` commands on the
+# durable channel (#848, #873). This consumer pulls them down over the
+# channel-authenticated fetch (box Bearer <redacted> #846 over TLS) and stamps
+# them into confirmd's answered/consumed store, so the parked agent sees the
+# same Decision legs (docs/APPROVAL_CLIENT_SIGNAL.md) as for a local tap.
+#
+# Trust model — a decision is honored only when ALL of these hold:
+#   1. It arrived over the mutually-authenticated fetch (the box Bearer <redacted>
+#      is box-scoped: the plane can only deliver this box's commands).
+#   2. Its payload validates (aid shape, decision word, decision_seq,
+#      idempotency_key bound to box_id+aid+seq — a forged or replayed key
+#      never matches).
+#   3. The aid binds to a local pending/<aid>.json the box itself filed
+#      (the proxy's _file_approval). A decision for an unknown aid is
+#      rejected, never stamped — this is the tenant/aid binding: a box
+#      only ever files its own tenant's approvals (tenant_id is null
+#      pre-H10; a non-null tenant_id on a live item fails closed — acked
+#      and loudly logged — because this client predates multi-tenancy).
+# Every stamped record carries `decision_origin: "plane"` plus the plane's
+# (seq, idempotency_key) as the receipt. That marker is provenance
+# bookkeeping inside the same DAC boundary every other store record
+# relies on — a local writer with approvals-dir access can forge the
+# marker the same way it can forge any record (the key format is
+# deterministic and box_id lives in 0600 enrollment.json). The boundary
+# the ingest actually enforces is above: only the ingest writes
+# plane-origin records, and only for plane-delivered commands.
+#
+# NOTE (stated plainly): this promotes the plane from relay to
+# grant-issuing authority — a compromised plane can mint arbitrary local
+# grants through the approve path. That is the feature's purpose (the
+# owner's tap moved to the plane dashboard), not an accident: the same
+# trust the box already places in the plane for pairing, token rotation,
+# and liveness now covers approvals.
+#
+# Crash/redelivery safety mirrors the channel contract (#848):
+#   - the cursor is the highest *acked* seq, never highest-fetched;
+#   - stamping is idempotent (idempotency_key log + consumed/-exists check);
+#   - grant minting on approve reuses confirmd's single writer
+#     (proxy/grant-writer, Finding 60) with the same argv shape and
+#     validations; the writer dedupes on approval_id, so a crash between
+#     mint and stamp cannot double-mint on redelivery;
+#   - the consumed/ write is write-if-absent (O_EXCL, like the proxy's
+#     _stamp_expired_consumed): first writer wins among O_EXCL stampers
+#     (the reapers, earlier ingests). confirmd's in-flight answer path is
+#     clobbering, not O_EXCL, so it wins the *record* regardless — the
+#     approve path re-checks for its terminal record after the mint
+#     instead of relying on this race.
+# ---------------------------------------------------------------------------
+
+_INGEST_FETCH_LIMIT = 200  # mirrors the plane's per-fetch clamp (#848)
+_INGEST_CURSOR_FILE = "commands_cursor.json"
+_INGESTED_DECISIONS_FILE = "ingested_decisions.json"
+_INGEST_LOCK_FILE = ".ingest.lock"
+_INGEST_LOG_FILE = "ingest.log"
+# Mirrors the proxy's _AID_RE (proxy/swap_addon.py): an aid that fails this
+# must never touch the approvals store.
+_INGEST_AID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+# Mirrors the proxy's APPROVALS_DIR default (SWAP_APPROVALS_DIR env).
+_APPROVALS_DIR_DEFAULT = "/home/swapd/approvals"
+# Mirrors confirmd's GRANT_WRITER default.
+_GRANT_WRITER_DEFAULT = "/home/swapd/grant-writer"
+# Mirrors confirmd's AUDIT default (confirm/confirmd.py) and its
+# _sanitize_audit_field / _AUDIT_FIELD_ALLOW_RE (#683, #17 twin): the
+# audit-line format is deliberately duplicated rather than imported
+# across the pairing/confirmd component boundary, like _AID_RE.
+_INGEST_AUDIT_DEFAULT = "/home/swapd/confirmd/audit.log"
+_INGEST_AUDIT_FIELD_RE = re.compile(r"[^!-~]")
+
+
+def _ingest_audit_field(value):
+    if value is None:
+        return "-"
+    return _INGEST_AUDIT_FIELD_RE.sub("", str(value))
+
+
+def _ingest_audit(d, aid, decision, requester, seq, ttl_hours=None):
+    """Append one `answer` audit line for a plane-stamped decision.
+
+    Mirrors confirmd's audit_log("answer", ...) shape plus
+    decision_origin=plane — plane decisions must not bypass the audit
+    trail the rest of the system treats as load-bearing (the proxy and
+    grant-writer treat the audit write as part of authorization, and
+    the sentinel feed ships the signed audit log). A single O_APPEND
+    write: the ingest runs ~1/min, so no rotation here (confirmd's
+    rotation owns the segment size). On failure the event is treated
+    as lost and named loudly on stderr — confirmd's posture: the audit
+    call happens after the decision, so the stamp stands and the trail
+    gap is operator-visible.
+    """
+    from datetime import datetime, timezone
+    detail = ("id=%s decision=%s requester=%s decision_origin=plane "
+              "plane_seq=%s" % (aid, decision, requester, seq))
+    if decision == "approve" and ttl_hours is not None:
+        detail += " ttl=%dh" % ttl_hours
+    line = ("ts=%s event=%s peer=%s login=%s %s\n"
+            % (datetime.now(timezone.utc).isoformat(timespec="seconds"),
+               _ingest_audit_field("answer"),
+               _ingest_audit_field("plane"),
+               _ingest_audit_field(""),  # wire v1: no owner principal
+               _ingest_audit_field(detail)))
+    path = os.environ.get("CONFIRM_AUDIT", _INGEST_AUDIT_DEFAULT)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o640)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError as e:
+        _ingest_fail(d, f"aid={aid}: LOST AUDIT EVENT event=answer "
+                        f"decision={decision} ({e}) — the stamp stands; "
+                        "the trail gap is operator-visible")
+# The box executor decides which plane-produced kinds it honors (#848):
+# unknown kinds are acked-and-logged so one unknown kind cannot wedge the
+# queue. (The dead-letter hook for poison commands is still future work —
+# a command the ingest cannot execute is NOT acked and the run stops at
+# it, so the next cron tick retries; see _ingest_commands.)
+_HONORED_COMMAND_KINDS = ("approval_decision",)
+# Bound on the idempotency log: decisions are write-once, and consumed/'s
+# own prune horizon bounds how long a redelivery can matter.
+_INGESTED_DECISIONS_CAP = 5000
+# Mirrors confirmd's _GRANT_MINT_TIMEOUT / _GRANT_MINT_WINDOW /
+# GRANT_TTL_DEFAULT (confirm/confirmd.py). The wire v1 carries no owner TTL
+# choice, so the default applies to plane-approved grants (wire v2 carries
+# the decided TTL: #946).
+_INGEST_GRANT_MINT_TIMEOUT = 15
+_INGEST_GRANT_MINT_WINDOW = 30
+_INGEST_GRANT_TTL_DEFAULT = 1
+
+
+def _ingest_fail(d, msg, redact=()):
+    _fail(d, msg, redact=redact, tag="ingest", log=_INGEST_LOG_FILE)
+
+
+def _ingest_say(msg, redact=()):
+    # Audible on stdout (cron mails it / journal captures it). `redact`
+    # lists secret values that must never reach the channel — used where
+    # plane-controlled strings are echoed (defense in depth: the failure
+    # classes never include the token themselves, but a hostile plane
+    # could echo it back inside a field we print).
+    for secret in redact:
+        if secret:
+            msg = msg.replace(secret, "<redacted>")
+    print(f"ingest: {msg}", flush=True)
+
+
+def _approvals_dir():
+    return os.environ.get("SVM_APPROVALS_DIR", _APPROVALS_DIR_DEFAULT)
+
+
+def _grant_writer():
+    return os.environ.get("GRANT_WRITER", _GRANT_WRITER_DEFAULT)
+
+
+def _utcnow_iso():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_expiry_ingest(exp):
+    # Mirrors confirmd's _parse_expiry (Finding 53b): datetimes, not ISO
+    # strings; unparseable -> None (the writer's --approval-expires check
+    # is the fail-closed backstop, mirroring the local answer path).
+    from datetime import datetime, timezone
+    if not exp:
+        return None
+    try:
+        dt = datetime.fromisoformat(exp)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def _ingest_item_expired(item):
+    from datetime import datetime, timezone
+    exp = _parse_expiry_ingest(item.get("expires"))
+    return exp is not None and datetime.now(timezone.utc) >= exp
+
+
+def _ingest_grant_window_ok(item):
+    # Mirrors confirmd's _grant_window_ok (issue #534): refuse to START the
+    # mint when the remaining validity is under the worst-case mint window.
+    from datetime import datetime, timezone
+    exp = _parse_expiry_ingest(item.get("expires"))
+    if exp is None:
+        return True
+    remaining = (exp - datetime.now(timezone.utc)).total_seconds()
+    return remaining >= _INGEST_GRANT_MINT_WINDOW
+
+
+def _ingest_file_owner(path):
+    # Finding 50: the requester is the file's owner, never an argument.
+    try:
+        import pwd
+        return pwd.getpwuid(os.stat(path).st_uid).pw_name
+    except (OSError, KeyError, ImportError):
+        return None
+
+
+def _load_ingest_cursor(d):
+    """(cursor, epoch) from commands_cursor.json.
+
+    Returns (None, None) when the file is missing, corrupt, or
+    wrong-shaped — the caller heals from the plane's acked_watermark and
+    logs loudly. A missing cursor is a normal first-run state, not an
+    error; a corrupt one is journaled as corruption, not silently reset.
+    """
+    path = os.path.join(d, _INGEST_CURSOR_FILE)
+    try:
+        with open(path) as f:
+            cur = json.load(f)
+    except FileNotFoundError:
+        return None, None, "first run (no cursor file yet)"
+    except (OSError, ValueError) as e:
+        return None, None, f"cursor file unreadable ({e})"
+    if not isinstance(cur, dict):
+        return None, None, "cursor file is not an object"
+    cursor, epoch = cur.get("cursor"), cur.get("epoch")
+    if not isinstance(cursor, int) or isinstance(cursor, bool):
+        return None, None, "cursor file has a non-integer cursor"
+    if epoch is not None and (not isinstance(epoch, int)
+                              or isinstance(epoch, bool)):
+        return None, None, "cursor file has a non-integer epoch"
+    return cursor, epoch, None
+
+
+def _save_ingest_cursor(d, cursor, epoch):
+    _write_private(os.path.join(d, _INGEST_CURSOR_FILE),
+                   json.dumps({"cursor": cursor, "epoch": epoch},
+                              indent=2).encode())
+
+
+def _load_ingested(d):
+    path = os.path.join(d, _INGESTED_DECISIONS_FILE)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_ingested(d, data):
+    # Bound the log: keep the newest entries by ingested_at. Decisions are
+    # write-once; an entry is only needed while its command could still be
+    # redelivered (lease windows are minutes; the cap is deep headroom).
+    items = sorted(data.items(),
+                   key=lambda kv: (kv[1].get("ingested_at", "")
+                                   if isinstance(kv[1], dict) else ""))
+    data = dict(items[-_INGESTED_DECISIONS_CAP:])
+    _write_private(os.path.join(d, _INGESTED_DECISIONS_FILE),
+                   json.dumps(data, indent=2).encode())
+
+
+def _ingest_command_shape(cmd):
+    """(seq, kind, payload, epoch) or None when the command row is malformed.
+
+    A malformed row is the plane's bug: it is skipped loudly WITHOUT
+    acking — the cursor holds, the run stops at the bad row, and the
+    plane repairs it. Never executed, never allowed to wedge the queue
+    silently.
+    """
+    if not isinstance(cmd, dict):
+        return None
+    seq, kind, payload = cmd.get("seq"), cmd.get("kind"), cmd.get("payload")
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+        return None
+    if not isinstance(kind, str) or not kind:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    epoch = cmd.get("epoch")
+    if epoch is not None and (not isinstance(epoch, int)
+                              or isinstance(epoch, bool)):
+        return None
+    return seq, kind, payload, epoch
+
+
+def _ingest_decision_payload(box_id, payload):
+    """(aid, decision, decision_seq, idempotency_key) or None.
+
+    The idempotency key must be byte-exactly the plane's canonical form
+    `approval_decision:<box_id>:<aid>:<decision_seq>` (#873): a forged or
+    replayed key never matches, so a tampered payload cannot pass.
+    """
+    aid = payload.get("aid")
+    decision = payload.get("decision")
+    dseq = payload.get("decision_seq")
+    key = payload.get("idempotency_key")
+    if not isinstance(aid, str) or not _INGEST_AID_RE.match(aid):
+        return None
+    if decision not in ("approve", "deny", "expire"):
+        return None
+    if not isinstance(dseq, int) or isinstance(dseq, bool) or dseq < 1:
+        return None
+    want_key = f"approval_decision:{box_id}:{aid}:{dseq}"
+    if not isinstance(key, str) or key != want_key:
+        return None
+    return aid, decision, dseq, key
+
+
+def _ingest_ack(control, box_id, token, seq):
+    """Ack one executed command. Returns True only when the plane accepted
+    the ack (2xx without an explicit ok:false — the ack endpoint's response
+    shape is not pinned in docs/DURABLE_COMMANDS.md).
+
+    The 2xx acceptance is deliberately loose, and it is safe *only*
+    because of execute-before-ack ordering: a loose misread (treating a
+    failed ack as accepted) advances the cursor past an unacked seq, but
+    the command was already executed AND the ack is idempotent — the
+    plane's acked_watermark is the recovery source, and a redelivered
+    command re-runs through the idempotency backstops. A *strict* misread
+    (treating an accepted ack as failed) only costs a redelivery, never
+    a loss. So the asymmetry favors looseness here: the dangerous
+    direction is strictness-looking-safe, not looseness.
+    """
+    url = (control.rstrip("/") + "/v1/boxes/"
+           + urllib.parse.quote(box_id, safe="") + "/commands/ack")
+    try:
+        status, resp = _http("POST", url, {"seqs": [seq]},
+                             {"Authorization": "Bearer " + token})
+    except Exception as e:  # _http is total, but stay total anyway
+        return False
+    if not (200 <= status < 300):
+        return False
+    return not (isinstance(resp, dict) and resp.get("ok") is False)
+
+
+def _mint_grant(argv):
+    """Subprocess seam for the single-writer grant mint (Finding 60) —
+    monkeypatched in tests."""
+    import subprocess
+    return subprocess.run(argv, capture_output=True, text=True,
+                          timeout=_INGEST_GRANT_MINT_TIMEOUT)
+
+
+def _ingest_stamp_consumed(approvals, aid, record):
+    """Write-if-absent consumed/<aid>.json (O_EXCL, like the proxy's
+    _stamp_expired_consumed). Returns True when this call created the
+    record, False when one already existed (first writer wins among
+    O_EXCL stampers — the reapers and earlier ingests; confirmd's
+    in-flight answer path is clobbering, not O_EXCL, so it wins the
+    record regardless)."""
+    path = os.path.join(approvals, "consumed", aid + ".json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(record, f, indent=2)
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def _ingest_answer_record(item, aid, decision, requester, seq, key):
+    """Build the answered/consumed record mirroring _answer_locked's stamp
+    shape (docs/APPROVAL_CLIENT_SIGNAL.md v1 contract) plus the
+    plane-origin receipt fields (additive — readers ignore unknown fields).
+
+    `answered_by` is null: the wire v1 does not carry the plane's owner
+    principal (follow-up: pin `decided_by` on the wire). `decision_origin`
+    is the honest provenance marker.
+    """
+    rec = dict(item)
+    rec.pop("_csrf", None)
+    rec.pop("_csrf_nonces", None)
+    rec["id"] = aid
+    rec["decision"] = decision
+    if decision == "deny":
+        # Issue #73 (belt-and-braces, mirroring _answer_locked): a
+        # requester-planted grant_ttl_hours must not survive into the
+        # answered record of a denial — deny mints nothing, so the
+        # record must not claim a lifetime.
+        rec.pop("grant_ttl_hours", None)
+    rec["answered_at"] = _utcnow_iso()
+    rec["answered_by"] = None
+    rec["requester"] = requester
+    rec["decision_origin"] = "plane"
+    rec["plane_seq"] = seq
+    rec["idempotency_key"] = key
+    return rec
+
+
+def _ingest_expired_record(item, aid, requester, seq, key):
+    """Build the terminal expiry record mirroring _stamp_expired_consumed's
+    shape. `expired_by: "plane"` names the third stamper alongside
+    confirmd/proxy (additive stamper value; readers key on
+    decision == "expired", never on the stamper's identity)."""
+    rec = dict(item)
+    rec.pop("_csrf", None)
+    rec.pop("_csrf_nonces", None)
+    rec.pop("answered_at", None)
+    rec.pop("answered_by", None)
+    rec["id"] = aid
+    rec["decision"] = "expired"
+    rec["expired_at"] = _utcnow_iso()
+    rec["expired_by"] = "plane"
+    rec["requester"] = requester
+    rec["tenant_id"] = None
+    rec["decision_origin"] = "plane"
+    rec["plane_seq"] = seq
+    rec["idempotency_key"] = key
+    return rec
+
+
+def _ingest_finish_move(d, approvals, aid, rec):
+    """Move an answered/ record to consumed/ and clean up.
+
+    The consumed/ write is write-if-absent (first writer wins among
+    O_EXCL stampers — the reapers and earlier ingests; against confirmd's
+    in-flight answer path the local record wins the record, so this is a
+    stamper race, not a cross-process guarantee); the answered/ cleanup
+    is best-effort
+    (confirmd's sweep collects strays, #233). Returns True when the
+    terminal state is settled, False when the write failed and the run
+    must retry (nothing is acked — the resume path below re-attempts the
+    move instead of treating the aid as unknown)."""
+    try:
+        if not _ingest_stamp_consumed(approvals, aid, rec):
+            _ingest_say(f"aid={aid}: lost the terminal race "
+                        "(consumed/ record already exists) — "
+                        "not stamping over the winner")
+    except OSError as e:
+        _ingest_fail(d, f"aid={aid}: consumed/ write failed ({e}) — "
+                        "decision NOT settled, will retry")
+        return False
+    try:
+        os.remove(os.path.join(approvals, "answered", aid + ".json"))
+    except OSError:
+        pass  # confirmd's sweep collects strays (#233)
+    return True
+
+
+def _ingest_stalled_record(approvals, aid, key):
+    """Return our own interrupted answered/ record, if any.
+
+    If a previous run removed the pending item but crashed before the
+    consumed/ move, the aid looks "unknown" on redelivery — but the
+    answered/ file with our decision_origin + idempotency_key proves it
+    is ours to finish, not a foreign aid to reject.
+    """
+    p = os.path.join(approvals, "answered", aid + ".json")
+    try:
+        with open(p) as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if (isinstance(rec, dict) and rec.get("decision_origin") == "plane"
+            and rec.get("idempotency_key") == key
+            and rec.get("id") == aid):
+        return rec
+    return None
+
+
+def _ingest_write_answered(approvals, aid, rec):
+    """Atomic tmp+replace write of the answered/ record (the human-history
+    half of the stamp; the proxy reads consumed/)."""
+    answered_path = os.path.join(approvals, "answered", aid + ".json")
+    os.makedirs(os.path.dirname(answered_path), exist_ok=True)
+    tmp = answered_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=2)
+    os.replace(tmp, answered_path)
+
+
+def _ingest_approval_decision(d, approvals, box_id, token, seq, payload,
+                              ingested, attention):
+    """Stamp one plane decision into confirmd's store.
+
+    Returns True when the command is consumed (ack it) and False when the
+    ingest must retry later (do NOT ack — the command redelivers).
+    `attention` collects operator-attention notes for permanently
+    unprocessable commands (acked-and-logged, queue advances, exit 1).
+    """
+    shaped = _ingest_decision_payload(box_id, payload)
+    if shaped is None:
+        # The plane's bug, never the box's data to invent: ack-and-log so
+        # a malformed row cannot wedge the queue, and never stamp garbage.
+        _ingest_fail(d, f"malformed approval_decision command seq={seq} — "
+                        "acked without stamping (plane bug; nothing was "
+                        "written)")
+        return True
+    aid, decision, dseq, key = shaped
+
+    def _mark():
+        ingested[key] = {"seq": seq, "decision": decision,
+                         "ingested_at": _utcnow_iso()}
+
+    if key in ingested:
+        _ingest_say(f"seq={seq} aid={aid}: already ingested "
+                    f"(idempotency key) — skipping")
+        return True
+    consumed_path = os.path.join(approvals, "consumed", aid + ".json")
+    if os.path.exists(consumed_path):
+        # First terminal wins: the local answer path (or an earlier
+        # ingest) already recorded the terminal state.
+        _ingest_say(f"seq={seq} aid={aid}: already terminal locally — "
+                    "plane decision superseded, not stamped")
+        _mark()
+        return True
+    pending_path = os.path.join(approvals, "pending", aid + ".json")
+    try:
+        with open(pending_path) as f:
+            item = json.load(f)
+    except FileNotFoundError:
+        stalled = _ingest_stalled_record(approvals, aid, key)
+        if stalled is not None:
+            # Our own stamp was interrupted after the pending removal:
+            # resume the consumed move instead of rejecting the aid.
+            _ingest_say(f"seq={seq} aid={aid}: resuming interrupted stamp")
+            if _ingest_finish_move(d, approvals, aid, stalled):
+                _mark()
+                return True
+            return False
+        # The tenant/aid binding: this box never filed this aid, so the
+        # decision is not ours to stamp — reject it, never stamp it.
+        _ingest_fail(d, f"seq={seq}: decision for unknown aid {aid} — no "
+                        "local pending item; rejecting (not stamped)")
+        _mark()
+        return True
+    except (OSError, ValueError) as e:
+        # A torn/unreadable pending file reads as "not found" on the
+        # local answer path (issue #77 L5) — same here: ack-and-log.
+        _ingest_fail(d, f"seq={seq} aid={aid}: pending item unreadable "
+                        f"({e}) — acked without stamping")
+        _mark()
+        return True
+    if not isinstance(item, dict):
+        _ingest_fail(d, f"seq={seq} aid={aid}: pending item is not an "
+                        "object — acked without stamping")
+        _mark()
+        return True
+    if item.get("tenant_id") is not None and not _ingest_item_expired(item):
+        # Permanent, not transient: this client predates multi-tenant
+        # confirmd (H10) and can never stamp a scoped item. Ack-and-log
+        # loudly with the upgrade runbook instead of wedging the queue
+        # behind it — but flag operator attention (the run exits 1)
+        # because a decision was dropped on the floor. A scoped item
+        # whose window already lapsed falls through to the honest
+        # expired stamp below, which drains it.
+        attention.append(
+            f"tenant-scoped approval {aid} (seq={seq}): decision "
+            f"{decision} acked without stamping — upgrade to an "
+            "H10-aware ingest client")
+        _ingest_fail(d, f"seq={seq} aid={aid}: tenant-scoped item "
+                        "(tenant_id set) — this client predates H10; "
+                        "acked without stamping (upgrade the client)",
+                     redact=(token,))
+        _mark()
+        return True
+    # Finding 50: the requester is the file's owner, never an argument —
+    # only bdrive/swapd may file. The item's "requester" field (when
+    # present) is requester-authored and is never consulted.
+    requester = _ingest_file_owner(pending_path)
+    if requester not in ("bdrive", "swapd"):
+        _ingest_fail(d, f"seq={seq} aid={aid}: unexpected requester "
+                        f"{requester!r} — refusing to stamp")
+        _mark()
+        return True
+
+    def _remove_pending():
+        try:
+            os.remove(pending_path)
+        except OSError:
+            pass  # confirmd's reap may have won the race; not an error
+
+    def _stamp_expired():
+        rec = _ingest_expired_record(item, aid, requester, seq, key)
+        if _ingest_stamp_consumed(approvals, aid, rec):
+            _ingest_audit(d, aid, "expired", requester, seq)
+        else:
+            # The O_EXCL write lost: a reaper (or an earlier ingest)
+            # recorded first, and write-if-absent means first-writer-wins
+            # the record among O_EXCL stampers. (Against confirmd's
+            # in-flight answer path the local record wins regardless —
+            # its move is clobbering, not O_EXCL — so the "first" here
+            # names the stamper race only.)
+            _ingest_say(f"seq={seq} aid={aid}: lost the terminal race "
+                        "(consumed/ record already exists) — "
+                        "not stamping over it")
+        _remove_pending()
+        _mark()
+
+    if decision == "expire" or _ingest_item_expired(item):
+        # A plane `expire`, or the window lapsed before the ingest ran:
+        # the honest outcome label is expired either way.
+        _stamp_expired()
+        _ingest_say(f"seq={seq} aid={aid}: stamped expired "
+                    f"(plane_seq={seq})")
+        return True
+
+    if decision == "deny":
+        rec = _ingest_answer_record(item, aid, "deny", requester, seq, key)
+        _ingest_write_answered(approvals, aid, rec)
+        _remove_pending()
+        # Finding 56: one-way. The O_EXCL move inside _ingest_finish_move
+        # keeps first-writer-wins among O_EXCL stampers (reapers, earlier
+        # ingests); against confirmd's in-flight answer the local record
+        # wins regardless — see the approve-path race handling above.
+        if not _ingest_finish_move(d, approvals, aid, rec):
+            return False
+        _ingest_audit(d, aid, "deny", requester, seq)
+        _mark()
+        _ingest_say(f"seq={seq} aid={aid}: stamped denied "
+                    f"(plane_seq={seq})")
+        return True
+
+    # decision == "approve": mirror _answer_locked's mint path (Findings
+    # 60/64) — the grant is minted via the single writer BEFORE the
+    # answered record exists.
+    name = item.get("credential")
+    host = item.get("host")
+    method = (item.get("method") or "").upper()
+    if not name or not host or not method:
+        # Finding 64: the tuple is validated before the mint, never after.
+        _ingest_fail(d, f"seq={seq} aid={aid}: cannot mint grant — missing "
+                        "credential/host/method; failing closed, not acked")
+        return False
+    if not _ingest_grant_window_ok(item):
+        # Issue #534: an expiry crossing mid-mint would land an
+        # un-revokable grant — refuse the mint, stamp expired honestly.
+        _stamp_expired()
+        _ingest_say(f"seq={seq} aid={aid}: approve arrived inside the "
+                    "grant-mint window — stamped expired")
+        return True
+    ttl_hours = _INGEST_GRANT_TTL_DEFAULT  # wire v1 carries no TTL choice
+    # Shrink the approve/terminal race window: re-check the terminal
+    # record immediately before the mint (the earlier check at the top of
+    # this function is stale by now). The window cannot be closed — the
+    # mint itself takes up to _INGEST_GRANT_MINT_TIMEOUT seconds — so the
+    # post-mint re-check below is the real backstop.
+    if os.path.exists(os.path.join(approvals, "consumed", aid + ".json")):
+        _ingest_say(f"seq={seq} aid={aid}: terminal record appeared "
+                    "before the mint — not minting (confirmd won the race)")
+        _mark()
+        return True
+    mint_argv = [_grant_writer(), "add",
+                 "--credential", name,
+                 "--host", host,
+                 "--method", method,
+                 "--path-prefix", item.get("path_prefix") or "/",
+                 "--approval-id", aid,
+                 "--scope", item.get("scope") or "",
+                 "--job", item.get("job") or "",
+                 "--ttl-hours", str(ttl_hours)]
+    if item.get("expires"):
+        # Issue #294: the writer fails closed at mint time (exit 3) when
+        # the instant crossed while we were working.
+        mint_argv += ["--approval-expires", str(item["expires"])]
+    try:
+        out = _mint_grant(mint_argv)
+    except Exception as e:
+        _ingest_fail(d, f"seq={seq} aid={aid}: grant mint failed ({e}) — "
+                        "not stamped, will retry")
+        return False
+    if out.returncode == 3:
+        # The approval's expiry crossed during the mint: the honest
+        # outcome is expired (#240 routing), not a phantom approval.
+        _stamp_expired()
+        _ingest_say(f"seq={seq} aid={aid}: writer refused (expiry crossed) "
+                    "— stamped expired")
+        return True
+    if out.returncode != 0:
+        _ingest_fail(d, f"seq={seq} aid={aid}: grant mint failed "
+                        f"(exit {out.returncode}) — not stamped, will retry")
+        return False
+    # #240-style post-mint terminal re-check (mirrors _answer_locked): the
+    # owner's tap — or a reaper — may have landed during the mint, and the
+    # pending file still existed for all of it (the ingest holds no
+    # per-aid lock against confirmd's answer path — the structural fix
+    # is #945). Cross-process truth:
+    # against confirmd's in-flight answer the local path wins the *record*
+    # (its answered→consumed move is clobbering os.replace, not O_EXCL),
+    # so "first-terminal-wins" describes the write-if-absent race against
+    # the reapers only — never a guarantee against _answer_locked.
+    if os.path.exists(os.path.join(approvals, "consumed", aid + ".json")):
+        # The grant is minted and cannot be un-minted (no per-approval-id
+        # revoke — grant-writer revoke is by job only). Journal the
+        # conflict loudly with the remediation runbook instead of
+        # stamping over the winner: a live grant under a deny/expired
+        # record is a fail-open the proxy would honor.
+        job = item.get("job") or "<job>"
+        try:
+            with open(os.path.join(approvals, "consumed",
+                                   aid + ".json")) as f:
+                winner = json.load(f)
+        except (OSError, ValueError):
+            winner = {}
+        _ingest_fail(d, f"seq={seq} aid={aid}: APPROVE/TERMINAL RACE — "
+                        "grant minted, but a terminal record landed "
+                        "during the mint; NOT stamping. approval_id="
+                        f"{aid} credential={item.get('credential')} "
+                        f"host={item.get('host')} "
+                        f"method={(item.get('method') or '').upper()} "
+                        f"path_prefix={item.get('path_prefix') or '/'} "
+                        f"job={job} winning_decision="
+                        f"{winner.get('decision')!r}. Runbook: the "
+                        "winning terminal state is in "
+                        f"consumed/{aid}.json; the minted grant stays "
+                        "live until its TTL expires — revoke it with "
+                        f"`grant-writer revoke --job {job}` if the "
+                        "winner is deny/expired.", redact=(token,))
+        _mark()
+        return True
+    if _ingest_item_expired(item):
+        # The window lapsed during the mint with no terminal record: the
+        # honest outcome is expired (the #240 outcome), not a phantom
+        # approval for an already-dead window.
+        _stamp_expired()
+        _ingest_say(f"seq={seq} aid={aid}: window lapsed during the mint "
+                    "— stamped expired")
+        _mark()
+        return True
+    rec = _ingest_answer_record(item, aid, "approve", requester, seq, key)
+    rec["grant_ttl_hours"] = ttl_hours
+    _ingest_write_answered(approvals, aid, rec)
+    _remove_pending()
+    # The grant is minted (the writer dedupes on approval_id, so a
+    # redelivery re-mint is a no-op); a failed move retries the *stamp*,
+    # never the mint — the resume path re-attempts the move.
+    if not _ingest_finish_move(d, approvals, aid, rec):
+        return False
+    _ingest_audit(d, aid, "approve", requester, seq, ttl_hours=ttl_hours)
+    _mark()
+    _ingest_say(f"seq={seq} aid={aid}: stamped approved and minted grant "
+                f"(plane_seq={seq})")
+    return True
+
+
+def _ingest_commands(d, approvals, box_id, token, control):
+    """One fetch-execute-ack pass over the durable command queue.
+
+    Returns 0 when the pass completed (every due command acked or the
+    queue drained), 1 when it did not (loud log already written).
+    """
+    cursor, epoch, cursor_note = _load_ingest_cursor(d)
+    healed = cursor is None
+    params = {"since": cursor or 0, "limit": _INGEST_FETCH_LIMIT}
+    url = (control.rstrip("/") + "/v1/boxes/"
+           + urllib.parse.quote(box_id, safe="") + "/commands/pending?"
+           + urllib.parse.urlencode(params))
+    status, resp = _http("GET", url, None,
+                         {"Authorization": "Bearer " + token})
+    if status == 401:
+        _ingest_fail(d, f"ingest rejected ({_plane_error(resp, status)}): "
+                        "this box token is dead (expired, revoked, or "
+                        "never valid) — re-pair the box (`request` + "
+                        "`redeem`)", redact=(token,))
+        return 1
+    if status == 404 and _plane_missing(resp):
+        _ingest_fail(d, "ingest failed: this control plane does not "
+                        "implement the commands endpoints yet — nothing "
+                        "was changed", redact=(token,))
+        return 1
+    if not isinstance(resp, dict) or status != 200:
+        _ingest_fail(d, f"ingest failed: {_plane_error(resp, status)} "
+                        f"(http={status}) — will retry at the next cron "
+                        "tick", redact=(token,))
+        return 1
+    commands = resp.get("commands")
+    if not isinstance(commands, list):
+        _ingest_fail(d, "ingest failed: malformed plane response "
+                        "(commands is not a list) — will retry at the "
+                        "next cron tick", redact=(token,))
+        return 1
+    watermark = resp.get("acked_watermark")
+    if healed:
+        # Reconcile from the plane's own watermark (the cursor contract,
+        # #848): a missing/corrupt cursor file heals to the highest acked
+        # seq, never to zero — zero would redeliver ancient history.
+        cursor = watermark if isinstance(watermark, int) \
+            and not isinstance(watermark, bool) else 0
+        if cursor_note.startswith("first run"):
+            _ingest_say(f"no cursor file yet — starting at plane "
+                        f"acked_watermark={cursor}")
+        else:
+            # Corruption is journal-worthy on the loud channel; the run
+            # still continues from the healed cursor.
+            _ingest_fail(d, f"cursor healed from plane acked_watermark="
+                            f"{cursor} ({cursor_note})", redact=(token,))
+    ingested = _load_ingested(d)
+    # Ascending seq order; the cursor advances only over the acked prefix
+    # (never past an unacked command — that would skip its redelivery).
+    rows = []
+    for cmd in commands:
+        shaped = _ingest_command_shape(cmd)
+        if shaped is None:
+            # No seq to ack and nothing safe to execute: skip loudly. The
+            # plane will return the row on every fetch until it is fixed —
+            # noisy, but the alternative (advancing past it blindly) hides
+            # a plane bug, and acking without a seq is impossible.
+            _ingest_fail(d, "malformed command row from plane — skipped "
+                            "(plane bug; nothing was written)",
+                         redact=(token,))
+            continue
+        rows.append(shaped)
+    rows.sort(key=lambda r: r[0])
+    new_cursor = cursor
+    ok = True
+    attention = []
+    for seq, kind, payload, cmd_epoch in rows:
+        if seq <= new_cursor:
+            continue  # already acked (defense: the plane should not send it)
+        if cmd_epoch is not None and cmd_epoch != epoch:
+            # Epoch adoption is last-writer-wins: the plane is the
+            # authority on which delivery-generation this pass belongs to,
+            # and the epoch is carried back in the ack envelope for
+            # diagnostics only. Two planes racing the same box would
+            # interleave epochs the box cannot arbitrate — the box-side
+            # cursor stays monotonic regardless. The ingest never *sends*
+            # ?epoch= (passive adopter); the incarnation claim is #947.
+            _ingest_say(f"epoch {epoch} -> {cmd_epoch} (plane moved on)")
+            epoch = cmd_epoch
+        if kind not in _HONORED_COMMAND_KINDS:
+            # The plane is opaque to kinds and the box executor decides;
+            # ack-and-log keeps one unknown kind from wedging the queue.
+            # `kind` is plane-controlled: redact like any plane string
+            # that reaches a cron-spooled channel.
+            _ingest_say(f"seq={seq}: unknown command kind {kind!r} — "
+                        "acked without execution", redact=(token,))
+            consumed = True
+        elif kind == "approval_decision":
+            try:
+                consumed = _ingest_approval_decision(d, approvals, box_id,
+                                                     token, seq, payload,
+                                                     ingested, attention)
+            except (OSError, ValueError) as e:
+                # A local I/O failure (disk full, torn state) must fail
+                # closed with a loud log — never a traceback, and never
+                # an ack: the command redelivers on the next tick.
+                _ingest_fail(d, f"seq={seq}: local failure during ingest "
+                                f"({e}) — not acked, will retry",
+                             redact=(token,))
+                consumed = False
+        else:  # pragma: no cover — registry and branch above stay in sync
+            consumed = False
+        if not consumed:
+            ok = False
+            break  # stop at the first un-ackable command; the rest wait
+        if not _ingest_ack(control, box_id, token, seq):
+            _ingest_fail(d, f"seq={seq}: ack failed — cursor held at "
+                            f"{new_cursor}; will retry at the next cron "
+                            "tick", redact=(token,))
+            ok = False
+            break
+        new_cursor = seq
+    try:
+        _save_ingest_cursor(d, new_cursor, epoch)
+        _save_ingested(d, ingested)
+    except OSError as e:
+        # ENOSPC/EACCES/EROFS on the state saves: fail closed and loud —
+        # never a traceback. Redelivery stays safe: acked commands are
+        # covered by the consumed/ records and the idempotency log the
+        # last successful save wrote.
+        _ingest_fail(d, f"state save failed ({e}) — cursor/log may be "
+                        "stale; redelivery is idempotent, will retry",
+                     redact=(token,))
+        return 1
+    if attention:
+        for note in attention:
+            _ingest_say("ATTENTION: " + note, redact=(token,))
+    if ok and new_cursor > cursor:
+        _ingest_say(f"ingested {new_cursor - cursor} command(s); "
+                    f"cursor -> {new_cursor}")
+    elif ok:
+        _ingest_say("queue drained; nothing due")
+    # Permanently-unprocessable commands were acked-and-logged above: the
+    # queue advanced, but the operator still needs to see the exit code.
+    return 0 if ok and not attention else 1
+
+
+def cmd_ingest(args):
+    """Box: pull durable commands and ingest plane approval decisions
+    (cron-friendly: exit 0 only when every due command was consumed,
+    loud on failure, quiet-ish on success)."""
+    d = _state_dir(args)
+    enroll_path = os.path.join(d, "enrollment.json")
+    try:
+        enroll = _read_json_file(enroll_path)
+    except (OSError, ValueError) as e:
+        _ingest_fail(d, f"enrollment.json is unreadable ({e}) — run "
+                        "`request` + `redeem` first")
+        return 1
+    if not isinstance(enroll, dict):
+        _ingest_fail(d, "enrollment.json is not an object — run `request` "
+                        "+ `redeem` first")
+        return 1
+    box_id, token = enroll.get("box_id"), enroll.get("token")
+    if not box_id or not token:
+        _ingest_fail(d, "enrollment.json is missing box_id/token — run "
+                        "`request` + `redeem` first")
+        return 1
+    control, msg = _resolve_control(args, enroll)
+    if control is None:
+        _ingest_fail(d, msg)
+        return 1
+    approvals = _approvals_dir()
+    if not os.path.isdir(approvals):
+        _ingest_fail(d, f"approvals dir {approvals} is missing — is "
+                        "confirmd installed on this box?", redact=(token,))
+        return 1
+    # Serialize overlapping cron ticks: two ingests racing the same queue
+    # would double-stamp (the idempotency log covers crashes, not
+    # concurrency — keep it serial).
+    lock_path = os.path.join(d, _INGEST_LOCK_FILE)
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.fchmod(lock_fd, 0o600)
+    except OSError as e:
+        _ingest_fail(d, f"ingest FAILED: cannot open lock file ({e}) — "
+                        "check state-dir permissions", redact=(token,))
+        return 1
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return _ingest_commands(d, approvals, box_id, token, control)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="spark-pair",
                                  description="pairing-code box enrollment")
@@ -961,6 +1901,13 @@ def main(argv=None):
                                       "exit 0 only on the plane's ok, loud "
                                       "on failure, quiet on success)")
     s.set_defaults(fn=cmd_heartbeat)
+
+    s = sub.add_parser("ingest", help="box: pull durable commands and "
+                                      "ingest plane approval decisions into "
+                                      "confirmd (cron-friendly: exit 0 only "
+                                      "when every due command was consumed, "
+                                      "loud on failure)")
+    s.set_defaults(fn=cmd_ingest)
 
     s = sub.add_parser("approve", help="owner: verify fingerprint + approve")
     s.add_argument("--pairing-id", help="pairing id (lists pending if omitted)")
