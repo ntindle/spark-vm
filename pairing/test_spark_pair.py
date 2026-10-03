@@ -1467,3 +1467,61 @@ def test_approve_list_control_char_entry_is_clean_error(ctx, monkeypatch,
     assert "malformed" in out
     assert "Traceback" not in out
     assert "\x1b" not in out
+
+
+def test_plane_error_strips_control_chars():
+    # #902: plane-supplied error strings are echoed into stdout by every
+    # command's failure path — ANSI escapes / CR / DEL must not reach the
+    # terminal. Non-vacuous: the old code printed resp["error"] verbatim.
+    f = spark_pair._plane_error
+    hostile = {"error": "denied\x1b[2K\rby policy\x7f"}
+    assert f(hostile, 403) == "denied[2Kby policy"  # only the control
+    # bytes are stripped; printable bytes ([2K) stay — the message keeps
+    # its meaning, the escape dies
+    # Clean strings pass through byte-identical.
+    assert f({"error": "quota exceeded"}, 403) == "quota exceeded"
+    # Missing "error" key: the numeric status fallback passes through.
+    assert f({}, 404) == 404
+    # Non-string error values are never mangled.
+    d = {"detail": 1}
+    assert f({"error": d}, 500) is d
+    assert f({"error": None}, 500) is None
+
+
+def test_approve_failed_error_is_scrubbed(ctx, monkeypatch, capsys):
+    # End-to-end through cmd_approve's fetch path: the hostile plane's
+    # error string is printed cleaned, never raw.
+    def fake_http(method, url, body=None, headers=None):
+        return 403, {"ok": False,
+                     "error": "forbidden\x1b]0;pwned\x07for you\r\n"}
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    ctx.pairing_id = "pair_1"
+    assert spark_pair.cmd_approve(ctx) == 1
+    out = capsys.readouterr().out
+    assert "fetch failed:" in out
+    assert "forbidden]0;pwnedfor you" in out  # escape dead, text intact
+    assert "\x1b" not in out and "\r" not in out and "\x07" not in out
+
+
+def test_request_scrubs_hostile_pairing_code_display(ctx, monkeypatch, capsys):
+    # #902 B1: the pairing code is displayed for the owner to transcribe —
+    # a hostile plane embedding escapes there has strictly more bite than
+    # an error string. The display must be scrubbed; the stored value in
+    # pairing.json keeps the raw code (a file, not a terminal).
+    _run_init(ctx)
+
+    def fake_http(method, url, body=None, headers=None):
+        if url.endswith("/v1/pairing/request"):
+            return 201, {"ok": True, "pairing_id": "pair_hostile",
+                         "code": "ABCD\x1b[2K\rEFGH", "expires_at": 9999999999}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(spark_pair, "_http", fake_http)
+    assert spark_pair.cmd_request(ctx) == 0
+    out = capsys.readouterr().out
+    assert "ABCD[2KEFGH" in out  # cleaned text, escape dead
+    assert "\x1b" not in out and "\r" not in out
+    # Stored value untouched (raw) — the scrub is display-only.
+    pairing = json.load(open(os.path.join(ctx.dir, "pairing.json")))
+    assert pairing["code"] == "ABCD\x1b[2K\rEFGH"
