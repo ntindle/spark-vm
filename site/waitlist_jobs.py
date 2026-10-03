@@ -9,6 +9,10 @@ Three cron entry points against the operator-side waitlist store
                                   status `dropped`, no third email)
     waitlist_jobs.py --purge      the 30d post-drop purge (§5: dropped →
                                   row deleted; slice 3b)
+    waitlist_jobs.py --rotate-funnel-events
+                                  the 90d funnel-event rotation (§5, #897:
+                                  aged events leave the hot file for dated
+                                  archives; coverage-pinned events stay)
 
 --purge is the operator pass slice 3a's docstring deferred: it rewrites
 rows.jsonl, so it has its own lock discipline (data lock held across
@@ -25,6 +29,7 @@ Operator cron shape (all three jobs share the service's env):
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... waitlist_jobs.py --remind
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... waitlist_jobs.py --drop
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... waitlist_jobs.py --purge
+    WAITLIST_HMAC_KEY=... WAITLIST_DATA=... waitlist_jobs.py --rotate-funnel-events  # weekly
 
 Config (env — same fail-loud contract as waitlistd):
     WAITLIST_HMAC_KEY    operator HMAC key — REQUIRED, fail loud if unset.
@@ -56,6 +61,17 @@ Purge semantics (§5):
   counts survive the PII. A dropped row with no parseable dropped_at is
   never purge-due (can't prove the 30 days elapsed; the operator handles
   hand-edited stores by hand).
+
+Rotation semantics (§5, #897):
+- events older than the funnel retention horizon (90d default,
+  WAITLIST_FUNNEL_RETENTION_SECONDS override) leave the hot
+  funnel_events.jsonl for funnel_events-archive-<YYYY-MM>.jsonl —
+  except coverage-pinned events (invite_sent/claimed still consulted by
+  the reconcile passes for live invited/signed_up rows), which stay
+  regardless of age, and unparseable lines, which are fail-closed.
+  Archives are the audit trail: the loop never deletes them. Weekly
+  cadence is plenty for a 90d horizon; run it from the same operator
+  cron block as --purge.
 
 stdlib only. Tested by scripts/test_waitlist_jobs.py.
 """
@@ -113,9 +129,11 @@ def main(argv):
     want_remind = "--remind" in argv
     want_drop = "--drop" in argv
     want_purge = "--purge" in argv
-    if sum((want_remind, want_drop, want_purge)) != 1:
+    want_rotate = "--rotate-funnel-events" in argv
+    if sum((want_remind, want_drop, want_purge, want_rotate)) != 1:
         sys.stderr.write(
-            "waitlist_jobs: pass exactly one of --remind, --drop, --purge\n")
+            "waitlist_jobs: pass exactly one of --remind, --drop, "
+            "--purge, --rotate-funnel-events\n")
         raise SystemExit(2)
     dry_run = "--dry-run" in argv
     key, data_dir, host = load_job_config(argv)
@@ -138,10 +156,17 @@ def main(argv):
                 sys.stdout.write(
                     f"waitlist_jobs: dry-run — {len(due_drop)} drop(s) due: "
                     f"{','.join(due_drop) or '(none)'}\n")
-            else:
+            elif want_purge:
                 sys.stdout.write(
                     f"waitlist_jobs: dry-run — {len(due_purge)} purge(s) "
                     f"due: {','.join(due_purge) or '(none)'}\n")
+            else:
+                result = service.rotate_funnel_events(dry_run=True)
+                sys.stdout.write(
+                    f"waitlist_jobs: dry-run — {result['archived']} "
+                    f"event(s) would rotate to "
+                    f"{len(result['archives'])} archive(s), "
+                    f"{result['kept']} kept\n")
             return 0
         if want_remind:
             sent = service.send_reminders()
@@ -149,9 +174,15 @@ def main(argv):
         elif want_drop:
             dropped = service.drop_expired()
             sys.stdout.write(f"waitlist_jobs: dropped {len(dropped)} row(s)\n")
-        else:
+        elif want_purge:
             purged = service.purge_dropped()
             sys.stdout.write(f"waitlist_jobs: purged {len(purged)} row(s)\n")
+        else:
+            result = service.rotate_funnel_events()
+            sys.stdout.write(
+                f"waitlist_jobs: rotated {result['archived']} event(s) to "
+                f"{len(result['archives'])} archive(s), "
+                f"{result['kept']} kept in hot\n")
     return 0
 
 

@@ -806,3 +806,32 @@ def test_purge_gc_prunes_consumed_tokens_of_gone_rows():
     status, html = svc.forget_get(forget_token)
     assert status == 200
     assert "already deleted" in html
+
+
+def test_rotate_funnel_events_cli(monkeypatch, capsys):
+    # #897: the operator cron entry point. Old audit-only events rotate to
+    # a dated archive; the CLI reports the partition; --dry-run is honest.
+    svc, tmp, clock = make_service()
+    old_at = wd.iso_z(clock.t - timedelta(days=120))
+    fresh_at = wd.iso_z(clock.t - timedelta(days=1))
+    with open(os.path.join(tmp, "funnel_events.jsonl"), "w",
+              encoding="utf-8") as fh:
+        fh.write(json.dumps({"event": "purged", "at": old_at, "ref": "e1",
+                             "attrs": {}}) + "\n")
+        fh.write(json.dumps({"event": "cta_click", "at": fresh_at,
+                             "ref": "selfhost", "attrs": {}}) + "\n")
+    monkeypatch.setenv("WAITLIST_HMAC_KEY", KEY.hex())
+    monkeypatch.setenv("WAITLIST_DATA", tmp)
+    assert wj.main(["--rotate-funnel-events", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "1 event(s) would rotate" in out
+    # Dry run wrote nothing.
+    assert len(events(tmp)) == 2
+    assert wj.main(["--rotate-funnel-events"]) == 0
+    out = capsys.readouterr().out
+    assert "rotated 1 event(s)" in out
+    remaining = events(tmp)
+    assert [e["event"] for e in remaining] == ["cta_click"]
+    archives = [f for f in os.listdir(tmp)
+                if f.startswith("funnel_events-archive-")]
+    assert len(archives) == 1
