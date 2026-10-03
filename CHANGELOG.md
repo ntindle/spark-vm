@@ -56,9 +56,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   `spark-pair.py ingest` command (cron-friendly, ~1/min) pulls durable
   commands from the plane and stamps owner approve/deny/expire decisions
   into the box's approval store, so a parked agent sees the same decision
-  signal as for a locally-tapped approval — with proof of plane origin on
-  every stamped record, idempotent stamping across redeliveries, and
-  fail-closed handling of unknown or tenant-scoped approvals. (#TBD)
+  signal as for a locally-tapped approval — with a `decision_origin:
+  "plane"` provenance marker plus the plane `(seq, idempotency_key)`
+  receipt on every stamped record (unforgeability holds at the delivery
+  channel, not on disk — see the trust-model note in `spark_pair.py`),
+  an `answer` audit-log line per stamped decision, idempotent stamping
+  across redeliveries, pre/post-mint terminal re-checks on the approve
+  path, and fail-closed handling of unknown or tenant-scoped approvals.
+  (#944)
 
 - Pinned the `approval_decision` command kind (#873): the first
   plane-produced command on the durable queue — an owner's approve/deny

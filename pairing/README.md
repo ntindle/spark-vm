@@ -219,19 +219,39 @@ the operator mirrors `heartbeat`:
 - **Lock file** (`.ingest.lock`) serializes overlapping cron ticks.
 
 `approval_decision` is the only honored command kind today; unknown kinds
-are acked-and-logged so one unknown kind cannot wedge the queue. Each
-decision is validated (aid shape, decision word, `decision_seq`, and the
-idempotency key bound to `box_id`+`aid`+`seq`), then stamped into
-confirmd's answered/consumed store exactly like a local tap — `deny` and
-`expire` land the terminal records the proxy's Decision legs read, and
-`approve` mints the grant through confirmd's single writer
+are acked-and-logged so one unknown kind cannot wedge the queue (note
+the version-skew hazard: a plane-produced kind this client does not
+understand is skipped *semantically*, not just executionally — a new
+honored kind needs an ingest update; see `docs/DURABLE_COMMANDS.md`).
+Each decision is validated (aid shape, decision word, `decision_seq`,
+and the idempotency key bound to `box_id`+`aid`+`seq`), then stamped
+into confirmd's answered/consumed store exactly like a local tap —
+`deny` and `expire` land the terminal records the proxy's Decision legs
+read, and `approve` mints the grant through confirmd's single writer
 (`proxy/grant-writer`, which dedupes on approval id, so a crash between
 mint and stamp cannot double-mint on redelivery). Every stamped record
 carries `decision_origin: "plane"` plus the plane's `(seq,
 idempotency_key)` as the receipt, and a decision is stamped only for an
 aid the box itself filed — a decision for an unknown aid is rejected,
-never stamped, and a tenant-scoped item fails closed (this client
-predates multi-tenant confirmd).
+never stamped. Stated plainly: this makes the plane a **grant-issuing
+authority** — a compromised plane can mint arbitrary local grants
+through the approve path; that is the feature's purpose (the owner's
+tap moved to the plane dashboard), and the box already trusts the plane
+for pairing, token rotation, and liveness. A tenant-scoped item is
+permanently unprocessable for this pre-H10 client: it is acked-and-logged
+loudly with the upgrade runbook (the run exits 1 for operator
+attention) rather than wedging the queue; a scoped item whose window
+already lapsed is stamped expired honestly, which drains it.
+
+Mode note: the approve path mints through `proxy/grant-writer` against
+the box's **local secrets dir** — the self-hosted mode, and the only
+mode this implementation supports. Vend-mode boxes (#891) must not run
+the local-mint approve path; the dual-mode seam is #891's scope (see
+`docs/DURABLE_COMMANDS.md`). Every stamped decision — `deny`,
+`expire`, `approve` — also appends one `answer` line to confirmd's
+audit log (same shape as the local answer path, plus
+`decision_origin=plane`), so plane decisions never bypass the audit
+trail.
 
 Cron-acceptable:
 

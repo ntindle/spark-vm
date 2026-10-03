@@ -966,12 +966,23 @@ def cmd_approve(args):
 #      (the proxy's _file_approval). A decision for an unknown aid is
 #      rejected, never stamped — this is the tenant/aid binding: a box
 #      only ever files its own tenant's approvals (tenant_id is null
-#      pre-H10; a non-null tenant_id fails closed, this client predates
-#      multi-tenant confirmd).
+#      pre-H10; a non-null tenant_id on a live item fails closed — acked
+#      and loudly logged — because this client predates multi-tenancy).
 # Every stamped record carries `decision_origin: "plane"` plus the plane's
-# (seq, idempotency_key) as the receipt — a box-local process can write
-# JSON, but it cannot produce a record that traces to a plane delivery,
-# and the ingest is the only writer of plane-origin records.
+# (seq, idempotency_key) as the receipt. That marker is provenance
+# bookkeeping inside the same DAC boundary every other store record
+# relies on — a local writer with approvals-dir access can forge the
+# marker the same way it can forge any record (the key format is
+# deterministic and box_id lives in 0600 enrollment.json). The boundary
+# the ingest actually enforces is above: only the ingest writes
+# plane-origin records, and only for plane-delivered commands.
+#
+# NOTE (stated plainly): this promotes the plane from relay to
+# grant-issuing authority — a compromised plane can mint arbitrary local
+# grants through the approve path. That is the feature's purpose (the
+# owner's tap moved to the plane dashboard), not an accident: the same
+# trust the box already places in the plane for pairing, token rotation,
+# and liveness now covers approvals.
 #
 # Crash/redelivery safety mirrors the channel contract (#848):
 #   - the cursor is the highest *acked* seq, never highest-fetched;
@@ -981,8 +992,11 @@ def cmd_approve(args):
 #     validations; the writer dedupes on approval_id, so a crash between
 #     mint and stamp cannot double-mint on redelivery;
 #   - the consumed/ write is write-if-absent (O_EXCL, like the proxy's
-#     _stamp_expired_consumed): first terminal wins if confirmd's own
-#     answer path races the ingest.
+#     _stamp_expired_consumed): first writer wins among O_EXCL stampers
+#     (the reapers, earlier ingests). confirmd's in-flight answer path is
+#     clobbering, not O_EXCL, so it wins the *record* regardless — the
+#     approve path re-checks for its terminal record after the mint
+#     instead of relying on this race.
 # ---------------------------------------------------------------------------
 
 _INGEST_FETCH_LIMIT = 200  # mirrors the plane's per-fetch clamp (#848)
@@ -997,6 +1011,56 @@ _INGEST_AID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 _APPROVALS_DIR_DEFAULT = "/home/swapd/approvals"
 # Mirrors confirmd's GRANT_WRITER default.
 _GRANT_WRITER_DEFAULT = "/home/swapd/grant-writer"
+# Mirrors confirmd's AUDIT default (confirm/confirmd.py) and its
+# _sanitize_audit_field / _AUDIT_FIELD_ALLOW_RE (#683, #17 twin): the
+# audit-line format is deliberately duplicated rather than imported
+# across the pairing/confirmd component boundary, like _AID_RE.
+_INGEST_AUDIT_DEFAULT = "/home/swapd/confirmd/audit.log"
+_INGEST_AUDIT_FIELD_RE = re.compile(r"[^!-~]")
+
+
+def _ingest_audit_field(value):
+    if value is None:
+        return "-"
+    return _INGEST_AUDIT_FIELD_RE.sub("", str(value))
+
+
+def _ingest_audit(d, aid, decision, requester, seq, ttl_hours=None):
+    """Append one `answer` audit line for a plane-stamped decision.
+
+    Mirrors confirmd's audit_log("answer", ...) shape plus
+    decision_origin=plane — plane decisions must not bypass the audit
+    trail the rest of the system treats as load-bearing (the proxy and
+    grant-writer treat the audit write as part of authorization, and
+    the sentinel feed ships the signed audit log). A single O_APPEND
+    write: the ingest runs ~1/min, so no rotation here (confirmd's
+    rotation owns the segment size). On failure the event is treated
+    as lost and named loudly on stderr — confirmd's posture: the audit
+    call happens after the decision, so the stamp stands and the trail
+    gap is operator-visible.
+    """
+    from datetime import datetime, timezone
+    detail = ("id=%s decision=%s requester=%s decision_origin=plane "
+              "plane_seq=%s" % (aid, decision, requester, seq))
+    if decision == "approve" and ttl_hours is not None:
+        detail += " ttl=%dh" % ttl_hours
+    line = ("ts=%s event=%s peer=%s login=%s %s\n"
+            % (datetime.now(timezone.utc).isoformat(timespec="seconds"),
+               _ingest_audit_field("answer"),
+               _ingest_audit_field("plane"),
+               _ingest_audit_field(""),  # wire v1: no owner principal
+               _ingest_audit_field(detail)))
+    path = os.environ.get("CONFIRM_AUDIT", _INGEST_AUDIT_DEFAULT)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o640)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError as e:
+        _ingest_fail(d, f"aid={aid}: LOST AUDIT EVENT event=answer "
+                        f"decision={decision} ({e}) — the stamp stands; "
+                        "the trail gap is operator-visible")
 # The box executor decides which plane-produced kinds it honors (#848):
 # unknown kinds are acked-and-logged so one unknown kind cannot wedge the
 # queue. (The dead-letter hook for poison commands is still future work —
@@ -1008,8 +1072,8 @@ _HONORED_COMMAND_KINDS = ("approval_decision",)
 _INGESTED_DECISIONS_CAP = 5000
 # Mirrors confirmd's _GRANT_MINT_TIMEOUT / _GRANT_MINT_WINDOW /
 # GRANT_TTL_DEFAULT (confirm/confirmd.py). The wire v1 carries no owner TTL
-# choice, so the default applies to plane-approved grants (follow-up: carry
-# the decided TTL on the wire).
+# choice, so the default applies to plane-approved grants (wire v2 carries
+# the decided TTL: #946).
 _INGEST_GRANT_MINT_TIMEOUT = 15
 _INGEST_GRANT_MINT_WINDOW = 30
 _INGEST_GRANT_TTL_DEFAULT = 1
@@ -1019,9 +1083,15 @@ def _ingest_fail(d, msg, redact=()):
     _fail(d, msg, redact=redact, tag="ingest", log=_INGEST_LOG_FILE)
 
 
-def _ingest_say(msg):
-    # Audible on stdout (cron mails it / journal captures it); never
-    # carries secrets — callers pass only ids, seqs, and decision words.
+def _ingest_say(msg, redact=()):
+    # Audible on stdout (cron mails it / journal captures it). `redact`
+    # lists secret values that must never reach the channel — used where
+    # plane-controlled strings are echoed (defense in depth: the failure
+    # classes never include the token themselves, but a hostile plane
+    # could echo it back inside a field we print).
+    for secret in redact:
+        if secret:
+            msg = msg.replace(secret, "<redacted>")
     print(f"ingest: {msg}", flush=True)
 
 
@@ -1138,8 +1208,10 @@ def _save_ingested(d, data):
 def _ingest_command_shape(cmd):
     """(seq, kind, payload, epoch) or None when the command row is malformed.
 
-    A malformed row is the plane's bug: it is acked-and-logged, never
-    executed and never allowed to wedge the queue.
+    A malformed row is the plane's bug: it is skipped loudly WITHOUT
+    acking — the cursor holds, the run stops at the bad row, and the
+    plane repairs it. Never executed, never allowed to wedge the queue
+    silently.
     """
     if not isinstance(cmd, dict):
         return None
@@ -1183,8 +1255,18 @@ def _ingest_decision_payload(box_id, payload):
 def _ingest_ack(control, box_id, token, seq):
     """Ack one executed command. Returns True only when the plane accepted
     the ack (2xx without an explicit ok:false — the ack endpoint's response
-    shape is not pinned in docs/DURABLE_COMMANDS.md; the idempotent ack
-    means a strict misread only costs a redelivery, never a loss)."""
+    shape is not pinned in docs/DURABLE_COMMANDS.md).
+
+    The 2xx acceptance is deliberately loose, and it is safe *only*
+    because of execute-before-ack ordering: a loose misread (treating a
+    failed ack as accepted) advances the cursor past an unacked seq, but
+    the command was already executed AND the ack is idempotent — the
+    plane's acked_watermark is the recovery source, and a redelivered
+    command re-runs through the idempotency backstops. A *strict* misread
+    (treating an accepted ack as failed) only costs a redelivery, never
+    a loss. So the asymmetry favors looseness here: the dangerous
+    direction is strictness-looking-safe, not looseness.
+    """
     url = (control.rstrip("/") + "/v1/boxes/"
            + urllib.parse.quote(box_id, safe="") + "/commands/ack")
     try:
@@ -1208,7 +1290,10 @@ def _mint_grant(argv):
 def _ingest_stamp_consumed(approvals, aid, record):
     """Write-if-absent consumed/<aid>.json (O_EXCL, like the proxy's
     _stamp_expired_consumed). Returns True when this call created the
-    record, False when one already existed (first terminal wins)."""
+    record, False when one already existed (first writer wins among
+    O_EXCL stampers — the reapers and earlier ingests; confirmd's
+    in-flight answer path is clobbering, not O_EXCL, so it wins the
+    record regardless)."""
     path = os.path.join(approvals, "consumed", aid + ".json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
@@ -1241,6 +1326,12 @@ def _ingest_answer_record(item, aid, decision, requester, seq, key):
     rec.pop("_csrf_nonces", None)
     rec["id"] = aid
     rec["decision"] = decision
+    if decision == "deny":
+        # Issue #73 (belt-and-braces, mirroring _answer_locked): a
+        # requester-planted grant_ttl_hours must not survive into the
+        # answered record of a denial — deny mints nothing, so the
+        # record must not claim a lifetime.
+        rec.pop("grant_ttl_hours", None)
     rec["answered_at"] = _utcnow_iso()
     rec["answered_by"] = None
     rec["requester"] = requester
@@ -1275,8 +1366,11 @@ def _ingest_expired_record(item, aid, requester, seq, key):
 def _ingest_finish_move(d, approvals, aid, rec):
     """Move an answered/ record to consumed/ and clean up.
 
-    The consumed/ write is write-if-absent (first-terminal-wins against
-    confirmd's own answer path); the answered/ cleanup is best-effort
+    The consumed/ write is write-if-absent (first writer wins among
+    O_EXCL stampers — the reapers and earlier ingests; against confirmd's
+    in-flight answer path the local record wins the record, so this is a
+    stamper race, not a cross-process guarantee); the answered/ cleanup
+    is best-effort
     (confirmd's sweep collects strays, #233). Returns True when the
     terminal state is settled, False when the write failed and the run
     must retry (nothing is acked — the resume path below re-attempts the
@@ -1285,7 +1379,7 @@ def _ingest_finish_move(d, approvals, aid, rec):
         if not _ingest_stamp_consumed(approvals, aid, rec):
             _ingest_say(f"aid={aid}: lost the terminal race "
                         "(consumed/ record already exists) — "
-                        "first-terminal-wins")
+                        "not stamping over the winner")
     except OSError as e:
         _ingest_fail(d, f"aid={aid}: consumed/ write failed ({e}) — "
                         "decision NOT settled, will retry")
@@ -1329,11 +1423,14 @@ def _ingest_write_answered(approvals, aid, rec):
     os.replace(tmp, answered_path)
 
 
-def _ingest_approval_decision(d, approvals, box_id, seq, payload, ingested):
+def _ingest_approval_decision(d, approvals, box_id, token, seq, payload,
+                              ingested, attention):
     """Stamp one plane decision into confirmd's store.
 
     Returns True when the command is consumed (ack it) and False when the
     ingest must retry later (do NOT ack — the command redelivers).
+    `attention` collects operator-attention notes for permanently
+    unprocessable commands (acked-and-logged, queue advances, exit 1).
     """
     shaped = _ingest_decision_payload(box_id, payload)
     if shaped is None:
@@ -1393,18 +1490,29 @@ def _ingest_approval_decision(d, approvals, box_id, seq, payload, ingested):
                         "object — acked without stamping")
         _mark()
         return True
-    if item.get("tenant_id") is not None:
-        # Pre-H10 tenant_id is always null; a scoped item means the box
-        # predates multi-tenant confirmd. Fail closed: the decision stays
-        # queued for an upgraded client rather than landing in the wrong
-        # tenant's store.
+    if item.get("tenant_id") is not None and not _ingest_item_expired(item):
+        # Permanent, not transient: this client predates multi-tenant
+        # confirmd (H10) and can never stamp a scoped item. Ack-and-log
+        # loudly with the upgrade runbook instead of wedging the queue
+        # behind it — but flag operator attention (the run exits 1)
+        # because a decision was dropped on the floor. A scoped item
+        # whose window already lapsed falls through to the honest
+        # expired stamp below, which drains it.
+        attention.append(
+            f"tenant-scoped approval {aid} (seq={seq}): decision "
+            f"{decision} acked without stamping — upgrade to an "
+            "H10-aware ingest client")
         _ingest_fail(d, f"seq={seq} aid={aid}: tenant-scoped item "
                         "(tenant_id set) — this client predates H10; "
-                        "failing closed, not acked")
-        return False
-    requester = item.get("requester") or _ingest_file_owner(pending_path)
+                        "acked without stamping (upgrade the client)",
+                     redact=(token,))
+        _mark()
+        return True
+    # Finding 50: the requester is the file's owner, never an argument —
+    # only bdrive/swapd may file. The item's "requester" field (when
+    # present) is requester-authored and is never consulted.
+    requester = _ingest_file_owner(pending_path)
     if requester not in ("bdrive", "swapd"):
-        # Finding 50: only the proxy's filers may own a decidable item.
         _ingest_fail(d, f"seq={seq} aid={aid}: unexpected requester "
                         f"{requester!r} — refusing to stamp")
         _mark()
@@ -1418,10 +1526,18 @@ def _ingest_approval_decision(d, approvals, box_id, seq, payload, ingested):
 
     def _stamp_expired():
         rec = _ingest_expired_record(item, aid, requester, seq, key)
-        if not _ingest_stamp_consumed(approvals, aid, rec):
+        if _ingest_stamp_consumed(approvals, aid, rec):
+            _ingest_audit(d, aid, "expired", requester, seq)
+        else:
+            # The O_EXCL write lost: a reaper (or an earlier ingest)
+            # recorded first, and write-if-absent means first-writer-wins
+            # the record among O_EXCL stampers. (Against confirmd's
+            # in-flight answer path the local record wins regardless —
+            # its move is clobbering, not O_EXCL — so the "first" here
+            # names the stamper race only.)
             _ingest_say(f"seq={seq} aid={aid}: lost the terminal race "
                         "(consumed/ record already exists) — "
-                        "first-terminal-wins")
+                        "not stamping over it")
         _remove_pending()
         _mark()
 
@@ -1438,9 +1554,12 @@ def _ingest_approval_decision(d, approvals, box_id, seq, payload, ingested):
         _ingest_write_answered(approvals, aid, rec)
         _remove_pending()
         # Finding 56: one-way. The O_EXCL move inside _ingest_finish_move
-        # keeps first-terminal-wins against confirmd's own answer path.
+        # keeps first-writer-wins among O_EXCL stampers (reapers, earlier
+        # ingests); against confirmd's in-flight answer the local record
+        # wins regardless — see the approve-path race handling above.
         if not _ingest_finish_move(d, approvals, aid, rec):
             return False
+        _ingest_audit(d, aid, "deny", requester, seq)
         _mark()
         _ingest_say(f"seq={seq} aid={aid}: stamped denied "
                     f"(plane_seq={seq})")
@@ -1465,6 +1584,16 @@ def _ingest_approval_decision(d, approvals, box_id, seq, payload, ingested):
                     "grant-mint window — stamped expired")
         return True
     ttl_hours = _INGEST_GRANT_TTL_DEFAULT  # wire v1 carries no TTL choice
+    # Shrink the approve/terminal race window: re-check the terminal
+    # record immediately before the mint (the earlier check at the top of
+    # this function is stale by now). The window cannot be closed — the
+    # mint itself takes up to _INGEST_GRANT_MINT_TIMEOUT seconds — so the
+    # post-mint re-check below is the real backstop.
+    if os.path.exists(os.path.join(approvals, "consumed", aid + ".json")):
+        _ingest_say(f"seq={seq} aid={aid}: terminal record appeared "
+                    "before the mint — not minting (confirmd won the race)")
+        _mark()
+        return True
     mint_argv = [_grant_writer(), "add",
                  "--credential", name,
                  "--host", host,
@@ -1495,6 +1624,53 @@ def _ingest_approval_decision(d, approvals, box_id, seq, payload, ingested):
         _ingest_fail(d, f"seq={seq} aid={aid}: grant mint failed "
                         f"(exit {out.returncode}) — not stamped, will retry")
         return False
+    # #240-style post-mint terminal re-check (mirrors _answer_locked): the
+    # owner's tap — or a reaper — may have landed during the mint, and the
+    # pending file still existed for all of it (the ingest holds no
+    # per-aid lock against confirmd's answer path — the structural fix
+    # is #945). Cross-process truth:
+    # against confirmd's in-flight answer the local path wins the *record*
+    # (its answered→consumed move is clobbering os.replace, not O_EXCL),
+    # so "first-terminal-wins" describes the write-if-absent race against
+    # the reapers only — never a guarantee against _answer_locked.
+    if os.path.exists(os.path.join(approvals, "consumed", aid + ".json")):
+        # The grant is minted and cannot be un-minted (no per-approval-id
+        # revoke — grant-writer revoke is by job only). Journal the
+        # conflict loudly with the remediation runbook instead of
+        # stamping over the winner: a live grant under a deny/expired
+        # record is a fail-open the proxy would honor.
+        job = item.get("job") or "<job>"
+        try:
+            with open(os.path.join(approvals, "consumed",
+                                   aid + ".json")) as f:
+                winner = json.load(f)
+        except (OSError, ValueError):
+            winner = {}
+        _ingest_fail(d, f"seq={seq} aid={aid}: APPROVE/TERMINAL RACE — "
+                        "grant minted, but a terminal record landed "
+                        "during the mint; NOT stamping. approval_id="
+                        f"{aid} credential={item.get('credential')} "
+                        f"host={item.get('host')} "
+                        f"method={(item.get('method') or '').upper()} "
+                        f"path_prefix={item.get('path_prefix') or '/'} "
+                        f"job={job} winning_decision="
+                        f"{winner.get('decision')!r}. Runbook: the "
+                        "winning terminal state is in "
+                        f"consumed/{aid}.json; the minted grant stays "
+                        "live until its TTL expires — revoke it with "
+                        f"`grant-writer revoke --job {job}` if the "
+                        "winner is deny/expired.", redact=(token,))
+        _mark()
+        return True
+    if _ingest_item_expired(item):
+        # The window lapsed during the mint with no terminal record: the
+        # honest outcome is expired (the #240 outcome), not a phantom
+        # approval for an already-dead window.
+        _stamp_expired()
+        _ingest_say(f"seq={seq} aid={aid}: window lapsed during the mint "
+                    "— stamped expired")
+        _mark()
+        return True
     rec = _ingest_answer_record(item, aid, "approve", requester, seq, key)
     rec["grant_ttl_hours"] = ttl_hours
     _ingest_write_answered(approvals, aid, rec)
@@ -1504,6 +1680,7 @@ def _ingest_approval_decision(d, approvals, box_id, seq, payload, ingested):
     # never the mint — the resume path re-attempts the move.
     if not _ingest_finish_move(d, approvals, aid, rec):
         return False
+    _ingest_audit(d, aid, "approve", requester, seq, ttl_hours=ttl_hours)
     _mark()
     _ingest_say(f"seq={seq} aid={aid}: stamped approved and minted grant "
                 f"(plane_seq={seq})")
@@ -1580,22 +1757,33 @@ def _ingest_commands(d, approvals, box_id, token, control):
     rows.sort(key=lambda r: r[0])
     new_cursor = cursor
     ok = True
+    attention = []
     for seq, kind, payload, cmd_epoch in rows:
         if seq <= new_cursor:
             continue  # already acked (defense: the plane should not send it)
         if cmd_epoch is not None and cmd_epoch != epoch:
+            # Epoch adoption is last-writer-wins: the plane is the
+            # authority on which delivery-generation this pass belongs to,
+            # and the epoch is carried back in the ack envelope for
+            # diagnostics only. Two planes racing the same box would
+            # interleave epochs the box cannot arbitrate — the box-side
+            # cursor stays monotonic regardless. The ingest never *sends*
+            # ?epoch= (passive adopter); the incarnation claim is #947.
             _ingest_say(f"epoch {epoch} -> {cmd_epoch} (plane moved on)")
             epoch = cmd_epoch
         if kind not in _HONORED_COMMAND_KINDS:
             # The plane is opaque to kinds and the box executor decides;
             # ack-and-log keeps one unknown kind from wedging the queue.
+            # `kind` is plane-controlled: redact like any plane string
+            # that reaches a cron-spooled channel.
             _ingest_say(f"seq={seq}: unknown command kind {kind!r} — "
-                        "acked without execution")
+                        "acked without execution", redact=(token,))
             consumed = True
         elif kind == "approval_decision":
             try:
                 consumed = _ingest_approval_decision(d, approvals, box_id,
-                                                     seq, payload, ingested)
+                                                     token, seq, payload,
+                                                     ingested, attention)
             except (OSError, ValueError) as e:
                 # A local I/O failure (disk full, torn state) must fail
                 # closed with a loud log — never a traceback, and never
@@ -1616,14 +1804,29 @@ def _ingest_commands(d, approvals, box_id, token, control):
             ok = False
             break
         new_cursor = seq
-    _save_ingest_cursor(d, new_cursor, epoch)
-    _save_ingested(d, ingested)
+    try:
+        _save_ingest_cursor(d, new_cursor, epoch)
+        _save_ingested(d, ingested)
+    except OSError as e:
+        # ENOSPC/EACCES/EROFS on the state saves: fail closed and loud —
+        # never a traceback. Redelivery stays safe: acked commands are
+        # covered by the consumed/ records and the idempotency log the
+        # last successful save wrote.
+        _ingest_fail(d, f"state save failed ({e}) — cursor/log may be "
+                        "stale; redelivery is idempotent, will retry",
+                     redact=(token,))
+        return 1
+    if attention:
+        for note in attention:
+            _ingest_say("ATTENTION: " + note, redact=(token,))
     if ok and new_cursor > cursor:
         _ingest_say(f"ingested {new_cursor - cursor} command(s); "
                     f"cursor -> {new_cursor}")
     elif ok:
         _ingest_say("queue drained; nothing due")
-    return 0 if ok else 1
+    # Permanently-unprocessable commands were acked-and-logged above: the
+    # queue advanced, but the operator still needs to see the exit code.
+    return 0 if ok and not attention else 1
 
 
 def cmd_ingest(args):
