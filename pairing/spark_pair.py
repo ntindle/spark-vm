@@ -40,6 +40,7 @@ import getpass
 import ipaddress
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -166,8 +167,16 @@ def _scrub_url_userinfo(url):
     echoed into error messages or logs (#885). A control URL carrying
     userinfo would otherwise leak into stdout / heartbeat.log through the
     cleartext-refusal message; the same holds for a hostile plane's
-    Location header echoed in the downgrade refusal."""
-    u = urllib.parse.urlparse(url)
+    Location header echoed in the downgrade refusal.
+
+    Total: never raises. An unparseable URL (e.g. an unmatched IPv6
+    bracket, which makes urlparse itself raise ValueError) falls back to
+    a crude last-@ cut — the credentials are still gone, and the URL is
+    refused on other grounds."""
+    try:
+        u = urllib.parse.urlparse(url)
+    except ValueError:
+        return url.rsplit("@", 1)[-1]
     if "@" not in u.netloc:
         return url
     try:
@@ -213,8 +222,12 @@ class _RedirectAuthStripper(urllib.request.HTTPRedirectHandler):
         except ValueError as e:
             # A garbage port (or other unparseable component) in the
             # request URL or the Location header: fail closed, clean.
+            # Scrub before echoing: the raw Location may carry userinfo
+            # the plane wants echoed back into our logs (B1); the scrub
+            # is total, so it cannot raise here.
             raise _BadRedirectTarget(
-                f"refusing redirect with unparseable target {newurl!r}: {e}")
+                f"refusing redirect with unparseable target "
+                f"{_scrub_url_userinfo(newurl)!r}: {e}")
         if old_parsed.scheme == "https" and new_parsed.scheme == "http":
             # Downgrade: the Authorization strip at the new origin is not
             # enough — the request itself would go out in the clear.
@@ -769,16 +782,28 @@ def cmd_heartbeat(args):
     return _heartbeat_result(d, box_id, token, body["sent_at"], status, resp)
 
 
+# Plane-supplied pairing fields are printed for the owner's visual
+# verification; control characters (CR, ANSI escapes, DEL) would let a
+# hostile plane make the terminal RENDER the expected fingerprint while
+# the underlying string differs, defeating the comparison (B2). Rows
+# carrying them are malformed.
+_PAIRING_FIELD_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def _pairing_row(p):
     """Extract (id, box_name, fingerprint) from a plane pairing row, or
-    None when the row is malformed (#881). The approve/list path is
+    None when the row is malformed (#881, B2). The approve/list path is
     interactive, so the bar is "never traceback on plane shape": a
     malformed or hostile plane's rows get a clean error, not silence and
-    not a KeyError traceback."""
+    not a KeyError traceback. Fields must be non-empty strings without
+    control characters — the fingerprint ceremony is this command's
+    security check, and terminal-escape injection must not reach it."""
     if not isinstance(p, dict):
         return None
     pid, name, fp = p.get("id"), p.get("box_name"), p.get("fingerprint")
-    if not all(isinstance(v, str) for v in (pid, name, fp)):
+    if not all(isinstance(v, str) and v
+               and not _PAIRING_FIELD_CONTROL.search(v)
+               for v in (pid, name, fp)):
         return None
     return pid, name, fp
 
@@ -824,7 +849,7 @@ def cmd_approve(args):
             row = _pairing_row(p)
             if row is None:
                 print("list failed: malformed plane response "
-                      "(pairing entry is missing id/box_name/fingerprint)")
+                      "(pairing entry id/box_name/fingerprint is malformed)")
                 return 1
             pid, name, fp = row
             print(f"  {pid}  {name}  {fp}")
@@ -847,16 +872,16 @@ def cmd_approve(args):
     if p.get("status") != "pending":
         print(f"pairing is {p.get('status') or 'unknown'} — nothing to approve")
         return 1
-    fp = p.get("fingerprint")
-    if not isinstance(fp, str) or not fp:
-        # The fingerprint comparison is the security check of this whole
-        # command; a pairing record without one cannot be approved.
+    row = _pairing_row(p)
+    if row is None:
+        # One row-shape rule for both paths: a missing/non-string/empty
+        # field or a control character (terminal-escape injection into
+        # the fingerprint ceremony, B2) means the owner cannot verify
+        # this pairing, so the approval cannot proceed.
         print("fetch failed: malformed plane response "
-              "(pairing has no fingerprint)")
+              "(pairing entry id/box_name/fingerprint is malformed)")
         return 1
-    box_name = p.get("box_name")
-    if not isinstance(box_name, str) or not box_name:
-        box_name = "<unnamed>"
+    _, box_name, fp = row
     print()
     print(f"  Box name:    {box_name}")
     print(f"  Fingerprint: {fp}")
