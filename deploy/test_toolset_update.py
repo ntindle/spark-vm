@@ -436,6 +436,29 @@ def test_registry_busy_missing_dir_is_idle(env):
     assert r.stdout.strip().endswith("rc=1"), r.stdout + r.stderr
 
 
+def test_idle_gate_defaults_agent_users_when_unset(env):
+    # Unset TOOLSET_AGENT_USERS: the default (ntindle) applies — the gate
+    # still probes instead of erroring under set -u.
+    e = dict(env["env"])
+    del e["TOOLSET_AGENT_USERS"]
+    r = source_and("set +e; unset TOOLSET_AGENT_USERS; _jobs_active; echo rc=$?",
+                   env_extra=e)
+    assert r.stdout.strip().endswith("rc=1"), r.stdout + r.stderr
+
+
+def test_idle_gate_tmux_missing_and_idle_registry_proceeds(env):
+    # Both halves clean with no tmux binary: the gate opens and the update
+    # proceeds — pins the degradation contract (a missing tmux alone never
+    # defers).
+    e = dict(env["env"])
+    e["TMUX_BIN"] = "/nonexistent/tmux"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert (env["apt"] / "20auto-upgrades").read_text() == GOOD_CONF
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+
+
 def test_idle_gate_empty_agent_users_is_open_but_loud(env):
     # An explicitly empty agent-user list opens the gate (operator's
     # choice), but it must say so loudly in the run log.

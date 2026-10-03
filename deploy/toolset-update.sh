@@ -408,7 +408,12 @@ for name in names:
     # must never mask a live top-level state); a file with no parseable
     # state at all is busy too (fail-closed, matching the python path).
     # Cruder than the JSON parse (first textual match per value) but still
-    # read-only.
+    # read-only. Known residual, fail-OPEN direction: a record with NO
+    # top-level state but a nested terminal one ({"a":{"state":"done"}})
+    # reads idle here (the nested "done" is all grep can see) while the
+    # python path reads busy on state=None — the fallback cannot see JSON
+    # structure. The primary python path is fail-closed; this fallback
+    # only runs when python3 is absent.
     local d slug states rest first busy=0
     for d in "$jobsdir"/*/; do
         [ -d "$d" ] || continue
