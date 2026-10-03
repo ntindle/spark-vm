@@ -53,6 +53,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Published a consolidated control-plane API reference for the spark-vm
+  control plane: every real endpoint across the owner, pairing, box,
+  action-approval, and durable-command namespaces with its auth class and
+  request/response shapes, plus the unified failure-code table — so
+  operators and self-hosters no longer have to piece the plane's surface
+  together from scattered docs and ship notes. Each claim cites its
+  canonical contract doc.
+  (#925)
 - The fleet dashboard's anti-XSS tests now exercise the real row
   templates: the fleet row, pairing card, detail rows, and service
   chips are built by single-copy pure renderers, and the test suite
