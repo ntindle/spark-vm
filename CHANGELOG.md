@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   weekly `waitlist_jobs.py --rotate-funnel-events` cron (same data-lock
   discipline as the purge job; `--dry-run` previews the partition), and
   the horizon is overridable via `WAITLIST_FUNNEL_RETENTION_SECONDS`.
-  (#TBD)
+  (#933)
 - Pinned the hosted credential-vending contract: the control-plane vend
   endpoint and its auth, the tenant-scoping decision (one box per tenant,
   so the box-side credential stack stays flat), lease-wrapped
