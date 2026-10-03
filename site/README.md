@@ -101,6 +101,20 @@ The markup carries placeholders the operator fills when §10 goes live:
   (fail-closed): the public listener must reach `waitlistd` directly
   (default `WAITLIST_BIND=127.0.0.1`), and any TLS-terminating or
   header-adding middlebox waits until it is declared here.
+- **Funnel-event retention: run the rotation cron.** The hot
+  `funnel_events.jsonl` is bounded at 90d by
+  `waitlist_jobs.py --rotate-funnel-events` (weekly cron, same data-lock
+  discipline as `--purge`; `--dry-run` previews the partition). Events
+  older than 90d move to `funnel_events-archive-<YYYY-MM>.jsonl` in the
+  data dir — the audit trail is never deleted by the loop, so archive
+  lifecycle is the operator's backup-retention call
+  (`docs/WAITLIST_OPERATIONS.md` §5). `invite_sent`/`claimed` events for
+  live rows are coverage-pinned and never rotate (rotating one would
+  make the reconcile passes re-emit duplicates). Override the horizon
+  with `WAITLIST_FUNNEL_RETENTION_SECONDS` (positive int seconds; fail
+  loud on garbage). Funnel metrics keep working:
+  `scripts/funnel_metrics.py --events` takes an explicit export path —
+  point it at the hot file plus the archives the query window needs.
 
 `/go/selfhost?src=selfhost` is page-build code the loop owns, not operator
 packet: on Pages it needs the static redirect shim

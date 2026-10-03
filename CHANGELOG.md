@@ -53,6 +53,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Bounded the waitlist funnel-event store: events older than 90 days now
+  rotate out of the hot `funnel_events.jsonl` into dated monthly
+  archives (never deleted — the audit trail stays on disk), while
+  `invite_sent`/`claimed` events for live rows stay pinned so the
+  reconcile passes never re-emit duplicates. Operators run it as a
+  weekly `waitlist_jobs.py --rotate-funnel-events` cron (same data-lock
+  discipline as the purge job; `--dry-run` previews the partition), and
+  the horizon is overridable via `WAITLIST_FUNNEL_RETENTION_SECONDS`.
+  (#TBD)
 - Pinned the hosted credential-vending contract: the control-plane vend
   endpoint and its auth, the tenant-scoping decision (one box per tenant,
   so the box-side credential stack stays flat), lease-wrapped

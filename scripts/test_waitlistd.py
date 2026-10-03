@@ -2221,3 +2221,214 @@ def test_repeated_forwarded_for_attacker_first_instance_ignored():
     # And through the handler wiring itself.
     stub = _StubHandler("127.0.0.1", h, trusted)
     assert wd._Handler._client_ip(stub) == "203.0.113.7"
+
+
+# ---------------------------------------------------------------------------
+# #897: funnel_events.jsonl retention / rotation
+# ---------------------------------------------------------------------------
+
+def _iso(days_ago):
+    return wd.iso_z(NOW - timedelta(days=days_ago))
+
+
+def _write_funnel_lines(tmp, lines):
+    with open(os.path.join(tmp, "funnel_events.jsonl"), "w",
+              encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(line)
+
+
+def _funnel_event(event, ref, days_ago, attrs=None):
+    return json.dumps({"event": event, "at": _iso(days_ago), "ref": ref,
+                       "attrs": attrs or {}}, sort_keys=True) + "\n"
+
+
+def _read_funnel_lines(tmp, name="funnel_events.jsonl"):
+    path = os.path.join(tmp, name)
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        return fh.readlines()
+
+
+class TestRotateFunnelEvents:
+    def test_old_audit_events_rotate_to_monthly_archive(self):
+        service, tmp = make_service()
+        _write_funnel_lines(tmp, [
+            _funnel_event("purged", "e-old-1", 120),
+            _funnel_event("dropped", "e-old-2", 100),
+            _funnel_event("cta_click", "selfhost", 10),
+        ])
+        result = service.rotate_funnel_events()
+        assert result["archived"] == 2
+        assert result["kept"] == 1
+        assert set(result["archives"]) == {
+            "funnel_events-archive-2026-05.jsonl",
+            "funnel_events-archive-2026-06.jsonl",
+        }
+        hot = _read_funnel_lines(tmp)
+        assert len(hot) == 1
+        assert json.loads(hot[0])["event"] == "cta_click"
+        may = _read_funnel_lines(tmp, "funnel_events-archive-2026-05.jsonl")
+        assert len(may) == 1
+        assert json.loads(may[0])["event"] == "purged"
+        jun = _read_funnel_lines(tmp, "funnel_events-archive-2026-06.jsonl")
+        assert len(jun) == 1
+        assert json.loads(jun[0])["event"] == "dropped"
+
+    def test_claimed_event_for_live_signed_up_row_is_pinned(self):
+        service, tmp = make_service()
+        service.rows["e1"] = {"entry_id": "e1", "status": "signed_up",
+                              "signed_up_at": _iso(200)}
+        _write_funnel_lines(tmp, [
+            _funnel_event("claimed", "e1", 200),   # at == signed_up_at: pinned
+            _funnel_event("claimed", "e1", 300),   # at < signed_up_at: rotates
+            _funnel_event("purged", "e-gone", 200),
+        ])
+        result = service.rotate_funnel_events()
+        assert result["archived"] == 2
+        hot = [json.loads(line) for line in _read_funnel_lines(tmp)]
+        assert [(e["event"], e["ref"]) for e in hot] == [("claimed", "e1")]
+
+    def test_invite_sent_for_live_invited_row_is_pinned(self):
+        service, tmp = make_service()
+        service.rows["e2"] = {"entry_id": "e2", "status": "invited",
+                              "invited_at": _iso(100)}
+        _write_funnel_lines(tmp, [
+            _funnel_event("invite_sent", "e2", 100),  # at == invited_at: pinned
+            _funnel_event("invite_sent", "e2", 150),  # older: rotates
+        ])
+        result = service.rotate_funnel_events()
+        assert result["archived"] == 1
+        hot = [json.loads(line) for line in _read_funnel_lines(tmp)]
+        assert len(hot) == 1
+        assert hot[0]["at"] == _iso(100)
+
+    def test_events_for_gone_rows_are_not_pinned(self):
+        service, tmp = make_service()
+        # No rows at all: even claimed/invite_sent events are audit-only.
+        _write_funnel_lines(tmp, [
+            _funnel_event("claimed", "e-gone", 200),
+            _funnel_event("invite_sent", "e-gone", 200),
+        ])
+        result = service.rotate_funnel_events()
+        assert result["archived"] == 2
+        assert _read_funnel_lines(tmp) == []
+
+    def test_rotation_preserves_reconcile_coverage(self):
+        # The property that matters: after rotation, the reconcile passes
+        # find nothing to re-emit. If pinning were wrong, the claimed or
+        # invite pass would re-derive a duplicate event here.
+        service, tmp = make_service()
+        service.rows["e1"] = {"entry_id": "e1", "status": "signed_up",
+                              "signed_up_at": _iso(200)}
+        service.rows["e2"] = {"entry_id": "e2", "status": "invited",
+                              "invited_at": _iso(100)}
+        _write_funnel_lines(tmp, [
+            _funnel_event("claimed", "e1", 200),
+            _funnel_event("invite_sent", "e2", 100),
+            _funnel_event("purged", "e-gone", 200),
+            _funnel_event("dropped", "e-gone", 150),
+        ])
+        assert service.reconcile_invite_events() == []
+        assert service.reconcile_claimed_events() == []
+        service.rotate_funnel_events()
+        assert service.reconcile_invite_events() == []
+        assert service.reconcile_claimed_events() == []
+        hot = [json.loads(line) for line in _read_funnel_lines(tmp)]
+        assert {(e["event"], e["ref"]) for e in hot} == {
+            ("claimed", "e1"), ("invite_sent", "e2")}
+
+    def test_crash_retry_does_not_duplicate_archive_lines(self):
+        # Crash between archive-append and hot-rewrite: the archive holds
+        # the lines but the hot file still has them. The re-run must not
+        # append them a second time.
+        service, tmp = make_service()
+        old = _funnel_event("purged", "e-old", 120)
+        _write_funnel_lines(tmp, [old, _funnel_event("cta_click", "s", 1)])
+        apath = os.path.join(tmp, "funnel_events-archive-2026-05.jsonl")
+        with open(apath, "w", encoding="utf-8") as fh:
+            fh.write(old)  # the crashed attempt's archive append
+        result = service.rotate_funnel_events()
+        assert result["archived"] == 1
+        assert _read_funnel_lines(tmp, "funnel_events-archive-2026-05.jsonl") \
+            == [old]
+        assert len(_read_funnel_lines(tmp)) == 1
+
+    def test_torn_tail_and_bad_at_are_fail_closed(self):
+        service, tmp = make_service()
+        lines = [
+            _funnel_event("purged", "e-old", 120),
+            json.dumps({"event": "dropped", "at": "not-a-date",
+                        "ref": "e-x", "attrs": {}}) + "\n",
+            json.dumps({"event": "purged", "ref": "e-y",
+                        "attrs": {}}) + "\n",  # no at at all
+            '{"event": "claimed", "at": "2026-01-01T00:00:00Z", "ref":',  # torn
+        ]
+        _write_funnel_lines(tmp, lines)
+        result = service.rotate_funnel_events()
+        assert result["archived"] == 1
+        assert result["unparseable_kept"] == 3
+        hot = _read_funnel_lines(tmp)
+        assert len(hot) == 3
+        # Byte-preservation: the torn tail still has no trailing newline.
+        assert not hot[-1].endswith("\n")
+        assert hot[-1] == lines[-1]
+
+    def test_dry_run_reports_partition_and_writes_nothing(self):
+        service, tmp = make_service()
+        before = [
+            _funnel_event("purged", "e-old", 120),
+            _funnel_event("cta_click", "s", 1),
+        ]
+        _write_funnel_lines(tmp, before)
+        result = service.rotate_funnel_events(dry_run=True)
+        assert result["dry_run"] is True
+        assert result["archived"] == 1
+        assert result["kept"] == 1
+        assert _read_funnel_lines(tmp) == before
+        assert not os.path.exists(
+            os.path.join(tmp, "funnel_events-archive-2026-05.jsonl"))
+
+    def test_nothing_due_leaves_hot_file_untouched(self):
+        service, tmp = make_service()
+        before = [_funnel_event("cta_click", "s", 1)]
+        _write_funnel_lines(tmp, before)
+        path = os.path.join(tmp, "funnel_events.jsonl")
+        mtime_before = os.path.getmtime(path)
+        result = service.rotate_funnel_events()
+        assert result["archived"] == 0
+        assert os.path.getmtime(path) == mtime_before
+        assert _read_funnel_lines(tmp) == before
+        assert not os.path.exists(path + ".rotate-tmp")
+
+    def test_retention_env_override(self, monkeypatch):
+        service, tmp = make_service()
+        _write_funnel_lines(tmp, [_funnel_event("purged", "e-old", 10)])
+        monkeypatch.setenv("WAITLIST_FUNNEL_RETENTION_SECONDS", "86400")
+        result = service.rotate_funnel_events()
+        assert result["archived"] == 1  # 10d > 1d override
+        # Garbage fails loud, never silently "keep forever".
+        monkeypatch.setenv("WAITLIST_FUNNEL_RETENTION_SECONDS", "soon")
+        with pytest.raises(SystemExit) as exc:
+            service.rotate_funnel_events()
+        assert exc.value.code == 2
+
+
+class TestReadTailLines:
+    def test_tail_basics(self, tmp_path):
+        p = tmp_path / "a.log"
+        p.write_bytes(b"one\ntwo\nthree\n")
+        assert wd._read_tail_lines(str(p), 2) == ["two\n", "three\n"]
+        assert wd._read_tail_lines(str(p), 10) == ["one\n", "two\n", "three\n"]
+        assert wd._read_tail_lines(str(p), 0) == []
+
+    def test_partial_tail_returned_as_is(self, tmp_path):
+        p = tmp_path / "a.log"
+        p.write_bytes(b"one\ntwo\npar")
+        assert wd._read_tail_lines(str(p), 2) == ["two\n", "par"]
+
+    def test_empty_file(self, tmp_path):
+        p = tmp_path / "empty.log"
+        p.write_bytes(b"")
+        assert wd._read_tail_lines(str(p), 3) == []

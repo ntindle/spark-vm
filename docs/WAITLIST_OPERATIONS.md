@@ -306,6 +306,30 @@ borrowed window: unprocessable mail is eyeballed within a day or two
 or it never will be, and raw inbound mail is the highest-PII-density
 store outside the row store — anything older is either handled or
 stale, and keeping it only extends the exposure.
+funnel events → 90d hot, archived not deleted (#897): the hot
+`funnel_events.jsonl` keeps events newer than 90d plus the
+coverage-pinned ones — `invite_sent`/`claimed` events the reconcile
+passes still consult for live `invited`/`signed_up` rows, which stay
+regardless of age (rotating one would make the next reconcile pass
+re-emit a duplicate event). Everything else older than 90d rotates to
+`funnel_events-archive-<YYYY-MM>.jsonl`, bucketed by the event's own
+`at` month. Archives are the audit trail: the loop never deletes them;
+their lifecycle is the operator's backup-retention call, same as
+**Backups** above. Unparseable lines and events with no provable `at`
+are fail-closed (stay in the hot file — a skip must never become a
+silent delete). 90d is ~2x the dropped-row purge horizon (14d drop +
+30d purge); pinning, not the horizon, carries reconcile correctness.
+The rotation runs as `waitlist_jobs.py --rotate-funnel-events`
+(weekly cron; `--dry-run` reports the partition); it holds the data
+lock, appends archives before the atomic hot rewrite (a kill between
+the two can only duplicate archive lines, and the re-run skips
+already-landed lines — the pass is idempotent). The horizon is
+overridable via `WAITLIST_FUNNEL_RETENTION_SECONDS` (positive int
+seconds; fail loud on garbage). Operator verification: the dry-run
+counts, then `ls funnel_events-archive-*.jsonl` against the hot file's
+oldest `at`. Funnel metrics keep working: `scripts/funnel_metrics.py`
+takes an explicit `--events` export — point it at the hot file plus
+whichever archives the query window needs.
 
 **Spool-drain contract (operator's sender):** spool files are drained as
 JSON by the operator's external sender; the contract is now stated, not
