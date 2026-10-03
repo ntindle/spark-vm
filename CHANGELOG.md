@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   enforced server-side (an expired record reads terminal), repeat taps
   replay the same decision, and conflicting decisions are rejected. The
   box-side filing, plane-to-box delivery, and ingest legs are separate
-  follow-ups. (#TBD)
+  follow-ups. (#916)
 
 - Published a vision-vs-state gap analysis for hosted box provisioning
   (signup → claim → provision → auto-pair → dashboard): the provider
