@@ -124,7 +124,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   its per-IP rate limit and its operator-only status route see only the
   socket peer address, so the service must not sit behind a same-host
   reverse proxy until an explicit trusted-proxy mechanism exists (filed
-  #896). (#TBD)
+  #896). (#899)
 
 ### Security
 - The proxy's refresh/navigation-target scan now matches past literal newlines:
