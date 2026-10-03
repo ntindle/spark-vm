@@ -141,7 +141,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   refuse relaunches with a stale "already running" verdict forever. The
   registry file itself is also written exclusively (0600, never following
   a planted symlink), so a corrupted or planted temp file can no longer
-  redirect or block persistence. (#TBD)
+  redirect or block persistence. (#893)
 - The box pairing client's "endpoint not implemented" detection no longer
   keys on an error string the control plane itself can return: the HTTP
   layer now marks the 404 payloads it synthesizes itself with an explicit
