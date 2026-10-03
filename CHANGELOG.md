@@ -237,6 +237,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The fleet's correlated-failure alert no longer fires on failures that
+  carry no target build: previously two unrelated failures with no
+  recorded target could be grouped on an empty key and page a
+  "bad release" fleet alert together. Correlation now requires the
+  shared target build the inference is actually about.
+  (#TBD)
 - The credential proxy now notices when a secret file's contents are
   rewritten in place: previously it only watched the secrets directory
   for additions and removals, so a secret rotated by editing the file
