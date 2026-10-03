@@ -410,6 +410,171 @@ def test_rule4_stuck_precheck(dirs):
     assert "3 precheck-fail" in stuck[0]["detail"]
 
 
+# --- Alert lifecycle (#927 / #928) ------------------------------------------
+def _import_events_module():
+    # Time-pinned alert tests import the module directly (precedent:
+    # test_retention.py / test_events_lock.py); the CLI-driven tests
+    # above keep going through subprocess.
+    if FLEET not in sys.path:
+        sys.path.insert(0, FLEET)
+    import events
+    return events
+
+
+def _precheck_row(box_id, emitted_at, seq):
+    return {"schema": "fleet-event/1", "event_id": "lifecycle-%s-%d" % (box_id, seq),
+            "box_id": box_id, "emitted_at": emitted_at,
+            "received_at": emitted_at, "kind": "deploy",
+            "outcome": "precheck-fail", "component": "deploy",
+            "subcomponent": None, "from": COMMIT_A, "to": COMMIT_B,
+            "note": "test"}
+
+
+def test_rule2_cluster_growth_refires(dirs):
+    # #927: a third box joining a paged correlated-failure cluster
+    # re-fires with the grown box list; the journaled 2-box row stays
+    # (it was true when it fired) and the new row carries a distinct id.
+    estate, store = dirs
+    line = {"from": COMMIT_A, "to": COMMIT_B, "component": "proxy",
+            "phase": "install"}
+    write_box(estate, "tower", [
+        audit_line("deploy", "deploy-fail", ts=ts(20), **line)])
+    write_box(estate, "cabin", [
+        audit_line("deploy", "deploy-fail", ts=ts(10), **line)])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    corr = [a for a in journal(store, "alerts.jsonl")
+            if a["rule"] == "correlated-failure"]
+    assert len(corr) == 1
+    assert "shed" not in corr[0]["detail"]
+    write_box(estate, "shed", [
+        audit_line("deploy", "deploy-fail", ts=ts(5), **line)])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    corr = [a for a in journal(store, "alerts.jsonl")
+            if a["rule"] == "correlated-failure"]
+    assert len(corr) == 2
+    ids = {a["alert_id"] for a in corr}
+    assert len(ids) == 2  # growth is a new page, not a dedup no-op
+    grown = max(corr, key=lambda a: a["fired_at"])
+    assert "tower" in grown["detail"] and "cabin" in grown["detail"] \
+        and "shed" in grown["detail"]
+
+
+def test_rule2_stable_cluster_does_not_refire(dirs):
+    # #927 contract pin: re-evaluating the identical cluster must stay
+    # silent — growth pages, stability dedups.
+    estate, store = dirs
+    line = {"from": COMMIT_A, "to": COMMIT_B, "component": "proxy",
+            "phase": "install"}
+    write_box(estate, "tower", [
+        audit_line("deploy", "deploy-fail", ts=ts(20), **line)])
+    write_box(estate, "cabin", [
+        audit_line("deploy", "deploy-fail", ts=ts(10), **line)])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    corr = [a for a in journal(store, "alerts.jsonl")
+            if a["rule"] == "correlated-failure"]
+    assert len(corr) == 1
+
+
+def test_rule4_suppressed_while_unacked_repages_after_ack(dirs):
+    # #927: a persistent stuck-precheck condition pages once and stays
+    # pending while unacknowledged — even across an anchor move (the
+    # pre-fix code paged again on the new anchor) — and re-pages after
+    # the operator acks, since persistence after an ack is new news.
+    events = _import_events_module()
+    estate, store = dirs
+    t0 = datetime(2026, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
+    batch1 = [_precheck_row("tower",
+                            (t0 - timedelta(hours=5, minutes=55)).isoformat(),
+                            0),
+              _precheck_row("tower",
+                            (t0 - timedelta(hours=5, minutes=50)).isoformat(),
+                            1),
+              _precheck_row("tower",
+                            (t0 - timedelta(hours=5, minutes=45)).isoformat(),
+                            2)]
+    events.append_events(store, batch1)
+    fired, err = events.evaluate_alerts(store, t0.isoformat())
+    assert err is None
+    assert len(fired) == 1
+    first_id = fired[0]["alert_id"]
+    # Fresh precheck-fails arrive; by the next evaluation the first
+    # batch has aged out of the 6h window, so the anchor moves to the
+    # second batch (new alert_id pre-fix).
+    batch2 = [_precheck_row("tower",
+                            (t0 + timedelta(minutes=10)).isoformat(), 3),
+              _precheck_row("tower",
+                            (t0 + timedelta(minutes=15)).isoformat(), 4),
+              _precheck_row("tower",
+                            (t0 + timedelta(minutes=20)).isoformat(), 5)]
+    events.append_events(store, batch2)
+    fired, err = events.evaluate_alerts(
+        store, (t0 + timedelta(hours=6, minutes=10)).isoformat())
+    assert err is None
+    assert fired == []  # suppressed: the first alert is still unacked
+    stuck = [a for a in events.load_alerts(store)[0]
+             if a["rule"] == "stuck-precheck"]
+    assert len(stuck) == 1 and stuck[0]["alert_id"] == first_id
+    # Acknowledge: persistence after the ack re-pages.
+    found, err = events.ack_alert(store, first_id)
+    assert err is None and found is True
+    fired, err = events.evaluate_alerts(
+        store, (t0 + timedelta(hours=6, minutes=10)).isoformat())
+    assert err is None
+    assert len(fired) == 1
+    assert fired[0]["alert_id"] != first_id
+    assert fired[0]["box_id"] == "tower"
+
+
+def test_ack_alert_stamps_provenance(dirs, monkeypatch):
+    # #928: the ack records when and by whom; the journal row is the
+    # transport a cron or the status page reads.
+    events = _import_events_module()
+    estate, store = dirs
+    write_box(estate, "tower", [
+        audit_line("deploy", "rollback-failed", ts=ts(30),
+                   **{"from": COMMIT_A, "to": COMMIT_B, "phase": "x"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    alert_id = journal(store, "alerts.jsonl")[0]["alert_id"]
+    monkeypatch.setenv("USER", "op-test")
+    monkeypatch.delenv("LOGNAME", raising=False)
+    found, err = events.ack_alert(store, alert_id)
+    assert err is None and found is True
+    row = journal(store, "alerts.jsonl")[0]
+    assert row["acked"] is True
+    assert row["acked_by"] == "op-test"
+    parsed = datetime.fromisoformat(row["acked_at"])
+    assert parsed.tzinfo is not None  # collector clock, aware
+
+
+def test_ack_alert_unknown_operator_does_not_fail(dirs, monkeypatch):
+    # #928 fail-closed posture: no operator identity available must not
+    # fail the ack — provenance degrades to null, the ack still lands.
+    events = _import_events_module()
+    estate, store = dirs
+    write_box(estate, "tower", [
+        audit_line("deploy", "rollback-failed", ts=ts(30),
+                   **{"from": COMMIT_A, "to": COMMIT_B, "phase": "x"}),
+    ])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    alert_id = journal(store, "alerts.jsonl")[0]["alert_id"]
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delenv("LOGNAME", raising=False)
+    found, err = events.ack_alert(store, alert_id)
+    assert err is None and found is True
+    row = journal(store, "alerts.jsonl")[0]
+    assert row["acked"] is True
+    assert row["acked_by"] is None
+    assert row["acked_at"] is not None
+
+
 def test_rule3_silent_wave_disarmed(dirs):
     estate, store = dirs
     # A box with a quiet tail: at S1 this must NOT page (every rollout

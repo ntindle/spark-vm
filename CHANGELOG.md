@@ -243,6 +243,23 @@ codified as rule 6 so future watch bullets arrive compliant.)
   "bad release" fleet alert together. Correlation now requires the
   shared target build the inference is actually about.
   (#929)
+- The fleet's correlated-failure alert now re-pages when another box
+  joins an already-paged failure cluster: previously the alert's
+  detail froze at the first two boxes and further failures inside the
+  window were silently absorbed, so a spreading bad release looked
+  contained in the alert journal. A growing cluster now pages again
+  with the full box list, while a stable cluster still fires exactly
+  once. (#TBD)
+- The stuck-precheck alert no longer pages once per evaluation window
+  while the underlying condition persists unacknowledged: an ignored
+  stuck box used to pile one pending page per window into the alert
+  journal (which never drops unacknowledged alerts). It now pages once,
+  stays visible as the one pending alert until you acknowledge it, and
+  pages again only if the condition is still present after the ack.
+  (#TBD)
+- Acknowledging a fleet alert now records when it was acknowledged
+  and by whom in the alert journal, so a handled page is
+  distinguishable from a silenced one. (#TBD)
 - The credential proxy now notices when a secret file's contents are
   rewritten in place: previously it only watched the secrets directory
   for additions and removals, so a secret rotated by editing the file

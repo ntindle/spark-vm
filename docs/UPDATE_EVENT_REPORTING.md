@@ -174,6 +174,15 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
      target build, and the empty key is the absence of evidence, not
      evidence — two unrelated target-less failures must never page a
      fleet alert together.
+     The alert's identity also carries the member box list (#927): when
+     another box joins a paged cluster inside the window, the rule
+     re-fires with the grown box list — cluster growth is new evidence
+     the operator has not seen, and the journaled row's frozen "2
+     boxes ..." detail would otherwise look like a contained incident
+     while the release keeps spreading. Re-evaluating an unchanged
+     cluster stays silent. One-time transition: clusters paged before
+     this change carry the old identity, so the first re-evaluation of
+     a still-live cluster pages once more under the new one.
   3. **Silent wave (live at G15 S2):** boxes with a non-null `rollout`
      envelope and zero non-noop events over the armed max-wait window →
      operator alert (feeds G15 §4's max-wait page). At S1 the envelope is
@@ -186,11 +195,24 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
      snapshot-fail, and the retired checkout-dirty) emits non-noop events forever, so no
      other rule catches a box stuck failing pre-deployment — and a
      perpetually un-updated box is #608's pain in a quieter key.
+     Re-fire discipline (#927): the alert pages once while the condition
+     persists. A still-unacknowledged stuck-precheck alert for the box
+     suppresses further pages — even as the sliding window's anchor
+     moves — so an ignored condition no longer piles one pending page
+     per window into the journal (retention deliberately never drops
+     unacknowledged alerts). Acknowledging re-arms the rule: if the
+     condition is still present after the ack, it pages again with the
+     moved anchor — persistence after acknowledgment is new information
+     the operator has not seen.
   Alert transport, honestly staged: S1 writes the alert into the
   operator's fleet journal and `fleet events watch` exits nonzero on
   unacknowledged alerts — a cron or the operator's existing paging consumes
   it. The P7 status page's alert feed is the formal home when it exists;
-  nothing in S1 pretends the feed exists before it does.
+  nothing in S1 pretends the feed exists before it does. Acknowledging an
+  alert stamps the journal row with `acked_at` (collector clock) and
+  `acked_by` (operator name, null when unknown — an unknown operator
+  never fails the ack), so a handled page is distinguishable from a
+  silenced one (#928).
 
   **Bounded evaluation scan (#814 slice 1):** each evaluation reasons
   only about the event-journal tail the armed rules can act on — the

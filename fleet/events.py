@@ -106,6 +106,23 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _operator_identity():
+    """Who is acknowledging, for the ack provenance stamp (#928).
+
+    Reads the operator name from the environment (the collector runs as
+    the operator's own cron/terminal user); an unknown operator returns
+    None and MUST NOT fail the ack — provenance is metadata, never a
+    gate. The value is _clean_text-processed so a hostile $USER cannot
+    inject control bytes into the journal or the CLI tables.
+    """
+    for key in ("USER", "LOGNAME"):
+        name = os.environ.get(key)
+        if isinstance(name, str) and name.strip():
+            cleaned = _clean_text(name.strip())
+            return cleaned or None
+    return None
+
+
 def _parse_ts(value):
     """Parse a timestamp to an aware datetime, or None. Mirrors
     inventory.py's helper: accepts ISO-8601 strings and epoch
@@ -646,7 +663,11 @@ def _rule_correlated_failure(events, fired_at):
         # Sliding 30-minute window: any window covering >=2 distinct
         # boxes fires. The anchor is the window's earliest event, so a
         # genuinely new cluster (new anchor) re-fires while the same
-        # cluster dedups.
+        # cluster dedups. The member box list rides the dedup key too
+        # (#927): a third box joining a paged cluster is new evidence
+        # the operator has not seen (the journaled row's "2 boxes ..."
+        # detail is stale), so it re-fires with the grown box list; a
+        # re-evaluation of the identical cluster dedups silently.
         n = len(members)
         for i in range(n):
             window_boxes = {members[i][1].get("box_id")}
@@ -665,7 +686,8 @@ def _rule_correlated_failure(events, fired_at):
                                     ", ".join(boxes)),
                     subcomponent=subcomp,
                     to=to,
-                    dedup_key=anchor.isoformat()))
+                    dedup_key=anchor.isoformat() + "|"
+                              + ",".join(boxes)))
                 break  # one alert per (subcomponent, to) cluster
     return alerts
 
@@ -763,6 +785,17 @@ def evaluate_alerts(store_dir, fired_at=None):
     journal lock so two overlapping evaluators cannot append the same
     alert twice. The store dir is created when any rule fires (the lock
     needs a home), even if every candidate then dedups.
+
+    Alert lifecycle (#927): rule 2 re-fires when the cluster's box set
+    grows (the dedup key carries the sorted member list, so growth is a
+    new page while a stable cluster dedups silently); rule 4 is
+    suppressed while an unacknowledged stuck-precheck alert for the box
+    already exists in the journal (a persisted condition pages once and
+    stays pending until the operator acks — an ignored condition must
+    not pile one page per sliding window into the journal, and
+    prune_events deliberately never drops unacknowledged alerts).
+    Acknowledging re-arms rule 4: persistence after an ack pages again
+    with the moved anchor (new information the operator has not seen).
     """
     fired_at = fired_at or _now_iso()
     fired_dt = _parse_ts(fired_at)
@@ -789,7 +822,20 @@ def evaluate_alerts(store_dir, fired_at=None):
                 return None, err
             seen = {a.get("alert_id") for a in existing
                     if isinstance(a.get("alert_id"), str)}
-            fresh = [a for a in candidates if a["alert_id"] not in seen]
+            # Rule 4 candidates whose box already has an unacknowledged
+            # stuck-precheck alert are suppressed: the condition stays
+            # visible as the one pending alert (see the lifecycle note in
+            # this docstring), and a re-page after the operator acks is
+            # handled by the anchor move, not by an exception here.
+            # journaled box_ids are _clean_text-processed at synthesis,
+            # as are the candidates' (via _alert), so the sets compare.
+            pending_stuck = {a.get("box_id") for a in existing
+                             if a.get("rule") == "stuck-precheck"
+                             and not a.get("acked")}
+            fresh = [a for a in candidates
+                     if a["alert_id"] not in seen
+                     and not (a.get("rule") == "stuck-precheck"
+                              and a.get("box_id") in pending_stuck)]
             if fresh:
                 alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
                 try:
@@ -817,6 +863,10 @@ def ack_alert(store_dir, alert_id):
     journal is rewritten atomically (tmp + os.replace) so a crash never
     tears it.
 
+    The ack stamps provenance (#928): `acked_at` (the collector clock)
+    and `acked_by` (the operator identity, or null when unknown — an
+    unknown operator never fails the ack).
+
     The load -> rewrite sequence runs under the store-scoped journal
     lock: two concurrent acks would otherwise both load the same rows
     and the second os.replace would clobber the first's ack. A missing
@@ -836,6 +886,8 @@ def ack_alert(store_dir, alert_id):
             for alert in alerts:
                 if alert.get("alert_id") == alert_id:
                     alert["acked"] = True
+                    alert["acked_at"] = _now_iso()
+                    alert["acked_by"] = _operator_identity()
                     found = True
             if not found:
                 return False, None
