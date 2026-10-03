@@ -172,6 +172,63 @@ function shortId(id) {
   id = String(id || "");
   return id.length > 14 ? id.slice(0, 14) + "…" : id;
 }
+function row(k, vHtml) { return "<dt>" + esc(k) + "</dt><dd>" + vHtml + "</dd>"; }
+/* Pure row renderers — the markup templates live here (single copy) and
+   the render functions below just inject the strings. Unit-tested in node
+   via test_dashboard.py, which calls the real functions with hostile
+   box-controlled inputs: a template that drops an esc() must fail them. */
+function fleetRow(b, now) {
+  var age = b.last_heartbeat_at == null ? "—" : relTime(b.last_heartbeat_at, now);
+  return '<div class="boxrow" tabindex="0" role="button" data-id="' + esc(b.id) + '"' +
+    ' aria-label="Box ' + esc(b.name) + ', open details">' +
+    '<span class="grow"><span class="name">' + esc(b.name) + '</span> ' +
+    '<span class="id">' + esc(shortId(b.id)) + '</span></span>' +
+    statusChip(b, now) +
+    '<span class="muted">' + esc(age) + '</span>' +
+    '</div>';
+}
+function pairingCard(p, now) {
+  var pending = p.status === "pending";
+  return '<div class="card" data-pid="' + esc(p.id) + '">' +
+    '<div><strong>' + esc(p.box_name) + '</strong> ' +
+    '<span class="chip ' + (pending ? "pending" : "ok") + '">' +
+      esc(pending ? "Pending" : "Approved") + '</span> ' +
+    '<span class="muted">code expires ' + esc(until(p.expires_at, now)) + '</span></div>' +
+    '<div class="fp" style="margin-top:8px">' + esc(p.fingerprint) + '</div>' +
+    (pending
+      ? '<div class="approve-row">' +
+        '<input type="text" class="code-input" placeholder="Pairing code from the box screen" ' +
+        'aria-label="Pairing code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">' +
+        '<button class="primary approve-btn">Approve</button>' +
+        '</div><div class="err hidden"></div><div class="okmsg hidden"></div>'
+      : '<p class="muted">Approved — waiting for the box to redeem its token.</p>') +
+    '</div>';
+}
+function detailRows(b, now) {
+  var st = b.last_status || {};
+  var host = st.host || {};
+  var tokenNote = b.token_expires_at == null
+    ? "no expiry (grandfathered pre-rotation token)"
+    : "expires " + fmtClock(b.token_expires_at);
+  return row("Box id", '<span class="mono">' + esc(b.id) + "</span>") +
+    row("Status", esc(b.status || "—")) +
+    row("Hostname", esc(host.hostname || "—")) +
+    row("Uptime", host.uptime_seconds != null ? esc(fmtUptime(host.uptime_seconds)) : "—") +
+    row("Last heartbeat", esc(relTime(b.last_heartbeat_at, now)) +
+      " (" + esc(fmtClock(b.last_heartbeat_at)) + ")") +
+    row("Box token", esc(tokenNote)) +
+    row("Enrolled", esc(fmtClock(b.created_at)));
+}
+function serviceChips(svcs) {
+  var names = Object.keys(svcs || {});
+  return names.length
+    ? names.map(function (n) {
+        var up = svcs[n] === "up";
+        return '<span class="chip svc ' + (up ? "ok" : "down") + '">' +
+               esc(n) + ": " + esc(svcs[n]) + "</span>";
+      }).join("")
+    : '<span class="muted">no service data</span>';
+}
 
 /* ---- app state ---- */
 var KEY = null;
@@ -264,16 +321,7 @@ function renderFleet() {
   document.getElementById("fleet-count").textContent =
     boxes.length ? "(" + boxes.length + ")" : "";
   if (!boxes.length) { el.innerHTML = '<p class="muted">No boxes enrolled.</p>'; return; }
-  el.innerHTML = boxes.map(function (b) {
-    var age = b.last_heartbeat_at == null ? "—" : relTime(b.last_heartbeat_at, now);
-    return '<div class="boxrow" tabindex="0" role="button" data-id="' + esc(b.id) + '"' +
-      ' aria-label="Box ' + esc(b.name) + ', open details">' +
-      '<span class="grow"><span class="name">' + esc(b.name) + '</span> ' +
-      '<span class="id">' + esc(shortId(b.id)) + '</span></span>' +
-      statusChip(b, now) +
-      '<span class="muted">' + esc(age) + '</span>' +
-      '</div>';
-  }).join("");
+  el.innerHTML = boxes.map(function (b) { return fleetRow(b, now); }).join("");
   Array.prototype.forEach.call(el.querySelectorAll(".boxrow"), function (row) {
     var open = function () { showDetail(row.getAttribute("data-id")); };
     row.addEventListener("click", open);
@@ -294,30 +342,11 @@ function showDetail(boxId) {
     }
     var b = r.data.box;
     document.getElementById("detail-name").textContent = b.name || b.id;
-    var st = b.last_status || {};
-    var host = st.host || {};
-    var tokenNote = b.token_expires_at == null
-      ? "no expiry (grandfathered pre-rotation token)"
-      : "expires " + fmtClock(b.token_expires_at);
     document.getElementById("detail-dl").innerHTML =
-      row("Box id", '<span class="mono">' + esc(b.id) + "</span>") +
-      row("Status", esc(b.status || "—")) +
-      row("Hostname", esc(host.hostname || "—")) +
-      row("Uptime", host.uptime_seconds != null ? esc(fmtUptime(host.uptime_seconds)) : "—") +
-      row("Last heartbeat", esc(relTime(b.last_heartbeat_at, Math.floor(Date.now()/1000))) +
-        " (" + esc(fmtClock(b.last_heartbeat_at)) + ")") +
-      row("Box token", esc(tokenNote)) +
-      row("Enrolled", esc(fmtClock(b.created_at)));
+      detailRows(b, Math.floor(Date.now()/1000));
     document.getElementById("detail-fp").textContent = b.fingerprint || "—";
-    var svcs = st.services || {};
-    var names = Object.keys(svcs);
-    document.getElementById("detail-services").innerHTML = names.length
-      ? names.map(function (n) {
-          var up = svcs[n] === "up";
-          return '<span class="chip svc ' + (up ? "ok" : "down") + '">' +
-                 esc(n) + ": " + esc(svcs[n]) + "</span>";
-        }).join("")
-      : '<span class="muted">no service data</span>';
+    var svcs = (b.last_status || {}).services || {};
+    document.getElementById("detail-services").innerHTML = serviceChips(svcs);
     document.getElementById("detail-raw").textContent =
       JSON.stringify(b.last_status, null, 2) || "null";
     document.getElementById("detail-raw").classList.add("hidden");
@@ -326,7 +355,6 @@ function showDetail(boxId) {
     document.getElementById("detail-name").textContent = "Failed to load box";
   });
 }
-function row(k, vHtml) { return "<dt>" + esc(k) + "</dt><dd>" + vHtml + "</dd>"; }
 function loadPairings() {
   if (!KEY) return;
   api("/v1/pairing").then(function (r) {
@@ -342,23 +370,7 @@ function renderPairings() {
     if (inputs[i] === document.activeElement || inputs[i].value) return;
   }
   if (!pairings.length) { el.innerHTML = '<p class="muted">None pending.</p>'; return; }
-  el.innerHTML = pairings.map(function (p) {
-    var pending = p.status === "pending";
-    return '<div class="card" data-pid="' + esc(p.id) + '">' +
-      '<div><strong>' + esc(p.box_name) + '</strong> ' +
-      '<span class="chip ' + (pending ? "pending" : "ok") + '">' +
-        esc(pending ? "Pending" : "Approved") + '</span> ' +
-      '<span class="muted">code expires ' + esc(until(p.expires_at, now)) + '</span></div>' +
-      '<div class="fp" style="margin-top:8px">' + esc(p.fingerprint) + '</div>' +
-      (pending
-        ? '<div class="approve-row">' +
-          '<input type="text" class="code-input" placeholder="Pairing code from the box screen" ' +
-          'aria-label="Pairing code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">' +
-          '<button class="primary approve-btn">Approve</button>' +
-          '</div><div class="err hidden"></div><div class="okmsg hidden"></div>'
-        : '<p class="muted">Approved — waiting for the box to redeem its token.</p>') +
-      '</div>';
-  }).join("");
+  el.innerHTML = pairings.map(function (p) { return pairingCard(p, now); }).join("");
   Array.prototype.forEach.call(el.querySelectorAll(".card"), function (card) {
     var btn = card.querySelector(".approve-btn");
     if (!btn) return;
