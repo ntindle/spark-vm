@@ -126,6 +126,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   reverse proxy until an explicit trusted-proxy mechanism exists (filed
   #896). (#899)
 
+- The waitlist invite tooling can now re-derive `claimed` funnel events
+  lost when the service crashes between recording a signup and emitting
+  its event: a new repair pass scans the row store and re-appends exactly
+  the missing events (marked as reconciled), so invite-to-claim
+  conversion stops under-reporting after a crash. The pass is idempotent
+  and sends nothing. (#900, #898)
+
 ### Security
 - The proxy's refresh/navigation-target scan now matches past literal newlines:
   a line break inside a meta-refresh `url=` value is legal HTML — browsers
@@ -148,6 +155,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - The waitlist's one-click "forget me" now erases the address from the live data stores the daemon manages, not just the row store: the abuse-detection ledger, the raw-mail triage folder, the quarantined malformed-line sidecars, and any still-queued outgoing mail for that address are all scrubbed when the forget link is honored, and triage files now expire after 48 hours instead of accumulating forever. The deletion confirmation remains the last mail ever sent to a forgotten address, and the stated contract is that the operator's mail sender deletes each queued mail after delivery. (Backups taken before the forget are outside this guarantee — the operator rotates them under their own retention.) (#840)
 - Egress guard now refuses the 6to4 (`2002::/16`) and Teredo (`2001::/32`) IPv6 transition ranges by default: both embed an IPv4 address inside a v6 literal, so a transition literal for a private IPv4 (e.g. 6to4's `2002:7f00:1::1` for 127.0.0.1) previously judged as a public v6 address and passed the SSRF guard — the same fail-open class the IPv4-mapped unwrapping already closed. These are deprecated transition mechanisms with no legitimate destination on the proxy's egress path, so the ranges are refused wholesale rather than unwrapped; the SSRF allow file can still admit them explicitly (hostname or CIDR) when an operator genuinely needs one. Separately, NAT64 well-known-prefix literals (`64:ff9b::/96`) are now unwrapped to their embedded IPv4 before the range judgment — a literal embedding a private IPv4 is refused, while one embedding a public IPv4 still passes, because NAT64 is a live mechanism (on DNS64 networks it is the legitimate path to v4 upstreams) and must not be refused wholesale. (#839)
 - Signed golden-image manifests (#155): the provision-time injector's manifest preflight no longer trusts the manifest's self-asserted version alone — once the operator enables the signed path (sign the manifest at image-build time with an Ed25519 key and configure the injector with the verification key), the preflight verifies the signature over the manifest's exact bytes before parsing anything, failing closed on a missing, malformed, or mismatched signature, so a tampered image registry can no longer serve a lying manifest that names the pinned version. The verification side takes a rotation window (`key_id=/path` pairs, mirroring the fleet release gate) so a stolen signing key rotates forward without a flag day, and the provision report records `ok-signed` vs `ok-unsigned-legacy` so the migration off unsigned preflights is observable. The signing key never enters the repo or the image; the verification keys ship with the injector's own configuration. Unsigned preflights keep working while older images are in service. (#831)
+
+- The waitlist signup service now resolves the real client address through
+  an explicitly declared reverse proxy: a new operator setting names the
+  proxy hop(s), and only then are forwarding headers honored — and only
+  from those peers. Without the declaration the service ignores forwarding
+  headers entirely, so the per-IP signup rate limit can no longer collapse
+  to one global bucket behind a same-host proxy, and the operator-only
+  status route (spool backlog and row counts) stays unreachable to
+  external clients arriving through the proxy while the on-box operator
+  keeps access both direct and via the proxy. A forged forwarding header
+  from a direct client is ignored, so it can neither dodge the rate limit
+  nor claim loopback. (#900, #896)
 
 ### Fixed
 - The dashboard sync tool now refuses two more ways to produce a broken

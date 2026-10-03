@@ -68,22 +68,39 @@ The markup carries placeholders the operator fills when §10 goes live:
   (`docs/WAITLIST_OPERATIONS.md` §10) at launch.
 - The pricing-teaser link points at the public thinking doc
   (`docs/PRICING_THINKING.md`); it becomes the pricing page when one exists.
-- **Do not front `waitlistd` with a reverse proxy on the same host until
-  a trusted-proxy mechanism lands (#896).** `waitlistd` terminates no TLS
-  itself, so a same-host proxy (nginx, Caddy, Cloudflare Tunnel) makes
-  every external client arrive as the socket peer `127.0.0.1` — and
-  `waitlistd` keys two security surfaces on that peer address: the
-  per-IP submit rate limit (`_ip_limited`) and the operator-only
-  `/waitlist/status` loopback gate (`_is_loopback`). Behind a proxy the
-  rate limit becomes one global bucket shared by all signups (one
-  aggressive client trips it for everyone), and the status route —
-  spool backlog + row counts, built to never leak onto a public
-  listener — evaluates loopback-true for every proxied request. The fix
-  is explicit operator config (which proxy hop's forwarding header to
-  trust), fail-closed — not blindly trusting `X-Forwarded-For` (clients
-  can spoof it). Until that lands, the public listener must reach
-  `waitlistd` directly (default `WAITLIST_BIND=127.0.0.1`); any
-  TLS-terminating or header-adding middlebox waits for the mechanism.
+- **Reverse-proxying `waitlistd`: declare the proxy hop explicitly.**
+  `waitlistd` terminates no TLS itself, so a same-host proxy (nginx,
+  Caddy, Cloudflare Tunnel) makes every external client arrive as the
+  socket peer `127.0.0.1` — and `waitlistd` keys two security surfaces
+  on the client address: the per-IP submit rate limit and the
+  operator-only `/waitlist/status` loopback gate. Behind an undeclared
+  proxy the rate limit collapses to one global bucket shared by all
+  signups (one aggressive client trips it for everyone), and the status
+  route — spool backlog + row counts, built to never leak onto a public
+  listener — evaluates loopback-true for every proxied request.
+  `WAITLIST_TRUSTED_PROXY` names the proxy hop(s) as a comma-separated
+  list of socket-peer IP addresses (e.g. `127.0.0.1`); only then are
+  `X-Forwarded-For` headers honored, and only from those peers — a
+  direct client cannot spoof its rate-limit key or claim loopback with
+  a forged header, and with the proxy declared the status gate
+  additionally requires the forwarded client to be loopback (the
+  on-box operator keeps access both direct and via the proxy). Only
+  `X-Forwarded-For` is read — not `CF-Connecting-IP`, `X-Real-IP`, or
+  the RFC 7239 `Forwarded` header — and the declared proxy must actually
+  forward the client IP in it: append (`proxy_set_header X-Forwarded-For
+  $proxy_add_x_forwarded_for;`, Caddy's default) or overwrite
+  (`proxy_set_header X-Forwarded-For $remote_addr;`). A declared proxy
+  that strips or never sets the header restores the pre-fix exposure
+  silently — every external client arrives as the trusted loopback peer
+  with no header, the gate passes, and the rate limit collapses — so
+  when in doubt leave `WAITLIST_TRUSTED_PROXY` unset. The declaration
+  must match the socket peer's literal address: an IPv4-mapped peer
+  (`::ffff:127.0.0.1`) does not match a declared `127.0.0.1`
+  (fail-closed — declare the address family the socket actually
+  reports). Unset, the daemon ignores forwarding headers entirely
+  (fail-closed): the public listener must reach `waitlistd` directly
+  (default `WAITLIST_BIND=127.0.0.1`), and any TLS-terminating or
+  header-adding middlebox waits until it is declared here.
 
 `/go/selfhost?src=selfhost` is page-build code the loop owns, not operator
 packet: on Pages it needs the static redirect shim

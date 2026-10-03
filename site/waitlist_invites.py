@@ -33,7 +33,21 @@ waitlistd.WaitlistService:
         (append-only posture — no hand-edits to funnel_events.jsonl) and
         marks each with attrs reconciled=True + via=reconcile_invite_events.
         Idempotent: re-running emits nothing new. Sends no email, so no
-        WAITLIST_CLAIM_LIVE gate.
+        WAITLIST_CLAIM_LIVE gate. Runs the claimed pass too (issue #898,
+        below) — one command after any suspected crash; --reconcile-claimed
+        runs only the claimed pass.
+
+    waitlist_invites.py --reconcile-claimed [--dry-run]
+        Issue #898: the claimed half of --reconcile, as a scoped variant.
+        `claim_post` commits the signed_up row (and consumes the invite
+        token) BEFORE emitting `claimed`; a crash in that window leaves
+        a claimed row whose funnel event never fired, and the funnel
+        under-reports invite_sent -> claimed conversion until repaired
+        (the signup-era provisioning surface reads the claim stream).
+        This pass re-derives exactly those missing events from rows.jsonl
+        and marks each with attrs reconciled=True +
+        via=reconcile_claimed_events. Idempotent: re-running emits
+        nothing new. Sends nothing, so no WAITLIST_CLAIM_LIVE gate.
 
     waitlist_invites.py --reinstate-confirmed --entry-id EID [--entry-id ...] --reason TEXT [--dry-run] [--force]
         Issue #235: flip stranded invited rows back to confirmed in the
@@ -84,6 +98,8 @@ On demand (no claim-live gate — sends nothing; idempotent):
 
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
         waitlist_invites.py --reconcile [--dry-run]  # after any suspected crash
+    WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
+        waitlist_invites.py --reconcile-claimed [--dry-run]  # after any suspected crash
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
         waitlist_invites.py --diagnose  # which stranded state each invited row is in
     WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \\
@@ -178,14 +194,16 @@ def main(argv):
     want_wave = "--send-wave" in argv
     want_rollover = "--rollover" in argv
     want_reconcile = "--reconcile" in argv
+    want_reconcile_claimed = "--reconcile-claimed" in argv
     want_reinstate = "--reinstate-confirmed" in argv
     want_diagnose = "--diagnose" in argv
     actions = (want_wave, want_rollover, want_reconcile,
-               want_reinstate, want_diagnose)
+               want_reconcile_claimed, want_reinstate, want_diagnose)
     if sum(actions) != 1:
         sys.stderr.write(
             "waitlist_invites: pass exactly one of --send-wave, "
-            "--rollover, --reconcile, --reinstate-confirmed, --diagnose\n")
+            "--rollover, --reconcile, --reconcile-claimed, "
+            "--reinstate-confirmed, --diagnose\n")
         raise SystemExit(2)
     dry_run = "--dry-run" in argv
     key, data_dir, host = load_config(argv)
@@ -301,6 +319,27 @@ def main(argv):
             sys.stdout.write(
                 f"waitlist_invites: {verb} "
                 f"{len(reconciled)} missing invite_sent event(s)"
+                + (f": {', '.join(reconciled)}" if reconciled else "")
+                + "\n")
+            # Issue #898: the claim commit -> emit window is the same
+            # crash class — repair it in the same run (invite pass first,
+            # so both re-derived stamps land together for the cohort
+            # latency gate). The passes are disjoint (invited vs
+            # signed_up rows, invite_sent vs claimed events) and both
+            # idempotent; --reconcile-claimed stays the scoped variant.
+            claimed = service.reconcile_claimed_events(dry_run=dry_run)
+            sys.stdout.write(
+                f"waitlist_invites: {verb} "
+                f"{len(claimed)} missing claimed event(s)"
+                + (f": {', '.join(claimed)}" if claimed else "")
+                + "\n")
+            return 0
+        elif want_reconcile_claimed:
+            reconciled = service.reconcile_claimed_events(dry_run=dry_run)
+            verb = "would reconcile" if dry_run else "reconciled"
+            sys.stdout.write(
+                f"waitlist_invites: {verb} "
+                f"{len(reconciled)} missing claimed event(s)"
                 + (f": {', '.join(reconciled)}" if reconciled else "")
                 + "\n")
             return 0

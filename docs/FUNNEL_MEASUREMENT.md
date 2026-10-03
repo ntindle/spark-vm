@@ -176,7 +176,7 @@ day-bucket and `attrs` is a small key-value map:
 | `purged` | 30d post-drop purge deletes a dropped row (`WAITLIST_OPERATIONS.md` §5); the row's PII is gone, the event keeps the counts | row id | — |
 | `forgot` | signed footer-link deletion deletes a row on the reader's request (`WAITLIST_OPERATIONS.md` §5); the row's PII is gone, the event keeps the counts | row id | — |
 | `invite_sent` | wave invite leaves | row id | `reconciled` = `true` + `via` = `reconcile_invite_events` when re-derived by the operator's `waitlist_invites.py --reconcile` pass after the commit → emit crash window (`WAITLIST_OPERATIONS.md` §7); `funnel_metrics.py` counts the last emission per ref, so a re-derived event is read as the same emission, never a double-count |
-| `claimed` | invite claim completes | row id | — |
+| `claimed` | invite claim completes | row id | `reconciled` = `true` + `via` = `reconcile_claimed_events` when re-derived by the operator's `waitlist_invites.py --reconcile` / `--reconcile-claimed` pass after the claim commit → emit crash window (`WAITLIST_OPERATIONS.md` §7); `funnel_metrics.py` counts the last emission per ref, so a re-derived event is read as the same emission, never a double-count |
 
 **Known divergence:** a crash between the invited-row commit and the
 `invite_sent` emit (`WAITLIST_OPERATIONS.md` §7) leaves an invited row
@@ -187,14 +187,25 @@ back to confirmed stay unrepaired by design: the next wave's fresh
 invite carries its own event. Rows whose invite expired *without* a
 rollover (e.g. the rollover cron was down) also stay unrepaired: run the
 daily `--rollover` first so they rejoin confirmed; reviving dead invites
-is the #235 operator tooling, not this pass.
+is the #235 operator tooling, not this pass. The same crash class has a
+claim-side window: a crash between the signed_up-row commit and the
+`claimed` emit leaves a claimed row with no event, and the funnel
+under-reports invite_sent → claimed conversion until the operator runs
+`waitlist_invites.py --reconcile` (which runs the claimed pass after
+the invite pass) or the scoped `--reconcile-claimed`.
 
 **Cohort note:** the re-derived event is stamped at repair time, and the
 invite→claim cohort is scoped on the `invite_sent` date — so repair
 promptly, or a late repair buckets those invites on the repair day
 rather than the wave day (their `wave` attr still names the wave they
 belong to). Claims that landed *before* the repair are excluded by the
-invite→claim latency gate (`claim_at >= invite_sent_at`).
+invite→claim latency gate (`claim_at >= invite_sent_at`). The claimed
+pass stamps its re-derived events at repair time too, so the claim
+cohort is likewise scoped on the claim date — repair promptly. When
+both passes repair in one `--reconcile` run, both stamps land on the
+repair day together, which keeps the latency gate consistent; repairing
+the invite pass long after a genuine claim would exclude that claim via
+the gate, so prefer the combined run after any suspected crash.
 
 The §7 metrics are pure queries over this table plus the daily page
 rollups — no other instrumentation is permitted. The day-1 operator query

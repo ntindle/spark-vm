@@ -448,6 +448,107 @@ def _is_loopback(addr):
     return ip.is_loopback
 
 
+def load_trusted_proxies():
+    """Parse WAITLIST_TRUSTED_PROXY into a frozenset of normalized IPs.
+
+    Comma-separated socket-peer addresses the operator declares as reverse
+    proxies in front of waitlistd (issue #896). Unset or blank -> empty
+    (fail-closed: forwarding headers are ignored entirely). An entry that
+    is not an IP address is a loud startup refusal — a typo'd trust
+    declaration must never silently mean "no proxy configured", or the
+    operator would deploy believing the rate limit keys on real client IPs
+    while it keys on the proxy's address.
+    """
+    proxies = set()
+    for part in os.environ.get("WAITLIST_TRUSTED_PROXY", "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            proxies.add(ipaddress.ip_address(part.split("%")[0]).compressed)
+        except ValueError:
+            sys.stderr.write(
+                f"waitlistd: WAITLIST_TRUSTED_PROXY entry {part!r} is not "
+                "an IP address — refusing to start with an unparseable "
+                "trust declaration.\n")
+            raise SystemExit(2)
+    return frozenset(proxies)
+
+
+def _norm_ip(addr):
+    """Normalized IP string, or None when addr is not an IP address."""
+    try:
+        return ipaddress.ip_address(addr.split("%")[0]).compressed
+    except (ValueError, AttributeError):
+        return None
+
+
+def _forwarded_for_values(headers):
+    """Every X-Forwarded-For header value, in order.
+
+    A real HTTPMessage can carry the header more than once; .get()
+    returns only the first instance, which would let an
+    attacker-supplied first instance shadow the trusted proxy's own
+    (QA review, issue #896). Join every instance instead.
+    """
+    if not headers:
+        return []
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        return [v for v in (get_all("X-Forwarded-For") or []) if v]
+    v = headers.get("X-Forwarded-For")
+    return [v] if v else []
+
+
+def resolve_client_ip(peer, headers, trusted_proxies):
+    """Client IP for abuse keying (the submit rate limit), resolved through
+    the declared proxy (issue #896).
+
+    Fail-closed: unless the socket peer is one of the declared trusted
+    proxies, forwarding headers are ignored entirely and the raw peer is
+    returned — byte-identical to the pre-#896 behavior. Blindly trusting
+    X-Forwarded-For would let any direct client spoof its rate-limit key.
+
+    When the peer IS trusted, the client is the address the proxy observed:
+    the rightmost X-Forwarded-For entry across every header instance.
+    Proxies either overwrite the header with the peer they saw (nginx
+    `proxy_set_header X-Forwarded-For $remote_addr`) or append to it
+    (Caddy, nginx `$proxy_add_x_forwarded_for`); in both shapes the entry
+    the trusted proxy wrote is the last one — any client-supplied prefix
+    or earlier header instance is attacker-controlled and sits to its
+    left. Missing or unparseable -> the (normalized) peer itself, never
+    an empty key.
+    """
+    peer_norm = _norm_ip(peer)
+    if peer_norm is None or peer_norm not in trusted_proxies:
+        return peer
+    xff = ",".join(_forwarded_for_values(headers))
+    if xff:
+        candidate = _norm_ip(xff.split(",")[-1].strip())
+        if candidate is not None:
+            return candidate
+    return peer_norm
+
+
+def status_gate_allows(peer, headers, trusted_proxies):
+    """Operator-only /waitlist/status gate (issue #896).
+
+    Pre-#896 the gate keyed on the raw socket peer; behind a same-host
+    reverse proxy every external request arrives as 127.0.0.1 and the
+    loopback check passed for the whole internet. The gate now passes only
+    when the socket peer is loopback AND (no proxy is declared, or the
+    client resolved through the declared proxy is also loopback) — an
+    external client through the proxy resolves to its real IP and is
+    refused, while the on-box operator keeps access both direct and via
+    the proxy. Off-listener peers still get a 404, not a 403 (#392).
+    """
+    if not _is_loopback(peer):
+        return False
+    if not trusted_proxies:
+        return True
+    return _is_loopback(resolve_client_ip(peer, headers, trusted_proxies))
+
+
 def b64url_encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
@@ -3026,6 +3127,100 @@ class WaitlistService:
             reconciled.append(entry_id)
         return reconciled
 
+    def reconcile_claimed_events(self, dry_run=False):
+        """Issue #898: re-derive `claimed` events lost to the commit ->
+        emit crash window, in the append-only posture.
+
+        `claim_post` commits the signed_up row (and consumes the invite
+        token), then emits `claimed` — a crash in that last window leaves
+        a claimed row whose funnel event never fired (the funnel reads
+        conservatively, so invite_sent -> claimed conversion
+        under-reports until repaired, and the signup-era provisioning
+        surface reads the claim stream). Rows are the source of truth
+        here: hand-editing funnel_events.jsonl is off-posture, so this
+        pass re-derives the missing events from rows.jsonl instead of
+        rewriting history.
+
+        Simpler than the invite pass (#234): signed_up is terminal —
+        there is no wave/reinvite ambiguity and no token-liveness check
+        to run. For every row with status == "signed_up" and no `claimed`
+        event with at >= its signed_up_at, it appends one `claimed`
+        (ref = entry_id) with attrs marking the reconciliation:
+
+            {"reconciled": True, "via": "reconcile_claimed_events",
+             "reason": "commit-crash window: the signed_up-row commit
+             landed but the claimed emit did not"}
+
+        Guard notes, each deliberate:
+        - Check (c) compares at >= signed_up_at rather than mere event
+          presence, mirroring the invite pass: claim_post is idempotent
+          (a re-POST renders the claim page verbatim, never a second
+          event), so a second legitimate `claimed` for one row cannot
+          exist — but the comparison keeps the same conservative shape
+          and can never double-count.
+        - Torn funnel_events lines (kill -9 can tear the last append)
+          are skipped loudly like _load does; they never count as
+          covering, so a torn emit line is re-derived, not trusted.
+          Before each append the torn tail is terminated
+          (_terminate_partial_tail) so the re-derived event starts on
+          its own parseable line instead of gluing onto the torn
+          partial — without this, one physical line would be
+          unparseable and a second pass would re-emit.
+        - Idempotent and crash-safe: check-then-append with no other
+          mutation; re-running (or dying mid-pass) emits each missing
+          event exactly once. Deterministic order (entry_id).
+
+        Returns the entry_ids whose events were re-derived (or would
+        be, under dry_run).
+
+        Caller must hold data_lock (the operator CLI does). Sends
+        nothing; no WAITLIST_CLAIM_LIVE gate.
+        """
+        covered = set()  # (ref, at) pairs of claimed events
+        events_path = os.path.join(self.data_dir, "funnel_events.jsonl")
+        if os.path.exists(events_path):
+            with open(events_path, encoding="utf-8") as fh:
+                for lineno, line in enumerate(fh, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        sys.stderr.write(
+                            "waitlistd: reconcile skipping torn "
+                            f"funnel_events.jsonl line {lineno}\n")
+                        continue
+                    if (isinstance(obj, dict) and
+                            obj.get("event") == "claimed"):
+                        covered.add((obj.get("ref"), obj.get("at")))
+        reconciled = []
+        for entry_id in sorted(self.rows):
+            row = self.rows[entry_id]
+            if row.get("status") != "signed_up":
+                continue
+            signed_up_at = row.get("signed_up_at") or ""
+            if any(ref == entry_id and (at or "") >= signed_up_at
+                   for ref, at in covered):
+                continue
+            if not dry_run:
+                # Quarantine a kill -9-torn tail FIRST: without this,
+                # the append below would glue the re-derived event onto
+                # the torn partial line, producing one unparseable
+                # physical line (and a second pass would re-emit, since
+                # the glued line never counts as covering).
+                self._terminate_partial_tail(events_path)
+                self._emit("claimed", entry_id, {
+                    "reconciled": True,
+                    "via": "reconcile_claimed_events",
+                    "reason": ("commit-crash window: the signed_up-row "
+                               "commit landed but the claimed emit did "
+                               "not"),
+                })
+                covered.add((entry_id, row.get("signed_up_at")))
+            reconciled.append(entry_id)
+        return reconciled
+
     # -- self-host CTA -----------------------------------------------------
 
     def cta_selfhost(self, src):
@@ -3343,6 +3538,11 @@ _OVERSIZED = object()  # _fields sentinel: body over MAX_BODY_BYTES
 
 class _Handler(BaseHTTPRequestHandler):
     service = None  # set by serve()
+    # Issue #896: socket-peer addresses declared (via WAITLIST_TRUSTED_PROXY)
+    # as reverse proxies in front of waitlistd. Empty by default —
+    # fail-closed: forwarding headers are ignored unless the operator
+    # declares the proxy. Set by main().
+    trusted_proxies = frozenset()
     server_version = "waitlistd/1"
 
     # Issue #471: per-connection socket timeout. StreamRequestHandler
@@ -3405,6 +3605,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("X-Robots-Tag", "noindex, nofollow")
         self.end_headers()
 
+    def _client_ip(self):
+        """Abuse-keying client IP for this request (issue #896)."""
+        return resolve_client_ip(
+            self.client_address[0], self.headers, self.trusted_proxies)
+
     def do_POST(self):  # noqa: N802
         path = urllib.parse.urlsplit(self.path).path
         fields = self._fields() if path in (
@@ -3422,7 +3627,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/waitlist/form":
             status, body = self.service.submit_form(
-                fields, self.client_address[0]
+                fields, self._client_ip()
             )
             self._send(status, body)
         elif path == "/waitlist/confirm":
@@ -3468,7 +3673,12 @@ class _Handler(BaseHTTPRequestHandler):
             # counts. Loopback-gated even when the daemon binds a
             # non-loopback interface — off-listener peers get a 404, not
             # a 403, so the route does not advertise itself to scanners.
-            if not _is_loopback(self.client_address[0]):
+            # Issue #896: the gate resolves the client through the
+            # declared trusted proxy — behind a same-host proxy the raw
+            # peer is the proxy itself (loopback for everyone), so the
+            # check additionally requires a loopback resolved client.
+            if not status_gate_allows(self.client_address[0], self.headers,
+                                      self.trusted_proxies):
                 self._send(404, PAGE_SHELL.format(
                     title="Not found",
                     body="<h1>Not found</h1>",
@@ -3534,11 +3744,13 @@ def load_config(argv):
 
 def main(argv):
     key, data_dir, host, bind, port = load_config(argv)
+    trusted = load_trusted_proxies()
     if "--check" in argv:
         sys.stdout.write("waitlistd: config ok\n")
         return 0
     service = WaitlistService(data_dir, key, host)
     _Handler.service = service
+    _Handler.trusted_proxies = trusted
     # Issue #471: bounded thread pool — ThreadingHTTPServer spawns one
     # thread per connection, so a peer slow-lorising the daemon could
     # grow the pool without bound. Over-cap connections are closed
@@ -3547,6 +3759,14 @@ def main(argv):
     # half of the helper is inert.
     httpd = BoundedThreadingHTTPServer((bind, port), _Handler)
     sys.stderr.write(f"waitlistd: listening on {bind}:{port}\n")
+    if trusted:
+        sys.stderr.write(
+            "waitlistd: trusted proxies (forwarding headers honored only "
+            f"from these peers): {', '.join(sorted(trusted))}\n")
+    else:
+        sys.stderr.write(
+            "waitlistd: no trusted proxies declared — forwarding headers "
+            "ignored (fail-closed)\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

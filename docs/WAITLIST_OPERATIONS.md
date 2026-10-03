@@ -421,6 +421,26 @@ daily `--rollover` first so they rejoin confirmed. Reviving dead invites
 is the #235 operator tooling, not this pass. Run it after any suspected
 crash; re-running when nothing is missing is a no-op.
 
+**Claim commit → emit crash window (issue #898):** `claim_post` commits
+the signed_up row (and consumes the invite token) BEFORE emitting the
+`claimed` funnel event; a crash in that window leaves a claimed row
+whose event never fired, and the funnel under-reports invite_sent →
+claimed conversion until repaired (the signup-era provisioning surface
+reads the claim stream). Repair with:
+
+    WAITLIST_HMAC_KEY=... WAITLIST_DATA=... \
+        waitlist_invites.py --reconcile-claimed   # idempotent; --dry-run to preview
+
+`--reconcile` runs this pass too, after the invite_sent pass. The pass
+re-derives only the missing events from rows.jsonl (append-only posture
+— the event trail is never hand-edited), marks each with `reconciled:
+true` + `via: reconcile_claimed_events` in its attrs, and is simpler
+than the invite pass by design: signed_up is terminal, so there is no
+wave/reinvite ambiguity and no token-liveness check — every signed_up
+row without a `claimed` event at or after its signed_up_at gets one.
+Run it after any suspected crash; re-running when nothing is missing is
+a no-op.
+
 **Per-invocation wave manifests (issue #405):** every `--send-wave`
 invocation writes one JSON manifest to `wave_manifests/` in the data
 dir, recording the wave name, invocation time, requested count, the
