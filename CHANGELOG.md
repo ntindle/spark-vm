@@ -60,7 +60,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   operators and self-hosters no longer have to piece the plane's surface
   together from five scattered docs. Each claim cites its canonical
   contract doc.
-  (#TBD)
+  (#925)
 - The fleet dashboard's anti-XSS tests now exercise the real row
   templates: the fleet row, pairing card, detail rows, and service
   chips are built by single-copy pure renderers, and the test suite
