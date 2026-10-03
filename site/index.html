@@ -13,6 +13,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>spark-vm — a real computer that stays yours</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png">
+<link rel="apple-touch-icon" href="/assets/logo-180.png">
 <!-- OG/social tag set: docs/FUNNEL_MEASUREMENT.md §5 (PR #99), exact.
      DEPLOY: replace <host> with the production host (no URL shorteners,
      no query-string trackers on the image URL). -->
@@ -63,6 +65,13 @@ details{border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin-
 summary{font-weight:600;cursor:pointer}
 details p{margin:10px 0 0}
 footer{border-top:1px solid var(--line);padding:28px 0 48px;font-size:.9rem;color:var(--muted)}
+.brandbar{background:#0d1319;border-bottom:1px solid #232c38}
+.brandbar .wrap{max-width:680px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:#f4f6f8;font-weight:700;font-size:1.05rem}
+.brand img{display:block}
+.brandbar nav{display:flex;gap:18px}
+.brandbar nav a{color:#aeb6c2;text-decoration:none;font-size:.92rem}
+.brandbar nav a:hover{color:#f4f6f8}
 footer .wrap{max-width:680px;margin:0 auto;padding:0 20px}
 footer p{margin:0 0 6px}
 .faq-cta{margin-top:18px}
@@ -70,6 +79,20 @@ footer p{margin:0 0 6px}
 </style>
 </head>
 <body>
+
+<!-- Brand bar: shared with the waitlist page (waitlist.html). The mark is
+     the #852 logo: site/assets/logo.svg source, PNG exports beside it. -->
+<div class="brandbar">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <img src="/assets/logo.svg" width="28" height="28" alt="spark-vm logo">
+      <span>spark-vm</span>
+    </a>
+    <nav aria-label="Site">
+      <a href="https://github.com/ntindle/spark-vm">GitHub</a>
+    </nav>
+  </div>
+</div>
 
 <header class="hero">
   <div class="wrap">

@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="site/assets/logo-180.png" width="96" alt="spark-vm logo">
+
 # spark-vm
 
 **A real computer that stays yours.**
