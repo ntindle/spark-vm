@@ -40,7 +40,7 @@ low-latency streaming, never slow screenshot-polling frame sync.
 | Vision element | Current state |
 |---|---|
 | Box publishes its desktop | **Nothing.** The box runs Xvfb `:98` + XFCE with `cua/bin/cua-bridge.py` (localhost-only, `X-CUA` CSRF): `GET /api/screenshot` is a PNG poll — the exact screenshot-sync class the vision forbids. `POST /api/click|type|key` give synthetic input. There is **no encoder, no WebRTC publisher, no persistent box process** — #847 G47.1 (the `boxd` decision) is still open, and #864's heartbeat sender is cron, not a daemon. |
-| Cloudflare Realtime SFU usage | **Nothing.** No Realtime app, no app secret anywhere, no session-creation code. Product facts (verified 2026-10-03): the SFU routes WebRTC media tracks + DataChannels; **your backend holds the app secret** and creates sessions via the Realtime API (`https://rtc.live.cloudflare.com/v1`), authenticates users, authorizes publish/subscribe, and shares session/track ids through your application state. **The SFU defines no rooms, participants, roles, or presence** — the app owns all of it. Pricing: $0.05/GB egress, first 1,000 GB/month free (SFU + TURN shared); TURN is free when used with the SFU (`turn.cloudflare.com`, anycast). |
+| Cloudflare Realtime SFU usage | **Nothing.** No Realtime app, no app secret anywhere, no session-creation code. Product facts (verified 2026-10-03): the SFU routes WebRTC media tracks + DataChannels; **your backend holds the app secret** and creates sessions via the Realtime API (`rtc.live.cloudflare.com/v1`), authenticates users, authorizes publish/subscribe, and shares session/track ids through your application state. **The SFU defines no rooms, participants, roles, or presence** — the app owns all of it. Pricing: $0.05/GB egress, first 1,000 GB/month free (SFU + TURN shared); TURN is free when used with the SFU (`turn.cloudflare.com`, anycast). |
 | Session/presence plane | **Nothing.** No session registry, no publish/subscribe authorization endpoints. The plane worker is a plain Workers-Python Worker (D1-backed): no WebSocket upgrade handler, no DO class (#847 open). Sessions, expiry, revocation — none of it exists. |
 | Viewer surface | **Nothing.** The fleet dashboard (`hosted/dashboard/`, owner-authenticated per #845) is fleet rows only: no video element, no WebRTC client, no input forwarding, no gesture layer. |
 | Mobile gestures | **Spec only.** The #47 gesture set is documented (standing user spec) with no client behind it. |
@@ -252,8 +252,8 @@ beyond its existing bearer.
 ## 5. Shape sketch (reserved, not final)
 
 The owner requests a session: `POST /v1/desktop/sessions {box_id}` (owner
-auth, #845 shape). The plane creates the SFU session via
-`https://rtc.live.cloudflare.com/v1` with the app secret from env, writes
+auth, #845 shape). The plane creates the SFU session via the Realtime API
+(`rtc.live.cloudflare.com/v1`) with the app secret from env, writes
 the D1 `desktop_sessions` row (box_id, owner, SFU session/track ids,
 `expires_at`), and returns the session handle. The box learns its session
 (the S2 slice picks HTTPS poll vs #847 WSS control frames) and its
