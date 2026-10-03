@@ -7,7 +7,10 @@ All tests run locally with no network and no home-dir writes: estates
 and stores live under tmp dirs, and the CLIs are exercised through
 subprocess, never imported. Time is controlled by writing audit lines
 with explicit ts values, so no test depends on the wall clock beyond
-"collect just ran".
+"collect just ran". The one exception is the alert-lifecycle section
+(#927): pinning the rule-4 window anchor across evaluations needs an
+explicit fired_at, so those tests import the events module directly
+(precedent: fleet/test_retention.py, fleet/test_events_lock.py).
 """
 
 import json
@@ -483,47 +486,72 @@ def test_rule2_stable_cluster_does_not_refire(dirs):
 def test_rule4_suppressed_while_unacked_repages_after_ack(dirs):
     # #927: a persistent stuck-precheck condition pages once and stays
     # pending while unacknowledged — even across an anchor move (the
-    # pre-fix code paged again on the new anchor) — and re-pages after
-    # the operator acks, since persistence after an ack is new news.
+    # pre-fix code paged again on the new anchor). After the ack, the
+    # re-fire gate needs genuinely new evidence: the candidate's anchor
+    # must postdate the ack (Product B1) — persistence on pre-ack
+    # evidence stays silent instead of re-paging immediately.
+    # Timeline is relative to the module's NOW so the ack (wall clock)
+    # always lands after batch2's evidence.
     events = _import_events_module()
     estate, store = dirs
-    t0 = datetime(2026, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
     batch1 = [_precheck_row("tower",
-                            (t0 - timedelta(hours=5, minutes=55)).isoformat(),
+                            (NOW - timedelta(hours=5, minutes=55)).isoformat(),
                             0),
               _precheck_row("tower",
-                            (t0 - timedelta(hours=5, minutes=50)).isoformat(),
+                            (NOW - timedelta(hours=5, minutes=50)).isoformat(),
                             1),
               _precheck_row("tower",
-                            (t0 - timedelta(hours=5, minutes=45)).isoformat(),
+                            (NOW - timedelta(hours=5, minutes=45)).isoformat(),
                             2)]
     events.append_events(store, batch1)
-    fired, err = events.evaluate_alerts(store, t0.isoformat())
+    fired, err = events.evaluate_alerts(store, NOW.isoformat())
     assert err is None
     assert len(fired) == 1
     first_id = fired[0]["alert_id"]
-    # Fresh precheck-fails arrive; by the next evaluation the first
-    # batch has aged out of the 6h window, so the anchor moves to the
-    # second batch (new alert_id pre-fix).
+    # Second batch straddles the first batch's age-out: by the next
+    # evaluation batch1 is outside the 6h window, so the anchor moves
+    # to batch2's min (new alert_id pre-fix).
     batch2 = [_precheck_row("tower",
-                            (t0 + timedelta(minutes=10)).isoformat(), 3),
+                            (NOW - timedelta(hours=2, minutes=50)).isoformat(),
+                            3),
               _precheck_row("tower",
-                            (t0 + timedelta(minutes=15)).isoformat(), 4),
+                            (NOW - timedelta(hours=2, minutes=40)).isoformat(),
+                            4),
               _precheck_row("tower",
-                            (t0 + timedelta(minutes=20)).isoformat(), 5)]
+                            (NOW - timedelta(hours=2, minutes=30)).isoformat(),
+                            5)]
     events.append_events(store, batch2)
     fired, err = events.evaluate_alerts(
-        store, (t0 + timedelta(hours=6, minutes=10)).isoformat())
+        store, (NOW + timedelta(hours=3, minutes=10)).isoformat())
     assert err is None
     assert fired == []  # suppressed: the first alert is still unacked
     stuck = [a for a in events.load_alerts(store)[0]
              if a["rule"] == "stuck-precheck"]
     assert len(stuck) == 1 and stuck[0]["alert_id"] == first_id
-    # Acknowledge: persistence after the ack re-pages.
+    # Acknowledge (acked_at = this test's wall clock K, after batch2).
+    # New failures arrive after the ack, but the window still holds
+    # pre-ack evidence: the anchor (batch2's min) predates the ack ->
+    # stays silent.
     found, err = events.ack_alert(store, first_id)
     assert err is None and found is True
+    acked_at = datetime.fromisoformat(
+        events.load_alerts(store)[0][0]["acked_at"])
+    assert acked_at > NOW - timedelta(hours=2, minutes=50)
+    batch3 = [_precheck_row(
+        "tower", (acked_at + timedelta(minutes=10)).isoformat(), 6),
+        _precheck_row(
+            "tower", (acked_at + timedelta(minutes=20)).isoformat(), 7),
+        _precheck_row(
+            "tower", (acked_at + timedelta(minutes=30)).isoformat(), 8)]
+    events.append_events(store, batch3)
     fired, err = events.evaluate_alerts(
-        store, (t0 + timedelta(hours=6, minutes=10)).isoformat())
+        store, (acked_at + timedelta(minutes=40)).isoformat())
+    assert err is None
+    assert fired == []
+    # Once the pre-ack evidence ages out of the 6h window, the anchor
+    # postdates the ack -> genuinely new evidence -> re-pages.
+    fired, err = events.evaluate_alerts(
+        store, (acked_at + timedelta(hours=6, minutes=10)).isoformat())
     assert err is None
     assert len(fired) == 1
     assert fired[0]["alert_id"] != first_id

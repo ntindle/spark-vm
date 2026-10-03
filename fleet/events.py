@@ -729,7 +729,12 @@ def _rule_stuck_precheck(events, fired_at):
     """Rule 4: >=N precheck-fail events on one box inside the window ->
     operator alert (a perpetually un-updated box no other rule catches).
     The anchor is the window's earliest qualifying event, so a
-    persistent condition re-fires only when the window's anchor moves."""
+    persistent condition re-fires only when the window's anchor moves.
+
+    Returns a list of (alert, anchor) pairs: the anchor is the evidence
+    timestamp the re-fire gate compares against the ack time (Product
+    B1, #927) — see evaluate_alerts.
+    """
     cutoff = _parse_ts(fired_at)
     if cutoff is None:
         return []
@@ -742,18 +747,18 @@ def _rule_stuck_precheck(events, fired_at):
         if ts is None or ts < cutoff:
             continue
         by_box.setdefault(e.get("box_id"), []).append(ts)
-    alerts = []
+    pairs = []
     for box_id, stamps in by_box.items():
         if len(stamps) >= _STUCK_PRECHECK_THRESHOLD:
             anchor = min(stamps)
-            alerts.append(_alert(
+            pairs.append((_alert(
                 "stuck-precheck", fired_at,
                 "box %s reported %d precheck-fail events in the last %dh" %
                 (box_id, len(stamps),
                  _STUCK_PRECHECK_WINDOW_S // 3600),
                 box_id=box_id,
-                dedup_key=anchor.isoformat()))
-    return alerts
+                dedup_key=anchor.isoformat()), anchor))
+    return pairs
 
 
 def evaluate_alerts(store_dir, fired_at=None):
@@ -788,14 +793,16 @@ def evaluate_alerts(store_dir, fired_at=None):
 
     Alert lifecycle (#927): rule 2 re-fires when the cluster's box set
     grows (the dedup key carries the sorted member list, so growth is a
-    new page while a stable cluster dedups silently); rule 4 is
-    suppressed while an unacknowledged stuck-precheck alert for the box
-    already exists in the journal (a persisted condition pages once and
-    stays pending until the operator acks — an ignored condition must
-    not pile one page per sliding window into the journal, and
+    new page while a stable cluster dedups silently); rule 4 pages once
+    per persistent condition — a still-unacknowledged stuck-precheck
+    alert for the box suppresses further pages, so an ignored condition
+    never piles one page per sliding window into the journal (and
     prune_events deliberately never drops unacknowledged alerts).
-    Acknowledging re-arms rule 4: persistence after an ack pages again
-    with the moved anchor (new information the operator has not seen).
+    Acknowledging re-arms rule 4, but only for genuinely new evidence:
+    the re-fire gate requires the candidate's anchor to postdate the
+    ack (#928's acked_at) — persistence on pre-ack evidence stays
+    silent, so an ack is never punished with an immediate re-page on
+    what the operator already saw (Product B1).
     """
     fired_at = fired_at or _now_iso()
     fired_dt = _parse_ts(fired_at)
@@ -812,7 +819,10 @@ def evaluate_alerts(store_dir, fired_at=None):
     candidates.extend(_rule_rollback_failed(events, fired_at))
     candidates.extend(_rule_correlated_failure(events, fired_at))
     candidates.extend(_rule_silent_wave(events, fired_at))
-    candidates.extend(_rule_stuck_precheck(events, fired_at))
+    rule4_pairs = _rule_stuck_precheck(events, fired_at)
+    candidates.extend(alert for alert, _ in rule4_pairs)
+    rule4_anchors = {alert["alert_id"]: anchor
+                     for alert, anchor in rule4_pairs}
     if not candidates:
         return [], None
     try:
@@ -822,20 +832,49 @@ def evaluate_alerts(store_dir, fired_at=None):
                 return None, err
             seen = {a.get("alert_id") for a in existing
                     if isinstance(a.get("alert_id"), str)}
-            # Rule 4 candidates whose box already has an unacknowledged
-            # stuck-precheck alert are suppressed: the condition stays
-            # visible as the one pending alert (see the lifecycle note in
-            # this docstring), and a re-page after the operator acks is
-            # handled by the anchor move, not by an exception here.
-            # journaled box_ids are _clean_text-processed at synthesis,
-            # as are the candidates' (via _alert), so the sets compare.
-            pending_stuck = {a.get("box_id") for a in existing
-                             if a.get("rule") == "stuck-precheck"
-                             and not a.get("acked")}
+            # Rule-4 re-fire gate (Product B1, #927): per box, an
+            # unacknowledged stuck-precheck alert suppresses every
+            # candidate (one pending page per box); after an ack, a
+            # candidate re-fires only when its anchor postdates the ack
+            # — the whole qualifying window is newer than what the
+            # operator acknowledged. journaled box_ids are
+            # _clean_text-processed at synthesis, as are the
+            # candidates' (via _alert), so the sets compare.
+            stuck_state = {}
+            for a in existing:
+                if a.get("rule") != "stuck-precheck":
+                    continue
+                box = a.get("box_id")
+                st = stuck_state.setdefault(
+                    box, {"unacked": False, "acked_at": None})
+                if a.get("acked"):
+                    acked_at = _parse_ts(a.get("acked_at"))
+                    if (acked_at is not None
+                            and (st["acked_at"] is None
+                                 or acked_at > st["acked_at"])):
+                        st["acked_at"] = acked_at
+                else:
+                    st["unacked"] = True
+
+            def _rule4_refire_allowed(alert):
+                st = stuck_state.get(alert.get("box_id"))
+                if st is None:
+                    return True  # no prior page for this box
+                if st["unacked"]:
+                    return False
+                if st["acked_at"] is None:
+                    # Acked before #928 recorded acked_at: no timestamp
+                    # to gate on — re-page once on the moved anchor;
+                    # the new unacknowledged alert then suppresses
+                    # further pages. Bounded one-time transition.
+                    return True
+                anchor = rule4_anchors.get(alert["alert_id"])
+                return anchor is not None and anchor > st["acked_at"]
+
             fresh = [a for a in candidates
                      if a["alert_id"] not in seen
-                     and not (a.get("rule") == "stuck-precheck"
-                              and a.get("box_id") in pending_stuck)]
+                     and (a.get("rule") != "stuck-precheck"
+                          or _rule4_refire_allowed(a))]
             if fresh:
                 alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
                 try:

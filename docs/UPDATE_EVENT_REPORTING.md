@@ -200,10 +200,12 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
      suppresses further pages — even as the sliding window's anchor
      moves — so an ignored condition no longer piles one pending page
      per window into the journal (retention deliberately never drops
-     unacknowledged alerts). Acknowledging re-arms the rule: if the
-     condition is still present after the ack, it pages again with the
-     moved anchor — persistence after acknowledgment is new information
-     the operator has not seen.
+     unacknowledged alerts). Acknowledging re-arms the rule, but only
+     for genuinely new evidence: a candidate re-fires only when its
+     anchor postdates the ack, i.e. every qualifying failure in the
+     window happened after the operator acknowledged. Persistence on
+     pre-ack evidence stays silent, so an ack is never punished with an
+     immediate re-page on what the operator already saw.
   Alert transport, honestly staged: S1 writes the alert into the
   operator's fleet journal and `fleet events watch` exits nonzero on
   unacknowledged alerts — a cron or the operator's existing paging consumes
@@ -212,7 +214,7 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
   alert stamps the journal row with `acked_at` (collector clock) and
   `acked_by` (operator name, null when unknown — an unknown operator
   never fails the ack), so a handled page is distinguishable from a
-  silenced one (#928).
+  silenced one in the journal row (#928).
 
   **Bounded evaluation scan (#814 slice 1):** each evaluation reasons
   only about the event-journal tail the armed rules can act on — the

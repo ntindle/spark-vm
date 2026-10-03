@@ -249,17 +249,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
   window were silently absorbed, so a spreading bad release looked
   contained in the alert journal. A growing cluster now pages again
   with the full box list, while a stable cluster still fires exactly
-  once. (#TBD)
+  once. (#927)
 - The stuck-precheck alert no longer pages once per evaluation window
   while the underlying condition persists unacknowledged: an ignored
   stuck box used to pile one pending page per window into the alert
   journal (which never drops unacknowledged alerts). It now pages once,
   stays visible as the one pending alert until you acknowledge it, and
-  pages again only if the condition is still present after the ack.
-  (#TBD)
+  after an ack re-pages only when every failure in the window is newer
+  than the ack — persistence on evidence you already saw stays silent.
+  (#927)
 - Acknowledging a fleet alert now records when it was acknowledged
-  and by whom in the alert journal, so a handled page is
-  distinguishable from a silenced one. (#TBD)
+  and by whom in the journal row, so a handled page is
+  distinguishable from a silenced one. (#928)
 - The credential proxy now notices when a secret file's contents are
   rewritten in place: previously it only watched the secrets directory
   for additions and removals, so a secret rotated by editing the file
