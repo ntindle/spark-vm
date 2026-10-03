@@ -53,6 +53,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Published a vision-vs-state gap analysis for hosted credential vending:
+  the self-hosted localhost swap-proxy half (placeholders, allowlists,
+  audit) exists and is hardened, but the "control plane vends narrow,
+  short-lived credentials" half is missing entirely — no vend endpoint,
+  no box fetch path, no tenant dimension, no short-lived semantics. Filed
+  as two new build items (plane vend endpoint, box-side plane-fetch path)
+  under a six-slice plan. (#850)
+
 - The box self-updater now converges Playwright the same way it holds the
   CUA driver: the pinned Playwright package, its Chromium browser builds,
   and the browser system libraries are all brought onto the operator's
