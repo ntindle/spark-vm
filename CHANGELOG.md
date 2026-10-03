@@ -53,6 +53,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The fleet dashboard's anti-XSS tests now exercise the real row
+  templates: the fleet row, pairing card, detail rows, and service
+  chips are built by single-copy pure renderers, and the test suite
+  renders them in Node with hostile box-controlled strings — so a
+  template that ever drops an escaper fails the suite. (#TBD)
 - The toolset self-updater now freezes after repeated failures: after
   three consecutive failed update runs it stops attempting updates and
   surfaces a single "box needs attention" state (visible in the status

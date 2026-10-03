@@ -14,10 +14,14 @@
   out of localStorage/URLs, and contains no '\"\"\"' (it would break the
   inlined Python string in worker.py).
 - js: the page's script passes `node --check`, and the pure helpers
-  (esc/relTime/until/isStale/fmtUptime/statusChip/shortId) are
+  (esc/relTime/until/isStale/fmtUptime/statusChip/shortId) plus the pure
+  row renderers (fleetRow/pairingCard/detailRows/serviceChips) are
   unit-tested in node by extracting the helper block and stubbing the
-  browser globals they touch.
+  browser globals they touch. #859: the XSS tests call the REAL
+  templates with hostile box-controlled inputs — a template that drops
+  an esc() must fail them (pinned by test_xss_tests_catch_a_dropped_esc).
 """
+import json
 import os
 import re
 import subprocess
@@ -306,6 +310,27 @@ def _script():
     return m.group(1)
 
 
+def _node_eval(fragment, helpers=None):
+    """Evaluate the pure-helper script plus `fragment` in node; the
+    fragment must print one JSON object to stdout, which is returned
+    parsed. Pass `helpers=` to evaluate a mutated helper block instead
+    (mutation non-vacuity testing)."""
+    if helpers is None:
+        helpers = _script().split("/* ---- app state ---- */")[0]
+    harness = helpers + "\n" + fragment
+    with tempfile.NamedTemporaryFile("w", suffix=".js",
+                                     delete=False) as f:
+        f.write(harness)
+        path = f.name
+    try:
+        r = subprocess.run(["node", path], capture_output=True, text=True,
+                           timeout=30)
+    finally:
+        os.unlink(path)
+    assert r.returncode == 0, "node harness failed:\n%s" % r.stderr
+    return json.loads(r.stdout)
+
+
 def test_js_syntax():
     script = _script()
     with tempfile.NamedTemporaryFile("w", suffix=".js",
@@ -395,31 +420,118 @@ def test_js_helpers():
 def test_xss_escaping_of_box_fields():
     """Box-controlled strings (name/id) must be escaped in the row HTML.
 
-    Renders the fleet-row template with a hostile name through node by
-    reusing esc() + shortId() + statusChip() — the same functions the
-    page uses — and asserts no raw markup survives."""
-    script = _script()
-    helpers = script.split("/* ---- app state ---- */")[0]
-    harness = helpers + """
-const b = {id: 'box_1"><img src=x onerror=alert(1)>', name: '<script>alert(2)</script>', last_heartbeat_at: 1290};
-const now = 1300;
-const row = '<div class="boxrow" data-id="' + esc(b.id) + '">' +
-  '<span class="grow"><span class="name">' + esc(b.name) + '</span> ' +
-  '<span class="id">' + esc(shortId(b.id)) + '</span></span>' +
-  statusChip(b, now) + '</div>';
-console.log(JSON.stringify({row}));
-"""
-    with tempfile.NamedTemporaryFile("w", suffix=".js",
-                                     delete=False) as f:
-        f.write(harness)
-        path = f.name
-    try:
-        r = subprocess.run(["node", path], capture_output=True, text=True,
-                           timeout=30)
-    finally:
-        os.unlink(path)
-    assert r.returncode == 0, r.stderr
-    import json
-    row = json.loads(r.stdout)["row"]
+    Calls the REAL fleetRow() template (the same function renderFleet
+    injects into the page) with a hostile name/id and asserts no raw
+    markup survives."""
+    box = {"id": 'box_1"><img src=x onerror=alert(1)>',
+           "name": "<script>alert(2)</script>",
+           "last_heartbeat_at": 1290}
+    o = _node_eval("""
+const b = %s;
+console.log(JSON.stringify({row: fleetRow(b, 1300)}));
+""" % json.dumps(box))
+    row = o["row"]
     assert "<script>" not in row and "<img" not in row
     assert "&lt;script&gt;" in row
+    # The hostile id must not break out of the data-id attribute either.
+    assert 'data-id="' in row
+    assert "&quot;" in row
+
+
+def test_xss_escaping_of_pairing_fields():
+    """Pairing rows carry box-controlled name/id/fingerprint — all must
+    be escaped by the REAL pairingCard() template."""
+    p = {"id": 'p_1"><img src=x onerror=alert(1)>',
+         "box_name": "<script>alert(2)</script>",
+         "status": "pending",
+         "expires_at": 1900,
+         "fingerprint": "<b>finger</b>print"}
+    o = _node_eval("""
+const p = %s;
+console.log(JSON.stringify({
+  pending: pairingCard(p, 1300),
+  approved: pairingCard(Object.assign({}, p, {status: "approved"}), 1300),
+}));
+""" % json.dumps(p))
+    for rendered in (o["pending"], o["approved"]):
+        assert "<script>" not in rendered and "<img" not in rendered
+        assert "&lt;script&gt;" in rendered
+        assert "&lt;b&gt;" in rendered
+
+
+def test_xss_escaping_of_detail_fields():
+    """Box-controlled detail fields (id, status, hostname, uptime note,
+    token note, services) must be escaped by the REAL detailRows() /
+    serviceChips() templates."""
+    box = {"id": 'box_1"><img src=x onerror=alert(1)>',
+           "name": "irrelevant-here",
+           "status": 'up"><svg onload=alert(3)>',
+           "last_heartbeat_at": 1290,
+           "created_at": 900,
+           "token_expires_at": 9999999999,
+           "last_status": {
+               "host": {"hostname": 'h"><iframe src=x>', "uptime_seconds": 3661},
+               "services": {'svc"><b>x': 'up', "svc2": 'down"><img src=x onerror=alert(4)>'},
+           }}
+    o = _node_eval("""
+const b = %s;
+console.log(JSON.stringify({
+  rows: detailRows(b, 1300),
+  chips: serviceChips(b.last_status.services),
+  empty: serviceChips({}),
+}));
+""" % json.dumps(box))
+    for rendered in (o["rows"], o["chips"]):
+        assert "<img" not in rendered and "<svg" not in rendered
+        assert "<iframe" not in rendered and "<b>" not in rendered
+    assert "&lt;script&gt;" not in o["rows"]  # no script hostile here either
+    assert "no service data" in o["empty"]
+
+
+def test_xss_tests_catch_a_dropped_esc():
+    """Non-vacuity pin for #859: the issue's acceptance criterion is
+    that mutating a template to drop an esc() fails the suite. Prove
+    the hostile-input assertions are sensitive — one dropped esc()
+    per template must leak raw markup."""
+    helpers = _script().split("/* ---- app state ---- */")[0]
+    box = {"id": 'box_1"><img src=x onerror=alert(1)>',
+           "name": "<script>alert(2)</script>",
+           "status": 'up"><svg onload=alert(3)>',
+           "last_heartbeat_at": 1290,
+           "created_at": 900,
+           "last_status": {"host": {"hostname": "h", "uptime_seconds": 1},
+                           "services": {}}}
+    cases = [
+        # (needle, replacement, js expression, raw marker that must leak)
+        ("esc(b.name)", "String(b.name)",
+         "fleetRow(b, 1300)", "<script>"),
+        ("esc(p.box_name)", "String(p.box_name)",
+         "pairingCard(p, 1300)", "<script>"),
+        ('esc(host.hostname || "—")', '(host.hostname || "—")',
+         "detailRows(b, 1300)", 'h"><iframe src=x>'),
+        ("esc(svcs[n])", "String(svcs[n])",
+         "serviceChips({'svc2': 'down\"><img src=x onerror=alert(4)>'})",
+         "<img"),
+    ]
+    p = dict(box)
+    p["box_name"] = box["name"]
+    p["status"] = "pending"
+    p["expires_at"] = 1900
+    p["fingerprint"] = "fp"
+    box["last_status"]["host"]["hostname"] = 'h"><iframe src=x>'
+    for needle, repl, expr, leaked in cases:
+        assert helpers.count(needle) >= 1, "mutation needle vanished: %r" % needle
+        mutated = helpers.replace(needle, repl, 1)  # drop ONE esc()
+        o = _node_eval("""
+const b = %s;
+const p = %s;
+console.log(JSON.stringify({out: %s}));
+""" % (json.dumps(box), json.dumps(p), expr), helpers=mutated)
+        assert leaked in o["out"], \
+            "dropped esc() in %r did not leak — the test is vacuous" % needle
+    # Sanity: the same expressions on the UNMUTATED helpers escape fully.
+    o = _node_eval("""
+const b = %s;
+console.log(JSON.stringify({out: fleetRow(b, 1300)}));
+""" % json.dumps(box))
+    assert "<script>" not in o["out"]
