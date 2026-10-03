@@ -1,0 +1,160 @@
+# Filing-upload gap analysis: from proxy refusal to the owner's phone
+
+**Status: analysis, not a commitment.** Code-state claims below were
+verified against the repo tree at main `5dc1d93` (2026-10-03 ~23:3x CDT)
+and the plane worker checkout
+`~/workspace/goals/sparkvm-dev-website-v2-cloudflare-management-infra/control-plane/worker.py`
+(the checkout the #846/#873 plane halves were deployed from). Issue/PR
+numbers are GitHub references as of 2026-10-03 (not code-verifiable from
+the tree). Honesty rules apply (`docs/POSITIONING.md`): this describes
+current state and work to do, not promises. Claims stay on the
+self-hosted reality until the hosted product exists.
+
+**Non-overlap map (what this doc is not):**
+- The full approvals path (request → filing → human answer → terminal
+  decision delivery → audit) is
+  `docs/APPROVALS_PLANE_GAP_ANALYSIS.md` (#849). This doc walks one leg
+  of it: the box→plane filing upload (G49.4 / #876) that the 2026-10-02
+  refresh filed and left unowned.
+- The plane-side record schema is #872 (closed; endpoints live on the
+  deployed plane). The decision wire shape is
+  `docs/DURABLE_COMMANDS.md` (#873, closed). Box-side ingest into
+  confirmd is `pairing/spark_pair.py ingest` (#874, closed). This doc
+  owns none of those.
+- Transport choices (WSS phone-home vs HTTPS) are
+  `docs/PHONE_HOME_GAP_ANALYSIS.md` (#847). This leg rides HTTPS only.
+
+## 1. The loop this leg completes
+
+A sensitive agent action travels: proxy refusal → local filing
+(`_file_approval`, Finding 49) → **filing upload (this leg)** →
+plane-side pending record (#872) → owner sees/taps → decision enqueued
+on the durable channel (#873) → box ingest stamps the grant into
+confirmd (#874) → the parked agent unparks. Four of the five legs are
+built and shipped. The upload leg is not: the plane record exists but
+nothing creates it from the box side.
+
+## 2. State (main `5dc1d93`)
+
+- **Local filing is build-complete.** `proxy/swap_addon.py::_file_approval`
+  mints a 16-hex `aid`, writes `confirm/pending/<aid>.json` with
+  `credential`, `host`, `method`, `path_prefix`, `created`, a 1-hour
+  `expires`, and a summary shaped `"METHOD host path for cred (refused:
+  reason)"` — no free text, the tuple comes from the real request
+  (Finding 49). Flood control is local: coalesce per (credential, host,
+  method), cap 5 pending per credential, one filing per credential per
+  60 s (Finding 58). The client's pending signal (`X-Spark-Approval-Pending:
+  <aid>`) rides the refusal response (#133/H18).
+- **The plane record exists and is deployed.** `_approvals_create` in the
+  plane worker: `(box_id, aid)` primary key, retried creates return
+  `200 {ok, approval, deduped: true}`; `aid` 1–64 chars
+  `[A-Za-z0-9._-]` (the local 16-hex aid fits); `summary` 1–256 chars;
+  `detail` opaque JSON ≤ 4 KB; `expires_in_secs` clamped to [60, 3600].
+  Server-side expiry is enforced at read.
+- **The upload leg has no auth path.** All four approvals endpoints go
+  through `_require_owner_for_approvals`; a box Bearer <redacted> gets
+  `401 "a box cannot decide its own approvals"` — a box can never
+  decide, read, **or create** its own approvals. The #876 acceptance
+  ("upload authenticated as the box, never as the agent") therefore has
+  no endpoint to talk to today.
+- **Expiry only fires on owner-authenticated calls.** `_expire_approvals`
+  runs at owner call sites; an unattended box whose owner never opens
+  the dashboard leaves its records pending until someone polls.
+- **The owner has no action-approval surface.** `hosted/dashboard/`
+  shows pairing approvals only (line 115's "Boxes waiting for your
+  approval" is enrollment); the decision endpoint exists but the owner
+  can only reach it via raw API. Even after the upload leg ships, the
+  owner cannot see or tap the pending record without this slice.
+
+## 3. Gaps
+
+Gap classes: `[BUILD]` exists nowhere, build it; `[DESIGN]` design
+exists, code does not; `[POLICY]` needs an operator (user) decision.
+
+- **`[BUILD]` G76.1 — no box-authenticated file endpoint.** Create is
+  owner-only by deliberate design (the 401 rule is a security boundary,
+  not an oversight). **Decision: a dedicated
+  `POST /v1/boxes/{box_id}/approvals/file`, authenticated by the box
+  Bearer <redacted> (#846), scoped to the token's own `box_id`,
+  create-only.** Response is write-only — `201 {ok, aid, deduped}` —
+  never the record body: the "a box cannot read its own approvals"
+  invariant stays intact. **Rejected:** relaxing the existing create
+  endpoint to accept box tokens. The owner surface's read/list/decide
+  endpoints share one auth helper; mixing token classes on one endpoint
+  is exactly the confusion the explicit 401 was built to prevent. A
+  separate endpoint keeps the file leg's rule explicit and auditable.
+- **`[DESIGN]` G76.2 — uploader placement.** Two candidates: inline in
+  `_file_approval` (the filing write POSTs to the plane immediately) or
+  a periodic `spark_pair.py upload-filings` that scans
+  `confirm/pending/` and rides the existing `* * * * *` cron (flock-
+  serialized, like the heartbeat). **Decision: periodic.** The proxy
+  refusal path must not gain plane latency or a plane-failure coupling;
+  the #876 acceptance's plane-unreachable degradation ("local filing
+  keeps working; uploads queue and retry") falls out of the periodic
+  design naturally. An inline first attempt is deferred, not
+  forbidden — it buys one cron-interval of latency at the cost of a
+  synchronous network call in the hot path; measure before adding.
+- **`[DESIGN]` G76.3 — payload mapping.** `aid`: the local 16-hex id is
+  already the plane's idempotency key — retries return `deduped: true`,
+  so the local flood-control caps never multiply into duplicates.
+  `summary`: the local summary is **unbounded** (`host` + `path` have
+  no length limit) while the plane caps at 256 chars — the uploader
+  truncates to 250 + "…", keeping the full tuple in `detail`.
+  `detail`: `{credential, host, method, path_prefix, reason, filed_at,
+  expires}` — Finding-49 discipline preserved (no free text, tuple from
+  the real request), far under 4 KB. `expires_in_secs`: 3600 (the
+  plane's max; matches the local 1-hour expiry).
+- **`[DESIGN]` G76.4 — local/plane divergence.** The uploader uploads
+  only filings still in `pending/` at upload time — a locally denied,
+  expired-stamped, or consumed record is never uploaded. The local
+  confirmd store stays the authority for the agent-facing signal; the
+  plane record is owner-facing. A record denied locally *after* upload
+  stays plane-pending until TTL — the divergence window is bounded by
+  the 3600 s plane TTL and needs no extra machinery (an owner tapping
+  decide on a locally-dead record gets the write-once 409/410 and the
+  box never acts on it, since ingest only stamps plane decisions into
+  confirmd's answered store, which the local scan reaps).
+- **`[DESIGN]` G76.5 — expiry for unattended boxes.** `_expire_approvals`
+  fires on owner-authenticated calls only. **Decision: the
+  box-authenticated file endpoint also triggers
+  `_expire_approvals(box_id)` (no record data returned)** — the
+  uploader's cadence then drives server-side expiry for unattended
+  boxes on schedule, instead of waiting for an owner who may never
+  poll.
+- **`[BUILD]` G76.6 — no owner action-approval surface.** The dashboard
+  (`hosted/dashboard/`, inlined into the deployed worker) shows
+  pairing approvals only. Slice: a pending-action-approvals section on
+  the box detail view (owner session key from `sessionStorage`) with
+  decide buttons calling the existing owner decision endpoint. Without
+  this, the uploaded record is visible only via raw API — the phone
+  tap the #849 vision names has no screen.
+- **`[POLICY]` G76.7 — writer identity and display hygiene.** The
+  uploader must read from swapd's root-owned `confirm/pending/` —
+  never from an agent-writable path (the "writer identity is the box,
+  never the agent" acceptance). The box token lives in the existing
+  enrollment store. In the other direction: the summary is
+  **box-controlled display data** shown to the owner — the dashboard
+  must neutralize it (control characters, terminal escapes) per the
+  #902/#915 hostile-display discipline, applied in reverse.
+
+## 4. Slices
+
+- **S1 (this doc):** vision-vs-state + the seven decisions above.
+  Non-goals: record schema (#872), decision wire (#873), ingest
+  (#874), tenant routing (#69), phone UX (#428 / #797).
+- **S2:** plane `POST /v1/boxes/{box_id}/approvals/file` — box-Bearer <redacted>
+  scoped to own `box_id`, write-only response, idempotent on
+  `(box_id, aid)`, `_expire_approvals` trigger on the box-auth path.
+  Filed as #952.
+- **S3:** `spark_pair.py upload-filings` — periodic scan of
+  `confirm/pending/`, payload mapping per G76.3 (incl. summary
+  truncation), pending-only upload per G76.4, root-owned paths per
+  G76.7, cron wiring alongside heartbeat/ingest. Filed as #953.
+- **S4:** dashboard action-approval pending list + decide buttons
+  (owner session), display-neutralized per G76.7. Filed as #954.
+- **S5 (acceptance, stays on #876):** a proxy refusal creates the plane
+  record within one uploader interval; retry storms return `deduped`;
+  plane down → local approvals unaffected and the upload backlog
+  drains on recovery; owner taps decide in the dashboard → #873
+  command → #874 ingest → the parked agent's next poll sees the
+  terminal signal.

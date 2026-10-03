@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- A new gap analysis maps the missing filing-upload leg of the hosted
+  approvals lane (#876): when the proxy refuses a sensitive action, the
+  plane-side approval record exists but nothing creates it from the box
+  side — the analysis pins the seven decisions the build needs (a
+  box-authenticated file endpoint, a periodic box-side uploader, pending-only
+  upload, the payload mapping, and the owner dashboard surface) and files
+  them as issues #952, #953, and #954.
 - The toolset updater now snapshots before it changes anything (#532): every
   `update` run records the pre-update state of the files each layer manages
   (plus a package-version inventory) and, when a layer fails, automatically
