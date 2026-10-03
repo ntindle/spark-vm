@@ -541,6 +541,33 @@ def test_rotate_prints_rekey_note(ctx, monkeypatch, capsys):
     assert "re-pair" in capsys.readouterr().out
 
 
+def test_rotate_scrubs_hostile_proof_in_success_print(ctx, monkeypatch, capsys):
+    # #915: the keyless (sig_b64 is None) rotate path printed the
+    # plane-supplied `proof` raw. A hostile plane could embed terminal
+    # control characters (ANSI escapes, CR) in it and cosmetically
+    # spoof the operator's terminal. Same sanitize-and-show treatment
+    # as #902's `_plane_text` sweep: display-only scrub; the stored
+    # token and the fail-closed proof comparison use the raw value.
+    _enroll(ctx)  # no keypair on disk: keyless path
+    hostile = "bearer\x1b[2J\rpoisoned"
+    monkeypatch.setattr(
+        spark_pair, "_http",
+        lambda m, u, body=None, headers=None: (
+            200, {"ok": True, "token": "T4",
+                  "token_expires_at": int(time.time()) + 24 * 3600,
+                  "proof": hostile}))
+    ctx.auto = False
+    ctx.within = spark_pair.AUTO_ROTATE_WITHIN
+    assert spark_pair.cmd_rotate(ctx) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\r" not in out
+    # _plane_text strips the control bytes but keeps the rest literal
+    # (#902 semantics: sanitize-and-show, not sequence parsing): the
+    # escape opener is gone, so "[2J" renders as inert text.
+    assert "(proof: bearer[2Jpoisoned)" in out
+    assert "T4" not in out  # the new token is never printed
+
+
 def test_revoke_url_encodes_box_id(ctx, monkeypatch):
     seen = {}
     monkeypatch.setattr(

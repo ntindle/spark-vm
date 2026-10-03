@@ -585,7 +585,8 @@ def _cmd_rotate_locked(args, d, enroll_path, box_id, token, control,
     os.replace(tmp, enroll_path)
     exp = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(new_exp))
     print(f"rotated box token for {_plane_text(box_id)} "
-          f"(proof: {resp.get('proof', 'unknown')}); new token expires {exp}")
+          f"(proof: {_plane_text(resp.get('proof', 'unknown'))}); "
+          f"new token expires {exp}")
     if resp.get("rekey_recommended"):
         print("note: the plane has no keypair for this box — re-pair "
               "(`request` + `redeem`) to get proof-of-possession rotation")
