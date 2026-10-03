@@ -93,7 +93,7 @@ complementary planes, not competitors (see "Two planes" below).
   or `--json`. Pure reads, stdlib only, never raises, always exits 0. This is
   the drift-visibility half of the system — it makes "the box rotted" a
   checkable fact before anything is automated.
-- **S2 — update execution + recovery (framework shipped, #551; cua-driver, apt, and playwright layers shipped):** per-tool
+- **S2 — update execution + recovery (framework shipped, #551; cua-driver, apt, and playwright layers shipped; pre-update snapshots + automatic rollback + blocked marking shipped):** per-tool
   updaters behind `deploy/toolset-update.sh update`, with `--dry-run`, the idle
   guard (defer while agent jobs are live), per-tool pinning enforcement, and
   structured logging. The v0 framework ships the chassis the behavior
@@ -101,11 +101,15 @@ complementary planes, not competitors (see "Two planes" below).
   (quiet-hours), `install` (provisioning path + one-command backfill onto
   existing boxes), `optout`/`optin`, single-flight lock, JSONL audit — plus the
   first real updater layer (`os-security`: unattended-upgrades presence plus
-  `20auto-upgrades` exact). Still to come: pre-update snapshots (extending
-  `deploy/auto-deploy.sh`'s snapshot/rollback pattern), per-component
+  `20auto-upgrades` exact). Pre-update snapshots (extending
+  `deploy/auto-deploy.sh`'s snapshot/rollback pattern), automatic rollback,
+  and blocked marking on layer failure are shipped: a failed layer is rolled
+  back to its snapshot and marked blocked so the next tick skips it instead
+  of retry-looping, and `rollback [--layer <name>]` is the manual recovery
+  entry point (see `docs/TOOLSET_UPDATE.md` "Snapshots and rollback"). Still
+  to come: per-component
   post-update health checks (CUA bridge answers, docker hello-world, Playwright
-  screenshot smoke, `cred` round-trips), automatic rollback + blocked marking on
-  failure, freeze on repeated failure, the machine-readable `spark-vm health`
+  screenshot smoke, `cred` round-trips), the machine-readable `spark-vm health`
   report for agent diagnosis, and the agent recovery runbook.
 - **S3 — acceptance + independent entry point (remaining):** the acceptance
   test harness (simulated 30-day drift on a fresh box) and the independent

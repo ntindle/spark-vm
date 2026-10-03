@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The toolset updater now snapshots before it changes anything (#532): every
+  `update` run records the pre-update state of the files each layer manages
+  (plus a package-version inventory) and, when a layer fails, automatically
+  rolls that layer back and marks it blocked — the next run skips the blocked
+  layer instead of retry-looping the same failing update. A new `rollback`
+  command restores the newest snapshot by hand, `unblock` clears a block after
+  investigation, and `status` reports both the blocked layers and the available
+  snapshots for the future machine-readable health report.
+
 - The box now ingests the control plane's approval decisions (#874): a new
   `spark-pair.py ingest` command (cron-friendly, ~1/min) pulls durable
   commands from the plane and stamps owner approve/deny/expire decisions
