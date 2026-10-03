@@ -243,6 +243,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- JSON request bodies are no longer corrupted when a credential
+  placeholder sits outside a quoted string: previously the proxy
+  substituted the raw secret value in unquoted positions, so a
+  non-numeric secret produced invalid JSON and the server rejected the
+  request with no audit line explaining why. The proxy now re-parses the
+  body after substitution — if it no longer parses, the whole swap is
+  refused, the placeholders are left in place, and the refusal is
+  logged and audited. (#TBD)
 - The fleet's correlated-failure alert no longer fires on failures that
   carry no target build: previously two unrelated failures with no
   recorded target could be grouped on an empty key and page a
