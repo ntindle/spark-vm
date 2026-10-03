@@ -204,6 +204,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   swap was silently skipped with no record, so typos were invisible to
   the credential owner. The entry is still left untouched — only the
   audit line is new. (#911)
+
+- Plane-supplied error text in the pairing client is now stripped of
+  terminal control characters before printing: a hostile control plane
+  could previously embed escape sequences in an error string that your
+  terminal would render. The message itself still prints; only the
+  control bytes are removed. (#902)
+
 - The desktop bridge's launch registry no longer trusts persisted process IDs
   blindly: a stored `0` (or boolean `true`, which is `1` in disguise) can
   never be pruned as dead, so a corrupted registry could refuse to start an

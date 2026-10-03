@@ -336,7 +336,7 @@ def cmd_request(args):
                           "pubkey": base64.b64encode(pub).decode(),
                           "fingerprint": ed25519.fingerprint(pub)})
     if status != 201 or not resp.get("ok"):
-        print(f"request failed: {resp.get('error', status)}")
+        print(f"request failed: {_plane_error(resp, status)}")
         return 1
     # The single-use code lives here until redeem: 0600 like the key.
     _write_private(os.path.join(d, "pairing.json"),
@@ -348,7 +348,7 @@ def cmd_request(args):
     print()
     print("  Give this pairing code to the box owner:")
     print()
-    print(f"    {resp['code']}")
+    print(f"    {_plane_text(resp['code'])}")
     print()
     print("  And confirm the key fingerprint matches what the box shows:")
     print(f"    {ed25519.fingerprint(pub)}")
@@ -401,10 +401,10 @@ def cmd_redeem(args):
             return 1
         status, resp = _http("GET", base + "/status")
         if status == 410 or resp.get("status") in ("expired", "consumed"):
-            print(f"pairing {resp.get('status', 'gone')} — run `request` again")
+            print(f"pairing {_plane_text(resp.get('status', 'gone'))} — run `request` again")
             return 1
         if status != 200 or not resp.get("ok"):
-            print(f"status check failed: {resp.get('error', status)}")
+            print(f"status check failed: {_plane_error(resp, status)}")
             return 1
         if resp.get("status") == "approved" and resp.get("challenge"):
             challenge = resp["challenge"]
@@ -416,7 +416,7 @@ def cmd_redeem(args):
     status, resp = _http("POST", base + "/redeem",
                          {"signature": base64.b64encode(sig).decode()})
     if status != 201 or not resp.get("ok"):
-        print(f"redeem failed: {resp.get('error', status)}")
+        print(f"redeem failed: {_plane_error(resp, status)}")
         return 1
     enroll_path = os.path.join(d, "enrollment.json")
     _write_private(enroll_path, json.dumps(
@@ -424,7 +424,7 @@ def cmd_redeem(args):
          "token_expires_at": resp["token_expires_at"],
          "control": control}, indent=2).encode())
     os.remove(pairing_path)
-    print(f"enrolled as {resp['box_id']} — token saved to {enroll_path} (0600)")
+    print(f"enrolled as {_plane_text(resp['box_id'])} — token saved to {enroll_path} (0600)")
     exp = time.strftime("%Y-%m-%d %H:%M %Z",
                         time.localtime(resp["token_expires_at"]))
     print(f"token expires {exp} (rotate before then: spark-pair.py rotate --auto)")
@@ -544,20 +544,20 @@ def _cmd_rotate_locked(args, d, enroll_path, box_id, token, control,
               "nothing was changed locally")
         return 1
     if status == 401:
-        print(f"rotation rejected ({resp.get('error', status)}): this box "
+        print(f"rotation rejected ({_plane_error(resp, status)}): this box "
               "token is dead (expired, revoked, or never valid) — re-pair "
               "the box (`request` + `redeem`)")
         return 1
     if status == 403:
         # Bearer <redacted> accepted but the proof was rejected: do NOT re-pair —
         # the enrollment is fine, the proof or the plane is at fault.
-        print(f"rotation refused ({resp.get('error', status)}): the plane "
+        print(f"rotation refused ({_plane_error(resp, status)}): the plane "
               "rejected the proof-of-possession signature — check the box "
               "clock (window is ±300 s) and the plane, then retry; the "
               "current token is untouched")
         return 1
     if status != 200 or not resp.get("ok") or not resp.get("token"):
-        print(f"rotation failed: {resp.get('error', status)}")
+        print(f"rotation failed: {_plane_error(resp, status)}")
         return 1
     new_exp = resp.get("token_expires_at")
     if (not isinstance(new_exp, int) or isinstance(new_exp, bool)
@@ -584,7 +584,7 @@ def _cmd_rotate_locked(args, d, enroll_path, box_id, token, control,
         indent=2).encode())
     os.replace(tmp, enroll_path)
     exp = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(new_exp))
-    print(f"rotated box token for {box_id} "
+    print(f"rotated box token for {_plane_text(box_id)} "
           f"(proof: {resp.get('proof', 'unknown')}); new token expires {exp}")
     if resp.get("rekey_recommended"):
         print("note: the plane has no keypair for this box — re-pair "
@@ -614,7 +614,7 @@ def cmd_revoke(args):
         print(f"no such box: {box_id}")
         return 1
     if status != 200 or not resp.get("ok"):
-        print(f"revoke failed: {resp.get('error', status)}")
+        print(f"revoke failed: {_plane_error(resp, status)}")
         return 1
     print(f"revoked the box token for {box_id} — its heartbeats are "
           "rejected immediately")
@@ -710,7 +710,7 @@ def _heartbeat_result(d, box_id, token, sent_at, status, resp):
              "plane_ok": True}, indent=2).encode())
         return 0
     if status == 401:
-        _fail(d, f"heartbeat rejected ({resp.get('error', status)}): this "
+        _fail(d, f"heartbeat rejected ({_plane_error(resp, status)}): this "
                  "box token is dead (expired, revoked, or never valid) — "
                  "re-pair the box (`request` + `redeem`)",
               redact=(token,))
@@ -722,7 +722,7 @@ def _heartbeat_result(d, box_id, token, sent_at, status, resp):
                  "POST /v1/boxes/{id}/heartbeat yet — nothing was changed",
               redact=(token,))
         return 1
-    _fail(d, f"heartbeat failed: {resp.get('error', status)} "
+    _fail(d, f"heartbeat failed: {_plane_error(resp, status)} "
              f"(http={status}) — will retry at the next cron tick",
           redact=(token,))
     return 1
@@ -790,6 +790,36 @@ def cmd_heartbeat(args):
 _PAIRING_FIELD_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
+def _plane_text(v):
+    """Strip terminal control characters from a plane-supplied value
+    (#902). Display-only scrub: a hostile plane could embed ANSI escapes
+    / carriage returns in any string it returns, and several commands
+    print those values to the operator's terminal. Non-strings pass
+    through unchanged; total, never raises. Stored values and
+    control-flow comparisons always use the raw value — this is for
+    terminal display only."""
+    if isinstance(v, str):
+        return _PAIRING_FIELD_CONTROL.sub("", v)
+    return v
+
+
+def _plane_error(resp, status):
+    """Scrub a plane-supplied error string for terminal display (#902).
+
+    Plane `error` strings are echoed into stdout (and, via `_fail`, into
+    heartbeat.log) by every command's failure path — a hostile plane
+    could embed ANSI escapes / carriage returns in them (terminal
+    injection, cosmetic-spoofing class). No trust decision hinges on
+    these strings (unlike the fingerprint ceremony's `_pairing_row`
+    fields, which reject control characters outright), so
+    sanitize-and-show is the right treatment: strip the control
+    characters and print the cleaned text rather than refusing the
+    whole message. Total: never raises; non-string values (e.g. the
+    numeric `status` fallback) pass through unchanged.
+    """
+    return _plane_text(resp.get("error", status))
+
+
 def _pairing_row(p):
     """Extract (id, box_name, fingerprint) from a plane pairing row, or
     None when the row is malformed (#881, B2). The approve/list path is
@@ -831,7 +861,7 @@ def cmd_approve(args):
     else:
         status, resp = _http("GET", base, headers=auth)
         if status != 200 or not resp.get("ok"):
-            print(f"list failed: {resp.get('error', status)}")
+            print(f"list failed: {_plane_error(resp, status)}")
             return 1
         pairs = resp.get("pairings", [])
         if not isinstance(pairs, list):
@@ -861,7 +891,7 @@ def cmd_approve(args):
 
     status, resp = _http("GET", f"{base}/{pid}", headers=auth)
     if status != 200 or not resp.get("ok"):
-        print(f"fetch failed: {resp.get('error', status)}")
+        print(f"fetch failed: {_plane_error(resp, status)}")
         return 1
     p = resp.get("pairing")
     if not isinstance(p, dict):
@@ -870,7 +900,7 @@ def cmd_approve(args):
               "(pairing is not an object)")
         return 1
     if p.get("status") != "pending":
-        print(f"pairing is {p.get('status') or 'unknown'} — nothing to approve")
+        print(f"pairing is {_plane_text(p.get('status')) or 'unknown'} — nothing to approve")
         return 1
     row = _pairing_row(p)
     if row is None:
@@ -898,7 +928,7 @@ def cmd_approve(args):
     status, resp = _http("POST", f"{base}/{pid}/approve", {"code": code},
                          headers=auth)
     if status != 200 or not resp.get("ok"):
-        print(f"approve failed: {resp.get('error', status)}")
+        print(f"approve failed: {_plane_error(resp, status)}")
         return 1
     print(f"approved {pid} — the box can now redeem its token")
     return 0
