@@ -40,7 +40,7 @@ def make_realtools(tmp_path):
     d.mkdir(parents=True, exist_ok=True)
     for t in ("bash", "sh", "grep", "mktemp", "install", "rm", "flock", "date", "mkdir",
               "wc", "tail", "mv", "chmod", "touch", "cat", "head", "cut",
-              "tr", "ps", "dirname", "basename"):
+              "tr", "ps", "dirname", "basename", "id"):
         p = shutil.which(t)
         if p:
             (d / t).symlink_to(p)
@@ -338,9 +338,10 @@ def test_script_never_fetches_code():
     # Trust-model pin (#532): the script's network surface is the
     # cua-driver layer's pinned release fetch, the apt layer's weekly
     # --only-upgrade, and the playwright layer's pinned pip + browser
-    # fetch. apt-get appears exactly twice: the unattended-upgrades
-    # bootstrap and the apt layer's `install --only-upgrade` (simulate in
-    # dry-run). curl appears exactly twice: the checksums.txt + tarball fetch
+    # fetch. apt-get appears exactly three times: the unattended-upgrades
+    # bootstrap, the apt layer's `install --only-upgrade` (simulate in
+    # dry-run), and the playwright layer's validated-names system-deps
+    # install. curl appears exactly twice: the checksums.txt + tarball fetch
     # inside _cua_driver_layer, both against "$base/$tag/..." (base defaults
     # to the single https:// constant CUA_RELEASE_BASE). `pip install`
     # appears exactly once: the playwright layer's exact-pin
@@ -372,10 +373,10 @@ def test_script_never_fetches_code():
     for l in logical:
         assert not bare_apt_re.search(l), f"bare `apt` binary must not be used: {l}"
     invocations = [l for l in logical if invocation_re.search(l)]
-    assert len(invocations) == 2, invocations
+    assert len(invocations) == 3, invocations
     bootstrap = [l for l in invocations if "install -y unattended-upgrades" in l]
     assert len(bootstrap) == 1, invocations
-    apt_layer = [l for l in invocations if l not in bootstrap]
+    apt_layer = [l for l in invocations if "--only-upgrade" in l]
     assert len(apt_layer) == 1, invocations
     line = apt_layer[0]
     assert "--only-upgrade" in line, line
@@ -384,6 +385,17 @@ def test_script_never_fetches_code():
     # One call site serves both modes via $mode (-y real, -s dry-run).
     assert 'apt-get "$mode" install' in line, line
     assert 'mode="-y"' in text and 'mode="-s"' in text, "dry/real modes"
+    # The playwright layer's system-deps install: validated names only —
+    # never --only-upgrade (these are fresh installs, not upgrades), never
+    # a bare `apt upgrade`, same non-interactive flags as the apt layer.
+    pw_deps = [l for l in invocations
+               if l not in bootstrap and l not in apt_layer]
+    assert len(pw_deps) == 1, invocations
+    line = pw_deps[0]
+    assert "--no-install-recommends" in line, line
+    assert "--only-upgrade" not in line, line
+    assert '-o Dpkg::Options::="--force-confdef"' in line, line
+    assert '-o Dpkg::Options::="--force-confold"' in line, line
     # The playwright layer is the single `pip install` call site: exact pin
     # only (`"playwright==$pin"`), never a floating upgrade. Matched on the
     # `-m pip install` invocation shape so the log strings mentioning
@@ -399,7 +411,8 @@ def test_script_never_fetches_code():
     # Never a bare `apt upgrade` / `apt-get upgrade` (would touch everything).
     for l in logical:
         if invocation_re.search(l):
-            assert "--only-upgrade" in l or "unattended-upgrades" in l, l
+            assert ("--only-upgrade" in l or "unattended-upgrades" in l
+                    or "--no-install-recommends" in l), l
     curls = [l for l in text.splitlines() if "curl -fsSL" in l]
     assert len(curls) == 2, curls
     for line in curls:
@@ -611,10 +624,13 @@ def stage_pw_venv(tmp_path, version, piplog=None, pwlog=None, pip_exit=0):
     """Materialize a managed-Playwright-venv stub under tmp.
 
     bin/python answers the `-c 'import playwright; ...'` probe with
-    `version` and logs `-m pip ...` invocations to piplog (if given),
-    exiting pip_exit for them; bin/playwright logs every invocation to
-    pwlog (if given). Returns the venv dir. Production shape: the update
-    plane converges exactly these two binaries, never PATH.
+    `version` (silent for the bare import probe) and logs `-m pip ...`
+    invocations to piplog (if given), exiting pip_exit for them;
+    bin/playwright logs every invocation to pwlog (if given) and answers
+    `install-deps --dry-run` with $PW_DRYRUN_TEXT / $PW_DRYRUN_EXIT
+    (default: "all installed", exit 0). Returns the venv dir. Production
+    shape: the update plane converges exactly these two binaries, never
+    PATH.
     """
     venv = tmp_path / "pw-venv"
     bind = venv / "bin"
@@ -642,6 +658,10 @@ def stage_pw_venv(tmp_path, version, piplog=None, pwlog=None, pip_exit=0):
         "#!/bin/sh\n"
         f'PWLOG="{pwlog or ""}"\n'
         '[ -n "$PWLOG" ] && echo "$@" >> "$PWLOG"\n'
+        'if [ "$1" = "install-deps" ] && [ "$2" = "--dry-run" ]; then\n'
+        '  printf "%s" "${PW_DRYRUN_TEXT:-All system dependencies are installed.}"\n'
+        '  exit "${PW_DRYRUN_EXIT:-0}"\n'
+        'fi\n'
         'exit 0\n')
     cli.chmod(cli.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return venv
@@ -650,16 +670,23 @@ def stage_pw_venv(tmp_path, version, piplog=None, pwlog=None, pip_exit=0):
 def pw_env(env, tmp_path, pin="1.62.0", cur_version="1.62.0"):
     """Env for playwright layer tests: pins file, hermetic managed venv at
     cur_version, PLAYWRIGHT_USER = the invoking user (so the user-switch
-    runs directly), and pip/browser invocation logs."""
+    runs directly), pip/browser invocation logs, and a succeeding apt-get
+    stub (the deps step's validated-names install; the fixture's apt-get
+    stub fails loudly, which is not this layer's story)."""
     e = dict(env["env"])
     (env["state"] / "self_update_pins.conf").write_text(
         f"# test pins\ncua-driver = 0.28.2\nplaywright = {pin}\n")
     piplog = tmp_path / "pip.log"
     pwlog = tmp_path / "playwright.log"
+    aptlog = tmp_path / "pw-apt.log"
+    bindir = make_stub_bin(tmp_path / "pwaptbin", {
+        "apt-get": f'echo "argv: $@" >> "{aptlog}"; exit 0',
+    })
+    e["PATH"] = bindir + os.pathsep + e["PATH"]
     venv = stage_pw_venv(tmp_path, cur_version, piplog=piplog, pwlog=pwlog)
     e["PLAYWRIGHT_VENV"] = str(venv)
     e["PLAYWRIGHT_USER"] = pwd.getpwuid(os.getuid()).pw_name
-    return e, piplog, pwlog
+    return e, piplog, pwlog, aptlog
 
 
 def test_read_pin_parses_pins_file(env):
@@ -1146,20 +1173,38 @@ def test_update_dry_run_simulates_apt(env, tmp_path):
 # --- playwright layer -----------------------------------------------------------
 
 def test_playwright_noop_when_at_pin(env, tmp_path):
-    # venv already on pin: no pip, no browser install, no install-deps.
-    e, piplog, pwlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    # venv already on pin: no pip — but the browser and system-deps steps
+    # still run (idempotent): an on-pin pip package with an emptied browser
+    # cache or missing system libs must still heal.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode == 0, r.stderr
     assert not piplog.exists(), "no pip call when already on pin"
-    assert not pwlog.exists(), "no browser/deps install when already on pin"
+    pw_calls = pwlog.read_text().splitlines()
+    assert "install chromium" in pw_calls, pw_calls
+    assert "install-deps --dry-run chromium" in pw_calls, pw_calls
+    # The dry-run stub reports everything installed by default: no apt-get.
+    assert not aptlog.exists(), "no apt call when deps are satisfied"
     lines = audit_lines(env)
     assert lines and lines[-1]["result"] == "ok"
     assert "playwright" in lines[-1]["components"]
 
 
+def test_playwright_on_pin_refuses_when_cli_missing(env, tmp_path):
+    # On-pin but the CLI is gone: the venv is corrupt — refuse fail-closed
+    # rather than trusting the version probe.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    (tmp_path / "pw-venv" / "bin" / "playwright").unlink()
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call on corrupt venv"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
 def test_playwright_installs_pin_on_drift(env, tmp_path):
-    # Drifted venv: exact-pin pip install, then browsers, then system deps.
-    e, piplog, pwlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    # Drifted venv: exact-pin pip install, then browsers, then the deps
+    # dry-run (satisfied here — the missing-deps install has its own tests).
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode == 0, r.stderr
     pip_calls = piplog.read_text().splitlines()
@@ -1170,17 +1215,92 @@ def test_playwright_installs_pin_on_drift(env, tmp_path):
     assert "playwright==" in pip_calls[0]
     pw_calls = pwlog.read_text().splitlines()
     assert "install chromium" in pw_calls, pw_calls
-    assert "install-deps chromium" in pw_calls, pw_calls
+    assert "install-deps --dry-run chromium" in pw_calls, pw_calls
     assert pw_calls.index("install chromium") < pw_calls.index(
-        "install-deps chromium"), pw_calls
+        "install-deps --dry-run chromium"), pw_calls
+    # The venv CLI is never executed as root for deps: no bare
+    # `install-deps` (the mutating form) may appear in the browser log.
+    assert not any(c.startswith("install-deps ") and "--dry-run" not in c
+                   for c in pw_calls), pw_calls
     lines = audit_lines(env)
     assert lines and lines[-1]["result"] == "ok"
+
+
+def test_playwright_install_deps_installs_missing_validated(env, tmp_path):
+    # Dry-run reports missing deps: root apt-get installs exactly the
+    # validated names (non-interactive, no recommends), nothing else.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    e["PW_DRYRUN_TEXT"] = ("Missing system dependencies (2):\n"
+                           "  libnss3\n  libatk1.0-0\n")
+    e["PW_DRYRUN_EXIT"] = "1"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    argv = aptlog.read_text().splitlines()
+    assert len(argv) == 1, argv
+    assert "install" in argv[0] and "--no-install-recommends" in argv[0], argv
+    assert "libnss3" in argv[0] and "libatk1.0-0" in argv[0], argv
+    assert "--only-upgrade" not in argv[0], argv
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+
+
+def test_playwright_install_deps_refuses_unsafe_name(env, tmp_path):
+    # A dep name outside the Debian package-name pattern: refuse, and root
+    # installs nothing.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    e["PW_DRYRUN_TEXT"] = ("Missing system dependencies (2):\n"
+                           "  libnss3\n  libnss3; rm -rf /\n")
+    e["PW_DRYRUN_EXIT"] = "1"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not aptlog.exists(), "no apt call on unsafe dep name"
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "playwright" in lines[-1]["failed"]
+
+
+def test_playwright_install_deps_refuses_count_mismatch(env, tmp_path):
+    # Header says 2, body lists 1: fail-closed, root installs nothing.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    e["PW_DRYRUN_TEXT"] = "Missing system dependencies (2):\n  libnss3\n"
+    e["PW_DRYRUN_EXIT"] = "1"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not aptlog.exists(), "no apt call on shape mismatch"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_install_deps_refuses_garbage_output(env, tmp_path):
+    # Neither the "all installed" message nor the Missing block: refuse.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    e["PW_DRYRUN_TEXT"] = "something unexpected happened\n"
+    e["PW_DRYRUN_EXIT"] = "1"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not aptlog.exists(), "no apt call on garbage output"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_refuses_when_user_switch_impossible(env, tmp_path):
+    # PLAYWRIGHT_USER names a user we can never become: the layer must
+    # refuse fail-closed instead of running pip/browsers as the wrong user.
+    # Hermetic as root (runuser fails on the bogus user) and non-root
+    # (direct refuse without being root).
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    e["PLAYWRIGHT_USER"] = "no-such-user-pw-qa"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call when the user-switch is impossible"
+    assert not pwlog.exists(), "no browser call when the user-switch is impossible"
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "failed"
+    assert "playwright" in lines[-1]["failed"]
 
 
 def test_playwright_refuses_when_venv_absent(env, tmp_path):
     # No managed venv: fail-closed (the venv is provisioned by setup, not
     # this layer) — nothing is fetched.
-    e, piplog, pwlog = pw_env(env, tmp_path)
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path)
     empty = tmp_path / "no-venv"
     empty.mkdir()
     e["PLAYWRIGHT_VENV"] = str(empty)
@@ -1193,7 +1313,7 @@ def test_playwright_refuses_when_venv_absent(env, tmp_path):
 
 
 def test_playwright_fail_closed_without_pin(env, tmp_path):
-    e, piplog, _ = pw_env(env, tmp_path)
+    e, piplog, _, _ = pw_env(env, tmp_path)
     (env["state"] / "self_update_pins.conf").write_text(
         "# no playwright pin\ncua-driver = 0.28.2\n")
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
@@ -1205,7 +1325,7 @@ def test_playwright_fail_closed_without_pin(env, tmp_path):
 
 
 def test_playwright_refuses_unsafe_pin(env, tmp_path):
-    e, piplog, _ = pw_env(env, tmp_path, pin="1.62.0;evil")
+    e, piplog, _, _ = pw_env(env, tmp_path, pin="1.62.0;evil")
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode != 0, r.stderr
     assert not piplog.exists(), "no pip call on unsafe pin"
@@ -1213,7 +1333,7 @@ def test_playwright_refuses_unsafe_pin(env, tmp_path):
 
 def test_playwright_version_unknown_refuses(env, tmp_path):
     # Installed but unparseable version: refuse rather than guess.
-    e, piplog, _ = pw_env(env, tmp_path, cur_version="not-a-version")
+    e, piplog, _, _ = pw_env(env, tmp_path, cur_version="not-a-version")
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode != 0, r.stderr
     assert not piplog.exists(), "no pip call on unparseable version"
@@ -1222,7 +1342,7 @@ def test_playwright_version_unknown_refuses(env, tmp_path):
 
 
 def test_playwright_dry_run_changes_nothing(env, tmp_path):
-    e, piplog, pwlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
     r = run_bash("./deploy/toolset-update.sh update --dry-run", env_extra=e)
     assert r.returncode == 0, r.stderr
     assert not piplog.exists(), "dry-run must not pip install"
@@ -1233,19 +1353,22 @@ def test_playwright_dry_run_changes_nothing(env, tmp_path):
 
 def test_playwright_browser_cli_missing_refuses(env, tmp_path):
     # pip succeeded but the venv has no playwright CLI: the browser/deps
-    # steps would be meaningless — refuse before touching the network.
-    e, piplog, pwlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    # steps would be meaningless — refuse on the explicit missing-CLI
+    # guard (not merely on the incidental exec failure).
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
     (tmp_path / "pw-venv" / "bin" / "playwright").unlink()
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode != 0, r.stderr
     assert piplog.exists(), "pip runs before the CLI check"
     assert not pwlog.exists(), "no browser/deps install without the CLI"
+    run_log = (env["state"] / "toolset-update.log").read_text()
+    assert "missing after pip install" in run_log, run_log
     lines = audit_lines(env)
     assert "playwright" in lines[-1]["failed"]
 
 
 def test_playwright_pip_failure_fails_loud(env, tmp_path):
-    e, piplog, pwlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
     # Re-stage the venv with a pip stub that fails.
     shutil.rmtree(tmp_path / "pw-venv")
     stage_pw_venv(tmp_path, "1.61.0", piplog=piplog, pwlog=pwlog, pip_exit=1)
@@ -1260,7 +1383,7 @@ def test_playwright_pip_failure_fails_loud(env, tmp_path):
 def test_playwright_senses_managed_venv_not_path(env, tmp_path):
     # A PATH-resolved `python` reporting the pin must not mask drift of the
     # managed venv: the probe senses the venv, never PATH.
-    e, piplog, _ = pw_env(env, tmp_path, cur_version="1.61.0")
+    e, piplog, _, _ = pw_env(env, tmp_path, cur_version="1.61.0")
     bindir = make_stub_bin(tmp_path / "pathbin", {
         "python": 'echo "1.62.0"',
         "python3": 'echo "1.62.0"',
@@ -1274,7 +1397,7 @@ def test_playwright_senses_managed_venv_not_path(env, tmp_path):
 def test_status_reports_playwright_from_managed_venv(env, tmp_path):
     # status probes the managed venv (not system python): present + version
     # when the venv has playwright, absent when the venv is gone.
-    e, _, _ = pw_env(env, tmp_path, cur_version="1.62.0")
+    e, _, _, _ = pw_env(env, tmp_path, cur_version="1.62.0")
     r = run_bash("./deploy/toolset-update.sh status", env_extra=e)
     assert r.returncode == 0, r.stderr
     rows = {line.split("\t")[0]: line.split("\t")
@@ -1291,7 +1414,7 @@ def test_status_reports_playwright_from_managed_venv(env, tmp_path):
 
 
 def test_update_audit_lists_playwright_when_green(env, tmp_path):
-    e, _, _ = pw_env(env, tmp_path)
+    e, _, _, _ = pw_env(env, tmp_path)
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode == 0, r.stderr
     lines = audit_lines(env)

@@ -134,31 +134,48 @@ all locked together by the `playwright` package version:
 1. the `playwright` **pip package** inside the managed venv (`$PLAYWRIGHT_VENV`,
    default `/home/ntindle/.venvs/pw`),
 2. the **Chromium browser builds** (`playwright install chromium`),
-3. the **system libraries** (`playwright install-deps chromium`, apt-based).
+3. the **system libraries** (apt packages).
 
 - **Exact pin, never a floating upgrade.** The specifier is always
   `playwright==<pin>`; the pins file is the version authority, not PyPI's
-  latest. On-pin is a no-op — the layer touches the network only on drift.
+  latest. The pip install is skipped when the venv is already on the pin —
+  but the browser and system-library steps still run on every update: both
+  are idempotent (`install` skips present builds; the deps step no-ops
+  when nothing is missing), so an on-pin pip package with an emptied
+  browser cache or missing system libraries still heals.
 - **User-space work runs as the user.** The venv and the browser cache are
-  owned by `$PLAYWRIGHT_USER` (default `ntindle`), so the pip install and
-  the browser install run as that user (via `runuser`/`sudo` when the timer
-  runs as root) — a root-installed venv or root-owned
-  `~/.cache/ms-playwright` would break the agent's own Playwright use. Only
-  the system-library install runs as root.
+  owned by `$PLAYWRIGHT_USER` (default `ntindle`), so the pip install, the
+  browser install, and the version probe all run as that user (via
+  `runuser`/`sudo` when the timer runs as root) — a root-installed venv or
+  root-owned `~/.cache/ms-playwright` would break the agent's own
+  Playwright use.
+- **Root never executes venv code.** The system-library step computes the
+  missing-package list as the user (`install-deps --dry-run` — a read-only
+  simulation via `apt-get install -s`, verified present in the pinned
+  1.62.0 wheel), validates each reported name against the Debian
+  package-name pattern (`^[a-z0-9][a-z0-9+.-]*$`), and root installs the
+  validated names itself with `apt-get` (non-interactive, conffile
+  keep-local, `--no-install-recommends`) from the box's configured,
+  signature-verified apt sources — the same pipeline as the `apt` layer.
+  List freshness comes from the `os-security` layer's daily refresh, like
+  the `apt` layer; this step never runs `apt-get update` itself (note the
+  real `install-deps` would — we deliberately don't call it).
 - **The probe senses the managed venv only** — never PATH — so a stray
   PATH copy of Playwright cannot mask drift of the managed install (same
   rationale as the `cua-driver` layer's managed-binary probe).
 - **Fail-closed:** a missing pin, an unsafe pin, a missing venv, an
-  unparseable installed version, a missing `bin/playwright` after the pip
-  install, or any failed step all refuse loudly and name `playwright` in
-  the audit line.
+  unparseable installed version, a missing `bin/playwright`, an
+  impossible user-switch, or any unexpected `--dry-run` output shape
+  (wrong header, count mismatch, unsafe name, garbage) all refuse loudly
+  and name `playwright` in the audit line.
 - **Trust residual (stated, not hidden):** unlike the `cua-driver` layer's
   SHA-256-verified tarball, the pip install and the browser download are
   TLS-only with no hash pinning — `pip install playwright==<pin>` trusts
   PyPI's index and TLS, `playwright install chromium` trusts the Playwright
-  CDN and TLS, and `install-deps` runs apt internally. Hash-pinning the
-  wheel and the browser archives is the follow-up slice that closes this
-  (see "Follow-ups").
+  CDN and TLS. Hash-pinning the wheel and the browser archives is the
+  follow-up slice that closes this (see "Follow-ups"). What root executes
+  is bounded to `apt-get` on validated names — the one new root-executed
+  surface this layer adds.
 
 Overrides (environment): `PLAYWRIGHT_VENV`, `PLAYWRIGHT_USER`.
 
@@ -203,11 +220,15 @@ Overrides (environment): `PLAYWRIGHT_VENV`, `PLAYWRIGHT_USER`.
   `apt-get install --only-upgrade <allowlisted names>` (same sources, never
   installs anything not already present). The `playwright` layer adds one
   `pip install playwright==<pin>` call site (exact pin only, run as the
-  venv-owning user), one `playwright install chromium` browser fetch, and
-  one `playwright install-deps chromium` (which runs apt internally for the
-  system libraries) — TLS-only, no hash pinning, the documented residual.
+  venv-owning user), one `playwright install chromium` browser fetch (run
+  as the user), and one `apt-get install -y --no-install-recommends
+  <validated names>` call site for the missing system libraries — the
+  names come from `install-deps --dry-run` (read-only, run as the user)
+  and are validated against the Debian package-name pattern before root
+  installs them, so root never executes venv code. The pip install and the
+  browser fetch are TLS-only, no hash pinning — the documented residual.
   The suite pins exactly that shape — no `wget`/`git clone`/`npm install`,
-  two `apt-get` call sites, two `curl` call sites, one exact-pin `pip
+  three `apt-get` call sites, two `curl` call sites, one exact-pin `pip
   install` call site.
 
 ## Component status
@@ -215,9 +236,10 @@ Overrides (environment): `PLAYWRIGHT_VENV`, `PLAYWRIGHT_USER`.
 `os-security` reports `ok` / `repair-needed`; `cua-driver` is enforced
 against the installed pins file (on-pin, absent→install, drift→reinstall);
 docker / node / gh are converged via the `apt` layer (installed packages
-only); Playwright's pip package, Chromium browser builds, and system
-libraries are converged onto the canonical pin via the `playwright` layer
-(on-pin is a no-op). npm rides with the nodesource `nodejs` package.
+only); Playwright's pip package is held on the canonical pin while its
+Chromium browser builds and system libraries converge every run (both
+idempotent) via the `playwright` layer. npm rides with the nodesource
+`nodejs` package.
 
 ## Follow-ups (issue #532, not in this slice)
 
@@ -243,5 +265,5 @@ libraries are converged onto the canonical pin via the `playwright` layer
 
 ## Tests
 
-`deploy/test_toolset_update.py` — 64 hermetic tests (stub PATH, real-tool
+`deploy/test_toolset_update.py` — 70 hermetic tests (stub PATH, real-tool
 symlinks, no root assumptions). Wired into CI alongside the deploy tests.
