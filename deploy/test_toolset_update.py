@@ -388,6 +388,10 @@ def test_log_sanitizes_control_characters(env):
     r = source_and(code, env_extra=env["env"])
     out = r.stdout
     assert "\x1b" not in out, repr(out)
+    # Note: the "\r" assertion below is vacuous — subprocess text mode
+    # translates \r to \n before Python sees stdout. The "forged clean"
+    # assertion is the load-bearing one: a surviving CR would overwrite
+    # "forged" in a terminal viewer instead of leaving "forged clean".
     assert "\r" not in out, repr(out)
     # ESC is stripped; the inert CSI parameter text remains visible.
     assert "job [2J[31m done" in out, repr(out)
