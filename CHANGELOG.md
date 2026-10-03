@@ -53,6 +53,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Published a standing production deploy contract for the hosted control
+  plane: every production deploy now requires unanimous SHIP IT from the
+  review roles on the exact final code (with the ratchet — SHIP ITs re-confirmed on the
+  final head), a test harness against the exact final head with stub
+  differences documented, a forward-only D1 migration discipline (recorded
+  forward-fix plan, no down-migrations), a recorded deployment id with
+  redeploy-as-rollback, live verification (auth taxonomy, test-row cleanup,
+  stated limits), and recorded credential provenance. Codifies how the
+  #846/#848 production deploys were done. (#TBD)
+
 - Published a vision-vs-state gap analysis for hosted credential vending:
   the self-hosted localhost swap-proxy half (placeholders, allowlists,
   audit) exists and is hardened, but the "control plane vends narrow,
