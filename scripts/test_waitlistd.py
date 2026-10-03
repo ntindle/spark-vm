@@ -2059,3 +2059,165 @@ def test_rewrite_with_no_skips_writes_no_sidecar():
     svc.reload()
     svc._rewrite_rows()
     assert _skipped_sidecars(tmp) == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #896: trusted-proxy client-IP discipline
+# ---------------------------------------------------------------------------
+
+def test_resolve_client_ip_fail_closed_by_default():
+    # No trusted proxy declared: forwarding headers are ignored entirely,
+    # even when present — the raw peer is returned byte-identical to the
+    # pre-#896 behavior.
+    assert wd.resolve_client_ip(
+        "127.0.0.1", {"X-Forwarded-For": "203.0.113.7"}, frozenset()
+    ) == "127.0.0.1"
+    assert wd.resolve_client_ip("203.0.113.9", {}, frozenset()) == "203.0.113.9"
+
+
+def test_resolve_client_ip_trusted_proxy_uses_forwarded():
+    trusted = frozenset({"127.0.0.1"})
+    assert wd.resolve_client_ip(
+        "127.0.0.1", {"X-Forwarded-For": "203.0.113.7"}, trusted
+    ) == "203.0.113.7"
+
+
+def test_resolve_client_ip_spoof_from_untrusted_peer_ignored():
+    # A direct client forging X-Forwarded-For must not move its own
+    # rate-limit key: the peer is not a declared proxy, so the header
+    # is ignored.
+    trusted = frozenset({"127.0.0.1"})
+    assert wd.resolve_client_ip(
+        "203.0.113.9", {"X-Forwarded-For": "10.0.0.1"}, trusted
+    ) == "203.0.113.9"
+
+
+def test_resolve_client_ip_rightmost_entry_wins():
+    # Append-mode proxies (Caddy, nginx $proxy_add_x_forwarded_for) leave
+    # attacker-controlled prefixes to the left; the entry the trusted
+    # proxy itself observed is the last one.
+    trusted = frozenset({"127.0.0.1"})
+    assert wd.resolve_client_ip(
+        "127.0.0.1",
+        {"X-Forwarded-For": "10.9.9.9, 198.51.100.4, 203.0.113.7"},
+        trusted,
+    ) == "203.0.113.7"
+
+
+def test_resolve_client_ip_garbage_or_missing_header_falls_back_to_peer():
+    trusted = frozenset({"127.0.0.1"})
+    # Garbage header: never an empty key, fall back to the (normalized) peer.
+    assert wd.resolve_client_ip(
+        "127.0.0.1", {"X-Forwarded-For": "not-an-ip"}, trusted
+    ) == "127.0.0.1"
+    # Missing header: the peer itself.
+    assert wd.resolve_client_ip("127.0.0.1", {}, trusted) == "127.0.0.1"
+    # No headers object at all.
+    assert wd.resolve_client_ip("127.0.0.1", None, trusted) == "127.0.0.1"
+
+
+def test_resolve_client_ip_normalizes_forms():
+    trusted = frozenset({"::1"})
+    assert wd.resolve_client_ip("::1", {"X-Forwarded-For": "::1"}, trusted) == "::1"
+    # An unparseable peer never matches the trust set — fail closed.
+    assert wd.resolve_client_ip(
+        "garbage", {"X-Forwarded-For": "203.0.113.7"}, trusted
+    ) == "garbage"
+
+
+def test_load_trusted_proxies_unset_is_empty(monkeypatch):
+    monkeypatch.delenv("WAITLIST_TRUSTED_PROXY", raising=False)
+    assert wd.load_trusted_proxies() == frozenset()
+
+
+def test_load_trusted_proxies_parses_list(monkeypatch):
+    monkeypatch.setenv("WAITLIST_TRUSTED_PROXY", "127.0.0.1, ::1 ,")
+    assert wd.load_trusted_proxies() == frozenset({"127.0.0.1", "::1"})
+
+
+def test_load_trusted_proxies_rejects_garbage_loudly(monkeypatch):
+    # A typo'd trust declaration must never silently mean "no proxy" —
+    # refuse to start instead.
+    monkeypatch.setenv("WAITLIST_TRUSTED_PROXY", "127.0.0.1, not-an-ip")
+    with pytest.raises(SystemExit) as exc:
+        wd.load_trusted_proxies()
+    assert exc.value.code == 2
+
+
+def test_status_gate_allows_direct_loopback_without_proxy():
+    assert wd.status_gate_allows("127.0.0.1", {}, frozenset()) is True
+    assert wd.status_gate_allows("::1", {}, frozenset()) is True
+    assert wd.status_gate_allows("203.0.113.9", {}, frozenset()) is False
+
+
+def test_status_gate_refuses_external_client_through_proxy():
+    # The #896 hole: behind a same-host proxy the raw peer is loopback
+    # for everyone. With the proxy declared, an external forwarded
+    # client is refused.
+    trusted = frozenset({"127.0.0.1"})
+    assert wd.status_gate_allows(
+        "127.0.0.1", {"X-Forwarded-For": "203.0.113.7"}, trusted
+    ) is False
+    # ...while the on-box operator keeps access via the proxy.
+    assert wd.status_gate_allows(
+        "127.0.0.1", {"X-Forwarded-For": "127.0.0.1"}, trusted
+    ) is True
+    # ...and direct (a missing header falls back to the loopback peer).
+    assert wd.status_gate_allows("127.0.0.1", {}, trusted) is True
+    # A non-loopback peer never passes, proxy or not.
+    assert wd.status_gate_allows(
+        "203.0.113.9", {"X-Forwarded-For": "127.0.0.1"}, trusted
+    ) is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #896, review round 2: real handler-path tests (QA B1/B2)
+# ---------------------------------------------------------------------------
+
+from http.client import parse_headers as _parse_headers
+import io as _io
+
+
+def _parsed_headers(text):
+    """A real http.client.HTTPMessage, like _Handler.headers in production."""
+    return _parse_headers(_io.BytesIO(text.encode("latin-1")))
+
+
+class _StubHandler:
+    """Enough of _Handler to exercise _client_ip's wiring without a socket."""
+
+    def __init__(self, peer, headers, trusted):
+        self.client_address = (peer, 1234)
+        self.headers = headers
+        self.trusted_proxies = trusted
+
+
+def test_client_ip_wiring_uses_real_message_headers():
+    h = _parsed_headers("X-Forwarded-For: 203.0.113.7\r\n\r\n")
+    stub = _StubHandler("127.0.0.1", h, frozenset({"127.0.0.1"}))
+    assert wd._Handler._client_ip(stub) == "203.0.113.7"
+
+
+def test_client_ip_wiring_fail_closed_no_proxy_declared():
+    # Through the real header object: a forged header from a direct
+    # client is ignored when no proxy is declared.
+    h = _parsed_headers("X-Forwarded-For: 203.0.113.7\r\n\r\n")
+    stub = _StubHandler("198.51.100.9", h, frozenset())
+    assert wd._Handler._client_ip(stub) == "198.51.100.9"
+
+
+def test_repeated_forwarded_for_attacker_first_instance_ignored():
+    # QA B1: HTTPMessage.get() returns the FIRST of repeated headers —
+    # an attacker-supplied first instance must not shadow the trusted
+    # proxy's own second instance. The proxy's observation (last) wins.
+    h = _parsed_headers(
+        "X-Forwarded-For: 127.0.0.1\r\n"
+        "X-Forwarded-For: 203.0.113.7\r\n\r\n")
+    trusted = frozenset({"127.0.0.1"})
+    assert wd.resolve_client_ip("127.0.0.1", h, trusted) == "203.0.113.7"
+    # The spoofed loopback claim is refused at the gate too — this is
+    # the #896 hole re-opened by the old .get() behavior.
+    assert wd.status_gate_allows("127.0.0.1", h, trusted) is False
+    # And through the handler wiring itself.
+    stub = _StubHandler("127.0.0.1", h, trusted)
+    assert wd._Handler._client_ip(stub) == "203.0.113.7"
