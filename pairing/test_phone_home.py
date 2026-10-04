@@ -125,8 +125,18 @@ class StubDO(threading.Thread):
       ("close", code, extra)  — send close control frame, linger, drop
       ("close-tcp",)          — drop TCP abruptly (transport loss)
       ("ping",)               — send JSON ping, expect JSON pong back
+      ("send-ws-ping", bytes) — send a WS-level ping (opcode 0x9)
+      ("expect-ws-pong", bytes) — read one frame, assert WS pong + payload
+      ("drain", seconds)      — read+record client frames until the deadline
+                               (discards nothing; never pongs JSON pings)
+      ("welcome-raw", obj)    — as step0: read hello, send obj as the first
+                               frame instead of a welcome (bad-welcome /
+                               close-before-welcome tests)
+      ("welcome-dwell", secs) — as step0: read hello, then stall past the
+                               client's welcome timeout
     Records per connection: raw upgrade request bytes, decoded hello,
-    all client frames, and the Authorization header presence.
+    all client frames (decoded JSON in "frames", raw payloads in
+    "frames_raw"), and the Authorization header presence.
     """
 
     def __init__(self, conns, box_id=BOX_ID):
@@ -178,7 +188,7 @@ class StubDO(threading.Thread):
 
     def _serve(self, conn, script):
         rec = {"request": b"", "hello": None, "frames": [],
-               "auth_header": None, "upgrade_path": None}
+               "frames_raw": [], "auth_header": None, "upgrade_path": None}
         self.records.append(rec)
         head = self._read_http(conn)
         rec["request"] = head
@@ -212,6 +222,14 @@ class StubDO(threading.Thread):
                       f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
         if step0[0] == "upgrade-bad-accept":
             return
+        if step0[0] == "welcome-dwell":
+            # Read hello, then stall past the client's welcome timeout —
+            # the client must transport-lost and reconnect, not traceback.
+            opcode, payload = _stub_read_frame(conn)
+            hello = json.loads(payload.decode())
+            rec["hello"] = hello
+            time.sleep(step0[1])
+            return
         # hello
         opcode, payload = _stub_read_frame(conn)
         assert opcode == 0x1
@@ -219,9 +237,12 @@ class StubDO(threading.Thread):
         rec["hello"] = hello
         assert hello["box_id"] == self.box_id
         generation = hello["generation"]
-        _stub_send_json(conn, {"type": "welcome", "box_id": self.box_id,
-                               "accepted_generation": generation,
-                               "server_time": 1234567890})
+        if step0[0] == "welcome-raw":
+            _stub_send_json(conn, step0[1])
+        else:
+            _stub_send_json(conn, {"type": "welcome", "box_id": self.box_id,
+                                   "accepted_generation": generation,
+                                   "server_time": 1234567890})
         for step in script[1:]:
             kind = step[0]
             if kind == "send":
@@ -244,10 +265,41 @@ class StubDO(threading.Thread):
             elif kind == "ping":
                 _stub_send_json(conn, {"type": "ping",
                                        "generation": generation, "ts": 4242})
-                opcode, payload = _stub_read_frame(conn)
-                frame = json.loads(payload.decode())
-                assert frame["type"] == "pong" and frame["ts"] == 4242, frame
+                deadline = time.time() + 5
+                while True:
+                    assert time.time() < deadline, \
+                        "no pong arrived for the scripted ping"
+                    opcode, payload = _stub_read_frame(conn)
+                    frame = json.loads(payload.decode())
+                    if frame.get("type") == "ping":
+                        continue  # the client's own periodic ping; keep
+                        # waiting for the pong that answers ours
+                    assert frame["type"] == "pong" and \
+                        frame["ts"] == 4242, frame
+                    break
                 rec["frames"].append(frame)
+            elif kind == "send-ws-ping":
+                _stub_send_frame(conn, step[1], opcode=0x9)
+            elif kind == "expect-ws-pong":
+                opcode, payload = _stub_read_frame(conn)
+                assert opcode == 0xA and payload == step[1], \
+                    (opcode, payload)
+            elif kind == "drain":
+                # Read client frames until the deadline, recording every
+                # raw payload; JSON pings are never ponged (the point is
+                # to observe, not to keepalive). Ends early if the client
+                # goes away.
+                deadline = time.time() + step[1]
+                conn.settimeout(0.3)
+                while time.time() < deadline:
+                    try:
+                        opcode, payload = _stub_read_frame(conn)
+                    except socket.timeout:
+                        continue
+                    except (ConnectionError, OSError):
+                        break
+                    rec["frames_raw"].append(payload)
+                conn.settimeout(10)
             elif kind == "close":
                 code, extra = step[1], step[2] if len(step) > 2 else {}
                 _stub_send_json(conn, {"type": "close", "generation":
@@ -330,10 +382,12 @@ def test_backoff_schedule_bounds():
     d1 = spark_pair._ws_backoff_delay(0, rng=lambda: 1.0)
     assert d0 == pytest.approx(0.75)  # 1s - 25%
     assert d1 == pytest.approx(1.25)  # 1s + 25%
-    # Doubling then the 60s cap:
+    # Doubling then the 60s cap (jitter applies before the final cap, so
+    # the result never exceeds 60):
     assert spark_pair._ws_backoff_delay(1, rng=lambda: 0.0) == pytest.approx(1.5)
-    assert spark_pair._ws_backoff_delay(10, rng=lambda: 1.0) == pytest.approx(75.0)
-    assert spark_pair._ws_backoff_delay(10, rng=lambda: 0.0) == pytest.approx(45.0)
+    assert spark_pair._ws_backoff_delay(10, rng=lambda: 1.0) == pytest.approx(60.0)
+    # Jitter applies before the final cap: 64 * 0.75 = 48 < 60, no cap.
+    assert spark_pair._ws_backoff_delay(10, rng=lambda: 0.0) == pytest.approx(48.0)
 
 
 def test_close_action_table():
@@ -411,8 +465,11 @@ def test_expired_reconnects_with_current_token(ctx):
     # Same generation+1 on reconnect (plain reconnect bumps generation,
     # never epoch — asserted below).
     assert stub.records[1]["hello"]["generation"] == 2
-    # No backoff sleep on the server-directed immediate retry.
-    assert ctx.sleeps == [0]
+    # The reconnect carries the current token.
+    assert stub.records[1]["auth_header"] == f"Bearer {TOKEN}"
+    # Server-directed reconnects back off with a floor (no zero-delay
+    # hot loop); the interruptible sleep splits it into ≤1s quanta.
+    assert 0.5 <= sum(ctx.sleeps) <= 1.5
 
 
 def test_going_away_waits_sixty_seconds(ctx):
@@ -421,7 +478,9 @@ def test_going_away_waits_sixty_seconds(ctx):
     rc = _run_client(ctx, stub)
     assert rc == 1
     assert len(stub.records) == 2
-    assert any(s >= 60 for s in ctx.sleeps), ctx.sleeps
+    # The ≥60 s wait is interruptible (1 s quanta), so the recorded total
+    # is what matters, not any single sleep.
+    assert sum(ctx.sleeps) >= 60, ctx.sleeps
 
 
 def test_stale_generation_adopts_and_bumps_epoch(ctx):
@@ -455,9 +514,9 @@ def test_plain_reconnect_leaves_epoch_alone(ctx):
     assert len(stub.records) == 2
     with open(cursor) as f:
         assert json.load(f) == {"cursor": 41, "epoch": 3}
-    # Transport loss backs off (attempt 0 → ~0.75-1.25s).
-    assert len(ctx.sleeps) == 1
-    assert 0.5 <= ctx.sleeps[0] <= 1.5
+    # Transport loss backs off (attempt 0 → ~0.75-1.25s total; the
+    # interruptible sleep splits it into ≤1s quanta).
+    assert 0.5 <= sum(ctx.sleeps) <= 1.5
 
 
 def test_upgrade_401_rotates_once_then_reconnects(ctx, monkeypatch):
@@ -500,12 +559,16 @@ def test_upgrade_302_never_followed(ctx):
         assert b"evil.test" not in rec["request"]
 
 
-def test_upgrade_bad_accept_refused(ctx):
+def test_upgrade_bad_accept_refused(ctx, capsys):
     stub = StubDO([[("upgrade-bad-accept",)],
                    [("welcome",), ("close", "revoked", {})]])
     rc = _run_client(ctx, stub)
     assert rc == 1
     assert len(stub.records) == 2  # retried with backoff after the refusal
+    # The refusal must be the loud MITM warning — not a silent
+    # transport-lost that a neutered (accept-anything) client also makes.
+    err = capsys.readouterr()
+    assert "Sec-WebSocket-Accept" in err.err
 
 
 def test_ping_pong_keepalive(ctx):
@@ -568,6 +631,7 @@ def test_client_sends_pings(ctx):
 def test_credential_never_in_logs_or_frames(ctx, capsys):
     stub = StubDO([[("welcome",),
                     ("send", {"type": "ping", "generation": 1, "ts": 1}),
+                    ("drain", 0.7),
                     ("close", "revoked",
                      {"reason": "token revoked; tok-secret-abc123 leaked?"})]])
     rc = _run_client(ctx, stub)
@@ -578,8 +642,11 @@ def test_credential_never_in_logs_or_frames(ctx, capsys):
     err = capsys.readouterr()
     assert TOKEN not in err.out and TOKEN not in err.err
     # The bearer travels only in the upgrade's Authorization header —
-    # never in a frame.
+    # never in ANY frame on the wire (hello, pings, pongs: all recorded
+    # raw during the drain).
     assert stub.records[0]["auth_header"] == f"Bearer {TOKEN}"
+    assert stub.records[0]["frames_raw"], "drain recorded no client frames"
+    assert TOKEN.encode() not in b"".join(stub.records[0]["frames_raw"])
     assert TOKEN.encode() not in json.dumps(
         stub.records[0]["hello"]).encode()
 
@@ -629,11 +696,243 @@ def test_second_instance_refuses_lock(ctx):
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
     try:
-        stub = StubDO([[("welcome",), ("close", "revoked", {})]])
-        # Don't start the stub: the client must fail before connecting.
-        rc = spark_pair.cmd_phone_home(ctx)
-        assert rc == 1
-        assert stub.records == []
+        # Watchdog: a lock-check regression must fail, not hang the suite.
+        rc = []
+        t = threading.Thread(
+            target=lambda: rc.append(spark_pair.cmd_phone_home(ctx)),
+            daemon=True)
+        t.start()
+        t.join(10)
+        assert not t.is_alive(), "second instance wedged instead of refusing"
+        assert rc == [1]
     finally:
         _fcntl.flock(fd, _fcntl.LOCK_UN)
         os.close(fd)
+
+
+# -- round-2 regression tests (adversarial review blockers) ----------------------
+
+def test_welcome_timeout_reconnects_not_tracebacks(ctx):
+    # Eng B1: a plane slow to send welcome (> read quantum) must read as
+    # transport-lost → backoff reconnect, never a TimeoutError traceback.
+    stub = StubDO([[("welcome-dwell", 2.0)],
+                   [("welcome",), ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 2
+
+
+def test_send_oserror_maps_to_transport_lost():
+    # Eng B2: a send-side EPIPE/RST is transport loss, not a traceback.
+    class DeadSock:
+        def sendall(self, b):
+            raise OSError("broken pipe")
+
+    s = spark_pair._PhoneHomeSession(None, DeadSock(), None, BOX_ID, 1,
+                                     TOKEN)
+    with pytest.raises(spark_pair._WsTransportLost):
+        s.send({"type": "ping"})
+
+
+def test_close_before_welcome_routes_through_close_table(ctx):
+    # Eng B3: a spec-mandated stale-generation answering hello is not a
+    # "bug" — the client must adopt, bump epoch, and reconnect.
+    cursor = os.path.join(ctx.dir, "commands_cursor.json")
+    with open(cursor, "w") as f:
+        json.dump({"cursor": 41, "epoch": 3}, f)
+    stub = StubDO([[("welcome-raw", {"type": "close", "generation": 1,
+                                    "code": "stale-generation",
+                                    "last_generation": 9})],
+                   [("welcome",), ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 2
+    assert stub.records[1]["hello"]["generation"] == 10
+    with open(cursor) as f:
+        assert json.load(f)["epoch"] == 4
+
+
+def test_rotate_budget_resets_after_healthy_session(ctx, monkeypatch):
+    # Eng B4: one rotate per 401; a healthy welcome earns a fresh budget.
+    calls = []
+
+    def fake_rotate(ns):
+        calls.append(1)
+        with open(os.path.join(ctx.dir, "enrollment.json"), "w") as f:
+            json.dump({"box_id": BOX_ID, "token": f"tok-new-{len(calls)}",
+                       "token_expires_at": int(time.time()) + 3600}, f)
+        return 0
+
+    monkeypatch.setattr(spark_pair, "cmd_rotate", fake_rotate)
+    stub = StubDO([[("upgrade-401",)],
+                   [("welcome",), ("close-tcp",)],
+                   [("upgrade-401",)],
+                   [("welcome",), ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert calls == [1, 1]
+    assert len(stub.records) == 4
+    # records[2] is the second 401 (still on tok-new-1); records[3] is the
+    # reconnect after the second rotate.
+    assert stub.records[2]["auth_header"] == "Bearer tok-new-1"
+    assert stub.records[3]["auth_header"] == "Bearer tok-new-2"
+
+
+def test_expired_no_double_rotate(ctx, monkeypatch):
+    # Eng B4: a plane closing expired in a loop must not spin
+    # rotate → handshake → expired forever.
+    with open(os.path.join(ctx.dir, "enrollment.json"), "w") as f:
+        json.dump({"box_id": BOX_ID, "token": "tok-old",
+                   "token_expires_at": int(time.time()) - 10}, f)
+    calls = []
+
+    def fake_rotate(ns):
+        calls.append(1)
+        with open(os.path.join(ctx.dir, "enrollment.json"), "w") as f:
+            json.dump({"box_id": BOX_ID, "token": "tok-fresh",
+                       "token_expires_at": int(time.time()) + 3600}, f)
+        return 0
+
+    monkeypatch.setattr(spark_pair, "cmd_rotate", fake_rotate)
+    stub = StubDO([[("welcome",), ("close", "expired", {})],
+                   [("welcome",), ("close", "expired", {})],
+                   [("welcome",), ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert calls == [1]  # the second expired saw the live token: no rotate
+    assert stub.records[1]["auth_header"] == "Bearer tok-fresh"
+    assert stub.records[2]["auth_header"] == "Bearer tok-fresh"
+
+
+def test_repeated_expired_backs_off_with_floor(ctx, monkeypatch):
+    # Security B2: repeated server-directed closes must not become a
+    # zero-delay hot reconnect loop. Scripted delays pin the growth:
+    # first expired → 1.0s (1 quantum), second → 2.0s (2 quanta).
+    delays = [1.0, 2.0]
+    monkeypatch.setattr(spark_pair, "_ws_backoff_delay",
+                        lambda attempt, rng=None: delays.pop(0))
+    stub = StubDO([[("welcome",), ("close", "expired", {})],
+                   [("welcome",), ("close", "expired", {})],
+                   [("welcome",), ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert ctx.sleeps == [1.0, 1.0, 1.0]
+
+
+def test_continuation_bomb_rejected():
+    # Security B1 / Eng B5: the per-frame cap does not bound the
+    # continuation count — the reassembled total is capped. The bomb is
+    # *valid JSON* (a 1.5 MiB string) so only the total cap can catch it —
+    # an undecodable payload would pass for the wrong reason.
+    c1 = b'"' + b"x" * 524287
+    c2 = b"x" * 524288
+    c3 = b"x" * 524287 + b'"'
+
+    def frag(first_opcode, chunk):
+        return bytes([first_opcode, 127]) + struct.pack(">Q", len(chunk)) \
+            + chunk
+
+    raw = frag(0x01, c1) + frag(0x00, c2) + frag(0x80, c3)
+    assert len(c1) + len(c2) + len(c3) > spark_pair._WS_MAX_FRAME
+    with pytest.raises(spark_pair._WsProtocolError):
+        spark_pair._ws_read_json_frame(spark_pair._WsReader(_FakeSock(raw)))
+
+
+def test_fragmented_control_frame_rejected():
+    with pytest.raises(spark_pair._WsProtocolError):
+        _decode_raw(bytes([0x09, 5]) + b"hello")  # FIN=0 ping
+
+
+def test_oversize_control_frame_rejected():
+    # Wire spec §3.1: control-class frames MUST be ≤ 4 KB.
+    obj = {"type": "ping", "generation": 1, "ts": 1, "pad": "x" * 5000}
+    payload = json.dumps(obj).encode()
+    raw = bytes([0x81, 127]) + struct.pack(">Q", len(payload)) + payload
+    with pytest.raises(spark_pair._WsProtocolError):
+        spark_pair._ws_read_json_frame(spark_pair._WsReader(_FakeSock(raw)))
+
+
+def test_reserved_and_unknown_frames_ignored(ctx):
+    # QA B3: the S5b-ignore promise — command/command_ack/unknown frames
+    # must not wedge the channel.
+    stub = StubDO([[("welcome",),
+                    ("send", {"type": "command", "generation": 1, "seq": 7,
+                              "epoch": 1, "payload": {}}),
+                    ("send", {"type": "command_ack", "generation": 1,
+                              "seq": 7, "epoch": 1}),
+                    ("send", {"type": "mystery", "generation": 1}),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 1  # channel survived to the close
+    with open(os.path.join(ctx.dir, "phone_home.log")) as f:
+        log = f.read()
+    assert log.count("ignoring") >= 3
+
+
+def test_pong_timeout_drops_dead_socket(ctx, monkeypatch):
+    # QA B4: the §4 keepalive liveness property — no pong within the
+    # timeout drops the socket and reconnects.
+    monkeypatch.setattr(spark_pair, "_WS_PONG_TIMEOUT", 0.5)
+    stub = StubDO([[("welcome",), ("drain", 3.0)],
+                   [("welcome",), ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 2
+
+
+def test_ws_level_ping_pong(ctx):
+    # QA B5: RFC 6455 pings get pong answers with the payload echoed.
+    stub = StubDO([[("welcome",),
+                    ("send-ws-ping", b"abc"),
+                    ("expect-ws-pong", b"abc"),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+
+
+def test_expired_no_live_token_rotates_once(ctx, monkeypatch):
+    # QA B6: the expired → re-read → no-live-token → one-rotate branch.
+    with open(os.path.join(ctx.dir, "enrollment.json"), "w") as f:
+        json.dump({"box_id": BOX_ID, "token": "tok-old",
+                   "token_expires_at": int(time.time()) - 10}, f)
+    calls = []
+
+    def fake_rotate(ns):
+        calls.append(1)
+        with open(os.path.join(ctx.dir, "enrollment.json"), "w") as f:
+            json.dump({"box_id": BOX_ID, "token": "tok-fresh",
+                       "token_expires_at": int(time.time()) + 3600}, f)
+        return 0
+
+    monkeypatch.setattr(spark_pair, "cmd_rotate", fake_rotate)
+    stub = StubDO([[("welcome",), ("close", "expired", {})],
+                   [("welcome",), ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert calls == [1]
+    assert stub.records[1]["auth_header"] == "Bearer tok-fresh"
+
+
+def test_bad_welcome_box_id_exits_no_reconnect(ctx):
+    # QA B9: spec §2 identity binding — wrong box_id in welcome is fatal.
+    stub = StubDO([[("welcome-raw", {"type": "welcome", "box_id": "WRONG",
+                                    "accepted_generation": 1})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 1
+
+
+def test_bad_welcome_generation_exits_no_reconnect(ctx):
+    stub = StubDO([[("welcome-raw", {"type": "welcome", "box_id": BOX_ID,
+                                    "accepted_generation": 999})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 1
+
+
+def test_unknown_close_code_exits_no_reconnect(ctx):
+    stub = StubDO([[("welcome",), ("close", "bogus-code", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 1

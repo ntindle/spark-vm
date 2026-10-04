@@ -2221,11 +2221,16 @@ def cmd_upload_filings(args):
 # the durable generation fence (§5), the close-code reconnect policy
 # (§6), keepalive (§4), and the upgrade-401 rotate-once path (§2).
 #
-# Deliberately NOT in this slice (S5b follow-up): `command` frames and
+# Deliberately NOT in this slice (S5b, #976): `command` frames and
 # `command_ack` over the socket — the queue contract is identical either
 # way (§3.3/§12), so commands keep flowing over the #874 HTTPS ingest
 # path until S5b lands. Unknown/reserved frame types are logged loudly
 # and ignored, never acted on, never fatal to the daemon.
+#
+# NOTE: the plane half (#958, one Durable Object per box) is not built
+# yet — the upgrade endpoint is unserved, so expect `upgrade failed`
+# retries with backoff until it lands. Validated against a stub harness
+# only (pairing/test_phone_home.py); live-plane acceptance is #960.
 #
 # Liveness: the #864 heartbeat stays the ONLY liveness signal (spec §8).
 # This client never writes last_heartbeat.json; a socket the plane
@@ -2239,7 +2244,13 @@ _WS_BACKOFF_INITIAL = 1.0  # spec §10: 1 s initial, doubling, 60 s cap, ±25% j
 _WS_BACKOFF_CAP = 60.0
 _WS_GOING_AWAY_WAIT = 60.0  # spec §6: going-away → wait ≥ 60 s
 _WS_READ_TIMEOUT = 5  # socket read quantum: keeps the ping timer + stop flag live
+_WS_UPGRADE_TIMEOUT = 30  # explicit handshake deadline (create_connection's
+# timeout lingers on the socket; naming it here so a future refactor
+# can't silently drop the bound)
 _WS_GENERATION_FILE = "phone_home_generation.json"
+# Wire-spec §3.1 control class: these JSON text frames MUST be ≤ 4 KB.
+_WS_CONTROL_TYPES = frozenset(
+    ["hello", "welcome", "ping", "pong", "close", "command_ack"])
 
 # Module-level sleep so tests can observe/stub timing without waiting out
 # real backoffs.
@@ -2396,8 +2407,14 @@ def _ws_send_json(sock, obj):
 def _ws_read_json_frame(reader):
     """Read frames until a complete text message arrives. Returns the
     decoded object. Binary messages are a protocol error (JSON text
-    frames only, §3); continuation frames are reassembled."""
+    frames only, §3); continuation frames are reassembled.
+
+    The reassembled total is capped at _WS_MAX_FRAME: the per-frame cap
+    in _ws_decode_frame does not bound a hostile plane's continuation
+    count, and an unbounded join would OOM the daemon. Control-class
+    frames (spec §3.1) are additionally capped at 4 KB."""
     parts = []
+    total = 0
     while True:
         opcode, payload, fin = _ws_decode_frame(reader)
         if opcode == 0x2:
@@ -2405,9 +2422,10 @@ def _ws_read_json_frame(reader):
         if opcode == 0x0:
             if not parts:
                 raise _WsProtocolError("continuation with nothing to continue")
-            parts.append(payload)
         elif opcode == 0x1:
-            parts.append(payload)
+            if parts:
+                raise _WsProtocolError(
+                    "new message inside fragmentation (RFC 6455 §5.4)")
         elif opcode == 0x9:
             # WS-level ping: answer with a WS-level pong per RFC 6455.
             # (The wire spec's keepalive is the JSON ping/pong control
@@ -2421,12 +2439,21 @@ def _ws_read_json_frame(reader):
             raise _WsTransportLost("peer closed the websocket")
         else:
             raise _WsProtocolError(f"unknown opcode {opcode:#x}")
+        parts.append(payload)
+        total += len(payload)
+        if total > _WS_MAX_FRAME:
+            raise _WsProtocolError(
+                "reassembled message exceeds the frame cap")
         if fin:
             break
     try:
-        return json.loads(b"".join(parts).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as e:
+        obj = json.loads(b"".join(parts).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, RecursionError) as e:
         raise _WsProtocolError(f"undecodable text frame: {e}")
+    if total > 4096 and isinstance(obj, dict) \
+            and obj.get("type") in _WS_CONTROL_TYPES:
+        raise _WsProtocolError("control frame exceeds 4 KB (spec §3.1)")
+    return obj
 
 
 class _WsPing(Exception):
@@ -2493,6 +2520,9 @@ def _ws_do_handshake(sock, host, path, key, token):
            "Sec-WebSocket-Version: 13\r\n"
            f"User-Agent: {USER_AGENT}\r\n\r\n")
     reader = _WsReader(sock)
+    # Explicit handshake deadline: create_connection's timeout lingers on
+    # the socket, but pin it by name so the bound is visible here.
+    sock.settimeout(_WS_UPGRADE_TIMEOUT)
     try:
         sock.sendall(req.encode())
         status_line = reader.readline().decode("latin-1")
@@ -2560,8 +2590,13 @@ def _phone_home_claim_generation(d):
             existed = False
     nxt = (last + 1) if usable else 1
     tmp = path + ".tmp"
-    _write_private(tmp, json.dumps({"generation": nxt}).encode())
-    os.replace(tmp, path)
+    try:
+        _write_private(tmp, json.dumps({"generation": nxt}).encode())
+        os.replace(tmp, path)
+    except OSError as e:
+        # A wedged state dir (disk full, permissions) is a loud local
+        # failure, not a traceback and not a reconnect loop.
+        raise _WsError(f"generation file unwritable ({e})")
     if usable:
         return nxt, "ok"
     return nxt, ("counter-loss" if existed else "first-run")
@@ -2571,8 +2606,11 @@ def _phone_home_adopt_generation(d, generation):
     """Persist a DO-dictated generation (stale-generation recovery)."""
     path = os.path.join(d, _WS_GENERATION_FILE)
     tmp = path + ".tmp"
-    _write_private(tmp, json.dumps({"generation": generation}).encode())
-    os.replace(tmp, path)
+    try:
+        _write_private(tmp, json.dumps({"generation": generation}).encode())
+        os.replace(tmp, path)
+    except OSError as e:
+        raise _WsError(f"generation file unwritable ({e})")
 
 
 def _phone_home_bump_epoch(d):
@@ -2594,7 +2632,10 @@ def _phone_home_bump_epoch(d):
     if not isinstance(epoch, int) or isinstance(epoch, bool):
         epoch = 0
     cur["epoch"] = epoch + 1
-    _write_private(path, json.dumps(cur, indent=2).encode())
+    try:
+        _write_private(path, json.dumps(cur, indent=2).encode())
+    except OSError as e:
+        raise _WsError(f"cursor file unwritable ({e})")
     return True
 
 
@@ -2632,9 +2673,31 @@ def _phone_home_close_action(code, frame):
 
 
 def _ws_backoff_delay(attempt, rng=random.random):
-    """1 s initial, doubling, 60 s cap, ±25% jitter (spec §10)."""
-    base = min(_WS_BACKOFF_CAP, _WS_BACKOFF_INITIAL * (2 ** attempt))
-    return base * (0.75 + 0.5 * rng())
+    """1 s initial, doubling, 60 s cap, ±25% jitter (spec §10).
+
+    The exponent is capped: beyond 2**6 the 60 s cap dominates anyway,
+    and an unbounded bigint would OverflowError the float multiply after
+    ~1024 consecutive failures. Jitter applies before the final cap, so
+    the result never exceeds 60 s."""
+    raw = _WS_BACKOFF_INITIAL * (2 ** min(attempt, 6))
+    return min(_WS_BACKOFF_CAP, raw * (0.75 + 0.5 * rng()))
+
+
+def _ws_sleep_or_stop(seconds):
+    """Sleep in ≤1 s quanta so SIGTERM/SIGINT stops the daemon promptly.
+
+    Returns True when the stop flag was set mid-sleep (the caller should
+    break out to the clean shutdown path). Quantum-counted, not
+    clock-counted: deterministic under a stubbed _ws_sleep in tests."""
+    while seconds > 0:
+        if _PHONE_HOME_STOP:
+            return True
+        quantum = min(1.0, seconds)
+        _ws_sleep(quantum)
+        if _PHONE_HOME_STOP:
+            return True
+        seconds -= quantum
+    return False
 
 
 # -- Session ----------------------------------------------------------------------
@@ -2649,20 +2712,44 @@ class _PhoneHomeSession:
         self.box_id = box_id
         self.generation = generation
         self.token = token
+        self.welcomed = False
 
     def send(self, obj):
-        _ws_send_json(self.sock, obj)
+        try:
+            _ws_send_json(self.sock, obj)
+        except OSError as e:
+            # The peer died between reads: a send-side EPIPE/RST is the
+            # same transport loss as a read-side EOF, not a traceback.
+            raise _WsTransportLost(f"send failed: {e}")
 
     def run(self):
         """Returns ("closed", code, frame) | ("transport-lost",) | ("bug", msg)."""
+        try:
+            return self._run()
+        except _WsTransportLost:
+            # Send-side EPIPE/RST (hello, ping, pong) is the same
+            # transport loss as a read-side EOF.
+            return ("transport-lost",)
+
+    def _run(self):
         self.send({"type": "hello", "box_id": self.box_id,
                    "generation": self.generation})
         try:
             welcome = _ws_read_json_frame(self.reader)
         except _WsTransportLost:
             return ("transport-lost",)
+        except socket.timeout:
+            # A slow plane (DO cold start) is a transport stall like any
+            # other: back off and reconnect, never traceback.
+            return ("transport-lost",)
         except (_WsProtocolError, _WsPing, _WsPong) as e:
             return ("bug", f"no valid welcome before the socket died ({e})")
+        if isinstance(welcome, dict) and welcome.get("type") == "close":
+            # A close answering hello is not a welcome failure: the spec
+            # mandates close/stale-generation here (§5), and a pre-welcome
+            # revoked deserves the re-pair guidance, not a "bug" message.
+            # Route it through the close table like any other close.
+            return ("closed", welcome.get("code"), welcome)
         if (not isinstance(welcome, dict)
                 or welcome.get("type") != "welcome"
                 or welcome.get("box_id") != self.box_id
@@ -2670,6 +2757,7 @@ class _PhoneHomeSession:
             return ("bug",
                     "bad welcome (identity or generation mismatch) — "
                     "not reconnecting")
+        self.welcomed = True
         _phone_home_say(
             self.d,
             f"channel open (generation {self.generation}, "
@@ -2750,7 +2838,7 @@ def _phone_home_request_stop(signum, frame):
 # -- Connect + daemon ---------------------------------------------------------------
 
 def _phone_home_connect(d, box_id, token, control, generation):
-    """Upgrade and run one session. Returns the session outcome tuple."""
+    """Upgrade and run one session. Returns (outcome, welcomed)."""
     ws_root = _ws_url_for_control(control)
     u = urllib.parse.urlparse(ws_root)
     host, port = u.hostname, u.port or (443 if u.scheme == "wss" else 80)
@@ -2770,9 +2858,9 @@ def _phone_home_connect(d, box_id, token, control, generation):
         sock.close()
         raise
     sock.settimeout(_WS_READ_TIMEOUT)
+    session = _PhoneHomeSession(d, sock, reader, box_id, generation, token)
     try:
-        return _PhoneHomeSession(d, sock, reader, box_id, generation,
-                                   token).run()
+        return session.run(), session.welcomed
     finally:
         try:
             sock.close()
@@ -2780,7 +2868,7 @@ def _phone_home_connect(d, box_id, token, control, generation):
             pass
 
 
-def _phone_home_rotate_once(args, d, enroll_path, box_id, token, control):
+def _phone_home_rotate_once(args, d, enroll_path):
     """One rotate attempt for the upgrade-401 path (spec §2).
 
     Reuses cmd_rotate's full machinery (proof-of-possession, locks, loud
@@ -2808,7 +2896,9 @@ def _phone_home_read_enrollment(d, enroll_path):
     if not isinstance(enroll, dict):
         return None, ("enrollment.json is not an object — "
                       "run `request` + `redeem` first")
-    if not enroll.get("box_id") or not enroll.get("token"):
+    box_id, token = enroll.get("box_id"), enroll.get("token")
+    if not isinstance(box_id, str) or not box_id \
+            or not isinstance(token, str) or not token:
         return None, ("enrollment.json is missing box_id/token — "
                       "run `request` + `redeem` first")
     return enroll, None
@@ -2846,6 +2936,16 @@ def cmd_phone_home(args):
         signal.signal(signal.SIGINT, _phone_home_request_stop)
     except (OSError, ValueError):
         pass  # non-POSIX or embedded: the loop still exits on close codes
+    # Defense in depth: phone_home.log carries redacted plane strings;
+    # keep it 0600 like the other state files even though the token never
+    # lands here unredacted (Security nit).
+    try:
+        _log_fd = os.open(os.path.join(d, "phone_home.log"),
+                          os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        os.fchmod(_log_fd, 0o600)
+        os.close(_log_fd)
+    except OSError:
+        pass  # _phone_home_say degrades to stdout-only
     _phone_home_say(d, f"phone-home starting for box "
                        f"{_plane_text(box_id)} (S5a connection core; "
                        "heartbeat stays the only liveness signal)", token)
@@ -2859,19 +2959,29 @@ def cmd_phone_home(args):
                 generation, gen_status = pending_generation, "adopted"
                 pending_generation = None
             else:
-                generation, gen_status = _phone_home_claim_generation(d)
+                try:
+                    generation, gen_status = _phone_home_claim_generation(d)
+                except _WsError as e:
+                    # Local state failure (disk full, permissions): loud,
+                    # no traceback, no reconnect loop.
+                    _phone_home_fail(d, f"{e}", token)
+                    return 1
             if gen_status == "counter-loss":
                 # Reboot-equivalent (§5): the old counter is gone, so any
                 # in-flight commands from the lost incarnation must die.
-                _phone_home_bump_epoch(d)
+                try:
+                    _phone_home_bump_epoch(d)
+                except _WsError as e:
+                    _phone_home_fail(d, f"{e}", token)
+                    return 1
                 _phone_home_say(
                     d, "generation counter lost — claimed epoch+1 "
                        "(counter loss is a reboot-equivalent per §5); the "
                        "DO's stale-generation fence will correct the "
                        "generation on connect", token)
             try:
-                outcome = _phone_home_connect(d, box_id, token, control,
-                                              generation)
+                outcome, welcomed = _phone_home_connect(
+                    d, box_id, token, control, generation)
             except _WsUpgradeAuth:
                 if rotate_tried:
                     _phone_home_fail(
@@ -2882,7 +2992,7 @@ def cmd_phone_home(args):
                 _phone_home_say(d, "upgrade rejected (401) — attempting one "
                                    "rotate before re-pair guidance", token)
                 new_token = _phone_home_rotate_once(
-                    args, d, enroll_path, box_id, token, control)
+                    args, d, enroll_path)
                 if new_token is None:
                     return 1  # rotate printed the guidance already
                 token = new_token
@@ -2893,15 +3003,22 @@ def cmd_phone_home(args):
                                     "with backoff (HTTPS heartbeat and "
                                     "command polling continue meanwhile)",
                                  token)
-                _ws_sleep(_ws_backoff_delay(attempt))
+                if _ws_sleep_or_stop(_ws_backoff_delay(attempt)):
+                    break
                 attempt += 1
                 continue
             except _WsError as e:
                 _phone_home_fail(d, f"phone-home error: {e} — will retry "
                                     "with backoff", token)
-                _ws_sleep(_ws_backoff_delay(attempt))
+                if _ws_sleep_or_stop(_ws_backoff_delay(attempt)):
+                    break
                 attempt += 1
                 continue
+            if welcomed:
+                # Each healthy session earns its own rotate budget: a 401
+                # after a long-lived session gets a fresh rotate attempt
+                # instead of immediate re-pair guidance.
+                rotate_tried = False
             kind = outcome[0]
             if kind == "stopped":
                 _phone_home_say(d, "stopping on signal", token)
@@ -2910,7 +3027,8 @@ def cmd_phone_home(args):
                 _phone_home_say(d, "socket lost — reconnecting with backoff "
                                    "(HTTPS heartbeat and command polling "
                                    "continue meanwhile)", token)
-                _ws_sleep(_ws_backoff_delay(attempt))
+                if _ws_sleep_or_stop(_ws_backoff_delay(attempt)):
+                    break
                 attempt += 1
                 continue
             if kind == "bug":
@@ -2945,13 +3063,22 @@ def cmd_phone_home(args):
                            "not reconnecting", token)
                 return param
             if action == "adopt":
-                _phone_home_adopt_generation(d, param)
-                _phone_home_bump_epoch(d)
+                try:
+                    _phone_home_adopt_generation(d, param)
+                    _phone_home_bump_epoch(d)
+                except _WsError as e:
+                    _phone_home_fail(d, f"{e}", token)
+                    return 1
                 _phone_home_say(
                     d, f"adopted generation {param} after stale-generation "
                        "fence (counter loss → epoch+1 per §5) — reconnecting",
                     token)
                 pending_generation, attempt = param, 0
+                # A beat before the adopt reconnect: a plane emitting
+                # repeated stale-generation closes must not pin the box in
+                # a zero-delay TCP+TLS reconnect loop.
+                if _ws_sleep_or_stop(1.0):
+                    break
                 continue
             # action == "reconnect"
             if code == "expired":
@@ -2965,20 +3092,36 @@ def cmd_phone_home(args):
                 exp = enroll2.get("token_expires_at")
                 if isinstance(exp, int) and not isinstance(exp, bool) \
                         and exp <= int(time.time()):
+                    if rotate_tried:
+                        # The rotate budget is one per healthy session: a
+                        # plane closing expired in a tight loop must not
+                        # spin rotate → handshake → expired forever.
+                        _phone_home_fail(
+                            d, "token expired again after a rotate — not "
+                               "rotating in a loop; re-pair the box "
+                               "(`request` + `redeem`)", token)
+                        return 1
                     _phone_home_say(
                         d, "no live token after expiry close — one rotate "
                            "attempt", token)
                     new_token = _phone_home_rotate_once(
-                        args, d, enroll_path, box_id, token, control)
+                        args, d, enroll_path)
                     if new_token is None:
                         return 1
                     token = new_token
                     rotate_tried = True
-            _ws_sleep(param)
-            # A server-directed reconnect (expired immediate retry,
-            # going-away ≥ 60 s) resets the backoff: it is not a
-            # congestion signal. Only silent transport loss backs off.
-            attempt = 0
+            if code == "going-away":
+                # Spec §6: wait ≥ 60 s. The wait itself is the backoff.
+                if _ws_sleep_or_stop(param):
+                    break
+                attempt = 0
+                continue
+            # Any other server-directed reconnect (expired): back off with
+            # a floor, growing on repeats — a plane emitting closes in a
+            # tight loop must not pin the box in a hot reconnect cycle.
+            if _ws_sleep_or_stop(_ws_backoff_delay(attempt)):
+                break
+            attempt += 1
     finally:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -3034,7 +3177,8 @@ def main(argv=None):
                                       "the control plane (daemon: reconnects "
                                       "per docs/PHONE_HOME_WIRE_PROTOCOL.md; "
                                       "the #864 heartbeat stays the only "
-                                      "liveness signal)")
+                                      "liveness signal; plane half #958 not "
+                                      "built yet — expect upgrade retries)")
     s.set_defaults(fn=cmd_phone_home)
 
     s = sub.add_parser("approve", help="owner: verify fingerprint + approve")

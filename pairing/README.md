@@ -319,6 +319,12 @@ Cron-acceptable:
 
 ## Phone-home channel (#959, S5a connection core)
 
+> **Plane half not built yet.** The one-Durable-Object-per-box plane half
+> (#958) that serves the upgrade endpoint does not exist — against a
+> current plane this daemon retries `upgrade failed` with backoff until
+> it lands. This slice was validated against a stub harness only (see
+> `pairing/test_phone_home.py`); live-plane acceptance is #960.
+
 The persistent outbound WSS channel from the box to the control plane,
 per `docs/PHONE_HOME_WIRE_PROTOCOL.md` (the S3 contract). Unlike the
 cron-shaped commands above, this one is a daemon — it holds the socket
@@ -327,6 +333,37 @@ open and reconnects per the wire spec's close taxonomy:
 ```bash
 spark-pair.py phone-home   # daemon: runs until SIGTERM/SIGINT or a fatal close
 ```
+
+Run it under a supervisor, not cron:
+
+```ini
+[Unit]
+Description=spark-vm phone-home channel
+After=network-online.target
+
+[Service]
+ExecStart=/path/to/spark-pair.py phone-home
+Restart=on-failure
+RestartSec=5
+# Exit 1 means HUMAN ATTENTION, not a restart loop: fatal closes (revoked
+# token, protocol errors) exit 1 deliberately, and a supervisor restarting
+# blindly would recreate the reconnect storm the daemon refuses — notably
+# on `revoked`, where re-pairing the box is the human path. Alert on
+# repeated restarts instead of restarting forever.
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`phone_home.log` in the state dir is append-only (one line per
+connection-lifecycle event, never per keepalive ping); rotate it with
+logrotate `copytruncate` or ship it to your log aggregator.
+
+**Exit codes:** `0` — stopped on SIGTERM/SIGINT. `1` — fatal, needs a
+human: revoked token (re-pair with `request` + `redeem`), a second
+session under this identity (`superseded-generation`), a client or plane
+bug (`identity-mismatch` / `protocol-error` / unknown close code), or
+enrollment/rotate failures.
 
 What it does:
 
