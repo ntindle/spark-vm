@@ -1506,7 +1506,7 @@ _snapshot_count() {
 _prune_snapshots() {
     # Keep the newest $TOOLSET_SNAPSHOT_KEEP snapshot dirs. Only removes
     # dirs directly under $SNAPSHOT_DIR whose names match the writer's
-    # timestamp-pid shape — never anything else.
+    # timestamp-pid-random shape — never anything else.
     local keep="$TOOLSET_SNAPSHOT_KEEP" d base gone=0
     [ -d "$SNAPSHOT_DIR" ] || return 0
     while IFS= read -r d; do
@@ -1761,13 +1761,37 @@ _layer_key() {
     # The convergence key for blocked marking: what the layer was trying
     # to reach. Pin-driven layers use the pin (a pin bump unblocks
     # implicitly); the others use a fixed key.
+    #
+    # #951: the key flows into the audit JSON (and the run log) before the
+    # layer's own _pin_ok check runs, so a hostile pin from the
+    # operator-edited pins file must be validated here. _pin_ok's charset
+    # ([A-Za-z0-9._-], no leading dot/dash) is JSON-safe by construction,
+    # so a validated key can never break the audit line. A present but
+    # invalid pin collapses to the fixed `invalid-pin` sentinel — fixing
+    # the pin changes the key and unblocks implicitly, exactly like a pin
+    # bump. An empty pin (missing/unreadable pins file) stays empty:
+    # _blocked_is deliberately never matches an empty key, so the layer's
+    # own fail-closed refusal (and the freeze counter) remains the signal
+    # for that case.
     case "$1" in
         os-security) printf 'unattended-config' ;;
-        cua-driver)  _read_pin cua-driver ;;
+        cua-driver)  _validated_key "$(_read_pin cua-driver)" ;;
         "apt")        printf 'converge' ;;
-        playwright)  _read_pin playwright ;;
+        playwright)  _validated_key "$(_read_pin playwright)" ;;
         *) return 1 ;;
     esac
+}
+
+_validated_key() {
+    # _validated_key <pin> — the pin when _pin_ok accepts it, the fixed
+    # `invalid-pin` sentinel when present but invalid, empty when absent.
+    # Pure function (no I/O): safe to call in command substitution.
+    [ -n "${1:-}" ] || { printf ''; return 0; }
+    if _pin_ok "$1"; then
+        printf '%s' "$1"
+    else
+        printf 'invalid-pin'
+    fi
 }
 
 _run_layer() {
@@ -2042,8 +2066,40 @@ cmd_install() {
     # install takes no flags; re-running refreshes the installed copy
     # (privileged step — review the diff first).
     for a in "$@"; do case "$a" in *) echo "ERROR: unknown flag: $a" >&2; return 2 ;; esac; done
+    # #951: harden the state-dir mode at install time. Privileged state
+    # (snapshots, blocked.state, the audit log) must not hinge on the
+    # install-time umask — the dir lives under the operator's home and may
+    # be pre-created with looser modes. Refuse any state dir resolving to
+    # the filesystem root (chmod 700 / would break the box): strip trailing
+    # slashes, collapse a leading run of slashes to one (on Linux `//` is
+    # `/`), then resolve `.`/`..` components with readlink -m (no existing
+    # path needed; also follows an existing symlink-to-/). GNU readlink -m
+    # may preserve a leading `//` (== `/` on Linux), so match both.
+    # Every other value is the updater's own state dir by construction.
+    # readlink failing at all is a loud install failure (fail-closed).
+    # The guard runs BEFORE any mkdir: refusal must precede all
+    # filesystem mutation, and a non-root installer's mkdir -p would
+    # otherwise fail first on uncreatable rootish paths with the wrong
+    # error (CI runs non-root).
+    local _sd="$TOOLSET_STATE_DIR"
+    while :; do case "$_sd" in */) _sd="${_sd%/}" ;; *) break ;; esac; done
+    case "$_sd" in
+        //*) _sd="/${_sd#"${_sd%%[!/]*}"}" ;;
+    esac
+    [ -z "$_sd" ] && _sd="/"
+    _sd="$(readlink -m -- "$_sd")" || {
+        echo "ERROR: cannot canonicalize TOOLSET_STATE_DIR=$TOOLSET_STATE_DIR" >&2
+        return 1
+    }
+    case "$_sd" in
+        /|//)
+            echo "ERROR: refusing to install with TOOLSET_STATE_DIR=$TOOLSET_STATE_DIR" >&2
+            return 1 ;;
+    esac
     _sudo mkdir -p "$INSTALLED_BIN" "$SYSTEMD_DIR" \
         || { echo "ERROR: cannot create install dirs" >&2; return 1; }
+    _sudo chmod 700 "$TOOLSET_STATE_DIR" \
+        || { echo "ERROR: cannot chmod state dir $TOOLSET_STATE_DIR" >&2; return 1; }
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0755 "$SCRIPT_DIR/toolset-update.sh" "$INSTALLED_SCRIPT" \
         || { echo "ERROR: cannot install script copy" >&2; return 1; }
     # The pins file is the operator-owned version authority for pinned

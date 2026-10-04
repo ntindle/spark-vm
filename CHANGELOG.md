@@ -346,6 +346,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   pairing records it prints, so a malformed or hostile control plane gets a
   clean error instead of a crash — and an approval can never proceed
   without a fingerprint to verify. (#903, #881, #885)
+- The toolset updater's `install` step now sets the state directory to
+  owner-only instead of trusting the install-time umask (#951): snapshots,
+  the layer block list, and the audit log live there, so a pre-created
+  loose directory no longer weakens them. A malformed version pin in the
+  pins file can also no longer corrupt the audit log's JSON — the updater
+  validates each pin before recording it as the layer's block key, and
+  fixing the pin unblocks the layer just like a pin bump does. (#966)
 
 ### Fixed
 
