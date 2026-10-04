@@ -1004,3 +1004,31 @@ def test_turn_stillborn_error_carries_diagnostics():
     assert err.terminal == "cancelled"
     assert err.journal == ("turn/started", "turn/completed")
     assert "boom" in str(err)
+
+
+def test_engagement_unknown_terminal_fails_closed():
+    # An unrecognized terminal means the turn ended in a way the
+    # client doesn't understand: fail closed (dead), never guess it
+    # was a successful engagement. The raw string is preserved
+    # in-memory for debugging; emission boundaries gate it via
+    # _terminal_label.
+    eng = _engage_with_notes([_note(
+        "turn/completed", {"sessionId": "sess-x", "turnId": "turn-x",
+                           "terminal": "evaporated"})])
+    assert eng["status"] == "dead"
+    assert eng["terminal"] == "evaporated"
+    assert mspt._terminal_label(eng["terminal"]) == "unknown"
+
+
+def test_terminal_label_vocabulary_gate():
+    # Server-controlled terminal strings must never reach logs or
+    # job.json verbatim: log injection (embedded newlines) and
+    # unbounded input are gated to "unknown" at the emission boundary.
+    assert mspt._terminal_label("cancelled") == "cancelled"
+    assert mspt._terminal_label("interrupted") == "interrupted"
+    assert mspt._terminal_label("failed") == "failed"
+    assert mspt._terminal_label("completed") == "completed"
+    assert mspt._terminal_label("cancelled\nINJECTED: pwned") == "unknown"
+    assert mspt._terminal_label("x" * 1000000) == "unknown"
+    assert mspt._terminal_label("") == "unknown"
+    assert mspt._terminal_label(None) == "unknown"

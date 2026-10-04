@@ -341,13 +341,17 @@ class TurnStillbornError(MSPTurnError):
     """The first turn of a spawn died before the agent could engage.
 
     Raised (via await_first_turn_engagement) when the turn reaches a
-    dead terminal -- cancelled, interrupted, or failed -- inside the
+    dead terminal -- cancelled, interrupted, failed, or an
+    unrecognized terminal (fail-closed on shape drift) -- inside the
     engagement window. At spawn time no user exists to cancel or
     interrupt a turn, so a dead first turn means the spawn never
     engaged: the caller must fail the spawn loudly rather than leave
     the job behind as "active" (issue #994). The redacted event-method
     journal rides on .journal for diagnostics; note params are never
-    attached (prompts may carry real secret values).
+    attached (prompts may carry real secret values). .terminal carries
+    the raw server-supplied string for in-memory debugging -- it must
+    pass through _terminal_label before it is ever persisted or
+    printed.
     """
 
     def __init__(self, message, *, turn_id, terminal, journal):
@@ -362,6 +366,26 @@ class TurnStillbornError(MSPTurnError):
 # anything else reaching terminal inside the engagement window is a
 # stillborn spawn.
 _FIRST_TURN_DEAD_TERMINALS = ("cancelled", "interrupted", "failed")
+
+# Terminals the client understands. A server-supplied terminal string
+# is never persisted or printed raw: at every emission boundary
+# (error messages, job.json) it passes through _terminal_label, which
+# maps anything outside this vocabulary to "unknown". The raw value
+# stays in-memory only, for debugging. Rationale: the terminal string
+# is server-controlled -- emitting it verbatim is a log-injection and
+# unbounded-input vector (cf. _raise_for_not_live, which formats a
+# server string only after allowlist membership in _NOT_LIVE_REASONS).
+_KNOWN_TERMINALS = ("cancelled", "interrupted", "failed", "completed")
+
+
+def _terminal_label(terminal):
+    """Emission-safe label for a server-supplied terminal string.
+
+    Known terminals pass through; anything else (including hostile
+    control characters or megabyte strings) becomes "unknown". Use at
+    every boundary where the terminal leaves the process.
+    """
+    return terminal if terminal in _KNOWN_TERMINALS else "unknown"
 
 # How long spawn waits for the first turn to prove it is alive. The
 # #994 cancellation landed ~1ms after turn start; ten seconds is
@@ -410,8 +434,9 @@ def await_first_turn_engagement(host, session_id, turn_id, *,
     - ``"done"`` -- the turn completed inside the window (a fast prompt
       that finished); terminal is "completed".
     - ``"dead"`` -- the turn reached a dead terminal (cancelled /
-      interrupted / failed) inside the window, before the agent could
-      engage. The caller must treat the spawn as failed
+      interrupted / failed -- or an unrecognized terminal, which fails
+      closed rather than guessing) inside the window, before the agent
+      could engage. The caller must treat the spawn as failed
       (TurnStillbornError), never as a live job.
 
     ``journal`` is the method-name sequence seen (methods only, no
@@ -461,8 +486,17 @@ def await_first_turn_engagement(host, session_id, turn_id, *,
         status = "engaged"
     elif term in _FIRST_TURN_DEAD_TERMINALS:
         status = "dead"
-    else:
+    elif term == "completed":
         status = "done"
+    else:
+        # An unrecognized terminal means the turn ended in a way the
+        # client doesn't understand. Fail closed: declaring an unknown
+        # terminal a successful engagement would be guessing, and the
+        # module's contract is fail-loud on shape drift (see
+        # _require_turn). A future benign terminal fails loudly here
+        # until the client learns the vocabulary -- that is the intended
+        # behavior, not a bug.
+        status = "dead"
     return {"status": status, "terminal": term, "journal": list(seen),
             "elapsed_s": elapsed}
 
