@@ -417,7 +417,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   A per-box tail-head watermark in the store now checks
   that consecutive pulls' tail windows overlap; when they don't, the
   collect warns loudly on stderr and records the break, so a too-short
-  tail is a visible incident instead of missing evidence. (#TBD)
+  tail is a visible incident instead of missing evidence. (#1006, #1011)
 
 ### Fixed
 
