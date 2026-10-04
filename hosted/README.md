@@ -129,7 +129,7 @@ it returns a `PushResult`, never sleeps, never logs).
   unmeasured, and this is the load-bearing input to the
   inline-vs-outbox decision (#990).
 
-Tested by `test_push_sender.py` (30 tests, neutering-verified
+Tested by `test_push_sender.py` (43 tests, neutering-verified
 non-vacuous) against a stub push service; the stub speaks plain HTTP on
 localhost — the difference from production is documented and compensated
 by a dedicated test pinning the production transport's TLS policy.
