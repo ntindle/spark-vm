@@ -52,6 +52,21 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted phone-home, S4b socket lifecycle decomposed into four buildable
+  slices (#958): the plane Durable Object's remaining session logic —
+  hello/identity binding plus the generation fence, command re-drive with
+  the socket ack consume-half, ping/alarm revocation re-verify with
+  hibernation, and the DO journal sink — is now four tracked slices,
+  each sized for one build slot with harness-first acceptance criteria. Five
+  structural pins landed with the analysis: the DO re-derives the handshake
+  identity from the upgrade token (never trusts a carried identity); new
+  enqueues wake the DO via an internal RPC, never a poll timer; the socket
+  ack path shares one idempotent update with the HTTPS ack endpoint so the
+  two cannot drift; the journal sink is a new D1 table (the wire spec's
+  "fleet event journal" named a sink that doesn't exist on the plane); and
+  the hibernation-API verification is the ping/alarm slice's entry ticket,
+  not a deferrable.
+
 - Hosted phone-approval push, send path built (#989): the send-path half
   of the push sender is built — a stdlib-only transport that POSTs the
   encrypted page to the push service with per-send VAPID credentials,
