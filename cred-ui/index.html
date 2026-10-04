@@ -62,6 +62,20 @@
 <div class="sub">swapd store on spark-vm &middot; values are never displayed
   &middot; <span id="refresh-note">auto-refreshing…</span></div>
 
+<div class="card hidden" id="unlock-card">
+  <h2>Unlock</h2>
+  <p class="sub">Paste the per-install API token once per browser session.
+    On spark-vm: <span class="mono">python3 ~/.local/share/spark-vm/cred-ui/cred-ui.py --print-token</span></p>
+  <label for="f-token">API token</label>
+  <input id="f-token" type="password" autocomplete="off" placeholder="paste token">
+  <button class="primary" id="btn-unlock">Unlock</button>
+  <div id="unlock-status"></div>
+</div>
+<div class="card" id="lock-row" style="display:flex;justify-content:space-between;align-items:center">
+  <span class="sub" id="lock-state">unlocked</span>
+  <button class="small" id="btn-lock">Lock</button>
+</div>
+
 <div class="card">
   <h2>Add / update credential</h2>
   <label for="f-name">Name</label>
@@ -112,10 +126,73 @@ placementSel.addEventListener('change', syncArg); syncArg();
 function esc(s) { return String(s).replace(/[&<>"]/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
+// Per-install API token (issue #86): kept in sessionStorage — a tab's
+// lifetime, never localStorage, never a cookie, never a URL. Every API
+// call routes through apiFetch so the token rides along; a 401 means the
+// token is wrong or was rotated server-side, so we drop it and show the
+// unlock card instead of hammering the server.
+let apiToken = sessionStorage.getItem('cred-ui-token') || '';
+
+function setLocked(locked, note) {
+  $('unlock-card').classList.toggle('hidden', !locked);
+  $('lock-row').style.display = locked ? 'none' : 'flex';
+  if (note !== undefined) $('unlock-status').textContent = note;
+  $('refresh-note').textContent = locked ? 'locked — paste the API token' : 'auto-refreshing…';
+  // A locked UI must not keep showing the credential names/placements
+  // from before the lock (the token gate exists to keep them from local
+  // eyes); the next successful refresh() re-renders the list.
+  if (locked) $('list').innerHTML = '<p class="sub">locked</p>';
+}
+
+function requireToken() {
+  if (!apiToken) { setLocked(true); return false; }
+  return true;
+}
+
+async function apiFetch(path, opts) {
+  opts = opts || {};
+  const headers = Object.assign({'X-Cred-UI': '1'}, opts.headers || {});
+  if (apiToken) headers['Authorization'] = 'Bearer ' + apiToken;
+  const r = await fetch(path, Object.assign({}, opts, {headers, cache: 'no-store'}));
+  if (r.status === 401) {
+    apiToken = '';
+    sessionStorage.removeItem('cred-ui-token');
+    setLocked(true, 'token rejected — paste the current token');
+    throw new Error('HTTP 401');
+  }
+  return r;
+}
+
+$('btn-unlock').addEventListener('click', async () => {
+  const t = $('f-token').value.trim();
+  $('f-token').value = '';
+  if (!t) { $('unlock-status').textContent = 'paste the token first'; return; }
+  apiToken = t;
+  try {
+    const r = await apiFetch('/api/creds');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    sessionStorage.setItem('cred-ui-token', t);
+    setLocked(false);
+    $('lock-state').textContent = 'unlocked';
+    refresh();
+  } catch (e) {
+    apiToken = '';
+    $('unlock-status').textContent = 'token rejected — ' + e;
+  }
+});
+
+$('btn-lock').addEventListener('click', () => {
+  apiToken = '';
+  sessionStorage.removeItem('cred-ui-token');
+  $('lock-state').textContent = 'locked';
+  setLocked(true);
+});
+
 let lastOk = 0;
 async function refresh() {
+  if (!requireToken()) return;
   try {
-    const r = await fetch('/api/creds', {cache: 'no-store'});
+    const r = await apiFetch('/api/creds');
     // A non-OK status (e.g. the store is damaged or unreadable) must NOT
     // render as an empty list: "none stored" would lie to the operator
     // about credentials that still exist on disk (issue #672).
@@ -125,6 +202,13 @@ async function refresh() {
     lastOk = Date.now();
     $('refresh-note').textContent = 'updated just now';
   } catch (e) {
+    // A 401 already showed the unlock card (apiFetch clears the token
+    // and re-locks) — don't also paint the store-damaged message; the
+    // token is just missing or was rotated server-side.
+    if (!apiToken) {
+      $('refresh-note').textContent = 'locked — paste the API token';
+      return;
+    }
     // render()'s typing guard applies here too: a failed poll must not
     // rebuild the table mid-typing and destroy the in-flight "add host"
     // input — the error text only replaces the list when no input inside
@@ -163,18 +247,19 @@ function render(creds) {
 $('list').addEventListener('click', async ev => {
   const t = ev.target;
   const setStatus = m => { $('status').textContent = m; };
+  try {
   if (t.dataset.del) {
     if (!confirm('Delete credential "' + t.dataset.del + '" (value + registration)?')) return;
-    const r = await fetch('/api/delete', {method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-Cred-UI': '1'},
+    const r = await apiFetch('/api/delete', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: t.dataset.del})});
     const d = await r.json();
     setStatus(d.ok ? 'deleted ' + t.dataset.del : 'error: ' + (d.error || r.status));
     refresh();
   } else if (t.dataset.delHost) {
     const [name, host] = t.dataset.delHost.split('|');
-    await fetch('/api/host/remove', {method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-Cred-UI': '1'},
+    await apiFetch('/api/host/remove', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name, host})});
     refresh();
   } else if (t.dataset.addBtn) {
@@ -182,12 +267,17 @@ $('list').addEventListener('click', async ev => {
     const input = document.querySelector('input[data-add-host="' + CSS.escape(name) + '"]');
     const host = (input.value || '').trim();
     if (!host) return;
-    const r = await fetch('/api/host/add', {method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-Cred-UI': '1'},
+    const r = await apiFetch('/api/host/add', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name, host})});
     const d = await r.json();
     if (!d.ok) setStatus('error: ' + (d.error || r.status));
     refresh();
+  }
+  } catch (e) {
+    // apiFetch throws on 401 (unlock card already shown, token cleared);
+    // surface anything else instead of an unhandled rejection.
+    if (apiToken) setStatus('request failed: ' + e);
   }
 });
 
@@ -203,8 +293,8 @@ $('btn-save').addEventListener('click', async () => {
   };
   $('status').textContent = 'saving…';
   try {
-    const r = await fetch('/api/set', {method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-Cred-UI': '1'}, body: JSON.stringify(body)});
+    const r = await apiFetch('/api/set', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
     const d = await r.json();
     if (d.ok) {
       $('status').textContent = 'saved ' + d.name;
@@ -225,6 +315,11 @@ setInterval(() => {
   }
 }, 1000);
 setInterval(refresh, 3000);
+// Initial state: no token in sessionStorage means the unlock card shows
+// first (refresh() would no-op through requireToken()).
+setLocked(!apiToken);
+if (apiToken) $('lock-state').textContent = 'unlocked';
+else $('lock-state').textContent = 'locked';
 refresh();
 </script>
 </body>

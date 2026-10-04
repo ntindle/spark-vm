@@ -30,13 +30,24 @@ Security properties (keep them if you touch this file):
   - Every response carries Cache-Control: no-store.
   - CSRF: the Host header must be this UI's own address, and POSTs must
     carry the X-Cred-UI: 1 header (index.html sends it on every POST).
+  - API token (issue #86): every /api/* endpoint additionally requires a
+    per-install bearer token (Authorization: Bearer ...) that only the
+    human knows — generated once into a 0600 file, pasted into the
+    browser once per session. Any local process can set X-Cred-UI: 1, so
+    the header alone authenticated nothing; the token closes the
+    loopback-any-process hole down to processes that can read the
+    owner's home dir (a same-uid process still can — see the honest
+    residual in the token block below).
 
 Stdlib only.
 """
 
+import hmac
 import json
 import os
 import re
+import secrets
+import stat
 import subprocess
 import sys
 import urllib.parse
@@ -121,6 +132,192 @@ ALLOWED_HOSTS = {"%s:%d" % (BIND, PORT), "localhost:%d" % PORT}
 # CSRF gate then 403s everything including index.html.
 CSRF_HEADER = "X-Cred-UI"
 CSRF_VALUE = "1"
+
+# --- API token auth (issue #86) ---
+# The CSRF gates stop malicious web pages, but any local process can set
+# X-Cred-UI: 1 — the management API authenticated nothing, so any local
+# process that could reach the loopback listener could add, list, remove,
+# and rebind every credential. Every /api/* endpoint now additionally
+# requires a per-install bearer token (issue #86's second fix option:
+# "a per-install token the human pastes once"). The token is generated
+# once (256 bits), kept in a 0600 file, and pasted into the browser once
+# per browser session (sessionStorage; never a cookie, never a URL,
+# never logged). `--print-token` shows it for the paste ceremony,
+# `--rotate-token` replaces it (restart the service afterwards).
+#
+# Honest residual: this binds the *browser session* to the human's paste.
+# It stops other-uid local processes, sandboxed agents, and containers
+# with loopback reach — but NOT a same-uid process, which can read the
+# 0600 token file just as it can already wield the NOPASSWD sudoers
+# writers (the issue's own caveat). What it ends is the endpoint
+# authenticating nothing at all. The hosted multi-tenancy identity
+# question (#281) — per-tenant session auth tied to H11's session model —
+# stays open; a stronger placement (token under swapd ownership with a
+# pinned sudoers reader — follow-up issue #964) is the next step.
+_TOKEN_FILE_ENV = "CRED_UI_TOKEN_FILE"
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+_API_TOKEN = None  # lazy: loaded once, cached (tests reset via _reset_token_cache)
+
+
+def _token_path():
+    override = os.environ.get(_TOKEN_FILE_ENV)
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".config", "cred-ui", "token")
+
+
+def _read_token_file(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def _ensure_token_parent(path):
+    """Create the token file's parent dir (and any missing ancestors)
+    with 0700 throughout. os.makedirs only honors `mode` on the leaf —
+    intermediates get 0777&~umask (0770 under umask 007) — and a
+    group-writable intermediate would trip _check_token_dir_chain on the
+    very next start, wedging a box we just provisioned."""
+    parent = os.path.dirname(path)
+    if not parent:
+        return
+    cur, missing = parent, []
+    while not os.path.isdir(cur):
+        missing.append(cur)
+        nxt = os.path.dirname(cur)
+        if nxt == cur:
+            break
+        cur = nxt
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    for d in missing:
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass  # lost a race; the chain check below is authoritative
+
+
+def _check_token_dir_chain(path):
+    """Fail closed when any ancestor directory of the token file (up to,
+    not including, $HOME) lets a non-owner replace the child entry — i.e.
+    is group/other-writable WITHOUT the sticky bit. A writable parent
+    lets a non-owner uid rename/replace the token file — or plant a
+    pre-first-start symlink to a file with a known value — and walk
+    straight through the management API. The file-mode check alone
+    cannot see this. The sticky bit (e.g. /tmp's 1777) counts as safe:
+    it restricts renames to the entry's owner regardless of the write
+    bits."""
+    home = os.path.expanduser("~")
+    d = os.path.dirname(os.path.abspath(path))
+    home_abs = os.path.abspath(home)
+    while d != home_abs and d != os.path.dirname(d):
+        try:
+            st = os.stat(d)
+        except FileNotFoundError:
+            # A missing ancestor is created 0700 by the makedirs below —
+            # nothing to check; keep checking the ancestors above it.
+            d = os.path.dirname(d)
+            continue
+        except OSError as e:
+            # An existing-but-unstatable ancestor fails closed rather
+            # than assumed safe.
+            raise RuntimeError(
+                "cannot stat token dir %s (%s); refusing to start" % (d, e))
+        mode = st.st_mode
+        if (mode & 0o022) and not (mode & stat.S_ISVTX):
+            raise RuntimeError(
+                "token dir %s is replaceable by group/other (mode %o, no "
+                "sticky bit); refusing to start — fix with: chmod go-w %s"
+                % (d, mode & 0o7777, d))
+        d = os.path.dirname(d)
+
+
+def _load_or_create_token(path=None):
+    """Return the API token, generating it on first start. Fail-closed on
+    a missing/unreadable/malformed token file or on a file other users
+    can read — a world-readable token file would hand the authenticator
+    to exactly the local processes it exists to exclude."""
+    path = path or _token_path()
+    _check_token_dir_chain(path)
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        st = None
+    except OSError as e:
+        raise RuntimeError("cannot stat token file %s: %s" % (path, e))
+    if st is not None:
+        if st.st_mode & 0o077:
+            raise RuntimeError(
+                "token file %s is readable by group/other (mode %o); "
+                "refusing to start — fix with: chmod 600 %s"
+                % (path, st.st_mode & 0o777, path))
+        try:
+            token = _read_token_file(path)
+        except OSError as e:
+            raise RuntimeError("cannot read token file %s: %s" % (path, e))
+        if not _TOKEN_RE.match(token):
+            raise RuntimeError(
+                "token file %s is empty or malformed; regenerate with "
+                "--rotate-token" % path)
+        return token
+    # First start: generate, write a COMPLETE file, then link it into
+    # place atomically — os.link fails with FileExistsError when the
+    # target exists, so a racing first-start either links first (we read
+    # the winner) or fails to link (it reads ours); nobody ever reads a
+    # half-written token file. (The old O_EXCL-direct-create shape let the
+    # loser stat+read the winner's file mid-write and fail closed
+    # spuriously.)
+    token = secrets.token_urlsafe(32)
+    _ensure_token_parent(path)
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(token + "\n")
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            pass  # lost the race; the winner's file is complete
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return _load_or_create_token(path)  # now exists, fully written
+
+
+def _rotate_token(path=None):
+    """Replace the token file atomically (0600). The running server keeps
+    the old token cached until restart — the operator restarts cred-ui
+    after rotating."""
+    path = path or _token_path()
+    token = secrets.token_urlsafe(32)
+    _ensure_token_parent(path)
+    _check_token_dir_chain(path)
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(token + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return token
+
+
+def _reset_token_cache():
+    """Test hook: drop the cached token so the next api_token() re-reads."""
+    global _API_TOKEN
+    _API_TOKEN = None
+
+
+def api_token():
+    global _API_TOKEN
+    if _API_TOKEN is None:
+        _API_TOKEN = _load_or_create_token()
+    return _API_TOKEN
 
 # --- Validation contract: single-sourced from credlib/credvalidate.py ---
 # (imported above; issue #706). The functions below are the UI's thin
@@ -337,10 +534,41 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _auth_ok(self):
+        # Per-install bearer token (issue #86). Exact "Bearer <token>"
+        # shape; anything else (missing, basic, trailing junk) is
+        # unauthenticated. compare_digest over the presented credential
+        # keeps the comparison timing-safe.
+        auth = self.headers.get("Authorization") or ""
+        if not auth.startswith("Bearer "):
+            return False
+        try:
+            return hmac.compare_digest(auth[len("Bearer "):], api_token())
+        except Exception:  # noqa: BLE001 -- fail closed, never 500 on auth
+            return False
+
+    def _check_auth(self):
+        # 401, deliberately without WWW-Authenticate: a browser basic-auth
+        # popup would be the wrong ceremony (the token is pasted, not
+        # typed into a dialog), and JSON keeps the UI's error path.
+        if not self._auth_ok():
+            self._send(401, {"error": "unauthorized"})
+            return False
+        return True
+
     def do_GET(self):
         if not self._check_csrf():
             return
         path = urllib.parse.urlparse(self.path).path
+        if path.startswith("/api/") and path != "/api/version":
+            # /api/version is public (service name + version only);
+            # index.html must stay public too (the human needs it to
+            # paste the token). Everything else under /api/ is the
+            # management API: /api/creds lists names, placements, and
+            # hosts — recon for a local attacker — so it is gated like
+            # the state-changing endpoints.
+            if not self._check_auth():
+                return
         if path == "/":
             try:
                 with open(_INDEX_PATH, "rb") as f:
@@ -361,6 +589,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._check_csrf():
+            return
+        # Auth before the body read: an unauthenticated client must not
+        # make us read (or time out on) a request body.
+        if not self._check_auth():
             return
         path = urllib.parse.urlparse(self.path).path
         data = self._read_json()
@@ -494,7 +726,22 @@ def api_host(data, add):
 
 def main():
     import os
+    if "--print-token" in sys.argv[1:]:
+        # The paste ceremony: shows the per-install API token once so the
+        # human can paste it into the browser. Run on the box; never log
+        # it, never send it anywhere but the browser's sessionStorage.
+        print(api_token(), flush=True)
+        return
+    if "--rotate-token" in sys.argv[1:]:
+        _rotate_token()
+        _reset_token_cache()
+        print("token rotated; restart cred-ui for the new token to take "
+              "effect", flush=True)
+        return
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    # Fail fast at startup (not on the first request) if the token file
+    # is missing-and-uncreatable, unreadable, or malformed.
+    api_token()
     # Issue #471: bounded thread pool — ThreadingHTTPServer spawns one
     # thread per connection, so a local peer slow-lorising the UI could
     # grow the pool without bound. Over-cap connections are closed

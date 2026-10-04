@@ -36,8 +36,16 @@ cred_ui = _load_cred_ui()
 
 
 @pytest.fixture()
-def server(monkeypatch):
-    """cred-ui Handler on an ephemeral port with ALLOWED_HOSTS patched."""
+def server(monkeypatch, tmp_path):
+    """cred-ui Handler on an ephemeral port with ALLOWED_HOSTS patched.
+
+    CRED_UI_TOKEN_FILE points at a tmp path so the token machinery never
+    touches the real ~/.config/cred-ui/token; the fixture yields
+    (port, token) so tests can send the Authorization header (issue #86).
+    """
+    monkeypatch.setenv("CRED_UI_TOKEN_FILE", str(tmp_path / "token"))
+    cred_ui._reset_token_cache()
+    token = cred_ui.api_token()
     srv = cred_ui.BoundedThreadingHTTPServer(("127.0.0.1", 0), cred_ui.Handler)
     port = srv.server_address[1]
     monkeypatch.setattr(
@@ -47,10 +55,15 @@ def server(monkeypatch):
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     try:
-        yield port
+        yield port, token
     finally:
         srv.shutdown()
         srv.server_close()
+        cred_ui._reset_token_cache()
+
+
+def _authz(token):
+    return {"Authorization": "Bearer " + token}
 
 
 def _req(port, method, path, body=None, headers=None):
@@ -63,10 +76,12 @@ def _req(port, method, path, body=None, headers=None):
     return resp.status, dict(resp.getheaders()), payload
 
 
-def _post(port, path, body, csrf=True):
+def _post(port, path, body, csrf=True, token=None):
     headers = {"Content-Type": "application/json"}
     if csrf:
         headers["X-Cred-UI"] = "1"
+    if token is not None:
+        headers["Authorization"] = "Bearer " + token
     return _req(port, "POST", path, body=body, headers=headers)
 
 
@@ -74,18 +89,21 @@ def _post(port, path, body, csrf=True):
 
 
 def test_index_requires_own_host_header(server):
-    status, _, _ = _req(server, "GET", "/", headers={"Host": "evil.example"})
+    port, _ = server
+    status, _, _ = _req(port, "GET", "/", headers={"Host": "evil.example"})
     assert status == 403
-    status, _, _ = _req(server, "GET", "/")
+    status, _, _ = _req(port, "GET", "/")
     assert status == 200
 
 
 def test_post_requires_custom_header(server):
-    status, _, _ = _post(server, "/api/delete", {"name": "x"}, csrf=False)
+    port, token = server
+    status, _, _ = _post(port, "/api/delete", {"name": "x"}, csrf=False,
+                         token=token)
     assert status == 403
     # Wrong Host fails even with the custom header present.
     status, _, _ = _req(
-        server, "POST", "/api/delete",
+        port, "POST", "/api/delete",
         body={"name": "x"},
         headers={"Host": "evil.example", "Content-Type": "application/json",
                  "X-Cred-UI": "1"},
@@ -277,9 +295,11 @@ def test_snapshot_renders_placement_only(monkeypatch):
 
 
 def test_creds_read_failure_is_generic(server, monkeypatch):
+    port, token = server
     monkeypatch.setattr(cred_ui, "read_registry",
                         lambda: (_ for _ in ()).throw(OSError("/home/swapd/x")))
-    status, _, payload = _req(server, "GET", "/api/creds")
+    status, _, payload = _req(port, "GET", "/api/creds",
+                              headers=_authz(token))
     assert status == 500
     body = json.loads(payload)
     assert body == {"error": "read failed"}
@@ -364,7 +384,9 @@ def test_creds_corrupt_registry_is_generic_500(server, monkeypatch):
     never a 200 whose `registered: false` lies to the human."""
     monkeypatch.setattr(
         cred_ui, "run", lambda argv, inp=None: (0, '{"gh": {"token": ', ""))
-    status, _, payload = _req(server, "GET", "/api/creds")
+    port, token = server
+    status, _, payload = _req(port, "GET", "/api/creds",
+                              headers=_authz(token))
     assert status == 500
     body = json.loads(payload)
     assert body == {"error": "read failed"}
@@ -412,15 +434,17 @@ def test_282_stalled_body_releases_handler_thread(server, monkeypatch):
     monkeypatch.setattr(cred_ui.Handler, "timeout", 1)
     baseline = threading.active_count()
 
-    s = socket.create_connection(("127.0.0.1", server), timeout=10)
+    port, token = server
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
     try:
         s.sendall(
             ("POST /api/set HTTP/1.1\r\n"
              "Host: 127.0.0.1:%d\r\n"
              "X-Cred-UI: 1\r\n"
+             "Authorization: Bearer %s\r\n"
              "Content-Type: application/json\r\n"
              "Content-Length: 1000000\r\n"
-             "\r\n" % server).encode()
+             "\r\n" % (port, token)).encode()
         )
         # Stall: send no body bytes at all.
         s.settimeout(10)

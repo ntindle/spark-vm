@@ -293,6 +293,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   unchanged (loud failure, freeze-counter accounting). (#962)
 
 ### Security
+- The credential web UI now requires a per-install API token on every
+  management endpoint (#86): the previous `X-Cred-UI: 1` header is not a
+  secret — any local process could set it and add, list, remove, or
+  rebind every credential. The token is generated once into a
+  owner-only file, pasted into the browser once per session, and compared
+  in constant time; the page never stores it in a cookie or URL. Show it
+  with `cred-ui.py --print-token`, replace it with
+  `cred-ui.py --rotate-token`. (#[TBD])
 - The proxy's refresh/navigation-target scan now matches past literal newlines:
   a line break inside a meta-refresh `url=` value is legal HTML — browsers
   strip it and navigate to the joined URL — so a secret smuggled after the

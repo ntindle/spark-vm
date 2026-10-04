@@ -33,6 +33,25 @@ ssh -L 18740:127.0.0.1:18740 ntindle@spark-vm
 
 Then open `http://127.0.0.1:18740` in a browser.
 
+## First run: the API token
+
+Every `/api/*` endpoint requires a per-install bearer token — the
+`X-Cred-UI: 1` header alone authenticates nothing (any local process can
+set a header). The token is generated on the service's first start into
+`~/.config/cred-ui/token` (mode `0600`); the server refuses to start if
+that file is missing-and-uncreatable, malformed, or readable by anyone
+but the owner.
+
+```bash
+# on the box: show the token once, then paste it into the browser
+python3 ~/.local/share/spark-vm/cred-ui/cred-ui.py --print-token
+```
+
+Paste it once per browser session (the page keeps it in
+`sessionStorage` — a tab's lifetime, never a cookie, never a URL). To
+replace it: `cred-ui.py --rotate-token`, then
+`systemctl --user restart cred-ui`, then paste the new one.
+
 ## What it does
 
 - **Add / update**: name, secret value, entry (default `access_token`),
@@ -64,4 +83,9 @@ Then open `http://127.0.0.1:18740` in a browser.
   bodies. `Cache-Control: no-store` on everything.
 - Binding is 127.0.0.1-only by construction (`BIND` in `cred-ui.py`).
   Do not change it to `0.0.0.0` — the tunnel is the access control.
+- The API token authenticates the browser session (the human's paste),
+  not the machine: it stops other-uid local processes and sandboxed
+  agents with loopback reach, but a same-uid process can read the token
+  file — and already holds equivalent power through the NOPASSWD sudoers
+  writers. Hosted multi-tenancy still needs real per-tenant session auth.
 - Stdlib only, no dependencies.
