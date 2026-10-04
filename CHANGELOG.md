@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Control-plane API reference, fix-up (#985): the consolidated endpoint
+  reference now documents the box-filing endpoint `POST
+  /v1/boxes/{box_id}/approvals/file` (box token, own box only, write-only
+  `201/200 {ok, aid, deduped}` — the phone-approval upload leg), notes that
+  recording a decision enqueues an `approval_decision` command so the box
+  learns over the command fetch, and drops the stale "plane implementation
+  is the next step" claims now that the approvals chain shipped. The
+  reference is pinned to the current main.
+
 - Hosted phone-approval push, payload scrub pinned (#980): the plane-side
   construction rule for push payloads — every box-controlled string is
   control-character stripped (C0/C1, so terminal-injection and ANSI
