@@ -557,6 +557,36 @@ def test_install_stages_script_and_units(env):
     assert lines and lines[-1]["result"] == "installed"
 
 
+def test_install_hardens_state_dir_mode(env):
+    # #951: install must explicitly chmod 700 the state dir — privileged
+    # state (snapshots, blocked.state, the audit log) must not depend on
+    # the install-time umask. Pre-create the dir loose; install must
+    # tighten it. (Vacuity: without the chmod the dir stays 0755 and this
+    # fails.)
+    env["state"].chmod(0o755)
+    r = run_bash("./deploy/toolset-update.sh install", env_extra=env["env"])
+    assert r.returncode == 0, r.stderr
+    assert stat.S_IMODE(env["state"].stat().st_mode) == 0o700
+
+
+def test_install_refuses_root_state_dir(env):
+    # chmod 700 on a misconfigured TOOLSET_STATE_DIR resolving to / would
+    # break the box — install must refuse it loudly instead of proceeding.
+    # All root-equivalent spellings must be refused: the guard strips
+    # trailing slashes, collapses leading slash runs (on Linux `//` is
+    # `/`), and resolves `.`/`..` components with readlink -m — so `//.`,
+    # `/./.`, and `/a/../` are root too, not just `/`.
+    # (Vacuity: without the guard none of these fail with "refusing".)
+    for rootish in ("/", "//", "///", "/.", "/./", "/../", "/./.",
+                    "//.", "//..", "///.", "//./", "//../", "//./.",
+                    "/a/../", "/a/b/../../", "/home/x/../.."):
+        e = dict(env["env"])
+        e["TOOLSET_STATE_DIR"] = rootish
+        r = run_bash("./deploy/toolset-update.sh install", env_extra=e)
+        assert r.returncode != 0, rootish
+        assert "refusing" in r.stderr, (rootish, r.stderr)
+
+
 def test_uninstall_removes_units(env):
     run_bash("./deploy/toolset-update.sh install", env_extra=env["env"])
     r = run_bash("./deploy/toolset-update.sh uninstall", env_extra=env["env"])
@@ -2074,8 +2104,91 @@ def test_run_layer_blocked_skip_does_not_rerun(env):
     assert "empty-key-not-blocked" in r.stdout, r.stdout  # empty key never matches
 
 
+def test_layer_key_passes_valid_pins_and_collapses_invalid(env):
+    # #951: pin-driven keys are validated through _pin_ok before they can
+    # reach the audit JSON. Valid pins pass through unchanged (a pin bump
+    # still unblocks implicitly); a present-but-invalid pin becomes the
+    # fixed `invalid-pin` sentinel; a missing pin stays empty (the empty
+    # key keeps _blocked_is's never-blocked semantics).
+    e = dict(env["env"])
+    r = source_and('_layer_key cua-driver; echo; _layer_key playwright; echo; '
+                   '_layer_key os-security; echo; _layer_key apt', env_extra=e)
+    assert r.stdout.splitlines() == ["0.28.2", "1.62.0", "unattended-config",
+                                     "converge"], r.stdout
+    (env["state"] / "self_update_pins.conf").write_text(
+        'cua-driver = 1.2";$(touch /tmp/toolset-key-pwned)"\n'
+        'playwright = 2.0";$(touch /tmp/toolset-key-pwned2)"\n')
+    r = source_and('echo "C=[$(_layer_key cua-driver)]"; '
+                   'echo "P=[$(_layer_key playwright)]"', env_extra=e)
+    assert "C=[invalid-pin]" in r.stdout, r.stdout
+    assert "P=[invalid-pin]" in r.stdout, r.stdout  # both pin-driven layers
+    assert not os.path.exists("/tmp/toolset-key-pwned")  # the pin is never eval'd
+    assert not os.path.exists("/tmp/toolset-key-pwned2")
+    (env["state"] / "self_update_pins.conf").write_text('# no pins here\n')
+    r = source_and('k="$(_layer_key cua-driver)"; echo "KEY=[$k]"', env_extra=e)
+    assert "KEY=[]" in r.stdout, r.stdout  # empty stays empty
+
+
+def test_run_layer_hostile_pin_keeps_audit_valid_json(env):
+    # #951 end-to-end: a JSON-breaking pin on a failing pin-driven layer
+    # must still produce a parseable audit log — the recorded key is the
+    # sentinel, not the raw pin. (Vacuity: with the raw pin interpolated,
+    # the audit line parses with an injected extra field and key != the
+    # sentinel, so the assertions below fail on the old code.)
+    e = _snapshot_env(env)
+    (env["state"] / "self_update_pins.conf").write_text(
+        'cua-driver = 1.2", "injected":"yes\n')
+    code = (
+        'snap="$(_snapshot_run)"; '
+        'stub_fail() { return 1; }; '
+        '_run_layer cua-driver 0 "$snap" stub_fail || echo "rc=$?"; '
+    )
+    r = source_and(code, env_extra=e)
+    assert "rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
+    lines = audit_lines(env)  # raises if any audit line is not valid JSON
+    rolled = [l for l in lines if l.get("result") == "rolled-back"]
+    assert rolled and rolled[0]["layer"] == "cua-driver", lines
+    assert rolled[0]["key"] == "invalid-pin", lines
+    raw = (env["state"] / "audit.log").read_text()
+    assert "injected" not in raw, raw  # the hostile pin reached neither JSON nor log
+    blocked_state = (env["state"] / "blocked.state").read_text()
+    assert "cua-driver\tinvalid-pin\t" in blocked_state, blocked_state
+
+
+def test_invalid_pin_blocked_then_fixed_pin_unblocks(env):
+    # #951: the sentinel composes with the blocked contract — a layer that
+    # fails on a hostile pin is skipped while the pin stays hostile, and
+    # fixing the pin unblocks implicitly (exactly like a pin bump).
+    e = _snapshot_env(env)
+    pins = env["state"] / "self_update_pins.conf"
+    pins.write_text('cua-driver = 1.2", "injected":"yes\n')
+    code = (
+        'snap="$(_snapshot_run)"; '
+        'stub_fail() { return 1; }; '
+        '_run_layer cua-driver 0 "$snap" stub_fail || echo "rc=$?"; '
+        # second run, pin still hostile: the layer must skip as blocked
+        # under the sentinel, never re-running the failing stub
+        'stub_never() { echo "STUB-RAN"; return 0; }; '
+        '_run_layer cua-driver 0 "$snap" stub_never; echo "rc2=$?"; '
+    )
+    r = source_and(code, env_extra=e)
+    assert "rc=1" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "rc2=0" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "STUB-RAN" not in r.stdout, r.stdout
+    # fix the pin: the key changes, so the layer runs again
+    pins.write_text('cua-driver = 0.28.2\n')
+    code = (
+        'snap="$(_snapshot_run)"; '
+        'stub_ok() { echo "STUB-RAN"; return 0; }; '
+        '_run_layer cua-driver 0 "$snap" stub_ok; echo "rc3=$?"; '
+    )
+    r = source_and(code, env_extra=e)
+    assert "rc3=0" in r.stdout.splitlines(), r.stdout + r.stderr
+    assert "STUB-RAN" in r.stdout, r.stdout
+
+
 def test_run_layer_snapshot_failure_refuses_without_changing(env):
-    # SNAPSHOT_DIR unusable (a file, not a dir): the layer must refuse
+    # SNAPSHOT_DIR unusable (a nonexistent dir): the layer must refuse
     # BEFORE changing anything — no change without a rollback target.
     e = _snapshot_env(env)
     code = (

@@ -283,7 +283,7 @@ repeated failure" half of #532's Recovery section.
 
 - Before any layer changes the box, `update` takes one **pre-update
   snapshot** of everything the run will touch, under
-  `$TOOLSET_STATE_DIR/snapshots/<UTC-timestamp>-<pid>/` with a per-layer
+  `$TOOLSET_STATE_DIR/snapshots/<UTC-timestamp>-<pid>-<random>/` with a per-layer
   `MANIFEST` (`FILE`/`ABSENT` lines mirroring
   `deploy/auto-deploy.sh`'s pattern, plus `STATE` lines carrying a
   pre-update package-version inventory). A failed snapshot fails the run
