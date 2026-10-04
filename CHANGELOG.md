@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   (a double-tap replays, a conflicting tap is rejected, an expired approval
   reads as expired, never pending) and the decision travels to the box over
   the durable command channel. All box-controlled text is HTML-escaped with
-  control characters neutralized before rendering. (#TBD)
+  control characters neutralized before rendering. (#963)
 - The hosted control plane gained a box-authenticated filing endpoint (#952):
   a box can now create its own action-approval records (`POST
   /v1/boxes/{id}/approvals/file`, scoped to the box's own id, accepting the
