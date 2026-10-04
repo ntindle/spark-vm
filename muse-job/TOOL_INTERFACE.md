@@ -91,9 +91,9 @@ close(slug)   # kill, remove worktree, delete branch, archive (terminal)
 
 | Spec | Reality | Adapter note |
 |---|---|---|
-| `spawn` | `muse-job spawn` → tmux + `muse --yolo "$(cat prompt.md)"` | CLI already async-ish (returns after UUID discovery ~5s); library returns the dict |
-| `steer` | tmux keystroke injection (separate text / Enter, verified) | encapsulated in `_steer`; fragility hidden behind `delivered` |
-| `interrupt` | `tmux send-keys C-c` | new tiny addition |
+| `spawn` | `muse-job spawn` → MSP `muse serve` session by default (`--tmux` opts into tmux + `muse --yolo "$(cat prompt.md)"`) | CLI already async-ish (returns after session start); library returns the dict |
+| `steer` | MSP `turn/steer` (or tmux keystroke injection on the legacy path: separate text / Enter, verified) | encapsulated in `_steer`; fragility hidden behind `delivered` |
+| `interrupt` | MSP `turn/interrupt` (or `tmux send-keys C-c` on the legacy path) | new tiny addition |
 | `status`/`list_jobs`/`log` | `muse-job status --json` / `list --json` / hook event files | direct JSON parsing |
 | `wait_for_turn` | poll `~/.local/share/muse-job/events/<uuid>.jsonl` for a new record | the push-emulation; backoff 5s→60s |
 | `pending_question` | hook classifier: `BLOCKED:` → blocked, trailing `?` → question | read latest event; the ask_for_information analog |
@@ -110,9 +110,10 @@ close(slug)   # kill, remove worktree, delete branch, archive (terminal)
   speaks JSON-RPC over stdio and the initialize handshake answers, but
   post-handshake calls returned `Not initialized`; the missing step was the
   `initialized` notification (verified 2026-09-21 against muse 1.3.0). No
-  longer deferred: #228 adopts MSP as the job transport and #221's
-  `bin/msp_host.py` implements the transport + handshake. The tmux paths
-  stay until the cutover slices (#222–#227) land.
+  longer deferred: #228 adopted MSP as the job transport and #221's
+  `bin/msp_host.py` implements the transport + handshake. The cutover
+  slices (#222–#227) have landed; the tmux paths stay as an explicit
+  `--tmux` opt-in fallback.
 
 ## 6. The question channel in practice
 

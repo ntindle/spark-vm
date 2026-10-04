@@ -299,6 +299,27 @@ with a line starting `DONE:`.
 """
 
 
+# MSP transport preamble (issue #227): the same delegate conventions, but
+# the agent is driven over the Muse Session Protocol instead of living in
+# a tmux-managed TUI pane. No tmux- or pane-specific language.
+PREAMBLE_MSP = """You are running as a delegate over the Muse Session Protocol. A human
+operator reads your event stream and can steer you at any turn boundary.
+
+Do not stop to ask questions you can resolve with a reasonable default: state
+your assumption and keep going. Stop only when genuinely blocked.
+
+Job dir: {jobdir}
+Every ~30 minutes of work, append a timestamped line to PROGRESS.md in the job
+dir (what you did, what's next). If you are genuinely blocked, do BOTH:
+(1) append the question and the options you considered to QUESTIONS.md in the
+job dir, (2) end your turn with a line starting `BLOCKED:`.
+When the work is finished, write SUMMARY.md in the job dir and end your turn
+with a line starting `DONE:`.
+
+---
+"""
+
+
 def run(*argv, check=True, capture=True, timeout=120):
     p = subprocess.run(
         list(argv),
@@ -513,13 +534,27 @@ def cmd_spawn(args):
         # `worktree add -b` (branch already exists), and the except-cleanup
         # would destroy the WINNER's worktree, branch, and job dir.
         # Inside the lock the loser fails fast at the exists check.
-        _spawn(slug, args)
+        # MSP is the default transport (issue #228: muse-job v2); --tmux
+        # opts back into the legacy TUI-pane path.
+        # getattr: older callers/tests build the Namespace without --tmux.
+        if getattr(args, "tmux", False):
+            _spawn(slug, args)
+        else:
+            _spawn_msp(slug, args)
 
     with_lock(slug, go)
     return 0
 
 
-def _spawn(slug, args):
+def _spawn_prepare(slug, args, preamble, tmux_name):
+    """Shared spawn prologue for both transports (tmux and MSP).
+
+    Clone/fetch, worktree, secret-scanned prompt.md, job dir + job.json.
+    Returns (job, work, jd); the caller launches the runtime (tmux pane or
+    MSP session). On failure the job dir and git state are cleaned up, same
+    as the old monolithic _spawn (BaseException so SIGTERM mid-clone also
+    cleans up).
+    """
     jd = job_dir(slug)
     if os.path.exists(jd):
         raise RuntimeError(f"job dir exists: {jd}")
@@ -573,7 +608,7 @@ def _spawn(slug, args):
         # reaches prompt.md or the TUI. The PREAMBLE is ours and carries no
         # operator text, so only the user-supplied prompt is scanned.
         require_no_secrets(prompt, "spawn prompt", args.allow_secrets)
-        full_prompt = PREAMBLE.format(jobdir=jd) + prompt
+        full_prompt = preamble.format(jobdir=jd) + prompt
         with open(os.path.join(jd, "prompt.md"), "w") as f:
             f.write(full_prompt)
         for name in ("SUMMARY.md", "QUESTIONS.md", "PROGRESS.md"):
@@ -587,7 +622,7 @@ def _spawn(slug, args):
             "branch": f"job/{slug}",
             "base": base,
             "base_sha": sha,
-            "tmux": f"mjob-{slug}",
+            "tmux": tmux_name,
             "session_uuid": None,
             "state": "active",
             "budget_hours": args.budget_hours,
@@ -620,6 +655,11 @@ def _spawn(slug, args):
             pass
         shutil.rmtree(jd, ignore_errors=True)
         raise
+    return job, work, jd
+
+
+def _spawn(slug, args):
+    job, work, jd = _spawn_prepare(slug, args, PREAMBLE, f"mjob-{slug}")
 
     if tmux_alive(slug):
         run("tmux", "kill-session", "-t", f"mjob-{slug}", check=False)
@@ -1316,6 +1356,9 @@ def cmd_steer(args):
     # Refuse before the per-slug lock is even taken -- no partial state
     # (no steer tmp file, no TUI paste) exists on the refusal path.
     require_no_secrets(args.message, "steer message", args.allow_secrets)
+    job = load_job(args.slug)
+    if _msp_transport(job):
+        return _msp_steer(job, args)
 
     def go():
         ok = _steer(args.slug, args.message)
@@ -2182,6 +2225,8 @@ def _safe_hhmm(ts):
 
 def cmd_status(args):
     job = load_job(args.slug)
+    if _msp_transport(job):
+        return _msp_status(job, args.slug, args)
     st = job_status(job, args.slug)
     if args.json:
         print(json.dumps(st, indent=2, default=str))
@@ -2234,6 +2279,7 @@ def cmd_list(args):
                     out.append({
                         "slug": slug,
                         "state": job.get("state"),
+                        "transport": job.get("transport") or "tmux",
                         "tmux_alive": tmux_alive(slug),
                         "session_uuid": job.get("session_uuid"),
                         # Sanitized like job_status (issue #3): a non-numeric
@@ -2248,11 +2294,17 @@ def cmd_list(args):
     else:
         for j in out:
             # Issue #23 B6: state comes from agent-writable job.json -- sanitize.
-            print(f"{j['slug']}: {_clean_text(j['state'])} tmux={'up' if j['tmux_alive'] else 'down'} {j['elapsed_h']}h")
+            print(f"{j['slug']}: {_clean_text(j['state'])} {_clean_text(j.get('transport') or 'tmux')} tmux={'up' if j['tmux_alive'] else 'down'} {j['elapsed_h']}h")
     return 0
 
 
 def cmd_log(args):
+    try:
+        job = load_job(args.slug) if os.path.isfile(job_json_path(args.slug)) else None
+    except Exception:
+        job = None
+    if job is not None and _msp_transport(job):
+        return _msp_log(args)
     if not tmux_alive(args.slug):
         raise RuntimeError("tmux session not alive")
     n = max(1, args.n)
@@ -2427,6 +2479,13 @@ def _kill_process_tree(slug):
 
 
 def cmd_kill(args):
+    # MSP jobs have no tmux pane or process tree: session/delete + state.
+    try:
+        job = load_job(args.slug) if os.path.isfile(job_json_path(args.slug)) else None
+    except Exception:
+        job = None
+    if job is not None and _msp_transport(job):
+        return _msp_kill(args)
     # Issue #12 L4: kill the session AND reap the pane process trees —
     # detached grandchildren must not survive the kill.
     leaked = _kill_process_tree(args.slug)
@@ -2549,6 +2608,8 @@ def _recover_trust_prompt(slug):
 
 def cmd_resume(args, _from_watch=False):
     job = load_job(args.slug)
+    if _msp_transport(job):
+        return _msp_resume(args, _from_watch)
     if tmux_alive(args.slug):
         # QA review: a live session means the job is running. A stale
         # "killed" record -- reachable because kill's session-kill runs
@@ -2664,9 +2725,14 @@ def cmd_close(args):
 
 def _close(slug):
     job = load_job(slug)
-    # Issue #12 L4: same tree-reap as cmd_kill — closing a job must not
-    # leave detached grandchildren running against the removed worktree.
-    _kill_process_tree(slug)
+    if _msp_transport(job):
+        # MSP jobs have no pane or process tree: delete the serve session,
+        # then run the shared archive/remove-worktree flow below.
+        _msp_close_runtime(slug, job)
+    else:
+        # Issue #12 L4: same tree-reap as cmd_kill — closing a job must not
+        # leave detached grandchildren running against the removed worktree.
+        _kill_process_tree(slug)
     # Destructive git inputs re-derived from the slug, never from the
     # agent-writable job.json (issue #11): a recorded branch="main" must not
     # reach `git branch -D`, nor a recorded worktree pointing at another
@@ -2713,6 +2779,17 @@ def cmd_watch(args):
         except Exception:
             return
         if job.get("state") not in ("active", "blocked"):
+            return
+        if _msp_transport(job):
+            # MSP jobs poll the event stream instead of probing a tmux
+            # pane; the recovery ladder replaces the resume-banner logic.
+            # Never let an MSP exception escape the pass (the tmux path
+            # below is wrapped the same way by the caller).
+            try:
+                _watch_msp_job(slug, job, events, time.time())
+            except Exception as e:
+                events.append({"job": slug, "signal": "needs-attention",
+                               "detail": f"MSP watch pass raised: {e}"})
             return
         st = job_status(job, slug)
         now = time.time()
@@ -2957,6 +3034,527 @@ def cmd_watch(args):
     return 0
 
 
+# === MSP transport (issue #227: muse-job v2) ==============================
+#
+# muse-job v2 drives jobs over the Muse Session Protocol (MSP) -- an NDJSON
+# JSON-RPC 2.0 stream to `muse serve` -- instead of scraping a TUI inside a
+# tmux pane. MSP is the default transport; `--tmux` opts back into the
+# legacy TUI-pane path. A job records its transport in job.json
+# ("transport": "msp" | "tmux", absent = tmux for legacy records) and
+# every subcommand branches on the record.
+#
+# Module map (all live beside this script, deployed together per the README
+# deploy map): msp_host (transport+handshake), msp_session (session
+# lifecycle), msp_turn (turn steering), msp_events (notification -> job
+# state view), msp_recovery (dead-turn recovery ladder), msp_approval
+# (blocking prompts and approvals, issue #225).
+#
+# Security: the MSP event stream can carry real secrets in tool results and
+# transcripts. Nothing in this section prints or logs transcript text --
+# operator surfaces (status/log/watch) render only the redacted JobSignal
+# stream (structural facts, never free text). The serve child's stderr is
+# logged to a 0o600 file inside the job dir (msp_host's doing).
+
+_MSP_IMPORTS = None
+
+
+def _msp_imports():
+    """Import the msp_* sibling modules next to this script.
+
+    Raises RuntimeError with a clear message when the modules were not
+    deployed alongside muse-job (the README deploy map lists them)."""
+    global _MSP_IMPORTS
+    if _MSP_IMPORTS is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        try:
+            import msp_host
+            import msp_session
+            import msp_turn
+            import msp_events
+            import msp_recovery
+        except ImportError as e:
+            raise RuntimeError(
+                "MSP transport needs msp_host/session/turn/events/recovery.py "
+                f"deployed beside muse-job: {e}")
+        _MSP_IMPORTS = (msp_host, msp_session, msp_turn, msp_events,
+                        msp_recovery)
+    return _MSP_IMPORTS
+
+
+def _msp_transport(job):
+    """True when the job record says MSP. Absent transport = tmux (legacy)."""
+    return (job.get("transport") or "tmux") == "msp"
+
+
+def _msp_require_sid(job, slug):
+    sid = job.get("session_uuid")
+    if not sid:
+        raise RuntimeError(f"job {slug}: no MSP session id recorded; "
+                           "cannot drive this job")
+    return sid
+
+
+def _msp_host_for(slug):
+    """Open an MSPHost on `muse serve` for one job. Caller must close().
+
+    Issue #212: MUSE_NO_AUTO_UPDATE=1 -- the serve host must not self-update
+    mid-job; an in-place binary swap would desync the protocol mid-turn."""
+    msp_host, _, _, _, _ = _msp_imports()
+    os.environ["MUSE_NO_AUTO_UPDATE"] = "1"
+    host = msp_host.MSPHost(
+        ["muse", "serve"],
+        client_name="muse_job",
+        log_path=os.path.join(job_dir(slug), "tmp", "msp-serve.log"),
+    )
+    host.open()
+    return host
+
+
+def _msp_call(slug, job, fn, pre_resume=True):
+    """Run fn(host) against a fresh serve connection; always close it.
+
+    A fresh `muse serve` host loads no sessions, so the job's recorded
+    session is resumed first -- without this, view/subscribe and turn
+    calls fail with "session is not loaded on this host". Resume on a
+    fresh host is idempotent (nothing is loaded yet). pre_resume=False
+    skips the resume for callers that manage the session lifecycle
+    themselves (the resume command's gone-session fallback).
+    """
+    _, msp_session, _, _, _ = _msp_imports()
+    host = _msp_host_for(slug)
+    try:
+        if pre_resume:
+            sid = _msp_require_sid(job, slug)
+            msp_session.resume_session(host, sid)
+        return fn(host)
+    finally:
+        try:
+            host.close()
+        except Exception:
+            pass
+
+
+# The redacted signal journal: every poll journals its replayed JobSignals
+# (kind/method/detail -- no transcript text) as JSON lines. `muse-job log`
+# renders the tail. Cap: rewrite when over _MSP_JOURNAL_CAP lines.
+_MSP_JOURNAL_CAP = 2000
+
+
+def _msp_journal_path(slug):
+    return os.path.join(job_dir(slug), "msp_signals.jsonl")
+
+
+def _msp_journal_append(slug, signals):
+    """Append JobSignals to the job's redacted journal. Never raises."""
+    try:
+        path = _msp_journal_path(slug)
+        lines = []
+        for sig in signals:
+            try:
+                lines.append(json.dumps({
+                    "t": time.time(),
+                    "kind": sig.kind,
+                    "method": sig.method,
+                    "detail": sig.detail,
+                }) + "\n")
+            except Exception:
+                continue
+        if not lines:
+            return
+        with open(path, "a") as f:
+            f.writelines(lines)
+        # Cap: count cheaply, rewrite keeping the tail.
+        try:
+            with open(path) as f:
+                n = sum(1 for _ in f)
+            if n > _MSP_JOURNAL_CAP:
+                with open(path) as f:
+                    tail = f.readlines()[-_MSP_JOURNAL_CAP:]
+                tmp = path + ".tmp"
+                with open(tmp, "w") as f:
+                    f.writelines(tail)
+                os.replace(tmp, path)
+        except OSError:
+            pass
+    except Exception:
+        pass
+
+
+def _msp_poll(host, slug, job, replay_wait=2.0):
+    """One poll_session_view with journaling; returns the JobView."""
+    _, _, _, msp_events, _ = _msp_imports()
+    sid = _msp_require_sid(job, slug)
+    seen = []
+
+    def sink(sig):
+        seen.append(sig)
+
+    view = msp_events.poll_session_view(
+        host, sid, job_dir(slug), replay_wait=replay_wait, sink=sink)
+    _msp_journal_append(slug, seen)
+    return view
+
+
+def _spawn_msp(slug, args):
+    """Spawn a job driven over MSP: worktree setup (shared), then
+    session/start + turn/start on `muse serve`."""
+    job, work, jd = _spawn_prepare(slug, args, PREAMBLE_MSP, None)
+    job["transport"] = "msp"
+    save_job(job, slug)
+    msp_host, msp_session, msp_turn, msp_events, _ = _msp_imports()
+    host = _msp_host_for(slug)
+    try:
+        session, _cursor = msp_session.start_session(
+            host, work, approval_mode=msp_session.YOLO_APPROVAL_MODE)
+        sid = session.get("sessionId") or session.get("id")
+        if not sid:
+            raise RuntimeError(f"session/start returned no session id: "
+                               f"{str(session)[:200]}")
+        with open(os.path.join(jd, "prompt.md")) as f:
+            full_prompt = f.read()
+        turn, _result = msp_turn.start_turn(host, sid, full_prompt)
+        job["session_uuid"] = sid
+        job["session_started_at"] = time.time()
+        save_job(job, slug)
+    except BaseException:
+        # Mirror the tmux path: don't leave a half-spawned job behind.
+        try:
+            host.close()
+        except Exception:
+            pass
+        raise
+    host.close()
+    print(json.dumps({"slug": slug, "transport": "msp",
+                      "session_id": job["session_uuid"], "state": "active"}))
+    return 0
+
+
+def _msp_steer(job, args):
+    """Steer an MSP job: poll the view, then steer the live turn or start a
+    fresh one when nothing is running (the turn-id match in the view is the
+    anti-cross-turn guard -- a steer never lands on the wrong turn)."""
+    slug = args.slug
+    _, _, msp_turn, _, _ = _msp_imports()
+
+    def go(host):
+        view = _msp_poll(host, slug, job)
+        sid = _msp_require_sid(job, slug)
+        if view.active_turn_id:
+            msp_turn.steer_turn(host, sid, args.message,
+                                expected_turn_id=view.active_turn_id)
+            return {"steered_turn": view.active_turn_id}
+        turn, _result = msp_turn.start_turn(host, sid, args.message)
+        return {"started_turn": (turn or {}).get("turnId")}
+    out = _msp_call(slug, job, go)
+    print(json.dumps({"slug": slug, **out}))
+    return 0
+
+
+# JobView.state -> the job.json state vocabulary (active/blocked), shared
+# by status, log, and the watch pass.
+_MSP_STATE_TO_JOB = {
+    "working": "active",
+    "idle": "active",
+    "stalled": "active",      # watchdog runs the recovery ladder
+    "turn_cancelled": "active",
+    "blocked_approval": "blocked",
+    "blocked_input": "blocked",
+    "turn_failed": "blocked",  # needs the operator; recovery gave up
+    "session_closed": "blocked",
+}
+
+
+def _msp_view_summary(view):
+    return {
+        "msp_state": view.state,
+        "active_turn_id": view.active_turn_id,
+        "pending": view.pending_summary,
+        "last_activity_age_s": (
+            round(time.time() - view.last_event_at, 1)
+            if view.last_event_at else None),
+    }
+
+
+def _msp_status(job, slug, args):
+    """status for an MSP job: poll the event stream, fold to a JobView."""
+    def go(host):
+        view = _msp_poll(host, slug, job)
+        job_state = _MSP_STATE_TO_JOB.get(view.state, "active")
+        if job.get("state") != job_state:
+            job["state"] = job_state
+            save_job(job, slug)
+        st = {
+            "slug": slug,
+            "transport": "msp",
+            "job_state": job_state,
+            "session_uuid": job.get("session_uuid"),
+            "elapsed_h": (time.time() - _num(job.get("started_at"),
+                                             time.time())) / 3600,
+            "budget_hours": _num(job.get("budget_hours"), 8),
+            "dir_bytes": _cached_dir_bytes(job, slug),
+            **_msp_view_summary(view),
+        }
+        try:
+            pm = os.path.getmtime(os.path.join(job_dir(slug), "PROGRESS.md"))
+            st["progress_age_s"] = time.time() - pm
+        except OSError:
+            st["progress_age_s"] = None
+        return st
+    st = _msp_call(slug, job, go)
+    if args.json:
+        print(json.dumps(st, indent=2, default=str))
+    else:
+        print(f"job {st['slug']}: transport=msp state={_clean_text(st['job_state'])} "
+              f"msp={_clean_text(st['msp_state'])} "
+              f"turn={_clean_text(st['active_turn_id'] or '-')}")
+        if st["pending"]:
+            print(f"  pending: {_clean_text(st['pending'])[:200]}")
+        if st["progress_age_s"] is not None:
+            print(f"  PROGRESS.md age: {st['progress_age_s']/60:.0f}m  "
+                  f"elapsed: {st['elapsed_h']:.1f}h / budget {st['budget_hours']}h")
+    return 0
+
+
+def _msp_log(args):
+    """log for an MSP job: the redacted signal journal (never transcript
+    text -- the event stream can carry real secrets)."""
+    slug = args.slug
+    n = max(1, args.n)
+    path = _msp_journal_path(slug)
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        raise RuntimeError(f"no MSP signal journal for job {slug}")
+    for line in lines[-n:]:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        ts = _safe_hhmm(e.get("t"))
+        print(f"{ts} {_clean_text(e.get('kind',''))} "
+              f"{_clean_text(e.get('method',''))} "
+              f"{_clean_text(e.get('detail',''))[:160]}")
+    return 0
+
+
+def _msp_delete_session_best_effort(host, sid):
+    """session/delete with a UUIDv7 idempotency key. Best-effort: teardown
+    must never fail the operator's kill/close/resume. The completion
+    arrives separately (SS3.24); a refusal here is advisory."""
+    _, msp_session, _, _, _ = _msp_imports()
+    try:
+        host.call("session/delete", {
+            "commandId": msp_session.new_command_id(),
+            "sessionId": sid,
+        })
+    except Exception:
+        pass
+
+
+def _msp_kill(args):
+    """kill for an MSP job: delete the serve session, mark killed.
+
+    No tmux pane or process tree exists for MSP jobs -- the serve child is
+    a per-command connection (opened/closed around each call), so there is
+    nothing to reap. The killed state keeps the watchdog off, same as the
+    tmux path (issue #5)."""
+    slug = args.slug
+    job = load_job(slug)
+    sid = job.get("session_uuid")
+    if sid:
+        def go(host):
+            _msp_delete_session_best_effort(host, sid)
+        try:
+            _msp_call(slug, job, go)
+        except Exception as e:
+            print(f"muse-job: warning: session/delete failed: {e}",
+                  file=sys.stderr)
+    job["state"] = "killed"
+    save_job(job, slug)
+    print(json.dumps({"slug": slug, "transport": "msp", "session": "deleted",
+                      "state": "killed"}))
+    return 0
+
+
+def _msp_resume(args, _from_watch=False):
+    """resume for an MSP job: session/resume the recorded session id.
+
+    A gone session starts fresh on the same worktree with a re-anchor
+    turn (PROGRESS.md tail + do-not-repeat, mirroring the tmux fallback's
+    contract). _from_watch keeps the issue-#5 re-read: a job that left the
+    monitored states mid-recovery is left alone."""
+    slug = args.slug
+    job = load_job(slug)
+    sid = _msp_require_sid(job, slug)
+    _, msp_session, msp_turn, _, _ = _msp_imports()
+
+    def go(host):
+        try:
+            result = msp_session.resume_session(host, sid)
+        except Exception as e:
+            if not _msp_session_gone(e):
+                raise
+            # Fresh session, same worktree: re-anchor like the tmux
+            # fallback-fresh path.
+            work, _, _ = trusted_job_paths(slug, job)
+            session, _cursor = msp_session.start_session(
+                host, work, approval_mode=msp_session.YOLO_APPROVAL_MODE)
+            new_sid = session.get("sessionId") or session.get("id")
+            if not new_sid:
+                raise RuntimeError("session/start returned no session id")
+            prompt = _reanchor_prompt(slug, job)
+            msp_turn.start_turn(host, new_sid, prompt)
+            return {"resumed": "fallback-fresh", "session_id": new_sid}
+        session = result.get("session", result) if isinstance(result, dict) else {}
+        return {"resumed": sid,
+                "status": (session or {}).get("status")}
+    out = _msp_call(slug, job, go, pre_resume=False)
+    if out.get("resumed") == "fallback-fresh":
+        job["session_uuid"] = out["session_id"]
+        job["session_started_at"] = time.time()
+    if _from_watch:
+        fresh = load_job(slug)
+        if fresh.get("state") not in ("active", "blocked"):
+            raise RuntimeError(
+                f"job {slug} left the monitored states during auto-recovery; "
+                "left the job alone")
+    if job.get("state") != "active":
+        job["state"] = "active"
+    save_job(job, slug)
+    print(json.dumps({"slug": slug, "transport": "msp", **out}))
+    return 0
+
+
+def _msp_session_gone(err):
+    """True when a resume failure means 'no such session' (not a transport
+    blip): tightened wording match, mirroring _RESUME_GONE_RE."""
+    return bool(_RESUME_GONE_RE.search(str(err)))
+
+
+def _reanchor_prompt(slug, job):
+    """Re-anchor prompt for a fresh MSP session on an existing worktree:
+    PROGRESS.md tail + do-not-repeat the completed work (the recovery
+    ladder's contract, issue #226)."""
+    tail = ""
+    try:
+        with open(os.path.join(job_dir(slug), "PROGRESS.md")) as f:
+            tail = f.read()[-4000:]
+    except OSError:
+        pass
+    return (
+        "You are resuming a job whose previous session is gone. "
+        "Do NOT repeat work already recorded below; continue from git state "
+        "(git log, git status, git diff) and carry on.\n\n"
+        "--- PROGRESS.md tail ---\n" + tail)
+
+
+def _msp_close_runtime(slug, job):
+    """Best-effort session/delete for close. Called from _close before the
+    shared archive/remove-worktree flow."""
+    sid = job.get("session_uuid")
+    if not sid:
+        return
+    try:
+        def go(host):
+            _msp_delete_session_best_effort(host, sid)
+        _msp_call(slug, job, go)
+    except Exception as e:
+        print(f"muse-job: warning: session/delete failed during close: {e}",
+              file=sys.stderr)
+
+
+def _watch_msp_job(slug, job, events, now):
+    """One watchdog pass for an MSP job. Emits JSON findings; never raises
+    past this boundary (the caller wraps in try/except like the tmux path).
+
+    - blocked_approval/blocked_input -> blocked finding (operator decision)
+    - turn_failed -> needs-attention (recovery already gave up)
+    - stalled/dead turn -> the msp_recovery ladder (continued/resumed =
+      recovered; give_up = needs-attention)
+    - turn completed with SUMMARY.md -> done finding (operator confirms,
+      then closes)
+    """
+    _, _, _, msp_events, msp_recovery = _msp_imports()
+    sid = job.get("session_uuid")
+    if not sid:
+        events.append({"job": slug, "signal": "needs-attention",
+                       "detail": "MSP job with no recorded session id; "
+                                 "cannot monitor it"})
+        return
+
+    def go(host):
+        return _msp_poll(host, slug, job)
+    try:
+        view = _msp_call(slug, job, go)
+    except Exception as e:
+        events.append({"job": slug, "signal": "needs-attention",
+                       "detail": f"MSP poll failed: {e}"})
+        return
+
+    state = view.state
+    job_state = _MSP_STATE_TO_JOB.get(state, "active")
+    if job.get("state") != job_state:
+        job["state"] = job_state
+        save_job(job, slug)
+
+    if state in ("blocked_approval", "blocked_input"):
+        events.append({"job": slug, "signal": "blocked",
+                       "detail": f"MSP session blocked: "
+                                 f"{_clean_text(view.pending_summary)[:200]}"})
+        return
+    if state == "session_closed":
+        events.append({"job": slug, "signal": "needs-attention",
+                       "detail": "MSP session closed unexpectedly; "
+                                 "`muse-job resume` to recover"})
+        return
+    if state == "turn_failed":
+        events.append({"job": slug, "signal": "needs-attention",
+                       "detail": "MSP turn failed; `muse-job steer` to "
+                                 "re-anchor or `muse-job kill` to end it"})
+        return
+    if state == "stalled":
+        def go2(host):
+            # recover_dead_turn polls the view and detects the dead shape
+            # internally; it takes (host, session_id, job_dir) and returns
+            # a RecoveryReport (never a diagnosis tuple).
+            return msp_recovery.recover_dead_turn(host, sid, job_dir(slug))
+        try:
+            report = _msp_call(slug, job, go2)
+        except Exception as e:
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": f"MSP recovery raised: {e}"})
+            return
+        action = report.action
+        note = (report.detail or "; ".join(report.attempts) or "")
+        detail = _clean_text(note)[:200]
+        if action == msp_recovery.ACTION_NONE:
+            return
+        if action in (msp_recovery.ACTION_CONTINUED,
+                      msp_recovery.ACTION_RESUMED):
+            events.append({"job": slug, "signal": "recovered",
+                           "detail": f"MSP stalled turn recovered via "
+                                     f"{action}: {detail}"})
+        else:
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": f"MSP stalled turn; recovery {action}: "
+                                     f"{detail}"})
+        return
+    # turn completed -> done claim when the agent wrote SUMMARY.md.
+    if view.last_terminal == "completed":
+        try:
+            summary = os.path.join(job_dir(slug), "SUMMARY.md")
+            if os.path.getsize(summary) > 0:
+                events.append({"job": slug, "signal": "done",
+                               "detail": "MSP turn completed and SUMMARY.md "
+                                         "is present; confirm, then "
+                                         "`muse-job close`"})
+        except OSError:
+            pass
+
+
 def main():
     # --version before argparse: subparsers are required, so argparse alone
     # would reject a bare --version. Only the bare flag counts, so a steer
@@ -2976,6 +3574,10 @@ def main():
     s.add_argument("--allow-secrets", action="store_true",
                    help="confirm the prompt may carry real secrets; without "
                    "this the issue-#9 scan refuses secret-shaped prompt text")
+    s.add_argument("--tmux", action="store_true",
+                   help="drive the job in a tmux TUI pane (legacy transport); "
+                   "default is MSP over `muse serve` "
+                   "(issue #228: muse-job v2)")
     s.set_defaults(fn=cmd_spawn)
 
     s = sub.add_parser("steer", help="send a message into a running job")

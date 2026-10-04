@@ -157,18 +157,27 @@ for line in sys.stdin:
                 "invalid turn/start commandId: expected UUIDv7",
                 {"kind": "invalidParams"})
             continue
+        inp = params.get("input")
+        if not isinstance(inp, list) or not inp:
+            err(rid, -32602,
+                "invalid turn/start params: missing field `input`",
+                {"kind": "invalidParams"})
+            continue
         s = sess(sid)
         tid = "turn-" + uuid.uuid4().hex[:12]
         state = "running" if s["active"] is None else "queued"
         trec = {"turnId": tid, "sessionId": sid, "state": state,
-                "promptEcho": params.get("prompt")}
+                "promptEcho": (inp[0].get("text") if isinstance(inp[0], dict)
+                               else None)}
         s["turns"][tid] = trec
         if state == "running":
             s["active"] = tid
         else:
             s["queued"].append(tid)
         send({"jsonrpc": "2.0", "id": rid,
-              "result": {"turn": dict(trec)}})
+              "result": {"commandId": cid, "disposition": "started",
+                         "startedNewTurn": True, "status": state,
+                         "turnId": tid}})
         notify("turn/started", {"sessionId": sid, "turnId": tid})
     elif method == "turn/steer":
         if check_drift(rid, params):
@@ -179,6 +188,17 @@ for line in sys.stdin:
                 "invalid turn/steer commandId: expected UUIDv7",
                 {"kind": "invalidParams"})
             continue
+        inp = params.get("input")
+        if not isinstance(inp, list) or not inp:
+            err(rid, -32602,
+                "invalid turn/steer params: missing field `input`",
+                {"kind": "invalidParams"})
+            continue
+        if not params.get("expectedTurnId"):
+            err(rid, -32602,
+                "invalid turn/steer params: missing field `expectedTurnId`",
+                {"kind": "invalidParams"})
+            continue
         s = sess(sid)
         tid = s["active"]
         if tid is None:
@@ -186,9 +206,11 @@ for line in sys.stdin:
                      "no active turn to steer into")
             continue
         trec = s["turns"][tid]
-        trec.setdefault("injected", []).append(params.get("message"))
+        trec.setdefault("injected", []).append(
+            inp[0].get("text") if isinstance(inp[0], dict) else None)
         send({"jsonrpc": "2.0", "id": rid,
-              "result": {"turn": dict(trec)}})
+              "result": {"commandId": cid, "status": trec["state"],
+                         "turnId": tid}})
         notify("turn/steered", {"sessionId": sid, "turnId": tid})
     elif method == "turn/interrupt":
         if check_drift(rid, params):
@@ -204,7 +226,8 @@ for line in sys.stdin:
         trec["state"] = "interrupted"
         s["active"] = None
         send({"jsonrpc": "2.0", "id": rid,
-              "result": {"turn": dict(trec)}})
+              "result": {"commandId": cid, "status": "interrupted",
+                         "turnId": tid}})
         notify("turn/interrupted", {"sessionId": sid, "turnId": tid})
         if s["queued"]:
             promoted = s["queued"].pop(0)
@@ -232,7 +255,8 @@ for line in sys.stdin:
         trec = s["turns"][tid]
         trec["state"] = "cancelled"
         send({"jsonrpc": "2.0", "id": rid,
-              "result": {"turn": dict(trec)}})
+              "result": {"commandId": cid, "status": "cancelled",
+                         "turnId": tid}})
         notify("turn/cancelled", {"sessionId": sid, "turnId": tid})
     else:
         err(rid, -32601, "unknown method")
@@ -294,13 +318,14 @@ def test_start_minimal_wire_shape(turn_serve):
     assert len(calls) == 1
     params = calls[0]["params"]
     assert params["sessionId"] == "sess-a"
-    # prompt-as-argv: the prompt travels as one opaque string.
-    assert params["prompt"] == "run the tests"
+    # prompt-as-argv: the prompt travels as one opaque text part in the
+    # input array (serve schema 1.4.x; the old `prompt` string field is
+    # rejected with invalid params).
+    assert params["input"] == [{"type": "text", "text": "run the tests"}]
     assert UUID7_RE.match(params["commandId"])
     assert turn["turnId"]
-    assert turn["sessionId"] == "sess-a"
-    assert turn["state"] == "running"
-    assert result["turn"]["turnId"] == turn["turnId"]
+    assert turn["status"] == "running"
+    assert result["turnId"] == turn["turnId"]
 
 
 PROMPT_WITH_METACHARS = (
@@ -316,16 +341,18 @@ def test_start_prompt_verbatim_metachars(turn_serve):
     with make_host(argv) as host:
         turn, _ = mspt.start_turn(host, "sess-meta", PROMPT_WITH_METACHARS)
     params = method_calls(record, "turn/start")[0]["params"]
-    assert params["prompt"] == PROMPT_WITH_METACHARS
+    assert params["input"] == [{"type": "text", "text": PROMPT_WITH_METACHARS}]
 
 
 def test_steer_message_verbatim_metachars(turn_serve):
     argv, record = turn_serve
     with make_host(argv) as host:
         turn, _ = mspt.start_turn(host, "sess-s", "go")
-        mspt.steer_turn(host, "sess-s", PROMPT_WITH_METACHARS)
+        mspt.steer_turn(host, "sess-s", PROMPT_WITH_METACHARS,
+                        expected_turn_id=turn["turnId"])
     params = method_calls(record, "turn/steer")[0]["params"]
-    assert params["message"] == PROMPT_WITH_METACHARS
+    assert params["input"] == [{"type": "text", "text": PROMPT_WITH_METACHARS}]
+    assert params["expectedTurnId"] == turn["turnId"]
 
 
 def test_start_queues_when_turn_running(turn_serve):
@@ -333,8 +360,8 @@ def test_start_queues_when_turn_running(turn_serve):
     with make_host(argv) as host:
         first, _ = mspt.start_turn(host, "sess-q", "first")
         second, _ = mspt.start_turn(host, "sess-q", "second")
-    assert first["state"] == "running"
-    assert second["state"] == "queued"
+    assert first["status"] == "running"
+    assert second["status"] == "queued"
     assert first["turnId"] != second["turnId"]
 
 
@@ -374,8 +401,9 @@ def test_caller_command_id_used_verbatim(turn_serve):
     argv, record = turn_serve
     cid = mspt.new_command_id()
     with make_host(argv) as host:
-        mspt.start_turn(host, "sess-c", "go", command_id=cid)
-        mspt.steer_turn(host, "sess-c", "more", command_id=mspt.new_command_id())
+        turn_c, _ = mspt.start_turn(host, "sess-c", "go", command_id=cid)
+        mspt.steer_turn(host, "sess-c", "more", command_id=mspt.new_command_id(),
+                        expected_turn_id=turn_c["turnId"])
     calls = method_calls(record, "turn/start") + method_calls(record, "turn/steer")
     assert calls[0]["params"]["commandId"] == cid
     assert calls[1]["params"]["commandId"] != cid
@@ -392,13 +420,15 @@ def test_steer_injects_into_active_turn(turn_serve):
     argv, record = turn_serve
     with make_host(argv) as host:
         turn, _ = mspt.start_turn(host, "sess-st", "go")
-        steered, result = mspt.steer_turn(host, "sess-st", "keep going")
+        steered, result = mspt.steer_turn(host, "sess-st", "keep going",
+                                          expected_turn_id=turn["turnId"])
     params = method_calls(record, "turn/steer")[0]["params"]
     assert params["sessionId"] == "sess-st"
-    assert params["message"] == "keep going"
+    assert params["input"] == [{"type": "text", "text": "keep going"}]
+    assert params["expectedTurnId"] == turn["turnId"]
     assert UUID7_RE.match(params["commandId"])
     assert steered["turnId"] == turn["turnId"]
-    assert result["turn"]["turnId"] == turn["turnId"]
+    assert result["turnId"] == turn["turnId"]
 
 
 def test_steer_needs_live_turn_not_silent(turn_serve):
@@ -406,7 +436,8 @@ def test_steer_needs_live_turn_not_silent(turn_serve):
     argv, _ = turn_serve
     with make_host(argv) as host:
         with pytest.raises(mspt.TurnNotLiveError) as ei:
-            mspt.steer_turn(host, "sess-fresh", "hello?")
+            mspt.steer_turn(host, "sess-fresh", "hello?",
+                            expected_turn_id="turn-missing")
     assert "226" in str(ei.value)  # the not-live error names the owner
 
 
@@ -415,7 +446,8 @@ def test_steer_dead_session_raises_not_live(turn_serve):
     argv, _ = turn_serve
     with make_host(argv) as host:
         with pytest.raises(mspt.TurnNotLiveError):
-            mspt.steer_turn(host, "dead-trackball-parked", "wake up")
+            mspt.steer_turn(host, "dead-trackball-parked", "wake up",
+                            expected_turn_id="turn-gone")
         with pytest.raises(mspt.TurnNotLiveError):
             mspt.start_turn(host, "dead-trackball-parked", "wake up")
         with pytest.raises(mspt.TurnNotLiveError):
@@ -427,7 +459,8 @@ def test_unmapped_refusal_stays_plain_server_error(turn_serve):
     argv, _ = turn_serve
     with make_host(argv) as host:
         with pytest.raises(mspt.ServerError) as ei:
-            mspt.steer_turn(host, "err-weird-boom", "x")
+            mspt.steer_turn(host, "err-weird-boom", "x",
+                            expected_turn_id="turn-x")
     assert not isinstance(ei.value, mspt.TurnNotLiveError)
     assert ei.value.data.get("reason") == "something_else"
 
@@ -442,8 +475,8 @@ def test_interrupt_stops_active_turn(turn_serve):
     params = method_calls(record, "turn/interrupt")[0]["params"]
     assert params["sessionId"] == "sess-i"
     assert "turnId" not in params  # omitted: act on the active turn
-    assert result["turn"]["turnId"] == turn["turnId"]
-    assert result["turn"]["state"] == "interrupted"
+    assert result["turnId"] == turn["turnId"]
+    assert result["status"] == "interrupted"
 
 
 def test_interrupt_promotes_queued_turn(turn_serve):
@@ -453,7 +486,8 @@ def test_interrupt_promotes_queued_turn(turn_serve):
         second, _ = mspt.start_turn(host, "sess-p", "second")
         mspt.interrupt_turn(host, "sess-p")
         # The queued turn is now the active one: steering lands on it.
-        steered, _ = mspt.steer_turn(host, "sess-p", "go on")
+        steered, _ = mspt.steer_turn(host, "sess-p", "go on",
+                                     expected_turn_id=second["turnId"])
     assert steered["turnId"] == second["turnId"]
 
 
@@ -488,8 +522,8 @@ def test_cancel_queued_turn(turn_serve):
         first, _ = mspt.start_turn(host, "sess-cx", "first")
         second, _ = mspt.start_turn(host, "sess-cx", "second")
         result = mspt.cancel_turn(host, "sess-cx")
-    assert result["turn"]["turnId"] == second["turnId"]
-    assert result["turn"]["state"] == "cancelled"
+    assert result["turnId"] == second["turnId"]
+    assert result["status"] == "cancelled"
     # The running turn is untouched.
     params = method_calls(record, "turn/cancel")[0]["params"]
     assert params["sessionId"] == "sess-cx"
@@ -534,7 +568,8 @@ def test_turn_plane_fails_loud_on_drift_end_to_end(turn_serve, case):
         with pytest.raises(mspt.MSPTurnError):
             mspt.start_turn(host, "drift:" + case, "go")
         with pytest.raises(mspt.MSPTurnError):
-            mspt.steer_turn(host, "drift:" + case, "go")
+            mspt.steer_turn(host, "drift:" + case, "go",
+                            expected_turn_id="turn-x")
         with pytest.raises(mspt.MSPTurnError):
             mspt.interrupt_turn(host, "drift:" + case)
         with pytest.raises(mspt.MSPTurnError):
@@ -581,7 +616,8 @@ def test_turn_start_observable_via_events(turn_serve):
         unsub = host.subscribe("turn", seen.append)
         try:
             turn, _ = mspt.start_turn(host, "sess-ev", "go")
-            steered, _ = mspt.steer_turn(host, "sess-ev", "more")
+            steered, _ = mspt.steer_turn(host, "sess-ev", "more",
+                                         expected_turn_id=turn["turnId"])
             assert wait_until(
                 lambda: sum(1 for n in seen
                             if n.get("method") == "turn/steered") >= 1)
@@ -737,8 +773,8 @@ def test_smoke_cli_start(turn_serve):
                    "--prompt", "hello", "--", *argv)
     assert out.returncode == 0, out.stderr
     body = json.loads(out.stdout)
-    assert body["turn"]["state"] == "running"
-    assert body["turn"]["sessionId"] == "sess-cli2"
+    assert body["turn"]["status"] == "running"
+    assert body["turn"]["turnId"]
 
 
 def test_smoke_cli_warns_not_redacted_on_stderr(turn_serve):
@@ -766,7 +802,8 @@ def test_smoke_cli_watch_observes_events(turn_serve):
 
 
 def test_smoke_cli_needs_serve_argv():
-    out = _run_cli("steer", "--session-id", "s", "--message", "m")
+    out = _run_cli("steer", "--session-id", "s", "--message", "m",
+                   "--turn-id", "t")
     assert out.returncode != 0
     assert "serve argv" in out.stderr
 
@@ -794,7 +831,7 @@ class _NoSubscribeHost:
 
     def call(self, method, params):
         assert method == "turn/interrupt"
-        return {"turn": {"turnId": "t-9", "state": "interrupted"}}
+        return {"turnId": "t-9", "status": "interrupted"}
 
     def subscribe(self, prefix, callback):
         raise AssertionError("subscribe called without a turn id to watch")

@@ -252,7 +252,9 @@ def resume_session(host, session_id):
     record's presence is asserted; fail loud on drift).
     """
     _check_session_id(session_id)
-    result = host.call("session/resume", {"sessionId": session_id})
+    result = host.call("session/resume",
+                       {"commandId": new_command_id(),
+                        "sessionId": session_id})
     _require_session(result, "session/resume")
     return result
 

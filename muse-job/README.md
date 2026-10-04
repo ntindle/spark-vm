@@ -11,10 +11,12 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 |---|---|
 | `bin/muse-job` | CLI: `spawn/steer/status/list/log/kill/resume/close/watch`. Single-file Python, stdlib only. |
 | `bin/muse-job-sweep` | Disk sweeper: prunes stale closed job dirs at >=85% disk; at >=93% closes the largest non-closed job (emergency breaker -- close, not kill: kill only ends the tmux session and frees ~0 bytes, the worktree is where the bytes are). Always JSON, fails open. |
-| `bin/msp_host.py` | MSP serve-host client (issue #221, #228 plan): stdlib-only module that spawns/owns one `muse serve` per job, speaks NDJSON JSON-RPC 2.0 over stdio, runs the initialize/initialized handshake, correlates calls, dispatches notifications, routes server→client requests, and pins the schema fingerprint. Imported by `bin/muse-job` as the tmux replacement lands slice by slice. |
-| `bin/msp_session.py` | MSP session-lifecycle client (issue #222, #228 plan): stdlib-only module on top of `msp_host.py` implementing `session/start`, `session/resume`, `session/list`, and `session/read` with client-side validation (UUIDv7 command ids, absolute workspace roots, the wire approval-mode enum, the 1..=200 list bound) and fail-loud result parsing, plus a smoke CLI. |
-| `bin/msp_turn.py` | MSP turn-plane client (issue #223, #228 plan): stdlib-only module on top of `msp_host.py` implementing `turn/start`, `turn/steer`, `turn/interrupt`, and `turn/cancel` -- the tmux send-keys replacement. Prompts travel as one opaque JSON string (never fragmented, never shell-parsed), and a server-reported not-live session surfaces as `TurnNotLiveError` instead of a silent success; dead-model recovery itself stays on issue #226. Ships a smoke CLI with an event-watch mode. |
-| `bin/msp_view.py` | MSP view-plane client (issue #224, #228 plan): stdlib-only module on top of `msp_host.py` implementing `view/subscribe` (replay `(after, head]` then live events) plus a job-state tracker mapping notifications to working / blocked (with the pending question surfaced) / idle / stalled -- the pane-scraping replacement `muse-job status`/`watch` will read at the #227 cutover. Ships a smoke CLI. |
+| `bin/msp_host.py` | MSP serve-host client (issue #221, #228): stdlib-only module that spawns/owns one `muse serve` per job, speaks NDJSON JSON-RPC 2.0 over stdio, runs the initialize/initialized handshake, correlates calls, dispatches notifications, routes server→client requests, and pins the schema fingerprint. Imported by `bin/muse-job` as the default transport (the #228 cutover has landed). |
+| `bin/msp_session.py` | MSP session-lifecycle client (issue #222, #228): stdlib-only module on top of `msp_host.py` implementing `session/start`, `session/resume`, `session/list`, and `session/read` with client-side validation (UUIDv7 command ids, absolute workspace roots, the wire approval-mode enum, the 1..=200 list bound) and fail-loud result parsing, plus a smoke CLI. |
+| `bin/msp_turn.py` | MSP turn-plane client (issue #223, #228): stdlib-only module on top of `msp_host.py` implementing `turn/start`, `turn/steer`, `turn/interrupt`, and `turn/cancel` -- the tmux send-keys replacement. Prompts travel as one opaque JSON string (never fragmented, never shell-parsed), and a server-reported not-live session surfaces as `TurnNotLiveError` instead of a silent success; dead-model recovery landed on issue #226. Ships a smoke CLI with an event-watch mode. |
+| `bin/msp_view.py` | MSP view-plane client (issue #224, #228): stdlib-only module on top of `msp_host.py` implementing `view/subscribe` (replay `(after, head]` then live events) plus a job-state tracker mapping notifications to working / blocked (with the pending question surfaced) / idle / stalled -- the pane-scraping replacement `muse-job status`/`watch` read at the #227 cutover. Ships a smoke CLI. |
+| `bin/msp_events.py` | MSP event-stream view layer (issue #224, #228): stdlib-only module that `muse-job`'s status/watch path actually reads — gapless replay from a per-job cursor, automatic re-seeding on dropped events, and the notification→job-state fold (working, blocked on approval or input, stalled, idle, turn failed). Hard-required by `bin/muse-job` (`_msp_imports`); supersedes `bin/msp_view.py` as the live view plane. |
+| `bin/msp_recovery.py` | MSP dead-turn recovery ladder (issue #226, #228): stdlib-only module that climbs interrupt-the-zombie-turn → continuation re-anchored on the progress log → resume-fresh-session → page-the-operator when a job's model stream dies mid-turn. Hard-required by `bin/muse-job` (`_msp_imports`); the watchdog runs it automatically on stalled MSP jobs. |
 | `plugin/` | `muse-job` Muse plugin source (v0.3.1, user-scope, approved): `Stop` hook classifies turn ends (blocked/done/question/idle), `SessionEnd` hook, `PreLLMCall` session-UUID registry. Events land in `~/.local/share/muse-job/events/<uuid>.jsonl`. |
 | `client/muse_job.py` | Python client presenting the subagent-like API (`spawn/steer/interrupt/status/list_jobs/log/wait_for_turn/pending_question/kill/resume/close`). Runs from the operator box over SSH. |
 | `TOOL_INTERFACE.md` | Interaction map (subagents / browser tasks / exec / cron) and the Muse-Code-as-a-tool spec the client implements. |
@@ -25,10 +27,12 @@ approvals — jobs run `muse --yolo` per standing owner authorization.
 |---|---|
 | `bin/muse-job` | `/home/ntindle/bin/muse-job` (on PATH) |
 | `bin/muse-job-sweep` | `/home/ntindle/bin/muse-job-sweep` |
-| `bin/msp_host.py` | `/home/ntindle/bin/msp_host.py` (to be imported by `bin/muse-job` as the #222–#227 cutover slices land) |
-| `bin/msp_session.py` | `/home/ntindle/bin/msp_session.py` (session-lifecycle layer for the cutover; same import path) |
-| `bin/msp_turn.py` | `/home/ntindle/bin/msp_turn.py` (turn-steering layer for the cutover; same import path) |
+| `bin/msp_host.py` | `/home/ntindle/bin/msp_host.py` (imported by `bin/muse-job`; the #228 cutover has landed) |
+| `bin/msp_session.py` | `/home/ntindle/bin/msp_session.py` (session-lifecycle layer; same import path) |
+| `bin/msp_turn.py` | `/home/ntindle/bin/msp_turn.py` (turn-steering layer; same import path) |
 | `bin/msp_view.py` | `/home/ntindle/bin/msp_view.py` (view/liveness layer for the cutover; same import path) |
+| `bin/msp_events.py` | `/home/ntindle/bin/msp_events.py` (event-stream view layer the status/watch path reads; hard-required; same import path) |
+| `bin/msp_recovery.py` | `/home/ntindle/bin/msp_recovery.py` (dead-turn recovery ladder; hard-required; same import path) |
 | `plugin/` | `/home/ntindle/muse-job-plugin/` (source) → user-scope plugin: `muse plugins install ./muse-job/plugin` (run from `~/spark-vm`), then `muse plugins approve` (`--force` on reinstall) |
 
 Redeploy: copy the files over, then reinstall the plugin with `--force`
@@ -37,7 +41,9 @@ Redeploy: copy the files over, then reinstall the plugin with `--force`
 ## Job runtime
 
 - One git worktree + branch per job under `/home/ntindle/muse-jobs/<slug>/`
-- One tmux session `mjob-<slug>` running interactive `muse --yolo`
+- Default transport is MSP: one `muse serve` session per job (no tmux, no
+  TUI scraping); `--tmux` opts back into the legacy path of one tmux
+  session `mjob-<slug>` running interactive `muse --yolo`
 - Job prompt at `/home/ntindle/muse-jobs/<slug>/prompt.md`, progress in `PROGRESS.md`
 - Job states (what `status`/`list` print): `active` / `blocked` — the watchdog acts on these (may page or attempt recovery); `killed` — operator-killed, the watchdog leaves it alone, `resume` is the deliberate way back; `closed` — archived, worktree removed, nothing to resume.
 
@@ -139,5 +145,5 @@ A rotation is reported as an `events-rotated` watch signal.
 - Never combine text+Enter in one `tmux send-keys` (silently no-ops vs the TUI); use separate text / sleep / Enter and verify the input box cleared.
 - Spawn prompts via argv: `muse --yolo "$(cat prompt.md)"`.
 - Muse's sqlite session index lags for TUI sessions; use the hook registry (`~/.local/share/muse-job/sessions/`).
-- `muse serve` (NDJSON JSON-RPC over stdio) is the planned job transport (#228): the 2026-09-17 `Not initialized` mystery was the missing `initialized` notification after `initialize` (verified 2026-09-21 against muse 1.3.0). `bin/msp_host.py` implements the transport + handshake (#221); tmux stays until the cutover slices land.
-- `muse session-message send` fails for exec AND TUI sessions (`external_agent_ingress_closed`); steering is tmux-only.
+- `muse serve` (NDJSON JSON-RPC over stdio) is the job transport (#228): the 2026-09-17 `Not initialized` mystery was the missing `initialized` notification after `initialize` (verified 2026-09-21 against muse 1.3.0). `bin/msp_host.py` implements the transport + handshake (#221). The tmux path remains as an explicit `--tmux` opt-in fallback.
+- `muse session-message send` fails for exec AND TUI sessions (`external_agent_ingress_closed`); on the legacy `--tmux` path, steering is tmux keystroke injection only (the default MSP path steers via `turn/steer`).
