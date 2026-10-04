@@ -74,7 +74,13 @@ Location carries a known secret value — raw, percent-encoded at any
 depth, or form-encoded (`+` for space) — to a
 non-allowlisted host are likewise refused at headers time (issue #94):
 the client's follow-up request would otherwise carry the real secret
-off-allowlist. Stated residuals: never-ending
+off-allowlist. Requests to non-allowlisted hosts carrying a real
+secret value are refused in `request` itself (issue #855): the target
+authority, the path+query under the same decode stages, and request
+headers (verbatim; framing headers skipped) are scanned for known
+secret values, and the flow is killed before anything is forwarded —
+the #94/#860 kills only close the headers-time navigation vectors.
+Stated residuals: never-ending
 chunked streams with an ordinary content type (indistinguishable from
 finite chunked bodies at headers time), HTTP/2 extended-CONNECT
 websockets (answer 200, no 101), images and binary bodies.
@@ -2406,6 +2412,63 @@ class SwapAddon:
                     self._audit_refused(host, m.group(1),
                                         "host-not-allowlisted")
 
+    def _request_secret_names(self, req, triples):
+        """Issue #855: placeholder names whose REAL secret value an
+        outbound request carries to a non-allowlisted host. The swap
+        never runs here, so the value would leave the box intact —
+        the #94/#860 redirect kills only close the headers-time
+        navigation vectors; a client-side redirect the proxy never
+        saw, a manually crafted request, or a token-subdomain exfil
+        all reach this hook.
+
+        Scans, in order:
+        - the request target authority (`pretty_host`) verbatim — a
+          secret smuggled in a token-subdomain leaks at DNS time;
+        - the request path+query under `_decode_stage_names` (the
+          same decode stages the #94 redirect gate uses) — query
+          strings are the classic exfil vector, and an open
+          redirector percent-encodes the value;
+        - request headers verbatim only (no decode stages): a decode
+          stage over header values would widen the false-positive
+          surface for a kill decision. Framing headers
+          (content-length, transfer-encoding) are never scanned —
+          the finding-70b hazard, response side: a whole-token TOTP
+          code matching a content-length number would kill an
+          innocent request. Decoded HTTP Basic credentials ARE
+          scanned (the same `_basic_decoded` helper the placeholder
+          warn path uses): the decoded form carries the real value,
+          so a match is a true positive, not a widening.
+        All three share `_matched_secret_names` — the response
+        scrubber's exact semantics — so the smoke-test exclusion,
+        the finding-36 short-value floor, TOTP whole-token matching,
+        and `scrub: false` opt-outs are baked into the triples and
+        cannot drift apart."""
+        names = self._matched_secret_names(
+            getattr(req, "pretty_host", "") or "", triples)
+        for placeholder in self._decode_stage_names(
+                getattr(req, "path", "") or "", triples):
+            if placeholder not in names:
+                names.append(placeholder)
+        try:
+            header_items = [(k, v) for k in req.headers.keys()
+                            for v in req.headers.get_all(k)]
+        except Exception:
+            header_items = []
+        for key, value in header_items:
+            if key.lower() in self._NEVER_SCRUB_RESPONSE_HEADERS:
+                continue
+            candidates = [value]
+            if key.lower() == "authorization":
+                decoded = self._basic_decoded(value)
+                if decoded:
+                    candidates.append(decoded)
+            for candidate in candidates:
+                for placeholder in self._matched_secret_names(
+                        candidate, triples):
+                    if placeholder not in names:
+                        names.append(placeholder)
+        return names
+
     # ------------------------------------------------------------------ SSRF
 
     async def _resolve_ips(self, host):
@@ -2611,6 +2674,35 @@ class SwapAddon:
         # here we only gate swapping on the hosts file.
         if not self._host_allowed(host):
             self._warn_if_placeholder(flow, host)
+            # Issue #855: a request carrying a REAL secret value to a
+            # non-allowlisted host is refused outright — the only
+            # existing request-side signal was the placeholder warn,
+            # which fires on the hsurr: form, never the real value.
+            # Detection-path exceptions fail closed: kill, don't
+            # forward. A killed flow forwards nothing, so the secret
+            # never leaves the box.
+            try:
+                triples = self._secret_replacements()
+                leaked = self._request_secret_names(req, triples)
+            except Exception:
+                log.exception(
+                    "swap: request-secret check failed; failing closed")
+                self._audit_note(host, "request-secret-refused",
+                                 "check-error")
+                flow.kill()
+                return
+            if leaked:
+                # The warning and the audit reason name the credential
+                # (hsurr:<name>), never the value — finding 71's
+                # no-raw-value discipline holds; refused= stays the
+                # constant action token, like the other _audit_note
+                # callers.
+                log.warning(
+                    "swap: refusing request to non-allowlisted host %s "
+                    "carrying real value of %s", host, ", ".join(leaked))
+                self._audit_note(host, "request-secret-refused",
+                                 "real-value:" + ",".join(leaked))
+                flow.kill()
             return
         # The Host header is client-controlled: refuse all swaps unless
         # it names the host the request will actually egress to.
@@ -2867,6 +2959,54 @@ class SwapAddon:
             elif value in new_text:
                 new_text = new_text.replace(value, placeholder)
         return new_text
+
+    def _matched_secret_names(self, text, triples):
+        """Placeholder names (hsurr:<name>) whose known secret value
+        appears in `text`. The membership test mirrors the response
+        scrubber's semantics exactly — whole-token regex for TOTP
+        triples, plain substring otherwise — so detection and
+        scrubbing share one truth: anything this returns would have
+        been scrubbed from an allowlisted response. Names are
+        returned, never values; deduped; longest-value first (the
+        triples arrive sorted that way)."""
+        if not text:
+            return []
+        matched = []
+        for value, placeholder, whole_token in triples:
+            if whole_token:
+                if re.search(r"(?<!\d)" + re.escape(value) + r"(?!\d)",
+                             text):
+                    matched.append(placeholder)
+            elif value in text:
+                matched.append(placeholder)
+        seen = set()
+        out = []
+        for placeholder in matched:
+            if placeholder not in seen:
+                seen.add(placeholder)
+                out.append(placeholder)
+        return out
+
+    def _decode_stage_names(self, text, triples):
+        """Placeholder names matched at any decoding the receiver may
+        apply: the raw text, then `unquote` to a fixpoint (finding
+        42's `_normalize_path` discipline, so double-encoded values
+        are caught), each stage tried both as-is and form-decoded
+        (`unquote_plus`: `+` is a space in query strings — the
+        `urlencode`/`quote_plus` output an open redirector emits).
+        Stages only widen detection in the fail-closed direction."""
+        names = []
+        seen = set()
+        stage = text or ""
+        while stage not in seen:
+            seen.add(stage)
+            for cand in (stage, urllib.parse.unquote_plus(stage)):
+                for placeholder in self._matched_secret_names(cand,
+                                                              triples):
+                    if placeholder not in names:
+                        names.append(placeholder)
+            stage = urllib.parse.unquote(stage)
+        return names
 
     @staticmethod
     def _stream_refusal_reason(resp):
@@ -3161,25 +3301,14 @@ class SwapAddon:
         The header scrubber rewrites verbatim secrets in Location, but
         an open redirector percent-encodes the value — verbatim
         matching misses it, and the client decodes it on the follow-up
-        request. Every decode stage is checked: the raw value, then
-        `unquote` to a fixpoint (finding 42's `_normalize_path`
-        discipline, so double-encoded values are caught), each stage
-        tried both as-is and form-decoded (`unquote_plus`: `+` is a
-        space in query strings — the `urlencode`/`quote_plus` output an
-        open redirector emits). Comparing the scrubbed rendering
-        (never the value itself) keeps whole-token TOTP semantics and
-        the smoke-test exclusion in one place. Stages only widen
-        detection in the fail-closed direction.
+        request. Detection delegates to `_decode_stage_names` (the raw
+        value, then `unquote` to a fixpoint, each stage tried both
+        as-is and form-decoded), comparing via the scrubber's own
+        membership semantics so whole-token TOTP and the smoke-test
+        exclusion live in one place. Stages only widen detection in
+        the fail-closed direction.
         """
-        seen = set()
-        stage = location or ""
-        while stage not in seen:
-            seen.add(stage)
-            for cand in (stage, urllib.parse.unquote_plus(stage)):
-                if self._scrub_text_value(cand, triples) != cand:
-                    return True
-            stage = urllib.parse.unquote(stage)
-        return False
+        return bool(self._decode_stage_names(location, triples))
 
     def _redirect_leak_target(self, resp, triples):
         """Issue #94: the non-allowlisted host a redirect leaks a

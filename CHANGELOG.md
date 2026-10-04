@@ -428,6 +428,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
   unchanged (loud failure, freeze-counter accounting). (#962)
 
 ### Security
+- The proxy now refuses outbound requests to non-allowlisted hosts that
+  carry a real credential value, not just the `hsurr:` placeholder (#855):
+  the target authority, the path and query string (raw, percent-decoded at
+  any depth, and form-decoded), and request headers are scanned for known
+  secret values, and the request is dropped before anything is forwarded —
+  closing the request-side half the redirect-time guard never saw (a
+  client-side redirect the proxy didn't observe, a manually crafted
+  request, or a secret smuggled in a token-subdomain). The operator
+  warning and the audit trail name the credential, never the value; TOTP
+  codes still match as whole tokens only, and framing headers are never
+  scanned, so innocent requests don't get killed. (#TBD)
 - The credential web UI now requires a per-install API token on every
   management endpoint (#86): the previous `X-Cred-UI: 1` header is not a
   secret — any local process could set it and add, list, remove, or
