@@ -4317,12 +4317,14 @@ class ApprovalSignalTests(unittest.TestCase):
                     "path_prefix": "/gists", "decision": "deny",
                     "answered_at": now.isoformat()}))
                 # Freeze the cache as a stale negative with the CURRENT
-                # dir mtime, so only a fresh-by-contract re-check can
-                # see the denial.
+                # mtimes of both dirs (#1004: the cache key now carries
+                # the (consumed, answered) mtime pair; answered/ is
+                # absent here so its mtime is 0), so only a
+                # fresh-by-contract re-check can see the denial.
                 key = ("github", "github.com", "POST", "/gists")
                 dm = os.stat(cdir).st_mtime_ns
                 a._denial_cache[key] = (
-                    None, now + dt.timedelta(seconds=30), dm)
+                    None, now + dt.timedelta(seconds=30), (dm, 0))
                 # Drop the filed approval so the second _file_approval
                 # reaches the fresh-filing path (no coalesce shortcut).
                 for f in (Path(tmp) / "pending").glob("*.json"):
@@ -4335,6 +4337,140 @@ class ApprovalSignalTests(unittest.TestCase):
                 self.assertFalse(
                     list((Path(tmp) / "pending").glob("*.json")))
                 push.assert_not_called()
+
+    def test_1004_answered_inflight_denial_aborts_filing(self):
+        """#1004: the poll/ingest race. The owner's deny commits to
+        answered/ (ingest's _ingest_write_answered() ran,
+        _remove_pending() ran) but the consumed/ move has NOT landed
+        when the refusal flow reaches the #306 pre-filing re-check. The
+        re-check must see the in-flight answered/ denial and abort the
+        filing (no re-page of the owner). Without the fix the re-check
+        scans consumed/ only and files a fresh approval."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                adir = Path(tmp) / "answered"
+                adir.mkdir()
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                a = self._addon(tmp)
+                # Initial refusal scan: nothing terminal anywhere yet.
+                self.assertIsNone(a._terminal_denial(
+                    "github", "github.com", "POST", "/gists"))
+                # The owner's deny commits to answered/; the pending/
+                # record is gone and the consumed/ move has not landed.
+                now = dt.datetime.now(dt.timezone.utc)
+                (adir / "deadbeef01.json").write_text(json.dumps({
+                    "id": "deadbeef01", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "deny",
+                    "answered_at": now.isoformat()}))
+                with (mock.patch.object(sa, "_push_notify") as push,
+                      mock.patch.object(sa, "_summons_append") as summons):
+                    signals = a._file_approval(
+                        "github", "github.com", "POST", "/gists",
+                        "no grant")
+                self.assertEqual(signals, [("deadbeef01", "denied")])
+                # Nothing filed, nothing pushed, nothing journaled.
+                self.assertFalse(
+                    list((Path(tmp) / "pending").glob("*.json")))
+                push.assert_not_called()
+                summons.assert_not_called()
+
+    def test_1004_answered_denial_visible_to_terminal_denial(self):
+        """#1004: _terminal_denial returns the aid for a denial that
+        lives in answered/ only (no consumed/ record)."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                adir = Path(tmp) / "answered"
+                adir.mkdir()
+                (Path(tmp) / "consumed").mkdir()
+                now = dt.datetime.now(dt.timezone.utc)
+                (adir / "deadbeef01.json").write_text(json.dumps({
+                    "id": "deadbeef01", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "deny",
+                    "answered_at": now.isoformat()}))
+                a = self._addon(tmp)
+                self.assertEqual(a._terminal_denial(
+                    "github", "github.com", "POST", "/gists"),
+                    "deadbeef01")
+
+    def test_1004_denial_survives_answered_to_consumed_move(self):
+        """#1004: when the answered/ denial moves to consumed/ between
+        polls, the mtime change on both dirs invalidates the #307
+        cache and the denial is still delivered."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                adir = Path(tmp) / "answered"
+                adir.mkdir()
+                cdir = Path(tmp) / "consumed"
+                cdir.mkdir()
+                now = dt.datetime.now(dt.timezone.utc)
+                (adir / "deadbeef01.json").write_text(json.dumps({
+                    "id": "deadbeef01", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "deny",
+                    "answered_at": now.isoformat()}))
+                a = self._addon(tmp)
+                self.assertEqual(a._terminal_denial(
+                    "github", "github.com", "POST", "/gists"),
+                    "deadbeef01")
+                # The terminal writer completes the move.
+                (adir / "deadbeef01.json").rename(
+                    cdir / "deadbeef01.json")
+                self.assertEqual(a._terminal_denial(
+                    "github", "github.com", "POST", "/gists"),
+                    "deadbeef01")
+
+    def test_1004_answered_mtime_invalidates_negative_cache(self):
+        """#1004: a denial staged in answered/ after a cached negative
+        scan is visible to the next non-fresh _terminal_denial call —
+        the answered/ mtime change invalidates the cache entry."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                adir = Path(tmp) / "answered"
+                adir.mkdir()
+                (Path(tmp) / "consumed").mkdir()
+                a = self._addon(tmp)
+                self.assertIsNone(a._terminal_denial(
+                    "github", "github.com", "POST", "/gists"))
+                now = dt.datetime.now(dt.timezone.utc)
+                (adir / "deadbeef01.json").write_text(json.dumps({
+                    "id": "deadbeef01", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "deny",
+                    "answered_at": now.isoformat()}))
+                self.assertEqual(a._terminal_denial(
+                    "github", "github.com", "POST", "/gists"),
+                    "deadbeef01")
+
+    def test_1004_answered_approve_is_not_terminal(self):
+        """#1004: an answered/ APPROVAL record is not a denial — the
+        leg must not read it as terminal."""
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir, pen = self._ctx(tmp)
+            with pdir, pen:
+                adir = Path(tmp) / "answered"
+                adir.mkdir()
+                (Path(tmp) / "consumed").mkdir()
+                now = dt.datetime.now(dt.timezone.utc)
+                (adir / "deadbeef01.json").write_text(json.dumps({
+                    "id": "deadbeef01", "credential": "github",
+                    "host": "github.com", "method": "POST",
+                    "path_prefix": "/gists", "decision": "approve",
+                    "answered_at": now.isoformat()}))
+                a = self._addon(tmp)
+                self.assertIsNone(a._terminal_denial(
+                    "github", "github.com", "POST", "/gists"))
 
     def _counting_listdir(self, cdir):
         """Wrap os.listdir, counting calls that scan the consumed/ dir."""

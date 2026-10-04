@@ -278,6 +278,53 @@ def test_trust_gate_requires_separate_lines_in_window(cli):
     assert cli._pane_shows_trust_gate(GATE_WITH_SLACK_PANE)
 
 
+# ---------------------------------------------------------------------------
+# Issue #993: the two-line prose misfire. A live TUI whose own conversation
+# narrates the trust choice carries both phrases on ADJACENT lines with no
+# selector marker:
+#   The TUI asked 'Do you trust this workspace?'
+#   I chose 'Trust and continue'
+# The #972 two-signal check matches it (question line + option-substring
+# line within the window) and the watch loop types "1"+Enter into a working
+# session. The classifier must match the real selector marker (`> 1`) on
+# the option line, not the bare option text.
+# ---------------------------------------------------------------------------
+
+# The #993 misfire: both phrases present on separate adjacent lines, but
+# the option line carries no selector marker -- not the gate.
+TWO_LINE_PROSE_MISFIRE_PANE = (
+    "The TUI asked 'Do you trust this workspace?'\n"
+    "I chose 'Trust and continue'\n"
+    "❯ \n")
+
+# Option text with a quote-style marker but no selector (`> N`) -- prose
+# quoting the option, not the gate's selector list.
+MARKERLESS_OPTION_PANE = (
+    "Do you trust this workspace?\n"
+    "> Trust and continue\n"
+    "❯ \n")
+
+
+def test_trust_gate_requires_selector_marker(cli):
+    # Issue #993: prose mentioning both phrases on separate lines must not
+    # match -- the option line needs the gate's `> N` selector marker.
+    assert not cli._pane_shows_trust_gate(TWO_LINE_PROSE_MISFIRE_PANE)
+    assert not cli._pane_shows_trust_gate(MARKERLESS_OPTION_PANE)
+    # The real gate (marker `> 1`) still matches, including with slack
+    # and tight spacing variants of the marker.
+    assert cli._pane_shows_trust_gate(TRUST_GATE_PANE)
+    assert cli._pane_shows_trust_gate(GATE_WITH_SLACK_PANE)
+    assert cli._pane_shows_trust_gate(
+        "Do you trust this workspace?\n"
+        "Workspace: /home/ntindle/muse-jobs/demo/work\n"
+        ">1 Trust and continue\n"
+        "  2  Quit\n")
+    assert cli._pane_shows_trust_gate(
+        "Do you trust this workspace?\n"
+        ">   10   Trust and continue\n"
+        "❯ \n")
+
+
 def test_trust_phrase_in_live_conversation_still_reads_live(cli):
     # Issue #961: the old bare-substring veto in _pane_shows_live_tui would
     # read this pane as gated. The TUI must keep reading as live.

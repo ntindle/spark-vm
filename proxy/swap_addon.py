@@ -1430,19 +1430,90 @@ class SwapAddon:
             if pair not in self._approval_signal:
                 self._approval_signal.append(pair)
 
+    def _scan_denial_dir(self, d, name, host, method_up, norm, now):
+        """Newest qualifying deny record in one approvals dir.
+
+        Issue #1004: the terminal-delivery leg must see a denial that is
+        committed but not yet moved to consumed/. Both terminal writers —
+        confirmd's _answer_locked (pending->answered->consumed) and the
+        box ingest (_ingest_write_answered -> _remove_pending ->
+        _ingest_finish_move) — stage the record in answered/ first, so a
+        refusal poll landing between the pending/ removal and the
+        consumed/ write would otherwise find neither and file a fresh
+        approval (re-paging the owner). answered/ is the commit point
+        (Finding 56: one-way), so a record there is an honest terminal
+        signal; a stray from a crashed run is still a committed decision
+        (the #233 sweep collects it to consumed/). Returns
+        (answered_at, aid) or None."""
+        best = None  # (answered_at, aid)
+        try:
+            fns = os.listdir(d)
+        except OSError:
+            return None
+        for fn in fns:
+            if not fn.endswith(".json"):
+                continue
+            p = os.path.join(d, fn)
+            try:
+                # mtime pre-filter: answered/ and consumed/ files are
+                # written via os.replace at decision time, with
+                # answered_at stamped just before the write — so mtime >=
+                # answered_at always, and a file older than the signal
+                # TTL cannot hold a qualifying denial. Skip the open +
+                # JSON parse for those: this scan runs synchronously on
+                # the proxy event loop per refusal, and consumed/ keeps
+                # up to 1000 items.
+                if (now.timestamp() - os.stat(p).st_mtime
+                        > APPROVAL_SIGNAL_TTL.total_seconds()):
+                    continue
+                with open(p) as f:
+                    it = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if it.get("credential") != name:
+                continue
+            if it.get("host") != host:
+                continue
+            if (it.get("method") or "").upper() != method_up:
+                continue
+            if it.get("path_prefix") != norm:
+                continue
+            if it.get("decision") != "deny":
+                continue
+            try:
+                answered = datetime.fromisoformat(it.get("answered_at"))
+                if answered.tzinfo is None:
+                    answered = answered.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+            if now - answered > APPROVAL_SIGNAL_TTL:
+                continue
+            aid = it.get("id") or fn[:-len(".json")]
+            if not _AID_RE.match(str(aid)):
+                continue
+            if best is None or answered > best[0]:
+                best = (answered, str(aid))
+        return best
+
     def _terminal_denial(self, name, host, method, path, fresh=False):
-        """H18 (#133): newest consumed/ denial for this (credential, host,
+        """H18 (#133): newest committed denial for this (credential, host,
         method) tuple *and this normalized path*, answered within
         APPROVAL_SIGNAL_TTL. A denial is terminal — the owner's answer is
         delivered instead of filing a fresh approval (which would
         re-push the owner). Path-scoped so one planted denial cannot
         suppress filings for other paths on the same tuple (fail closed:
-        a consumed item without a matching path_prefix is ignored).
+        a record without a matching path_prefix is ignored).
 
-        #307: the consumed/ scan is cached per (credential, host, method,
-        path) with consumed/ dir-mtime invalidation plus a short TTL —
-        an agent can already trigger refusals at will, so repeated
-        refusals must not pay the full listdir+stat scan each time.
+        Issue #1004: the scan covers consumed/ AND the in-flight
+        answered/ records — a denial staged in answered/ (both terminal
+        writers stage there first) is already committed, so the leg
+        delivers it instead of filing a fresh approval into the
+        pending->consumed window.
+
+        #307: the scan is cached per (credential, host, method, path)
+        with BOTH dirs' mtime invalidation plus a short TTL — an agent
+        can already trigger refusals at will, so repeated refusals must
+        not pay the full listdir+stat scan each time.
         fresh=True bypasses the cache for one authoritative read; used
         by #306's pre-filing re-check, which exists precisely to catch a
         denial that landed after the cached initial scan.
@@ -1450,6 +1521,7 @@ class SwapAddon:
         Returns the approval id, or None."""
         try:
             d = os.path.join(APPROVALS_DIR, "consumed")
+            da = os.path.join(APPROVALS_DIR, "answered")
             method_up = (method or "").upper()
             norm = _normalize_path(path or "/")
             now = datetime.now(timezone.utc)
@@ -1458,63 +1530,35 @@ class SwapAddon:
                 dir_mtime = os.stat(d).st_mtime_ns
             except OSError:
                 return None
+            try:
+                # Issue #1004: answered/ is transient and may not exist
+                # on a fresh install — a missing dir is an empty scan,
+                # not an error.
+                ans_mtime = os.stat(da).st_mtime_ns
+            except OSError:
+                ans_mtime = 0
+            seen = (dir_mtime, ans_mtime)
             if not fresh:
                 hit = self._denial_cache.get(key)
                 if hit is not None:
                     aid, valid_until, seen_mtime = hit
-                    # A terminal write (deny, expired-stamp, prune)
-                    # always lands a new file in consumed/ (or removes
-                    # one), so an unchanged dir-mtime means the scan
-                    # result cannot have changed. st_mtime_ns (integer)
-                    # so a sub-microsecond rename cannot collide with
-                    # the scan's stat. valid_until additionally bounds
-                    # a denial's APPROVAL_SIGNAL_TTL ageing.
-                    if seen_mtime == dir_mtime and now < valid_until:
+                    # A terminal write (deny, expired-stamp, prune) or an
+                    # answered/ stage/move always lands a new file in
+                    # consumed/ or answered/ (or removes one), so
+                    # unchanged mtimes on BOTH dirs mean the scan result
+                    # cannot have changed. st_mtime_ns (integer) so a
+                    # sub-microsecond rename cannot collide with the
+                    # scan's stat. valid_until additionally bounds a
+                    # denial's APPROVAL_SIGNAL_TTL ageing.
+                    if seen_mtime == seen and now < valid_until:
                         return aid
-            best = None  # (answered_at, aid)
-            for fn in os.listdir(d):
-                if not fn.endswith(".json"):
-                    continue
-                p = os.path.join(d, fn)
-                try:
-                    # mtime pre-filter: consumed/ files are written via
-                    # os.replace at decision time, with answered_at
-                    # stamped just before the write — so mtime >=
-                    # answered_at always, and a file older than the
-                    # signal TTL cannot hold a qualifying denial. Skip
-                    # the open + JSON parse for those: this scan runs
-                    # synchronously on the proxy event loop per refusal,
-                    # and consumed/ keeps up to 1000 items.
-                    if (now.timestamp() - os.stat(p).st_mtime
-                            > APPROVAL_SIGNAL_TTL.total_seconds()):
-                        continue
-                    with open(p) as f:
-                        it = json.load(f)
-                except (OSError, ValueError):
-                    continue
-                if it.get("credential") != name:
-                    continue
-                if it.get("host") != host:
-                    continue
-                if (it.get("method") or "").upper() != method_up:
-                    continue
-                if it.get("path_prefix") != norm:
-                    continue
-                if it.get("decision") != "deny":
-                    continue
-                try:
-                    answered = datetime.fromisoformat(it.get("answered_at"))
-                    if answered.tzinfo is None:
-                        answered = answered.replace(tzinfo=timezone.utc)
-                except (ValueError, TypeError):
-                    continue
-                if now - answered > APPROVAL_SIGNAL_TTL:
-                    continue
-                aid = it.get("id") or fn[:-len(".json")]
-                if not _AID_RE.match(str(aid)):
-                    continue
-                if best is None or answered > best[0]:
-                    best = (answered, str(aid))
+            best = self._scan_denial_dir(d, name, host, method_up, norm,
+                                        now)
+            ans_best = self._scan_denial_dir(da, name, host, method_up,
+                                            norm, now)
+            if (ans_best is not None
+                    and (best is None or ans_best[0] > best[0])):
+                best = ans_best
             if best is not None:
                 aid, answered = best[1], best[0]
                 # The cached positive must not outlive the denial's own
@@ -1530,7 +1574,7 @@ class SwapAddon:
                 # rescan, never correctness (fail-open cost, not a
                 # security change).
                 self._denial_cache.clear()
-            self._denial_cache[key] = (aid, valid_until, dir_mtime)
+            self._denial_cache[key] = (aid, valid_until, seen)
             return aid
         except OSError:
             return None
@@ -1849,7 +1893,7 @@ class SwapAddon:
                 return signals
             # #306: the owner's deny may have landed between the initial
             # _terminal_denial check (in _approval_signal_for_refusal)
-            # and this filing write — the confirmd deny path moves
+            # and this filing write — the terminal writers move
             # pending->answered->consumed as separate steps, so the
             # window is real. Re-check FRESH (bypassing the #307 cache)
             # immediately before minting and writing the new approval:
@@ -1857,13 +1901,16 @@ class SwapAddon:
             # push) and deliver the denial instead. The terminal signal
             # supersedes any expiry: _approval_signal_for_refusal skips
             # the _terminal_expiry append when a denied leg is present,
-            # matching the terminal branch here. Residual (accepted): a deny landing in the
-            # microseconds between the fresh re-check and the
-            # os.replace below still files+pushes once; the next
-            # refusal poll re-scans fresh (mtime-invalidated) and
-            # delivers terminal "denied", so the window is
-            # self-healing — closing it would need a cross-process
-            # lockfile shared with the confirmd daemon.
+            # matching the terminal branch here. #1004: the fresh
+            # re-check is answered/-aware, so a denial whose answered/
+            # record has landed is terminal here even before its
+            # consumed/ move completes. Residual (accepted): a denial
+            # landing in the microseconds between the fresh re-check and
+            # the os.replace below still files+pushes once; the next
+            # refusal poll re-scans fresh (mtime-invalidated,
+            # answered/-aware) and delivers terminal "denied", so the
+            # window is self-healing — closing it would need a
+            # cross-process lockfile shared with the terminal writers.
             # (The coalesce return above has no re-check: it
             # files and pushes nothing, so the worst case is one stale
             # pending signal; the next refusal poll re-scans fresh.)
