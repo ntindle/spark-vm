@@ -78,3 +78,18 @@ so S1 proceeds in-worker. Read the module docstring before reusing: the
 field arithmetic is not constant-time (assessed non-exploitable in the
 plane's threat model), peer keys are curve-validated per RFC 8291
 section 7, and the VAPID private key must never leave the plane.
+
+## push_payload.py — push payload construction discipline (#970 / GP4)
+
+The plane's push path is a hostile-*box* surface: box-controlled strings
+flow into payloads the plane signs and sends to the owner's lock screen.
+This module pins the single construction-time rule the future sender's
+enqueue boundary applies to every box-controlled payload field —
+control-character strip (C0 + C1, so ANSI escapes die) plus an explicit
+byte-length bound with ellipsis truncation that never splits a code
+point — proven by `test_push_payload.py` (22 tests, neutering-verified
+non-vacuous). Payload shape is exactly `{aid, ttl_s, summary}` ("go
+look" payloads, decision D4): the builder takes no token, key, or VAPID
+argument and returns an immutable mapping, so secrets have no ingress
+path at construction. Push-construction
+only: the owner-facing decision surface keeps showing the full raw text.
