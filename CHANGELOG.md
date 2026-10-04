@@ -60,7 +60,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   close-code reconnect policy (revoked → no reconnect loop, expired →
   reconnect with the current token, stale-generation → adopt and bump
   epoch, going-away → ≥60 s backoff). The #864 heartbeat stays the only
-  liveness signal; command frames and socket acks ride in S5b. (#TBD)
+  liveness signal; command frames and socket acks ride in S5b. (#975)
 
 - The docs index now covers the two newest hosted-product gap analyses —
   the box-to-plane filing-upload leg (#876) and the missing plane push
