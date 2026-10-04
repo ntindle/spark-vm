@@ -382,7 +382,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   within a few lines (#972): a live session whose own conversation mentions
   both phrases (e.g. the agent pasting a gate transcript, or saying it chose
   "Trust and continue") no longer reads as a trust gate, so the watch loop
-  can no longer type "1"+Enter into a working session's input box. (#TBD)
+  can no longer type "1"+Enter into a working session's input box. (#992)
 
 - The box-side command ingest now asserts its command incarnation on every
   queue fetch (#947): the plane can detect a box whose epoch is stale and
