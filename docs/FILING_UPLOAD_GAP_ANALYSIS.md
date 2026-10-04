@@ -189,6 +189,16 @@ exists, code does not; `[POLICY]` needs an operator (user) decision.
   `owner_id` NULL means box-filed (the box token is the
   provenance), and owner decisions stay owner-keyed.
   Filed as #952.
+  **Implemented 2026-10-03 (#952):** the plane now serves
+  `POST /v1/boxes/{box_id}/approvals/file` — box-token-authenticated,
+  scoped to the path's own `box_id` (wrong-box reads 401), accepting
+  `current` and `grace` token states; write-only response
+  `201/200 {ok, aid, deduped}` (never the record body — the box still
+  cannot read its own approvals); idempotent on `(box_id, aid)`; payload
+  bounds shared with the owner create path by construction; `owner_id`
+  NULL is the box-filed provenance marker (forward D1 migration,
+  table-rebuild). Owner-filed rows always carry a key id; the owner
+  read/list/decide surface is unchanged.
 - **S3:** `spark_pair.py upload-filings` — periodic scan of
   `confirm/pending/` (not the summons journal — G76.2 decision),
   payload mapping per G76.3 (incl. summary AND
