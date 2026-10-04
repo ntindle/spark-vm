@@ -127,7 +127,7 @@ rewrites the decision.
 
 | Method & path | Purpose |
 |---|---|
-| `GET /` | The authenticated fleet dashboard (`hosted/dashboard/` is the canonical copy, inlined into the deployed worker). Owner sign-in (key held in the tab's `sessionStorage` only); fleet list with STALE marking; box detail; pairing approvals; every API call carries the owner key as a `Bearer` token and a 401 anywhere returns the UI to the sign-in screen. |
+| `GET /` | The authenticated fleet dashboard (`hosted/dashboard/` is the canonical copy, inlined into the deployed worker). Owner sign-in (key held in the tab's `sessionStorage` only); fleet list with STALE marking; box detail; pairing approvals; pending action approvals with approve/deny taps on the box detail view (write-once decisions: same-decision tap replays, conflicting tap is rejected, expired reads as expired); every API call carries the owner key as a `Bearer` token and a 401 anywhere returns the UI to the sign-in screen. |
 | `GET /v1/health` | Public health check — the plane answers on the public endpoint (per `docs/PRODUCTION_DEPLOY_CONTRACT.md`'s live-verification checklist). The `/v1/health` path itself is asserted only on ntindle's #843 ship comment (2026-10-02) and the control-plane checkout's `worker.py` module docstring (the endpoint table — the source of truth); no repo doc pins that path. If this reference disagrees with `worker.py`, `worker.py` wins and this doc owes a fix-up turn. |
 
 ## Failure codes
