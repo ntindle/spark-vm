@@ -29,6 +29,12 @@ Implements issue #844's box side and the human-approval side:
                                              # confirmd's answered/consumed
                                              # store (cron ~1/min)
 
+  Filing upload (issue #953):
+    spark-pair.py upload-filings             # scan confirm/pending/ and POST
+                                             # new filings to the plane's
+                                             # box-authenticated file endpoint
+                                             # (cron ~1/min)
+
 The private key never leaves the box. The pairing code expires (15 min).
 The bearer token issued at redeem is short-lived (24 h); `rotate` replaces
 it before expiry so heartbeats never drop. The server half of rotation
@@ -828,8 +834,13 @@ def _plane_error(resp, status):
     sanitize-and-show is the right treatment: strip the control
     characters and print the cleaned text rather than refusing the
     whole message. Total: never raises; non-string values (e.g. the
-    numeric `status` fallback) pass through unchanged.
+    numeric `status` fallback) pass through unchanged. A non-dict
+    response (a 2xx with a JSON list/string/null body) falls back to
+    the numeric status — callers that branch on `isinstance(resp, dict)`
+    may pass the raw response through safely.
     """
+    if not isinstance(resp, dict):
+        return _plane_text(status)
     return _plane_text(resp.get("error", status))
 
 
@@ -1878,6 +1889,316 @@ def cmd_ingest(args):
         os.close(lock_fd)
 
 
+# ---------------------------------------------------------------------------
+# Box-side filing uploader (issue #953 — #876 S3)
+# ---------------------------------------------------------------------------
+# The proxy files refused-grant approvals locally only
+# (confirm/pending/<aid>.json); the plane record (#872) and the
+# box-authenticated file endpoint (S2, #952) give it a destination, but
+# nothing moves the filing across. upload-filings is the periodic mover:
+# one scan-and-POST pass per cron tick, riding the heartbeat/ingest
+# * * * * * pattern (own lock file, own log) — not folded into ingest
+# (G76.2).
+_UPLOAD_FILINGS_LOCK_FILE = ".upload-filings.lock"
+_UPLOAD_FILINGS_LOG_FILE = "upload-filings.log"
+_UPLOAD_SUMMARY_LIMIT = 250     # plane caps summary at 256 chars (#952)
+_UPLOAD_DETAIL_MAX_BYTES = 4096  # plane's MAX_DETAIL_BYTES (#952)
+_UPLOAD_TTL_SECS = 3600         # plane's max TTL; matches the local 1 h
+# The proxy's filing summary ends with the refusal reason
+# (proxy/swap_addon.py _file_approval: "%s %s%s for %s (refused: %s)").
+# The reason is not stored as its own field, so the uploader reads it
+# back from the pinned suffix — a repo-internal format contract, not a
+# plane contract. _upload_reason anchors on the LAST " (refused: " via
+# rpartition (the path can carry a literal one, percent-decoded).
+
+
+def _upload_fail(d, msg, redact=()):
+    _fail(d, msg, redact=redact, tag="upload-filings",
+          log=_UPLOAD_FILINGS_LOG_FILE)
+
+
+def _upload_say(msg, redact=()):
+    # Audible on stdout (cron mails it / journal captures it), same
+    # redaction discipline as _ingest_say.
+    for secret in redact:
+        if secret:
+            msg = msg.replace(secret, "<redacted>")
+    print(f"upload-filings: {msg}", flush=True)
+
+
+def _upload_truncate_summary(summary):
+    """Clip the local (unbounded) summary to the plane's 256-char bound:
+    250 chars + "…" = 251, with headroom under the cap (G76.3)."""
+    s = summary if isinstance(summary, str) else ""
+    s = s.strip()
+    if len(s) > _UPLOAD_SUMMARY_LIMIT:
+        s = s[:_UPLOAD_SUMMARY_LIMIT] + "…"
+    return s
+
+
+def _upload_reason(summary):
+    """Pull the refusal reason out of the proxy's pinned summary suffix.
+
+    The suffix is the LAST " (refused: …)" in the string — the path
+    portion of the summary can itself carry a literal " (refused: " (the
+    proxy's _normalize_path percent-decodes to fixpoint), so a leftmost
+    regex match would capture garbage. rpartition anchors on the last
+    occurrence.
+
+    Returns None when the summary does not carry the suffix (a filing
+    written by a different writer) — the detail tuple stays valid
+    without it. Total: a non-string summary yields None, never a
+    TypeError."""
+    if not isinstance(summary, str):
+        return None
+    _head, sep, tail = summary.rpartition(" (refused: ")
+    if not sep or not tail.endswith(")"):
+        return None
+    return tail[:-1]
+
+
+def _upload_detail(rec):
+    """Build the plane detail tuple per G76.3:
+    {credential, host, method, path_prefix, reason, filed_at, expires} —
+    Finding-49 discipline (no free text, tuple from the real request).
+
+    path_prefix (unbounded on the local side) is truncated with "…" while
+    the full host is kept, so a pathological filing can never breach the
+    plane's 4 KB detail cap. The longest fitting prefix is binary-searched
+    — the bound is byte-exact, not heuristic.
+
+    Returns (detail, None) or (None, reason) when the record cannot form
+    a valid tuple."""
+    tup = {}
+    for key in ("credential", "host", "method", "path_prefix"):
+        v = rec.get(key)
+        if not isinstance(v, str) or not v:
+            return None, f"record has no usable {key!r} — skipped"
+        tup[key] = v
+    reason = _upload_reason(rec.get("summary"))
+    if reason:
+        tup["reason"] = reason
+    for key in ("created", "expires"):
+        v = rec.get(key)
+        if not isinstance(v, str) or not v:
+            return None, f"record has no usable {key!r} — skipped"
+        tup["filed_at" if key == "created" else "expires"] = v
+    blob = json.dumps(tup).encode()
+    if len(blob) <= _UPLOAD_DETAIL_MAX_BYTES:
+        return tup, None
+    # Over cap: shrink path_prefix only (host stays full — G76.3).
+    path_prefix = tup["path_prefix"]
+    lo, hi = 0, len(path_prefix)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        cand = dict(tup)
+        cand["path_prefix"] = path_prefix[:mid] + "…"
+        if len(json.dumps(cand).encode()) <= _UPLOAD_DETAIL_MAX_BYTES:
+            lo = mid
+        else:
+            hi = mid - 1
+    tup["path_prefix"] = path_prefix[:lo] + "…"
+    if len(json.dumps(tup).encode()) > _UPLOAD_DETAIL_MAX_BYTES:
+        # Even the empty prefix is over cap (a pathological host): the
+        # plane would 400 with no uploader recovery — skip loudly rather
+        # than POST a known-400 every tick.
+        return None, "detail exceeds 4 KB even with an empty path_prefix"
+    return tup, None
+
+
+def _upload_one(d, box_id, token, url, aid, rec):
+    """POST one pending filing. Returns (state, note) where state is
+    "uploaded", "deduped", "failed", or "abort" (a token-state failure
+    that poisons the whole pass)."""
+    if rec.get("id") != aid:
+        _upload_fail(d, f"pending/{aid}.json: record id "
+                        f"{rec.get('id')!r} does not match the filename — "
+                        "skipped", redact=(token,))
+        return "failed", "id/filename mismatch"
+    summary = _upload_truncate_summary(rec.get("summary"))
+    if not summary:
+        _upload_fail(d, f"pending/{aid}.json: empty summary — skipped",
+                     redact=(token,))
+        return "failed", "empty summary"
+    detail, derr = _upload_detail(rec)
+    if derr is not None:
+        _upload_fail(d, f"pending/{aid}.json: {derr}", redact=(token,))
+        return "failed", derr
+    body = {"aid": aid, "summary": summary, "detail": detail,
+            "expires_in_secs": _UPLOAD_TTL_SECS}
+    status, resp = _http("POST", url, body,
+                         {"Authorization": "Bearer " + token})
+    if status == 401:
+        _upload_fail(d, f"upload rejected ({_plane_error(resp, status)}): "
+                        "this box token is dead (expired, revoked, or "
+                        "never valid) — re-pair the box (`request` + "
+                        "`redeem`); pass aborted", redact=(token,))
+        return "abort", "token dead"
+    if status == 404 and _plane_missing(resp):
+        _upload_fail(d, "upload failed: this control plane does not "
+                        "implement POST /v1/boxes/{id}/approvals/file yet "
+                        "— nothing was changed; pass aborted",
+                     redact=(token,))
+        return "abort", "endpoint missing"
+    if not isinstance(resp, dict) or status not in (200, 201) \
+            or not resp.get("ok") or resp.get("aid") != aid:
+        # A plane outage degrades loudly but never touches the local
+        # filing: the pending record stays, the next tick retries (G76.2).
+        _upload_fail(d, f"pending/{aid}.json: upload failed: "
+                        f"{_plane_error(resp, status)} (http={status}) — "
+                        "will retry at the next cron tick", redact=(token,))
+        return "failed", f"http={status}"
+    if resp.get("deduped"):
+        return "deduped", "already on the plane"
+    return "uploaded", "filed"
+
+
+def _upload_filings(d, approvals, box_id, token, control):
+    """One scan-and-POST pass over confirm/pending/.
+
+    Returns 0 when every pending filing was uploaded or already on the
+    plane (deduped), 1 otherwise. Pending-only by construction (G76.4):
+    the scan reads the pending store itself — denied, expired-stamped,
+    and consumed records live elsewhere and are never seen. A record
+    whose local expiry already passed is skipped too: it is on its way
+    to consumed/ and uploading it would mint a plane-side ghost.
+    """
+    pending = os.path.join(approvals, "pending")
+    # G76.7 writer identity: the pending dir must be box-service-owned
+    # (bdrive/swapd) — never an agent-writable path. This directory gate
+    # is only a coarse sanity check: the real Finding-50 enforcement is
+    # the per-file owner check before each read below (ingest enforces
+    # per record; the uploader matches it). A box-owned but
+    # agent-writable dir would otherwise let an agent plant filings the
+    # box then POSTs in its own name.
+    owner = _ingest_file_owner(pending)
+    if owner not in ("bdrive", "swapd"):
+        _upload_fail(d, f"pending dir {pending} is owned by {owner!r} — "
+                        "refusing to upload (writer identity must be the "
+                        "box, never the agent)", redact=(token,))
+        return 1
+    try:
+        names = sorted(os.listdir(pending))
+    except OSError as e:
+        _upload_fail(d, f"cannot list pending dir {pending} ({e}) — "
+                        "is confirmd installed on this box?", redact=(token,))
+        return 1
+    url = (control.rstrip("/") + "/v1/boxes/"
+           + urllib.parse.quote(box_id, safe="") + "/approvals/file")
+    uploaded = deduped = skipped = failed = 0
+    for fn in names:
+        # Only finished filings: the proxy writes tmp+replace, so a
+        # "*.json.tmp" mid-write filing is skipped until renamed.
+        if not fn.endswith(".json"):
+            continue
+        aid = fn[:-len(".json")]
+        if not _INGEST_AID_RE.match(aid):
+            _upload_fail(d, f"pending/{fn}: aid fails the aid shape — "
+                            "skipped", redact=(token,))
+            failed += 1
+            continue
+        path = os.path.join(pending, fn)
+        # Finding 50 (B1): the writer is the file's owner, never an
+        # argument — a box-owned dir does not prove each file inside it
+        # is box-written. Check immediately before the read to narrow
+        # the check-then-use window to what ingest already accepts.
+        fowner = _ingest_file_owner(path)
+        if fowner not in ("bdrive", "swapd"):
+            _upload_fail(d, f"pending/{fn}: owned by {fowner!r} — "
+                            "refusing to upload (writer identity must be "
+                            "the box, never the agent)", redact=(token,))
+            failed += 1
+            continue
+        try:
+            rec = _read_json_file(path)
+        except (OSError, ValueError) as e:
+            _upload_fail(d, f"pending/{fn}: unreadable ({e}) — skipped",
+                         redact=(token,))
+            failed += 1
+            continue
+        if not isinstance(rec, dict):
+            _upload_fail(d, f"pending/{fn}: not an object — skipped",
+                         redact=(token,))
+            failed += 1
+            continue
+        if _ingest_item_expired(rec):
+            # Locally dead already; the expiry reap will move it to
+            # consumed/. Not a failure — the next tick will not see it.
+            skipped += 1
+            continue
+        state, _note = _upload_one(d, box_id, token, url, aid, rec)
+        if state == "uploaded":
+            uploaded += 1
+        elif state == "deduped":
+            deduped += 1
+        elif state == "abort":
+            return 1
+        else:
+            failed += 1
+    if failed:
+        _upload_say(f"pass finished with failures: {uploaded} uploaded, "
+                    f"{deduped} already on the plane, {skipped} expired, "
+                    f"{failed} failed — will retry at the next cron tick",
+                    redact=(token,))
+        return 1
+    _upload_say(f"pass complete: {uploaded} uploaded, {deduped} already "
+                f"on the plane, {skipped} expired")
+    return 0
+
+
+def cmd_upload_filings(args):
+    """Box: scan confirm/pending/ and upload new filings to the plane's
+    box-authenticated file endpoint (cron-friendly: exit 0 only when
+    every pending filing was uploaded or deduped, loud on failure,
+    quiet-ish on success)."""
+    d = _state_dir(args)
+    enroll_path = os.path.join(d, "enrollment.json")
+    try:
+        enroll = _read_json_file(enroll_path)
+    except (OSError, ValueError) as e:
+        _upload_fail(d, f"enrollment.json is unreadable ({e}) — run "
+                        "`request` + `redeem` first")
+        return 1
+    if not isinstance(enroll, dict):
+        _upload_fail(d, "enrollment.json is not an object — run `request` "
+                        "+ `redeem` first")
+        return 1
+    box_id, token = enroll.get("box_id"), enroll.get("token")
+    if not box_id or not token:
+        _upload_fail(d, "enrollment.json is missing box_id/token — run "
+                        "`request` + `redeem` first")
+        return 1
+    control, msg = _resolve_control(args, enroll)
+    if control is None:
+        _upload_fail(d, msg)
+        return 1
+    approvals = _approvals_dir()
+    if not os.path.isdir(approvals):
+        _upload_fail(d, f"approvals dir {approvals} is missing — is "
+                        "confirmd installed on this box?", redact=(token,))
+        return 1
+    # Serialize overlapping cron ticks: two uploaders racing the same
+    # pending store would double-POST (the plane dedupes on (box_id, aid),
+    # so the cost is load, not duplicates — keep it serial anyway).
+    lock_path = os.path.join(d, _UPLOAD_FILINGS_LOCK_FILE)
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        # 0600 at creation is not enough: a pre-existing lock file keeps
+        # its wider mode through the open. Force it every time (#883).
+        os.fchmod(lock_fd, 0o600)
+    except OSError as e:
+        _upload_fail(d, f"upload-filings FAILED: cannot open lock file "
+                        f"({e}) — check state-dir permissions",
+                     redact=(token,))
+        return 1
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return _upload_filings(d, approvals, box_id, token, control)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="spark-pair",
                                  description="pairing-code box enrollment")
@@ -1908,6 +2229,15 @@ def main(argv=None):
                                       "when every due command was consumed, "
                                       "loud on failure)")
     s.set_defaults(fn=cmd_ingest)
+
+    s = sub.add_parser("upload-filings", help="box: upload locally filed "
+                                      "approvals from confirm/pending/ to "
+                                      "the plane's box-authenticated file "
+                                      "endpoint (cron-friendly: exit 0 only "
+                                      "when every pending filing was "
+                                      "uploaded or deduped, loud on "
+                                      "failure)")
+    s.set_defaults(fn=cmd_upload_filings)
 
     s = sub.add_parser("approve", help="owner: verify fingerprint + approve")
     s.add_argument("--pairing-id", help="pairing id (lists pending if omitted)")
