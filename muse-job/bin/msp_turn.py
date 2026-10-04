@@ -337,6 +337,136 @@ def watch_turn_events(host, session_id, turn_id, timeout=30.0):
     return seen
 
 
+class TurnStillbornError(MSPTurnError):
+    """The first turn of a spawn died before the agent could engage.
+
+    Raised (via await_first_turn_engagement) when the turn reaches a
+    dead terminal -- cancelled, interrupted, or failed -- inside the
+    engagement window. At spawn time no user exists to cancel or
+    interrupt a turn, so a dead first turn means the spawn never
+    engaged: the caller must fail the spawn loudly rather than leave
+    the job behind as "active" (issue #994). The redacted event-method
+    journal rides on .journal for diagnostics; note params are never
+    attached (prompts may carry real secret values).
+    """
+
+    def __init__(self, message, *, turn_id, terminal, journal):
+        super().__init__(message)
+        self.turn_id = turn_id
+        self.terminal = terminal
+        self.journal = tuple(journal)
+
+
+# Terminals that mean "the turn died before the agent engaged". At
+# spawn time a completed turn is fine (a fast prompt that finished);
+# anything else reaching terminal inside the engagement window is a
+# stillborn spawn.
+_FIRST_TURN_DEAD_TERMINALS = ("cancelled", "interrupted", "failed")
+
+# How long spawn waits for the first turn to prove it is alive. The
+# #994 cancellation landed ~1ms after turn start; ten seconds is
+# generous for a healthy turn to emit its first event while keeping a
+# silent-but-dead server from stalling spawn badly.
+FIRST_TURN_ENGAGEMENT_TIMEOUT = 10.0
+
+
+def _turn_terminal(note, turn_id):
+    """Classify a notification's terminal state for turn_id, or None.
+
+    Two wire shapes exist (the fixture emits method-level
+    ``turn/cancelled``; the real serve host emits ``turn/completed``
+    with a ``terminal`` param -- issue #994's journal): both are
+    honored, mirroring msp_events' classification. A ``turn/completed``
+    with no terminal param reads as completed. Unknown non-empty
+    terminal strings pass through verbatim so callers see the drift
+    instead of a guess.
+    """
+    if not isinstance(note, dict):
+        return None
+    params = note.get("params")
+    if not isinstance(params, dict) or params.get("turnId") != turn_id:
+        return None
+    method = note.get("method")
+    if method == "turn/completed":
+        terminal = params.get("terminal")
+        if isinstance(terminal, str) and terminal:
+            return terminal
+        return "completed"
+    if method == "turn/cancelled":
+        return "cancelled"
+    if method == "turn/interrupted":
+        return "interrupted"
+    return None
+
+
+def await_first_turn_engagement(host, session_id, turn_id, *,
+                                timeout=FIRST_TURN_ENGAGEMENT_TIMEOUT):
+    """Watch the first turn of a spawn until it engages or dies.
+
+    Returns a dict {"status", "terminal", "journal", "elapsed_s"}:
+
+    - ``"engaged"`` -- no terminal event inside the window; the turn is
+      (presumably) still running. This is the normal case.
+    - ``"done"`` -- the turn completed inside the window (a fast prompt
+      that finished); terminal is "completed".
+    - ``"dead"`` -- the turn reached a dead terminal (cancelled /
+      interrupted / failed) inside the window, before the agent could
+      engage. The caller must treat the spawn as failed
+      (TurnStillbornError), never as a live job.
+
+    ``journal`` is the method-name sequence seen (methods only, no
+    params -- safe to log; prompts may carry secrets). Malformed
+    notifications are ignored, never raised: the callback runs on the
+    transport's reader thread (same rule as watch_turn_events).
+
+    This is the issue-#994 acceptance made concrete: "verify the first
+    turn actually engages, not just that the session started".
+    """
+    _check_session_id(session_id)
+    _check_turn_id(turn_id)
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise ValueError(
+            f"timeout must be a positive number of seconds, got {timeout!r}")
+    seen = []
+    terminal = {"value": None}
+    t0 = time.time()
+
+    def on_note(note):
+        params = note.get("params") if isinstance(note, dict) else None
+        if not isinstance(params, dict):
+            # Missing or non-dict params carry nothing to filter on.
+            # Ignore rather than raising: subscriber exceptions drop the
+            # event silently, which would lose a terminal and turn the
+            # watch into a full-timeout wait.
+            return
+        if params.get("sessionId") != session_id:
+            return
+        method = note.get("method")
+        if isinstance(method, str):
+            seen.append(method)
+        term = _turn_terminal(note, turn_id)
+        if term is not None and terminal["value"] is None:
+            terminal["value"] = term
+
+    unsub = host.subscribe("turn", on_note)
+    try:
+        end = t0 + timeout
+        while time.time() < end and terminal["value"] is None:
+            time.sleep(0.05)
+    finally:
+        unsub()
+    elapsed = time.time() - t0
+    term = terminal["value"]
+    if term is None:
+        status = "engaged"
+    elif term in _FIRST_TURN_DEAD_TERMINALS:
+        status = "dead"
+    else:
+        status = "done"
+    return {"status": status, "terminal": term, "journal": list(seen),
+            "elapsed_s": elapsed}
+
+
 def main(argv):
     """Smoke CLI: exercise the turn plane against a real serve host.
 

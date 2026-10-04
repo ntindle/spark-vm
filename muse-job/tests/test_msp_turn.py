@@ -875,3 +875,132 @@ def test_smoke_cli_watch_interrupt_with_turn_id_is_bounded(monkeypatch,
     body = json.loads(capsys.readouterr().out)
     assert body["watchedEvents"] == []
     assert elapsed < 5, "watch did not return at its timeout: %.1fs" % elapsed
+
+
+# -- await_first_turn_engagement (#994) ---------------------------------------
+
+def _engage_with_notes(notes, *, session_id="sess-x", turn_id="turn-x",
+                       timeout=5.0):
+    """Run await_first_turn_engagement against the stub host, feed it
+    `notes`, and return the engagement record."""
+    host = _StubWatchHost()
+    box = {}
+
+    def run():
+        box["eng"] = mspt.await_first_turn_engagement(
+            host, session_id, turn_id, timeout=timeout)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    assert wait_until(lambda: host.callback is not None), \
+        "await_first_turn_engagement never subscribed"
+    for note in notes:
+        host.callback(note)
+    t.join(timeout + 10)
+    assert not t.is_alive(), "await_first_turn_engagement did not return"
+    return box["eng"]
+
+
+def _stillborn_journal():
+    # The real #994 signal journal: the serve host emits turn/completed
+    # with a terminal param (NOT the fixture's method-level
+    # turn/cancelled).
+    return [
+        _note("turn/started", {"sessionId": "sess-x", "turnId": "turn-x"}),
+        _note("item/completed", {"sessionId": "sess-x", "turnId": "turn-x",
+                                 "item": "userMessage"}),
+        _note("item/started", {"sessionId": "sess-x", "turnId": "turn-x",
+                               "item": "reminderChild"}),
+        _note("item/completed", {"sessionId": "sess-x", "turnId": "turn-x",
+                                 "item": "reminderChild"}),
+        _note("turn/completed", {"sessionId": "sess-x", "turnId": "turn-x",
+                                 "terminal": "cancelled"}),
+    ]
+
+
+def test_engagement_detects_stillborn_via_terminal_param():
+    eng = _engage_with_notes(_stillborn_journal())
+    assert eng["status"] == "dead"
+    assert eng["terminal"] == "cancelled"
+    assert eng["journal"] == ["turn/started", "item/completed",
+                              "item/started", "item/completed",
+                              "turn/completed"]
+    assert eng["elapsed_s"] < 5.0
+
+
+def test_engagement_detects_stillborn_via_method_level_cancel():
+    notes = [_note("turn/cancelled",
+                   {"sessionId": "sess-x", "turnId": "turn-x"})]
+    eng = _engage_with_notes(notes)
+    assert eng["status"] == "dead"
+    assert eng["terminal"] == "cancelled"
+
+
+def test_engagement_detects_stillborn_interrupt_and_failed():
+    for method, params, terminal in (
+            ("turn/interrupted", {"sessionId": "sess-x", "turnId": "turn-x"},
+             "interrupted"),
+            ("turn/completed", {"sessionId": "sess-x", "turnId": "turn-x",
+                                "terminal": "failed"}, "failed")):
+        eng = _engage_with_notes([_note(method, params)])
+        assert eng["status"] == "dead", method
+        assert eng["terminal"] == terminal, method
+
+
+def test_engagement_completed_turn_is_done_not_dead():
+    for params in ({"sessionId": "sess-x", "turnId": "turn-x",
+                   "terminal": "completed"},
+                  {"sessionId": "sess-x", "turnId": "turn-x"}):
+        eng = _engage_with_notes([_note("turn/completed", params)])
+        assert eng["status"] == "done", params
+        assert eng["terminal"] == "completed", params
+
+
+def test_engagement_running_turn_reports_engaged_at_timeout():
+    notes = [_note("turn/started", {"sessionId": "sess-x", "turnId": "turn-x"})]
+    t0 = time.time()
+    eng = _engage_with_notes(notes, timeout=0.4)
+    elapsed = time.time() - t0
+    assert eng["status"] == "engaged"
+    assert eng["terminal"] is None
+    assert eng["journal"] == ["turn/started"]
+    assert elapsed >= 0.3, "returned before the timeout: %.2fs" % elapsed
+
+
+def test_engagement_ignores_other_turn_and_malformed_notes():
+    notes = [
+        {"jsonrpc": "2.0", "method": "turn/started"},       # params missing
+        _note("turn/steered", None),                        # params null
+        _note("turn/steered", "oops"),                      # non-dict params
+        _note("turn/started", {"sessionId": "sess-other",   # other session
+                               "turnId": "turn-x"}),
+        _note("turn/cancelled", {"sessionId": "sess-x",     # other turn
+                                 "turnId": "turn-other"}),
+        _note("turn/started", {"sessionId": "sess-x", "turnId": "turn-x"}),
+    ]
+    t0 = time.time()
+    eng = _engage_with_notes(notes, timeout=0.4)
+    assert eng["status"] == "engaged"
+    assert eng["journal"] == ["turn/cancelled", "turn/started"]
+    assert time.time() - t0 >= 0.3
+
+
+def test_engagement_rejects_bad_arguments():
+    host = _StubWatchHost()
+    with pytest.raises(ValueError):
+        mspt.await_first_turn_engagement(host, "", "turn-x")
+    with pytest.raises(ValueError):
+        mspt.await_first_turn_engagement(host, "sess-x", "")
+    with pytest.raises(ValueError):
+        mspt.await_first_turn_engagement(host, "sess-x", "turn-x", timeout=0)
+
+
+def test_turn_stillborn_error_carries_diagnostics():
+    err = mspt.TurnStillbornError("boom", turn_id="turn-x",
+                                  terminal="cancelled",
+                                  journal=["turn/started", "turn/completed"])
+    assert isinstance(err, mspt.MSPTurnError)
+    assert err.turn_id == "turn-x"
+    assert err.terminal == "cancelled"
+    assert err.journal == ("turn/started", "turn/completed")
+    assert "boom" in str(err)

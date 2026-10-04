@@ -3237,6 +3237,32 @@ def _spawn_msp(slug, args):
         with open(os.path.join(jd, "prompt.md")) as f:
             full_prompt = f.read()
         turn, _result = msp_turn.start_turn(host, sid, full_prompt)
+        # Issue #994: a turn/start that returns is not proof the spawn
+        # engaged -- the real serve host cancelled the first turn
+        # server-side within ~1ms, and the job sat "active" forever with
+        # nothing working. Verify the first turn is alive (or done)
+        # before declaring the spawn a success; a dead first turn fails
+        # the spawn loudly and marks the job blocked, never active.
+        eng = msp_turn.await_first_turn_engagement(host, sid, turn["turnId"])
+        if eng["status"] == "dead":
+            job["session_uuid"] = sid
+            job["state"] = "blocked"
+            job["stillborn"] = {
+                "turn_id": turn["turnId"],
+                "terminal": eng["terminal"],
+                "journal": eng["journal"],
+            }
+            save_job(job, slug)
+            raise msp_turn.TurnStillbornError(
+                f"muse-job spawn {slug!r}: the first turn died before "
+                f"engaging (terminal={eng['terminal']!r}, "
+                f"{len(eng['journal'])} events in {eng['elapsed_s']:.1f}s); "
+                f"the job is marked blocked, not active. Event methods: "
+                f"{','.join(eng['journal'])}. If the turn was cancelled "
+                f"server-side within ~1s of start, this matches issue #994 "
+                f"(session/branchChanged race suspect); retry with --tmux.",
+                turn_id=turn["turnId"], terminal=eng["terminal"],
+                journal=eng["journal"])
         job["session_uuid"] = sid
         job["session_started_at"] = time.time()
         save_job(job, slug)
