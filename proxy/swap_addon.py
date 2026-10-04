@@ -674,6 +674,15 @@ def _sanitize_audit_field(value):
     return _AUDIT_FIELD_ALLOW_RE.sub("", str(value))
 
 
+def _reject_nonstandard_constant(value):
+    """parse_constant hook for the #838 JSON validity gate: Python's
+    json.loads accepts NaN/Infinity/-Infinity by default, but RFC 8259
+    does not — a strict server would 400 the body, which is exactly the
+    silently-broken outcome the gate exists to prevent. Raising
+    ValueError folds into the gate's refusal path."""
+    raise ValueError("non-standard JSON constant: %r" % (value,))
+
+
 def _open_audit_log():
     """Open the audit log for append, creating it 0600 if missing.
 
@@ -2355,15 +2364,22 @@ class SwapAddon:
         released. Pass 2 is the real swap; if it diverges from the
         validated probe (an audit write failed, or resolution changed
         between passes) the whole body is refused rather than releasing a
-        document the probe did not validate."""
+        document the probe did not validate.
+
+        The probe parse is strict: `RecursionError` fails closed like
+        invalid JSON (deep nesting under the size cap must not crash the
+        hook), and non-standard constants (NaN/Infinity) are rejected —
+        Python accepts them, RFC 8259 does not, and a strict server would
+        400 the body, which is exactly the silently-broken outcome this
+        gate exists to prevent."""
         probe = self._swap_text(
             text, host, method, path, encode=lambda v: json.dumps(v)[1:-1],
             location=location, defer_audit=True)
         if probe == text:
             return text  # nothing swapped: the proxy broke nothing
         try:
-            json.loads(probe)
-        except ValueError:
+            json.loads(probe, parse_constant=_reject_nonstandard_constant)
+        except (ValueError, RecursionError):
             log.warning("swap: JSON swap for %s produced invalid JSON; "
                         "refusing swap, leaving placeholders", host)
             self._audit_note(host, "json-swap", "invalid-json-after-swap")
