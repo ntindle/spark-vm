@@ -296,7 +296,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   continue") co-occur in the viewport tail. Previously a session discussing
   the gate read as gated, and the automatic answer typed "1"+Enter into the
   live session's input box. The genuine gate shape is unchanged, so a
-  truly parked TUI is still answered. (#TBD)
+  truly parked TUI is still answered. (#973)
 
 - The job watchdog now distinguishes a workspace-trust gate the TUI is
   parked at from a generically dead pane even when the pane's foreground
