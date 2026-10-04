@@ -52,6 +52,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted phone-approval push, sender design split into buildable slices (#991): the remaining sender work is now three tracked issues — the subscription/budget/send-record database contract, the push-service transport (request shape, retries, per-code handling), and the enqueue boundary (where filing becomes a page, and the backpressure story). Three structural pins landed with it: the anti-spam page budget counts pages, not device deliveries (one page to all your devices is one unit); every send re-checks whether the approval was already decided or expired, so a decided approval never pages; and a page fans out to every live subscription registered for that owner and box.
+
 - muse-job v2 (MSP cutover): MSP is now the default transport — `muse-job spawn` drives jobs over `muse serve` unless `--tmux` opts back into the legacy TUI-pane path (closes #228). The cutover also fixes a serve-schema drift the 1.4.x binary exposed: `turn/start` and `turn/steer` now send the required `input` content-part array (the old opaque `prompt`/`message` string fields are rejected with invalid params), and `turn/steer` carries the required `expectedTurnId` anti-cross-turn guard. (#228)
 
 - Control-plane API reference, fix-up (#985): the consolidated endpoint

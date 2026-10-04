@@ -75,7 +75,11 @@ different design and must re-litigate here:
 - **D3. One plane identity, per-(box, device) subscriptions.**
   The plane owns a single VAPID keypair (operator-generated, worker
   secret). Subscriptions are keyed `(owner_principal, box_id, device)`
-  in the D1 database. This analysis pins the custody rule itself (the
+  in the D1 database. A page for an (owner, box) event fans out to
+  every live subscription under that `(owner_principal, box_id, *)`
+  key. Whether subscribing is per-box opt-in or per-owner default is
+  a product question for the schema-contract slice, not settled here.
+  This analysis pins the custody rule itself (the
   D-series' stated job): subscription secrets rest in the D1 database,
   readable only by the owner principal's own authenticated reads, with
   no box-legible surface and never in worker logs; the VAPID private

@@ -164,7 +164,12 @@ Notes the table needs to say out loud:
   failures (410, dead-letter) do not consume budget: the budget
   bounds *successful buzzes*, not attempts. Page-once per
   `(box_id, aid)` is enforced by the enqueue dedup key, independent
-  of the budget.
+  of the budget. The budget counts **pages, not device deliveries**:
+  one page fanned out to N of the owner's devices consumes one unit
+  of the per-(box, hour) and per-(owner, hour) budgets. Rationale:
+  the bound's job is capping box-driven events — a hostile box
+  cannot inflate the owner's device count, so fanout (owner-driven)
+  is not the attack the bound exists for.
 - **D11. Expiry pages nothing.** (See §2 notes.) Terminal states
   observed server-side are not paging events.
 - **D12. The reminder lease has two gates.** Gate-1 at sweep: select
@@ -174,6 +179,13 @@ Notes the table needs to say out loud:
   row feeds the sentinel leg (#798–#800), not the phone — a dropped
   reminder is operator-visible, never owner-paged. This is what makes
   "decided → cancel outstanding" enforceable rather than aspirational.
+  Gate-2 applies to **every** send, not just reminders: the first
+  page re-reads the record's terminal state at send time too. With an
+  async send path the owner can decide between enqueue and send, and
+  a page for a decided approval pages about nothing — the §2 table's
+  "Cancelled / superseded by: decision, expiry (record terminal)"
+  column already promises this for the filed page; gate-2 is the
+  mechanism.
 - **D13. Event identity keys are the table's, verbatim — with "token
   generation" defined here.** The #969 build uses these keys for
   dedup; inventing a new key scheme is a re-litigation of this doc.
