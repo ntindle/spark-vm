@@ -116,14 +116,16 @@ slice (S5) shipped 2026-10-04, live-plane acceptance still open on
 | Method & path | Purpose |
 |---|---|
 | `POST /v1/boxes/{box_id}/approvals` | Create a pending record. Body: `{aid, summary, detail?, expires_in_secs?}` (`aid`: client-chosen idempotency key, 1–64 chars in `[A-Za-z0-9._-]`; `summary`: 1–256 chars; `detail`: opaque JSON object ≤ 4 KB. The `(box_id, aid)` primary key makes create retries safe: a retried create returns the existing record with `200 {ok, approval, deduped: true}` instead of a duplicate) → `201 {ok, approval}`. |
-| `POST /v1/boxes/{box_id}/approvals/file` | **Box token, own `box_id` only (the owner-key exception on this surface).** The box files its own pending record (`spark_pair.py upload-filings`, #953; #952): `current` **and** `grace` token states accepted (the #846 rotation grace must never stall uploads). Body mirrors the owner create path (`{aid, summary, detail?, expires_in_secs?}`, same payload bounds by construction); `owner_id` is stored NULL — the box-filed provenance marker, and owner decisions stay owner-keyed. Response is write-only — `201/200 {ok, aid, deduped}` (a retried file returns the existing row's aid as `200 {deduped: true}`), never the record body: the "a box cannot read its own approvals" invariant stays intact. A box token for the wrong box_id 401s. (Canonical: `docs/FILING_UPLOAD_GAP_ANALYSIS.md` S2.) |
+| `POST /v1/boxes/{box_id}/approvals/file` | **Box token, own `box_id` only (the owner-key exception on this surface).** The box files its own pending record (`spark_pair.py upload-filings`, #953; #952): `current` **and** `grace` token states accepted (the #846 rotation grace must never stall uploads). Body mirrors the owner create path (`{aid, summary, detail?, expires_in_secs?}`, same payload bounds by construction); `owner_id` is stored NULL — the box-filed provenance marker, and owner decisions stay owner-keyed. Response is write-only — `201/200 {ok, aid, deduped}` (a retried file returns the existing row as `200 {ok, aid, deduped: true}`), never the record body: the "a box cannot read its own approvals" invariant stays intact. A box token for the wrong box_id 401s. (Canonical: `docs/FILING_UPLOAD_GAP_ANALYSIS.md` S2.) |
 | `GET /v1/boxes/{box_id}/approvals` | List records (`?status=pending\|approved\|denied\|expired`, `?limit=` ≤ 200, default 50). Server-side expiry applied before listing. |
 | `GET /v1/boxes/{box_id}/approvals/{aid}` | One record; server-side expiry applied. |
 | `POST /v1/boxes/{box_id}/approvals/{aid}/decision` | Record the decision: `{decision: "approve"\|"deny"}` → `200 {ok, approval}`. First decision wins (conditional update on `pending` rows only); re-deciding with the same decision is a `200` replay (`deduped: true`); a conflicting decision on a decided record is `409 "approval already decided"`; deciding an expired record is `410` (expiry is terminal). Recording a decision enqueues an `approval_decision` command on the durable queue (#873) so the box learns it over the command fetch; server-side expiry enqueues `decision=expire` the same way. |
 
-A box token presented at the owner-key endpoints on this surface gets
-`401 "a box cannot decide its own approvals"` — a box can never
-decide or read its own approvals; the sole box-token endpoint is the
+A box token for the path's own `box_id` presented at the owner-key endpoints
+on this surface gets `401 "a box cannot decide its own approvals"` — a box
+can never decide or read its own approvals. A wrong-box or dead token at
+those endpoints gets the plain 401 (wrong-identity and no-identity are
+deliberately indistinguishable). The sole box-token endpoint is the
 `approvals/file` create, which is write-only by design. `expires_in_secs` defaults to 600 (10 min), clamped to
 [60, 3600]; a client TTL is never trusted. Once decided, expiry never
 rewrites the decision.
