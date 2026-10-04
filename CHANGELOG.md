@@ -82,7 +82,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - `spark-pair.py phone-home`: socket command frames + `command_ack`s (#976,
   S5b) — the daemon now executes durable commands pushed over the open
-  channel through the same ingest path as the HTTPS fetch loop
+  channel (plane half #958 still pending; validated against a stub
+  harness only) through the same ingest path as the HTTPS fetch loop
   (execute-before-ack, redeliveries deduped), and acks them back over the
   socket instead of a separate HTTPS call. Untrusted frames (wrong
   generation, malformed, oversized, unknown kinds) are logged loudly and

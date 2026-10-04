@@ -2733,8 +2733,8 @@ class _PhoneHomeSession:
     carrier for the same queue, not a second queue: redeliveries dedupe
     through the shared backstops (the ingested idempotency log and the
     consumed/ O_EXCL records), and the acked prefix never skips a bad
-    row — the same never-advance-past-unacked invariant the HTTPS fetch
-    path's cursor enforces.
+    row — the socket prefix additionally holds on malformed rows rather
+    than skipping them.
     """
 
     def __init__(self, d, sock, reader, box_id, generation, token,
@@ -2789,8 +2789,9 @@ class _PhoneHomeSession:
         the caller reconnects and the command redelivers; the
         idempotency backstops make the re-execution safe. A frame the
         box cannot trust is logged loudly and never acked: the DO
-        re-drives from its acked_watermark, the same noisy-until-fixed
-        posture as the HTTPS path's malformed-row skip.
+        re-drives from its acked_watermark, a stricter hold than the
+        HTTPS path's malformed-row skip — the socket fast-path degrades
+        to the HTTPS cron until the plane fixes the row.
         """
         if frame.get("generation") != self.generation:
             # A stale session's frame (or a plane bug): it does not
@@ -2828,8 +2829,9 @@ class _PhoneHomeSession:
         if shaped is None:
             # No seq to ack and nothing safe to execute: the DO
             # re-drives until the plane fixes the row — noisy, but the
-            # alternative (advancing past it) hides a plane bug. Mirrors
-            # the HTTPS path's malformed-row skip.
+            # alternative (advancing past it) hides a plane bug. Stricter
+            # than the HTTPS path's malformed-row skip, which drops the
+            # row and advances the cursor.
             _phone_home_say(self.d,
                             "ignoring malformed command frame (plane "
                             "bug) — not acked, will re-drive",
@@ -2840,7 +2842,10 @@ class _PhoneHomeSession:
             if seq <= self._acked_prefix:
                 # Redelivery of an already-acked seq (a lost ack heals
                 # this way): re-ack without re-executing.
-                self._socket_ack(seq, epoch)
+                try:
+                    self._socket_ack(seq, epoch)
+                except _WsTransportLost:
+                    return "transport-lost"
                 return "ok"
             if seq > self._acked_prefix + 1:
                 # Gap: the DO drives in order from its watermark, so a
@@ -2869,9 +2874,37 @@ class _PhoneHomeSession:
                     self.token)
                 consumed = True
             elif kind == "approval_decision":
-                consumed = _ingest_approval_decision(
-                    self.d, self.approvals, self.box_id, self.token, seq,
-                    payload, self._ingested, attention)
+                # Join the .ingest.lock discipline (see the
+                # _ingest_commands wrapper): the idempotency log covers
+                # crashes, not concurrency. Non-blocking: contention
+                # defers to the DO's re-drive rather than stalling the
+                # frame loop (keepalive must keep flowing). A lock-file
+                # open failure fails closed like contention (loud log,
+                # no ack) — never a traceback out of the frame loop.
+                try:
+                    lock_fd = os.open(os.path.join(self.d, _INGEST_LOCK_FILE),
+                                      os.O_CREAT | os.O_RDWR, 0o600)
+                except OSError as e:
+                    _phone_home_say(self.d,
+                                    f"seq={seq}: cannot open ingest lock "
+                                    f"({e}) — not acked, will re-drive",
+                                    self.token)
+                    return "ok"
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    os.close(lock_fd)
+                    _phone_home_say(self.d,
+                                    f"seq={seq}: ingest lock contended — "
+                                    "not acked, will re-drive", self.token)
+                    return "ok"
+                try:
+                    consumed = _ingest_approval_decision(
+                        self.d, self.approvals, self.box_id, self.token, seq,
+                        payload, self._ingested, attention)
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    os.close(lock_fd)
             else:  # pragma: no cover — registry and branch above stay in sync
                 consumed = False
         except (OSError, ValueError) as e:

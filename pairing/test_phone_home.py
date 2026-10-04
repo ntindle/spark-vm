@@ -1312,3 +1312,49 @@ def test_socket_command_redelivery_across_session_boundary(
     assert [a["seq"] for a in acks] == [1]
     assert acks[0]["generation"] == \
         stub.records[1]["hello"]["generation"]
+
+
+def test_socket_command_ingest_lock_contention_defers(ctx, monkeypatch,
+                                                      tmp_path, capsys):
+    # Security B1: the socket ingest joins the .ingest.lock
+    # serialization discipline (the same lock the #874 HTTPS cron
+    # ingest holds — the idempotency log covers crashes, not
+    # concurrency). A command arriving while the lock is contended is
+    # loudly deferred — no ack, no stamp — and the DO's re-drive heals
+    # it once the lock is free.
+    import fcntl
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    inner = _s5b_inner()
+    lock_fd = os.open(os.path.join(ctx.dir, spark_pair._INGEST_LOCK_FILE),
+                      os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        stub = StubDO([[("welcome",),
+                        ("send-command", 1, 0, inner),
+                        ("drain", 1.0),
+                        ("close", "revoked", {})]])
+        rc = _run_client(ctx, stub)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    assert rc == 1
+    # Contended: nothing acked (drain-based proof, not the quota-blind
+    # rec["frames"]), nothing stamped, and the log says so loudly.
+    assert _s5b_drained_acks(stub) == []
+    assert _s5b_consumed(approvals) is None, \
+        "contended command must not be stamped"
+    assert "ingest lock contended" in capsys.readouterr().out
+    # Re-drive after the lock is free: the same command is ingested
+    # and acked exactly once (the first run stamped nothing).
+    spark_pair._PHONE_HOME_STOP = False
+    stub2 = StubDO([[("welcome",),
+                     ("send-command", 1, 0, inner),
+                     ("expect-acks", [1]),
+                     ("close", "revoked", {})]])
+    rc2 = _run_client(ctx, stub2)
+    assert rc2 == 1
+    assert [a["seq"] for a in _s5b_acks(stub2)] == [1]
+    assert _s5b_consumed(approvals)["plane_seq"] == 1
+    with open(os.path.join(ctx.dir, "ingested_decisions.json")) as f:
+        assert len(json.load(f)) == 1
