@@ -261,6 +261,27 @@ Worker entrypoint's lane (S4 may keep an unattributed counter there).
 Staleness chips stay heartbeat-driven (§8); these events are the
 operational trail, not the liveness signal.
 
+### Sink (S4b-4)
+
+The journal is the D1 table `phone_home_events` (migration
+`migrate_958_s4b.sql`, re-run safe):
+
+| column | meaning |
+|---|---|
+| `box_id` | owning box |
+| `event` | one of the six names above — the plane's journal helper is the only writer and raises (fail-closed) on anything else |
+| `generation` | bound generation for `connect` / `disconnect` / `hibernate_wake` / `revoked_kill` / `expired_close`; for `generation_fence` this is the **kept** generation; NULL when unbound (connect is unbound until S4b-1 binds the fence) |
+| `seen_generation` | only `generation_fence`: the dropped stale generation |
+| `code` | TEXT: close code as decimal (`disconnect`) or wake cause (`hibernate_wake`); NULL otherwise |
+| `server_time` | unix seconds, plane clock |
+
+Owner read path: `GET /v1/boxes/{id}/phone-home/events` (`limit`,
+default 50 / max 200; `since` unix-seconds cursor), newest-first; the
+response also carries the unattributed `upgrade_401s_7d` series (the
+probe counter from the paragraph above). A box token is explicitly
+refused on this path — a box cannot read its own journal. Retention:
+90 days (GC tracked separately, #1013).
+
 ## 10. Box-side wire constraints (G47.6)
 
 - The wire is plain RFC 6455 over TLS (wss). The stdlib-only client
