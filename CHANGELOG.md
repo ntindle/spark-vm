@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The docs index now covers the two newest hosted-product gap analyses —
+  the box-to-plane filing-upload leg (#876) and the missing plane push
+  sender for the phone-approval lane (#849) — and the approvals-plane index
+  row is refreshed to the 2026-10-02/03 state (the client signal, the expired
+  terminal record, and the return leg shipped with the filing record, the
+  decision channel, and box-side ingest; among the gaps that remain: tenant
+  routing, push retry, the first-approval summons, alert fan-out, and the
+  sentinel audit leg). (#TBD)
+
 - A new gap analysis maps the missing plane-hosted push leg of the hosted
   phone-approval lane (#971): the filing, record, decide, and
   decision-delivery legs are all shipped, but the control plane has no push
