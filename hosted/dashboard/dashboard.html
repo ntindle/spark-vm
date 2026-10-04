@@ -59,6 +59,8 @@
   .approve-row { display: flex; gap: 8px; margin-top: 8px; }
   .approve-row input { flex: 1; min-width: 0; }
   .approve-row .approve-btn { flex-shrink: 0; }
+  .decide-row { display: flex; gap: 8px; margin-top: 8px; }
+  .decide-row .deny-btn { border-color: var(--err); color: var(--err); }
   @media (max-width: 480px) {
     dl.detail { grid-template-columns: 1fr; }
     dl.detail dd { margin-bottom: 8px; }
@@ -108,6 +110,12 @@
     <div class="fp" id="detail-fp"></div>
     <p><button id="raw-toggle">Show raw status JSON</button></p>
     <pre class="raw hidden" id="detail-raw"></pre>
+    <h3 class="muted" style="font-size:.9rem">Pending action approvals</h3>
+    <p class="muted">Agent actions on this box waiting for your tap — the
+    human side of the phone-approval flow. Each tap is write-once: a
+    double-tap replays, a conflicting tap is rejected, and an expired
+    approval reads as expired, never pending.</p>
+    <div id="detail-approvals"><p class="muted">Loading…</p></div>
     <p><button id="detail-close">Back to fleet</button></p>
   </section>
 
@@ -229,12 +237,59 @@ function serviceChips(svcs) {
       }).join("")
     : '<span class="muted">no service data</span>';
 }
+function scrubCtrl(s) {
+  // Strip C0/C1 control characters before rendering: the approval summary
+  // is box-controlled data, so terminal-escape / control-byte smuggling is
+  // neutralized here at display time (the #902/#915 discipline, reversed).
+  // Display-only — stored values and comparisons keep the raw bytes.
+  return String(s == null ? "" : s).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "");
+}
+function approvalChip(a) {
+  // Server-side expiry is applied before listing, so a record shown as
+  // "expired" is terminal — it never reads as pending again.
+  if (a.status === "approved") return '<span class="chip ok">Approved</span>';
+  if (a.status === "denied") return '<span class="chip down">Denied</span>';
+  if (a.status === "expired") return '<span class="chip stale">Expired</span>';
+  return '<span class="chip pending">Pending</span>';
+}
+function approvalCard(a, now) {
+  // Pure template for one action-approval record. Every box-controlled
+  // field is scrubCtrl()'d AND esc()'d — a template that drops either
+  // must fail the node XSS suite (see test_dashboard.py).
+  var pending = a.status === "pending";
+  var decidedLine = "";
+  if (!pending) {
+    decidedLine = '<div class="muted">' +
+      esc(scrubCtrl(a.status)) +
+      (a.decided_by ? " by " + esc(scrubCtrl(a.decided_by)) : "") +
+      (a.decided_at != null ? " · " + esc(fmtClock(a.decided_at)) : "") +
+      "</div>";
+  }
+  return '<div class="card" data-aid="' + esc(scrubCtrl(a.aid)) + '">' +
+    '<div><strong>' + esc(scrubCtrl(a.summary)) + '</strong> ' +
+    approvalChip(a) + '</div>' +
+    '<div class="muted mono" style="margin-top:4px">' +
+      esc(scrubCtrl(a.aid)) + '</div>' +
+    '<div class="muted">requested ' + esc(fmtClock(a.created_at)) +
+    (pending && a.expires_at != null
+      ? ' · expires ' + esc(until(a.expires_at, now))
+      : '') + '</div>' +
+    decidedLine +
+    (pending
+      ? '<div class="decide-row">' +
+        '<button class="primary decide-btn" data-decision="approve">Approve</button>' +
+        '<button class="decide-btn deny-btn" data-decision="deny">Deny</button>' +
+        '</div><div class="err hidden"></div><div class="okmsg hidden"></div>'
+      : '') +
+    '</div>';
+}
 
 /* ---- app state ---- */
 var KEY = null;
 var boxes = [];
 var pairings = [];
 var refreshTimer = null;
+var detailBoxId = null; // box whose detail card is open, or null
 
 function api(path, opts) {
   opts = opts || {};
@@ -313,6 +368,8 @@ function refreshAll() {
     banner.classList.remove("hidden");
   });
   loadPairings();
+  if (detailBoxId && !document.getElementById("detail-card").classList.contains("hidden"))
+    loadApprovals(detailBoxId, true);
 }
 function renderFleet() {
   var now = Math.floor(Date.now() / 1000);
@@ -335,9 +392,12 @@ function showDetail(boxId) {
   document.getElementById("detail-name").textContent = "Loading…";
   card.classList.remove("hidden");
   card.scrollIntoView();
+  detailBoxId = boxId;
   api("/v1/boxes/" + encodeURIComponent(boxId)).then(function (r) {
+    if (detailBoxId !== boxId) return; // a newer box was opened; stay out
     if (r.status !== 200 || !r.data.ok) {
       document.getElementById("detail-name").textContent = "Box not found";
+      detailBoxId = null;
       return;
     }
     var b = r.data.box;
@@ -351,8 +411,113 @@ function showDetail(boxId) {
       JSON.stringify(b.last_status, null, 2) || "null";
     document.getElementById("detail-raw").classList.add("hidden");
     document.getElementById("raw-toggle").textContent = "Show raw status JSON";
+    loadApprovals(boxId);
   }).catch(function () {
+    if (detailBoxId !== boxId) return; // a newer box was opened; stay out
     document.getElementById("detail-name").textContent = "Failed to load box";
+    detailBoxId = null;
+  });
+}
+function loadApprovals(boxId, quiet) {
+  // Owner list of the box's pending action approvals (#954). Server-side
+  // expiry is applied before listing, so expired records never read as
+  // pending. A 401 anywhere (incl. a box key) returns to sign-in via api().
+  var el = document.getElementById("detail-approvals");
+  if (!quiet || !el.querySelector(".card")) el.innerHTML = '<p class="muted">Loading…</p>';
+  api("/v1/boxes/" + encodeURIComponent(boxId) +
+      "/approvals?status=pending&limit=50").then(function (r) {
+    if (r.status === 200 && r.data.ok) {
+      renderApprovals(boxId, r.data.approvals || []);
+    } else {
+      el.innerHTML = '<p class="err">Failed to load approvals: ' +
+        esc(r.data.error || ("HTTP " + r.status)) + "</p>";
+    }
+  }).catch(function (e) {
+    if (String(e && e.message) === "unauthorized") return;
+    el.innerHTML = '<p class="err">Failed to load approvals: ' +
+      esc(e && e.message || e) + "</p>";
+  });
+}
+function renderApprovals(boxId, approvals) {
+  var el = document.getElementById("detail-approvals");
+  // Never wipe a card while a decide is in flight or while its feedback
+  // is on screen — the 30s auto-refresh must not destroy a confirmation
+  // or error before the user reads it.
+  if (el.querySelector(".decide-btn[disabled], .err:not(.hidden), .okmsg:not(.hidden)")) return;
+  var now = Math.floor(Date.now() / 1000);
+  if (!approvals.length) {
+    el.innerHTML = '<p class="muted">None pending.</p>';
+    return;
+  }
+  el.innerHTML = approvals.map(function (a) { return approvalCard(a, now); }).join("");
+  Array.prototype.forEach.call(el.querySelectorAll(".card"), function (card) {
+    Array.prototype.forEach.call(card.querySelectorAll(".decide-btn"),
+      function (btn) {
+        btn.addEventListener("click", function () {
+          decideApproval(card, boxId, card.getAttribute("data-aid"),
+                         btn.getAttribute("data-decision"));
+        });
+      });
+  });
+}
+function decideApproval(card, boxId, aid, decision) {
+  // The plane's decision record is write-once: the first decision wins,
+  // re-deciding the same decision is a 200 replay, a conflicting one is
+  // 409, and an expired record is 410 (expiry is terminal).
+  var err = card.querySelector(".err"), ok = card.querySelector(".okmsg");
+  err.classList.add("hidden"); ok.classList.add("hidden");
+  var btns = card.querySelectorAll(".decide-btn");
+  Array.prototype.forEach.call(btns, function (b) { b.disabled = true; });
+  var reload = function () {
+    if (detailBoxId) loadApprovals(detailBoxId);
+  };
+  // api() is a bare fetch with no timeout: a request that never settles
+  // would leave the buttons disabled forever, and the no-wipe guard in
+  // renderApprovals would keep the frozen card on screen indefinitely.
+  // The watchdog breaks the deadlock — a late response is ignored.
+  var settled = false;
+  var watchdog = setTimeout(function () {
+    if (settled) return;
+    settled = true;
+    Array.prototype.forEach.call(btns, function (b) { b.disabled = false; });
+    err.textContent = "Decision timed out — the plane may still have " +
+      "recorded it; refresh or tap again to check.";
+    err.classList.remove("hidden");
+  }, 30000);
+  api("/v1/boxes/" + encodeURIComponent(boxId) + "/approvals/" +
+      encodeURIComponent(aid) + "/decision",
+      { method: "POST", body: { decision: decision } }).then(function (r) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
+    Array.prototype.forEach.call(btns, function (b) { b.disabled = false; });
+    if (r.status === 200 && r.data.ok) {
+      ok.textContent = (r.data.approval && r.data.approval.deduped
+        ? "Decision was already recorded — " : "Recorded — ") +
+        "the box learns it over the durable channel.";
+      ok.classList.remove("hidden");
+      setTimeout(reload, 1500);
+    } else if (r.status === 409) {
+      err.textContent = "Already decided differently (409) — refreshing.";
+      err.classList.remove("hidden");
+      setTimeout(reload, 1500);
+    } else if (r.status === 410) {
+      err.textContent = "Expired before the tap landed — expiry is terminal.";
+      err.classList.remove("hidden");
+      setTimeout(reload, 1500);
+    } else {
+      err.textContent = "Decision failed: " +
+        (r.data.error || ("HTTP " + r.status));
+      err.classList.remove("hidden");
+    }
+  }).catch(function (e) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
+    Array.prototype.forEach.call(btns, function (b) { b.disabled = false; });
+    if (String(e && e.message) === "unauthorized") return;
+    err.textContent = "Decision failed: " + (e && e.message || e);
+    err.classList.remove("hidden");
   });
 }
 function loadPairings() {
@@ -416,6 +581,7 @@ document.getElementById("logout-btn").addEventListener("click", function () { lo
 document.getElementById("refresh-btn").addEventListener("click", refreshAll);
 document.getElementById("detail-close").addEventListener("click", function () {
   document.getElementById("detail-card").classList.add("hidden");
+  detailBoxId = null;
 });
 document.getElementById("raw-toggle").addEventListener("click", function () {
   var pre = document.getElementById("detail-raw");

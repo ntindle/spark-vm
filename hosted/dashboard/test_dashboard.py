@@ -264,8 +264,8 @@ def test_no_triple_quote():
 def test_required_views_and_ids():
     html = _html()
     for token in ("login-view", "app-view", "fleet-list", "detail-card",
-                  "pairing-list", "key-input", "login-form", "logout-btn",
-                  "refresh-btn"):
+                  "detail-approvals", "pairing-list", "key-input",
+                  "login-form", "logout-btn", "refresh-btn"):
         assert 'id="%s"' % token in html, "missing #%s" % token
 
 
@@ -287,6 +287,11 @@ def test_api_calls_are_same_origin():
     html = _html()
     for path in ('"/v1/boxes"', '"/v1/pairing"'):
         assert path in html, "dashboard must call %s relatively" % path
+    # Approval list/decide URLs are built by concatenation — the path
+    # fragments must stay relative, never hard-coded absolute.
+    assert '"/v1/boxes/"' in html
+    assert "/approvals?status=pending&limit=50" in html
+    assert "/approvals/" in html and '/decision"' in html
     assert "https://api.sparkvm.dev" not in html, \
         "no hard-coded plane origin; the page calls the plane that served it"
 
@@ -512,6 +517,8 @@ def test_xss_tests_catch_a_dropped_esc():
         ("esc(svcs[n])", "String(svcs[n])",
          "serviceChips({'svc2': 'down\"><img src=x onerror=alert(4)>'})",
          "<img"),
+        ("esc(scrubCtrl(a.summary))", "String(scrubCtrl(a.summary))",
+         "approvalCard(a, 1300)", "<script>"),
     ]
     p = dict(box)
     p["box_name"] = box["name"]
@@ -519,14 +526,21 @@ def test_xss_tests_catch_a_dropped_esc():
     p["expires_at"] = 1900
     p["fingerprint"] = "fp"
     box["last_status"]["host"]["hostname"] = 'h"><iframe src=x>'
+    a = {"aid": 'a_1"><img src=x onerror=alert(9)>',
+         "box_id": "box_1",
+         "summary": "<script>alert(5)</scr" + "ipt>",
+         "status": "pending",
+         "created_at": 900,
+         "expires_at": 1900}
     for needle, repl, expr, leaked in cases:
         assert helpers.count(needle) >= 1, "mutation needle vanished: %r" % needle
         mutated = helpers.replace(needle, repl, 1)  # drop ONE esc()
         o = _node_eval("""
 const b = %s;
 const p = %s;
+const a = %s;
 console.log(JSON.stringify({out: %s}));
-""" % (json.dumps(box), json.dumps(p), expr), helpers=mutated)
+""" % (json.dumps(box), json.dumps(p), json.dumps(a), expr), helpers=mutated)
         assert leaked in o["out"], \
             "dropped esc() in %r did not leak — the test is vacuous" % needle
     # Sanity: the same expressions on the UNMUTATED helpers escape fully.
@@ -535,3 +549,213 @@ const b = %s;
 console.log(JSON.stringify({out: fleetRow(b, 1300)}));
 """ % json.dumps(box))
     assert "<script>" not in o["out"]
+
+
+def test_approval_card_xss_and_control_neutralization():
+    """#954: the approval summary is box-controlled data — the REAL
+    approvalCard() template must escape markup AND neutralize control
+    characters / terminal escapes."""
+    a = {"aid": 'a_1"><img src=x onerror=alert(9)>',
+         "box_id": "box_1",
+         # hostile markup + ESC + C1 control smuggled into the summary
+         "summary": '<script>alert(5)</scr' + 'ipt>\x1b[31mred\x85tail',
+         "status": "pending",
+         "created_at": 900,
+         "expires_at": 1900}
+    o = _node_eval("""
+const a = %s;
+console.log(JSON.stringify({
+  pending: approvalCard(a, 1300),
+  denied: approvalCard(Object.assign({}, a, {status: "denied",
+                                             decision: "deny",
+                                             decided_by: "owner_<svg>",
+                                             decided_at: 1200}), 1300),
+}));
+""" % json.dumps(a))
+    pending, denied = o["pending"], o["denied"]
+    for rendered in (pending, denied):
+        assert "<script>" not in rendered and "<img" not in rendered
+        assert "\x1b" not in rendered and "\x85" not in rendered
+        assert "&lt;script&gt;" in rendered
+    # Hostile aid must not break out of the data-aid attribute.
+    assert 'data-aid="' in pending
+    assert "&quot;" in pending
+    # Pending card has both decide buttons; decided card has none and
+    # shows the terminal decision line.
+    assert pending.count("decide-btn") == 2
+    assert "Deny" in pending and "Approve" in pending
+    assert "decide-btn" not in denied
+    assert "denied" in denied and "owner_&lt;svg&gt;" in denied
+    assert "in 10m" in pending  # until(1900, 1300)
+
+
+def test_approval_chip_terminal_states():
+    """#954 acceptance: expired reads as expired, never pending."""
+    o = _node_eval("""
+console.log(JSON.stringify({
+  pending: approvalChip({status: "pending"}),
+  approved: approvalChip({status: "approved"}),
+  denied: approvalChip({status: "denied"}),
+  expired: approvalChip({status: "expired"}),
+}));
+""")
+    assert ">Pending<" in o["pending"]
+    assert ">Approved<" in o["approved"]
+    assert ">Denied<" in o["denied"]
+    assert ">Expired<" in o["expired"]
+    assert "chip stale" in o["expired"]
+    assert "chip pending" not in o["expired"]
+
+
+def test_scrub_ctrl_strips_c0_c1():
+    o = _node_eval("""
+console.log(JSON.stringify({
+  clean: scrubCtrl("normal text"),
+  escapes: scrubCtrl("\\x1b[31mred\\x1b[0m"),
+  c1: scrubCtrl("a\\x85\\x9bb"),
+  null: scrubCtrl(null),
+}));
+""")
+    assert o["clean"] == "normal text"
+    assert o["escapes"] == "[31mred[0m"  # ESC byte gone, printable leftovers
+    assert o["c1"] == "ab"
+    assert o["null"] == ""
+
+
+# --- app-state (DOM-stubbed node tests) ------------------------------------
+
+_APP_PREAMBLE = """
+function __makeEl() {
+  var el = {
+    textContent: "", innerHTML: "", value: "", disabled: false,
+    _cls: {}, listeners: {},
+    addEventListener: function (t, fn) { el.listeners[t] = fn; },
+    querySelector: function () { return null; },
+    querySelectorAll: function () { return []; },
+    getAttribute: function () { return null; },
+    scrollIntoView: function () {},
+  };
+  el.classList = {
+    add: function (c) { el._cls[c] = 1; },
+    remove: function (c) { delete el._cls[c]; },
+    contains: function (c) { return !!el._cls[c]; },
+    toggle: function (c) { var v = !el._cls[c];
+      if (v) el._cls[c] = 1; else delete el._cls[c]; return !v; },
+  };
+  return el;
+}
+var __els = {};
+var document = {
+  getElementById: function (id) {
+    if (!__els[id]) __els[id] = __makeEl();
+    return __els[id];
+  },
+  activeElement: null,
+};
+var sessionStorage = {
+  getItem: function () { return null; },
+  setItem: function () {}, removeItem: function () {},
+};
+"""
+
+
+def _node_app_eval(fragment):
+    """Evaluate the FULL dashboard script (helpers + app state) with a
+    stubbed DOM, then run `fragment` (which may rebind `api` /
+    `setTimeout` after script load). Prints one JSON object."""
+    harness = _APP_PREAMBLE + "\n" + _script() + "\n" + fragment
+    with tempfile.NamedTemporaryFile("w", suffix=".js",
+                                     delete=False) as f:
+        f.write(harness)
+        path = f.name
+    try:
+        r = subprocess.run(["node", path], capture_output=True, text=True,
+                           timeout=30)
+    finally:
+        os.unlink(path)
+    assert r.returncode == 0, "app harness failed:\n%s" % r.stderr
+    return json.loads(r.stdout)
+
+
+def test_showdetail_late_response_does_not_clobber_newer_box():
+    """Engineering B1 (#954): opening box B while box A's detail fetch is
+    still in flight must not let A's late response overwrite B's card or
+    fire loadApprovals(A) into it."""
+    o = _node_app_eval("""
+var __pendingApi = [];
+api = function (path) {
+  return new Promise(function (res, rej) {
+    __pendingApi.push({ path: path, resolve: res, reject: rej });
+  });
+};
+(async function () {
+  showDetail("boxA");   // slow
+  showDetail("boxB");   // fast
+  __pendingApi[1].resolve({ status: 200, data: { ok: true,
+    box: { id: "boxB", name: "Bee", last_status: {} } } });
+  await Promise.resolve(); await Promise.resolve();
+  var mid = document.getElementById("detail-name").textContent;
+  var approvalsCallsMid = __pendingApi.filter(function (p) {
+    return p.path.indexOf("/approvals") !== -1;
+  }).length;
+  __pendingApi[0].resolve({ status: 200, data: { ok: true,
+    box: { id: "boxA", name: "Ay", last_status: {} } } });
+  await Promise.resolve(); await Promise.resolve();
+  var late = document.getElementById("detail-name").textContent;
+  var approvalsCallsLate = __pendingApi.filter(function (p) {
+    return p.path.indexOf("/approvals") !== -1;
+  }).length;
+  console.log(JSON.stringify({ mid: mid, late: late,
+    approvalsCallsMid: approvalsCallsMid,
+    approvalsCallsLate: approvalsCallsLate }));
+})();
+""")
+    assert o["mid"] == "Bee"      # B rendered
+    assert o["late"] == "Bee"    # A's late response stayed out
+    assert o["approvalsCallsMid"] == 1   # loadApprovals(B) fired
+    assert o["approvalsCallsLate"] == 1  # no loadApprovals(A) after it
+
+
+def test_decide_watchdog_releases_wedged_buttons():
+    """Engineering B2 (#954): a decide POST that never settles must not
+    wedge the card forever — the 30s watchdog re-enables the buttons,
+    surfaces the timeout, and ignores the late response."""
+    o = _node_app_eval("""
+var __pendingApi = [];
+api = function (path, opts) {
+  return new Promise(function (res, rej) {
+    __pendingApi.push({ resolve: res, reject: rej });
+  });
+};
+var __realSetTimeout = setTimeout;
+var __timers = [];
+setTimeout = function (fn, ms) { __timers.push(fn); return __timers.length; };
+var errEl = __makeEl(), okEl = __makeEl(), b1 = __makeEl(), b2 = __makeEl();
+var card = __makeEl();
+card.querySelector = function (s) { return s === ".err" ? errEl : okEl; };
+card.querySelectorAll = function () { return [b1, b2]; };
+card.getAttribute = function () { return "a_1"; };
+(async function () {
+  decideApproval(card, "box1", "a_1", "approve");
+  var disabledAtTap = b1.disabled && b2.disabled;
+  var watchdogArmed = __timers.length === 1;
+  __timers[0]();  // fire the watchdog: the plane never answered
+  var out = {
+    disabledAtTap: disabledAtTap,
+    watchdogArmed: watchdogArmed,
+    reenabled: !b1.disabled && !b2.disabled,
+    errShown: errEl.textContent.indexOf("timed out") !== -1 &&
+              !errEl.classList.contains("hidden"),
+  };
+  // A late plane response after the watchdog must be ignored, not crash.
+  __pendingApi[0].resolve({ status: 200, data: { ok: true, approval: {} } });
+  await new Promise(function (r) { __realSetTimeout(r, 10); });
+  out.lateIgnored = !b1.disabled && errEl.textContent.indexOf("timed out") !== -1;
+  console.log(JSON.stringify(out));
+})();
+""")
+    assert o["disabledAtTap"] is True
+    assert o["watchdogArmed"] is True
+    assert o["reenabled"] is True
+    assert o["errShown"] is True
+    assert o["lateIgnored"] is True

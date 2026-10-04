@@ -32,6 +32,13 @@ unchanged).
   database with no owner keys yet, the very first approval is CLI-only
   (`spark_pair.py approve --bootstrap`) — the dashboard can't sign in
   until the first owner key exists.
+- **Action approvals.** Pending agent actions for the open box, with
+  approve/deny taps. Each tap is write-once (the plane rejects a
+  conflicting re-tap, a replay confirms the recorded decision, and an
+  expired approval reads as expired, never pending). All box-controlled
+  strings are HTML-escaped and control characters neutralized before
+  rendering. This is the human side of the phone-approval flow
+  (`docs/APPROVALS_PLANE_GAP_ANALYSIS.md`).
 - **Login gating.** Every API call carries the owner key as a
   `Bearer` token; a 401 anywhere returns the UI to the sign-in screen.
   The dashboard only ever shows the signed-in owner's boxes (the plane
