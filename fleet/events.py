@@ -426,11 +426,10 @@ def collect_box_events(box_dir, box_id, received_at):
 # the box's auto-deploy audit log") — a tail of operator-chosen length.
 # When more audit lines are emitted between two pulls than the tail
 # holds, the pulled tail silently starts after the previously pulled
-# tail's head: the lost lines never reach the collector, and the
-# deterministic event-id dedup (re-collection is a no-op) hides the loss
-# completely — a pull that silently dropped 500 lines produces exactly
-# the same downstream state as a pull where nothing happened. The lost
-# lines can include the very failure events the alert rules exist to
+# tail's head: the lost lines never reach the collector, and the tail
+# truncation itself hides the loss — the deterministic event-id dedup
+# (re-collection is a no-op) only makes it undiscoverable by re-pulling.
+# The lost lines can include the very failure events the alert rules
 # page, so an overflowing tail is an evidence-loss hole in the paging
 # pipeline, not a cosmetic gap.
 #
@@ -511,24 +510,37 @@ def _save_tail_watermarks(store_dir, marks):
     return None
 
 
-def check_tail_continuity(store_dir, box_tails, observed_at):
+def check_tail_continuity(store_dir, box_dirs, observed_at):
     """Detect audit-tail overflow between collects.
 
-    box_tails is a list of (box_id, line_hashes) as returned by
-    audit_tail_lines. For each box with a pullable tail, the previous
-    pull's tail-head hash must still be present in the current tail's
-    line hashes — i.e. the two tail windows overlap. When the windows
-    no longer overlap, more lines were emitted between pulls than the
-    tail holds and the intervening lines were never collected: audit
-    events (including failure events the alert rules page on) may have
-    been silently lost.
+    box_dirs is a list of (box_dir, box_id) for the boxes this collect
+    handled. For each box with a pullable tail, the previous pull's
+    tail-head hash must still be present in the current tail's line
+    hashes — i.e. the two tail windows overlap. When the windows no
+    longer overlap, more lines were emitted between pulls than the tail
+    holds and the intervening lines were never collected: audit events
+    (including failure events the alert rules page on) may have been
+    silently lost.
 
-    Known conservative edge: when exactly tail_length lines were
+    The tail files are hashed *inside* the store-scoped journal lock,
+    together with the mark read and the mark write: the check-then-set
+    is atomic with respect to overlapping collects. Hashing the input
+    before taking the lock would let a stale read meet a newer mark —
+    collect A reads tail C1, collect B reads grown tail C2 and wins the
+    lock first (no warning, mark advances), then A's stale C1 input
+    would false-fire against B's mark. Reading under the lock closes
+    that race: both collects always check the latest estate file
+    against the latest mark.
+
+    Known conservative edges: (a) when exactly tail_length lines are
     emitted between pulls the windows are adjacent, not overlapping —
     no line was ever unpulled, but the check still fires. Exact
     adjacency at the operator's tail length is measure-zero in practice
     (it needs pathological emit volume between two pulls), and the
-    notice is a warning, never a page.
+    notice is a warning, never a page. (b) The watermark hashes a
+    single line's content, so a byte-identical re-emission of the exact
+    head line would defeat detection — contrived given timestamped JSON
+    audit lines, noted for honesty.
 
     Runs under the store-scoped journal lock and updates the watermarks
     atomically. Returns (warnings, error): warnings are human-readable
@@ -541,9 +553,12 @@ def check_tail_continuity(store_dir, box_tails, observed_at):
             marks, corrupt_note = _load_tail_watermarks(store_dir)
             if corrupt_note:
                 warnings.append(corrupt_note)
-            for box_id, line_hashes in box_tails:
+            for box_dir, box_id in box_dirs:
                 if not isinstance(box_id, str) or not box_id:
                     continue
+                # Read under the lock (see docstring): a stale input
+                # must never meet a newer mark.
+                line_hashes, _ = audit_tail_lines(box_dir)
                 if not line_hashes:
                     # No pullable tail this round (missing/unreadable/
                     # empty): keep the old watermark — the artifact
