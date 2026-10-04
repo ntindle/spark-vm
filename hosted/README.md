@@ -62,3 +62,19 @@ is darkness too, not an error; only the writer fails loud).
 Run the tests: `python3 -m pytest hosted/` from the repo root.
 Query smoke test: `python3 hosted/relay_liveness.py --query <vm-id>
 [--journal /path/journal.jsonl]`.
+
+## push_crypto.py — Web Push content-encoding crypto (RFC 8291), stdlib-only
+
+The design-hypothesis validation for #967 S1 (the plane Web Push sender):
+proves the Python plane worker can do in-worker Web Push sending with no
+JS interop and no C extensions. Implements ECDH P-256, HKDF-SHA-256,
+AES-128-GCM, and RFC 6979 deterministic ECDSA (for VAPID JWTs, RFC 8292)
+in pure Python, and pins every step against the RFC 8291 section 5 /
+Appendix A worked example in `test_push_crypto.py` (22 tests).
+
+Result: validated — one full send (ephemeral keygen + ECDH + KDF +
+AES-GCM + VAPID sign, 200 B payload) costs ~38 ms on the loop's dev VM,
+so S1 proceeds in-worker. Read the module docstring before reusing: the
+field arithmetic is not constant-time (assessed non-exploitable in the
+plane's threat model), peer keys are curve-validated per RFC 8291
+section 7, and the VAPID private key must never leave the plane.
