@@ -27,9 +27,8 @@ differ — the sketch was reserved shape, this is the contract.
 
 ## 2. Upgrade handshake and authentication (G47.3)
 
-- The box opens `wss://<plane>/v1/boxes/{box_id}/phone-home` (exact path
-  is the plane workspace's to finalize; the contract is the handshake,
-  not the path spelling).
+- The box opens `wss://<plane>/v1/boxes/{box_id}/phone-home` (path
+  pinned by #958 S4a, deployed live 2026-10-04; see §7).
 - The box presents the **box Bearer <redacted> in the `Authorization`
   header of the upgrade request** — the same credential the heartbeat
   path uses (#844/#846). The credential **never travels in a message
@@ -199,6 +198,22 @@ revocation-latency ceiling for a silent socket is that wake interval.
 - DO id is derived from the box id only: `phone-home:<box_id>`, where
   the box id is the **token's** `box_id` — the worker verifies the token
   before routing and derives the stub name via `idFromName` from it (§2).
+- **Implemented 2026-10-04 (#958 S4a):** the plane serves
+  `GET /v1/boxes/{box_id}/phone-home` — the §2 upgrade entry point,
+  deployed live to the hosted control plane. The token is classified by
+  the shared box-token classifier, so the upgrade path shares the exact
+  revoked/grace logic with no drift; unknown, expired, or revoked tokens
+  get one undifferentiated HTTP 401 (no socket, no redirect, no
+  token-state oracle); the 15-minute rotation grace is honored; an
+  authenticated non-upgrade request gets 426. The stub name is
+  `idFromName("phone-home:" + box_id)` from the **token's** `box_id` —
+  the URL id is a routing hint only and cannot mistarget a DO. The
+  `BoxDO` class accepts the socket and holds it; session logic
+  (hello/identity binding, generation fence, re-drive, ping/alarm
+  revocation re-verify, journal) is the S4b slice. The contract is
+  plane-neutral — self-hosted planes implement the same §2 entry point.
+  Live-verified: 101 on a proper handshake, 401/426 paths,
+  verification's test registry rows removed.
 - A DO binds exactly one box: the handshake identity at first connect.
   It never routes a frame to another stub.
 - Defense in depth: every frame's effective identity is the bound
@@ -282,7 +297,8 @@ S6 verifies, against a live plane, on this contract:
 
 ## 12. Open questions for S4/S5 (not blocking this contract)
 
-- Exact upgrade path spelling (plane workspace).
+- Exact upgrade path spelling — PINNED by #958 S4a, deployed live
+  2026-10-04: `GET /v1/boxes/{box_id}/phone-home` (see §7 note).
 - Ack transport — DECIDED by S5b (#976): `command_ack` frames ride the
   socket (rationale in §3.3); S4 implements the DO-side consume half.
   (Was: socket vs HTTPS, queue contract identical either way.)
