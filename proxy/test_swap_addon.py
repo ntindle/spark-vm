@@ -1467,6 +1467,228 @@ class SwapAddonTests(unittest.TestCase):
                          "\n".join(r.getMessage() for r in records))
 
 
+class JsonSwapValidityTests(unittest.TestCase):
+    """Issue #838: a JSON-escaped substitution only holds in string
+    positions. A placeholder in an unquoted position gets the raw value,
+    so a non-numeric secret breaks the document. The fix re-parses the
+    substituted RESULT: when it doesn't parse, the swap is refused
+    (placeholders left in place) and the refusal is audited. The refusal
+    is two-pass — no `swapped=` audit line and no `approved:` signal may
+    exist for credentials that were never released."""
+
+    def test_unquoted_non_numeric_secret_refuses_swap(self):
+        """The core #838 case: {"port": hsurr:github} must NOT go out as
+        {"port": ghp_TOKEN}. The placeholder is left in place and the
+        refusal is audited."""
+        a = make_addon()
+        body = b'{"port": hsurr:github}'
+        req = Request("api.github.com", "/cfg",
+                      [("Content-Type", "application/json")], body)
+        a.request(Flow(req))
+        self.assertEqual(req.content, body)  # untouched, not broken
+        self.assertIn(("api.github.com", "json-swap",
+                       "invalid-json-after-swap"), a.audit_notes)
+
+    def test_mixed_positions_refuse_as_a_whole(self):
+        """A body with a valid string-position swap AND a broken
+        unquoted swap is refused as a whole: no partial release."""
+        a = make_addon()
+        body = b'{"k": "hsurr:github", "port": hsurr:github}'
+        req = Request("api.github.com", "/cfg",
+                      [("Content-Type", "application/json")], body)
+        a.request(Flow(req))
+        self.assertEqual(req.content, body)
+        self.assertIn(("api.github.com", "json-swap",
+                       "invalid-json-after-swap"), a.audit_notes)
+
+    def test_unquoted_numeric_secret_still_swaps(self):
+        """A numeric secret in an unquoted position is valid JSON after
+        substitution, so the swap proceeds as before."""
+        secrets = dict(SECRETS)
+        secrets["portnum"] = "12345"
+        registry = {k: dict(v) for k, v in REGISTRY.items()}
+        registry["portnum"] = {"allowed_hosts": ["api.github.com"]}
+        a = make_addon(secrets=secrets, registry=registry)
+        req = Request("api.github.com", "/cfg",
+                      [("Content-Type", "application/json")],
+                      b'{"port": hsurr:portnum}')
+        a.request(Flow(req))
+        self.assertEqual(json.loads(req.content.decode())["port"], 12345)
+
+    def test_already_invalid_body_is_refused_too(self):
+        """A JSON-content-type body that never parsed: the substituted
+        result still doesn't parse, so the swap is refused (fail-closed,
+        audited) rather than releasing a secret inside garbage."""
+        a = make_addon()
+        body = b'not-json hsurr:github'
+        req = Request("api.github.com", "/cfg",
+                      [("Content-Type", "application/json")], body)
+        a.request(Flow(req))
+        self.assertEqual(req.content, body)
+        self.assertIn(("api.github.com", "json-swap",
+                       "invalid-json-after-swap"), a.audit_notes)
+
+    def test_string_position_swap_unaffected(self):
+        """The normal case — placeholders in quoted positions — swaps
+        exactly as before, with no refusal audit."""
+        a = make_addon()
+        req = Request("api.github.com", "/login",
+                      [("Content-Type", "application/json")],
+                      b'{"password":"hsurr:pw"}')
+        a.request(Flow(req))
+        body = json.loads(req.content.decode())
+        self.assertEqual(body["password"], SECRETS["pw"])
+        self.assertEqual(a.audit_notes, [])
+
+    def test_refused_swap_leaves_no_audit_trail_and_no_signal(self):
+        """Round-1 Architecture finding: a refused swap must not leave
+        `swapped=` audit lines (they would assert a release that never
+        happened) nor `approved:` approval signals for unreleased
+        credentials. The two-pass structure defers both side effects to
+        the validated real pass."""
+        a = make_addon()
+        audits = []
+        a._audit = lambda host, matched: audits.append(
+            (host, matched)) or True
+        real_resolve = a._resolve
+
+        def resolve_with_aid(name, entry, host, method, path, location):
+            v, _ = real_resolve(name, entry, host, method, path, location)
+            return v, ("grantaid1" if v is not None else None)
+
+        a._resolve = resolve_with_aid
+        flow = Flow(Request("api.github.com", "/cfg",
+                            [("Content-Type", "application/json")],
+                            b'{"port": hsurr:github}'))
+        a.request(flow)
+        # the refusal itself
+        self.assertEqual(flow.request.content, b'{"port": hsurr:github}')
+        self.assertIn(("api.github.com", "json-swap",
+                       "invalid-json-after-swap"), a.audit_notes)
+        # no per-credential audit line for the unreleased swap
+        self.assertEqual(audits, [])
+        # no client-visible approval signal either
+        self.assertIsNone(a._approval_signal)
+        self.assertNotIn("spark_approval_signal", flow.metadata)
+
+    def test_valid_swap_still_audits_and_signals(self):
+        """Positive control for the test above: a swap that passes the
+        validity check still writes its `swapped=` audit line and its
+        `approved:` signal."""
+        a = make_addon()
+        audits = []
+        a._audit = lambda host, matched: audits.append(
+            (host, matched)) or True
+        real_resolve = a._resolve
+
+        def resolve_with_aid(name, entry, host, method, path, location):
+            v, _ = real_resolve(name, entry, host, method, path, location)
+            return v, ("grantaid1" if v is not None else None)
+
+        a._resolve = resolve_with_aid
+        flow = Flow(Request("api.github.com", "/cfg",
+                            [("Content-Type", "application/json")],
+                            b'{"k": "hsurr:github"}'))
+        a.request(flow)
+        self.assertEqual(json.loads(flow.request.content.decode())["k"],
+                         "ghp_TOKEN")
+        self.assertEqual(audits, [("api.github.com", "hsurr:github")])
+        self.assertIsNone(a._approval_signal)  # stashed onto the flow
+        self.assertEqual(flow.metadata["spark_approval_signal"],
+                         [("grantaid1", "approved")])
+
+    def test_divergence_abort_leaves_no_audit_trail_and_no_signal(self):
+        """Round-2 Architecture finding: pass 2 used to write `swapped=`
+        audit lines inline, BEFORE the divergence check ran. A resolution
+        change between passes (a TOTP 30s boundary straddled mid-request)
+        left `swapped=` lines for credentials that were never released —
+        the round-1 structural hole on the divergence path. Pass 2 now
+        buffers its audit writes in a sink that is discarded on abort, so
+        the divergence abort leaves zero residue."""
+        a = make_addon()
+        audits = []
+        a._audit = lambda host, matched: audits.append(
+            (host, matched)) or True
+        real_resolve = a._resolve
+        calls = []
+
+        def resolve_rotating(name, entry, host, method, path, location):
+            v, _ = real_resolve(name, entry, host, method, path, location)
+            calls.append(name)
+            if v is None:
+                return None, None
+            # First pass (probe) sees one value, second pass another:
+            # simulates a credential rotating between the passes.
+            return (("AAAA" if len(calls) == 1 else "BBBB"), "grantaid1")
+
+        a._resolve = resolve_rotating
+        flow = Flow(Request("api.github.com", "/cfg",
+                            [("Content-Type", "application/json")],
+                            b'{"k": "hsurr:github"}'))
+        a.request(flow)
+        # the body is refused as a whole, placeholders left in place
+        self.assertEqual(flow.request.content, b'{"k": "hsurr:github"}')
+        self.assertIn(("api.github.com", "json-swap",
+                       "probe-diverged"), a.audit_notes)
+        # the blocker: no `swapped=` audit line for the unreleased swap
+        self.assertEqual(audits, [])
+        # no client-visible approval signal either
+        self.assertFalse(a._approval_signal)
+        self.assertNotIn("spark_approval_signal", flow.metadata)
+
+    def test_audit_flush_failure_refuses_whole_body(self):
+        """Buffered-audit corollary: when a pass-2 audit write fails at
+        flush time, the whole body is refused (placeholders left) rather
+        than released with a partial trail — fail closed, with the
+        failure itself audited."""
+        a = make_addon()
+        a._audit = lambda host, matched: False  # audit log unwritable
+        flow = Flow(Request("api.github.com", "/cfg",
+                            [("Content-Type", "application/json")],
+                            b'{"k": "hsurr:github"}'))
+        a.request(flow)
+        self.assertEqual(flow.request.content, b'{"k": "hsurr:github"}')
+        self.assertIn(("api.github.com", "json-swap",
+                       "audit-flush-failed"), a.audit_notes)
+        self.assertFalse(a._approval_signal)
+
+    def test_deeply_nested_body_refuses_without_crash(self):
+        """Round-1 Security/Engineering finding: json.loads raises
+        RecursionError (not ValueError) on deep nesting — a body far
+        under the size cap. The gate must fail closed (refuse + audit),
+        not propagate the exception out of request()."""
+        a = make_addon()
+        depth = 15000
+        body = (b'{"k": "hsurr:github", "deep": '
+                + b"[" * depth + b"]" * depth + b"}")
+        req = Request("api.github.com", "/cfg",
+                      [("Content-Type", "application/json")], body)
+        a.request(Flow(req))  # must not raise
+        self.assertEqual(req.content, body)
+        self.assertIn(("api.github.com", "json-swap",
+                       "invalid-json-after-swap"), a.audit_notes)
+
+    def test_nonstandard_constants_refuse_swap(self):
+        """Round-1 Security finding: Python's json.loads accepts
+        NaN/Infinity, but RFC 8259 does not — a strict server 400s the
+        body. A credential whose value is exactly such a constant, in an
+        unquoted position, must be refused, not released."""
+        for value in ("NaN", "Infinity", "-Infinity"):
+            secrets = dict(SECRETS)
+            secrets["constcred"] = value
+            registry = {k: dict(v) for k, v in REGISTRY.items()}
+            registry["constcred"] = {"allowed_hosts": ["api.github.com"]}
+            a = make_addon(secrets=secrets, registry=registry)
+            body = b'{"k": hsurr:constcred}'
+            req = Request("api.github.com", "/cfg",
+                          [("Content-Type", "application/json")], body)
+            a.request(Flow(req))
+            self.assertEqual(req.content, body,
+                             "constant %r was released" % value)
+            self.assertIn(("api.github.com", "json-swap",
+                           "invalid-json-after-swap"), a.audit_notes)
+
+
 class SmokeHostRestrictionTests(unittest.TestCase):
     """§3a smoke echo hosts (G6): the proxy swaps ONLY the public
     smoke-test credential for them. The echo endpoint returns the
@@ -2027,10 +2249,14 @@ class ProxyHardeningRoundTests(unittest.TestCase):
 
     def test_71_body_exactly_at_cap_is_still_swapped(self):
         """Finding 71: the gate is `>`, not `>=` — a body of exactly
-        _MAX_SWAP_BODY_BYTES is still swapped. Pins the boundary."""
+        _MAX_SWAP_BODY_BYTES is still swapped. Pins the boundary. The
+        pad lives inside a string value so the body stays valid JSON
+        (#838's validity gate refuses broken documents — that is not
+        what this boundary test pins)."""
         a = make_addon()
-        pad_len = sa._MAX_SWAP_BODY_BYTES - len(b'{"k": "hsurr:github"}')
-        body = b'{"k": "hsurr:github"}' + b"x" * pad_len
+        pad_len = (sa._MAX_SWAP_BODY_BYTES
+                   - len(b'{"k": "hsurr:github", "pad": ""}'))
+        body = (b'{"k": "hsurr:github", "pad": "' + b"x" * pad_len + b'"}')
         self.assertEqual(len(body), sa._MAX_SWAP_BODY_BYTES)
         req = Request("api.github.com", "/x",
                       [("Content-Type", "application/json")], body)
