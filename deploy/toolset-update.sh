@@ -1627,8 +1627,9 @@ _take_recovery_lock() {
     # against a snapshot/blocked state that an in-flight `update` is
     # still writing (partial-snapshot restore, lost blocked marks).
     # Non-blocking: refuse loudly instead of waiting on the weekly run.
-    # (cmd_update keeps its own inline lock with its deferral/freeze
-    # semantics; this is the shared shape for the recovery commands.)
+    # (The update run's own lock lives in _take_update_lock, which adds
+    # the deferral/freeze semantics the recovery commands don't need;
+    # this is the shared shape for the recovery commands.)
     local cmdname="$1"
     mkdir -p "$TOOLSET_STATE_DIR" 2>/dev/null \
         || { echo "ERROR: $cmdname: cannot create state dir $TOOLSET_STATE_DIR" >&2; return 1; }
@@ -1815,9 +1816,46 @@ _run_layer() {
 }
 
 # --- update ---------------------------------------------------------------------
+_take_update_lock() {
+    # Single-flight lock for the update run, with the run's deferral/freeze
+    # semantics: a held lock is a quiet no-op (deferred, not failed), while
+    # infra failures (missing flock, unopenable lock) are loud failures
+    # that feed the freeze counter. Return codes: 0 = lock acquired,
+    # proceed; 2 = lock held by another run, defer (quiet no-op); anything
+    # else = infra failure. The caller MUST dispatch on 2 explicitly: a
+    # bare `|| return $?` would treat deferral as success and run the
+    # update WITHOUT the lock (Security round-1, issue #950).
+    # NOTE: no `2>/dev/null` on the exec line -- `exec 9>... 2>/dev/null`
+    # applies the 2> to THIS shell on the successful open (not just the
+    # open itself), permanently silencing the shell's stderr and swallowing
+    # every later >&2 diagnostic. On failure bash prints its own error and
+    # the handler below runs (issue #950).
+    if ! command -v flock >/dev/null 2>&1; then
+        # A missing flock must not degrade into a silent perpetual no-op:
+        # fail loud so the timer's failure is visible in the audit log.
+        # This is a failed update attempt like any other -- it feeds the
+        # freeze counter (S1), so a broken box can't churn here either.
+        log "update: flock not found; cannot take the single-flight lock"
+        _freeze_record_result failed "infra"
+        audit 'toolset-update' ',"result":"failed","reason":"flock-missing"'
+        return 1
+    fi
+    exec 9>"$STATE_LOCK" || {
+        log "update: cannot open lock"
+        _freeze_record_result failed "infra"
+        return 1
+    }
+    if ! flock -n 9 2>/dev/null; then
+        log "update: another run holds the lock; no-op"
+        audit 'toolset-update' ',"result":"deferred","reason":"lock-held"'
+        return 2
+    fi
+    return 0
+}
+
 cmd_update() {
     # cmd_update [--dry-run] [--now] [--force]
-    local dry=0 now=0 force=0
+    local dry=0 now=0 force=0 rc=0
     for a in "$@"; do
         case "$a" in
             --dry-run) dry=1 ;;
@@ -1837,26 +1875,15 @@ cmd_update() {
     # Single-flight: never interleave two update runs.
     mkdir -p "$TOOLSET_STATE_DIR" 2>/dev/null \
         || { log "update: cannot create state dir $TOOLSET_STATE_DIR"; return 1; }
-    if ! command -v flock >/dev/null 2>&1; then
-        # A missing flock must not degrade into a silent perpetual no-op:
-        # fail loud so the timer's failure is visible in the audit log.
-        # This is a failed update attempt like any other — it feeds the
-        # freeze counter (S1), so a broken box can't churn here either.
-        log "update: flock not found; cannot take the single-flight lock"
-        _freeze_record_result failed "infra"
-        audit 'toolset-update' ',"result":"failed","reason":"flock-missing"'
-        return 1
-    fi
-    exec 9>"$STATE_LOCK" 2>/dev/null || {
-        log "update: cannot open lock"
-        _freeze_record_result failed "infra"
-        return 1
-    }
-    if ! flock -n 9 2>/dev/null; then
-        log "update: another run holds the lock; no-op"
-        audit 'toolset-update' ',"result":"deferred","reason":"lock-held"'
-        return 0
-    fi
+    # The rc dance is required: a bare failing call under `set -e` would
+    # exit the shell, and `|| return $?` alone would treat deferral (2) as
+    # success and run the update WITHOUT the lock (Security round-1).
+    rc=0; _take_update_lock || rc=$?
+    case "$rc" in
+        0) ;;            # lock acquired; proceed
+        2) return 0 ;;   # deferred: quiet no-op, the old inline contract
+        *) return "$rc" ;;
+    esac
 
     # Failure freeze (#532 Recovery): a frozen box surfaces "box needs
     # attention" instead of churning through doomed updates. --dry-run is

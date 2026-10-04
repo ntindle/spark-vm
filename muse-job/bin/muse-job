@@ -2045,6 +2045,7 @@ def job_status(job, slug):
     pane_live, pane_banner = False, False
     pane_cmd = ""
     pane_trust = False
+    pane_trust_unverified = False
     if alive:
         pane, pane_cmd = _capture_pane_state(f"mjob-{slug}")
         pane_live = _pane_shows_live_tui(pane, pane_cmd)
@@ -2057,6 +2058,18 @@ def job_status(job, slug):
         # a dead pane is never sent keystrokes).
         pane_trust = ((not pane_live) and _is_tui_process(pane_cmd)
                       and _TRUST_PROMPT_TEXT in _pane_tail(pane))
+        # Issue #836 (regression of #791): the gate can be showing while
+        # the foreground process is NOT a recognized TUI process -- a new
+        # binary name after an in-place auto-update (issue #212), a
+        # wrapper launcher, or a tmux capture hiccup -- and then
+        # pane_trust stays clear while the job strands. The trust TEXT is
+        # still in the tail, so this is observably a trust gate, not
+        # generic tui-dead -- but issue #4 still forbids keystrokes into a
+        # pane whose process identity is unverified, so this reads as a
+        # LOUD operator-actionable signal (blocked-trust-unverified),
+        # never as an auto-answer attempt.
+        pane_trust_unverified = ((not pane_live) and (not pane_trust)
+                                 and _TRUST_PROMPT_TEXT in _pane_tail(pane))
     return {
         "slug": slug,
         "job_state": job.get("state"),
@@ -2064,6 +2077,10 @@ def job_status(job, slug):
         "pane_live_tui": pane_live,
         "pane_resume_banner": pane_banner,
         "pane_trust_prompt": pane_trust,
+        # Issue #836: trust gate visible but foreground process not a
+        # recognized TUI process -- loud blocked-trust-unverified, never
+        # auto-answered (issue #4).
+        "pane_trust_unverified": pane_trust_unverified,
         "pane_cmd": pane_cmd,
         # Server-side session creation time: the unspoofable anchor for the
         # liveness grace windows (issue #23, sec review). None when tmux is
@@ -2681,6 +2698,24 @@ def cmd_watch(args):
         if not st["pane_live_tui"]:
             if st["pane_trust_prompt"]:
                 events.append(_recover_trust_prompt(slug))
+            elif st["pane_trust_unverified"]:
+                # Issue #836: the workspace-trust prompt text is visible in
+                # the pane tail but the foreground process is not a
+                # recognized TUI process -- the #791 auto-answer cannot run
+                # (issue #4: never send keystrokes into an unverified pane),
+                # and the old code lumped this into generic tui-dead, which
+                # is exactly how the #836 job stranded silently. Loud and
+                # actionable instead; the remedy answers the gate by hand.
+                events.append({"job": slug, "signal": "blocked-trust-unverified",
+                               "detail": "the workspace-trust prompt is showing "
+                                         f"but the pane's foreground process "
+                                         f"({_clean_text(st['pane_cmd'])!r}) "
+                                         "is not the Muse TUI -- refusing to "
+                                         "auto-answer (issue #4). Operator "
+                                         "remedy: inspect with muse-job log, "
+                                         "answer the prompt manually in the "
+                                         "pane, or muse-job kill <slug> and "
+                                         "resume"})
             elif st["pane_resume_banner"]:
                 try:
                     if _recover_resume_banner(slug):
