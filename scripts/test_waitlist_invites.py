@@ -1175,9 +1175,17 @@ def test_cli_reconcile(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("WAITLIST_PUBLIC_HOST",
                        "https://waitlist.example.invalid")
     monkeypatch.delenv("WAITLIST_CLAIM_LIVE", raising=False)
+    # Pin the service clock to the real now: the CLI invocations below
+    # re-read the store with the wall clock, and an invite minted at the
+    # fixed test NOW expires 14d later — a hardcoded date turns this
+    # test into a time bomb once the wall clock passes NOW + 14d
+    # (observed 2026-10-04: invite_expires_at == 2026-10-04T12:00Z, the
+    # CLI's real clock read the token as expired and reconcile found
+    # nothing). Minting at now keeps the invite live for the CLI.
     service = wd.WaitlistService(str(data), KEY,
                                  "https://waitlist.example.invalid",
-                                 clock=MutClock())
+                                 clock=MutClock(start=datetime.now(
+                                     timezone.utc)))
     service.submit_form({"owner_email": "a@example.com"}, "127.0.0.1")
     row = service.rows[service.by_email["a@example.com"]]
     service.confirm_post(row["active_token"])
