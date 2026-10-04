@@ -2327,10 +2327,31 @@ class SwapAddon:
     def _swap_json_text(self, text, host, method=None, path=None,
                         location=("body", None)):
         """Substitute placeholders in a JSON body, JSON-escaping each value
-        so quotes/backslashes in a secret can't break the document."""
-        return self._swap_text(
+        so quotes/backslashes in a secret can't break the document.
+
+        Issue #838: the escaping only holds in STRING positions. A
+        placeholder in an unquoted position (e.g. "port": hsurr:acme:port)
+        gets the raw value: a numeric secret still yields valid JSON, but
+        a non-numeric secret breaks the document. After substitution the
+        result is re-parsed: when it no longer parses, the swap is refused
+        (the placeholders are left in place), a warning is logged, and the
+        refusal is audited — a silently broken body must never go out.
+        Note the check is on the substituted RESULT, not a before/after
+        comparison: a placeholder in an unquoted position is never valid
+        JSON before the swap either."""
+        new_text = self._swap_text(
             text, host, method, path, encode=lambda v: json.dumps(v)[1:-1],
             location=location)
+        if new_text == text:
+            return text  # nothing swapped: the proxy broke nothing
+        try:
+            json.loads(new_text)
+        except ValueError:
+            log.warning("swap: JSON swap for %s produced invalid JSON; "
+                        "refusing swap, leaving placeholders", host)
+            self._audit_note(host, "json-swap", "invalid-json-after-swap")
+            return text
+        return new_text
 
     def _swap_urlencoded(self, text, host, method=None, path=None,
                          location=("body", None)):

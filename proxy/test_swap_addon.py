@@ -1467,6 +1467,79 @@ class SwapAddonTests(unittest.TestCase):
                          "\n".join(r.getMessage() for r in records))
 
 
+class JsonSwapValidityTests(unittest.TestCase):
+    """Issue #838: a JSON-escaped substitution only holds in string
+    positions. A placeholder in an unquoted position gets the raw value,
+    so a non-numeric secret breaks the document. The fix re-parses the
+    substituted body: when the document parsed before the swap but no
+    longer does, the swap is refused (placeholders left in place) and
+    the refusal is audited."""
+
+    def test_unquoted_non_numeric_secret_refuses_swap(self):
+        """The core #838 case: {"port": hsurr:github} must NOT go out as
+        {"port": ghp_TOKEN}. The placeholder is left in place and the
+        refusal is audited."""
+        a = make_addon()
+        body = b'{"port": hsurr:github}'
+        req = Request("api.github.com", "/cfg",
+                      [("Content-Type", "application/json")], body)
+        a.request(Flow(req))
+        self.assertEqual(req.content, body)  # untouched, not broken
+        self.assertIn(("api.github.com", "json-swap",
+                       "invalid-json-after-swap"), a.audit_notes)
+
+    def test_mixed_positions_refuse_as_a_whole(self):
+        """A body with a valid string-position swap AND a broken
+        unquoted swap is refused as a whole: no partial release."""
+        a = make_addon()
+        body = b'{"k": "hsurr:github", "port": hsurr:github}'
+        req = Request("api.github.com", "/cfg",
+                      [("Content-Type", "application/json")], body)
+        a.request(Flow(req))
+        self.assertEqual(req.content, body)
+        self.assertIn(("api.github.com", "json-swap",
+                       "invalid-json-after-swap"), a.audit_notes)
+
+    def test_unquoted_numeric_secret_still_swaps(self):
+        """A numeric secret in an unquoted position is valid JSON after
+        substitution, so the swap proceeds as before."""
+        secrets = dict(SECRETS)
+        secrets["portnum"] = "12345"
+        registry = {k: dict(v) for k, v in REGISTRY.items()}
+        registry["portnum"] = {"allowed_hosts": ["api.github.com"]}
+        a = make_addon(secrets=secrets, registry=registry)
+        req = Request("api.github.com", "/cfg",
+                      [("Content-Type", "application/json")],
+                      b'{"port": hsurr:portnum}')
+        a.request(Flow(req))
+        self.assertEqual(json.loads(req.content.decode())["port"], 12345)
+
+    def test_already_invalid_body_is_refused_too(self):
+        """A JSON-content-type body that never parsed: the substituted
+        result still doesn't parse, so the swap is refused (fail-closed,
+        audited) rather than releasing a secret inside garbage."""
+        a = make_addon()
+        body = b'not-json hsurr:github'
+        req = Request("api.github.com", "/cfg",
+                      [("Content-Type", "application/json")], body)
+        a.request(Flow(req))
+        self.assertEqual(req.content, body)
+        self.assertIn(("api.github.com", "json-swap",
+                       "invalid-json-after-swap"), a.audit_notes)
+
+    def test_string_position_swap_unaffected(self):
+        """The normal case — placeholders in quoted positions — swaps
+        exactly as before, with no refusal audit."""
+        a = make_addon()
+        req = Request("api.github.com", "/login",
+                      [("Content-Type", "application/json")],
+                      b'{"password":"hsurr:pw"}')
+        a.request(Flow(req))
+        body = json.loads(req.content.decode())
+        self.assertEqual(body["password"], SECRETS["pw"])
+        self.assertEqual(a.audit_notes, [])
+
+
 class SmokeHostRestrictionTests(unittest.TestCase):
     """§3a smoke echo hosts (G6): the proxy swaps ONLY the public
     smoke-test credential for them. The echo endpoint returns the
@@ -2027,10 +2100,14 @@ class ProxyHardeningRoundTests(unittest.TestCase):
 
     def test_71_body_exactly_at_cap_is_still_swapped(self):
         """Finding 71: the gate is `>`, not `>=` — a body of exactly
-        _MAX_SWAP_BODY_BYTES is still swapped. Pins the boundary."""
+        _MAX_SWAP_BODY_BYTES is still swapped. Pins the boundary. The
+        pad lives inside a string value so the body stays valid JSON
+        (#838's validity gate refuses broken documents — that is not
+        what this boundary test pins)."""
         a = make_addon()
-        pad_len = sa._MAX_SWAP_BODY_BYTES - len(b'{"k": "hsurr:github"}')
-        body = b'{"k": "hsurr:github"}' + b"x" * pad_len
+        pad_len = (sa._MAX_SWAP_BODY_BYTES
+                   - len(b'{"k": "hsurr:github", "pad": ""}'))
+        body = (b'{"k": "hsurr:github", "pad": "' + b"x" * pad_len + b'"}')
         self.assertEqual(len(body), sa._MAX_SWAP_BODY_BYTES)
         req = Request("api.github.com", "/x",
                       [("Content-Type", "application/json")], body)
