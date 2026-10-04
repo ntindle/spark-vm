@@ -279,10 +279,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
   loud `blocked-trust-unverified` alert (never auto-answered, never
   keystrokes into an unverified pane) instead of the generic `tui-dead`,
   so a gate the automatic answer can't reach no longer strands silently.
+  (#836, #962)
 - The toolset updater no longer silences its own error output while taking
   its single-flight lock (#950): diagnostics written after the lock is
   taken reach the log and terminal again. The lock's failure modes are
-  unchanged (loud failure, freeze-counter accounting).
+  unchanged (loud failure, freeze-counter accounting). (#962)
 
 ### Security
 - The proxy's refresh/navigation-target scan now matches past literal newlines:
