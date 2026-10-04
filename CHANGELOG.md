@@ -53,7 +53,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 ### Added
 
 - A new gap analysis maps the missing plane-hosted push leg of the hosted
-  phone-approval lane (#TBD): the filing, record, decide, and
+  phone-approval lane (#971): the filing, record, decide, and
   decision-delivery legs are all shipped, but the control plane has no push
   sender — its only "push" mention is a comment admitting the approval TTL
   is "a race against push" it cannot win. The analysis pins the trust model
@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   credential; only plane-observed events can page) and files the build
   slices: the plane Web Push sender service, the owner subscription surface,
   the event-to-push mapping with anti-spam bounds, and payload discipline
-  for box-controlled text. (#TBD)
+  for box-controlled text. (#971)
 - The fleet dashboard now shows each box's pending action approvals with
   approve/deny taps (#954): the owner can see and decide agent actions from
   the box detail view instead of raw API calls. Decisions are write-once
@@ -165,7 +165,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   templates: the fleet row, pairing card, detail rows, and service
   chips are built by single-copy pure renderers, and the test suite
   renders them in Node with hostile box-controlled strings — so a
-  template that ever drops an escaper fails the suite. (#TBD)
+  template that ever drops an escaper fails the suite. (#971)
 - Competitor watch, 2026-10-03 (morning): DigitalOcean's own pricing
   page now confirms the Oct-1 Agent Droplets monthly-price plans with
   dollar figures (Pro $50 with 15% usage discount, Team $200 with
@@ -176,7 +176,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   surfaces a single "box needs attention" state (visible in the status
   report and the timer logs) until an operator clears it with the new
   `unfreeze` command. Deferrals, dry-runs, and opt-outs never count
-  toward the streak; a successful run resets it. (#TBD)
+  toward the streak; a successful run resets it. (#971)
 
 - Published the control-plane protocol for phone-approval records: the
   plane now holds a per-box action-approval record (owner-created, with a
@@ -193,7 +193,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   interface ships but no Fly driver implements it, the invite-claim stream
   has no provision consumer, plane-provisioned boxes have no pairing
   auto-approval design, and spend caps are a decision with no enforcement
-  mechanism — filed as new tracked issues. (#TBD)
+  mechanism — filed as new tracked issues. (#971)
 
 - Published a vision-vs-state gap analysis for terminal streams and R2 artifact
   upload: no stream transport exists yet (the per-box Durable Object and
@@ -202,7 +202,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   stream bytes must never ride the durable command queue, and that stream
   viewing is observation while stream input rides a dedicated input frame
   class (approval as the consent plane, never the approvals decision wire).
-  Filed as new tracked issues. (#TBD)
+  Filed as new tracked issues. (#971)
 
 - spark-vm has a brand logo: a gold spark on a dark terminal badge, with SVG
   source and PNG exports for the site header, app icons, and favicon. The
