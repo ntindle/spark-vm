@@ -352,7 +352,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   loose directory no longer weakens them. A malformed version pin in the
   pins file can also no longer corrupt the audit log's JSON — the updater
   validates each pin before recording it as the layer's block key, and
-  fixing the pin unblocks the layer just like a pin bump does. (#TBD)
+  fixing the pin unblocks the layer just like a pin bump does. (#966)
 
 ### Fixed
 
