@@ -59,6 +59,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   reads its own approvals — the forward database migration makes the record's
   owner field nullable, with null meaning box-filed. The owner-side
   create/list/decide surface is unchanged. (#956)
+- The box now uploads its locally filed approvals to the hosted control
+  plane (#953): a new periodic `spark-pair.py upload-filings` command scans
+  the box's pending-approvals store and files each record with the plane's
+  box-authenticated endpoint, retrying on the next cron tick when the plane
+  is unreachable. Uploads are pending-only (denied, expired, and decided
+  records never cross), the store must be box-service-owned, and the payload
+  is clipped to the plane's size bounds — so the proxy's refusal path gains
+  no plane latency and the owner can see and decide pending approvals from
+  the plane. (#957)
 - A new gap analysis maps the missing filing-upload leg of the hosted
   approvals lane (#876): when the proxy refuses a sensitive action, the
   plane-side approval record exists but nothing creates it from the box

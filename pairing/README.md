@@ -263,6 +263,60 @@ The approvals store is located via `SVM_APPROVALS_DIR` (default
 `/home/swapd/approvals`, the proxy's default); the grant writer via
 `GRANT_WRITER` (default `/home/swapd/grant-writer`, confirmd's default).
 
+## Filing upload (#953)
+
+The other half of the approvals return leg: the proxy files refused-grant
+approvals locally only (`confirm/pending/<aid>.json`), and the plane
+record (#872) plus the box-authenticated file endpoint (#952) give it a
+destination — but nothing moves the filing across. The uploader closes
+that leg:
+
+```bash
+spark-pair.py upload-filings   # one scan-and-POST pass, then exit
+```
+
+One invocation scans `confirm/pending/` (never the summons outbox
+journal — the journal is append-only and serves the summons observer)
+and POSTs each still-pending filing to the plane's
+`POST /v1/boxes/{id}/approvals/file` with the box Bearer. The contract
+with the operator mirrors `heartbeat`/`ingest`:
+
+- **Periodic, not inline.** The proxy refusal hot path never gains plane
+  latency or a plane-failure coupling: a plane outage degrades loudly
+  but the local filing keeps working — the pending record stays and the
+  next tick retries.
+- **Exit 0 only when every pending filing was uploaded, already on the
+  plane, or locally expired (skipped).** The plane dedupes on `(box_id,
+  aid)`, so a retried filing returns `deduped: true` instead of a
+  duplicate — the retry loop is idempotent by construction.
+- **Failures are loud.** Every failure prints to stderr AND is appended to
+  `upload-filings.log` in the state dir; the token is redacted from both
+  channels. A 401 names re-pairing (and aborts the pass — a dead token
+  poisons every filing); a plane without the file endpoint says so
+  honestly instead of failing opaquely.
+- **Lock file** (`.upload-filings.lock`) serializes overlapping cron ticks.
+- **Pending-only.** Denied, expired-stamped, and consumed records live
+  outside `pending/` and are never seen; a locally-expired record is
+  skipped too (it is on its way to `consumed/`, and uploading it would
+  mint a plane-side ghost). The ingest's first-terminal-wins check stays
+  the real divergence gate.
+- **Writer identity.** The pending dir must be box-service-owned
+  (`bdrive`/`swapd` — the same DAC-owner discipline ingest enforces per
+  record): an agent-owned store is refused, never uploaded.
+- **Payload mapping** (per `docs/FILING_UPLOAD_GAP_ANALYSIS.md` G76.3):
+  `aid` is the plane's idempotency key; the local (unbounded) summary is
+  clipped to 250 + "…"; the detail tuple
+  `{credential, host, method, path_prefix, reason, filed_at, expires}`
+  carries no free text (Finding-49 discipline), and `path_prefix` is
+  truncated with "…" (full host kept) so a pathological filing can never
+  breach the plane's 4 KB detail cap.
+
+Cron-acceptable:
+
+```
+* * * * * /path/to/spark-pair.py upload-filings >>/var/log/spark-upload-filings.log 2>&1
+```
+
 ## Security properties
 
 - **No self-registration.** The old register endpoint is gone (404). A box
@@ -327,6 +381,7 @@ The approvals store is located via `SVM_APPROVALS_DIR` (default
 | POST | /v1/boxes/{id}/revoke | owner | revoke the box's Bearer <redacted> immediately (#846; live on the hosted plane since 2026-10-02) |
 | GET | /v1/boxes/{id}/commands/pending | box Bearer <redacted> | `?since=&limit=` → `{commands, acked_watermark, lease_secs}` — due durable commands, current epoch, `seq > since` (#848; consumed by `spark-pair.py ingest`, #874) |
 | POST | /v1/boxes/{id}/commands/ack | box Bearer <redacted> | `{seqs:[...]}` — idempotent ack of executed commands (#848; consumed by `spark-pair.py ingest`, #874) |
+| POST | /v1/boxes/{id}/approvals/file | box Bearer <redacted> | `{aid, summary, detail?, expires_in_secs}` → `201/200 {ok, aid, deduped}` (write-only — never the record body) — box files its own pending approvals; idempotent on `(box_id, aid)`; `current`+`grace` token states accepted (#952; consumed by `spark-pair.py upload-filings`, #953; live on the hosted plane since 2026-10-03) |
 
 ## Trying it
 
