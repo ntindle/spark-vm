@@ -52,13 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- Hosted phone-approval push, payload scrub pinned (#TBD): the plane-side
+- Hosted phone-approval push, payload scrub pinned (#980): the plane-side
   construction rule for push payloads — every box-controlled string is
   control-character stripped (C0/C1, so terminal-injection and ANSI
   escapes die) and truncated to a byte-exact 256-byte bound with an
   ellipsis, before the plane signs anything. Payloads stay "go look"
-  only (approval id + TTL + scrubbed summary); secrets can never enter
-  a payload by construction. The owner-facing approval surface keeps
+  only (approval id + TTL + scrubbed summary); the builder takes no
+  token/key argument and returns an immutable mapping, so secrets have
+  no ingress path at construction. The owner-facing approval surface keeps
   showing the full raw text so nothing is hidden from the decider.
 
 - Hosted phone-approval push, sender crypto validated (#978): the plane worker

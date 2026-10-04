@@ -87,8 +87,9 @@ This module pins the single construction-time rule the future sender's
 enqueue boundary applies to every box-controlled payload field —
 control-character strip (C0 + C1, so ANSI escapes die) plus an explicit
 byte-length bound with ellipsis truncation that never splits a code
-point — proven by `test_push_payload.py` (21 tests, neutering-verified
+point — proven by `test_push_payload.py` (22 tests, neutering-verified
 non-vacuous). Payload shape is exactly `{aid, ttl_s, summary}` ("go
-look" payloads, decision D4): no secrets ever enter a payload, by
-construction — the builder takes no token/key argument. Push-construction
+look" payloads, decision D4): the builder takes no token, key, or VAPID
+argument and returns an immutable mapping, so secrets have no ingress
+path at construction. Push-construction
 only: the owner-facing decision surface keeps showing the full raw text.

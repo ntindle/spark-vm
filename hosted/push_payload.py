@@ -21,9 +21,12 @@ for terminal display only") and unbounded. Payload construction needs a
 byte bound because the sender encrypts and transmits the bytes.
 
 Payload shape (decision D4, "go look" payloads): aid + TTL + scrubbed
-summary only. Never secrets — no bearer tokens, no subscription keys, no
-VAPID material ever enter a payload, and this module provides no path
-for them (there is no "extra fields" argument on purpose).
+summary only. Never secrets — the builder takes no bearer token, no
+subscription key, and no VAPID material as arguments, and returns an
+immutable mapping so keys cannot be added post-hoc without an explicit,
+reviewable copy. (The module cannot police what a caller does after an
+explicit copy — the guarantee is the builder's interface and the
+returned mapping's immutability, not caller discipline.)
 
 Scope note: this module is push-construction only. The owner-facing
 decision surface (#954) deliberately shows the FULL raw text so the
@@ -31,11 +34,15 @@ owner can judge it; do not apply this scrub on the dashboard read path.
 """
 
 import re
+from types import MappingProxyType
 
 # The single construction rule: strip C0 and C1 controls (incl. ESC),
-# then enforce the byte bound. `_plane_text` (#902) strips only
-# [\x00-\x1f\x7f]; payload bytes can land on a phone notification
-# renderer, so the C1 range [\x80-\x9f] is scrubbed here too.
+# then enforce the byte bound. The control-char class here is identical
+# to #902's `_plane_text` (`pairing/spark_pair.py`); what differs is the
+# application, not the class: `_plane_text` is display-only, unbounded,
+# and total (never raises), while this rule is construction-time — a
+# byte bound plus fail-closed typing — because the output becomes signed
+# and transmitted bytes.
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 # Maximum summary size in the payload: byte-exact, enforced on the
@@ -58,7 +65,10 @@ def scrub_push_text(value, max_bytes=MAX_SUMMARY_BYTES):
     Raises TypeError on a non-str `value` (fail-closed: the enqueue
     boundary must never silently stringify an unexpected type into a
     signed payload), and ValueError on a `max_bytes` that cannot hold
-    even the ellipsis.
+    even the ellipsis. A lone surrogate raises UnicodeEncodeError at
+    the encode step — also fail-closed (no payload emitted), and
+    unreachable over the real WSS path, where text frames are valid
+    UTF-8.
     """
     if not isinstance(value, str):
         raise TypeError(
@@ -96,15 +106,17 @@ def build_push_payload(aid, ttl_s, summary):
     Shape is exactly {"aid", "ttl_s", "summary"} (D4). `aid` is
     plane-minted (validated non-empty, never box-controlled free text);
     `summary` is the single box-controlled field and is scrubbed by
-    `scrub_push_text`. No secrets are accepted or emitted — there is no
-    extra-fields escape hatch.
+    `scrub_push_text`. Returns an immutable mapping (MappingProxyType):
+    post-hoc key addition raises TypeError, so a secret cannot be
+    smuggled into the payload after construction without an explicit,
+    reviewable `dict()` copy.
     """
     if not isinstance(aid, str) or not aid:
         raise ValueError("aid must be a non-empty str")
     if not isinstance(ttl_s, int) or isinstance(ttl_s, bool) or ttl_s <= 0:
         raise ValueError("ttl_s must be a positive int")
-    return {
+    return MappingProxyType({
         "aid": aid,
         "ttl_s": ttl_s,
         "summary": scrub_push_text(summary),
-    }
+    })

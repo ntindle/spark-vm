@@ -59,7 +59,8 @@ def test_truncation_never_splits_code_point():
     out.encode("utf-8")  # raises on surrogates/partial sequences
     assert "�" not in out
     assert len(out.encode("utf-8")) <= MAX_SUMMARY_BYTES
-    # 253 bytes of emoji payload + 3-byte ellipsis = byte-exact 256.
+    # 63 4-byte emoji = 252 bytes of payload + 3-byte ellipsis = 255
+    # (<= 256; the remaining byte can't fit another 4-byte code point).
     assert out == "🚨" * 63 + "…"
 
 
@@ -138,6 +139,17 @@ def test_build_payload_rejects_bad_ttl():
 def test_build_payload_rejects_non_str_summary():
     with pytest.raises(TypeError):
         build_push_payload("aid-1", 60, None)
+
+
+def test_build_payload_mapping_is_immutable():
+    # Post-hoc key addition must fail at the boundary — a secret cannot
+    # be smuggled into the payload after construction without an
+    # explicit, reviewable dict() copy.
+    p = build_push_payload("aid-1", 60, "s")
+    with pytest.raises(TypeError):
+        p["auth"] = "secret"
+    with pytest.raises(TypeError):
+        del p["aid"]
 
 
 def test_no_secrets_in_payload_shape():
