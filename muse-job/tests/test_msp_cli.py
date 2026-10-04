@@ -134,6 +134,42 @@ def fakes(monkeypatch):
     m_turn.steer_turn = steer_turn
     m_turn.interrupt_turn = lambda host, sid, **kw: {}
 
+    # Mirror the REAL msp_turn engagement-gate API shape: the spawn
+    # path subscribes BEFORE turn/start (begin_first_turn_watch) and
+    # binds the turn id after (await_first_turn_engagement) -- a fake
+    # with a different shape would hide call-site/mock drift, the same
+    # class that broke the stalled-recovery ladder once before.
+    def begin_first_turn_watch(host, session_id):
+        m_turn.watch_calls.append((host, session_id))
+        return {"fake": "watch"}
+
+    def await_first_turn_engagement(watch, turn_id, *, timeout=None):
+        m_turn.awaited.append((watch, turn_id, timeout))
+        return ns.engagement
+
+    def close_first_turn_watch(watch):
+        m_turn.closed_watches.append(watch)
+
+    class TurnStillbornError(Exception):
+        def __init__(self, message, *, turn_id, terminal, journal):
+            super().__init__(message)
+            self.turn_id = turn_id
+            self.terminal = terminal
+            self.journal = tuple(journal)
+
+    m_turn.begin_first_turn_watch = begin_first_turn_watch
+    m_turn.await_first_turn_engagement = await_first_turn_engagement
+    m_turn.close_first_turn_watch = close_first_turn_watch
+    m_turn.TurnStillbornError = TurnStillbornError
+    m_turn._terminal_label = lambda t: (
+        t if t in ("cancelled", "interrupted", "failed", "completed")
+        else "unknown")
+    m_turn.watch_calls = []
+    m_turn.awaited = []
+    m_turn.closed_watches = []
+    ns.engagement = {"status": "engaged", "terminal": None, "journal": [],
+                     "elapsed_s": 0.0}
+
     m_events = types.ModuleType("msp_events")
     m_events.polled = []
 
@@ -246,6 +282,45 @@ def test_spawn_msp_records_transport_and_session(cli, fakes, monkeypatch):
     assert host.serve_argv == ["muse", "serve"]
     assert host.client_name == "muse_job"
     assert host.closed
+
+
+def test_spawn_msp_stillborn_dead_first_turn(cli, fakes, monkeypatch):
+    # Issue #994: a first turn that dies before engaging must fail the
+    # spawn loudly -- the job is marked blocked (never active), the
+    # stillborn record is persisted, and TurnStillbornError carries the
+    # remediation. This pins the spawn-wiring contract; the unit tests
+    # only cover the engagement gate in isolation.
+    slug = "mspstill"
+    fakes.engagement = {"status": "dead", "terminal": "cancelled",
+                        "journal": ["turn/started", "turn/completed"],
+                        "elapsed_s": 0.1}
+
+    def fake_prepare(slug, args, preamble, tmux_name):
+        os.makedirs(os.path.join(cli.job_dir(slug), "tmp"), exist_ok=True)
+        with open(os.path.join(cli.job_dir(slug), "prompt.md"), "w") as f:
+            f.write("PROMPT-BODY")
+        return ({"slug": slug}, os.path.join(cli.job_dir(slug), "work"),
+                cli.job_dir(slug))
+
+    monkeypatch.setattr(cli, "_spawn_prepare", fake_prepare)
+    m_turn = fakes.modules["msp_turn"]
+    with pytest.raises(m_turn.TurnStillbornError) as excinfo:
+        cli._spawn_msp(slug, argparse.Namespace(slug=slug))
+    # the watch was subscribed before turn/start (the subscribe-gap fix)
+    assert m_turn.watch_calls, "begin_first_turn_watch was not called"
+    assert m_turn.awaited[0][1] == "turn-1"
+    job = _read_job(cli, slug)
+    assert job["state"] == "blocked"
+    assert job["stillborn"]["turn_id"] == "turn-1"
+    assert job["stillborn"]["terminal"] == "cancelled"
+    assert job["stillborn"]["journal"] == ["turn/started", "turn/completed"]
+    # the error names the real retry steps: the blocked job dir is kept,
+    # so "retry with --tmux" alone would hit "job dir exists"
+    msg = str(excinfo.value)
+    assert "--tmux" in msg
+    assert "new slug" in msg
+    assert excinfo.value.turn_id == "turn-1"
+    assert excinfo.value.terminal == "cancelled"
 
 
 def test_spawn_msp_sets_no_auto_update(cli, fakes, monkeypatch):

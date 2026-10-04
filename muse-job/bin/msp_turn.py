@@ -387,10 +387,15 @@ def _terminal_label(terminal):
     """
     return terminal if terminal in _KNOWN_TERMINALS else "unknown"
 
-# How long spawn waits for the first turn to prove it is alive. The
-# #994 cancellation landed ~1ms after turn start; ten seconds is
-# generous for a healthy turn to emit its first event while keeping a
-# silent-but-dead server from stalling spawn badly.
+# How long spawn waits for the first turn to prove it is alive. This
+# window is paid on EVERY healthy spawn (the loop only exits early on
+# a terminal event); the #994 cancellation landed ~1ms after turn
+# start, so the window is not sized to the defect -- it is sized to
+# survive slow event delivery and reader-thread scheduling jitter on a
+# loaded box. Ten seconds is a bounded, one-time tax on an infrequent
+# operation (jobs live for hours); a stranded "active" job costs far
+# more. A turn that stays silent for the whole window is reported
+# "engaged" -- absence of death, not proof of life.
 FIRST_TURN_ENGAGEMENT_TIMEOUT = 10.0
 
 

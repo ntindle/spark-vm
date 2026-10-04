@@ -3275,9 +3275,13 @@ def _spawn_msp(slug, args):
                 f"engaging (terminal={term_label!r}, "
                 f"{len(eng['journal'])} events in {eng['elapsed_s']:.1f}s); "
                 f"the job is marked blocked, not active. Event methods: "
-                f"{','.join(eng['journal'])}. If the turn was cancelled "
-                f"server-side within ~1s of start, this matches issue #994 "
-                f"(session/branchChanged race suspect); retry with --tmux.",
+                f"{','.join(eng['journal'])}. The blocked job record "
+                f"(event journal under job.json 'stillborn') is kept at "
+                f"{jd} for diagnosis. To retry: remove the job dir or use "
+                f"a new slug, then `muse-job spawn {slug} --tmux`. If the "
+                f"turn was cancelled server-side within ~1s of start, "
+                f"this matches issue #994 (session/branchChanged race "
+                f"suspect).",
                 turn_id=turn["turnId"], terminal=eng["terminal"],
                 journal=eng["journal"])
         job["session_uuid"] = sid
