@@ -52,6 +52,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted phone-approval push, sender crypto validated (#978): the plane worker
+  can encrypt Web Push messages in-worker — a stdlib-only implementation of
+  the RFC 8291 `aes128gcm` content encoding (P-256 key agreement, AES-GCM,
+  VAPID signing) proven against the RFC's worked example. One send costs
+  ~38 ms, so the sender service needs no separate process or JS bridge.
+
 - `spark-pair.py phone-home`: the box-side persistent WSS channel to the
   control plane (#959, S5a connection core) — stdlib-only RFC 6455 framing,
   the upgrade handshake with the box bearer in the `Authorization` header

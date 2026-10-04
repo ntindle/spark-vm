@@ -125,6 +125,25 @@ different design and must re-litigate here:
   pure-Python P-256 + AES. An explicit validation step decides
   in-worker sender vs a separate sender service; the S1 shape is
   contingent on it.
+
+  **Validation result (2026-10-04, `hosted/push_crypto.py`): VALIDATED —
+  in-worker sender.** A stdlib-only implementation (pure-Python P-256
+  ECDH, HKDF-SHA-256, AES-128-GCM, RFC 6979 deterministic ECDSA for
+  VAPID) reproduces every RFC 8291 section 5 / Appendix A intermediate
+  value (ECDH secret, PRK_key, IKM, PRK, CEK, nonce, full 144-octet
+  body) plus a NIST AES-GCM vector and an RFC 6979 KAT; fresh ephemeral
+  sends are verified via receiver-side decrypt emulation, and one
+  golden ephemeral body is pinned byte-for-byte (independently
+  cross-checked during authoring). Cost per send (ephemeral keygen +
+  ECDH + KDF + AES-GCM + VAPID sign, 200 B payload): ~38 ms on the
+  loop's dev VM — no separate sender service needed on performance
+  grounds. Security posture: not constant-time (assessed
+  non-exploitable in the plane's threat model — the box gets no timing
+  oracle on the crypto), deterministic ECDSA nonces (RFC 6979, so no
+  RNG failure can leak the VAPID key), peer keys curve-validated per
+  RFC 8291 section 7. Caveats: the VAPID private key must never leave
+  the plane; caller-supplied salts must be unique per message. S1
+  proceeds in-worker; no JS-interop dependency.
 - **[GP2] #968 — owner subscription management surface:** owner-auth
   `POST /v1/push/subscriptions` / `DELETE` on the plane (D1 database,
   D3-custody), plus dashboard subscribe/unsubscribe affordance on the
