@@ -352,7 +352,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   recovery), and an owner decision served as a plane approval-decision
   command is stamped by the real ingest with plane provenance. The suite
   also pins the cross-leg filing schema, so a future change to either side
-  breaks loudly instead of silently skipping proxy-filed refusals. (#TBD)
+  breaks loudly instead of silently skipping proxy-filed refusals. (#983)
 
 ### Fixed
 
