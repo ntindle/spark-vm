@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- `spark-pair.py phone-home`: the box-side persistent WSS channel to the
+  control plane (#959, S5a connection core) — stdlib-only RFC 6455 framing,
+  the upgrade handshake with the box bearer in the `Authorization` header
+  only (never in a frame, never in a log; redirects refused outright), a
+  crash-safe durable generation counter, 30 s keepalive pings, and the
+  close-code reconnect policy (revoked → no reconnect loop, expired →
+  reconnect with the current token, stale-generation → adopt and bump
+  epoch, going-away → ≥60 s backoff). The #864 heartbeat stays the only
+  liveness signal; command frames and socket acks ride in S5b. (#TBD)
+
 - The docs index now covers the two newest hosted-product gap analyses —
   the box-to-plane filing-upload leg (#876) and the missing plane push
   sender for the phone-approval lane (#849) — and the approvals-plane index

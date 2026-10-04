@@ -317,6 +317,50 @@ Cron-acceptable:
 * * * * * /path/to/spark-pair.py upload-filings >>/var/log/spark-upload-filings.log 2>&1
 ```
 
+## Phone-home channel (#959, S5a connection core)
+
+The persistent outbound WSS channel from the box to the control plane,
+per `docs/PHONE_HOME_WIRE_PROTOCOL.md` (the S3 contract). Unlike the
+cron-shaped commands above, this one is a daemon — it holds the socket
+open and reconnects per the wire spec's close taxonomy:
+
+```bash
+spark-pair.py phone-home   # daemon: runs until SIGTERM/SIGINT or a fatal close
+```
+
+What it does:
+
+- **Upgrade.** Derives `wss://` from the control URL (loopback `ws://`
+  stays allowed, same as the cleartext discipline everywhere else),
+  speaks the HTTP/1.1 upgrade by hand — there is no redirect-following
+  on this path by construction (any 3xx is an upgrade failure), and the
+  `Sec-WebSocket-Accept` is validated. The box Bearer <redacted> in the
+  `Authorization` header only: never in a frame, never in `phone_home.log`.
+- **Generation fence.** A crash-safe durable counter
+  (`phone_home_generation.json`, persisted before use so a crash skips a
+  value, never reuses one); `hello` carries it, and a `stale-generation`
+  close makes the client adopt the DO's `last_generation + 1` and bump
+  the ingest epoch (counter loss is a reboot-equivalent per the spec).
+  Plain reconnects bump the generation only — never the epoch.
+- **Reconnect policy.** `revoked` → no reconnect loop (re-pair is the
+  human path); `expired` → reconnect with the current token (one rotate
+  attempt only when no live token is held); `going-away` → wait ≥ 60 s;
+  silent transport loss → 1 s doubling backoff, 60 s cap, ±25% jitter.
+  `identity-mismatch` / `protocol-error` / unknown close codes exit loud
+  without reconnecting — a protocol bug must never become a reconnect
+  storm. An upgrade `401` gets exactly one rotate attempt, then re-pair
+  guidance.
+- **Keepalive.** JSON `ping` every 30 s; no `pong` within 90 s drops the
+  socket. The #864 heartbeat stays the ONLY liveness signal — this
+  client never writes `last_heartbeat.json`.
+- **One writer.** A `.phone-home.lock` is held for the daemon's life; a
+  second instance exits instead of forking the generation counter.
+
+Command frames and `command_ack` over the socket are S5b (reserved shape
+in the wire spec); until then the #874 HTTPS ingest path owns the
+durable-command queue, and this client logs-and-ignores those frame
+types rather than wedging the channel on a plane surprise.
+
 ## Security properties
 
 - **No self-registration.** The old register endpoint is gone (404). A box
