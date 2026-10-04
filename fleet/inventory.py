@@ -942,6 +942,20 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
         print("fleet events: %d new event(s) journaled, %d duplicate(s) "
               "skipped; %d alert(s) fired" % (appended, duplicates,
                                               len(fired)))
+    # Audit-tail continuity (arch 20261004-1359, #1006): the estate pulls
+    # only a tail of each box's audit log. When more lines are emitted
+    # between pulls than the tail holds, the lost lines never reach the
+    # collector and the truncation hides the loss — the failure events
+    # the alert rules page on can vanish silently. The per-box tail-head
+    # watermark detects the break loudly. Warning-class only: promoting
+    # the discontinuity to a fifth alert rule is #1006's remaining
+    # proposal, a deliberate deferral, not an oversight.
+    cont_warnings, cont_err = events.check_tail_continuity(
+        store_dir, box_contexts, observed_at)
+    if cont_err:
+        return "tail continuity: %s" % cont_err
+    for warning in cont_warnings:
+        print("fleet events WARNING: %s" % warning, file=sys.stderr)
     print("collected %d %s into %s (%d appended this run; %d journal "
           "lines replayed)"
           % (len(records), "box" if len(records) == 1 else "boxes",
