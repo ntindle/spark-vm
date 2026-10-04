@@ -214,6 +214,70 @@ def test_trust_gate_requires_question_and_option(cli):
     assert not cli._pane_shows_trust_gate("")
 
 
+# ---------------------------------------------------------------------------
+# Issue #972: the two halves of the gate must sit on SEPARATE lines with the
+# option line after the question line within a small window. The #961
+# tail-substring check is order-insensitive and position-insensitive, so a
+# live TUI's conversation containing BOTH phrases still misfires.
+# ---------------------------------------------------------------------------
+
+# A single line containing both halves (the agent pasting a gate transcript,
+# or a one-line summary of its choice) -- not the gate.
+SINGLE_LINE_BOTH_HALVES = (
+    'I chose "Trust and continue" when it asked '
+    '"Do you trust this workspace?"\n'
+    "❯ \n")
+
+# Both halves present but the option line is beyond the line window.
+DISTANT_OPTION_PANE = (
+    "Do you trust this workspace?\n"
+    "filler line one\n"
+    "filler line two\n"
+    "filler line three\n"
+    "filler line four\n"
+    "> 1  Trust and continue\n"
+    "❯ \n")
+
+# Both halves present but in the wrong order (option line before question).
+REVERSED_ORDER_PANE = (
+    "> 1  Trust and continue\n"
+    "Do you trust this workspace?\n"
+    "❯ \n")
+
+# The real gate shape with one extra line of slack (option 3 lines after the
+# question) -- still the gate.
+GATE_WITH_SLACK_PANE = (
+    "Do you trust this workspace?\n"
+    "Workspace: /home/ntindle/muse-jobs/demo/work\n"
+    "(a plugin banner took a line)\n"
+    "> 1  Trust and continue\n"
+    "  2  Quit\n")
+
+# Both halves present but the option line sits exactly one line beyond the
+# window (4 lines after the question) -- not the gate. Pins
+# _TRUST_GATE_LINE_WINDOW == 3 exactly: DISTANT_OPTION_PANE alone only
+# pins the window to <= 4.
+OPTION_JUST_OUTSIDE_WINDOW_PANE = (
+    "Do you trust this workspace?\n"
+    "Workspace: /home/ntindle/muse-jobs/demo/work\n"
+    "filler line one\n"
+    "filler line two\n"
+    "> 1  Trust and continue\n"
+    "  2  Quit\n")
+
+
+def test_trust_gate_requires_separate_lines_in_window(cli):
+    # Issue #972: same-line co-occurrence of both phrases is a misfire, not
+    # a gate; so is an option line beyond the window or before the question.
+    assert not cli._pane_shows_trust_gate(SINGLE_LINE_BOTH_HALVES)
+    assert not cli._pane_shows_trust_gate(DISTANT_OPTION_PANE)
+    assert not cli._pane_shows_trust_gate(OPTION_JUST_OUTSIDE_WINDOW_PANE)
+    assert not cli._pane_shows_trust_gate(REVERSED_ORDER_PANE)
+    # The real shape (option ~2 lines after the question) still matches.
+    assert cli._pane_shows_trust_gate(TRUST_GATE_PANE)
+    assert cli._pane_shows_trust_gate(GATE_WITH_SLACK_PANE)
+
+
 def test_trust_phrase_in_live_conversation_still_reads_live(cli):
     # Issue #961: the old bare-substring veto in _pane_shows_live_tui would
     # read this pane as gated. The TUI must keep reading as live.
