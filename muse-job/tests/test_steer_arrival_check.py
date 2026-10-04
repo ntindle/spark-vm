@@ -122,3 +122,115 @@ def test_verify_false_skips_arrival_check(cli, monkeypatch, run_calls):
     _install(cli, monkeypatch, run_calls, [empty])
     assert cli._steer("s", "hello world", verify=False) is True
     assert _enter_sent(run_calls)
+
+
+def _echo_pane(first60):
+    # A pane whose last ❯ line holds only the message's first-line
+    # prefix: a stale agent echo of an earlier steer sharing that
+    # prefix, NOT the new message in the input box.
+    return "agent transcript line\n❯ %s\n" % first60
+
+
+def test_stale_echo_of_first_line_does_not_count_as_arrival(
+        cli, monkeypatch, run_calls):
+    # Issue #12 L9: the old 60-char first-line needle read a stale echo
+    # as arrival. The new needle also requires the last-line suffix, so
+    # an echo of only the first line must NOT count -- and no Enter may
+    # go out for text that never arrived.
+    message = "x" * 60 + "\nthe real last line"
+    echo = (_echo_pane("x" * 60), "muse")
+    _install(cli, monkeypatch, run_calls, [echo, echo])
+    assert cli._steer("s", message, verify=True) is False
+    assert not _enter_sent(run_calls), "Enter sent for echoed-not-arrived text"
+
+
+def test_mid_transcript_echo_does_not_spoof(cli, monkeypatch, run_calls):
+    # An echo sitting mid-transcript (above the real, empty box) is not
+    # in the box region, so it cannot satisfy the arrival check even when
+    # it reproduces the whole first line.
+    message = "do the thing"
+    pane = ("transcript\n❯ do the thing\n❯ \n", "muse")
+    _install(cli, monkeypatch, run_calls, [pane, pane])
+    assert cli._steer("s", message, verify=True) is False
+    assert not _enter_sent(run_calls)
+
+
+def _wrapped_box_pane(first, continuation):
+    # Input box with a wrapped continuation row (no ❯ prefix on it).
+    return "transcript\n❯ %s\n%s\n" % (first, continuation)
+
+
+def test_multiline_message_matches_across_wrapped_rows(
+        cli, monkeypatch, run_calls):
+    # The last-line suffix may live on a wrapped continuation row: both
+    # needle parts must be found across the box region for arrival to
+    # count, and clearance afterwards still reports delivered.
+    message = "first line here\nsecond row wrapped text"
+    full = (_wrapped_box_pane("first line here", "second row wrapped text"),
+            "muse")
+    clear = (_box_pane(""), "muse")
+    _install(cli, monkeypatch, run_calls, [full, full, clear])
+    assert cli._steer("s", message, verify=True) is True
+    assert _enter_sent(run_calls)
+
+
+def test_single_line_needle_still_two_sided(cli, monkeypatch, run_calls):
+    # Single-line messages: first and last parts are the same line, so
+    # the old behavior is preserved end to end.
+    full = (_box_pane("hello world"), "muse")
+    clear = (_box_pane(""), "muse")
+    _install(cli, monkeypatch, run_calls, [full, full, clear])
+    assert cli._steer("s", "hello world", verify=True) is True
+    assert _enter_sent(run_calls)
+
+
+def test_blank_message_skips_arrival_check(cli, monkeypatch, run_calls):
+    # ("", "") needle: the arrival check is skipped and the steer flows,
+    # exactly as the old empty-string needle behaved.
+    empty = (_box_pane(""), "muse")
+    _install(cli, monkeypatch, run_calls, [empty, empty])
+    assert cli._steer("s", "   \n  ", verify=True) is True
+    assert _enter_sent(run_calls)
+
+
+_ALPHABET62 = ("abcdefghijklmnopqrstuvwxyz"
+               "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+               "0123456789")
+
+
+def _distinct(n, seed=7):
+    # 62-char-cycle string: no 60-char window repeats within a single
+    # physical row, so a wrap-spanning needle part provably cannot hide
+    # inside one row (a 26-char cycle would alias across the boundary).
+    return "".join(_ALPHABET62[(seed + i) % 62] for i in range(n))
+
+
+def test_long_last_line_split_across_wrap_still_matches(
+        cli, monkeypatch, run_calls):
+    # Engineering round-1 blocker: capture-pane -p splits a long pasted
+    # line across physical rows. A needle part straddling the wrap
+    # boundary must still count as present — matching runs on the
+    # de-wrapped box region. (80-col pane: the 90-char last line wraps
+    # after 78 chars; the 60-char suffix provably spans the boundary
+    # because the chars are distinct.)
+    last = _distinct(90)
+    message = "short first\n" + last
+    wrapped = "❯ short first\n" + last[:78] + "\n" + last[78:] + "\n"
+    full = ("transcript\n" + wrapped, "muse")
+    clear = (_box_pane(""), "muse")
+    _install(cli, monkeypatch, run_calls, [full, full, clear])
+    assert cli._steer("s", message, verify=True) is True
+    assert _enter_sent(run_calls)
+
+
+def test_long_single_line_split_across_wrap_still_matches(
+        cli, monkeypatch, run_calls):
+    # Same wrap case for a single long line: both needle parts straddle
+    # the boundary and must still match.
+    message = _distinct(100, seed=13)
+    wrapped = "❯ " + message[:76] + "\n" + message[76:] + "\n"
+    full = ("transcript\n" + wrapped, "muse")
+    clear = (_box_pane(""), "muse")
+    _install(cli, monkeypatch, run_calls, [full, full, clear])
+    assert cli._steer("s", message, verify=True) is True
+    assert _enter_sent(run_calls)

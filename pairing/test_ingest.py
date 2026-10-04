@@ -603,6 +603,33 @@ def test_ingest_epoch_transition_adopted(ctx, monkeypatch, capsys):
     assert "epoch" in capsys.readouterr().out
 
 
+def _fetch_urls(plane):
+    return [url for method, url, _body in plane.calls
+            if method == "GET" and "/commands/pending" in url]
+
+
+def test_ingest_fetch_sends_epoch_claim(ctx, monkeypatch):
+    # #947: the box asserts its epoch on every fetch (?epoch=) so the
+    # plane can detect a stale-epoch box and force re-sync.
+    with open(os.path.join(ctx.dir, "commands_cursor.json"), "w") as f:
+        json.dump({"cursor": 41, "epoch": 7}, f)
+    plane = FakePlane(commands=[], watermark=41)
+    assert _run(ctx, plane, monkeypatch) == 0
+    urls = _fetch_urls(plane)
+    assert urls, "expected at least one pending-fetch call"
+    assert "epoch=7" in urls[0]
+
+
+def test_ingest_fetch_omits_epoch_when_unknown(ctx, monkeypatch):
+    # First run: no cursor file, no epoch to claim — a fresh box must
+    # never assert a bogus epoch=0.
+    plane = FakePlane(commands=[], watermark=0)
+    assert _run(ctx, plane, monkeypatch) == 0
+    urls = _fetch_urls(plane)
+    assert urls, "expected at least one pending-fetch call"
+    assert "epoch=" not in urls[0]
+
+
 def test_ingest_401_says_repair(ctx, monkeypatch, capsys):
     plane = FakePlane()
     plane.pending_status = 401

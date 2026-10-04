@@ -25,6 +25,11 @@ payloads — it stores and delivers them; only the box executes them.
   transport reconnect does **not**.
 - A fetch may claim a higher epoch (`?epoch=`). Adoption is monotonic —
   a racing lower claim loses (`409 stale epoch`) rather than regressing.
+- The box-side ingest always attaches its current claim:
+  `GET /commands/pending?since=…&limit=…&epoch=<n>` (#947). The param is
+  omitted when the box has no epoch yet (first run) so a fresh box never
+  asserts a bogus `epoch=0`. Stale-epoch detection on the plane is
+  #848/#958 scope; the box only ever asserts what it knows.
 - Claiming a new incarnation expires every pending/leased command of
   older epochs: they are never delivered again. An owner epoch reset
   does the same for recovery (e.g. a box that lost its counter).

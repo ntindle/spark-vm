@@ -814,16 +814,48 @@ def session_bound_to_workdir(uuid, workdir):
         return False
 
 
+def _make_steer_needle(message):
+    """Delivery-verification needle for steer arrival checks.
+
+    Issue #12 L9: the old needle was the first 60 chars of the first
+    line, so a stale agent echo of an earlier steer ("agent output
+    echoing steer text can fake 'delivered'") could satisfy the arrival
+    check for a new message sharing that prefix. The new needle is a
+    (first-line, last-line) pair: the check matches the 60-char first-line
+    prefix and the 60-char last-line suffix as substrings of the input-box
+    region, so an echo only fools it when both affixes appear there.
+    Returns ("", "") for blank input (no arrival check, as before).
+    """
+    stripped = message.strip()
+    if not stripped:
+        return ("", "")
+    lines = stripped.splitlines()
+    return (lines[0][:60], lines[-1][-60:])
+
+
 def _input_box_has_text(pane, needle):
-    """True if the TUI input box (last ❯ line) still holds our text."""
-    last_box = None
-    for line in pane.splitlines():
-        s = line.strip()
-        if s.startswith("❯"):
-            last_box = s
-    if last_box is None:
+    """True if the TUI input box still holds the steer text.
+
+    The box region is the last ❯-starting line plus its wrapped
+    continuation rows. Wrap boundaries are display artifacts
+    (capture-pane -p emits physical rows), so matching runs against the
+    region with newlines removed: a needle part split across a wrap
+    still counts as present. Echo protection is unaffected — the region
+    is still anchored at the last ❯ line, so mid-transcript echoes sit
+    outside it either way.
+    """
+    first, last = needle
+    if not first and not last:
         return False
-    return bool(needle) and needle in last_box
+    lines = pane.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("❯"):
+            start = i
+    if start is None:
+        return False
+    flat = "".join(lines[start:])
+    return first in flat and last in flat
 
 
 def _pane_shows_live_tui(pane, pane_cmd):
@@ -1232,15 +1264,20 @@ def _steer(slug, message, verify=True):
     pane, pane_cmd = _capture_pane_state(target)
     if not _pane_shows_live_tui(pane, pane_cmd):
         return False
-    needle = message.strip().splitlines()[0][:60] if message.strip() else ""
-    if verify and needle and not _input_box_has_text(pane, needle):
-        # Issue #12 L9 -- arrival check. The clearance check below reports
-        # "delivered" when the input box no longer holds the steer needle,
-        # but a box the paste never reached is equally clear of it: a
-        # silently failed paste (or agent output echoing the steer text into
-        # the pane) would read as a delivery that never happened. Fail
-        # closed: the needle must be seen in the box at least once before
-        # the box going clear can count as delivered.
+    needle = _make_steer_needle(message)
+    if verify and any(needle) and not _input_box_has_text(pane, needle):
+        # Issue #12 L9 -- arrival check. The needle is the message's
+        # first-line prefix + last-line suffix over the input-box region
+        # (last ❯ line + wrapped continuation rows), so a stale agent echo
+        # of the steer text can no longer fake arrival: the echo would
+        # have to reproduce the first AND last lines verbatim *in the
+        # box*. The clearance check below reports "delivered" when the
+        # box no longer holds the steer needle, but a box the paste never
+        # reached is equally clear of it: a silently failed paste (or
+        # agent output echoing the steer text into the pane) would read
+        # as a delivery that never happened. Fail closed: the needle must
+        # be seen in the box at least once before the box going clear can
+        # count as delivered.
         time.sleep(2)
         pane, pane_cmd = _capture_pane_state(target)
         if (not _pane_shows_live_tui(pane, pane_cmd)
