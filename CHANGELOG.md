@@ -397,7 +397,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   window is still reported engaged (absence of death, not proof of
   life). To retry a stillborn spawn: remove the job dir or use a new
   slug, then spawn with `--tmux`, while the serve-side cause is
-  investigated. (#TBD)
+  investigated. (#997)
 
 - muse-job's workspace-trust gate detector now requires the question and the
   "Trust and continue" option on separate lines, option after the question
