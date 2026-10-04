@@ -56,6 +56,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - muse-job v2 (MSP cutover): MSP is now the default transport — `muse-job spawn` drives jobs over `muse serve` unless `--tmux` opts back into the legacy TUI-pane path (closes #228). The cutover also fixes a serve-schema drift the 1.4.x binary exposed: `turn/start` and `turn/steer` now send the required `input` content-part array (the old opaque `prompt`/`message` string fields are rejected with invalid params), and `turn/steer` carries the required `expectedTurnId` anti-cross-turn guard. (#228)
 
+- Hosted phone-home, plane entry point live (#958 S4a): the hosted
+  control plane now serves the WebSocket upgrade `GET /v1/boxes/{box_id}/phone-home`,
+
+  fronting each box's own Durable Object. The upgrade authenticates the
+  box's short-lived Bearer <redacted> first — unknown, expired, or revoked tokens
+  get a plain 401 with no socket and no redirect, and the socket is
+  always routed by the verified token identity, never the URL. First
+  slice; the socket session logic (hello handshake, command re-drive,
+  revocation checks) follows. (#986)
 - Control-plane API reference, fix-up (#985): the consolidated endpoint
   reference now documents the box-filing endpoint `POST
   /v1/boxes/{box_id}/approvals/file` (box token, own box only, write-only
