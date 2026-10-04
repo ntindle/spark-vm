@@ -62,6 +62,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
   no ingress path at construction. The owner-facing approval surface keeps
   showing the full raw text so nothing is hidden from the decider.
 
+- Hosted phone-approval push, event taxonomy pinned (#982): which plane events
+  page and which don't — an approval filing pages once, expiry never pages,
+  and a decision is the cancellation signal rather than an event. The reminder
+  point is parameterized on the approval's own TTL (the "15 minutes before
+  expiry" rule is unsatisfiable under the 10-minute default), the reminder
+  sweep gets a scheduler home on the request-driven plane (cron first), page
+  volume is bounded per box and per owner with hourly digest coalescing, and
+  a two-gate lease re-checks the record before sending so a just-decided
+  approval never buzzes after the fact.
+
 - Hosted phone-approval push, sender crypto validated (#978): the plane worker
   can encrypt Web Push messages in-worker — a stdlib-only implementation of
   the RFC 8291 `aes128gcm` content encoding (P-256 key agreement, AES-GCM,
