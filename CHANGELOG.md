@@ -300,7 +300,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   owner-only file, pasted into the browser once per session, and compared
   in constant time; the page never stores it in a cookie or URL. Show it
   with `cred-ui.py --print-token`, replace it with
-  `cred-ui.py --rotate-token`. (#[TBD])
+  `cred-ui.py --rotate-token`. (#965)
 - The proxy's refresh/navigation-target scan now matches past literal newlines:
   a line break inside a meta-refresh `url=` value is legal HTML — browsers
   strip it and navigate to the joined URL — so a secret smuggled after the
