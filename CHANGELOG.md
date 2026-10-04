@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- The hosted control plane gained a box-authenticated filing endpoint (#952):
+  a box can now create its own action-approval records (`POST
+  /v1/boxes/{id}/approvals/file`, scoped to the box's own id, accepting the
+  current or in-grace-rotation token), answering write-only so the box never
+  reads its own approvals — the forward database migration makes the record's
+  owner field nullable, with null meaning box-filed. The owner-side
+  create/list/decide surface is unchanged. (#956)
 - A new gap analysis maps the missing filing-upload leg of the hosted
   approvals lane (#876): when the proxy refuses a sensitive action, the
   plane-side approval record exists but nothing creates it from the box
