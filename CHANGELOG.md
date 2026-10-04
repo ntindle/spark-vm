@@ -62,7 +62,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   no ingress path at construction. The owner-facing approval surface keeps
   showing the full raw text so nothing is hidden from the decider.
 
-- Hosted phone-approval push, event taxonomy pinned (#TBD): which plane events
+- Hosted phone-approval push, event taxonomy pinned (#982): which plane events
   page and which don't — an approval filing pages once, expiry never pages,
   and a decision is the cancellation signal rather than an event. The reminder
   point is parameterized on the approval's own TTL (the "15 minutes before
