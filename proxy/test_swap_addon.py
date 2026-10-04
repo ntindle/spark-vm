@@ -1597,6 +1597,61 @@ class JsonSwapValidityTests(unittest.TestCase):
         self.assertEqual(flow.metadata["spark_approval_signal"],
                          [("grantaid1", "approved")])
 
+    def test_divergence_abort_leaves_no_audit_trail_and_no_signal(self):
+        """Round-2 Architecture finding: pass 2 used to write `swapped=`
+        audit lines inline, BEFORE the divergence check ran. A resolution
+        change between passes (a TOTP 30s boundary straddled mid-request)
+        left `swapped=` lines for credentials that were never released —
+        the round-1 structural hole on the divergence path. Pass 2 now
+        buffers its audit writes in a sink that is discarded on abort, so
+        the divergence abort leaves zero residue."""
+        a = make_addon()
+        audits = []
+        a._audit = lambda host, matched: audits.append(
+            (host, matched)) or True
+        real_resolve = a._resolve
+        calls = []
+
+        def resolve_rotating(name, entry, host, method, path, location):
+            v, _ = real_resolve(name, entry, host, method, path, location)
+            calls.append(name)
+            if v is None:
+                return None, None
+            # First pass (probe) sees one value, second pass another:
+            # simulates a credential rotating between the passes.
+            return (("AAAA" if len(calls) == 1 else "BBBB"), "grantaid1")
+
+        a._resolve = resolve_rotating
+        flow = Flow(Request("api.github.com", "/cfg",
+                            [("Content-Type", "application/json")],
+                            b'{"k": "hsurr:github"}'))
+        a.request(flow)
+        # the body is refused as a whole, placeholders left in place
+        self.assertEqual(flow.request.content, b'{"k": "hsurr:github"}')
+        self.assertIn(("api.github.com", "json-swap",
+                       "probe-diverged"), a.audit_notes)
+        # the blocker: no `swapped=` audit line for the unreleased swap
+        self.assertEqual(audits, [])
+        # no client-visible approval signal either
+        self.assertFalse(a._approval_signal)
+        self.assertNotIn("spark_approval_signal", flow.metadata)
+
+    def test_audit_flush_failure_refuses_whole_body(self):
+        """Buffered-audit corollary: when a pass-2 audit write fails at
+        flush time, the whole body is refused (placeholders left) rather
+        than released with a partial trail — fail closed, with the
+        failure itself audited."""
+        a = make_addon()
+        a._audit = lambda host, matched: False  # audit log unwritable
+        flow = Flow(Request("api.github.com", "/cfg",
+                            [("Content-Type", "application/json")],
+                            b'{"k": "hsurr:github"}'))
+        a.request(flow)
+        self.assertEqual(flow.request.content, b'{"k": "hsurr:github"}')
+        self.assertIn(("api.github.com", "json-swap",
+                       "audit-flush-failed"), a.audit_notes)
+        self.assertFalse(a._approval_signal)
+
     def test_deeply_nested_body_refuses_without_crash(self):
         """Round-1 Security/Engineering finding: json.loads raises
         RecursionError (not ValueError) on deep nesting — a body far
