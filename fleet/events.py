@@ -43,6 +43,7 @@ Key design rules, from the doc (call-site-auditable):
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import sys
@@ -418,6 +419,176 @@ def collect_box_events(box_dir, box_id, received_at):
         notes.append("%d check-noop event(s) kept local (noise discipline)"
                      % local_noops)
     return events, local_noops, notes
+
+
+# --- Audit-tail continuity (§4 S1 follow-up, arch 20261004-1359) ------------
+# The estate pulls only a *tail* of each box's audit log (README: "tail of
+# the box's auto-deploy audit log") — a tail of operator-chosen length.
+# When more audit lines are emitted between two pulls than the tail
+# holds, the pulled tail silently starts after the previously pulled
+# tail's head: the lost lines never reach the collector, and the
+# deterministic event-id dedup (re-collection is a no-op) hides the loss
+# completely — a pull that silently dropped 500 lines produces exactly
+# the same downstream state as a pull where nothing happened. The lost
+# lines can include the very failure events the alert rules exist to
+# page, so an overflowing tail is an evidence-loss hole in the paging
+# pipeline, not a cosmetic gap.
+#
+# The watermark is physical, not content-addressed: the SHA-256 of the
+# pulled tail's last non-blank line. On the next collect the pulled tail
+# must still contain that line (the tail windows overlap) — if it does
+# not, lines scrolled out of the tail between pulls without ever being
+# collected. A missing/unreadable/empty tail keeps the old watermark:
+# the artifact notes already cover the missing tail, and a missing tail
+# is not proof of loss. A corrupt watermark file warns loudly and
+# re-establishes rather than bricking every future collect.
+TAIL_WATERMARKS_NAME = "tail_watermarks.json"
+
+
+def audit_tail_lines(box_dir):
+    """Hash identities of the pulled audit tail's non-blank lines.
+
+    Returns (line_hashes, error): line_hashes is the SHA-256 hex digest
+    of each non-blank line of <box_dir>/audit-tail.jsonl, in file order
+    (the tail's head is line_hashes[-1]); never raises. A missing,
+    unreadable, or empty tail yields ([], error-or-None) — the caller
+    keeps the old watermark in that case (a missing tail is not proof
+    of loss; the artifact notes already cover it)."""
+    path = os.path.join(box_dir, "audit-tail.jsonl")
+    hashes = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped:
+                    hashes.append(
+                        hashlib.sha256(stripped.encode("utf-8")).hexdigest())
+    except FileNotFoundError:
+        return [], "missing"
+    except OSError as exc:
+        return [], "unreadable: %s" % exc
+    return hashes, None
+
+
+def _load_tail_watermarks(store_dir):
+    """Load the per-box tail watermarks; returns (marks, corrupt_note).
+
+    A missing file is a fresh store (no note); a corrupt one warns and
+    re-establishes — a corrupt watermark must never brick collection."""
+    path = os.path.join(store_dir, TAIL_WATERMARKS_NAME)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, ValueError) as exc:
+        return {}, ("tail watermarks file %s is corrupt (%s); "
+                    "re-establishing" % (TAIL_WATERMARKS_NAME, exc))
+    if not isinstance(data, dict):
+        return {}, ("tail watermarks file %s is not an object; "
+                    "re-establishing" % TAIL_WATERMARKS_NAME)
+    return data, None
+
+
+def _save_tail_watermarks(store_dir, marks):
+    """Write the watermark file atomically (tmp + fsync + os.replace);
+    returns an error string or None."""
+    path = os.path.join(store_dir, TAIL_WATERMARKS_NAME)
+    tmp = path + ".tmp.%d" % os.getpid()
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(marks, fh, sort_keys=True, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return "cannot write %s: %s" % (TAIL_WATERMARKS_NAME, exc)
+    return None
+
+
+def check_tail_continuity(store_dir, box_tails, observed_at):
+    """Detect audit-tail overflow between collects.
+
+    box_tails is a list of (box_id, line_hashes) as returned by
+    audit_tail_lines. For each box with a pullable tail, the previous
+    pull's tail-head hash must still be present in the current tail's
+    line hashes — i.e. the two tail windows overlap. When the windows
+    no longer overlap, more lines were emitted between pulls than the
+    tail holds and the intervening lines were never collected: audit
+    events (including failure events the alert rules page on) may have
+    been silently lost.
+
+    Known conservative edge: when exactly tail_length lines were
+    emitted between pulls the windows are adjacent, not overlapping —
+    no line was ever unpulled, but the check still fires. Exact
+    adjacency at the operator's tail length is measure-zero in practice
+    (it needs pathological emit volume between two pulls), and the
+    notice is a warning, never a page.
+
+    Runs under the store-scoped journal lock and updates the watermarks
+    atomically. Returns (warnings, error): warnings are human-readable
+    discontinuity/corruption notices for the operator's stderr; error is
+    a loud failure (lock or write failure) that must fail the collect.
+    """
+    warnings = []
+    try:
+        with journal_lock(store_dir):
+            marks, corrupt_note = _load_tail_watermarks(store_dir)
+            if corrupt_note:
+                warnings.append(corrupt_note)
+            for box_id, line_hashes in box_tails:
+                if not isinstance(box_id, str) or not box_id:
+                    continue
+                if not line_hashes:
+                    # No pullable tail this round (missing/unreadable/
+                    # empty): keep the old watermark — the artifact
+                    # notes already cover the missing tail, and a
+                    # missing tail is not proof of loss.
+                    continue
+                head = line_hashes[-1]
+                prev = marks.get(box_id)
+                prev_head = (prev.get("tail_head_sha256")
+                             if isinstance(prev, dict) else None)
+                if isinstance(prev_head, str) and prev_head:
+                    if prev_head not in line_hashes:
+                        warnings.append(
+                            "box %s: audit-tail discontinuity — the "
+                            "previous pull's tail head is no longer in "
+                            "the pulled tail (%d line(s) pulled); audit "
+                            "events emitted between pulls may have been "
+                            "lost" % (box_id, len(line_hashes)))
+                        marks[box_id] = {
+                            "tail_head_sha256": head,
+                            "tail_lines": len(line_hashes),
+                            "observed_at": observed_at,
+                            "last_discontinuity_at": observed_at,
+                        }
+                    else:
+                        marks[box_id] = {
+                            "tail_head_sha256": head,
+                            "tail_lines": len(line_hashes),
+                            "observed_at": observed_at,
+                            "last_discontinuity_at": (
+                                prev.get("last_discontinuity_at")),
+                        }
+                else:
+                    marks[box_id] = {
+                        "tail_head_sha256": head,
+                        "tail_lines": len(line_hashes),
+                        "observed_at": observed_at,
+                        "last_discontinuity_at": None,
+                    }
+            err = _save_tail_watermarks(store_dir, marks)
+            if err:
+                return None, err
+    except JournalLockError as exc:
+        return None, str(exc)
+    return warnings, None
 
 
 # --- Store-scoped journal lock --------------------------------------------

@@ -1097,3 +1097,108 @@ def test_inventory_long_box_id_keeps_columns_aligned(env):
     assert len(drows) == 2, drift.stdout
     offsets = {line.index("unexplained") for line in drows}
     assert len(offsets) == 1, drift.stdout
+
+
+# --- audit-tail continuity (arch 20261004-1359) ----------------------------
+
+
+def _watermarks(store):
+    with open(os.path.join(store, "tail_watermarks.json")) as fh:
+        return json.load(fh)
+
+
+def _tail_lines(n, start=0):
+    # Timestamps depend only on the line index, so _tail_lines(8)
+    # extends _tail_lines(5) with byte-identical shared lines (the
+    # overlap the continuity check looks for), while start=100 yields a
+    # disjoint tail (the overflow simulation).
+    base = NOW - timedelta(hours=1)
+    return [_audit_line(base + timedelta(minutes=i), "deploy", COMMIT_A,
+                       COMMIT_B, result="ok")
+            for i in range(start, start + n)]
+
+
+def test_tail_continuity_first_pull_establishes_silently(env):
+    _collect(env, {"tower": {"status": _status_json(),
+                             "audit": _tail_lines(5),
+                             "snapshot": _snapshot_json(COMMIT_A)}})
+    estate, store = env
+    marks = _watermarks(store)
+    assert set(marks) == {"tower"}
+    with open(os.path.join(estate, "tower", "audit-tail.jsonl")) as fh:
+        last = [line.strip() for line in fh if line.strip()][-1]
+    assert marks["tower"]["tail_head_sha256"] == \
+        hashlib.sha256(last.encode()).hexdigest()
+    assert marks["tower"]["tail_lines"] == 5
+    assert marks["tower"]["last_discontinuity_at"] is None
+
+
+def test_tail_continuity_overlap_no_warning(env):
+    estate, store = _collect(env, {"tower": {
+        "status": _status_json(), "audit": _tail_lines(5),
+        "snapshot": _snapshot_json(COMMIT_A)}})
+    # Append lines (the operator's pull pattern: the tail grows); the
+    # previous head is still inside the new tail -> windows overlap.
+    _write_box(estate, "tower", audit=_tail_lines(8))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "discontinuity" not in proc.stderr
+    marks = _watermarks(store)
+    assert marks["tower"]["tail_lines"] == 8
+    assert marks["tower"]["last_discontinuity_at"] is None
+
+
+def test_tail_continuity_overflow_warns(env):
+    estate, store = _collect(env, {"tower": {
+        "status": _status_json(), "audit": _tail_lines(5),
+        "snapshot": _snapshot_json(COMMIT_A)}})
+    # Simulate overflow: the whole tail is replaced by lines the
+    # previous pull never saw (more emitted between pulls than the tail
+    # holds). The previous head is gone -> loud warning, collect still
+    # succeeds, watermark re-establishes on the new tail.
+    _write_box(estate, "tower",
+               audit=_tail_lines(5, start=100))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "audit-tail discontinuity" in proc.stderr, proc.stderr
+    assert "tower" in proc.stderr
+    marks = _watermarks(store)
+    assert marks["tower"]["tail_lines"] == 5
+    assert marks["tower"]["last_discontinuity_at"] is not None
+    # A third collect on the same tail is quiet again (the watermark
+    # re-established; no repeated warning for one break).
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "discontinuity" not in proc.stderr
+
+
+def test_tail_continuity_missing_tail_keeps_watermark(env):
+    estate, store = _collect(env, {"tower": {
+        "status": _status_json(), "audit": _tail_lines(5),
+        "snapshot": _snapshot_json(COMMIT_A)}})
+    before = _watermarks(store)
+    os.unlink(os.path.join(estate, "tower", "audit-tail.jsonl"))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "discontinuity" not in proc.stderr
+    assert _watermarks(store) == before
+
+
+def test_tail_continuity_empty_tail_first_pull(env):
+    _collect(env, {"tower": {"status": _status_json(), "audit": [],
+                             "snapshot": _snapshot_json(COMMIT_A)}})
+    _, store = env
+    assert _watermarks(store) == {}
+
+
+def test_tail_continuity_corrupt_watermark_reestablishes(env):
+    estate, store = _collect(env, {"tower": {
+        "status": _status_json(), "audit": _tail_lines(5),
+        "snapshot": _snapshot_json(COMMIT_A)}})
+    with open(os.path.join(store, "tail_watermarks.json"), "w") as fh:
+        fh.write("not json {{{")
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "corrupt" in proc.stderr, proc.stderr
+    marks = _watermarks(store)  # valid again
+    assert set(marks) == {"tower"}

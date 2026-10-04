@@ -408,6 +408,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
   terminal-delivery read and the no-re-file composition against
   neutering. (#984, #876)
 
+- Fleet update events: `fleet collect` now detects audit-tail overflow
+  between pulls. The estate pulls only a tail of each box's audit log,
+  and when more lines are emitted between pulls than the tail holds, the
+  lost lines — including the failure events the alert rules page on —
+  vanished silently, with the deterministic event-id dedup hiding the
+  loss entirely. A per-box tail-head watermark in the store now checks
+  that consecutive pulls' tail windows overlap; when they don't, the
+  collect warns loudly on stderr and records the break, so a too-short
+  tail is a visible incident instead of missing evidence. (#TBD)
+
 ### Fixed
 
 - muse-job spawn over MSP now detects a first turn that died before
