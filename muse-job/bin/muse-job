@@ -1036,21 +1036,43 @@ _TRUST_PROMPT_TEXT = "Do you trust this workspace?"
 # the option line too restores the two-signal shape: a mere mention of the
 # question no longer matches.
 _TRUST_OPTION_TEXT = "Trust and continue"
+# Issue #972: the two halves of the gate must sit on SEPARATE lines with the
+# option line after the question line, within a small window. The real gate
+# renders them ~2 lines apart (question, `Workspace:` line,
+# `> 1  Trust and continue`). The #961 tail-substring check is
+# order-insensitive and position-insensitive: a single line like
+# `I chose "Trust and continue" when it asked "Do you trust this workspace?"`
+# in a live TUI's own conversation still misfires. This window restores the
+# positional half of the gate shape.
+_TRUST_GATE_LINE_WINDOW = 3
 
 
 def _pane_shows_trust_gate(pane):
     """True when the viewport tail shows the TUI's workspace-trust gate.
 
-    Both halves of the gate's observed shape must co-occur in the tail: the
-    question line AND its option line. Issue #961: a bare question-substring
+    Both halves of the gate's observed shape must appear on separate lines:
+    the question line, then the option line after it within
+    _TRUST_GATE_LINE_WINDOW lines. Issue #961: a bare question-substring
     match fires when a live TUI's conversation merely mentions the phrase
     (e.g. the agent discussing the gate), which the watch loop then answers
-    into a live input box. Process identity is NOT checked here -- the call
+    into a live input box. Issue #972: the #961 tail-substring check is
+    order-insensitive and position-insensitive, so a single line containing
+    BOTH phrases (e.g. the agent pasting a gate transcript, or `I chose
+    "Trust and continue" when it asked "Do you trust this workspace?"`)
+    still misfires. Process identity is NOT checked here -- the call
     sites keep their own _is_tui_process gates (a stale gate in a dead
     pane's scrollback is still text-only evidence, issue #4).
     """
-    tail = _pane_tail(pane)
-    return _TRUST_PROMPT_TEXT in tail and _TRUST_OPTION_TEXT in tail
+    lines = _pane_tail(pane).splitlines()
+    for i, line in enumerate(lines):
+        if _TRUST_PROMPT_TEXT not in line:
+            continue
+        # The option half must follow on its own line: same-line co-occurrence
+        # (a transcript paste, a one-line summary) is a misfire, not a gate.
+        for j in range(i + 1, min(i + 1 + _TRUST_GATE_LINE_WINDOW, len(lines))):
+            if _TRUST_OPTION_TEXT in lines[j]:
+                return True
+    return False
 
 
 def _capture_pane_state(target):
