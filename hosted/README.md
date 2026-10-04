@@ -114,7 +114,8 @@ it returns a `PushResult`, never sleeps, never logs).
   verification on; connect 5 s / read 10 s. Redirects are never followed
   — any 3xx is a dead-letter (credential-orientation).
 - **Result taxonomy** (the per-code table the module docstring pins):
-  201/202 → `accepted` (record it — feeds #428's §4 email-fallback
+  any 2xx → `accepted` (201 is the RFC 8030 norm, but FCM answers
+  successful sends with 200 — record it; feeds #428's §4 email-fallback
   retirement via `acceptance_fields()`); 429 → `retry` honoring
   `Retry-After` (clamped ≤ 600 s) else the 2/8/32/128/300 backoff
   schedule; 410/404 → `tombstone` (caller deletes, dashboard offers
@@ -122,8 +123,10 @@ it returns a `PushResult`, never sleeps, never logs).
   other 4xx, any 3xx → `dead-letter` + operator-visible alert. `retry`
   returns a `retry_after_s` hint — the #990 enqueue machinery owns the
   wait; the module's `MAX_ATTEMPTS = 5` is the policy the caller enforces.
-- **Latency:** every attempt reports `latency_ms` — real push-service RTT
-  is still unmeasured, and this is the load-bearing input to the
+- **Latency:** every attempt reports `latency_ms` (network only — the
+  timer starts after crypto + VAPID signing, so VAPID-sign timing is
+  excluded from the observable output). Real push-service RTT is still
+  unmeasured, and this is the load-bearing input to the
   inline-vs-outbox decision (#990).
 
 Tested by `test_push_sender.py` (30 tests, neutering-verified

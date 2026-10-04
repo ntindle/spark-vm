@@ -34,7 +34,10 @@ Decisions (from #989's structural findings):
    ============  =====================================================
    status        outcome
    ============  =====================================================
-   201 / 202     ``accepted`` — record it (feeds #428's §4 retirement)
+   any 2xx       ``accepted`` — record it (feeds #428's §4 retirement).
+                 201 is the RFC 8030 norm, but FCM (the likeliest push
+                 service for the owner's phone) returns 200 on success;
+                 a successful page must never classify dead-letter.
    429           ``retry`` — ``Retry-After`` honored (clamped ≤ 600 s),
                  else the backoff schedule
    410 / 404     ``tombstone`` — subscription is dead; the caller
@@ -77,7 +80,7 @@ Decisions (from #989's structural findings):
 *caller* records ``acceptance_fields(result, ...)`` into the
 send-result/acceptance store (#988 owns the D1 table). #428's §4
 criterion flips when that store holds a plane-recorded ``accepted``
-(201/202) for the tenant's subscription. The endpoint, ``p256dh`` and
+(any 2xx) for the tenant's subscription. The endpoint, ``p256dh`` and
 ``auth`` secrets never appear in the record — only the caller's opaque
 ``subscription_ref``.
 
@@ -99,11 +102,9 @@ logs with its own correlation ids (the endpoint never appears in logs).
 from __future__ import annotations
 
 import base64
-import hashlib
 import http.client
 import socket
 import ssl
-import struct
 import time
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
@@ -129,8 +130,10 @@ VAPID_EXPIRY_S = 12 * 3600
 CONNECT_TIMEOUT_S = 5.0
 READ_TIMEOUT_S = 10.0
 
-#: Retry bound (finding 3): the module never sleeps; the caller enforces
-#: this many total attempts using ``backoff_s`` / ``parse_retry_after``.
+#: Retry bound (finding 3): the module never sleeps and never loops;
+#: the #990 caller enforces this many total attempts using
+#: ``backoff_s`` / ``parse_retry_after``. Named here (not in the caller)
+#: so the policy lives with the taxonomy it bounds.
 MAX_ATTEMPTS = 5
 
 #: ``Retry-After`` is honored but clamped — a push service asking us to
@@ -166,7 +169,9 @@ class PushResult:
     #: for ``retry``. ``None`` for terminal outcomes. The module never
     #: sleeps — the caller (#990) owns the wait.
     retry_after_s: float | None
-    #: Wall-clock time for the attempt (crypto + network), milliseconds.
+    #: Wall-clock time for the attempt (network only), milliseconds.
+    #: The timer starts after crypto + VAPID signing, so VAPID-sign
+    #: timing is excluded from the observable output.
     latency_ms: float
     #: Human-readable classification reason. Never contains the endpoint
     #: or any secret.
@@ -179,6 +184,8 @@ def backoff_s(attempt: int) -> float:
     ``attempt`` is 1-based (the attempt that just failed)."""
     if attempt < 1:
         raise ValueError("attempt is 1-based")
+    if attempt >= 5:
+        return 300.0  # 2×4^4 already exceeds the cap; no OverflowError
     return min(2.0 * (4.0 ** (attempt - 1)), 300.0)
 
 
@@ -229,19 +236,31 @@ def _validated_endpoint(endpoint: object) -> tuple[str, str, int, str]:
     fail-closed (finding: credential-orientation)."""
     if not isinstance(endpoint, str) or not endpoint:
         raise ValueError("endpoint must be a non-empty string")
+    # Fail fast, before any crypto: control characters and non-ASCII
+    # would otherwise surface as http.client errors after the ECDH work.
+    if any(ord(c) < 32 or ord(c) == 127 for c in endpoint):
+        raise ValueError("endpoint must not contain control characters")
+    try:
+        endpoint.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("endpoint must be ASCII") from exc
     parts = urlsplit(endpoint)
     if parts.scheme != "https":
         raise ValueError("endpoint must use https (cleartext refused)")
-    if parts.username or parts.password:
+    if parts.username is not None or parts.password is not None:
         raise ValueError("endpoint must not carry userinfo")
     if not parts.hostname:
         raise ValueError("endpoint must have a host")
+    host = parts.hostname
     port = parts.port or 443
     path = parts.path or "/"
     if parts.query:
         path += "?" + parts.query
-    origin = f"https://{parts.hostname}" + (f":{parts.port}" if parts.port else "")
-    return origin, parts.hostname, port, path
+    # Origin per WHATWG serialization: default port dropped, IPv6
+    # literals bracketed (so VAPID aud is well-formed for them too).
+    display_host = f"[{host}]" if ":" in host else host
+    origin = f"https://{display_host}" + ("" if port == 443 else f":{port}")
+    return origin, host, port, path
 
 
 def _validated_subscription(subscription: object) -> tuple[str, bytes, bytes]:
@@ -294,15 +313,21 @@ def _default_transport(*, host: str, port: int, path: str,
         host, port, timeout=CONNECT_TIMEOUT_S, context=context)
     try:
         conn.request("POST", path, body=body, headers=headers)
-        # Read timeout: bound the whole response read, not just connect.
+        # Bound the response-header read. The timeout is per-recv, not a
+        # total deadline; push responses are tiny headers, so this is
+        # the right granularity here.
         conn.sock.settimeout(READ_TIMEOUT_S)
         resp = conn.getresponse()
         status = resp.status
         resp_headers = {k.lower(): v for k, v in resp.getheaders()}
-        resp_body = resp.read()
     finally:
         conn.close()
-    return status, resp_headers, resp_body
+    # The response body is intentionally NOT read: the caller discards it
+    # (a push receipt carries nothing we need), the socket closes anyway,
+    # and an unbounded read() is a memory-exhaustion vector against a
+    # hostile endpoint (each drip within the per-recv timeout would keep
+    # read() looping forever).
+    return status, resp_headers, b""
 
 
 def send_push(*, subscription, plaintext: bytes,
@@ -329,7 +354,7 @@ def send_push(*, subscription, plaintext: bytes,
         raise ValueError(
             f"plaintext ({len(plaintext)} B) exceeds the pinned record_size "
             f"{RECORD_SIZE} (RFC 8291 §4: rs > len(plaintext)+17)")
-    if not isinstance(ttl_s, int) or not 0 < ttl_s <= TTL_HEADER_MAX_S:
+    if type(ttl_s) is not int or not 0 < ttl_s <= TTL_HEADER_MAX_S:
         raise ValueError(f"ttl_s must be an int in (0, {TTL_HEADER_MAX_S}]")
     if not isinstance(vapid_subject, str) or not vapid_subject:
         raise ValueError("vapid_subject is operator configuration (no default)")
@@ -378,18 +403,23 @@ def send_push(*, subscription, plaintext: bytes,
             note=f"transport error ({type(exc).__name__}); backoff")
     latency_ms = (time.perf_counter() - started) * 1000.0
 
-    if status in (201, 202):
+    if 200 <= status <= 299:
+        # FCM (the likeliest push service for the owner's phone) answers
+        # successful Web Push sends with 200, not 201 — any 2xx is an
+        # accepted page, and misclassifying a success as dead-letter would
+        # break #428's §4 retirement.
         return PushResult(
             outcome="accepted", http_status=status, retry_after_s=None,
             latency_ms=latency_ms, note=f"push service accepted ({status})")
     if status == 429:
-        wait = parse_retry_after(resp_headers.get("retry-after"), now=moment)
-        if wait is None:
-            wait = backoff_s(attempt)
+        header = resp_headers.get("retry-after")
+        parsed = parse_retry_after(header, now=moment) if header else None
+        wait = parsed if parsed is not None else backoff_s(attempt)
         return PushResult(
             outcome="retry", http_status=429, retry_after_s=wait,
-            latency_ms=latency_ms, note="429; Retry-After honored" if
-            resp_headers.get("retry-after") else "429; backoff schedule")
+            latency_ms=latency_ms,
+            note="429; Retry-After honored" if parsed is not None
+            else "429; backoff schedule")
     if status in (410, 404):
         return PushResult(
             outcome="tombstone", http_status=status, retry_after_s=None,
@@ -424,6 +454,9 @@ def acceptance_fields(result: PushResult, *, subscription_ref: str,
     ``p256dh`` and ``auth`` secrets never appear here. #988 owns the D1
     table; this pins the *fields*. #428's §4 criterion flips when the
     store holds a plane-recorded record with ``outcome == "accepted"``.
+
+    ``sent_at`` is epoch seconds (float), matching the ``now`` clock the
+    caller passes to ``send_push``.
     """
     if result.outcome != "accepted":
         raise ValueError("acceptance records are only built for accepted sends")

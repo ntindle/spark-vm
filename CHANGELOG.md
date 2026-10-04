@@ -52,15 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- Hosted phone-approval push, send path built (#989): the control plane can
-  now actually deliver a Web Push page to the owner's device — the
-  previously validated crypto gains a stdlib-only transport that POSTs the
+- Hosted phone-approval push, send path built (#989): the send-path half
+  of the push sender is built — a stdlib-only transport that POSTs the
   encrypted page to the push service with per-send VAPID credentials,
   honors `Retry-After`, never follows redirects, classifies every outcome
   (accepted / retry / dead subscription / dead-letter) so the plane can
   re-queue, tombstone, or alert, and records accepted deliveries for the
-  email-fallback retirement check. Still ahead: the subscription database
-  contract, the enqueue boundary, and the dashboard subscription surface.
+  email-fallback retirement check. End-to-end delivery waits on the
+  enqueue boundary. Still ahead: the subscription database contract, the
+  enqueue boundary, and the dashboard subscription surface.
 
 - Hosted phone-approval push, sender design split into buildable slices (#991): the remaining sender work is now three tracked issues — the subscription/budget/send-record database contract, the push-service transport (request shape, retries, per-code handling), and the enqueue boundary (where filing becomes a page, and the backpressure story). Three structural pins landed with it: the anti-spam page budget counts pages, not device deliveries (one page to all your devices is one unit); every send re-checks whether the approval was already decided or expired, so a decided approval never pages; and a page fans out to every live subscription registered for that owner and box.
 

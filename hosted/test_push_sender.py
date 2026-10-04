@@ -78,6 +78,7 @@ class StubPushService:
     def __init__(self):
         self.server = http.server.HTTPServer(("127.0.0.1", 0), _StubHandler)
         self.server.requests = []
+        self.server.targets = []  # (host, port, path) per transport call
         self.server.scripted = deque()
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        daemon=True)
@@ -110,13 +111,15 @@ def stub():
         yield service
 
 
-def _subscription(endpoint_host="push.example.com", endpoint_port=None):
+def _subscription(endpoint_host="push.example.com", endpoint_port=None, query=None):
     priv, pub = push_crypto.generate_keypair()
     auth = secrets.token_bytes(16)
     endpoint = f"https://{endpoint_host}"
     if endpoint_port:
         endpoint += f":{endpoint_port}"
     endpoint += "/wp/abc123"
+    if query:
+        endpoint += "?" + query
     return {
         "endpoint": endpoint,
         "p256dh": _b64url(pub),
@@ -132,10 +135,13 @@ def _stub_transport(stub):
     def transport(*, host, port, path, headers, body):
         # Documented stub difference: plain HTTP to localhost. The
         # production transport speaks TLS; its policy is pinned by
-        # test_default_transport_enforces_tls instead.
+        # test_default_transport_enforces_tls instead. The request
+        # target (host/port/path) is recorded so tests pin that
+        # send_push computed it from the subscription endpoint.
+        stub.server.targets.append((host, port, path))
         conn = http.client.HTTPConnection("127.0.0.1", stub.port, timeout=5)
         try:
-            conn.request("POST", "/", body=body, headers=headers)
+            conn.request("POST", path, body=body, headers=headers)
             resp = conn.getresponse()
             return resp.status, {k.lower(): v for k, v in resp.getheaders()}, resp.read()
         finally:
@@ -145,9 +151,11 @@ def _stub_transport(stub):
 
 def _send(stub, sub=None, plaintext=b'{"aid":"a1","ttl_s":600,"summary":"hi"}',
           ttl_s=600, attempt=1, now=1_700_000_000.0, transport=None,
-          vapid_subject="mailto:ops@example.com", **kw):
+          vapid_subject="mailto:ops@example.com",
+          vapid_priv=None, vapid_pub=None, **kw):
     sub = sub if sub is not None else _subscription()
-    vapid_priv, vapid_pub = _vapid_keys()
+    if vapid_priv is None or vapid_pub is None:
+        vapid_priv, vapid_pub = _vapid_keys()
     return push_sender.send_push(
         subscription=sub, plaintext=plaintext,
         vapid_private_key=vapid_priv, vapid_public_key=vapid_pub,
@@ -180,6 +188,10 @@ def test_accepted_201_and_request_shape(stub):
     assert len(stub.server.requests) == 1
     req = stub.server.requests[0]
     assert req["method"] == "POST"
+    # The request target is computed from the subscription endpoint —
+    # the stub records what the transport was asked to hit.
+    assert req["path"] == "/wp/abc123"
+    assert stub.server.targets == [("push.example.com", 443, "/wp/abc123")]
     h = req["headers"]
     assert h["ttl"] == "600"
     assert h["urgency"] == "high"
@@ -195,18 +207,23 @@ def test_accepted_201_and_request_shape(stub):
     assert len(body[21:86]) == 65
 
 
-def test_accepted_202(stub):
-    stub.script((202, {}, b""))
+@pytest.mark.parametrize("status", [200, 201, 202, 204])
+def test_accepted_2xx(stub, status):
+    # 201 is the RFC 8030 norm, but FCM answers successful Web Push
+    # sends with 200 — any 2xx is an accepted page.
+    stub.script((status, {}, b""))
     result, _ = _send(stub)
-    assert result.outcome == "accepted"
-    assert result.http_status == 202
+    assert result.outcome == "accepted", status
+    assert result.http_status == status
+    assert result.retry_after_s is None
 
 
 def test_vapid_policy_exp_aud_k(stub):
-    result, sub = _send(stub, now=1_700_000_000.0)
+    vapid_priv, vapid_pub = _vapid_keys()
+    result, sub = _send(stub, now=1_700_000_000.0,
+                        vapid_priv=vapid_priv, vapid_pub=vapid_pub)
     assert result.outcome == "accepted"
     h = stub.server.requests[0]["headers"]
-    vapid_priv, vapid_pub = _vapid_keys()
     # Re-derive what the header must carry: aud = endpoint origin.
     claims = _jwt_claims(h["authorization"])
     assert claims["aud"] == "https://push.example.com"
@@ -214,9 +231,9 @@ def test_vapid_policy_exp_aud_k(stub):
     assert claims["exp"] - 1_700_000_000 <= 24 * 3600
     assert claims["sub"] == "mailto:ops@example.com"
     k_param = h["authorization"].split(", k=")[1]
-    # k= must be *a* 65-octet uncompressed point (the current VAPID key).
-    raw = base64.urlsafe_b64decode(k_param + "=" * (-len(k_param) % 4))
-    assert len(raw) == 65 and raw[:1] == b"\x04"
+    # k= must be EXACTLY the VAPID public key passed to the call
+    # (rotation correctness depends on it) — not just a well-formed point.
+    assert k_param == _b64url(vapid_pub)
 
 
 def test_vapid_aud_uses_endpoint_origin_with_port(stub):
@@ -286,11 +303,18 @@ def test_redirect_never_followed(stub):
     assert len(stub.server.requests) == 1, "redirect must not be followed"
 
 
-def test_transport_error_retries(stub):
+@pytest.mark.parametrize("exc", [
+    ConnectionError("refused"),
+    socket.timeout("timed out"),
+    socket.gaierror("dns fail"),
+    ssl.SSLError("tls fail"),
+    http.client.BadStatusLine("garbage"),
+])
+def test_transport_error_retries(stub, exc):
     def boom(**kw):
-        raise ConnectionError("refused")
+        raise exc
     result, _ = _send(stub, transport=boom, attempt=1)
-    assert result.outcome == "retry"
+    assert result.outcome == "retry", type(exc).__name__
     assert result.http_status is None
     assert result.retry_after_s == push_sender.backoff_s(1) == 2.0
 
@@ -334,7 +358,47 @@ def test_endpoint_userinfo_refused(stub):
     sub["endpoint"] = "https://user:pass@push.example.com/wp/x"
     with pytest.raises(ValueError):
         _send(stub, sub=sub)
+    sub["endpoint"] = "https://@push.example.com/wp/x"  # empty userinfo
+    with pytest.raises(ValueError):
+        _send(stub, sub=sub)
     assert stub.server.requests == []
+
+
+def test_endpoint_control_chars_and_unicode_refused(stub):
+    # Fail fast, before any crypto — these would otherwise surface as
+    # http.client errors after the ECDH work.
+    for bad in ("https://push.example.com/wp/\x01",
+                "https://push.example.com/wörld",
+                "https://push.example.com/wp/x\n"):
+        sub = _subscription()
+        sub["endpoint"] = bad
+        with pytest.raises(ValueError):
+            _send(stub, sub=sub)
+    assert stub.server.requests == []
+
+
+def test_endpoint_query_preserved(stub):
+    result, _ = _send(stub, sub=_subscription(query="x=1&y=2"))
+    assert result.outcome == "accepted"
+    assert stub.server.requests[0]["path"] == "/wp/abc123?x=1&y=2"
+    assert stub.server.targets == [("push.example.com", 443, "/wp/abc123?x=1&y=2")]
+
+
+def test_ipv6_endpoint_aud_bracketed(stub):
+    vapid_priv, vapid_pub = _vapid_keys()
+    sub = _subscription(endpoint_host="[2001:db8::1]", endpoint_port=8443)
+    result, _ = _send(stub, sub=sub, vapid_priv=vapid_priv, vapid_pub=vapid_pub)
+    assert result.outcome == "accepted"
+    claims = _jwt_claims(stub.server.requests[0]["headers"]["authorization"])
+    assert claims["aud"] == "https://[2001:db8::1]:8443"
+
+
+def test_explicit_default_port_normalized(stub):
+    sub = _subscription(endpoint_port=443)
+    result, _ = _send(stub, sub=sub)
+    assert result.outcome == "accepted"
+    claims = _jwt_claims(stub.server.requests[0]["headers"]["authorization"])
+    assert claims["aud"] == "https://push.example.com"
 
 
 def test_bad_subscription_keys(stub):
@@ -354,8 +418,10 @@ def test_bad_subscription_keys(stub):
 def test_bad_vapid_keys(stub):
     sub = _subscription()
     vapid_priv, vapid_pub = _vapid_keys()
+    n_bytes = push_crypto._N.to_bytes(32, "big")  # d must be < N
     for priv, pub in [(b"\x00" * 32, vapid_pub), (vapid_priv, b"\x04" + b"\x00" * 64),
-                      (b"short", vapid_pub), (vapid_priv, b"short")]:
+                      (b"short", vapid_pub), (vapid_priv, b"short"),
+                      (n_bytes, vapid_pub), (b"\xff" * 32, vapid_pub)]:
         with pytest.raises(ValueError):
             push_sender.send_push(
                 subscription=sub, plaintext=b'{"a":1}',
@@ -370,6 +436,16 @@ def test_oversized_plaintext_rejected_before_network(stub):
     assert stub.server.requests == []
 
 
+def test_record_size_boundary(stub):
+    # RFC 8291 §4: rs > len(plaintext)+17 — with rs=1024, len 1007
+    # rejects (1007+17 = 1024, not strictly less) and 1006 passes.
+    with pytest.raises(ValueError):
+        _send(stub, plaintext=b"x" * 1007)
+    assert stub.server.requests == []
+    result, _ = _send(stub, plaintext=b"x" * 1006)
+    assert result.outcome == "accepted"
+
+
 def test_empty_plaintext_rejected(stub):
     with pytest.raises(ValueError):
         _send(stub, plaintext=b"")
@@ -382,6 +458,14 @@ def test_ttl_header_bounds(stub):
         _send(stub, ttl_s=90000)
     with pytest.raises(ValueError):
         _send(stub, vapid_subject="")
+    with pytest.raises(ValueError):
+        _send(stub, ttl_s=True)  # bool is not an int here
+
+
+def test_ttl_header_value(stub):
+    result, _ = _send(stub, ttl_s=300)
+    assert result.outcome == "accepted"
+    assert stub.server.requests[0]["headers"]["ttl"] == "300"
 
 
 # ---------------------------------------------------------------------------
@@ -431,10 +515,12 @@ def test_default_transport_enforces_tls():
                 status = 201
 
                 def getheaders(self):
-                    return []
+                    # Mixed-case, as a real server sends them — the
+                    # transport must lowercase before classifying.
+                    return [("Retry-After", "30"), ("X-Mixed", "v")]
 
                 def read(self):
-                    return b""
+                    return b"SHOULD-NOT-BE-READ"
             return R()
 
         def close(self):
@@ -443,7 +529,8 @@ def test_default_transport_enforces_tls():
     with mock.patch.object(http.client, "HTTPSConnection", FakeConn):
         status, headers, body = push_sender._default_transport(
             host="push.example.com", port=443, path="/wp/x",
-            headers={"TTL": "600"}, body=b"body")
+            headers={"TTL": "600", "Authorization": "vapid t=abc, k=def"},
+            body=b"body")
 
     assert status == 201
     ctx = seen["context"]
@@ -451,9 +538,17 @@ def test_default_transport_enforces_tls():
     assert ctx.check_hostname is True
     assert ctx.verify_mode == ssl.CERT_REQUIRED
     assert seen["method"] == "POST"
+    assert seen["path"] == "/wp/x"
     assert seen["timeout"] == push_sender.CONNECT_TIMEOUT_S
     assert seen["read_timeout"] == push_sender.READ_TIMEOUT_S
     assert seen["closed"] is True
+    # Response headers are lowercased (so "Retry-After" classifies),
+    # request headers and body pass through untouched...
+    assert headers == {"retry-after": "30", "x-mixed": "v"}
+    assert seen["headers"]["Authorization"] == "vapid t=abc, k=def"
+    # ...and the response body is deliberately NOT read (the caller
+    # discards it; an unbounded read is a memory-exhaustion vector).
+    assert body == b""
 
 
 # ---------------------------------------------------------------------------
