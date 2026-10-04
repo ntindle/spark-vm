@@ -1,12 +1,15 @@
-"""Tests for spark-pair.py phone-home (issue #959 S5a: box-side WSS client).
+"""Tests for spark-pair.py phone-home (issues #959 S5a + #976 S5b: box-side
+WSS client).
 
 A stub control plane speaks the wire-spec subset (upgrade handshake,
 hello/welcome, keepalive, the close taxonomy) over a loopback TCP socket;
 every test proves a spec property against it: the generation fence, the
 close-code reconnect policy, the upgrade-401 rotate-once path, the
 no-redirect upgrade, backoff bounds, and the credential-never-in-logs
-discipline. Command frames / socket acks are S5b (the client logs and
-ignores them; the #874 HTTPS ingest path still owns the queue).
+discipline. S5b wires `command` frames into the #874 ingest executor
+with socket `command_ack`s (the §3.3 decision — _http is rigged to
+explode in the S5b tests, so any HTTPS ack would fail); untrusted
+command frames are logged and never executed.
 """
 import base64
 import hashlib
@@ -129,6 +132,16 @@ class StubDO(threading.Thread):
       ("expect-ws-pong", bytes) — read one frame, assert WS pong + payload
       ("drain", seconds)      — read+record client frames until the deadline
                                (discards nothing; never pongs JSON pings)
+      ("send-command", seq, epoch, inner)
+                             — send a wire-spec §3.3 command frame with
+                               this connection's generation
+      ("send-command-as", gen, seq, epoch, inner)
+                             — as send-command but with an explicit
+                               generation (fence tests)
+      ("expect-acks", [seqs])  — read client frames (skipping the client's
+                               own periodic JSON pings) until one
+                               command_ack per seq in `seqs` arrives;
+                               asserts the §3.1 ack shape on each
       ("welcome-raw", obj)    — as step0: read hello, send obj as the first
                                frame instead of a welcome (bad-welcome /
                                close-before-welcome tests)
@@ -300,6 +313,40 @@ class StubDO(threading.Thread):
                         break
                     rec["frames_raw"].append(payload)
                 conn.settimeout(10)
+            elif kind == "send-command":
+                _stub_send_json(conn, {"type": "command",
+                                       "generation": generation,
+                                       "seq": step[1], "epoch": step[2],
+                                       "payload": step[3]})
+            elif kind == "send-command-as":
+                _stub_send_json(conn, {"type": "command",
+                                       "generation": step[1],
+                                       "seq": step[2], "epoch": step[3],
+                                       "payload": step[4]})
+            elif kind == "expect-acks":
+                # Collect one command_ack per wanted seq, in order,
+                # skipping the client's own periodic JSON pings. The
+                # §3.1 shape (type/generation/seq, epoch when sent) is
+                # asserted on every ack.
+                want = list(step[1])
+                acks = []
+                deadline = time.time() + 10
+                while len(acks) < len(want) and time.time() < deadline:
+                    opcode, payload = _stub_read_frame(conn)
+                    frame = json.loads(payload.decode())
+                    if frame.get("type") == "ping":
+                        continue  # the client's own keepalive ping
+                    assert frame.get("type") == "command_ack", frame
+                    assert frame.get("generation") == generation, frame
+                    assert isinstance(frame.get("seq"), int) \
+                        and not isinstance(frame.get("seq"), bool), frame
+                    epoch = frame.get("epoch")
+                    assert epoch is None or (
+                        isinstance(epoch, int)
+                        and not isinstance(epoch, bool)), frame
+                    acks.append(frame)
+                assert [a["seq"] for a in acks] == want, acks
+                rec["frames"].extend(acks)
             elif kind == "close":
                 code, extra = step[1], step[2] if len(step) > 2 else {}
                 _stub_send_json(conn, {"type": "close", "generation":
@@ -853,8 +900,11 @@ def test_oversize_control_frame_rejected():
 
 
 def test_reserved_and_unknown_frames_ignored(ctx):
-    # QA B3: the S5b-ignore promise — command/command_ack/unknown frames
-    # must not wedge the channel.
+    # Malformed command frames (no shape to execute), a plane-sent
+    # command_ack (box→DO only), and unknown frame types must not wedge
+    # the channel. Well-formed command frames are EXECUTED now (S5b —
+    # see the tests below); this one has an empty payload, so it is
+    # still log-and-ignore.
     stub = StubDO([[("welcome",),
                     ("send", {"type": "command", "generation": 1, "seq": 7,
                               "epoch": 1, "payload": {}}),
@@ -936,3 +986,375 @@ def test_unknown_close_code_exits_no_reconnect(ctx):
     rc = _run_client(ctx, stub)
     assert rc == 1
     assert len(stub.records) == 1
+
+
+# -- S5b: socket command frames + command_ack (issue #976) ------------------------
+# The S5a harness above proved the connection core; these prove the
+# command-carrying half against the same stub DO: command frames
+# dispatch into the #874 ingest executor, acks ride the socket (§3.3
+# decision — _http is monkeypatched to explode, so any HTTPS ack would
+# fail the test), and untrusted frames are never executed.
+
+
+def _s5b_setup(ctx, monkeypatch, tmp_path):
+    """Ingest fixtures for socket-command tests.
+
+    A tmp approvals dir (via SVM_APPROVALS_DIR), the Finding-50 owner
+    lookup faked to swapd, the audit trail pointed at tmp, and _http
+    rigged to explode — proving the socket path never touches the HTTPS
+    ack endpoint. Returns the approvals dir."""
+    approvals = tmp_path / "approvals"
+    for sub in ("pending", "answered", "consumed"):
+        (approvals / sub).mkdir(parents=True)
+    monkeypatch.setenv("SVM_APPROVALS_DIR", str(approvals))
+    monkeypatch.setattr(spark_pair, "_ingest_file_owner",
+                        lambda path: "swapd")
+    monkeypatch.setenv("CONFIRM_AUDIT", str(tmp_path / "audit.log"))
+
+    def _no_http(method, url, body=None, headers=None):
+        raise AssertionError(
+            f"socket command path must not call _http: {method} {url}")
+    monkeypatch.setattr(spark_pair, "_http", _no_http)
+    return str(approvals)
+
+
+_S5B_AID = "s5bcmd0000000001"
+
+
+def _s5b_file_pending(approvals, aid=_S5B_AID):
+    # No "requester" field: Finding-50 reads the requester from the
+    # file's owner (faked to swapd above), never from the item.
+    item = {"id": aid, "credential": "openai", "host": "api.openai.com",
+            "method": "POST", "path_prefix": "/v1/chat",
+            "scope": "", "job": "job-1", "kind": "grant-request",
+            "created": "2026-10-04T00:00:00+00:00",
+            "expires": "2099-01-01T00:00:00+00:00",
+            "tenant_id": None}
+    with open(os.path.join(approvals, "pending", aid + ".json"),
+              "w") as f:
+        json.dump(item, f)
+
+
+def _s5b_decision(aid=_S5B_AID, decision="deny", dseq=1):
+    # "deny" exercises the full stamp path without grant minting.
+    return {"aid": aid, "decision": decision, "decision_seq": dseq,
+            "idempotency_key":
+                f"approval_decision:{BOX_ID}:{aid}:{dseq}"}
+
+
+def _s5b_inner(decision=None):
+    return {"kind": "approval_decision",
+            "payload": decision if decision is not None
+            else _s5b_decision()}
+
+
+def _s5b_acks(stub):
+    return [f for f in stub.records[0]["frames"]
+            if f.get("type") == "command_ack"]
+
+
+def _s5b_drained_acks(stub, conn=0):
+    """command_ack frames among one connection's drained raw client
+    frames. expect-acks stops reading after its quota, so a no-ack
+    claim needs this drain-based proof instead of rec["frames"]."""
+    acks = []
+    for raw in stub.records[conn].get("frames_raw", []):
+        try:
+            frame = json.loads(raw.decode())
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(frame, dict) and frame.get("type") == "command_ack":
+            acks.append(frame)
+    return acks
+
+
+def _s5b_consumed(approvals, aid=_S5B_AID):
+    p = os.path.join(approvals, "consumed", aid + ".json")
+    if not os.path.exists(p):
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def test_socket_command_delivery_stamps_and_socket_acks(ctx, monkeypatch,
+                                                       tmp_path):
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, _s5b_inner()),
+                    ("expect-acks", [1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    acks = _s5b_acks(stub)
+    assert len(acks) == 1
+    ack = acks[0]
+    assert ack["seq"] == 1
+    assert ack["epoch"] == 0  # the frame's epoch echoed back
+    assert ack["generation"] == stub.records[0]["hello"]["generation"]
+    # The decision went through the #874 executor: the consumed record
+    # carries the plane receipt fields.
+    stamped = _s5b_consumed(approvals)
+    assert stamped is not None, "decision was never stamped"
+    assert stamped["decision"] == "deny"
+    assert stamped["decision_origin"] == "plane"
+    assert stamped["plane_seq"] == 1
+    # _http exploding proves the ack rode the socket, never HTTPS.
+
+
+def test_socket_command_redelivery_deduped(ctx, monkeypatch, tmp_path,
+                                             capsys):
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, _s5b_inner()),
+                    ("send-command", 1, 0, _s5b_inner()),
+                    ("expect-acks", [1, 1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    # One stamp, one idempotency-log entry, two idempotent acks. The
+    # re-ack must come from the session's _acked_prefix path, NOT from
+    # re-entering the executor: the executor's "already ingested
+    # (idempotency key)" line must never print (it is the only place
+    # that string originates, so its absence proves the re-ack path).
+    assert _s5b_consumed(approvals)["plane_seq"] == 1
+    with open(os.path.join(ctx.dir, "ingested_decisions.json")) as f:
+        assert len(json.load(f)) == 1
+    assert "already ingested (idempotency key)" not in \
+        capsys.readouterr().out
+
+
+def test_socket_command_gap_holds_prefix(ctx, monkeypatch, tmp_path):
+    # The contiguous-ack guard: seq 3 must not be acked (or stamped)
+    # until the missing seq 2 arrives — the DO's re-drive heals the gap.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    aids = {1: "s5bgap0000000001", 2: "s5bgap0000000002",
+            3: "s5bgap0000000003"}
+    for seq, aid in aids.items():
+        _s5b_file_pending(approvals, aid)
+
+    def inner(seq, aid):
+        return _s5b_inner(_s5b_decision(aid=aid, dseq=seq))
+
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, inner(1, aids[1])),
+                    ("send-command", 3, 0, inner(3, aids[3])),  # gap
+                    ("send-command", 2, 0, inner(2, aids[2])),
+                    ("send-command", 3, 0, inner(3, aids[3])),  # re-drive
+                    ("expect-acks", [1, 2, 3]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    for aid in aids.values():
+        assert _s5b_consumed(approvals, aid) is not None, \
+            f"aid {aid} was never stamped"
+    # The gap held more than the ack: seq 3 was not STAMPED until seq 2
+    # was. answered_at is microsecond ISO-8601, so lexicographic order
+    # is chronological; an early-execute mutation stamps 3 before 2.
+    t1 = _s5b_consumed(approvals, aids[1])["answered_at"]
+    t2 = _s5b_consumed(approvals, aids[2])["answered_at"]
+    t3 = _s5b_consumed(approvals, aids[3])["answered_at"]
+    assert t1 <= t2 <= t3, (t1, t2, t3)
+
+
+def test_socket_command_malformed_frame_no_ack(ctx, monkeypatch, tmp_path,
+                                              capsys):
+    _s5b_setup(ctx, monkeypatch, tmp_path)
+    stub = StubDO([[("welcome",),
+                    ("send-command", "bogus", 0, _s5b_inner()),
+                    # rec["frames"] is only populated by expect-acks, so
+                    # the no-ack claim needs the drain-based proof.
+                    ("drain", 1.0),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert _s5b_drained_acks(stub) == []
+    assert "malformed command frame" in capsys.readouterr().out
+
+
+_S5B_AID2 = "s5bcmd0000000002"
+
+
+def test_socket_command_wrong_generation_ignored(ctx, monkeypatch,
+                                                tmp_path):
+    # A command fenced to another generation is never executed and never
+    # acked — the fence holds on the socket path exactly as on upgrade.
+    # The valid first command proves the handler is live, so this is not
+    # the old log-and-ignore-everything behavior.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals, _S5B_AID)
+    _s5b_file_pending(approvals, _S5B_AID2)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, _s5b_inner(
+                        _s5b_decision(aid=_S5B_AID, dseq=1))),
+                    ("send-command-as", 999, 2, 0, _s5b_inner(
+                        _s5b_decision(aid=_S5B_AID2, dseq=2))),
+                    ("expect-acks", [1]),
+                    # expect-acks stops reading after its quota: a
+                    # wrongly-sent ack for the fenced seq would sit
+                    # unread, so the no-ack claim needs the drain.
+                    ("drain", 0.5),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert [a["seq"] for a in _s5b_acks(stub)] == [1]
+    assert _s5b_drained_acks(stub) == []
+    assert _s5b_consumed(approvals, _S5B_AID) is not None
+    assert _s5b_consumed(approvals, _S5B_AID2) is None
+
+
+def test_socket_command_unknown_kind_acked_not_executed(ctx, monkeypatch,
+                                                       tmp_path, capsys):
+    # Ack-and-log: one unknown kind must not wedge the queue.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0,
+                     {"kind": "future_kind", "payload": {}}),
+                    ("expect-acks", [1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert os.listdir(os.path.join(approvals, "consumed")) == []
+    assert "unknown command kind" in capsys.readouterr().out
+
+
+def test_socket_command_oversize_payload_rejected(ctx, monkeypatch,
+                                                 tmp_path, capsys):
+    # Wire-spec §3.3: command payloads are ≤ 16 KiB. A bigger payload is
+    # a plane bug — rejected, never executed, never acked.
+    _s5b_setup(ctx, monkeypatch, tmp_path)
+    big = {"kind": "approval_decision",
+           "payload": {"pad": "x" * (20 * 1024)}}
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, big),
+                    # rec["frames"] is only populated by expect-acks, so
+                    # the no-ack claim needs the drain-based proof.
+                    ("drain", 1.0),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert _s5b_drained_acks(stub) == []
+    assert "16 KiB" in capsys.readouterr().out
+
+
+def test_received_command_ack_ignored(ctx, monkeypatch, tmp_path):
+    # command_ack is box→DO only (§3.1): a DO sending one is a plane bug —
+    # logged, never acted on, never fatal to the daemon. The valid
+    # command first proves the channel is live (not the old
+    # ignore-everything behavior).
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, _s5b_inner()),
+                    ("send", {"type": "command_ack", "generation": 1,
+                              "seq": 7, "epoch": 0}),
+                    ("expect-acks", [1]),
+                    # A buggy client echoing an ack for the received
+                    # command_ack would go unread by expect-acks; the
+                    # drain proves no echo happened.
+                    ("drain", 0.5),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert [a["seq"] for a in _s5b_acks(stub)] == [1]
+    assert _s5b_drained_acks(stub) == []
+    assert len(stub.records) == 1  # channel survived to the close
+
+
+def test_socket_command_ack_omits_missing_epoch(ctx, monkeypatch,
+                                               tmp_path):
+    # The ack echoes the frame's epoch when the frame carried one and
+    # omits the key when it did not (never a null epoch on the wire).
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    stub = StubDO([[("welcome",),
+                    # Raw send: no "epoch" key at all (first-run
+                    # generation is 1, like the other raw-send tests).
+                    ("send", {"type": "command", "generation": 1,
+                              "seq": 1, "payload": _s5b_inner()}),
+                    ("expect-acks", [1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    acks = _s5b_acks(stub)
+    assert len(acks) == 1
+    assert "epoch" not in acks[0]
+    assert _s5b_consumed(approvals) is not None
+
+
+def test_socket_command_redelivery_across_session_boundary(
+        ctx, monkeypatch, tmp_path):
+    # The durable recovery story: conn1 dies before its ack is read; the
+    # DO redrives the command on conn2. Dedupe survives the session
+    # boundary through the shared backstops (ingested log + consumed/
+    # records), not through _acked_prefix (which is per-session).
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    inner = _s5b_inner()
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, inner),
+                    ("close-tcp",)],
+                   [("welcome",),
+                    ("send-command", 1, 0, inner),
+                    ("expect-acks", [1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 2
+    # Exactly one stamp and one idempotency-log entry across both
+    # sessions, and conn2's ack carries conn2's session generation.
+    assert _s5b_consumed(approvals)["plane_seq"] == 1
+    with open(os.path.join(ctx.dir, "ingested_decisions.json")) as f:
+        assert len(json.load(f)) == 1
+    acks = [f for f in stub.records[1]["frames"]
+            if f.get("type") == "command_ack"]
+    assert [a["seq"] for a in acks] == [1]
+    assert acks[0]["generation"] == \
+        stub.records[1]["hello"]["generation"]
+
+
+def test_socket_command_ingest_lock_contention_defers(ctx, monkeypatch,
+                                                      tmp_path, capsys):
+    # Security B1: the socket ingest joins the .ingest.lock
+    # serialization discipline (the same lock the #874 HTTPS cron
+    # ingest holds — the idempotency log covers crashes, not
+    # concurrency). A command arriving while the lock is contended is
+    # loudly deferred — no ack, no stamp — and the DO's re-drive heals
+    # it once the lock is free.
+    import fcntl
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    inner = _s5b_inner()
+    lock_fd = os.open(os.path.join(ctx.dir, spark_pair._INGEST_LOCK_FILE),
+                      os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        stub = StubDO([[("welcome",),
+                        ("send-command", 1, 0, inner),
+                        ("drain", 1.0),
+                        ("close", "revoked", {})]])
+        rc = _run_client(ctx, stub)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    assert rc == 1
+    # Contended: nothing acked (drain-based proof, not the quota-blind
+    # rec["frames"]), nothing stamped, and the log says so loudly.
+    assert _s5b_drained_acks(stub) == []
+    assert _s5b_consumed(approvals) is None, \
+        "contended command must not be stamped"
+    assert "ingest lock contended" in capsys.readouterr().out
+    # Re-drive after the lock is free: the same command is ingested
+    # and acked exactly once (the first run stamped nothing).
+    spark_pair._PHONE_HOME_STOP = False
+    stub2 = StubDO([[("welcome",),
+                     ("send-command", 1, 0, inner),
+                     ("expect-acks", [1]),
+                     ("close", "revoked", {})]])
+    rc2 = _run_client(ctx, stub2)
+    assert rc2 == 1
+    assert [a["seq"] for a in _s5b_acks(stub2)] == [1]
+    assert _s5b_consumed(approvals)["plane_seq"] == 1
+    with open(os.path.join(ctx.dir, "ingested_decisions.json")) as f:
+        assert len(json.load(f)) == 1

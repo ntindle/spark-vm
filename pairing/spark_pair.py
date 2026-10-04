@@ -2223,20 +2223,26 @@ def cmd_upload_filings(args):
         os.close(lock_fd)
 
 
-# ---- #959 S5a: box-side WSS phone-home client (connection core) ---------------
+# ---- #959 S5a + #976 S5b: box-side WSS phone-home client -----------------------
 # The persistent outbound channel from the box to the control plane, per
-# docs/PHONE_HOME_WIRE_PROTOCOL.md (the S3 contract, #941). This slice is
-# the connection core: stdlib-only RFC 6455 framing, the upgrade
+# docs/PHONE_HOME_WIRE_PROTOCOL.md (the S3 contract, #941). S5a is the
+# connection core: stdlib-only RFC 6455 framing, the upgrade
 # handshake (no redirect-following by construction, box Bearer <redacted> in
 # the Authorization header only — never in a frame, never in a log),
 # the durable generation fence (§5), the close-code reconnect policy
 # (§6), keepalive (§4), and the upgrade-401 rotate-once path (§2).
 #
-# Deliberately NOT in this slice (S5b, #976): `command` frames and
-# `command_ack` over the socket — the queue contract is identical either
-# way (§3.3/§12), so commands keep flowing over the #874 HTTPS ingest
-# path until S5b lands. Unknown/reserved frame types are logged loudly
-# and ignored, never acted on, never fatal to the daemon.
+# S5b (#976) adds the command-carrying half on top of the session:
+# `command` frames (wire-spec §3.3 shape) dispatch into the #874 ingest
+# executor with the same execute-before-ack / dedupe-by-(box_id, seq)
+# semantics as the HTTPS fetch path, and `command_ack` frames ride the
+# socket (the §3.3 socket-vs-HTTPS choice, recorded in the wire doc —
+# the HTTPS /commands/ack endpoint stays as the fetch path's ack; the
+# DO consumes both into the same acked_watermark). The socket is a
+# faster carrier for the same queue, not a second queue.
+#
+# Unknown/reserved frame types are logged loudly and ignored, never
+# acted on, never fatal to the daemon.
 #
 # NOTE: the plane half (#958, one Durable Object per box) is not built
 # yet — the upgrade endpoint is unserved, so expect `upgrade failed`
@@ -2262,6 +2268,10 @@ _WS_GENERATION_FILE = "phone_home_generation.json"
 # Wire-spec §3.1 control class: these JSON text frames MUST be ≤ 4 KB.
 _WS_CONTROL_TYPES = frozenset(
     ["hello", "welcome", "ping", "pong", "close", "command_ack"])
+# Wire-spec §3.3: a command frame's payload is ≤ 16 KiB, verbatim. A
+# bigger payload is a plane bug: reject the frame (log loudly, never
+# ack) rather than executing unbounded work off the socket.
+_WS_COMMAND_PAYLOAD_MAX = 16 * 1024
 
 # Module-level sleep so tests can observe/stub timing without waiting out
 # real backoffs.
@@ -2714,16 +2724,41 @@ def _ws_sleep_or_stop(seconds):
 # -- Session ----------------------------------------------------------------------
 
 class _PhoneHomeSession:
-    """One connected WSS session: hello/welcome, keepalive, frame dispatch."""
+    """One connected WSS session: hello/welcome, keepalive, frame dispatch.
 
-    def __init__(self, d, sock, reader, box_id, generation, token):
+    S5b (#976): the session also carries the socket half of the durable
+    command queue — `command` frames dispatch into the #874 ingest
+    executor and `command_ack` frames ride the socket (the §3.3 decision,
+    recorded in docs/PHONE_HOME_WIRE_PROTOCOL.md). The socket is a faster
+    carrier for the same queue, not a second queue: redeliveries dedupe
+    through the shared backstops (the ingested idempotency log and the
+    consumed/ O_EXCL records), and the acked prefix never skips a bad
+    row — the socket prefix additionally holds on malformed rows rather
+    than skipping them.
+    """
+
+    def __init__(self, d, sock, reader, box_id, generation, token,
+                 approvals=None):
         self.d = d
         self.sock = sock
         self.reader = reader
         self.box_id = box_id
         self.generation = generation
         self.token = token
+        # Production always passes the resolved dir; the default keeps
+        # direct unit construction (which never handles commands) working.
+        self.approvals = approvals if approvals is not None \
+            else _approvals_dir()
         self.welcomed = False
+        # Highest contiguously socket-acked seq on THIS session. The DO's
+        # acked_watermark is the durable record; this is the per-session
+        # ordering guard so a malformed or failed row holds the queue
+        # (later seqs wait for the re-drive) instead of being skipped.
+        self._acked_prefix = None
+        # Shared with the HTTPS ingest path: redelivery dedupe by
+        # (box_id, seq) survives a session boundary through this log and
+        # the consumed/ records, not through _acked_prefix.
+        self._ingested = _load_ingested(d) if d is not None else {}
 
     def send(self, obj):
         try:
@@ -2732,6 +2767,180 @@ class _PhoneHomeSession:
             # The peer died between reads: a send-side EPIPE/RST is the
             # same transport loss as a read-side EOF, not a traceback.
             raise _WsTransportLost(f"send failed: {e}")
+
+    def _socket_ack(self, seq, epoch):
+        """Send the wire-spec §3.1 command_ack for one executed command.
+
+        The ack carries this session's generation: it is bound to the
+        fence that received the command, so the DO can reject acks from
+        a stale session the same way it rejects stale commands. Raises
+        _WsTransportLost when the socket died mid-send."""
+        ack = {"type": "command_ack", "generation": self.generation,
+               "seq": seq}
+        if isinstance(epoch, int) and not isinstance(epoch, bool):
+            ack["epoch"] = epoch
+        self.send(ack)
+
+    def _handle_socket_command(self, frame):
+        """Execute one `command` frame via the #874 ingest executor.
+
+        Returns "ok" when the frame was handled (acked, or deliberately
+        not acked) and "transport-lost" when the ack could not be sent —
+        the caller reconnects and the command redelivers; the
+        idempotency backstops make the re-execution safe. A frame the
+        box cannot trust is logged loudly and never acked: the DO
+        re-drives from its acked_watermark, a stricter hold than the
+        HTTPS path's malformed-row skip — the socket fast-path degrades
+        to the HTTPS cron until the plane fixes the row.
+        """
+        if frame.get("generation") != self.generation:
+            # A stale session's frame (or a plane bug): it does not
+            # belong to this fence. Never execute, never ack.
+            _phone_home_say(
+                self.d,
+                "ignoring command frame for generation "
+                f"{_plane_text(frame.get('generation'))!r} (session is "
+                f"{self.generation}) — stale or misaddressed",
+                self.token)
+            return "ok"
+        inner = frame.get("payload")
+        if not isinstance(inner, dict):
+            _phone_home_say(self.d,
+                            "ignoring command frame with non-object "
+                            "payload (plane bug) — not acked, will "
+                            "re-drive",
+                            self.token)
+            return "ok"
+        try:
+            payload_bytes = len(json.dumps(inner).encode("utf-8"))
+        except (TypeError, ValueError):
+            payload_bytes = _WS_COMMAND_PAYLOAD_MAX + 1
+        if payload_bytes > _WS_COMMAND_PAYLOAD_MAX:
+            _phone_home_say(
+                self.d,
+                f"ignoring command frame: payload {payload_bytes} bytes "
+                "exceeds the wire-spec 16 KiB bound (plane bug) — not "
+                "acked, will re-drive",
+                self.token)
+            return "ok"
+        shaped = _ingest_command_shape({
+            "seq": frame.get("seq"), "epoch": frame.get("epoch"),
+            "kind": inner.get("kind"), "payload": inner.get("payload")})
+        if shaped is None:
+            # No seq to ack and nothing safe to execute: the DO
+            # re-drives until the plane fixes the row — noisy, but the
+            # alternative (advancing past it) hides a plane bug. Stricter
+            # than the HTTPS path's malformed-row skip, which drops the
+            # row and advances the cursor.
+            _phone_home_say(self.d,
+                            "ignoring malformed command frame (plane "
+                            "bug) — not acked, will re-drive",
+                            self.token)
+            return "ok"
+        seq, kind, payload, epoch = shaped
+        if self._acked_prefix is not None:
+            if seq <= self._acked_prefix:
+                # Redelivery of an already-acked seq (a lost ack heals
+                # this way): re-ack without re-executing.
+                try:
+                    self._socket_ack(seq, epoch)
+                except _WsTransportLost:
+                    return "transport-lost"
+                return "ok"
+            if seq > self._acked_prefix + 1:
+                # Gap: the DO drives in order from its watermark, so a
+                # jump means a row is missing or was rejected. Hold the
+                # prefix — the re-drive resends the gap; acking past it
+                # would hide a plane bug the way skipping a bad row
+                # would.
+                _phone_home_say(
+                    self.d,
+                    f"ignoring command seq={seq}: gap after acked "
+                    f"prefix {self._acked_prefix} — not acked, waiting "
+                    "on the re-drive",
+                    self.token)
+                return "ok"
+        attention = []
+        try:
+            if kind not in _HONORED_COMMAND_KINDS:
+                # The plane is opaque to kinds and the box executor
+                # decides; ack-and-log keeps one unknown kind from
+                # wedging the queue. `kind` is plane-controlled: scrub
+                # it like any plane string on a loud channel.
+                _phone_home_say(
+                    self.d,
+                    f"seq={seq}: unknown command kind "
+                    f"{_plane_text(kind)!r} — acked without execution",
+                    self.token)
+                consumed = True
+            elif kind == "approval_decision":
+                # Join the .ingest.lock discipline (see the
+                # _ingest_commands wrapper): the idempotency log covers
+                # crashes, not concurrency. Non-blocking: contention
+                # defers to the DO's re-drive rather than stalling the
+                # frame loop (keepalive must keep flowing). A lock-file
+                # open failure fails closed like contention (loud log,
+                # no ack) — never a traceback out of the frame loop.
+                try:
+                    lock_fd = os.open(os.path.join(self.d, _INGEST_LOCK_FILE),
+                                      os.O_CREAT | os.O_RDWR, 0o600)
+                except OSError as e:
+                    _phone_home_say(self.d,
+                                    f"seq={seq}: cannot open ingest lock "
+                                    f"({e}) — not acked, will re-drive",
+                                    self.token)
+                    return "ok"
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    os.close(lock_fd)
+                    _phone_home_say(self.d,
+                                    f"seq={seq}: ingest lock contended — "
+                                    "not acked, will re-drive", self.token)
+                    return "ok"
+                try:
+                    consumed = _ingest_approval_decision(
+                        self.d, self.approvals, self.box_id, self.token, seq,
+                        payload, self._ingested, attention)
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    os.close(lock_fd)
+            else:  # pragma: no cover — registry and branch above stay in sync
+                consumed = False
+        except (OSError, ValueError) as e:
+            # A local I/O failure (disk full, torn state) must fail
+            # closed with a loud log — never a traceback, and never an
+            # ack: the command redelivers on the next (re)bind.
+            _phone_home_say(self.d,
+                            f"seq={seq}: local failure during socket "
+                            f"ingest ({e}) — not acked, will re-drive",
+                            self.token)
+            return "ok"
+        for note in attention:
+            _phone_home_say(self.d, "ATTENTION: " + note, self.token)
+        if not consumed:
+            return "ok"  # not acked; the DO re-drives
+        try:
+            _save_ingested(self.d, self._ingested)
+        except OSError as e:
+            _phone_home_say(self.d,
+                            f"seq={seq}: ingested-log save failed ({e}) "
+                            "— not acked; redelivery is idempotent, will "
+                            "re-drive",
+                            self.token)
+            return "ok"
+        try:
+            self._socket_ack(seq, epoch)
+        except _WsTransportLost:
+            # Executed and logged, but the ack never left: the command
+            # redelivers and the backstops dedupe it. Reconnect now.
+            return "transport-lost"
+        self._acked_prefix = seq
+        _phone_home_say(self.d,
+                        f"acked command seq={seq} "
+                        f"(kind={_plane_text(kind)!r}) over the socket",
+                        self.token)
+        return "ok"
 
     def run(self):
         """Returns ("closed", code, frame) | ("transport-lost",) | ("bug", msg)."""
@@ -2822,15 +3031,18 @@ class _PhoneHomeSession:
             elif ftype == "welcome":
                 _phone_home_say(self.d, "ignoring duplicate welcome",
                                 self.token)
-            elif ftype in ("command", "command_ack"):
-                # Reserved shape (§3.3); S5b wires socket commands/acks.
-                # Until then the #874 HTTPS ingest path owns the queue —
-                # ignoring here is correct, dropping the socket would
-                # wedge the channel over a plane surprise.
+            elif ftype == "command":
+                # S5b (#976): socket command frames dispatch into the
+                # #874 ingest executor and ack over the socket (§3.3).
+                if self._handle_socket_command(frame) == "transport-lost":
+                    return ("transport-lost",)
+            elif ftype == "command_ack":
+                # box→DO only (§3.1): a DO sending one is a plane bug —
+                # log it loudly, never act on it.
                 _phone_home_say(
                     self.d,
-                    f"ignoring {ftype} frame (S5b wires socket "
-                    "commands/acks; HTTPS ingest still owns the queue)",
+                    "ignoring command_ack frame from the plane "
+                    "(box→DO only — plane bug)",
                     self.token)
             else:
                 _phone_home_say(
@@ -2869,7 +3081,8 @@ def _phone_home_connect(d, box_id, token, control, generation):
         sock.close()
         raise
     sock.settimeout(_WS_READ_TIMEOUT)
-    session = _PhoneHomeSession(d, sock, reader, box_id, generation, token)
+    session = _PhoneHomeSession(d, sock, reader, box_id, generation, token,
+                                _approvals_dir())
     try:
         return session.run(), session.welcomed
     finally:
@@ -2958,7 +3171,8 @@ def cmd_phone_home(args):
     except OSError:
         pass  # _phone_home_say degrades to stdout-only
     _phone_home_say(d, f"phone-home starting for box "
-                       f"{_plane_text(box_id)} (S5a connection core; "
+                       f"{_plane_text(box_id)} (S5a connection core + S5b "
+                       "socket command frames/acks; "
                        "heartbeat stays the only liveness signal)", token)
     attempt, rotate_tried = 0, False
     pending_generation = None  # set by the stale-generation adopt path

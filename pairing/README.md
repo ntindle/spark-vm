@@ -317,7 +317,7 @@ Cron-acceptable:
 * * * * * /path/to/spark-pair.py upload-filings >>/var/log/spark-upload-filings.log 2>&1
 ```
 
-## Phone-home channel (#959, S5a connection core)
+## Phone-home channel (#959 S5a connection core + #976 S5b socket commands)
 
 > **Plane half not built yet.** The one-Durable-Object-per-box plane half
 > (#958) that serves the upgrade endpoint does not exist — against a
@@ -393,10 +393,17 @@ What it does:
 - **One writer.** A `.phone-home.lock` is held for the daemon's life; a
   second instance exits instead of forking the generation counter.
 
-Command frames and `command_ack` over the socket are S5b (reserved shape
-in the wire spec); until then the #874 HTTPS ingest path owns the
-durable-command queue, and this client logs-and-ignores those frame
-types rather than wedging the channel on a plane surprise.
+Command frames ride the socket too (S5b, #976): `command` frames
+dispatch into the same #874 ingest executor the HTTPS fetch path uses
+(execute-before-ack, dedupe by `(box_id, seq)` through the shared
+idempotency log + `consumed/` records), and `command_ack` frames go back
+over the socket — the wire spec's §3.3 socket-vs-HTTPS choice, decided
+for the socket (same session, generation-bound, DO-direct; the HTTPS
+`/commands/ack` endpoint stays as the fetch path's ack). The acked
+prefix never skips a bad row: a malformed, oversized (> 16 KiB), or
+wrong-generation frame is logged loudly and never acked, and a seq gap
+holds the prefix until the DO's re-drive heals it — the same
+never-advance-past-unacked invariant as the HTTPS cursor.
 
 ## Security properties
 
