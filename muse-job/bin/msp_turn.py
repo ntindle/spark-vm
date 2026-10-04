@@ -146,15 +146,29 @@ def _check_turn_id(turn_id):
 
 
 def _require_turn(result, method):
-    """Pull the turn record out of a call result; fail loud on drift."""
+    """Pull the turn record out of a call result; fail loud on drift.
+
+    The serve schema (muse 1.4.x) returns the turn id flat on the result
+    (``TurnStartResult.turnId`` etc.); older shapes nested it under a
+    ``turn`` object. Accept both, normalizing to a dict carrying at
+    least ``turnId``.
+    """
     if not isinstance(result, dict):
         raise MSPTurnError(
             f"{method} returned a non-dict result: {type(result).__name__}"
         )
     turn = result.get("turn")
-    if not isinstance(turn, dict):
+    if isinstance(turn, dict):
+        pass
+    elif isinstance(result.get("turnId"), str) and result["turnId"]:
+        turn = {"turnId": result["turnId"]}
+        # Carry the sibling fields callers read, when present.
+        for key in ("sessionId", "state", "status", "disposition"):
+            if key in result:
+                turn[key] = result[key]
+    else:
         raise MSPTurnError(
-            f"{method} result has no 'turn' object "
+            f"{method} result has no turn id "
             f"(keys: {sorted(result)[:8]})"
         )
     if not turn.get("turnId"):
@@ -186,6 +200,16 @@ def _call_turn(host, method, params, session_id):
         _raise_for_not_live(e, session_id, method)
 
 
+def _text_part(text):
+    """Wrap a plain prompt/message string as a turn input part.
+
+    The serve schema (muse 1.4.x) takes ``input`` -- an ordered array of
+    content parts -- instead of the older opaque ``prompt``/``message``
+    string fields. A text part needs only its type discriminator.
+    """
+    return {"type": "text", "text": text}
+
+
 def start_turn(host, session_id, prompt, *, command_id=None):
     """Begin a new turn on a live session; return (turn_dict, result_dict).
 
@@ -203,23 +227,35 @@ def start_turn(host, session_id, prompt, *, command_id=None):
     _check_session_id(session_id)
     _check_text(prompt, "prompt")
     cid = check_command_id(command_id) if command_id is not None else new_command_id()
-    params = {"commandId": cid, "sessionId": session_id, "prompt": prompt}
+    params = {
+        "commandId": cid,
+        "sessionId": session_id,
+        "input": [_text_part(prompt)],
+    }
     result = _call_turn(host, "turn/start", params, session_id)
     return _require_turn(result, "turn/start"), result
 
 
-def steer_turn(host, session_id, message, *, command_id=None):
+def steer_turn(host, session_id, message, *, command_id=None,
+               expected_turn_id=None):
     """Inject a follow-up message into the session's current turn.
 
     ``turn/steer`` is the tmux send-keys replacement: no Enter
     swallowing, no text/Enter dance, no paste verification. The message
-    travels verbatim (see _check_text). Returns (turn_dict, result_dict);
-    raises as start_turn does.
+    travels verbatim (see _check_text). expected_turn_id is the turn the
+    caller polled as active -- the server rejects the steer when another
+    turn has taken over (the anti-cross-turn guard). Returns
+    (turn_dict, result_dict); raises as start_turn does.
     """
     _check_session_id(session_id)
     _check_text(message, "message")
     cid = check_command_id(command_id) if command_id is not None else new_command_id()
-    params = {"commandId": cid, "sessionId": session_id, "message": message}
+    params = {
+        "commandId": cid,
+        "sessionId": session_id,
+        "expectedTurnId": _check_turn_id(expected_turn_id),
+        "input": [_text_part(message)],
+    }
     result = _call_turn(host, "turn/steer", params, session_id)
     return _require_turn(result, "turn/steer"), result
 
@@ -350,6 +386,9 @@ def main(argv):
 
     p_steer = sub.add_parser("steer", help="turn/steer a follow-up message")
     p_steer.add_argument("--message", required=True)
+    p_steer.add_argument("--turn-id", required=True,
+                         help="expected active turn id (server-required "
+                         "anti-cross-turn guard)")
     add_common(p_steer)
 
     p_int = sub.add_parser("interrupt", help="turn/interrupt the active turn")
@@ -375,7 +414,8 @@ def main(argv):
             out = {"turn": turn, "result": result}
         elif args.action == "steer":
             turn, result = steer_turn(host, args.session_id, args.message,
-                                      command_id=args.command_id)
+                                      command_id=args.command_id,
+                                      expected_turn_id=args.turn_id)
             turn_id = turn["turnId"]
             out = {"turn": turn, "result": result}
         elif args.action == "interrupt":

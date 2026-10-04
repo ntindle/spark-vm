@@ -206,6 +206,12 @@ for line in sys.stdin:
     elif method == "session/resume":
         if check_drift(rid, params):
             continue
+        cid = params.get("commandId")
+        if not isinstance(cid, str) or not UUID7_RE.match(cid):
+            err(rid, -32602,
+                "invalid session/resume commandId: expected UUIDv7",
+                {"kind": "invalidParams"})
+            continue
         sid = params.get("sessionId")
         recd = store.get(sid) if isinstance(sid, str) else None
         if recd is None:
@@ -288,6 +294,10 @@ def wait_until(pred, timeout=10.0, step=0.05):
 
 def start_params(record):
     return [m for m in read_record(record) if m.get("method") == "session/start"]
+
+
+def resume_params(record):
+    return [m for m in read_record(record) if m.get("method") == "session/resume"]
 
 
 UUID7_RE = re.compile(
@@ -479,6 +489,21 @@ def test_list_limit_boundary_values_pass(session_serve):
 
 
 # -- session/resume ---------------------------------------------------------
+
+def test_resume_sends_uuid7_command_id(session_serve):
+    """session/resume must carry a UUIDv7 commandId (1.4.x requires it)."""
+    argv, record, _store = session_serve
+    host = make_host(argv)
+    try:
+        host.open()
+        session, _cursor = msps.start_session(host, "/w")
+        msps.resume_session(host, session["sessionId"])
+    finally:
+        host.close()
+    params = resume_params(record)[0]["params"]
+    assert params["sessionId"] == session["sessionId"]
+    assert UUID7_RE.match(params["commandId"]), params["commandId"]
+
 
 def test_resume_returns_history(session_serve):
     argv, _record, _store = session_serve
