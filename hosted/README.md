@@ -93,3 +93,43 @@ look" payloads, decision D4): the builder takes no token, key, or VAPID
 argument and returns an immutable mapping, so secrets have no ingress
 path at construction. Push-construction
 only: the owner-facing decision surface keeps showing the full raw text.
+
+## push_sender.py — Web Push send-path transport (#989 / GP1)
+
+The other half of the GP1 sender: `push_crypto.py` proved the crypto but
+deliberately has no HTTP layer — this module PINs the transport decisions
+and executes one send attempt per call (stdlib-only, side-effect free —
+it returns a `PushResult`, never sleeps, never logs).
+
+- **Request:** RFC 8030 POST with `Authorization: vapid t=<jwt>, k=<pubkey>`
+  (VAPID `exp` = now + 12 h, `aud` = the endpoint origin per send, `k` =
+  the caller's current key — rotation lives with the caller), `TTL:` =
+  the payload's own `ttl_s`, `Urgency: high` (page-only channel — D2/D4),
+  no `Topic` (never replace a page), `record_size` pinned at 1024
+  (deliberate, not the 4096 default; oversized plaintext is rejected
+  pre-send, never truncated). No caller salts anywhere — `secrets` mints
+  a fresh one per send (finding 7, stated as a rule).
+- **TLS:** `https://` endpoints only, no userinfo (cleartext refused —
+  a VAPID-signed request never travels unencrypted); hostname + cert
+  verification on; connect 5 s / read 10 s. Redirects are never followed
+  — any 3xx is a dead-letter (credential-orientation).
+- **Result taxonomy** (the per-code table the module docstring pins):
+  any 2xx → `accepted` (201 is the RFC 8030 norm, but FCM answers
+  successful sends with 200 — record it; feeds #428's §4 email-fallback
+  retirement via `acceptance_fields()`); 429 → `retry` honoring
+  `Retry-After` (clamped ≤ 600 s) else the 2/8/32/128/300 backoff
+  schedule; 410/404 → `tombstone` (caller deletes, dashboard offers
+  re-subscribe); 5xx and transport errors → `retry`; 400/401/413, any
+  other 4xx, any 3xx → `dead-letter` + operator-visible alert. `retry`
+  returns a `retry_after_s` hint — the #990 enqueue machinery owns the
+  wait; the module's `MAX_ATTEMPTS = 5` is the policy the caller enforces.
+- **Latency:** every attempt reports `latency_ms` (network only — the
+  timer starts after crypto + VAPID signing, so VAPID-sign timing is
+  excluded from the observable output). Real push-service RTT is still
+  unmeasured, and this is the load-bearing input to the
+  inline-vs-outbox decision (#990).
+
+Tested by `test_push_sender.py` (43 tests, neutering-verified
+non-vacuous) against a stub push service; the stub speaks plain HTTP on
+localhost — the difference from production is documented and compensated
+by a dedicated test pinning the production transport's TLS policy.
