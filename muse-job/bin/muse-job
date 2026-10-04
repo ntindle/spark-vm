@@ -1035,7 +1035,20 @@ _TRUST_PROMPT_TEXT = "Do you trust this workspace?"
 # auto-answer types "1"+Enter into a working session's input box. Requiring
 # the option line too restores the two-signal shape: a mere mention of the
 # question no longer matches.
-_TRUST_OPTION_TEXT = "Trust and continue"
+# Issue #993: the bare option-text substring above still misfires on a
+# live TUI whose own conversation mentions the option as prose --
+#   The TUI asked 'Do you trust this workspace?'
+#   I chose 'Trust and continue'
+# carries both substrings on adjacent lines with NO selector marker, so
+# the two-signal shape matches and the auto-answer fires into a working
+# session. The real gate renders its options as a selector list
+# (`> 1  Trust and continue`), so match the selector marker instead of
+# the bare text: the misfire prose never carries `> N`, while the live
+# gate always does. A verbatim pasted gate transcript still matches
+# (text-only by design, issue #4). If the TUI rewords or renumbers the
+# marker the match fails and the job degrades to tui-dead (loud, manual
+# remedy) -- fail-loud, never silent.
+_TRUST_OPTION_MARKER_RE = re.compile(r">\s*\d+\s*Trust and continue")
 # Issue #972: the two halves of the gate must sit on SEPARATE lines with the
 # option line after the question line, within a small window. The real gate
 # renders them ~2 lines apart (question, `Workspace:` line,
@@ -1070,7 +1083,7 @@ def _pane_shows_trust_gate(pane):
         # The option half must follow on its own line: same-line co-occurrence
         # (a transcript paste, a one-line summary) is a misfire, not a gate.
         for j in range(i + 1, min(i + 1 + _TRUST_GATE_LINE_WINDOW, len(lines))):
-            if _TRUST_OPTION_TEXT in lines[j]:
+            if _TRUST_OPTION_MARKER_RE.search(lines[j]):
                 return True
     return False
 
