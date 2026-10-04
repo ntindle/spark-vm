@@ -186,6 +186,79 @@ def test_trust_prompt_blocks_live_predicate(cli):
     assert cli._pane_shows_live_tui(pane + "\n" * 20 + "❯ \n", "muse")
 
 
+# ---------------------------------------------------------------------------
+# Issue #961: trust-gate substring matching can misfire on a live TUI's own
+# conversation. The classifier must require the gate's full observed shape
+# (question + option line) -- a mere mention of the phrase in a working
+# session's conversation must not read as a gate, or the watch loop's
+# auto-answer types "1"+Enter into the live input box.
+# ---------------------------------------------------------------------------
+
+# A live TUI whose own conversation mentions the trust question (question
+# text present, no option line anywhere in the tail).
+CONVERSATION_MENTION_PANE = (
+    "◆ The trust gate asks \"Do you trust this workspace?\" on first\n"
+    "  resume -- answering 1 once unblocks the TUI.\n"
+    + "─" * 40 + "\n❯ \n" + "─" * 40 + "\n"
+    + "  muse-spark-1.3-contributor · max · ~/work · YOLO\n")
+
+
+def test_trust_gate_requires_question_and_option(cli):
+    # Issue #961: the gate is the question AND its option line co-occurring
+    # in the tail. Either half alone is not the gate.
+    assert cli._pane_shows_trust_gate(TRUST_GATE_PANE)
+    assert not cli._pane_shows_trust_gate(
+        "The agent asked: Do you trust this workspace?\n❯ \n")
+    assert not cli._pane_shows_trust_gate("> 1  Trust and continue\n❯ \n")
+    assert not cli._pane_shows_trust_gate("❯ \n")
+    assert not cli._pane_shows_trust_gate("")
+
+
+def test_trust_phrase_in_live_conversation_still_reads_live(cli):
+    # Issue #961: the old bare-substring veto in _pane_shows_live_tui would
+    # read this pane as gated. The TUI must keep reading as live.
+    assert cli._pane_shows_live_tui(CONVERSATION_MENTION_PANE, "muse")
+
+
+def test_pane_trust_prompt_clear_when_conversation_mentions_gate(
+        cli, monkeypatch):
+    # Issue #961: end-to-end through job_status -- the live TUI discussing
+    # the gate must not raise pane_trust_prompt (the watch loop would answer
+    # it into the live input box).
+    _job_status_harness(cli, monkeypatch, CONVERSATION_MENTION_PANE, "muse")
+    job = {"slug": "demo", "session_uuid": None, "state": "active",
+           "started_at": _time.time()}
+    st = cli.job_status(job, "demo")
+    assert st["pane_trust_prompt"] is False
+    assert st["pane_trust_unverified"] is False
+    assert st["pane_live_tui"] is True
+
+
+def test_answer_trust_prompt_ignores_conversation_mention(cli, monkeypatch):
+    # Issue #961: the auto-answer must not fire on a mere mention of the
+    # phrase in a live session -- zero keys sent.
+    calls = []
+
+    def fake_run(*argv, **kw):
+        calls.append(list(argv))
+
+        class P:
+            returncode = 0
+            stderr = b""
+            if "capture-pane" in argv:
+                stdout = CONVERSATION_MENTION_PANE.encode()
+            elif "display-message" in argv:
+                stdout = b"muse"
+            else:
+                stdout = b""
+        return P()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    assert cli._answer_trust_prompt("demo", timeout=0.01) is False
+    assert [c for c in calls if "send-keys" in c] == []
+
+
 def test_tui_process_predicate(cli):
     # Version-tolerant: the TUI presents as muse-bin-<version> as well as
     # the plain launcher names. Shells are never the TUI (issue #4).
