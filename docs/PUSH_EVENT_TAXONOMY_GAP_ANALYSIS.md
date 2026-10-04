@@ -46,13 +46,15 @@ against that promise:
 - **F1. "T-15m" is unsatisfiable under the shipped record.** The #872
   record (`docs/APPROVALS_PLANE_PROTOCOL.md` §"Expiry: server-side
   only") takes `expires_in_secs` default **600 (10 min)**, clamped to
-  **[60, 3600]**. GP3 was written against the 60-minute TTL the parent
-  doc assumed (`APPROVAL_TTL_MIN = 60`). A reminder "15 minutes before
-  expiry" cannot fire for a 10-minute approval — and the clamp means a
-  fixed minute-offset is wrong for *every* TTL except the one it was
-  written against. The reminder point must be **parameterized on the
-  record's own TTL** (decision D8, below); the issue body's "T-15m"
-  language is superseded by it.
+  **[60, 3600]**. GP3 was written against the "60-minute" TTL the
+  parent doc assumed — itself a slip: the shipped constants are
+  `APPROVAL_TTL = 600` seconds (the 10-minute default) with an
+  `APPROVAL_TTL_MIN = 60` *second* floor. A reminder "15 minutes
+  before expiry" cannot fire for a 10-minute approval — and the clamp
+  means a fixed minute-offset is wrong for *every* TTL except the one
+  it was written against. The reminder point must be
+  **parameterized on the record's own TTL** (decision D8, below); the
+  issue body's "T-15m" language is superseded by it.
 - **F2. The T-minus reminder has no scheduler home.** Nothing on the
   plane can fire at T-minus: the worker checkout has no `scheduled`
   handler, no cron trigger support, and no wrangler config — the plane
@@ -106,11 +108,11 @@ verdict; nothing else may enqueue.
 | Event | Page | Dedup key | Cancelled / superseded by |
 |---|---|---|---|
 | approval filed | once | `(box_id, aid)` — the same key the #952 endpoint dedups filings on | decision, expiry (record terminal) |
-| reminder (T-minus) | once, at `filed_at + TTL/2`, only when `TTL ≥ 300s` (D8) | `(box_id, aid)` | decision, expiry — re-checked at both lease gates (D12) |
+| reminder (T-minus) | once, at `created_at + TTL/2`, only when `TTL ≥ 300s` (D8) | `(box_id, aid)` | decision, expiry — re-checked at both lease gates (D12) |
 | decided (#873 enqueue) | **no page** — this is the cancellation *signal*, not an event (D6/D12) | — | — |
 | expired (server-side) | **no page** (D11) | — | — |
-| token-expiry warning | once per token generation, at 2h before expiry, only if no rotation since the last window (F6) | `(box_id, token_generation)` | successful rotation (new generation resets the key) |
-| box revoked | once | `(box_id, revoked_at)` — plane-side action, plane-originated | — |
+| token-expiry warning | once per token generation, at 2h before expiry (recommended lead time; the #969 build adopts-or-records it), only if no rotation since the last window (F6) | `(box_id, token_generation)` where generation := the current `token_hash` in the boxes row (D13) | successful rotation (new hash = new generation = key resets) |
+| box revoked | once | `(box_id, revoked_at)` — the key *is* the revocation event's identity (revocation is naturally singular; a timestamp never repeats, so this is identity, not collision-prone dedup) | — |
 | heartbeat-stale | once per stale-epoch, with a quiet period (F7) | `(box_id, stale_epoch)` | heartbeat resume (new epoch) |
 
 Notes the table needs to say out loud:
@@ -130,7 +132,7 @@ Notes the table needs to say out loud:
 ## 3. Decisions pinned (continuing the parent's D-series)
 
 - **D8. Reminder timing is parameterized, not T-15m.** Reminder at
-  `filed_at + TTL/2`, fired only when the record's TTL ≥ 300s.
+  `created_at + TTL/2`, fired only when the record's TTL ≥ 300s.
   Rationale: always positive for every legal TTL (600s default →
   T-5m reminder; 3600s → T-30m; 60s → no reminder, correctly, since
   the window is nearly over by the time the reminder sweep runs).
@@ -141,17 +143,26 @@ Notes the table needs to say out loud:
   Object: a new scheduled worker entry (per-minute cron) scans the
   D1 database for due reminders and enqueues them. One code path,
   no DO dependency; #958's DO may adopt per-approval alarms in a
-  later slice without changing the taxonomy. The deploy path
+  later slice without changing the taxonomy — but that slice must
+  retire or feature-gate the cron sweep in the same change, or
+  reminders double-fire. The deploy path
   (`deploy_worker.py`) needs cron-trigger support for this — that
   support is inside the reminder slice, not a separate item.
 - **D10. Page budget: per-(box, hour) ≤ 3, per-(owner, hour) ≤ 10.**
   Overflow does not send — it coalesces into a single hourly digest
   page per owner ("N approvals need you — open the dashboard"), which
-  stays a "go look" payload (D4). Reminders are exempt from the
-  budget (capped at one per approval by D6/D8 — they are
-  plane-scheduled, not box-driven, so a hostile box cannot inflate
-  them). Delivery failures (410, dead-letter) do not consume budget:
-  the budget bounds *successful buzzes*, not attempts. Page-once per
+  carries the count plus the dashboard deep-link rather than a single
+  `aid`, and still counts as one page against the owner's hourly
+  budget (it is a buzz, not silence). Reminders **consume** the
+  per-(box, hour) budget like any page: they are plane-*scheduled*
+  but box-*count-driven* (one per box-filed approval, and the plane
+  worker has no per-box filing throttle), so exempting them would
+  let a hostile box bypass the bound 1:1 — N filings/hour = N
+  exempt buzzes. Over-budget reminders coalesce into the digest
+  instead of paging individually. The "one reminder per approval"
+  cap (D6/D8) stays as a separate, complementary bound. Delivery
+  failures (410, dead-letter) do not consume budget: the budget
+  bounds *successful buzzes*, not attempts. Page-once per
   `(box_id, aid)` is enforced by the enqueue dedup key, independent
   of the budget.
 - **D11. Expiry pages nothing.** (See §2 notes.) Terminal states
@@ -163,9 +174,15 @@ Notes the table needs to say out loud:
   row feeds the sentinel leg (#798–#800), not the phone — a dropped
   reminder is operator-visible, never owner-paged. This is what makes
   "decided → cancel outstanding" enforceable rather than aspirational.
-- **D13. Event identity keys are the table's, verbatim.** The #969
-  build uses these keys for dedup; inventing a new key scheme is a
-  re-litigation of this doc.
+- **D13. Event identity keys are the table's, verbatim — with "token
+  generation" defined here.** The #969 build uses these keys for
+  dedup; inventing a new key scheme is a re-litigation of this doc.
+  "Generation" is not a schema field (#846's boxes row carries
+  `token_hash`, `token_expires_at`, `revoked_at`,
+  `prev_token_hash` — no generation counter): generation := the
+  current `token_hash` value in the boxes row, so a rotation
+  (hash change) is definitionally a new generation and resets the
+  warning key.
 
 ## 4. Backlog reconciliation
 
@@ -187,9 +204,11 @@ what the record schema cannot deliver.
 - The digest page ("N approvals need you") is still a page: it
   consumes one unit of the owner's attention budget per hour, not
   zero. D10 bounds the cannon; it does not make paging free.
-- The heartbeat-stale quiet period and the token-warning lead time
-  are pinned as *rules* here; their exact durations are the #969
-  build's call and must be recorded when chosen.
+- The heartbeat-stale quiet period is pinned as a *rule* here; its
+  exact duration is the #969 build's call and must be recorded when
+  chosen. The token-warning's 2h lead time is the recommended default
+  the build adopts-or-records (the rule — warn when auto-rotation
+  appears to have failed, keyed on the token hash — is pinned).
 - Operator alerting for incidents stays G23's job (D5). A box going
   stale is an owner event (their agent is parked); it is not an
   operator page.
