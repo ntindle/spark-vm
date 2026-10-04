@@ -87,8 +87,10 @@ known secret values. Stated residuals: over-cap and binary request
 bodies, which pass through unscanned (the over-cap pass is
 audited); never-ending
 chunked streams with an ordinary content type (indistinguishable from
-finite chunked bodies at headers time), HTTP/2 extended-CONNECT
-websockets (answer 200, no 101), images and binary bodies.
+finite chunked bodies at headers time), images and binary bodies.
+(HTTP/2 extended-CONNECT was listed here as a residual; it is a
+verified non-issue — mitmproxy's H2 layer rejects it before any
+addon hook fires. See the `responseheaders` docstring.)
 
 Egress guard: the `server_connect` hook resolves the request host
 BEFORE the upstream TCP connect (finding 38), so a refused host never
@@ -3050,12 +3052,14 @@ class SwapAddon:
     def websocket_message(self, flow):
         # SUPERSEDED by the finding-40e stream refusal (issue #92):
         # `responseheaders` kills the 101 upgrade for allowlisted hosts,
-        # so this hook sees no 101 from those hosts — but H2
-        # extended-CONNECT websockets (answer 200, a stated #92 residual)
-        # still reach it, and non-allowlisted hosts early-return in both
-        # hooks. Kept, with its unit tests, for the insertion logic
-        # itself — a per-host stream opt-in (follow-up to #92) would
-        # re-enable this path.
+        # so this hook sees no 101 from those hosts. HTTP/2
+        # extended-CONNECT (RFC 8441) never reaches the proxy at all:
+        # mitmproxy's H2 layer rejects it with a connection-terminating
+        # protocol error before any addon hook fires (#629 piece 2,
+        # verified non-issue on mitmproxy 12.2.3). Non-allowlisted hosts
+        # early-return in both hooks. Kept, with its unit tests, for
+        # the insertion logic itself — a per-host stream opt-in
+        # (follow-up to #92) would re-enable this path.
         self._maybe_reload()
         self._current_egress_ip = None
         # H18: no header channel exists on websocket messages, so any
@@ -3282,9 +3286,14 @@ class SwapAddon:
         a duplicate header with the stream type in a non-first position
         must not slip past `Headers.get`'s first-value behavior. A
         chunked stream with an ordinary content type is indistinguishable
-        from a finite chunked body at headers time, and HTTP/2
-        extended-CONNECT websockets answer 200 (no 101) — both stay
-        stated residual risks (finding 40e).
+        from a finite chunked body at headers time and stays a stated
+        residual risk (finding 40e). HTTP/2 extended-CONNECT
+        (RFC 8441) never reaches this hook at all: mitmproxy's H2 layer
+        rejects it with a connection-terminating protocol error before
+        any addon hook fires — `parse_h2_request_headers` refuses the
+        `:protocol` pseudo-header (and every H2 CONNECT, which lacks
+        `:scheme`); verified against mitmproxy 12.2.3. #629 piece 2 is
+        therefore a verified non-issue, not a residual.
         """
         ctypes = resp.headers.get_all("content-type") or []
         if any("text/event-stream" in (c or "").lower() for c in ctypes):
