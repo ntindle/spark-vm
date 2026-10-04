@@ -400,10 +400,14 @@ def _turn_terminal(note, turn_id):
     Two wire shapes exist (the fixture emits method-level
     ``turn/cancelled``; the real serve host emits ``turn/completed``
     with a ``terminal`` param -- issue #994's journal): both are
-    honored, mirroring msp_events' classification. A ``turn/completed``
-    with no terminal param reads as completed. Unknown non-empty
-    terminal strings pass through verbatim so callers see the drift
-    instead of a guess.
+    honored. The ``cancelled``/``failed`` params-level mapping matches
+    msp_events' classification; the method-level shapes match
+    watch_turn_events' terminal set. ``interrupted`` is treated as dead
+    by this gate (a first turn interrupted at spawn never engaged),
+    even though the steady-state view maps it to done. A
+    ``turn/completed`` with no terminal param reads as completed.
+    Unknown non-empty terminal strings pass through verbatim so
+    callers see the drift instead of a guess.
     """
     if not isinstance(note, dict):
         return None
@@ -423,9 +427,65 @@ def _turn_terminal(note, turn_id):
     return None
 
 
-def await_first_turn_engagement(host, session_id, turn_id, *,
+def begin_first_turn_watch(host, session_id):
+    """Subscribe to the turn prefix and buffer this session's turn notes.
+
+    Call this BEFORE turn/start. The reader thread dispatches
+    notifications only to currently-registered subscribers, so a
+    terminal notification the server emits in the gap between
+    turn/start returning and a later subscribe() would be silently
+    dropped -- and the #994 cancellation landed ~1ms after turn start,
+    making that gap the plausible case, not a theoretical one.
+    Subscribing first closes it: buffered notes are replayed for the
+    turn id once await_first_turn_engagement binds it.
+
+    Returns an opaque watch token; pass it to
+    await_first_turn_engagement. If turn/start raises, hand the token
+    to close_first_turn_watch so the subscriber is released.
+    Buffered notes are raw notifications (in-memory only, like
+    watch_turn_events' `seen` list); the journal the await returns is
+    method-names only.
+    """
+    _check_session_id(session_id)
+    buffered = []
+
+    def on_note(note):
+        params = note.get("params") if isinstance(note, dict) else None
+        if not isinstance(params, dict):
+            # Missing or non-dict params carry nothing to filter on.
+            # Ignore rather than raising: subscriber exceptions drop the
+            # event silently, which would lose a terminal and turn the
+            # await into a full-timeout wait.
+            return
+        if params.get("sessionId") != session_id:
+            return
+        method = note.get("method")
+        if isinstance(method, str):
+            buffered.append(note)
+
+    unsub = host.subscribe("turn", on_note)
+    return {"session_id": session_id, "buffered": buffered, "unsub": unsub,
+            "started_at": time.time()}
+
+
+def close_first_turn_watch(watch):
+    """Release a first-turn watch without awaiting it (turn/start raised)."""
+    try:
+        unsub = watch["unsub"]
+    except (TypeError, KeyError):
+        raise ValueError(f"not a first-turn watch: {watch!r}")
+    unsub()
+
+
+def await_first_turn_engagement(watch, turn_id, *,
                                 timeout=FIRST_TURN_ENGAGEMENT_TIMEOUT):
     """Watch the first turn of a spawn until it engages or dies.
+
+    `watch` is a token from begin_first_turn_watch (already
+    subscribed); `turn_id` comes from turn/start's result and is bound
+    here. Notes the server emitted between the subscribe and this call
+    are replayed first, so a terminal that arrived before the caller
+    knew the turn id is still caught.
 
     Returns a dict {"status", "terminal", "journal", "elapsed_s"}:
 
@@ -447,46 +507,43 @@ def await_first_turn_engagement(host, session_id, turn_id, *,
     This is the issue-#994 acceptance made concrete: "verify the first
     turn actually engages, not just that the session started".
     """
-    _check_session_id(session_id)
     _check_turn_id(turn_id)
     if not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ValueError(
             f"timeout must be a positive number of seconds, got {timeout!r}")
+    try:
+        buffered = watch["buffered"]
+        unsub = watch["unsub"]
+    except (TypeError, KeyError):
+        raise ValueError(f"not a first-turn watch: {watch!r}")
     seen = []
-    terminal = {"value": None}
+    terminal = None
+    idx = 0
     t0 = time.time()
-
-    def on_note(note):
-        params = note.get("params") if isinstance(note, dict) else None
-        if not isinstance(params, dict):
-            # Missing or non-dict params carry nothing to filter on.
-            # Ignore rather than raising: subscriber exceptions drop the
-            # event silently, which would lose a terminal and turn the
-            # watch into a full-timeout wait.
-            return
-        if params.get("sessionId") != session_id:
-            return
-        method = note.get("method")
-        if isinstance(method, str):
-            seen.append(method)
-        term = _turn_terminal(note, turn_id)
-        if term is not None and terminal["value"] is None:
-            terminal["value"] = term
-
-    unsub = host.subscribe("turn", on_note)
     try:
         end = t0 + timeout
-        while time.time() < end and terminal["value"] is None:
+        while True:
+            # Drain everything buffered so far (the reader thread may
+            # append while we drain; list.append is atomic and the
+            # length check re-evaluates each iteration).
+            while idx < len(buffered):
+                note = buffered[idx]
+                idx += 1
+                seen.append(note.get("method"))
+                term = _turn_terminal(note, turn_id)
+                if term is not None and terminal is None:
+                    terminal = term
+            if terminal is not None or time.time() >= end:
+                break
             time.sleep(0.05)
     finally:
         unsub()
     elapsed = time.time() - t0
-    term = terminal["value"]
-    if term is None:
+    if terminal is None:
         status = "engaged"
-    elif term in _FIRST_TURN_DEAD_TERMINALS:
+    elif terminal in _FIRST_TURN_DEAD_TERMINALS:
         status = "dead"
-    elif term == "completed":
+    elif terminal == "completed":
         status = "done"
     else:
         # An unrecognized terminal means the turn ended in a way the
@@ -497,7 +554,7 @@ def await_first_turn_engagement(host, session_id, turn_id, *,
         # until the client learns the vocabulary -- that is the intended
         # behavior, not a bug.
         status = "dead"
-    return {"status": status, "terminal": term, "journal": list(seen),
+    return {"status": status, "terminal": terminal, "journal": list(seen),
             "elapsed_s": elapsed}
 
 

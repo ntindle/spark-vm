@@ -880,20 +880,24 @@ def test_smoke_cli_watch_interrupt_with_turn_id_is_bounded(monkeypatch,
 # -- await_first_turn_engagement (#994) ---------------------------------------
 
 def _engage_with_notes(notes, *, session_id="sess-x", turn_id="turn-x",
-                       timeout=5.0):
-    """Run await_first_turn_engagement against the stub host, feed it
-    `notes`, and return the engagement record."""
+                       timeout=5.0, pre_notes=()):
+    """Run begin_first_turn_watch + await_first_turn_engagement against
+    the stub host. `pre_notes` are fed after subscribing but before the
+    turn id is bound -- the subscribe gap that #994's ~1ms cancellation
+    falls into. `notes` are fed while the await runs."""
     host = _StubWatchHost()
+    watch = mspt.begin_first_turn_watch(host, session_id)
+    assert host.callback is not None, "begin_first_turn_watch never subscribed"
+    for note in pre_notes:
+        host.callback(note)
     box = {}
 
     def run():
         box["eng"] = mspt.await_first_turn_engagement(
-            host, session_id, turn_id, timeout=timeout)
+            watch, turn_id, timeout=timeout)
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
-    assert wait_until(lambda: host.callback is not None), \
-        "await_first_turn_engagement never subscribed"
     for note in notes:
         host.callback(note)
     t.join(timeout + 10)
@@ -987,12 +991,54 @@ def test_engagement_ignores_other_turn_and_malformed_notes():
 
 def test_engagement_rejects_bad_arguments():
     host = _StubWatchHost()
+    watch = mspt.begin_first_turn_watch(host, "sess-x")
     with pytest.raises(ValueError):
-        mspt.await_first_turn_engagement(host, "", "turn-x")
+        mspt.begin_first_turn_watch(host, "")
     with pytest.raises(ValueError):
-        mspt.await_first_turn_engagement(host, "sess-x", "")
+        mspt.await_first_turn_engagement(watch, "")
     with pytest.raises(ValueError):
-        mspt.await_first_turn_engagement(host, "sess-x", "turn-x", timeout=0)
+        mspt.await_first_turn_engagement(watch, "turn-x", timeout=0)
+    with pytest.raises(ValueError):
+        mspt.await_first_turn_engagement({}, "turn-x")
+    mspt.close_first_turn_watch(watch)
+
+
+def test_begin_watch_closes_subscribe_gap():
+    # The #994 timeline: the server cancels ~1ms after turn/start --
+    # before the caller could possibly hold the turn id. The terminal
+    # arrives while only the pre-start subscription exists; the await
+    # binds the turn id later and must still catch it via replay.
+    host = _StubWatchHost()
+    watch = mspt.begin_first_turn_watch(host, "sess-x")
+    host.callback(_note("turn/completed", {"sessionId": "sess-x",
+                                           "turnId": "turn-x",
+                                           "terminal": "cancelled"}))
+    eng = mspt.await_first_turn_engagement(watch, "turn-x", timeout=5.0)
+    assert eng["status"] == "dead"
+    assert eng["terminal"] == "cancelled"
+    assert eng["journal"] == ["turn/completed"]
+
+
+def test_close_first_turn_watch_releases_subscriber():
+    host = _StubWatchHost()
+    released = []
+    real_subscribe = host.subscribe
+
+    def tracking_subscribe(prefix, callback):
+        unsub = real_subscribe(prefix, callback)
+
+        def tracking_unsub():
+            released.append(True)
+            return unsub()
+
+        return tracking_unsub
+
+    host.subscribe = tracking_subscribe
+    watch = mspt.begin_first_turn_watch(host, "sess-x")
+    mspt.close_first_turn_watch(watch)
+    assert released == [True]
+    with pytest.raises(ValueError):
+        mspt.close_first_turn_watch({"nope": True})
 
 
 def test_turn_stillborn_error_carries_diagnostics():
