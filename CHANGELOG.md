@@ -87,7 +87,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   socket instead of a separate HTTPS call. Untrusted frames (wrong
   generation, malformed, oversized, unknown kinds) are logged loudly and
   never executed; a missing sequence number holds the queue until the
-  plane re-drives it. (#TBD)
+  plane re-drives it. (#981)
 
 - The docs index now covers the two newest hosted-product gap analyses —
   the box-to-plane filing-upload leg (#876) and the missing plane push
