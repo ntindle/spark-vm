@@ -19,7 +19,11 @@ what #873 enqueues on POST /v1/boxes/{id}/approvals/{aid}/decision.
 Scope: the suite starts at the filing leg (SwapAddon._file_approval). The
 refusal *decision* (the grant/registry check that leads to a refusal) is
 unit-tested in proxy/test_swap_addon.py; what S5 needs is the
-filing -> upload -> record -> decision -> stamp chain.
+filing -> upload -> record -> decision -> stamp chain, plus (#984) the parked
+agent's next poll: the real proxy serve leg
+(_approval_signal_for_refusal, the decision point behind the H18
+client-visible channel) is driven against the same approvals dir and the
+terminal signal is asserted.
 """
 import json
 import os
@@ -51,6 +55,7 @@ def _make_addon():
     a = sa.SwapAddon.__new__(sa.SwapAddon)
     a._pending_cache = {}  # #563 per-tuple pending/ scan cache
     a._denial_cache = {}   # #307 per-tuple consumed/ denial cache
+    a._expiry_cache = {}   # #511 per-tuple consumed/ expiry cache
     a._audit = lambda host, matched: True
     return a
 
@@ -276,6 +281,51 @@ def test_owner_decision_roundtrip_stamps_plane_origin(loop, monkeypatch):
     assert rec["idempotency_key"] == \
         "approval_decision:%s:%s:1" % (BOX_ID, aid)
     assert seq in loop.plane.acked
+
+
+def test_denied_decision_reaches_parked_agent_poll(loop):
+    """S5 (5, #984): the parked agent's next poll sees the terminal
+    denial. After the plane decision is stamped by the real ingest, the
+    real proxy serve leg (_approval_signal_for_refusal — the decision
+    point behind the H18 client-visible channel) returns [(aid,
+    "denied")] for the same tuple. The poll BEFORE the decision must
+    see [(aid, "pending")] and must not file a second approval."""
+    aid = _file_refusal()
+    assert spark_pair.cmd_upload_filings(loop) == 0
+
+    addon = _make_addon()
+
+    def _poll():
+        """One parked-agent poll, recorded exactly the way _resolve
+        records it onto the H18 client-visible channel."""
+        signals = addon._approval_signal_for_refusal(
+            "github", "github.com", "POST", "/gists", "no grant")
+        addon._approval_signal = None
+        for sig_aid, state in signals:
+            addon._record_approval_signal(sig_aid, state)
+        return addon._approval_signal
+
+    # Pre-decision poll: the agent sees pending; the pending filing is
+    # coalesced, not re-filed (no second owner push).
+    assert _poll() == [(aid, "pending")]
+    assert _pending_aids(loop) == [aid]
+
+    loop.plane.owner_decide(BOX_ID, aid, "deny")
+    assert spark_pair.cmd_ingest(loop) == 0
+
+    rec = _consumed(loop, aid)
+    assert rec is not None
+    assert rec["decision"] == "deny"
+    assert rec["decision_origin"] == "plane"
+
+    # The same addon instance: the pre-poll cached a negative #307
+    # entry, so the serve leg re-scans past it (consumed/ dir-mtime
+    # invalidation) to deliver the denial here. Composition-level pin
+    # only: the #306 fresh re-check in _file_approval would deliver the
+    # same terminal signal even if the cache never invalidated, so the
+    # suite pins the delivery, not which layer fired.
+    assert _poll() == [(aid, "denied")]
+    assert _pending_aids(loop) == []
 
 
 def test_filing_shape_satisfies_uploader_contract(loop):

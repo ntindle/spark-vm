@@ -400,6 +400,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   also pins the cross-leg filing schema, so a future change to either side
   breaks loudly instead of silently skipping proxy-filed refusals. (#983)
 
+- Contributor DX: the filing-loop integration test now closes the last
+  hop — after a plane denial is stamped by the real ingest, the real proxy
+  serve leg returns the terminal "denied" signal for the parked agent's
+  next poll (and no fresh approval is filed), while the poll before the
+  decision sees "pending" without re-filing. The suite pins both the
+  terminal-delivery read and the no-re-file composition against
+  neutering. (#984, #876)
+
 ### Fixed
 
 - muse-job spawn over MSP now detects a first turn that died before
