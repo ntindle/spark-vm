@@ -15,7 +15,7 @@ reference.
 and a self-hosted plane are the same endpoint contract — the dashboard
 calls the plane that served it, and so does everything else here.
 
-**Pinned:** main `36d353e9` (2026-10-03). The plane deploys from a
+**Pinned:** main `c9660e6` (2026-10-04). The plane deploys from a
 separate checkout — endpoint availability follows the plane's deploys,
 not this doc. If this reference disagrees with the control-plane
 checkout's `worker.py` module docstring (the endpoint table — the
@@ -101,25 +101,30 @@ stores and delivers them; only the box executes them.
 | `POST /v1/boxes/{box_id}/commands/ack` | box token | `{seqs:[...]}` — idempotent; acking only completes `pending`/`leased` commands; acking an `expired` (epoch-killed) command still returns success so the retry loop terminates. |
 | `POST /v1/boxes/{box_id}/commands/epoch` | owner | Incarnation reset: bumps the box's command epoch and expires every pending/leased command of older epochs (they are never delivered again). A fetch may also claim a higher epoch (`?epoch=`); adoption is monotonic — a racing lower claim loses with `409 stale epoch`. |
 
-### Action-approval record endpoints (`/v1/boxes/{box_id}/approvals*`) — auth: owner key
+### Action-approval record endpoints (`/v1/boxes/{box_id}/approvals*`) — auth: owner key, except `approvals/file` (box token)
 
 The plane-side record for the hosted phone-approval flow (#849, #872):
 an agent action on a box → the owner taps approve/deny → the decision
-travels back to the box. **Protocol published (#916, on main); plane
-implementation is the next step** — the box→plane filing leg (#876),
-the plane→box wire shape (#873), and box-side ingest into confirmd
-(#874) are separate issues.
+travels back to the box. Protocol published (#916, on main); the plane
+half shipped 2026-10-03 — the plane→box wire shape (#873), box-side
+ingest into confirmd (#874), and the box→plane filing leg (#876:
+plane file endpoint S2, `spark_pair.py upload-filings` S3, dashboard
+pending+decide S4) all landed that day; the #876 in-repo acceptance
+slice (S5) shipped 2026-10-04, live-plane acceptance still open on
+#876.
 
 | Method & path | Purpose |
 |---|---|
 | `POST /v1/boxes/{box_id}/approvals` | Create a pending record. Body: `{aid, summary, detail?, expires_in_secs?}` (`aid`: client-chosen idempotency key, 1–64 chars in `[A-Za-z0-9._-]`; `summary`: 1–256 chars; `detail`: opaque JSON object ≤ 4 KB. The `(box_id, aid)` primary key makes create retries safe: a retried create returns the existing record with `200 {ok, approval, deduped: true}` instead of a duplicate) → `201 {ok, approval}`. |
+| `POST /v1/boxes/{box_id}/approvals/file` | **Box token, own `box_id` only (the owner-key exception on this surface).** The box files its own pending record (`spark_pair.py upload-filings`, #953; #952): `current` **and** `grace` token states accepted (the #846 rotation grace must never stall uploads). Body mirrors the owner create path (`{aid, summary, detail?, expires_in_secs?}`, same payload bounds by construction); `owner_id` is stored NULL — the box-filed provenance marker, and owner decisions stay owner-keyed. Response is write-only — `201/200 {ok, aid, deduped}` (a retried file returns the existing row's aid as `200 {deduped: true}`), never the record body: the "a box cannot read its own approvals" invariant stays intact. A box token for the wrong box_id 401s. (Canonical: `docs/FILING_UPLOAD_GAP_ANALYSIS.md` S2.) |
 | `GET /v1/boxes/{box_id}/approvals` | List records (`?status=pending\|approved\|denied\|expired`, `?limit=` ≤ 200, default 50). Server-side expiry applied before listing. |
 | `GET /v1/boxes/{box_id}/approvals/{aid}` | One record; server-side expiry applied. |
-| `POST /v1/boxes/{box_id}/approvals/{aid}/decision` | Record the decision: `{decision: "approve"\|"deny"}` → `200 {ok, approval}`. First decision wins (conditional update on `pending` rows only); re-deciding with the same decision is a `200` replay (`deduped: true`); a conflicting decision on a decided record is `409 "approval already decided"`; deciding an expired record is `410` (expiry is terminal). |
+| `POST /v1/boxes/{box_id}/approvals/{aid}/decision` | Record the decision: `{decision: "approve"\|"deny"}` → `200 {ok, approval}`. First decision wins (conditional update on `pending` rows only); re-deciding with the same decision is a `200` replay (`deduped: true`); a conflicting decision on a decided record is `409 "approval already decided"`; deciding an expired record is `410` (expiry is terminal). Recording a decision enqueues an `approval_decision` command on the durable queue (#873) so the box learns it over the command fetch; server-side expiry enqueues `decision=expire` the same way. |
 
-A box token presented at any of these gets `401 "a box cannot decide
-its own approvals"` — a box can never decide (or read, or create) its
-own approvals. `expires_in_secs` defaults to 600 (10 min), clamped to
+A box token presented at the owner-key endpoints on this surface gets
+`401 "a box cannot decide its own approvals"` — a box can never
+decide or read its own approvals; the sole box-token endpoint is the
+`approvals/file` create, which is write-only by design. `expires_in_secs` defaults to 600 (10 min), clamped to
 [60, 3600]; a client TTL is never trusted. Once decided, expiry never
 rewrites the decision.
 
@@ -155,8 +160,11 @@ rewrites the decision.
 - **Terminal streams / R2 uploads** (#853 → #919/#920/#921): spec'd and
   gap-analyzed, not implemented — no endpoints yet.
 - **Approval-decision wire shape** (#873), **box-side approval ingest**
-  (#874), **box→plane refusal filing** (#876): designed in the #849 gap
-  analysis, not implemented.
+  (#874), **box→plane refusal filing** (#876): shipped 2026-10-03 as
+  the `POST /v1/boxes/{box_id}/approvals/file` endpoint, the
+  `approval_decision` durable-command kind, and `spark_pair.py`
+  `ingest`/`upload-filings` — covered in the action-approval table
+  above, not this section.
 - **Credential vending** (#850 → #890/#891): no vend endpoint, no box
   fetch path — the self-hosted swap-proxy half is the only half that
   exists.
@@ -169,6 +177,7 @@ rewrites the decision.
   table: `pairing/README.md`
 - Durable-command queue, epochs, cursors, acks: `docs/DURABLE_COMMANDS.md`
 - Action-approval records: `docs/APPROVALS_PLANE_PROTOCOL.md`
+- Box-filed approval records (`/approvals/file`): `docs/FILING_UPLOAD_GAP_ANALYSIS.md` S2
 - Dashboard page, canonical-copy rule, sync: `hosted/dashboard/README.md`
 - Fleet-read endpoints (`GET /v1/boxes*`): ntindle's
   #843 ship comment (2026-10-02) — these endpoints live in the ops
