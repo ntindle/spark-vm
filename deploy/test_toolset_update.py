@@ -2249,3 +2249,66 @@ def test_rollback_with_no_snapshots_fails_clean(env):
     r = run_bash("./deploy/toolset-update.sh rollback", env_extra=e)
     assert r.returncode == 1, r.stderr
     assert "no snapshots" in r.stderr
+
+
+
+# --- issue #950: the update lock permanently silenced stderr -----------------
+def test_update_lock_does_not_silence_stderr(env):
+    # Issue #950: the old inline `exec 9>"$STATE_LOCK" 2>/dev/null` applied
+    # the 2> to the shell itself once the open SUCCEEDED, permanently
+    # redirecting the shell's own stderr to /dev/null -- every later >&2
+    # diagnostic vanished silently. (The failure path never silenced
+    # anything: bash applies none of the redirections when the open fails.)
+    # Take the real update lock, then emit a >&2 diagnostic from the same
+    # shell: it must reach stderr.
+    tools = make_realtools(env["tmp"])  # real flock on PATH
+    e = dict(env["env"])
+    e["PATH"] = f"{tools}{os.pathsep}{env['env']['PATH']}"
+    r = source_and(
+        '_take_update_lock; echo "rc=$?"; echo "STDERR-LIVE" >&2',
+        env_extra=e)
+    assert "rc=0" in r.stdout, r.stdout
+    assert "STDERR-LIVE" in r.stderr, (
+        f"stderr was swallowed by the lock acquisition: {r.stderr!r}")
+
+
+def test_update_lock_open_failure_fails_loud(env):
+    # The lock-open failure path stays fail-loud: rc=1 and the freeze
+    # counter moves, the same as before the #950 refactor.
+    tools = make_realtools(env["tmp"])  # real flock on PATH
+    e = dict(env["env"])
+    e["PATH"] = f"{tools}{os.pathsep}{env['env']['PATH']}"
+    (env["state"] / "toolset-update.lock").mkdir()  # open fails: directory
+    r = source_and(
+        'rc=0; _take_update_lock || rc=$?; echo "rc=$rc"; '
+        'cat "$TOOLSET_STATE_DIR/freeze.state"',
+        env_extra=e)
+    assert "rc=1" in r.stdout, r.stdout
+    assert "consecutive" in r.stdout, r.stdout
+
+
+def test_update_deferred_when_lock_held_never_runs_body(env):
+    # Issue #950 regression (Security round-1): the deferred path must abort
+    # the update (quiet no-op, rc=0) -- never proceed without the lock. A
+    # background subshell holds the lock; _idle_gate is instrumented so any
+    # update-body execution is observable. (The pre-fix refactor returned 0
+    # from the helper and the caller's `|| return $?` treated deferral as
+    # success -- the update ran lockless.)
+    tools = make_realtools(env["tmp"])  # real flock on PATH
+    e = dict(env["env"])
+    e["PATH"] = f"{tools}{os.pathsep}{env['env']['PATH']}"
+    r = source_and(
+        'syncf="$TOOLSET_STATE_DIR/lock-sync"; '
+        '( exec 8>"$TOOLSET_STATE_DIR/toolset-update.lock"; flock 8; '
+        'touch "$syncf"; sleep 20 ) & holder=$!; '
+        'for i in $(seq 1 100); do if [ -f "$syncf" ]; then break; fi; '
+        'sleep 0.1; done; '
+        '_idle_gate() { echo "IDLE-GATE-RAN" >&2; return 0; }; '
+        'rc=0; cmd_update || rc=$?; echo "rc=$rc"; '
+        'kill "$holder" 2>/dev/null || true',
+        env_extra=e)
+    assert "rc=0" in r.stdout, r.stdout
+    assert "IDLE-GATE-RAN" not in r.stderr, (
+        f"update body ran despite the held lock: {r.stderr!r}")
+    logtext = (env["state"] / "toolset-update.log").read_text()
+    assert "another run holds the lock; no-op" in logtext, logtext

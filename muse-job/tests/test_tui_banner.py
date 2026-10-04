@@ -412,7 +412,8 @@ def _trust_status(**kw):
     st = {
         "slug": "demo", "job_state": "active", "tmux_alive": True,
         "pane_live_tui": False, "pane_resume_banner": False,
-        "pane_trust_prompt": True, "pane_cmd": "muse",
+        "pane_trust_prompt": True, "pane_trust_unverified": False,
+        "pane_cmd": "muse",
         "session_created": _time.time(), "session_uuid": None,
         "session_status": None, "bytes_total": 0, "bytes_delta": 0,
         "last_hook_event": None, "progress_age_s": None,
@@ -583,3 +584,129 @@ def test_watch_emits_blocked_trust_when_gate_persists(cli, monkeypatch, capsys):
     events = _watch_events(cli, capsys)
     sigs = [e["signal"] for e in events if e["job"] == "trustjob"]
     assert "blocked-trust" in sigs
+
+
+# --- issue #836: trust gate visible while the foreground process is not a
+# recognized TUI process -----------------------------------------------
+# The #791 fix answered the gate only when the pane's foreground process
+# was a known TUI process (issue #4 anti-spoofing gate). #836 showed the
+# hole: a gate with an unrecognized fg process (new binary name after an
+# in-place auto-update, a wrapper launcher, a capture hiccup) kept
+# pane_trust_prompt clear, and the watchdog lumped it into generic
+# tui-dead -- the job stranded with no recovery attempt. The gate is now
+# its own loud signal (blocked-trust-unverified), still never auto-answered.
+
+
+def test_pane_trust_unverified_set_when_process_not_tui(cli, monkeypatch):
+    # Trust text in the tail, but the fg process is bash: the gate is
+    # observably showing, yet the auto-answer is refused (issue #4).
+    _job_status_harness(cli, monkeypatch, TRUST_GATE_PANE, "bash")
+    job = {"slug": "demo", "session_uuid": None, "state": "active",
+           "started_at": _time.time()}
+    st = cli.job_status(job, "demo")
+    assert st["pane_trust_prompt"] is False
+    assert st["pane_trust_unverified"] is True
+    assert st["pane_live_tui"] is False
+
+
+def test_pane_trust_unverified_set_when_process_unknown(cli, monkeypatch):
+    # Capture hiccup: empty process name with the trust text in the tail.
+    _job_status_harness(cli, monkeypatch, TRUST_GATE_PANE, "")
+    job = {"slug": "demo", "session_uuid": None, "state": "active",
+           "started_at": _time.time()}
+    st = cli.job_status(job, "demo")
+    assert st["pane_trust_prompt"] is False
+    assert st["pane_trust_unverified"] is True
+
+
+def test_pane_trust_unverified_clear_when_process_recognized(cli, monkeypatch):
+    # The verified path still classifies the same pane as the answerable
+    # gate -- the new signal must not steal it.
+    _job_status_harness(cli, monkeypatch, TRUST_GATE_PANE, "muse")
+    job = {"slug": "demo", "session_uuid": None, "state": "active",
+           "started_at": _time.time()}
+    st = cli.job_status(job, "demo")
+    assert st["pane_trust_prompt"] is True
+    assert st["pane_trust_unverified"] is False
+
+
+def test_pane_trust_unverified_clear_on_live_tui(cli, monkeypatch):
+    _job_status_harness(cli, monkeypatch, LIVE_PANE, "muse")
+    job = {"slug": "demo", "session_uuid": None, "state": "active",
+           "started_at": _time.time()}
+    st = cli.job_status(job, "demo")
+    assert st["pane_trust_prompt"] is False
+    assert st["pane_trust_unverified"] is False
+
+
+def test_pane_trust_unverified_clear_when_no_trust_text(cli, monkeypatch):
+    # A plain dead shell with no trust text in the tail: no trust signal
+    # of any kind -- still generic tui-dead.
+    _job_status_harness(cli, monkeypatch, "last login\n$ ", "bash")
+    job = {"slug": "demo", "session_uuid": None, "state": "active",
+           "started_at": _time.time()}
+    st = cli.job_status(job, "demo")
+    assert st["pane_trust_prompt"] is False
+    assert st["pane_trust_unverified"] is False
+
+
+def test_watch_emits_blocked_trust_unverified_and_never_answers(
+        cli, monkeypatch, capsys):
+    # End to end through cmd_watch: trust text visible but the fg process
+    # is unverified -- the distinct blocked-trust-unverified signal fires,
+    # NO answer attempt is made (issue #4: never send keystrokes into an
+    # unverified pane), and generic tui-dead stays out of the events.
+    _make_watch_job(cli, "trustjob")
+    monkeypatch.setattr(cli, "job_status",
+                        lambda job, slug: _trust_status(
+                            slug=slug, pane_trust_prompt=False,
+                            pane_trust_unverified=True, pane_cmd="bash"))
+    answered = []
+    monkeypatch.setattr(cli, "_answer_trust_prompt",
+                        lambda slug, timeout=20: answered.append(slug) or True)
+    monkeypatch.setattr(cli, "_capture_pane_state",
+                        lambda target: (TRUST_GATE_PANE, "bash"))
+    monkeypatch.setattr(cli, "_emit_tui_swap_event",
+                        lambda job, slug, pane_cmd, events: None)
+    monkeypatch.setattr(cli, "maybe_adopt_session",
+                        lambda job, slug: (None, None))
+    monkeypatch.setattr(cli, "git_diffstat", lambda path: "")
+    events = _watch_events(cli, capsys)
+    by_sig = {}
+    for e in events:
+        by_sig.setdefault(e["signal"], []).append(e)
+    assert answered == [], "issue #4: no keystrokes into an unverified pane"
+    assert "blocked-trust-unverified" in by_sig
+    ev = by_sig["blocked-trust-unverified"][0]
+    assert ev["job"] == "trustjob"
+    assert "muse-job log" in ev["detail"]
+    assert "tui-dead" not in by_sig
+    assert "trust-answered" not in by_sig
+    assert "blocked-trust" not in by_sig
+
+
+def test_watch_integration_unverified_gate_end_to_end(
+        cli, monkeypatch, capsys):
+    # QA AC5 (review round-1): no stub between job_status and cmd_watch --
+    # the REAL detection feeds the REAL dispatch. Trust text in the tail
+    # with an unverified fg process must yield blocked-trust-unverified
+    # from the live pipeline, with no answer attempt. Pre-fix this emitted
+    # generic tui-dead (the #836 complaint).
+    _make_watch_job(cli, "trustjob")
+    _job_status_harness(cli, monkeypatch, TRUST_GATE_PANE, "bash")
+    answered = []
+    monkeypatch.setattr(cli, "_answer_trust_prompt",
+                        lambda slug, timeout=20: answered.append(slug) or True)
+    monkeypatch.setattr(cli, "_emit_tui_swap_event",
+                        lambda job, slug, pane_cmd, events: None)
+    monkeypatch.setattr(cli, "maybe_adopt_session",
+                        lambda job, slug: (None, None))
+    monkeypatch.setattr(cli, "git_diffstat", lambda path: "")
+    events = _watch_events(cli, capsys)
+    by_sig = {}
+    for e in events:
+        by_sig.setdefault(e["signal"], []).append(e)
+    assert answered == [], "issue #4: no keystrokes into an unverified pane"
+    assert "blocked-trust-unverified" in by_sig
+    assert by_sig["blocked-trust-unverified"][0]["job"] == "trustjob"
+    assert "tui-dead" not in by_sig
