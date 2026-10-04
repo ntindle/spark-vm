@@ -387,6 +387,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- muse-job spawn over MSP now detects a first turn that died before
+  engaging (#994): after `turn/start`, spawn watches the new turn's
+  events for a few seconds — if the turn dies before the agent engages
+  (cancelled, interrupted, or failed server-side, as seen when the
+  serve host cancelled the first turn within ~1ms), the spawn fails
+  loudly and the job is marked blocked instead of sitting "active"
+  forever with nothing working. A turn that stays silent for the whole
+  window is still reported engaged (absence of death, not proof of
+  life). To retry a stillborn spawn: remove the job dir or use a new
+  slug, then spawn with `--tmux`, while the serve-side cause is
+  investigated. (#997)
+
 - muse-job's workspace-trust gate detector now requires the question and the
   "Trust and continue" option on separate lines, option after the question
   within a few lines (#972): a live session whose own conversation mentions

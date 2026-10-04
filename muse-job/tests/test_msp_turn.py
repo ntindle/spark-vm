@@ -875,3 +875,206 @@ def test_smoke_cli_watch_interrupt_with_turn_id_is_bounded(monkeypatch,
     body = json.loads(capsys.readouterr().out)
     assert body["watchedEvents"] == []
     assert elapsed < 5, "watch did not return at its timeout: %.1fs" % elapsed
+
+
+# -- await_first_turn_engagement (#994) ---------------------------------------
+
+def _engage_with_notes(notes, *, session_id="sess-x", turn_id="turn-x",
+                       timeout=5.0, pre_notes=()):
+    """Run begin_first_turn_watch + await_first_turn_engagement against
+    the stub host. `pre_notes` are fed after subscribing but before the
+    turn id is bound -- the subscribe gap that #994's ~1ms cancellation
+    falls into. `notes` are fed while the await runs."""
+    host = _StubWatchHost()
+    watch = mspt.begin_first_turn_watch(host, session_id)
+    assert host.callback is not None, "begin_first_turn_watch never subscribed"
+    for note in pre_notes:
+        host.callback(note)
+    box = {}
+
+    def run():
+        box["eng"] = mspt.await_first_turn_engagement(
+            watch, turn_id, timeout=timeout)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    for note in notes:
+        host.callback(note)
+    t.join(timeout + 10)
+    assert not t.is_alive(), "await_first_turn_engagement did not return"
+    return box["eng"]
+
+
+def _stillborn_journal():
+    # The real #994 signal journal: the serve host emits turn/completed
+    # with a terminal param (NOT the fixture's method-level
+    # turn/cancelled).
+    return [
+        _note("turn/started", {"sessionId": "sess-x", "turnId": "turn-x"}),
+        _note("item/completed", {"sessionId": "sess-x", "turnId": "turn-x",
+                                 "item": "userMessage"}),
+        _note("item/started", {"sessionId": "sess-x", "turnId": "turn-x",
+                               "item": "reminderChild"}),
+        _note("item/completed", {"sessionId": "sess-x", "turnId": "turn-x",
+                                 "item": "reminderChild"}),
+        _note("turn/completed", {"sessionId": "sess-x", "turnId": "turn-x",
+                                 "terminal": "cancelled"}),
+    ]
+
+
+def test_engagement_detects_stillborn_via_terminal_param():
+    eng = _engage_with_notes(_stillborn_journal())
+    assert eng["status"] == "dead"
+    assert eng["terminal"] == "cancelled"
+    assert eng["journal"] == ["turn/started", "item/completed",
+                              "item/started", "item/completed",
+                              "turn/completed"]
+    assert eng["elapsed_s"] < 5.0
+
+
+def test_engagement_detects_stillborn_via_method_level_cancel():
+    notes = [_note("turn/cancelled",
+                   {"sessionId": "sess-x", "turnId": "turn-x"})]
+    eng = _engage_with_notes(notes)
+    assert eng["status"] == "dead"
+    assert eng["terminal"] == "cancelled"
+
+
+def test_engagement_detects_stillborn_interrupt_and_failed():
+    for method, params, terminal in (
+            ("turn/interrupted", {"sessionId": "sess-x", "turnId": "turn-x"},
+             "interrupted"),
+            ("turn/completed", {"sessionId": "sess-x", "turnId": "turn-x",
+                                "terminal": "failed"}, "failed")):
+        eng = _engage_with_notes([_note(method, params)])
+        assert eng["status"] == "dead", method
+        assert eng["terminal"] == terminal, method
+
+
+def test_engagement_completed_turn_is_done_not_dead():
+    for params in ({"sessionId": "sess-x", "turnId": "turn-x",
+                   "terminal": "completed"},
+                  {"sessionId": "sess-x", "turnId": "turn-x"}):
+        eng = _engage_with_notes([_note("turn/completed", params)])
+        assert eng["status"] == "done", params
+        assert eng["terminal"] == "completed", params
+
+
+def test_engagement_running_turn_reports_engaged_at_timeout():
+    notes = [_note("turn/started", {"sessionId": "sess-x", "turnId": "turn-x"})]
+    t0 = time.time()
+    eng = _engage_with_notes(notes, timeout=0.4)
+    elapsed = time.time() - t0
+    assert eng["status"] == "engaged"
+    assert eng["terminal"] is None
+    assert eng["journal"] == ["turn/started"]
+    assert elapsed >= 0.3, "returned before the timeout: %.2fs" % elapsed
+
+
+def test_engagement_ignores_other_turn_and_malformed_notes():
+    notes = [
+        {"jsonrpc": "2.0", "method": "turn/started"},       # params missing
+        _note("turn/steered", None),                        # params null
+        _note("turn/steered", "oops"),                      # non-dict params
+        _note("turn/started", {"sessionId": "sess-other",   # other session
+                               "turnId": "turn-x"}),
+        _note("turn/cancelled", {"sessionId": "sess-x",     # other turn
+                                 "turnId": "turn-other"}),
+        _note("turn/started", {"sessionId": "sess-x", "turnId": "turn-x"}),
+    ]
+    t0 = time.time()
+    eng = _engage_with_notes(notes, timeout=0.4)
+    assert eng["status"] == "engaged"
+    assert eng["journal"] == ["turn/cancelled", "turn/started"]
+    assert time.time() - t0 >= 0.3
+
+
+def test_engagement_rejects_bad_arguments():
+    host = _StubWatchHost()
+    watch = mspt.begin_first_turn_watch(host, "sess-x")
+    with pytest.raises(ValueError):
+        mspt.begin_first_turn_watch(host, "")
+    with pytest.raises(ValueError):
+        mspt.await_first_turn_engagement(watch, "")
+    with pytest.raises(ValueError):
+        mspt.await_first_turn_engagement(watch, "turn-x", timeout=0)
+    with pytest.raises(ValueError):
+        mspt.await_first_turn_engagement({}, "turn-x")
+    mspt.close_first_turn_watch(watch)
+
+
+def test_begin_watch_closes_subscribe_gap():
+    # The #994 timeline: the server cancels ~1ms after turn/start --
+    # before the caller could possibly hold the turn id. The terminal
+    # arrives while only the pre-start subscription exists; the await
+    # binds the turn id later and must still catch it via replay.
+    host = _StubWatchHost()
+    watch = mspt.begin_first_turn_watch(host, "sess-x")
+    host.callback(_note("turn/completed", {"sessionId": "sess-x",
+                                           "turnId": "turn-x",
+                                           "terminal": "cancelled"}))
+    eng = mspt.await_first_turn_engagement(watch, "turn-x", timeout=5.0)
+    assert eng["status"] == "dead"
+    assert eng["terminal"] == "cancelled"
+    assert eng["journal"] == ["turn/completed"]
+
+
+def test_close_first_turn_watch_releases_subscriber():
+    host = _StubWatchHost()
+    released = []
+    real_subscribe = host.subscribe
+
+    def tracking_subscribe(prefix, callback):
+        unsub = real_subscribe(prefix, callback)
+
+        def tracking_unsub():
+            released.append(True)
+            return unsub()
+
+        return tracking_unsub
+
+    host.subscribe = tracking_subscribe
+    watch = mspt.begin_first_turn_watch(host, "sess-x")
+    mspt.close_first_turn_watch(watch)
+    assert released == [True]
+    with pytest.raises(ValueError):
+        mspt.close_first_turn_watch({"nope": True})
+
+
+def test_turn_stillborn_error_carries_diagnostics():
+    err = mspt.TurnStillbornError("boom", turn_id="turn-x",
+                                  terminal="cancelled",
+                                  journal=["turn/started", "turn/completed"])
+    assert isinstance(err, mspt.MSPTurnError)
+    assert err.turn_id == "turn-x"
+    assert err.terminal == "cancelled"
+    assert err.journal == ("turn/started", "turn/completed")
+    assert "boom" in str(err)
+
+
+def test_engagement_unknown_terminal_fails_closed():
+    # An unrecognized terminal means the turn ended in a way the
+    # client doesn't understand: fail closed (dead), never guess it
+    # was a successful engagement. The raw string is preserved
+    # in-memory for debugging; emission boundaries gate it via
+    # _terminal_label.
+    eng = _engage_with_notes([_note(
+        "turn/completed", {"sessionId": "sess-x", "turnId": "turn-x",
+                           "terminal": "evaporated"})])
+    assert eng["status"] == "dead"
+    assert eng["terminal"] == "evaporated"
+    assert mspt._terminal_label(eng["terminal"]) == "unknown"
+
+
+def test_terminal_label_vocabulary_gate():
+    # Server-controlled terminal strings must never reach logs or
+    # job.json verbatim: log injection (embedded newlines) and
+    # unbounded input are gated to "unknown" at the emission boundary.
+    assert mspt._terminal_label("cancelled") == "cancelled"
+    assert mspt._terminal_label("interrupted") == "interrupted"
+    assert mspt._terminal_label("failed") == "failed"
+    assert mspt._terminal_label("completed") == "completed"
+    assert mspt._terminal_label("cancelled\nINJECTED: pwned") == "unknown"
+    assert mspt._terminal_label("x" * 1000000) == "unknown"
+    assert mspt._terminal_label("") == "unknown"
+    assert mspt._terminal_label(None) == "unknown"

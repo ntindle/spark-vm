@@ -337,6 +337,232 @@ def watch_turn_events(host, session_id, turn_id, timeout=30.0):
     return seen
 
 
+class TurnStillbornError(MSPTurnError):
+    """The first turn of a spawn died before the agent could engage.
+
+    Raised (via await_first_turn_engagement) when the turn reaches a
+    dead terminal -- cancelled, interrupted, failed, or an
+    unrecognized terminal (fail-closed on shape drift) -- inside the
+    engagement window. At spawn time no user exists to cancel or
+    interrupt a turn, so a dead first turn means the spawn never
+    engaged: the caller must fail the spawn loudly rather than leave
+    the job behind as "active" (issue #994). The redacted event-method
+    journal rides on .journal for diagnostics; note params are never
+    attached (prompts may carry real secret values). .terminal carries
+    the raw server-supplied string for in-memory debugging -- it must
+    pass through _terminal_label before it is ever persisted or
+    printed.
+    """
+
+    def __init__(self, message, *, turn_id, terminal, journal):
+        super().__init__(message)
+        self.turn_id = turn_id
+        self.terminal = terminal
+        self.journal = tuple(journal)
+
+
+# Terminals that mean "the turn died before the agent engaged". At
+# spawn time a completed turn is fine (a fast prompt that finished);
+# anything else reaching terminal inside the engagement window is a
+# stillborn spawn.
+_FIRST_TURN_DEAD_TERMINALS = ("cancelled", "interrupted", "failed")
+
+# Terminals the client understands. A server-supplied terminal string
+# is never persisted or printed raw: at every emission boundary
+# (error messages, job.json) it passes through _terminal_label, which
+# maps anything outside this vocabulary to "unknown". The raw value
+# stays in-memory only, for debugging. Rationale: the terminal string
+# is server-controlled -- emitting it verbatim is a log-injection and
+# unbounded-input vector (cf. _raise_for_not_live, which formats a
+# server string only after allowlist membership in _NOT_LIVE_REASONS).
+_KNOWN_TERMINALS = ("cancelled", "interrupted", "failed", "completed")
+
+
+def _terminal_label(terminal):
+    """Emission-safe label for a server-supplied terminal string.
+
+    Known terminals pass through; anything else (including hostile
+    control characters or megabyte strings) becomes "unknown". Use at
+    every boundary where the terminal leaves the process.
+    """
+    return terminal if terminal in _KNOWN_TERMINALS else "unknown"
+
+# How long spawn waits for the first turn to prove it is alive. This
+# window is paid on EVERY healthy spawn (the loop only exits early on
+# a terminal event); the #994 cancellation landed ~1ms after turn
+# start, so the window is not sized to the defect -- it is sized to
+# survive slow event delivery and reader-thread scheduling jitter on a
+# loaded box. Ten seconds is a bounded, one-time tax on an infrequent
+# operation (jobs live for hours); a stranded "active" job costs far
+# more. A turn that stays silent for the whole window is reported
+# "engaged" -- absence of death, not proof of life.
+FIRST_TURN_ENGAGEMENT_TIMEOUT = 10.0
+
+
+def _turn_terminal(note, turn_id):
+    """Classify a notification's terminal state for turn_id, or None.
+
+    Two wire shapes exist (the fixture emits method-level
+    ``turn/cancelled``; the real serve host emits ``turn/completed``
+    with a ``terminal`` param -- issue #994's journal): both are
+    honored. The ``cancelled``/``failed`` params-level mapping matches
+    msp_events' classification; the method-level shapes match
+    watch_turn_events' terminal set. ``interrupted`` is treated as dead
+    by this gate (a first turn interrupted at spawn never engaged),
+    even though the steady-state view maps it to done. A
+    ``turn/completed`` with no terminal param reads as completed.
+    Unknown non-empty terminal strings pass through verbatim so
+    callers see the drift instead of a guess.
+    """
+    if not isinstance(note, dict):
+        return None
+    params = note.get("params")
+    if not isinstance(params, dict) or params.get("turnId") != turn_id:
+        return None
+    method = note.get("method")
+    if method == "turn/completed":
+        terminal = params.get("terminal")
+        if isinstance(terminal, str) and terminal:
+            return terminal
+        return "completed"
+    if method == "turn/cancelled":
+        return "cancelled"
+    if method == "turn/interrupted":
+        return "interrupted"
+    return None
+
+
+def begin_first_turn_watch(host, session_id):
+    """Subscribe to the turn prefix and buffer this session's turn notes.
+
+    Call this BEFORE turn/start. The reader thread dispatches
+    notifications only to currently-registered subscribers, so a
+    terminal notification the server emits in the gap between
+    turn/start returning and a later subscribe() would be silently
+    dropped -- and the #994 cancellation landed ~1ms after turn start,
+    making that gap the plausible case, not a theoretical one.
+    Subscribing first closes it: buffered notes are replayed for the
+    turn id once await_first_turn_engagement binds it.
+
+    Returns an opaque watch token; pass it to
+    await_first_turn_engagement. If turn/start raises, hand the token
+    to close_first_turn_watch so the subscriber is released.
+    Buffered notes are raw notifications (in-memory only, like
+    watch_turn_events' `seen` list); the journal the await returns is
+    method-names only.
+    """
+    _check_session_id(session_id)
+    buffered = []
+
+    def on_note(note):
+        params = note.get("params") if isinstance(note, dict) else None
+        if not isinstance(params, dict):
+            # Missing or non-dict params carry nothing to filter on.
+            # Ignore rather than raising: subscriber exceptions drop the
+            # event silently, which would lose a terminal and turn the
+            # await into a full-timeout wait.
+            return
+        if params.get("sessionId") != session_id:
+            return
+        method = note.get("method")
+        if isinstance(method, str):
+            buffered.append(note)
+
+    unsub = host.subscribe("turn", on_note)
+    return {"session_id": session_id, "buffered": buffered, "unsub": unsub,
+            "started_at": time.time()}
+
+
+def close_first_turn_watch(watch):
+    """Release a first-turn watch without awaiting it (turn/start raised)."""
+    try:
+        unsub = watch["unsub"]
+    except (TypeError, KeyError):
+        raise ValueError(f"not a first-turn watch: {watch!r}")
+    unsub()
+
+
+def await_first_turn_engagement(watch, turn_id, *,
+                                timeout=FIRST_TURN_ENGAGEMENT_TIMEOUT):
+    """Watch the first turn of a spawn until it engages or dies.
+
+    `watch` is a token from begin_first_turn_watch (already
+    subscribed); `turn_id` comes from turn/start's result and is bound
+    here. Notes the server emitted between the subscribe and this call
+    are replayed first, so a terminal that arrived before the caller
+    knew the turn id is still caught.
+
+    Returns a dict {"status", "terminal", "journal", "elapsed_s"}:
+
+    - ``"engaged"`` -- no terminal event inside the window; the turn is
+      (presumably) still running. This is the normal case.
+    - ``"done"`` -- the turn completed inside the window (a fast prompt
+      that finished); terminal is "completed".
+    - ``"dead"`` -- the turn reached a dead terminal (cancelled /
+      interrupted / failed -- or an unrecognized terminal, which fails
+      closed rather than guessing) inside the window, before the agent
+      could engage. The caller must treat the spawn as failed
+      (TurnStillbornError), never as a live job.
+
+    ``journal`` is the method-name sequence seen (methods only, no
+    params -- safe to log; prompts may carry secrets). Malformed
+    notifications are ignored, never raised: the callback runs on the
+    transport's reader thread (same rule as watch_turn_events).
+
+    This is the issue-#994 acceptance made concrete: "verify the first
+    turn actually engages, not just that the session started".
+    """
+    _check_turn_id(turn_id)
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise ValueError(
+            f"timeout must be a positive number of seconds, got {timeout!r}")
+    try:
+        buffered = watch["buffered"]
+        unsub = watch["unsub"]
+    except (TypeError, KeyError):
+        raise ValueError(f"not a first-turn watch: {watch!r}")
+    seen = []
+    terminal = None
+    idx = 0
+    t0 = time.time()
+    try:
+        end = t0 + timeout
+        while True:
+            # Drain everything buffered so far (the reader thread may
+            # append while we drain; list.append is atomic and the
+            # length check re-evaluates each iteration).
+            while idx < len(buffered):
+                note = buffered[idx]
+                idx += 1
+                seen.append(note.get("method"))
+                term = _turn_terminal(note, turn_id)
+                if term is not None and terminal is None:
+                    terminal = term
+            if terminal is not None or time.time() >= end:
+                break
+            time.sleep(0.05)
+    finally:
+        unsub()
+    elapsed = time.time() - t0
+    if terminal is None:
+        status = "engaged"
+    elif terminal in _FIRST_TURN_DEAD_TERMINALS:
+        status = "dead"
+    elif terminal == "completed":
+        status = "done"
+    else:
+        # An unrecognized terminal means the turn ended in a way the
+        # client doesn't understand. Fail closed: declaring an unknown
+        # terminal a successful engagement would be guessing, and the
+        # module's contract is fail-loud on shape drift (see
+        # _require_turn). A future benign terminal fails loudly here
+        # until the client learns the vocabulary -- that is the intended
+        # behavior, not a bug.
+        status = "dead"
+    return {"status": status, "terminal": terminal, "journal": list(seen),
+            "elapsed_s": elapsed}
+
+
 def main(argv):
     """Smoke CLI: exercise the turn plane against a real serve host.
 

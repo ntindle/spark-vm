@@ -3236,7 +3236,54 @@ def _spawn_msp(slug, args):
                                f"{str(session)[:200]}")
         with open(os.path.join(jd, "prompt.md")) as f:
             full_prompt = f.read()
-        turn, _result = msp_turn.start_turn(host, sid, full_prompt)
+        # Subscribe BEFORE turn/start: the reader thread dispatches
+        # only to registered subscribers, so a terminal the server
+        # emits in the gap between turn/start returning and a later
+        # subscribe would be silently dropped -- and the #994
+        # cancellation landed ~1ms after turn start. Buffered notes are
+        # replayed for the turn id once the await binds it.
+        watch = msp_turn.begin_first_turn_watch(host, sid)
+        try:
+            turn, _result = msp_turn.start_turn(host, sid, full_prompt)
+        except BaseException:
+            msp_turn.close_first_turn_watch(watch)
+            raise
+        # Issue #994: a turn/start that returns is not proof the spawn
+        # engaged -- the real serve host cancelled the first turn
+        # server-side within ~1ms, and the job sat "active" forever with
+        # nothing working. Verify the first turn is alive (or done)
+        # before declaring the spawn a success; a dead first turn fails
+        # the spawn loudly and marks the job blocked, never active.
+        eng = msp_turn.await_first_turn_engagement(watch, turn["turnId"])
+        if eng["status"] == "dead":
+            # The terminal string is server-controlled: never persist
+            # or print it raw (log injection / unbounded input). The
+            # raw value stays on the in-memory eng record and the
+            # exception attribute for debugging; every emission
+            # boundary uses the vocabulary-gated label.
+            term_label = msp_turn._terminal_label(eng["terminal"])
+            job["session_uuid"] = sid
+            job["state"] = "blocked"
+            job["stillborn"] = {
+                "turn_id": turn["turnId"],
+                "terminal": term_label,
+                "journal": eng["journal"],
+            }
+            save_job(job, slug)
+            raise msp_turn.TurnStillbornError(
+                f"muse-job spawn {slug!r}: the first turn died before "
+                f"engaging (terminal={term_label!r}, "
+                f"{len(eng['journal'])} events in {eng['elapsed_s']:.1f}s); "
+                f"the job is marked blocked, not active. Event methods: "
+                f"{','.join(eng['journal'])}. The blocked job record "
+                f"(event journal under job.json 'stillborn') is kept at "
+                f"{jd} for diagnosis. To retry: remove the job dir or use "
+                f"a new slug, then `muse-job spawn {slug} --tmux`. If the "
+                f"turn was cancelled server-side within ~1s of start, "
+                f"this matches issue #994 (session/branchChanged race "
+                f"suspect).",
+                turn_id=turn["turnId"], terminal=eng["terminal"],
+                journal=eng["journal"])
         job["session_uuid"] = sid
         job["session_started_at"] = time.time()
         save_job(job, slug)
@@ -3499,6 +3546,21 @@ def _watch_msp_job(slug, job, events, now):
     - turn completed with SUMMARY.md -> done finding (operator confirms,
       then closes)
     """
+    stillborn = job.get("stillborn")
+    if isinstance(stillborn, dict):
+        # Issue #994: the first turn died at spawn before the agent
+        # engaged. The job is blocked, not active -- and it must STAY
+        # blocked. Without this short-circuit the poll below replays the
+        # cancelled turn, maps turn_cancelled -> "active", and the
+        # watchdog resurrects the zombie on its next pass.
+        term = stillborn.get("terminal")
+        label = term if term in ("cancelled", "interrupted", "failed",
+                                 "completed", "unknown") else "unknown"
+        events.append({"job": slug, "signal": "needs-attention",
+                       "detail": f"first turn stillborn at spawn "
+                                 f"(terminal={label!r}); retry spawn with "
+                                 f"--tmux or `muse-job close` the job"})
+        return
     _, _, _, msp_events, msp_recovery = _msp_imports()
     sid = job.get("session_uuid")
     if not sid:
