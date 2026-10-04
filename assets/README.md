@@ -375,6 +375,12 @@ sudo chmod 600 /home/swapd/credentials.json /home/swapd/secrets/demo-github-ro
 # 1. demo instance (terminal A) -- DEMO ONLY, localhost bind is hardcoded
 python3 cred-ui/cred-ui.py   # listens on 127.0.0.1:18740
 
+# NOTE (issue #86): the page now opens on the unlock card — the per-install
+# API token gate means a bare headless capture records the LOCKED state
+# (see capture_credui_phone's docstring). That is the honest current
+# first-run experience; the shipped GIF below still shows the pre-token UI
+# until someone re-records it.
+
 # 2. capture + assemble (terminal B)
 # CHROME_HEADLESS_SHELL is optional -- the generator auto-discovers the
 # Playwright browser cache; set it only to pin a specific binary.

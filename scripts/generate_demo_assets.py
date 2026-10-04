@@ -842,9 +842,9 @@ def generate_musejob_watch(capture_dir, frames_dir):
 
 CREDUI_FRAMES = [
     ("c1-form",
-     "1/2 — the add/update form on a phone viewport: full width, no sideways scroll"),
+     "1/2 — the unlock gate on a phone viewport: the per-install API token, pasted once per session"),
     ("c2-list",
-     "2/2 — stored credentials as stacked cards: names, states, hosts — values never appear"),
+     "2/2 — locked state: no credential names render until the token is pasted — values never appear"),
 ]
 CREDUI_HOLDS = {"c1-form": 2.2, "c2-list": 2.6}
 
@@ -881,7 +881,15 @@ def _content_bottom(im):
 
 
 def capture_credui_phone(url, frames_dir):
-    """Capture the two phone viewports of the demo cred-ui page."""
+    """Capture the two phone viewports of the demo cred-ui page.
+
+    Since the #86 per-install API token gate, a bare headless-shell
+    --screenshot (no sessionStorage, no way to paste the token) captures
+    the LOCKED state — the unlock card, not the credential form. That is
+    what this ships: honest pixels of the current first-run experience.
+    (A Playwright-driven capture that pastes the demo token could show
+    the unlocked UI; nobody has needed it yet.)
+    """
     os.makedirs(frames_dir, exist_ok=True)
     shell = _headless_shell()
     full = os.path.join(frames_dir, "credui-full.png")

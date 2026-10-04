@@ -151,8 +151,10 @@ Secrets are installed **only** by the human, in their own session. Two ways:
 
 ```bash
 ssh -L 18740:127.0.0.1:18740 ntindle@spark-vm
-# open http://127.0.0.1:18740 — add name, paste value, pick placement,
-# list allowed hosts. The list auto-refreshes every 3 s.
+# open http://127.0.0.1:18740 — paste the per-install API token once per
+# browser session (see cred-ui/README.md "First run: the API token"),
+# then add name, paste value, pick placement, list allowed hosts.
+# The list auto-refreshes every 3 s.
 ```
 
 **CLI.** `cred set <name>` (paste or no-echo prompt), then
