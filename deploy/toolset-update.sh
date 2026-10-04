@@ -2066,8 +2066,6 @@ cmd_install() {
     # install takes no flags; re-running refreshes the installed copy
     # (privileged step — review the diff first).
     for a in "$@"; do case "$a" in *) echo "ERROR: unknown flag: $a" >&2; return 2 ;; esac; done
-    _sudo mkdir -p "$INSTALLED_BIN" "$SYSTEMD_DIR" \
-        || { echo "ERROR: cannot create install dirs" >&2; return 1; }
     # #951: harden the state-dir mode at install time. Privileged state
     # (snapshots, blocked.state, the audit log) must not hinge on the
     # install-time umask — the dir lives under the operator's home and may
@@ -2079,6 +2077,10 @@ cmd_install() {
     # may preserve a leading `//` (== `/` on Linux), so match both.
     # Every other value is the updater's own state dir by construction.
     # readlink failing at all is a loud install failure (fail-closed).
+    # The guard runs BEFORE any mkdir: refusal must precede all
+    # filesystem mutation, and a non-root installer's mkdir -p would
+    # otherwise fail first on uncreatable rootish paths with the wrong
+    # error (CI runs non-root).
     local _sd="$TOOLSET_STATE_DIR"
     while :; do case "$_sd" in */) _sd="${_sd%/}" ;; *) break ;; esac; done
     case "$_sd" in
@@ -2094,6 +2096,8 @@ cmd_install() {
             echo "ERROR: refusing to install with TOOLSET_STATE_DIR=$TOOLSET_STATE_DIR" >&2
             return 1 ;;
     esac
+    _sudo mkdir -p "$INSTALLED_BIN" "$SYSTEMD_DIR" \
+        || { echo "ERROR: cannot create install dirs" >&2; return 1; }
     _sudo chmod 700 "$TOOLSET_STATE_DIR" \
         || { echo "ERROR: cannot chmod state dir $TOOLSET_STATE_DIR" >&2; return 1; }
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0755 "$SCRIPT_DIR/toolset-update.sh" "$INSTALLED_SCRIPT" \
