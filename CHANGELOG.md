@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted phone-approval push, payload scrub pinned (#TBD): the plane-side
+  construction rule for push payloads — every box-controlled string is
+  control-character stripped (C0/C1, so terminal-injection and ANSI
+  escapes die) and truncated to a byte-exact 256-byte bound with an
+  ellipsis, before the plane signs anything. Payloads stay "go look"
+  only (approval id + TTL + scrubbed summary); secrets can never enter
+  a payload by construction. The owner-facing approval surface keeps
+  showing the full raw text so nothing is hidden from the decider.
+
 - Hosted phone-approval push, sender crypto validated (#978): the plane worker
   can encrypt Web Push messages in-worker — a stdlib-only implementation of
   the RFC 8291 `aes128gcm` content encoding (P-256 key agreement, AES-GCM,
