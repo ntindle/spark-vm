@@ -290,6 +290,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The job watchdog's trust-gate detection no longer fires on a live TUI's
+  own conversation merely mentioning the trust question (#961): the gate is
+  only recognized when the question line AND its option line ("Trust and
+  continue") co-occur in the viewport tail. Previously a session discussing
+  the gate read as gated, and the automatic answer typed "1"+Enter into the
+  live session's input box. The genuine gate shape is unchanged, so a
+  truly parked TUI is still answered. (#TBD)
+
 - The job watchdog now distinguishes a workspace-trust gate the TUI is
   parked at from a generically dead pane even when the pane's foreground
   process isn't the TUI (#836): the visible-but-unverifiable gate raises a

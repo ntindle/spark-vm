@@ -855,8 +855,13 @@ def _pane_shows_live_tui(pane, pane_cmd):
     if not pane or not _is_tui_process(pane_cmd):
         return False
     tail = _pane_tail(pane).splitlines()
-    if any(_RESUME_BANNER_TEXT in line or _TRUST_PROMPT_TEXT in line
-           for line in tail):
+    if any(_RESUME_BANNER_TEXT in line for line in tail):
+        return False
+    # Issue #961: the trust-gate veto requires the gate's full observed
+    # shape (question + option line, _pane_shows_trust_gate), not the bare
+    # question substring -- a live TUI discussing the gate in its own
+    # conversation must keep reading as live.
+    if _pane_shows_trust_gate(pane):
         return False
     box = None
     for i, line in enumerate(tail):
@@ -952,6 +957,28 @@ _RESUME_BANNER_LINE = "❯ /resume reopens a past session (--last for the latest
 # workspace? ... 1 Trust and continue"). Observed blocking `muse resume`
 # unattended 2026-09-21.
 _TRUST_PROMPT_TEXT = "Do you trust this workspace?"
+# The gate's option line. Issue #961: matching the question substring alone
+# misfires on a live TUI whose own conversation happens to contain the
+# phrase -- the gate classifier then reads live input as a gate and the
+# auto-answer types "1"+Enter into a working session's input box. Requiring
+# the option line too restores the two-signal shape: a mere mention of the
+# question no longer matches.
+_TRUST_OPTION_TEXT = "Trust and continue"
+
+
+def _pane_shows_trust_gate(pane):
+    """True when the viewport tail shows the TUI's workspace-trust gate.
+
+    Both halves of the gate's observed shape must co-occur in the tail: the
+    question line AND its option line. Issue #961: a bare question-substring
+    match fires when a live TUI's conversation merely mentions the phrase
+    (e.g. the agent discussing the gate), which the watch loop then answers
+    into a live input box. Process identity is NOT checked here -- the call
+    sites keep their own _is_tui_process gates (a stale gate in a dead
+    pane's scrollback is still text-only evidence, issue #4).
+    """
+    tail = _pane_tail(pane)
+    return _TRUST_PROMPT_TEXT in tail and _TRUST_OPTION_TEXT in tail
 
 
 def _capture_pane_state(target):
@@ -2055,9 +2082,12 @@ def job_status(job, slug):
         # Trust text in the tail implies not-live (per _pane_shows_live_tui's
         # own rule); the foreground-process gate is what keeps a dead pane
         # with stale prompt text in its scrollback from counting (issue #4:
-        # a dead pane is never sent keystrokes).
+        # a dead pane is never sent keystrokes). Issue #961: the gate needs
+        # the full shape (question + option line), not the bare question
+        # substring, so a live TUI's conversation merely mentioning the
+        # phrase does not flip the signal.
         pane_trust = ((not pane_live) and _is_tui_process(pane_cmd)
-                      and _TRUST_PROMPT_TEXT in _pane_tail(pane))
+                      and _pane_shows_trust_gate(pane))
         # Issue #836 (regression of #791): the gate can be showing while
         # the foreground process is NOT a recognized TUI process -- a new
         # binary name after an in-place auto-update (issue #212), a
@@ -2069,7 +2099,7 @@ def job_status(job, slug):
         # LOUD operator-actionable signal (blocked-trust-unverified),
         # never as an auto-answer attempt.
         pane_trust_unverified = ((not pane_live) and (not pane_trust)
-                                 and _TRUST_PROMPT_TEXT in _pane_tail(pane))
+                                 and _pane_shows_trust_gate(pane))
     return {
         "slug": slug,
         "job_state": job.get("state"),
@@ -2429,8 +2459,12 @@ def _answer_trust_prompt(slug, timeout=20):
             # false answer (issue #4: a dead pane is never sent keystrokes).
             # The gate fires only while the foreground process is the TUI --
             # the prompt only renders then, so genuine gates still answer.
+            # Issue #961: require the gate's full observed shape (question
+            # + option line), not the bare question substring -- a live TUI
+            # discussing the gate in its own conversation must not be
+            # answered into.
             if (_is_tui_process(pane_cmd)
-                    and _TRUST_PROMPT_TEXT in _pane_tail(pane)):
+                    and _pane_shows_trust_gate(pane)):
                 run("tmux", "send-keys", "-t", target, "1", timeout=30)
                 time.sleep(1)
                 run("tmux", "send-keys", "-t", target, "Enter", timeout=30)
