@@ -1720,6 +1720,13 @@ def _ingest_commands(d, approvals, box_id, token, control):
     cursor, epoch, cursor_note = _load_ingest_cursor(d)
     healed = cursor is None
     params = {"since": cursor or 0, "limit": _INGEST_FETCH_LIMIT}
+    if epoch is not None:
+        # #947: incarnation claim — the box asserts the epoch it knows on
+        # every fetch so the plane can detect a stale-epoch box and force
+        # re-sync (detection itself is #848/#958 scope; the box only ever
+        # asserts what it knows). Omitted when the cursor has no epoch
+        # (first run) so a fresh box never claims a bogus epoch=0.
+        params["epoch"] = epoch
     url = (control.rstrip("/") + "/v1/boxes/"
            + urllib.parse.quote(box_id, safe="") + "/commands/pending?"
            + urllib.parse.urlencode(params))
@@ -1791,8 +1798,12 @@ def _ingest_commands(d, approvals, box_id, token, control):
             # and the epoch is carried back in the ack envelope for
             # diagnostics only. Two planes racing the same box would
             # interleave epochs the box cannot arbitrate — the box-side
-            # cursor stays monotonic regardless. The ingest never *sends*
-            # ?epoch= (passive adopter); the incarnation claim is #947.
+            # cursor stays monotonic regardless. The box asserts its epoch
+            # claim on every fetch (?epoch=, #947) so the plane can detect
+            # a stale-epoch box and force re-sync. Adoption is
+            # last-writer-wins (monotonic in the single-plane case); the
+            # box never writes plane state, so it cannot regress the
+            # plane's epoch.
             _ingest_say(f"epoch {epoch} -> {cmd_epoch} (plane moved on)")
             epoch = cmd_epoch
         if kind not in _HONORED_COMMAND_KINDS:

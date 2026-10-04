@@ -312,6 +312,19 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The box-side command ingest now asserts its command incarnation on every
+  queue fetch (#947): the plane can detect a box whose epoch is stale and
+  force it to re-sync (plane-side detection itself is #848/#958 scope)
+  instead of serving it commands from an old incarnation. A box with no
+  epoch yet (first run) sends no claim rather than asserting a bogus
+  zero. (#977)
+
+- Steering a job's TUI now verifies delivery with a stronger needle (#12):
+  the arrival check requires the message's first-line AND last-line text in
+  the input box, so a stale agent echo of an earlier steer can no longer
+  fake a delivery that never happened. Previously the check used only the
+  first 60 characters of the first line. (#977)
+
 - The job watchdog's trust-gate detection no longer fires on a live TUI's
   own conversation merely mentioning the trust question (#961): the gate is
   only recognized when the question line AND its option line ("Trust and
