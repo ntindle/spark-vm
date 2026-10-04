@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted phone-home journal sink (S4b-4, #999): the plane's durable
+  per-box journal is in place — connect and revocation/expiry closes are
+  journaled today (no payloads or credentials), and owners can read a
+  box's journal plus the unattributed upgrade-probe counter from a new
+  owner-only API endpoint — a box can never read its own journal. The
+  remaining emission sites (disconnect, hibernate wake, generation fence,
+  identity conflicts) land in S4b-1–3.
 - Hosted phone-home, S4b socket lifecycle decomposed into four buildable
   slices (#958): the plane Durable Object's remaining session logic —
   hello/identity binding plus the generation fence, command re-drive with
