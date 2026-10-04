@@ -345,6 +345,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   conversion stops under-reporting after a crash. The pass is idempotent
   and sends nothing. (#900, #898)
 
+- Contributor DX: the box-side filing loop now has an integration test
+  proving the legs compose — a proxy refusal filed by the real filing path
+  is picked up by the real uploader scan and POSTed to a contract-faithful
+  plane stub (dedupe-on-retry, plane-down degradation with backlog drain on
+  recovery), and an owner decision served as a plane approval-decision
+  command is stamped by the real ingest with plane provenance. The suite
+  also pins the cross-leg filing schema, so a future change to either side
+  breaks loudly instead of silently skipping proxy-filed refusals. (#TBD)
+
 ### Fixed
 
 - The box-side command ingest now asserts its command incarnation on every
