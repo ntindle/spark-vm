@@ -52,7 +52,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- Control-plane API reference, fix-up (#TBD): the consolidated endpoint
+- Control-plane API reference, fix-up (#985): the consolidated endpoint
   reference now documents the box-filing endpoint `POST
   /v1/boxes/{box_id}/approvals/file` (box token, own box only, write-only
   `201/200 {ok, aid, deduped}` — the phone-approval upload leg), notes that
