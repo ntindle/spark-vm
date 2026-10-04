@@ -74,7 +74,18 @@ Location carries a known secret value — raw, percent-encoded at any
 depth, or form-encoded (`+` for space) — to a
 non-allowlisted host are likewise refused at headers time (issue #94):
 the client's follow-up request would otherwise carry the real secret
-off-allowlist. Stated residuals: never-ending
+off-allowlist. Requests to non-allowlisted hosts carrying a real
+secret value are refused before anything is forwarded (issue #855):
+the target authority is refused pre-connect in `server_connect`
+(a token-subdomain secret leaks at DNS time, so the request-hook
+scan would be too late — it stays as the backstop), and in
+`request` the path+query under the same decode stages, request
+headers (verbatim; framing headers skipped; decoded HTTP Basic
+credentials on both authorization headers scanned), and the request
+body (text-decodable, bounded like the swap path) are scanned for
+known secret values. Stated residuals: over-cap and binary request
+bodies, which pass through unscanned (the over-cap pass is
+audited); never-ending
 chunked streams with an ordinary content type (indistinguishable from
 finite chunked bodies at headers time), HTTP/2 extended-CONNECT
 websockets (answer 200, no 101), images and binary bodies.
@@ -2406,6 +2417,106 @@ class SwapAddon:
                     self._audit_refused(host, m.group(1),
                                         "host-not-allowlisted")
 
+    def _request_secret_names(self, req, triples):
+        """Issue #855: placeholder names whose REAL secret value an
+        outbound request carries to a non-allowlisted host. The swap
+        never runs here, so the value would leave the box intact —
+        the #94/#860 redirect kills only close the headers-time
+        navigation vectors; a client-side redirect the proxy never
+        saw, a manually crafted request, or a token-subdomain exfil
+        all reach this hook.
+
+        Scans, in order:
+        - the request target authority (`pretty_host`) verbatim — a
+          secret smuggled in a token-subdomain leaks at DNS time, so
+          the authority is ALSO refused pre-resolution in
+          `server_connect`; this scan stays as the backstop (and
+          covers CONNECT-ordering cases);
+        - the request path+query under `_decode_stage_names` (the
+          same decode stages the #94 redirect gate uses) — query
+          strings are the classic exfil vector, and an open
+          redirector percent-encodes the value;
+        - request headers verbatim only (no decode stages): a decode
+          stage over header values would widen the false-positive
+          surface for a kill decision. Framing headers
+          (content-length, transfer-encoding) are never scanned —
+          the finding-70b hazard, response side: a whole-token TOTP
+          code matching a content-length number would kill an
+          innocent request. Decoded HTTP Basic credentials ARE
+          scanned on both `authorization` and `proxy-authorization`
+          (the same `_basic_decoded` helper the placeholder warn
+          path uses): the decoded form carries the real value, so a
+          match is a true positive, not a widening — and mitmproxy
+          forwards Proxy-Authorization upstream when the proxy
+          itself doesn't consume proxy-auth;
+        - the request body, when present and text-decodable, under
+          the same decode stages (form/JSON bodies are exactly what
+          exfil looks like). Bounded by `_MAX_SWAP_BODY_BYTES` like
+          the allowlisted swap path (finding 71): an over-cap body
+          passes through unscanned and is audited, and a binary
+          (non-UTF-8) body passes through silently — both stated
+          residuals, not solved risks.
+
+        Detection delegates to `_matched_secret_names`, i.e. through
+        the response scrubber itself: the smoke-test exclusion, the
+        finding-36 short-value floor, TOTP whole-token matching,
+        and `scrub: false` opt-outs are baked into the triples and
+        cannot drift apart from scrubbing.
+
+        Exceptions are NOT caught here: the caller (`request`)
+        fails closed on any detection-path error — a swallowed
+        exception would skip a scan surface while the request
+        proceeds, which is fail-open."""
+        safe_host = self._audit_target_host(
+            getattr(req, "pretty_host", "") or "", triples)
+        names = self._matched_secret_names(
+            getattr(req, "pretty_host", "") or "", triples)
+        for placeholder in self._decode_stage_names(
+                getattr(req, "path", "") or "", triples):
+            if placeholder not in names:
+                names.append(placeholder)
+        header_items = [(k, v) for k in req.headers.keys()
+                        for v in req.headers.get_all(k)]
+        for key, value in header_items:
+            kl = key.lower()
+            if kl in self._NEVER_SCRUB_RESPONSE_HEADERS:
+                continue
+            candidates = [value]
+            if kl in ("authorization", "proxy-authorization"):
+                decoded = self._basic_decoded(value)
+                if decoded:
+                    candidates.append(decoded)
+            for candidate in candidates:
+                for placeholder in self._matched_secret_names(
+                        candidate, triples):
+                    if placeholder not in names:
+                        names.append(placeholder)
+        body = getattr(req, "content", b"") or b""
+        if body:
+            if len(body) > _MAX_SWAP_BODY_BYTES:
+                # Finding 71: an attacker-sized body must not become a
+                # parsing DoS on the shared proxy; it passes through
+                # unscanned, and the pass is audited like the
+                # allowlisted swap path's over-cap pass.
+                log.warning("swap: request body %d bytes over scan cap "
+                            "for %s; passing through unscanned",
+                            len(body), safe_host)
+                self._audit_note(safe_host, "request-body",
+                                 "over-scan-cap")
+            else:
+                try:
+                    body_text = body.decode("utf-8")
+                except UnicodeDecodeError:
+                    # Binary body: a stated residual, like the
+                    # allowlisted path's binary-body pass-through.
+                    pass
+                else:
+                    for placeholder in self._decode_stage_names(
+                            body_text, triples):
+                        if placeholder not in names:
+                            names.append(placeholder)
+        return names
+
     # ------------------------------------------------------------------ SSRF
 
     async def _resolve_ips(self, host):
@@ -2502,6 +2613,39 @@ class SwapAddon:
                         host)
             self._audit_ssrf_refused(host, "-", "deny-list")
             server.error = "swap-proxy: egress refused (deny-list)"
+            return
+        # Issue #855: a secret smuggled in the target authority
+        # (token-subdomain) leaks at DNS time — the request()-hook
+        # scan runs after the upstream connect, so the authority is
+        # checked HERE, before _resolve_ips, while refusing still
+        # prevents any resolution or SNI from leaving the box. The
+        # request()-time authority scan stays as the backstop (and
+        # covers CONNECT-ordering cases). Refusal shape mirrors the
+        # deny-list path; the audit/warning name the credential,
+        # never the value, and the host field is scrubbed via the
+        # #94 helper (the raw host may BE the secret). Kill first,
+        # then warn/audit — the refusal must not depend on the audit
+        # write succeeding.
+        triples = None
+        try:
+            triples = self._secret_replacements()
+            auth_leaked = self._matched_secret_names(host, triples)
+        except Exception:
+            server.error = "swap-proxy: egress refused (authority-secret)"
+            log.exception("swap: authority-secret check failed; "
+                          "failing closed")
+            safe = (self._audit_target_host(host, triples)
+                    if triples is not None else host)
+            self._audit_note(safe, "authority-secret-refused",
+                             "check-error")
+            return
+        if auth_leaked:
+            server.error = "swap-proxy: egress refused (authority-secret)"
+            safe = self._audit_target_host(host, triples)
+            log.warning("swap: refusing egress to %s carrying real value "
+                        "of %s", safe, ", ".join(auth_leaked))
+            self._audit_note(safe, "authority-secret-refused",
+                             "real-value:" + ",".join(auth_leaked))
             return
         ips = await self._resolve_ips(host)
         if ips is None:
@@ -2611,6 +2755,42 @@ class SwapAddon:
         # here we only gate swapping on the hosts file.
         if not self._host_allowed(host):
             self._warn_if_placeholder(flow, host)
+            # Issue #855: a request carrying a REAL secret value to a
+            # non-allowlisted host is refused outright — the only
+            # existing request-side signal was the placeholder warn,
+            # which fires on the hsurr: form, never the real value.
+            # Detection-path exceptions fail closed: kill, don't
+            # forward. A killed flow forwards nothing, so the secret
+            # never leaves the box.
+            # Kill FIRST, then warn/audit: the refusal must not be
+            # conditional on the audit write succeeding (an audit
+            # exception before the kill would be fail-open). The
+            # warning and the audit name the credential
+            # (hsurr:<name>), never the value — finding 71's
+            # no-raw-value discipline holds, and the host field is
+            # scrubbed too: in the token-subdomain case the raw host
+            # IS the secret (`_audit_target_host`, the #94 helper).
+            triples = None
+            try:
+                triples = self._secret_replacements()
+                leaked = self._request_secret_names(req, triples)
+            except Exception:
+                flow.kill()
+                log.exception(
+                    "swap: request-secret check failed; failing closed")
+                safe = (self._audit_target_host(host, triples)
+                        if triples is not None else host)
+                self._audit_note(safe, "request-secret-refused",
+                                 "check-error")
+                return
+            if leaked:
+                flow.kill()
+                safe = self._audit_target_host(host, triples)
+                log.warning(
+                    "swap: refusing request to non-allowlisted host %s "
+                    "carrying real value of %s", safe, ", ".join(leaked))
+                self._audit_note(safe, "request-secret-refused",
+                                 "real-value:" + ",".join(leaked))
             return
         # The Host header is client-controlled: refuse all swaps unless
         # it names the host the request will actually egress to.
@@ -2867,6 +3047,61 @@ class SwapAddon:
             elif value in new_text:
                 new_text = new_text.replace(value, placeholder)
         return new_text
+
+    def _matched_secret_names(self, text, triples):
+        """Placeholder names (hsurr:<name>) whose known secret value
+        appears in `text`.
+
+        Detection runs THROUGH the response scrubber: each triple is
+        applied on its own, and a name is returned exactly when the
+        scrubber would have rewritten the text. Membership semantics
+        (whole-token TOTP regex, verbatim substring, the #88/#121
+        bare-rendering triples) therefore live in exactly one place —
+        `_scrub_text_value` — and the next scrubber change cannot
+        silently drift detection. Triple construction (the smoke-test
+        exclusion, the finding-36 short-value floor, `scrub: false`
+        opt-outs) is shared via `_secret_replacements`. Names are
+        returned, never values; deduped; longest-value first (the
+        triples arrive sorted that way).
+
+        Decode stages (fixpoint `unquote`, `unquote_plus`) are a
+        fail-closed detection-side widening in `_decode_stage_names`;
+        the verbatim response scrubber does not perform them."""
+        if not text:
+            return []
+        matched = []
+        for value, placeholder, whole_token in triples:
+            if self._scrub_text_value(
+                    text, [(value, placeholder, whole_token)]) != text:
+                matched.append(placeholder)
+        seen = set()
+        out = []
+        for placeholder in matched:
+            if placeholder not in seen:
+                seen.add(placeholder)
+                out.append(placeholder)
+        return out
+
+    def _decode_stage_names(self, text, triples):
+        """Placeholder names matched at any decoding the receiver may
+        apply: the raw text, then `unquote` to a fixpoint (finding
+        42's `_normalize_path` discipline, so double-encoded values
+        are caught), each stage tried both as-is and form-decoded
+        (`unquote_plus`: `+` is a space in query strings — the
+        `urlencode`/`quote_plus` output an open redirector emits).
+        Stages only widen detection in the fail-closed direction."""
+        names = []
+        seen = set()
+        stage = text or ""
+        while stage not in seen:
+            seen.add(stage)
+            for cand in (stage, urllib.parse.unquote_plus(stage)):
+                for placeholder in self._matched_secret_names(cand,
+                                                              triples):
+                    if placeholder not in names:
+                        names.append(placeholder)
+            stage = urllib.parse.unquote(stage)
+        return names
 
     @staticmethod
     def _stream_refusal_reason(resp):
@@ -3161,25 +3396,14 @@ class SwapAddon:
         The header scrubber rewrites verbatim secrets in Location, but
         an open redirector percent-encodes the value — verbatim
         matching misses it, and the client decodes it on the follow-up
-        request. Every decode stage is checked: the raw value, then
-        `unquote` to a fixpoint (finding 42's `_normalize_path`
-        discipline, so double-encoded values are caught), each stage
-        tried both as-is and form-decoded (`unquote_plus`: `+` is a
-        space in query strings — the `urlencode`/`quote_plus` output an
-        open redirector emits). Comparing the scrubbed rendering
-        (never the value itself) keeps whole-token TOTP semantics and
-        the smoke-test exclusion in one place. Stages only widen
-        detection in the fail-closed direction.
+        request. Detection delegates to `_decode_stage_names` (the raw
+        value, then `unquote` to a fixpoint, each stage tried both
+        as-is and form-decoded), whose membership test runs through
+        the response scrubber — so whole-token TOTP semantics and
+        the smoke-test exclusion live in one place. Stages only
+        widen detection in the fail-closed direction.
         """
-        seen = set()
-        stage = location or ""
-        while stage not in seen:
-            seen.add(stage)
-            for cand in (stage, urllib.parse.unquote_plus(stage)):
-                if self._scrub_text_value(cand, triples) != cand:
-                    return True
-            stage = urllib.parse.unquote(stage)
-        return False
+        return bool(self._decode_stage_names(location, triples))
 
     def _redirect_leak_target(self, resp, triples):
         """Issue #94: the non-allowlisted host a redirect leaks a
