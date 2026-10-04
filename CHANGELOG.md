@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   terminal record, and the return leg shipped with the filing record, the
   decision channel, and box-side ingest; among the gaps that remain: tenant
   routing, push retry, the first-approval summons, alert fan-out, and the
-  sentinel audit leg). (#TBD)
+  sentinel audit leg). (#974)
 
 - A new gap analysis maps the missing plane-hosted push leg of the hosted
   phone-approval lane (#971): the filing, record, decide, and
