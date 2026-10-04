@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- A new gap analysis maps the missing plane-hosted push leg of the hosted
+  phone-approval lane (#TBD): the filing, record, decide, and
+  decision-delivery legs are all shipped, but the control plane has no push
+  sender — its only "push" mention is a comment admitting the approval TTL
+  is "a race against push" it cannot win. The analysis pins the trust model
+  (box-to-plane-to-device only; the tenant box never holds a push
+  credential; only plane-observed events can page) and files the build
+  slices: the plane Web Push sender service, the owner subscription surface,
+  the event-to-push mapping with anti-spam bounds, and payload discipline
+  for box-controlled text. (#TBD)
 - The fleet dashboard now shows each box's pending action approvals with
   approve/deny taps (#954): the owner can see and decide agent actions from
   the box detail view instead of raw API calls. Decisions are write-once
