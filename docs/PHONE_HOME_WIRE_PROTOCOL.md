@@ -76,7 +76,7 @@ none do today.
 | `welcome` | DO→box | `box_id`, `accepted_generation`, `server_time` |
 | `ping` / `pong` | both | `generation`, `ts` (unix seconds) |
 | `close` | both | `generation`, `code`, `reason` (human-readable, never a secret; optional) |
-| `command_ack` | box→DO | `generation`, `seq`, `epoch` — reserved; S4/S5 choose socket vs HTTPS acks per §3.3 |
+| `command_ack` | box→DO | `generation`, `seq`, `epoch` — S5b decision (§3.3): the box acks over the socket; the HTTPS `/commands/ack` endpoint stays as the fetch path's ack; the DO consumes both into the same `acked_watermark` |
 
 Control frames MUST be ≤ 4 KB. Unknown `type` values are ignored
 (forward compatibility), except `hello` shape violations, which close
@@ -90,7 +90,7 @@ new class needs a row here before any frame of its type may be sent.
 
 | Class | `type` values | Owner | Notes |
 |---|---|---|---|
-| control | `hello`, `welcome`, `ping`, `pong`, `close`, `command_ack` | #847 (this doc) | §3.1; `command_ack` reserved — S4/S5 choose socket vs HTTPS per §3.3 |
+| control | `hello`, `welcome`, `ping`, `pong`, `close`, `command_ack` | #847 (this doc) | §3.1; `command_ack` rides the socket per the S5b decision (§3.3) |
 | command | `command` | #848 | Reserved shape §3.3; payload semantics are #848's lane |
 | terminal stream | `stream_open`, `stream_data`, `stream_close` | #853 / #919 | Real-time, lossy, ordered-per-session, never acked; stream bytes MUST NEVER ride the at-least-once command queue (G53.2) |
 | input | `input` | #853 / #919 | Dedicated input frame class (G53.2(a)): owner-typed bytes and programmatic input; approval is the consent plane (#849), the bytes ride here |
@@ -109,9 +109,17 @@ never inject bytes into a live session.
   payloads are opaque to the plane (≤ 16 KB, verbatim).
 - The same table/seq/epoch semantics as `docs/DURABLE_COMMANDS.md` are
   transport-agnostic: the socket is a faster carrier for the same queue,
-  not a second queue. Acks still flow (as `command_ack` frames — now a
-  registered control type, §3.1 — or the existing HTTPS ack endpoint;
-  S4/S5 choose; the queue contract is unchanged either way).
+  not a second queue.
+- **Ack decision (S5b, #976, box client):** `command_ack` frames ride the
+  socket. The ack goes out on the same authenticated session that
+  received the command (no extra TLS handshake per command), carries the
+  session's `generation` so the DO can reject acks from a stale session
+  by the same fence, and lands directly in the queue-owning DO instead
+  of traveling through the durable table first. The existing HTTPS
+  `/commands/ack` endpoint stays as the fetch path's ack — the DO
+  consumes both into the same `acked_watermark`. Ack-loss recovery is
+  identical either way: the command redelivers and the box dedupes by
+  `(box_id, seq)`. The queue contract is unchanged either way.
 - **Re-drive rendezvous:** on (re)bind the DO re-drives from the durable
   queue's `acked_watermark` — it owns the queue, so it knows where to
   resume pushing; the box dedupes redeliveries by `(box_id, seq)` per
@@ -275,6 +283,6 @@ S6 verifies, against a live plane, on this contract:
 ## 12. Open questions for S4/S5 (not blocking this contract)
 
 - Exact upgrade path spelling (plane workspace).
-- Whether acks ride the socket (`command_ack` frames, now a registered
-  control type) or stay HTTPS — the queue contract is identical either
-  way (§3.3).
+- Ack transport — DECIDED by S5b (#976): `command_ack` frames ride the
+  socket (rationale in §3.3); S4 implements the DO-side consume half.
+  (Was: socket vs HTTPS, queue contract identical either way.)

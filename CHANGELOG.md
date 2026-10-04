@@ -76,10 +76,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
   close-code reconnect policy (revoked → no reconnect loop, expired →
   reconnect with the current token, stale-generation → adopt and bump
   epoch, going-away → ≥60 s backoff). The #864 heartbeat stays the only
-  liveness signal; command frames and socket acks ride in S5b (#976).
-  Note: the plane half (#958) is not built yet, so the daemon retries
-  `upgrade failed` with backoff until it lands — validated against a stub
-  harness only. (#975)
+  liveness signal. Note: the plane half (#958) is not built yet, so the
+  daemon retries `upgrade failed` with backoff until it lands — validated
+  against a stub harness only. (#975)
+
+- `spark-pair.py phone-home`: socket command frames + `command_ack`s (#976,
+  S5b) — the daemon now executes durable commands pushed over the open
+  channel through the same ingest path as the HTTPS fetch loop
+  (execute-before-ack, redeliveries deduped), and acks them back over the
+  socket instead of a separate HTTPS call. Untrusted frames (wrong
+  generation, malformed, oversized, unknown kinds) are logged loudly and
+  never executed; a missing sequence number holds the queue until the
+  plane re-drives it. (#TBD)
 
 - The docs index now covers the two newest hosted-product gap analyses —
   the box-to-plane filing-upload leg (#876) and the missing plane push
