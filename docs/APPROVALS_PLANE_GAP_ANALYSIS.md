@@ -396,7 +396,7 @@ not to a repo commit). Honesty rules apply as before.
   `docs/DURABLE_COMMANDS.md`'s Command kinds registry: `approval_decision`
   with payload (`aid`, `decision`, `decision_seq`, `idempotency_key`) —
   `box_id` rides the command row, not the payload. `decision_seq` is a
-  per-approval write-once sequence, explicitly not the channel's
+  per-approval write-once sequence, distinct from the channel's
   incarnation epoch (shipped PR #943).
 - **G49.3 (#874) — box-side ingest: CLOSED.** `pairing/spark_pair.py
   ingest` runs the fetch-execute-ack loop over the durable command queue
@@ -411,8 +411,9 @@ not to a repo commit). Honesty rules apply as before.
   then the worker deployed), S3 the periodic `spark_pair.py
   upload-filings` uploader (#953, PR #957), S4 the dashboard
   pending+decide surface (#954, PR #963), and the S5 in-repo acceptance
-  slice (PR #983 — a six-test filing→upload→record→decision→stamp
-  chain against a contract-faithful plane stub) are all merged. Open:
+  slice (PR #983 — a five-test filing→upload→record→decision→stamp
+  chain plus a sixth schema-pin test, all against a contract-faithful
+  plane stub) are all merged. Open:
   the live-plane S5 acceptance — a proxy refusal creating a plane
   record, an owner tap, and the decision stamping into the box, end to
   end against the deployed plane.
@@ -432,9 +433,10 @@ not to a repo commit). Honesty rules apply as before.
 ### Honesty note
 
 The honest gap in this doc's original 2026-09-21 check — "the plane is
-a dead end for the agent" — is now closed twice over: the box-local
-plane's return leg (#133/H18, #511/#546) and the hosted loop (filing
-#876 S1–S4 + in-repo S5, the plane record #872, the decision channel
-#873, box-side delivery #874) are all built. What remains is
-acceptance, not construction: the live-plane S5 proof on #876, the
-tenant dimension (#69), and the phone-delivery substrate.
+a dead end for the agent" — is now closed for the hosted approvals
+loop itself (filing #876 S1–S4 + in-repo S5, the plane record #872,
+the decision channel #873, box-side delivery #874): on that loop, what
+remains is acceptance, not construction — the live-plane S5 proof on
+#876. The tenant dimension (#69) and the phone-delivery substrate (the
+push lane under #967, the summons in #428, alert fan-out in #797/G23)
+are still under construction, not acceptance.
