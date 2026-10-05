@@ -414,6 +414,131 @@ wrong-generation frame is logged loudly and never acked, and a seq gap
 holds the prefix until the DO's re-drive heals it — the same
 never-advance-past-unacked invariant as the HTTPS cursor.
 
+## Box-side ensemble (#1021)
+
+The five box-side processes above are the steady state — not a stepping
+stone to one supervised box daemon. Their failure semantics are
+incompatible (a cron tick's exit 1 means *retry next minute*; the daemon's
+exit 1 means *human attention, never restart*), so they stay separate by
+decision (`docs/BOXD_PROCESS_SHAPE_GAP_ANALYSIS.md` D19). This section is
+the operator's single surface for the ensemble: what runs, how to install
+it, what healthy looks like, and what to alert on.
+
+### Inventory
+
+All five entrypoints live in `spark_pair.py` and share one state dir
+(`SVM_PAIR_DIR` or `~/.config/spark-pair`, 0700); every lock file is
+0600, forced on every open. The timer inventory is unstaggered by
+decision (D22): three Python startups at the top of every minute, one
+hourly.
+
+| # | Entrypoint | Shape / schedule | Lock | Log | State files | Failure semantics |
+|---|---|---|---|---|---|---|
+| 1 | `rotate --auto` (#846) | one-shot, hourly cron (`0 * * * *`) | `.rotate.lock` — flock EX blocking (serializes a manual `rotate` against the cron job) | cron shell redirect `/var/log/spark-rotate.log` | `enrollment.json` (0600, atomic temp+rename save) | exit 1 on any failure — transport errors, 401 (re-pair the box: `request` + `redeem`), 403 (check the box clock and retry, token untouched), or unreadable state; quiet only on the skip path; cron retries next hour |
+| 2 | `heartbeat` (#864) | one-shot, every-minute cron (`* * * * *`) | `.heartbeat.lock` — flock EX blocking (a slow plane can't stack overlapping invocations) | stderr + `heartbeat.log` in the state dir — failures only, append-only | `last_heartbeat.json` (last tick the plane confirmed) | exit 0 only on the plane's own `{ok:true}`; every other outcome exits 1 |
+| 3 | `ingest` (#874) | one-shot, every-minute cron (`* * * * *`) | `.ingest.lock` — flock EX blocking, held across the whole pass incl. the cursor save | stderr + `ingest.log` in the state dir — failures only, append-only | `commands_cursor.json` `{cursor, epoch}`, healed from the plane's `acked_watermark` | exit 0 only when every due command was consumed and nothing needs operator attention; transient local failures are *not* acked — the run stops at them and they redeliver next tick; permanently-unprocessable commands are acked-and-logged — tenant-scoped items flag operator attention (exit 1), unknown kinds drain quietly (exit 0) |
+| 4 | `upload-filings` (#953) | one-shot, every-minute cron (`* * * * *`) | `.upload-filings.lock` — flock EX blocking | stderr + `upload-filings.log` in the state dir — failures only, append-only | none (reads `confirm/pending/`) | exit 0 only when every pending filing was uploaded, already on the plane (deduped), or locally expired; a 401 aborts the pass — a dead token poisons every filing |
+| 5 | `phone-home` (#959/#976) | **daemon** under systemd — never cron | `.phone-home.lock` — flock EX, non-blocking, held for the daemon's life (a second instance exits instead of forking the generation counter) | `phone_home.log` in the state dir — connection-lifecycle events only, never per-keepalive pings | `phone_home_generation.json` (crash-safe durable generation counter) | exit 0 = clean stop on SIGTERM/SIGINT (no restart); exit 1 = deliberate human-attention exit (revoked token, protocol errors — the supervisor never restarts these); exit 2 = unexpected crash (uncaught exception — restarts under `on-failure`) |
+
+Known rough edges the checklist works around (not gaps in this doc):
+the failure logs are append-only and unbounded — bound them with
+logrotate or your aggregator until in-code bounding lands (#1020); a
+daemon restart resets the reconnect backoff to 1 s (accepted residual,
+#1022).
+
+### Install checklist (fresh box)
+
+1. Pair and redeem the box (see The flow above).
+2. Deploy `spark-pair.py` to its path on the box.
+3. Install the four cron lines under the box-service user (the same user
+   that owns the approvals dir and the confirm store — the ingest and
+   upload-filings ticks enforce the box-service DAC ownership discipline):
+
+```
+0 * * * * /path/to/spark-pair.py rotate --auto >>/var/log/spark-rotate.log 2>&1
+* * * * * /path/to/spark-pair.py heartbeat >>/var/log/spark-heartbeat.log 2>&1
+* * * * * /path/to/spark-pair.py ingest >>/var/log/spark-ingest.log 2>&1
+* * * * * /path/to/spark-pair.py upload-filings >>/var/log/spark-upload-filings.log 2>&1
+```
+
+4. Install the systemd unit from the phone-home section above as
+   `/etc/systemd/system/spark-phone-home.service`, then
+   `systemctl daemon-reload` and `systemctl enable --now spark-phone-home.service`.
+5. Verify per the next section.
+
+### Verification (healthy box)
+
+- The state dir holds `enrollment.json` (0600) plus the lock, log, and
+  cursor files; `last_heartbeat.json` is fresh — a value older than a few
+  minutes means heartbeats are failing (the fleet dashboard marks a box
+  stale after 300 s).
+- The failure logs are silent: `heartbeat.log`, `ingest.log`, and
+  `upload-filings.log` grow only on failure, so new lines mean something
+  to read. Success is quiet — three silent cron ticks every minute is the
+  healthy pattern, not a monitoring gap.
+- The daemon is up: `systemctl is-active spark-phone-home.service`
+  reports active (running), and the last line of `phone_home.log` is a
+  normal lifecycle event (`connecting (generation N) to …`,
+  `socket lost — reconnecting with backoff …`, or
+  `phone-home starting for box …`) — not a repeated `revoked`,
+  `superseded-generation`, or crash line. (Keepalive pings are answered
+  silently and never appear in the log.)
+- The token is fresh: `enrollment.json`'s `token_expires_at` is well in the
+  future (a 401 in the rotate output means re-pair, not retry).
+
+### Alerting hooks (page vs ignore)
+
+- **Page:** repeated non-zero exits on any cron tick — every tick's
+  stderr is redirected into its shell log (`/var/log/spark-rotate.log`,
+  `/var/log/spark-heartbeat.log`, …) and every failure is appended to the
+  state dir's `*.log` files, so steadily growing lines in any of those is
+  the page trigger (an operator who wants cron mail instead can set
+  `MAILTO=` with a no-redirect cron variant). `heartbeat.log` failures
+  sustained past the dashboard's 300 s staleness window mean the box is
+  offline to the fleet. **Page:** the daemon's unit entering a restart
+  loop — the unit's comment says alert on repeated restarts instead of
+  restarting forever.
+- **Human, not a restart:** daemon exit 1 (revoked token,
+  `superseded-generation`, identity-mismatch / protocol errors / unknown
+  close codes, or enrollment / rotate failures) — the supervisor stays
+  dead on purpose; re-pairing or a code fix is the path, never a blind
+  restart.
+- **Ignore:** quiet minute ticks (success is silent by design); a single
+  one-off failure line with a clean next tick (transient plane blips heal
+  on the next tick); a 1 s initial backoff right after a daemon restart
+  (in-memory backoff resets — accepted until #1022).
+- **Liveness is heartbeat-only.** `docs/PHONE_HOME_WIRE_PROTOCOL.md` §8
+  pins this: the plane's last-confirmed-heartbeat timestamp is the ONLY
+  freshness signal the dashboard may use; the socket MUST NOT write or
+  refresh it. A connected socket never makes a box "live" and a dropped
+  socket never makes it "dead" beyond what the heartbeat already says.
+  Never "fix" monitoring by watching the socket or the daemon's systemd
+  state — a wedged-but-connected box is exactly the fake-liveness class
+  the heartbeat contract was built to refuse.
+
+### Reconciling already-deployed units (F-BD-7)
+
+Boxes provisioned from the old README unit — before `RestartPreventExitStatus=1`
+and the exit-code split — keep the old behavior until reconciled: deliberate
+exit-1 paths (notably revoked tokens) restart-loop against a dead token
+until the start limit trips, and crashes exit 1 like everything else.
+To reconcile:
+
+1. Diff the installed unit against the current unit block above — look for
+   `RestartPreventExitStatus=1` and the exit-code comment.
+2. Re-apply the current unit file; `systemctl daemon-reload`.
+3. Replace `spark-pair.py` with the current payload — the exit-code split
+   lives in code, and an old payload maps crashes to exit 1, which the new
+   unit would deliberately never restart.
+4. Restart the daemon where safe (`systemctl restart spark-phone-home.service` —
+   a clean SIGTERM is exit 0, and the reconnect backoff absorbs the flap).
+5. Watch `phone_home.log` for a clean reconnect lifecycle line and
+   `last_heartbeat.json` for uninterrupted minute ticks.
+
+Payload lifecycle (updates, versioning, rollback) is deliberately owned by
+the claim→provision orchestrator (#906) — until then this checklist is the
+stopgap, and the fleet must stay small.
+
 ## Security properties
 
 - **No self-registration.** The old register endpoint is gone (404). A box
