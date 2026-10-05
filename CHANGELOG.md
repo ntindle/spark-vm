@@ -500,7 +500,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   and the test failed on main. The test now anchors to real time and
   its refusal-text assertion drains earlier stderr first. No product
   behavior changed — the reinstatement path itself was correct.
-  (#TBD)
+  (#1052)
 
 - The fleet release-gate sync loop hardens its delivery path (#1009): a
   failed gate-file install no longer leaves stray temp files on the box
