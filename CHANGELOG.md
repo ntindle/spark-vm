@@ -76,7 +76,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   actually engages within 10 seconds instead of trusting the session start
   — a dead first turn marks the job blocked, never active, keeps the turn
   id, failure reason, and an event journal in the job record for diagnosis,
-  and the watchdog refuses to resurrect it. (#TBD)
+  and the watchdog refuses to resurrect it. (#1025)
 - Hosted phone-home, S4b socket lifecycle decomposed into four buildable
   slices (#958): the plane Durable Object's remaining session logic —
   hello/identity binding plus the generation fence, command re-drive with
