@@ -1526,7 +1526,15 @@ def _sort_key(event):
     # Consumers order by (emitted_at, event_id) (§2); box clocks are
     # never trusted for ordering, and the dedup id is the tiebreak that
     # keeps re-collection from reordering history.
-    return (str(event.get("emitted_at") or ""),
+    # Finding #1010: emitted_at is compared by parsed timestamp, not
+    # lexically — a journal mixing ISO strings and epoch-shaped values
+    # misordered the per-box series under the old str() key (any epoch
+    # int sorts before any "20xx" ISO string lexically, regardless of
+    # actual time). Unparseable or missing timestamps sort last,
+    # matching the retention policy's "never drop what it cannot date".
+    parsed = _parse_ts(event.get("emitted_at"))
+    return (parsed is None,
+            parsed.timestamp() if parsed is not None else 0.0,
             str(event.get("event_id") or ""))
 
 
