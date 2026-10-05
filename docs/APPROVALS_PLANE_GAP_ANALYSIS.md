@@ -394,9 +394,10 @@ not to a repo commit). Honesty rules apply as before.
 - **G49.2 (#873) — approval-decision command type: CLOSED.** The first
   honored kind on the durable channel is pinned in
   `docs/DURABLE_COMMANDS.md`'s Command kinds registry: `approval_decision`
-  with (box_id, aid, decision, decision_seq, idempotency_key) —
-  `decision_seq` is a per-approval write-once sequence, explicitly not
-  the channel's incarnation epoch (shipped PR #943).
+  with payload (`aid`, `decision`, `decision_seq`, `idempotency_key`) —
+  `box_id` rides the command row, not the payload. `decision_seq` is a
+  per-approval write-once sequence, explicitly not the channel's
+  incarnation epoch (shipped PR #943).
 - **G49.3 (#874) — box-side ingest: CLOSED.** `pairing/spark_pair.py
   ingest` runs the fetch-execute-ack loop over the durable command queue
   and stamps plane approve/deny/expire decisions into confirmd's
@@ -410,7 +411,7 @@ not to a repo commit). Honesty rules apply as before.
   then the worker deployed), S3 the periodic `spark_pair.py
   upload-filings` uploader (#953, PR #957), S4 the dashboard
   pending+decide surface (#954, PR #963), and the S5 in-repo acceptance
-  slice (PR #983 — a five-test filing→upload→record→decision→stamp
+  slice (PR #983 — a six-test filing→upload→record→decision→stamp
   chain against a contract-faithful plane stub) are all merged. Open:
   the live-plane S5 acceptance — a proxy refusal creating a plane
   record, an owner tap, and the decision stamping into the box, end to
