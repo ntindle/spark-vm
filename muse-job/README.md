@@ -49,10 +49,12 @@ Redeploy: copy the files over, then reinstall the plugin with `--force`
 
 ### Stillborn-spawn detection (issue #994)
 
-A spawn that returns from `turn/start` has only proven the session
-started — not that the agent engaged. The real #994 failure was the
-serve host cancelling the first turn server-side within ~1ms of start,
-after which the job sat `active` forever with nothing working.
+A spawn that returns from `turn/start` has only proven the turn started
+— not that the agent engaged. The real #994 failure was the serve host
+cancelling the first turn server-side within ~1ms of start, after which
+the job sat `active` forever with nothing working. This guard applies to
+the default MSP transport only — the legacy `--tmux` path has no
+first-turn watch.
 
 `spawn` therefore verifies the first turn actually engages before it
 declares success:
@@ -80,6 +82,9 @@ declares success:
   path, and returns without touching the job. Without the
   short-circuit, the cancelled turn would replay to `active` and the
   watchdog would resurrect the zombie on its next pass.
+- The 10-second watch is paid on every healthy spawn (the loop exits early
+  on a terminal event) — a bounded one-time tax; a stranded `active` job
+  costs far more.
 
 To retry a stillborn spawn: remove the job dir (or use a new slug) and
 `muse-job spawn <slug> --tmux` — the first-turn cancellation is an
