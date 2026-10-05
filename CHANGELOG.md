@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Approvals-plane gap analysis refreshed (#1038): the four control-plane
+  gaps filed in October for the hosted phone-approval flow are now
+  recorded as shipped — the plane-side approval record (#872), the
+  approval-decision channel kind (#873), and box-side decision ingest
+  (#874) all landed, and the box→plane filing upload (#876) is built
+  through the box uploader, the dashboard decide surface, and in-repo
+  acceptance; only live-plane acceptance stays open. This is a
+  documentation catch-up — no product behavior changed.
+
 - Hosted terminal-stream wire protocol (#919): the contract for live
   terminal output from a box through its phone-home connection — lossy
   ordered output chunks, a dedicated input channel that carries both

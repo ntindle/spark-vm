@@ -314,6 +314,9 @@ that read, not to a repo commit). Honesty rules apply as before.
 
 ### New gaps for #849 (filed this turn; G49.4 on review)
 
+*(2026-10-05: all four G49 gaps shipped — reconciled in the 2026-10-05
+refresh below. This section is kept as the 2026-10-02 filing record.)*
+
 - **`[BUILD]` G49.1 (+HOSTED tenant scope) — no plane-side approval
   record.** Approvals exist in exactly two places: box-local confirmd
   files (single-tenant, #69) and plane pairing approvals (one-shot
@@ -369,3 +372,71 @@ that read, not to a repo commit). Honesty rules apply as before.
 - Phone delivery: `docs/PUSH_NOTIFICATIONS.md`,
   `docs/ALERT_PUSH_FANOUT_SPEC.md`, `docs/FIRST_APPROVAL_SUMMONS.md`
   (#428); plane fan-out is #797/G23.
+
+## 2026-10-05 refresh — the 2026-10-02 "New gaps for #849" are reconciled
+
+The 2026-10-02 refresh filed G49.1–G49.4 as open. Every claim in this
+section was re-verified against the repo tree at `d7a00cc` (2026-10-05)
+and the four issues' states read from GitHub on 2026-10-05 (~02:4x CDT);
+plane claims follow the 2026-10-02 convention (the control-plane Worker
+lives outside this repo — plane claims are pinned to the deployed read,
+not to a repo commit). Honesty rules apply as before.
+
+### What's closed since 2026-10-02
+
+- **G49.1 (#872) — plane-side action-approval record: CLOSED.** The
+  protocol shipped as `docs/APPROVALS_PLANE_PROTOCOL.md` (PR #916): the
+  record shape, the owner-key endpoints, and the "a box cannot decide
+  its own approvals" 401 boundary. `docs/CONTROL_PLANE_API_REFERENCE.md`
+  consolidates the surface (the reference itself shipped in #925, stale
+  shipped-claims fixed in #985). The only endpoint a box token can touch
+  is the G49.4 S2 file exception — write-only, `owner_id` stored NULL.
+- **G49.2 (#873) — approval-decision command type: CLOSED.** The first
+  honored kind on the durable channel is pinned in
+  `docs/DURABLE_COMMANDS.md`'s Command kinds registry: `approval_decision`
+  with payload (`aid`, `decision`, `decision_seq`, `idempotency_key`) —
+  `box_id` rides the command row, not the payload. `decision_seq` is a
+  per-approval write-once sequence, distinct from the channel's
+  incarnation epoch (shipped PR #943).
+- **G49.3 (#874) — box-side ingest: CLOSED.** `pairing/spark_pair.py
+  ingest` runs the fetch-execute-ack loop over the durable command queue
+  and stamps plane approve/deny/expire decisions into confirmd's
+  answered/consumed store with `decision_origin: "plane"` — the parked
+  agent sees the same Decision legs it sees for local approvals
+  (shipped PR #944).
+- **G49.4 (#876) — box→plane filing upload: S1–S4 + the in-repo S5
+  slice shipped; the issue stays OPEN on the live-plane half of S5
+  acceptance.** S1 gap analysis (PR #955), S2 the plane file endpoint
+  (#952, shipped in PR #956 — forward D1 migration applied live first,
+  then the worker deployed), S3 the periodic `spark_pair.py
+  upload-filings` uploader (#953, PR #957), S4 the dashboard
+  pending+decide surface (#954, PR #963), and the S5 in-repo acceptance
+  slice (PR #983 — a five-test filing→upload→record→decision→stamp
+  chain plus a sixth schema-pin test, all against a contract-faithful
+  plane stub) are all merged. Open:
+  the live-plane S5 acceptance — a proxy refusal creating a plane
+  record, an owner tap, and the decision stamping into the box, end to
+  end against the deployed plane.
+
+### What still holds (open, referenced not duplicated)
+
+- #849 itself stays open as the hosted phone-approvals vision tracker;
+  the push lane under it is still building (event-taxonomy analysis
+  #969, validated sender crypto; the sender build's open slices are
+  #988 and #990 — #989's send-path transport shipped via #995 as
+  `hosted/push_sender.py`; #967 still open).
+- #69 (per-tenant approval routing), #194 (multi-replica atomicity),
+  #74 (push retry, H14a), #428 (first-approval summons), #797/G23
+  (alert fan-out into the H14 push plane), #798–#800 (audit →
+  sentinel feed) — unchanged from the 2026-10-02 refresh.
+
+### Honesty note
+
+The honest gap in this doc's original 2026-09-21 check — "the plane is
+a dead end for the agent" — is now closed for the hosted approvals
+loop itself (filing #876 S1–S4 + in-repo S5, the plane record #872,
+the decision channel #873, box-side delivery #874): on that loop, what
+remains is acceptance, not construction — the live-plane S5 proof on
+#876. The tenant dimension (#69) and the phone-delivery substrate (the
+push lane under #967, the summons in #428, alert fan-out in #797/G23)
+are still under construction, not acceptance.
