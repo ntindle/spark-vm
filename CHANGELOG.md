@@ -493,6 +493,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The fleet release-gate sync loop hardens its delivery path (#1009): a
+  failed gate-file install no longer leaves stray temp files on the box
+  (cleanup now runs on failure too, and on failed transfers), and two
+  overlapping scheduled syncs no longer race — the second one exits
+  loudly instead. (#1046)
+
 - The hosted push sender now bounds the push-service response read with a
   total 30-second deadline (#1039): previously only a per-read timeout
   applied, so a push service answering very slowly could hold a send
