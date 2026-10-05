@@ -161,8 +161,9 @@ the truncation rule is documented in the response schema, not hidden.
   response. The two unbounded canonical-row lists
   (`/fleet/events?box=<id>`, `/fleet/alerts`) refuse with **413** past
   50,000 rows (`_MAX_EVENT_ROWS` / `_MAX_ALERT_ROWS` in `fleet/api.py`
-  — a guardrail with two orders of magnitude of headroom over a
-  plausible 90-day-retained estate, not a quota). The 413 body is JSON
+  — a guardrail, not a quota: ~5x of headroom over a busy
+  90-day-retained estate for the per-box events bound; operator-fired
+  alerts sit far further below the journal-wide cap). The 413 body is JSON
   (`error`, `cap_rows`, `total_rows`, `hint`); there is deliberately no
   `Retry-After` header — waiting never shrinks the journal. The
   per-box series shape of `/fleet/events` is one row per box and is

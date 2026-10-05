@@ -75,14 +75,18 @@ _WAVES_UNAVAILABLE = ("unavailable until G15 S2 (rollout envelope null on "
 # canonical-row lists that can grow without bound; anything past the
 # cap fails closed with 413 instead of being built, serialized, and
 # written. The check runs before row-mapping and serialization, so the
-# over-cap path pays only the (retention-bounded) journal load and sort.
+# over-cap path pays only the (retention-bounded) journal loads and
+# sort — never row-mapping, serialization, or the write.
 #
 # 50,000 is a guardrail, not a quota: the journals are 90-day
-# retention-bounded (events.prune_events), so a plausible estate (100
-# boxes x 100 events/day x 90 days ~ 900k events total, ~9k per box;
-# alerts are operator-fired, far fewer) sits two orders of magnitude
-# below the cap. If a legitimate estate ever trips it, that is the
-# signal to land S2 paging (#795 OQ5), not to raise the cap quietly.
+# retention-bounded (events.prune_events). A busy estate (100 boxes x
+# 100 events/day x 90 days) lands ~9,000 events per box against the
+# 50,000 per-box events cap (~5x of headroom); alerts are
+# operator-fired and sit far below the journal-wide alerts cap. The
+# bound exists to stop a runaway journal from wedging the server, not
+# to ration legitimate estates. If a legitimate estate ever trips it,
+# that is the signal to land S2 paging (#795 OQ5), not to raise the
+# cap quietly.
 #
 # Residuals, named not punted: per-row free-text length (event ``note``,
 # alert ``detail``) is unbounded, so the cap bounds rows, not bytes —
@@ -94,26 +98,25 @@ _MAX_EVENT_ROWS = 50000
 _MAX_ALERT_ROWS = 50000
 
 
-def _over_cap_body(endpoint, total, cap, remedies):
+def _over_cap_body(endpoint, total, cap, hint):
     """413 body for the #1033 response bound.
 
     Deliberately no Retry-After header: waiting never shrinks the
     journal, so a retry-after would be a lie. The hint names the real
-    remedies — narrow the request, prune the journal, or land S2
-    paging.
+    remedies — prune the journal or land S2 paging.
     """
     return {
         "error": ("too many %s rows (%d) for one S1 response "
                   "(cap %d rows)" % (endpoint, total, cap)),
         "cap_rows": cap,
         "total_rows": total,
-        "hint": remedies,
+        "hint": hint,
     }
 
 
-_EVENT_OVER_CAP_HINT = ("narrow with ?box=<id>, prune the journal with the "
-                        "retention policy (fleet/events.py: prune_events), "
-                        "or land S2 paging (#795 OQ5)")
+_EVENT_OVER_CAP_HINT = ("prune the journal with the retention policy "
+                        "(fleet/events.py: prune_events), or land S2 "
+                        "paging (#795 OQ5)")
 _ALERT_OVER_CAP_HINT = ("prune the alert journal with the retention policy "
                         "(fleet/events.py: prune_events), or land S2 paging "
                         "(#795 OQ5)")
