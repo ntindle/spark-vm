@@ -1715,8 +1715,15 @@ def test_cli_reinstate_and_diagnose(tmp_path, monkeypatch, capsys):
 
     # Live-token refusal through the CLI without --force; --force
     # retires the live token and the row rejoins confirmed.
-    clock2 = MutClock()
-    clock2.advance(hours=25)  # the §4 cap is per 24h rolling window
+    # clock2 is anchored to real-now, NOT the fixed NOW fixture: the
+    # operator CLI below builds its own WaitlistService on the real
+    # clock, and lookup_invite_token classifies the token against that
+    # clock (issued + 14d TTL). A NOW-based fixture is a time bomb —
+    # NOW + 25h + 14d passed on 2026-10-05 ~13:00 UTC, after which the
+    # live token reads "expired" instead of "ok" (issue #1051). The
+    # §4 3/24h cap needs no manual advance: wave1's sends went out at
+    # NOW (2026-09-20), far outside clock2's trailing 24h window.
+    clock2 = MutClock(start=datetime.now(timezone.utc))
     svc2 = wd.WaitlistService(data, KEY, "https://waitlist.example.invalid",
                               clock=clock2)
     svc2.submit_form({"owner_email": "b@example.com"}, "127.0.0.1")
@@ -1730,6 +1737,10 @@ def test_cli_reinstate_and_diagnose(tmp_path, monkeypatch, capsys):
                           wave="wave2", count=2)
     monkeypatch.delenv("WAITLIST_CLAIM_LIVE", raising=False)
     del svc2
+    # Drain earlier refusal stderr: the LIVE assertion must test exactly
+    # this refusal's text, not the accumulated stderr of the three
+    # refusal cases above it.
+    capsys.readouterr()
     with pytest.raises(SystemExit) as exc:
         wi.main(["--reinstate-confirmed", "--entry-id", eid2,
                  "--reason", "bounced"])
