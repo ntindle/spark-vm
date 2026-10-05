@@ -3577,10 +3577,26 @@ def _watch_msp_job(slug, job, events, now):
         term = stillborn.get("terminal")
         label = term if term in ("cancelled", "interrupted", "failed",
                                  "completed", "unknown") else "unknown"
+        # Issue #1029: the advice must mirror the two-path retry the
+        # TurnStillbornError and the README stillborn-spawn section pin.
+        # A bare "retry spawn with --tmux" is actively wrong on the same
+        # slug: _spawn_prepare refuses a slug whose job dir still exists,
+        # so the operator needs the close-first (and dir removal) path.
         events.append({"job": slug, "signal": "needs-attention",
                        "detail": f"first turn stillborn at spawn "
-                                 f"(terminal={label!r}); retry spawn with "
-                                 f"--tmux or `muse-job close` the job"})
+                                 f"(terminal={label!r}); to retry, pick one "
+                                 f"path -- the job dir cannot be both removed "
+                                 f"and closed (job.json lives inside it, so "
+                                 f"removing the dir deletes the record "
+                                 f"`close` would archive): new slug (keeps "
+                                 f"the diagnosis): `muse-job spawn "
+                                 f"<new-slug> --tmux`, then `muse-job close "
+                                 f"{slug}` to archive the blocked record; "
+                                 f"same slug: `muse-job close {slug}` first "
+                                 f"(tears down the git worktree and deletes "
+                                 f"the job branch), remove the job dir, then "
+                                 f"`muse-job spawn {slug} --tmux` (spawn "
+                                 f"refuses an existing dir)"})
         return
     _, _, _, msp_events, msp_recovery = _msp_imports()
     sid = job.get("session_uuid")
