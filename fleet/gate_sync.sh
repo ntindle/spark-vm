@@ -40,9 +40,11 @@ DRY_RUN=0
 # One writer, enforced in code: the loop must not overlap with itself. Two
 # concurrent cron ticks share nothing but the box's gate dir — §5's
 # "one writer" delivery-path ownership is a per-estate property, not a
-# per-PID one, so the lock is estate-scoped. A second overlapping run exits
-# loudly (exit 2) instead of racing; the fd dies with the process, so a
-# killed run can never wedge future runs (flock, not a pidfile).
+# per-PID one, so the lock is estate-scoped (single machine, single ESTATE
+# path — it does not span operator machines or estate aliases). A second
+# overlapping run exits loudly (exit 2) instead of racing; the fd dies with
+# the process, so a killed run can never wedge future runs (flock, not a
+# pidfile).
 LOCKFILE="$ESTATE/.gate_sync.lock"
 exec 9>"$LOCKFILE"
 if ! flock -n 9; then
@@ -91,11 +93,9 @@ for boxdir in "$ESTATE"/*/; do
     # Atomic, mode-preserving delivery: scp to a temp name, then install -m
     # 600 into place. The publisher's 0600 survives the trip (plain scp
     # would land the file at the remote umask), and a concurrent
-    # gate_query never reads a half-written document.
-#
-# The loop takes an estate-scoped flock (a second overlapping cron tick
-# exits loudly instead of racing), and every remote temp file is removed
-# by a remote EXIT trap so failures leave no litter on the box.
+    # gate_query never reads a half-written document. The tmp file is
+    # removed by a remote EXIT trap, so install failures leave no litter
+    # on the box (a failed scp gets a best-effort remote rm below).
     tmp_remote="$GATE_DIR/.gate.json.tmp.$$"
     # shellcheck disable=SC2086
     if ! scp $SSH_OPTS "$GATE" "${GATE_USER}@${target}:${tmp_remote}"; then
