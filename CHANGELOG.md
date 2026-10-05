@@ -63,7 +63,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - Push enqueue boundary (#1060): the trust boundary between a hostile box's filing storm and the owner's phone — plane-observed events now enqueue through a single gate that enforces page-once-per-event dedup, atomically reserves the per-(box, hour) and per-(owner, hour) page budgets in one step (two racing filings cannot both pass a bound of one), and coalesces over-budget pages into the hourly digest instead of sending them. (#990)
 
-- Push event mapping (#TBD): the hosted push lane's paging policy — each
+- Push event mapping (#1062): the hosted push lane's paging policy — each
   plane-observed event (approval filed, token-expiry warning, box revoked,
   heartbeat-stale) now maps to exactly one enqueue decision: reminders
   fire once per approval at half its TTL (never for short-lived
