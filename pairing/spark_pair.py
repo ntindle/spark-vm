@@ -70,6 +70,7 @@ import ssl
 import struct
 import sys
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -3128,6 +3129,38 @@ def _phone_home_read_enrollment(d, enroll_path):
     return enroll, None
 
 
+def _phone_home_main(args):
+    """phone-home dispatch: separate crashes from deliberate exits.
+
+    Exit codes: 0 = stopped on SIGTERM/SIGINT (clean, no restart);
+    1 = deliberate human-attention exit (revoked token, protocol errors —
+    the supervisor must NOT restart these; see RestartPreventExitStatus
+    in the README unit); 2 = unexpected crash (uncaught exception — the
+    supervisor SHOULD restart these). CPython exits 1 on uncaught
+    exceptions, so without this split the unit could not tell a crash
+    from a deliberate stop.
+    """
+    try:
+        return cmd_phone_home(args)
+    except Exception:
+        d = _state_dir(args)
+        token = ()
+        try:
+            with open(os.path.join(d, "enrollment.json")) as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("token"), str):
+                token = data["token"]
+        except (OSError, ValueError):
+            pass
+        tb = traceback.format_exc()
+        if isinstance(token, str) and token:
+            tb = tb.replace(token, "<redacted>")
+        _phone_home_fail(d, "phone-home crashed (uncaught exception) — "
+                            "traceback on stderr", token)
+        sys.stderr.write(tb)
+        return 2
+
+
 def cmd_phone_home(args):
     d = _state_dir(args)
     enroll_path = os.path.join(d, "enrollment.json")
@@ -3404,7 +3437,7 @@ def main(argv=None):
                                       "the #864 heartbeat stays the only "
                                       "liveness signal; plane half #958 not "
                                       "built yet — expect upgrade retries)")
-    s.set_defaults(fn=cmd_phone_home)
+    s.set_defaults(fn=_phone_home_main)
 
     s = sub.add_parser("approve", help="owner: verify fingerprint + approve")
     s.add_argument("--pairing-id", help="pairing id (lists pending if omitted)")

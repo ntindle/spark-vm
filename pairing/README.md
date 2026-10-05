@@ -346,12 +346,13 @@ ExecStart=/path/to/spark-pair.py phone-home
 Restart=on-failure
 RestartPreventExitStatus=1
 RestartSec=5
-# Exit 1 means HUMAN ATTENTION, not a restart loop: fatal closes (revoked
-# token, protocol errors) exit 1 deliberately, and RestartPreventExitStatus
-# keeps those deliberate exits dead — a supervisor restarting blindly would
-# recreate the reconnect storm the daemon refuses, notably on `revoked`,
-# where re-pairing the box is the human path. Crashes and signals still
-# restart under on-failure. Alert on repeated restarts instead of
+# Exit 1 = deliberate human-attention exit (revoked token, protocol
+# errors): RestartPreventExitStatus keeps these dead — a supervisor
+# restarting blindly would recreate the reconnect storm the daemon
+# refuses, notably on `revoked`, where re-pairing the box is the human
+# path. Exit 2 = unexpected crash (uncaught exception): restarts under
+# on-failure. Signal deaths (SIGKILL/SIGSEGV) also restart; SIGTERM is
+# handled to a clean exit 0. Alert on repeated restarts instead of
 # restarting forever.
 
 [Install]
@@ -366,7 +367,12 @@ logrotate `copytruncate` or ship it to your log aggregator.
 human: revoked token (re-pair with `request` + `redeem`), a second
 session under this identity (`superseded-generation`), a client or plane
 bug (`identity-mismatch` / `protocol-error` / unknown close code), or
-enrollment/rotate failures.
+enrollment/rotate failures. The supervisor never restarts exit 1
+(`RestartPreventExitStatus=1` in the unit above). `2` — unexpected
+crash (uncaught exception): loud on stderr and in `phone_home.log`,
+then the supervisor restarts it. CPython exits 1 on uncaught
+exceptions, so the daemon maps crashes to 2 explicitly — without the
+split, the unit could not tell a crash from a deliberate stop.
 
 What it does:
 
