@@ -286,6 +286,17 @@ def test_retry_5xx(stub):
     assert result.retry_after_s == push_sender.backoff_s(3) == 32.0
 
 
+def test_retry_408_request_timeout(stub):
+    # Finding #1040: a 408 is the push service giving up on the request —
+    # a server-side timeout, not a client error on our deterministic
+    # request — so it retries on the backoff schedule like a 5xx.
+    stub.script((408, {}, b""))
+    result, _ = _send(stub, attempt=1)
+    assert result.outcome == "retry"
+    assert result.http_status == 408
+    assert result.retry_after_s == push_sender.backoff_s(1) == 2.0
+
+
 @pytest.mark.parametrize("status", [400, 401, 413, 418, 422])
 def test_dead_letter_client_errors(stub, status):
     stub.script((status, {}, b""))
