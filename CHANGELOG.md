@@ -594,6 +594,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   unchanged (loud failure, freeze-counter accounting). (#962)
 
 ### Security
+- The toolset self-updater's Playwright browser downloads are now
+  hash-pinned (#1017): the updater takes the exact archive URLs from the
+  Playwright driver's own dry-run output (refusing on any shape drift) and
+  refuses unless each archive's SHA-256 matches the digest recorded at
+  commit time (x86_64 and aarch64) — a CDN serving different bytes for the
+  same browser revision can no longer slip past the updater. Verified
+  installs are stamped so later runs skip the download entirely.
 - The fleet read API's access log now strips control characters before
   writing (#1032): the request line is client-controlled and used to reach
   the operator's terminal raw, so a local client could inject terminal
