@@ -52,6 +52,17 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted terminal-stream wire protocol (#919): the contract for live
+  terminal output from a box through its phone-home connection — lossy
+  ordered output chunks, a dedicated input channel that carries both
+  owner-typed input and approval-authorized input (approval stays the
+  consent step; the bytes ride the input channel), replay protection so
+  a stale connection can never inject bytes into a live session, and an
+  audit rule that attributes every open, close, and input without ever
+  recording terminal contents. The box-side producer (#920) and the
+  dashboard viewer (#1035) build against it.
+  (#TBD)
+
 - Fleet release-gate hook loop (G18 S1b, #777): every gated box now
   refreshes its own release-gate answer every 60–120 seconds via a
   systemd timer and keeps the latest answer in a local status file, so a
