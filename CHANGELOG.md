@@ -61,6 +61,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
   the VAPID key lifecycle. Design contract only; nothing sends a push
   yet. (#1059)
 
+- Push enqueue boundary (#1060): the trust boundary between a hostile box's filing storm and the owner's phone — plane-observed events now enqueue through a single gate that enforces page-once-per-event dedup, atomically reserves the per-(box, hour) and per-(owner, hour) page budgets in one step (two racing filings cannot both pass a bound of one), and coalesces over-budget pages into the hourly digest instead of sending them. (#990)
+
 - Box-side ensemble operator checklist (#1021): the pairing client
   README gains a single operator surface for the five box-side processes
   (hourly token rotation, per-minute heartbeat, per-minute command ingest,
