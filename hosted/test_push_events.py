@@ -230,8 +230,39 @@ def test_heartbeat_stale_suppressed_budget_does_not_arm_quiet(conn):
         conn, box_id="box-1", owner_principal="owner-1",
         stale_epoch="epoch-1")
     assert r.disposition == "suppressed_budget"
-    # ...so the quiet clock never started (D62): no queued stale page.
+    # ...so the quiet clock never started (D62): no queued/accepted
+    # stale page.
     assert push_events.last_heartbeat_stale_page_at(conn, "box-1") is None
+
+
+def test_heartbeat_stale_quiet_survives_delivery(conn):
+    # Architecture B1: the sender loop DELETEs the queued work-item row
+    # on the terminal attempt (D50) — the F7 quiet window must be
+    # armed by the `accepted` row, not evaporate on delivery.
+    t0 = _utcnow()
+    r1 = push_events.on_heartbeat_stale(
+        conn, box_id="box-1", owner_principal="owner-1",
+        stale_epoch="epoch-1", now=t0)
+    assert r1.disposition == "queued"
+    # Simulate the sender loop's terminal transaction: one `accepted`
+    # attempt row per device, then DELETE the queued work-item row.
+    with conn:
+        conn.execute(
+            "INSERT INTO push_send_results (at, owner_principal, box_id,"
+            " device, event_kind, event_key, outcome, http_status,"
+            " latency_ms, sent_at, vapid_key_id)"
+            " VALUES (?, ?, ?, 'dev-1', ?, ?, 'accepted', 201, 42.0,"
+            " ?, 'key-1')",
+            (t0.isoformat(), "owner-1", "box-1", "heartbeat_stale",
+             r1.detail.event_key, t0.timestamp()))
+        conn.execute("DELETE FROM push_send_results WHERE id = ?",
+                     (r1.detail.row_id,))
+    assert push_events.last_heartbeat_stale_page_at(conn, "box-1") == t0
+    # A flap-derived new epoch 1h after delivery is still suppressed.
+    r2 = push_events.on_heartbeat_stale(
+        conn, box_id="box-1", owner_principal="owner-1",
+        stale_epoch="epoch-2", now=t0 + timedelta(hours=1))
+    assert r2.disposition == "suppressed_quiet_period"
 
 
 # --- reminder ------------------------------------------------------------------
@@ -323,6 +354,46 @@ def test_reminder_terminal_audit_is_idempotent(conn):
         assert r.disposition == "superseded_terminal"
     rows = _outcomes(conn, "reminder")
     assert rows == [("reminder", "suppressed_terminal")]
+
+
+@pytest.mark.parametrize("terminal,expected", [
+    (False, "queued"),
+    (True, "superseded_terminal"),
+    (0, "queued"),                  # SQLite boolean-expression form
+    (1, "superseded_terminal"),     # (Security B2)
+])
+def test_reminder_terminal_coercion(conn, terminal, expected):
+    now = _utcnow()
+    rec = _record(now - timedelta(minutes=40), ttl_seconds=3600)
+    rec["terminal"] = terminal
+    r = push_events.maybe_enqueue_reminder(
+        conn, box_id="box-1", owner_principal="owner-1", aid="aid-1",
+        get_record=lambda aid: rec, now=now)
+    assert r.disposition == expected
+
+
+@pytest.mark.parametrize("bad_terminal", [2, -1, "1", "true", None, 1.0])
+def test_reminder_terminal_rejects_non_bool_int(conn, bad_terminal):
+    now = _utcnow()
+    rec = _record(now - timedelta(minutes=40), ttl_seconds=3600)
+    rec["terminal"] = bad_terminal
+    with pytest.raises(ValueError):
+        push_events.maybe_enqueue_reminder(
+            conn, box_id="box-1", owner_principal="owner-1", aid="aid-1",
+            get_record=lambda aid: rec, now=now)
+
+
+def test_reminder_naive_created_at_assumed_utc(conn):
+    # Security N4: the naive=UTC convention is pinned by this test —
+    # a naive-local writer would silently shift reminder_at.
+    now = _utcnow()
+    naive = (now - timedelta(minutes=40)).replace(tzinfo=None)
+    rec = {"aid": "aid-1", "created_at": naive.isoformat(),
+           "ttl_seconds": 3600, "terminal": False}
+    r = push_events.maybe_enqueue_reminder(
+        conn, box_id="box-1", owner_principal="owner-1", aid="aid-1",
+        get_record=lambda aid: rec, now=now)
+    assert r.disposition == "queued"
 
 
 def test_reminder_no_record(conn):

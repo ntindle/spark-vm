@@ -35,8 +35,8 @@ Decisions (continuing the push lane's D-series; D50-D57 are #990's):
   pages only when the record is still pending (D12 gate-1). The reader
   contract: returns `None` when the record does not exist, else a dict
   with `created_at` (full ISO-8601 timestamp with a time component —
-  a bare date carries no time and fails loud, per the #988 TEXT
-  timestamp convention), `ttl_seconds` (int), and `terminal` (bool — an owner decision exists
+  a bare date carries no time and fails loud — in the adapter's
+  normalized form, not the raw #872 epoch-int shape), `ttl_seconds` (int), and `terminal` (bool — an owner decision exists
   or server-side expiry fired, derived plane-side). A corrupt record
   (unparseable timestamp, non-int TTL, missing keys, wrong types) is a
   `ValueError`, not a silent skip: a sweep that quietly drops corrupt
@@ -70,11 +70,12 @@ Decisions (continuing the push lane's D-series; D50-D57 are #990's):
   the #864 heartbeat cadence is 1/min, so 4h = 240 missed heartbeats —
   long enough to cover flap clusters (reboot, brief network loss) that
   re-derive fresh stale epochs, short enough that a genuinely re-staled
-  box re-pages the same evening. Only `queued` rows arm the window: a
-  `suppressed_budget` row never buzzed, so it must not start the quiet
-  clock. Same-epoch replays never reach the quiet check — the
-  boundary's dedup returns `duplicate` first (page-once per
-  stale-epoch, taxonomy §2).
+  box re-pages the same evening. The window is armed by `queued` *or*
+  `accepted` rows: the sender loop DELETEs the queued work-item row on
+  the terminal attempt (D50), so arming on `queued` alone would
+  evaporate the window the moment a page is delivered. Rows that never
+  buzzed (`suppressed_budget`, `tombstone`, `dead-letter`,
+  `suppressed_terminal`) do not arm it.
 - **D63. Token-warning timing belongs to the caller.** The 2h lead and
   F6's "only if no rotation since the last window" are the rotation
   watcher's timing decision — it owns the boxes-row read. This module
@@ -102,11 +103,27 @@ caller logic; this module validates the values it is given
 Pre-deploy wiring (D49-style anchor for the operator): the D9 sweep /
 plane worker calls these functions with `conn` on the live D1 database
 (the fixture DDL here is the #988 contract §§1.2-1.4 plus the D57
-index, identical to `test_push_enqueue.py`'s). `get_record` is wired to
-`SELECT created_at, ttl_seconds, (decision IS NOT NULL OR expired)`
-from the #872 approvals table for the aid. No new tables, no worker
-route changes in this slice — the sweep scheduler itself (D9) is the
-named follow-up.
+index, identical to `test_push_enqueue.py`'s). `get_record` is a
+plane-side **adapter**, not a raw row passthrough: the #872 approvals
+record (`docs/APPROVALS_PLANE_PROTOCOL.md` "The record") carries
+`created_at`/`expires_at` as epoch ints, `status` as a
+pending|approved|denied|expired enum, and `decision` as
+"approve"|"deny"|null — none of which is the D59 dict shape. The
+adapter runs
+`SELECT created_at, expires_at, decision, status FROM approvals
+WHERE box_id = ? AND aid = ?` and builds the D59 dict as
+`{"created_at": datetime.fromtimestamp(created_at,
+tz=timezone.utc).isoformat(), "ttl_seconds": expires_at - created_at,
+"terminal": decision is not None or status in ("approved", "denied",
+"expired") or (status == "pending" and now >= expires_at)}`.
+The D59 dict contract is the interface; the adapter does the
+translation. No new tables, no worker route changes in this slice —
+the sweep scheduler itself (D9) is the named follow-up.
+
+STACKING NOTE: this module imports `hosted.push_enqueue` from the
+sibling PR #1060 (`hourly/security-990-enqueue-20261005-1629`), which
+is still open — do not merge this PR before #1060 lands; rebase onto
+main after its squash-merge.
 """
 
 from __future__ import annotations
@@ -142,11 +159,11 @@ def _utcnow(now=None):
 
 def _require_owner_box(owner_principal, box_id):
     # D2 restated: the caller resolves these from the enrollment
-    # registry; the module fail-closes on anything else.
-    if not isinstance(owner_principal, str) or not owner_principal:
-        raise ValueError("owner_principal must be a non-empty str")
-    if not isinstance(box_id, str) or not box_id:
-        raise ValueError("box_id must be a non-empty str")
+    # registry; the module fail-closes on anything else. Both go
+    # through _require_key_material (not just non-empty): a U+0000 in
+    # either would forge the event-key structure downstream.
+    _require_key_material("owner_principal", owner_principal)
+    _require_key_material("box_id", box_id)
 
 
 def _require_key_material(name, value):
@@ -205,10 +222,17 @@ def _parse_reminder_record(record, aid):
     if ttl_raw <= 0:
         raise ValueError(
             "record ttl_seconds for aid %r must be positive" % (aid,))
-    if not isinstance(terminal_raw, bool):
+    if isinstance(terminal_raw, bool):
+        terminal = terminal_raw
+    elif type(terminal_raw) is int and terminal_raw in (0, 1):
+        # SQLite evaluates boolean expressions (e.g. "decision IS NOT
+        # NULL OR ...") to INTEGER 0/1 — accept those, reject anything
+        # else. A Python-side adapter should still pass real bools.
+        terminal = bool(terminal_raw)
+    else:
         raise ValueError(
-            "record terminal for aid %r must be a bool" % (aid,))
-    return created_at.astimezone(timezone.utc), ttl_raw, terminal_raw
+            "record terminal for aid %r must be a bool or 0/1" % (aid,))
+    return created_at.astimezone(timezone.utc), ttl_raw, terminal
 
 
 def _write_suppressed_terminal(conn, at, owner_principal, box_id,
@@ -277,16 +301,26 @@ def on_box_revoked(conn, *, box_id, owner_principal, revoked_at, now=None):
 
 
 def last_heartbeat_stale_page_at(conn, box_id):
-    """Newest `queued` heartbeat-stale page for the box (D62 helper).
+    """Newest heartbeat-stale buzz for the box (D62 helper).
 
-    Only `queued` rows arm the quiet window — a `suppressed_budget` row
-    never buzzed, so it must not start the quiet clock. Returns an
-    aware UTC datetime, or None when the box never paged stale.
+    Arms on `queued` *or* `accepted` rows: the sender loop DELETEs the
+    queued work-item row on the terminal attempt (D50), so arming on
+    `queued` alone would evaporate the quiet window the moment a page
+    is delivered. `suppressed_budget`, `tombstone`, `dead-letter`, and
+    `suppressed_terminal` never buzzed, so they must not start the
+    quiet clock. Returns an aware UTC datetime, or None when the box
+    never paged stale.
+
+    Format assumption (pinned): `MAX(at)` over TEXT is chronological
+    only because the boundary is the sole writer of `queued` rows and
+    the sender loop the sole writer of terminal rows, both always
+    writing `moment.astimezone(timezone.utc).isoformat()`. A second
+    writer with a different format would silently skew the window.
     """
     row = conn.execute(
         "SELECT MAX(at) FROM push_send_results"
         " WHERE box_id = ? AND event_kind = 'heartbeat_stale'"
-        " AND outcome = 'queued'", (box_id,)).fetchone()
+        " AND outcome IN ('queued', 'accepted')", (box_id,)).fetchone()
     if row is None or row[0] is None:
         return None
     at = datetime.fromisoformat(row[0])
@@ -397,8 +431,7 @@ def maybe_enqueue_digest(conn, *, owner_principal, now=None):
     consumes owner budget like any page (D10) — enforced by the
     boundary, not here. Returns `no_digest_due` when nothing coalesced.
     """
-    if not isinstance(owner_principal, str) or not owner_principal:
-        raise ValueError("owner_principal must be a non-empty str")
+    _require_key_material("owner_principal", owner_principal)
     moment = _utcnow(now)
     window_start = push_enqueue.hour_bucket(moment)
     if push_enqueue.get_digest_count(conn, owner_principal,
