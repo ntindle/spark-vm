@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Fleet estate read API (G21 S1, #795): the operator's fleet store is now
+  queryable over HTTP — `fleet api --store DIR --port 18760` serves a
+  read-only JSON projection of the estate (fleet version table, per-box
+  history, drift, update events, alerts, claim-vs-inventory crosscheck,
+  and a reserved waves shape that names its own unavailability until wave
+  assignments land). Every endpoint is field-equivalent to its `fleet` CLI
+  counterpart with a per-endpoint conformance test to prove it; the API
+  binds 127.0.0.1 only with no auth in this slice — the operator's own box
+  is the trust boundary, same as the CLI.
+
 - Hosted phone-home journal retention (#1013): the plane's per-box
   journal and the unattributed upgrade-probe counter now expire on a
   schedule — journal rows older than 90 days and probe-counter day
@@ -85,6 +95,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   — a dead first turn marks the job blocked, never active, keeps the turn
   id, failure reason, and an event journal in the job record for diagnosis,
   and the watchdog refuses to resurrect it. (#1025)
+
 - Hosted phone-home, S4b socket lifecycle decomposed into four buildable
   slices (#958): the plane Durable Object's remaining session logic —
   hello/identity binding plus the generation fence, command re-drive with

@@ -136,10 +136,49 @@ python3 fleet/inventory.py events watch --store ~/fleet-store   # exit 1 on unac
 python3 fleet/inventory.py events ack --store ~/fleet-store --alert-id <id>
 python3 fleet/inventory.py events crosscheck --store ~/fleet-store   # exit 1 on claim/inventory violations (G17 S2)
 
+# 5b. Serve the same reads over HTTP (G21 S1, #795 — read-only JSON,
+#     binds 127.0.0.1 only, no auth: the operator's own box is the
+#     trust boundary, same as the CLI)
+python3 fleet/inventory.py api --store ~/fleet-store --port 18760
+# GET /fleet/boxes /fleet/boxes/<id> /fleet/drift /fleet/events
+#     /fleet/alerts /fleet/crosscheck /fleet/waves
+
 # 6. Age the journals out (G17 S2 retention — run on a schedule)
 python3 fleet/inventory.py events prune --store ~/fleet-store   # 30d compact / 90d drop + old acked alerts
 python3 fleet/inventory.py prune --store ~/fleet-store          # inventory journal 90d drop + snapshot rebuild
 ```
+
+## Read API (G21 S1, #795)
+
+`fleet/inventory.py api` serves the estate store as read-only JSON
+(`fleet/api.py`, stdlib `http.server` only) — the machine-readable
+surface the G21 S2 console will consume. Every endpoint is
+field-equivalent to its CLI counterpart (the CLI renders text tables,
+the API renders the same fields as JSON; display truncations travel
+alongside their full values), pinned by the per-endpoint conformance
+tests in `fleet/test_api.py`. Design: `docs/FLEET_READ_API_SPEC.md`.
+
+Read-only by construction: there is no write endpoint (ack stays
+CLI-only until the S2 console's auth story lands), the server never
+writes to the store, and it binds 127.0.0.1 hardcoded — no bind-address
+flag exists. The API is **unversioned** in S1: same-repo consumers only
+(the S2 console); hosted and third-party consumers get versioned paths
+at S2. **Multi-user-box caveat:** on a box with more than one uid,
+every local uid can query the API while it runs — the running API
+re-exposes whatever the store contains to local users who could not
+read the store files directly (e.g. a `0700` store). Treat the store
+as readable by all local users, or don't run the API there. A
+uid-scoped transport is deferred to the S2 auth story (see the spec's
+§5). `data_current_as_of` on every data-carrying response names the freshness
+of what was actually served (snapshot `generated_at` for the
+inventory endpoints, newest `observed_at` for box history, newest
+`received_at` across the event/alert journals otherwise); an empty
+store answers with empty lists (and the CLI's own 404s where the CLI
+would 404 — e.g. `/fleet/boxes` on a missing snapshot is 404 "run
+collect first"), never a clean-fleet fiction. One deliberate
+divergence: `/fleet/boxes/<id>` answers from the journal even when
+the snapshot is missing, where the CLI would error on the snapshot
+first — the API is more honest here, and the shape is unchanged.
 
 ## Update events (G17 / #608, S1)
 
