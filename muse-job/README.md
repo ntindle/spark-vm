@@ -47,6 +47,61 @@ Redeploy: copy the files over, then reinstall the plugin with `--force`
 - Job prompt at `/home/ntindle/muse-jobs/<slug>/prompt.md`, progress in `PROGRESS.md`
 - Job states (what `status`/`list` print): `active` / `blocked` — the watchdog acts on these (may page or attempt recovery); `killed` — operator-killed, the watchdog leaves it alone, `resume` is the deliberate way back; `closed` — archived, worktree removed, nothing to resume.
 
+### Stillborn-spawn detection (issue #994)
+
+A spawn that returns from `turn/start` has only proven the turn started
+— not that the agent engaged. The real #994 failure was the serve host
+cancelling the first turn server-side within ~1ms of start, after which
+the job sat `active` forever with nothing working. This guard applies to
+the default MSP transport only — the legacy `--tmux` path has no
+first-turn watch.
+
+`spawn` therefore verifies the first turn actually engages before it
+declares success:
+
+- It subscribes to turn notifications *before* `turn/start` — a terminal
+  the server emits in that gap would otherwise be silently dropped.
+- It then watches up to 10 seconds: the turn is *engaged* (still
+  running — the normal case), *done* (a fast prompt completed), or
+  *dead* (the turn reached `cancelled`, `interrupted`, `failed`, or an
+  unrecognized terminal — unrecognized fails closed rather than
+  guessing).
+- A dead first turn at spawn time means the spawn never engaged (no
+  user exists yet to cancel or interrupt a just-started turn), so the
+  spawn fails loudly and the job is marked `blocked`, **never**
+  `active`. The `job.json` record keeps a `stillborn` section with the
+  turn id, a vocabulary-gated terminal label, and the event-method
+  journal (method names only — prompts and secrets are never logged
+  in the record).
+- The raw server-supplied terminal string is never persisted or
+  printed: every emission boundary goes through a vocabulary gate
+  (`cancelled`/`interrupted`/`failed`/`completed`/`unknown`), so a
+  hostile or malformed server value can't inject log lines.
+- The watchdog short-circuits stillborn jobs: it emits a
+  `needs-attention` signal pointing at the terminal and the retry
+  path, and returns without touching the job. Without the
+  short-circuit, the cancelled turn would replay to `active` and the
+  watchdog would resurrect the zombie on its next pass.
+- The 10-second watch is paid on every healthy spawn (the loop exits early
+  on a terminal event) — a bounded one-time tax; a stranded `active` job
+  costs far more.
+
+To retry a stillborn spawn, pick one path — the job dir cannot be both
+removed and closed (`job.json` lives inside it, so removing the dir
+deletes the record `close` would archive):
+
+- New slug (keeps the diagnosis): `muse-job spawn <new-slug> --tmux`,
+  then `muse-job close <slug>` the blocked job record — `close` archives
+  it and removes the worktree and branch.
+- Same slug: `muse-job close <slug>` first (this is what tears down the
+  git worktree and deletes the job branch), then remove the job dir
+  `/home/ntindle/muse-jobs/<slug>/` — `spawn` refuses a slug whose dir
+  still exists — then `muse-job spawn <slug> --tmux`.
+
+The legacy tmux transport is the safe retry: the first-turn cancellation
+is a suspected MSP/serve-host race (session/branchChanged, per issue #994)
+the `--tmux` path never hits (it has no first-turn watch).
+
 ### TUI auto-update policy (issue #699)
 
 **Updates are deferred while a job is active.** The `muse` launcher
