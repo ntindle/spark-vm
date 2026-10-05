@@ -166,6 +166,24 @@ def test_box_revoked_pages_once(conn):
     assert r2.disposition == "duplicate"
 
 
+@pytest.mark.parametrize("bad_ts", [
+    "not-a-timestamp",
+    "2026-10-05",          # bare date: no time component, could repeat
+    "1699999999",          # epoch int as string is not ISO-8601
+    "2026-10-05T",         # T with no time
+    "",
+])
+def test_box_revoked_rejects_non_timestamp(conn, bad_ts):
+    # The module's identity claim ("a timestamp never repeats") is
+    # enforced: a constant or date-only string would silently collapse
+    # distinct revocations into one page.
+    with pytest.raises(ValueError):
+        push_events.on_box_revoked(
+            conn, box_id="box-1", owner_principal="owner-1",
+            revoked_at=bad_ts)
+    assert _outcomes(conn, "box_revoked") == []
+
+
 # --- heartbeat_stale ---------------------------------------------------------
 
 def test_heartbeat_stale_quiet_period(conn):
@@ -193,10 +211,11 @@ def test_heartbeat_stale_quiet_period(conn):
     after = push_enqueue.get_counter(
         conn, "box", "box-1", push_enqueue.hour_bucket(t0))
     assert after == before
-    # After the quiet window, a new epoch pages again.
+    # After the quiet window, a new epoch pages again — including at
+    # exactly the 4h boundary ("do not page *for* 4 hours").
     r4 = push_events.on_heartbeat_stale(
         conn, box_id="box-1", owner_principal="owner-1",
-        stale_epoch="epoch-3", now=t0 + timedelta(hours=5))
+        stale_epoch="epoch-3", now=t0 + timedelta(hours=4))
     assert r4.disposition == "queued"
 
 
@@ -281,6 +300,29 @@ def test_reminder_terminal_record_is_superseded_with_audit(conn):
     assert device == ""
     assert http_status is None and latency is None
     assert sent_at is None and vapid is None
+    # The audit row carries its own key (page key + U+0000 suffix), so
+    # the boundary's outcome-blind dedup can never mistake a later
+    # page attempt for a duplicate of this audit row.
+    key = conn.execute(
+        "SELECT event_key FROM push_send_results"
+        " WHERE event_kind = 'reminder'").fetchone()[0]
+    assert key == "box-1\x00aid-1\x00superseded"
+
+
+def test_reminder_terminal_audit_is_idempotent(conn):
+    # The D9 sweep is periodic: a terminal approval must accrue exactly
+    # one audit row no matter how many passes observe it.
+    t0 = _utcnow()
+    rec = _record(t0 - timedelta(minutes=40), ttl_seconds=3600,
+                  terminal=True)
+    get = lambda aid: rec
+    for _ in range(3):
+        r = push_events.maybe_enqueue_reminder(
+            conn, box_id="box-1", owner_principal="owner-1", aid="aid-1",
+            get_record=get, now=t0)
+        assert r.disposition == "superseded_terminal"
+    rows = _outcomes(conn, "reminder")
+    assert rows == [("reminder", "suppressed_terminal")]
 
 
 def test_reminder_no_record(conn):
@@ -293,6 +335,8 @@ def test_reminder_no_record(conn):
 
 @pytest.mark.parametrize("make_bad", [
     lambda aid: {"aid": aid, "created_at": "not-a-time",
+                 "ttl_seconds": 3600, "terminal": False},
+    lambda aid: {"aid": aid, "created_at": "2026-10-05",
                  "ttl_seconds": 3600, "terminal": False},
     lambda aid: {"aid": aid,
                  "created_at": datetime.now(timezone.utc).isoformat(),
