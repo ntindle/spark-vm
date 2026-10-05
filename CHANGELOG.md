@@ -65,7 +65,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   box-local meter agent and plane-side metering ingestion with billing
   aggregates. Plane state is pinned to a read of the external
   control-plane worker (the Worker lives outside this repo), not to a
-  repo commit. (PR number filled on open — #TBD)
+  repo commit. (#1050)
 
 - Approvals-plane gap analysis refreshed (#1038): the four control-plane
   gaps filed in October for the hosted phone-approval flow are now
