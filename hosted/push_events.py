@@ -251,6 +251,13 @@ def _write_suppressed_terminal(conn, at, owner_principal, box_id,
 def on_approval_filed(conn, *, box_id, owner_principal, aid, now=None):
     """Map the approval-filed event to one page (taxonomy §2).
 
+    Caller obligation (Security review N1): the #952 filing endpoint
+    must never emit a filing event for an aid whose #872 record is
+    already terminal (approved/denied/expired) — there is no gate-1
+    re-read on this path by design (filing *is* the plane's own
+    write), so a terminal aid filed here would page spuriously. Same
+    class of caller obligation as D65's.
+
     Page-once per (box_id, aid): the boundary's dedup makes replays
     return `duplicate`. Callers are expected to dedup upstream too
     (the #952 endpoint already dedups filings on (box_id, aid)), but
