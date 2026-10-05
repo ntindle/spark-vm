@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Fleet release-gate hook loop (G18 S1b, #777): every gated box now
+  refreshes its own release-gate answer every 60–120 seconds via a
+  systemd timer and keeps the latest answer in a local status file, so a
+  frozen or gate-stale fleet shows up as visible degraded operation
+  instead of silent drift. The update tick's own gate check remains the
+  enforcement point; the hook only keeps the answer fresh and observable.
+  (#1034)
+
 - Fleet estate read API (G21 S1, #795): the operator's fleet store is now
   queryable over HTTP — `fleet api --store DIR --port 18760` serves a
   read-only JSON projection of the estate (fleet version table, per-box

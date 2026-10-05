@@ -1,0 +1,41 @@
+[Unit]
+Description=spark-vm gate hook: refresh the box's local G18 release-gate answer (#777 S1b)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The latency optimizer + local-status writer of
+# docs/RELEASE_GATE_CHANNEL_DESIGN.md §3 — NOT the enforcement point (the
+# update tick's own gate_query re-check enforces). Runs as root: the gate
+# key files are 0600 root-owned (G18 §5 — gate_query refuses anything
+# looser, so the hook could not self-evaluate as anyone else), and the
+# status dir is root-owned too. Do not "fix" this to User=ntindle: the
+# hook would lose key access and every box would report frozen.
+#
+# CRITICAL: ExecStart points at the INSTALLED copy in
+# /home/ntindle/.sparkvm-deploy/bin/ — never at the repo checkout. A writer
+# with checkout access must not be able to rewire the hook's own code (a
+# forged status file would blind the gate-stale visibility the hook
+# exists to provide); refreshing the installed copy is the privileged
+# `auto-deploy.sh init` step (see deploy/README.md).
+#
+# Identity/keys come from the Environment= lines below (same values the
+# operator's install step sets on the box — G18 §5; see fleet/README.md
+# "Provisioning"). The status file path defaults to
+# /var/lib/sparkvm/gate/status.json (SPARKVM_GATE_STATUS overrides).
+User=root
+# --- operator install step: uncomment and set per box ---
+#Environment=SPARKVM_BOX_ID=box-07
+#Environment=SPARKVM_GATE_KEYS=ctl-2026-09=/var/lib/sparkvm/gate/ctl.key
+ExecStart=/home/ntindle/.sparkvm-deploy/bin/gate_hook.sh
+# Harden the root service: no privilege escalation from the hook itself.
+NoNewPrivileges=true
+# The hook exits 0 whenever the status file was written — even when the
+# answer is frozen (a frozen fleet is the signal, not a hook failure).
+# A failed run must be loud in the journal.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -67,6 +67,12 @@ sudo systemctl enable --now auto-deploy.timer
 The timer runs as `ntindle` — the same identity that runs `proxy/deploy.sh`
 manually — using that user's existing sudo rights. No new privilege is granted.
 
+`init` also installs the fleet release-gate hook (`fleet/gate_hook.sh`,
+#777 S1b) next to `gate_query.py` — the `deploy/gate-hook.timer` tick
+script. The hook's own install step (systemd units + box identity/keys)
+is documented in `fleet/README.md` ("The hook loop"); this README covers
+only the updater side (installed copy + drift warning).
+
 ## How a run works
 
 1. **Fetch** `origin/main` in the updater mirror (never the working checkout);

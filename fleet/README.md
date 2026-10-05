@@ -45,9 +45,60 @@ the operator's sync loop. Key rotation is a document field (`key_id`);
 during a rotation window the box accepts current + next, logging which
 verified.
 
-S1a enforces the **repo updater only** (the `pending_range()` cap). The
-toolset `_read_pin` cap, the hook-loop status writer, and the `fleet
-status` gate-stale line land in S1b (design §8).
+S1a enforces the **repo updater only** (the `pending_range()` cap). S1b
+ships the hook-loop status writer below; the toolset `_read_pin` cap and
+the `fleet status` gate-stale line are the remaining S1b slices (design
+§8).
+
+### The hook loop (S1b, #777)
+
+`fleet/gate_hook.sh` is the §3 hook loop: a small systemd timer unit that
+runs `gate_query.py state` every 60–120s and writes the box's
+self-evaluated answer to the local gate status file
+(`/var/lib/sparkvm/gate/status.json`). It is the **latency optimizer and
+status writer, not the enforcement point** — the update tick's own
+re-query enforces the gate; the hook keeps the answer fresh and makes a
+frozen or gate-stale fleet *visible* instead of silent.
+
+Status file schema (written atomically, temp + rename):
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-05T06:12:33Z",
+  "source": "gate_hook",
+  "answer": { "state": "live", "freeze": "false", "reason": "gate ok", "...": "..." }
+}
+```
+
+`generated_at` is the hook's write time (UTC); readers derive staleness
+as now − generated_at ("last good answer T ago"). The `answer` object is
+`gate_query.py state`'s key=value map verbatim. A frozen fleet is written
+as `state=frozen`, never skipped — the hook exits 0 whenever the file
+was written, and non-zero only when the write itself failed (then the
+timer goes red and the journal carries the reason). The one-line journal
+summary is control-character scrubbed (the S1a log-channel rule).
+
+Install (per box, after the 0c identity/key step above):
+
+```bash
+# 0e. Install the hook (privileged — review the checkout diff first, same
+#     discipline as the updater itself)
+./deploy/auto-deploy.sh init   # installs gate_hook.sh next to gate_query.py
+sudo install -o root -g root -m 0644 deploy/gate-hook.service deploy/gate-hook.timer \
+    /etc/systemd/system/
+sudo systemctl daemon-reload
+# set the box identity + keys on the hook unit (same values as 0d):
+sudo systemctl edit gate-hook.service   # add Environment=SPARKVM_BOX_ID=… and
+                                        # Environment=SPARKVM_GATE_KEYS=…
+sudo systemctl enable --now gate-hook.timer
+```
+
+Verify: `cat /var/lib/sparkvm/gate/status.json` shows a fresh
+`generated_at`; `journalctl -u gate-hook.service` shows the per-tick
+`gate_hook: state=…` summary lines. A missed sync loop ages the file past
+the gate TTL by design — the fleet freezes loudly, and the aged
+`generated_at` is the incident's first signal.
 
 ### Provisioning (operator runbook)
 
