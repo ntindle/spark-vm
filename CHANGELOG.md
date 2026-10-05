@@ -52,7 +52,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- Approvals-plane gap analysis refreshed (#TBD): the four control-plane
+- Approvals-plane gap analysis refreshed (#1038): the four control-plane
   gaps filed in October for the hosted phone-approval flow are now
   recorded as shipped — the plane-side approval record (#872), the
   approval-decision channel kind (#873), and box-side decision ingest
