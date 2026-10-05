@@ -344,12 +344,15 @@ After=network-online.target
 [Service]
 ExecStart=/path/to/spark-pair.py phone-home
 Restart=on-failure
+RestartPreventExitStatus=1
 RestartSec=5
 # Exit 1 means HUMAN ATTENTION, not a restart loop: fatal closes (revoked
-# token, protocol errors) exit 1 deliberately, and a supervisor restarting
-# blindly would recreate the reconnect storm the daemon refuses — notably
-# on `revoked`, where re-pairing the box is the human path. Alert on
-# repeated restarts instead of restarting forever.
+# token, protocol errors) exit 1 deliberately, and RestartPreventExitStatus
+# keeps those deliberate exits dead — a supervisor restarting blindly would
+# recreate the reconnect storm the daemon refuses, notably on `revoked`,
+# where re-pairing the box is the human path. Crashes and signals still
+# restart under on-failure. Alert on repeated restarts instead of
+# restarting forever.
 
 [Install]
 WantedBy=multi-user.target

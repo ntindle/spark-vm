@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted box-side process-shape gap analysis (#847/#849): a vision-vs-state
+  inventory of the five box-side processes (the four cron one-shots —
+  token rotation, heartbeat, command ingest, filing upload — plus the
+  supervised phone-home daemon) against the never-pinned "boxd" decision
+  from the phone-home design. Seven findings, six pinned decisions (the
+  mixed cron+daemon shape is the steady state, no boxd convergence; the
+  epoch bump joins the ingest-lock discipline; in-code log bounding;
+  one operator checklist), and four tracked build slices (#1019–#1022).
+  (#TBD)
+
 - Hosted phone-home journal sink (S4b-4, #999): the plane's durable
   per-box journal is in place — connect and revocation/expiry closes are
   journaled today (no payloads or credentials), and owners can read a
@@ -427,6 +437,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   tail is a visible incident instead of missing evidence. (#1006, #1011)
 
 ### Fixed
+
+- Phone-home systemd unit no longer contradicts its own restart comment:
+  `RestartPreventExitStatus=1` keeps the deliberate exit-1 human-attention
+  exits (revoked token, protocol errors) dead instead of restart-looping
+  against them, while crashes and signals still restart under
+  `on-failure`. (#TBD)
 
 - muse-job spawn over MSP now detects a first turn that died before
   engaging (#994): after `turn/start`, spawn watches the new turn's
