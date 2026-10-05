@@ -1,8 +1,9 @@
 """Tests for hosted/push_enqueue.py (#990 — enqueue boundary + backpressure).
 
 The fixture DDL is verbatim from docs/PUSH_SENDER_SCHEMA_CONTRACT.md
-§§1.2–1.4 (the #988 contract) — the three tables the enqueue boundary
-writes. `push_subscriptions` is #968's table and is not touched here.
+§§1.2–1.4 (the #988 contract) **plus** the D57 partial unique index
+(marked below) — the contract text predates it; a follow-up amends the
+contract §1.3 and migrate_967_push.sql.
 """
 
 import os
@@ -60,11 +61,20 @@ CREATE TABLE IF NOT EXISTS push_digest_state (
 );
 """
 
+# D57 — page-once as a DB invariant. NOT in the #988 contract text
+# (predates it); follow-up amends the contract §1.3 + migration.
+DDL_PAGE_ONCE_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_push_send_results_page_once
+  ON push_send_results(box_id, event_kind, event_key)
+  WHERE outcome IN ('queued', 'suppressed_budget');
+"""
+
 
 @pytest.fixture
 def conn():
     c = sqlite3.connect(":memory:")
-    c.executescript(DDL_BUDGET_COUNTERS + DDL_SEND_RESULTS + DDL_DIGEST_STATE)
+    c.executescript(DDL_BUDGET_COUNTERS + DDL_SEND_RESULTS
+                    + DDL_DIGEST_STATE + DDL_PAGE_ONCE_INDEX)
     yield c
     c.close()
 
@@ -73,7 +83,8 @@ def conn():
 def dbfile(tmp_path):
     p = str(tmp_path / "enqueue.db")
     c = sqlite3.connect(p)
-    c.executescript(DDL_BUDGET_COUNTERS + DDL_SEND_RESULTS + DDL_DIGEST_STATE)
+    c.executescript(DDL_BUDGET_COUNTERS + DDL_SEND_RESULTS
+                    + DDL_DIGEST_STATE + DDL_PAGE_ONCE_INDEX)
     c.close()
     yield p
 
@@ -112,6 +123,27 @@ def test_digest_event_is_owner_scoped(conn):
         box_id=None, key_material="2026-10-05T16")
     assert r.disposition == "queued"
     assert r.event_key == "owner-1\x002026-10-05T16"
+    ws = push_enqueue.hour_bucket()
+    # Owner-only reservation (D52): the owner scope is consumed, and no
+    # ("box","") shared counter is ever created (no cross-owner bleed).
+    assert push_enqueue.get_counter(conn, "owner", "owner-1", ws) == 1
+    assert push_enqueue.get_counter(conn, "box", "", ws) == 0
+    assert push_enqueue.get_counter(conn, "box", "owner-1", ws) == 0
+
+
+def test_digest_cross_owner_no_starvation(conn):
+    ws = push_enqueue.hour_bucket()
+    for i in range(3):
+        r = push_enqueue.enqueue_page(
+            conn, event_kind="digest", owner_principal="owner-A",
+            box_id=None, key_material="2026-10-05T%d" % i)
+        assert r.disposition == "queued"
+    # Owner B's digest still queues: no shared ("box","") scope to exhaust.
+    r = push_enqueue.enqueue_page(
+        conn, event_kind="digest", owner_principal="owner-B",
+        box_id=None, key_material="2026-10-05T16")
+    assert r.disposition == "queued"
+    assert push_enqueue.get_counter(conn, "owner", "owner-B", ws) == 1
 
 
 # --- D53 dedup ------------------------------------------------------------
@@ -139,6 +171,50 @@ def test_dedup_is_per_event_key(conn):
         box_id="box-1", key_material="aid-2")
     assert r.disposition == "queued"
     assert push_enqueue.get_counter(conn, "box", "box-1", push_enqueue.hour_bucket()) == 2
+
+
+# --- D53/D57 dedup race ----------------------------------------------------
+
+def test_dedup_race_same_key_single_page(dbfile):
+    """Two concurrent enqueues of the SAME event: exactly one pages.
+
+    The D53 dedup SELECT is only a fast path; the D57 partial unique
+    index is the enforcement. The loser must observe `duplicate` and its
+    just-taken budget unit must be released — one event, one page, one
+    budget unit. Verified non-vacuous: dropping the D57 index lets both
+    threads queue (2 rows, 2 units).
+    """
+    barrier = threading.Barrier(2)
+    results = []
+
+    def worker():
+        c = sqlite3.connect(dbfile, timeout=10.0)
+        barrier.wait()
+        try:
+            results.append(push_enqueue.enqueue_page(
+                c, event_kind="approval_filed", owner_principal="owner-1",
+                box_id="box-1", key_material="aid-race"))
+        finally:
+            c.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    dispositions = sorted(r.disposition for r in results)
+    assert dispositions == ["duplicate", "queued"]
+    c = sqlite3.connect(dbfile)
+    try:
+        queued = c.execute(
+            "SELECT COUNT(*) FROM push_send_results"
+            " WHERE outcome = 'queued'").fetchone()[0]
+        assert queued == 1
+        ws = push_enqueue.hour_bucket()
+        assert push_enqueue.get_counter(c, "box", "box-1", ws) == 1
+        assert push_enqueue.get_counter(c, "owner", "owner-1", ws) == 1
+    finally:
+        c.close()
 
 
 # --- D52 atomicity: the harness proof -------------------------------------
