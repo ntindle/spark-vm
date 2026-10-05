@@ -500,7 +500,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   a new slug, then close the blocked job to archive it) and the
   same-slug path (close first, remove the job dir, then spawn again),
   matching the spawn error and the README.
-  (#TBD)
+  (#1037)
 
 - Phone-home epoch bump now joins the command ingest's lock discipline
   (#1019): the reboot-equivalent epoch fence previously rewrote the
