@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Push-sender schema contract (#988): the D1 store the hosted Web Push
+  sender builds against — subscription table, page-budget counters,
+  send-result and acceptance records (the record the first-approval
+  email fallback's retirement criterion reads), and digest state — plus
+  the custody rules (subscription secrets encrypted at rest, never
+  readable back through the API, no claim of operator blindness) and
+  the VAPID key lifecycle. Design contract only; nothing sends a push
+  yet. (#1059)
+
 - Box-side ensemble operator checklist (#1021): the pairing client
   README gains a single operator surface for the five box-side processes
   (hourly token rotation, per-minute heartbeat, per-minute command ingest,
