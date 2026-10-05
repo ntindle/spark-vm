@@ -50,7 +50,17 @@ Decisions (from #989's structural findings):
                  deletes/tombstones it and the dashboard offers
                  re-subscribe
    5xx           ``retry`` — backoff schedule
-   400 / 401 / 413 or any other 4xx / any 3xx
+   408           ``retry`` — backoff schedule (finding #1040: a 408 is
+                 the *server* giving up on the request, not a client
+                 error on our deterministic request — RFC 7231 sanctions
+                 repeating it unchanged. Double-delivery is possible
+                 (Web Push has no idempotency key) when the push service
+                 processed the request but dropped the response; the
+                 cost is a second buzz, not a safety violation — while
+                 losing the page outright pages the owner never, and
+                 #969's reminder machinery is unbuilt, so nothing else
+                 would page them for that approval.)
+   400 / 401 / 413 or any other 4xx (except 408) / any 3xx
                  ``dead-letter`` — our requests are deterministic, so a
                  client error cannot be retried into success; the caller
                  raises the operator-visible alert
@@ -506,6 +516,20 @@ def send_push(*, subscription, plaintext: bytes,
             outcome="retry", http_status=status,
             retry_after_s=backoff_s(attempt), latency_ms=latency_ms,
             note=f"{status}; backoff schedule")
+    if status == 408:
+        # Finding #1040: a 408 is the push service giving up on the
+        # request — a server-side timeout, not a client error on our
+        # deterministic request. Repeating the identical request may
+        # succeed (RFC 7231 sanctions the repeat). Double-delivery is
+        # possible (Web Push carries no idempotency key) when the service
+        # processed the request but dropped the response — a second
+        # buzz, never a safety violation; losing the page outright (the
+        # old dead-letter) paged the owner never, and #969's reminder
+        # machinery is unbuilt, so nothing would page them instead.
+        return PushResult(
+            outcome="retry", http_status=408,
+            retry_after_s=backoff_s(attempt), latency_ms=latency_ms,
+            note="408 request timeout; backoff schedule")
     # Finding 3: any 3xx (redirect — never followed) or any other 4xx is
     # dead-letter. Our requests are deterministic, so a client error
     # cannot be retried into success.

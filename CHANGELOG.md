@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Box-side ensemble operator checklist (#1021): the pairing client
+  README gains a single operator surface for the five box-side processes
+  (hourly token rotation, per-minute heartbeat, per-minute command ingest,
+  per-minute filing upload, and the phone-home daemon) — an inventory of
+  what each process owns, the install checklist, how to verify a healthy
+  box, what to alert on (and what to ignore), and how to reconcile boxes
+  still running the old systemd unit. Reaffirms the wire spec's rule that
+  the heartbeat is the only liveness signal — a connected socket never
+  makes a box look alive. (#1054)
+
 - Metering & billing gap analysis (#1047, #1048): vision-vs-state of
   the usage-metering-to-billing lane — the five meters, the canonical
   envelope, the emission path, and the spend-cap sequencing all exist as
@@ -1006,6 +1016,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Restored the changelog ritual's own rule 1 text: a botched insertion from the October 2 durable-commands docs PR had left a fragment of a changelog bullet inside the standing merge-gate wording, so the ritual no longer read as written. (#940)
 - The box-side phone-home daemon now restarts its reconnect backoff after a healthy session: the backoff counter previously accumulated for the daemon's whole life, so the first reconnect after a long-lived session could wait up to a minute instead of starting over at one second as the wire spec requires. (#1028)
 - `fleet events list` now orders the per-box series by parsed timestamp instead of lexically: journals mixing ISO strings and epoch-shaped `emitted_at` values previously misordered the series, so the "last outcome" row the operator reads could be the wrong row. Unparseable timestamps sort last. (#1057)
+- A 408 (request timeout) from the push service now retries on the standard backoff schedule instead of discarding the page: a 408 is the push service giving up on the request, not a defect in the request, so repeating the identical send may well succeed. Possible double-delivery (Web Push carries no idempotency key) is recorded as an accepted tradeoff — it costs a second notification, never a false approval, while discarding the page meant the owner was never paged for that approval. (#1056)
 
 ## [0.5.0] - 2026-09-29
 
