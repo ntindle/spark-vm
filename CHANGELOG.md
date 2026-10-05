@@ -497,7 +497,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   failed gate-file install no longer leaves stray temp files on the box
   (cleanup now runs on failure too, and on failed transfers), and two
   overlapping scheduled syncs no longer race — the second one exits
-  loudly instead. (#TBD)
+  loudly instead. (#1046)
 
 - The hosted push sender now bounds the push-service response read with a
   total 30-second deadline (#1039): previously only a per-read timeout
