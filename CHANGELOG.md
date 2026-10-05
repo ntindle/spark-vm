@@ -493,6 +493,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Fixed a time-bombed waitlist operator test (#1051): the live-token
+  reinstatement case pinned its clock to a fixed 2026-09-20 fixture
+  while the operator CLI reads real time, so once real time passed
+  the fixture's 14-day invite window the live token read "expired"
+  and the test failed on main. The test now anchors to real time and
+  its refusal-text assertion drains earlier stderr first. No product
+  behavior changed — the reinstatement path itself was correct.
+  (#1052)
+
 - The fleet release-gate sync loop hardens its delivery path (#1009): a
   failed gate-file install no longer leaves stray temp files on the box
   (cleanup now runs on failure too, and on failed transfers), and two
