@@ -542,22 +542,32 @@ try:
     # The real remote command is:
     #   trap "rm -f '<tmp>'" EXIT; install -m 600 '<tmp>' '<dst>'
     # shlex collapses the quoting, so install lands at parts[3:6].
+    # The EXIT trap is modeled HONESTLY (QA): the tmp is removed on
+    # failure only when the command actually installed an EXIT trap
+    # naming the tmp. A trap-less command leaves litter on failure —
+    # exactly the pre-fix behavior the test must catch.
     if parts[3:6] == ["install", "-m", "600"]:
         src, dst = parts[6], parts[7]
+        trap_body = parts[1] if parts[0] == "trap" else ""
+        trap_cleans_tmp = ("EXIT" in parts[2] and "rm" in trap_body
+                           and src in trap_body)
         fail = os.environ.get("FAKE_SSH_INSTALL_FAIL") == "1"
         try:
             if fail:
                 raise subprocess.CalledProcessError(1, "install")
             subprocess.run(["install", "-m", "600", "-D", R(src), R(dst)],
                            check=True)
-        finally:
-            # The remote EXIT trap: the tmp file is removed whether the
-            # install succeeded or failed.
-            try:
-                os.remove(R(src))
-            except OSError:
-                pass
-        sys.exit(1 if fail else 0)
+            # Success path: the old &&-chained rm and the new EXIT trap
+            # both remove the tmp.
+            os.remove(R(src))
+            sys.exit(0)
+        except (subprocess.CalledProcessError, OSError):
+            if trap_cleans_tmp:
+                try:
+                    os.remove(R(src))
+                except OSError:
+                    pass
+            sys.exit(1)
     if parts[:2] == ["rm", "-f"]:
         # Best-effort post-scp-failure cleanup: idempotent, always exits 0.
         try:
@@ -567,7 +577,12 @@ try:
         sys.exit(0)
 except (OSError, subprocess.CalledProcessError, IndexError):
     sys.exit(1)
-sys.exit(0)
+# An unrecognized remote command is a harness bug, not a success: fail
+# loudly so future script changes that alter the remote command shape
+# break tests instead of silently "succeeding".
+sys.stderr.write("FAKE_SSH: unrecognized remote command: "
+                 + " ".join(cmd) + "\\n")
+sys.exit(99)
 """
 
 FAKE_SCP = """#!/usr/bin/env python3
