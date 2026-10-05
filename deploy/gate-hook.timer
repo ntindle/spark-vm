@@ -1,0 +1,20 @@
+[Unit]
+Description=Run the spark-vm G18 gate hook every 60-120s (#777 S1b)
+
+[Timer]
+# The design's hook-loop cadence (docs/RELEASE_GATE_CHANNEL_DESIGN.md §3):
+# 90s base + a one-sided 0–30s randomized delay (RandomizedDelaySec never
+# shortens), so every tick lands inside the 60–120s window.
+# The hook is the latency optimizer, not the enforcement point — a missed
+# tick only ages the local status file; the update tick's own re-query
+# still enforces the gate, and the aged status file makes the stall
+# visible instead of silent.
+OnBootSec=1min
+OnUnitActiveSec=90s
+RandomizedDelaySec=30s
+# Don't pile up missed runs after downtime; the next tick rewrites the
+# status file with a fresh answer anyway.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

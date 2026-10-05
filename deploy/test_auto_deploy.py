@@ -2712,3 +2712,58 @@ def test_legacy_artifact_migration_wired_into_cmd_deploy():
     # retries next tick instead of aborting cmd_deploy.
     assert "migrate_legacy_cred_ui_checkout_artifact ||" in body, \
         "migration hook must tolerate failure (|| log), never abort the deploy"
+
+
+def test_init_installs_gate_hook_next_to_query(tmp_path):
+    """cmd_init must install fleet/gate_hook.sh into the updater's bin next
+    to gate_query.py — the gate-hook.service ExecStart points at the
+    installed copy, never at the checkout (G18 S1b, #777). Hermetic:
+    pre-create the updater repo's .git so init skips the network clone."""
+    state = tmp_path / "state"
+    (state / "repo" / ".git").mkdir(parents=True)
+    env = dict(os.environ, UPDATER_STATE_DIR=str(state))
+    r = subprocess.run(["bash", SCRIPT, "init"], env=env,
+                       capture_output=True, text=True, timeout=120, cwd=REPO)
+    assert r.returncode == 0, r.stderr + r.stdout
+    hook = state / "bin" / "gate_hook.sh"
+    query = state / "bin" / "gate_query.py"
+    assert hook.is_file(), "init must install gate_hook.sh into the updater bin"
+    assert query.is_file(), "init must keep installing gate_query.py"
+    assert os.access(hook, os.X_OK), "the installed hook must be executable"
+    with open(os.path.join(REPO, "fleet", "gate_hook.sh"), "rb") as fh:
+        assert hook.read_bytes() == fh.read(), \
+            "installed hook bytes must equal the checkout's bytes"
+
+
+def test_check_updater_drift_warns_on_gate_hook_change(tmp_path):
+    """origin/main advancing only fleet/gate_hook.sh past the recorded
+    source commit produces the stale-updater warning naming the hook —
+    the drift check covers the installed hook script, not just deploy/."""
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=mirror, check=True,
+                                   capture_output=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    run("git", "config", "commit.gpgsign", "false")
+    (mirror / "fleet").mkdir()
+    (mirror / "fleet" / "gate_hook.sh").write_text("# v1\n")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "base")
+    src = subprocess.run(["git", "rev-parse", "HEAD"], cwd=mirror,
+                         capture_output=True, text=True).stdout.strip()
+    (mirror / "fleet" / "gate_hook.sh").write_text("# v2\n")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "advance")
+    run("git", "update-ref", "refs/remotes/origin/main", "HEAD")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "updater-source-commit").write_text(src + "\n")
+    r = source_and('check_updater_drift',
+                   env_extra={"UPDATER_STATE_DIR": str(state),
+                              "UPDATER_REPO": str(mirror)})
+    assert "WARNING: updater code is stale" in r.stderr, r.stderr + r.stdout
+    assert "gate_hook" in r.stderr, \
+        "the stale warning must name the hook script that advanced"
+    assert "re-run './deploy/auto-deploy.sh init'" in r.stderr

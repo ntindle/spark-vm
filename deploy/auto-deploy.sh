@@ -913,6 +913,10 @@ cmd_init() {
     # fleet/gate_query.py (the timer's $INSTALLED_BIN, not the checkout —
     # same trust model as the updater script itself: re-run init to refresh).
     install -m 0644 "$SCRIPT_DIR/../fleet/gate_query.py" "$INSTALLED_BIN/gate_query.py"
+    # G18 S1b (#777): the gate-hook timer's tick script — installed next to
+    # the query side under the same refresh discipline (the service's
+    # ExecStart points here, never at the checkout).
+    install -m 0755 "$SCRIPT_DIR/../fleet/gate_hook.sh" "$INSTALLED_BIN/gate_hook.sh"
     record_updater_source
     log "installed updater to $INSTALLED_BIN (timer ExecStart must point here)"
     log "init done. Next: install the systemd unit + timer (see README.md)."
@@ -941,9 +945,9 @@ check_updater_drift() {
     [ "$src" != "unknown" ] && [ "$cur" != "unknown" ] && [ "$src" != "$cur" ] || return 0
     git -C "$UPDATER_REPO" merge-base --is-ancestor "$src" "$cur" 2>/dev/null || return 0
     git -C "$UPDATER_REPO" diff --quiet "$src" "$cur" -- deploy/ 2>/dev/null && \
-        git -C "$UPDATER_REPO" diff --quiet "$src" "$cur" -- fleet/gate_query.py 2>/dev/null && return 0
+        git -C "$UPDATER_REPO" diff --quiet "$src" "$cur" -- fleet/gate_query.py fleet/gate_hook.sh 2>/dev/null && return 0
     log "WARNING: updater code is stale: installed copy came from $src,"
-    log "WARNING: origin/main $cur carries newer deploy/ or fleet/gate_query.py changes that are NOT live."
+    log "WARNING: origin/main $cur carries newer deploy/ or fleet/gate_query.py / fleet/gate_hook.sh changes that are NOT live."
     log "WARNING: re-run './deploy/auto-deploy.sh init' from an updated checkout."
 }
 
