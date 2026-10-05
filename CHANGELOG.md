@@ -73,12 +73,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - Documented the stillborn-spawn guard in the muse-job README (#994): every
   MSP spawn (the default transport) now verifies the first agent turn
-  actually engages within 10 seconds
-  (subscribe-before-start, fail-closed on unrecognized terminals) instead of
-  trusting the session start — a dead first turn marks the job blocked, never
-  active, with a vocabulary-gated terminal label and an event journal kept in
-  the job record for diagnosis, and the watchdog refuses to resurrect it.
-  (#TBD)
+  actually engages within 10 seconds instead of trusting the session start
+  — a dead first turn marks the job blocked, never active, keeps the turn
+  id, failure reason, and an event journal in the job record for diagnosis,
+  and the watchdog refuses to resurrect it. (#TBD)
 - Hosted phone-home, S4b socket lifecycle decomposed into four buildable
   slices (#958): the plane Durable Object's remaining session logic —
   hello/identity binding plus the generation fence, command re-drive with

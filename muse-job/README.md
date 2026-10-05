@@ -86,11 +86,21 @@ declares success:
   on a terminal event) — a bounded one-time tax; a stranded `active` job
   costs far more.
 
-To retry a stillborn spawn: remove the job dir (or use a new slug) and
-`muse-job spawn <slug> --tmux` — the first-turn cancellation is a suspected
-MSP/serve-host race (session/branchChanged, per issue #994), so the legacy tmux
-transport is the safe retry;
-`muse-job close` the blocked job record when done.
+To retry a stillborn spawn, pick one path — the job dir cannot be both
+removed and closed (`job.json` lives inside it, so removing the dir
+deletes the record `close` would archive):
+
+- New slug (keeps the diagnosis): `muse-job spawn <new-slug> --tmux`,
+  then `muse-job close <slug>` the blocked job record — `close` archives
+  it and removes the worktree and branch.
+- Same slug: `muse-job close <slug>` first (this is what tears down the
+  git worktree and deletes the job branch), then remove the job dir
+  `/home/ntindle/muse-jobs/<slug>/` — `spawn` refuses a slug whose dir
+  still exists — then `muse-job spawn <slug> --tmux`.
+
+The legacy tmux transport is the safe retry: the first-turn cancellation
+is a suspected MSP/serve-host race (session/branchChanged, per issue #994)
+the `--tmux` path never hits (it has no first-turn watch).
 
 ### TUI auto-update policy (issue #699)
 
