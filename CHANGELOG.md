@@ -72,7 +72,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
   identity conflicts) land in S4b-1–3.
 
 - Documented the stillborn-spawn guard in the muse-job README (#994): every
-  spawn now verifies the first agent turn actually engages within 10 seconds
+  MSP spawn (the default transport) now verifies the first agent turn
+  actually engages within 10 seconds
   (subscribe-before-start, fail-closed on unrecognized terminals) instead of
   trusting the session start — a dead first turn marks the job blocked, never
   active, with a vocabulary-gated terminal label and an event journal kept in

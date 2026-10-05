@@ -82,8 +82,9 @@ declares success:
   watchdog would resurrect the zombie on its next pass.
 
 To retry a stillborn spawn: remove the job dir (or use a new slug) and
-`muse-job spawn <slug>` again — `--tmux` opts back into the legacy
-path if the MSP transport is suspect.
+`muse-job spawn <slug> --tmux` — the first-turn cancellation is an
+MSP/serve-host race, so the legacy tmux transport is the safe retry;
+`muse-job close` the blocked job record when done.
 
 ### TUI auto-update policy (issue #699)
 
