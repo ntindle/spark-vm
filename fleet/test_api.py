@@ -767,20 +767,27 @@ def test_access_log_scrubs_client_control_bytes(store, monkeypatch):
             b"GET /fleet/boxes/\x1b[31mRED\x1b[0m\x9b0m HTTP/1.1\r\n"
             b"Host: x\r\nConnection: close\r\n\r\n")
         assert resp.split(b"\r\n", 1)[0].endswith(b"404 Not Found")
-        # Case 2: a bare newline in the request target attempts to
-        # forge an extra log line.
-        _raw_request(
+        # Case 2: a bare CR in the request target. Unlike LF (which
+        # http.server's readline splits on, so it never reaches the
+        # logged line), CR survives readline and the rstrip('\r\n')
+        # terminator strip, landing in the logged request line — pre-fix
+        # a local client could overwrite the visible log line via
+        # carriage return. The 4-token line fails request parsing, so
+        # the 400 also exercises the log_error -> log_message path
+        # through the scrub.
+        resp = _raw_request(
             port,
-            b"GET /fleet/boxes/\x0aforged-line HTTP/1.1\r\n"
+            b"GET /fleet/boxes/\rforged-line HTTP/1.1\r\n"
             b"Host: x\r\nConnection: close\r\n\r\n")
+        assert resp.split(b"\r\n", 1)[0].endswith(b"400 Bad Request")
     logged = buf.getvalue()
     assert logged, "expected at least one access-log line"
     # No raw control bytes may reach the operator's terminal.
     assert "\x1b" not in logged
     assert "\x9b" not in logged
-    # The forged line cannot survive as its own log line: every logged
-    # line carries the server's own prefix (the newline was stripped, so
-    # the "forged-line" text — if logged at all — rides inside the
-    # server's own 400 line).
+    assert "\r" not in logged
+    # The forged text cannot survive as its own log line: every logged
+    # line carries the server's own prefix (the CR was stripped, so the
+    # "forged-line" text rides inside the server's own 400 line).
     for line in logged.splitlines():
         assert line.startswith("fleet-api "), line

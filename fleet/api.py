@@ -74,7 +74,8 @@ def _clean_log_line(value):
     (``ESC[31m``) or forge extra log lines (``\\n``) unless the line is
     scrubbed. Strip C0 controls, DEL, and C1 (``\\x80``–``\\x9f`` —
     ``\\x9b`` is a live CSI introducer), the same rule the pairing
-    client's display path uses. Non-strings pass through unchanged.
+    client's display path uses (``pairing/spark_pair.py::_plane_text``).
+    Non-strings pass through unchanged.
     """
     if not isinstance(value, str):
         return value
