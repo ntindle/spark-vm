@@ -566,6 +566,49 @@ def test_plain_reconnect_leaves_epoch_alone(ctx):
     assert 0.5 <= sum(ctx.sleeps) <= 1.5
 
 
+# -- epoch bump joins the ingest lock discipline (#1019, D20) -----------------
+
+def _epoch_cursor(ctx, epoch=3, cursor=41):
+    path = os.path.join(ctx.dir, "commands_cursor.json")
+    with open(path, "w") as f:
+        json.dump({"cursor": cursor, "epoch": epoch}, f)
+    return path
+
+
+def test_epoch_bump_applies_under_free_lock(ctx):
+    path = _epoch_cursor(ctx)
+    assert spark_pair._phone_home_bump_epoch(ctx.dir, TOKEN) is True
+    with open(path) as f:
+        cur = json.load(f)
+    assert cur == {"cursor": 41, "epoch": 4}  # cursor kept, epoch fenced
+    # The lock file is a plain 0600 file; the lock is released, not left
+    # held — a subsequent ingest can acquire it.
+    lock_path = os.path.join(ctx.dir, ".ingest.lock")
+    assert (os.stat(lock_path).st_mode & 0o777) == 0o600
+
+
+def test_epoch_bump_skips_loudly_under_ingest_lock_contention(ctx, capsys):
+    import fcntl
+    path = _epoch_cursor(ctx)
+    # Hold the lock the way the cron ingest's wrapper does: the bump must
+    # see contention and skip instead of stalling or interleaving.
+    lock_path = os.path.join(ctx.dir, ".ingest.lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        assert spark_pair._phone_home_bump_epoch(ctx.dir, TOKEN) is False
+        with open(path) as f:
+            cur = json.load(f)
+        assert cur == {"cursor": 41, "epoch": 3}  # untouched, not torn
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    out = capsys.readouterr()
+    assert "epoch bump SKIPPED" in out.out  # loud: stdout + phone_home.log
+    assert "ingest lock contended" in out.out
+    assert TOKEN not in out.out  # redaction discipline on the loud channel
+
+
 def test_upgrade_401_rotates_once_then_reconnects(ctx, monkeypatch):
     calls = []
 
