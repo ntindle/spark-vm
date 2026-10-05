@@ -15,7 +15,9 @@ Endpoints (each names its `fleet` CLI counterpart):
 - ``GET /fleet/boxes/<id>`` — ``inventory --store --box <id>``
 - ``GET /fleet/drift?expected=<commit>&staleness_hours=N`` — ``drift``
 - ``GET /fleet/events?box=&wave=`` — ``events list [--box] [--wave]``
-- ``GET /fleet/alerts`` — ``events watch``
+  (the per-box shape refuses with 413 past the S1 response bound, #1033)
+- ``GET /fleet/alerts`` — ``events watch`` (refuses with 413 past the S1
+  response bound, #1033)
 - ``GET /fleet/crosscheck?box=`` — ``events crosscheck [--box]``
 - ``GET /fleet/waves`` — reserved shape (G15 S2 unlanded)
 
@@ -61,6 +63,63 @@ import events
 _NO_DATA_NOTE = "no journaled records; run collect first"
 _WAVES_UNAVAILABLE = ("unavailable until G15 S2 (rollout envelope null on "
                       "all journaled events)")
+
+# ---------------------------------------------------------------------------
+# S1 response-size bound (#1033).
+#
+# The server is single-threaded stdlib http.server: every response is
+# built in memory and written on the one thread, so a multi-hundred-MB
+# JSON response from a runaway journal wedges the API for every other
+# local client (any local uid can query — spec §5 — so this is a
+# local-availability note, not a data leak). These caps bound the two
+# canonical-row lists that can grow without bound; anything past the
+# cap fails closed with 413 instead of being built, serialized, and
+# written. The check runs before row-mapping and serialization, so the
+# over-cap path pays only the (retention-bounded) journal loads and
+# sort — never row-mapping, serialization, or the write.
+#
+# 50,000 is a guardrail, not a quota: the journals are 90-day
+# retention-bounded (events.prune_events). A busy estate (100 boxes x
+# 100 events/day x 90 days) lands ~9,000 events per box against the
+# 50,000 per-box events cap (~5x of headroom); alerts are
+# operator-fired and sit far below the journal-wide alerts cap. The
+# bound exists to stop a runaway journal from wedging the server, not
+# to ration legitimate estates. If a legitimate estate ever trips it,
+# that is the signal to land S2 paging (#795 OQ5), not to raise the
+# cap quietly.
+#
+# Residuals, named not punted: per-row free-text length (event ``note``,
+# alert ``detail``) is unbounded, so the cap bounds rows, not bytes —
+# a byte-level guard is a follow-up slice. The per-box series shape of
+# /fleet/events and /fleet/crosscheck's verdict list are out of this
+# slice's scope (#1033 names events/alerts; the series shape is bounded
+# by box count).
+_MAX_EVENT_ROWS = 50000
+_MAX_ALERT_ROWS = 50000
+
+
+def _over_cap_body(endpoint, total, cap, hint):
+    """413 body for the #1033 response bound.
+
+    Deliberately no Retry-After header: waiting never shrinks the
+    journal, so a retry-after would be a lie. The hint names the real
+    remedies — prune the journal or land S2 paging.
+    """
+    return {
+        "error": ("too many %s rows (%d) for one S1 response "
+                  "(cap %d rows)" % (endpoint, total, cap)),
+        "cap_rows": cap,
+        "total_rows": total,
+        "hint": hint,
+    }
+
+
+_EVENT_OVER_CAP_HINT = ("prune the journal with the retention policy "
+                        "(fleet/events.py: prune_events), or land S2 "
+                        "paging (#795 OQ5)")
+_ALERT_OVER_CAP_HINT = ("prune the alert journal with the retention policy "
+                        "(fleet/events.py: prune_events), or land S2 paging "
+                        "(#795 OQ5)")
 
 
 def _clean_log_line(value):
@@ -426,6 +485,12 @@ def api_events(store_dir, box_id, wave):
         if not filtered:
             return 404, {"error": "box %s has no events in the journal"
                                   % box_id}
+        # #1033: fail closed before row-mapping/serialization — the
+        # single-threaded server must never build a giant response.
+        if len(filtered) > _MAX_EVENT_ROWS:
+            return 413, _over_cap_body("event", len(filtered),
+                                       _MAX_EVENT_ROWS,
+                                       _EVENT_OVER_CAP_HINT)
         body = {
             "box_id": box_id,
             "event_count": len(filtered),
@@ -504,9 +569,6 @@ def api_alerts(store_dir):
     all_alerts, err = events.load_alerts(store_dir)
     if err:
         return 500, {"error": err}
-    data_as_of, err = _journal_freshness(store_dir)
-    if err:
-        return 500, {"error": err}
     pending = [a for a in all_alerts if not a.get("acked")]
     acked = [a for a in all_alerts if a.get("acked")]
     # Pending rows follow the CLI's fired_at-ascending order; the acked
@@ -514,6 +576,15 @@ def api_alerts(store_dir):
     # ordered the same way but marked as such in the conformance test.
     ordered = (sorted(pending, key=lambda x: str(x.get("fired_at") or ""))
                + sorted(acked, key=lambda x: str(x.get("fired_at") or "")))
+    # #1033: fail closed before freshness/row-mapping — the over-cap
+    # path pays only the (retention-bounded) journal load and sort.
+    if len(ordered) > _MAX_ALERT_ROWS:
+        return 413, _over_cap_body("alert", len(ordered),
+                                   _MAX_ALERT_ROWS,
+                                   _ALERT_OVER_CAP_HINT)
+    data_as_of, err = _journal_freshness(store_dir)
+    if err:
+        return 500, {"error": err}
     body = {
         "status": "pending" if pending else "clear",
         "pending_count": len(pending),
