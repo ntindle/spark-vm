@@ -546,7 +546,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 - The fleet read API's access log now strips control characters before
-  writing (#TBD): the request line is client-controlled and used to reach
+  writing (#1032): the request line is client-controlled and used to reach
   the operator's terminal raw, so a local client could inject terminal
   escape sequences or forge extra log lines — the log line is now scrubbed
   (C0 controls, DEL, and C1) the same way the pairing client scrubs its
