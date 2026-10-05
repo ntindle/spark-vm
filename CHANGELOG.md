@@ -78,7 +78,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   trusting the session start — a dead first turn marks the job blocked, never
   active, with a vocabulary-gated terminal label and an event journal kept in
   the job record for diagnosis, and the watchdog refuses to resurrect it.
-  (#1025)
+  (#TBD)
 - Hosted phone-home, S4b socket lifecycle decomposed into four buildable
   slices (#958): the plane Durable Object's remaining session logic —
   hello/identity binding plus the generation fence, command re-drive with

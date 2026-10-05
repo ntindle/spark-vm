@@ -87,8 +87,9 @@ declares success:
   costs far more.
 
 To retry a stillborn spawn: remove the job dir (or use a new slug) and
-`muse-job spawn <slug> --tmux` — the first-turn cancellation is an
-MSP/serve-host race, so the legacy tmux transport is the safe retry;
+`muse-job spawn <slug> --tmux` — the first-turn cancellation is a suspected
+MSP/serve-host race (session/branchChanged, per issue #994), so the legacy tmux
+transport is the safe retry;
 `muse-job close` the blocked job record when done.
 
 ### TUI auto-update policy (issue #699)
