@@ -37,6 +37,19 @@ set -euo pipefail
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
+# One writer, enforced in code: the loop must not overlap with itself. Two
+# concurrent cron ticks share nothing but the box's gate dir — §5's
+# "one writer" delivery-path ownership is a per-estate property, not a
+# per-PID one, so the lock is estate-scoped. A second overlapping run exits
+# loudly (exit 2) instead of racing; the fd dies with the process, so a
+# killed run can never wedge future runs (flock, not a pidfile).
+LOCKFILE="$ESTATE/.gate_sync.lock"
+exec 9>"$LOCKFILE"
+if ! flock -n 9; then
+    echo "ERROR: another gate_sync is already syncing $ESTATE (lock $LOCKFILE held)" >&2
+    exit 2
+fi
+
 fail=0
 for boxdir in "$ESTATE"/*/; do
     [ -d "$boxdir" ] || continue
@@ -79,16 +92,29 @@ for boxdir in "$ESTATE"/*/; do
     # 600 into place. The publisher's 0600 survives the trip (plain scp
     # would land the file at the remote umask), and a concurrent
     # gate_query never reads a half-written document.
+#
+# The loop takes an estate-scoped flock (a second overlapping cron tick
+# exits loudly instead of racing), and every remote temp file is removed
+# by a remote EXIT trap so failures leave no litter on the box.
     tmp_remote="$GATE_DIR/.gate.json.tmp.$$"
     # shellcheck disable=SC2086
     if ! scp $SSH_OPTS "$GATE" "${GATE_USER}@${target}:${tmp_remote}"; then
         echo "ERROR: scp to $box failed" >&2
+        # A failed scp can leave a partial tmp_remote behind — same litter
+        # class as a failed install (the tmp name is ours, so the leftover
+        # is always ours to remove). Best-effort: if the box is down this
+        # ssh fails too, which is fine.
+        # shellcheck disable=SC2086
+        ssh $SSH_OPTS "${GATE_USER}@${target}" "rm -f '$tmp_remote'" || true
         fail=1
         continue
     fi
+    # The tmp file is removed by a remote EXIT trap, so an install failure
+    # cleans up exactly like the success path — no .gate.json.tmp.<pid>
+    # litter accumulates in the gate dir on repeated failures.
     # shellcheck disable=SC2086
     if ssh $SSH_OPTS "${GATE_USER}@${target}" \
-        "install -m 600 '$tmp_remote' '$GATE_DIR/gate.json' && rm -f '$tmp_remote'"; then
+        "trap \"rm -f '$tmp_remote'\" EXIT; install -m 600 '$tmp_remote' '$GATE_DIR/gate.json'"; then
         echo "synced $box"
     else
         echo "ERROR: atomic install on $box failed" >&2

@@ -519,8 +519,9 @@ def test_query_rejects_group_readable_key(tmp_path, keyfile, registry,
 SYNC = os.path.join(REPO, "fleet", "gate_sync.sh")
 
 # Hermetic ssh/scp stand-ins: they map the remote absolute path into a
-# per-host directory under FAKE_SSH_ROOT and emulate exactly the two remote
-# commands gate_sync.sh sends (test -d probe, install -m 600 delivery).
+# per-host directory under FAKE_SSH_ROOT and emulate exactly the remote
+# commands gate_sync.sh sends (test -d probe, trap + install -m 600
+# delivery, best-effort rm -f cleanup).
 FAKE_SSH = """#!/usr/bin/env python3
 import os, shlex, subprocess, sys
 root = os.environ["FAKE_SSH_ROOT"]
@@ -538,11 +539,31 @@ parts = shlex.split(" ".join(cmd))
 try:
     if parts[:2] == ["test", "-d"]:
         sys.exit(0 if os.path.isdir(R(parts[2])) else 1)
-    if parts[:3] == ["install", "-m", "600"] and "&&" in parts:
-        src, dst = parts[3], parts[4]
-        subprocess.run(["install", "-m", "600", "-D", R(src), R(dst)],
-                       check=True)
-        os.remove(R(src))
+    # The real remote command is:
+    #   trap "rm -f '<tmp>'" EXIT; install -m 600 '<tmp>' '<dst>'
+    # shlex collapses the quoting, so install lands at parts[3:6].
+    if parts[3:6] == ["install", "-m", "600"]:
+        src, dst = parts[6], parts[7]
+        fail = os.environ.get("FAKE_SSH_INSTALL_FAIL") == "1"
+        try:
+            if fail:
+                raise subprocess.CalledProcessError(1, "install")
+            subprocess.run(["install", "-m", "600", "-D", R(src), R(dst)],
+                           check=True)
+        finally:
+            # The remote EXIT trap: the tmp file is removed whether the
+            # install succeeded or failed.
+            try:
+                os.remove(R(src))
+            except OSError:
+                pass
+        sys.exit(1 if fail else 0)
+    if parts[:2] == ["rm", "-f"]:
+        # Best-effort post-scp-failure cleanup: idempotent, always exits 0.
+        try:
+            os.remove(R(parts[2]))
+        except (OSError, IndexError):
+            pass
         sys.exit(0)
 except (OSError, subprocess.CalledProcessError, IndexError):
     sys.exit(1)
@@ -558,6 +579,11 @@ host, path = dest.split(":", 1)
 host = host.split("@", 1)[1]
 full = os.path.join(root, host, path.lstrip("/"))
 os.makedirs(os.path.dirname(full), exist_ok=True)
+if os.environ.get("FAKE_SCP_FAIL") == "1":
+    # A failed transfer may leave a partial remote file, like real scp.
+    with open(full, "wb") as fh:
+        fh.write(open(src, "rb").read(8))
+    sys.exit(1)
 shutil.copyfile(src, full)
 """
 
@@ -655,6 +681,86 @@ def test_gate_sync_rejects_option_injection(tmp_path, sync_harness, keyfile,
     r = run("bash", SYNC, env_extra=env)
     assert r.returncode == 1
     assert "invalid ssh-target" in r.stderr
+
+
+def test_gate_sync_failed_install_leaves_no_tmp(tmp_path, sync_harness,
+                                                keyfile, registry, manifest):
+    # #1009(1): an install failure must still clean the remote tmp via the
+    # EXIT trap — repeated failures must not accumulate
+    # .gate.json.tmp.<pid> litter in the gate dir.
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    fakeroot = tmp_path / "fakeroot"
+    gatedir = fakeroot / "box-01" / "var" / "lib" / "sparkvm" / "gate"
+    gatedir.mkdir(parents=True)
+    env = sync_env(tmp_path, sync_harness, estate,
+                   {"GATE": gate, "FAKE_SSH_INSTALL_FAIL": "1"})
+    r = run("bash", SYNC, env_extra=env)
+    assert r.returncode == 1
+    assert "atomic install" in r.stderr
+    leftovers = [p for p in gatedir.iterdir()
+                 if p.name.startswith(".gate.json.tmp.")]
+    assert leftovers == []
+
+
+def test_gate_sync_failed_scp_cleans_partial_tmp(tmp_path, sync_harness,
+                                                 keyfile, registry, manifest):
+    # #1009(1): a failed scp can leave a partial remote tmp — the script
+    # must best-effort remove it (same litter class as a failed install).
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    fakeroot = tmp_path / "fakeroot"
+    gatedir = fakeroot / "box-01" / "var" / "lib" / "sparkvm" / "gate"
+    gatedir.mkdir(parents=True)
+    env = sync_env(tmp_path, sync_harness, estate,
+                   {"GATE": gate, "FAKE_SCP_FAIL": "1"})
+    r = run("bash", SYNC, env_extra=env)
+    assert r.returncode == 1
+    assert "scp to box-01 failed" in r.stderr
+    leftovers = [p for p in gatedir.iterdir()
+                 if p.name.startswith(".gate.json.tmp.")]
+    assert leftovers == []
+    # The best-effort cleanup ssh actually ran.
+    assert "rm -f" in open(tmp_path / "ssh.log").read()
+
+
+def test_gate_sync_overlapping_run_exits_loud(tmp_path, sync_harness, keyfile,
+                                              registry, manifest):
+    # #1009(2): a second overlapping run must exit loudly (exit 2) instead
+    # of racing the first. The flock is per-process: killing the holder
+    # releases it, so this can never wedge future runs.
+    import fcntl
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    lockfile = str(estate / ".gate_sync.lock")
+    fd = os.open(lockfile, os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        gate = publish(tmp_path, keyfile, registry, manifest)
+        env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
+        r = run("bash", SYNC, "--dry-run", env_extra=env)
+        assert r.returncode == 2
+        assert "already" in r.stderr
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def test_gate_sync_lock_releases_between_runs(tmp_path, sync_harness, keyfile,
+                                              registry, manifest):
+    # The lock is held only for the run's lifetime: sequential runs each
+    # acquire it, and the lockfile itself (a dotfile) never glob-matches a
+    # box dir, so it can't be mistaken for a box.
+    estate = tmp_path / "estate"
+    (estate / "box-01").mkdir(parents=True)
+    gate = publish(tmp_path, keyfile, registry, manifest)
+    env = sync_env(tmp_path, sync_harness, estate, {"GATE": gate})
+    for _ in range(2):
+        r = run("bash", SYNC, "--dry-run", env_extra=env)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.count("would sync") == 1
 
 
 def test_gate_cap_nonancestor_divergence_refuses(tmp_path):
