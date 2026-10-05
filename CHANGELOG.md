@@ -58,7 +58,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   frozen or gate-stale fleet shows up as visible degraded operation
   instead of silent drift. The update tick's own gate check remains the
   enforcement point; the hook only keeps the answer fresh and observable.
-  (#TBD)
+  (#1034)
 
 - Fleet estate read API (G21 S1, #795): the operator's fleet store is now
   queryable over HTTP — `fleet api --store DIR --port 18760` serves a
