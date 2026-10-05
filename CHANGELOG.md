@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted phone-home journal retention (#1013): the plane's per-box
+  journal and the unattributed upgrade-probe counter now expire on a
+  schedule — journal rows older than 90 days and probe-counter day
+  buckets older than 7 days are deleted by a daily automatic cleanup
+  (03:17 UTC), and owners can trigger the same cleanup on demand with a new
+  owner-only API endpoint (`POST /v1/ops/phone_home/gc` — a box can never
+  trigger the cleanup of its own journal). Cleanup runs are visible in the plane Worker's logs.
+
 - Hosted box-side process-shape gap analysis (#847/#849): a vision-vs-state
   inventory of the five box-side processes (the four cron one-shots —
   token rotation, heartbeat, command ingest, filing upload — plus the

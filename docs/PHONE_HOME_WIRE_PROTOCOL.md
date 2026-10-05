@@ -280,7 +280,12 @@ default 50 / max 200; `since` unix-seconds cursor), newest-first; the
 response also carries the unattributed `upgrade_401s_7d` series (the
 probe counter from the paragraph above). A box token is explicitly
 refused on this path — a box cannot read its own journal. Retention:
-90 days (GC tracked separately, #1013).
+90 days — enforced by a daily Worker cron cleanup (03:17 UTC) plus an owner-run
+`POST /v1/ops/phone_home/gc` manual trigger (owner-only; a box token is
+explicitly refused, mirroring the read path). The unattributed
+upgrade-401 day buckets older than 7 days are deleted, matching the read
+path's 7-day series. Cleanup runs are visible in the plane Worker's logs; the manual
+endpoint returns the deleted-row counts. (#1013)
 
 ## 10. Box-side wire constraints (G47.6)
 
