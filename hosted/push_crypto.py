@@ -20,6 +20,11 @@ Public API (sender side only -- the plane never decrypts):
   body: 16-octet salt || u32 record size || keyid || AES-GCM ciphertext.
 - :func:`vapid_sign` / :func:`vapid_authorization_header` -- RFC 8292
   VAPID JWT (ES256) for the push-service request.
+- :func:`validate_peer_public_key` / :func:`validate_private_key` --
+  fail-closed public validators for a peer (user-agent) P-256 public key
+  (RFC 8291 section 7 curve check) and a P-256 private key, for
+  cross-module callers (e.g. :mod:`hosted.push_sender`) that need the
+  validation verdict without the decoded coordinates.
 
 Security posture (read before reusing):
 

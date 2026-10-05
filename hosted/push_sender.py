@@ -22,8 +22,14 @@ Decisions (from #989's structural findings):
 2. **HTTP client.** ``http.client.HTTPSConnection`` with
    ``ssl.create_default_context()`` (hostname check + cert verification
    on — a self-signed or mismatched push service is a hard failure, not
-   a warning). Connect timeout 5 s, read timeout 10 s — a push service
-   is fast; slower than this is a dead peer, not a slow one.
+   a warning). Connect timeout 5 s, per-recv read timeout 10 s — a push
+   service is fast; slower than this is a dead peer, not a slow one.
+   The response-header phase additionally carries a **total 30 s
+   deadline** from request start (``RESPONSE_DEADLINE_S``, #1039): the
+   per-recv timeout alone cannot stop a peer that drips bytes inside
+   the window, so the deadline re-arms the socket timeout from the
+   remaining budget on every read and raises ``socket.timeout``
+   (transport-error class → ``retry``) at expiry.
 3. **Redirects are never followed.** Any 3xx classifies ``dead-letter``.
    Following a redirect on a VAPID-signed request is a
    credential-orientation question; the answer is no. (``http.client``
@@ -129,6 +135,14 @@ VAPID_EXPIRY_S = 12 * 3600
 #: a dead peer.
 CONNECT_TIMEOUT_S = 5.0
 READ_TIMEOUT_S = 10.0
+
+#: Total deadline for the response-header phase (finding #1039): the
+#: per-recv ``READ_TIMEOUT_S`` keeps the fast path, but a push service
+#: dripping bytes inside the per-recv window would hold the send path
+#: indefinitely. Wall-clock from request start; expiry raises
+#: ``socket.timeout`` from the socket's own read path, so it classifies
+#: ``retry`` (transport-error class) like every other transport error.
+RESPONSE_DEADLINE_S = 30.0
 
 #: Retry bound (finding 3): the module never sleeps and never loops;
 #: the #990 caller enforces this many total attempts using
@@ -303,6 +317,54 @@ def _validated_vapid_keys(private_key: bytes, public_key: bytes) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _DeadlineSocketIO(socket.SocketIO):
+    """A raw socket file object that re-arms the socket timeout from the
+    remaining deadline budget before every read (finding #1039).
+
+    ``http.client`` performs the response-header read through
+    ``sock.makefile()``, whose read path funnels into this object's
+    ``readinto`` — overriding it here bounds the whole header phase on
+    any socket type, without reaching into the socket's own attributes
+    (plain ``socket.socket`` forbids instance-attribute shadowing, so a
+    recv-patching approach would only work on SSLSocket by accident).
+    """
+
+    def __init__(self, sock, mode, deadline):
+        super().__init__(sock, mode)
+        self._deadline = deadline
+
+    def readinto(self, b):
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout("push response-header deadline exceeded")
+        # The per-recv READ_TIMEOUT_S still applies while the budget is
+        # ample; the bound tightens as the deadline approaches, and at
+        # expiry the read raises instead of waiting.
+        self._sock.settimeout(min(READ_TIMEOUT_S, remaining))
+        return super().readinto(b)
+
+
+class _DeadlineSocket:
+    """Proxy over the connection socket that bounds the response-header
+    read with a total deadline (finding #1039).
+
+    ``http.client`` builds its response reader from ``sock.makefile()``;
+    this proxy's ``makefile`` returns a :class:`_DeadlineSocketIO`, so
+    the header phase cannot outlive the deadline no matter how slowly
+    the peer drips. Every other attribute delegates to the real socket.
+    """
+
+    def __init__(self, sock, deadline):
+        object.__setattr__(self, "_real_sock", sock)
+        object.__setattr__(self, "_deadline", deadline)
+
+    def makefile(self, mode="r", *args, **kwargs):
+        return _DeadlineSocketIO(self._real_sock, mode, self._deadline)
+
+    def __getattr__(self, name):
+        return getattr(self._real_sock, name)
+
+
 def _default_transport(*, host: str, port: int, path: str,
                        headers: dict, body: bytes) -> tuple[int, dict, bytes]:
     """The production transport (finding 2): TLS with hostname + cert
@@ -317,12 +379,21 @@ def _default_transport(*, host: str, port: int, path: str,
     conn = http.client.HTTPSConnection(
         host, port, timeout=CONNECT_TIMEOUT_S, context=context)
     try:
+        # Finding #1039: the total deadline runs from request start — a
+        # per-recv timeout alone cannot stop a slow drip.
+        deadline = time.monotonic() + RESPONSE_DEADLINE_S
         conn.request("POST", path, body=body, headers=headers)
         # Bound the response-header read. The timeout is per-recv, not a
         # total deadline; push responses are tiny headers, so this is
         # the right granularity here.
         conn.sock.settimeout(READ_TIMEOUT_S)
-        resp = conn.getresponse()
+        # Swap in the deadline proxy for the header phase only; the real
+        # socket is restored before close so teardown stays ordinary.
+        real_sock, conn.sock = conn.sock, _DeadlineSocket(conn.sock, deadline)
+        try:
+            resp = conn.getresponse()
+        finally:
+            conn.sock = real_sock
         status = resp.status
         resp_headers = {k.lower(): v for k, v in resp.getheaders()}
     finally:
