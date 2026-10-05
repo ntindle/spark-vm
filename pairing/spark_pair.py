@@ -3319,8 +3319,13 @@ def cmd_phone_home(args):
             if welcomed:
                 # Each healthy session earns its own rotate budget: a 401
                 # after a long-lived session gets a fresh rotate attempt
-                # instead of immediate re-pair guidance.
+                # instead of immediate re-pair guidance — and starts a
+                # fresh backoff episode (spec §10 "1 s initial"): without
+                # this reset, the first reconnect after a long-lived
+                # session would wait the accumulated cap (up to 60 s)
+                # instead of starting over at 1 s (#1027).
                 rotate_tried = False
+                attempt = 0
             kind = outcome[0]
             if kind == "stopped":
                 _phone_home_say(d, "stopping on signal", token)

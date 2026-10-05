@@ -567,6 +567,24 @@ def test_plain_reconnect_leaves_epoch_alone(ctx):
     assert 0.5 <= sum(ctx.sleeps) <= 1.5
 
 
+def test_backoff_episode_resets_after_healthy_session(ctx, monkeypatch):
+    # #1027: a healthy (welcomed) session starts a fresh backoff episode
+    # (spec §10 "1 s initial"). Connection 1 drops (attempt 0 → 1), then
+    # connection 2 lives briefly and drops: the second reconnect must
+    # back off from attempt 0 again, not from the accumulated attempt 1.
+    attempts = []
+    monkeypatch.setattr(
+        spark_pair, "_ws_backoff_delay",
+        lambda attempt, *a, **k: (attempts.append(attempt), 0.01)[1])
+    stub = StubDO([[("welcome",), ("close-tcp",)],
+                   [("welcome",), ("drain", 0.6), ("close-tcp",)],
+                   [("welcome",), ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(stub.records) == 3
+    assert attempts == [0, 0], attempts  # pre-#1027 fix: [0, 1]
+
+
 # -- epoch bump joins the ingest lock discipline (#1019, D20) -----------------
 
 def _epoch_cursor(ctx, epoch=3, cursor=41):
