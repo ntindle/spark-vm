@@ -136,7 +136,13 @@ the truncation rule is documented in the response schema, not hidden.
   no auth story is a review blocker, so S1 ships no way to do it.
   `--port` stays configurable (suggested default **18760**). No auth
   in S1 — the operator's own box is the trust boundary, same as the
-  CLI today.
+  CLI today. **Multi-user-box caveat:** on a box with more than one
+  uid, every local uid can query the API while it runs — the running
+  API re-exposes whatever the store contains to local users who
+  could not read the store files directly (e.g. a `0700` store).
+  Treat the store as readable by all local users, or don't run the
+  API there. A uid-scoped transport (unix socket / peer-credential
+  check) is deferred to the S2 auth story.
 - `--store DIR` is required; the API never writes to the store (reads
   take the same read-only posture as the inventory/event journal
   readers — pure readers stay unlocked per the #817 flock discipline).

@@ -1029,6 +1029,16 @@ def main(argv=None):
     p_events.add_argument("--alert-id", default=None,
                           help="with ack: the alert to acknowledge")
 
+    p_api = sub.add_parser("api", help="read-only HTTP projection of the "
+                                      "fleet estate store (G21 S1, #795)")
+    p_api.add_argument("--store", required=True,
+                       help="store dir (journal.jsonl + snapshot.json); "
+                            "never written")
+    p_api.add_argument("--port", type=int, default=18760,
+                       help="localhost port (default 18760); binds "
+                            "127.0.0.1 only — no bind-address flag exists "
+                            "by design (spec §5)")
+
     args = parser.parse_args(argv)
     if args.command in ("inventory", "drift"):
         # timedelta(hours=...) blows up on nan/inf; reject non-finite or
@@ -1090,6 +1100,14 @@ def main(argv=None):
                     return 2
             else:
                 err = "unknown events action %s" % args.action
+        elif args.command == "api":
+            # G21 S1: the read API lives in fleet/api.py (same-dir import,
+            # like the `import events` above). Imported lazily so the
+            # plain CLI never pays for http.server, and the api command
+            # never runs on import.
+            import api as fleet_api
+            return fleet_api.main(["--store", args.store,
+                                   "--port", str(args.port)])
         else:
             err = "unknown command %s" % args.command
     except Exception as exc:
