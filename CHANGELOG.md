@@ -439,6 +439,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Phone-home epoch bump now joins the command ingest's lock discipline
+  (#1019): the reboot-equivalent epoch fence previously rewrote the
+  ingest cursor without the lock, so a cron ingest mid-pass could save
+  a stale epoch back over the bumped one and lose the fence. The bump
+  now takes the ingest lock non-blocking — under contention it skips
+  loudly and defers to the plane's stale-generation fence instead of
+  stalling, and the generation-loss log line no longer claims the bump
+  when it skipped. (#1024)
+
 - Phone-home daemon exit codes now distinguish crashes from deliberate
   stops: uncaught exceptions exit 2 (loud on stderr and in the log,
   traceback with the token redacted) so the supervisor restarts them,

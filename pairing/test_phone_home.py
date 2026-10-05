@@ -12,6 +12,7 @@ explode in the S5b tests, so any HTTPS ack would fail); untrusted
 command frames are logged and never executed.
 """
 import base64
+import errno
 import hashlib
 import io
 import json
@@ -564,6 +565,151 @@ def test_plain_reconnect_leaves_epoch_alone(ctx):
     # Transport loss backs off (attempt 0 → ~0.75-1.25s total; the
     # interruptible sleep splits it into ≤1s quanta).
     assert 0.5 <= sum(ctx.sleeps) <= 1.5
+
+
+# -- epoch bump joins the ingest lock discipline (#1019, D20) -----------------
+
+def _epoch_cursor(ctx, epoch=3, cursor=41):
+    path = os.path.join(ctx.dir, "commands_cursor.json")
+    with open(path, "w") as f:
+        json.dump({"cursor": cursor, "epoch": epoch}, f)
+    return path
+
+
+def test_epoch_bump_applies_under_free_lock(ctx):
+    import fcntl
+    path = _epoch_cursor(ctx)
+    assert spark_pair._phone_home_bump_epoch(ctx.dir, TOKEN) is True
+    with open(path) as f:
+        cur = json.load(f)
+    assert cur == {"cursor": 41, "epoch": 4}  # cursor kept, epoch fenced
+    # The lock file is a plain 0600 file, and the lock is released, not
+    # left held — a subsequent ingest-style acquire on a fresh fd
+    # succeeds immediately.
+    lock_path = os.path.join(ctx.dir, ".ingest.lock")
+    assert (os.stat(lock_path).st_mode & 0o777) == 0o600
+    fd2 = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        fcntl.flock(fd2, fcntl.LOCK_UN)
+        os.close(fd2)
+
+
+def test_epoch_bump_skips_loudly_under_ingest_lock_contention(ctx, capsys):
+    import fcntl
+    path = _epoch_cursor(ctx)
+    # Hold the lock the way the cron ingest's wrapper does: the bump must
+    # see contention and skip instead of stalling or interleaving.
+    lock_path = os.path.join(ctx.dir, ".ingest.lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        assert spark_pair._phone_home_bump_epoch(ctx.dir, TOKEN) is False
+        with open(path) as f:
+            cur = json.load(f)
+        assert cur == {"cursor": 41, "epoch": 3}  # untouched, not torn
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    out = capsys.readouterr()
+    # Loud = the stdout channel _phone_home_say names (the log append
+    # is best-effort); the redaction discipline holds on that channel.
+    assert "epoch bump SKIPPED" in out.out
+    assert "ingest lock contended" in out.out
+    assert TOKEN not in out.out  # redaction discipline on the loud channel
+
+
+def _hold_ingest_lock(d):
+    """Hold the cron-ingest's lock, modeling a mid-pass ingest."""
+    import fcntl
+    fd = os.open(os.path.join(d, ".ingest.lock"),
+                 os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _release_ingest_lock(fd):
+    import fcntl
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+
+def test_epoch_bump_no_cursor_is_quiet_noop(ctx):
+    # Missing cursor → nothing to fence; unparseable → same. Returns
+    # False and creates no cursor file (pre-existing quiet paths).
+    assert spark_pair._phone_home_bump_epoch(ctx.dir, TOKEN) is False
+    path = os.path.join(ctx.dir, "commands_cursor.json")
+    assert not os.path.exists(path)
+    with open(path, "w") as f:
+        f.write("garbage{")
+    assert spark_pair._phone_home_bump_epoch(ctx.dir, TOKEN) is False
+
+
+def test_epoch_bump_skips_loudly_on_lock_open_failure(ctx, monkeypatch,
+                                                      capsys):
+    path = _epoch_cursor(ctx)
+    real_open = os.open
+
+    def fail_lock(p, flags, *a):
+        if os.path.basename(p) == ".ingest.lock":
+            raise OSError(errno.EACCES, "Permission denied")
+        return real_open(p, flags, *a)
+
+    monkeypatch.setattr(os, "open", fail_lock)
+    assert spark_pair._phone_home_bump_epoch(ctx.dir, TOKEN) is False
+    with open(path) as f:
+        cur = json.load(f)
+    assert cur == {"cursor": 41, "epoch": 3}  # untouched
+    out = capsys.readouterr()
+    assert "epoch bump SKIPPED" in out.out
+    assert "cannot open ingest lock" in out.out
+    assert TOKEN not in out.out
+
+
+def test_epoch_bump_skip_mutes_adopt_claim(ctx, capsys):
+    # The adopt-path caller gate: when the bump skips, the
+    # "counter loss → epoch+1" claim must stay silent (no overclaim).
+    path = _epoch_cursor(ctx)
+    fd = _hold_ingest_lock(ctx.dir)
+    try:
+        stub = StubDO([[("welcome",),
+                        ("close", "stale-generation",
+                         {"last_generation": 9})],
+                       [("welcome",), ("close", "revoked", {})]])
+        rc = _run_client(ctx, stub)
+    finally:
+        _release_ingest_lock(fd)
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "epoch bump SKIPPED" in out.out
+    assert "counter loss \u2192 epoch+1" not in out.out
+    # The DO-dictated generation still adopted; the epoch fence did not move.
+    with open(os.path.join(ctx.dir, "phone_home_generation.json")) as f:
+        assert json.load(f)["generation"] == 10
+    with open(path) as f:
+        assert json.load(f) == {"cursor": 41, "epoch": 3}
+
+
+def test_epoch_bump_skip_mutes_counter_loss_claim(ctx, capsys):
+    # The counter-loss caller gate: corrupt generation file → bump
+    # attempt under a held lock skips; "claimed epoch+1" stays silent.
+    path = _epoch_cursor(ctx)
+    with open(os.path.join(ctx.dir, "phone_home_generation.json"),
+              "w") as f:
+        f.write("garbage{")  # counter loss: reboot-equivalent
+    fd = _hold_ingest_lock(ctx.dir)
+    try:
+        stub = StubDO([[("welcome",), ("close", "revoked", {})]])
+        rc = _run_client(ctx, stub)
+    finally:
+        _release_ingest_lock(fd)
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "epoch bump SKIPPED" in out.out
+    assert "claimed epoch+1" not in out.out  # no overclaim on the skip
+    with open(path) as f:
+        assert json.load(f) == {"cursor": 41, "epoch": 3}
 
 
 def test_upgrade_401_rotates_once_then_reconnects(ctx, monkeypatch):

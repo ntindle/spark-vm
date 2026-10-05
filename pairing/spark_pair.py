@@ -2635,30 +2635,70 @@ def _phone_home_adopt_generation(d, generation):
         raise _WsError(f"generation file unwritable ({e})")
 
 
-def _phone_home_bump_epoch(d):
+def _phone_home_bump_epoch(d, token=()):
     """Counter loss is a reboot-equivalent (§5): claim a higher epoch so
     stale in-flight commands die per #848's incarnation rule.
 
     Only touches an existing, parseable cursor file; a missing cursor
     means no in-flight state to fence, so there is nothing to bump.
-    Plain reconnects never call this."""
-    path = os.path.join(d, _INGEST_CURSOR_FILE)
+    Plain reconnects never call this.
+
+    Joins the .ingest.lock discipline (#1019, D20): the bump rewrites
+    the cron ingest's cursor file, so it must hold the lock across the
+    read-modify-write — without it the cron pass can save a stale epoch
+    back over the bumped one. Non-blocking: a held lock means the cron
+    ingest is mid-pass, so the bump skips loudly instead of stalling —
+    the DO's stale-generation fence is the authoritative recovery for
+    the lost incarnation (the bump is advisory), and a lock-file open
+    failure skips loudly the same way. Returns True when the bump
+    applied, False when there was nothing to bump or the bump skipped.
+
+    The write itself stays O_TRUNC (no temp+rename) — a crash mid-write
+    can still tear the cursor; that residual is scoped out of #1019 and
+    covered by the plane-`acked_watermark` heal path per the issue.
+    """
     try:
-        with open(path) as f:
-            cur = json.load(f)
-    except (OSError, ValueError):
-        return False
-    if not isinstance(cur, dict):
-        return False
-    epoch = cur.get("epoch")
-    if not isinstance(epoch, int) or isinstance(epoch, bool):
-        epoch = 0
-    cur["epoch"] = epoch + 1
-    try:
-        _write_private(path, json.dumps(cur, indent=2).encode())
+        lock_fd = os.open(os.path.join(d, _INGEST_LOCK_FILE),
+                          os.O_CREAT | os.O_RDWR, 0o600)
+        # 0600 at creation is not enough: a pre-existing lock file keeps
+        # its wider mode through the open (same as the ingest wrapper).
+        os.fchmod(lock_fd, 0o600)
     except OSError as e:
-        raise _WsError(f"cursor file unwritable ({e})")
-    return True
+        _phone_home_say(d, "epoch bump SKIPPED: cannot open ingest lock "
+                           f"({e}) — the DO's stale-generation fence is "
+                           "the authoritative recovery for the lost "
+                           "incarnation", token)
+        return False
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(lock_fd)
+        _phone_home_say(d, "epoch bump SKIPPED: ingest lock contended — "
+                           "the cron ingest is mid-pass; the DO's "
+                           "stale-generation fence is the authoritative "
+                           "recovery for the lost incarnation", token)
+        return False
+    try:
+        path = os.path.join(d, _INGEST_CURSOR_FILE)
+        try:
+            with open(path) as f:
+                cur = json.load(f)
+        except (OSError, ValueError):
+            return False
+        if not isinstance(cur, dict):
+            return False
+        epoch = cur.get("epoch")
+        if not isinstance(epoch, int) or isinstance(epoch, bool):
+            epoch = 0
+        cur["epoch"] = epoch + 1
+        try:
+            _write_private(path, json.dumps(cur, indent=2).encode())
+        except OSError as e:
+            raise _WsError(f"cursor file unwritable ({e})")
+        return True
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 # -- Close-code reconnect policy (spec §6) ----------------------------------------
@@ -3227,16 +3267,20 @@ def cmd_phone_home(args):
             if gen_status == "counter-loss":
                 # Reboot-equivalent (§5): the old counter is gone, so any
                 # in-flight commands from the lost incarnation must die.
+                # The bump is advisory and may skip under ingest-lock
+                # contention (#1019) — it logs its own loud skip, so the
+                # epoch+1 claim below is only said when it applied.
                 try:
-                    _phone_home_bump_epoch(d)
+                    bumped = _phone_home_bump_epoch(d, token)
                 except _WsError as e:
                     _phone_home_fail(d, f"{e}", token)
                     return 1
-                _phone_home_say(
-                    d, "generation counter lost — claimed epoch+1 "
-                       "(counter loss is a reboot-equivalent per §5); the "
-                       "DO's stale-generation fence will correct the "
-                       "generation on connect", token)
+                if bumped:
+                    _phone_home_say(
+                        d, "generation counter lost — claimed epoch+1 "
+                           "(counter loss is a reboot-equivalent per §5); "
+                           "the DO's stale-generation fence will correct "
+                           "the generation on connect", token)
             try:
                 outcome, welcomed = _phone_home_connect(
                     d, box_id, token, control, generation)
@@ -3321,16 +3365,20 @@ def cmd_phone_home(args):
                            "not reconnecting", token)
                 return param
             if action == "adopt":
+                # The bump is advisory and may skip under ingest-lock
+                # contention (#1019) — it logs its own loud skip, so the
+                # epoch+1 claim below is only said when it applied.
                 try:
                     _phone_home_adopt_generation(d, param)
-                    _phone_home_bump_epoch(d)
+                    bumped = _phone_home_bump_epoch(d, token)
                 except _WsError as e:
                     _phone_home_fail(d, f"{e}", token)
                     return 1
-                _phone_home_say(
-                    d, f"adopted generation {param} after stale-generation "
-                       "fence (counter loss → epoch+1 per §5) — reconnecting",
-                    token)
+                if bumped:
+                    _phone_home_say(
+                        d, f"adopted generation {param} after "
+                           "stale-generation fence (counter loss → "
+                           "epoch+1 per §5) — reconnecting", token)
                 pending_generation, attempt = param, 0
                 # A beat before the adopt reconnect: a plane emitting
                 # repeated stale-generation closes must not pin the box in
