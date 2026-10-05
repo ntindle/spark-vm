@@ -182,16 +182,16 @@ all locked together by the `playwright` package version:
   wheel hash mismatch, a failed wheel download, or any unexpected
   `--dry-run` output shape (wrong header, count mismatch, unsafe name,
   garbage) all refuse loudly and name `playwright` in the audit line.
-- **Trust residual (stated, not hidden):** unlike the `cua-driver` layer's
-  SHA-256-verified tarball and the wheel's SHA-256-verified download, the
-  browser download is TLS-only with no hash pinning — `playwright install
-  chromium` trusts the Playwright CDN and TLS (the build revision it
-  fetches is still fully determined by the hash-verified package, so only
-  a CDN serving different bytes for the same revision URL is unaddressed).
-  pip's transitive dependencies (pyee, greenlet) are TLS-only too.
-  Hash-pinning the browser archives is the remaining follow-up (see
-  "Follow-ups"). What root executes is bounded to `apt-get` on validated
-  names — the one new root-executed surface this layer adds.
+- **Trust residual (stated, not hidden):** the browser archives are now
+  hash-pinned like the wheel: the driver names the exact download URLs via
+  `install --dry-run chromium` (fail-closed on any shape drift), and each
+  archive's SHA-256 is pinned in `scripts/playwright_browser_hashes.txt`
+  (x86_64 + aarch64, captured 2026-10-05 from `cdn.playwright.dev` over
+  TLS for playwright 1.62.0). A CDN serving different bytes for the same
+  revision URL is now refused at the digest gate. The remaining residual is
+  pip's transitive dependencies (pyee, greenlet) — TLS-only, unpinned.
+  What root executes is bounded to `apt-get` on validated names — the one
+  new root-executed surface this layer adds.
 
 Overrides (environment): `PLAYWRIGHT_VENV`, `PLAYWRIGHT_USER`.
 
@@ -339,10 +339,6 @@ repeated failure" half of #532's Recovery section.
 
 ## Follow-ups (issue #532, not in this slice)
 
-- Hash-pin the playwright browser archives — the remaining half of the
-  TLS-only residual (the wheel half is hash-pinned: the layer downloads
-  the pinned wheel from its hash-pinned URL and SHA-256-verifies it before
-  pip installs the local file)
 - Hash-pin pip's transitive dependencies (pyee, greenlet) for the
   playwright layer — still TLS-only today (documented in the trust-model
   section); `--require-hashes` needs the full closure pinned

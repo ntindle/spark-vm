@@ -17,6 +17,7 @@ import hashlib
 import shutil
 import stat
 import subprocess
+import zipfile
 
 import pytest
 
@@ -153,6 +154,19 @@ def env(tmp_path):
     venv = stage_pw_venv(tmp_path, "1.62.0")
     e["PLAYWRIGHT_VENV"] = str(venv)
     e["PLAYWRIGHT_USER"] = pwd.getpwuid(os.getuid()).pw_name
+    # Default browser fixture: one archive, already verified (the skip
+    # path), so every full `update` test exercises the idempotent browser
+    # step without a download. Tests that need the fetch path re-stage
+    # their own fixtures via stage_browser_archives.
+    browsers, bhashes, dryrun, curldir = stage_browser_archives(tmp_path)
+    e["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+    e["PLAYWRIGHT_BROWSER_HASHES"] = str(bhashes)
+    e["PW_CURL_DIR"] = str(curldir)
+    e["PW_BROWSER_DRYRUN_TEXT"] = dryrun
+    loc = browsers / "chromium-1234"
+    loc.mkdir(parents=True)
+    digest = bhashes.read_text().splitlines()[1].split()[0]
+    (loc / ".sparkvm-browser-verified").write_text(digest + "\n")
     return {"env": e, "tmp": tmp_path, "apt": aptdir, "state": statedir,
             "sys": sysdir, "optout": optout, "fakehome": fakehome, "me": me}
 
@@ -614,11 +628,14 @@ def test_script_never_fetches_code():
     # fetch. apt-get appears exactly three times: the unattended-upgrades
     # bootstrap, the apt layer's `install --only-upgrade` (simulate in
     # dry-run), and the playwright layer's validated-names system-deps
-    # install. curl appears exactly three times: the checksums.txt + tarball
+    # install. curl appears exactly four times: the checksums.txt + tarball
     # fetch inside _cua_driver_layer (both against "$base/$tag/...", base
-    # defaults to the single https:// constant CUA_RELEASE_BASE) and the
+    # defaults to the single https:// constant CUA_RELEASE_BASE), the
     # playwright layer's wheel fetch (against "$url" — the URL comes only
-    # from the installed wheel-hashes file, never a hardcoded origin).
+    # from the installed wheel-hashes file, never a hardcoded origin),
+    # and the playwright layer's browser-archive fetch (#1017: against
+    # "$url" — the URL comes only from the browser-hashes file, which is
+    # itself derived from the driver's --dry-run output and hash-pinned).
     # `pip install` appears exactly once: the playwright layer installing
     # the hash-verified local wheel file (`"$work/$file"` — pip never
     # selects a version, so no floating upgrade is possible; the pin bound
@@ -695,15 +712,16 @@ def test_script_never_fetches_code():
             assert ("--only-upgrade" in l or "unattended-upgrades" in l
                     or "--no-install-recommends" in l), l
     curls = [l for l in text.splitlines() if "curl -fsSL" in l]
-    assert len(curls) == 3, curls
+    assert len(curls) == 4, curls
     cua_curls = [l for l in curls if "$base/$tag/" in l]
     assert len(cua_curls) == 2, curls
     pw_curls = [l for l in curls if l not in cua_curls]
-    assert len(pw_curls) == 1, curls
-    # The wheel URL is looked up from the installed hashes file — never a
-    # hardcoded download origin.
-    assert '"$url"' in pw_curls[0], pw_curls
-    assert "https://" not in pw_curls[0], pw_curls
+    assert len(pw_curls) == 2, curls
+    # The wheel and browser-archive URLs are looked up from their
+    # installed hashes files — never a hardcoded download origin.
+    for c in pw_curls:
+        assert '"$url"' in c, curls
+        assert "https://" not in c, curls
     # No other curl call sites (the remaining "curl" mentions are the
     # presence check and the missing-curl log string, not invocations).
     other_curl = [l for l in text.splitlines()
@@ -712,12 +730,17 @@ def test_script_never_fetches_code():
                   and "curl not found" not in l]
     assert not other_curl, other_curl
     https = [l for l in text.splitlines() if "https://" in l]
-    assert len(https) == 2, https
+    assert len(https) == 3, https
     assert 'CUA_RELEASE_BASE:=' in https[0] and 'github.com/trycua/cua' in https[0]
     # The second https:// is the wheel-hash URL-scheme allowlist
     # (https://*|file://*) — the scheme gate, not a download origin: the
     # actual wheel URL comes only from the installed hashes file.
     assert 'https://*|file://*' in https[1], https
+    # The third https:// is the browser-archive URL-scheme allowlist
+    # (#1017: https://* — fail-closed, no mirrors): the actual browser
+    # URLs come only from the driver's --dry-run output + the installed
+    # browser-hashes file.
+    assert https[2].strip() == 'https://*) ;;', https
 
 
 def test_umask_is_restrictive():
@@ -959,6 +982,10 @@ def stage_pw_venv(tmp_path, version, piplog=None, pwlog=None, pip_exit=0):
         '  printf "%s" "${PW_DRYRUN_TEXT:-All system dependencies are installed.}"\n'
         '  exit "${PW_DRYRUN_EXIT:-0}"\n'
         'fi\n'
+        'if [ "$1" = "install" ] && [ "$2" = "--dry-run" ]; then\n'
+        '  printf "%s" "${PW_BROWSER_DRYRUN_TEXT:-}"\n'
+        '  exit "${PW_BROWSER_DRYRUN_EXIT:-0}"\n'
+        'fi\n'
         'exit 0\n')
     cli.chmod(cli.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return venv
@@ -1010,15 +1037,26 @@ def pw_env(env, tmp_path, pin="1.62.0", cur_version="1.62.0"):
     aptlog = tmp_path / "pw-apt.log"
     curllog = tmp_path / "pw-curl.log"
     curlbin = make_stub_bin(tmp_path / "pwcurlbin", {
-        # Faithful-enough fetch stub: log argv, copy the staged wheel to
-        # the -o target. Failure simulation is a per-test PATH prepend.
+        # Faithful-enough fetch stub: log argv, deliver the staged bytes
+        # to the -o target. With PW_CURL_DIR set and the URL basename
+        # present there, serve the fixture (browser-archive tests);
+        # otherwise copy the staged wheel (wheel tests). A hash mismatch
+        # on wrong bytes still refuses loudly at the digest gate.
         "curl": (
             f'echo "argv: $@" >> "{curllog}"; '
-            'dest=""; prev=""; '
+            'dest=""; prev=""; url=""; '
             'for a in "$@"; do '
-            '[ "$prev" = "-o" ] && dest="$a"; prev="$a"; '
+            '[ "$prev" = "-o" ] && dest="$a"; '
+            'case "$a" in https://*|http://*|file://*) url="$a";; esac; '
+            'prev="$a"; '
             'done; '
-            f'cp "{wheel}" "$dest"'
+            'base="${url##*/}"; '
+            'if [ -n "${PW_CURL_DIR:-}" ] && [ -n "$base" ] && '
+            '[ -f "$PW_CURL_DIR/$base" ]; then '
+            'cp "$PW_CURL_DIR/$base" "$dest"; '
+            'else '
+            f'cp "{wheel}" "$dest"; '
+            'fi'
         ),
     })
     bindir = make_stub_bin(tmp_path / "pwaptbin", {
@@ -1028,7 +1066,42 @@ def pw_env(env, tmp_path, pin="1.62.0", cur_version="1.62.0"):
     venv = stage_pw_venv(tmp_path, cur_version, piplog=piplog, pwlog=pwlog)
     e["PLAYWRIGHT_VENV"] = str(venv)
     e["PLAYWRIGHT_USER"] = pwd.getpwuid(os.getuid()).pw_name
+    # Browser fixtures come from the base env fixture (already-verified
+    # skip path); tests needing the fetch path re-stage via
+    # stage_browser_archives and override the PW_* vars.
     return e, piplog, pwlog, aptlog
+
+
+def stage_browser_archives(tmp_path, names=("chromium-1234",), digest=None,
+                           base_url="https://cdn.playwright.dev/x/"):
+    """Stage fixture browser archives + hashes file + canned --dry-run text.
+
+    names: install-location dir names (e.g. "chromium-1234"). Each gets a
+    real zip at $PW_CURL_DIR/<name>.zip containing <name>/hello.txt, a
+    matching hashes-file line for <base_url><name>.zip, and a
+    corresponding --dry-run pair. Returns
+    (browsers_dir, hashes_path, dryrun_text, curldir).
+    Pass digest= to list a digest that does not match the staged bytes
+    (hash-mismatch simulation).
+    """
+    browsers = tmp_path / "ms-playwright"
+    curldir = tmp_path / "curldir"
+    curldir.mkdir(exist_ok=True)
+    lines = ["# test browser hashes"]
+    dryrun = ""
+    for name in names:
+        zippath = curldir / f"{name}.zip"
+        with zipfile.ZipFile(zippath, "w") as z:
+            z.writestr(f"{name}/hello.txt", f"hello from {name}\n")
+        real = hashlib.sha256(zippath.read_bytes()).hexdigest()
+        url = f"{base_url}{name}.zip"
+        lines.append(f"{digest or real}  {url}")
+        dryrun += (f"Test Browser {name}\n"
+                   f"  Install location:    {browsers / name}\n"
+                   f"  Download url:        {url}\n")
+    hashes = tmp_path / "playwright_browser_hashes.txt"
+    hashes.write_text("\n".join(lines) + "\n")
+    return browsers, hashes, dryrun, curldir
 
 
 def test_read_pin_parses_pins_file(env):
@@ -1662,6 +1735,19 @@ def test_install_copies_wheel_hashes_file(env):
     assert "playwright-1.62.0" in hashes.read_text()
 
 
+def test_install_copies_browser_hashes_file(env):
+    # The update plane reads the hashes ONLY from the installed copy
+    # (two-planes contract); if this install line regresses, every
+    # playwright update fails closed. Mirror of the wheel-hashes test.
+    r = run_bash("./deploy/toolset-update.sh install", env_extra=env["env"])
+    assert r.returncode == 0, r.stderr
+    hashes = env["state"] / "playwright_browser_hashes.txt"
+    assert hashes.exists()
+    text = hashes.read_text()
+    assert "# playwright pin: 1.62.0" in text
+    assert "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-linux64.zip" in text
+
+
 def test_playwright_wheel_hashes_cover_pins_conf():
     # Bump discipline: the repo pins.conf's playwright pin must have
     # exactly one hash line per linux wheel asset the updater may fetch.
@@ -1683,6 +1769,225 @@ def test_playwright_wheel_hashes_cover_pins_conf():
         digest = lines[0].split()[0]
         assert re.fullmatch(r"[0-9a-f]{64}", digest), \
             f"digest for {asset} must be 64 lowercase hex"
+
+
+# --- playwright browser-archive hash pinning (issue #1017) -------------------
+
+def test_playwright_browser_hashes_cover_pins_conf():
+    # Bump discipline: the browser-hashes file must name the pins.conf
+    # playwright pin it was captured for, and every archive line must be
+    # well-formed (exactly one line per URL, 64-hex digest, https URL).
+    # The expected archive set is pinned explicitly: `install chromium`
+    # on the pinned playwright fetches these three linux archives.
+    import re
+    pins = open(os.path.join(
+        REPO, "scripts", "self_update_pins.conf")).read()
+    m = re.search(r"^playwright\s*=\s*([^\s#]+)", pins, re.M)
+    assert m, "playwright pin missing from self_update_pins.conf"
+    pin = m.group(1)
+    text = open(os.path.join(
+        REPO, "scripts", "playwright_browser_hashes.txt")).read()
+    assert re.search(rf"^# playwright pin: {re.escape(pin)}\s*$", text, re.M), \
+        "browser hashes file must name the pins.conf playwright pin it was captured for"
+    seen_urls = set()
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split()
+        assert len(parts) == 2, f"hash line must be '<sha256>  <url>': {line!r}"
+        digest, url = parts
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), \
+            f"digest must be 64 lowercase hex: {line!r}"
+        assert url.startswith("https://"), \
+            f"browser archive URL must be https: {line!r}"
+        assert url not in seen_urls, f"duplicate hash line for {url}"
+        seen_urls.add(url)
+    # playwright 1.62.0's `install chromium` on linux fetches these three
+    # archives (x86_64: Chrome-for-Testing builds; aarch64: revision builds).
+    expected = {
+        "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-linux64.zip",
+        "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip",
+        "https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux.zip",
+        "https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1234/chromium-linux-arm64.zip",
+        "https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1234/chromium-headless-shell-linux-arm64.zip",
+        "https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux-arm64.zip",
+    }
+    assert expected <= seen_urls, \
+        f"missing pinned archives: {expected - seen_urls}"
+
+
+def test_playwright_browser_fetch_verifies_and_extracts(env, tmp_path):
+    # Marker absent: the layer curl-fetches the exact pinned URL,
+    # SHA-256-verifies, extracts into the driver's install location, and
+    # stamps both markers; the driver's own `install chromium` still runs
+    # as the convergence backstop.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    browsers, bhashes, dryrun, curldir = stage_browser_archives(
+        tmp_path, names=("chromium-9999",))
+    e["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+    e["PLAYWRIGHT_BROWSER_HASHES"] = str(bhashes)
+    e["PW_BROWSER_DRYRUN_TEXT"] = dryrun
+    e["PW_CURL_DIR"] = str(curldir)
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    loc = browsers / "chromium-9999"
+    assert (loc / "chromium-9999" / "hello.txt").read_text() == \
+        "hello from chromium-9999\n"
+    assert (loc / "INSTALLATION_COMPLETE").exists()
+    digest = bhashes.read_text().splitlines()[1].split()[0]
+    assert (loc / ".sparkvm-browser-verified").read_text().strip() == digest
+    # The fetch used the exact pinned URL (not a constructed one), once.
+    curl_calls = (tmp_path / "pw-curl.log").read_text().splitlines()
+    assert len(curl_calls) == 1, curl_calls
+    assert "https://cdn.playwright.dev/x/chromium-9999.zip" in curl_calls[0], \
+        curl_calls
+    # The backstop still runs after the verified pre-seed.
+    assert "install chromium" in pwlog.read_text().splitlines()
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+    assert "playwright" in lines[-1]["components"]
+
+
+def test_playwright_browser_fetches_all_archives(env, tmp_path):
+    # The real driver emits 3 archives (chromium, headless shell, ffmpeg):
+    # all are fetched, verified, and marker-stamped, and a second run
+    # downloads nothing (per-archive skip). Locks in the multi-archive
+    # loop, not just the single-archive happy path. Distinct archive
+    # names keep clear of the base fixture's pre-stamped chromium-1234
+    # marker (fixture zips carry 2-second-granularity timestamps, so a
+    # rebuilt same-named zip can hash identically and skip).
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    names = ("chromium-9999", "chromium_headless_shell-9999", "ffmpeg-9999")
+    browsers, bhashes, dryrun, curldir = stage_browser_archives(
+        tmp_path, names=names)
+    e["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+    e["PLAYWRIGHT_BROWSER_HASHES"] = str(bhashes)
+    e["PW_CURL_DIR"] = str(curldir)
+    e["PW_BROWSER_DRYRUN_TEXT"] = dryrun
+    curllog = tmp_path / "pw-curl.log"
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    for name in names:
+        loc = browsers / name
+        assert (loc / "INSTALLATION_COMPLETE").exists(), name
+        assert (loc / ".sparkvm-browser-verified").exists(), name
+        assert (loc / name / "hello.txt").read_text() == f"hello from {name}\n"
+    assert len(curllog.read_text().splitlines()) == 3, curllog.read_text()
+    # Second run: every archive already verified — zero downloads.
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert len(curllog.read_text().splitlines()) == 3, curllog.read_text()
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+
+
+def test_playwright_browser_skips_when_verified(env, tmp_path):
+    # Marker present with the pinned digest: no download, no extraction —
+    # but the driver's backstop install still runs (idempotent).
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "pw-curl.log").exists(), \
+        "no download when the browser archive is already verified"
+    assert "install chromium" in pwlog.read_text().splitlines()
+    lines = audit_lines(env)
+    assert lines and lines[-1]["result"] == "ok"
+
+
+def test_playwright_browser_refuses_on_stale_hash(env, tmp_path):
+    # The --dry-run URL has no hash line (pin bumped without refreshing the
+    # hashes file): refuse fail-closed instead of a TLS-only fetch.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    e["PW_BROWSER_DRYRUN_TEXT"] = (
+        "Test Browser\n"
+        f"  Install location:    {tmp_path}/ms-playwright/chromium-9999\n"
+        "  Download url:        https://cdn.playwright.dev/x/unpinned.zip\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not (tmp_path / "pw-curl.log").exists(), \
+        "no fetch without a pinned hash"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_browser_refuses_on_hash_mismatch(env, tmp_path):
+    # The downloaded bytes don't match the pinned digest: refuse before
+    # anything is extracted or placed.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    browsers, bhashes, dryrun, curldir = stage_browser_archives(
+        tmp_path, names=("chromium-9999",), digest="0" * 64)
+    e["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+    e["PLAYWRIGHT_BROWSER_HASHES"] = str(bhashes)
+    e["PW_BROWSER_DRYRUN_TEXT"] = dryrun
+    e["PW_CURL_DIR"] = str(curldir)
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not (browsers / "chromium-9999").exists(), \
+        "no partial install on hash mismatch"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_browser_refuses_zip_slip(env, tmp_path):
+    # A zip-slip entry in a (hypothetically mis-pinned) archive refuses
+    # before any write outside the staging dir.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    browsers = tmp_path / "ms-playwright"
+    curldir = tmp_path / "curldir-slip"
+    curldir.mkdir(exist_ok=True)
+    zippath = curldir / "evil.zip"
+    with zipfile.ZipFile(zippath, "w") as z:
+        z.writestr("../evil.txt", "pwned")
+    digest = hashlib.sha256(zippath.read_bytes()).hexdigest()
+    url = "https://cdn.playwright.dev/x/evil.zip"
+    bhashes = tmp_path / "playwright_browser_hashes.txt"
+    bhashes.write_text(f"# test\n{digest}  {url}\n")
+    e["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+    e["PLAYWRIGHT_BROWSER_HASHES"] = str(bhashes)
+    e["PW_BROWSER_DRYRUN_TEXT"] = (
+        "Evil\n"
+        f"  Install location:    {browsers}/evil-1\n"
+        f"  Download url:        {url}\n")
+    e["PW_CURL_DIR"] = str(curldir)
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not (browsers / "evil-1").exists(), \
+        "no install location created for a refused archive"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_browser_refuses_nonhttps_dryrun_url(env, tmp_path):
+    # A non-https URL from --dry-run refuses at parse time. The evil URL
+    # is pinned in the hashes file so the hash-lookup backstop cannot be
+    # what refuses — neuter the https gate and this test must fail.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    url = "http://evil.example/evil.zip"
+    with open(tmp_path / "playwright_browser_hashes.txt", "a") as f:
+        f.write(f"{'0' * 64}  {url}\n")
+    e["PW_BROWSER_DRYRUN_TEXT"] = (
+        "Evil\n"
+        f"  Install location:    {tmp_path}/ms-playwright/evil-1\n"
+        f"  Download url:        {url}\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not (tmp_path / "pw-curl.log").exists()
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_browser_refuses_location_outside_browsers_dir(env, tmp_path):
+    # An install location outside the user's browsers dir refuses — the
+    # verified bytes must never be extracted to a driver-drifted path.
+    # The evil URL is pinned so the hash backstop cannot be what refuses.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.62.0")
+    url = "https://cdn.playwright.dev/x/evil.zip"
+    with open(tmp_path / "playwright_browser_hashes.txt", "a") as f:
+        f.write(f"{'0' * 64}  {url}\n")
+    e["PW_BROWSER_DRYRUN_TEXT"] = (
+        "Evil\n"
+        "  Install location:    /tmp/evil-browser\n"
+        f"  Download url:        {url}\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not (tmp_path / "pw-curl.log").exists()
+    assert "playwright" in audit_lines(env)[-1]["failed"]
 
 
 def test_playwright_install_deps_installs_missing_validated(env, tmp_path):
@@ -2607,3 +2912,6 @@ def test_update_deferred_when_lock_held_never_runs_body(env):
         f"update body ran despite the held lock: {r.stderr!r}")
     logtext = (env["state"] / "toolset-update.log").read_text()
     assert "another run holds the lock; no-op" in logtext, logtext
+
+
+

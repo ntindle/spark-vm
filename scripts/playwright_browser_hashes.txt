@@ -1,0 +1,44 @@
+# playwright_browser_hashes.txt — SHA-256 pinned browser-archive downloads
+# for the toolset updater's playwright layer (issues #532, #1017).
+#
+# Format: one `<sha256>  <url>` line per pinned archive. Blank lines and
+# `#` comments are ignored. The updater (`deploy/toolset-update.sh`,
+# `_playwright_layer`) derives the exact archive URLs the hash-verified
+# playwright package would fetch (`playwright install --dry-run chromium`,
+# parsed fail-closed) and looks each URL up here; a URL with no
+# exactly-one well-formed hash line refuses fail-closed instead of a
+# TLS-only fetch.
+#
+# Hash authority: Playwright publishes no archive hashes upstream, so the
+# hashes are recorded here at commit time by the maintainer from the CDN
+# download the pinned playwright package names (fetched over TLS). The
+# threat this closes is narrow by construction — the archive revision is
+# already bound by the hash-verified pip package (its browsers.json), so
+# the only unaddressed case was a CDN serving different bytes for the same
+# revision URL. The installed copy (see `toolset-update.sh install`, which
+# copies this file into the state dir next to self_update_pins.conf) is
+# the runtime authority. The update plane never reads this file from the
+# live checkout.
+#
+# Discipline: bump this file in the same PR that bumps the playwright pin
+# in scripts/self_update_pins.conf. The test suite pins the sync
+# (test_playwright_browser_hashes_cover_pins_conf): the file names the
+# playwright pin it was captured for, and every archive the pinned
+# playwright's `install chromium` fetches on linux must have exactly one
+# well-formed hash line. Only the linux archives are listed — spark-vm
+# boxes are linux.
+#
+# playwright pin: 1.62.0
+# Captured 2026-10-05 from cdn.playwright.dev over TLS for playwright
+# 1.62.0 (chromium rev 1234 / Chrome for Testing 151.0.7922.34,
+# ffmpeg rev 1011). Only the primary download URLs are pinned — the
+# driver's fallback mirrors are never fetched by the updater (a primary
+# failure refuses fail-closed and retries on the next timer tick).
+# x86_64 (Chrome-for-Testing builds):
+ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8  https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-linux64.zip
+3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14  https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip
+ebc74fc5b94830176a3c2914ae96bd8bc7f6a91f4f33890230f84a172ee61ccc  https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux.zip
+# aarch64 (revision builds):
+b5ad7d8fe70f230b34198ddb5626d717c016db2f627cb44b922babbcaf3479b9  https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1234/chromium-linux-arm64.zip
+b03443e1e1a60d06e07b6cdfe650b8c2bfcbb3db497d2b652f73dc6912f4ae15  https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1234/chromium-headless-shell-linux-arm64.zip
+2628c03f05318ff812c8c9baaf207dea2ddf53e818c0dc936714b0fbe3afb009  https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux-arm64.zip

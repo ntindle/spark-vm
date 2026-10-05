@@ -106,10 +106,14 @@
 #                  is downloaded from the hash-pinned URL in
 #                  playwright_wheel_hashes.txt and SHA-256-verified before
 #                  pip ever sees it — never a floating upgrade); the
-#                  Chromium browser builds (`playwright install chromium`)
+#                  Chromium browser builds are downloaded from the
+#                  hash-pinned URLs in playwright_browser_hashes.txt and
+#                  SHA-256-verified before extraction (issue #1017 — the
+#                  exact archive URLs come from the hash-verified
+#                  package's own `install --dry-run`, parsed fail-closed);
 #                  and the system libraries converge on every run
-#                  (idempotent — `install` skips present builds, the deps
-#                  step no-ops when nothing is missing). Venv and browser
+#                  (idempotent — verified browser builds are skipped, the
+#                  deps step no-ops when nothing is missing). Venv and browser
 #                  work runs as $PLAYWRIGHT_USER so the venv and browser
 #                  cache stay user-owned. The system-library step never
 #                  executes venv code as root: the missing-package list is
@@ -146,7 +150,9 @@
 # dir), PLAYWRIGHT_VENV (managed Playwright venv; default
 # /home/ntindle/.venvs/pw), PLAYWRIGHT_USER (owner of that venv and of the
 # browser cache; default ntindle), PLAYWRIGHT_WHEEL_HASHES (installed
-# wheel-hash list; default $TOOLSET_STATE_DIR/playwright_wheel_hashes.txt).
+# wheel-hash list; default $TOOLSET_STATE_DIR/playwright_wheel_hashes.txt),
+# PLAYWRIGHT_BROWSER_HASHES (installed browser-archive hash list; default
+# $TOOLSET_STATE_DIR/playwright_browser_hashes.txt).
 #
 # Trust model (read docs/TOOLSET_UPDATE.md before enabling):
 #   - THE TIMER RUNS THE INSTALLED COPY at $TOOLSET_STATE_DIR/bin/, NOT the
@@ -171,11 +177,12 @@
 #     installed playwright_wheel_hashes.txt, SHA-256-verified before pip
 #     sees the wheel; the exact asset is built from the pins.conf pin and
 #     the box arch, so the version the layer may install is bounded by the
-#     operator-owned pins file) plus `playwright install chromium`
-#     (browser binaries from the Playwright CDN, run as the user) is
-#     TLS-only without hash pinning — the documented residual for a
-#     follow-up slice; pip's transitive dependencies (pyee, greenlet) are
-#     TLS-only as well. The system-library step does NOT execute
+#     operator-owned pins file) plus its hash-pinned browser-archive
+#     downloads (issue #1017: the exact archive URLs come from the
+#     hash-verified package's own `install --dry-run`, parsed fail-closed,
+#     and each `$url` is looked up byte-exact in the installed
+#     playwright_browser_hashes.txt — SHA-256-verified before extraction,
+#     so only the pinned bytes are installable). The system-library step does NOT execute
 #     venv code as root: `install-deps --dry-run` (a read-only simulation)
 #     runs as the user, root validates each reported package name against
 #     the Debian package-name pattern, and root installs the validated
@@ -234,6 +241,12 @@ TMUX_RESOLVED="$(command -v "$TMUX_BIN" 2>/dev/null || printf '%s' "$TMUX_BIN")"
 # the privileged `install` step — never from the live repo checkout, same
 # two-planes contract as the pins file (docs/SELF_UPDATE.md).
 : "${PLAYWRIGHT_WHEEL_HASHES:=$TOOLSET_STATE_DIR/playwright_wheel_hashes.txt}"
+# Browser hashes: the installed/backfilled copy of the SHA-256 pinned
+# browser-archive download list (scripts/playwright_browser_hashes.txt),
+# refreshed only by the privileged `install` step — never from the live
+# repo checkout, same two-planes contract as the pins file
+# (docs/SELF_UPDATE.md). Issue #1017.
+: "${PLAYWRIGHT_BROWSER_HASHES:=$TOOLSET_STATE_DIR/playwright_browser_hashes.txt}"
 
 STATE_AUDIT_LOG="$TOOLSET_STATE_DIR/audit.log"
 STATE_RUN_LOG="$TOOLSET_STATE_DIR/toolset-update.log"
@@ -913,13 +926,15 @@ _apt_layer() {
 # Issue #532: converge Playwright onto the pins.conf pin. Three artifacts,
 # all version-locked together by the playwright package version:
 #   1. the `playwright` pip package inside the managed venv,
-#   2. the Chromium browser builds (`playwright install chromium`),
+#   2. the Chromium browser builds (issue #1017: hash-pinned archives),
 #   3. the system libraries (apt packages).
 # The pip package is held on the exact pin (the wheel is SHA-256-verified
 # against the installed wheel-hashes file before pip installs the local
-# file); the browsers and the system
-# libraries converge on every run (both steps are idempotent — `install`
-# skips present builds, and the deps step no-ops when nothing is missing),
+# file); the browser archives are SHA-256-verified against the installed
+# browser-hashes file before extraction (the exact archive URLs come from
+# the hash-verified package's own `install --dry-run`, parsed fail-closed
+# — the layer never hardcodes CDN URLs); the system libraries converge on
+# every run (idempotent — the deps step no-ops when nothing is missing),
 # so an on-pin pip package with an emptied browser cache or missing system
 # libs still heals.
 # The venv and browser cache are owned by $PLAYWRIGHT_USER (the agent user),
@@ -1165,16 +1180,298 @@ _playwright_pip_install_wheel() {
     return 0
 }
 
+_playwright_browser_pairs() {
+    # _playwright_browser_pairs <cli> — print the browser archives the
+    # hash-verified playwright package would fetch for `install chromium`
+    # on this box, parsed from `install --dry-run` (fail-closed). Output
+    # is alternating lines: <install-location>, <download-url>, one pair
+    # per archive. The URL list comes from the installed, hash-verified
+    # package — the pins file is the version authority, the package is the
+    # revision authority — so the layer never hardcodes CDN URLs. Only the
+    # primary "Download url:" lines are taken; the driver's fallback
+    # mirrors are never fetched (a primary failure refuses fail-closed and
+    # retries on the next timer tick).
+    local cli="$1" out loc url
+    out="$(_as_playwright_user "$cli" install --dry-run chromium 2>/dev/null)" || {
+        log "playwright: install --dry-run chromium failed — refusing"
+        return 1
+    }
+    local line rest pairs='' pending=''
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            '  Install location:'*)
+                rest="${line#*:}"
+                # Trim leading/trailing whitespace without forking sed —
+                # the browser step runs on the same lean PATH as the rest
+                # of the layer (see make_realtools in the test suite).
+                loc="${rest#"${rest%%[![:space:]]*}"}"
+                loc="${loc%"${loc##*[![:space:]]}"}"
+                case "$loc" in
+                    /*) pending="$loc" ;;
+                    *)
+                        log "playwright: refusing non-absolute install location from --dry-run: $loc"
+                        return 1 ;;
+                esac ;;
+            '  Download url:'*)
+                rest="${line#*:}"
+                url="${rest#"${rest%%[![:space:]]*}"}"
+                url="${url%"${url##*[![:space:]]}"}"
+                if [ -z "$pending" ]; then
+                    log "playwright: download url without install location in --dry-run output — refusing"
+                    return 1
+                fi
+                case "$url" in
+                    https://*) ;;
+                    *)
+                        log "playwright: refusing non-https browser URL from --dry-run: $url"
+                        return 1 ;;
+                esac
+                pairs="${pairs}${pending}
+${url}
+"
+                pending='' ;;
+        esac
+    done < <(printf '%s\n' "$out")
+    if [ -n "$pending" ]; then
+        log "playwright: install location without download url in --dry-run output — refusing"
+        return 1
+    fi
+    if [ -z "$pairs" ]; then
+        log "playwright: no browser archives in --dry-run output — refusing"
+        return 1
+    fi
+    printf '%s' "$pairs"
+}
+
+_playwright_browser_hash() {
+    # _playwright_browser_hash <url> — print the pinned sha256 for the
+    # browser archive URL from the installed browser-hashes file, or
+    # nothing. Fail-closed shape mirrors _playwright_wheel_hash: exactly
+    # one matching line, digest 64 lowercase hex. The lookup is keyed by
+    # the FULL url (byte equality) — the --dry-run-derived URL must be the
+    # exact pinned URL, so a drifted or hostile driver cannot redirect the
+    # fetch to an unpinned mirror (only the pinned bytes are installable).
+    local url="$1" hashes="${PLAYWRIGHT_BROWSER_HASHES:-}" line digest u
+    local match='' count=0
+    [ -n "$hashes" ] && [ -f "$hashes" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in \#*|'') continue ;; esac
+        # Split "<digest><whitespace><url>" without forking awk — the
+        # browser step runs on the same lean PATH as the rest of the
+        # layer (see make_realtools in the test suite).
+        set -f
+        # shellcheck disable=SC2086
+        set -- $line
+        set +f
+        [ "$#" = "2" ] || continue
+        digest="$1"; u="$2"
+        [ "$u" = "$url" ] || continue
+        match="$digest"
+        count=$((count + 1))
+    done <"$hashes"
+    [ "$count" = "1" ] || return 0
+    case "$match" in
+        *[!0-9a-f]*|'') return 0 ;;
+    esac
+    [ "${#match}" = "64" ] || return 0
+    printf '%s' "$match"
+}
+
+_playwright_browsers_dir() {
+    # _playwright_browsers_dir — print the user's ms-playwright cache dir,
+    # honoring PLAYWRIGHT_BROWSERS_PATH exactly as the driver does.
+    _as_playwright_user sh -c 'printf "%s" "${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"'
+}
+
+_playwright_fetch_verified_browser() {
+    # _playwright_fetch_verified_browser <install-location> <url> — fetch
+    # the browser archive over HTTPS, SHA-256-verify it against the pinned
+    # browser-hashes file, and extract it into the driver's install
+    # location. All user-space work runs as $PLAYWRIGHT_USER (the timer
+    # runs as root; a root-owned browser cache would break the agent's own
+    # Playwright use). Fail-closed: missing/stale/ambiguous hash, download
+    # failure, hash mismatch, or an unsafe zip entry all refuse loudly and
+    # leave no partial install behind (extraction goes to a staging dir,
+    # moved into place only after verification). After a verified
+    # extraction the function stamps the driver's INSTALLATION_COMPLETE
+    # marker — the bytes are exactly what the driver's own install would
+    # have laid down (verified, not trusted), so the convergence backstop
+    # no-ops — plus the layer's own .sparkvm-browser-verified marker
+    # holding the pinned digest, so later runs skip without re-fetching.
+    local loc="$1" url="$2" want base work file got parent
+    want="$(_playwright_browser_hash "$url")"
+    if [ -z "$want" ]; then
+        log "playwright: no usable browser hash for $url in ${PLAYWRIGHT_BROWSER_HASHES:-<unset>} — refusing (fail-closed)"
+        return 1
+    fi
+    base="${url##*/}"
+    case "$base" in
+        ''|*/*)
+            log "playwright: refusing unsafe archive basename from URL: $url"
+            return 1 ;;
+    esac
+    if ! _as_playwright_user command -v curl >/dev/null 2>&1; then
+        log "playwright: curl not found for $PLAYWRIGHT_USER — cannot fetch the browser archive"
+        return 1
+    fi
+    if ! _as_playwright_user command -v python3 >/dev/null 2>&1; then
+        log "playwright: python3 not found for $PLAYWRIGHT_USER — cannot extract the browser archive"
+        return 1
+    fi
+    work="$(_as_playwright_user mktemp -d)" || {
+        log "playwright: cannot create browser staging dir"
+        return 1
+    }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work'" RETURN
+    file="$base"
+    log "playwright: fetching browser archive $base"
+    if ! _as_playwright_user curl -fsSL --max-time 600 -o "$work/$file" "$url"; then
+        log "playwright: could not fetch $base"
+        return 1
+    fi
+    got="$(_as_playwright_user sha256sum "$work/$file" 2>/dev/null | awk '{print $1}')"
+    if [ -z "$got" ] || [ "$got" != "$want" ]; then
+        log "playwright: SHA256 mismatch for $base — refusing"
+        return 1
+    fi
+    # Extract with zip-slip refusal (absolute paths and `..` segments are
+    # rejected before any write). The archive is already hash-verified, so
+    # this is defense-in-depth against a mis-pinned hashes file.
+    if ! _as_playwright_user python3 - "$work/$file" "$work/extracted" <<'PYEOF'
+import sys, zipfile
+zippath, dest = sys.argv[1], sys.argv[2]
+z = zipfile.ZipFile(zippath)
+for n in z.namelist():
+    if n.startswith('/'):
+        sys.exit('refusing absolute zip entry: ' + n)
+    if '..' in n.split('/'):
+        sys.exit('refusing zip entry with .. segment: ' + n)
+z.extractall(dest)
+PYEOF
+    then
+        log "playwright: refusing unsafe browser archive $base"
+        return 1
+    fi
+    if [ -z "$(_as_playwright_user ls -A "$work/extracted" 2>/dev/null)" ]; then
+        log "playwright: extracted browser archive $base is empty — refusing"
+        return 1
+    fi
+    # Clear any stale partial dir, then place the verified tree. $loc is
+    # validated by the caller to sit inside the user's browsers dir.
+    if ! _as_playwright_user rm -rf "$loc"; then
+        log "playwright: cannot clear stale browser dir $loc — refusing"
+        return 1
+    fi
+    parent="${loc%/*}"
+    if ! _as_playwright_user mkdir -p "$parent"; then
+        log "playwright: cannot create browser parent dir $parent — refusing"
+        return 1
+    fi
+    if ! _as_playwright_user mv "$work/extracted" "$loc"; then
+        log "playwright: cannot place verified browser tree at $loc — refusing"
+        return 1
+    fi
+    if ! _as_playwright_user touch "$loc/INSTALLATION_COMPLETE"; then
+        log "playwright: cannot stamp INSTALLATION_COMPLETE for $base — refusing"
+        return 1
+    fi
+    if ! printf '%s\n' "$want" | _as_playwright_user tee "$loc/.sparkvm-browser-verified" >/dev/null; then
+        log "playwright: cannot stamp verified marker for $base — refusing"
+        return 1
+    fi
+    log "playwright: installed hash-verified browser archive $base"
+    return 0
+}
+
+_playwright_install_browsers() {
+    # _playwright_install_browsers <cli> — converge the browser archives
+    # onto the hash-pinned downloads (issue #1017). For each
+    # (install-location, url) pair the pinned package names: skip when the
+    # location already holds the layer's verified marker for the pinned
+    # digest (idempotent — mirrors the old `install` skips-present-builds
+    # behavior, and heals an emptied cache); otherwise
+    # fetch-verify-extract. Afterwards the driver's own `install chromium`
+    # runs as the convergence backstop — it no-ops when the verified
+    # builds are present (their INSTALLATION_COMPLETE markers are stamped
+    # by the verified path) and heals anything the verified path does not
+    # know about. A future archive the pin file does not cover fails the
+    # NEXT run's hash lookup loudly, by design.
+    local cli="$1" bdir pairs loc url want marker got base seen
+    bdir="$(_playwright_browsers_dir)" || {
+        log "playwright: cannot resolve browsers dir — refusing"
+        return 1
+    }
+    [ -n "$bdir" ] || {
+        log "playwright: empty browsers dir — refusing"
+        return 1
+    }
+    pairs="$(_playwright_browser_pairs "$cli")" || return 1
+    seen='|'
+    while IFS= read -r loc; do
+        IFS= read -r url || {
+            log "playwright: truncated --dry-run pair (location without url) — refusing"
+            return 1
+        }
+        # The install location must stay inside the user's browsers dir —
+        # the driver is hash-verified, but extraction as the user must not
+        # follow a drifted path outside the cache.
+        case "$loc" in
+            "$bdir"/*) ;;
+            *)
+                log "playwright: refusing install location outside browsers dir: $loc"
+                return 1 ;;
+        esac
+        case "$loc" in
+            *..*)
+                log "playwright: refusing install location with .. segment: $loc"
+                return 1 ;;
+        esac
+        want="$(_playwright_browser_hash "$url")"
+        if [ -z "$want" ]; then
+            log "playwright: no usable browser hash for $url in ${PLAYWRIGHT_BROWSER_HASHES:-<unset>} — refusing (fail-closed)"
+            return 1
+        fi
+        base="${url##*/}"
+        case "$seen" in
+            *"|$base|"*)
+                log "playwright: duplicate archive basename $base in --dry-run output — refusing"
+                return 1 ;;
+        esac
+        seen="${seen}$base|"
+        marker="$loc/.sparkvm-browser-verified"
+        got="$(_as_playwright_user cat "$marker" 2>/dev/null || true)"
+        if [ -n "$got" ] && [ "$got" = "$want" ]; then
+            log "playwright: browser archive $base already verified"
+            continue
+        fi
+        if ! _playwright_fetch_verified_browser "$loc" "$url"; then
+            return 1
+        fi
+    done < <(printf '%s\n' "$pairs")
+    if ! _as_playwright_user "$cli" install chromium; then
+        log "playwright: browser install failed"
+        return 1
+    fi
+    return 0
+}
+
 _playwright_layer() {
     # _playwright_layer <dry:0|1> — converge Playwright onto the pins.conf
-    # pin. Idempotent: the pip install is skipped on-pin, but the browser
-    # and system-library steps still run (both no-op when satisfied).
+    # pin. Idempotent: the pip install is skipped on-pin, each browser
+    # archive is skipped when its install location already holds the
+    # verified marker for the pinned digest, and the system-library step
+    # no-ops when satisfied — so an on-pin pip package with an emptied
+    # browser cache or missing system libs still heals.
     # Fail-closed: missing/unsafe pin, missing venv, unparseable installed
     # version, missing browser CLI, missing/stale wheel hashes, wheel hash
-    # mismatch, or any deps-step refusal all fail the layer loudly. The
-    # wheel installed is the hash-verified download for the exact pin —
-    # never a floating upgrade: the pins file is the version authority,
-    # not PyPI's latest.
+    # mismatch, missing/stale browser hashes, browser hash mismatch, or
+    # any deps-step refusal all fail the layer loudly. The wheel installed
+    # is the hash-verified download for the exact pin — never a floating
+    # upgrade: the pins file is the version authority, not PyPI's latest.
+    # The browser archives installed are the hash-verified downloads for
+    # the exact URLs the pinned package names (issue #1017) — never a
+    # TLS-only fetch.
     local dry="$1"
     local pin cur py cli
     pin="$(_read_pin playwright)"
@@ -1220,11 +1517,10 @@ _playwright_layer() {
             return 1
         fi
     fi
-    # Browsers as the user (they land in the user's ~/.cache/ms-playwright);
+    # Browsers as the user (they land in the user's ms-playwright cache);
     # system libraries via the validated-names apt path (root, never the
     # venv CLI).
-    if ! _as_playwright_user "$cli" install chromium; then
-        log "playwright: browser install failed"
+    if ! _playwright_install_browsers "$cli"; then
         return 1
     fi
     if ! _playwright_install_deps "$cli"; then
@@ -2227,6 +2523,12 @@ cmd_install() {
     # two-planes contract as the pins file.
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/../scripts/playwright_wheel_hashes.txt" "$TOOLSET_STATE_DIR/playwright_wheel_hashes.txt" \
         || { echo "ERROR: cannot install wheel hashes file" >&2; return 1; }
+    # The browser-hashes file is the operator-owned hash authority for the
+    # playwright layer's browser-archive downloads. Installed/backfilled
+    # ONLY here — the update plane never reads it from the live checkout,
+    # same two-planes contract as the pins file.
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/../scripts/playwright_browser_hashes.txt" "$TOOLSET_STATE_DIR/playwright_browser_hashes.txt" \
+        || { echo "ERROR: cannot install browser hashes file" >&2; return 1; }
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/sparkvm-toolset-update.service" "$SYSTEMD_DIR/" \
         || { echo "ERROR: cannot install service unit" >&2; return 1; }
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/sparkvm-toolset-update.timer" "$SYSTEMD_DIR/" \
