@@ -61,7 +61,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   epoch bump joins the ingest-lock discipline; in-code log bounding;
   one operator checklist; payload updates deferred to the provisioning
   orchestrator), and four tracked build slices (#1019–#1022).
-  (#TBD)
+  (#1023)
 
 - Hosted phone-home journal sink (S4b-4, #999): the plane's durable
   per-box journal is in place — connect and revocation/expiry closes are
@@ -446,7 +446,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   restarted (`RestartPreventExitStatus=1` in the documented systemd
   unit — previously the unit's `Restart=on-failure` contradicted its
   own "exit 1 means human attention, not a restart loop" comment).
-  (#TBD)
+  (#1023)
 
 - muse-job spawn over MSP now detects a first turn that died before
   engaging (#994): after `turn/start`, spawn watches the new turn's
