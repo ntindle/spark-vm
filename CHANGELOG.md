@@ -481,6 +481,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   unchanged (loud failure, freeze-counter accounting). (#962)
 
 ### Security
+- The toolset self-updater's Playwright install is now hash-pinned (#TBD):
+  the updater downloads the exact pinned Playwright wheel and refuses
+  unless its SHA-256 matches the digest recorded at commit time — a
+  compromised package index can no longer slip a different wheel past the
+  version pin. A pin bumped without its recorded hashes fails closed
+  instead of falling back to an unverified download. The browser binaries
+  remain the documented residual: their build revision is fully determined
+  by the now hash-verified package, but the archive bytes themselves are
+  still fetched over TLS only.
 - The proxy now refuses outbound requests to non-allowlisted hosts that
   carry a real credential value, not just the `hsurr:` placeholder (#855):
   a secret smuggled in the target authority is refused before any DNS
