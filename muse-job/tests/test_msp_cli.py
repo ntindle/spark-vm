@@ -319,6 +319,15 @@ def test_spawn_msp_stillborn_dead_first_turn(cli, fakes, monkeypatch):
     msg = str(excinfo.value)
     assert "--tmux" in msg
     assert "new slug" in msg
+    # #1026: the two retry paths are pinned with close-first ordering --
+    # new-slug (keeps the diagnosis, close archives the blocked record)
+    # and same-slug (close tears down worktree+branch, THEN remove dir).
+    close_cmd = f"muse-job close {slug}"
+    assert msg.count(close_cmd) == 2, f"expected two close paths in: {msg}"
+    same_slug_tail = msg.split("same slug")[1]
+    assert same_slug_tail.index(close_cmd) < same_slug_tail.index(
+        f"remove {cli.job_dir(slug)}"), "same-slug path must close before removing the dir"
+    assert "issue #994" in msg
     assert excinfo.value.turn_id == "turn-1"
     assert excinfo.value.terminal == "cancelled"
 

@@ -454,6 +454,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The stillborn-spawn error now gives the two real retry paths (#994):
+  the in-code retry advice contradicted the muse-job README — telling the
+  operator to remove the job dir first would delete the job record `close`
+  is supposed to archive, breaking both retry paths. The error now points
+  at the new-slug path (retry with a new slug, then close the blocked job
+  to archive it) and the same-slug path (`close` first to tear down the
+  git worktree and job branch, then remove the job dir, then spawn again).
+  (#1026)
+
 - Phone-home epoch bump now joins the command ingest's lock discipline
   (#1019): the reboot-equivalent epoch fence previously rewrote the
   ingest cursor without the lock, so a cron ingest mid-pass could save
