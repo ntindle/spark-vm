@@ -421,8 +421,9 @@ not to a repo commit). Honesty rules apply as before.
 
 - #849 itself stays open as the hosted phone-approvals vision tracker;
   the push lane under it is still building (event-taxonomy analysis
-  #969, validated sender crypto, the sender build split into
-  #988/#989/#990; #967 still open).
+  #969, validated sender crypto; the sender build's open slices are
+  #988 and #990 — #989's send-path transport shipped via #995 as
+  `hosted/push_sender.py`; #967 still open).
 - #69 (per-tenant approval routing), #194 (multi-replica atomicity),
   #74 (push retry, H14a), #428 (first-approval summons), #797/G23
   (alert fan-out into the H14 push plane), #798–#800 (audit →
