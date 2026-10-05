@@ -972,3 +972,39 @@ def test_non_string_versions_and_trigger_fall_back(dirs):
     assert ev["to_version"] is None
     assert ev["emitted_at"] is None
     assert ev["trigger"] == "scheduled"
+
+
+# --- Sort-key ordering (#1010) -------------------------------------------------
+def _row(emitted_at, event_id):
+    return {"emitted_at": emitted_at, "event_id": event_id}
+
+
+def test_sort_key_mixed_iso_and_epoch_orders_chronologically():
+    # Finding #1010: a journal mixing ISO strings and epoch-shaped
+    # emitted_at values misordered the per-box series under the old
+    # lexical str() key — every epoch int sorts before every "20xx"
+    # ISO string lexically, regardless of actual time. The sort key
+    # must compare parsed timestamps.
+    events = _import_events_module()
+    rows = [
+        _row(2000000000, "a"),                  # 2033-05-18, lexically first
+        _row("2026-10-05T12:00:00Z", "b"),
+        _row("2026-10-05T10:00:00Z", "c"),
+    ]
+    ordered = sorted(rows, key=events._sort_key)
+    # Old key gave ["a", "c", "b"]; chronological order is c, b, a.
+    assert [r["event_id"] for r in ordered] == ["c", "b", "a"]
+
+
+def test_sort_key_unparseable_sorts_last_with_event_id_tiebreak():
+    # Unparseable or missing emitted_at sorts last (never drop what it
+    # cannot date); event_id stays the tiebreak for equal timestamps.
+    events = _import_events_module()
+    rows = [
+        _row("not-a-timestamp", "b"),
+        _row("2026-10-05T12:00:00Z", "a"),
+        _row(None, "c"),
+        _row("2026-10-05T12:00:00Z", "0"),
+    ]
+    ordered = sorted(rows, key=events._sort_key)
+    assert [r["event_id"] for r in ordered] == ["0", "a", "b", "c"]

@@ -52,6 +52,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Push-sender schema contract (#988): the D1 store the hosted Web Push
+  sender builds against — subscription table, page-budget counters,
+  send-result and acceptance records (the record the first-approval
+  email fallback's retirement criterion reads), and digest state — plus
+  the custody rules (subscription secrets encrypted at rest, never
+  readable back through the API, no claim of operator blindness) and
+  the VAPID key lifecycle. Design contract only; nothing sends a push
+  yet. (#1059)
+
 - Push enqueue boundary (#1060): the trust boundary between a hostile box's filing storm and the owner's phone — plane-observed events now enqueue through a single gate that enforces page-once-per-event dedup, atomically reserves the per-(box, hour) and per-(owner, hour) page budgets in one step (two racing filings cannot both pass a bound of one), and coalesces over-budget pages into the hourly digest instead of sending them. (#990)
 
 - Box-side ensemble operator checklist (#1021): the pairing client
@@ -1017,6 +1026,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Fleet alert evaluation now reasons about a bounded window instead of the whole journal (#814 slice 1): each evaluation's rule logic sees only the tail the armed alert rules can act on (the longest rule window, six hours), so the per-collect rule-evaluation work stays bounded as the journal grows — the journal file itself is still read in full on every collect (bounding the read is a later slice; retention caps the file at 90 days). Behavior is unchanged for every event inside that window — including events that can't be dated, which the scanner still passes through — and the at-most-once alert dedup is unchanged. Two deliberate edges, both requiring the operator to have skipped evaluation for longer than the window: a failed-rollback older than the window that was never evaluated no longer pages (evaluation runs on every collect, and the stuck-box rules still cover a box that stays broken), and a correlated-failure cluster straddling the window edge is no longer detectable. (#832)
 - Restored the changelog ritual's own rule 1 text: a botched insertion from the October 2 durable-commands docs PR had left a fragment of a changelog bullet inside the standing merge-gate wording, so the ritual no longer read as written. (#940)
 - The box-side phone-home daemon now restarts its reconnect backoff after a healthy session: the backoff counter previously accumulated for the daemon's whole life, so the first reconnect after a long-lived session could wait up to a minute instead of starting over at one second as the wire spec requires. (#1028)
+- `fleet events list` now orders the per-box series by parsed timestamp instead of lexically: journals mixing ISO strings and epoch-shaped `emitted_at` values previously misordered the series, so the "last outcome" row the operator reads could be the wrong row. Unparseable timestamps sort last. (#1057)
 - A 408 (request timeout) from the push service now retries on the standard backoff schedule instead of discarding the page: a 408 is the push service giving up on the request, not a defect in the request, so repeating the identical send may well succeed. Possible double-delivery (Web Push carries no idempotency key) is recorded as an accepted tradeoff — it costs a second notification, never a false approval, while discarding the page meant the owner was never paged for that approval. (#1056)
 
 ## [0.5.0] - 2026-09-29
