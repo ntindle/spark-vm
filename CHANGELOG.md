@@ -446,7 +446,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   now takes the ingest lock non-blocking — under contention it skips
   loudly and defers to the plane's stale-generation fence instead of
   stalling, and the generation-loss log line no longer claims the bump
-  when it skipped. (#TBD)
+  when it skipped. (#1024)
 
 - Phone-home daemon exit codes now distinguish crashes from deliberate
   stops: uncaught exceptions exit 2 (loud on stderr and in the log,
