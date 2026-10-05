@@ -13,6 +13,7 @@ import time
 import pytest
 
 from hosted.push_crypto import (
+    _N,
     _aes_gcm_decrypt,
     _aes_gcm_encrypt,
     derive_push_keys,
@@ -21,6 +22,8 @@ from hosted.push_crypto import (
     ecdsa_verify,
     encrypt_push_message,
     generate_keypair,
+    validate_peer_public_key,
+    validate_private_key,
     vapid_authorization_header,
     vapid_sign,
 )
@@ -344,3 +347,22 @@ def test_full_send_timing_recorded():
     assert len(body) > 86 and jwt.count(".") == 2
     assert elapsed < 30, f"one send took {elapsed:.1f}s -- investigate before S1"
     print(f"\none pure-Python send (200B payload): {elapsed * 1000:.0f} ms")
+
+
+def test_public_key_validators():
+    # The public validation API push_sender (and future cross-module
+    # callers) must use instead of push_crypto's underscore helpers.
+    priv, pub = generate_keypair()
+    validate_peer_public_key(pub)
+    validate_private_key(priv)
+    # Fail-closed: non-bytes never raise TypeError, always ValueError.
+    for bad in ("not-bytes", None, 123, b"\x04" + b"\x00" * 63,
+                b"\x04" + b"\x00" * 65, b"\x05" + b"\x00" * 64,
+                b"\x04" + b"\xff" * 64):  # well-formed shape, off-curve
+        with pytest.raises(ValueError):
+            validate_peer_public_key(bad)
+    n_bytes = _N.to_bytes(32, "big")
+    for bad in ("not-bytes", None, b"short", b"\x00" * 32,
+                b"\xff" * 32, n_bytes):  # 0, 2^256-1, and N itself
+        with pytest.raises(ValueError):
+            validate_private_key(bad)

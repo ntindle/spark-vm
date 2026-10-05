@@ -493,6 +493,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The push sender's key-validation checks are now a public, documented API
+  instead of reaching into the crypto module's internals — a future change
+  to the crypto internals can no longer silently break push delivery, and
+  the validation contract (fail-closed on malformed keys, no exceptions
+  leaking) is pinned by tests. No behavior changed. (#TBD)
+
 - The stillborn-spawn error now gives the two real retry paths (#994):
   the in-code retry advice contradicted the muse-job README — telling the
   operator to remove the job dir first would delete the job record `close`

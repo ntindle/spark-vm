@@ -143,6 +143,34 @@ def _check_private_key(private_key: bytes) -> int:
     return d
 
 
+def validate_peer_public_key(encoded: bytes) -> None:
+    """Fail-closed validation of a peer (user-agent) P-256 public key for
+    the RFC 8291 KDF: 65-octet uncompressed point, verified on the curve
+    (RFC 8291 section 7).
+
+    Public counterpart of :func:`_decode_uncompressed_point` — same
+    check, ``None`` return, for callers (e.g. :mod:`hosted.push_sender`)
+    that need the validation verdict without the decoded coordinates.
+    Anything invalid — non-bytes, wrong shape, off-curve — raises
+    :exc:`ValueError` before any crypto touches the value.
+    """
+    if not isinstance(encoded, bytes):
+        raise ValueError("peer public key must be bytes")
+    _decode_uncompressed_point(encoded)
+
+
+def validate_private_key(private_key: bytes) -> None:
+    """Fail-closed validation of a P-256 private key: 32 octets,
+    ``1 <= d < N``. Public counterpart of :func:`_check_private_key` —
+    same check, ``None`` return, for cross-module callers. Anything
+    invalid — non-bytes, wrong length, out of range — raises
+    :exc:`ValueError`.
+    """
+    if not isinstance(private_key, bytes):
+        raise ValueError("private key must be bytes")
+    _check_private_key(private_key)
+
+
 def generate_keypair() -> tuple[bytes, bytes]:
     """Fresh P-256 keypair: (private_key 32 octets, public_key 65 octets
     uncompressed).  Uses :mod:`secrets` (CSPRNG)."""

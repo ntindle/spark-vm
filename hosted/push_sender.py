@@ -277,7 +277,9 @@ def _validated_subscription(subscription: object) -> tuple[str, bytes, bytes]:
     ua_public_key = _b64url_decode(p256dh, "p256dh")
     if len(ua_public_key) != 65:
         raise ValueError("p256dh must decode to 65 octets (uncompressed P-256)")
-    push_crypto._decode_uncompressed_point(ua_public_key)  # RFC 8291 §7 curve check
+    # RFC 8291 §7 curve check via push_crypto's PUBLIC validator —
+    # push_sender never reaches into push_crypto's underscore helpers.
+    push_crypto.validate_peer_public_key(ua_public_key)
     auth_secret = _b64url_decode(auth, "auth")
     if len(auth_secret) != 16:
         raise ValueError("auth must decode to 16 octets")
@@ -285,12 +287,15 @@ def _validated_subscription(subscription: object) -> tuple[str, bytes, bytes]:
 
 
 def _validated_vapid_keys(private_key: bytes, public_key: bytes) -> None:
+    # Shape checks stay subscription-shaped here (subscription-specific
+    # messages); the crypto checks ride push_crypto's PUBLIC validators —
+    # push_sender never reaches into push_crypto's underscore helpers.
     if not isinstance(private_key, bytes) or len(private_key) != 32:
         raise ValueError("vapid_private_key must be 32 octets")
-    push_crypto._check_private_key(private_key)
+    push_crypto.validate_private_key(private_key)
     if not isinstance(public_key, bytes) or len(public_key) != 65:
         raise ValueError("vapid_public_key must be 65 octets (uncompressed P-256)")
-    push_crypto._decode_uncompressed_point(public_key)
+    push_crypto.validate_peer_public_key(public_key)
 
 
 # ---------------------------------------------------------------------------
