@@ -481,7 +481,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   unchanged (loud failure, freeze-counter accounting). (#962)
 
 ### Security
-- The toolset self-updater's Playwright install is now hash-pinned (#TBD):
+- The toolset self-updater's Playwright install is now hash-pinned (#1018):
   the updater downloads the exact pinned Playwright wheel and refuses
   unless its SHA-256 matches the digest recorded at commit time — a
   compromised package index can no longer slip a different wheel past the
