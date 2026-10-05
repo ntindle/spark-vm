@@ -70,6 +70,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   owner-only API endpoint — a box can never read its own journal. The
   remaining emission sites (disconnect, hibernate wake, generation fence,
   identity conflicts) land in S4b-1–3.
+
+- Documented the stillborn-spawn guard in the muse-job README (#994): every
+  spawn now verifies the first agent turn actually engages within 10 seconds
+  (subscribe-before-start, fail-closed on unrecognized terminals) instead of
+  trusting the session start — a dead first turn marks the job blocked, never
+  active, with a vocabulary-gated terminal label and an event journal kept in
+  the job record for diagnosis, and the watchdog refuses to resurrect it.
+  (#1025)
 - Hosted phone-home, S4b socket lifecycle decomposed into four buildable
   slices (#958): the plane Durable Object's remaining session logic —
   hello/identity binding plus the generation fence, command re-drive with
