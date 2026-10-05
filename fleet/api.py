@@ -34,7 +34,10 @@ bind is impossible on this API. ``--port`` stays configurable (default
 same as the CLI. Errors never leak box-controlled bytes raw: box-
 controlled free text (event ``note``, alert ``detail``) passes through
 ``_clean_text`` (control-char strip) exactly like the CLI's display
-path; a crafted audit line can never forge an API row.
+path; a crafted audit line can never forge an API row. The access log
+is scrubbed the same way at write time (``_clean_log_line``): the
+request line is client-controlled and reaches the operator's terminal
+raw, so control bytes are stripped before logging.
 """
 
 import argparse
@@ -58,6 +61,25 @@ import events
 _NO_DATA_NOTE = "no journaled records; run collect first"
 _WAVES_UNAVAILABLE = ("unavailable until G15 S2 (rollout envelope null on "
                       "all journaled events)")
+
+
+def _clean_log_line(value):
+    """Strip control characters from one access-log line.
+
+    The access log is a raw-bytes-to-terminal channel: unlike the JSON
+    responses (where ``json.dumps`` escapes everything), whatever lands
+    here reaches the operator's terminal or cron log verbatim. The
+    request line is client-controlled and ``http.server`` logs it raw,
+    so a local client can inject terminal escape sequences
+    (``ESC[31m``) or forge extra log lines (``\\n``) unless the line is
+    scrubbed. Strip C0 controls, DEL, and C1 (``\\x80``–``\\x9f`` —
+    ``\\x9b`` is a live CSI introducer), the same rule the pairing
+    client's display path uses. Non-strings pass through unchanged.
+    """
+    if not isinstance(value, str):
+        return value
+    return "".join(ch for ch in value
+                   if not (ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f))
 
 
 def _store_check(store_dir):
@@ -658,8 +680,12 @@ class FleetAPIHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # Access log to stderr, one line per request — same as the
         # fleet collector's loud-logging discipline, never silent.
+        # The request line is client-controlled and http.server would
+        # log it raw: scrub control characters (incl. C1) so a local
+        # client cannot inject terminal escapes or forge log lines.
         sys.stderr.write("fleet-api %s - %s\n" %
-                         (self.address_string(), fmt % args))
+                         (_clean_log_line(self.address_string()),
+                          _clean_log_line(fmt % args)))
 
 
 def serve(store_dir, port):

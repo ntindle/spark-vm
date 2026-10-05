@@ -545,6 +545,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
   unchanged (loud failure, freeze-counter accounting). (#962)
 
 ### Security
+- The fleet read API's access log now strips control characters before
+  writing (#TBD): the request line is client-controlled and used to reach
+  the operator's terminal raw, so a local client could inject terminal
+  escape sequences or forge extra log lines — the log line is now scrubbed
+  (C0 controls, DEL, and C1) the same way the pairing client scrubs its
+  display path.
 - The toolset self-updater's Playwright install is now hash-pinned (#1018):
   the updater downloads the exact pinned Playwright wheel and refuses
   unless its SHA-256 matches the digest recorded at commit time — a

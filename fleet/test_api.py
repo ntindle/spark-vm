@@ -18,6 +18,7 @@ import io
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -715,3 +716,71 @@ def test_responses_are_json(store):
                      "/nope"):
             _, _, ctype = get(base, path)
             assert ctype == "application/json", path
+
+
+# --- access-log scrub ------------------------------------------------------
+# The request line is client-controlled and reaches the operator's
+# terminal/cron log through FleetAPIHandler.log_message. A local client
+# sending raw control bytes (literal ESC, not percent-encoded) must not
+# be able to inject terminal escapes or forge log lines.
+
+
+def test_clean_log_line_strips_controls():
+    scrub = api._clean_log_line
+    # C0 escapes, newline (line-forgery), DEL, and C1 (0x9b is CSI).
+    assert scrub("GET /\x1b[31mRED\x1b[0m HTTP/1.1") == \
+        "GET /[31mRED[0m HTTP/1.1"
+    assert scrub("one\ntwo") == "onetwo"
+    assert scrub("a\x7fb") == "ab"
+    assert scrub("a\x9bb") == "ab"
+    # Printable text (incl. non-ASCII) survives verbatim.
+    assert scrub("box-α β 200 -") == "box-α β 200 -"
+    # Non-strings pass through unchanged.
+    assert scrub(None) is None
+    assert scrub(200) == 200
+
+
+def _raw_request(port, payload):
+    """Send raw bytes to the test server; return the full response."""
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        sock.sendall(payload)
+        resp = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+        return resp
+    finally:
+        sock.close()
+
+
+def test_access_log_scrubs_client_control_bytes(store, monkeypatch):
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", buf)
+    with api_server(store) as base:
+        port = int(base.rsplit(":", 1)[1])
+        # Case 1: literal ESC + C1 bytes in a well-formed request line.
+        resp = _raw_request(
+            port,
+            b"GET /fleet/boxes/\x1b[31mRED\x1b[0m\x9b0m HTTP/1.1\r\n"
+            b"Host: x\r\nConnection: close\r\n\r\n")
+        assert resp.split(b"\r\n", 1)[0].endswith(b"404 Not Found")
+        # Case 2: a bare newline in the request target attempts to
+        # forge an extra log line.
+        _raw_request(
+            port,
+            b"GET /fleet/boxes/\x0aforged-line HTTP/1.1\r\n"
+            b"Host: x\r\nConnection: close\r\n\r\n")
+    logged = buf.getvalue()
+    assert logged, "expected at least one access-log line"
+    # No raw control bytes may reach the operator's terminal.
+    assert "\x1b" not in logged
+    assert "\x9b" not in logged
+    # The forged line cannot survive as its own log line: every logged
+    # line carries the server's own prefix (the newline was stripped, so
+    # the "forged-line" text — if logged at all — rides inside the
+    # server's own 400 line).
+    for line in logged.splitlines():
+        assert line.startswith("fleet-api "), line
