@@ -138,6 +138,15 @@ from waitlistd import (  # noqa: E402
     data_lock,
 )
 
+# Clock the CLI's WaitlistService runs on. None (the default) means the
+# service uses the real clock. Tests pin this to a fixture clock via
+# monkeypatch (see test_cli_reinstate_and_diagnose): the CLI builds its
+# own service, and without the pin a fixture-minted token is classified
+# against real time — a fixed fixture date plus a real-clock CLI is a
+# time-bombed test (issue #1051). Nothing outside the test suite sets
+# this.
+_cli_clock = None
+
 
 def load_config(argv):
     if "--help" in argv or "-h" in argv:
@@ -271,7 +280,7 @@ def main(argv):
         reinstate_force = "--force" in argv
 
     with data_lock(data_dir):
-        service = WaitlistService(data_dir, key, host)
+        service = WaitlistService(data_dir, key, host, clock=_cli_clock)
         service.reload()  # never scan from a pre-daemon view
         if want_diagnose:
             rows = service.diagnose_invites()

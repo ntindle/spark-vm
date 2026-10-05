@@ -508,6 +508,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The waitlist operator test suite is time-bomb-proof (#1051): the
+  live-token reinstatement case previously mixed a fixed 2026-09-20
+  fixture clock with the real clock the operator CLI reads, so the
+  test only passed while the fixture date was within the 14-day
+  invite window — it failed on main once, and the interim fix only
+  reset the fuse for another 14 days. The CLI now accepts a pinned
+  test clock, so the whole case runs on the fixture date and passes
+  no matter when the suite runs. No product behavior changed.
+  (#1053)
+
 - Fixed a time-bombed waitlist operator test (#1051): the live-token
   reinstatement case pinned its clock to a fixed 2026-09-20 fixture
   while the operator CLI reads real time, so once real time passed
