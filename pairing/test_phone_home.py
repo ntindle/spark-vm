@@ -1358,3 +1358,48 @@ def test_socket_command_ingest_lock_contention_defers(ctx, monkeypatch,
     assert _s5b_consumed(approvals)["plane_seq"] == 1
     with open(os.path.join(ctx.dir, "ingested_decisions.json")) as f:
         assert len(json.load(f)) == 1
+
+
+def test_dispatch_crash_exits_2_not_1(ctx, monkeypatch, capsys):
+    """An uncaught exception in the daemon must exit 2 (restartable),
+    not 1 (deliberate human-attention stop). CPython's default is 1,
+    which the systemd unit deliberately never restarts."""
+    def boom(args):
+        raise RuntimeError("simulated crash")
+    monkeypatch.setattr(spark_pair, "cmd_phone_home", boom)
+    rc = spark_pair._phone_home_main(ctx)
+    assert rc == 2
+    captured = capsys.readouterr()
+    # _phone_home_fail is loud on stderr (the _fail helper's channel).
+    assert "crashed" in captured.err
+    assert "RuntimeError" in captured.err
+    assert "simulated crash" in captured.err
+    # The loud log line lands in phone_home.log; the token never does.
+    with open(os.path.join(ctx.dir, "phone_home.log")) as f:
+        log = f.read()
+    assert "crashed" in log
+    assert TOKEN not in log
+    assert TOKEN not in captured.out
+    assert TOKEN not in captured.err
+
+
+def test_dispatch_deliberate_exit_1_passes_through(ctx, monkeypatch):
+    """Deliberate human-attention exits keep their code: the wrapper
+    only translates uncaught exceptions."""
+    monkeypatch.setattr(spark_pair, "cmd_phone_home", lambda args: 1)
+    assert spark_pair._phone_home_main(ctx) == 1
+    monkeypatch.setattr(spark_pair, "cmd_phone_home", lambda args: 0)
+    assert spark_pair._phone_home_main(ctx) == 0
+
+
+def test_dispatch_crash_redacts_token_from_traceback(ctx, monkeypatch,
+                                                    capsys):
+    """The crash traceback on stderr must not carry the box token even
+    if the exception message embeds it."""
+    def boom(args):
+        raise RuntimeError(f"auth failed for {TOKEN}")
+    monkeypatch.setattr(spark_pair, "cmd_phone_home", boom)
+    assert spark_pair._phone_home_main(ctx) == 2
+    captured = capsys.readouterr()
+    assert TOKEN not in captured.err
+    assert "<redacted>" in captured.err
