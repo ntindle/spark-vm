@@ -2652,10 +2652,17 @@ def _phone_home_bump_epoch(d, token=()):
     the lost incarnation (the bump is advisory), and a lock-file open
     failure skips loudly the same way. Returns True when the bump
     applied, False when there was nothing to bump or the bump skipped.
+
+    The write itself stays O_TRUNC (no temp+rename) — a crash mid-write
+    can still tear the cursor; that residual is scoped out of #1019 and
+    covered by the plane-`acked_watermark` heal path per the issue.
     """
     try:
         lock_fd = os.open(os.path.join(d, _INGEST_LOCK_FILE),
                           os.O_CREAT | os.O_RDWR, 0o600)
+        # 0600 at creation is not enough: a pre-existing lock file keeps
+        # its wider mode through the open (same as the ingest wrapper).
+        os.fchmod(lock_fd, 0o600)
     except OSError as e:
         _phone_home_say(d, "epoch bump SKIPPED: cannot open ingest lock "
                            f"({e}) — the DO's stale-generation fence is "
@@ -3358,6 +3365,9 @@ def cmd_phone_home(args):
                            "not reconnecting", token)
                 return param
             if action == "adopt":
+                # The bump is advisory and may skip under ingest-lock
+                # contention (#1019) — it logs its own loud skip, so the
+                # epoch+1 claim below is only said when it applied.
                 try:
                     _phone_home_adopt_generation(d, param)
                     bumped = _phone_home_bump_epoch(d, token)
