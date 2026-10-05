@@ -11,7 +11,9 @@ systemd, or /etc.
 
 import json
 import os
+import platform
 import pwd
+import hashlib
 import shutil
 import stat
 import subprocess
@@ -612,12 +614,17 @@ def test_script_never_fetches_code():
     # fetch. apt-get appears exactly three times: the unattended-upgrades
     # bootstrap, the apt layer's `install --only-upgrade` (simulate in
     # dry-run), and the playwright layer's validated-names system-deps
-    # install. curl appears exactly twice: the checksums.txt + tarball fetch
-    # inside _cua_driver_layer, both against "$base/$tag/..." (base defaults
-    # to the single https:// constant CUA_RELEASE_BASE). `pip install`
-    # appears exactly once: the playwright layer's exact-pin
-    # `"playwright==$pin"` (never a floating upgrade). A future slice
-    # adding network or package-manager surface must update this pin and
+    # install. curl appears exactly three times: the checksums.txt + tarball
+    # fetch inside _cua_driver_layer (both against "$base/$tag/...", base
+    # defaults to the single https:// constant CUA_RELEASE_BASE) and the
+    # playwright layer's wheel fetch (against "$url" — the URL comes only
+    # from the installed wheel-hashes file, never a hardcoded origin).
+    # `pip install` appears exactly once: the playwright layer installing
+    # the hash-verified local wheel file (`"$work/$file"` — pip never
+    # selects a version, so no floating upgrade is possible; the pin bound
+    # is enforced by building the asset name from the pins.conf pin plus
+    # the hashes-file lookup). A future slice adding network or
+    # package-manager surface must update this pin and
     # docs/TOOLSET_UPDATE.md. (Matches command invocations only — the
     # "apt-get install failed" log strings are not call sites; the
     # DEBIAN_FRONTEND= prefix on the apt-layer calls is part of the
@@ -667,16 +674,19 @@ def test_script_never_fetches_code():
     assert "--only-upgrade" not in line, line
     assert '-o Dpkg::Options::="--force-confdef"' in line, line
     assert '-o Dpkg::Options::="--force-confold"' in line, line
-    # The playwright layer is the single `pip install` call site: exact pin
-    # only (`"playwright==$pin"`), never a floating upgrade. Matched on the
-    # `-m pip install` invocation shape so the log strings mentioning
-    # "pip install" are not counted as call sites.
+    # The playwright layer is the single `pip install` call site: it
+    # installs only the hash-verified local wheel file (`"$work/$file"`),
+    # never a version specifier — pip performs no version selection, so no
+    # floating upgrade is possible. Matched on the `-m pip install`
+    # invocation shape so the log strings mentioning "pip install" are not
+    # counted as call sites.
     pip_invocations = [l for l in logical
                        if re.search(r"-m\s+pip\s+install\b", l)
                        and not l.lstrip().startswith("#")]
     assert len(pip_invocations) == 1, pip_invocations
     pip_line = pip_invocations[0]
-    assert '"playwright==$pin"' in pip_line, pip_line
+    assert '"$work/$file"' in pip_line, pip_line
+    assert "playwright==" not in pip_line, pip_line
     assert "--upgrade" not in pip_line, pip_line
     assert "-U" not in pip_line.split(), pip_line
     # Never a bare `apt upgrade` / `apt-get upgrade` (would touch everything).
@@ -685,9 +695,15 @@ def test_script_never_fetches_code():
             assert ("--only-upgrade" in l or "unattended-upgrades" in l
                     or "--no-install-recommends" in l), l
     curls = [l for l in text.splitlines() if "curl -fsSL" in l]
-    assert len(curls) == 2, curls
-    for line in curls:
-        assert "$base/$tag/" in line, line
+    assert len(curls) == 3, curls
+    cua_curls = [l for l in curls if "$base/$tag/" in l]
+    assert len(cua_curls) == 2, curls
+    pw_curls = [l for l in curls if l not in cua_curls]
+    assert len(pw_curls) == 1, curls
+    # The wheel URL is looked up from the installed hashes file — never a
+    # hardcoded download origin.
+    assert '"$url"' in pw_curls[0], pw_curls
+    assert "https://" not in pw_curls[0], pw_curls
     # No other curl call sites (the remaining "curl" mentions are the
     # presence check and the missing-curl log string, not invocations).
     other_curl = [l for l in text.splitlines()
@@ -696,8 +712,12 @@ def test_script_never_fetches_code():
                   and "curl not found" not in l]
     assert not other_curl, other_curl
     https = [l for l in text.splitlines() if "https://" in l]
-    assert len(https) == 1, https
+    assert len(https) == 2, https
     assert 'CUA_RELEASE_BASE:=' in https[0] and 'github.com/trycua/cua' in https[0]
+    # The second https:// is the wheel-hash URL-scheme allowlist
+    # (https://*|file://*) — the scheme gate, not a download origin: the
+    # actual wheel URL comes only from the installed hashes file.
+    assert 'https://*|file://*' in https[1], https
 
 
 def test_umask_is_restrictive():
@@ -944,22 +964,67 @@ def stage_pw_venv(tmp_path, version, piplog=None, pwlog=None, pip_exit=0):
     return venv
 
 
+def pw_wheel_asset(pin):
+    """Wheel asset filename `_playwright_wheel_asset` produces for this box."""
+    m = platform.machine()
+    if m == "x86_64":
+        plat = "manylinux1_x86_64"
+    elif m == "aarch64":
+        plat = "manylinux_2_17_aarch64.manylinux2014_aarch64"
+    else:
+        pytest.skip(f"no pinned playwright wheel for arch {m}")
+    return f"playwright-{pin}-py3-none-{plat}.whl"
+
+
+def stage_wheel_hashes(tmp_path, pin, wheel_body=b"FAKE-PLAYWRIGHT-WHEEL",
+                       digest=None):
+    """Stage a fixture wheel + hashes file (file:// URL). Returns
+    (hashes_path, wheel_path, asset). Pass digest= to list a digest that
+    does not match the wheel (hash-mismatch simulation)."""
+    asset = pw_wheel_asset(pin)
+    wheel = tmp_path / "wheelhouse" / asset
+    wheel.parent.mkdir(parents=True, exist_ok=True)
+    wheel.write_bytes(wheel_body)
+    real = hashlib.sha256(wheel_body).hexdigest()
+    hashes = tmp_path / "playwright_wheel_hashes.txt"
+    hashes.write_text(f"# test hashes\n{digest or real}  file://{wheel}\n")
+    return hashes, wheel, asset
+
+
 def pw_env(env, tmp_path, pin="1.62.0", cur_version="1.62.0"):
     """Env for playwright layer tests: pins file, hermetic managed venv at
     cur_version, PLAYWRIGHT_USER = the invoking user (so the user-switch
     runs directly), pip/browser invocation logs, and a succeeding apt-get
     stub (the deps step's validated-names install; the fixture's apt-get
-    stub fails loudly, which is not this layer's story)."""
+    stub fails loudly, which is not this layer's story). Also stages a
+    fixture wheel, a hashes file pointing at it via file://, and a curl
+    stub that delivers the staged wheel to the -o target (logging argv) —
+    so drift-path tests exercise the hash-verified download end to end."""
     e = dict(env["env"])
     (env["state"] / "self_update_pins.conf").write_text(
         f"# test pins\ncua-driver = 0.28.2\nplaywright = {pin}\n")
+    hashes, wheel, asset = stage_wheel_hashes(tmp_path, pin)
+    e["PLAYWRIGHT_WHEEL_HASHES"] = str(hashes)
     piplog = tmp_path / "pip.log"
     pwlog = tmp_path / "playwright.log"
     aptlog = tmp_path / "pw-apt.log"
+    curllog = tmp_path / "pw-curl.log"
+    curlbin = make_stub_bin(tmp_path / "pwcurlbin", {
+        # Faithful-enough fetch stub: log argv, copy the staged wheel to
+        # the -o target. Failure simulation is a per-test PATH prepend.
+        "curl": (
+            f'echo "argv: $@" >> "{curllog}"; '
+            'dest=""; prev=""; '
+            'for a in "$@"; do '
+            '[ "$prev" = "-o" ] && dest="$a"; prev="$a"; '
+            'done; '
+            f'cp "{wheel}" "$dest"'
+        ),
+    })
     bindir = make_stub_bin(tmp_path / "pwaptbin", {
         "apt-get": f'echo "argv: $@" >> "{aptlog}"; exit 0',
     })
-    e["PATH"] = bindir + os.pathsep + e["PATH"]
+    e["PATH"] = curlbin + os.pathsep + bindir + os.pathsep + e["PATH"]
     venv = stage_pw_venv(tmp_path, cur_version, piplog=piplog, pwlog=pwlog)
     e["PLAYWRIGHT_VENV"] = str(venv)
     e["PLAYWRIGHT_USER"] = pwd.getpwuid(os.getuid()).pw_name
@@ -1479,17 +1544,25 @@ def test_playwright_on_pin_refuses_when_cli_missing(env, tmp_path):
 
 
 def test_playwright_installs_pin_on_drift(env, tmp_path):
-    # Drifted venv: exact-pin pip install, then browsers, then the deps
-    # dry-run (satisfied here — the missing-deps install has its own tests).
+    # Drifted venv: hash-verified wheel download, pip install of the local
+    # wheel, then browsers, then the deps dry-run (satisfied here — the
+    # missing-deps install has its own tests).
     e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
     r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
     assert r.returncode == 0, r.stderr
     pip_calls = piplog.read_text().splitlines()
     assert len(pip_calls) == 1, pip_calls
-    assert "install" in pip_calls[0] and "playwright==1.62.0" in pip_calls[0], \
-        pip_calls
-    # Never a floating upgrade: the specifier is exactly the pin.
-    assert "playwright==" in pip_calls[0]
+    # pip installs the hash-verified local wheel — never a bare specifier,
+    # so no version selection (and no floating upgrade) can happen inside
+    # pip; the pin bound is enforced by the asset-name + hash lookup.
+    assert "install" in pip_calls[0], pip_calls
+    assert pip_calls[0].rstrip().endswith(pw_wheel_asset("1.62.0")), pip_calls
+    assert "playwright==" not in pip_calls[0], pip_calls
+    # The download URL came from the hashes file (not constructed), and the
+    # digest gate passed before pip ran.
+    curl_calls = (tmp_path / "pw-curl.log").read_text().splitlines()
+    assert len(curl_calls) == 1, curl_calls
+    assert f"file://{tmp_path}/wheelhouse/" in curl_calls[0], curl_calls
     pw_calls = pwlog.read_text().splitlines()
     assert "install chromium" in pw_calls, pw_calls
     assert "install-deps --dry-run chromium" in pw_calls, pw_calls
@@ -1501,6 +1574,115 @@ def test_playwright_installs_pin_on_drift(env, tmp_path):
                    for c in pw_calls), pw_calls
     lines = audit_lines(env)
     assert lines and lines[-1]["result"] == "ok"
+
+
+def test_playwright_refuses_on_wheel_hash_mismatch(env, tmp_path):
+    # The downloaded bytes don't match the pinned digest: refuse before
+    # pip ever sees the wheel.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    hashes = tmp_path / "playwright_wheel_hashes.txt"
+    hashes.write_text(
+        "# tampered\n" + "0" * 64 +
+        f"  file://{tmp_path}/wheelhouse/{pw_wheel_asset('1.62.0')}\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "pip must never see a hash-mismatched wheel"
+    assert not pwlog.exists(), "no browser install after the hash refusal"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_refuses_when_wheel_hash_missing(env, tmp_path):
+    # Hashes file has no line for the pinned version (pin bumped without
+    # the hashes file): refuse fail-closed instead of falling back to a
+    # TLS-only pip fetch.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    hashes = tmp_path / "playwright_wheel_hashes.txt"
+    kept = [l for l in hashes.read_text().splitlines()
+            if "1.62.0" not in l]
+    hashes.write_text("\n".join(kept) + "\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call without a pinned wheel hash"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_refuses_when_hashes_file_absent(env, tmp_path):
+    # No hashes file at all: refuse fail-closed.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    e["PLAYWRIGHT_WHEEL_HASHES"] = str(tmp_path / "no-such-hashes.txt")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call without the hashes file"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_refuses_on_ambiguous_hash_lines(env, tmp_path):
+    # Two hash lines for the same asset: ambiguous — refuse rather than
+    # picking one.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    hashes = tmp_path / "playwright_wheel_hashes.txt"
+    text = hashes.read_text()
+    last = [l for l in text.splitlines() if l and not l.startswith("#")][-1]
+    hashes.write_text(text + last + "\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call on ambiguous hashes"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_refuses_on_malformed_digest(env, tmp_path):
+    # Digest is not 64 lowercase hex: the line is unusable — refuse.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    hashes = tmp_path / "playwright_wheel_hashes.txt"
+    hashes.write_text(
+        "# malformed\n" + "Z" * 64 +
+        f"  file://{tmp_path}/wheelhouse/{pw_wheel_asset('1.62.0')}\n")
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call on a malformed digest"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_playwright_refuses_when_wheel_download_fails(env, tmp_path):
+    # curl fails: refuse, pip never runs.
+    e, piplog, pwlog, aptlog = pw_env(env, tmp_path, cur_version="1.61.0")
+    failbin = make_stub_bin(tmp_path / "pwcurlfail", {"curl": "exit 1"})
+    e["PATH"] = failbin + os.pathsep + e["PATH"]
+    r = run_bash("./deploy/toolset-update.sh update", env_extra=e)
+    assert r.returncode != 0, r.stderr
+    assert not piplog.exists(), "no pip call when the download fails"
+    assert "playwright" in audit_lines(env)[-1]["failed"]
+
+
+def test_install_copies_wheel_hashes_file(env):
+    r = run_bash("./deploy/toolset-update.sh install", env_extra=env["env"])
+    assert r.returncode == 0, r.stderr
+    hashes = env["state"] / "playwright_wheel_hashes.txt"
+    assert hashes.exists()
+    assert "playwright-1.62.0" in hashes.read_text()
+
+
+def test_playwright_wheel_hashes_cover_pins_conf():
+    # Bump discipline: the repo pins.conf's playwright pin must have
+    # exactly one hash line per linux wheel asset the updater may fetch.
+    import re
+    pins = open(os.path.join(
+        REPO, "scripts", "self_update_pins.conf")).read()
+    m = re.search(r"^playwright\s*=\s*([^\s#]+)", pins, re.M)
+    assert m, "playwright pin missing from self_update_pins.conf"
+    pin = m.group(1)
+    text = open(os.path.join(
+        REPO, "scripts", "playwright_wheel_hashes.txt")).read()
+    for asset in (f"playwright-{pin}-py3-none-manylinux1_x86_64.whl",
+                  f"playwright-{pin}-py3-none-"
+                  f"manylinux_2_17_aarch64.manylinux2014_aarch64.whl"):
+        lines = [l for l in text.splitlines()
+                 if l.strip() and not l.startswith("#")
+                 and l.split()[-1].endswith("/" + asset)]
+        assert len(lines) == 1, f"exactly one hash line for {asset}"
+        digest = lines[0].split()[0]
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), \
+            f"digest for {asset} must be 64 lowercase hex"
 
 
 def test_playwright_install_deps_installs_missing_validated(env, tmp_path):

@@ -102,8 +102,10 @@
 #                  only behind the idle gate in the weekly quiet-hours window.
 #   playwright   — converge Playwright onto the pins.conf pin (issue #532):
 #                  the `playwright` pip package inside the managed venv
-#                  ($PLAYWRIGHT_VENV) is held on the exact pin
-#                  (`playwright==<pin>`, never a floating upgrade); the
+#                  ($PLAYWRIGHT_VENV) is held on the exact pin (the wheel
+#                  is downloaded from the hash-pinned URL in
+#                  playwright_wheel_hashes.txt and SHA-256-verified before
+#                  pip ever sees it — never a floating upgrade); the
 #                  Chromium browser builds (`playwright install chromium`)
 #                  and the system libraries converge on every run
 #                  (idempotent — `install` skips present builds, the deps
@@ -116,10 +118,12 @@
 #                  package-name pattern, and root installs the validated
 #                  names with apt-get itself. Fail-closed: missing/unsafe
 #                  pin, missing venv, unparseable installed version,
-#                  missing browser CLI, or any unexpected --dry-run output
-#                  shape all refuse loudly. The pip install and the browser
-#                  download are TLS-only without hash pinning (follow-up:
-#                  hash-pinned wheel + browser archives).
+#                  missing browser CLI, missing/stale wheel hashes, a wheel
+#                  hash mismatch, or any unexpected --dry-run output
+#                  shape all refuse loudly. The browser download is
+#                  TLS-only without hash pinning (follow-up: hash-pinned
+#                  browser archives); pip's transitive dependencies are
+#                  TLS-only too.
 #
 # Env overrides (for tests): TOOLSET_STATE_DIR, APT_CONF_DIR, SYSTEMD_DIR,
 # OPTOUT_FILE, SKIP_SYSTEMCTL=1 (skip systemctl calls), SKIP_SUDO=1 (run
@@ -141,7 +145,8 @@
 # root), CUA_RELEASE_BASE (release download base; tests point it at a local
 # dir), PLAYWRIGHT_VENV (managed Playwright venv; default
 # /home/ntindle/.venvs/pw), PLAYWRIGHT_USER (owner of that venv and of the
-# browser cache; default ntindle).
+# browser cache; default ntindle), PLAYWRIGHT_WHEEL_HASHES (installed
+# wheel-hash list; default $TOOLSET_STATE_DIR/playwright_wheel_hashes.txt).
 #
 # Trust model (read docs/TOOLSET_UPDATE.md before enabling):
 #   - THE TIMER RUNS THE INSTALLED COPY at $TOOLSET_STATE_DIR/bin/, NOT the
@@ -162,12 +167,15 @@
 #     never executed and never extracted wholesale — only a single member
 #     named `cua-driver` is extracted, after the member list is screened for
 #     unsafe entries (symlinks/hardlinks/devices, `..`, absolute paths)). The
-#     playwright layer's `pip install playwright==<pin>` (exact pin, never a
-#     floating upgrade, run as the venv-owning user) plus `playwright install
-#     chromium` (browser binaries from the Playwright CDN, run as the user)
-#     are TLS-only without hash pinning — the documented residual for a
-#     follow-up slice; the version the layer may install is bounded by the
-#     operator-owned pins file. The system-library step does NOT execute
+#     playwright layer's hash-pinned wheel download (`$url` from the
+#     installed playwright_wheel_hashes.txt, SHA-256-verified before pip
+#     sees the wheel; the exact asset is built from the pins.conf pin and
+#     the box arch, so the version the layer may install is bounded by the
+#     operator-owned pins file) plus `playwright install chromium`
+#     (browser binaries from the Playwright CDN, run as the user) is
+#     TLS-only without hash pinning — the documented residual for a
+#     follow-up slice; pip's transitive dependencies (pyee, greenlet) are
+#     TLS-only as well. The system-library step does NOT execute
 #     venv code as root: `install-deps --dry-run` (a read-only simulation)
 #     runs as the user, root validates each reported package name against
 #     the Debian package-name pattern, and root installs the validated
@@ -221,6 +229,11 @@ TMUX_RESOLVED="$(command -v "$TMUX_BIN" 2>/dev/null || printf '%s' "$TMUX_BIN")"
 # would break the agent's own Playwright use).
 : "${PLAYWRIGHT_VENV:=/home/ntindle/.venvs/pw}"
 : "${PLAYWRIGHT_USER:=ntindle}"
+# Wheel hashes: the installed/backfilled copy of the SHA-256 pinned wheel
+# download list (scripts/playwright_wheel_hashes.txt), refreshed only by
+# the privileged `install` step — never from the live repo checkout, same
+# two-planes contract as the pins file (docs/SELF_UPDATE.md).
+: "${PLAYWRIGHT_WHEEL_HASHES:=$TOOLSET_STATE_DIR/playwright_wheel_hashes.txt}"
 
 STATE_AUDIT_LOG="$TOOLSET_STATE_DIR/audit.log"
 STATE_RUN_LOG="$TOOLSET_STATE_DIR/toolset-update.log"
@@ -902,7 +915,9 @@ _apt_layer() {
 #   1. the `playwright` pip package inside the managed venv,
 #   2. the Chromium browser builds (`playwright install chromium`),
 #   3. the system libraries (apt packages).
-# The pip package is held on the exact pin; the browsers and the system
+# The pip package is held on the exact pin (the wheel is SHA-256-verified
+# against the installed wheel-hashes file before pip installs the local
+# file); the browsers and the system
 # libraries converge on every run (both steps are idempotent — `install`
 # skips present builds, and the deps step no-ops when nothing is missing),
 # so an on-pin pip package with an emptied browser cache or missing system
@@ -1050,15 +1065,116 @@ _playwright_install_deps() {
     return 0
 }
 
+_playwright_wheel_asset() {
+    # _playwright_wheel_asset <pin> — print the expected PyPI wheel filename
+    # for the pinned playwright version on this box's arch, or nothing when
+    # the arch has no pinned wheel. The filename is built from the
+    # version-safe pin, so the asset the layer may fetch is bounded by the
+    # operator-owned pins file.
+    local pin="$1" plat
+    case "$(uname -m)" in
+        x86_64)  plat="manylinux1_x86_64" ;;
+        aarch64) plat="manylinux_2_17_aarch64.manylinux2014_aarch64" ;;
+        *)       return 0 ;;
+    esac
+    printf 'playwright-%s-py3-none-%s.whl' "$pin" "$plat"
+}
+
+_playwright_wheel_hash() {
+    # _playwright_wheel_hash <asset> — print `<sha256> <url>` for the wheel
+    # asset from the installed wheel-hashes file, or nothing. Fail-closed
+    # shape: exactly one matching line, digest must be 64 lowercase hex,
+    # URL must be https (the file:// scheme is allowed only so tests can
+    # stage fixtures — a production hashes file with a file:// URL would be
+    # caught by review, and the installed copy is operator-owned).
+    local asset="$1" hashes="${PLAYWRIGHT_WHEEL_HASHES:-}" line digest url base
+    local match='' count=0
+    [ -n "$hashes" ] && [ -f "$hashes" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in \#*|'') continue ;; esac
+        digest="$(printf '%s' "$line" | awk '{print $1}')"
+        url="$(printf '%s' "$line" | awk '{print $2}')"
+        base="${url##*/}"
+        [ "$base" = "$asset" ] || continue
+        match="$digest $url"
+        count=$((count + 1))
+    done <"$hashes"
+    [ "$count" = "1" ] || return 0
+    digest="$(printf '%s' "$match" | awk '{print $1}')"
+    url="$(printf '%s' "$match" | awk '{print $2}')"
+    case "$digest" in
+        *[!0-9a-f]*|'') return 0 ;;
+    esac
+    [ "${#digest}" = "64" ] || return 0
+    case "$url" in
+        https://*|file://*) ;;
+        *) return 0 ;;
+    esac
+    printf '%s' "$match"
+}
+
+_playwright_pip_install_wheel() {
+    # _playwright_pip_install_wheel <pin> <py> <cli> — download the pinned
+    # playwright wheel from its hash-pinned URL and install it into the
+    # managed venv. The download and the SHA-256 check run as
+    # $PLAYWRIGHT_USER (the wheel lands in the user's venv); pip installs
+    # the verified local file, so pip never selects a version itself — no
+    # floating upgrade is possible. Fail-closed: unsupported arch,
+    # missing/stale/ambiguous hashes, bad digest shape, download failure,
+    # or hash mismatch all refuse loudly.
+    local pin="$1" py="$2" cli="$3" asset want url work file got
+    asset="$(_playwright_wheel_asset "$pin")"
+    if [ -z "$asset" ]; then
+        log "playwright: no pinned wheel for arch $(uname -m) — refusing (fail-closed)"
+        return 1
+    fi
+    want="$(_playwright_wheel_hash "$asset")"
+    if [ -z "$want" ]; then
+        log "playwright: no usable wheel hash for $asset in ${PLAYWRIGHT_WHEEL_HASHES:-<unset>} — refusing (fail-closed)"
+        return 1
+    fi
+    url="$(printf '%s' "$want" | awk '{print $2}')"
+    want="$(printf '%s' "$want" | awk '{print $1}')"
+    if ! _as_playwright_user command -v curl >/dev/null 2>&1; then
+        log "playwright: curl not found for $PLAYWRIGHT_USER — cannot fetch the wheel"
+        return 1
+    fi
+    work="$(_as_playwright_user mktemp -d)" || {
+        log "playwright: cannot create wheel staging dir"
+        return 1
+    }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work'" RETURN
+    file="$asset"
+    log "playwright: fetching $asset"
+    if ! _as_playwright_user curl -fsSL --max-time 600 -o "$work/$file" "$url"; then
+        log "playwright: could not fetch $asset"
+        return 1
+    fi
+    got="$(_as_playwright_user sha256sum "$work/$file" 2>/dev/null | awk '{print $1}')"
+    if [ -z "$got" ] || [ "$got" != "$want" ]; then
+        log "playwright: SHA256 mismatch for $asset — refusing"
+        return 1
+    fi
+    if ! _as_playwright_user "$py" -m pip install "$work/$file"; then
+        log "playwright: pip install of hash-verified $asset failed"
+        return 1
+    fi
+    [ -x "$cli" ] \
+        || { log "playwright: $cli missing after pip install — refusing"; return 1; }
+    return 0
+}
+
 _playwright_layer() {
     # _playwright_layer <dry:0|1> — converge Playwright onto the pins.conf
     # pin. Idempotent: the pip install is skipped on-pin, but the browser
     # and system-library steps still run (both no-op when satisfied).
     # Fail-closed: missing/unsafe pin, missing venv, unparseable installed
-    # version, missing browser CLI, or any deps-step refusal all fail the
-    # layer loudly. The pip specifier is the exact pin
-    # (`playwright==<pin>`), never a floating upgrade — the pins file is the
-    # version authority, not PyPI's latest.
+    # version, missing browser CLI, missing/stale wheel hashes, wheel hash
+    # mismatch, or any deps-step refusal all fail the layer loudly. The
+    # wheel installed is the hash-verified download for the exact pin —
+    # never a floating upgrade: the pins file is the version authority,
+    # not PyPI's latest.
     local dry="$1"
     local pin cur py cli
     pin="$(_read_pin playwright)"
@@ -1100,12 +1216,9 @@ _playwright_layer() {
         return 0
     fi
     if [ "$pip_needed" = "1" ]; then
-        if ! _as_playwright_user "$py" -m pip install "playwright==$pin"; then
-            log "playwright: pip install playwright==$pin failed"
+        if ! _playwright_pip_install_wheel "$pin" "$py" "$cli"; then
             return 1
         fi
-        [ -x "$cli" ] \
-            || { log "playwright: $cli missing after pip install — refusing"; return 1; }
     fi
     # Browsers as the user (they land in the user's ~/.cache/ms-playwright);
     # system libraries via the validated-names apt path (root, never the
@@ -2108,6 +2221,12 @@ cmd_install() {
     # trust model (docs/SELF_UPDATE.md "Two planes" contract).
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/../scripts/self_update_pins.conf" "$TOOLSET_STATE_DIR/self_update_pins.conf" \
         || { echo "ERROR: cannot install pins file" >&2; return 1; }
+    # The wheel-hashes file is the operator-owned hash authority for the
+    # playwright layer's wheel download. Installed/backfilled ONLY here —
+    # the update plane never reads it from the live checkout, same
+    # two-planes contract as the pins file.
+    _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/../scripts/playwright_wheel_hashes.txt" "$TOOLSET_STATE_DIR/playwright_wheel_hashes.txt" \
+        || { echo "ERROR: cannot install wheel hashes file" >&2; return 1; }
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/sparkvm-toolset-update.service" "$SYSTEMD_DIR/" \
         || { echo "ERROR: cannot install service unit" >&2; return 1; }
     _sudo install -o "$TOOLSET_INSTALL_OWNER" -g "$TOOLSET_INSTALL_GROUP" -m 0644 "$SCRIPT_DIR/sparkvm-toolset-update.timer" "$SYSTEMD_DIR/" \

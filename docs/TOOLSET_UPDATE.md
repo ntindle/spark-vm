@@ -134,13 +134,25 @@ all locked together by the `playwright` package version:
 2. the **Chromium browser builds** (`playwright install chromium`),
 3. the **system libraries** (apt packages).
 
-- **Exact pin, never a floating upgrade.** The specifier is always
-  `playwright==<pin>`; the pins file is the version authority, not PyPI's
-  latest. The pip install is skipped when the venv is already on the pin —
-  but the browser and system-library steps still run on every update: both
-  are idempotent (`install` skips present builds; the deps step no-ops
-  when nothing is missing), so an on-pin pip package with an emptied
-  browser cache or missing system libraries still heals.
+- **Hash-pinned wheel, never a floating upgrade.** The layer downloads the
+  wheel for the exact pin from the URL listed in the installed
+  `playwright_wheel_hashes.txt` (installed/backfilled only by the
+  privileged `install` step, next to the pins file — the update plane
+  never reads it from the live checkout), SHA-256-verifies the download
+  against the installed digest, and pip-installs the verified local file.
+  pip performs no version selection at all; the pins file is the version
+  authority, not PyPI's latest. The wheel filename is built from the pin
+  and the box arch (`playwright-<pin>-py3-none-<platform>.whl`), so a pin
+  bumped without its hash lines refuses fail-closed instead of falling
+  back to a TLS-only fetch. The pip install is skipped when the venv is
+  already on the pin — but the browser and system-library steps still run
+  on every update: both are idempotent (`install` skips present builds;
+  the deps step no-ops when nothing is missing), so an on-pin pip package
+  with an emptied browser cache or missing system libraries still heals.
+  Bump discipline: the hashes file is bumped in the same PR as the
+  `playwright` pin (hashes recorded from PyPI's JSON API at commit time;
+  the suite asserts every linux asset for the pinned version has exactly
+  one well-formed hash line).
 - **User-space work runs as the user.** The venv and the browser cache are
   owned by `$PLAYWRIGHT_USER` (default `ntindle`), so the pip install, the
   browser install, and the version probe all run as that user (via
@@ -166,17 +178,20 @@ all locked together by the `playwright` package version:
   never run it directly.
 - **Fail-closed:** a missing pin, an unsafe pin, a missing venv, an
   unparseable installed version, a missing `bin/playwright`, an
-  impossible user-switch, or any unexpected `--dry-run` output shape
-  (wrong header, count mismatch, unsafe name, garbage) all refuse loudly
-  and name `playwright` in the audit line.
+  impossible user-switch, a missing/stale/ambiguous wheel-hashes entry, a
+  wheel hash mismatch, a failed wheel download, or any unexpected
+  `--dry-run` output shape (wrong header, count mismatch, unsafe name,
+  garbage) all refuse loudly and name `playwright` in the audit line.
 - **Trust residual (stated, not hidden):** unlike the `cua-driver` layer's
-  SHA-256-verified tarball, the pip install and the browser download are
-  TLS-only with no hash pinning — `pip install playwright==<pin>` trusts
-  PyPI's index and TLS, `playwright install chromium` trusts the Playwright
-  CDN and TLS. Hash-pinning the wheel and the browser archives is the
-  follow-up slice that closes this (see "Follow-ups"). What root executes
-  is bounded to `apt-get` on validated names — the one new root-executed
-  surface this layer adds.
+  SHA-256-verified tarball and the wheel's SHA-256-verified download, the
+  browser download is TLS-only with no hash pinning — `playwright install
+  chromium` trusts the Playwright CDN and TLS (the build revision it
+  fetches is still fully determined by the hash-verified package, so only
+  a CDN serving different bytes for the same revision URL is unaddressed).
+  pip's transitive dependencies (pyee, greenlet) are TLS-only too.
+  Hash-pinning the browser archives is the remaining follow-up (see
+  "Follow-ups"). What root executes is bounded to `apt-get` on validated
+  names — the one new root-executed surface this layer adds.
 
 Overrides (environment): `PLAYWRIGHT_VENV`, `PLAYWRIGHT_USER`.
 
@@ -215,28 +230,35 @@ Overrides (environment): `PLAYWRIGHT_VENV`, `PLAYWRIGHT_USER`.
   delay (`sparkvm-toolset-update.timer`, `Persistent=false`).
 - Root-required operations fail loudly instead of silently skipping.
 - **The only code fetched over the network is the `cua-driver` layer's
-  pinned release fetch**, deliberately and narrowly: exactly two `curl`
-  calls (the release's `checksums.txt` and the exact pinned tarball, both
-  under `$CUA_RELEASE_BASE/cua-driver-rs-v<pin>/`), with SHA-256 verification
+  pinned release fetch and the `playwright` layer's hash-pinned wheel
+  download**, deliberately and narrowly: exactly three `curl` calls — the
+  release's `checksums.txt` and the exact pinned tarball (both under
+  `$CUA_RELEASE_BASE/cua-driver-rs-v<pin>/`), with SHA-256 verification
   against the release's own checksums file before anything is executed or
-  installed — see "The `cua-driver` layer" for the fail-closed rules. The
-  package-manager call sites are the one-time
-  `apt-get install -y unattended-upgrades` bootstrap (downloads from the
-  box's configured, signature-verified apt sources, only if the package is
-  missing) and the `apt` layer's weekly
-  `apt-get install --only-upgrade <allowlisted names>` (same sources, never
-  installs anything not already present). The `playwright` layer adds one
-  `pip install playwright==<pin>` call site (exact pin only, run as the
-  venv-owning user), one `playwright install chromium` browser fetch (run
-  as the user), and one `apt-get install -y --no-install-recommends
-  <validated names>` call site for the missing system libraries — the
-  names come from `install-deps --dry-run` (read-only, run as the user)
-  and are validated against the Debian package-name pattern before root
-  installs them, so root never executes venv code. The pip install and the
-  browser fetch are TLS-only, no hash pinning — the documented residual.
-  The suite pins exactly that shape — no `wget`/`git clone`/`npm install`,
-  three `apt-get` call sites, two `curl` call sites, one exact-pin `pip
-  install` call site.
+  installed (see "The `cua-driver` layer" for the fail-closed rules), and
+  the playwright wheel (the URL listed for the pinned version + box arch
+  in the installed `playwright_wheel_hashes.txt`), with SHA-256
+  verification against the installed hash before pip ever sees the file
+  (see "The `playwright` layer"). The package-manager call sites are the
+  one-time `apt-get install -y unattended-upgrades` bootstrap (downloads
+  from the box's configured, signature-verified apt sources, only if the
+  package is missing) and the `apt` layer's weekly
+  `apt-get install --only-upgrade <allowlisted names>` (same sources,
+  never installs anything not already present). The `playwright` layer
+  adds one `pip install <hash-verified local wheel>` call site (run as the
+  venv-owning user; pip performs no version selection — no floating
+  upgrade — and the wheel filename is built from the exact pin, so the
+  pins file stays the version authority), one `playwright install
+  chromium` browser fetch (run as the user), and one `apt-get install -y
+  --no-install-recommends <validated names>` call site for the missing
+  system libraries — the names come from `install-deps --dry-run`
+  (read-only, run as the user) and are validated against the Debian
+  package-name pattern before root installs them, so root never executes
+  venv code. The browser fetch is TLS-only, no hash pinning — the
+  documented residual; pip's transitive dependencies are TLS-only too.
+  The suite pins exactly that shape — no `wget`/`git clone`/`npm
+  install`, three `apt-get` call sites, three `curl` call sites, one
+  hash-pinned-wheel `pip install` call site.
 
 ## Component status
 
@@ -317,9 +339,13 @@ repeated failure" half of #532's Recovery section.
 
 ## Follow-ups (issue #532, not in this slice)
 
-- Hash-pin the playwright wheel and browser archives (`--require-hashes`
-  / Sigstore) — closes the TLS-only residual of the `playwright` layer's
-  pip install and browser fetch
+- Hash-pin the playwright browser archives — the remaining half of the
+  TLS-only residual (the wheel half is hash-pinned: the layer downloads
+  the pinned wheel from its hash-pinned URL and SHA-256-verifies it before
+  pip installs the local file)
+- Hash-pin pip's transitive dependencies (pyee, greenlet) for the
+  playwright layer — still TLS-only today (documented in the trust-model
+  section); `--require-hashes` needs the full closure pinned
 - Validate `APT_*_PKGS` candidates against the Debian package-name pattern
   (defense in depth against glob expansion / option injection via root-set
   env; currently the only setter with privilege is root, so no boundary is

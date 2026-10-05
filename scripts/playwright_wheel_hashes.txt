@@ -1,0 +1,23 @@
+# playwright_wheel_hashes.txt — SHA-256 pinned wheel downloads for the
+# toolset updater's playwright layer (issue #532).
+#
+# Format: one `<sha256>  <url>` line per pinned artifact. Blank lines and
+# `#` comments are ignored. The updater (`deploy/toolset-update.sh`,
+# `_playwright_layer`) looks up the line whose URL basename is exactly the
+# wheel asset for the pinned version + box arch, downloads it, and refuses
+# unless the downloaded bytes match the listed digest.
+#
+# Hash authority: the hashes are recorded here at commit time from PyPI's
+# JSON API (https://pypi.org/pypi/playwright/<version>/json); the installed
+# copy (see `toolset-update.sh install`, which copies this file into the
+# state dir next to self_update_pins.conf) is the runtime authority. The
+# update plane never reads this file from the live checkout.
+#
+# Discipline: bump this file in the same PR that bumps the playwright pin
+# in scripts/self_update_pins.conf. The test suite pins the sync
+# (test_playwright_wheel_hashes_cover_pins_conf). Only the linux wheels
+# are listed — spark-vm boxes are linux.
+#
+# playwright = 1.62.0
+ba33bae6a13b3d9d354c751cb618af357d20fe1d57767cbcce52079bbef17ad3  https://files.pythonhosted.org/packages/43/6b/b24aebc2b04bffcb342bccf96e287c78b363e1615bed5cea97500cc0393a/playwright-1.62.0-py3-none-manylinux1_x86_64.whl
+db2d76613a57ad844362ce42f7d0c2fa26b19a4f7a46d4f76b891c631e6e5aff  https://files.pythonhosted.org/packages/36/43/b4b18bdc87e1949568fffdcde3ff9a0456266b2d0c6d4432cc34d89ea6eb/playwright-1.62.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
