@@ -578,3 +578,47 @@ def test_watch_done_claim_on_completed_turn(cli, fakes):
     events = []
     cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time())
     assert events[0]["signal"] == "done"
+
+
+def test_watch_stillborn_carries_two_path_retry_advice(cli, fakes):
+    # Issue #1029: the stillborn short-circuit's needs-attention signal
+    # must carry the same two-path retry as the TurnStillbornError and
+    # the README stillborn-spawn section -- a bare "retry spawn with
+    # --tmux" is actively wrong on the same slug, because _spawn_prepare
+    # refuses a slug whose job dir still exists.
+    slug = "stillbornretry"
+    _make_job(cli, slug, state="blocked",
+              stillborn={"turn_id": "turn-1", "terminal": "cancelled",
+                         "journal": ["turn/started", "turn/completed"]})
+    events = []
+    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time())
+    assert len(events) == 1
+    assert events[0]["signal"] == "needs-attention"
+    detail = events[0]["detail"]
+    assert "'cancelled'" in detail
+    # New-slug path (keeps the diagnosis record).
+    assert "`muse-job spawn <new-slug> --tmux`" in detail
+    assert f"`muse-job close {slug}`" in detail
+    # Same-slug path: close first, then remove the job dir, then spawn.
+    assert f"`muse-job close {slug}` first" in detail
+    assert "remove the job dir" in detail
+    assert f"`muse-job spawn {slug} --tmux`" in detail
+    # The advice must never pretend a same-dir same-slug spawn works.
+    assert "retry spawn with --tmux or" not in detail
+    # The job must stay blocked, untouched by the poll machinery.
+    assert _read_job(cli, slug)["state"] == "blocked"
+    assert _read_job(cli, slug)["stillborn"]["terminal"] == "cancelled"
+
+
+def test_watch_stillborn_gates_unknown_terminal(cli, fakes):
+    # The vocabulary gate on the signal detail must survive the #1029
+    # rewording: a hostile terminal string never reaches the detail.
+    slug = "stillbornweird"
+    _make_job(cli, slug, state="blocked",
+              stillborn={"turn_id": "turn-1", "terminal": "EVIL\nline",
+                         "journal": ["turn/started"]})
+    events = []
+    cli._watch_msp_job(slug, _read_job(cli, slug), events, time.time())
+    assert len(events) == 1
+    assert "EVIL" not in events[0]["detail"]
+    assert "'unknown'" in events[0]["detail"]

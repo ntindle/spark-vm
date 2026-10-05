@@ -78,8 +78,10 @@ declares success:
   (`cancelled`/`interrupted`/`failed`/`completed`/`unknown`), so a
   hostile or malformed server value can't inject log lines.
 - The watchdog short-circuits stillborn jobs: it emits a
-  `needs-attention` signal pointing at the terminal and the retry
-  path, and returns without touching the job. Without the
+  `needs-attention` signal carrying the full two-path retry advice —
+  new slug, or close-first same-slug with job-dir removal, the same
+  wording the spawn error uses — and returns without touching the job.
+  Without the
   short-circuit, the cancelled turn would replay to `active` and the
   watchdog would resurrect the zombie on its next pass.
 - The 10-second watch is paid on every healthy spawn (the loop exits early

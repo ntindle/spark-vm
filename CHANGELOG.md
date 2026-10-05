@@ -493,6 +493,15 @@ codified as rule 6 so future watch bullets arrive compliant.)
   git worktree and job branch, then remove the job dir, then spawn again).
   (#1026)
 
+- The watchdog's stillborn needs-attention signal now carries the full
+  two-path retry advice (#1029): it previously suggested "retry spawn
+  with --tmux", but a same-slug spawn refuses a slug whose job dir
+  still exists — so the signal now names the new-slug path (spawn with
+  a new slug, then close the blocked job to archive it) and the
+  same-slug path (close first, remove the job dir, then spawn again),
+  matching the spawn error and the README.
+  (#TBD)
+
 - Phone-home epoch bump now joins the command ingest's lock discipline
   (#1019): the reboot-equivalent epoch fence previously rewrote the
   ingest cursor without the lock, so a cron ingest mid-pass could save
