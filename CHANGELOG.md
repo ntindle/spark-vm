@@ -60,7 +60,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   box, what to alert on (and what to ignore), and how to reconcile boxes
   still running the old systemd unit. Reaffirms the wire spec's rule that
   the heartbeat is the only liveness signal — a connected socket never
-  makes a box look alive.
+  makes a box look alive. (#1054)
 
 - Metering & billing gap analysis (#1047, #1048): vision-vs-state of
   the usage-metering-to-billing lane — the five meters, the canonical
