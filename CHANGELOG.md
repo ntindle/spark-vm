@@ -52,6 +52,21 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Metering & billing gap analysis (#1047, #1048): vision-vs-state of
+  the usage-metering-to-billing lane — the five meters, the canonical
+  envelope, the emission path, and the spend-cap sequencing all exist as
+  design, with zero implementation anywhere (no meter agent, no emission
+  queue, no plane ingestion, no spend ledger). Pins five decisions (no
+  billing on cooperative telemetry; metering stays both-supported;
+  meters-before-*fine-grained*-caps, with coarse enforcement on provision
+  records unblocked; the fleet journal is a meter-daemon *source*, not a
+  competing emission path; `mac` reserved with `(source, epoch, seq)`
+  dedupe as the integrity story) and files the two build slices: the
+  box-local meter agent and plane-side metering ingestion with billing
+  aggregates. Plane state is pinned to a read of the external
+  control-plane worker (the Worker lives outside this repo), not to a
+  repo commit. (PR number filled on open — #TBD)
+
 - Approvals-plane gap analysis refreshed (#1038): the four control-plane
   gaps filed in October for the hosted phone-approval flow are now
   recorded as shipped — the plane-side approval record (#872), the
