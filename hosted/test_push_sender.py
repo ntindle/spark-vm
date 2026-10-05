@@ -496,19 +496,19 @@ def test_each_send_uses_fresh_salt(stub):
 def test_default_transport_enforces_tls():
     seen = {}
 
+    class FakeSock:
+        def settimeout(self, t):
+            seen["read_timeout"] = t
+
     class FakeConn:
         def __init__(self, host, port, timeout=None, context=None):
             seen.update(host=host, port=port, timeout=timeout, context=context)
+            # Plain attribute (not a property): _default_transport swaps
+            # in its deadline proxy for the header phase and restores it.
+            self.sock = FakeSock()
 
         def request(self, method, path, body=None, headers=None):
             seen.update(method=method, path=path, headers=headers)
-
-        @property
-        def sock(self):
-            class S:
-                def settimeout(self, t):
-                    seen["read_timeout"] = t
-            return S()
 
         def getresponse(self):
             class R:
@@ -549,6 +549,164 @@ def test_default_transport_enforces_tls():
     # ...and the response body is deliberately NOT read (the caller
     # discards it; an unbounded read is a memory-exhaustion vector).
     assert body == b""
+
+
+# ---------------------------------------------------------------------------
+# #1039: total deadline on the response-header read
+# ---------------------------------------------------------------------------
+
+
+class _DripServer:
+    """A push-service stub that drips the response one byte per 9 s —
+    inside the 10 s per-recv timeout, so without a total deadline the
+    header read would never finish."""
+
+    DRIP_INTERVAL_S = 9.0
+
+    def __init__(self):
+        self._done = threading.Event()
+        self.lsock = socket.socket()
+        self.lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.lsock.bind(("127.0.0.1", 0))
+        self.lsock.listen(1)
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._done.set()
+        try:
+            self.lsock.close()
+        except OSError:
+            pass
+        self.thread.join(timeout=10)
+
+    @property
+    def port(self):
+        return self.lsock.getsockname()[1]
+
+    def _serve(self):
+        try:
+            conn, _ = self.lsock.accept()
+        except OSError:
+            return
+        try:
+            # Read the request (headers + declared body) so the client
+            # never blocks on send.
+            f = conn.makefile("rb")
+            length = 0
+            while True:
+                line = f.readline()
+                if not line or line in (b"\r\n", b"\n"):
+                    break
+                if line.lower().startswith(b"content-length:"):
+                    length = int(line.split(b":", 1)[1])
+            while length > 0:
+                chunk = f.read(min(length, 65536))
+                if not chunk:
+                    break
+                length -= len(chunk)
+            # Drip response bytes forever (or until the client goes away).
+            stream = b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
+            i = 0
+            while not self._done.is_set():
+                try:
+                    conn.sendall(stream[i:i + 1])
+                except OSError:
+                    break
+                i = (i + 1) % len(stream)
+                self._done.wait(self.DRIP_INTERVAL_S)
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+class _DripConn:
+    """A stand-in for ``http.client.HTTPSConnection`` that opens a real
+    plain socket to the drip server but runs the production header-read
+    path: ``http.client.HTTPResponse`` over ``sock.makefile()`` — exactly
+    what ``_default_transport`` feeds its deadline proxy."""
+
+    def __init__(self, server):
+        self._server = server
+
+    def __call__(self, host, port, timeout=None, context=None):
+        server = self._server
+
+        class Conn:
+            def __init__(self):
+                # Plain attribute (not a property): _default_transport
+                # swaps in its deadline proxy for the header phase.
+                self.sock = socket.create_connection(
+                    ("127.0.0.1", server.port), timeout=timeout)
+
+            def request(self, method, path, body=None, headers=None):
+                lines = [f"{method} {path} HTTP/1.1", "Host: drip.invalid"]
+                for k, v in (headers or {}).items():
+                    lines.append(f"{k}: {v}")
+                raw = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+                self.sock.sendall(raw + (body or b""))
+
+            def getresponse(self):
+                # Same construction the real HTTPSConnection performs —
+                # the deadline proxy is already installed as self.sock,
+                # and begin() is where the header read happens.
+                resp = http.client.HTTPResponse(self.sock, method="POST")
+                resp.begin()
+                return resp
+
+            def close(self):
+                try:
+                    self.sock.close()
+                except OSError:
+                    pass
+
+        return Conn()
+
+
+def test_response_header_total_deadline():
+    """#1039: the production transport's response-header read carries a
+    total deadline — the drip server answers inside the per-recv window
+    forever, so only the deadline can stop the read."""
+    with _DripServer() as server:
+        with mock.patch.object(http.client, "HTTPSConnection",
+                               _DripConn(server)):
+            start = time.monotonic()
+            with pytest.raises(socket.timeout):
+                push_sender._default_transport(
+                    host="drip.invalid", port=443, path="/",
+                    headers={}, body=b"x")
+            elapsed = time.monotonic() - start
+    # ~30 s, not ~10 s (per-recv never fires — bytes arrive every 9 s)
+    # and nowhere near the ~200 s the unbounded drip would take.
+    assert 25 <= elapsed < 60, f"deadline did not bound the drip: {elapsed:.1f}s"
+    assert push_sender.RESPONSE_DEADLINE_S == 30.0
+
+
+def test_dripping_push_service_classifies_retry():
+    """#1039 end-to-end: the deadline expiry surfaces as a transport
+    error, which send_push classifies retry (the push service may come
+    back) — never a hang, never a terminal misclassification."""
+    with _DripServer() as server:
+        sub = _subscription()
+        vapid_priv, vapid_pub = _vapid_keys()
+        with mock.patch.object(http.client, "HTTPSConnection",
+                               _DripConn(server)):
+            start = time.monotonic()
+            result = push_sender.send_push(
+                subscription=sub, plaintext=b'{"aid":"a1"}',
+                vapid_private_key=vapid_priv, vapid_public_key=vapid_pub,
+                vapid_subject="mailto:ops@example.com", ttl_s=600,
+                attempt=1, now=1_700_000_000.0, transport=None)
+            elapsed = time.monotonic() - start
+    assert result.outcome == "retry"
+    assert result.http_status is None
+    assert result.retry_after_s == push_sender.backoff_s(1)
+    assert 25 <= elapsed < 60, f"deadline did not bound the drip: {elapsed:.1f}s"
 
 
 # ---------------------------------------------------------------------------

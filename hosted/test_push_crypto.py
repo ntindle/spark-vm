@@ -14,6 +14,8 @@ import pytest
 
 from hosted.push_crypto import (
     _N,
+    _P,
+    _on_curve,
     _aes_gcm_decrypt,
     _aes_gcm_encrypt,
     derive_push_keys,
@@ -349,6 +351,24 @@ def test_full_send_timing_recorded():
     print(f"\none pure-Python send (200B payload): {elapsed * 1000:.0f} ms")
 
 
+def _valid_range_off_curve_point(pub: bytes) -> bytes:
+    """A 65-octet point whose coordinates are in field range but which is
+    NOT on the P-256 curve: flip low bits of a valid point's x until the
+    curve equation fails (a random (x, y) lands on the curve with
+    probability ~1/2 per try, so this terminates in a flip or two, and
+    deterministically for the given key). Only the on-curve check can
+    fire on the result — the exact attack the RFC 8291 section 7 gate
+    exists for."""
+    x = int.from_bytes(pub[1:33], "big")
+    y = int.from_bytes(pub[33:65], "big")
+    assert _on_curve(x, y), "premise: the source point is on the curve"
+    for bit in range(64):
+        x2 = x ^ (1 << bit)
+        if x2 < _P and not _on_curve(x2, y):
+            return b"\x04" + x2.to_bytes(32, "big") + y.to_bytes(32, "big")
+    raise AssertionError("unreachable: 64 x-flips all stayed on-curve")
+
+
 def test_public_key_validators():
     # The public validation API push_sender (and future cross-module
     # callers) must use instead of push_crypto's underscore helpers.
@@ -358,9 +378,15 @@ def test_public_key_validators():
     # Fail-closed: non-bytes never raise TypeError, always ValueError.
     for bad in ("not-bytes", None, 123, b"\x04" + b"\x00" * 63,
                 b"\x04" + b"\x00" * 65, b"\x05" + b"\x00" * 64,
-                b"\x04" + b"\xff" * 64):  # well-formed shape, off-curve
+                # 0xff..ff exceeds the field prime, so this is rejected
+                # by the field-range check, not the curve check:
+                b"\x04" + b"\xff" * 64):
         with pytest.raises(ValueError):
             validate_peer_public_key(bad)
+    # The true invalid-curve path: coordinates in field range, point not
+    # on the curve. Pins that the curve check fires (not the range check).
+    with pytest.raises(ValueError, match="not on the P-256 curve"):
+        validate_peer_public_key(_valid_range_off_curve_point(pub))
     n_bytes = _N.to_bytes(32, "big")
     for bad in ("not-bytes", None, b"short", b"\x00" * 32,
                 b"\xff" * 32, n_bytes):  # 0, 2^256-1, and N itself

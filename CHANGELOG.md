@@ -493,6 +493,12 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The hosted push sender now bounds the push-service response read with a
+  total 30-second deadline (#1039): previously only a per-read timeout
+  applied, so a push service answering very slowly could hold a send
+  indefinitely; when the deadline expires the attempt is retried like any
+  other transport error. (#1043)
+
 - The push sender's key-validation checks are now a public, documented API
   instead of reaching into the crypto module's internals — a future change
   to the crypto internals can no longer silently break push delivery, and
