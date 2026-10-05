@@ -516,7 +516,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   reset the fuse for another 14 days. The CLI now accepts a pinned
   test clock, so the whole case runs on the fixture date and passes
   no matter when the suite runs. No product behavior changed.
-  (#TBD)
+  (#1053)
 
 - Fixed a time-bombed waitlist operator test (#1051): the live-token
   reinstatement case pinned its clock to a fixed 2026-09-20 fixture
