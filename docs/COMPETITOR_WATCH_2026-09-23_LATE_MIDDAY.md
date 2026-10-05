@@ -51,7 +51,7 @@ reads ~11:56 CDT:
   (**VERIFIED**: https://termsquad.com/, ~11:56).
 - **DigitalOcean** — droplet pricing identical (Basic Droplets $4–$96,
   per-second billing from Jan 1 2026, unchanged)
-  (**VERIFIED**: https://www.digitalocean.com/pricing/droplets, ~11:56).
+  (**VERIFIED**: https://docs.digitalocean.com/products/droplets/details/pricing/, ~11:56).
 - **AgentComputer** — pricing identical ($0.07/CPU-hour,
   $0.04375/GB-hour memory)
   (**VERIFIED**: https://www.agentcomputer.ai/pricing, ~11:56).

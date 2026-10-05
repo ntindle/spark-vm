@@ -52,6 +52,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Box-side ensemble operator checklist (#1021): the pairing client
+  README gains a single operator surface for the five box-side processes
+  (hourly token rotation, per-minute heartbeat, per-minute command ingest,
+  per-minute filing upload, and the phone-home daemon) — an inventory of
+  what each process owns, the install checklist, how to verify a healthy
+  box, what to alert on (and what to ignore), and how to reconcile boxes
+  still running the old systemd unit. Reaffirms the wire spec's rule that
+  the heartbeat is the only liveness signal — a connected socket never
+  makes a box look alive. (#1054)
+
 - Metering & billing gap analysis (#1047, #1048): vision-vs-state of
   the usage-metering-to-billing lane — the five meters, the canonical
   envelope, the emission path, and the spend-cap sequencing all exist as

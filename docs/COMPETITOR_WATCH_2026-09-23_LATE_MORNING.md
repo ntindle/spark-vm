@@ -52,7 +52,7 @@ reads ~09:55–10:00 CDT:
   (**VERIFIED**: https://termsquad.com/, ~09:58).
 - **DigitalOcean** — droplet pricing identical (per-second billing,
   v5 Droplets still advertised)
-  (**VERIFIED**: https://www.digitalocean.com/pricing/droplets, ~09:59).
+  (**VERIFIED**: https://docs.digitalocean.com/products/droplets/details/pricing/, ~09:59).
 - **AgentComputer** — pricing identical ($0.07/CPU-hour,
   $0.04375/GB-hour memory)
   (**VERIFIED**: https://www.agentcomputer.ai/pricing, ~10:00).
