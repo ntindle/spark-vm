@@ -343,6 +343,9 @@ repeated failure" half of #532's Recovery section.
   TLS-only residual (the wheel half is hash-pinned: the layer downloads
   the pinned wheel from its hash-pinned URL and SHA-256-verifies it before
   pip installs the local file)
+- Hash-pin pip's transitive dependencies (pyee, greenlet) for the
+  playwright layer — still TLS-only today (documented in the trust-model
+  section); `--require-hashes` needs the full closure pinned
 - Validate `APT_*_PKGS` candidates against the Debian package-name pattern
   (defense in depth against glob expansion / option injection via root-set
   env; currently the only setter with privilege is root, so no boundary is
