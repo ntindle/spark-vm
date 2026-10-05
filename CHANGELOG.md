@@ -594,6 +594,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
   unchanged (loud failure, freeze-counter accounting). (#962)
 
 ### Security
+- The fleet read API now refuses oversized journal projections with
+  HTTP 413 instead of building them (#1033): the events and alerts
+  endpoints previously loaded, sorted, and serialized the entire
+  journal into one JSON response per request — on the single-threaded
+  server, one slow-reading local client could wedge the API for
+  everyone. Past 50,000 rows the endpoints now fail closed with a JSON
+  413 (naming the cap, the total, and the remedies) before any rows
+  are built. Full paging stays an S2 decision (#795).
 - The toolset self-updater's Playwright browser downloads are now
   hash-pinned (#1017): the updater takes the exact archive URLs from the
   Playwright driver's own dry-run output (refusing on any shape drift) and

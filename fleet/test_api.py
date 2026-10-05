@@ -505,6 +505,61 @@ def test_alerts_clear_shape(store):
     assert body["alerts"] == []
 
 
+# --- #1033 response-size bound ----------------------------------------
+
+def test_alerts_over_cap_is_413(store, monkeypatch):
+    # The single-threaded server must never build the giant response:
+    # past the cap the endpoint fails closed with 413, as JSON.
+    monkeypatch.setattr(api, "_MAX_ALERT_ROWS", 1)
+    with api_server(store) as base:
+        status, body, ctype = get(base, "/fleet/alerts")
+    assert status == 413
+    assert ctype == "application/json"
+    assert body["cap_rows"] == 1
+    assert body["total_rows"] == 2
+    assert "error" in body
+    assert "hint" in body
+
+
+def test_alerts_at_cap_is_200(store, monkeypatch):
+    monkeypatch.setattr(api, "_MAX_ALERT_ROWS", 2)
+    with api_server(store) as base:
+        status, body, _ = get(base, "/fleet/alerts")
+    assert status == 200
+    assert len(body["alerts"]) == 2
+
+
+def test_events_box_over_cap_is_413(store, monkeypatch):
+    monkeypatch.setattr(api, "_MAX_EVENT_ROWS", 2)
+    with api_server(store) as base:
+        status, body, ctype = get(base, "/fleet/events?box=box-a")
+    assert status == 413
+    assert ctype == "application/json"
+    assert body["cap_rows"] == 2
+    assert body["total_rows"] == 3  # box-a's three events
+    assert "error" in body
+    assert "hint" in body
+
+
+def test_events_box_at_cap_is_200(store, monkeypatch):
+    monkeypatch.setattr(api, "_MAX_EVENT_ROWS", 3)
+    with api_server(store) as base:
+        status, body, _ = get(base, "/fleet/events?box=box-a")
+    assert status == 200
+    assert body["event_count"] == 3
+
+
+def test_events_series_shape_not_capped(store, monkeypatch):
+    # The aggregate shape returns one row per box (bounded by box
+    # count), not canonical rows — the cap does not apply to it. Five
+    # events total across two boxes stays 200 with the cap at 2.
+    monkeypatch.setattr(api, "_MAX_EVENT_ROWS", 2)
+    with api_server(store) as base:
+        status, body, _ = get(base, "/fleet/events")
+    assert status == 200
+    assert body["event_count"] == 5
+
+
 # --- /fleet/crosscheck -------------------------------------------------
 
 def test_crosscheck_conformance(store):

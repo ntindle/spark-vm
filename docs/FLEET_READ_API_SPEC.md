@@ -156,6 +156,18 @@ the truncation rule is documented in the response schema, not hidden.
   CLI (field-equivalence). Bounded paging (`?limit=`/`?offset=`) is
   an S2 decision the console and the page will need — deferred
   deliberately, not overlooked (OQ5).
+- S1 response-size bound (#1033): paging is deferred, but the
+  single-threaded server must never build a multi-hundred-MB
+  response. The two unbounded canonical-row lists
+  (`/fleet/events?box=<id>`, `/fleet/alerts`) refuse with **413** past
+  50,000 rows (`_MAX_EVENT_ROWS` / `_MAX_ALERT_ROWS` in `fleet/api.py`
+  — a guardrail with two orders of magnitude of headroom over a
+  plausible 90-day-retained estate, not a quota). The 413 body is JSON
+  (`error`, `cap_rows`, `total_rows`, `hint`); there is deliberately no
+  `Retry-After` header — waiting never shrinks the journal. The
+  per-box series shape of `/fleet/events` is one row per box and is
+  not capped. If a legitimate estate ever trips the bound, that is the
+  signal to land S2 paging, not to raise the cap quietly.
 - Errors never leak box-controlled bytes raw: alert `detail` and
   record `note` fields pass through the same control-char stripping
   the alert journal synthesis applies (a crafted audit line can never
