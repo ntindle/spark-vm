@@ -214,6 +214,35 @@ revocation-latency ceiling for a silent socket is that wake interval.
   plane-neutral — self-hosted planes implement the same §2 entry point.
   Live-verified: 101 on a proper handshake, 401/426 paths,
   verification's test registry rows removed.
+- **Implemented 2026-10-05 (#1000 S4b-1):** the `BoxDO` now runs the §2
+  hello handshake and the §5 generation fence, deployed live to the
+  hosted control plane. The hello's `box_id` self-assertion must equal
+  the handshake identity re-derived from the upgrade `Authorization`
+  header (mismatch → `close`/`identity-mismatch` + journal; malformed
+  hello → `close`/`protocol-error`); `generation > last_generation`
+  (DO durable storage) binds the new socket and closes the old one
+  `superseded-generation`; `<= last_generation` →
+  `close`/`stale-generation` carrying `last_generation` (never
+  `protocol-error`), then `welcome` with `accepted_generation`. Every
+  subsequent frame is fenced before the unknown-`type` ignore
+  (`generation < last_generation` → drop + journal
+  `phone_home.generation_fence`); frames on a non-bound socket are
+  dropped; control frames over 4 KB are refused before parsing (§3.1);
+  transport close journals `phone_home.disconnect`. Implementation note
+  for self-hosted planes: workers-py requires socket listeners wrapped
+  in `pyodide.ffi.create_proxy` — a raw Python callable registered with
+  `addEventListener` is silently never invoked. The proxy must also be
+  **retained** for the socket's lifetime (e.g. a per-socket list pruned
+  on close): Pyodide destroys a proxy once Python drops its last
+  reference, which silently detaches the listener mid-session — the same
+  silent-failure class as the unwrapped callable. Live-verified against
+  the deployed plane 2026-10-05 ~15:2x CDT
+  (`control-plane/live_smoke_1000.py`, 12/12 checks: hello → welcome
+  with `accepted_generation`, newer-generation supersede binding the
+  new socket with `close`/`superseded-generation` on the old one,
+  stale-generation close carrying `last_generation`, connect rows in
+  D1; test box + journal rows deleted
+  afterwards).
 - A DO binds exactly one box: the handshake identity at first connect.
   It never routes a frame to another stub.
 - Defense in depth: every frame's effective identity is the bound
