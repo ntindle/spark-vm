@@ -89,7 +89,12 @@ than its own installed copy. `muse-job --version` reads the repo file.
    (on main, clean tree, strict semver, HEAD == origin/main, tag `vX.Y.Z`
    absent everywhere, and VERSION newer than every existing release tag),
    assembles the release notes from the changelog section plus the
-   merged-PR list since the previous tag, creates the annotated tag (tags
+   merged-PR list since the previous tag, capped at GitHub's 125,000-
+   character release-body limit (an oversized changelog section is
+   trimmed at whole-bullet boundaries with a note pointing at the full
+   CHANGELOG.md section; if the merged-PR list alone exceeds the cap the
+   script fails loudly with an operator diagnostic instead of hitting
+   the API's 422), creates the annotated tag (tags
    are never moved or re-cut), and publishes the GitHub release. Semver
    prereleases (`-rc.1`) are marked prerelease on GitHub. Merging to main
    is the release authorization — treat VERSION bumps like releases in

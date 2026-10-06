@@ -54,6 +54,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - Provisioning + metering convergence analysis: the metered, capped, provisioned box vs the hosted vision, pinned to v0.6.0 — files three genuinely-new gaps (the golden image has a gate but no build pipeline; the meter envelope has a producer and a plane endpoint but no emission worker; the pairing attestation token needs a plane-readable provision record, pinning the record store to D1) and pins the lane build order (#1090).
 
+### Fixed
+
+- GitHub releases: release notes are now capped at GitHub's 125,000-character body limit — an oversized curated section is trimmed at whole-bullet boundaries with a note pointing at the full changelog on the tag, instead of failing the publish step (and its recovery) with a body-too-long error, as the v0.6.0 cut did (#1091).
+
 ## [0.6.0] - 2026-10-06
 
 ### Added
