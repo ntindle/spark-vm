@@ -154,6 +154,7 @@ not re-filed. These are new:
 - Fly driver build (#905 — narrowed to the driver + exec-install path
   per F-P1; the golden-image producer moved to #1087), orchestrator
   (#906), attested-pairing design (#907, consuming #1089's contract),
+  spend-cap mechanism (#908) + slices (#1074–#1077), meter_agent
   (#1047), plane metering endpoint (#1048), exec-install alternative
   (F1b, rides #905), golden-image *gate* (exists), first-boot hook
   (rides #905/G51.4), H4 live-API clearance (granted; the first smoke
@@ -164,7 +165,7 @@ not re-filed. These are new:
 - F-P1 → new issue: golden-image build pipeline (producer for the gated
   image, pins v0.6.0).
 - F-P2 → new issue: meter-envelope emission worker (spool → plane) —
-  the MeterQueue's worker half per D-M4, fail-open per §6.
+  the MeterQueue's worker half per D-M4, fail-open per D-P3.
 - F-P3 → new issue: provision-record store pin (D1, plane-readable for
   G51.3 token validation) — deliverable is an in-repo schema-contract
   amendment carrying the pinned DDL (`IF NOT EXISTS`, named migration
