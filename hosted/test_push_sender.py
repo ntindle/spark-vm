@@ -75,13 +75,23 @@ class StubPushService:
     """A scripted push-service stub. ``scripted`` is a deque of
     (status, headers, body) tuples consumed one per request."""
 
+    # serve_forever's default poll_interval (0.5 s) makes server.shutdown()
+    # block up to half a second per test in the fixture teardown — the stub
+    # exists for speed, so a short interval is a deliberate contract, not
+    # an accident (dx: this file's 40 stub-fixture cases (29 test functions,
+    # 3 parametrized) each paid up to 0.5 s; measured hosted/ suite
+    # 79.5 s -> 68.9 s).
+    POLL_INTERVAL_S = 0.05
+
     def __init__(self):
         self.server = http.server.HTTPServer(("127.0.0.1", 0), _StubHandler)
         self.server.requests = []
         self.server.targets = []  # (host, port, path) per transport call
         self.server.scripted = deque()
-        self.thread = threading.Thread(target=self.server.serve_forever,
-                                       daemon=True)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            kwargs={"poll_interval": self.POLL_INTERVAL_S},
+            daemon=True)
 
     def __enter__(self):
         self.thread.start()
@@ -109,6 +119,43 @@ def _b64url(data: bytes) -> str:
 def stub():
     with StubPushService() as service:
         yield service
+
+
+# ---------------------------------------------------------------------------
+# Stub speed contract (dx)
+# ---------------------------------------------------------------------------
+
+
+def test_stub_serve_loop_passes_short_poll_interval():
+    """The stub's whole point is speed: serve_forever must be handed a short
+    poll_interval, otherwise server.shutdown() blocks up to the 0.5 s default
+    in every fixture teardown (measured: 0.50 s teardown on each of this
+    file's 40 stub-using cases (29 test functions, 3 parametrized);
+    hosted/ suite 79.5 s -> 68.9 s with the short interval). Pin the wiring,
+    not just the constant — a test that
+    only reads POLL_INTERVAL_S would stay green with the Thread's kwargs
+    deleted and the default silently restored.
+
+    Deterministic, not timing-flaky: serve_forever is replaced with an
+    autospec mock, so the serve thread returns immediately; shutdown is
+    mocked too (the real one waits on the __is_shut_down event the mocked
+    serve loop never sets); thread.join() in __exit__ can't return before
+    the mock recorded its call."""
+    with mock.patch.object(http.server.HTTPServer, "serve_forever",
+                           autospec=True) as serve, \
+         mock.patch.object(http.server.HTTPServer, "shutdown",
+                           autospec=True):
+        with StubPushService():
+            pass
+    args, kwargs = serve.call_args
+    # serve_forever(self, poll_interval=0.5): a correct-but-red refactor could
+    # pass the interval positionally, so probe the keyword AND the second
+    # positional (args[0] is the bound instance under autospec).
+    interval = kwargs.get("poll_interval", args[1] if len(args) > 1 else 0.5)
+    assert 0 < interval <= 0.1, (
+        f"serve_forever called with poll_interval={interval!r}: must stay "
+        "well under the 0.5 s default or every stub-fixture teardown pays "
+        "the shutdown tax again")
 
 
 def _subscription(endpoint_host="push.example.com", endpoint_port=None, query=None):
