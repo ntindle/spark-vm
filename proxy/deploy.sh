@@ -59,6 +59,7 @@ for f in proxy/swap_addon.py proxy/host_match.py proxy/grant-writer proxy/cred-g
          proxy/cred-store-set proxy/cred-store-set-inference \
          proxy/cred-store-verify-inference \
          proxy/cred-store-get proxy/cred-store-delete \
+         proxy/cred-ui-token-set \
          proxy/with-proxy proxy/ssrf.deny proxy/sudoers-swapd \
          proxy/safe_install.py \
          proxy/build_ca_bundle.py \
@@ -104,6 +105,9 @@ sudo install -o root -g root -m 0755 proxy/cred-store-set-inference /usr/local/b
 sudo install -o root -g root -m 0755 proxy/cred-store-verify-inference /usr/local/bin/cred-store-verify-inference
 sudo install -o root -g root -m 0755 proxy/cred-store-get /usr/local/bin/cred-store-get
 sudo install -o root -g root -m 0755 proxy/cred-store-delete /usr/local/bin/cred-store-delete
+# Issue #964: narrow writer for cred-ui's per-install API token
+# (/home/swapd/ui-token, 0600 swapd-owned).
+sudo install -o root -g root -m 0755 proxy/cred-ui-token-set /usr/local/bin/cred-ui-token-set
 # Issue #706: the shared validation contract ships next to the writers it
 # serves (same install step, so the two update atomically). Root-owned
 # 0644: it is imported, never executed.
@@ -113,7 +117,7 @@ sudo install -o root -g root -m 0644 credlib/credvalidate.py /usr/local/bin/cred
 # drift (a stale or tampered /usr/local/bin).
 for f in cred-registry-set cred-registry-set-inference cred-store-set \
          cred-store-set-inference cred-store-verify-inference cred-store-get \
-         cred-store-delete \
+         cred-store-delete cred-ui-token-set \
          cred-grant-revoke; do
     got="$(stat -c '%U:%a' "/usr/local/bin/$f")"
     if [ "$got" != "root:755" ]; then
