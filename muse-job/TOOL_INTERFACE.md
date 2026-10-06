@@ -96,7 +96,7 @@ close(slug)   # kill, remove worktree, delete branch, archive (terminal)
 | `interrupt` | MSP `turn/interrupt` (or `tmux send-keys C-c` on the legacy path) | new tiny addition |
 | `status`/`list_jobs`/`log` | `muse-job status --json` / `list --json` / hook event files | direct JSON parsing |
 | `wait_for_turn` | poll `~/.local/share/muse-job/events/<uuid>.jsonl` for a new record | the push-emulation; backoff 5s→60s |
-| `pending_question` | hook classifier: `BLOCKED:` → blocked, trailing `?` → question | read latest event; the ask_for_information analog |
+| `pending_question` | hook classifier: final-line `BLOCKED:` → blocked, trailing `?` → question (quoted/fenced markers ignored, #8) | read latest event; the ask_for_information analog |
 | `kill`/`resume`/`close` | `muse-job kill`/`resume`/`close` | direct |
 
 ### What the spec deliberately does NOT include

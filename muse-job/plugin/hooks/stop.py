@@ -30,6 +30,14 @@ _ANSI_RE = re.compile(
 # write through a symlink.
 _SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
+# Issue #8: quoted markers. Fenced code blocks are never the agent's own
+# terminal marker (preamble quotes, example output, instructed shapes like
+# "BLOCKED: <question>") — remove them before classification. The fence
+# match is non-greedy so a single unclosed fence only eats to the next
+# closing fence, and an unmatched ``` is left alone (classification then
+# falls back to the last-line rule below).
+_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+
 
 def _clean(s):
     return _ANSI_RE.sub("", s or "")
@@ -79,16 +87,46 @@ def _append_event(evdir, sid, evt):
 
 
 def classify(message):
-    """Return (state, detail) from the assistant's final message."""
+    """Return (state, detail) from the assistant's final message.
+
+    Issue #8: the marker is the protocol's FINAL line ("end turn with
+    `BLOCKED: <question>` / `DONE: <summary>` — TOOL_INTERFACE.md), so only
+    the last non-empty line may carry it. Quoted or example markers earlier
+    in the message (preamble literals, fenced code blocks) no longer flip
+    the job's state. A genuine marker wrapped in a fenced code block is
+    also ignored — the protocol wants the bare marker as the final line,
+    so fence only examples, not the marker. Residual, stated plainly: an
+    agent that buries a genuine BLOCKED: mid-message and ends on prose is
+    classified idle — deliberate, since the fix for a missing marker is the
+    same as before (the preamble's explicit instruction), while a phantom
+    done closes a live job.
+    """
     state, detail = "idle", ""
     if not message:
         return state, detail
-    lines = [l.strip() for l in message.splitlines() if l.strip()]
-    for line in lines:
-        if line.startswith("BLOCKED:"):
-            return "blocked", _clean(line[len("BLOCKED:"):].strip())[:500]
-        if line.startswith("DONE:"):
-            return "done", _clean(line[len("DONE:"):].strip())[:500]
+    body = _FENCE_RE.sub("", message)
+    # Split on \n only: \r is a content byte (the sanitizer strips it from
+    # the detail), not a protocol line break. splitlines() would let a \r
+    # injection PROMOTE a mid-message marker to the final line: in
+    # "prose\rDONE: phantom", splitlines() cuts at \r, making the phantom
+    # the last line, so it classifies done. split("\n") keeps \r inside
+    # the line; strip() removes it at the line ends, so a genuine
+    # "DONE: x\r\n"-terminated marker still binds.
+    lines = [l.strip() for l in body.split("\n") if l.strip()]
+    if not lines:
+        return state, detail
+    # Issue #8: marker matching is structural — startswith() on the last
+    # non-empty line. A quoted line (leading ">") can never satisfy
+    # startswith("BLOCKED:")/startswith("DONE:"), so quoted lines are
+    # excluded structurally; no unquoting or quote-aware branch is needed.
+    # Fences are stripped above. (Quoted lines still feed the question
+    # tail below; that predates this fix and question state never closes
+    # a job.)
+    last = lines[-1]
+    if last.startswith("BLOCKED:"):
+        return "blocked", _clean(last[len("BLOCKED:"):].strip())[:500]
+    if last.startswith("DONE:"):
+        return "done", _clean(last[len("DONE:"):].strip())[:500]
     tail = lines[-3:]
     # Return the actual question line, not just the last tail line.
     for t in reversed(tail):
