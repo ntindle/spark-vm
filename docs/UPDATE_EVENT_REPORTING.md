@@ -160,7 +160,7 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
 - **Read:** `fleet events` shows the per-box outcome series;
   `fleet events --wave` filters by the rollout envelope (null until G15 S2).
 - **Alert — the promptness ask.** The issue's core requirement is that a
-  failed fleet update is *noticed*, not discovered. Four fleet-side rules,
+  failed fleet update is *noticed*, not discovered. Five fleet-side rules,
   evaluated on every collect:
   1. **Any `rollback-failed`** → immediate alert (a box stuck on a
      known-bad build).
@@ -206,6 +206,18 @@ when a consumer proves it needs tick-heartbeat evidence (open question 1).
      window happened after the operator acknowledged. Persistence on
      pre-ack evidence stays silent, so an ack is never punished with an
      immediate re-page on what the operator already saw.
+  5. **Tail discontinuity (#1006):** the estate pulls only a *tail* of
+     each box's audit log; when the previous pull's tail-head hash is no
+     longer in the pulled tail, more lines were emitted between pulls
+     than the tail holds and the intervening lines never reached the
+     collector — possibly including the very failure events rules 1–4
+     page on. One page-class alert per distinct lost window (deduped on
+     the lost window's head hash, so re-collection never re-fires and a
+     genuinely new overflow fires a new alert). Unlike rules 1–4 this
+     rule does not scan the event journal: it fires from the collector's
+     continuity check (`fleet/events.py: check_tail_continuity`). A
+     warning-only signal would be exactly as losable as the events it
+     reports, so the durable paging path carries the finding.
   Alert transport, honestly staged: S1 writes the alert into the
   operator's fleet journal and `fleet events watch` exits nonzero on
   unacknowledged alerts — a cron or the operator's existing paging consumes
@@ -355,7 +367,7 @@ waits on:
 - **S1 — canonicalize + alert (ship first):** fleet-side canonicalizer for
   the auto-deploy audit shape (the toolset half is planned-not-known);
   event journal in the fleet store with (box_id, event_id) dedup;
-  `fleet events` CLI; the four alert rules with interim journal+exit-code
+  `fleet events` CLI; the five alert rules with interim journal+exit-code
   transport; noop-stays-local noise discipline.
   No box-side change. #608's acceptance sketch is this slice.
 - **S2 — box-side journal + gate aggregation:** `update-events.jsonl`

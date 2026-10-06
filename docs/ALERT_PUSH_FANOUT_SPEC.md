@@ -10,7 +10,7 @@ S2 builds the enqueue path, S3 the tenant variant.
 ## 1. What the earlier designs already decide (bounds, not repeated)
 
 - **G17 S1** (`fleet/events.py` + `docs/UPDATE_EVENT_REPORTING.md` §4):
-  four alert rules evaluated on every collect, journaled to
+  five alert rules evaluated on every collect, journaled to
   `alerts.jsonl`. Rule 1: any `rollback-failed` → immediate alert, one
   per rollback-failed event. Rule 2: correlated failure — ≥2 boxes
   reporting failed/rolled-back on the same `(subcomponent, to)` within
@@ -19,7 +19,11 @@ S2 builds the enqueue path, S3 the tenant variant.
   dedups. Rule 3: silent wave — **disarmed at S1** (`rollout`
   envelope is null on every event; the rule cannot fire). Rule 4: stuck
   precheck — ≥N `precheck-fail` events on one box inside the window,
-  anchored the same way. Alert identity is `alert_id` =
+  anchored the same way. Rule 5: tail discontinuity (#1006) — when the
+  estate's pulled audit tail no longer contains the previous pull's
+  tail head, one page-class alert per distinct lost window, fired from
+  the collector's continuity check (not from the event journal),
+  deduped on the lost window's head hash. Alert identity is `alert_id` =
   `uuid5(rule|box_id|subcomponent|to|dedup_key)` — stable across
   collector re-runs; the collector dedups appends on it. The S1
   transport is the journal plus `fleet events watch` exiting nonzero

@@ -6,7 +6,7 @@ no box-side change, no new port. The canonicalizer translates the
 auto-deploy audit lines the G16 S1 collector already pulls
 (<estate>/<box>/audit-tail.jsonl) into the standard event shape at
 collect time, appends them to the store's event journal with
-(box_id, event_id) dedup, and evaluates the four S1 alert rules on
+(box_id, event_id) dedup, and evaluates the five S1 alert rules on
 every collect. Alert transport at S1 is the operator's fleet journal
 (alerts.jsonl in the store) plus `fleet events watch` exiting nonzero
 on unacknowledged alerts.
@@ -536,18 +536,32 @@ def check_tail_continuity(store_dir, box_dirs, observed_at):
     emitted between pulls the windows are adjacent, not overlapping —
     no line was ever unpulled, but the check still fires. Exact
     adjacency at the operator's tail length is measure-zero in practice
-    (it needs pathological emit volume between two pulls), and the
-    notice is a warning, never a page. (b) The watermark hashes a
-    single line's content, so a byte-identical re-emission of the exact
-    head line would defeat detection — contrived given timestamped JSON
-    audit lines, noted for honesty.
+    (it needs pathological emit volume between two pulls). (b) The
+    watermark hashes a single line's content, so a byte-identical
+    re-emission of the exact head line would defeat detection —
+    contrived given timestamped JSON audit lines, noted for honesty.
+
+    Page-class, not warning-class (#1006): a discontinuity fires the
+    fifth S1 alert rule (`tail-discontinuity`) into the alert journal,
+    alongside the stderr warning. The evidence-loss hole can swallow
+    the very failure events the paging pipeline exists for, so the
+    durable paging path (alerts.jsonl + `fleet events watch`) carries
+    the finding — a warning-only signal would be exactly as losable
+    as the events it reports. Each distinct lost window fires once:
+    the alert's dedup key is the lost window's head hash, so
+    re-collection never re-fires and a genuinely new overflow fires a
+    new alert. (Rule 4's unacknowledged-suppression is not needed here:
+    at-most-once per lost window bounds the journal to actual losses.)
 
     Runs under the store-scoped journal lock and updates the watermarks
-    atomically. Returns (warnings, error): warnings are human-readable
-    discontinuity/corruption notices for the operator's stderr; error is
-    a loud failure (lock or write failure) that must fail the collect.
+    atomically. Returns (warnings, fired_alerts, error): warnings are
+    human-readable discontinuity/corruption notices for the operator's
+    stderr; fired_alerts are the newly journaled `tail-discontinuity`
+    alerts; error is a loud failure (lock or write failure) that must
+    fail the collect.
     """
     warnings = []
+    findings = []  # (box_id, prev_head, tail_lines) per discontinuity
     try:
         with journal_lock(store_dir):
             marks, corrupt_note = _load_tail_watermarks(store_dir)
@@ -577,6 +591,8 @@ def check_tail_continuity(store_dir, box_dirs, observed_at):
                             "the pulled tail (%d line(s) pulled); audit "
                             "events emitted between pulls may have been "
                             "lost" % (box_id, len(line_hashes)))
+                        findings.append(
+                            (box_id, prev_head, len(line_hashes)))
                         marks[box_id] = {
                             "tail_head_sha256": head,
                             "tail_lines": len(line_hashes),
@@ -598,12 +614,35 @@ def check_tail_continuity(store_dir, box_dirs, observed_at):
                         "observed_at": observed_at,
                         "last_discontinuity_at": None,
                     }
+            # Failure ordering (Engineering, #1006 review): the alert
+            # append runs BEFORE the watermark save. The alert_id dedup
+            # makes the reorder safe in both failure directions — append
+            # OK then save fails: the next collect re-detects the same
+            # lost window (the mark did not advance) and the re-fire is
+            # a dedup no-op, so no journal growth; append fails: the
+            # mark did not advance either, so the next collect retries
+            # the alert. Saving the mark first would permanently drop
+            # the alert on an append failure (the next collect would see
+            # no discontinuity). The lock makes the section atomic w.r.t.
+            # other processes; the ordering makes it failure-safe w.r.t.
+            # a crash between the two writes. With no findings the
+            # journal is not read at all (a collect that detected no
+            # discontinuity behaves exactly as before this change).
+            alerts = [_rule_tail_discontinuity(box_id, prev_head,
+                                               tail_lines, observed_at)
+                      for box_id, prev_head, tail_lines in findings]
+            if alerts:
+                fired, err = _append_alerts_nolock(store_dir, alerts)
+                if err:
+                    return None, None, err
+            else:
+                fired = []
             err = _save_tail_watermarks(store_dir, marks)
             if err:
-                return None, err
+                return None, None, err
     except JournalLockError as exc:
-        return None, str(exc)
-    return warnings, None
+        return None, None, str(exc)
+    return warnings, fired, None
 
 
 # --- Store-scoped journal lock --------------------------------------------
@@ -798,6 +837,35 @@ def _alert(rule, fired_at, detail, box_id=None, subcomponent=None,
     }
 
 
+def _append_alerts_nolock(store_dir, candidates):
+    """Append candidates to the alert journal, deduped on alert_id.
+
+    The caller must hold the store-scoped journal lock (this keeps
+    evaluate_alerts and check_tail_continuity sharing one dedup/append
+    path instead of two). Returns (fresh, error): fresh is the list of
+    alerts actually appended. The alert-id dedup is at-most-once:
+    re-firing an already-journaled alert, acked or not, is a no-op.
+    """
+    existing, err = _load_journal(store_dir, ALERTS_JOURNAL_NAME)
+    if err:
+        return None, err
+    seen = {a.get("alert_id") for a in existing
+            if isinstance(a.get("alert_id"), str)}
+    fresh = [a for a in candidates if a["alert_id"] not in seen]
+    if not fresh:
+        return [], None
+    alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
+    try:
+        with open(alerts_path, "a", encoding="utf-8", buffering=1) as fh:
+            for alert in fresh:
+                fh.write(json.dumps(alert, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError as exc:
+        return None, "cannot append to alert journal: %s" % exc
+    return fresh, None
+
+
 def _rule_rollback_failed(events, fired_at):
     """Rule 1: any rollback-failed -> immediate alert (a box stuck on a
     known-bad build). One alert per rollback-failed event."""
@@ -947,11 +1015,46 @@ def _rule_stuck_precheck(events, fired_at):
     return pairs
 
 
+def _rule_tail_discontinuity(box_id, prev_head, tail_lines,
+                             fired_at):
+    """Rule 5: audit-tail discontinuity -> immediate alert (#1006).
+
+    The estate pulls only a tail of each box's audit log; when the
+    previous pull's tail-head hash is no longer in the pulled tail,
+    more lines were emitted between pulls than the tail holds and the
+    intervening lines never reached the collector — including possibly
+    the very failure events the other rules page on. Page-class: the
+    durable paging path (alerts.jsonl + `fleet events watch`) must
+    carry the finding, because a warning-class signal would be exactly
+    as losable as the events it reports.
+
+    One alert per distinct lost window: the dedup key is the lost
+    window's head hash (prev_head), so re-collection never re-fires
+    (the mark already advanced) and a genuinely new overflow fires a
+    new alert. At-most-once per lost window bounds the journal to
+    actual losses — no unacknowledged-suppression machinery needed.
+    """
+    return _alert(
+        "tail-discontinuity", fired_at,
+        "box %s: audit-tail discontinuity — the previous pull's tail "
+        "head is no longer in the pulled tail (%d line(s) pulled); "
+        "audit events emitted between pulls may have been lost. Size "
+        "the box's audit tail per the fleet README (Update events: "
+        "Sizing the audit tail)" % (box_id, tail_lines),
+        box_id=box_id,
+        dedup_key=prev_head)
+
+
 def evaluate_alerts(store_dir, fired_at=None):
-    """Run the four S1 alert rules over the store's event journal and
-    append newly fired alerts (deduped on alert_id — re-firing an
-    already-journaled alert, acked or not, is a no-op). Returns
-    (fired_alerts, error).
+    """Run the event-journal alert rules (rules 1–4) over the store's
+    event journal and append newly fired alerts (deduped on alert_id —
+    re-firing an already-journaled alert, acked or not, is a no-op).
+    Returns (fired_alerts, error).
+
+    Rule 5 (`tail-discontinuity`, #1006) is the fifth S1 rule but does
+    not scan the event journal: it fires from `check_tail_continuity`'s
+    watermark comparison and is journaled there, so it is not part of
+    this evaluation.
 
     The rule evaluation reasons only about the bounded scan window
     (_alert_scan_window_s() before fired_at) instead of the whole
@@ -1057,25 +1160,12 @@ def evaluate_alerts(store_dir, fired_at=None):
                 anchor = rule4_anchors.get(alert["alert_id"])
                 return anchor is not None and anchor > st["acked_at"]
 
-            fresh = [a for a in candidates
-                     if a["alert_id"] not in seen
-                     and (a.get("rule") != "stuck-precheck"
-                          or _rule4_refire_allowed(a))]
-            if fresh:
-                alerts_path = os.path.join(store_dir, ALERTS_JOURNAL_NAME)
-                try:
-                    with open(alerts_path, "a", encoding="utf-8",
-                              buffering=1) as fh:
-                        for alert in fresh:
-                            fh.write(json.dumps(alert, sort_keys=True)
-                                     + "\n")
-                        fh.flush()
-                        os.fsync(fh.fileno())
-                except OSError as exc:
-                    return None, "cannot append to alert journal: %s" % exc
+            gated = [a for a in candidates
+                     if a.get("rule") != "stuck-precheck"
+                     or _rule4_refire_allowed(a)]
+            return _append_alerts_nolock(store_dir, gated)
     except JournalLockError as exc:
         return None, str(exc)
-    return fresh, None
 
 
 def load_alerts(store_dir):
