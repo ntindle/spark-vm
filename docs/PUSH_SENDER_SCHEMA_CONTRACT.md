@@ -26,7 +26,7 @@ paragraph. Builds against this contract: #990 (enqueue boundary +
 backpressure), #968 (owner subscription surface).
 
 **Vision tracker:** #849 (phone-approval loop). Implementation items:
-#989 (shipped), #990, #968. This contract is also what #428's §4
+#989 (shipped), #990 (shipped), #968. This contract is also what #428's §4
 retirement criterion consumes: the criterion flips when the plane
 records a push-service-accepted delivery for the tenant — the
 record shape that makes it satisfiable is §1.3 below
@@ -146,7 +146,7 @@ Every send attempt lands exactly one row. The outcome vocabulary is
 the sender's verbatim (`hosted/push_sender.py::OUTCOMES`), plus three
 documented *extensions* for enqueue-boundary decisions (not part of
 #989's taxonomy) — D50 added the third, the `'queued'` outbox work
-item (#1061). The table preserves `acceptance_fields()`' pinned
+item (documented here by #1061). The table preserves `acceptance_fields()`' pinned
 fields (`outcome`, `http_status`, `sent_at`, `latency_ms`),
 decomposing its opaque `subscription_ref` into the key columns so the
 D13 dedup keys and the fanout queries work without parsing.
@@ -190,7 +190,8 @@ CREATE INDEX IF NOT EXISTS idx_push_send_results_dedup
   ON push_send_results(box_id, event_kind, event_key);
 CREATE INDEX IF NOT EXISTS idx_push_send_results_tenant
   ON push_send_results(owner_principal, at);
--- D57 (added by #1061; the operator applies this with
+-- D57 (pinned in the contract by #1061's amendment — this is #990's
+-- shipped statement, PR #1060; the operator applies it with
 -- migrate_967_push.sql, which lives in the control-plane workspace
 -- outside this repo): page-once is a DB invariant — one row per event
 -- across the enqueue boundary, enforced at the database layer. The
@@ -246,8 +247,9 @@ boundary's extensions):
   `id` ASC, INSERTs one row per send attempt, and DELETEs the
   `queued` row on the terminal attempt — so "every send attempt lands
   exactly one row" and the "three retries then accepted lands four
-  rows" accounting hold verbatim (the `queued` row is gone by the
-  time the row-count is read). Holds the D10 reservation for the
+  rows" accounting hold verbatim, per device (the fanout multiplicity
+  is one row per (device × attempt), D56c; the `queued` row is gone by
+  the time the row-count is read). Holds the D10 reservation for the
   whole outbox wait; the terminal outcome's §1.2 rule resolves it.
   (Extension, not a sender outcome.)
 
@@ -265,7 +267,11 @@ migration):** SQLite cannot ALTER an index predicate — when the
 predicate changes, run `DROP INDEX IF EXISTS
 idx_push_send_results_page_once` then CREATE with the new
 predicate, and do it *before* deploying any build that writes these
-tables, alongside `migrate_967_push.sql`.
+tables, alongside `migrate_967_push.sql`. Before dropping, confirm
+the current predicate with `SELECT sql FROM sqlite_master WHERE
+name='idx_push_send_results_page_once';` — if it shows anything
+other than the statement above (e.g. an earlier two-value
+predicate), the DROP/CREATE applies.
 
 ### 1.4 `push_digest_state` — the D10 digest, made stateless-safe
 
@@ -406,10 +412,12 @@ decisions here, not follow-ups.
 ## 4. Forward migration plan (D49)
 
 - **D49. One one-shot forward migration: `migrate_967_push.sql`.**
-  Creates all four tables + the two indexes, `IF NOT EXISTS`
-  throughout (re-run is a silent no-op — the #846/#848/#952/#999
-  precedent: applied statement-by-statement against live D1).
-  **Both** builds that touch these tables carry the migration as
+  Creates all four tables + the three indexes (the §1.3 dedup index,
+  the tenant index, and the D57 page-once partial unique index —
+  #1061), `IF NOT EXISTS` throughout (re-run is a silent no-op — the
+  #846/#848/#952/#999 precedent: applied statement-by-statement
+  against live D1). **Both** builds that touch these tables carry the
+  migration as
   a pre-deploy step (#968 for `push_subscriptions`; #990 for the
   other three) — the second apply is a no-op. The conditional
   "whichever build is first carries it" is deliberately rejected:
@@ -439,7 +447,7 @@ does not pre-decide it.
 
 ## 6. What's next
 
-- **#990 (enqueue boundary + backpressure):** the enqueue API, the
+- **#990 (shipped, PR #1060):** the enqueue API, the
   atomic D10 check-and-increment over both scopes together, the
   first-page path, the digest enqueue split — implemented against
   §§1.2–1.4; carries `migrate_967_push.sql` as a pre-deploy step
