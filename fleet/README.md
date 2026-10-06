@@ -160,10 +160,11 @@ enrolled, with a warning when a gate document is present but no keys are
    box's `SPARKVM_GATE_KEYS`. Until you do, the old key still signs
    fleet-accepted documents — rotation without retirement is a permanent
    second signing key. Then close the rotation window in the publisher's
-   ledger so the reminders stop:
-   `python3 fleet/gate_publish.py --rotation-complete ctl-2026-09`
-   (an open window older than 14 days makes every later publish warn loudly;
-   tune with `--rotation-stale-days`).
+   ledger so the reminders stop (the ledger lives next to your registry by
+   default — point at it explicitly so the close lands in the right file):
+   `python3 fleet/gate_publish.py --rotation-complete ctl-2026-09 --rotation-log <registry-dir>/gate_rotation_log.json`
+   (an open window reaching the stale threshold — 14 days, tunable with
+   `--rotation-stale-days` — makes every later publish warn loudly).
 
 ## Quick start (operator estate)
 

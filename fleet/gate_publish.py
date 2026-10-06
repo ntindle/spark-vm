@@ -31,8 +31,8 @@ Rotation reminders (issue #1008): the publisher keeps a controller-side
 ledger of key rotations (gate_rotation_log.json next to the registry by
 default; key_ids + timestamps only, never key material). Publishing with a
 new --key-id opens a rotation window and says so loudly; every later publish
-reports still-open windows and warns loudly once a window is older than
---rotation-stale-days. After runbook step 4 (retire the old key from every
+reports still-open windows and warns loudly once a window reaches
+--rotation-stale-days (default 14). After runbook step 4 (retire the old key from every
 box), close the window with:
     python3 fleet/gate_publish.py --rotation-complete ctl-2026-09
 An un-closed window is a permanent second signing key — the ledger makes it
@@ -193,10 +193,21 @@ def _rotation_log_path(args) -> str:
     return ROTATION_LOG_NAME
 
 
+def _parse_ledger_ts(value):
+    """Parse a ledger timestamp ("%Y-%m-%dT%H:%M:%SZ"); None if unparseable."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
 def _load_rotation_log(path: str) -> dict:
     """Load the rotation ledger. A missing ledger is a first run (empty).
     A corrupt ledger is LOUD on stderr but never blocks publishing the gate
-    document — the ledger is advisory; the document is the release channel."""
+    document — the ledger is advisory; the document is the release channel.
+    Malformed events (wrong shape, unparseable timestamps) are dropped with
+    the same loud warning rather than crashing the publish path."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -212,6 +223,21 @@ def _load_rotation_log(path: str) -> dict:
         print(f"WARNING: rotation ledger {path} has an unexpected shape; "
               "treating as empty.", file=sys.stderr)
         return {"ledger_version": ROTATION_LEDGER_VERSION, "rotations": []}
+    kept = []
+    for ev in data["rotations"]:
+        if (_parse_ledger_ts(ev.get("opened_at")) is not None
+                and isinstance(ev.get("to_key_id"), str)
+                and (ev.get("from_key_id") is None
+                     or isinstance(ev.get("from_key_id"), str))
+                and (ev.get("closed_at") is None
+                     or _parse_ledger_ts(ev.get("closed_at")) is not None)):
+            kept.append(ev)
+        else:
+            print(f"WARNING: rotation ledger {path} has a malformed "
+                  "rotation event; dropping it. The gate document still "
+                  "publishes; fix or delete the file to restore rotation "
+                  "reminders.", file=sys.stderr)
+    data["rotations"] = kept
     return data
 
 
@@ -240,9 +266,8 @@ def _last_key_id(log: dict):
 
 
 def _rotation_age_days(opened_at: str) -> int:
-    opened = datetime.strptime(opened_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-        tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - opened).days
+    return (datetime.now(timezone.utc)
+            - _parse_ledger_ts(opened_at)).days
 
 
 def process_rotation(key_id: str, log_path: str, stale_days: int) -> None:
@@ -281,9 +306,10 @@ def process_rotation(key_id: str, log_path: str, stale_days: int) -> None:
     else:
         for o in _open_rotations(log):
             age_days = _rotation_age_days(o["opened_at"])
+            to_key = o["to_key_id"]
             if age_days >= stale_days:
                 print(f"WARNING: key rotation {o['from_key_id']} -> "
-                      f"{key_id} has been open for {age_days} days (since "
+                      f"{to_key} has been open for {age_days} days (since "
                       f"{o['opened_at']}) — {o['from_key_id']} is still a "
                       "valid signing key until retired. Finish runbook "
                       "step 4 (remove its key_id=/path entry from every "
@@ -291,7 +317,7 @@ def process_rotation(key_id: str, log_path: str, stale_days: int) -> None:
                       f"--rotation-complete {o['from_key_id']} "
                       "--rotation-log " + log_path, file=sys.stderr)
             else:
-                print(f"note: key rotation {o['from_key_id']} -> {key_id} "
+                print(f"note: key rotation {o['from_key_id']} -> {to_key} "
                       f"open for {age_days} days (since {o['opened_at']}); "
                       f"retire {o['from_key_id']} per runbook step 4, then "
                       "--rotation-complete.", file=sys.stderr)
@@ -339,7 +365,10 @@ def main(argv=None) -> int:
                     f"{DEFAULT_ROTATION_STALE_DAYS})")
     ap.add_argument("--rotation-complete", metavar="OLD_KEY_ID", default=None,
                     help="close an open rotation window: declare runbook "
-                    "step 4 done for OLD_KEY_ID (no document is published)")
+                    "step 4 done for OLD_KEY_ID (no document is published). "
+                    "The window is located via --rotation-log, else via "
+                    "--registry's directory, else ./gate_rotation_log.json "
+                    "in the current directory.")
     args = ap.parse_args(argv)
 
     if args.rotation_complete:
@@ -347,9 +376,9 @@ def main(argv=None) -> int:
         return 0
 
     for flag in ("registry", "manifest", "key_id", "key_file", "out"):
-        if not getattr(args, flag.replace("-", "_")):
-            sys.exit(f"ERROR: --{flag} is required (unless "
-                     "--rotation-complete is used).")
+        if not getattr(args, flag):
+            sys.exit(f"ERROR: --{flag.replace('_', '-')} is required "
+                     "(unless --rotation-complete is used).")
     if args.rotation_stale_days < 0:
         sys.exit("ERROR: --rotation-stale-days must be non-negative.")
 

@@ -995,3 +995,32 @@ def test_rotation_chained_windows_all_reported(tmp_path, keyfile, registry,
     log = json.loads(open(rlog).read())
     open_evs = [e for e in log["rotations"] if e["closed_at"] is None]
     assert len(open_evs) == 2
+    # Each open window is reported with its own from -> to pair (not the
+    # current publish key attributed to every window).
+    _, _, r2 = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                "ctl-2026-11")
+    assert f"{KEY_ID} -> ctl-2026-10" in r2.stderr
+    assert "ctl-2026-10 -> ctl-2026-11" in r2.stderr
+
+
+def test_rotation_malformed_event_does_not_block_publish(tmp_path, keyfile,
+                                                         registry, manifest):
+    rlog = str(tmp_path / "rotation_log.json")
+    open(rlog, "w").write(json.dumps({
+        "ledger_version": 1,
+        "rotations": [
+            {"from_key_id": "ctl-2026-09", "to_key_id": "ctl-2026-10",
+             "opened_at": "not-a-timestamp", "closed_at": None},
+            {"to_key_id": "ctl-2026-10"},  # missing opened_at
+        ],
+    }))
+    _, rlog2, r = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                   "ctl-2026-10", rotation_log=rlog)
+    assert r.returncode == 0
+    assert "WARNING" in r.stderr  # malformed events are loud...
+    assert "malformed" in r.stderr
+    assert os.path.exists(rlog2)  # ...but the document still publishes
+    log = json.loads(open(rlog2).read())
+    # Malformed events were dropped; the new publish recorded its own event.
+    assert all(e.get("opened_at") != "not-a-timestamp"
+               for e in log["rotations"])
