@@ -44,10 +44,20 @@ if [ "$size" -gt "$max_bytes" ]; then
     echo "cred-ui-token-set: token exceeds $max_bytes bytes" >&2
     exit 2
 fi
+# grep -qE matches line-by-line, so an embedded newline would sail
+# through the alphabet check below (verified) — reject newlines first.
+# The token is a single line; the UI sends it bare (no trailing
+# newline) and the reader strips whitespace on load. (wc -l counts the
+# newline bytes; a $(tr)-based check would silently pass because
+# command substitution strips trailing newlines.)
+if [ "$(wc -l < "$tmp")" -gt 0 ]; then
+    echo "cred-ui-token-set: token must not contain newlines" >&2
+    exit 2
+fi
 # The token alphabet is the UI's _TOKEN_RE — the writer pins it so a
-# caller can never write a newline-laden or control-char file that a
-# later reader would mis-parse. (grep -qE is the POSIX spelling;
-# [[ =~ ]] would work too, but grep keeps the regex in one readable place.)
+# caller can never write a control-char file that a later reader would
+# mis-parse. (grep -qE is the POSIX spelling; [[ =~ ]] would work too,
+# but grep keeps the regex in one readable place.)
 if ! grep -qE '^[A-Za-z0-9_-]{16,128}$' "$tmp"; then
     echo "cred-ui-token-set: token is malformed (use [A-Za-z0-9_-], 16-128 chars)" >&2
     exit 2

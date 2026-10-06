@@ -185,10 +185,16 @@ def _swapd_token_backed():
 
 
 def _token_path():
+    """Local-file token path — only meaningful when CRED_UI_TOKEN_FILE
+    is set (dev, CI, tests). The old ~/.config/cred-ui/token default is
+    gone (issue #964); reaching this without the env var is a bug, so
+    fail loud instead of guessing a path."""
     override = os.environ.get(_TOKEN_FILE_ENV)
-    if override:
-        return override
-    return os.path.join(os.path.expanduser("~"), ".config", "cred-ui", "token")
+    if not override:
+        raise RuntimeError(
+            "CRED_UI_TOKEN_FILE is not set and the swapd backend was "
+            "bypassed — refusing to guess a token path")
+    return override
 
 
 def _read_token_file(path):
@@ -260,8 +266,9 @@ def _read_swapd_token():
     file is absent (fresh box, nothing generated yet — the first-start
     path); raises RuntimeError on any other read failure — fail closed,
     never an empty guess. The absent-file match anchors on cat's
-    path-specific prefix AND the errno phrase (the same locale-safe
-    posture as read_registry's absent check, issue #672); every other
+    path-specific prefix AND the errno phrase, the same fail-loud
+    posture as read_registry's absent check (issue #672): a locale that
+    renames the phrase fails loud, never silent. Every other
     stderr (permission denied, no sudoers entry) stays loud."""
     rc, out, err = run(UI_TOKEN_CAT)
     if rc == 0:

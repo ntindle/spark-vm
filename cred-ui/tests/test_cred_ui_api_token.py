@@ -1,4 +1,4 @@
-"""Hermetic tests for cred-ui's per-install API token (issue #86).
+"""Hermetic tests for cred-ui's per-install API token (issues #86, #964).
 
 The CSRF header (X-Cred-UI: 1) is not a secret — any local process can
 set it. Every /api/* endpoint (except the public /api/version) now

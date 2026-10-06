@@ -110,7 +110,9 @@ if [ -z "${CRED_UI_TOKEN_FILE:-}" ]; then
     # stderr is captured — on failure cat prints nothing to stdout, so
     # the captured text can never contain the token.
     set +e
-    _ui_token_err="$(sudo -n -u swapd /usr/bin/cat /home/swapd/ui-token 2>&1 >/dev/null)"
+    # LC_ALL=C: the "No such file or directory" match below must not
+    # depend on the box's locale.
+    _ui_token_err="$(LC_ALL=C sudo -n -u swapd /usr/bin/cat /home/swapd/ui-token 2>&1 >/dev/null)"
     _ui_token_rc=$?
     set -e
     case "$_ui_token_rc:$_ui_token_err" in
