@@ -206,10 +206,10 @@ cadence the request path cannot supply.
   derivation that raises mid-iteration cannot continue (the generator
   is dead): it is one loud `poisoned` count and *that watcher* stops;
   the other watcher still runs. Sentinel-row quarantine
-  (park-until-repaired) was considered and deferred: it needs a repair
-  path that does not exist (no repair API, no operator alert sink
-  beyond #1069's handler log) — the per-tick loud retry is the honest
-  failure mode until one does.
+  (park-until-repaired) was considered and deferred to #1103: it needs
+  a repair path that does not exist (no repair API, no operator alert
+  sink beyond #1069's handler log) — the per-tick loud retry is the
+  honest failure mode until one does.
 
 ## 3. What the build slice implements (#1063)
 

@@ -188,7 +188,7 @@ def _isolate_candidate(counts, pass_name, identity, fn):
         fn()
     except Exception as exc:  # noqa: BLE001 — per-candidate isolation is the point
         counts["poisoned"] = counts.get("poisoned", 0) + 1
-        _loud("%s: poisoned candidate %s: %r — pass continues (D78)"
+        _loud("%s: poisoned candidate %s: %r — pass continues"
               % (pass_name, identity, exc))
 
 
@@ -208,7 +208,7 @@ def _drive_watcher(counts, label, derive, conn, moment, on_item):
     except Exception as exc:  # noqa: BLE001 — see _isolate_candidate
         counts["poisoned"] = counts.get("poisoned", 0) + 1
         _loud("%s: poisoned derivation (failed at call time): %r — "
-              "watcher stops, other watchers continue (D78)"
+              "watcher stops, other watchers continue"
               % (label, exc))
         return
     while True:
@@ -219,7 +219,7 @@ def _drive_watcher(counts, label, derive, conn, moment, on_item):
         except Exception as exc:  # noqa: BLE001 — see _isolate_candidate
             counts["poisoned"] = counts.get("poisoned", 0) + 1
             _loud("%s: poisoned derivation (raised mid-iteration): %r — "
-                  "watcher stops, other watchers continue (D78)"
+                  "watcher stops, other watchers continue"
                   % (label, exc))
             return
         _isolate_candidate(counts, label, repr(item),
