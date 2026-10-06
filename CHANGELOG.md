@@ -602,7 +602,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   digest suppressed by an exhausted page budget no longer
   wedges that hour's digest permanently: the suppression is recorded
   without blocking the digest's key, so the digest retries once
-  budget frees instead of never going out. (#PR)
+  budget frees instead of never going out. (#1080)
 
 - Answering an approval no longer crashes with a server error when the
   pending file is consumed by another process in the instant between the
