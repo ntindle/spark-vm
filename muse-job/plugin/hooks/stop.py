@@ -97,11 +97,13 @@ def classify(message):
     `BLOCKED: <question>` / `DONE: <summary>` — TOOL_INTERFACE.md), so only
     the last non-empty line may carry it. Quoted or example markers earlier
     in the message (preamble literals, fenced code blocks) no longer flip
-    the job's state. Residual, stated plainly: an agent that buries a
-    genuine BLOCKED: mid-message and ends on prose is classified idle —
-    deliberate, since the fix for a missing marker is the same as before
-    (the preamble's explicit instruction), while a phantom done closes a
-    live job.
+    the job's state. A genuine marker wrapped in a fenced code block is
+    also ignored — the protocol wants the bare marker as the final line,
+    so fence only examples, not the marker. Residual, stated plainly: an
+    agent that buries a genuine BLOCKED: mid-message and ends on prose is
+    classified idle — deliberate, since the fix for a missing marker is the
+    same as before (the preamble's explicit instruction), while a phantom
+    done closes a live job.
     """
     state, detail = "idle", ""
     if not message:
@@ -116,8 +118,10 @@ def classify(message):
         return state, detail
     # Issue #8: a line the agent merely quoted (markdown blockquote) is
     # never its own marker. Any leading ">" prefix disqualifies the line
-    # entirely — including nested quotes like ">> DONE:", which unquoting
-    # to the bare marker would otherwise misclassify.
+    # from marker matching — including nested quotes like ">> DONE:",
+    # which unquoting to the bare marker would otherwise misclassify.
+    # (Quoted lines still feed the question tail below; that predates
+    # this fix and question state never closes a job.)
     last_raw = lines[-1]
     if _QUOTE_RE.sub("", last_raw) != last_raw:
         last = None
