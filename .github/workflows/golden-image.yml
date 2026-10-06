@@ -1,0 +1,66 @@
+# Golden-image build gate (#1087, F-P1).
+#
+# Builds the golden-image recipe (deploy/golden-image/Dockerfile) on every
+# v* release tag and runs the automatable half of the per-build gate
+# (docs/GOLDEN_IMAGE_GATE_PROCEDURE.md): the baked-secrets scan against the
+# built image (Step 0b) and the manifest preflight (Step 0).
+#
+# Build-only, never a push: publishing stays an operator step AFTER the
+# interactive gate (file → answer → grant → verify, teardown, re-scan) —
+# the registry credentials are operator-owned, and an image without a
+# completed gate record does not publish. The job's verdict is the signal;
+# the operator re-runs deploy/golden-image/build-image.sh locally for the
+# manifest + gate-record artifacts.
+#
+# Only actions/checkout is used (SHA-pinned per the repo convention in
+# release.yml); docker buildx ships on ubuntu-latest runners, so no other
+# actions are needed.
+
+name: golden-image
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Least privilege: this workflow only reads the repo and reports status.
+permissions:
+  contents: read
+
+jobs:
+  build-and-gate:
+    name: build recipe + baked-secrets scan + manifest preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
+        with:
+          fetch-depth: 0
+      - name: Resolve the D-P1 pins from the tree
+        # The tree is the pin: the tag push IS the release commit, so HEAD
+        # names the baked commit and VERSION names the release tag.
+        run: |
+          echo "SPARKVM_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "SPARKVM_VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=sparkvm-golden:$(cat VERSION)+$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+      - name: Build the recipe
+        run: |
+          docker buildx build --load \
+            -f deploy/golden-image/Dockerfile \
+            --build-arg "SPARKVM_VERSION=${SPARKVM_VERSION}" \
+            --build-arg "SPARKVM_SHA=${SPARKVM_SHA}" \
+            -t "${IMAGE_TAG}" .
+      - name: Baked-secrets scan of the built image (gate Step 0b)
+        # Exit 1 is a gate refusal (baked secret material); exit 2 is an
+        # invocation error. Either fails the job — the image does not publish.
+        run: |
+          docker run --rm --entrypoint /bin/bash "${IMAGE_TAG}" \
+            /opt/sparkvm/harness/scan-baked-secrets.sh /
+      - name: Manifest preflight (gate Step 0)
+        run: |
+          harness/generate-image-manifest.sh --out image-manifest.json
+          harness/check-image-manifest.sh image-manifest.json \
+            --expect-version "${SPARKVM_SHA}"
+      - name: Emit the gate-record skeleton
+        run: |
+          deploy/golden-image/build-image.sh --gate-record-out gate-record.json
+          python3 -c "import json; d=json.load(open('gate-record.json')); assert d['image_version']=='${SPARKVM_SHA}', d"
