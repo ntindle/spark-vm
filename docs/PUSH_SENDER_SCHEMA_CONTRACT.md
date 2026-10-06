@@ -115,6 +115,9 @@ deliveries**.
 -- resolve the reservation: 'accepted' keeps it (budget consumed);
 -- 'tombstone', 'dead-letter', and 'suppressed_terminal' release it
 -- (decrement both scopes); 'suppressed_budget' never took one.
+-- The 'queued' outbox row (D50) holds the reservation for the whole
+-- outbox wait; the terminal outcome's rule above resolves it when the
+-- queued row is DELETEed at the terminal attempt.
 CREATE TABLE IF NOT EXISTS push_budget_counters (
   scope_type   TEXT NOT NULL,  -- 'box' | 'owner'
   scope_id     TEXT NOT NULL,  -- box_id | owner_principal
@@ -140,9 +143,10 @@ filed follow-up #1058 (see §4).
 ### 1.3 `push_send_results` — the record #428's §4 criterion consumes
 
 Every send attempt lands exactly one row. The outcome vocabulary is
-the sender's verbatim (`hosted/push_sender.py::OUTCOMES`), plus two
+the sender's verbatim (`hosted/push_sender.py::OUTCOMES`), plus three
 documented *extensions* for enqueue-boundary decisions (not part of
-#989's taxonomy). The table preserves `acceptance_fields()`' pinned
+#989's taxonomy) — D50 added the third, the `'queued'` outbox work
+item (#1061). The table preserves `acceptance_fields()`' pinned
 fields (`outcome`, `http_status`, `sent_at`, `latency_ms`),
 decomposing its opaque `subscription_ref` into the key columns so the
 D13 dedup keys and the fanout queries work without parsing.
@@ -169,21 +173,33 @@ CREATE TABLE IF NOT EXISTS push_send_results (
                                  -- retry | tombstone | dead-letter; plus
                                  -- enqueue-boundary extensions:
                                  -- suppressed_budget | suppressed_terminal
+                                 -- | queued (D50, the outbox work item)
   http_status     INTEGER,        -- the push-service status (NULL for
-                                 -- suppressed_* — nothing was sent)
+                                 -- suppressed_* and queued — nothing was
+                                 -- sent)
   latency_ms      REAL,           -- measured send latency (NULL for
-                                 -- suppressed_*); the ~38 ms crypto-only
-                                 -- figure is NOT this column
+                                 -- suppressed_* and queued); the ~38 ms
+                                 -- crypto-only figure is NOT this column
   sent_at         REAL,           -- epoch seconds, the sender's clock
   vapid_key_id    TEXT            -- which VAPID key signed this send (NULL
-                                 -- for suppressed_*); the D48d compromise
-                                 -- audit joins on this, not the
+                                 -- for suppressed_* and queued); the D48d
+                                 -- compromise audit joins on this, not the
                                  -- subscription's current row
 );
 CREATE INDEX IF NOT EXISTS idx_push_send_results_dedup
   ON push_send_results(box_id, event_kind, event_key);
 CREATE INDEX IF NOT EXISTS idx_push_send_results_tenant
   ON push_send_results(owner_principal, at);
+-- D57 (added by #1061; the operator applies this with
+-- migrate_967_push.sql, which lives in the control-plane workspace
+-- outside this repo): page-once is a DB invariant — one row per event
+-- across the enqueue boundary, enforced at the database layer. The
+-- predicate excludes the sender loop's per-attempt rows (which
+-- legitimately share the event key and must not collide), so D50's
+-- "every send attempt lands exactly one row" is untouched.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_push_send_results_page_once
+  ON push_send_results(box_id, event_kind, event_key)
+  WHERE outcome IN ('queued', 'suppressed_budget', 'suppressed_terminal');
 ```
 
 #### 1.3a `event_key` encoding
@@ -200,7 +216,7 @@ The D13 dedup keys with values, components joined by a single U+0000
 | `digest` | `owner_principal + "\x00" + window_start` (the digest carries a count, never an aid — not cancellable per-aid, by design) |
 
 Outcome semantics (the #989 result taxonomy, recorded here so the
-table reads without the code; `suppressed_*` are the enqueue
+table reads without the code; `suppressed_*` and `queued` are the enqueue
 boundary's extensions):
 
 - `accepted` — push service returned 2xx (any 2xx — the sender
@@ -222,6 +238,34 @@ boundary's extensions):
   expired between enqueue and send; the reservation taken at
   enqueue is released. The audit row the taxonomy promises the
   sentinel leg is this row. (Extension, not a sender outcome.)
+- `queued` — D50: the outbox work item, not a send result. Inserted
+  by `enqueue_page` when the page takes the D10 reservation and
+  waits for the sender loop (enqueue-time rows carry `device=''`;
+  `http_status`, `latency_ms`, `sent_at`, `vapid_key_id` NULL —
+  nothing was sent yet). The sender loop selects `'queued'` rows in
+  `id` ASC, INSERTs one row per send attempt, and DELETEs the
+  `queued` row on the terminal attempt — so "every send attempt lands
+  exactly one row" and the "three retries then accepted lands four
+  rows" accounting hold verbatim (the `queued` row is gone by the
+  time the row-count is read). Holds the D10 reservation for the
+  whole outbox wait; the terminal outcome's §1.2 rule resolves it.
+  (Extension, not a sender outcome.)
+
+**D57 — the predicate covers `suppressed_terminal` too.** The
+partial unique index above is #990's shipped statement, not #1061's
+issue-body draft (which proposed only `('queued',
+'suppressed_budget')`): the #990 build (unanimous SHIP IT,
+PR #1060) carries the three-value predicate, and the contract pins
+the shipped statement. `suppressed_terminal` does not false-collide
+under the predicate: the D61 audit key is the page key plus a
+U+0000 `"superseded"` suffix, distinct from every page and attempt
+key, so the audit's exactly-once holds under overlapping sweeps
+(D69) with no false collisions. **Operator note (forward
+migration):** SQLite cannot ALTER an index predicate — when the
+predicate changes, run `DROP INDEX IF EXISTS
+idx_push_send_results_page_once` then CREATE with the new
+predicate, and do it *before* deploying any build that writes these
+tables, alongside `migrate_967_push.sql`.
 
 ### 1.4 `push_digest_state` — the D10 digest, made stateless-safe
 
