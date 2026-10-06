@@ -11,13 +11,14 @@ needed no new handling: `startswith` never matched a `>`-prefixed line
 under the old classifier either — the blockquote assertions pin that
 preserved property; they are not fix tests.)
 
-Verified against the pre-fix hook on a scratch copy: 6 of the 10 test
+Verified against the pre-fix hook on a scratch copy: 8 of the 14 test
 functions fail on the old any-line classifier — the fenced-preamble,
-mid-message, fenced-marker-at-end, unclosed-fence, final-detail, and
-question cases. The 4 that pass on old pin preserved behavior: the two
-genuine-final-marker cases, the trailing-blank case, and the blockquote
-case (vacuous on old by construction — kept as a guard against any
-future unquoting logic).
+mid-message, fenced-marker-at-end, unclosed-fence, final-detail,
+\r-promotion, fenced-question, and mid-marker-question cases. The 6
+that pass on old pin preserved behavior: the two genuine-final-marker
+cases, the trailing-blank case, the blockquote case (vacuous on old by
+construction — kept as a guard against any future unquoting logic),
+the CRLF-terminated-marker case, and the ANSI-in-detail case.
 """
 import importlib.machinery
 import importlib.util
