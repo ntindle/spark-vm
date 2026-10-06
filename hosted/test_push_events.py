@@ -513,6 +513,46 @@ def test_digest_trigger(conn):
     assert d2.disposition == "duplicate"
 
 
+def _digest_state(conn, owner, window):
+    return conn.execute(
+        "SELECT count, enqueued_at FROM push_digest_state"
+        " WHERE owner_principal = ? AND window_start = ?",
+        (owner, window)).fetchone()
+
+
+def test_digest_fire_stamps_enqueued_at(conn):
+    # D76: the D54 obligation — enqueued_at is stamped when the digest
+    # page is accepted; a duplicate refire does not touch the stamp.
+    now = _utcnow()
+    ws = push_enqueue.hour_bucket(now)
+    for i in range(4):
+        push_enqueue.enqueue_page(
+            conn, event_kind="approval_filed", owner_principal="owner-1",
+            box_id="box-9", key_material="aid-%d" % i, now=now)
+    assert _digest_state(conn, "owner-1", ws)[1] is None
+    d1 = push_events.maybe_enqueue_digest(
+        conn, owner_principal="owner-1", now=now)
+    assert d1.disposition == "queued"
+    count, stamp = _digest_state(conn, "owner-1", ws)
+    assert count == 1 and stamp is not None
+    d2 = push_events.maybe_enqueue_digest(
+        conn, owner_principal="owner-1", now=now)
+    assert d2.disposition == "duplicate"
+    assert _digest_state(conn, "owner-1", ws)[1] == stamp
+
+
+def test_digest_window_start_fail_closed(conn):
+    # D76: the explicit window is key material — empty or
+    # separator-injected windows are ValueError, never a weird key.
+    with pytest.raises(ValueError):
+        push_events.maybe_enqueue_digest(
+            conn, owner_principal="owner-1", window_start="")
+    with pytest.raises(ValueError):
+        push_events.maybe_enqueue_digest(
+            conn, owner_principal="owner-1",
+            window_start="2026-10-05T10\x00x")
+
+
 # --- fail-closed surface -----------------------------------------------------------
 
 def test_no_page_kinds_are_unrepresentable():

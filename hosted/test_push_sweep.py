@@ -361,6 +361,78 @@ def test_no_coalesced_digest_fires_nothing(conn):
     assert _queued(conn, "digest") == []
 
 
+def _seed_digest(conn, owner, window, count, enqueued_at=None):
+    conn.execute(
+        "INSERT INTO push_digest_state"
+        " (owner_principal, window_start, count, enqueued_at)"
+        " VALUES (?, ?, ?, ?)",
+        (owner, window, count, enqueued_at))
+    conn.commit()
+
+
+def _digest_row(conn, owner, window):
+    return conn.execute(
+        "SELECT count, enqueued_at FROM push_digest_state"
+        " WHERE owner_principal = ? AND window_start = ?",
+        (owner, window)).fetchone()
+
+
+def test_digest_pending_past_window_fires_with_own_key(conn):
+    # D76: the hour-boundary strand — coalescing that landed on a past
+    # window's row after that window's last digest-pass tick fires late
+    # with the past window's own page-once key, and enqueued_at is
+    # stamped. (T0 is 2026-10-05T12Z; the stranded row is T10.)
+    past = "2026-10-05T10"
+    _seed_digest(conn, "owner-1", past, 3)
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.digests.get("queued") == 1
+    rows = _queued(conn, "digest")
+    assert len(rows) == 1
+    assert rows[0][1] == "owner-1\x00" + past
+    count, enqueued_at = _digest_row(conn, "owner-1", past)
+    assert count == 3
+    assert enqueued_at is not None
+
+
+def test_digest_fired_window_never_refires(conn):
+    # D76: a window whose digest already fired (enqueued_at set) is
+    # never refired, even with more coalesced counts — D67's accepted
+    # drift for post-fire coalescing stands.
+    past = "2026-10-05T10"
+    _seed_digest(conn, "owner-1", past, 5,
+                 enqueued_at="2026-10-05T11:59:05+00:00")
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.digests == {}
+    assert _queued(conn, "digest") == []
+
+
+def test_digest_budget_suppressed_stays_pending_and_retries(conn):
+    # D76: a budget-suppressed digest leaves enqueued_at NULL (so a
+    # later sweep retries) and coalesces into the current window; once
+    # budget frees, the pending past window fires.
+    past = "2026-10-05T10"
+    _seed_digest(conn, "owner-1", past, 2)
+    ws = push_enqueue.hour_bucket(T0)
+    for _ in range(10):
+        assert push_enqueue.reserve_budget(conn, None, "owner-1", ws)
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.digests.get("suppressed_budget") == 1
+    assert _digest_row(conn, "owner-1", past)[1] is None
+    cur_count, cur_enq = _digest_row(conn, "owner-1", ws)
+    assert cur_count == 1 and cur_enq is None
+    for _ in range(10):
+        push_enqueue.release_reservation(conn, None, "owner-1", ws)
+    s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s2.digests.get("queued") == 2
+    assert _digest_row(conn, "owner-1", past)[1] is not None
+    assert _digest_row(conn, "owner-1", ws)[1] is not None
+    keys = sorted(r[1] for r in _queued(conn, "digest"))
+    assert keys == sorted(["owner-1\x00" + past, "owner-1\x00" + ws])
+
+
 # --- Pass 3: watchers --------------------------------------------------------
 
 def test_stale_watcher_pages_once_per_epoch(conn):
