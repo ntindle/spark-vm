@@ -203,18 +203,25 @@ def test_short_ttl_never_pages(conn):
     assert s.reminders.get("queued") is None
 
 
-def test_corrupt_record_fails_loud(conn):
+def test_corrupt_record_fails_loud(conn, capsys):
     # created_at stored as text: the D49 adapter must ValueError, not
-    # silently skip (D59).
+    # silently skip (D59). D78: the loudness is per-candidate now —
+    # the corrupt row is counted `poisoned` and logged loudly while
+    # the pass completes (#1095).
     conn.execute(
         "INSERT INTO approvals (box_id, aid, owner_id, summary, status,"
         " created_at, expires_at)"
         " VALUES ('box-1', 'aid-1', 'owner-1', 's', 'pending',"
         " 'not-an-epoch', ?)", (EPOCH_T0 + 600,))
     conn.commit()
-    reg = _registry({"box-1": "owner-1"})
-    with pytest.raises(ValueError):
-        push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    _file_approval(conn, "box-2", "aid-2")
+    reg = _registry({"box-1": "owner-1", "box-2": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.reminders.get("poisoned") == 1
+    err = capsys.readouterr().err
+    assert "poisoned" in err and "box-1" in err and "aid-1" in err
+    # The healthy candidate behind the poison row still pages.
+    assert s.reminders.get("queued") == 1
 
 
 def test_missing_resolve_owner_fails_loud(conn):
@@ -223,11 +230,17 @@ def test_missing_resolve_owner_fails_loud(conn):
         push_sweep.sweep_once(conn, now=T0, resolve_owner=None)
 
 
-def test_bad_owner_from_registry_fails_loud(conn):
+def test_bad_owner_from_registry_fails_loud(conn, capsys):
+    # A resolver that returns a bad owner is still fail-closed per D2
+    # (no guessed owner) — D78: the failure is per-candidate now, a
+    # loud `poisoned` count while the pass completes (#1095).
     _file_approval(conn, "box-1", "aid-1")
-    with pytest.raises(ValueError):
-        push_sweep.sweep_once(conn, now=T0,
+    s = push_sweep.sweep_once(conn, now=T0,
                               resolve_owner=_registry({"box-1": ""}))
+    assert s.reminders.get("poisoned") == 1
+    assert s.reminders.get("queued") is None
+    assert "poisoned" in capsys.readouterr().err
+    assert _queued(conn, "reminder") == []
 
 
 def test_reminders_disabled_skips_pass(conn):
@@ -291,25 +304,42 @@ def test_paged_then_clock_expired_still_audits(conn):
     assert len(_queued(conn, "reminder")) == 1
 
 
-def test_paged_then_corrupted_still_fails_loud(conn):
+def test_paged_then_corrupted_still_fails_loud(conn, capsys):
     # D75 precision: a paged record that corrupts between ticks stays
     # a candidate — the D59 fail-loud still fires instead of the sweep
-    # silently excluding it.
+    # silently excluding it. D78: the loudness is per-candidate now —
+    # the corrupt row is counted `poisoned` and logged loudly while the
+    # healthy candidate behind it still pages (no more whole-pass
+    # abort; #1095).
     _file_approval(conn, "box-1", "aid-1", ttl=600, age=400)
-    reg = _registry({"box-1": "owner-1"})
+    reg = _registry({"box-1": "owner-1", "box-2": "owner-1"})
     s1 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
     assert s1.reminders.get("queued") == 1
     conn.execute(
         "UPDATE approvals SET created_at = 'garbage'"
         " WHERE box_id = 'box-1' AND aid = 'aid-1'")
     conn.commit()
-    with pytest.raises(ValueError):
-        push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    # A healthy candidate filed after the corruption: pre-D78 the
+    # sweep raised at box-1 (sorts first in keyset order) and box-2
+    # never paged. Now box-2 pages and box-1 is a loud poisoned count
+    # — still loud every tick (D59), never silent.
+    _file_approval(conn, "box-2", "aid-2", ttl=600, age=400)
+    s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s2.reminders.get("queued") == 1
+    assert s2.reminders.get("poisoned") == 1
+    err = capsys.readouterr().err
+    assert "poisoned" in err and "box-1" in err and "aid-1" in err
+    # Next tick: the poison row is still a candidate, still loud.
+    s3 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s3.reminders.get("poisoned") == 1
+    assert "poisoned" in capsys.readouterr().err
 
-def test_resolver_failure_mid_sweep_is_fail_closed_and_resumable(conn):
-    # box-0 pages, then the registry fails on box-1: the sweep raises
-    # fail-closed with box-0's page committed; the next sweep with a
-    # healthy registry resumes box-1, and box-0 dedups cleanly.
+def test_resolver_failure_mid_sweep_is_fail_closed_and_resumable(conn, capsys):
+    # box-0 pages, then the registry fails on box-1: D78 isolates the
+    # failure — box-1 is a loud `poisoned` count (never a guessed
+    # owner, still fail-closed per D2) while the pass completes; the
+    # next sweep with a healthy registry resumes box-1, and box-0
+    # dedups cleanly.
     for i in range(2):
         _file_approval(conn, "box-%d" % i, "aid-%d" % i)
 
@@ -318,14 +348,18 @@ def test_resolver_failure_mid_sweep_is_fail_closed_and_resumable(conn):
             raise RuntimeError("registry down")
         return "owner-1"
 
-    with pytest.raises(RuntimeError):
-        push_sweep.sweep_once(conn, now=T0, resolve_owner=flaky)
+    s1 = push_sweep.sweep_once(conn, now=T0, resolve_owner=flaky)
+    assert s1.reminders.get("queued") == 1
+    assert s1.reminders.get("poisoned") == 1
+    assert s1.candidates_seen == 2
+    assert "poisoned" in capsys.readouterr().err
     assert len(_queued(conn, "reminder")) == 1
     reg = _registry({"box-0": "owner-1", "box-1": "owner-1"})
     s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
     # box-1 pages; box-0 is anti-joined out (already paged — it would
     # have deduped at the boundary). Exactly the two pages, no more.
     assert s2.reminders.get("queued") == 1
+    assert s2.reminders.get("poisoned") is None
     assert s2.candidates_seen == 1
     assert len(_queued(conn, "reminder")) == 2
 
@@ -471,6 +505,92 @@ def test_watchers_off_by_default(conn):
     assert s.stale_watchers == {"skipped": True}
     assert s.token_warnings == {"skipped": True}
     assert _queued(conn) == []
+
+
+# --- D78: per-candidate error isolation (#1095) --------------------------------
+
+def test_digest_pass_isolates_corrupt_window(conn, capsys):
+    # D78: a corrupt digest-state row (empty owner_principal fails the
+    # policy's key-material gate) is a loud `poisoned` count while the
+    # healthy window still fires in the same pass — pre-D78 the whole
+    # digest pass aborted at the corrupt row ("", ws sorts first).
+    ws = push_enqueue.hour_bucket(T0)
+    _seed_digest(conn, "", ws, 1)  # corrupt: fails _require_key_material
+    _seed_digest(conn, "owner-1", ws, 1)
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.digests.get("queued") == 1
+    assert s.digests.get("poisoned") == 1
+    err = capsys.readouterr().err
+    assert "poisoned" in err and "digests" in err
+    assert _digest_row(conn, "owner-1", ws)[1] is not None
+
+
+def test_watchers_isolate_per_candidate_errors(conn, capsys):
+    # D78: a raising candidate in one watcher is a loud `poisoned`
+    # count; the sibling candidate and the other watcher still run.
+    def flaky(box_id):
+        if box_id == "box-a":
+            raise RuntimeError("registry down")
+        return "owner-1"
+    s = push_sweep.sweep_once(
+        conn, now=T0, resolve_owner=flaky,
+        derive_stale=lambda c, m: [("box-a", "epoch-1"),
+                                   ("box-b", "epoch-2")],
+        derive_token_warnings=lambda c, m: [("box-b", "hash-1")])
+    assert s.stale_watchers.get("queued") == 1
+    assert s.stale_watchers.get("poisoned") == 1
+    err = capsys.readouterr().err
+    assert "poisoned" in err and "box-a" in err
+    # The token watcher ran independently of the stale watcher's poison.
+    assert s.token_warnings.get("queued") == 1
+    assert s.token_warnings.get("poisoned") is None
+
+
+def test_watcher_derivation_failure_stops_only_that_watcher(conn, capsys):
+    # D78: a derivation that raises mid-iteration cannot continue (the
+    # generator is dead) — one loud `poisoned` count for that watcher;
+    # the other watcher still runs.
+    def broken(conn, moment):
+        yield ("box-1", "epoch-1")
+        raise RuntimeError("derivation blew up")
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(
+        conn, now=T0, resolve_owner=reg,
+        derive_stale=broken,
+        derive_token_warnings=lambda c, m: [("box-1", "hash-1")])
+    assert s.stale_watchers.get("queued") == 1
+    assert s.stale_watchers.get("poisoned") == 1
+    assert "poisoned" in capsys.readouterr().err
+    assert s.token_warnings.get("queued") == 1
+
+
+def test_watcher_derivation_call_time_failure_is_loud(conn, capsys):
+    # D78: caller-wired logic that fails at call time is one loud
+    # `poisoned` count for that watcher, not a whole-sweep abort.
+    def broken(conn, moment):
+        raise RuntimeError("derivation down")
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(
+        conn, now=T0, resolve_owner=reg,
+        derive_stale=broken,
+        derive_token_warnings=lambda c, m: [("box-1", "hash-1")])
+    assert s.stale_watchers == {"poisoned": 1}
+    assert "poisoned" in capsys.readouterr().err
+    assert s.token_warnings.get("queued") == 1
+
+
+def test_base_exception_still_aborts_whole_sweep(conn):
+    # D78 pin: only `Exception` is isolated. BaseException
+    # (KeyboardInterrupt, SystemExit) is an operator signal, not data
+    # corruption — it still aborts the whole sweep.
+    _file_approval(conn, "box-1", "aid-1")
+
+    def kb(box_id):
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        push_sweep.sweep_once(conn, now=T0, resolve_owner=kb)
 
 
 # --- Clock ------------------------------------------------------------------

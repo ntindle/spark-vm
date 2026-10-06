@@ -189,6 +189,27 @@ cadence the request path cannot supply.
   harmless `duplicate` (the suppression was already recorded and the
   count incremented once — no double-counting, since the audit INSERT
   and the count increment share one transaction).
+- **D78. Per-candidate error isolation (feature 20261006-1759,
+  #1095).** One corrupt row no longer aborts a whole pass. Each
+  candidate's body (adapter + owner resolution + policy call) runs
+  inside a per-candidate isolation boundary: an `Exception` is counted
+  as a `poisoned` disposition on that pass's summary map, logged
+  loudly to stderr with the candidate identity, and the pass
+  continues. The poison row stays a candidate on the next tick, so
+  D59's fail-loud is preserved — still loud every tick, never silently
+  skipped — without the fleet-wide starvation a whole-pass abort
+  caused. Only `Exception` is caught: `BaseException`
+  (KeyboardInterrupt, SystemExit) is an operator signal, not data
+  corruption, and still aborts the whole sweep. Infrastructure
+  failures (the candidate SELECT itself, the pending-window SELECT)
+  are not data corruption — they still abort the pass loudly. A
+  derivation that raises mid-iteration cannot continue (the generator
+  is dead): it is one loud `poisoned` count and *that watcher* stops;
+  the other watcher still runs. Sentinel-row quarantine
+  (park-until-repaired) was considered and deferred: it needs a repair
+  path that does not exist (no repair API, no operator alert sink
+  beyond #1069's handler log) — the per-tick loud retry is the honest
+  failure mode until one does.
 
 ## 3. What the build slice implements (#1063)
 
