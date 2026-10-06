@@ -133,3 +133,46 @@ Tested by `test_push_sender.py` (43 tests, neutering-verified
 non-vacuous) against a stub push service; the stub speaks plain HTTP on
 localhost — the difference from production is documented and compensated
 by a dedicated test pinning the production transport's TLS policy.
+
+## push_sweep.py — the D9 reminder/digest sweep scheduler (#1063)
+
+The cadence that calls the push lane's paging policy: one sweep reads
+the plane's D1 database (the #988 contract tables plus the #872
+approvals record) and runs three passes in order — due reminders,
+digest triggers, then the cadence-driven watchers (heartbeat-stale,
+token-expiry warning). The sweep only *selects candidates*; every
+timing, dedup, and budget decision stays with the policy's gate-1
+re-read and the enqueue boundary (`push_enqueue.py`). Over-selecting is
+safe, under-selecting is the bug — the candidate SELECT is a hint, not
+a decision. Truncation is self-healing (D75): already-paged reminders
+are anti-joined out of the hint, so a truncated sweep's remainder is
+reached next tick. Overlapping sweeps are safe without locks: the
+page-once dedup and the idempotent superseded audit (D61, index-backed)
+make a second concurrent sweep a no-op.
+
+A due reminder pages exactly once; a decided/expired approval is never
+a candidate, so it pages zero times and writes zero audit rows
+(operator visibility is the approvals record itself); a pending
+approval terminal only by the clock writes exactly one idempotent
+audit row.
+
+Owner identity is resolved from the enrollment registry via an injected
+`resolve_owner(box_id)` — never from a box assertion, never from the
+approvals row (fail-closed). The heartbeat-stale and token-warning
+*derivations* stay plane-side caller logic (injected, off by default);
+the sweep owns the cadence, not the derivation. The `reminders_enabled`
+flag is the retirement hook for #958's Durable Object alarms. One
+clock reading per sweep, threaded through every pass. The per-minute
+cron trigger registration on the plane (D66/D72) is tracked in #1069.
+
+Tested by `test_push_sweep.py` (19 tests, neutering-verified
+non-vacuous): due reminder pages exactly once; decided/expired
+approvals page zero times with zero audit rows; terminal-by-clock
+selections write exactly one idempotent audit row; corrupt records
+fail loud; paged candidate queries stay bounded and self-heal after
+truncation; same-sweep reminder→digest ordering; mid-sweep resolver
+failure is fail-closed and resumable; watchers page once per epoch /
+per token generation.
+
+Run the tests: `python3 -m pytest hosted/test_push_sweep.py` from the
+repo root.

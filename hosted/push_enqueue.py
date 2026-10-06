@@ -167,12 +167,21 @@ schema contract):
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_push_send_results_page_once
         ON push_send_results(box_id, event_kind, event_key)
-        WHERE outcome IN ('queued', 'suppressed_budget');
+        WHERE outcome IN ('queued', 'suppressed_budget',
+                          'suppressed_terminal');
 
   The predicate excludes the sender loop's per-attempt rows (D50:
   "every send attempt lands exactly one row" — those share the event
   key and must not collide). Attempt rows for a dead subscription
-  (`tombstone`) likewise never collide.
+  (`tombstone`) likewise never collide. `suppressed_terminal` is
+  covered because the D61 audit key is the page key + a U+0000
+  "superseded" suffix — distinct from every page and attempt key, so
+  the audit's exactly-once holds under overlapping sweeps (D69) with
+  no false collisions. Forward-migration note for the operator (the
+  migration lives in the control-plane workspace per the D49 anchor):
+  SQLite cannot ALTER an index predicate — `DROP INDEX IF EXISTS
+  idx_push_send_results_page_once` then CREATE with the new predicate,
+  before deploying any build that writes these tables.
 
 Schema note (D49): this build carries `migrate_967_push.sql` as a
 pre-deploy step per the #988 contract. **Pre-deploy instruction for
@@ -217,11 +226,16 @@ PAGING_EVENT_KINDS = frozenset({
 OUTCOME_QUEUED = "queued"
 OUTCOME_SUPPRESSED_BUDGET = "suppressed_budget"
 
-# D57 — page-once as a DB invariant (see module docstring).
+# D57 — page-once as a DB invariant (see module docstring). The
+# predicate covers 'suppressed_terminal' too: the D61 audit key is the
+# page key + a U+0000 "superseded" suffix, distinct from every page and
+# attempt key, so the audit's exactly-once holds under overlapping
+# sweeps with no false collisions.
 PAGE_ONCE_INDEX_SQL = (
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_push_send_results_page_once"
     " ON push_send_results(box_id, event_kind, event_key)"
-    " WHERE outcome IN ('queued', 'suppressed_budget')"
+    " WHERE outcome IN ('queued', 'suppressed_budget',"
+    " 'suppressed_terminal')"
 )
 
 EnqueueResult = namedtuple("EnqueueResult",

@@ -11,6 +11,7 @@ mocked.
 import os
 import sqlite3
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -65,10 +66,14 @@ CREATE TABLE IF NOT EXISTS push_digest_state (
 
 # D57 — page-once as a DB invariant. NOT in the #988 contract text
 # (predates it); follow-up amends the contract §1.3 + migration.
+# The predicate covers 'suppressed_terminal' too (D61 audit
+# exactly-once under overlapping sweeps, #1063): the audit key is
+# the page key + a U+0000 suffix, so it never collides with page
+# or attempt rows. The contract amendment (#1061) must carry this.
 DDL_PAGE_ONCE_INDEX = """
 CREATE UNIQUE INDEX IF NOT EXISTS idx_push_send_results_page_once
   ON push_send_results(box_id, event_kind, event_key)
-  WHERE outcome IN ('queued', 'suppressed_budget');
+  WHERE outcome IN ('queued', 'suppressed_budget', 'suppressed_terminal');
 """
 
 
@@ -431,6 +436,54 @@ def test_reminder_corrupt_record_fail_loud(conn, make_bad):
             conn, box_id="box-1", owner_principal="owner-1", aid="aid-1",
             get_record=make_bad)
     assert _outcomes(conn, "reminder") == []
+
+
+def test_superseded_audit_exactly_once_under_overlap(tmp_path):
+    """Overlapping gate-1 observations of one terminal approval:
+    exactly one `suppressed_terminal` audit row.
+
+    The D61 write is SELECT-then-INSERT; the D57 partial unique index
+    (whose predicate covers `suppressed_terminal`) is the enforcement,
+    and the writer tolerates the loser's IntegrityError. Verified
+    non-vacuous: dropping 'suppressed_terminal' from the index
+    predicate lets all six threads insert (six rows).
+    """
+    dbfile = str(tmp_path / "audit_race.db")
+    c = sqlite3.connect(dbfile)
+    c.executescript(DDL_BUDGET_COUNTERS + DDL_SEND_RESULTS
+                    + DDL_DIGEST_STATE + DDL_PAGE_ONCE_INDEX)
+    c.close()
+    now = _utcnow()
+    rec = _record(now - timedelta(minutes=40), ttl_seconds=600,
+                  terminal=True)
+    barrier = threading.Barrier(6)
+    results = []
+
+    def worker():
+        cc = sqlite3.connect(dbfile, timeout=10.0)
+        barrier.wait()
+        try:
+            results.append(push_events.maybe_enqueue_reminder(
+                cc, box_id="box-1", owner_principal="owner-1",
+                aid="aid-1", get_record=lambda a: rec, now=now))
+        finally:
+            cc.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(results) == 6
+    assert all(r.disposition == "superseded_terminal" for r in results)
+    c = sqlite3.connect(dbfile)
+    try:
+        n = c.execute(
+            "SELECT COUNT(*) FROM push_send_results"
+            " WHERE outcome = 'suppressed_terminal'").fetchone()[0]
+        assert n == 1
+    finally:
+        c.close()
 
 
 # --- digest ----------------------------------------------------------------------

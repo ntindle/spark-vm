@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Push reminder/digest scheduler (#1063): the sweep logic the control
+  plane's per-minute trigger will drive — a due reminder pages exactly
+  once, a decided or expired approval is never paged (terminal-by-clock
+  selections write one idempotent audit row for the operator), and
+  digest triggers fire in the same sweep as the reminder that tipped
+  the budget. The cron-trigger registration on the plane (D72) ships
+  as its own tracked item (#1069).
 - Hosted phone-home session handshake (#1000): the plane's per-box
   connection now completes the hello/welcome handshake and enforces the
   generation fence — the box's hello identity must match the token the

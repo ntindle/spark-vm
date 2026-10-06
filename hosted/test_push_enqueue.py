@@ -63,10 +63,14 @@ CREATE TABLE IF NOT EXISTS push_digest_state (
 
 # D57 — page-once as a DB invariant. NOT in the #988 contract text
 # (predates it); follow-up amends the contract §1.3 + migration.
+# The predicate covers 'suppressed_terminal' too (D61 audit
+# exactly-once under overlapping sweeps, #1063): the audit key is
+# the page key + a U+0000 suffix, so it never collides with page
+# or attempt rows. The contract amendment (#1061) must carry this.
 DDL_PAGE_ONCE_INDEX = """
 CREATE UNIQUE INDEX IF NOT EXISTS idx_push_send_results_page_once
   ON push_send_results(box_id, event_kind, event_key)
-  WHERE outcome IN ('queued', 'suppressed_budget');
+  WHERE outcome IN ('queued', 'suppressed_budget', 'suppressed_terminal');
 """
 
 

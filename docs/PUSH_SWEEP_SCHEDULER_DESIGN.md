@@ -98,8 +98,9 @@ cadence the request path cannot supply.
 - **D73. One clock, one read, pure arithmetic.** The sweep takes `now`
   once (epoch seconds, UTC). `created_at`/`expires_at` on the #872
   record are epoch ints, so due-ness is epoch arithmetic — the halved
-  TTL is fractional in the SQL (`(expires_at - created_at) / 2` yields
-  a REAL), which is numerically harmless — with no ISO parsing in the
+  TTL `(expires_at - created_at) / 2` is INTEGER division in SQLite
+  (verified: `601/2 → 300`), which over-selects by at most half a
+  second in the safe direction per D68 — with no ISO parsing in the
   hot path. The D59 adapter's normalization (epoch → ISO) stays in the
   plane-side `get_record` adapter (§3.2) where the #969 docstring
   already places it; the sweep does not duplicate it.
@@ -110,21 +111,47 @@ cadence the request path cannot supply.
   docstring's D2 restatement — the sweep's job is the cadence, not the
   derivation. The window is armed by `queued|accepted` rows so the sender
   loop's delete-on-terminal (D50) cannot evaporate it mid-sweep.
+- **D75. Truncation is self-healing.** The candidate hint additionally
+  anti-joins approvals whose reminder page already exists in
+  `push_send_results` — the boundary's outcome-blind dedup fast-path,
+  mirrored in SQL on `box_id || char(0) || aid` (the exact page-key
+  encoding). The exclusion is precise: only candidates the policy would
+  certainly `duplicate` are excluded — a page row exists for the exact
+  key, the record is not terminal (`decision IS NULL` and not
+  clock-expired, mirroring the adapter's terminal derivation), and the
+  record is well-formed (epoch ints). A paged approval that later
+  clock-expires stays a candidate, so gate-1 still writes its D61 audit
+  (pre-D75 behavior preserved — the terminal check runs before the
+  boundary dedup, and the audit uses the suffixed key the page-key
+  anti-join never matches); a paged record that corrupts between ticks
+  stays a candidate, so the D59 fail-loud still fires. Every excluded
+  candidate would have returned `duplicate` — no page, no audit, no
+  state change — so the exclusion is behavior-preserving, and a
+  truncated sweep's remainder is actually reached on the next tick
+  instead of the already-processed rows re-dominating the first pages.
+  The `page_size × max_pages` cap stays a capacity assumption (peak
+  due-reminders/minute); repeated truncation is an operator alert.
 
 ## 3. What the build slice implements (#1063)
 
-1. The `scheduled` handler in the plane Worker (D66) running the
-   two-pass sweep (D67), with paged candidate queries (D69) and a
-   single UTC epoch `now` (D73).
+1. The sweep logic the plane Worker's `scheduled` handler will drive:
+   the three-pass sweep — reminders, then digests (D67), then the
+   cadence-driven watchers (D74) — with paged, self-healing candidate
+   queries (D69, D75) and a single UTC epoch `now` (D73). The per-minute
+   `scheduled` trigger registration itself (D66) is #1069's, not this
+   slice's.
 2. Plane-side wiring of the policy functions against the live D1
    database (the D49-style adapter from #969's docstring: `get_record`
    translating the #872 epoch-int record shape into the D59 dict).
-3. The `deploy_worker.py` cron-trigger declaration + staging smoke
-   (D72) in the plane workspace.
-4. The acceptance test: a due reminder pages exactly once with no human
-   driving it; a decided/expired approval pages zero times (the gate-1
-   re-read + D61 audit proving the zero).
-5. The cadence-driven watcher calls (D74/D63): per sweep, derive
+3. The acceptance test, sliced: a due reminder produces exactly one
+   `queued` page; a decided/expired approval is never a candidate, so
+   it pages zero times and writes zero audit rows (operator visibility
+   is the approvals record itself); a pending approval terminal only
+   by the clock reaches gate-1 and writes exactly one idempotent
+   `suppressed_terminal` audit row (D61). The "with no human driving
+   it" half of #1063's acceptance criterion is owned by #1069 (the
+   cron-trigger wiring), which keeps this issue open until it lands.
+4. The cadence-driven watcher calls (D74/D63): per sweep, derive
    stale-epoch candidates (missed-heartbeat counting per the #864 1/min
    cadence) and call `on_heartbeat_stale` per candidate box, and derive
    token-warning candidates (2h lead; F6's "no rotation since the last
@@ -137,6 +164,13 @@ cadence the request path cannot supply.
 
 ## 4. What this does not claim
 
+- The per-minute cron trigger registration on the plane Worker (D66)
+  and the `deploy_worker.py` cron-trigger declaration + staging smoke
+  (D72) are not this slice's: they are tracked in #1069, which keeps
+  #1063 open until the "without a human driving it" half of the
+  acceptance criterion lands. A sweep handler that runs proves nothing
+  about the trigger registration — the silently-unwired failure mode
+  D72 names.
 - The sender loop (#967 remainder) is still unbuilt: a sweep-fired page
   lands in the outbox; nothing yet fans it out to devices. The #1063
   acceptance criterion is met when the page exists in the outbox —
