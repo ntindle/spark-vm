@@ -98,8 +98,9 @@ cadence the request path cannot supply.
 - **D73. One clock, one read, pure arithmetic.** The sweep takes `now`
   once (epoch seconds, UTC). `created_at`/`expires_at` on the #872
   record are epoch ints, so due-ness is epoch arithmetic — the halved
-  TTL is fractional in the SQL (`(expires_at - created_at) / 2` yields
-  a REAL), which is numerically harmless — with no ISO parsing in the
+  TTL `(expires_at - created_at) / 2` is INTEGER division in SQLite
+  (verified: `601/2 → 300`), which over-selects by at most half a
+  second in the safe direction per D68 — with no ISO parsing in the
   hot path. The D59 adapter's normalization (epoch → ISO) stays in the
   plane-side `get_record` adapter (§3.2) where the #969 docstring
   already places it; the sweep does not duplicate it.
@@ -110,6 +111,17 @@ cadence the request path cannot supply.
   docstring's D2 restatement — the sweep's job is the cadence, not the
   derivation. The window is armed by `queued|accepted` rows so the sender
   loop's delete-on-terminal (D50) cannot evaporate it mid-sweep.
+- **D75. Truncation is self-healing.** The candidate hint additionally
+  anti-joins approvals whose reminder page already exists in
+  `push_send_results` — the boundary's outcome-blind dedup fast-path,
+  mirrored in SQL on `box_id || char(0) || aid` (the exact page-key
+  encoding). Every excluded candidate would have returned `duplicate`
+  — no page, no audit, no state change — so the exclusion is
+  behavior-preserving, and a truncated sweep's remainder is actually
+  reached on the next tick instead of the already-processed rows
+  re-dominating the first pages. The `page_size × max_pages` cap stays
+  a capacity assumption (peak due-reminders/minute); repeated
+  truncation is an operator alert.
 
 ## 3. What the build slice implements (#1063)
 

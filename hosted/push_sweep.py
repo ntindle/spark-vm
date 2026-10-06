@@ -5,29 +5,36 @@ The push lane's paging policy exists and is tested (`hosted/push_events.py`:
 `on_token_expiry_warning`), but nothing calls it. This module is the
 cadence that calls the policy: one sweep reads the plane's D1 database
 (the #988 contract tables plus the #872 approvals record), runs the
-passes in D67 order, and lets the policy, the gate-1 re-read (D59/D12),
-and the enqueue boundary (`hosted/push_enqueue.py`, D50-D57) make every
-timing, dedup, and budget decision.
+passes in order — reminders, then digests, then the cadence-driven
+watchers — and lets the policy, the gate-1 re-read (D59/D12), and the
+enqueue boundary (`hosted/push_enqueue.py`, D50-D57) make every timing,
+dedup, and budget decision.
 
-Decisions D66-D74 live in `docs/PUSH_SWEEP_SCHEDULER_DESIGN.md`; this
+Decisions D66-D75 live in `docs/PUSH_SWEEP_SCHEDULER_DESIGN.md`; this
 module is that doc's §3 build slice. The points the doc pins on the
-plane worker (the `scheduled` cron trigger, D66; the deploy-side
-trigger registration check, D72) are caller/operator work — the
-sweep's job is the candidate selection and the pass order, nothing
-about how the worker is invoked.
+plane worker — the per-minute `scheduled` cron trigger (D66) and the
+deploy-side trigger-registration check (D72) — are tracked in #1069
+(the plane-workspace cron-trigger wiring); the sweep's job is the
+candidate selection and the pass order, and #1063 stays open until
+#1069 lands the "without a human driving it" half of the acceptance
+criterion.
 
 Design summary (see the design doc for the full D-series):
 
-- **Two passes per sweep, reminders first, digests second (D67).** A
-  reminder that tips an owner over budget coalesces into the digest in
-  the same sweep (D10) — the only ordering that cannot strand counts.
-  Overlapping sweeps are safe, not prevented: the D57 page-once index
-  and the idempotent D61 `suppressed_terminal` audit make a second
-  concurrent sweep a no-op (D69, same discipline as the #874 ingest).
+- **Three passes per sweep: reminders, digests, watchers (D67, D74).**
+  A reminder that tips an owner over budget coalesces into the digest
+  in the same sweep (D10) — the only ordering that cannot strand
+  counts. The watchers (D74/D63) run last. Overlapping sweeps are safe,
+  not prevented: the D57 page-once index and the idempotent D61
+  `suppressed_terminal` audit make a second concurrent sweep a no-op
+  (D69, same discipline as the #874 ingest).
 - **The candidate SELECT is a hint, not a decision (D68).** The sweep
   over-selects on purpose; the policy's gate-1 re-read is the timing
   decision, the boundary's page-once dedup is the never-double-page
-  guarantee. The sweep writes no lease rows.
+  guarantee. The sweep writes no lease rows. Truncation is self-healing
+  (D75): candidates whose reminder page already exists are anti-joined
+  out, so a truncated sweep's remainder is actually reached next tick
+  instead of re-dominating the first pages as duplicates.
 - **The sweep never pre-checks the D10 budget (D70).** Every due page
   goes through `enqueue_page`; pre-checking would TOCTOU the atomic
   reservation and invent a second, racing budget ledger.
@@ -50,11 +57,17 @@ D2 (restated, fail-closed): `owner_principal` is resolved from the
 plane's enrollment registry via the injected `resolve_owner(box_id)` —
 never from a box assertion, never from the approvals row. A missing or
 misbehaving resolver is a ValueError, not a guessed owner.
+
+Acceptance reading (the D9 criterion, sliced): a due reminder produces
+exactly one `queued` disposition; a decided/expired approval is never a
+candidate, so it produces zero pages and zero audit rows (operator
+visibility is the approvals record itself); a pending approval that is
+terminal only by the clock (`now >= expires_at`) reaches gate-1 and
+writes exactly one idempotent `suppressed_terminal` audit row (D61).
 """
 
 from __future__ import annotations
 
-import sqlite3
 from collections import namedtuple
 from datetime import datetime, timezone
 
@@ -65,7 +78,10 @@ from hosted import push_events
 REMINDER_MIN_TTL_SECONDS = 300
 
 # D69 — bounded work per sweep: the candidate query pages instead of
-# scanning the whole approvals table, and pages are capped.
+# scanning the whole approvals table, and pages are capped. The cap is
+# a capacity assumption, not a correctness bound: page_size*max_pages
+# must exceed peak due-reminders/minute; repeated truncation is an
+# operator alert (the D75 anti-join keeps truncation self-healing).
 DEFAULT_PAGE_SIZE = 100
 DEFAULT_MAX_PAGES = 100
 
@@ -75,9 +91,14 @@ SweepSummary = namedtuple(
      "candidates_seen", "pages_truncated", "reminders_enabled"])
 # Each of reminders/digests/stale_watchers/token_warnings is a dict
 # disposition -> count, or {"skipped": True} when the pass did not run.
-# candidates_seen counts reminder candidates pulled from the approvals
-# table; pages_truncated is True when max_pages stopped the reminder
-# pass early (the remainder stays due for the next sweep).
+
+ReminderPassResult = namedtuple(
+    "ReminderPassResult",
+    ["dispositions", "candidates_seen", "pages_truncated"])
+# The reminders pass keeps its meta out of the disposition map: the
+# per-pass map is disposition -> count only; candidates_seen and
+# pages_truncated ride alongside, and sweep_once copies them onto the
+# SweepSummary's dedicated fields.
 
 
 def _utcnow(now=None):
@@ -134,10 +155,12 @@ def make_record_adapter(conn, now):
         {"created_at": <full ISO-8601>, "ttl_seconds": <int>,
          "terminal": <bool>}
 
-    `now` is the sweep's single clock reading (D73); a missing row
-    returns None (the policy reports `no_record`); a corrupt row is a
-    ValueError — a sweep must never silently skip a record whose timing
-    cannot be trusted (D59).
+    Signature is `(box_id, aid)` — the sweep's adapter shape, since the
+    candidate carries both; the sweep bridges it per-candidate into the
+    policy's one-arg D59 reader. `now` is the sweep's single clock
+    reading (D73); a missing row returns None (the policy reports
+    `no_record`); a corrupt row is a ValueError — a sweep must never
+    silently skip a record whose timing cannot be trusted (D59).
     """
     moment = _utcnow(now)
     moment_epoch = moment.timestamp()
@@ -189,6 +212,15 @@ def _reminder_candidates(conn, now_epoch, page_size, max_pages):
     decision. Keyset pagination ordered by (box_id, aid) keeps each
     query bounded (D69); stops after max_pages and reports truncation
     so the remainder stays due for the next sweep.
+
+    D75 — self-healing truncation: the hint additionally anti-joins
+    candidates whose reminder page already exists in
+    `push_send_results` (the boundary's outcome-blind dedup fast-path,
+    mirrored on `box_id || char(0) || aid`). Every excluded candidate
+    would have returned `duplicate` — no page, no audit, no state
+    change — so the exclusion is behavior-preserving, and a truncated
+    sweep's remainder is actually reached next tick instead of the
+    already-processed rows re-dominating the first pages.
     """
     last_box, last_aid = None, None
     pages = 0
@@ -201,7 +233,14 @@ def _reminder_candidates(conn, now_epoch, page_size, max_pages):
         where = (
             "WHERE status = 'pending' AND decision_seq IS NULL"
             " AND created_at + (expires_at - created_at) / 2 <= ?"
-            " AND (expires_at - created_at) >= ?")
+            " AND (expires_at - created_at) >= ?"
+            " AND NOT EXISTS ("
+            "  SELECT 1 FROM push_send_results r"
+            "  WHERE r.box_id = approvals.box_id"
+            "    AND r.event_kind = 'reminder'"
+            "    AND r.event_key ="
+            "        approvals.box_id || char(0) || approvals.aid"
+            ")")
         params = [now_epoch, REMINDER_MIN_TTL_SECONDS]
         if last_box is not None:
             where += " AND (box_id > ? OR (box_id = ? AND aid > ?))"
@@ -221,21 +260,23 @@ def _reminder_candidates(conn, now_epoch, page_size, max_pages):
     yield {"__meta__": {"seen": seen, "truncated": truncated}}
 
 
-def sweep_reminders(conn, *, now=None, resolve_owner, get_record=None,
+def sweep_reminders(conn, *, now=None, resolve_owner, record_adapter=None,
                     page_size=DEFAULT_PAGE_SIZE,
                     max_pages=DEFAULT_MAX_PAGES,
                     reminders_enabled=True):
-    """Pass 1: due reminders (D67, D68, D69, D70).
+    """Pass 1: due reminders (D67, D68, D69, D70, D75).
 
     For every candidate the sweep calls the policy's
     `maybe_enqueue_reminder` with the D49 adapter (the D59 dict bridge)
     — the sweep never re-implements timing, dedup, or budget (D70).
-    Returns a dict disposition -> count, plus "skipped" when the pass
-    is gated off (D71).
+    `record_adapter` is the sweep's two-arg `(box_id, aid)` adapter
+    (default: the built-in D49 adapter over the approvals table).
+    Returns a ReminderPassResult: the disposition -> count map plus
+    the pass meta (kept out of the map).
     """
-    _require_resolve_owner(resolve_owner)
     if not reminders_enabled:
-        return {"skipped": True}
+        return ReminderPassResult({"skipped": True}, 0, False)
+    _require_resolve_owner(resolve_owner)
     if not isinstance(page_size, int) or isinstance(page_size, bool) \
             or page_size <= 0:
         raise ValueError("page_size must be a positive int")
@@ -244,14 +285,15 @@ def sweep_reminders(conn, *, now=None, resolve_owner, get_record=None,
         raise ValueError("max_pages must be a positive int")
     moment = _utcnow(now)
     now_epoch = moment.timestamp()
-    adapter = get_record if get_record is not None else \
+    adapter = record_adapter if record_adapter is not None else \
         make_record_adapter(conn, moment)
     counts = {}
-    meta = {"seen": 0, "truncated": False}
+    seen, truncated = 0, False
     for page in _reminder_candidates(conn, now_epoch, page_size,
                                      max_pages):
         if isinstance(page, dict):
-            meta = page["__meta__"]
+            seen = page["__meta__"]["seen"]
+            truncated = page["__meta__"]["truncated"]
             break
         for box_id, aid in page:
             owner_principal = _resolve_owner(resolve_owner, box_id)
@@ -261,9 +303,7 @@ def sweep_reminders(conn, *, now=None, resolve_owner, get_record=None,
                 get_record=lambda a, _b=box_id: adapter(_b, a),
                 now=moment)
             counts[r.disposition] = counts.get(r.disposition, 0) + 1
-    counts["_candidates_seen"] = meta["seen"]
-    counts["_pages_truncated"] = meta["truncated"]
-    return counts
+    return ReminderPassResult(counts, seen, truncated)
 
 
 def sweep_digests(conn, *, now=None):
@@ -332,7 +372,7 @@ def sweep_watchers(conn, *, now=None, resolve_owner=None,
     return {"stale": stale_counts, "token_warnings": warning_counts}
 
 
-def sweep_once(conn, *, now=None, resolve_owner, get_record=None,
+def sweep_once(conn, *, now=None, resolve_owner, record_adapter=None,
                page_size=DEFAULT_PAGE_SIZE, max_pages=DEFAULT_MAX_PAGES,
                reminders_enabled=True, derive_stale=None,
                derive_token_warnings=None):
@@ -340,29 +380,31 @@ def sweep_once(conn, *, now=None, resolve_owner, get_record=None,
 
     `now` is taken once and threaded through every pass (D73).
     `resolve_owner(box_id)` is required (D2) whenever a pass needs an
-    owner; `get_record` overrides the built-in D49 adapter (tests);
+    owner; `record_adapter` overrides the built-in D49 adapter (tests);
     the watchers fire only when their derivations are wired.
 
     Returns a SweepSummary. The D9 acceptance criterion reads off it:
     a due reminder produces exactly one `queued` disposition; a
-    decided/expired approval produces zero pages and exactly one
-    idempotent `superseded_terminal` audit (D61).
+    decided/expired approval is never a candidate, so it produces zero
+    pages and zero audit rows; a pending approval terminal only by the
+    clock writes exactly one idempotent `superseded_terminal` audit
+    row (D61).
     """
     moment = _utcnow(now)
-    reminders = sweep_reminders(
+    rem = sweep_reminders(
         conn, now=moment, resolve_owner=resolve_owner,
-        get_record=get_record, page_size=page_size, max_pages=max_pages,
-        reminders_enabled=reminders_enabled)
+        record_adapter=record_adapter, page_size=page_size,
+        max_pages=max_pages, reminders_enabled=reminders_enabled)
     digests = sweep_digests(conn, now=moment)
     watchers = sweep_watchers(
         conn, now=moment, resolve_owner=resolve_owner,
         derive_stale=derive_stale,
         derive_token_warnings=derive_token_warnings)
     return SweepSummary(
-        reminders=reminders,
+        reminders=rem.dispositions,
         digests=digests,
         stale_watchers=watchers["stale"],
         token_warnings=watchers["token_warnings"],
-        candidates_seen=reminders.get("_candidates_seen", 0),
-        pages_truncated=bool(reminders.get("_pages_truncated", False)),
+        candidates_seen=rem.candidates_seen,
+        pages_truncated=rem.pages_truncated,
         reminders_enabled=reminders_enabled)

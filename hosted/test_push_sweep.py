@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS push_digest_state (
 DDL_PAGE_ONCE_INDEX = """
 CREATE UNIQUE INDEX IF NOT EXISTS idx_push_send_results_page_once
   ON push_send_results(box_id, event_kind, event_key)
-  WHERE outcome IN ('queued', 'suppressed_budget');
+  WHERE outcome IN ('queued', 'suppressed_budget', 'suppressed_terminal');
 """
 
 T0 = datetime(2026, 10, 5, 12, 0, 0, tzinfo=timezone.utc)
@@ -139,19 +139,23 @@ def test_due_reminder_pages_exactly_once(conn):
     s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
     assert s.reminders.get("queued") == 1
     assert len(_queued(conn, "reminder")) == 1
-    # Second sweep: the boundary's page-once dedup reports duplicate,
-    # never a second page.
+    # Second sweep: the D75 anti-join excludes the already-paged
+    # reminder from candidates (it would have returned `duplicate`
+    # from the boundary) — still exactly one page, never a second.
     s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
-    assert s2.reminders.get("duplicate") == 1
+    assert s2.reminders == {}
+    assert s2.candidates_seen == 0
     assert len(_queued(conn, "reminder")) == 1
 
 
-def test_decided_approval_pages_zero_times_with_idempotent_audit(conn):
+def test_decided_approval_pages_zero_times_no_audit(conn):
+    # Decided rows are never candidates (the D68 hint's status filter),
+    # so gate-1 never runs: zero pages AND zero audit rows. Operator
+    # visibility for decided approvals is the approvals record itself.
     _file_approval(conn, "box-1", "aid-1", status="approved",
                    decision="approve", decision_seq=1)
     reg = _registry({"box-1": "owner-1"})
     s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
-    # Decided rows are not candidates (status filter) — no pages.
     assert _queued(conn) == []
     assert _outcome_count(conn, "suppressed_terminal") == 0
     assert s.candidates_seen == 0
@@ -160,8 +164,11 @@ def test_decided_approval_pages_zero_times_with_idempotent_audit(conn):
 def test_terminal_by_clock_writes_exactly_one_audit_row(conn):
     # The candidate SELECT is a hint (D68): this row matches the hint
     # (status pending, no decision) but the gate-1 re-read finds it
-    # terminal because now >= expires_at. created == EPOCH_T0-700,
-    # ttl 600 -> reminder_at = EPOCH_T0-400 <= now: due.
+    # terminal because now >= expires_at. Only this clock-terminal
+    # class reaches gate-1 and earns the D61 audit — decided/expired
+    # rows never do (see the test above).
+    # created == EPOCH_T0-700, ttl 600 -> reminder_at = EPOCH_T0-400
+    # <= now: due.
     _file_approval(conn, "box-1", "aid-1", ttl=600, age=700)
     reg = _registry({"box-1": "owner-1"})
     s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
@@ -256,10 +263,38 @@ def test_max_pages_truncates_leaves_rest_for_next_sweep(conn):
     assert s.candidates_seen == 2
     assert s.pages_truncated is True
     assert s.reminders.get("queued") == 2
-    # The remainder stays due: the next sweep picks it up.
+    # D75 self-healing: the D75 anti-join excludes the two already-
+    # paged reminders, so the next sweep reaches the remainder instead
+    # of re-dominating the first pages as duplicates.
     s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
                                page_size=10)
     assert s2.reminders.get("queued") == 3
+    assert s2.reminders.get("duplicate") is None
+    assert s2.pages_truncated is False
+
+
+def test_resolver_failure_mid_sweep_is_fail_closed_and_resumable(conn):
+    # box-0 pages, then the registry fails on box-1: the sweep raises
+    # fail-closed with box-0's page committed; the next sweep with a
+    # healthy registry resumes box-1, and box-0 dedups cleanly.
+    for i in range(2):
+        _file_approval(conn, "box-%d" % i, "aid-%d" % i)
+
+    def flaky(box_id):
+        if box_id == "box-1":
+            raise RuntimeError("registry down")
+        return "owner-1"
+
+    with pytest.raises(RuntimeError):
+        push_sweep.sweep_once(conn, now=T0, resolve_owner=flaky)
+    assert len(_queued(conn, "reminder")) == 1
+    reg = _registry({"box-0": "owner-1", "box-1": "owner-1"})
+    s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    # box-1 pages; box-0 is anti-joined out (already paged — it would
+    # have deduped at the boundary). Exactly the two pages, no more.
+    assert s2.reminders.get("queued") == 1
+    assert s2.candidates_seen == 1
+    assert len(_queued(conn, "reminder")) == 2
 
 
 # --- Pass 2: digests --------------------------------------------------------

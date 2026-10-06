@@ -56,10 +56,14 @@ Decisions (continuing the push lane's D-series; D50-D57 are #990's):
   is operator-visible, never owner-paged. This is what makes "a decided
   approval never gets a post-decision reminder" (#969 acceptance)
   auditable rather than aspirational. Two properties the periodic D9
-  sweep demands: the write is idempotent (a SELECT on the audit key
-  precedes the INSERT, so a terminal approval accrues exactly one audit
-  row no matter how many sweep passes observe it), and the audit row
-  carries its own key (the page key + a U+0000 "superseded" suffix) —
+  sweep demands: the write is idempotent — the D57 partial unique index
+  covers `suppressed_terminal` (the audit key is the page key + a
+  U+0000 "superseded" suffix, so it never collides with page or
+  attempt rows), and a lost INSERT race surfaces as IntegrityError,
+  which the writer tolerates — so a terminal approval accrues exactly
+  one audit row no matter how many overlapping sweeps observe it; and
+  the audit row carries its own key (the page key + a U+0000 "superseded"
+  suffix) —
   sharing the page's exact key would let the boundary's outcome-blind
   dedup fast-path misreport a later page attempt as "duplicate" though
   no page ever went out.
@@ -152,6 +156,12 @@ _OUTCOME_SUPPRESSED_TERMINAL = "suppressed_terminal"
 
 def _utcnow(now=None):
     moment = now if now is not None else datetime.now(timezone.utc)
+    if not isinstance(moment, datetime):
+        # Fail-loud, not AttributeError: a non-datetime clock reading
+        # is a caller bug, and the sweep's D73 epoch form is normalized
+        # by the caller's own _utcnow before it reaches the policy.
+        raise ValueError("now must be a datetime, not %r"
+                         % (type(moment).__name__,))
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(timezone.utc)
@@ -237,15 +247,30 @@ def _parse_reminder_record(record, aid):
 
 def _write_suppressed_terminal(conn, at, owner_principal, box_id,
                                event_kind, event_key):
-    """Gate-1 superseded audit row (D61, D56e shape)."""
-    with conn:
-        conn.execute(
-            "INSERT INTO push_send_results"
-            " (at, owner_principal, box_id, device, event_kind, event_key,"
-            "  outcome, http_status, latency_ms, sent_at, vapid_key_id)"
-            " VALUES (?, ?, ?, '', ?, ?, ?, NULL, NULL, NULL, NULL)",
-            (at, owner_principal, box_id, event_kind, event_key,
-             _OUTCOME_SUPPRESSED_TERMINAL))
+    """Gate-1 superseded audit row (D61, D56e shape).
+
+    Idempotent under overlapping sweeps (D69): the D57 partial unique
+    index covers `suppressed_terminal` (the audit key is the page key
+    + a U+0000 "superseded" suffix, so it never collides with page or
+    attempt rows), and a lost INSERT race surfaces as IntegrityError —
+    the row already exists, which is exactly the idempotency the audit
+    promises. The SELECT fast-path in the caller stays for the common
+    sequential case.
+    """
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO push_send_results"
+                " (at, owner_principal, box_id, device, event_kind, event_key,"
+                "  outcome, http_status, latency_ms, sent_at, vapid_key_id)"
+                " VALUES (?, ?, ?, '', ?, ?, ?, NULL, NULL, NULL, NULL)",
+                (at, owner_principal, box_id, event_kind, event_key,
+                 _OUTCOME_SUPPRESSED_TERMINAL))
+    except sqlite3.IntegrityError:
+        # Lost the race: another sweep wrote this audit row first.
+        # Nothing to do — the row exists, which is the idempotent
+        # outcome.
+        pass
 
 
 def on_approval_filed(conn, *, box_id, owner_principal, aid, now=None):
