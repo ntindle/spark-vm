@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Push-sender schema contract amendments (#1061): the enqueue boundary's
+  `queued` outbox outcome is documented alongside `suppressed_budget` /
+  `suppressed_terminal` — its lifecycle (inserted by the enqueue call,
+  selected by the sender loop, deleted on the terminal attempt) and its
+  hold on the page-budget reservation — and the page-once partial unique
+  index lands as an operator-run migration statement (the exact
+  statement the enqueue build shipped), so the contract stays the
+  operator's DDL source of truth. (#1079)
 - Spend-cap enforcement gap analysis (#908): a vision-vs-state writeup of
   the hosted product's spend-cap lane — the missing spend ledger,
   pre-provision cap check, and destroy-on-budget-exceed worker — pinning
