@@ -42,6 +42,12 @@ jobs:
           echo "SPARKVM_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "SPARKVM_VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=sparkvm-golden:$(cat VERSION)+$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+      - name: Generate the image manifest into the build context
+        # The recipe COPYs the manifest in — it cannot be generated in-image
+        # (the build context excludes .git, and the generator needs git
+        # metadata to name the SHA). Cleaned up after the build so the tree
+        # stays pristine.
+        run: harness/generate-image-manifest.sh --out deploy/golden-image/image-manifest.json
       - name: Build the recipe
         run: |
           docker buildx build --load \
@@ -49,6 +55,9 @@ jobs:
             --build-arg "SPARKVM_VERSION=${SPARKVM_VERSION}" \
             --build-arg "SPARKVM_SHA=${SPARKVM_SHA}" \
             -t "${IMAGE_TAG}" .
+      - name: Remove the build-context manifest
+        if: always()
+        run: rm -f deploy/golden-image/image-manifest.json
       - name: Baked-secrets scan of the built image (gate Step 0b)
         # Exit 1 is a gate refusal (baked secret material); exit 2 is an
         # invocation error. Either fails the job — the image does not publish.

@@ -95,11 +95,71 @@ def test_dockerfile_oci_labels():
     assert 'org.opencontainers.image.revision="$SPARKVM_SHA"' in text
 
 
-def test_dockerfile_runs_gate_tooling():
-    """The recipe generates + preflights the manifest and installs the gate
-    fixture — the D-P1 artifact and the gate procedure's fixture step."""
+def test_dockerfile_copies_host_generated_manifest():
+    """The manifest is generated on the host (build-image.sh / CI) and
+    COPY'd in — it cannot be generated in-image (the build context excludes
+    .git, and the generator needs git metadata to name the SHA). The
+    in-image preflight stays."""
     text = _dockerfile_text()
-    assert "harness/generate-image-manifest.sh" in text
+    assert "COPY deploy/golden-image/image-manifest.json /etc/sparkvm/image-manifest.json" in text
+    assert "generate-image-manifest.sh" not in text
+    assert "check-image-manifest.sh" in text
+
+
+def _pins_conf():
+    pins = {}
+    with open(os.path.join(REPO_ROOT, "scripts", "self_update_pins.conf"), encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = (p.strip() for p in line.split("=", 1))
+            pins[k] = v
+    return pins
+
+
+def test_recipe_pins_match_pins_conf():
+    """The recipe's tool pins must equal scripts/self_update_pins.conf —
+    the pins are bumped deliberately with a changelog note, and the recipe
+    follows the same discipline instead of drifting."""
+    pins = _pins_conf()
+    text = _dockerfile_text()
+    m = re.search(r"^ARG CUA_DRIVER_VERSION=(\S+)", text, re.M)
+    assert m, "ARG CUA_DRIVER_VERSION default missing"
+    assert m.group(1) == pins["cua-driver"], (m.group(1), pins["cua-driver"])
+    assert f'"playwright=={pins["playwright"]}"' in text
+
+
+def test_build_image_stages_context_manifest(tmp_path):
+    """The driver stages the manifest into the build context before docker
+    runs (the recipe COPYs it in) and arranges its removal so the tree stays
+    clean for the next run."""
+    with open(BUILD_IMAGE, encoding="utf-8") as f:
+        text = f.read()
+    assert "deploy/golden-image/image-manifest.json" in text
+    assert "trap" in text and "CONTEXT_MANIFEST" in text
+
+
+def test_build_image_refuses_duplicate_recipe_default(tmp_path):
+    """Two defaulted ARG SPARKVM_VERSION lines make the effective default
+    ambiguous (the first wins silently) — the driver must refuse."""
+    def add_dup(src, dst):
+        with open(src, encoding="utf-8") as f:
+            t = f.read()
+        with open(dst, "w", encoding="utf-8") as f:
+            f.write(t + "\nARG SPARKVM_VERSION=0.0.0\n")
+    repo, _ = _scratch_repo(tmp_path, dockerfile_transform=add_dup)
+    r = _run_driver(repo, "--preflight-only")
+    assert r.returncode != 0
+    assert "exactly one" in r.stderr
+
+
+def test_dockerfile_runs_gate_tooling():
+    """The recipe preflights the baked manifest and installs the gate
+    fixture — the D-P1 artifact and the gate procedure's fixture step.
+    (The manifest is generated on the host and COPY'd in — see
+    test_dockerfile_copies_host_generated_manifest.)"""
+    text = _dockerfile_text()
     assert "harness/check-image-manifest.sh" in text
     assert "harness/install-gate-fixture.sh" in text
     assert "proxy/deploy.sh --no-restart" in text
@@ -193,12 +253,15 @@ def test_supervisord_commands_mirror_units():
 # real ARG default, the real version checker, the real manifest scripts).
 
 
-def _scratch_repo(tmp_path, version="0.6.0", dirty=False):
+def _scratch_repo(tmp_path, version="0.6.0", dirty=False, dockerfile_transform=None):
     repo = tmp_path / "scratch"
     (repo / "deploy" / "golden-image").mkdir(parents=True)
     (repo / "harness").mkdir()
     (repo / "scripts").mkdir()
-    shutil.copy(DOCKERFILE, repo / "deploy" / "golden-image" / "Dockerfile")
+    if dockerfile_transform is None:
+        shutil.copy(DOCKERFILE, repo / "deploy" / "golden-image" / "Dockerfile")
+    else:
+        dockerfile_transform(DOCKERFILE, repo / "deploy" / "golden-image" / "Dockerfile")
     for name in ("generate-image-manifest.sh", "check-image-manifest.sh"):
         shutil.copy(os.path.join(REPO_ROOT, "harness", name), repo / "harness" / name)
     shutil.copy(

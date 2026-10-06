@@ -97,14 +97,28 @@ RUN python3 -m venv /home/swapd/.venvs/mitm \
  && cd /opt/sparkvm && ./proxy/deploy.sh --no-restart
 
 # --- playwright (pinned to scripts/self_update_pins.conf) -------------------
+# The tolerance is scoped to the ONE flaky step (install-deps): a trailing
+# `|| true` on the whole chain would mask a venv/pip/chromium failure and
+# ship an image silently missing the browser stack.
 RUN python3 -m venv /opt/venvs/playwright \
  && /opt/venvs/playwright/bin/pip install -q "playwright==1.62.0" \
  && /opt/venvs/playwright/bin/playwright install chromium --with-deps \
- && /opt/venvs/playwright/bin/playwright install-deps chromium || true
+ && { /opt/venvs/playwright/bin/playwright install-deps chromium \
+      || echo "playwright install-deps failed; continuing (chromium --with-deps already ran)" >&2; }
+
+# --- CUA desktop stack (agent skeleton) -------------------------------
+# cua/bin (cua-desktop.sh supervisor, cua-bridge.py, keepalive) is the
+# orchestration the supervisord cua-stack program drives.
+RUN mkdir -p /home/agent/cua \
+ && cp -r /opt/sparkvm/cua/. /home/agent/cua/ \
+ && chown -R agent:agent /home/agent/cua \
+ && mkdir -p /home/agent/.local/bin /home/agent/.local/share/spark-vm \
+ && chown -R agent:agent /home/agent/.local
 
 # --- cua-driver (pinned binary, checksum-verified — same discipline as
 # --- deploy/toolset-update.sh's cua-driver layer) -----------------------------
-# Installs into the skeleton agent home's cua/bin (cua/ dir is copied below).
+# Installed AFTER the cua/ copy above: a cua/bin/cua-driver file in the repo
+# tree must never clobber the checksum-verified binary.
 RUN set -e; \
     arch="$(uname -m)"; \
     case "$arch" in x86_64) a=x86_64 ;; aarch64) a=aarch64 ;; *) echo "unsupported arch $arch" >&2; exit 1 ;; esac; \
@@ -125,16 +139,7 @@ RUN set -e; \
     chmod 0755 /home/agent/cua/bin/cua-driver; \
     chown -R agent:agent /home/agent/cua
 
-# --- CUA desktop stack + cred-ui (agent skeleton) -------------------------------
-# cua/bin (cua-desktop.sh supervisor, cua-bridge.py, keepalive) is the
-# orchestration the supervisord cua-stack program drives; the driver binary
-# above landed in the same bin dir.
-RUN mkdir -p /home/agent/cua \
- && cp -r /opt/sparkvm/cua/. /home/agent/cua/ \
- && chown -R agent:agent /home/agent/cua \
- && chmod 0755 /home/agent/cua/bin/cua-driver \
- && mkdir -p /home/agent/.local/bin /home/agent/.local/share/spark-vm \
- && chown -R agent:agent /home/agent/.local
+# --- cred-ui runtime (agent skeleton) ------------------------------------------
 # cred-ui runtime installs outside the checkout (cred-ui/install.sh):
 # install to the skeleton agent home; first boot instantiates tenant users
 # from /etc/skel (see below).
@@ -151,11 +156,15 @@ RUN CRED_UI_INSTALL_DIR=/home/agent/.local/share/spark-vm/cred-ui \
 RUN /opt/sparkvm/harness/install-gate-fixture.sh
 
 # --- image manifest (the D-P1 artifact) --------------------------------------
-# Records image_version (full SHA) + built_from_version (release tag) +
-# baked[] + registry_paths + units. check-image-manifest.sh preflights it
-# at gate time and the provision-time injector preflights it before box-live.
-RUN /opt/sparkvm/harness/generate-image-manifest.sh --out /etc/sparkvm/image-manifest.json \
- && /opt/sparkvm/harness/check-image-manifest.sh /etc/sparkvm/image-manifest.json \
+# The manifest is generated on the HOST by build-image.sh (or the CI job)
+# from the clean tree and copied in — it CANNOT be generated inside the
+# image: the build context excludes .git (see .dockerignore) and the
+# generator needs git metadata to name the SHA. Generating it in-image
+# would fail the build (or record a wrong SHA that fails the preflight).
+# The preflight below proves the baked manifest names the build pin; the
+# provision-time injector preflights it again before box-live.
+COPY deploy/golden-image/image-manifest.json /etc/sparkvm/image-manifest.json
+RUN /opt/sparkvm/harness/check-image-manifest.sh /etc/sparkvm/image-manifest.json \
       --expect-version "$SPARKVM_SHA"
 
 # --- skeleton home for first-boot tenant instantiation ------------------------

@@ -10,11 +10,15 @@
 #      itself and passes them as build args — the tree is the pin; there is
 #      no override flag, so a build can never silently bake a different
 #      commit than the one the manifest names;
-#   3. builds the image from that tree;
-#   4. runs the baked-secrets scan INSIDE the built image (the gate
+#   3. generates the image manifest into the build context (the recipe COPYs
+#      it in — it cannot be generated in-image because the build context
+#      excludes .git and the generator needs git metadata), removed by a
+#      trap so the tree stays clean;
+#   4. builds the image from that tree;
+#   5. runs the baked-secrets scan INSIDE the built image (the gate
 #      procedure's Step 0b — exit 1 is a build failure, not a warning);
-#   5. generates + preflights the image manifest (gate Step 0);
-#   6. emits the gate-record skeleton (automated steps filled, the
+#   6. preflights the baked manifest (gate Step 0);
+#   7. emits the gate-record skeleton (automated steps filled, the
 #      interactive round-trip steps left pending — the operator runs
 #      docs/GOLDEN_IMAGE_GATE_PROCEDURE.md before publish).
 #
@@ -66,6 +70,11 @@ VERSION="$(cat "$REPO/VERSION")" || die "cannot read VERSION"
 # The recipe's own ARG default must agree with the tree: a recipe that
 # defaults to a different version than the tree being baked is a silent
 # pin — refuse (the Dockerfile RUN check is the second line of defense).
+# Exactly one defaulted ARG may exist: two would make the effective default
+# ambiguous (the first wins silently).
+RECIPE_DEFAULT_COUNT="$(sed -n 's/^ARG SPARKVM_VERSION=//p' "$REPO/deploy/golden-image/Dockerfile" | grep -c .)"
+[ "$RECIPE_DEFAULT_COUNT" -eq 1 ] \
+    || die "expected exactly one ARG SPARKVM_VERSION default in the recipe, found $RECIPE_DEFAULT_COUNT"
 RECIPE_DEFAULT="$(sed -n 's/^ARG SPARKVM_VERSION=//p' "$REPO/deploy/golden-image/Dockerfile" | head -1)"
 [ "$RECIPE_DEFAULT" = "$VERSION" ] \
     || die "recipe ARG default '$RECIPE_DEFAULT' != tree VERSION '$VERSION' — bump the Dockerfile deliberately (D-P1), never silently"
@@ -147,6 +156,17 @@ fi
 
 command -v docker >/dev/null 2>&1 || die "docker not found — the image builds on the operator's build host or in CI"
 
+# --- 2b. manifest into the build context -----------------------------------------
+# The recipe COPYs the manifest in — it cannot generate it in-image (the
+# build context excludes .git, and the generator needs git metadata to name
+# the SHA). Generated here, after the dirty-tree preflight above, and removed
+# by the trap below so the tree stays clean for the next run.
+CONTEXT_MANIFEST="$REPO/deploy/golden-image/image-manifest.json"
+cleanup_context_manifest() { rm -f "$CONTEXT_MANIFEST"; }
+trap cleanup_context_manifest EXIT
+"$REPO/harness/generate-image-manifest.sh" --out "$CONTEXT_MANIFEST"
+echo "build-image: context manifest generated"
+
 # --- 3. build ------------------------------------------------------------------
 echo "build-image: docker build $TAG"
 docker build -f "$REPO/deploy/golden-image/Dockerfile" \
@@ -181,9 +201,12 @@ elif [ "$SCAN_EXIT" -ne 0 ]; then
 fi
 echo "build-image: scan clean (exit 0)"
 
-# --- 5. manifest generate + preflight (gate Step 0) ------------------------------
+# --- 5. manifest preflight (gate Step 0) -------------------------------------------
+# The context manifest (generated pre-build in step 2b) is the D-P1 artifact;
+# preflight it here for the gate record (the recipe preflights the baked
+# copy in-image too).
 MANIFEST="image-manifest-${SHA:0:12}.json"
-"$REPO/harness/generate-image-manifest.sh" --out "$MANIFEST"
+cp "$CONTEXT_MANIFEST" "$MANIFEST"
 "$REPO/harness/check-image-manifest.sh" "$MANIFEST" --expect-version "$SHA" >/dev/null
 echo "build-image: manifest $MANIFEST preflights (exit 0)"
 
