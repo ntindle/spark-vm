@@ -37,10 +37,6 @@ _SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # closing fence, and an unmatched ``` is left alone (classification then
 # falls back to the last-line rule below).
 _FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
-# Markdown blockquote detection: any leading ">" prefix means the line is
-# quoted text, never the agent's own marker — the marker check disqualifies
-# such lines entirely (see classify()).
-_QUOTE_RE = re.compile(r"^(?:>\s*)+")
 
 
 def _clean(s):
@@ -111,25 +107,25 @@ def classify(message):
     body = _FENCE_RE.sub("", message)
     # Split on \n only: \r is a content byte (the sanitizer strips it from
     # the detail), not a protocol line break. splitlines() would let a \r
-    # injection re-cut the message and detach a genuine final-line marker
-    # from the classifier (issue #23 B6 pinning test).
+    # injection PROMOTE a mid-message marker to the final line: in
+    # "prose\rDONE: phantom", splitlines() cuts at \r, making the phantom
+    # the last line, so it classifies done. split("\n") keeps \r inside
+    # the line; strip() removes it at the line ends, so a genuine
+    # "DONE: x\r\n"-terminated marker still binds.
     lines = [l.strip() for l in body.split("\n") if l.strip()]
     if not lines:
         return state, detail
-    # Issue #8: a line the agent merely quoted (markdown blockquote) is
-    # never its own marker. Any leading ">" prefix disqualifies the line
-    # from marker matching — including nested quotes like ">> DONE:",
-    # which unquoting to the bare marker would otherwise misclassify.
-    # (Quoted lines still feed the question tail below; that predates
-    # this fix and question state never closes a job.)
-    last_raw = lines[-1]
-    if _QUOTE_RE.sub("", last_raw) != last_raw:
-        last = None
-    else:
-        last = last_raw
-    if last is not None and last.startswith("BLOCKED:"):
+    # Issue #8: marker matching is structural — startswith() on the last
+    # non-empty line. A quoted line (leading ">") can never satisfy
+    # startswith("BLOCKED:")/startswith("DONE:"), so quoted lines are
+    # excluded structurally; no unquoting or quote-aware branch is needed.
+    # Fences are stripped above. (Quoted lines still feed the question
+    # tail below; that predates this fix and question state never closes
+    # a job.)
+    last = lines[-1]
+    if last.startswith("BLOCKED:"):
         return "blocked", _clean(last[len("BLOCKED:"):].strip())[:500]
-    if last is not None and last.startswith("DONE:"):
+    if last.startswith("DONE:"):
         return "done", _clean(last[len("DONE:"):].strip())[:500]
     tail = lines[-3:]
     # Return the actual question line, not just the last tail line.

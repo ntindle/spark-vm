@@ -6,11 +6,18 @@ BLOCKED: paged the operator on a phantom.
 
 The fix: only the protocol's FINAL line carries the marker ("end turn
 with `BLOCKED: <question>` / `DONE: <summary>` — TOOL_INTERFACE.md),
-fenced code blocks are stripped before classification, and blockquote
-prefixes never count. The six false-positive tests fail against the old
-any-line classifier (verified by running this file against the pre-fix
-hook on a scratch copy — 6 failed, the 4 regression tests below pass on
-both, pinning the preserved behavior).
+and fenced code blocks are stripped before classification. (Quoted lines
+needed no new handling: `startswith` never matched a `>`-prefixed line
+under the old classifier either — the blockquote assertions pin that
+preserved property; they are not fix tests.)
+
+Verified against the pre-fix hook on a scratch copy: 6 of the 10 test
+functions fail on the old any-line classifier — the fenced-preamble,
+mid-message, fenced-marker-at-end, unclosed-fence, final-detail, and
+question cases. The 4 that pass on old pin preserved behavior: the two
+genuine-final-marker cases, the trailing-blank case, and the blockquote
+case (vacuous on old by construction — kept as a guard against any
+future unquoting logic).
 """
 import importlib.machinery
 import importlib.util
@@ -109,3 +116,34 @@ def test_detail_from_final_line_only(hook):
         "DONE: decoy in the middle\nMore prose.\nDONE: the real one")
     assert state == "done"
     assert detail == "the real one"
+
+
+def test_crlf_terminated_marker_still_classified(hook):
+    # \r is a content byte, not a line break: strip() removes it at the
+    # line ends, so a CRLF-terminated genuine marker still binds.
+    state, detail = hook.classify("Done.\r\nDONE: shipped\r\n")
+    assert state == "done"
+    assert detail == "shipped"
+
+
+def test_cr_promotion_attack_not_classified(hook):
+    # splitlines() would cut at the \r, promoting the buried marker to
+    # the final line and classifying a phantom done; split("\n") keeps
+    # the \r inside the line, so the marker stays buried -> idle.
+    assert hook.classify("some prose\rDONE: phantom")[0] == "idle"
+
+
+def test_ansi_in_detail_cleaned(hook):
+    # The marker binds, but the terminal-escape detail never reaches the
+    # event log raw (issue #3's sanitizer discipline).
+    state, detail = hook.classify("Done.\nDONE: ok\x1b[2K")
+    assert state == "done"
+    assert detail == "ok"
+    assert "\x1b" not in detail
+
+
+def test_fenced_question_not_classified(hook):
+    # A "?" inside a fence no longer leaks into the question tail — the
+    # tail runs on the fence-stripped body (behavior change shipped with
+    # the fence stripping; beneficial, previously unadvertised).
+    assert hook.classify("```\nShould I proceed?\n```\nDone.")[0] == "idle"
