@@ -565,13 +565,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
   pending file is consumed by another process in the instant between the
   existence check and the consume: the answer is now refused honestly as
   "not found or already answered" with a distinct audit event, matching
-  the concurrent-answer loser path. (#TBD)
+  the concurrent-answer loser path. (#1068)
 
 - The proxy now leaves an audit note naming the credential (never the
   value) when response-header scrubbing rewrites a `Set-Cookie` for a
   credential the request side cannot swap back into `Cookie` headers —
   so a session that mysteriously breaks after the first request is
-  diagnosable from the audit trail instead of failing silently. (#TBD)
+  diagnosable from the audit trail instead of failing silently. (#1068)
 
 - The waitlist operator test suite is time-bomb-proof (#1051): the
   live-token reinstatement case previously mixed a fixed 2026-09-20
