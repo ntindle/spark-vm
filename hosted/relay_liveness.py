@@ -364,6 +364,10 @@ def emit_frame(*, timeout_s=None, **fields):
     _journal_locked. The daemon's emit path keeps the default: a slow
     collect overlapping an emit is normal contention and still
     serializes; only a genuinely wedged holder trips the loud error.
+    NOTE: timeout_s is reserved — it is never a journaled field, so a
+    caller passing timeout_s as frame data would silently set the
+    lock budget instead of failing schema validation. Frame fields
+    are exactly FRAME_FIELDS.
 
     Returns ``"journaled"`` normally, or ``"dropped"`` when the frame
     carries the prober identity marker — R2's dial prober is
