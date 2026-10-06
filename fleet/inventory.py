@@ -919,7 +919,7 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
 
     # G17 S1: canonicalize each box's audit tail into the update-event
     # journal (the design's S1 sink — the same estate dir the collector
-    # already pulls), then evaluate the four fleet alert rules. A failed
+    # already pulls), then evaluate the five fleet alert rules. A failed
     # event/alert write fails the collect loudly: the operator's
     # contract is the exit code, and a silently un-journaled event would
     # be missing evidence masquerading as silence.
@@ -947,15 +947,19 @@ def cmd_collect(estate_dir, store_dir, box_id_map):
     # between pulls than the tail holds, the lost lines never reach the
     # collector and the truncation hides the loss — the failure events
     # the alert rules page on can vanish silently. The per-box tail-head
-    # watermark detects the break loudly. Warning-class only: promoting
-    # the discontinuity to a fifth alert rule is #1006's remaining
-    # proposal, a deliberate deferral, not an oversight.
-    cont_warnings, cont_err = events.check_tail_continuity(
+    # watermark detects the break; each distinct lost window fires the
+    # fifth S1 alert rule (`tail-discontinuity`) into the alert journal,
+    # page-class (a warning-only signal would be exactly as losable as
+    # the events it reports), alongside the stderr warning.
+    cont_warnings, cont_fired, cont_err = events.check_tail_continuity(
         store_dir, box_contexts, observed_at)
     if cont_err:
         return "tail continuity: %s" % cont_err
     for warning in cont_warnings:
         print("fleet events WARNING: %s" % warning, file=sys.stderr)
+    if cont_fired:
+        print("fleet events: %d tail-discontinuity alert(s) fired"
+              % len(cont_fired))
     print("collected %d %s into %s (%d appended this run; %d journal "
           "lines replayed)"
           % (len(records), "box" if len(records) == 1 else "boxes",

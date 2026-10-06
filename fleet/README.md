@@ -261,12 +261,43 @@ translation table in `events.py`, verified against
   (3) silent wave —
   **disarmed at S1** (every rollout envelope is null; firing it would
   page every healthy idle estate); (4) ≥3 `precheck-fail` on one box in
-  6h. Alerts land in the store's `alerts.jsonl` (deduped on `alert_id`);
+  6h; (5) `tail-discontinuity` — the estate pulls only a *tail* of each
+  box's audit log, and when the previous pull's tail-head is no longer
+  in the pulled tail, lines scrolled out between pulls were never
+  collected (possibly including the failure events the other rules page
+  on): one page-class alert per distinct lost window. Alerts land in
+  the store's `alerts.jsonl` (deduped on `alert_id`);
   `fleet events watch` exits 1 while any alert is unacknowledged — a
   cron or the operator's existing paging consumes it.
 - **Known S1 limits** — session_epoch/rollout/window are null (no
   provisioner record, no G15 waves, no G14 windows); `attested` is always
   false.
+
+### Sizing the audit tail
+
+The tail (`audit-tail.jsonl`) is operator-chosen — the collector's
+continuity watermark (#1006) detects when it was too short, and the
+`tail-discontinuity` alert rule pages on it. Size it so an overflow is
+the exception, not the routine. The numbers below are grounded in
+`deploy/auto-deploy.sh` (the writer of the tailed log):
+
+- The box's updater timer ticks every 10 minutes
+  (`deploy/auto-deploy.timer`, `OnUnitActiveSec=10min`). A quiet check
+  emits exactly 1 audit line (`check`/`noop`).
+- A busy check emits a handful, not a fan-out: the per-component loops
+  (gates, snapshots) abort on the *first* failing component, so there
+  is at most one per-component audit line per check. The measured worst
+  case per check is ~5 lines (`pull-only` + `deploy-fail` +
+  `rolled-back` + `reload-fail`), independent of component count.
+- **Rule of thumb:** `tail_lines ≥ 2 × ceil(pull_interval_min / 10) × 5`
+  — one interval of cover plus a 2× margin over the measured worst case.
+- **Worked example:** hourly pulls → `2 × 6 × 5 = 60` — pull at least
+  100 lines.
+
+When the watermark warns or the alert fires, the tail was undersized
+for the emit volume between those two pulls: raise the tail length (or
+pull more often) and re-check the sizing formula — do not just
+acknowledge the alert and move on.
 
 ## Journal retention (G17 S2)
 

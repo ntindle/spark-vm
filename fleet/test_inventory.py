@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1202,3 +1203,102 @@ def test_tail_continuity_corrupt_watermark_reestablishes(env):
     assert "corrupt" in proc.stderr, proc.stderr
     marks = _watermarks(store)  # valid again
     assert set(marks) == {"tower"}
+
+
+# --- audit-tail discontinuity, fifth S1 alert rule (#1006) ----------------
+
+
+def _alerts(store):
+    path = os.path.join(store, "alerts.jsonl")
+    if not os.path.exists(path):
+        return []
+    with open(path) as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def _expected_tail_discontinuity_id(box_id, prev_head):
+    # Mirrors events._alert's id derivation: uuid5 over
+    # rule|box_id|subcomponent|to|dedup_key, with subcomponent and to
+    # empty for this rule.
+    alert_ns = uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        "https://github.com/ntindle/spark-vm/fleet/alerts")
+    return str(uuid.uuid5(
+        alert_ns, "tail-discontinuity|%s|||%s" % (box_id, prev_head)))
+
+
+def test_tail_discontinuity_fires_page_class_alert(env):
+    # #1006 remaining slice: the discontinuity promotes to a fifth S1
+    # alert rule — the durable paging path (alerts.jsonl + watch), not
+    # just the stderr warning.
+    estate, store = _collect(env, {"tower": {
+        "status": _status_json(), "audit": _tail_lines(5),
+        "snapshot": _snapshot_json(COMMIT_A)}})
+    assert _alerts(store) == []
+    prev_head = _watermarks(store)["tower"]["tail_head_sha256"]
+    # Simulate overflow: the whole tail is replaced by lines the
+    # previous pull never saw.
+    _write_box(estate, "tower", audit=_tail_lines(5, start=100))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "audit-tail discontinuity" in proc.stderr
+    assert "1 tail-discontinuity alert(s) fired" in proc.stdout, proc.stdout
+    rows = _alerts(store)
+    assert len(rows) == 1, rows
+    alert = rows[0]
+    assert alert["schema"] == "fleet-alert/1"
+    assert alert["rule"] == "tail-discontinuity"
+    assert alert["box_id"] == "tower"
+    assert alert["acked"] is False
+    assert "discontinuity" in alert["detail"]
+    assert "tower" in alert["detail"]
+    # The dedup key is the lost window's head hash: one alert per
+    # distinct lost window.
+    assert alert["alert_id"] == _expected_tail_discontinuity_id(
+        "tower", prev_head)
+    # The paging path sees it: `events watch` exits 1 while the alert
+    # is unacknowledged.
+    watch = run_inventory("events", "watch", "--store", store)
+    assert watch.returncode == 1, watch.stdout
+    assert "tail-discontinuity" in watch.stdout
+
+
+def test_tail_discontinuity_dedups_on_recollect(env):
+    # Re-collection after a discontinuity never re-fires: the mark
+    # already advanced, so the same lost window cannot page twice.
+    estate, store = _collect(env, {"tower": {
+        "status": _status_json(), "audit": _tail_lines(5),
+        "snapshot": _snapshot_json(COMMIT_A)}})
+    _write_box(estate, "tower", audit=_tail_lines(5, start=100))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert len(_alerts(store)) == 1
+    # A third collect on the same tail is quiet again: no new warning,
+    # no new alert row.
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "discontinuity" not in proc.stderr
+    assert "tail-discontinuity alert(s) fired" not in proc.stdout
+    assert len(_alerts(store)) == 1
+
+
+def test_tail_discontinuity_second_break_refires(env):
+    # A genuinely new overflow (a new lost window) fires a new alert —
+    # each row is distinct evidence, deduped on the lost head hash.
+    estate, store = _collect(env, {"tower": {
+        "status": _status_json(), "audit": _tail_lines(5),
+        "snapshot": _snapshot_json(COMMIT_A)}})
+    _write_box(estate, "tower", audit=_tail_lines(5, start=100))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert len(_alerts(store)) == 1
+    # A second, disjoint overflow: the re-established head is gone again.
+    _write_box(estate, "tower", audit=_tail_lines(5, start=200))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "audit-tail discontinuity" in proc.stderr
+    rows = _alerts(store)
+    assert len(rows) == 2, rows
+    assert rows[0]["alert_id"] != rows[1]["alert_id"]
+    assert {r["rule"] for r in rows} == {"tail-discontinuity"}
+    assert {r["box_id"] for r in rows} == {"tower"}

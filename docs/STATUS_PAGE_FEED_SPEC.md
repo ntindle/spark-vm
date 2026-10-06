@@ -21,14 +21,18 @@ S3 answers the incident-comms question.
   the fleet event journal (canonical shape: `event_id`, `box_id`,
   `session_epoch`, `emitted_at`, `received_at`, `source`, `component`,
   `subcomponent`, `subcomponents`, `kind`, `outcome`, `from`, `to`, `phase`, `rollout`, `trigger`,
-  `attested`, `note`) and the alert journal (`alerts.jsonl`), with four
+  `attested`, `note`) and the alert journal (`alerts.jsonl`), with five
   alert rules evaluated on every collect: (1) any `rollback-failed` →
   immediate alert; (2) correlated failure (≥2 boxes, same
   `(subcomponent, to)` or `(to)`-alone for audit lines without a
   component, 30-minute window); (3) silent wave — **not live until
   G15 S2** (the `rollout` envelope is null on every event today, so this
   rule cannot fire); (4) stuck precheck (≥N `precheck-fail` on one box
-  inside the window). Alert transport S1: the alert is journaled and
+  inside the window); (5) tail discontinuity (#1006) — when the pulled
+  audit tail no longer contains the previous pull's tail head, one
+  page-class alert per distinct lost window, fired from the collector's
+  continuity check (not from the event journal) and deduped on the lost
+  window's head hash. Alert transport S1: the alert is journaled and
   `fleet events watch` exits nonzero on unacknowledged alerts.
 - **The G17 S1 honesty rule**, quoted, not paraphrased: *"The P7 status
   page's alert feed is the formal home when it exists; **nothing in S1

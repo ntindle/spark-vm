@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Fleet audit-tail continuity (#1006): when a box's pulled audit tail
+  no longer contains the previous pull's tail head — lines scrolled out
+  of the tail between pulls and may never have reached the collector —
+  the collector now pages a `tail-discontinuity` alert (one per distinct
+  lost window, through the alert journal and `events watch`) alongside
+  the stderr warning, and the fleet README names a tail-length sizing
+  rule so operators size the tail instead of discovering overflow via
+  the warning. (#1072)
 - Push reminder/digest scheduler (#1063): the sweep logic the control
   plane's per-minute trigger will drive — a due reminder pages exactly
   once, a decided or expired approval is never paged (terminal-by-clock
