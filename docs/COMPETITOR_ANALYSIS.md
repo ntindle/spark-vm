@@ -158,7 +158,7 @@ pricing at $0.00936/vCPU-h (C41, billing since 2026-07-31) |
 | **OpenAI Dots** (announced 2026-09-29, DevDay; filed C70) | Always-on persistent agent compute (OpenAI-operated) | **VENDOR-VERIFIED** (OpenAI's official DevDay 2026 recap, 2026-09-29): "Dots are persistent agents with connected apps and their own cloud computer." OpenAI's own "Introducing dots" (2026-09-29) — release specifics quoted via PYMNTS' Sept-29 coverage: each dot runs on GPT-6 Astra, gets its own cloud computer and browser, learns from feedback over time, works around the clock, connects to 4,000+ apps; one dot included with Pro/Business Premium. Rollout: Pro and Business Premium in eligible markets; Enterprise/Edu/Healthcare admin-enabled beta. (The recap's vendor-verified core claim is "persistent agents with connected apps and their own cloud computer"; the release specifics above are second-order, quoted via coverage.) The pre-keynote "o" always-on-agent leak is REFUTED as a name (rumor grading: "the agent is named dots, not o") — its substance (always-on agent with its own compute) is CONFIRMED as Dots. OpenAI is now a direct operator of always-on agent compute, the segment closest to spark-vm's hosted vision. | Bundled: one dot included with Pro/Business Premium (no standalone PAYG rate card yet) |
 | **OpenAI Codex Cloud** (announced 2026-09-29, DevDay; filed C71) | Developer-agent cloud compute (OpenAI-operated) | **VENDOR-VERIFIED** (OpenAI's official DevDay 2026 recap, 2026-09-29): "Codex Cloud runs tasks while your laptop is closed, with access across devices"; alongside Code Review, Codex Security Cloud, and the CLI `/agents` view. A developer-agent cloud compute surface from OpenAI — coding-agent workloads (the exact workload spark-vm's own improvement loop runs) now have a first-party OpenAI cloud option. Relevant to spark-vm's "where agent coding work runs" positioning; does not change the open-source/self-hosted track. | Included in the Codex surface (no standalone rate card yet) |
 | **MongoDB Atlas Agent Engine** (launched 2026-09-29, Investor Day; filed C72) | Managed agent runtime + memory + governance (MongoDB-operated) | **VENDOR-VERIFIED** (company-issued PR Newswire release, MongoDB, Inc., 2026-09-29): "a unified execution, memory, and governance layer for production AI agents." Launched at its Investor Day at the Nasdaq MarketSite in New York City; "Atlas Agent Engine is available today in public preview. New and existing Atlas customers can get started at agentengine.mongodb.com." Retrieval powered by MongoDB Voyage AI (embedding/reranking); memory and governance layers adoptable independently of the runtime; model- and framework-agnostic. (Corollary color, same release: MongoDB 9.0 launched the same day — adjacent infra, not a filing.) spark-vm relevance: another managed agent runtime in the agent-compute lane; the memory/governance-independence design point is color for spark-vm's own human-approval + audit-separation design. | Consumption-based pricing for Atlas Agent Runtime and Atlas Agent Memory; usage draws on customers' existing Atlas commitments (no standalone rate card in the release) |
-| **Amazon Bedrock Managed Agents** (announced 2026-04-28, re-announced DevDay 2026-09-29; filed C73) | Managed agent runtime (AWS-operated, OpenAI models) | **VENDOR-VERIFIED** (Amazon's own aboutamazon.com announcement page): "April 28, 2026: Today, we are announcing a major expansion of our partnership with OpenAI... three new offerings, all in limited preview: OpenAI models on Amazon Bedrock... Codex on Amazon Bedrock... Amazon Bedrock Managed Agents, powered by OpenAI: an optimized experience for building production-ready AI agents with OpenAI frontier models on AWS." Re-announced in the OpenAI DevDay 2026 keynote (2026-09-29) — the in-window event (OpenAI's own recap + third-party keynote coverage: OpenAI models + Codex harness + Bedrock AgentCore, IAM-role identities, human approval gates, CloudTrail logging, data stays in AWS; Salesforce named as early customer — third-party color). **Caveat:** the original announcement predates the window; the Sept-29 in-window event is the DevDay re-announcement. Filed on the vendor-confirmed service, not the recap alone. spark-vm relevance: AWS-run agent compute with IAM identities and human approval gates — the human-approval-gates detail is confirmd-adjacent design color; CloudTrail logging mirrors the loop's own journaled-audit posture. Carry (not in the fold): a third-party claim of a limited-to-public preview state change needs a first-party AWS developer-guide read before the corpus carries it. | Limited preview at announcement (no public rate card) |
+| **Amazon Bedrock Managed Agents** (announced 2026-04-28, re-announced DevDay 2026-09-29; filed C73) | Managed agent runtime (AWS-operated, OpenAI models) | **VENDOR-VERIFIED** (Amazon's own aboutamazon.com announcement page): "April 28, 2026: Today, we are announcing a major expansion of our partnership with OpenAI... three new offerings, all in limited preview: OpenAI models on Amazon Bedrock... Codex on Amazon Bedrock... Amazon Bedrock Managed Agents, powered by OpenAI: an optimized experience for building production-ready AI agents with OpenAI frontier models on AWS." Re-announced in the OpenAI DevDay 2026 keynote (2026-09-29) — the in-window event (OpenAI's own recap + third-party keynote coverage: OpenAI models + Codex harness + Bedrock AgentCore, IAM-role identities, human approval gates, CloudTrail logging, data stays in AWS; Salesforce named as early customer — third-party color). **Caveat:** the original announcement predates the window; the Sept-29 in-window event is the DevDay re-announcement. Filed on the vendor-confirmed service, not the recap alone. spark-vm relevance: AWS-run agent compute with IAM identities and human approval gates — the human-approval-gates detail is confirmd-adjacent design color; CloudTrail logging mirrors the loop's own journaled-audit posture. **2026-10-06 morning fold (VENDOR-VERIFIED, first-party AWS News Blog "AWS Weekly Roundup (October 5, 2026)", page read in full this cycle):** the launch is postured by AWS itself as a **public preview** — "we announced a **public preview of Amazon Bedrock Managed Agents** powered by OpenAI". This retires the cycles-59–62 flagged-only question (limited vs public preview: neoteo.com carried an April-28-2026 "limited preview" origin and a "developer guide labels the service a public preview" claim; webpronews/oossa carried the Sep-29 DevDay "limited preview" posture). Folded into this row per the C32 primary-source-verification fold precedent; no new C-number. The DevDay announcement (Sep 29) predates the watch window; the first-party public-preview posture is confirmed in-window via the Oct-5 AWS blog. | Public preview (first-party, 2026-10-05 AWS News Blog; no public rate card) |
 | **Vercel Sandbox — Secure Compute support** (announced 2026-09-30; filed C74) | Sandbox capability addition (Vercel-operated) | **VENDOR-VERIFIED** (first-party dated Vercel changelog sitemap + index): the 2026-09-30 entry "Vercel Sandbox now supports Secure Compute". Capability addition on the tracked Vercel Sandbox surface, not a new SKU; Secure Compute is Vercel's private-network-connectivity surface, so sandbox workloads now have a private/egress-postured networking option. Details beyond the changelog line were not verified this pass. spark-vm relevance: private-networking posture for sandboxes is directly comparable to the egress-fencing thesis; design color for the live-provider network posture under H4. | Sandbox pricing unchanged (Active-CPU $0.128/vCPU-hr) |
 
 ## TermSquad watch — first pass (R3)
@@ -5192,3 +5192,84 @@ delegated by the evening cycle-3 doc's watch-out #5).
   C68 RESOLVED.
 - Full evidence in
   `docs/COMPETITOR_WATCH_2026-10-03_MORNING_C60.md`.
+
+## Watch update — 2026-10-06 (morning, cycle 63): C73 public-preview fold (Bedrock Managed Agents); Daytona V0.222.0 + Microsandbox v0.7.7 as watch-doc deltas
+
+- **C73 — Amazon Bedrock Managed Agents public-preview fold
+  (VENDOR-VERIFIED, first-party AWS News Blog "AWS Weekly Roundup
+  (October 5, 2026)", page read in full this cycle).** AWS itself
+  postures the launch as a **public preview** — "we announced a
+  **public preview of Amazon Bedrock Managed Agents** powered by
+  OpenAI". This retires the cycles-59–62 flagged-only question
+  (limited vs public preview); folded into the C73 field-table row
+  per the C32 primary-source-verification fold precedent; no new
+  C-number. Timing caveat by analogy with C75's: the DevDay
+  announcement (Sep 29) predates the watch window; the first-party
+  public-preview posture is confirmed in-window via the Oct-5 AWS
+  blog. The cycle-62 "first-party AWS developer-guide read
+  outstanding" watch-out is satisfied via the News Blog rather than
+  the dev guide; the C73 row's "carry" note is retired.
+- **Watch-doc deltas (no new C-numbers):** A lane 14 NO-CHANGE / 3
+  DELTA / 0 UNVERIFIED. (1) **Daytona V0.222.0** (OCT 05 2026: "PTY
+  keepalive pings and Android sandbox class removal" — removes the
+  android sandbox class from the API client, PTY WebSocket keepalive
+  pings, Go SDK/CLI temp-file cleanup; no V0.219.x / V0.221.x on the
+  page). Per the V0.220.0 precedent (cycle 57): a minor changelog
+  delta (no new product, no pricing change), recorded here and not
+  folded as a field-table change. Design color: a sandbox class
+  removed from the API surface — product coverage reduction. (2)
+  **Microsandbox v0.7.7** (breaking build(ruby)! parallelize; HTTP
+  CONNECT outbound proxy; disable guest clock sync; storage cache
+  cleanup + usage reports + CLI polish; filesystem DAX support;
+  ~17 fixes incl. secret-leak prevention; reduced paused-sandbox
+  host CPU). Per the v0.7.5/v0.7.6 precedent: recorded here, not a
+  corpus mint. Design color: HTTP CONNECT outbound proxy is
+  egress-fencing-thesis color; reduced paused-sandbox host CPU is
+  pause-cost color. (3) **Vercel changelog sitemap count-field move**
+  (1386 → 1387 total posts) with no new dated entry visible in the
+  2026 window shown — the dated tops are unchanged (still the three
+  2026-10-01 entries; no 2026-10-02 through 2026-10-05 entries; no
+  Drives GA; public-beta entry still 2026-09-23). Recorded as an
+  anomaly, not a filing (nothing visible to file); next slot
+  re-checks. The B lane produced 1 candidate (the C73 fold) / 15
+  clean dedupes / 6 flagged-only.
+- **Flagged-item bookkeeping:** the Cloudflare Containers/Sandboxes
+  cross-tenant patch flagged item is CLOSED this cycle (every
+  in-window item traces to the Sep-4-reported / Sep-19-remediated
+  Oren Yomtov dm-thin `skip_block_zeroing` incident — restatement
+  confirmed, nothing genuinely new; watch color continues). NEW
+  flagged-only item: a third-party "Vercel KVM Zero-Day: $50K
+  Bounty, No CVE Yet" report (tech-insider.org — KVM-level bug
+  reportedly bypassing Firecracker-level mitigation, Vercel HackerOne
+  bounty up to $50,000 confirmed) — third-party only, no vendor
+  confirmation, no CVE; watch color. Perplexity SPACE carries (new
+  first-party "How we engineer safer agents" color — SPACE as an
+  ephemeral Firecracker microVM per task; still third-party
+  research, no vendor confirmation from the named vendors). Cloudflare
+  Clef carries (lane-adjacent model weights). Modal GPU-clusters GA
+  and Cloudflare Containers rebuild carry (predate window).
+- **Standing items:** C11 FILE ON CLOSE still armed, gate NOT
+  triggered (Modal $750M "nearing"/"closing in on"; Baseten ~$26B
+  "in talks"/"under discussion"/"prospective private-market
+  valuations, not cash raised"); C12 OPEN (63rd consecutive
+  first-party read — AgentComputer still publishes no egress pricing
+  line); Modal egress billing EFFECTIVE 2026-10-01 (five-days-
+  post-effective first-party read: verbatim, no went-live banner,
+  no usage-posture change; first bill including egress still
+  postured for November 1, 2026; no third-party go-live signal);
+  Vercel Drives GA standing tracked item (public beta since
+  2026-09-23; no GA language); Vercel "eve" novelty watch retired
+  as corpus-known; Hugo CVE-2026-100690 third-party-only (file on
+  first-party GHSA only; cycle-62 gap re-checked successfully this
+  pass); alleged Vercel dark-web credential sale stays watch-only
+  (unconfirmed; do-not-conflate with April-2026 stands; ShinyHunters
+  publicly denied involvement in the April sale); NanoCo re-grade
+  bar unmet (framework/harness color only; cycle-62 gap re-checked
+  successfully this pass); Modal July compromise resolved/
+  watch-only.
+- **Aging:** no age-outs this pass. No re-folds. C11 quiet stays
+  0/3. Aged-out stay out: C29, C45, C56, C66, C67, C62,
+  Heapjack/Overpatch, GitLab CVE-2026-85706, Dextr AI. C26 closed.
+  C68 RESOLVED.
+- Full evidence in
+  `docs/COMPETITOR_WATCH_2026-10-06_MORNING_C63.md`.
