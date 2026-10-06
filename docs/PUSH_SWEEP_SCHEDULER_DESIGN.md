@@ -125,18 +125,24 @@ cadence the request path cannot supply.
 
 ## 3. What the build slice implements (#1063)
 
-1. The `scheduled` handler in the plane Worker (D66) running the
-   two-pass sweep (D67), with paged candidate queries (D69) and a
-   single UTC epoch `now` (D73).
+1. The sweep logic the plane Worker's `scheduled` handler will drive:
+   the three-pass sweep — reminders, then digests (D67), then the
+   cadence-driven watchers (D74) — with paged, self-healing candidate
+   queries (D69, D75) and a single UTC epoch `now` (D73). The per-minute
+   `scheduled` trigger registration itself (D66) is #1069's, not this
+   slice's.
 2. Plane-side wiring of the policy functions against the live D1
    database (the D49-style adapter from #969's docstring: `get_record`
    translating the #872 epoch-int record shape into the D59 dict).
-3. The `deploy_worker.py` cron-trigger declaration + staging smoke
-   (D72) in the plane workspace.
-4. The acceptance test: a due reminder pages exactly once with no human
-   driving it; a decided/expired approval pages zero times (the gate-1
-   re-read + D61 audit proving the zero).
-5. The cadence-driven watcher calls (D74/D63): per sweep, derive
+3. The acceptance test, sliced: a due reminder produces exactly one
+   `queued` page; a decided/expired approval is never a candidate, so
+   it pages zero times and writes zero audit rows (operator visibility
+   is the approvals record itself); a pending approval terminal only
+   by the clock reaches gate-1 and writes exactly one idempotent
+   `suppressed_terminal` audit row (D61). The "with no human driving
+   it" half of #1063's acceptance criterion is owned by #1069 (the
+   cron-trigger wiring), which keeps this issue open until it lands.
+4. The cadence-driven watcher calls (D74/D63): per sweep, derive
    stale-epoch candidates (missed-heartbeat counting per the #864 1/min
    cadence) and call `on_heartbeat_stale` per candidate box, and derive
    token-warning candidates (2h lead; F6's "no rotation since the last
@@ -149,6 +155,13 @@ cadence the request path cannot supply.
 
 ## 4. What this does not claim
 
+- The per-minute cron trigger registration on the plane Worker (D66)
+  and the `deploy_worker.py` cron-trigger declaration + staging smoke
+  (D72) are not this slice's: they are tracked in #1069, which keeps
+  #1063 open until the "without a human driving it" half of the
+  acceptance criterion lands. A sweep handler that runs proves nothing
+  about the trigger registration — the silently-unwired failure mode
+  D72 names.
 - The sender loop (#967 remainder) is still unbuilt: a sweep-fired page
   lands in the outbox; nothing yet fans it out to devices. The #1063
   acceptance criterion is met when the page exists in the outbox —
