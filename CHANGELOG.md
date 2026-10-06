@@ -52,6 +52,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Push reminder/digest scheduler (#1063): the control plane now sweeps
+  for due approval reminders and digest triggers on a per-minute cadence
+  instead of waiting for a human to drive it — a due reminder pages
+  exactly once, a decided or expired approval pages zero times with an
+  operator-visible audit row, and digest coalescing fires in the same
+  sweep as the reminder that tipped the budget (never stranded behind a
+  tick boundary).
 - Hosted phone-home session handshake (#1000): the plane's per-box
   connection now completes the hello/welcome handshake and enforces the
   generation fence — the box's hello identity must match the token the

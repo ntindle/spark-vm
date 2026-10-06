@@ -1,0 +1,350 @@
+"""Tests for hosted/push_sweep.py (#1063 — D9 sweep scheduler build slice).
+
+The fixture DDL below is the #988 contract (§§1.2–1.4) plus the D57
+partial unique index (same as test_push_enqueue.py) plus an `approvals`
+fixture pinning the #872 record shape (box_id, aid, owner_id, status,
+decision, decision_seq, created_at/expires_at as epoch ints).
+"""
+
+import os
+import sqlite3
+import sys
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from hosted import push_enqueue, push_sweep
+
+DDL_APPROVALS = """
+CREATE TABLE approvals (
+  box_id       TEXT NOT NULL,
+  aid          TEXT NOT NULL,
+  owner_id     TEXT NOT NULL,
+  summary      TEXT NOT NULL,
+  detail       TEXT,
+  status       TEXT NOT NULL,
+  decision     TEXT,
+  decision_seq INTEGER,
+  decided_by   TEXT,
+  decided_at   REAL,
+  created_at   INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  PRIMARY KEY (box_id, aid)
+);
+"""
+
+DDL_BUDGET_COUNTERS = """
+CREATE TABLE IF NOT EXISTS push_budget_counters (
+  scope_type   TEXT NOT NULL,
+  scope_id     TEXT NOT NULL,
+  window_start TEXT NOT NULL,
+  count        INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope_type, scope_id, window_start)
+);
+"""
+
+DDL_SEND_RESULTS = """
+CREATE TABLE IF NOT EXISTS push_send_results (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  at              TEXT NOT NULL,
+  owner_principal TEXT NOT NULL,
+  box_id          TEXT NOT NULL,
+  device          TEXT NOT NULL,
+  event_kind      TEXT NOT NULL,
+  event_key       TEXT NOT NULL,
+  outcome         TEXT NOT NULL,
+  http_status     INTEGER,
+  latency_ms      REAL,
+  sent_at         REAL,
+  vapid_key_id    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_push_send_results_dedup
+  ON push_send_results(box_id, event_kind, event_key);
+CREATE INDEX IF NOT EXISTS idx_push_send_results_tenant
+  ON push_send_results(owner_principal, at);
+"""
+
+DDL_DIGEST_STATE = """
+CREATE TABLE IF NOT EXISTS push_digest_state (
+  owner_principal TEXT NOT NULL,
+  window_start    TEXT NOT NULL,
+  count           INTEGER NOT NULL DEFAULT 0,
+  enqueued_at     TEXT,
+  PRIMARY KEY (owner_principal, window_start)
+);
+"""
+
+DDL_PAGE_ONCE_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_push_send_results_page_once
+  ON push_send_results(box_id, event_kind, event_key)
+  WHERE outcome IN ('queued', 'suppressed_budget');
+"""
+
+T0 = datetime(2026, 10, 5, 12, 0, 0, tzinfo=timezone.utc)
+EPOCH_T0 = int(T0.timestamp())
+
+
+@pytest.fixture
+def conn():
+    c = sqlite3.connect(":memory:")
+    c.executescript(DDL_APPROVALS + DDL_BUDGET_COUNTERS + DDL_SEND_RESULTS
+                    + DDL_DIGEST_STATE + DDL_PAGE_ONCE_INDEX)
+    yield c
+    c.close()
+
+
+def _registry(mapping):
+    def resolve_owner(box_id):
+        return mapping[box_id]
+    return resolve_owner
+
+
+def _file_approval(conn, box_id, aid, *, ttl=600, age=400,
+                   status="pending", decision=None, decision_seq=None):
+    created = EPOCH_T0 - age
+    conn.execute(
+        "INSERT INTO approvals (box_id, aid, owner_id, summary, status,"
+        " decision, decision_seq, created_at, expires_at)"
+        " VALUES (?, ?, ?, 's', ?, ?, ?, ?, ?)",
+        (box_id, aid, "owner-1", status, decision, decision_seq,
+         created, created + ttl))
+    conn.commit()
+
+
+def _queued(conn, event_kind=None):
+    q = "SELECT event_kind, event_key FROM push_send_results" \
+        " WHERE outcome = 'queued'"
+    params = ()
+    if event_kind is not None:
+        q += " AND event_kind = ?"
+        params = (event_kind,)
+    return conn.execute(q, params).fetchall()
+
+
+def _outcome_count(conn, outcome):
+    return conn.execute(
+        "SELECT COUNT(*) FROM push_send_results WHERE outcome = ?",
+        (outcome,)).fetchone()[0]
+
+
+# --- Pass 1: reminders ------------------------------------------------------
+
+def test_due_reminder_pages_exactly_once(conn):
+    # age 400 > ttl/2 (300): due.
+    _file_approval(conn, "box-1", "aid-1")
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.reminders.get("queued") == 1
+    assert len(_queued(conn, "reminder")) == 1
+    # Second sweep: the boundary's page-once dedup reports duplicate,
+    # never a second page.
+    s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s2.reminders.get("duplicate") == 1
+    assert len(_queued(conn, "reminder")) == 1
+
+
+def test_decided_approval_pages_zero_times_with_idempotent_audit(conn):
+    _file_approval(conn, "box-1", "aid-1", status="approved",
+                   decision="approve", decision_seq=1)
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    # Decided rows are not candidates (status filter) — no pages.
+    assert _queued(conn) == []
+    assert _outcome_count(conn, "suppressed_terminal") == 0
+    assert s.candidates_seen == 0
+
+
+def test_terminal_by_clock_writes_exactly_one_audit_row(conn):
+    # The candidate SELECT is a hint (D68): this row matches the hint
+    # (status pending, no decision) but the gate-1 re-read finds it
+    # terminal because now >= expires_at. created == EPOCH_T0-700,
+    # ttl 600 -> reminder_at = EPOCH_T0-400 <= now: due.
+    _file_approval(conn, "box-1", "aid-1", ttl=600, age=700)
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.reminders.get("superseded_terminal") == 1
+    assert _queued(conn) == []
+    assert _outcome_count(conn, "suppressed_terminal") == 1
+    # Repeat sweep: the D61 audit is idempotent — still exactly one.
+    s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s2.reminders.get("superseded_terminal") == 1
+    assert _outcome_count(conn, "suppressed_terminal") == 1
+
+
+def test_not_due_approval_skips(conn):
+    # age 100 < ttl/2 (300): not due yet. The D68 hint excludes it
+    # from candidates entirely (the complement of the policy's
+    # reminder_not_due) — no page, no policy call.
+    _file_approval(conn, "box-1", "aid-1", age=100)
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.candidates_seen == 0
+    assert s.reminders.get("reminder_not_due") is None
+    assert _queued(conn) == []
+
+
+def test_short_ttl_never_pages(conn):
+    # ttl 200 < 300: the D68 hint excludes it entirely (D8).
+    _file_approval(conn, "box-1", "aid-1", ttl=200, age=150)
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.candidates_seen == 0
+    assert _queued(conn) == []
+    assert s.reminders.get("queued") is None
+
+
+def test_corrupt_record_fails_loud(conn):
+    # created_at stored as text: the D49 adapter must ValueError, not
+    # silently skip (D59).
+    conn.execute(
+        "INSERT INTO approvals (box_id, aid, owner_id, summary, status,"
+        " created_at, expires_at)"
+        " VALUES ('box-1', 'aid-1', 'owner-1', 's', 'pending',"
+        " 'not-an-epoch', ?)", (EPOCH_T0 + 600,))
+    conn.commit()
+    reg = _registry({"box-1": "owner-1"})
+    with pytest.raises(ValueError):
+        push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+
+
+def test_missing_resolve_owner_fails_loud(conn):
+    _file_approval(conn, "box-1", "aid-1")
+    with pytest.raises(ValueError):
+        push_sweep.sweep_once(conn, now=T0, resolve_owner=None)
+
+
+def test_bad_owner_from_registry_fails_loud(conn):
+    _file_approval(conn, "box-1", "aid-1")
+    with pytest.raises(ValueError):
+        push_sweep.sweep_once(conn, now=T0,
+                              resolve_owner=_registry({"box-1": ""}))
+
+
+def test_reminders_disabled_skips_pass(conn):
+    # D71: the DO-alarm change retires the reminder pass via this flag.
+    _file_approval(conn, "box-1", "aid-1")
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              reminders_enabled=False)
+    assert s.reminders_enabled is False
+    assert s.reminders == {"skipped": True}
+    assert _queued(conn) == []
+
+
+def test_candidates_paged_bounded(conn):
+    # page_size=2, 5 due approvals on distinct boxes (each box gets
+    # its own D10 budget): 3 pages, all swept, none truncated.
+    for i in range(5):
+        _file_approval(conn, "box-%d" % i, "aid-%d" % i)
+    reg = _registry({"box-%d" % i: "owner-1" for i in range(5)})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              page_size=2)
+    assert s.candidates_seen == 5
+    assert s.pages_truncated is False
+    assert s.reminders.get("queued") == 5
+
+
+def test_max_pages_truncates_leaves_rest_for_next_sweep(conn):
+    for i in range(5):
+        _file_approval(conn, "box-%d" % i, "aid-%d" % i)
+    reg = _registry({"box-%d" % i: "owner-1" for i in range(5)})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                              page_size=2, max_pages=1)
+    assert s.candidates_seen == 2
+    assert s.pages_truncated is True
+    assert s.reminders.get("queued") == 2
+    # The remainder stays due: the next sweep picks it up.
+    s2 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg,
+                               page_size=10)
+    assert s2.reminders.get("queued") == 3
+
+
+# --- Pass 2: digests --------------------------------------------------------
+
+def test_digest_fires_in_same_sweep_as_coalescing(conn):
+    # D67: a reminder that tips the box over budget must coalesce into
+    # the digest in the SAME sweep, not after the digest already fired.
+    # Exhaust the per-box budget (3) so the reminder suppresses and
+    # coalesces; the owner budget (10) still has room for the digest.
+    ws = push_enqueue.hour_bucket(T0)
+    for i in range(3):
+        push_enqueue.enqueue_page(
+            conn, event_kind="approval_filed", owner_principal="owner-1",
+            box_id="box-1", key_material="k%d" % i, now=T0)
+    assert push_enqueue.get_digest_count(conn, "owner-1", ws) == 0
+    _file_approval(conn, "box-1", "aid-1")
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.reminders.get("suppressed_budget") == 1
+    assert push_enqueue.get_digest_count(conn, "owner-1", ws) == 1
+    # The digest pass ran after the reminder pass in the same sweep:
+    # the digest is queued now, not on a later tick.
+    assert s.digests.get("queued") == 1
+    assert len(_queued(conn, "digest")) == 1
+
+
+def test_no_coalesced_digest_fires_nothing(conn):
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.digests == {}
+    assert _queued(conn, "digest") == []
+
+
+# --- Pass 3: watchers --------------------------------------------------------
+
+def test_stale_watcher_pages_once_per_epoch(conn):
+    reg = _registry({"box-1": "owner-1"})
+    derived = [("box-1", "epoch-1")]
+    s = push_sweep.sweep_once(
+        conn, now=T0, resolve_owner=reg,
+        derive_stale=lambda c, m: derived)
+    assert s.stale_watchers.get("queued") == 1
+    assert len(_queued(conn, "heartbeat_stale")) == 1
+    # Same epoch again: page-once dedup.
+    s2 = push_sweep.sweep_once(
+        conn, now=T0, resolve_owner=reg,
+        derive_stale=lambda c, m: derived)
+    assert s2.stale_watchers.get("duplicate") == 1
+    assert len(_queued(conn, "heartbeat_stale")) == 1
+
+
+def test_token_warning_pages_once_per_generation(conn):
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(
+        conn, now=T0, resolve_owner=reg,
+        derive_token_warnings=lambda c, m: [("box-1", "hash-1")])
+    assert s.token_warnings.get("queued") == 1
+    # A rotation (new hash) is a new generation: pages again (D13).
+    s2 = push_sweep.sweep_once(
+        conn, now=T0, resolve_owner=reg,
+        derive_token_warnings=lambda c, m: [("box-1", "hash-2")])
+    assert s2.token_warnings.get("queued") == 1
+    assert len(_queued(conn, "token_expiry_warning")) == 2
+
+
+def test_watchers_off_by_default(conn):
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s.stale_watchers == {"skipped": True}
+    assert s.token_warnings == {"skipped": True}
+    assert _queued(conn) == []
+
+
+# --- Clock ------------------------------------------------------------------
+
+def test_single_clock_threaded_through(conn):
+    # D73: one `now`, epoch form accepted, shared by all passes.
+    _file_approval(conn, "box-1", "aid-1")
+    reg = _registry({"box-1": "owner-1"})
+    s = push_sweep.sweep_once(conn, now=float(EPOCH_T0),
+                              resolve_owner=reg)
+    assert s.reminders.get("queued") == 1
+
+
+def test_bad_clock_fails_loud(conn):
+    reg = _registry({"box-1": "owner-1"})
+    with pytest.raises(ValueError):
+        push_sweep.sweep_once(conn, now="soon", resolve_owner=reg)
