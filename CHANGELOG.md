@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Push sweep scheduler design (#1063): the first build slice of the
+  reminder/digest scheduler home — a per-minute scheduled run on the
+  control plane that scans for due approval reminders and hourly digest
+  triggers, with paged scans, no scheduler-side budget guessing (the
+  enqueue boundary stays the single gate), and a retirement rule so the
+  later Durable-Object alarms can't double-page. Design only; no
+  scheduler runs yet. (#1067)
+
 - Push-sender schema contract (#988): the D1 store the hosted Web Push
   sender builds against — subscription table, page-budget counters,
   send-result and acceptance records (the record the first-approval

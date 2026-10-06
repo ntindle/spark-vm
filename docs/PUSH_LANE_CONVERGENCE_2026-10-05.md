@@ -3,7 +3,7 @@
 **Status: analysis, not a commitment.** Code-state claims below were
 verified against the repo tree at main `0edb0eb` (2026-10-05 ~19:0x CDT,
 post-#1060 merge) and the #1062 branch tip `62fdd982` (rebased); #1062 has
-since merged as `a366aba` (2026-10-05 ~19:4x CDT). Issue/PR numbers are GitHub references as of 2026-10-05 (not
+since merged as `a366aba` (2026-10-05 ~19:0x CDT). Issue/PR numbers are GitHub references as of 2026-10-05 (not
 code-verifiable from the tree). Honesty rules apply (`docs/POSITIONING.md`):
 this describes current state and work to do, not promises. Nothing here
 sends a push.
@@ -47,7 +47,7 @@ two taps → the agent unparks — without the approvals page open.**
 | The buzz — payload discipline | SHIPPED: `hosted/push_payload.py` (#970, GP4): construction-time scrub |
 | The buzz — schema | SHIPPED: `docs/PUSH_SENDER_SCHEMA_CONTRACT.md` (#988, PR #1059 merged): four D1 tables, custody D45–D47, VAPID lifecycle D48, forward migration D49 |
 | The buzz — enqueue boundary | SHIPPED: `hosted/push_enqueue.py` (#990, PR #1060 merged 2026-10-05 ~19:0x CDT): atomic D10 budget reservation (single-statement, D1-batch portable), `enqueue_page` with partial-unique-index page-once dedup (D57), digest backpressure |
-| The buzz — event→push mapping | SHIPPED: `hosted/push_events.py` (PR #1062 squash-merged `a366aba` 2026-10-05 ~19:4x CDT): one mapping function per taxonomy §2 paging event, D8 reminder timing, D12 gate-1 re-read, D61 `suppressed_terminal` audit, D62 quiet period, D54 digest trigger — policy only, all paging through the #990 boundary |
+| The buzz — event→push mapping | SHIPPED: `hosted/push_events.py` (PR #1062 squash-merged `a366aba` 2026-10-05 ~19:0x CDT): one mapping function per taxonomy §2 paging event, D8 reminder timing, D12 gate-1 re-read, D61 `suppressed_terminal` audit, D62 quiet period, D54 digest trigger — policy only, all paging through the #990 boundary |
 | The buzz — **sender loop** | **OPEN (#967 remaining):** the worker-side loop that claims `queued` outbox rows, fans out per `(owner_principal, box_id, device)`, executes `send_push`, schedules `retry` per `backoff_s`, tombstones on 410, and writes send-result rows. Crypto + transport + schema + boundary + mapping are all done; the loop that drives them is not. |
 | Subscriptions | OPEN (#968): owner-auth subscription endpoints + dashboard subscribe affordance. Also the subscription-store D1 half of #967. Blocked on the operator's Worker-secret data key (custody §3; the loop must not generate it — standing NEEDS_USER entry). |
 | Reminders/digest scheduler | **UNFILED → filed this turn (§3):** D9's cron sweep has no owner. |
