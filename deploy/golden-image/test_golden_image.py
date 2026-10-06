@@ -135,9 +135,16 @@ def test_build_image_stages_context_manifest(tmp_path):
     runs (the recipe COPYs it in) and arranges its removal so the tree stays
     clean for the next run."""
     with open(BUILD_IMAGE, encoding="utf-8") as f:
-        text = f.read()
-    assert "deploy/golden-image/image-manifest.json" in text
-    assert "trap" in text and "CONTEXT_MANIFEST" in text
+        lines = f.read().splitlines()
+    assert any("deploy/golden-image/image-manifest.json" in l for l in lines)
+    trap_line = next(
+        i for i, l in enumerate(lines) if "trap cleanup_context_manifest EXIT" in l
+    )
+    gen_line = next(
+        i for i, l in enumerate(lines)
+        if 'generate-image-manifest.sh" --out "$CONTEXT_MANIFEST"' in l
+    )
+    assert trap_line < gen_line, "cleanup trap must precede manifest generation"
 
 
 def test_build_image_refuses_duplicate_recipe_default(tmp_path):
