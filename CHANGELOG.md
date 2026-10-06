@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   tenant-facing buyer story), the standing destroy-on-exceed decision,
   the required pre-destroy notice and grace window, and the
   source-of-truth gate the cap check must clear before it ships; filed
-  as four build slices. (#TBD)
+  as four build slices. (#1078)
 - Fleet audit-tail continuity (#1006): when a box's pulled audit tail
   no longer contains the previous pull's tail head — lines scrolled out
   of the tail between pulls and may never have reached the collector —
