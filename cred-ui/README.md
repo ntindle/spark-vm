@@ -38,9 +38,14 @@ Then open `http://127.0.0.1:18740` in a browser.
 Every `/api/*` endpoint requires a per-install bearer token — the
 `X-Cred-UI: 1` header alone authenticates nothing (any local process can
 set a header). The token is generated on the service's first start into
-`~/.config/cred-ui/token` (mode `0600`); the server refuses to start if
-that file is missing-and-uncreatable, malformed, or readable by anyone
-but the owner.
+`/home/swapd/ui-token` (mode `0600`, owned by `swapd`), fetched at
+startup through the pinned
+`sudo -n -u swapd /usr/bin/cat /home/swapd/ui-token` sudoers entry and
+written through the narrow `/usr/local/bin/cred-ui-token-set` writer —
+both installed by `proxy/deploy.sh`. A process running as your own user
+can no longer read the token straight off the filesystem; the server
+refuses to start if the token is missing-and-unwritable, malformed, or
+unreadable through the pinned reader.
 
 ```bash
 # on the box: show the token once, then paste it into the browser
@@ -51,6 +56,10 @@ Paste it once per browser session (the page keeps it in
 `sessionStorage` — a tab's lifetime, never a cookie, never a URL). To
 replace it: `cred-ui.py --rotate-token`, then
 `systemctl --user restart cred-ui`, then paste the new one.
+
+Developers: set `CRED_UI_TOKEN_FILE` to keep the old behavior — a local
+`0600` token file at the path you name (dev machines, CI, and the test
+suite use this; no sudo or swapd involved).
 
 ## What it does
 
@@ -85,7 +94,11 @@ replace it: `cred-ui.py --rotate-token`, then
   Do not change it to `0.0.0.0` — the tunnel is the access control.
 - The API token authenticates the browser session (the human's paste),
   not the machine: it stops other-uid local processes and sandboxed
-  agents with loopback reach, but a same-uid process can read the token
-  file — and already holds equivalent power through the NOPASSWD sudoers
-  writers. Hosted multi-tenancy still needs real per-tenant session auth.
+  agents with loopback reach. The token file itself is swapd-owned
+  (`/home/swapd/ui-token`), so a same-uid process can no longer read it
+  straight off the filesystem — though sudo matches the invoking user,
+  not the process, so it can still reach the token through the pinned
+  sudo entries (and already holds equivalent power through the NOPASSWD
+  writers). Every token read now crosses sudo's audit trail. Hosted
+  multi-tenancy still needs real per-tenant session auth.
 - Stdlib only, no dependencies.

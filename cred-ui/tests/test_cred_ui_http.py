@@ -39,8 +39,8 @@ cred_ui = _load_cred_ui()
 def server(monkeypatch, tmp_path):
     """cred-ui Handler on an ephemeral port with ALLOWED_HOSTS patched.
 
-    CRED_UI_TOKEN_FILE points at a tmp path so the token machinery never
-    touches the real ~/.config/cred-ui/token; the fixture yields
+    CRED_UI_TOKEN_FILE points at a tmp path (the local-file backend, so
+    the token machinery never needs sudo or swapd); the fixture yields
     (port, token) so tests can send the Authorization header (issue #86).
     """
     monkeypatch.setenv("CRED_UI_TOKEN_FILE", str(tmp_path / "token"))

@@ -1,0 +1,83 @@
+#!/bin/bash
+# cred-ui-token-set — narrow writer for cred-ui's per-install API token.
+# Invoked as: sudo -n -u swapd /usr/local/bin/cred-ui-token-set
+# Reads the token from stdin and writes it atomically to
+# /home/swapd/ui-token (0600, swapd-owned).
+#
+# Issue #964: the token no longer lives in the ntindle-owned
+# ~/.config/cred-ui/token (0600 stops other-uid readers, but a same-uid
+# process could read it directly). Under swapd ownership the file is off
+# every ntindle process's filesystem — the UI fetches it at startup
+# through the pinned `sudo -n -u swapd /usr/bin/cat /home/swapd/ui-token`
+# sudoers entry (same pattern as the registry reads).
+#
+# Store contract (matches cred-store-set's): stdin is stored VERBATIM —
+# no newline handling here. The UI sends exactly the bare token
+# (secrets.token_urlsafe(32), matching ^[A-Za-z0-9_-]{16,128}$), and the
+# reader strips whitespace on load. Direct invocation must pipe exact
+# bytes (printf '%s', never echo) — do NOT add a chomp here: it would
+# double-chomp behind the UI and corrupt nothing today, but the
+# verbatim contract keeps every frontend honest about what it sends.
+#
+# Root-owned 0755; ntindle cannot modify this script, only execute it
+# via the sudoers entry.
+set -euo pipefail
+umask 077
+
+dir=/home/swapd
+dest="$dir/ui-token"
+max_bytes=128
+
+tmp="$(mktemp "$dir/.ui-token.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
+chmod 600 "$tmp"
+
+# Read stdin capped at max_bytes+1 so an oversized value is detectable.
+# head exits 0 even when the input is shorter.
+head -c $((max_bytes + 1)) > "$tmp"
+size="$(wc -c < "$tmp")"
+if [ "$size" -eq 0 ]; then
+    echo "cred-ui-token-set: refusing to store an empty token" >&2
+    exit 2
+fi
+if [ "$size" -gt "$max_bytes" ]; then
+    echo "cred-ui-token-set: token exceeds $max_bytes bytes" >&2
+    exit 2
+fi
+# grep -qE matches line-by-line, so an embedded newline would sail
+# through the alphabet check below (verified) — reject newlines first.
+# The token is a single line; the UI sends it bare (no trailing
+# newline) and the reader strips whitespace on load. (wc -l counts the
+# newline bytes; a $(tr)-based check would silently pass because
+# command substitution strips trailing newlines.)
+if [ "$(wc -l < "$tmp")" -gt 0 ]; then
+    echo "cred-ui-token-set: token must not contain newlines" >&2
+    exit 2
+fi
+# The token alphabet is the UI's _TOKEN_RE — the writer pins it so a
+# caller can never write a control-char file that a later reader would
+# mis-parse. (grep -qE is the POSIX spelling; [[ =~ ]] would work too,
+# but grep keeps the regex in one readable place.)
+if ! grep -qE '^[A-Za-z0-9_-]{16,128}$' "$tmp"; then
+    echo "cred-ui-token-set: token is malformed (use [A-Za-z0-9_-], 16-128 chars)" >&2
+    exit 2
+fi
+
+# Crash-durable: fsync the file, rename atomically, fsync the directory.
+python3 - "$tmp" <<'PYEOF'
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PYEOF
+mv -f "$tmp" "$dest"
+python3 - "$dir" <<'PYEOF'
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PYEOF

@@ -30,14 +30,15 @@ Security properties (keep them if you touch this file):
   - Every response carries Cache-Control: no-store.
   - CSRF: the Host header must be this UI's own address, and POSTs must
     carry the X-Cred-UI: 1 header (index.html sends it on every POST).
-  - API token (issue #86): every /api/* endpoint additionally requires a
+  - API token (issues #86, #964): every /api/* endpoint additionally requires a
     per-install bearer token (Authorization: Bearer ...) that only the
-    human knows — generated once into a 0600 file, pasted into the
-    browser once per session. Any local process can set X-Cred-UI: 1, so
-    the header alone authenticated nothing; the token closes the
-    loopback-any-process hole down to processes that can read the
-    owner's home dir (a same-uid process still can — see the honest
-    residual in the token block below).
+    human knows — generated once into /home/swapd/ui-token (0600,
+    swapd-owned), fetched at startup through a pinned sudo reader, pasted
+    into the browser once per session. Any local process can set
+    X-Cred-UI: 1, so the header alone authenticated nothing; the token
+    closes the loopback-any-process hole down to the service's own user
+    (a same-uid process can still reach it through the pinned sudo
+    entries — see the honest residual in the token block below).
 
 Stdlib only.
 """
@@ -133,37 +134,67 @@ ALLOWED_HOSTS = {"%s:%d" % (BIND, PORT), "localhost:%d" % PORT}
 CSRF_HEADER = "X-Cred-UI"
 CSRF_VALUE = "1"
 
-# --- API token auth (issue #86) ---
+# --- API token auth (issues #86, #964) ---
 # The CSRF gates stop malicious web pages, but any local process can set
 # X-Cred-UI: 1 — the management API authenticated nothing, so any local
 # process that could reach the loopback listener could add, list, remove,
 # and rebind every credential. Every /api/* endpoint now additionally
 # requires a per-install bearer token (issue #86's second fix option:
 # "a per-install token the human pastes once"). The token is generated
-# once (256 bits), kept in a 0600 file, and pasted into the browser once
-# per browser session (sessionStorage; never a cookie, never a URL,
-# never logged). `--print-token` shows it for the paste ceremony,
-# `--rotate-token` replaces it (restart the service afterwards).
+# once (256 bits) and pasted into the browser once per browser session
+# (sessionStorage; never a cookie, never a URL, never logged).
+# `--print-token` shows it for the paste ceremony, `--rotate-token`
+# replaces it (restart the service afterwards).
 #
-# Honest residual: this binds the *browser session* to the human's paste.
-# It stops other-uid local processes, sandboxed agents, and containers
-# with loopback reach — but NOT a same-uid process, which can read the
-# 0600 token file just as it can already wield the NOPASSWD sudoers
-# writers (the issue's own caveat). What it ends is the endpoint
-# authenticating nothing at all. The hosted multi-tenancy identity
-# question (#281) — per-tenant session auth tied to H11's session model —
-# stays open; a stronger placement (token under swapd ownership with a
-# pinned sudoers reader — follow-up issue #964) is the next step.
+# Placement (issue #964): the token lives under swapd ownership at
+# /home/swapd/ui-token (0600), fetched at startup through the pinned
+# `sudo -n -u swapd /usr/bin/cat /home/swapd/ui-token` sudoers entry
+# (same pattern as the registry reads) and written through the narrow
+# /usr/local/bin/cred-ui-token-set writer (first start, --rotate-token).
+# A same-uid process can no longer read the token straight off the
+# filesystem. CRED_UI_TOKEN_FILE still names a local 0600 file instead
+# (dev, CI, tests) — the old ~/.config/cred-ui/token default is gone.
+#
+# Honest residual: sudo matches the invoking *user*, not the process, so
+# a same-uid process can still reach the token through these pinned sudo
+# entries — and already holds equivalent power through the NOPASSWD
+# writers (#86's own caveat). What the move ends is the silent
+# direct-file-read path: every read now crosses sudo's audit trail. It
+# stops other-uid local processes (including the on-box agent user, which
+# can neither read the swapd-owned file nor use the service-user-scoped
+# sudo entries), sandboxed agents, and containers with loopback reach. The
+# hosted multi-tenancy identity question (#281) — per-tenant session auth
+# tied to H11's session model — stays open.
 _TOKEN_FILE_ENV = "CRED_UI_TOKEN_FILE"
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _API_TOKEN = None  # lazy: loaded once, cached (tests reset via _reset_token_cache)
 
+# Issue #964: absolute paths pinned exactly as the sudoers entries carry
+# them (issue #670's pin; see the REGISTRY_CAT comment). No shell
+# anywhere; -n so a request thread never blocks on a password prompt.
+UI_TOKEN_CAT = ["sudo", "-n", "-u", "swapd", "/usr/bin/cat",
+                "/home/swapd/ui-token"]
+UI_TOKEN_SET = ["sudo", "-n", "-u", "swapd",
+                "/usr/local/bin/cred-ui-token-set"]
+
+
+def _swapd_token_backed():
+    """True when the token lives under swapd ownership (the default);
+    False when CRED_UI_TOKEN_FILE names a local file (dev, CI, tests)."""
+    return not os.environ.get(_TOKEN_FILE_ENV)
+
 
 def _token_path():
+    """Local-file token path — only meaningful when CRED_UI_TOKEN_FILE
+    is set (dev, CI, tests). The old ~/.config/cred-ui/token default is
+    gone (issue #964); reaching this without the env var is a bug, so
+    fail loud instead of guessing a path."""
     override = os.environ.get(_TOKEN_FILE_ENV)
-    if override:
-        return override
-    return os.path.join(os.path.expanduser("~"), ".config", "cred-ui", "token")
+    if not override:
+        raise RuntimeError(
+            "CRED_UI_TOKEN_FILE is not set and the swapd backend was "
+            "bypassed — refusing to guess a token path")
+    return override
 
 
 def _read_token_file(path):
@@ -230,11 +261,79 @@ def _check_token_dir_chain(path):
         d = os.path.dirname(d)
 
 
+def _read_swapd_token():
+    """Read the token through the pinned sudo cat. Returns None when the
+    file is absent (fresh box, nothing generated yet — the first-start
+    path); raises RuntimeError on any other read failure — fail closed,
+    never an empty guess. The absent-file match anchors on cat's
+    path-specific prefix AND the errno phrase, the same fail-loud
+    posture as read_registry's absent check (issue #672): a locale that
+    renames the phrase fails loud, never silent. Every other
+    stderr (permission denied, no sudoers entry) stays loud."""
+    rc, out, err = run(UI_TOKEN_CAT)
+    if rc == 0:
+        return out.strip()
+    if "cat: %s: No such file or directory" % UI_TOKEN_CAT[-1] in err:
+        return None
+    raise RuntimeError(
+        "cannot read the swapd UI token (%s); refusing to start — "
+        "check the sudoers entries and that proxy/deploy.sh ran"
+        % err.strip()[-200:])
+
+
+def _write_swapd_token(token):
+    """Write the token through the narrow writer (value on stdin). The
+    writer re-validates the token alphabet and writes atomically 0600
+    swapd-owned; the UI's regex pre-check is fail-fast UX, not the
+    enforcement — a non-zero writer exit fails closed, loudly."""
+    if not _TOKEN_RE.match(token):
+        raise RuntimeError("refusing to write a malformed token")
+    rc, _, err = run(UI_TOKEN_SET, inp=token)
+    if rc != 0:
+        raise RuntimeError(
+            "swapd UI token write failed: %s" % err.strip()[-200:])
+
+
+def _load_or_create_swapd_token():
+    """Swapd-backed variant of the token load: read via the pinned cat;
+    on first start generate, write via the narrow writer, and re-read to
+    prove the write landed with the exact value. Any mismatch fails
+    closed — the UI trusts only what it reads back."""
+    token = _read_swapd_token()
+    if token is not None:
+        if not _TOKEN_RE.match(token):
+            raise RuntimeError(
+                "swapd UI token is empty or malformed; regenerate with "
+                "--rotate-token")
+        return token
+    fresh = secrets.token_urlsafe(32)
+    _write_swapd_token(fresh)
+    if _read_swapd_token() != fresh:
+        raise RuntimeError(
+            "swapd UI token write did not land; refusing to start")
+    return fresh
+
+
+def _rotate_swapd_token():
+    """Replace the swapd-owned token atomically via the narrow writer,
+    then prove the rotation landed by reading back. The running server
+    keeps the old token cached until restart — the operator restarts
+    cred-ui after rotating."""
+    token = secrets.token_urlsafe(32)
+    _write_swapd_token(token)
+    if _read_swapd_token() != token:
+        raise RuntimeError(
+            "swapd UI token rotation did not land; refusing to start")
+    return token
+
+
 def _load_or_create_token(path=None):
     """Return the API token, generating it on first start. Fail-closed on
     a missing/unreadable/malformed token file or on a file other users
     can read — a world-readable token file would hand the authenticator
     to exactly the local processes it exists to exclude."""
+    if _swapd_token_backed():
+        return _load_or_create_swapd_token()
     path = path or _token_path()
     _check_token_dir_chain(path)
     try:
@@ -285,9 +384,11 @@ def _load_or_create_token(path=None):
 
 
 def _rotate_token(path=None):
-    """Replace the token file atomically (0600). The running server keeps
+    """Replace the token atomically (0600). The running server keeps
     the old token cached until restart — the operator restarts cred-ui
     after rotating."""
+    if _swapd_token_backed():
+        return _rotate_swapd_token()
     path = path or _token_path()
     token = secrets.token_urlsafe(32)
     _ensure_token_parent(path)
@@ -381,6 +482,12 @@ SECRET_DELETE = ["sudo", "-n", "-u", "swapd", "/usr/local/bin/cred-store-delete"
 
 
 def run(argv, inp=None):
+    # stdin is bytes on the wire: callers pass str (issue #964 exposed
+    # this — subprocess.run(input=<str>) raises TypeError, which had been
+    # 500ing api_set's STORE_SET call on the box). Encode UTF-8 here,
+    # once, instead of at every call site.
+    if isinstance(inp, str):
+        inp = inp.encode("utf-8")
     p = subprocess.run(argv, input=inp, capture_output=True, timeout=15)
     return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
 

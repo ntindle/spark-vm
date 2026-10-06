@@ -186,6 +186,9 @@ def test_proxy_install_paths_cover_deploy_sh_writes():
         "/usr/local/bin/credvalidate.py",  # issue #706: the shared
         # validation contract ships next to the writers — rollback must
         # cover it in lockstep.
+        "/usr/local/bin/cred-ui-token-set",  # issue #964: the narrow
+        # writer for cred-ui's swapd-owned API token — rollback must
+        # cover it in lockstep with the sudoers entries.
     }
     missing = required - listed
     assert not missing, "missing from proxy_install_paths: %s" % sorted(missing)
@@ -295,7 +298,12 @@ def test_cred_ui_install_end_to_end(tmp_path):
         'cd "$UPDATER_REPO" && eval "$inst"',
         env_extra={"UPDATER_REPO": REPO,
                    "CRED_UI_INSTALL_DIR": str(install_dir),
-                   "SYSTEMD_USER_DIR": str(unit_dir)},
+                   "SYSTEMD_USER_DIR": str(unit_dir),
+                   # Issue #964: install.sh's pre-restart guard probes the
+                   # pinned ui-token sudoers entry when CRED_UI_TOKEN_FILE
+                   # is unset — this hermetic install is a dev-mode
+                   # install, so it takes the local-file path.
+                   "CRED_UI_TOKEN_FILE": str(tmp_path / "token")},
     )
     assert r.returncode == 0, r.stderr + r.stdout
     for name, src in (("cred-ui.py", "cred-ui/cred-ui.py"),
@@ -1129,6 +1137,12 @@ def test_install_component_cred_ui_ships_version_to_install_dir(tmp_path):
                               "CRED_UI_INSTALL_DIR": str(install_dir),
                               "SYSTEMD_USER_DIR": str(unit_dir),
                               "SKIP_SUDO": "1",
+                              # Issue #964: install.sh's pre-restart guard
+                              # probes the pinned ui-token sudoers entry
+                              # when CRED_UI_TOKEN_FILE is unset — this
+                              # hermetic deploy-test has no swapd, so it
+                              # takes the local-file path.
+                              "CRED_UI_TOKEN_FILE": str(tmp_path / "token"),
                               "AUTO_DEPLOY_NO_MAIN": "1"})
     assert r.returncode == 0, r.stdout + r.stderr
     want_version = open(os.path.join(REPO, "VERSION"),

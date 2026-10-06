@@ -1,4 +1,4 @@
-"""Hermetic tests for cred-ui's per-install API token (issue #86).
+"""Hermetic tests for cred-ui's per-install API token (issues #86, #964).
 
 The CSRF header (X-Cred-UI: 1) is not a secret — any local process can
 set it. Every /api/* endpoint (except the public /api/version) now
@@ -7,8 +7,9 @@ per browser session.
 
 The real server is spun up on an ephemeral localhost port with the
 sudo-backed `run()` monkeypatched, so no secrets, sudo, or swapd are
-involved. CRED_UI_TOKEN_FILE points the token at a tmp dir, so the real
-~/.config/cred-ui/token is never touched.
+involved. CRED_UI_TOKEN_FILE points the token at a tmp dir (the
+local-file backend, issue #964), so the swapd-backed default is never
+touched.
 
 Run from the repo root:  python3 -m pytest cred-ui/tests/test_cred_ui_api_token.py -q
 """
@@ -313,3 +314,194 @@ def test_index_routes_all_api_calls_through_api_fetch():
         single = "apiFetch('%s'" % endpoint
         double = 'apiFetch("%s"' % endpoint
         assert single in src or double in src
+
+# --- swapd-backed token placement (issue #964) ---------------------------
+#
+# The default placement is swapd-owned /home/swapd/ui-token (0600),
+# reached only through the pinned sudoers entries UI_TOKEN_CAT /
+# UI_TOKEN_SET. CRED_UI_TOKEN_FILE opts out into the local-file path
+# (dev, CI, these tests' file-mode section above). These tests
+# monkeypatch cred_ui.run, so no sudo, swapd, or real files are
+# involved — and they delete CRED_UI_TOKEN_FILE to take the swapd path.
+
+
+@pytest.fixture()
+def swapd_env(monkeypatch):
+    """Take the swapd token path: no CRED_UI_TOKEN_FILE, clean cache."""
+    monkeypatch.delenv("CRED_UI_TOKEN_FILE", raising=False)
+    cred_ui._reset_token_cache()
+    yield
+    cred_ui._reset_token_cache()
+
+
+def _pinned_cat_stderr():
+    return "cat: /home/swapd/ui-token: No such file or directory"
+
+
+def test_swapd_token_read_via_pinned_cat(swapd_env, monkeypatch):
+    seen = []
+
+    def fake_run(argv, inp=None):
+        seen.append(list(argv))
+        assert argv == cred_ui.UI_TOKEN_CAT  # pinned literal, no shell
+        assert inp is None  # the read path sends nothing on stdin
+        return 0, "a" * 32 + "\n", ""
+
+    monkeypatch.setattr(cred_ui, "run", fake_run)
+    token = cred_ui.api_token()
+    assert token == "a" * 32
+    assert seen == [cred_ui.UI_TOKEN_CAT]
+    # The argv is the absolute-path pin from the sudoers entry (#670):
+    # no bare `cat`, no shell, no argument interpolation.
+    assert cred_ui.UI_TOKEN_CAT == [
+        "sudo", "-n", "-u", "swapd",
+        "/usr/bin/cat", "/home/swapd/ui-token",
+    ]
+
+
+def test_swapd_token_first_start_generates_writes_and_confirms(
+        swapd_env, monkeypatch):
+    calls = []
+    stored = {}
+
+    def fake_run(argv, inp=None):
+        calls.append((list(argv), inp))
+        if argv == cred_ui.UI_TOKEN_CAT:
+            if "token" not in stored:
+                return 1, "", _pinned_cat_stderr()
+            return 0, stored["token"] + "\n", ""
+        assert argv == cred_ui.UI_TOKEN_SET  # pinned writer, no shell
+        assert isinstance(inp, str)  # bare token, verbatim
+        assert cred_ui._TOKEN_RE.match(inp)
+        stored["token"] = inp
+        return 0, "", ""
+
+    monkeypatch.setattr(cred_ui, "run", fake_run)
+    token = cred_ui.api_token()
+    assert cred_ui._TOKEN_RE.match(token)
+    # One absent-read, one write, one read-back confirmation.
+    assert [c[0] for c in calls] == [
+        cred_ui.UI_TOKEN_CAT, cred_ui.UI_TOKEN_SET, cred_ui.UI_TOKEN_CAT]
+    assert cred_ui.UI_TOKEN_SET == [
+        "sudo", "-n", "-u", "swapd", "/usr/local/bin/cred-ui-token-set"]
+    # Stable: a second load reads the same token, no rewrite.
+    cred_ui._reset_token_cache()
+    assert cred_ui.api_token() == token
+    assert len(calls) == 4  # no second write
+
+
+def test_swapd_token_cat_permission_denied_fails_closed(
+        swapd_env, monkeypatch):
+    monkeypatch.setattr(
+        cred_ui, "run",
+        lambda argv, inp=None: (1, "", "sudo: a password is required"))
+    with pytest.raises(RuntimeError, match="cannot read the swapd UI token"):
+        cred_ui.api_token()
+
+
+def test_swapd_token_malformed_from_cat_fails_closed(
+        swapd_env, monkeypatch):
+    monkeypatch.setattr(
+        cred_ui, "run", lambda argv, inp=None: (0, "not a token!\n", ""))
+    with pytest.raises(RuntimeError, match="empty or malformed"):
+        cred_ui.api_token()
+
+
+def test_swapd_token_writer_failure_fails_closed(
+        swapd_env, monkeypatch):
+    def fake_run(argv, inp=None):
+        if argv == cred_ui.UI_TOKEN_CAT:
+            return 1, "", _pinned_cat_stderr()
+        return 2, "", "cred-ui-token-set: refusing to store an empty token"
+
+    monkeypatch.setattr(cred_ui, "run", fake_run)
+    with pytest.raises(RuntimeError, match="write failed"):
+        cred_ui.api_token()
+
+
+def test_swapd_token_readback_mismatch_fails_closed(
+        swapd_env, monkeypatch):
+    # The writer claimed success but the read-back differs (someone
+    # rotated concurrently, or the writer lied) — never trust the
+    # in-memory value; refuse to start.
+    def fake_run(argv, inp=None):
+        if argv == cred_ui.UI_TOKEN_CAT:
+            if not hasattr(fake_run, "written"):
+                return 1, "", _pinned_cat_stderr()
+            return 0, "b" * 32 + "\n", ""
+        fake_run.written = True
+        return 0, "", ""
+
+    monkeypatch.setattr(cred_ui, "run", fake_run)
+    with pytest.raises(RuntimeError, match="did not land"):
+        cred_ui.api_token()
+
+
+def test_swapd_rotate_token_replaces_and_confirms(
+        swapd_env, monkeypatch):
+    stored = {"token": "a" * 32}
+    writes = []
+
+    def fake_run(argv, inp=None):
+        if argv == cred_ui.UI_TOKEN_CAT:
+            return 0, stored["token"] + "\n", ""
+        writes.append(inp)
+        assert cred_ui._TOKEN_RE.match(inp)
+        stored["token"] = inp
+        return 0, "", ""
+
+    monkeypatch.setattr(cred_ui, "run", fake_run)
+    old = cred_ui.api_token()
+    new = cred_ui._rotate_token()
+    assert new != old
+    assert cred_ui._TOKEN_RE.match(new)
+    assert writes == [new]
+    cred_ui._reset_token_cache()
+    assert cred_ui.api_token() == new
+
+
+def test_swapd_malformed_never_reaches_writer(
+        swapd_env, monkeypatch):
+    # Defense in depth: _write_swapd_token pre-validates the alphabet
+    # before spawning sudo, so a programming error upstream fails fast
+    # instead of handing sudo a bad value.
+    monkeypatch.setattr(
+        cred_ui, "run",
+        lambda argv, inp=None: (_ for _ in ()).throw(
+            AssertionError("sudo must not be spawned")))
+    with pytest.raises(RuntimeError, match="malformed"):
+        cred_ui._write_swapd_token("has spaces in it")
+
+
+# --- run(): str stdin is encoded, not TypeError'd ------------------------
+#
+# Issue #964 exposed this: subprocess.run(input=<str>) raises TypeError,
+# which had been 500ing api_set's STORE_SET call (the only other inp=
+# caller) on the box. The fix lives in run(), once, for all callers.
+
+
+def test_run_encodes_str_stdin():
+    import sys
+    # Hermetic: python reads its own stdin and asserts the exact bytes.
+    rc, out, err = cred_ui.run(
+        [sys.executable, "-c",
+         "import sys; assert sys.stdin.read() == 'secret-value'"],
+        inp="secret-value")
+    assert rc == 0, err
+    assert out == ""
+
+
+def test_run_bytes_stdin_still_works():
+    import sys
+    rc, out, _ = cred_ui.run(
+        [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
+        inp=b"raw-bytes")
+    assert rc == 0
+    assert out.strip() == "raw-bytes"
+
+
+def test_run_no_stdin_unchanged():
+    import sys
+    rc, out, _ = cred_ui.run([sys.executable, "-c", "print('ok')"])
+    assert rc == 0
+    assert out.strip() == "ok"

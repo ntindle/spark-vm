@@ -22,6 +22,19 @@ ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-registry-set
 ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-registry-set-inference
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/cat /home/swapd/credentials.json
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/cat /home/swapd/inference-registry.json
+# cred-ui (issue #964): the management API's per-install Bearer <redacted> lives
+# under swapd ownership at /home/swapd/ui-token (0600) instead of the
+# ntindle-owned ~/.config/cred-ui/token, so a same-uid process can no longer
+# read it straight off the filesystem. The UI fetches it at startup through
+# the pinned cat (same pattern as the registry reads above) and writes it
+# through the narrow cred-ui-token-set writer (first start, --rotate-token).
+# Both rules are literal paths — the file's one-argument-wildcard invariant
+# (the whois peer IP below) is unchanged. Honest residual: sudo matches the
+# invoking user, not the process, so a ntindle-uid process can still reach
+# the token through these pinned entries; the move removes the silent
+# direct-file-read path and puts every read through sudo's audit trail.
+ntindle ALL=(swapd) NOPASSWD: /usr/bin/cat /home/swapd/ui-token
+ntindle ALL=(swapd) NOPASSWD: /usr/local/bin/cred-ui-token-set
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/ls /home/swapd/secrets
 # inference proxy (finding 31): append-only hosts file, listable secrets dir
 ntindle ALL=(swapd) NOPASSWD: /usr/bin/tee -a /home/swapd/inference-hosts.allow
