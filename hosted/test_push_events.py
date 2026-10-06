@@ -541,6 +541,65 @@ def test_digest_fire_stamps_enqueued_at(conn):
     assert _digest_state(conn, "owner-1", ws)[1] == stamp
 
 
+def test_digest_crash_gap_heals_on_duplicate_refire(conn):
+    # #1096: a crash between enqueue_page's commit (the `queued` row)
+    # and the enqueued_at stamp leaves a live page row with
+    # enqueued_at NULL. The next sweep's refire reports `duplicate` —
+    # and the stamp now heals instead of stranding the window.
+    now = _utcnow()
+    ws = push_enqueue.hour_bucket(now)
+    for i in range(4):
+        push_enqueue.enqueue_page(
+            conn, event_kind="approval_filed", owner_principal="owner-1",
+            box_id="box-9", key_material="aid-%d" % i, now=now)
+    # Simulate the crash: the digest page row is committed (first
+    # commit) but the enqueued_at stamp (second commit) never ran.
+    r = push_enqueue.enqueue_page(
+        conn, event_kind="digest", owner_principal="owner-1",
+        box_id=None, key_material=ws, now=now)
+    assert r.disposition == "queued"
+    assert _digest_state(conn, "owner-1", ws)[1] is None
+    # The next sweep refires, dedups, and stamps the window.
+    d = push_events.maybe_enqueue_digest(
+        conn, owner_principal="owner-1", now=now)
+    assert d.disposition == "duplicate"
+    count, stamp = _digest_state(conn, "owner-1", ws)
+    assert count == 1 and stamp is not None
+
+
+def test_digest_duplicate_without_page_row_leaves_stamp_unset(conn):
+    # #1096, the careful point: a `duplicate` from the D57 race path
+    # with no page row present must NOT stamp. A digest suppressed
+    # twice in a row produces exactly this: the second refire dedups
+    # against the first sweep's suffixed suppression audit (D77), so
+    # no exact-key page row exists — the stamp stays NULL and a later
+    # sweep retries.
+    now = _utcnow()
+    ws = push_enqueue.hour_bucket(now)
+    # Exhaust the owner's D10 budget (10 approvals across 10 boxes).
+    for i in range(10):
+        r = push_enqueue.enqueue_page(
+            conn, event_kind="approval_filed", owner_principal="owner-1",
+            box_id="box-%d" % i, key_material="aid-%d" % i, now=now)
+        assert r.disposition == "queued"
+    assert push_enqueue.get_digest_count(conn, "owner-1", ws) == 0
+    # One more filing coalesces (count > 0) so the digest fires.
+    push_enqueue.enqueue_page(
+        conn, event_kind="approval_filed", owner_principal="owner-1",
+        box_id="box-10", key_material="aid-10", now=now)
+    assert push_enqueue.get_digest_count(conn, "owner-1", ws) == 1
+    d1 = push_events.maybe_enqueue_digest(
+        conn, owner_principal="owner-1", now=now)
+    assert d1.disposition == "suppressed_budget"
+    assert _digest_state(conn, "owner-1", ws)[1] is None
+    d2 = push_events.maybe_enqueue_digest(
+        conn, owner_principal="owner-1", now=now)
+    assert d2.disposition == "duplicate"
+    # No exact-key page row exists (only the suffixed audit) —
+    # the stamp stays unset for a later sweep.
+    assert _digest_state(conn, "owner-1", ws)[1] is None
+
+
 def test_digest_window_start_fail_closed(conn):
     # D76: the explicit window is key material — empty or
     # separator-injected windows are ValueError, never a weird key.

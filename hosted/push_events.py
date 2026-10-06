@@ -473,6 +473,16 @@ def maybe_enqueue_digest(conn, *, owner_principal, now=None,
     digest leaves `enqueued_at` NULL so a later sweep retries; a
     fired window is never refired (the D54/D57 page-once key is the
     window itself, so a refire attempt is a harmless `duplicate`).
+
+    #1096 — the crash gap: `enqueue_page` commits the `queued` row in
+    its own transaction and the stamp below is a second commit, so a
+    crash between them leaves `enqueued_at` NULL with a live page row
+    — and the stamp (then only on `queued`) never healed. The stamp
+    now also lands on a `duplicate` refire when a page/attempt row
+    exists for the window's exact digest key (the D77 suppression
+    audit is suffixed, so it cannot false-match). A `duplicate` from
+    the D57 race path with no page row present leaves the stamp
+    unset — a later sweep retries.
     """
     _require_key_material("owner_principal", owner_principal)
     moment = _utcnow(now)
@@ -485,10 +495,31 @@ def maybe_enqueue_digest(conn, *, owner_principal, now=None,
     r = push_enqueue.enqueue_page(
         conn, event_kind="digest", owner_principal=owner_principal,
         box_id=None, key_material=window, now=moment)
-    if r.disposition == "queued":
+    if r.disposition == "queued" or (
+            r.disposition == "duplicate"
+            and _digest_page_row_exists(conn, owner_principal, window)):
         conn.execute(
             "UPDATE push_digest_state SET enqueued_at = ?"
             " WHERE owner_principal = ? AND window_start = ?",
             (moment.isoformat(), owner_principal, window))
         conn.commit()
     return MapResult(r.disposition, r)
+
+
+def _digest_page_row_exists(conn, owner_principal, window):
+    """True when a page/attempt row exists for the window's exact
+    digest key (#1096).
+
+    The digest's budget-suppression audit is keyed with a U+0000
+    suffix (D77), so it can never false-match the exact page key:
+    an exact-key row means the digest page was accepted at some
+    point and `enqueued_at` may be stamped on a `duplicate` refire.
+    A `duplicate` from the D57 race path with no page row present
+    leaves the stamp unset (a later sweep retries).
+    """
+    key = push_enqueue.event_key_for("digest", owner_principal, None,
+                                     window)
+    return conn.execute(
+        "SELECT 1 FROM push_send_results"
+        " WHERE box_id = '' AND event_kind = 'digest'"
+        " AND event_key = ? LIMIT 1", (key,)).fetchone() is not None

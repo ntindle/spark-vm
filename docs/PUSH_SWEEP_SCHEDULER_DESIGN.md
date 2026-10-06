@@ -155,6 +155,14 @@ cadence the request path cannot supply.
   the D9 slice had left unwritten (the column existed in the #988
   contract but nothing wrote it); a budget-suppressed digest leaves it
   NULL so a later sweep retries; a fired window is never refired.
+  (Amended by #1096, 2026-10-06: the stamp also lands on a
+  `duplicate` refire when a page/attempt row exists for the window's
+  exact digest key — healing the crash gap where the `queued` row
+  commits but the stamp's separate commit never runs, which used to
+  strand the window phantom-pending. The D77 suffixed suppression
+  audit cannot false-match the exact key; a `duplicate` from the D57
+  race path with no page row present leaves the stamp unset, so a
+  later sweep retries.)
   Known residual: a window that fired and then receives more
   coalescing in its final minute keeps the D67 accepted drift (no
   refire — the page-once key *is* the window, so a second digest for
