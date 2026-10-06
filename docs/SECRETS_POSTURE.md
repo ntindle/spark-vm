@@ -61,15 +61,16 @@ placeholders. On each outbound request the proxy:
   - **Set-Cookie is scrubbed too, and that breaks session cookies by
     design.** The request side only swaps placeholders into `Cookie` headers
     for credentials whose registry placement explicitly names the Cookie
-    header — but the response scrubber rewrites the secret in *every*
-    response header including `Set-Cookie`. If a server echoes the secret
-    into `session=<secret>`, the client stores `session=hsurr:<name>`; the
-    next request sends the literal placeholder (the cookie branch refuses
-    to re-swap a credential with no Cookie placement) and the session
-    breaks — fail-closed, with a `set-cookie-no-cookie-swap` audit note
-    explaining why, never the value. Exempting Set-Cookie would re-open
-    the echo leak the scrubber exists to close; the fix is to give the
-    credential a Cookie placement or handle cookies client-side.
+    header — but the response scrubber rewrites the secret in every response
+    header except content-length/transfer-encoding, including `Set-Cookie`.
+    If a server echoes the secret into `session=<secret>`, the client stores
+    `session=hsurr:<name>`; the next request sends the literal placeholder
+    (the cookie branch refuses to re-swap a credential with no Cookie
+    placement) and the session breaks — fail-closed, with a
+    `set-cookie-no-cookie-swap` audit note explaining why, never the value.
+    Exempting Set-Cookie would re-open the echo leak the scrubber exists to
+    close; the fix is to give the credential a Cookie placement in the
+    registry (option (c) of #837).
 - resolves the destination host **before** the upstream TCP connect, so a
   refused host never even gets a SYN (private ranges, loopback, link-local,
   CGNAT/tailnet space, and the `ssrf.deny` hard list are refused by default;
