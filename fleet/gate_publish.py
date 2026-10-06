@@ -24,7 +24,19 @@ Usage:
         --key-id ctl-2026-09 \
         --key-file /path/to/controller.key \
         --out gate.json \
-        [--ttl-seconds 600]
+        [--ttl-seconds 600] \
+        [--rotation-log PATH] [--rotation-stale-days 14]
+
+Rotation reminders (issue #1008): the publisher keeps a controller-side
+ledger of key rotations (gate_rotation_log.json next to the registry by
+default; key_ids + timestamps only, never key material). Publishing with a
+new --key-id opens a rotation window and says so loudly; every later publish
+reports still-open windows and warns loudly once a window reaches
+--rotation-stale-days (default 14). After runbook step 4 (retire the old key from every
+box), close the window with:
+    python3 fleet/gate_publish.py --rotation-complete ctl-2026-09
+An un-closed window is a permanent second signing key — the ledger makes it
+visible instead of silent.
 
 registry.json: {"repo": {"max_permitted_commit": "<40hex>", "channel": "stable"},
                 "toolset": {"max_permitted_pin": "2026.09.27", "channel": "stable"},
@@ -38,6 +50,7 @@ Stdlib only. Never prints key material (not even a prefix).
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import hmac
 import json
@@ -52,6 +65,13 @@ COMPONENTS = ("repo", "toolset", "image")
 WAVE_STATES = ("draft", "canary", "wave-1", "wave-2", "wave-3", "wave-4",
                "complete", "halted")
 REPO_COMMIT_RE = set("0123456789abcdef")
+ROTATION_LOG_NAME = "gate_rotation_log.json"
+# A rotation window the operator never closes becomes a permanent second
+# signing key (issue #1008). The ledger below makes an open window visible:
+# each publish either opens a new window (new --key-id) or reports the age
+# of the still-open one, warning loudly once it exceeds --rotation-stale-days.
+DEFAULT_ROTATION_STALE_DAYS = 14
+ROTATION_LEDGER_VERSION = 1
 
 
 def canonical_body(body: dict) -> bytes:
@@ -161,26 +181,255 @@ def sign_document(body: dict, key: bytes) -> dict:
     return doc
 
 
+def _rotation_log_path(args) -> str:
+    """Controller-side ledger path. Explicit --rotation-log wins; otherwise
+    it sits next to the operator-managed registry (operator-local state,
+    key_ids + timestamps only — never key material). In --rotation-complete
+    mode without --registry, the current directory is the fallback."""
+    if args.rotation_log:
+        return args.rotation_log
+    if args.registry:
+        return os.path.join(os.path.dirname(os.path.abspath(args.registry)),
+                            ROTATION_LOG_NAME)
+    return ROTATION_LOG_NAME
+
+
+def _parse_ledger_ts(value):
+    """Parse a ledger timestamp ("%Y-%m-%dT%H:%M:%SZ"); None if unparseable."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_rotation_log(path: str) -> dict:
+    """Load the rotation ledger. A missing ledger is a first run (empty).
+    A corrupt ledger is LOUD on stderr but never blocks publishing the gate
+    document — the ledger is advisory; the document is the release channel.
+    Malformed events (wrong shape, unparseable timestamps) are dropped with
+    the same loud warning rather than crashing the publish path."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {"ledger_version": ROTATION_LEDGER_VERSION, "rotations": []}
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"WARNING: rotation ledger {path} unreadable ({exc}); "
+              "treating as empty. Fix or delete the file to restore "
+              "rotation reminders.", file=sys.stderr)
+        return {"ledger_version": ROTATION_LEDGER_VERSION, "rotations": []}
+    if (not isinstance(data, dict)
+            or not isinstance(data.get("rotations"), list)):
+        print(f"WARNING: rotation ledger {path} has an unexpected shape; "
+              "treating as empty.", file=sys.stderr)
+        return {"ledger_version": ROTATION_LEDGER_VERSION, "rotations": []}
+    kept = []
+    for ev in data["rotations"]:
+        if (_parse_ledger_ts(ev.get("opened_at")) is not None
+                and isinstance(ev.get("to_key_id"), str)
+                and (ev.get("from_key_id") is None
+                     or isinstance(ev.get("from_key_id"), str))
+                and (ev.get("closed_at") is None
+                     or _parse_ledger_ts(ev.get("closed_at")) is not None)):
+            kept.append(ev)
+        else:
+            print(f"WARNING: rotation ledger {path} has a malformed "
+                  "rotation event; dropping it. The gate document still "
+                  "publishes; fix or delete the file to restore rotation "
+                  "reminders.", file=sys.stderr)
+    data["rotations"] = kept
+    return data
+
+
+def _save_rotation_log(path: str, log: dict) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(log, fh, sort_keys=True, indent=2, ensure_ascii=False)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def _open_rotations(log: dict):
+    """All currently open rotation events, oldest first."""
+    return [ev for ev in log["rotations"]
+            if ev.get("closed_at") is None and ev.get("from_key_id") is not None]
+
+
+def _last_key_id(log: dict):
+    """Most recent key_id the tool published with, or None (first run)."""
+    for ev in reversed(log["rotations"]):
+        if ev.get("to_key_id"):
+            return ev["to_key_id"]
+    return None
+
+
+def _rotation_age_days(opened_at: str) -> int:
+    return (datetime.now(timezone.utc)
+            - _parse_ledger_ts(opened_at)).days
+
+
+def process_rotation(key_id: str, log_path: str, stale_days: int) -> None:
+    """Update the rotation ledger for a publish signed with key_id and emit
+    reminders. A key change opens a rotation window (loud once, naming the
+    old key and the runbook step that closes it); every still-open window is
+    reported on every publish, and warned loudly once it reaches the stale
+    threshold. Chained rotations (a new key before the old window closed)
+    keep ALL windows open and report each — every un-retired key is a live
+    signing key.
+
+    The whole load->modify->save runs under an advisory exclusive lock so
+    concurrent publishers cannot silently drop each other's rotation events
+    (B2); the lock lives on a dedicated lockfile, never the ledger itself,
+    because the atomic rename replaces the ledger's inode. A lock that
+    cannot be taken skips the reminders loudly but never blocks the
+    document; a save failure propagates to main's wrapper, which does the
+    same (B1)."""
+    lock_path = log_path + ".lock"
+    try:
+        lf = open(lock_path, "w")
+    except OSError as exc:
+        print(f"WARNING: cannot lock rotation ledger ({exc}); rotation "
+              "reminders unavailable, but the gate document publishes "
+              "normally.", file=sys.stderr)
+        return
+    with lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        log = _load_rotation_log(log_path)
+        last = _last_key_id(log)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        if last is not None and key_id != last:
+            ev = {"from_key_id": last, "to_key_id": key_id, "opened_at": now,
+                  "closed_at": None}
+            log["rotations"].append(ev)
+            still_open = [o for o in _open_rotations(log)
+                          if o["to_key_id"] != key_id]
+            print(f"ROTATION OPEN: documents are now signed with {key_id}; "
+                  f"{last} is still provisioned on the estate until you finish "
+                  "runbook step 4 (remove its key_id=/path entry from every "
+                  "box's SPARKVM_GATE_KEYS), then close the window with: "
+                  f"gate_publish.py --rotation-complete {last} --rotation-log "
+                  + log_path, file=sys.stderr)
+            for o in still_open:
+                print(f"NOTE: an earlier rotation window ({o['from_key_id']} -> "
+                      f"{o['to_key_id']}, opened {o['opened_at']}) is STILL "
+                      "open; both keys remain valid. Retire each key, then "
+                      f"--rotation-complete each.", file=sys.stderr)
+        elif last is None:
+            # Baseline event on first run (from=None: not a rotation; the
+            # ledger starts closed so a plain first publish is quiet).
+            log["rotations"].append({"from_key_id": None, "to_key_id": key_id,
+                                     "opened_at": now, "closed_at": now})
+        else:
+            for o in _open_rotations(log):
+                age_days = _rotation_age_days(o["opened_at"])
+                to_key = o["to_key_id"]
+                if age_days >= stale_days:
+                    print(f"WARNING: key rotation {o['from_key_id']} -> "
+                          f"{to_key} has been open for {age_days} days (since "
+                          f"{o['opened_at']}) — {o['from_key_id']} is still a "
+                          "valid signing key until retired. Finish runbook "
+                          "step 4 (remove its key_id=/path entry from every "
+                          "box's SPARKVM_GATE_KEYS), then: gate_publish.py "
+                          f"--rotation-complete {o['from_key_id']} "
+                          "--rotation-log " + log_path, file=sys.stderr)
+                else:
+                    print(f"note: key rotation {o['from_key_id']} -> {to_key} "
+                          f"open for {age_days} days (since {o['opened_at']}); "
+                          f"retire {o['from_key_id']} per runbook step 4, then "
+                          "--rotation-complete.", file=sys.stderr)
+        _save_rotation_log(log_path, log)
+
+
+def close_rotation(old_key_id: str, log_path: str) -> None:
+    """Close the open rotation that retired old_key_id (runbook step 4 done).
+    Exits non-zero if no such window is open — the operator typed the wrong
+    key, or nothing was open to close. Reports any still-open windows
+    honestly instead of claiming sole-key status while other keys remain
+    valid (B3)."""
+    log = _load_rotation_log(log_path)
+    for ev in reversed(log["rotations"]):
+        if (ev.get("from_key_id") == old_key_id
+                and ev.get("closed_at") is None):
+            ev["closed_at"] = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            _save_rotation_log(log_path, log)
+            remaining = _open_rotations(log)
+            if remaining:
+                pairs = ", ".join(
+                    f"{e['from_key_id']}->{e['to_key_id']}"
+                    for e in remaining)
+                print(f"rotation window closed: {old_key_id} retired; "
+                      f"{len(remaining)} other window(s) STILL OPEN: "
+                      f"{pairs} — those keys remain valid until retired "
+                      "and --rotation-complete'd.")
+            else:
+                print(f"rotation window closed: {old_key_id} retired; "
+                      f"{ev['to_key_id']} is the sole signing key.")
+            return
+    sys.exit(f"ERROR: no open rotation window retiring {old_key_id} "
+             f"(ledger: {log_path}).")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--registry", required=True,
+    ap.add_argument("--registry",
                     help="release registry JSON (releases map)")
-    ap.add_argument("--manifest", required=True,
+    ap.add_argument("--manifest",
                     help="wave manifest JSON (waves map)")
     ap.add_argument("--freeze", action="store_true",
                     help="publish a fleet-wide freeze (orthogonal to releases)")
-    ap.add_argument("--key-id", required=True, help="signing key id (ctl-YYYY-MM)")
-    ap.add_argument("--key-file", required=True, help="controller MAC key file (0600)")
-    ap.add_argument("--out", required=True, help="where to write gate.json")
+    ap.add_argument("--key-id", help="signing key id (ctl-YYYY-MM)")
+    ap.add_argument("--key-file", help="controller MAC key file (0600)")
+    ap.add_argument("--out", help="where to write gate.json")
     ap.add_argument("--ttl-seconds", type=int, default=DEFAULT_TTL_SECONDS,
                     help="document lease in seconds (default 600)")
+    ap.add_argument("--rotation-log", default=None,
+                    help="rotation ledger path (default: "
+                    "gate_rotation_log.json next to --registry)")
+    ap.add_argument("--rotation-stale-days", type=int,
+                    default=DEFAULT_ROTATION_STALE_DAYS,
+                    help="days an open rotation window may age before the "
+                    "publish warns loudly (default "
+                    f"{DEFAULT_ROTATION_STALE_DAYS})")
+    ap.add_argument("--rotation-complete", metavar="OLD_KEY_ID", default=None,
+                    help="close an open rotation window: declare runbook "
+                    "step 4 done for OLD_KEY_ID (no document is published). "
+                    "The window is located via --rotation-log, else via "
+                    "--registry's directory, else ./gate_rotation_log.json "
+                    "in the current directory.")
     args = ap.parse_args(argv)
+
+    if args.rotation_complete:
+        close_rotation(args.rotation_complete, _rotation_log_path(args))
+        return 0
+
+    for flag in ("registry", "manifest", "key_id", "key_file", "out"):
+        if not getattr(args, flag):
+            sys.exit(f"ERROR: --{flag.replace('_', '-')} is required "
+                     "(unless --rotation-complete is used).")
+    if args.rotation_stale_days < 0:
+        sys.exit("ERROR: --rotation-stale-days must be non-negative.")
 
     if args.ttl_seconds <= 0:
         sys.exit("ERROR: --ttl-seconds must be positive.")
     registry = _validate_registry(_load_json(args.registry, "registry"))
     manifest = _validate_manifest(_load_json(args.manifest, "manifest"))
     key = _load_key(args.key_file)
+
+    try:
+        process_rotation(args.key_id, _rotation_log_path(args),
+                         args.rotation_stale_days)
+    except (OSError, ValueError, AttributeError) as exc:
+        # B1: the release channel must never depend on advisory state. A
+        # ledger the tool cannot read, lock, or write is loud on stderr but
+        # never blocks the gate document.
+        print(f"WARNING: rotation ledger update failed ({exc}); rotation "
+              "reminders unavailable, but the gate document publishes "
+              "normally.", file=sys.stderr)
 
     body = build_gate_document(registry, manifest, args.freeze,
                                args.key_id, args.ttl_seconds)

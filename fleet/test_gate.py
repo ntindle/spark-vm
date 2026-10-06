@@ -878,3 +878,186 @@ def test_pending_range_first_run_frozen_refuses(tmp_path):
     r = bash_source("pending_range", env_extra=env)
     assert r.returncode == 2
     assert "frozen" in r.stderr
+
+
+# --- rotation reminders (issue #1008 option (b)) ---------------------------
+
+def publish_with_log(tmp_path, keyfile, registry, manifest, key_id,
+                     extra=(), rotation_log=None):
+    out = str(tmp_path / "gate.json")
+    rlog = rotation_log or str(tmp_path / "rotation_log.json")
+    r = run(sys.executable, PUBLISH, "--registry", registry,
+            "--manifest", manifest,
+            "--key-id", key_id, "--key-file", keyfile, "--out", out,
+            "--rotation-log", rlog, *extra)
+    assert r.returncode == 0, r.stderr
+    return out, rlog, r
+
+
+def test_rotation_first_publish_is_quiet_baseline(tmp_path, keyfile, registry,
+                                                  manifest):
+    out, rlog, r = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                    KEY_ID)
+    assert "ROTATION OPEN" not in r.stderr
+    log = json.loads(open(rlog).read())
+    assert len(log["rotations"]) == 1
+    ev = log["rotations"][0]
+    assert ev["from_key_id"] is None and ev["to_key_id"] == KEY_ID
+    assert ev["closed_at"] is not None  # baseline: not an open window
+
+
+def test_rotation_new_key_opens_window(tmp_path, keyfile, registry, manifest):
+    _, rlog, _ = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                  KEY_ID)
+    _, _, r = publish_with_log(tmp_path, keyfile, registry, manifest,
+                               "ctl-2026-10")
+    assert "ROTATION OPEN" in r.stderr
+    assert "ctl-2026-09" in r.stderr  # the old key is named
+    assert "runbook step 4" in r.stderr
+    log = json.loads(open(rlog).read())
+    open_evs = [e for e in log["rotations"] if e["closed_at"] is None]
+    assert len(open_evs) == 1
+    assert open_evs[0]["from_key_id"] == KEY_ID
+    assert open_evs[0]["to_key_id"] == "ctl-2026-10"
+
+
+def test_rotation_open_window_noted_on_later_publish(tmp_path, keyfile,
+                                                     registry, manifest):
+    _, rlog, _ = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                  KEY_ID)
+    publish_with_log(tmp_path, keyfile, registry, manifest, "ctl-2026-10")
+    _, _, r = publish_with_log(tmp_path, keyfile, registry, manifest,
+                               "ctl-2026-10")
+    assert "rotation" in r.stderr and "open" in r.stderr
+    assert "WARNING" not in r.stderr  # fresh window: note, not warning
+
+
+def test_rotation_stale_window_warns(tmp_path, keyfile, registry, manifest):
+    _, rlog, _ = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                  KEY_ID)
+    publish_with_log(tmp_path, keyfile, registry, manifest, "ctl-2026-10")
+    # Age the open window past the stale threshold.
+    log = json.loads(open(rlog).read())
+    log["rotations"][-1]["opened_at"] = "2026-01-01T00:00:00Z"
+    open(rlog, "w").write(json.dumps(log))
+    _, _, r = publish_with_log(tmp_path, keyfile, registry, manifest,
+                               "ctl-2026-10")
+    assert "WARNING" in r.stderr
+    assert "ctl-2026-09" in r.stderr  # un-retired key named
+    assert "--rotation-complete" in r.stderr
+
+
+def test_rotation_complete_closes_window(tmp_path, keyfile, registry,
+                                         manifest):
+    _, rlog, _ = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                  KEY_ID)
+    publish_with_log(tmp_path, keyfile, registry, manifest, "ctl-2026-10")
+    r = run(sys.executable, PUBLISH, "--rotation-complete", KEY_ID,
+            "--rotation-log", rlog)
+    assert r.returncode == 0, r.stderr
+    assert "closed" in r.stdout
+    log = json.loads(open(rlog).read())
+    assert all(e["closed_at"] is not None for e in log["rotations"])
+    # Later publishes stay quiet about the closed window.
+    _, _, r2 = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                "ctl-2026-10")
+    assert "WARNING" not in r2.stderr
+    assert "rotation" not in r2.stderr
+
+
+def test_rotation_complete_unknown_key_fails(tmp_path):
+    rlog = str(tmp_path / "rotation_log.json")
+    r = run(sys.executable, PUBLISH, "--rotation-complete", "ctl-nope",
+            "--rotation-log", rlog)
+    assert r.returncode != 0
+    assert "no open rotation" in r.stderr
+
+
+def test_rotation_corrupt_ledger_does_not_block_publish(tmp_path, keyfile,
+                                                        registry, manifest):
+    rlog = str(tmp_path / "rotation_log.json")
+    open(rlog, "w").write("{not json")
+    _, rlog2, r = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                   KEY_ID, rotation_log=rlog)
+    assert r.returncode == 0
+    assert "WARNING" in r.stderr  # ledger problem is loud...
+    assert os.path.exists(rlog2)  # ...but the document still publishes
+
+
+def test_rotation_chained_windows_all_reported(tmp_path, keyfile, registry,
+                                               manifest):
+    _, rlog, _ = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                  KEY_ID)
+    publish_with_log(tmp_path, keyfile, registry, manifest, "ctl-2026-10")
+    _, _, r = publish_with_log(tmp_path, keyfile, registry, manifest,
+                               "ctl-2026-11")
+    assert "STILL" in r.stderr  # the K1->K2 window never closed
+    log = json.loads(open(rlog).read())
+    open_evs = [e for e in log["rotations"] if e["closed_at"] is None]
+    assert len(open_evs) == 2
+    # Each open window is reported with its own from -> to pair (not the
+    # current publish key attributed to every window).
+    _, _, r2 = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                "ctl-2026-11")
+    assert f"{KEY_ID} -> ctl-2026-10" in r2.stderr
+    assert "ctl-2026-10 -> ctl-2026-11" in r2.stderr
+
+
+def test_rotation_malformed_event_does_not_block_publish(tmp_path, keyfile,
+                                                         registry, manifest):
+    rlog = str(tmp_path / "rotation_log.json")
+    open(rlog, "w").write(json.dumps({
+        "ledger_version": 1,
+        "rotations": [
+            {"from_key_id": "ctl-2026-09", "to_key_id": "ctl-2026-10",
+             "opened_at": "not-a-timestamp", "closed_at": None},
+            {"to_key_id": "ctl-2026-10"},  # missing opened_at
+        ],
+    }))
+    _, rlog2, r = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                   "ctl-2026-10", rotation_log=rlog)
+    assert r.returncode == 0
+    assert "WARNING" in r.stderr  # malformed events are loud...
+    assert "malformed" in r.stderr
+    assert os.path.exists(rlog2)  # ...but the document still publishes
+    log = json.loads(open(rlog2).read())
+    # Malformed events were dropped; the new publish recorded its own event.
+    assert all(e.get("opened_at") != "not-a-timestamp"
+               for e in log["rotations"])
+
+
+def test_rotation_unwritable_ledger_does_not_block_publish(tmp_path, keyfile,
+                                                           registry, manifest):
+    # B1: the release channel never depends on advisory state. A ledger path
+    # that cannot be written (here: a directory) is loud on stderr, and the
+    # gate document still publishes.
+    r = run(sys.executable, PUBLISH, "--registry", registry,
+            "--manifest", manifest,
+            "--key-id", KEY_ID, "--key-file", keyfile,
+            "--out", str(tmp_path / "gate.json"),
+            "--rotation-log", str(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" in r.stderr
+    assert "rotation ledger" in r.stderr
+    assert os.path.exists(str(tmp_path / "gate.json"))
+
+
+def test_rotation_complete_chained_is_honest(tmp_path, keyfile, registry,
+                                             manifest):
+    # B3: closing one window of a chained rotation must not claim the new
+    # key is the sole signing key while another window is still open.
+    _, rlog, _ = publish_with_log(tmp_path, keyfile, registry, manifest,
+                                  KEY_ID)
+    publish_with_log(tmp_path, keyfile, registry, manifest, "ctl-2026-10")
+    publish_with_log(tmp_path, keyfile, registry, manifest, "ctl-2026-11")
+    r = run(sys.executable, PUBLISH, "--rotation-complete", KEY_ID,
+            "--rotation-log", rlog)
+    assert r.returncode == 0, r.stderr
+    assert "STILL OPEN" in r.stdout
+    assert "ctl-2026-10->ctl-2026-11" in r.stdout
+    assert "sole signing key" not in r.stdout
+    # Closing the last window earns the sole-key claim.
+    r2 = run(sys.executable, PUBLISH, "--rotation-complete", "ctl-2026-10",
+             "--rotation-log", rlog)
+    assert r2.returncode == 0, r2.stderr
+    assert "sole signing key" in r2.stdout
