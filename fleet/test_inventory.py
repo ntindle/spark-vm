@@ -1302,3 +1302,90 @@ def test_tail_discontinuity_second_break_refires(env):
     assert rows[0]["alert_id"] != rows[1]["alert_id"]
     assert {r["rule"] for r in rows} == {"tail-discontinuity"}
     assert {r["box_id"] for r in rows} == {"tower"}
+
+
+# --- tail-discontinuity test hardening (#1073, QA follow-ups to #1006) --
+
+
+def test_tail_discontinuity_multi_box_fires_once(env):
+    # #1073.1: one box discontinuous in a multi-box estate fires exactly
+    # one alert, and the other box's watermark is left untouched — the
+    # per-box marks are independent.
+    estate, store = _collect(env, {
+        "tower": {"status": _status_json(), "audit": _tail_lines(5),
+                  "snapshot": _snapshot_json(COMMIT_A)},
+        "desk": {"status": _status_json(), "audit": _tail_lines(5),
+                 "snapshot": _snapshot_json(COMMIT_A)}})
+    assert _alerts(store) == []
+    desk_mark = _watermarks(store)["desk"]
+    # Only tower overflows; desk's tail keeps overlapping.
+    _write_box(estate, "tower", audit=_tail_lines(5, start=100))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    assert "tower" in proc.stderr and "discontinuity" in proc.stderr
+    rows = _alerts(store)
+    assert len(rows) == 1, rows
+    assert rows[0]["rule"] == "tail-discontinuity"
+    assert rows[0]["box_id"] == "tower"
+    # The other box's watermark keeps its head hash/lines (observed_at
+    # advances on every pull by design — the continuity evidence is the
+    # head hash, not the pull timestamp).
+    after = _watermarks(store)["desk"]
+    for key in ("tail_head_sha256", "tail_lines", "last_discontinuity_at"):
+        assert after[key] == desk_mark[key], (key, after, desk_mark)
+
+
+def test_same_collect_dual_fire_event_rule_and_discontinuity(env):
+    # #1073.2: one collect where evaluate_alerts fires an event-journal
+    # rule (rule 1, rollback-failed) AND check_tail_continuity fires a
+    # discontinuity journals both alerts — each append runs under the
+    # shared store journal lock, so the two writes never clobber each
+    # other.
+    estate, store = _collect(env, {"tower": {
+        "status": _status_json(), "audit": _tail_lines(5),
+        "snapshot": _snapshot_json(COMMIT_A)}})
+    assert _alerts(store) == []
+    failed = _audit_line(NOW - timedelta(minutes=55), "rollback",
+                         COMMIT_A, COMMIT_B, result="rollback-failed")
+    _write_box(estate, "tower",
+               audit=_tail_lines(5, start=100) + [failed])
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    rows = _alerts(store)
+    assert len(rows) == 2, rows
+    by_rule = {r["rule"]: r for r in rows}
+    assert set(by_rule) == {"rollback-failed", "tail-discontinuity"}
+    assert by_rule["rollback-failed"]["box_id"] == "tower"
+    assert by_rule["tail-discontinuity"]["box_id"] == "tower"
+    assert by_rule["rollback-failed"]["alert_id"] != \
+        by_rule["tail-discontinuity"]["alert_id"]
+    assert all(r["acked"] is False for r in rows)
+
+
+def test_tail_discontinuity_ack_lifecycle_new_alert_id(env):
+    # #1073.3: ack a tail-discontinuity alert, then trigger a genuinely
+    # new discontinuity — a new alert fires with a new alert_id. The
+    # dedup key is the lost window's head hash, ack-independent, so the
+    # ack never suppresses fresh evidence (rule 4's ack-gate does not
+    # apply to rule 5).
+    estate, store = _collect(env, {"tower": {
+        "status": _status_json(), "audit": _tail_lines(5),
+        "snapshot": _snapshot_json(COMMIT_A)}})
+    _write_box(estate, "tower", audit=_tail_lines(5, start=100))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    first = _alerts(store)
+    assert len(first) == 1
+    ack = run_inventory("events", "ack", "--store", store,
+                        "--alert-id", first[0]["alert_id"])
+    assert ack.returncode == 0, ack.stderr
+    # A second, disjoint overflow after the ack.
+    _write_box(estate, "tower", audit=_tail_lines(5, start=200))
+    proc = run_inventory("collect", "--estate", estate, "--store", store)
+    assert proc.returncode == 0, proc.stderr
+    rows = _alerts(store)
+    assert len(rows) == 2, rows
+    assert rows[0]["alert_id"] != rows[1]["alert_id"]
+    assert rows[0]["acked"] is True
+    assert rows[1]["acked"] is False
+    assert rows[1]["rule"] == "tail-discontinuity"

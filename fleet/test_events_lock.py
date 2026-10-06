@@ -8,6 +8,12 @@ waits on a barrier so the mutations genuinely overlap; the journal is
 then asserted to hold exactly one copy of each row, and every worker's
 ack to have stuck.
 
+The lock's wait is bounded (#1007): a holder stopped with SIGSTOP (or
+wedged on a stuck filesystem) never releases its flock, so waiters get
+a loud JournalLockError naming the lock file after the timeout instead
+of blocking forever — the #1007 tests below pin that contract, again
+with real stopped processes.
+
 Run from the repo root:  python3 -m pytest fleet/test_events_lock.py -q
 
 Hermetic: stores live under tmp dirs; no network, no home-dir writes.
@@ -20,8 +26,10 @@ suite.
 import json
 import multiprocessing
 import os
+import signal
 import sys
 import tempfile
+import time
 
 import pytest
 
@@ -237,3 +245,212 @@ def test_lock_fail_closed_when_store_unwritable(tmp_path):
     found, err = events.ack_alert(store, "anything")
     assert found is None and err is not None
     assert "not a directory" in err, err
+
+
+# --- Bounded wait (#1007) -------------------------------------------------
+
+def _stopped_lock_holder(store, ready, resume):
+    """Child body for the #1007 wedge scenario: take the journal lock,
+    signal readiness, then block until the parent resumes us. The PARENT
+    performs the SIGSTOP (see _LockHolder._stop_child) and the resume is
+    a multiprocessing.Event — never signal semantics. Two races this
+    avoids: (1) a child that SIGSTOPs itself races the parent's cleanup
+    SIGCONT — a SIGCONT that lands first is a silent no-op and the
+    child then stops itself after the only resume was spent; (2)
+    signal.pause() does NOT wake on SIGCONT (the stop resumes but
+    pause() keeps sleeping), so pause() can never be the resume
+    mechanism."""
+    with events.journal_lock(store):
+        ready.set()
+        resume.wait()
+    # Exiting the with-block releases the lock.
+
+
+def _brief_lock_holder(store, hold_s, ready):
+    """Child body for the serialize-not-skip case: hold the lock
+    briefly, then release it normally."""
+    with events.journal_lock(store):
+        ready.set()
+        time.sleep(hold_s)
+
+
+def _proc_state(pid):
+    """Single-letter process state from /proc (Linux-only, like the
+    rest of this file). Raises ProcessLookupError/FileNotFoundError
+    when the pid is gone."""
+    with open("/proc/%d/stat" % pid, "r", encoding="utf-8") as fh:
+        data = fh.read()
+    # comm may itself contain spaces/parens: the state field follows
+    # the last ')'.
+    return data.rsplit(")", 1)[1].split()[0]
+
+
+class _LockHolder:
+    """Fork a child holding the journal lock (stopped or brief), and
+    guarantee it is resumed and reaped on exit even if the test fails.
+
+    For the stopped holder the parent performs the SIGSTOP itself and
+    verifies the child actually reached the stopped state before the
+    test body runs — deterministic ordering, no self-stop race. Cleanup
+    uses timed joins only, escalating to SIGKILL (which, unlike SIGTERM,
+    terminates even a stopped process): no untimed wait anywhere, so a
+    wedged child can fail the test but never hang the suite."""
+
+    def __init__(self, store, hold_s=None):
+        self.store = store
+        self.hold_s = hold_s
+        self.ready = multiprocessing.Event()
+        self.resume = multiprocessing.Event()
+        if hold_s is None:
+            target = _stopped_lock_holder
+            args = (store, self.ready, self.resume)
+        else:
+            target, args = _brief_lock_holder, (store, hold_s, self.ready)
+        self.proc = multiprocessing.Process(target=target, args=args)
+
+    def __enter__(self):
+        self.proc.start()
+        try:
+            if not self.ready.wait(30):
+                raise AssertionError(
+                    "lock-holder child never took the lock")
+            if self.hold_s is None:
+                self._stop_child()
+        except BaseException:
+            self._cleanup()
+            raise
+        # The brief holder set readiness while still holding the lock;
+        # the stopped holder is verified stopped by _stop_child.
+        return self
+
+    def _stop_child(self):
+        """SIGSTOP the child and wait until it is actually stopped."""
+        pid = self.proc.pid
+        if pid is None:
+            raise AssertionError("lock-holder child has no pid")
+        try:
+            os.kill(pid, signal.SIGSTOP)
+        except ProcessLookupError:
+            raise AssertionError(
+                "lock-holder child died before it could be stopped")
+        for _ in range(200):
+            try:
+                if _proc_state(pid) == "T":
+                    return
+            except (ProcessLookupError, FileNotFoundError):
+                raise AssertionError(
+                    "lock-holder child died while being stopped")
+            time.sleep(0.01)
+        raise AssertionError(
+            "lock-holder child never entered the stopped state")
+
+    def _cleanup(self):
+        proc = self.proc
+        pid = proc.pid
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+        # Wake the child via the Event (a no-op if it already exited;
+        # the flag stays set, so there is no lost-wakeup race even if
+        # the child has not reached resume.wait() yet). The brief
+        # holder never waits on it — harmless.
+        self.resume.set()
+        proc.join(10)
+        if proc.is_alive():
+            # Escalate: SIGKILL terminates even a stopped process
+            # (a pending SIGTERM would not).
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, TypeError):
+                pass
+            proc.join(10)
+        assert not proc.is_alive(), \
+            "lock-holder child could not be reaped"
+
+    def __exit__(self, *exc):
+        self._cleanup()
+
+
+def test_lock_times_out_on_sigstop_holder(tmp_path):
+    """A holder stopped with SIGSTOP never releases its flock: the
+    waiter's bounded wait raises JournalLockError (not a silent
+    forever-block), and the error names the lock file and points the
+    operator at the holder — the exact #1007 failure mode."""
+    store = str(tmp_path / "store")
+    os.makedirs(store)
+    with _LockHolder(store):
+        with pytest.raises(events.JournalLockError) as excinfo:
+            with events.journal_lock(store, timeout_s=2):
+                pytest.fail("acquired a lock held by a stopped process")
+    msg = str(excinfo.value)
+    assert "journal.lock" in msg, msg
+    assert "SIGSTOP" in msg, msg
+    assert "fuser" in msg, msg
+    assert "2 seconds" in msg, msg
+
+
+def test_lock_timeout_zero_fails_fast_when_held(tmp_path):
+    """timeout_s=0 is the fail-fast knob: one LOCK_NB attempt, then the
+    loud error — no sleeping when the caller wants an answer now."""
+    store = str(tmp_path / "store")
+    os.makedirs(store)
+    with _LockHolder(store):
+        start = time.monotonic()
+        with pytest.raises(events.JournalLockError):
+            with events.journal_lock(store, timeout_s=0):
+                pass
+        assert time.monotonic() - start < 2
+
+
+def test_lock_negative_timeout_rejected(tmp_path):
+    """A negative timeout is a caller bug: fail loudly and immediately,
+    never silently clamp to a forever-wait."""
+    store = str(tmp_path / "store")
+    with pytest.raises(events.JournalLockError) as excinfo:
+        with events.journal_lock(store, timeout_s=-1):
+            pass
+    assert "negative" in str(excinfo.value)
+
+
+def test_lock_nan_timeout_rejected(tmp_path):
+    """NaN is not a timeout: like a negative timeout it is a caller
+    bug and must fail loudly, never degrade to the unbounded wait
+    #1007 eliminated (NaN comparisons never trip the deadline)."""
+    store = str(tmp_path / "store")
+    with pytest.raises(events.JournalLockError) as excinfo:
+        with events.journal_lock(store, timeout_s=float("nan")):
+            pass
+    assert "non-negative" in str(excinfo.value)
+
+
+def test_lock_waits_its_turn_then_acquires(tmp_path):
+    """The bounded wait preserves the design intent: a waiter behind a
+    normally-slow holder still serializes (no silent skip, no loud
+    error) — only the pathological wait becomes a failure."""
+    store = str(tmp_path / "store")
+    os.makedirs(store)
+    with _LockHolder(store, hold_s=1.0):
+        start = time.monotonic()
+        with events.journal_lock(store, timeout_s=30):
+            elapsed = time.monotonic() - start
+    assert elapsed >= 0.5, \
+        "acquired without waiting behind the holder (%0.2fs)" % elapsed
+    assert elapsed < 30
+
+
+def test_journal_mutation_fails_loud_on_wedged_lock(tmp_path, monkeypatch):
+    """End to end through the public mutation path: with the lock held
+    by a stopped process, append_events returns the loud timeout error
+    — the collect fails instead of journaling unsynchronized."""
+    monkeypatch.setattr(events, "_JOURNAL_LOCK_WAIT_TIMEOUT_S", 2)
+    store = str(tmp_path / "store")
+    with _LockHolder(store):
+        appended, duplicates, err = events.append_events(
+            store, [_make_event("box1", "evt-1")])
+    assert appended is None and duplicates is None
+    assert err is not None, "wedged lock produced no error"
+    assert "journal.lock" in err and "SIGSTOP" in err, err
+    # Nothing was journaled unsynchronized behind the wedge.
+    assert not os.path.exists(os.path.join(store, "events.jsonl"))
