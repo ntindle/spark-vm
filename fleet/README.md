@@ -159,7 +159,11 @@ enrolled, with a warning when a gate document is present but no keys are
 4. **Retire the old key**: remove its `key_id=/path` entry from every
    box's `SPARKVM_GATE_KEYS`. Until you do, the old key still signs
    fleet-accepted documents — rotation without retirement is a permanent
-   second signing key.
+   second signing key. Then close the rotation window in the publisher's
+   ledger so the reminders stop:
+   `python3 fleet/gate_publish.py --rotation-complete ctl-2026-09`
+   (an open window older than 14 days makes every later publish warn loudly;
+   tune with `--rotation-stale-days`).
 
 ## Quick start (operator estate)
 
