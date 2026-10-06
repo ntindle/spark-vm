@@ -52,6 +52,22 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Hosted phone-home session handshake (#1000): the plane's per-box
+  connection now completes the hello/welcome handshake and enforces the
+  generation fence — the box's hello identity must match the token the
+  upgrade carried (mismatch closes the socket and is journaled), a hello
+  with a stale generation gets a close carrying the current fence value
+  so the box can adopt it and reconnect, a newer generation cleanly
+  supersedes the old socket, and every later frame is fenced before
+  anything else sees it (stale frames are dropped and journaled).
+  Deployed live; verified end-to-end against the deployed plane
+  2026-10-05 ~15:2x CDT (12/12 live checks: hello → welcome with
+  `accepted_generation`, newer-generation supersede binding the new
+  socket with `close`/`superseded-generation` on the old one,
+  stale-generation close carrying `last_generation`, connect rows in D1;
+  test box + journal rows deleted afterwards).
+  (#1055)
+
 - Push sweep scheduler design (#1063): the first build slice of the
   reminder/digest scheduler home — a per-minute scheduled run on the
   control plane that scans for due approval reminders and hourly digest
