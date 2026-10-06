@@ -62,6 +62,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     ca-certificates curl git jq unzip sudo \
     openssh-server supervisor tini \
+    unattended-upgrades \
     xvfb xfce4 xfce4-terminal dbus-x11 \
     python3 python3-venv python3-pip \
     nodejs npm gh \
@@ -161,10 +162,18 @@ RUN /opt/sparkvm/harness/generate-image-manifest.sh --out /etc/sparkvm/image-man
 RUN cp -a /home/agent/. /etc/skel/ && chown -R root:root /etc/skel
 
 # --- sshd: key-only, host keys generated on first boot -------------------------
+# openssh-server's postinst generates host keys at PACKAGE INSTALL time —
+# inside the docker build. Without the explicit removal below, every
+# machine provisioned from this image would share ONE host keypair (the
+# firstboot wrapper would find the keys present and become a permanent
+# no-op). The removal is the design, not the scan: rm the baked keys here,
+# document it, and pin it with a test so a future edit cannot silently
+# drop the line.
 COPY deploy/golden-image/sparkvm-sshd-firstboot.sh /usr/local/bin/sparkvm-sshd-firstboot.sh
 COPY deploy/golden-image/supervisord.conf /etc/supervisor/conf.d/sparkvm.conf
 RUN chmod 0755 /usr/local/bin/sparkvm-sshd-firstboot.sh \
- && printf 'PasswordAuthentication no\nChallengeResponseAuthentication no\nPermitRootLogin no\n' \
+ && rm -f /etc/ssh/ssh_host_* \
+ && printf 'PasswordAuthentication no\nChallengeResponseAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n' \
       > /etc/ssh/sshd_config.d/sparkvm.conf \
  && chmod 0644 /etc/ssh/sshd_config.d/sparkvm.conf
 

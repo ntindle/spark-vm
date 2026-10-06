@@ -154,8 +154,15 @@ docker build -f "$REPO/deploy/golden-image/Dockerfile" \
     --build-arg "SPARKVM_SHA=$SHA" \
     -t "$TAG" "$REPO"
 
-BASE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$TAG" 2>/dev/null || true)"
-echo "build-image: base digest: ${BASE_DIGEST:-(not recorded — image built without a digest pull)}"
+# The gate record's base_digest must name the BASE image's resolved digest,
+# not the built tag's (a locally built tag has no RepoDigests until it is
+# pushed — inspecting $TAG would record an empty string and the "gate
+# record makes base drift visible" claim would be false). Resolve the base
+# ref from the recipe's FROM line so the two cannot diverge.
+BASE_REF="$(sed -n 's/^FROM[[:space:]]\+\([^[:space:]]\+\).*/\1/p' "$REPO/deploy/golden-image/Dockerfile" | head -1)"
+[ -n "$BASE_REF" ] || die "cannot resolve the base image ref from the Dockerfile FROM line"
+BASE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$BASE_REF" 2>/dev/null || true)"
+echo "build-image: base $BASE_REF digest: ${BASE_DIGEST:-(not recorded — pull the base by digest to pin it)}"
 
 # --- 4. baked-secrets scan inside the built image (gate Step 0b) ---------------
 echo "build-image: baked-secrets scan of the built image"

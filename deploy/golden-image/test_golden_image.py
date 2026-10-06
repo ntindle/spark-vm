@@ -64,6 +64,24 @@ def test_dockerfile_recipe_default_matches_tree_version():
         assert m.group(1) == f.read().strip()
 
 
+def test_dockerfile_removes_package_generated_host_keys():
+    """openssh-server's postinst generates host keys at package-install time
+    (inside the docker build). Without an explicit removal, every machine
+    provisioned from the image would share one host keypair and the
+    firstboot wrapper would be a permanent no-op. The removal must be in
+    the recipe text itself — the scan is the backstop, not the design."""
+    assert "rm -f /etc/ssh/ssh_host_" in _dockerfile_text()
+
+
+def test_dockerignore_excludes_git():
+    """The build context must not bake the git history into the image
+    (bloat + history disclosure). The D-P1 pin comes from git metadata at
+    build time (build-image.sh), never from the baked tree."""
+    with open(os.path.join(REPO_ROOT, ".dockerignore"), encoding="utf-8") as f:
+        text = f.read()
+    assert re.search(r"^\.git\s*$", text, re.M)
+
+
 def test_dockerfile_oci_labels():
     text = _dockerfile_text()
     for label in (

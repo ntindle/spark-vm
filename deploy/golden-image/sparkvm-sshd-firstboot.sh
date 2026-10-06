@@ -25,4 +25,8 @@ if [ "$missing" = "1" ]; then
     ssh-keygen -A
 fi
 
+# /run is a fresh tmpfs on most runtimes — the build-time /run/sshd may not
+# survive. sshd refuses to start without it, and the box would lose SSH.
+mkdir -p /run/sshd
+
 exec /usr/sbin/sshd -D -e

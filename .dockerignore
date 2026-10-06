@@ -1,0 +1,9 @@
+# Golden-image build context exclusions (#1087).
+#
+# The build context is the clean repo tree; the image must not carry the
+# git history (bloat + history disclosure — every tenant image would ship
+# the full object DB). The D-P1 pin comes from git metadata at build time
+# (build-image.sh), never from the baked tree, so excluding .git changes
+# nothing about the pin.
+.git
+.github
