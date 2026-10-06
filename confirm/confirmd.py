@@ -2539,7 +2539,25 @@ class Handler(BaseHTTPRequestHandler):
         with open(tmp, "w") as f:
             json.dump(it, f, indent=2)
         os.replace(tmp, dst)
-        os.remove(src)
+        try:
+            os.remove(src)
+        except FileNotFoundError:
+            # Issue #195 (residual): the pre-consume exists check is a
+            # TOCTOU window — an out-of-process remover (a second
+            # confirmd, an operator, a reaper racing the check) can
+            # delete the pending file after the check above. The answer
+            # record above is already truthfully written (the grant
+            # mint, if any, really happened), but the pending file is
+            # verifiably gone, so say so honestly instead of raising an
+            # uncaught FileNotFoundError (a 500 on a legitimate answer).
+            # FileNotFoundError only, deliberately not bare OSError: an
+            # EACCES-style failure leaves the pending file in place and
+            # "not found or already answered" would be a lie for it.
+            audit_log("answer-raced-consume", self.client_address[0],
+                      login, "id=%s decision=%s" % (aid, decision))
+            _evict_aid_lock(aid)
+            self._err("not found or already answered", 404)
+            return
         _evict_aid_lock(aid)
         try:
             os.replace(dst, os.path.join(consumed_dir(), aid + ".json"))

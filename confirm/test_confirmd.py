@@ -1372,6 +1372,63 @@ class ConfirmdTests(unittest.TestCase):
         # path must evict too (issue #231's boundedness goal).
         self.assertNotIn(aid, cd._aid_locks)
 
+    def test_195_consume_raced_file_vanishes_audits_and_404s(self):
+        """Issue #195 (residual): the consume path's os.path.exists
+        check is a TOCTOU window — if an out-of-process remover deletes
+        the pending file between the check and os.remove(src), the
+        handler must audit the distinct 'answer-raced-consume' event and
+        refuse with 404 ('not found or already answered', the #71 loser
+        path) instead of raising an uncaught FileNotFoundError (a 500 on
+        a legitimate answer). Deterministic: os.remove is stubbed to
+        raise FileNotFoundError for exactly the pending path. The deny
+        decision skips the grant-mint subprocess, isolating the race to
+        the consume window."""
+        aid = "raced-consume-1"
+        it = {"id": aid, "summary": "s", "kind": "first-use",
+              "created": "2026-09-18T10:00:00+00:00",
+              "expires": "2999-01-01T00:00:00+00:00",
+              "credential": "c", "host": "h", "method": "GET"}
+        nonce = cd._mint_csrf_nonce(it["id"])
+        src = self.approvals / "pending" / (aid + ".json")
+        src.write_text(json.dumps(it))
+
+        real_remove = os.remove
+
+        def fake_remove(p):
+            if str(p) == str(src):
+                # The out-of-process remover struck inside the TOCTOU
+                # window between the exists check and the remove.
+                raise FileNotFoundError(2, "No such file or directory",
+                                        str(p))
+            return real_remove(p)
+
+        h = cd.Handler.__new__(cd.Handler)
+        h.client_address = ("100.99.0.1", 1234)
+        got = {}
+        events = []
+        cd._aid_lock(aid)  # ensure the entry exists pre-answer
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)), \
+             mock.patch.object(cd, "file_owner_name",
+                               return_value="swapd"), \
+             mock.patch("os.remove", side_effect=fake_remove), \
+             mock.patch.object(cd, "audit_log",
+                               side_effect=lambda *a: events.append(a)), \
+             mock.patch.object(cd.Handler, "_err",
+                               side_effect=lambda m, c: got.update(
+                                   msg=m, code=c)):
+            h._answer_locked("ntindle@github", aid, nonce, "deny")
+        self.assertEqual(got["code"], 404)
+        self.assertEqual(got["msg"], "not found or already answered")
+        self.assertTrue(
+            any(e[0] == "answer-raced-consume" for e in events),
+            "no answer-raced-consume audit; events: %r" % (events,))
+        # The decision was genuinely recorded before the race (deny
+        # mints no grant); the file is verifiably gone; this terminal
+        # path must evict too (issue #231's boundedness goal).
+        self.assertTrue(
+            (self.approvals / "answered" / (aid + ".json")).exists())
+        self.assertNotIn(aid, cd._aid_locks)
+
     def test_240_expiry_crossing_mid_mint_audits_and_refuses(self):
         """Issue #240: if the expiry instant crosses DURING the grant-mint
         subprocess (up to 15 s), the post-mint os.path.exists check (#233)

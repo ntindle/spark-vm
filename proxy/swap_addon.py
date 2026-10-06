@@ -3613,6 +3613,47 @@ class SwapAddon:
             return "secret-in-host-redacted"
         return target
 
+    def _note_set_cookie_scrub_no_cookie_swap(self, host,
+                                                  original_values, triples):
+        """Issue #837: when the response scrubber rewrites a Set-Cookie
+        header, the client stores the placeholder as the cookie value —
+        and the request-side Cookie branch only re-swaps placeholders
+        for credentials whose registry placement explicitly names the
+        Cookie header (`_cookie_swap_name_set`). For a credential with
+        no Cookie placement, the next request carries the literal
+        placeholder to the server and the session breaks: fail-closed,
+        but proxy-caused and otherwise invisible (the scrub is silent
+        by design). The scrub must still happen — exempting Set-Cookie
+        would re-open the echo leak the scrubber exists to close — so
+        this leaves a durable audit note naming the credential (never
+        the value) so the operator can see the breakage in the trail.
+        Detection runs through the same `_matched_secret_names` /
+        `_cookie_swap_name_set` gates as production, so the note fires
+        exactly when the request side would refuse the re-swap."""
+        warned = set()
+        for v in original_values:
+            try:
+                placeholders = self._matched_secret_names(v, triples)
+            except Exception:
+                # Detection-side failure only — the scrub already
+                # applied; log loudly, skip the note, never fail closed
+                # here (nothing is being refused).
+                log.exception("swap: set-cookie audit-note detection "
+                              "failed")
+                continue
+            for ph in placeholders:
+                parts = ph.split(":")
+                name = parts[1] if len(parts) > 1 else ph
+                if name in warned or name in self._cookie_swap_name_set:
+                    continue
+                warned.add(name)
+                self._audit_note(
+                    host, "set-cookie-no-cookie-swap",
+                    "credential=%s: the scrubbed Set-Cookie stores the "
+                    "placeholder, but the request side will not re-swap "
+                    "it into Cookie (no Cookie placement) — the session "
+                    "will break on the next request" % name)
+
     def responseheaders(self, flow):
         """Scrub response headers as soon as they arrive.
 
@@ -3681,12 +3722,19 @@ class SwapAddon:
             resp.headers.set_all(
                 "refresh", [self._REFRESH_NEUTRALIZED_VALUE])
         for key in list(resp.headers.keys()):
-            if key.lower() in self._NEVER_SCRUB_RESPONSE_HEADERS:
+            kl = key.lower()
+            if kl in self._NEVER_SCRUB_RESPONSE_HEADERS:
                 continue
             vals = resp.headers.get_all(key)
             new_vals = [self._scrub_text_value(v, triples) for v in vals]
             if new_vals != vals:
                 resp.headers.set_all(key, new_vals)
+                if kl == "set-cookie":
+                    # Issue #837: the rewrite above stores placeholders
+                    # in the client's cookie jar — note it when the
+                    # request side cannot re-swap them (session breaks).
+                    self._note_set_cookie_scrub_no_cookie_swap(
+                        host, vals, triples)
         if leak_target is not None:
             self._audit_note(host, "redirect-secret-refused",
                              self._audit_target_host(leak_target, triples))

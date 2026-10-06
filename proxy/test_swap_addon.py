@@ -2214,6 +2214,50 @@ class ProxyHardeningRoundTests(unittest.TestCase):
         a.responseheaders(flow)
         self.assertEqual(other.headers.get("X-Echo"), "ghp_TOKEN")
 
+    def test_837_set_cookie_scrub_without_cookie_placement_audits(self):
+        """Issue #837: when the response scrubber rewrites a Set-Cookie
+        header carrying a secret for a credential with NO Cookie
+        placement, the client stores the placeholder and the
+        request-side Cookie branch will refuse to re-swap it (session
+        breaks, silently). The proxy must leave a durable audit note
+        naming the credential (never the value). A credential WITH
+        Cookie placement is scrubbed with no note."""
+        a = make_addon()
+        resp = FakeResponse(b'{"ok": true}', "application/json")
+        # acme has no Cookie placement: scrubbed -> audit note.
+        resp.headers["Set-Cookie"] = "session=correct horse; Path=/"
+        # sess HAS Cookie placement: scrubbed, no note.
+        resp.headers._items.append(("Set-Cookie", "s=sess-SECRET"))
+        flow = Flow(Request("github.com", "/"))
+        flow.response = resp
+        a.responseheaders(flow)
+        cookies = resp.headers.get_all("Set-Cookie")
+        self.assertIn("session=hsurr:acme:password; Path=/", cookies)
+        self.assertIn("s=hsurr:sess", cookies)
+        notes = [n for n in a.audit_notes
+                 if n[1] == "set-cookie-no-cookie-swap"]
+        self.assertEqual(len(notes), 1,
+                         "expected exactly one audit note; got %r"
+                         % (a.audit_notes,))
+        host, token, reason = notes[0]
+        self.assertEqual(host, "github.com")
+        self.assertIn("acme", reason)
+        self.assertNotIn("correct horse", reason)
+        self.assertNotIn("sess-SECRET",
+                         " ".join(r for _, _, r in a.audit_notes))
+        # A Set-Cookie carrying no secret is byte-identical and silent.
+        a2 = make_addon()
+        resp2 = FakeResponse(b'{"ok": true}', "application/json")
+        resp2.headers["Set-Cookie"] = "prefs=dark; Path=/"
+        flow2 = Flow(Request("github.com", "/"))
+        flow2.response = resp2
+        a2.responseheaders(flow2)
+        self.assertEqual(resp2.headers.get("Set-Cookie"),
+                         "prefs=dark; Path=/")
+        self.assertFalse(
+            [n for n in a2.audit_notes
+             if n[1] == "set-cookie-no-cookie-swap"])
+
     def test_71_oversize_request_body_passes_through_unswapped(self):
         """Finding 71: a request body over the swap cap passes through
         unswapped (headers/query/path were already handled); the skip is
