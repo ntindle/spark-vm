@@ -57,6 +57,16 @@ Design summary (see the design doc for the full D-series):
   pass (delete it or gate it). The `reminders_enabled` flag is the
   in-repo expression of that plane-side setting (default True); the
   digest pass is unaffected.
+- **Per-candidate error isolation (D78).** A raising candidate is
+  counted `poisoned` on its pass's disposition map, logged loudly with
+  its identity, and skipped — the pass continues with the next
+  candidate. The poison row stays a candidate on the next tick, so
+  D59's fail-loud is preserved (loud every tick, never silently
+  skipped) without the fleet-wide starvation a whole-pass abort
+  caused. Derivation-level failures stop only their own watcher; the
+  other watcher still runs. Infrastructure failures (the candidate
+  SELECT itself, the pending-window SELECT) are not data corruption —
+  they still abort the pass loudly.
 
 D2 (restated, fail-closed): `owner_principal` is resolved from the
 plane's enrollment registry via the injected `resolve_owner(box_id)` —
@@ -73,6 +83,7 @@ writes exactly one idempotent `suppressed_terminal` audit row (D61).
 
 from __future__ import annotations
 
+import sys
 from collections import namedtuple
 from datetime import datetime, timezone
 
@@ -146,6 +157,73 @@ def _require_key_material(name, value):
         raise ValueError("%s must be a non-empty str" % name)
     if "\x00" in value:
         raise ValueError("%s must not contain U+0000" % name)
+
+
+def _loud(msg):
+    """Emit a loud operator-visible line for a poisoned candidate (D78).
+
+    The sweep is driven by #1069's scheduled handler; stderr is the
+    loud channel that handler already surfaces. Never raises — a
+    broken loud channel must not kill the pass it is reporting on.
+    """
+    try:
+        print("[push_sweep] " + msg, file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+def _isolate_candidate(counts, pass_name, identity, fn):
+    """Run one candidate's sweep body with per-candidate isolation (D78).
+
+    A raising candidate is counted as a `poisoned` disposition on its
+    pass's summary map, logged loudly with its identity, and skipped —
+    the pass continues. The poison row stays a candidate on the next
+    tick, so D59's fail-loud is preserved (still loud every tick, never
+    silently skipped) without the fleet-wide starvation. Only
+    `Exception` is caught: `BaseException` (KeyboardInterrupt,
+    SystemExit) still aborts the whole sweep — those are operator
+    signals, not data corruption.
+    """
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 — per-candidate isolation is the point
+        counts["poisoned"] = counts.get("poisoned", 0) + 1
+        _loud("%s: poisoned candidate %s: %r — pass continues"
+              % (pass_name, identity, exc))
+
+
+def _drive_watcher(counts, label, derive, conn, moment, on_item):
+    """Drive one watcher derivation with per-candidate isolation (D78).
+
+    Each yielded item is an isolated candidate (see
+    `_isolate_candidate`). A derivation that raises mid-iteration
+    cannot continue — the generator is dead — so it is counted once as
+    `poisoned`, logged loudly, and *that watcher* stops; the other
+    watcher still runs. The derivation call itself is inside the same
+    guard: caller-wired logic that fails at call time is one loud
+    poisoned count, not a whole-sweep abort.
+    """
+    try:
+        items = iter(derive(conn, moment))
+    except Exception as exc:  # noqa: BLE001 — see _isolate_candidate
+        counts["poisoned"] = counts.get("poisoned", 0) + 1
+        _loud("%s: poisoned derivation (failed at call time): %r — "
+              "watcher stops, other watchers continue"
+              % (label, exc))
+        return
+    while True:
+        try:
+            item = next(items)
+        except StopIteration:
+            return
+        except Exception as exc:  # noqa: BLE001 — see _isolate_candidate
+            counts["poisoned"] = counts.get("poisoned", 0) + 1
+            _loud("%s: poisoned derivation (raised mid-iteration): %r — "
+                  "watcher stops, other watchers continue"
+                  % (label, exc))
+            return
+        _isolate_candidate(counts, label, repr(item),
+                           lambda _it=item: on_item(_it))
 
 
 def make_record_adapter(conn, now):
@@ -289,6 +367,8 @@ def sweep_reminders(conn, *, now=None, resolve_owner, record_adapter=None,
     — the sweep never re-implements timing, dedup, or budget (D70).
     `record_adapter` is the sweep's two-arg `(box_id, aid)` adapter
     (default: the built-in D49 adapter over the approvals table).
+    Each candidate is isolated (D78): a raising candidate is counted
+    `poisoned`, logged loudly, and skipped — the pass continues.
     Returns a ReminderPassResult: the disposition -> count map plus
     the pass meta (kept out of the map).
     """
@@ -314,13 +394,16 @@ def sweep_reminders(conn, *, now=None, resolve_owner, record_adapter=None,
             truncated = page["__meta__"]["truncated"]
             break
         for box_id, aid in page:
-            owner_principal = _resolve_owner(resolve_owner, box_id)
-            r = push_events.maybe_enqueue_reminder(
-                conn, box_id=box_id, owner_principal=owner_principal,
-                aid=aid,
-                get_record=lambda a, _b=box_id: adapter(_b, a),
-                now=moment)
-            counts[r.disposition] = counts.get(r.disposition, 0) + 1
+            def _one(_box=box_id, _aid=aid):
+                owner_principal = _resolve_owner(resolve_owner, _box)
+                r = push_events.maybe_enqueue_reminder(
+                    conn, box_id=_box, owner_principal=owner_principal,
+                    aid=_aid,
+                    get_record=lambda a, _b=_box: adapter(_b, a),
+                    now=moment)
+                counts[r.disposition] = counts.get(r.disposition, 0) + 1
+            _isolate_candidate(counts, "reminders",
+                               "box_id=%r aid=%r" % (box_id, aid), _one)
     return ReminderPassResult(counts, seen, truncated)
 
 
@@ -339,6 +422,8 @@ def sweep_digests(conn, *, now=None):
     D67 accepted drift for post-fire coalescing stands. Runs after
     the reminder pass (D67): a reminder that coalesced into the
     digest this sweep must be carried by the digest in the same sweep.
+    Each window is isolated (D78): a raising window is counted
+    `poisoned`, logged loudly, and skipped — the pass continues.
     Returns a dict disposition -> count.
     """
     moment = _utcnow(now)
@@ -351,10 +436,14 @@ def sweep_digests(conn, *, now=None):
         (current,)).fetchall()
     counts = {}
     for owner_principal, window_start in pending:
-        r = push_events.maybe_enqueue_digest(
-            conn, owner_principal=owner_principal, now=moment,
-            window_start=window_start)
-        counts[r.disposition] = counts.get(r.disposition, 0) + 1
+        def _one(_owner=owner_principal, _window=window_start):
+            r = push_events.maybe_enqueue_digest(
+                conn, owner_principal=_owner, now=moment,
+                window_start=_window)
+            counts[r.disposition] = counts.get(r.disposition, 0) + 1
+        _isolate_candidate(
+            counts, "digests",
+            "owner=%r window=%r" % (owner_principal, window_start), _one)
     return counts
 
 
@@ -370,32 +459,40 @@ def sweep_watchers(conn, *, now=None, resolve_owner=None,
     caller logic (the #969 docstring's D2 restatement); the sweep only
     supplies the cadence and resolves owners from the registry (D2).
     A derivation that is None means the watcher is not wired — the
-    pass reports "skipped", it is never guessed.
-    Returns {"stale": {...}, "token_warnings": {...}} disposition maps.
+    pass reports "skipped", it is never guessed. Each yielded item is
+    an isolated candidate (D78); a derivation that raises stops only
+    its own watcher. Returns {"stale": {...}, "token_warnings": {...}}
+    disposition maps.
     """
     moment = _utcnow(now)
     stale_counts = {}
     if derive_stale is not None:
         _require_resolve_owner(resolve_owner)
-        for box_id, stale_epoch in derive_stale(conn, moment):
-            owner_principal = _resolve_owner(resolve_owner, box_id)
+        def _stale(item, _resolve=resolve_owner):
+            box_id, stale_epoch = item
+            owner_principal = _resolve_owner(_resolve, box_id)
             r = push_events.on_heartbeat_stale(
                 conn, box_id=box_id, owner_principal=owner_principal,
                 stale_epoch=stale_epoch, now=moment)
             stale_counts[r.disposition] = \
                 stale_counts.get(r.disposition, 0) + 1
+        _drive_watcher(stale_counts, "stale_watchers",
+                       derive_stale, conn, moment, _stale)
     else:
         stale_counts = {"skipped": True}
     warning_counts = {}
     if derive_token_warnings is not None:
         _require_resolve_owner(resolve_owner)
-        for box_id, token_hash in derive_token_warnings(conn, moment):
-            owner_principal = _resolve_owner(resolve_owner, box_id)
+        def _warn(item, _resolve=resolve_owner):
+            box_id, token_hash = item
+            owner_principal = _resolve_owner(_resolve, box_id)
             r = push_events.on_token_expiry_warning(
                 conn, box_id=box_id, owner_principal=owner_principal,
                 token_hash=token_hash, now=moment)
             warning_counts[r.disposition] = \
                 warning_counts.get(r.disposition, 0) + 1
+        _drive_watcher(warning_counts, "token_warnings",
+                       derive_token_warnings, conn, moment, _warn)
     else:
         warning_counts = {"skipped": True}
     return {"stale": stale_counts, "token_warnings": warning_counts}
