@@ -52,6 +52,14 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Spend-cap enforcement gap analysis (#908): a vision-vs-state writeup of
+  the hosted product's spend-cap lane — the missing spend ledger,
+  pre-provision cap check, and destroy-on-budget-exceed worker — pinning
+  the two-sided cap model (operator-side margin protection vs the
+  tenant-facing buyer story), the standing destroy-on-exceed decision,
+  the required pre-destroy notice and grace window, and the
+  source-of-truth gate the cap check must clear before it ships; filed
+  as four build slices. (#1078)
 - Fleet audit-tail continuity (#1006): when a box's pulled audit tail
   no longer contains the previous pull's tail head — lines scrolled out
   of the tail between pulls and may never have reached the collector —
