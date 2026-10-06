@@ -50,6 +50,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-06
+
 ### Added
 
 - Push-sender schema contract amendments (#1061): the enqueue boundary's
@@ -2733,7 +2735,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Fixed critical and high findings from the security code review
   ([`dd382af`](https://github.com/ntindle/spark-vm/commit/dd382af))
 
-[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/ntindle/spark-vm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ntindle/spark-vm/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ntindle/spark-vm/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ntindle/spark-vm/compare/v0.2.0...v0.3.0
