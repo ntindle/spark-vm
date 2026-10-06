@@ -592,6 +592,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Fleet journal lock no longer blocks forever on a stopped or wedged
+  lock holder (#1007): collectors, prunes, and alert acks wait up to
+  five minutes for the store lock, then fail loudly — naming the lock
+  file and pointing the operator at the stopped (SIGSTOP) or wedged
+  process holding it — instead of piling up hung cron jobs with no
+  error. A normally-slow holder still serializes as before; only the
+  pathological wait becomes a failure. (#TBD)
 - Push digest reliability (#1063): two gaps in the hourly digest that
   carries over-budget pages are closed. Digests for past hours whose
   pages arrived after the hour's last scheduler tick no longer strand

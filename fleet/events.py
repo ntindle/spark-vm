@@ -47,6 +47,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -663,12 +664,25 @@ def check_tail_continuity(store_dir, box_dirs, observed_at):
 # machine only. A multi-host shared store (G26's fleet event stream)
 # needs its own design; this claims no cross-host exclusion.
 #
-# Blocking, not try-lock: an overlapping collect waits its turn rather
-# than silently skipping work — the dedup/no-op claims depend on every
-# collect seeing every prior collect's rows. flock releases on process
-# death, so there is no stale-lock state to sweep (unlike #716's tmp
-# files); a crashed holder can only delay, never wedge, the next run.
+# Bounded wait, not forever-blocking (#1007): an overlapping collect waits
+# its turn — up to the wait timeout — rather than silently skipping work,
+# because the dedup/no-op claims depend on every collect seeing every
+# prior collect's rows. Past the deadline the wait becomes a loud
+# JournalLockError instead of a silent wedge: the classic cause is a lock
+# holder stopped with SIGSTOP (flock is per-fd, so a stopped holder never
+# releases) or wedged on a stuck filesystem. flock still releases on
+# process death, so there is no stale-lock state to sweep (unlike #716's
+# tmp files); a crashed holder can only delay, never wedge, the next run.
+# Deleting journal.lock does NOT release a holder's flock (the lock lives
+# on the holder's open fd, not the path) — the loud error tells the
+# operator to find and revive/kill the holder instead.
 _JOURNAL_LOCK_NAME = "journal.lock"
+# Default bounded wait for the journal lock, in seconds (#1007). Long
+# enough that a slow collect (overlapping crons, a contended fs) never
+# trips it in normal operation, short enough that a wedged holder is
+# found in minutes, not days.
+_JOURNAL_LOCK_WAIT_TIMEOUT_S = 300.0
+_JOURNAL_LOCK_POLL_INTERVAL_S = 0.1
 
 
 class JournalLockError(Exception):
@@ -684,8 +698,15 @@ def _ensure_store_dir(store_dir):
 
 
 @contextlib.contextmanager
-def journal_lock(store_dir):
+def journal_lock(store_dir, timeout_s=None):
     """Hold an exclusive flock on <store>/journal.lock.
+
+    Bounded wait (#1007): the lock is attempted with LOCK_NB in a retry
+    loop for up to timeout_s seconds (default
+    _JOURNAL_LOCK_WAIT_TIMEOUT_S), then raises JournalLockError naming
+    the lock file and the likely cause, instead of blocking forever
+    behind a stopped (SIGSTOP) or wedged holder. Waiting callers still
+    serialize — only the pathological wait becomes a loud failure.
 
     Fail-closed: if fcntl is unavailable (non-Linux) or the lock file
     cannot be opened/locked, raise JournalLockError instead of
@@ -693,6 +714,12 @@ def journal_lock(store_dir):
     return shape so a collect fails loudly instead of journaling
     duplicates or losing acks.
     """
+    if timeout_s is None:
+        timeout_s = _JOURNAL_LOCK_WAIT_TIMEOUT_S
+    if not (timeout_s >= 0):
+        raise JournalLockError(
+            "journal lock timeout must be a non-negative number of "
+            "seconds, got %r" % (timeout_s,))
     if fcntl is None:
         raise JournalLockError(
             "journal lock unavailable: this platform lacks fcntl")
@@ -706,10 +733,28 @@ def journal_lock(store_dir):
         raise JournalLockError(
             "cannot open journal lock %s: %s" % (lock_path, exc))
     with fh:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        except OSError as exc:
-            raise JournalLockError("cannot lock journal: %s" % exc)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(fh.fileno(),
+                            fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                # Held by another process; retry until the deadline.
+                pass
+            except OSError as exc:
+                raise JournalLockError(
+                    "cannot lock journal %s: %s" % (lock_path, exc))
+            if time.monotonic() >= deadline:
+                raise JournalLockError(
+                    "journal lock %s is still held after %.0f seconds; "
+                    "the holder may be stopped (SIGSTOP) or wedged on a "
+                    "stuck filesystem — find it (fuser/lsof %s) and "
+                    "revive or kill it; do not delete %s (deleting the "
+                    "path does not release the holder's flock)"
+                    % (lock_path, timeout_s, lock_path,
+                       _JOURNAL_LOCK_NAME))
+            time.sleep(_JOURNAL_LOCK_POLL_INTERVAL_S)
         try:
             yield
         finally:
