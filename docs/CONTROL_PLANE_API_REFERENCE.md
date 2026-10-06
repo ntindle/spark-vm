@@ -2,8 +2,9 @@
 
 The consolidated HTTP reference for the spark-vm **control plane**
 (`sparkvm-control`, the Worker that fronts an owner's fleet). It covers
-every real endpoint across the owner, pairing, box, action-approval, and
-durable-command namespaces — auth class, request/response shapes, and the failure codes.
+every real endpoint across the owner, pairing, box, action-approval,
+durable-command, and phone-home WebSocket namespaces — auth class,
+request/response shapes, and the failure codes.
 
 **This doc adds no new claims.** Every section restates a contract that
 already lives in a repo doc; the *Sources* section at the bottom names the
@@ -15,7 +16,7 @@ reference.
 and a self-hosted plane are the same endpoint contract — the dashboard
 calls the plane that served it, and so does everything else here.
 
-**Pinned:** main `c9660e6` (2026-10-04). The plane deploys from a
+**Pinned:** main `888f875` (2026-10-06). The plane deploys from a
 separate checkout — endpoint availability follows the plane's deploys,
 not this doc. If this reference disagrees with the control-plane
 checkout's `worker.py` module docstring (the endpoint table — the
@@ -101,6 +102,56 @@ stores and delivers them; only the box executes them.
 | `POST /v1/boxes/{box_id}/commands/ack` | box token | `{seqs:[...]}` — idempotent; acking only completes `pending`/`leased` commands; acking an `expired` (epoch-killed) command still returns success so the retry loop terminates. |
 | `POST /v1/boxes/{box_id}/commands/epoch` | owner | Incarnation reset: bumps the box's command epoch and expires every pending/leased command of older epochs (they are never delivered again). A fetch may also claim a higher epoch (`?epoch=`); adoption is monotonic — a racing lower claim loses with `409 stale epoch`. |
 
+### Phone-home WebSocket + journal endpoints (`/v1/boxes/{box_id}/phone-home*`)
+
+The box→plane WSS channel (#847; plane DO class + upgrade handler
+deployed live 2026-10-04 as #958 S4a, socket lifecycle documented as
+#1000): the faster carrier for the durable command queue, not a second
+queue — the same seq/epoch semantics as `docs/DURABLE_COMMANDS.md` ride
+the socket.
+
+**Upgrade.** The box opens `wss://<plane>/v1/boxes/{box_id}/phone-home`
+with the box Bearer <redacted> in the `Authorization` header of the
+upgrade request — the same credential the heartbeat path uses; it never
+travels in a frame and is never written to any log or journal. The plane
+MUST NOT redirect the upgrade path and the box MUST NOT follow redirects
+— any 3xx is an upgrade failure (fall back to HTTPS). The plane validates
+the token *before* completing the upgrade and routes on the verified
+identity: the DO stub name is derived via `idFromName` from the token's
+`box_id` — the URL's `{box_id}` is a routing hint only. Token states at
+upgrade mirror the heartbeat path: unknown, expired, or revoked → `401`
+(plain HTTP, never a socket); the #846 15-minute previous-token grace is
+honored; an authenticated non-upgrade request on the path gets `426`.
+**The box MUST NOT reconnect-loop on an upgrade `401`** — no live token →
+one `POST /v1/boxes/token/rotate`; rotate-`401` → re-pair guidance and
+exit; rotate-`403` → check clock skew (±300 s).
+
+**Session.** `hello`/`welcome` binds the *generation* — the box's
+network-session counter, bumped on every fresh connect (there is no
+resume). The handshake identity is authoritative: the `hello` frame's
+`box_id` MUST equal the token's; mismatch closes the socket with
+`identity-mismatch` and the box MUST NOT reconnect. The
+command-incarnation `epoch` (#848 — bumped on reboot, reprovision, or
+counter loss) is the separate counter: a plain transport reconnect bumps
+generation only; a reboot bumps both. Keepalive: the box sends `ping`
+every 30 s and the DO may ping on its own schedule; no `pong` within 90 s
+→ the DO hibernates the socket.
+**Absence of keepalive never fabricates liveness** — the heartbeat stays
+the only liveness signal. The DO re-verifies the bound token's
+`revoked_at`/`token_expires_at` on every alarm wake (G47.3): a hibernated
+socket is re-checked before any further frame is accepted.
+
+| Method & path | Auth | Purpose |
+|---|---|---|
+| `GET /v1/boxes/{box_id}/phone-home` | box token (in the upgrade `Authorization` header) | WSS upgrade → one DO per box (`phone-home:<box_id>`). Close codes (a `close` control frame, `code` + human-readable `reason`, never a secret): `revoked` → fall back to HTTPS, MUST NOT reconnect-loop; `expired` → reconnect with the box's current token (a socket riding the previous token lands here once the 15-min grace lapses — do not rotate again); `superseded-generation` → normal, the old socket is dead by design — keep the new one, never reconnect the old; `stale-generation` → adopt `last_generation + 1`, treat as counter loss (bump epoch), reconnect; `identity-mismatch` / `protocol-error` → client bug, fix it, no reconnect; `going-away` → back off ≥ 60 s before reconnecting. Plain WS `1000`/`1001` closes are transport-level only and carry no protocol meaning. |
+| `GET /v1/boxes/{id}/phone-home/events` | owner key (a box token is explicitly refused — a box cannot read its own journal) | The DO's fleet event journal: `connect`, `disconnect`, `hibernate_wake`, `generation_fence`, `revoked_kill`, `expired_close`, `identity_mismatch` — box id, generation, close code / wake cause; never payloads, never tokens, never frame contents. `?limit=` (default 50, max 200), `?since=` (unix-seconds cursor), newest-first. The response also carries the unattributed `upgrade_401s_7d` series — pre-handshake upgrade `401`s are not journal events (no DO exists yet; the prober is unattributable). Retention: 90 days. (#1013) |
+| `POST /v1/ops/phone_home/gc` | owner key (a box token is explicitly refused) | Manual retention trigger: runs the same 90-day cleanup the daily Worker cron runs and returns the deleted-row counts. (#1013) |
+
+The Durable Object is the queue's home: `command_ack` frames ride the
+socket into the same `acked_watermark` the HTTPS `/commands/ack` path
+feeds — the DO consumes both, and ack-loss recovery is identical either
+way (the command redelivers; the box dedupes by `(box_id, seq)`).
+
 ### Action-approval record endpoints (`/v1/boxes/{box_id}/approvals*`) — auth: owner key, except `approvals/file` (box token)
 
 The plane-side record for the hosted phone-approval flow (#849, #872):
@@ -151,6 +202,7 @@ rewrites the decision.
 | 409 `"approval already decided"` | Conflicting decision on an already-decided approval record | Create a new approval instead of rewriting history |
 | 410 | Deciding an expired approval record | The decision was not recorded; the record stays expired |
 | 400 | Validation: malformed aid, out-of-range cursor/seq/epoch (`limit` is clamped to 200, not rejected) | Fix the request fields; never a server error |
+| 426 | Authenticated non-upgrade request on the phone-home upgrade path | Retry as a real WSS upgrade — the plane never downgrades to HTTP here |
 | 429 | Pairing cap (50 pending) | Approve the real pairings or wait out the 15-min expiry |
 
 ## Deliberately NOT in this reference
@@ -178,6 +230,9 @@ rewrites the decision.
 - Pairing flow, token rotation, heartbeat client contract, the endpoint
   table: `pairing/README.md`
 - Durable-command queue, epochs, cursors, acks: `docs/DURABLE_COMMANDS.md`
+- Phone-home WSS handshake, frames, close taxonomy, journal events and
+  sink: `docs/PHONE_HOME_WIRE_PROTOCOL.md` (upgrade path pinned by #958
+  S4a; journal sink + GC by #1013)
 - Action-approval records: `docs/APPROVALS_PLANE_PROTOCOL.md`
 - Box-filed approval records (`/approvals/file`): `docs/FILING_UPLOAD_GAP_ANALYSIS.md` S2
 - Dashboard page, canonical-copy rule, sync: `hosted/dashboard/README.md`
