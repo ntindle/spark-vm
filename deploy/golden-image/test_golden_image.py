@@ -33,10 +33,13 @@ def _dockerfile_text():
 
 def test_dockerfile_no_latest_tags():
     """No image reference may float on :latest — every layer pins forward."""
+    found = 0
     for line in _dockerfile_text().splitlines():
         m = re.match(r"\s*FROM\s+(\S+)", line, re.IGNORECASE)
         if m:
+            found += 1
             assert ":latest" not in m.group(1).lower(), line
+    assert found >= 1, "no FROM lines found — the test would pass vacuously"
 
 
 def test_dockerfile_requires_pin_args():
@@ -109,14 +112,27 @@ def test_supervisord_program_set():
 
 
 def test_supervisord_privilege_split():
-    """The proxy daemons run as swapd (mirroring the systemd units); sshd is
-    the only root program. A daemon that silently runs as root widens the
-    image's privilege surface."""
+    """The full program→user mapping: sshd is the ONLY root program; the
+    proxy daemons run as swapd (mirroring the systemd units), the UI/CUA
+    stack as agent. A daemon that silently runs as root widens the image's
+    privilege surface — checking only a subset would let one through."""
     cfg = _supervisord()
-    for prog in ("swap-proxy", "swap-inference", "confirmd"):
-        assert cfg[f"program:{prog}"]["user"] == "swapd", prog
-    assert cfg["program:sshd"]["user"] == "root"
-    assert cfg["program:cred-ui"]["user"] == "agent"
+    expected = {
+        "sshd": "root",
+        "swap-proxy": "swapd",
+        "swap-inference": "swapd",
+        "confirmd": "swapd",
+        "cred-ui": "agent",
+        "cua-stack": "agent",
+        "cua-bridge": "agent",
+        "cua-keepalive": "agent",
+    }
+    programs = {
+        s.split(":", 1)[1]: cfg[s].get("user")
+        for s in cfg.sections()
+        if s.startswith("program:")
+    }
+    assert programs == expected, programs
 
 
 def test_supervisord_no_public_listener():
@@ -126,18 +142,30 @@ def test_supervisord_no_public_listener():
     assert not any(s.startswith("inet_http_server") for s in cfg.sections())
 
 
+def _unit_exec_start(unit_file):
+    """Read a systemd unit's ExecStart verbatim — the source of truth the
+    supervisord conf must mirror."""
+    with open(os.path.join(REPO_ROOT, unit_file), encoding="utf-8") as f:
+        for line in f:
+            m = re.match(r"ExecStart=(.+)", line.strip())
+            if m:
+                return m.group(1).strip()
+    raise AssertionError(f"no ExecStart in {unit_file}")
+
+
 def test_supervisord_commands_mirror_units():
-    """The mitmdump invocations mirror the systemd units' ExecStart lines so
-    the two cannot diverge silently (proxy/swap-proxy.service,
-    proxy/swap-inference.service)."""
+    """The supervisord commands must contain the units' ExecStart verbatim —
+    if a unit changes and the conf doesn't (the exact silent divergence
+    this guards), the test fails."""
     cfg = _supervisord()
-    proxy_cmd = cfg["program:swap-proxy"]["command"]
-    assert "mitmdump -p 18080" in proxy_cmd
-    assert "--set listen_host=127.0.0.1" in proxy_cmd
-    assert "-s /home/swapd/swap_addon.py" in proxy_cmd
-    inference_cmd = cfg["program:swap-inference"]["command"]
-    assert "mitmdump -p 18081" in inference_cmd
-    assert "-s /home/swapd/swap_addon.py" in inference_cmd
+    for prog, unit in (
+        ("swap-proxy", "proxy/swap-proxy.service"),
+        ("swap-inference", "proxy/swap-inference.service"),
+        ("confirmd", "confirm/confirmd.service"),
+    ):
+        exec_start = _unit_exec_start(unit)
+        cmd = cfg[f"program:{prog}"]["command"]
+        assert exec_start in cmd, f"{prog}: unit ExecStart not mirrored in supervisord command"
 
 
 # --- build driver (build-image.sh) ----------------------------------------------
@@ -244,8 +272,13 @@ def test_gate_record_skeleton_schema(tmp_path):
 
 
 def test_scan_clean_on_real_tree():
-    """The gate's Step 0b scan exits 0 on the real repo tree (it must not
-    false-refuse on its own pattern file or on test artifacts)."""
+    """The gate's Step 0b scan must not false-refuse on the repo tree itself
+    (its own pattern file, test fixtures, regenerated artifacts). This is a
+    false-positive guard, not a gate proxy: the real gate scans the BUILT
+    IMAGE (CI's `docker run … scan-baked-secrets.sh /`, covered by
+    test_workflow_runs_gate_subset), which is the only place build-time
+    generated material (pip venvs, browser downloads, tarball contents)
+    can appear."""
     r = subprocess.run(
         ["bash", SCAN_SCRIPT, REPO_ROOT],
         capture_output=True, text=True, timeout=300,
@@ -254,9 +287,15 @@ def test_scan_clean_on_real_tree():
 
 
 def test_scan_refuses_baked_private_key(tmp_path):
-    """The scan is not vacuous: a baked private key is refused (exit 1)."""
+    """The scan is not vacuous: the SAME invocation exits 0 on a clean dir
+    and 1 once a baked private key appears."""
     victim = tmp_path / "leak"
     victim.mkdir()
+    clean = subprocess.run(
+        ["bash", SCAN_SCRIPT, str(victim)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert clean.returncode == 0, clean.stderr
     # The PEM header is built by concatenation so this test file itself does
     # not trip the baked-secrets scan (the scan matches the literal pattern;
     # harness/test_baked_secrets_scan.py uses the same discipline).
@@ -281,8 +320,10 @@ def _workflow_text():
 
 
 def test_workflow_exists_and_builds_on_release_tags():
+    """The v* tag trigger must exist structurally — asserting the prose
+    comment alone would pass with the trigger deleted."""
     text = _workflow_text()
-    assert "v*" in text  # triggered by the release-tag push
+    assert re.search(r"tags:\s*\[\s*\"v\*\"\s*\]", text), "v* tag trigger missing"
 
 
 def test_workflow_actions_sha_pinned():
@@ -297,10 +338,15 @@ def test_workflow_actions_sha_pinned():
 
 
 def test_workflow_least_privilege_and_no_push():
-    """contents:read only; the CI job builds and scans but never pushes a
-    registry — publishing stays an operator step after the interactive gate."""
+    """contents:read only (the permissions block must carry nothing else);
+    the CI job builds and scans but never pushes a registry — publishing
+    stays an operator step after the interactive gate."""
     text = _workflow_text()
-    assert re.search(r"contents:\s*read", text)
+    m = re.search(r"^permissions:\s*\n((?:[ \t]+\S.*\n)+)", text, re.M)
+    assert m, "top-level permissions block missing"
+    keys = [line.split(":")[0].strip() for line in m.group(1).splitlines()]
+    assert keys == ["contents"], f"permissions block must be contents-only, got {keys}"
+    assert re.search(r"^\s+contents:\s*read\s*$", m.group(1), re.M)
     assert "docker push" not in text
     assert "push: true" not in text
 

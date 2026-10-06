@@ -84,9 +84,9 @@ fi
 emit_gate_record() {
     # args: out_path manifest_status base_digest scan_exit scan_target scan_hits docker_note
     local out="$1" manifest_status="$2" base_digest="$3" scan_exit="$4" scan_target="$5" scan_hits="$6" docker_note="$7"
-    python3 - "$out" "$manifest_status" "$base_digest" "$scan_exit" "$scan_target" "$scan_hits" "$docker_note" <<EOF
+    python3 - "$out" "$manifest_status" "$base_digest" "$scan_exit" "$scan_target" "$scan_hits" "$docker_note" "$TAG" <<EOF
 import json, sys, datetime
-out, manifest_status, base_digest, scan_exit, scan_target, scan_hits, docker_note = sys.argv[1:8]
+out, manifest_status, base_digest, scan_exit, scan_target, scan_hits, docker_note, tag = sys.argv[1:9]
 record = {
     "schema": "sparkvm/golden-image-gate-record@1",
     "image_version": "$SHA",
@@ -94,7 +94,9 @@ record = {
     "manifest_schema": "sparkvm/golden-image-manifest@1",
     "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "build": {
-        "tag": "$TAG",
+        # TAG is operator input — it travels via argv, never interpolated
+        # into the heredoc, so a quote/backslash in --tag cannot break the JSON.
+        "tag": tag,
         "docker_built": docker_note != "not-built",
         "base_digest": base_digest or None,
         "note": docker_note,
