@@ -28,7 +28,13 @@ Design decisions (all per the design doc, no improvisation):
   control-plane query (reader) run in different processes. Appends
   take an exclusive ``flock`` on a sidecar lock; rotation happens
   under the same lock; queries take the shared lock. Torn trailing
-  lines are skipped by the reader, never fatal.
+  lines are skipped by the reader, never fatal. The wait is bounded
+  (#1082): ``LOCK_NB`` in a retry loop up to a deadline, then a loud
+  ``JournalLockError`` naming the wedged holder — a stopped (SIGSTOP)
+  or wedged writer can delay the instrument, never freeze it
+  silently. This module stays single-file stdlib-only, so the
+  discipline is shared with ``fleet/events.py``'s ``journal_lock``
+  (#1007) by documentation and review, not by import.
 - Timestamps are epoch-seconds floats (``time.time()``) — stdlib
   only, so this module runs unchanged on the relay host, the hosted
   control plane, and the operator laptop, like ``tenant_status.py``.
@@ -48,6 +54,7 @@ import contextlib
 import fcntl
 import json
 import os
+import sys
 import time
 
 # ---------------------------------------------------------------------------
@@ -194,22 +201,97 @@ def validate_frame(frame):
 # Bounded journal — append, rotate, read
 
 
+# ---------------------------------------------------------------------------
+# Bounded journal — append, rotate, read
+
+# Same bounded-wait discipline as fleet/events.py journal_lock (#1007):
+# LOCK_NB in a retry loop up to a deadline, then a loud JournalLockError
+# naming the lock file and pointing the operator at the stopped/wedged
+# holder. Kept in this module (not imported from fleet) on purpose: this
+# file is stdlib-only and single-file so it runs unchanged on the relay
+# host, the hosted control plane, and the operator laptop — the
+# discipline is shared by documentation and review, not by import.
+# Deleting the <journal>.lock sidecar does NOT release a holder's flock
+# (the lock lives on the holder's open fd, not the path) — the loud
+# error tells the operator to find and revive/kill the holder instead.
+_JOURNAL_LOCK_WAIT_TIMEOUT_S = 300.0
+_JOURNAL_LOCK_POLL_INTERVAL_S = 0.1
+
+
+class JournalLockError(OSError):
+    """The relay journal lock could not be acquired within the deadline.
+
+    Subclasses OSError so emit_frame's "fail loud on OSError" contract
+    is preserved while the failure class stays nameable — tests, the
+    operator CLI, and the query path's deliberate raise (a wedged
+    instrument is an error, not darkness) all key on the name.
+    """
+
+
 @contextlib.contextmanager
-def _journal_locked(path, exclusive=True):
-    """Cross-process lock for journal writes/reads.
+def _journal_locked(path, exclusive=True, timeout_s=None):
+    """Cross-process lock for journal writes/reads, with a bounded wait.
 
     The relay daemon (writer) and the control-plane query (reader) are
     different processes. Writers take LOCK_EX; readers take LOCK_SH so a
     read can never interleave with a rotation. Lock lives in a sidecar
     so the journal path itself is never opened read-write by the reader.
+
+    Bounded wait (#1082): the lock is attempted with LOCK_NB in a retry
+    loop for up to timeout_s seconds (default
+    _JOURNAL_LOCK_WAIT_TIMEOUT_S), then raises JournalLockError naming
+    the lock file and the likely cause, instead of blocking forever
+    behind a stopped (SIGSTOP) or wedged holder. Waiting callers still
+    serialize — only the pathological wait becomes a loud failure.
+
+    A missing lock sidecar (FileNotFoundError) is NOT wrapped: the
+    reader maps it to darkness (None) and the writer already refuses a
+    missing journal directory before locking. Darkness is an absent
+    instrument; a lock wedge is a broken one — they must not share an
+    error shape.
     """
+    if timeout_s is None:
+        timeout_s = _JOURNAL_LOCK_WAIT_TIMEOUT_S
+    if not (timeout_s >= 0):
+        raise JournalLockError(
+            "journal lock timeout must be a non-negative number of "
+            "seconds, got %r" % (timeout_s,))
     lock_path = path + ".lock"
-    with open(lock_path, "a+b") as lf:
-        fcntl.flock(lf.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    try:
+        lf = open(lock_path, "a+b")
+    except FileNotFoundError:
+        raise
+    with lf:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(lf.fileno(),
+                            (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                            | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                # Held by another process; retry until the deadline.
+                pass
+            except OSError as exc:
+                raise JournalLockError(
+                    "cannot lock relay journal %s: %s" % (lock_path, exc))
+            if time.monotonic() >= deadline:
+                raise JournalLockError(
+                    "relay journal lock %s is still held after %.0f "
+                    "seconds; the holder may be stopped (SIGSTOP) or "
+                    "wedged on a stuck filesystem — find it (fuser/lsof "
+                    "%s) and revive or kill it; do not delete %s "
+                    "(deleting the path does not release the holder's "
+                    "flock)" % (lock_path, timeout_s, lock_path,
+                                lock_path))
+            time.sleep(_JOURNAL_LOCK_POLL_INTERVAL_S)
         try:
             yield
         finally:
-            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            try:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
 
 
 def _rotate_if_needed(path):
@@ -271,7 +353,9 @@ def emit_frame(**fields):
 
     Raises ValueError on schema violations; raises OSError when the
     journal cannot be written (fail loud — the daemon operator must
-    know the instrument is dark).
+    know the instrument is dark). A lock held past the bounded wait
+    raises JournalLockError (an OSError) naming the wedged holder — a
+    stopped (SIGSTOP) or wedged daemon, not a silent block.
     """
     frame = dict(fields)
     if frame.pop("prober", False):
@@ -335,8 +419,13 @@ def relay_session_liveness(vm_id, now=None):
     darkness as insufficient-observability, never as ``ok``. A missing
     journal *directory* is also darkness (None), not an error: the
     module is designed to run on machines where the control-plane
-    journal was never deployed (operator laptop, fresh plane). Only the
-    writer fails loud.
+    journal was never deployed (operator laptop, fresh plane).
+
+    Raises JournalLockError when the journal lock cannot be acquired
+    within the bounded wait (#1082): a wedged lock is a broken
+    instrument, not darkness — darkness is reserved for "never
+    deployed here", so a SIGSTOP'd or wedged writer can never freeze
+    the liveness signal with no error again.
     """
     if now is None:
         now = time.time()
@@ -384,6 +473,13 @@ if __name__ == "__main__":
     if args.journal:
         os.environ["RELAY_SESSION_JOURNAL"] = args.journal
     if args.query:
-        print(json.dumps(relay_session_liveness(args.query), indent=2))
+        try:
+            result = relay_session_liveness(args.query)
+        except JournalLockError as exc:
+            # Loud, not a traceback: a wedged lock is an operator
+            # action item (find/revive the holder), not a bug report.
+            print("error: %s" % exc, file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps(result, indent=2))
     else:
         ap.print_help()

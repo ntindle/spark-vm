@@ -592,6 +592,13 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The relay liveness journal no longer blocks forever on a stopped or
+  wedged lock holder (#1082): frame emission and the control-plane
+  liveness query wait up to five minutes for the journal lock, then
+  fail loudly — naming the lock file and pointing the operator at the
+  stopped (SIGSTOP) or wedged process holding it — instead of freezing
+  the liveness signal with no error. A journal that was never deployed
+  on this machine still reads as darkness, not an error. (#PR)
 - The jail firewall watchdog now pins the firewall table by its
   canonical structure instead of its rendered text (#444): an nftables
   upgrade that re-words rule text — not just re-indents it — no longer
