@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   lost window, through the alert journal and `events watch`) alongside
   the stderr warning, and the fleet README names a tail-length sizing
   rule so operators size the tail instead of discovering overflow via
-  the warning. (#TBD)
+  the warning. (#1072)
 - Push reminder/digest scheduler (#1063): the sweep logic the control
   plane's per-minute trigger will drive — a due reminder pages exactly
   once, a decided or expired approval is never paged (terminal-by-clock
