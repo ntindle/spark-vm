@@ -673,6 +673,25 @@ def cmd_revoke(args):
 #     a lock file rather than doubling heartbeats.
 
 
+_LOG_MAX_BYTES = 1024 * 1024  # 1 MiB per log file (D21, #1020)
+
+
+def _rotate_log(path):
+    """Best-effort single-generation rotation: <log> -> <log>.1.
+
+    Never raises: returns the OSError on failure (None on success) so
+    a failed rotation degrades loudly on stderr without losing the
+    line being logged — the caller still appends to the (over-cap)
+    log. `os.replace` is atomic on POSIX, so the old generation is
+    either fully moved or untouched.
+    """
+    try:
+        os.replace(path, path + ".1")
+    except OSError as e:
+        return e
+    return None
+
+
 def _fail(d, msg, redact=(), tag="heartbeat", log="heartbeat.log"):
     """Fail loud: stderr + appended to <log> in the state dir.
 
@@ -682,6 +701,12 @@ def _fail(d, msg, redact=(), tag="heartbeat", log="heartbeat.log"):
     echoed back by a misbehaving plane must not become a credential leak
     in a local log). `tag`/`log` let the box-side cron commands share the
     loud-failure shape (heartbeat, ingest) without cross-writing logs.
+
+    Bounded growth (D21, #1020): the log is capped at 1 MiB — when the new
+    line would overflow it, the log rotates to `<log>.1` (single
+    generation; the previous `.1` is replaced) and the new line starts a
+    fresh log. A failed rotation is loud on stderr but never loses the
+    line: it still lands in the over-cap log.
     """
     for secret in redact:
         if secret:
@@ -689,8 +714,19 @@ def _fail(d, msg, redact=(), tag="heartbeat", log="heartbeat.log"):
     line = (f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {tag} FAILED: "
             f"{msg}")
     print(line, file=sys.stderr)
+    path = os.path.join(d, log)
     try:
-        with open(os.path.join(d, log), "a") as f:
+        if os.path.isfile(path):
+            line_bytes = len((line + "\n").encode("utf-8"))
+            if os.path.getsize(path) + line_bytes > _LOG_MAX_BYTES:
+                err = _rotate_log(path)
+                if err is not None:
+                    # Loud, not fatal: the new line below still lands in
+                    # the (over-cap) log — a wedged .1 must never eat it.
+                    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {tag} "
+                          f"log-rotation FAILED for {log}: {err}",
+                          file=sys.stderr)
+        with open(path, "a") as f:
             f.write(line + "\n")
     except OSError:
         pass  # stderr is the loud channel; a broken log must not mask it

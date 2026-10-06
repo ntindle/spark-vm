@@ -1575,3 +1575,75 @@ def test_request_scrubs_hostile_pairing_code_display(ctx, monkeypatch, capsys):
     # Stored value untouched (raw) — the scrub is display-only.
     pairing = json.load(open(os.path.join(ctx.dir, "pairing.json")))
     assert pairing["code"] == "ABCD\x1b[2K\rEFGH"
+
+
+# --- _fail log rotation (#1020, D21) --------------------------------------------
+
+def test_fail_log_rotates_at_cap_and_continues_appending(ctx, monkeypatch):
+    # A 1 MiB cap with single-generation rotation: when the new line
+    # would overflow, the log moves to <log>.1 and the new line starts
+    # a fresh log. Every generation stays bounded.
+    monkeypatch.setattr(spark_pair, "_LOG_MAX_BYTES", 200)
+    d = ctx.dir
+    for i in range(6):
+        spark_pair._fail(d, "boom %d" % i, log="heartbeat.log")
+    rotated = os.path.join(d, "heartbeat.log.1")
+    active = os.path.join(d, "heartbeat.log")
+    assert os.path.isfile(rotated)
+    assert os.path.isfile(active)
+    assert os.path.getsize(rotated) <= 200
+    assert os.path.getsize(active) <= 200
+    # Continued appends land in the fresh active log.
+    assert open(active).read().rstrip().endswith("boom 5")
+    assert "boom 0" in open(rotated).read()
+
+
+def test_fail_redaction_survives_rotation(ctx, monkeypatch):
+    # Token redaction holds across the rotation: neither generation
+    # may carry the raw secret.
+    monkeypatch.setattr(spark_pair, "_LOG_MAX_BYTES", 100)
+    d = ctx.dir
+    secret = "s3cr3t-token-value"
+    spark_pair._fail(d, "plane said %s loudly" % secret,
+                    redact=(secret,), log="heartbeat.log")
+    spark_pair._fail(d, "plane said %s again" % secret,
+                    redact=(secret,), log="heartbeat.log")
+    rotated = os.path.join(d, "heartbeat.log.1")
+    assert os.path.isfile(rotated)  # the rotation fired
+    for name in ("heartbeat.log", "heartbeat.log.1"):
+        body = open(os.path.join(d, name)).read()
+        assert secret not in body
+        assert "<redacted>" in body
+
+
+def test_fail_wedged_dot1_still_logs_loudly(ctx, monkeypatch, capsys):
+    # A corrupt .1 (a directory — os.replace fails) degrades loudly
+    # without losing the new line: the line still lands in the
+    # over-cap log and stderr carries the rotation failure.
+    monkeypatch.setattr(spark_pair, "_LOG_MAX_BYTES", 50)
+    d = ctx.dir
+    active = os.path.join(d, "heartbeat.log")
+    open(active, "w").write("x" * 100 + "\n")
+    os.mkdir(os.path.join(d, "heartbeat.log.1"))
+    spark_pair._fail(d, "plane unreachable", log="heartbeat.log")
+    err = capsys.readouterr().err
+    assert "log-rotation FAILED" in err
+    assert "plane unreachable" in err  # the loud stderr channel
+    body = open(active).read()
+    assert "plane unreachable" in body  # the new line is not lost
+
+
+def test_fail_second_rotation_replaces_dot1(ctx, monkeypatch):
+    # Single generation: a second rotation replaces the previous .1 —
+    # only one old generation is ever kept, not the whole history.
+    monkeypatch.setattr(spark_pair, "_LOG_MAX_BYTES", 200)
+    d = ctx.dir
+    for i in range(12):
+        spark_pair._fail(d, "tick %d" % i, log="heartbeat.log")
+    rotated = os.path.join(d, "heartbeat.log.1")
+    active = os.path.join(d, "heartbeat.log")
+    assert os.path.isfile(rotated)
+    assert os.path.getsize(rotated) <= 200
+    assert os.path.getsize(active) <= 200
+    assert "tick 11" in open(active).read()
+    assert "tick 0" not in open(rotated).read() + open(active).read()
