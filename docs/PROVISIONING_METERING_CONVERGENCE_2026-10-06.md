@@ -69,7 +69,15 @@ not re-filed. These are new:
   image: no Dockerfile/packer/Fly-image recipe, no CI job, no pin of
   v0.6.0 as the base. FLY_DRIVER_RESEARCH recommends the golden-image
   path over exec-install, but the image is an artifact with no producer
-  and no owner. Filed as a new issue (see §6).
+  and no owner. Scope note: G51.1's state list named "no golden-image
+  build" inside the #905 filing, and #905's body cites the golden image
+  as the driver's recommended path — this gap explicitly re-scopes that
+  overlap: **#905 narrows to the driver + exec-install path; the
+  golden-image producer moves to #1087** (no two-owner conflict).
+  Filed as a new issue (see §6). The image producer is shared
+  infrastructure: it serves the provision path (#905) and the rollout
+  reimage waves (G11, `ROLLOUT_CONTROLLER_DESIGN.md`), not the driver
+  alone.
 - **F-P2 — the meter envelope has a producer and an ingestion endpoint,
   but no emission worker.** #1047 scopes the box-local `meter_agent`
   (spool under the #376 rotation bound); #1048 scopes the plane's
@@ -87,10 +95,17 @@ not re-filed. These are new:
   orchestrator-local or in-repo-filesystem provision store for the
   attestation half: the provision record's home is D1 (the plane's
   database), whether the orchestrator itself runs in-repo or on the
-  plane. This narrows G51.2's placement question without answering it —
-  the orchestrator may poll claims anywhere, but the record it writes
-  must be plane-readable. Filed as a design gap on #907's scope (see
-  §6).
+  plane. Why not an orchestrator-side validation callback instead: the
+  callback alternative fails on availability, not trust — the plane must
+  validate tokens while the in-repo cron isn't running, and a synchronous
+  plane→orchestrator round trip makes every pairing approval depend on
+  the orchestrator's liveness. The unexamined dependency D-P2 names
+  honestly: **who authenticates the orchestrator's D1 writes** — the
+  orchestrator writes operator-trusted records consumed by both G51.3
+  validation and the #1074 spend ledger, so the write credential (and
+  its custody) is the actual trust root, not the store choice. That
+  credential design rides with #1089's schema contract. Filed as the
+  separate issue #1089 (see §6); #907 consumes its contract.
 
 ## 4. Decisions pinned (D-P series)
 
@@ -103,23 +118,42 @@ not re-filed. These are new:
   lives in D1. The #1074 spend ledger consumes provision records from
   the same store — one record, two consumers (G51.3 validation, #1074
   ingestion).
-- **D-P3 — emission reuses the #953/#864 transport discipline.** The
-  F-P2 emission worker is a periodic scan with loud failure, flock
-  serialization, and plane-down degradation — the pattern the repo
-  already ships twice (upload-filings scan, heartbeat). No new transport
-  invention.
+- **D-P3 — emission is the MeterQueue's worker half; reuse the
+  #953/#864 transport discipline.** Reconciliation with D-M4
+  (`METERING_BILLING_GAP_ANALYSIS.md`): the dedicated `MeterQueue`
+  (box-local spool + worker, copied from the PushQueue pattern) remains
+  the design's emission path — D-P3's worker is that worker, not a
+  competing transport. The #953 upload-filings scan / #864 heartbeat
+  discipline (periodic, flock-serialized, loud failure, plane-down
+  degradation) is the concrete shape the §6 worker takes for the
+  5-minute `resource_window` / 60-second `idle_heartbeat` cadence, with
+  the design's `(source, epoch, seq)` dedupe as the at-least-once
+  integrity story. "Loud failure" is pinned as **fail-open**, never
+  fail-closed: per `USAGE_METERING_DESIGN.md` §6, a full spool, a dead
+  worker, or a plane outage never blocks the box, never fails a swap,
+  never loses an approval — gaps are detectable (`seq`
+  discontinuities), breakage is not. This is also not the "two emission
+  paths" question #1049 framed and the metering analysis closed as
+  invalid premise (F-M7: the fleet journal is a meter-daemon *source*,
+  upstream of the same MeterQueue) — no second spool system is proposed.
 - **D-P4 — build order for the lane.** #905 (driver) and the F-P1 image
-  producer are the critical path — nothing downstream can be exercised
-  without a machine that boots the stack. Then #906 (orchestrator) with
-  the D-P2 record store, then #907 (attestation design, consuming the
-  shipped `approved_by` vocabulary). #1074 → #1075 → #1076 is the
-  spend-cap sub-order; #1047 → F-P2 → #1048 is the metering sub-order.
-  #1077 ([POLICY]) proceeds on operator-set defaults meanwhile.
+  producer are the integration critical path — nothing downstream can
+  be exercised end-to-end without a machine that boots the stack — but
+  the design/schema/policy work proceeds in parallel: #907 (attestation
+  design) and #1074 (ledger schema) and #1077 ([POLICY]) do not wait for
+  the driver. Order within the wired sequence: #1089 (provision-record
+  schema contract) lands before #906's record-store wiring and before
+  #1074's provision-record ingestion, since both consume the schema;
+  #907 consumes #1089's contract for the token-validation half. Then
+  #906 (orchestrator) with the D-P2 record store. Sub-orders:
+  #1074 → #1075 → #1076 (spend-cap), #1047 → F-P2/#1088 → #1048
+  (metering). #1077 proceeds on operator-set defaults meanwhile.
 
 ## 5. Explicitly NOT new gaps (already owned)
 
-- Fly driver build (#905), orchestrator (#906), attested-pairing design
-  (#907), spend-cap mechanism (#908) + slices (#1074–#1077), meter_agent
+- Fly driver build (#905 — narrowed to the driver + exec-install path
+  per F-P1; the golden-image producer moved to #1087), orchestrator
+  (#906), attested-pairing design (#907, consuming #1089's contract),
   (#1047), plane metering endpoint (#1048), exec-install alternative
   (F1b, rides #905), golden-image *gate* (exists), first-boot hook
   (rides #905/G51.4), H4 live-API clearance (granted; the first smoke
@@ -129,6 +163,10 @@ not re-filed. These are new:
 
 - F-P1 → new issue: golden-image build pipeline (producer for the gated
   image, pins v0.6.0).
-- F-P2 → new issue: meter-envelope emission worker (spool → plane).
+- F-P2 → new issue: meter-envelope emission worker (spool → plane) —
+  the MeterQueue's worker half per D-M4, fail-open per §6.
 - F-P3 → new issue: provision-record store pin (D1, plane-readable for
-  G51.3 token validation).
+  G51.3 token validation) — deliverable is an in-repo schema-contract
+  amendment carrying the pinned DDL (`IF NOT EXISTS`, named migration
+  file), following the #1061 contract-doc vehicle; names the
+  orchestrator write credential as the trust root.
