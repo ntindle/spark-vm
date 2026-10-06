@@ -7,8 +7,9 @@ per browser session.
 
 The real server is spun up on an ephemeral localhost port with the
 sudo-backed `run()` monkeypatched, so no secrets, sudo, or swapd are
-involved. CRED_UI_TOKEN_FILE points the token at a tmp dir, so the real
-~/.config/cred-ui/token is never touched.
+involved. CRED_UI_TOKEN_FILE points the token at a tmp dir (the
+local-file backend, issue #964), so the swapd-backed default is never
+touched.
 
 Run from the repo root:  python3 -m pytest cred-ui/tests/test_cred_ui_api_token.py -q
 """

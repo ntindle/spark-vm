@@ -41,6 +41,11 @@ def _run_install(repo_root, install_dir, unit_dir, extra_env=None):
     env = dict(os.environ)
     env["CRED_UI_INSTALL_DIR"] = str(install_dir)
     env["SYSTEMD_USER_DIR"] = str(unit_dir)
+    # Issue #964: install.sh's pre-restart guard probes the pinned
+    # ui-token sudoers entry when CRED_UI_TOKEN_FILE is unset. These
+    # hermetic installs are dev-mode installs (no sudo/swapd on CI), so
+    # they take the local-file path the README documents for developers.
+    env["CRED_UI_TOKEN_FILE"] = str(install_dir.parent / "token")
     env.update(extra_env or {})
     return subprocess.run(
         ["bash", os.path.join(repo_root, "cred-ui", "install.sh")],

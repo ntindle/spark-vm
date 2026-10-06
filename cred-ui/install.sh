@@ -93,6 +93,40 @@ then
     exit 1
 fi
 
+# Issue #964: pre-restart guard for the swapd-backed token. The installed
+# UI fetches its token through the pinned
+# `sudo -n -u swapd /usr/bin/cat /home/swapd/ui-token` sudoers entry; if
+# that entry is absent the service fails at startup. Fail the install
+# here instead — before any mutation and before the deploy's restart —
+# so a deploy never swaps a working UI for one that can't start. A
+# missing /home/swapd/ui-token FILE is fine (first start generates it
+# through the narrow writer); a sudo denial means the sudoers entry
+# isn't installed (proxy/deploy.sh hasn't run, or a proxy-only rollback
+# reverted it — see the cross-component note in deploy/components.conf).
+# Skipped when CRED_UI_TOKEN_FILE names a local file (dev/CI/manual
+# installs without swapd — the README documents this contract).
+if [ -z "${CRED_UI_TOKEN_FILE:-}" ]; then
+    # stdout is discarded (it would be the token on success); only
+    # stderr is captured — on failure cat prints nothing to stdout, so
+    # the captured text can never contain the token.
+    set +e
+    _ui_token_err="$(sudo -n -u swapd /usr/bin/cat /home/swapd/ui-token 2>&1 >/dev/null)"
+    _ui_token_rc=$?
+    set -e
+    case "$_ui_token_rc:$_ui_token_err" in
+        0:*) ;; # entry present, token readable
+        *"No such file or directory"*) ;; # entry present, file not yet generated
+        *)
+            echo "ERROR: the pinned ui-token sudoers entry is not installed:" >&2
+            echo "  sudo -n -u swapd /usr/bin/cat /home/swapd/ui-token -> ${_ui_token_err}" >&2
+            echo "The UI would fail at startup. Install it with proxy/deploy.sh" >&2
+            echo "(or set CRED_UI_TOKEN_FILE for a local-file install) — aborting before any mutation" >&2
+            exit 1
+            ;;
+    esac
+    unset _ui_token_err _ui_token_rc
+fi
+
 mkdir -p "$CRED_UI_INSTALL_DIR" "$SYSTEMD_USER_DIR" || {
     echo "ERROR: cannot create install directories" >&2
     exit 1
