@@ -42,7 +42,10 @@ cadence the request path cannot supply.
   fired. Under overlap the digest carries the count-at-fire-time;
   coalescing that lands after the digest fired is accepted count drift
   for that window (no refire — D54/D57 dedup). The same-sweep coalescing
-  guarantee holds only for a non-overlapping sweep.
+  guarantee holds only for a non-overlapping sweep. (Amended by D76:
+  the digest pass scans *pending* windows — `count > 0 AND
+  enqueued_at IS NULL` — not just the current one, so a window
+  stranded by the hour boundary fires late with its own window key.)
 - **D68. The sweep's candidate SELECT is a hint, not a decision.** The
   reminder pass selects
   `WHERE status = 'pending' AND decision_seq IS NULL`
@@ -130,7 +133,54 @@ cadence the request path cannot supply.
   truncated sweep's remainder is actually reached on the next tick
   instead of the already-processed rows re-dominating the first pages.
   The `page_size × max_pages` cap stays a capacity assumption (peak
-  due-reminders/minute); repeated truncation is an operator alert.
+  due-reminders/minute); repeated truncation is an operator alert —
+  the alert sink is the scheduled handler's structured log (#1069's
+  scope, D72; the sweep surfaces `pages_truncated` on the
+  `SweepSummary` for exactly this).
+
+- **D76. Pending-window digest scan + `enqueued_at` lifecycle
+  (arch 20261006-0329).** The digest pass scans for *pending* windows
+  — `count > 0 AND enqueued_at IS NULL`, oldest first — not just the
+  current window. This heals the hour-boundary strand the original
+  D67 text missed: coalescing that lands on window H's
+  `push_digest_state` row after H's last digest-pass tick (the final
+  ~minute of the hour, or after a skipped/delayed tick) would
+  otherwise never fire — the row's counts would never reach the owner
+  in any form, silently breaking D10's "hourly digest coalescing"
+  promise for those pages. A late fire uses H's own window key (a
+  fresh page-once key — no dedup conflict with any other window) and
+  consumes the *current* window's owner budget (the page goes out now,
+  so now's budget is the honest one). `maybe_enqueue_digest` stamps
+  `enqueued_at` when the digest page is accepted — the D54 obligation
+  the D9 slice had left unwritten (the column existed in the #988
+  contract but nothing wrote it); a budget-suppressed digest leaves it
+  NULL so a later sweep retries; a fired window is never refired.
+  Known residual: a window that fired and then receives more
+  coalescing in its final minute keeps the D67 accepted drift (no
+  refire — the page-once key *is* the window, so a second digest for
+  the same window is unrepresentable under D54/D57; carrying that
+  delta would need a new key scheme, left for #1064's digest
+  assembly). No staleness bound is placed on pending windows: a
+  window stranded by a prolonged scheduler outage fires arbitrarily
+  late (the realistic case is the final minute of the hour, healed on
+  the next tick) — deliberately, since dropping a stranded digest
+  would silently un-deliver its coalesced pages.
+- **D77. The digest's suppression audit uses a suffixed key
+  (arch 20261006-0329).** `enqueue_page`'s `suppressed_budget` audit
+  row for a *digest* is written with key `event_key +
+  "\x00suppressed"` instead of the page's exact key (the D61 pattern:
+  `suppressed_terminal` audits already suffix for the same reason).
+  Without this, the outcome-blind dedup fast-path and the D57 partial
+  unique index report every later retry as `duplicate` even though no
+  digest ever went out — a single over-budget hour would wedge that
+  window's digest permanently, stranding every coalesced page it was
+  meant to deliver (the digest is the delivery vehicle for all of
+  them). Filing events keep the exact key: D53's replayed-filing rule
+  stands — a replayed filing coalesced into the digest stays
+  coalesced. A repeated suppression while still over budget is a
+  harmless `duplicate` (the suppression was already recorded and the
+  count incremented once — no double-counting, since the audit INSERT
+  and the count increment share one transaction).
 
 ## 3. What the build slice implements (#1063)
 

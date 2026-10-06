@@ -87,10 +87,12 @@ Decisions (continuing the push lane's D-series; D50-D57 are #990's):
   current `token_hash` (D13), so a rotation (hash change) is
   definitionally a new generation and resets the warning key.
 - **D64. Digest trigger (D54).** `maybe_enqueue_digest` fires the
-  digest enqueue when `push_digest_state.count > 0` for the owner's
-  current hour window. The digest page consumes owner budget like any
-  page (D10) — the boundary's owner-only reservation handles it; this
-  module only decides *whether* the trigger fires.
+  digest enqueue when `push_digest_state.count > 0` for the target
+  window (default: the owner's current hour window; D76 lets the
+  sweep name a past pending window). The digest page consumes owner
+  budget like any page (D10) — the boundary's owner-only reservation
+  handles it; this module only decides *whether* the trigger fires,
+  and stamps `enqueued_at` when the page is accepted (D76).
 - **D65. Revocation pages; grandfathering does not.** The taxonomy's
   note is a caller obligation: `on_box_revoked` must only be called
   for real revocation events, never for the pre-#844 keyless-
@@ -455,21 +457,38 @@ def maybe_enqueue_reminder(conn, *, box_id, owner_principal, aid,
     return MapResult(r.disposition, r)
 
 
-def maybe_enqueue_digest(conn, *, owner_principal, now=None):
-    """Fire the D54 digest trigger when coalesced pages exist (D64).
+def maybe_enqueue_digest(conn, *, owner_principal, now=None,
+                         window_start=None):
+    """Fire the D54 digest trigger when coalesced pages exist (D64, D76).
 
-    When `push_digest_state.count > 0` for the owner's current hour
-    window, enqueues the digest page (key = window_start). The digest
-    consumes owner budget like any page (D10) — enforced by the
-    boundary, not here. Returns `no_digest_due` when nothing coalesced.
+    Fires the digest for `window_start` — defaulting to the owner's
+    current hour window — when `push_digest_state.count > 0` for that
+    window. The digest consumes owner budget like any page (D10) —
+    enforced by the boundary, not here. Returns `no_digest_due` when
+    nothing coalesced.
+
+    D76 — the pending-window lifecycle: when the digest page is
+    accepted (disposition `queued`), `push_digest_state.enqueued_at`
+    is stamped with the sweep's clock reading. A budget-suppressed
+    digest leaves `enqueued_at` NULL so a later sweep retries; a
+    fired window is never refired (the D54/D57 page-once key is the
+    window itself, so a refire attempt is a harmless `duplicate`).
     """
     _require_key_material("owner_principal", owner_principal)
     moment = _utcnow(now)
-    window_start = push_enqueue.hour_bucket(moment)
+    window = window_start if window_start is not None \
+        else push_enqueue.hour_bucket(moment)
+    _require_key_material("window_start", window)
     if push_enqueue.get_digest_count(conn, owner_principal,
-                                     window_start) <= 0:
+                                     window) <= 0:
         return MapResult("no_digest_due", None)
     r = push_enqueue.enqueue_page(
         conn, event_kind="digest", owner_principal=owner_principal,
-        box_id=None, key_material=window_start, now=moment)
+        box_id=None, key_material=window, now=moment)
+    if r.disposition == "queued":
+        conn.execute(
+            "UPDATE push_digest_state SET enqueued_at = ?"
+            " WHERE owner_principal = ? AND window_start = ?",
+            (moment.isoformat(), owner_principal, window))
+        conn.commit()
     return MapResult(r.disposition, r)

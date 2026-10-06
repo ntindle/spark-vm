@@ -325,24 +325,35 @@ def sweep_reminders(conn, *, now=None, resolve_owner, record_adapter=None,
 
 
 def sweep_digests(conn, *, now=None):
-    """Pass 2: the D54 digest trigger (D64, D67).
+    """Pass 2: the D54 digest trigger (D64, D67, D76).
 
-    Scans `push_digest_state` for owners with `count > 0` in the
-    owner's current hour window and fires `maybe_enqueue_digest` per
-    owner. Runs after the reminder pass (D67): a reminder that
-    coalesced into the digest this sweep must be carried by the digest
-    in the same sweep. Returns a dict disposition -> count.
+    Fires `maybe_enqueue_digest` for every *pending* digest window —
+    `count > 0` with `enqueued_at IS NULL` — oldest first (D76). The
+    current window is the common case; the pending scan is what heals
+    the hour-boundary strand: coalescing that lands on window H's row
+    after H's last digest-pass tick fires late with H's own window
+    key (a fresh page-once key — no dedup conflict with any other
+    window) and consumes the current window's owner budget (the page
+    goes out now, so now's budget is the honest one). A window whose
+    digest already fired (`enqueued_at` set) is never refired — the
+    D67 accepted drift for post-fire coalescing stands. Runs after
+    the reminder pass (D67): a reminder that coalesced into the
+    digest this sweep must be carried by the digest in the same sweep.
+    Returns a dict disposition -> count.
     """
     moment = _utcnow(now)
-    window_start = push_enqueue.hour_bucket(moment)
-    owners = conn.execute(
-        "SELECT owner_principal FROM push_digest_state"
-        " WHERE window_start = ? AND count > 0", (window_start,)
-    ).fetchall()
+    current = push_enqueue.hour_bucket(moment)
+    pending = conn.execute(
+        "SELECT owner_principal, window_start FROM push_digest_state"
+        " WHERE count > 0 AND enqueued_at IS NULL"
+        " AND window_start <= ?"
+        " ORDER BY window_start, owner_principal",
+        (current,)).fetchall()
     counts = {}
-    for (owner_principal,) in owners:
+    for owner_principal, window_start in pending:
         r = push_events.maybe_enqueue_digest(
-            conn, owner_principal=owner_principal, now=moment)
+            conn, owner_principal=owner_principal, now=moment,
+            window_start=window_start)
         counts[r.disposition] = counts.get(r.disposition, 0) + 1
     return counts
 

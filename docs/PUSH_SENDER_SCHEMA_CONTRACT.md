@@ -283,8 +283,8 @@ CREATE TABLE IF NOT EXISTS push_digest_state (
   owner_principal TEXT NOT NULL,
   window_start    TEXT NOT NULL,  -- hour bucket, YYYY-MM-DDTHH UTC
   count           INTEGER NOT NULL DEFAULT 0,  -- coalesced pages
-  enqueued_at     TEXT,           -- ISO UTC of the digest page send
-                                 -- (NULL = pending, not yet sent)
+  enqueued_at     TEXT,           -- ISO UTC the digest page was accepted
+                                 -- (enqueue-time; NULL = pending, not yet fired)
   PRIMARY KEY (owner_principal, window_start)
 );
 ```

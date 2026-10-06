@@ -331,6 +331,68 @@ def test_suppressed_replay_stays_suppressed(conn):
     assert push_enqueue.get_digest_count(conn, "owner-1", push_enqueue.hour_bucket()) == 1
 
 
+def test_digest_suppression_stays_retryable(conn):
+    # D77: a budget-suppressed digest's audit row uses a suffixed key,
+    # so the digest page key stays free — once budget frees, the retry
+    # queues instead of wedging on "duplicate" forever.
+    ws = push_enqueue.hour_bucket()
+    for _ in range(10):
+        assert push_enqueue.reserve_budget(conn, None, "owner-1", ws)
+    conn.execute(
+        "INSERT INTO push_digest_state"
+        " (owner_principal, window_start, count)"
+        " VALUES ('owner-1', ?, 2)", (ws,))
+    conn.commit()
+    s1 = push_enqueue.enqueue_page(
+        conn, event_kind="digest", owner_principal="owner-1",
+        box_id=None, key_material=ws)
+    assert s1.disposition == "suppressed_budget"
+    assert s1.event_key == "owner-1\x00" + ws
+    keys = [r[0] for r in conn.execute(
+        "SELECT event_key FROM push_send_results"
+        " WHERE outcome = 'suppressed_budget'").fetchall()]
+    assert keys == ["owner-1\x00" + ws + "\x00suppressed"]
+    for _ in range(10):
+        push_enqueue.release_reservation(conn, None, "owner-1", ws)
+    s2 = push_enqueue.enqueue_page(
+        conn, event_kind="digest", owner_principal="owner-1",
+        box_id=None, key_material=ws)
+    assert s2.disposition == "queued"
+    assert s2.event_key == "owner-1\x00" + ws
+
+
+def test_digest_repeated_suppression_is_duplicate_not_double_count(conn):
+    # D77: a second suppression while still over budget is a harmless
+    # "duplicate" (the suppression is already recorded) — the digest
+    # count is incremented exactly once.
+    ws = push_enqueue.hour_bucket()
+    for _ in range(10):
+        assert push_enqueue.reserve_budget(conn, None, "owner-1", ws)
+    conn.execute(
+        "INSERT INTO push_digest_state"
+        " (owner_principal, window_start, count)"
+        " VALUES ('owner-1', ?, 2)", (ws,))
+    conn.commit()
+    s1 = push_enqueue.enqueue_page(
+        conn, event_kind="digest", owner_principal="owner-1",
+        box_id=None, key_material=ws)
+    assert s1.disposition == "suppressed_budget"
+    s2 = push_enqueue.enqueue_page(
+        conn, event_kind="digest", owner_principal="owner-1",
+        box_id=None, key_material=ws)
+    assert s2.disposition == "duplicate"
+    assert push_enqueue.get_digest_count(conn, "owner-1", ws) == 3
+    # D77 regression pin: the suppression audit must carry the suffixed
+    # key. With the plain key (reverted), the audit row shares the page
+    # key and a later retry wedges on "duplicate" forever. The two
+    # assertions above pin the no-double-count behavior but pass
+    # identically with or without the suffix; this one does not.
+    keys = [r[0] for r in conn.execute(
+        "SELECT event_key FROM push_send_results"
+        " WHERE outcome = 'suppressed_budget'").fetchall()]
+    assert keys == ["owner-1\x00" + ws + "\x00suppressed"]
+
+
 # --- D56 reservation lifecycle ---------------------------------------------
 
 def test_release_reservation(conn):

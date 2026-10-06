@@ -592,6 +592,18 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Push digest reliability (#1063): two gaps in the hourly digest that
+  carries over-budget pages are closed. Digests for past hours whose
+  pages arrived after the hour's last scheduler tick no longer strand
+  silently — the scheduler now fires any pending digest window with
+  that window's own key, and records when each window's digest went
+  out. A late digest counts against the current hour's page budget —
+  the page goes out now, so now's budget is the honest one. And a
+  digest suppressed by an exhausted page budget no longer
+  wedges that hour's digest permanently: the suppression is recorded
+  without blocking the digest's key, so the digest retries once
+  budget frees instead of never going out. (#PR)
+
 - Answering an approval no longer crashes with a server error when the
   pending file is consumed by another process in the instant between the
   existence check and the consume: the answer is now refused honestly as
