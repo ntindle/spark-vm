@@ -59,6 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Stop hook classifier: a quoted or example `BLOCKED:`/`DONE:` (prompt-preamble literals, fenced code blocks, blockquoted quotes) no longer flips the job's state — only the protocol's final line carries the marker, so a quoted `DONE:` can't silently close a live job (#8).
 - Control-plane API reference: the phone-home WebSocket lane is now covered — the box→plane upgrade handshake, the session and close-code taxonomy, and the owner-only journal read + retention endpoints — closing the gap since the plane DO deployed live in October (#1092).
 - GitHub releases: release notes are now capped at GitHub's 125,000-character body limit — an oversized curated section is trimmed at whole-bullet boundaries with a note pointing at the full changelog on the tag, instead of failing the publish step (and its recovery) with a body-too-long error, as the v0.6.0 cut did (#1091).
 

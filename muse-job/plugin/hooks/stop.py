@@ -30,6 +30,18 @@ _ANSI_RE = re.compile(
 # write through a symlink.
 _SID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
+# Issue #8: quoted markers. Fenced code blocks are never the agent's own
+# terminal marker (preamble quotes, example output, instructed shapes like
+# "BLOCKED: <question>") — remove them before classification. The fence
+# match is non-greedy so a single unclosed fence only eats to the next
+# closing fence, and an unmatched ``` is left alone (classification then
+# falls back to the last-line rule below).
+_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+# Markdown blockquote detection: any leading ">" prefix means the line is
+# quoted text, never the agent's own marker — the marker check disqualifies
+# such lines entirely (see classify()).
+_QUOTE_RE = re.compile(r"^(?:>\s*)+")
+
 
 def _clean(s):
     return _ANSI_RE.sub("", s or "")
@@ -79,16 +91,42 @@ def _append_event(evdir, sid, evt):
 
 
 def classify(message):
-    """Return (state, detail) from the assistant's final message."""
+    """Return (state, detail) from the assistant's final message.
+
+    Issue #8: the marker is the protocol's FINAL line ("end turn with
+    `BLOCKED: <question>` / `DONE: <summary>` — TOOL_INTERFACE.md), so only
+    the last non-empty line may carry it. Quoted or example markers earlier
+    in the message (preamble literals, fenced code blocks) no longer flip
+    the job's state. Residual, stated plainly: an agent that buries a
+    genuine BLOCKED: mid-message and ends on prose is classified idle —
+    deliberate, since the fix for a missing marker is the same as before
+    (the preamble's explicit instruction), while a phantom done closes a
+    live job.
+    """
     state, detail = "idle", ""
     if not message:
         return state, detail
-    lines = [l.strip() for l in message.splitlines() if l.strip()]
-    for line in lines:
-        if line.startswith("BLOCKED:"):
-            return "blocked", _clean(line[len("BLOCKED:"):].strip())[:500]
-        if line.startswith("DONE:"):
-            return "done", _clean(line[len("DONE:"):].strip())[:500]
+    body = _FENCE_RE.sub("", message)
+    # Split on \n only: \r is a content byte (the sanitizer strips it from
+    # the detail), not a protocol line break. splitlines() would let a \r
+    # injection re-cut the message and detach a genuine final-line marker
+    # from the classifier (issue #23 B6 pinning test).
+    lines = [l.strip() for l in body.split("\n") if l.strip()]
+    if not lines:
+        return state, detail
+    # Issue #8: a line the agent merely quoted (markdown blockquote) is
+    # never its own marker. Any leading ">" prefix disqualifies the line
+    # entirely — including nested quotes like ">> DONE:", which unquoting
+    # to the bare marker would otherwise misclassify.
+    last_raw = lines[-1]
+    if _QUOTE_RE.sub("", last_raw) != last_raw:
+        last = None
+    else:
+        last = last_raw
+    if last is not None and last.startswith("BLOCKED:"):
+        return "blocked", _clean(last[len("BLOCKED:"):].strip())[:500]
+    if last is not None and last.startswith("DONE:"):
+        return "done", _clean(last[len("DONE:"):].strip())[:500]
     tail = lines[-3:]
     # Return the actual question line, not just the last tail line.
     for t in reversed(tail):
