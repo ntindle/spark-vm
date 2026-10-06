@@ -115,13 +115,22 @@ cadence the request path cannot supply.
   anti-joins approvals whose reminder page already exists in
   `push_send_results` — the boundary's outcome-blind dedup fast-path,
   mirrored in SQL on `box_id || char(0) || aid` (the exact page-key
-  encoding). Every excluded candidate would have returned `duplicate`
-  — no page, no audit, no state change — so the exclusion is
-  behavior-preserving, and a truncated sweep's remainder is actually
-  reached on the next tick instead of the already-processed rows
-  re-dominating the first pages. The `page_size × max_pages` cap stays
-  a capacity assumption (peak due-reminders/minute); repeated
-  truncation is an operator alert.
+  encoding). The exclusion is precise: only candidates the policy would
+  certainly `duplicate` are excluded — a page row exists for the exact
+  key, the record is not terminal (`decision IS NULL` and not
+  clock-expired, mirroring the adapter's terminal derivation), and the
+  record is well-formed (epoch ints). A paged approval that later
+  clock-expires stays a candidate, so gate-1 still writes its D61 audit
+  (pre-D75 behavior preserved — the terminal check runs before the
+  boundary dedup, and the audit uses the suffixed key the page-key
+  anti-join never matches); a paged record that corrupts between ticks
+  stays a candidate, so the D59 fail-loud still fires. Every excluded
+  candidate would have returned `duplicate` — no page, no audit, no
+  state change — so the exclusion is behavior-preserving, and a
+  truncated sweep's remainder is actually reached on the next tick
+  instead of the already-processed rows re-dominating the first pages.
+  The `page_size × max_pages` cap stays a capacity assumption (peak
+  due-reminders/minute); repeated truncation is an operator alert.
 
 ## 3. What the build slice implements (#1063)
 

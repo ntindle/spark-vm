@@ -273,6 +273,39 @@ def test_max_pages_truncates_leaves_rest_for_next_sweep(conn):
     assert s2.pages_truncated is False
 
 
+def test_paged_then_clock_expired_still_audits(conn):
+    # D75 precision: the anti-join excludes only candidates the policy
+    # would certainly `duplicate`. A paged approval that later
+    # clock-expires stays a candidate — gate-1 still writes its D61
+    # audit (pre-D75 behavior preserved; the terminal check runs
+    # before the boundary dedup).
+    _file_approval(conn, "box-1", "aid-1", ttl=600, age=400)
+    reg = _registry({"box-1": "owner-1"})
+    s1 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s1.reminders.get("queued") == 1
+    later = T0 + timedelta(seconds=300)  # past expires_at (T0+200)
+    s2 = push_sweep.sweep_once(conn, now=later, resolve_owner=reg)
+    assert s2.reminders.get("superseded_terminal") == 1
+    assert _outcome_count(conn, "suppressed_terminal") == 1
+    # Still exactly one page — the audit is not a second page.
+    assert len(_queued(conn, "reminder")) == 1
+
+
+def test_paged_then_corrupted_still_fails_loud(conn):
+    # D75 precision: a paged record that corrupts between ticks stays
+    # a candidate — the D59 fail-loud still fires instead of the sweep
+    # silently excluding it.
+    _file_approval(conn, "box-1", "aid-1", ttl=600, age=400)
+    reg = _registry({"box-1": "owner-1"})
+    s1 = push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+    assert s1.reminders.get("queued") == 1
+    conn.execute(
+        "UPDATE approvals SET created_at = 'garbage'"
+        " WHERE box_id = 'box-1' AND aid = 'aid-1'")
+    conn.commit()
+    with pytest.raises(ValueError):
+        push_sweep.sweep_once(conn, now=T0, resolve_owner=reg)
+
 def test_resolver_failure_mid_sweep_is_fail_closed_and_resumable(conn):
     # box-0 pages, then the registry fails on box-1: the sweep raises
     # fail-closed with box-0's page committed; the next sweep with a

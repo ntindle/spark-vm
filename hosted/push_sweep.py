@@ -32,9 +32,14 @@ Design summary (see the design doc for the full D-series):
   over-selects on purpose; the policy's gate-1 re-read is the timing
   decision, the boundary's page-once dedup is the never-double-page
   guarantee. The sweep writes no lease rows. Truncation is self-healing
-  (D75): candidates whose reminder page already exists are anti-joined
-  out, so a truncated sweep's remainder is actually reached next tick
-  instead of re-dominating the first pages as duplicates.
+  (D75): candidates the policy would certainly `duplicate` — a reminder
+  page row already exists for the exact page key, the record is not
+  terminal, the record is well-formed — are anti-joined out, so a
+  truncated sweep's remainder is actually reached next tick instead of
+  re-dominating the first pages. A paged approval that later
+  clock-expires stays a candidate (gate-1 still writes its D61 audit);
+  a paged record that corrupts between ticks stays a candidate (the D59
+  fail-loud still fires).
 - **The sweep never pre-checks the D10 budget (D70).** Every due page
   goes through `enqueue_page`; pre-checking would TOCTOU the atomic
   reservation and invent a second, racing budget ledger.
@@ -215,11 +220,20 @@ def _reminder_candidates(conn, now_epoch, page_size, max_pages):
 
     D75 — self-healing truncation: the hint additionally anti-joins
     candidates whose reminder page already exists in
-    `push_send_results` (the boundary's outcome-blind dedup fast-path,
-    mirrored on `box_id || char(0) || aid`). Every excluded candidate
-    would have returned `duplicate` — no page, no audit, no state
-    change — so the exclusion is behavior-preserving, and a truncated
-    sweep's remainder is actually reached next tick instead of the
+    `push_send_results` — the boundary's outcome-blind dedup fast-path,
+    mirrored on `box_id || char(0) || aid` (the exact page-key
+    encoding). The exclusion is precise: only candidates the policy
+    would certainly `duplicate` are excluded — a page row exists for
+    the exact key, the record is not terminal (`decision IS NULL` and
+    not clock-expired, mirroring the adapter's terminal derivation),
+    and the record is well-formed (epoch ints, null-or-text decision).
+    A paged approval that later clock-expires stays a candidate, so
+    gate-1 still writes its D61 audit (pre-D75 behavior preserved);
+    a paged record that corrupts between ticks stays a candidate, so
+    the D59 fail-loud still fires. Every excluded candidate would have
+    returned `duplicate` — no page, no audit, no state change — so the
+    exclusion is behavior-preserving, and a truncated sweep's
+    remainder is actually reached next tick instead of the
     already-processed rows re-dominating the first pages.
     """
     last_box, last_aid = None, None
@@ -240,8 +254,12 @@ def _reminder_candidates(conn, now_epoch, page_size, max_pages):
             "    AND r.event_kind = 'reminder'"
             "    AND r.event_key ="
             "        approvals.box_id || char(0) || approvals.aid"
+            "    AND approvals.decision IS NULL"
+            "    AND approvals.expires_at > ?"
+            "    AND typeof(approvals.created_at) = 'integer'"
+            "    AND typeof(approvals.expires_at) = 'integer'"
             ")")
-        params = [now_epoch, REMINDER_MIN_TTL_SECONDS]
+        params = [now_epoch, REMINDER_MIN_TTL_SECONDS, now_epoch]
         if last_box is not None:
             where += " AND (box_id > ? OR (box_id = ? AND aid > ?))"
             params += [last_box, last_box, last_aid]
