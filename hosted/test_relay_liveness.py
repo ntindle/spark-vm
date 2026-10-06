@@ -410,16 +410,15 @@ class _LockHolder:
         self._cleanup()
 
 
-def test_emit_lock_timeout_raises_loud(journal, monkeypatch):
+def test_emit_lock_timeout_raises_loud(journal):
     """A writer stopped with SIGSTOP while holding LOCK_EX never
     releases its flock: the emitter's bounded wait raises
     JournalLockError (not a silent forever-block), naming the lock
     sidecar and pointing the operator at the holder — the exact #1082
-    failure mode."""
-    monkeypatch.setattr(rl, "_JOURNAL_LOCK_WAIT_TIMEOUT_S", 2)
+    failure mode. The public timeout_s knob threads to the lock."""
     with _LockHolder(journal):
         with pytest.raises(rl.JournalLockError) as excinfo:
-            rl.emit_frame(**frame())
+            rl.emit_frame(**frame(), timeout_s=2)
     msg = str(excinfo.value)
     assert journal + ".lock" in msg, msg
     assert "SIGSTOP" in msg, msg
@@ -430,16 +429,16 @@ def test_emit_lock_timeout_raises_loud(journal, monkeypatch):
     assert isinstance(excinfo.value, OSError)
 
 
-def test_query_lock_timeout_raises_loud_not_darkness(journal, monkeypatch):
+def test_query_lock_timeout_raises_loud_not_darkness(journal):
     """The issue's core: a wedged writer must not freeze the
     control-plane query path silently. The query takes the shared lock
     behind the stopped exclusive holder, waits its bounded turn, then
-    raises — it never reads as darkness."""
-    monkeypatch.setattr(rl, "_JOURNAL_LOCK_WAIT_TIMEOUT_S", 2)
+    raises — it never reads as darkness. The public timeout_s knob
+    threads to the lock."""
     rl.emit_frame(**frame())  # the journal exists; darkness is off the table
     with _LockHolder(journal):
         with pytest.raises(rl.JournalLockError):
-            rl.relay_session_liveness("vm-1", now=NOW)
+            rl.relay_session_liveness("vm-1", now=NOW, timeout_s=2)
 
 
 def test_lock_timeout_zero_fails_fast_when_held(journal):

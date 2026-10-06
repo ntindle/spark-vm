@@ -214,6 +214,25 @@ def validate_frame(frame):
 # Deleting the <journal>.lock sidecar does NOT release a holder's flock
 # (the lock lives on the holder's open fd, not the path) — the loud
 # error tells the operator to find and revive/kill the holder instead.
+#
+# Deliberate divergences from fleet/events.py::journal_lock — the loops
+# look alike but the contracts differ, so a shared helper would need a
+# parameter for every one of these (near-duplication behind a seam):
+#   1. JournalLockError subclasses OSError here (fleet's subclasses
+#      Exception) — preserves emit_frame's "raises OSError when the
+#      journal cannot be written" contract. The two classes are
+#      module-local and NOT interchangeable: catching fleet's
+#      JournalLockError around a relay call (or vice versa) silently
+#      misses the wedge — the exact failure mode #1082 was about.
+#   2. FileNotFoundError on the sidecar is NOT wrapped (fleet wraps
+#      open failures in JournalLockError) — the relay reader maps a
+#      never-deployed journal to darkness (None). Darkness is an
+#      absent instrument; a wedge is a broken one; they must not
+#      share an error shape.
+#   3. Readers take LOCK_SH here; fleet's readers stay unlocked
+#      (line-atomic O_APPEND appends) — the relay journal rotates
+#      under the lock, so a read must never interleave with a
+#      rotation.
 _JOURNAL_LOCK_WAIT_TIMEOUT_S = 300.0
 _JOURNAL_LOCK_POLL_INTERVAL_S = 0.1
 
@@ -337,8 +356,14 @@ def _append_locked(path, frame):
         os.fsync(f.fileno())
 
 
-def emit_frame(**fields):
+def emit_frame(*, timeout_s=None, **fields):
     """Emit one §2 session frame from the relay daemon.
+
+    timeout_s bounds the journal-lock wait (default
+    _JOURNAL_LOCK_WAIT_TIMEOUT_S, five minutes) and is threaded to
+    _journal_locked. The daemon's emit path keeps the default: a slow
+    collect overlapping an emit is normal contention and still
+    serializes; only a genuinely wedged holder trips the loud error.
 
     Returns ``"journaled"`` normally, or ``"dropped"`` when the frame
     carries the prober identity marker — R2's dial prober is
@@ -365,7 +390,7 @@ def emit_frame(**fields):
     parent = os.path.dirname(path)
     if parent and not os.path.isdir(parent):
         raise OSError("journal directory does not exist: %s" % parent)
-    with _journal_locked(path, exclusive=True):
+    with _journal_locked(path, exclusive=True, timeout_s=timeout_s):
         _append_locked(path, frame)
     return "journaled"
 
@@ -401,8 +426,16 @@ def _iter_frames(path):
 # §8 R1 — the control-plane query surface
 
 
-def relay_session_liveness(vm_id, now=None):
+def relay_session_liveness(vm_id, now=None, timeout_s=None):
     """``relay_session_liveness(vm_id)`` — the passive liveness instrument.
+
+    timeout_s bounds the journal-lock wait (default
+    _JOURNAL_LOCK_WAIT_TIMEOUT_S, five minutes) and is threaded to
+    _journal_locked. Plane-facing callers (R3/R4) should pass a
+    request-scoped budget — seconds, not minutes: a wedged writer
+    delays the query up to the deadline before the loud error, so the
+    default is a pathology bound, not a latency budget. The daemon's
+    emit path keeps the default.
 
     Returns the newest frame for ``vm_id`` as
     ``{"session_id", "state", "last_bytes_at", "hostkey_verified"}``
@@ -432,7 +465,7 @@ def relay_session_liveness(vm_id, now=None):
     path = journal_path()
     latest = None
     try:
-        with _journal_locked(path, exclusive=False):
+        with _journal_locked(path, exclusive=False, timeout_s=timeout_s):
             for frame, _gen in _iter_frames(path):
                 if frame.get("vm_id") != vm_id:
                     continue

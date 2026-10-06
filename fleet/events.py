@@ -686,7 +686,16 @@ _JOURNAL_LOCK_POLL_INTERVAL_S = 0.1
 
 
 class JournalLockError(Exception):
-    """The store-scoped journal lock could not be acquired."""
+    """The store-scoped journal lock could not be acquired.
+
+    NOTE: hosted/relay_liveness.py defines its own module-local
+    JournalLockError(OSError) for the relay journal's _journal_locked —
+    a deliberate sibling, not this class (different base, different
+    contracts: the relay copy preserves an OSError fail-loud contract
+    for emit_frame, maps a never-deployed journal to darkness instead
+    of raising, and locks readers with LOCK_SH). The two classes are
+    NOT interchangeable — catch each around its own module's calls.
+    Do not "unify" them without reading both divergence lists."""
 
 
 def _ensure_store_dir(store_dir):
