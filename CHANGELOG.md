@@ -1017,6 +1017,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Job liveness from the session's own event stream, first slice (#224): the operator tooling gains a view-plane client for the `muse serve` protocol — subscribing at a cursor replays a session's recent events and then follows them live, deriving a working / blocked / idle / stalled state (a pending approval or question is surfaced when blocked; a session silent with no live turn for ten minutes reads as stalled). This is the pane-scraping replacement that `muse-job status` and `watch` will read once the transport cutover lands; the old TUI probes stay until then. (#772)
 
 ### Changed
+- Contributor DX: the push-sender test suite's local stub server now shuts down on a 50 ms poll interval instead of the half-second default — the stub's per-test teardown was paying up to half a second each, about ten seconds a run, so the whole suite runs noticeably faster for contributors and in CI. A new test pins the short interval so a future edit can't silently restore the default. (#1066)
 - Contributor DX: the fleet journal loader no longer carries a dead parameter every caller passed as empty — the five load sites read plainly now; no behavior change. (#823)
 
 ### Fixed
