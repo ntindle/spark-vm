@@ -59,7 +59,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
   hold on the page-budget reservation — and the page-once partial unique
   index lands as an operator-run migration statement (the exact
   statement the enqueue build shipped), so the contract stays the
-  operator's DDL source of truth. (#TBD)
+  operator's DDL source of truth. (#1079)
 - Spend-cap enforcement gap analysis (#908): a vision-vs-state writeup of
   the hosted product's spend-cap lane — the missing spend ledger,
   pre-provision cap check, and destroy-on-budget-exceed worker — pinning
