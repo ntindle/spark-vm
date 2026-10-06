@@ -50,6 +50,7 @@ Stdlib only. Never prints key material (not even a prefix).
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import hmac
 import json
@@ -274,60 +275,81 @@ def process_rotation(key_id: str, log_path: str, stale_days: int) -> None:
     """Update the rotation ledger for a publish signed with key_id and emit
     reminders. A key change opens a rotation window (loud once, naming the
     old key and the runbook step that closes it); every still-open window is
-    reported on every publish, and warned loudly once it goes stale. Chained
-    rotations (a new key before the old window closed) keep ALL windows open
-    and report each — every un-retired key is a live signing key."""
-    log = _load_rotation_log(log_path)
-    last = _last_key_id(log)
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    reported on every publish, and warned loudly once it reaches the stale
+    threshold. Chained rotations (a new key before the old window closed)
+    keep ALL windows open and report each — every un-retired key is a live
+    signing key.
 
-    if last is not None and key_id != last:
-        ev = {"from_key_id": last, "to_key_id": key_id, "opened_at": now,
-              "closed_at": None}
-        log["rotations"].append(ev)
-        still_open = [o for o in _open_rotations(log)
-                      if o["to_key_id"] != key_id]
-        print(f"ROTATION OPEN: documents are now signed with {key_id}; "
-              f"{last} is still provisioned on the estate until you finish "
-              "runbook step 4 (remove its key_id=/path entry from every "
-              "box's SPARKVM_GATE_KEYS), then close the window with: "
-              f"gate_publish.py --rotation-complete {last} --rotation-log "
-              + log_path, file=sys.stderr)
-        for o in still_open:
-            print(f"NOTE: an earlier rotation window ({o['from_key_id']} -> "
-                  f"{o['to_key_id']}, opened {o['opened_at']}) is STILL "
-                  "open; both keys remain valid. Retire each key, then "
-                  f"--rotation-complete each.", file=sys.stderr)
-    elif last is None:
-        # Baseline event on first run (from=None: not a rotation; the
-        # ledger starts closed so a plain first publish is quiet).
-        log["rotations"].append({"from_key_id": None, "to_key_id": key_id,
-                                 "opened_at": now, "closed_at": now})
-    else:
-        for o in _open_rotations(log):
-            age_days = _rotation_age_days(o["opened_at"])
-            to_key = o["to_key_id"]
-            if age_days >= stale_days:
-                print(f"WARNING: key rotation {o['from_key_id']} -> "
-                      f"{to_key} has been open for {age_days} days (since "
-                      f"{o['opened_at']}) — {o['from_key_id']} is still a "
-                      "valid signing key until retired. Finish runbook "
-                      "step 4 (remove its key_id=/path entry from every "
-                      "box's SPARKVM_GATE_KEYS), then: gate_publish.py "
-                      f"--rotation-complete {o['from_key_id']} "
-                      "--rotation-log " + log_path, file=sys.stderr)
-            else:
-                print(f"note: key rotation {o['from_key_id']} -> {to_key} "
-                      f"open for {age_days} days (since {o['opened_at']}); "
-                      f"retire {o['from_key_id']} per runbook step 4, then "
-                      "--rotation-complete.", file=sys.stderr)
-    _save_rotation_log(log_path, log)
+    The whole load->modify->save runs under an advisory exclusive lock so
+    concurrent publishers cannot silently drop each other's rotation events
+    (B2); the lock lives on a dedicated lockfile, never the ledger itself,
+    because the atomic rename replaces the ledger's inode. A lock that
+    cannot be taken skips the reminders loudly but never blocks the
+    document; a save failure propagates to main's wrapper, which does the
+    same (B1)."""
+    lock_path = log_path + ".lock"
+    try:
+        lf = open(lock_path, "w")
+    except OSError as exc:
+        print(f"WARNING: cannot lock rotation ledger ({exc}); rotation "
+              "reminders unavailable, but the gate document publishes "
+              "normally.", file=sys.stderr)
+        return
+    with lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        log = _load_rotation_log(log_path)
+        last = _last_key_id(log)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        if last is not None and key_id != last:
+            ev = {"from_key_id": last, "to_key_id": key_id, "opened_at": now,
+                  "closed_at": None}
+            log["rotations"].append(ev)
+            still_open = [o for o in _open_rotations(log)
+                          if o["to_key_id"] != key_id]
+            print(f"ROTATION OPEN: documents are now signed with {key_id}; "
+                  f"{last} is still provisioned on the estate until you finish "
+                  "runbook step 4 (remove its key_id=/path entry from every "
+                  "box's SPARKVM_GATE_KEYS), then close the window with: "
+                  f"gate_publish.py --rotation-complete {last} --rotation-log "
+                  + log_path, file=sys.stderr)
+            for o in still_open:
+                print(f"NOTE: an earlier rotation window ({o['from_key_id']} -> "
+                      f"{o['to_key_id']}, opened {o['opened_at']}) is STILL "
+                      "open; both keys remain valid. Retire each key, then "
+                      f"--rotation-complete each.", file=sys.stderr)
+        elif last is None:
+            # Baseline event on first run (from=None: not a rotation; the
+            # ledger starts closed so a plain first publish is quiet).
+            log["rotations"].append({"from_key_id": None, "to_key_id": key_id,
+                                     "opened_at": now, "closed_at": now})
+        else:
+            for o in _open_rotations(log):
+                age_days = _rotation_age_days(o["opened_at"])
+                to_key = o["to_key_id"]
+                if age_days >= stale_days:
+                    print(f"WARNING: key rotation {o['from_key_id']} -> "
+                          f"{to_key} has been open for {age_days} days (since "
+                          f"{o['opened_at']}) — {o['from_key_id']} is still a "
+                          "valid signing key until retired. Finish runbook "
+                          "step 4 (remove its key_id=/path entry from every "
+                          "box's SPARKVM_GATE_KEYS), then: gate_publish.py "
+                          f"--rotation-complete {o['from_key_id']} "
+                          "--rotation-log " + log_path, file=sys.stderr)
+                else:
+                    print(f"note: key rotation {o['from_key_id']} -> {to_key} "
+                          f"open for {age_days} days (since {o['opened_at']}); "
+                          f"retire {o['from_key_id']} per runbook step 4, then "
+                          "--rotation-complete.", file=sys.stderr)
+        _save_rotation_log(log_path, log)
 
 
 def close_rotation(old_key_id: str, log_path: str) -> None:
     """Close the open rotation that retired old_key_id (runbook step 4 done).
     Exits non-zero if no such window is open — the operator typed the wrong
-    key, or nothing was open to close."""
+    key, or nothing was open to close. Reports any still-open windows
+    honestly instead of claiming sole-key status while other keys remain
+    valid (B3)."""
     log = _load_rotation_log(log_path)
     for ev in reversed(log["rotations"]):
         if (ev.get("from_key_id") == old_key_id
@@ -335,8 +357,18 @@ def close_rotation(old_key_id: str, log_path: str) -> None:
             ev["closed_at"] = datetime.now(timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ")
             _save_rotation_log(log_path, log)
-            print(f"rotation window closed: {old_key_id} retired; "
-                  f"{ev['to_key_id']} is the sole signing key.")
+            remaining = _open_rotations(log)
+            if remaining:
+                pairs = ", ".join(
+                    f"{e['from_key_id']}->{e['to_key_id']}"
+                    for e in remaining)
+                print(f"rotation window closed: {old_key_id} retired; "
+                      f"{len(remaining)} other window(s) STILL OPEN: "
+                      f"{pairs} — those keys remain valid until retired "
+                      "and --rotation-complete'd.")
+            else:
+                print(f"rotation window closed: {old_key_id} retired; "
+                      f"{ev['to_key_id']} is the sole signing key.")
             return
     sys.exit(f"ERROR: no open rotation window retiring {old_key_id} "
              f"(ledger: {log_path}).")
@@ -388,8 +420,16 @@ def main(argv=None) -> int:
     manifest = _validate_manifest(_load_json(args.manifest, "manifest"))
     key = _load_key(args.key_file)
 
-    process_rotation(args.key_id, _rotation_log_path(args),
-                     args.rotation_stale_days)
+    try:
+        process_rotation(args.key_id, _rotation_log_path(args),
+                         args.rotation_stale_days)
+    except (OSError, ValueError, AttributeError) as exc:
+        # B1: the release channel must never depend on advisory state. A
+        # ledger the tool cannot read, lock, or write is loud on stderr but
+        # never blocks the gate document.
+        print(f"WARNING: rotation ledger update failed ({exc}); rotation "
+              "reminders unavailable, but the gate document publishes "
+              "normally.", file=sys.stderr)
 
     body = build_gate_document(registry, manifest, args.freeze,
                                args.key_id, args.ttl_seconds)
