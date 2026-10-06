@@ -241,6 +241,25 @@ $SUDO systemctl enable --now jail-firewall.service
 say "firewall active:"
 # (|| true: head closes the pipe early; pipefail would SIGPIPE the script.)
 $SUDO nft list table inet jail | head -8 || true
+# Semantic watchdog pin (issue #444): compile the applied conf to a
+# canonical JSON pin (apply -> capture). The runtime watchdog compares
+# the live table against this pin semantically — whitespace AND semantic
+# text re-renderings across nft versions are absorbed instead of
+# fail-closing. Regenerated on every build: the pin can never drift
+# from the table the build installed. (set -e: an uncapturable pin
+# aborts the build — a jail must never be built without its pin.)
+CANON_SCRIPT="$(dirname "$0")/nft-pin-canon.py"
+[[ -f "$CANON_SCRIPT" ]] || { echo "ERROR: $CANON_SCRIPT missing (jail requires it alongside build.sh)"; exit 1; }
+$SUDO install -m 755 "$CANON_SCRIPT" /usr/local/sbin/jail-nft-pin-canon.py
+# Atomic pin write: the pipeline lands in a .tmp sibling and is renamed
+# into place, so a failed capture never leaves a truncated pin behind
+# for the running timer to trip on (set -e + pipefail: a failed capture
+# aborts the build with the previous pin untouched).
+$SUDO nft --json list table inet jail \
+    | $SUDO python3 /usr/local/sbin/jail-nft-pin-canon.py \
+    | $SUDO tee /etc/nftables-jail.pin.json.tmp >/dev/null \
+    && $SUDO mv /etc/nftables-jail.pin.json.tmp /etc/nftables-jail.pin.json
+say "semantic pin captured: /etc/nftables-jail.pin.json"
 
 # ---------------------------------------------------------------- firewall watchdog (C25 / issue #254)
 say "jail firewall watchdog"
@@ -275,9 +294,13 @@ After=jail-firewall.service
 
 [Service]
 Type=oneshot
-# Pin the comparison source: the unit must compare against the conf it
-# repairs from, not whatever $CONF happens to be in the environment.
+# Pin the comparison sources: the unit must compare against the pin it
+# repairs toward, the conf it repairs from, and the canonicalizer it
+# compares through — not whatever $PIN/$CONF/$CANON the environment
+# happens to carry.
 Environment=CONF=/etc/nftables-jail.conf
+Environment=PIN=/etc/nftables-jail.pin.json
+Environment=CANON=/usr/local/sbin/jail-nft-pin-canon.py
 ExecStart=/usr/local/sbin/jail-firewall-verify.sh
 EOF
 $SUDO tee /etc/systemd/system/jail-firewall-verify.timer >/dev/null <<'EOF'

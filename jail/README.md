@@ -119,21 +119,32 @@ states the construction, not a static pin.
   build.sh from `jail-firewall-verify.sh`) re-check the table every
   minute. The checked invariant is the enforcement rules themselves,
   not the chain shells: all three chains are `policy accept`, so the
-  watchdog pins the drop-rule markers (`jail-fwd-drop:`,
-  `jail-fwd-indrop:`, `jail-input-drop:`) and the proxy DNAT rule — an
-  emptied chain (`nft flush chain`) is detected just like a deleted
-  table — and it pins the allow head: every rule line in the live table
-  must be one of the installed conf's rule lines, matched on the full
-  rule text (match expression plus verdict), so a widened ruleset (an
-  added broad accept above the drops, or a broadened match with a
-  dropped qualifier) fails closed the same as a missing one. The match
-  is whitespace-canonicalized (whitespace outside quoted names is
-  ignored on both sides), so an nftables version that re-renders rule
-  text — indent, brace spacing, token gaps — cannot turn the watchdog
-  into a false-alarm machine; quoted interface names and log prefixes
-  still match exactly. The conf
-  is the single source of truth — the pin hardcodes nothing, so it
-  cannot drift from the table it guards. build.sh also runs the verify
+  watchdog pins the whole table semantically — an emptied chain
+  (`nft flush chain`) is detected just like a deleted table — and a
+  widened ruleset (an added broad accept above the drops, or a
+  broadened match with a dropped qualifier) fails closed the same as a
+  missing rule. The comparison is semantic, not textual: build.sh
+  captures `nft --json list table inet jail` right after applying the
+  conf and stores the canonicalized capture at
+  `/etc/nftables-jail.pin.json` (regenerated on every build); the
+  canonicalizer (`jail/nft-pin-canon.py`) strips the nftables version
+  metainfo, kernel handles, and volatile counter readings, and sorts
+  dict keys. The tick re-captures through the same canonicalizer and
+  requires byte equality, so an nftables version that re-renders rule
+  text — whitespace AND semantic re-wordings like `ct state
+  established,related` as `ct state { established, related }` — cannot
+  turn the watchdog into a false-alarm machine. Quoted interface names
+  and log prefixes still match exactly (they are JSON strings, compared
+  verbatim). Stated residuals of the semantic pin: (a) JSON schema
+  drift — a future nft whose JSON schema re-words the table
+  structurally diffs the pin and fails closed on the first post-upgrade
+  tick, by design; the build-time self-test (below) trips a
+  canonicalizer *crash* on this box's rendering, not drift — and
+  re-running build.sh regenerates the pin; (b) hand-editing `/etc/nftables-jail.conf` without
+  re-running build.sh no longer trips the watchdog (the live table
+  still matches the pin). The pin hardcodes nothing about the rules —
+  it is captured from the applied conf — so it cannot drift from the
+  table it guards. build.sh also runs the verify
   service once at build time: a pin-vs-live-table mismatch fails the
   build loudly instead of surfacing as a fail-closed storm on the first
   watchdog tick. On confirmed damage (a
@@ -159,8 +170,9 @@ states the construction, not a static pin.
   a debugging surface. Any rule the conf does not contain — including a
   temporary accept added while debugging — trips the pin: the watchdog
   stops the jail, destroys and re-applies the table, and goes red. Make
-  table changes through `build.sh` (which regenerates the conf the pin
-  compares against), or stop `jail-firewall-verify.timer` first and
+  table changes through `build.sh` (which re-applies the conf and
+  regenerates the pin from the applied table), or stop
+  `jail-firewall-verify.timer` first and
   accept that the watchdog will repair your edits away on the next run.
   Note the consequence remains specifically
   the drop-based isolation: a flush also deletes the DNAT rule, so the

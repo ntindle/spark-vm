@@ -20,10 +20,12 @@ run in CI, so this pins what a smoke check CAN verify without executing it:
 
 A future edit that silently drops one of these properties fails the suite.
 """
+import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -466,21 +468,48 @@ class TestFirewallWatchdogStatic:
     def test_script_install_guarded(self, active):
         assert '[[ -f "$VERIFY_SCRIPT" ]]' in active
 
-    def test_pins_enforcement_markers_not_chain_shells(self, verify_src):
-        # Security blocker (round 1): `nft flush chain` empties rules but
-        # leaves chain definitions; grepping 'chain forward' would report
-        # healthy on an open-egress chain. The markers are the drop-rule
-        # log prefixes and the proxy DNAT.
-        for marker in ("jail-fwd-drop", "jail-fwd-indrop",
-                       "jail-input-drop", "dnat ip to 127.0.0.1"):
-            assert marker in verify_src, "marker missing: %s" % marker
-        # ...and the check must not be satisfiable by chain shells alone.
+    def test_semantic_pin_subsumes_text_markers(self, verify_src):
+        # Issue #444: the whole-table semantic pin replaces the marker
+        # presence checks (drop-rule log prefixes, proxy DNAT grep) and
+        # the text allow-head pin — a widened or narrowed ruleset differs
+        # structurally from the pin and fails closed, so the old
+        # grep/norm_canon/conf_rule_lines machinery is gone.
+        for token in ("grep -q 'jail-fwd-drop'", "norm_canon",
+                      "norm_rule_line", "conf_rule_lines",
+                      "allow_head_intact"):
+            assert token not in verify_src, \
+                "text-pin machinery must be gone: %s" % token
+        # The single comparison: live == pin, both canonicalized.
+        assert 'live="$(capture_table)" || return 1' in verify_src
+        assert 'pin="$(read_pin)" || return 1' in verify_src
+        assert '[ "$live" = "$pin" ]' in verify_src
+        # ...and the check must not be satisfiable by chain shells alone:
+        # an emptied chain is a structural diff against the pin.
         assert "grep -q 'chain forward'" not in verify_src
 
-    def test_single_nft_list_call(self, verify_src):
+    def test_single_json_list_call(self, verify_src):
         # One listing parsed repeatedly: no triple invocation, no TOCTOU
-        # between checks.
-        assert verify_src.count("list table") == 1
+        # between checks. The listing is the JSON rendering, not text.
+        assert verify_src.count('"$NFT" --json list table "$TABLE"') == 1
+        assert '"$NFT" list table "$TABLE"' not in verify_src
+
+    def test_unverifiable_table_fails_closed(self, verify_src):
+        # An unreadable pin, a failed capture, or an empty capture must
+        # never bless the table: every read path carries || return 1 and
+        # the comparison requires both sides non-empty.
+        assert 'live="$(capture_table)" || return 1' in verify_src
+        assert 'pin="$(read_pin)" || return 1' in verify_src
+        assert '[ -n "$live" ] && [ -n "$pin" ]' in verify_src
+        # capture_table and read_pin both run through the canonicalizer —
+        # an invalid JSON capture or an unreadable pin exits nonzero.
+        assert '"$NFT" --json list table "$TABLE" 2>/dev/null | python3 "$CANON" 2>/dev/null' in verify_src
+        assert 'python3 "$CANON" < "$PIN" 2>/dev/null' in verify_src
+
+    def test_pin_and_canon_overridable(self, verify_src):
+        # Same test-seam discipline as NFT/CONF: the functional tests
+        # point PIN at a fixture and CANON at the repo script.
+        assert 'PIN="${PIN:-/etc/nftables-jail.pin.json}"' in verify_src
+        assert 'CANON="${CANON:-/usr/local/sbin/jail-nft-pin-canon.py}"' in verify_src
 
     def test_validates_before_destroy(self, verify_src):
         # A corrupt conf must not widen the hole: `nft -c -f` precedes any
@@ -531,66 +560,39 @@ class TestFirewallWatchdogStatic:
         # damage avoids fail-closed false positives.
         assert "sleep 10" in verify_src
 
-    def test_allow_head_pin(self, verify_src):
-        # Arch finding (2026-09-23): the marker presence checks cannot see
-        # a WIDENED ruleset — with policy-accept chains, an added broad
-        # accept above the drops voids the isolation exactly like a
-        # deleted drop. healthy() must also pin the allow head: every rule
-        # line in the live table must be one of the installed conf's rule
-        # lines, matched on the FULL rule text (match expression plus
-        # verdict) — a broadened match (dropped qualifier) is not the
-        # expected line and fails closed.
-        assert "allow_head_intact" in verify_src
-        assert '&& allow_head_intact "$rules"' in verify_src
-        # The pin derives its expected lines from the installed conf —
-        # nothing about the allow head is hardcoded in the script, so it
-        # cannot drift from the table it guards (Architecture blocker 2).
-        assert "conf_rule_lines" in verify_src
-        assert "norm_rule_line" in verify_src
-        assert 'CONF="${CONF:-/etc/nftables-jail.conf}"' in verify_src
-        # Full-line exact matching with quotes INTACT (grep -qxF): a DNAT
-        # port suffix cannot hide, and quoted interface names keep their
-        # identity — stripping quotes made iifname "ve-jail" and
-        # iifname "tailscale0" indistinguishable (Security round 2).
-        assert "grep -qxF" in verify_src
-        assert 's/"[^"]*"//g' not in verify_src
-        # An unreadable conf must fail closed, not bless the table.
-        assert '[ -n "$expected" ] || return 1' in verify_src
+    def test_canon_script_installed_from_repo_file(self, active):
+        # The canonicalizer is a first-class repo file, not an inline
+        # python -c: directly testable, reviewable, and installed to the
+        # path the watchdog expects -- one implementation, two consumers
+        # (build-time capture and tick-time comparison).
+        assert 'CANON_SCRIPT="$(dirname "$0")/nft-pin-canon.py"' in active
+        assert '[[ -f "$CANON_SCRIPT" ]]' in active
+        assert 'install -m 755 "$CANON_SCRIPT" ' \
+            '/usr/local/sbin/jail-nft-pin-canon.py' in active
 
-    def test_conf_fixture_matches_build_sh(self):
-        # Drift test (Architecture blocker 2): the HEALTHY_CONF fixture
-        # the functional tests stub must be exactly what build.sh renders
-        # (@@JAIL_SSH_PORT@@ substituted). Extract the heredoc from
-        # build.sh, apply the same sed, and compare normalized rule lines.
-        build_sh = (Path(JAIL_DIR) / "build.sh").read_text()
-        m = re.search(r"<<'NFT_EOF'.*?\n(.*?)\nNFT_EOF\n", build_sh, re.S)
-        assert m, "nftables heredoc not found in build.sh"
-        port = re.search(r"^JAIL_SSH_PORT=(\d+)", build_sh, re.M).group(1)
-        rendered = m.group(1).replace("@@JAIL_SSH_PORT@@", port)
+    def test_pin_regenerated_after_firewall_apply(self, active):
+        # Issue #444: build.sh compiles the applied conf to the canonical
+        # JSON pin (apply -> capture), regenerated on every build, so the
+        # pin can never drift from the installed table. Position pinned:
+        # the capture must follow the firewall apply.
+        apply = active.index("systemctl enable --now jail-firewall.service")
+        tail = active[apply:]
+        assert "nft --json list table inet jail" in tail, \
+            "pin capture never runs after the firewall apply"
+        assert "tee /etc/nftables-jail.pin.json" in tail, \
+            "pin capture never writes /etc/nftables-jail.pin.json"
+        # Atomic pin write (Engineering review): the pipeline lands in a
+        # .tmp sibling and is renamed into place, so a failed capture
+        # never leaves a truncated pin for the running timer to trip on.
+        assert "tee /etc/nftables-jail.pin.json.tmp" in tail
+        assert "mv /etc/nftables-jail.pin.json.tmp " \
+            "/etc/nftables-jail.pin.json" in tail
+        # set -e means an uncapturable pin aborts the build -- a jail must
+        # never be built without its pin (fail-closed at build time).
+        capture = tail.index("nft --json list table inet jail")
+        pin_write = tail.index("tee /etc/nftables-jail.pin.json")
+        assert capture < pin_write
 
-        def norm_lines(text):
-            # Mirrors the production norm_rule_line (quotes INTACT —
-            # Architecture final review: stripping quotes here would let a
-            # quote-confined conf change pass while the fixture goes stale).
-            out = []
-            for line in text.splitlines():
-                t = line.lstrip()
-                if not t or t.startswith("#") or \
-                        t.startswith(("chain", "type", "table", "}")):
-                    continue
-                out.append(t)
-            return out
-
-        assert norm_lines(rendered) == norm_lines(HEALTHY_CONF), \
-            "HEALTHY_CONF drifted from build.sh's nftables heredoc"
-        # Guard (Architecture round 2): an inline `#` comment on a conf
-        # rule line would fail closed as a false positive (only full-line
-        # comments are skipped by the pin). Keep comments on their own
-        # lines so a future editor doesn't trip the watchdog.
-        for line in rendered.splitlines():
-            t = line.strip()
-            if t and not t.startswith(("#", "table", "chain", "type", "}")):
-                assert " #" not in t, "inline comment on conf rule: %r" % t
 
     def test_service_runs_the_script(self, active):
         m = re.search(
@@ -612,10 +614,13 @@ class TestFirewallWatchdogStatic:
         # Wants, never Requires: if the oneshot failed at boot, the
         # watchdog must still run and fail-close on the missing table.
         assert "Requires=jail-firewall.service" not in unit
-        # Security round 2: pin the comparison source in the unit so the
-        # pin compares against the conf it repairs from, not whatever
-        # $CONF the environment happens to carry.
+        # Security round 2: pin the comparison sources in the unit so the
+        # watchdog compares against the pin it repairs toward, the conf
+        # it repairs from, and the canonicalizer it compares through —
+        # not whatever the environment happens to carry.
         assert "Environment=CONF=/etc/nftables-jail.conf" in unit
+        assert "Environment=PIN=/etc/nftables-jail.pin.json" in unit
+        assert "Environment=CANON=/usr/local/sbin/jail-nft-pin-canon.py" in unit
 
     def test_timer_cadence_and_wiring(self, active):
         m = re.search(
@@ -636,10 +641,15 @@ class TestFirewallWatchdogStatic:
     def test_build_self_tests_watchdog_pin(self, active):
         # Issue #437: build.sh must run the verify service once after
         # enabling the timer — the build-time self-test proves the pin
-        # matches this box's live `nft list` output at build time. The
-        # oneshot exits 0 on healthy / nonzero on damage, and build.sh
-        # runs under `set -e`, so a pin mismatch fails the build loudly
-        # instead of surfacing as a fail-closed storm on the first tick.
+        # matches this box's live `nft --json` rendering at build time.
+        # With #444's semantic pin this exercises the canonicalizer
+        # against this box's rendering (a canonicalizer crash fails the
+        # build); it is NOT a tripwire for future JSON schema drift —
+        # drift fails closed on the first post-upgrade tick, by design,
+        # and re-running build.sh regenerates the pin. The oneshot exits
+        # 0 on healthy / nonzero on damage, and build.sh runs under
+        # `set -e`, so a pin mismatch fails the build loudly instead of
+        # surfacing as a fail-closed storm on the first tick.
         enable = active.index(
             "systemctl enable --now jail-firewall-verify.timer")
         tail = active[enable:]
@@ -648,221 +658,117 @@ class TestFirewallWatchdogStatic:
 
 
 # ---------------------------------------------------------------- functional
-# The detection semantics the round-1 review proved were missing: stub nft /
-# systemctl / logger / sleep via PATH (+ the NFT env override) and run the
-# real script against canned rulesets.
+# Detection semantics, issue #444: stub nft / systemctl / logger / sleep
+# via PATH (+ the NFT/PIN/CANON env overrides) and run the real script
+# against canned `nft --json list table` captures.
+#
+# The fixtures are canonicalizer-shaped (nft-pin-canon.py is
+# schema-opaque): each capture is a JSON doc with metainfo + table +
+# chain + rule objects whose exprs are compact match/verdict pairs. What
+# matters is the property under test: two captures of the SAME table
+# under different renderings (nft version, key order, kernel handles)
+# canonicalize equal; any structural change canonicalizes different.
 
-# The conf build.sh installs (JAIL_SSH_PORT=2222 substituted) — the
-# watchdog's single source of truth for the allow-head pin. The drift
-# test below pins this fixture to build.sh's actual heredoc.
-HEALTHY_CONF = """\
-# Proxy-only egress for the jail's veth (ve-jail).
-table inet jail {
-    chain prerouting {
-        type nat hook prerouting priority dstnat; policy accept;
-        iifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat ip to 127.0.0.1
-        iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22
-    }
-    chain input {
-        type filter hook input priority -10; policy accept;
-        iifname "ve-jail" tcp dport { 18080, 18081 } accept
-        iifname "ve-jail" ct state established,related accept
-        iifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-input-drop: "
-        iifname "ve-jail" drop
-    }
-    chain forward {
-        type filter hook forward priority -10; policy accept;
-        iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
-        iifname "ve-jail" ct state established,related accept
-        oifname "ve-jail" ct state established,related accept
-        iifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "
-        iifname "ve-jail" drop
-        oifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-indrop: "
-        oifname "ve-jail" drop
-    }
-}
-"""
+CANON_SCRIPT = os.path.join(JAIL_DIR, "nft-pin-canon.py")
 
-HEALTHY_RULESET = """\
-table inet jail {
-\tchain prerouting {
-\t\ttype nat hook prerouting priority dstnat; policy accept;
-\t\tiifname "ve-jail" ip daddr 10.99.0.1 tcp dport { 18080, 18081 } dnat ip to 127.0.0.1
-\t\tiifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22
-\t}
-\tchain input {
-\t\ttype filter hook input priority -10; policy accept;
-\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept
-\t\tiifname "ve-jail" ct state established,related accept
-\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-input-drop: "
-\t\tiifname "ve-jail" drop
-\t}
-\tchain forward {
-\t\ttype filter hook forward priority -10; policy accept;
-\t\tiifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 tcp dport 22 ct state established,new accept
-\t\tiifname "ve-jail" ct state established,related accept
-\t\toifname "ve-jail" ct state established,related accept
-\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "
-\t\tiifname "ve-jail" drop
-\t\toifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-indrop: "
-\t\toifname "ve-jail" drop
-\t}
-}
-"""
+# The healthy table: (chain, match, verdict) for every rule build.sh's
+# conf installs.
+HEALTHY_RULES = [
+    ("prerouting",
+     'iifname "ve-jail" ip daddr 10.99.0.1 tcp dport {18080,18081}',
+     "dnat ip to 127.0.0.1"),
+    ("prerouting", 'iifname "tailscale0" tcp dport 2222',
+     "dnat ip to 10.99.0.2:22"),
+    ("input", 'iifname "ve-jail" tcp dport {18080,18081}', "accept"),
+    ("input", 'iifname "ve-jail" ct state established,related', "accept"),
+    ("input",
+     'iifname "ve-jail" limit rate 5/minute burst 10 packets',
+     'log prefix "jail-input-drop: "'),
+    ("input", 'iifname "ve-jail"', "drop"),
+    ("forward",
+     'iifname "tailscale0" oifname "ve-jail" ip daddr 10.99.0.2 '
+     "tcp dport 22 ct state established,new", "accept"),
+    ("forward", 'iifname "ve-jail" ct state established,related', "accept"),
+    ("forward", 'oifname "ve-jail" ct state established,related', "accept"),
+    ("forward",
+     'iifname "ve-jail" limit rate 5/minute burst 10 packets',
+     'log prefix "jail-fwd-drop: "'),
+    ("forward", 'iifname "ve-jail"', "drop"),
+    ("forward",
+     'oifname "ve-jail" limit rate 5/minute burst 10 packets',
+     'log prefix "jail-fwd-indrop: "'),
+    ("forward", 'oifname "ve-jail"', "drop"),
+]
 
-# The Security round-1 case: `nft flush chain inet jail forward` — chains
-# intact, rules gone, policy accept. Old code reported healthy; the new
-# code must not.
-FLUSHED_CHAIN_RULESET = """\
-table inet jail {
-\tchain prerouting {
-\t\ttype nat hook prerouting priority dstnat; policy accept;
-\t}
-\tchain input {
-\t\ttype filter hook input priority -10; policy accept;
-\t}
-\tchain forward {
-\t\ttype filter hook forward priority -10; policy accept;
-\t}
-}
-"""
 
-# The 2026-09-23 arch case: a WIDENED ruleset — every drop marker and the
-# proxy DNAT are present, but an injected broad accept sits above the
-# drops. Marker presence alone reported healthy on this; the allow-head
-# pin must not.
-WIDENED_ACCEPT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
-    '\t\tiifname "ve-jail" drop',
-    '\t\tiifname "ve-jail" accept\n'
-    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
-    '\t\tiifname "ve-jail" drop',
-)
+def _reverse_keys(node):
+    # Simulate a renderer that emits dict keys in the opposite order.
+    if isinstance(node, dict):
+        return {k: _reverse_keys(v) for k, v in reversed(list(node.items()))}
+    if isinstance(node, list):
+        return [_reverse_keys(x) for x in node]
+    return node
 
-# The 2026-09-23 arch case: a rogue DNAT variant — the proxy DNAT's target
-# gains a port. The old substring grep 'dnat to 127.0.0.1' still matched
-# this; the end-anchored pin must not.
-ROGUE_DNAT_RULESET = HEALTHY_RULESET.replace(
-    'dnat ip to 127.0.0.1\n',
-    'dnat ip to 127.0.0.1:9999\n',
-)
 
-# The 2026-09-23 review case (Security): a re-addressed DNAT variant —
-# the target is a different host that still contains the 'dnat to
-# 127.0.0.1' substring. The end-anchored pin must reject it.
-ROGUE_DNAT_READDR_RULESET = HEALTHY_RULESET.replace(
-    'dnat ip to 127.0.0.1\n',
-    'dnat ip to 127.0.0.10\n',
-)
+def _render_capture(rules, *, version, handle_base, reverse_keys=False):
+    """One `nft --json list table inet jail` capture of `rules`."""
+    objs = [
+        {"metainfo": {"version": version, "release_name": "Laotzu",
+                      "json_schema_version": 1}},
+        {"table": {"family": "inet", "name": "jail"}},
+    ]
+    for chain in ("prerouting", "input", "forward"):
+        objs.append({"chain": {"family": "inet", "table": "jail",
+                               "name": chain, "policy": "accept"}})
+    for i, (chain, match, verdict) in enumerate(rules):
+        objs.append({"rule": {"family": "inet", "table": "jail",
+                              "chain": chain, "handle": handle_base + i,
+                              "expr": [{"match": match,
+                                        "verdict": verdict}]}})
+    doc = {"nftables": objs}
+    return json.dumps(_reverse_keys(doc) if reverse_keys else doc)
 
-# The 2026-09-23 review case (Security): a quoted-string smuggle — the
-# broad accept carries a full accept fingerprint inside its log prefix.
-# Unanchored fingerprint matching alone passes this; the pin must strip
-# quoted strings before matching and fail closed.
-SMUGGLER_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
-    '\t\tiifname "ve-jail" drop',
-    '\t\tiifname "ve-jail" log prefix "ct state established,related accept" accept\n'
-    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
-    '\t\tiifname "ve-jail" drop',
-)
 
-# The 2026-09-23 review case (Security): a DNAT-family verdict spelled
-# differently — 'redirect' moves packets without the 'dnat' or 'accept'
-# substrings. The pin must deny all packet-moving verdicts it does not
-# know, not just dnat/accept spellings.
-REDIRECT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
-    '\t\tiifname "ve-jail" drop',
-    '\t\tiifname "ve-jail" tcp dport 9999 redirect to :9999\n'
-    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
-    '\t\tiifname "ve-jail" drop',
-)
+# Build-time capture (the pin's source) vs tick-time capture of the SAME
+# table under a re-rendered schema: new nft version, new kernel handles,
+# reversed key order. The raw captures differ byte-wise; the
+# canonicalizer must absorb all of it (the #444 headline case).
+PIN_CAPTURE = _render_capture(HEALTHY_RULES, version="1.0.9",
+                              handle_base=5)
+LIVE_SAME_TABLE = _render_capture(HEALTHY_RULES, version="1.1.0",
+                                  handle_base=900, reverse_keys=True)
 
-# The 2026-09-23 review case (Engineering A1): a rogue sshd-DNAT
-# variant — the target address is changed while the match stays narrow.
-ROGUE_SSH_DNAT_RULESET = HEALTHY_RULESET.replace(
-    'iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22',
-    'iifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.99:22',
-)
-
-# The 2026-09-23 review case (Architecture, blocker 1): broadened-match
-# variants — the realistic way a ruleset gets widened (an admin copying a
-# rule and loosening it). Each keeps the verdict but drops narrowing
-# qualifiers, so verdict-substring pins are blind to them; the full-rule
-# pin must fail closed on all three.
-# 1. Forward chain: jail sshd accept reachable from anywhere, not just the
-#    tailnet (dropped iifname/oifname/daddr qualifiers).
-BROADENED_SSH_ACCEPT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
-    '\t\tiifname "ve-jail" drop',
-    '\t\tiifname "ve-jail" tcp dport 22 ct state established,new accept\n'
-    '\t\tiifname "ve-jail" limit rate 5/minute burst 10 packets log prefix "jail-fwd-drop: "\n'
-    '\t\tiifname "ve-jail" drop',
-)
-# 2. Prerouting: the jail's sshd DNATed from any interface (dropped the
-#    tailscale0 iifname).
-BROADENED_DNAT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "tailscale0" tcp dport 2222 dnat ip to 10.99.0.2:22',
-    '\t\ttcp dport 9999 dnat ip to 10.99.0.2:22',
-)
-# 3. Input chain: proxy ports accepted off every interface (dropped the
-#    ve-jail iifname).
-BROADENED_PROXY_ACCEPT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept',
-    '\t\ttcp dport { 18080, 18081 } accept',
-)
-
-# The 2026-09-23 review case (Security round 2): an interface-name
-# swap — the proxy accept with "ve-jail" replaced by "tailscale0".
-# Quote-stripping made these indistinguishable; with quotes intact the
-# line is not the conf's line and must fail closed.
-IFACE_SWAP_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept',
-    '\t\tiifname "tailscale0" tcp dport { 18080, 18081 } accept',
-)
-
-# A benign duplicate of a legit narrow rule: the pin must not false-positive
-# on rule duplication (e.g. a re-applied table that kept a stale copy).
-DUPLICATE_ACCEPT_RULESET = HEALTHY_RULESET.replace(
-    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept\n',
-    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept\n'
-    '\t\tiifname "ve-jail" tcp dport { 18080, 18081 } accept\n',
-)
-
-# The 2026-09-25 arch case (issue #436): the SAME ruleset re-rendered by a
-# different nft formatter — whitespace-only variance (indent width, brace
-# spacing, token gaps) carries no rule semantics, so the canonicalized pin
-# must still report healthy. Quotes stay intact (interface names, log
-# prefixes); semantic changes still fail (covered by the adversarial
-# fixtures above).
-REFORMATTED_HEALTHY_RULESET = HEALTHY_RULESET.replace(
-    '\t', '  ',
-).replace(
-    'tcp dport { 18080, 18081 }', 'tcp dport {18080, 18081}',
-).replace(
-    'ct state established,related', 'ct state  established,  related',
-).replace(
-    'ct state established,new', 'ct state   established, new',
-).replace(
-    'iifname "tailscale0" oifname "ve-jail"',
-    'iifname   "tailscale0"   oifname   "ve-jail"',
-)
+# Structural damage variants (each must fail closed).
+_dropped = [r for i, r in enumerate(HEALTHY_RULES) if i != 5]
+LIVE_RULE_DELETED = _render_capture(_dropped, version="1.1.0",
+                                    handle_base=900, reverse_keys=True)
+_widened = list(HEALTHY_RULES)
+_widened.insert(10, ("forward", 'iifname "ve-jail"', "accept"))
+LIVE_BROAD_ACCEPT = _render_capture(_widened, version="1.1.0",
+                                    handle_base=900, reverse_keys=True)
+_readdr = list(HEALTHY_RULES)
+_readdr[0] = ("prerouting", _readdr[0][1], "dnat ip to 10.99.0.10")
+LIVE_DNAT_READDRESSED = _render_capture(_readdr, version="1.1.0",
+                                        handle_base=900, reverse_keys=True)
+# The old round-1 Security case: `nft flush chain` — chains intact, rules
+# gone, policy accept. A structural diff against the pin.
+LIVE_FLUSHED = _render_capture([], version="1.1.0", handle_base=900,
+                               reverse_keys=True)
 
 
 @pytest.fixture()
 def watchdog_stubs(tmp_path, monkeypatch):
-    """PATH stub dir: nft (canned ruleset via $NFT_FIXTURE_FILE, rc via
-    $NFT_LIST_RC / $NFT_CHECK_RC, invocation log at $NFT_LOG), systemctl,
-    logger, sleep (no-op). Returns (stubdir, logpath)."""
+    """PATH stub dir: nft (canned JSON capture via $NFT_JSON_FIXTURE,
+    rc via $NFT_LIST_RC / $NFT_CHECK_RC, invocation log at $CALLS_LOG),
+    systemctl, logger, sleep (no-op). Returns the log path."""
     bindir = tmp_path / "stubs"
     bindir.mkdir()
     log = tmp_path / "calls.log"
     (bindir / "nft").write_text("""\
 #!/bin/bash
 echo "nft $*" >> "$CALLS_LOG"
-if [ "$1 $2" = "list table" ]; then
-    cat "$NFT_FIXTURE_FILE"; exit "${NFT_LIST_RC:-0}"
+if [ "$1 $2 $3" = "--json list table" ]; then
+    cat "$NFT_JSON_FIXTURE"; exit "${NFT_LIST_RC:-0}"
 fi
 if [ "$1 $2" = "-c -f" ]; then exit "${NFT_CHECK_RC:-0}"; fi
 exit 0
@@ -883,18 +789,36 @@ exit 0
     monkeypatch.setenv("PATH", str(bindir) + ":/usr/bin:/bin")
     monkeypatch.setenv("NFT", str(bindir / "nft"))
     monkeypatch.setenv("CALLS_LOG", str(log))
-    monkeypatch.delenv("NFT_FIXTURE_FILE", raising=False)
+    monkeypatch.delenv("NFT_JSON_FIXTURE", raising=False)
     return log
 
 
-def _run_watchdog(fixture_text=None, list_rc="0", check_rc="0",
-                  tmp_path=None, monkeypatch=None, conf_text=HEALTHY_CONF):
-    fix = tmp_path / "ruleset.txt"
-    fix.write_text(fixture_text or "")
+def _canonicalize(raw):
+    p = subprocess.run([sys.executable, CANON_SCRIPT], input=raw,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    return p.stdout
+
+
+def _run_watchdog(live_capture=None, *, list_rc="0", check_rc="0",
+                  pin_capture=PIN_CAPTURE, unreadable_pin=False,
+                  raw_pin=False, canon_path=CANON_SCRIPT,
+                  tmp_path=None, monkeypatch=None):
+    live = tmp_path / "live.json"
+    live.write_text(live_capture if live_capture is not None else "")
     conf = tmp_path / "nftables-jail.conf"
-    conf.write_text(conf_text)
-    monkeypatch.setenv("NFT_FIXTURE_FILE", str(fix))
+    conf.write_text("# repair source; content is irrelevant to the pin")
+    monkeypatch.setenv("NFT_JSON_FIXTURE", str(live))
+    if unreadable_pin:
+        monkeypatch.setenv("PIN", str(tmp_path / "does-not-exist.pin.json"))
+    else:
+        pin = tmp_path / "pin.json"
+        # raw_pin: store the capture un-canonicalized — read_pin
+        # re-canonicalizes on read (idempotent), so this must stay healthy.
+        pin.write_text(pin_capture if raw_pin else _canonicalize(pin_capture))
+        monkeypatch.setenv("PIN", str(pin))
     monkeypatch.setenv("CONF", str(conf))
+    monkeypatch.setenv("CANON", str(canon_path))
     monkeypatch.setenv("NFT_LIST_RC", list_rc)
     monkeypatch.setenv("NFT_CHECK_RC", check_rc)
     return subprocess.run(
@@ -904,39 +828,62 @@ def _run_watchdog(fixture_text=None, list_rc="0", check_rc="0",
 class TestFirewallWatchdogFunctional:
     def test_healthy_table_exits_quiet(self, watchdog_stubs, tmp_path,
                                        monkeypatch):
-        r = _run_watchdog(HEALTHY_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 0
-        calls = watchdog_stubs.read_text()
-        assert "systemctl stop" not in calls
-        assert "destroy table" not in calls
-
-    def test_reformatted_ruleset_still_healthy(self, watchdog_stubs,
-                                              tmp_path, monkeypatch):
-        # The 2026-09-25 arch case (issue #436): the same ruleset as the
-        # conf, re-rendered by a different nft formatter (indent width,
-        # brace spacing, token gaps). Whitespace-only variance carries no
-        # rule semantics; the canonicalized pin must report healthy, not
-        # fail closed. Semantic changes still fail (all adversarial
-        # fixtures below run through the same canonicalization).
-        r = _run_watchdog(REFORMATTED_HEALTHY_RULESET, tmp_path=tmp_path,
+        # The #444 headline: build-time capture vs tick-time capture of
+        # the SAME table under a re-rendered schema (new nft version,
+        # new handles, reversed key order). The raw captures differ
+        # byte-wise; the semantic pin must report healthy, not fail
+        # closed.
+        assert PIN_CAPTURE != LIVE_SAME_TABLE
+        r = _run_watchdog(LIVE_SAME_TABLE, tmp_path=tmp_path,
                           monkeypatch=monkeypatch)
         assert r.returncode == 0, r.stderr
         calls = watchdog_stubs.read_text()
         assert "systemctl stop" not in calls
         assert "destroy table" not in calls
 
-    def test_flushed_chain_triggers_fail_closed(self, watchdog_stubs,
-                                                tmp_path, monkeypatch):
-        # The round-1 Security hole: chain shells intact, rules gone.
-        r = _run_watchdog(FLUSHED_CHAIN_RULESET, tmp_path=tmp_path,
+    def test_deleted_drop_triggers_fail_closed(self, watchdog_stubs,
+                                               tmp_path, monkeypatch):
+        r = _run_watchdog(LIVE_RULE_DELETED, tmp_path=tmp_path,
                           monkeypatch=monkeypatch)
         assert r.returncode == 1
         calls = watchdog_stubs.read_text()
-        # Fail-closed: jail stopped BEFORE the table is repaired.
         assert calls.index("systemctl stop systemd-nspawn@jail") < \
             calls.index("nft destroy table")
-        assert "nft -f %s" % (tmp_path / "nftables-jail.conf") in calls
+        assert "ALERT" in calls
+
+    def test_added_broad_accept_triggers_fail_closed(self, watchdog_stubs,
+                                                     tmp_path, monkeypatch):
+        # The arch case: every drop and the DNAT are present, but an
+        # injected broad accept sits above the drops — policy-accept
+        # chains make this open egress. The whole-table pin fails closed.
+        r = _run_watchdog(LIVE_BROAD_ACCEPT, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert calls.index("systemctl stop systemd-nspawn@jail") < \
+            calls.index("nft destroy table")
+        assert "ALERT" in calls
+
+    def test_readdressed_dnat_triggers_fail_closed(self, watchdog_stubs,
+                                                   tmp_path, monkeypatch):
+        # 'dnat ip to 10.99.0.10' is not the pin's 'dnat ip to
+        # 127.0.0.1' verdict; the structural comparison must reject it.
+        r = _run_watchdog(LIVE_DNAT_READDRESSED, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+        assert "nft destroy table" in calls
+
+    def test_flushed_chain_triggers_fail_closed(self, watchdog_stubs,
+                                                tmp_path, monkeypatch):
+        # The round-1 Security case: chain shells intact, rules gone.
+        r = _run_watchdog(LIVE_FLUSHED, tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert calls.index("systemctl stop systemd-nspawn@jail") < \
+            calls.index("nft destroy table")
         assert "ALERT" in calls
 
     def test_missing_table_triggers_fail_closed(self, watchdog_stubs,
@@ -948,44 +895,53 @@ class TestFirewallWatchdogFunctional:
         assert "systemctl stop systemd-nspawn@jail" in calls
         assert "nft destroy table" in calls
 
-    def test_transient_gap_heals_without_drama(self, watchdog_stubs,
-                                               tmp_path, monkeypatch):
-        # First listing damaged (the oneshot's own destroy-then-apply
-        # window), second listing healthy: no stop, no repair, exit 0.
-        fix = tmp_path / "ruleset.txt"
-        fix.write_text(FLUSHED_CHAIN_RULESET)
-        monkeypatch.setenv("NFT_FIXTURE_FILE", str(fix))
-        counter = tmp_path / "n"
-        counter.write_text("0")
-        stub = tmp_path / "stubs" / "nft"
-        stub.write_text("""\
-#!/bin/bash
-echo "nft $*" >> "$CALLS_LOG"
-if [ "$1 $2" = "list table" ]; then
-    c=$(cat "$NFT_COUNT"); echo $((c+1)) > "$NFT_COUNT"
-    if [ "$c" = "0" ]; then cat "$NFT_FIXTURE_FILE"; else cat "$NFT_HEALTHY"; fi
-    exit 0
-fi
-exit 0
-""")
-        stub.chmod(0o755)
-        healthy = tmp_path / "healthy.txt"
-        healthy.write_text(HEALTHY_RULESET)
-        conf = tmp_path / "nftables-jail.conf"
-        conf.write_text(HEALTHY_CONF)
-        monkeypatch.setenv("CONF", str(conf))
-        monkeypatch.setenv("NFT_COUNT", str(counter))
-        monkeypatch.setenv("NFT_HEALTHY", str(healthy))
-        r = subprocess.run(["bash", VERIFY_SCRIPT],
-                           capture_output=True, text=True)
-        assert r.returncode == 0
+    def test_invalid_live_json_triggers_fail_closed(self, watchdog_stubs,
+                                                    tmp_path, monkeypatch):
+        # A corrupt `nft --json` capture is unverifiable — never blessed.
+        r = _run_watchdog("not json at all", tmp_path=tmp_path,
+                          monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+
+    def test_unreadable_pin_triggers_fail_closed(self, watchdog_stubs,
+                                                 tmp_path, monkeypatch):
+        # An unreadable pin must fail closed, not bless the table.
+        r = _run_watchdog(LIVE_SAME_TABLE, unreadable_pin=True,
+                          tmp_path=tmp_path, monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+
+    def test_missing_canon_helper_triggers_fail_closed(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # QA blocker 1: capture_table()'s comment names the missing
+        # canon helper as a fail-closed case — prove it. python3 cannot
+        # open the helper, the pipeline fails under pipefail, and the
+        # unverifiable table is never blessed.
+        r = _run_watchdog(LIVE_SAME_TABLE,
+                          canon_path=str(tmp_path / "no-such-canon.py"),
+                          tmp_path=tmp_path, monkeypatch=monkeypatch)
+        assert r.returncode == 1
+        calls = watchdog_stubs.read_text()
+        assert "systemctl stop systemd-nspawn@jail" in calls
+
+    def test_raw_uncanonicalized_pin_still_healthy(
+            self, watchdog_stubs, tmp_path, monkeypatch):
+        # QA blocker 2: read_pin re-canonicalizes on read (idempotent),
+        # so a pin file stored as the raw capture — never canonicalized
+        # at write time — must still compare healthy.
+        assert _canonicalize(PIN_CAPTURE) != PIN_CAPTURE
+        r = _run_watchdog(LIVE_SAME_TABLE, raw_pin=True,
+                          tmp_path=tmp_path, monkeypatch=monkeypatch)
+        assert r.returncode == 0, r.stderr
         calls = watchdog_stubs.read_text()
         assert "systemctl stop" not in calls
         assert "destroy table" not in calls
 
     def test_corrupt_conf_never_destroys(self, watchdog_stubs, tmp_path,
                                          monkeypatch):
-        r = _run_watchdog(FLUSHED_CHAIN_RULESET, check_rc="1",
+        r = _run_watchdog(LIVE_RULE_DELETED, check_rc="1",
                           tmp_path=tmp_path, monkeypatch=monkeypatch)
         assert r.returncode == 1
         calls = watchdog_stubs.read_text()
@@ -994,136 +950,50 @@ exit 0
         assert "destroy table" not in calls
         assert "CRITICAL" in calls
 
-    def test_widened_accept_triggers_fail_closed(self, watchdog_stubs,
-                                                 tmp_path, monkeypatch):
-        # The 2026-09-23 arch case: every marker is present but an
-        # injected broad accept sits above the drops — policy-accept
-        # chains make this open egress. The old presence-only check
-        # reported healthy; the allow-head pin must fail closed.
-        r = _run_watchdog(WIDENED_ACCEPT_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 1
-        calls = watchdog_stubs.read_text()
-        assert calls.index("systemctl stop systemd-nspawn@jail") < \
-            calls.index("nft destroy table")
-        assert "ALERT" in calls
-
-    def test_rogue_dnat_variant_triggers_fail_closed(self, watchdog_stubs,
-                                                     tmp_path, monkeypatch):
-        # The old substring grep 'dnat to 127.0.0.1' matched the rogue
-        # 'dnat to 127.0.0.1:9999' variant; the end-anchored pin must not.
-        r = _run_watchdog(ROGUE_DNAT_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 1
-        calls = watchdog_stubs.read_text()
-        assert "systemctl stop systemd-nspawn@jail" in calls
-        assert "nft destroy table" in calls
-
-    def test_rogue_dnat_readdressed_triggers_fail_closed(
-            self, watchdog_stubs, tmp_path, monkeypatch):
-        # Review case: 'dnat ip to 127.0.0.10' is not the conf's
-        # 'dnat ip to 127.0.0.1' line; the full-line pin must reject it.
-        r = _run_watchdog(ROGUE_DNAT_READDR_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 1
-        calls = watchdog_stubs.read_text()
-        assert "systemctl stop systemd-nspawn@jail" in calls
-        assert "nft destroy table" in calls
-
-    def test_smuggled_fingerprint_triggers_fail_closed(
-            self, watchdog_stubs, tmp_path, monkeypatch):
-        # Review case (Security): a broad accept smuggling a full accept
-        # fingerprint inside its log prefix. Unanchored matching alone
-        # passes this; the pin strips quoted strings first, so this must
-        # fail closed — with stop-before-destroy ordering.
-        r = _run_watchdog(SMUGGLER_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 1
-        calls = watchdog_stubs.read_text()
-        assert calls.index("systemctl stop systemd-nspawn@jail") < \
-            calls.index("nft destroy table")
-        assert "ALERT" in calls
-
-    def test_redirect_verdict_triggers_fail_closed(
-            self, watchdog_stubs, tmp_path, monkeypatch):
-        # Review case (Security): 'redirect' moves packets without the
-        # 'dnat' or 'accept' substrings. The pin denies packet-moving
-        # verdicts it does not know; this must fail closed.
-        r = _run_watchdog(REDIRECT_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 1
-        calls = watchdog_stubs.read_text()
-        assert "systemctl stop systemd-nspawn@jail" in calls
-        assert "nft destroy table" in calls
-
-    def test_iface_swap_triggers_fail_closed(
-            self, watchdog_stubs, tmp_path, monkeypatch):
-        # Review case (Security round 2): "ve-jail" swapped for
-        # "tailscale0" on the proxy accept. Quoted identifiers are part
-        # of the rule's identity; this must fail closed.
-        r = _run_watchdog(IFACE_SWAP_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 1
-        calls = watchdog_stubs.read_text()
-        assert calls.index("systemctl stop systemd-nspawn@jail") < \
-            calls.index("nft destroy table")
-        assert "ALERT" in calls
-
-    def test_rogue_ssh_dnat_triggers_fail_closed(
-            self, watchdog_stubs, tmp_path, monkeypatch):
-        # Review case (Engineering A1): the sshd DNAT's target is
-        # re-addressed while the match stays narrow — not the conf's line.
-        r = _run_watchdog(ROGUE_SSH_DNAT_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 1
-        calls = watchdog_stubs.read_text()
-        assert "systemctl stop systemd-nspawn@jail" in calls
-        assert "nft destroy table" in calls
-
-    def test_broadened_ssh_accept_triggers_fail_closed(
-            self, watchdog_stubs, tmp_path, monkeypatch):
-        # Review case (Architecture blocker 1): the SSH accept with its
-        # narrowing qualifiers dropped — direct outbound SSH for the jail.
-        # A verdict-substring pin is blind to this; the full-rule pin
-        # must fail closed.
-        r = _run_watchdog(BROADENED_SSH_ACCEPT_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 1
-        calls = watchdog_stubs.read_text()
-        assert "systemctl stop systemd-nspawn@jail" in calls
-        assert "nft destroy table" in calls
-
-    def test_broadened_dnat_triggers_fail_closed(
-            self, watchdog_stubs, tmp_path, monkeypatch):
-        # Review case (Architecture blocker 1): the sshd DNAT without the
-        # tailscale0 iifname — reachable from any interface.
-        r = _run_watchdog(BROADENED_DNAT_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 1
-        calls = watchdog_stubs.read_text()
-        assert "systemctl stop systemd-nspawn@jail" in calls
-        assert "nft destroy table" in calls
-
-    def test_broadened_proxy_accept_triggers_fail_closed(
-            self, watchdog_stubs, tmp_path, monkeypatch):
-        # Review case (Architecture blocker 1): the proxy-port accept
-        # without the ve-jail iifname — accepted off every interface.
-        r = _run_watchdog(BROADENED_PROXY_ACCEPT_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 1
-        calls = watchdog_stubs.read_text()
-        assert "systemctl stop systemd-nspawn@jail" in calls
-        assert "nft destroy table" in calls
-
-    def test_benign_duplicate_accept_stays_healthy(self, watchdog_stubs,
-                                                   tmp_path, monkeypatch):
-        # A duplicated legit narrow rule is not damage: no false positive.
-        r = _run_watchdog(DUPLICATE_ACCEPT_RULESET, tmp_path=tmp_path,
-                          monkeypatch=monkeypatch)
-        assert r.returncode == 0
+    def test_transient_gap_heals_without_drama(self, watchdog_stubs,
+                                               tmp_path, monkeypatch):
+        # First capture damaged (the oneshot's own destroy-then-apply
+        # window), second capture healthy: no stop, no repair, exit 0.
+        damaged = tmp_path / "damaged.json"
+        damaged.write_text(LIVE_RULE_DELETED)
+        healthy = tmp_path / "healthy.json"
+        healthy.write_text(LIVE_SAME_TABLE)
+        counter = tmp_path / "n"
+        counter.write_text("0")
+        stub = tmp_path / "stubs" / "nft"
+        stub.write_text("""\
+#!/bin/bash
+echo "nft $*" >> "$CALLS_LOG"
+if [ "$1 $2 $3" = "--json list table" ]; then
+    c=$(cat "$NFT_COUNT"); echo $((c+1)) > "$NFT_COUNT"
+    if [ "$c" = "0" ]; then cat "$NFT_JSON_FIXTURE"; else cat "$NFT_HEALTHY"; fi
+    exit 0
+fi
+exit 0
+""")
+        stub.chmod(0o755)
+        pin = tmp_path / "pin.json"
+        pin.write_text(_canonicalize(PIN_CAPTURE))
+        conf = tmp_path / "nftables-jail.conf"
+        conf.write_text("# repair source")
+        monkeypatch.setenv("NFT_JSON_FIXTURE", str(damaged))
+        monkeypatch.setenv("NFT_HEALTHY", str(healthy))
+        monkeypatch.setenv("NFT_COUNT", str(counter))
+        monkeypatch.setenv("PIN", str(pin))
+        monkeypatch.setenv("CONF", str(conf))
+        monkeypatch.setenv("CANON", CANON_SCRIPT)
+        r = subprocess.run(["bash", VERIFY_SCRIPT],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
         calls = watchdog_stubs.read_text()
         assert "systemctl stop" not in calls
         assert "destroy table" not in calls
+        # QA blocker 3: prove the transient path actually ran — the
+        # damaged first capture plus the healing re-check are exactly
+        # two live captures. Without this the test would pass even if
+        # the "damaged" fixture were accidentally healthy.
+        assert (tmp_path / "n").read_text().strip() == "2"
+        assert calls.count("nft --json list table") == 2
 
 
 def _with_proxy_heredoc_body(src):
@@ -1163,6 +1033,7 @@ def _render_with_proxy(body):
         line = re.sub(r"\\([\\$`])", r"\1", line)
         rendered.append(line)
     return "\n".join(rendered) + "\n"
+
 
 
 class TestWithProxyHeredoc:
