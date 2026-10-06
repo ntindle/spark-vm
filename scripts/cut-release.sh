@@ -12,7 +12,15 @@
 #      main, and tag v<VERSION> does not exist locally or on the remote.
 #   2. Assembles release notes: the curated CHANGELOG.md section for this
 #      version when it exists, plus the merged-PR list since the previous
-#      tag. Notes are printed (and optionally written) in --dry-run.
+#      tag. Notes are printed (and optionally written) in --dry-run. The
+#      body is capped at GitHub's 125,000-character release-body limit
+#      (the Releases API 422s longer bodies): an oversized Highlights
+#      section is trimmed at whole-bullet boundaries with an explicit note
+#      pointing at the full CHANGELOG.md section; the merged-PR list and
+#      the footer are never trimmed. If the body still exceeds the cap
+#      with Highlights fully trimmed, the script dies with an operator
+#      diagnostic (GitHub #1086 — the v0.6.0 cut failed its publish step
+#      AND its --publish-only recovery on the same unbounded body).
 #   3. In --execute: creates an annotated, immutable tag v<VERSION>, pushes
 #      it, and publishes a GitHub release (via `gh`, or the API with
 #      $GITHUB_TOKEN when `gh` is unavailable).
@@ -44,7 +52,9 @@
 #      unavailable; never logged; GH_TOKEN accepted as an alias),
 #      CUT_RELEASE_POLL_ATTEMPTS (default 10;
 #      0 disables the wait) and CUT_RELEASE_POLL_SLEEP (default 3) bound
-#      the post-tag-push replication wait before publishing.
+#      the post-tag-push replication wait before publishing,
+#      CUT_RELEASE_MAX_BODY_CHARS (default 125000; testing hook) caps the
+#      release-notes body at GitHub's 125,000-character Releases API limit.
 #
 # Never commits secrets: the token is read from the environment only.
 
@@ -121,6 +131,12 @@ fi
     || die "CUT_RELEASE_POLL_ATTEMPTS must be a non-negative integer (got '${CUT_RELEASE_POLL_ATTEMPTS:-10}')"
 [[ "${CUT_RELEASE_POLL_SLEEP:-3}" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
     || die "CUT_RELEASE_POLL_SLEEP must be a non-negative number (got '${CUT_RELEASE_POLL_SLEEP:-3}')"
+
+# The release-body cap must be a positive integer: a zero/negative cap
+# would make every release die in the trim step below.
+[[ "${CUT_RELEASE_MAX_BODY_CHARS:-125000}" =~ ^[1-9][0-9]*$ ]] \
+    || die "CUT_RELEASE_MAX_BODY_CHARS must be a positive integer (got '${CUT_RELEASE_MAX_BODY_CHARS:-125000}')"
+MAX_BODY_CHARS="${CUT_RELEASE_MAX_BODY_CHARS:-125000}"
 
 
 REPO_DIR="${CUT_RELEASE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -304,6 +320,116 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
     echo "Release tag \`$TAG\` (immutable — tags are never moved or re-cut)."
     echo "Full commit \`$RELEASE_SHA\`."
 } > "$NOTES"
+
+# --- release-notes body cap (GitHub #1086) ---
+# GitHub's Releases API rejects bodies over 125,000 characters with HTTP
+# 422 "body is too long". The v0.6.0 cut hit this in --execute AND in the
+# --publish-only recovery (the recovery regenerates the same unbounded
+# body), so the cap is enforced here, on the shared assembly path, before
+# --notes-file is written and before any publish attempt. Only the curated
+# Highlights section is trimmed — at whole-line (whole-bullet) boundaries,
+# with an explicit note pointing at the full CHANGELOG.md section; the
+# merged-PR list and the footer are never trimmed. If the body still
+# exceeds the cap with Highlights fully trimmed, the script dies with an
+# operator diagnostic. CUT_RELEASE_MAX_BODY_CHARS exists only so tests can
+# exercise the trim; production always uses GitHub's real limit. Lengths
+# are counted in Unicode code points, matching how the API measures the
+# JSON body.
+TRIM_MSG="$(MAX_BODY_CHARS="$MAX_BODY_CHARS" python3 - "$NOTES" <<'PYEOF' 2>&1
+import os
+import sys
+
+notes_path = sys.argv[1]
+cap = int(os.environ["MAX_BODY_CHARS"])
+cap_fmt = f"{cap:,}"
+
+with open(notes_path, encoding="utf-8") as f:
+    text = f.read()
+
+if len(text) <= cap:
+    print("cut-release.sh: release notes %s characters (cap %s) - no trim needed"
+          % (f"{len(text):,}", cap_fmt))
+    sys.exit(0)
+
+lines = text.split("\n")
+
+def find(pred, start=0):
+    for i in range(start, len(lines)):
+        if pred(lines[i]):
+            return i
+    return -1
+
+i_high = find(lambda l: l == "## Highlights")
+i_merge = find(lambda l: l.startswith("## Merged"),
+               i_high + 1 if i_high >= 0 else 0)
+i_sep = -1
+if i_merge >= 0:
+    for i in range(i_merge + 1, len(lines) - 1):
+        if lines[i] == "---" and lines[i + 1].startswith("Release tag "):
+            i_sep = i
+            break
+if i_high < 0 or i_merge < 0 or i_sep < 0:
+    sys.stderr.write("internal error: release-notes structure changed; "
+                     "cannot apply the body cap\n")
+    sys.exit(1)
+
+HEADER_PREFIX = "## Highlights\n\n"
+# The section content sits between the header's blank line and the blank
+# line before "## Merged ...". (The awk that extracts the section stops at
+# the next "## " heading, so the content itself never contains a "## "
+# line that could confuse the marker search above.)
+content = lines[i_high + 2:i_merge - 1]
+pr_block = "\n".join(lines[i_merge:i_sep]) + "\n"
+footer = "\n".join(lines[i_sep:]) + "\n"
+
+trim_note = ("_The Highlights section was trimmed to fit the %s-character "
+             "release-body limit; the full section is in CHANGELOG.md on "
+             "this tag._\n" % cap_fmt)
+
+# Even a fully trimmed Highlights section keeps its header, the trim note,
+# the whole merged-PR list, and the footer.
+floor_len = len(HEADER_PREFIX + trim_note + pr_block + footer)
+if floor_len > cap:
+    sys.stderr.write(
+        "release notes are %s characters and still exceed the %s-character "
+        "release-body limit with the Highlights section fully trimmed - "
+        "the merged-PR list alone is too long to publish. Trim the PR list "
+        "by hand: cut-release.sh --dry-run --notes-file notes.md, edit the "
+        "file, then publish with: gh release create <tag> --title <tag> "
+        "--notes-file notes.md --target main\n"
+        % (f"{len(text):,}", cap_fmt))
+    sys.exit(1)
+
+kept = []
+kept_len = floor_len
+dropped = 0
+for ln in content:
+    # Whole lines only: a bullet is kept entire or dropped entire, never
+    # split mid-line.
+    if kept_len + len(ln) + 1 <= cap:
+        kept.append(ln)
+        kept_len += len(ln) + 1
+    else:
+        dropped += 1
+# A subsection header ("### Added") with no surviving bullets underneath
+# would dangle at the end of the trimmed section; drop it.
+while kept and kept[-1].startswith("### "):
+    kept_len -= len(kept.pop()) + 1
+    dropped += 1
+
+new_text = HEADER_PREFIX
+if kept:
+    new_text += "\n".join(kept) + "\n"
+new_text += trim_note + pr_block + footer
+# Invariant by construction: kept_len tracked every addition, and the
+# header-pop only shrinks it; floor_len <= cap was checked above.
+with open(notes_path, "w", encoding="utf-8") as f:
+    f.write(new_text)
+print("cut-release.sh: release notes trimmed to %s characters (cap %s); "
+      "%d Highlights line(s) dropped" % (f"{len(new_text):,}", cap_fmt, dropped))
+PYEOF
+)" || die "$TRIM_MSG"
+echo "$TRIM_MSG" >&2
 
 if [[ -n "$NOTES_FILE" ]]; then
     cp "$NOTES" "$NOTES_FILE"

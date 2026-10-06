@@ -907,3 +907,151 @@ def test_api_fallback_accepts_gh_token_alias(workrepo, tmp_path):
     log = curl_log.read_text()
     assert "CONFIG_HAS_AUTH_HEADER" in log  # the alias carried the token
     assert "gh-alias-sekrit" not in log  # ...and never on the command line
+
+
+# --- release-notes body cap (GitHub #1086) ---
+
+TRIM_MARKER = "release-body limit"
+
+
+def write_section_changelog(work, version, section_md):
+    body = ("# Changelog\n\n## [Unreleased]\n\n"
+            "## [%s] - 2026-09-19\n\n%s\n" % (version, section_md))
+    (work / "CHANGELOG.md").write_text(body)
+
+
+def commit_changelog(work, msg="docs: update changelog"):
+    git("add", "-A", cwd=work)
+    git("commit", "-m", msg, cwd=work)
+    git("push", "origin", "main", cwd=work)
+
+
+def dry_run_notes(work, tmp_path, name, env=None):
+    notes = tmp_path / name
+    r = run_script(work, "--dry-run", "--notes-file", str(notes), env=env)
+    assert r.returncode == 0, r.stderr + r.stdout
+    return notes.read_text(), r
+
+
+def highlights_region(body):
+    """The assembled Highlights section, between its header and the PR list."""
+    start = body.index("## Highlights")
+    end = body.index("## Merged")
+    return body[start:end]
+
+
+def test_oversized_highlights_trimmed_with_default_cap(workrepo, tmp_path):
+    # The production default (125,000 characters): a curated section over
+    # the cap is trimmed at whole-bullet boundaries; the PR list and the
+    # footer survive untouched.
+    bullets = ["- bullet %04d %s" % (i, "x" * 80) for i in range(1400)]
+    bullet_set = set(bullets)
+    section = "### Added\n" + "\n".join(bullets) + "\n"
+    assert len(section) > 125000  # the trim must engage (non-vacuous)
+    write_section_changelog(workrepo, "0.2.0", section)
+    commit_changelog(workrepo)
+    body, r = dry_run_notes(workrepo, tmp_path, "notes.md")
+    assert len(body) <= 125000
+    assert "trimmed to fit the 125,000-character " + TRIM_MARKER in body
+    assert "CHANGELOG.md on this tag" in body
+    region = highlights_region(body)
+    kept_lines = [l for l in region.splitlines() if l.startswith("- ")]
+    assert kept_lines  # some bullets survive
+    assert len(kept_lines) < len(bullets)  # ...but not all
+    for line in kept_lines:
+        assert line in bullet_set  # whole bullets only: never split mid-line
+    # The merged-PR list and the footer are never trimmed.
+    assert "- release: bump VERSION to 0.2.0" in body
+    assert "\n---\n" in body
+    assert "Release tag `v0.2.0`" in body
+    assert any(l.startswith("Full commit `") for l in body.splitlines())
+    assert "no trim needed" not in r.stderr
+
+
+def test_cap_never_splits_a_single_long_bullet(workrepo, tmp_path):
+    # A bullet longer than the remaining budget is dropped entire — its
+    # prefix must not leak into the notes.
+    giant = "- GIANT-" + "x" * 5000 + "-END"
+    section = "### Added\n- short one\n%s\n- short two\n" % giant
+    write_section_changelog(workrepo, "0.2.0", section)
+    commit_changelog(workrepo)
+    body, _ = dry_run_notes(workrepo, tmp_path, "notes.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": "3000"})
+    assert len(body) <= 3000
+    assert "GIANT-" not in body  # absent entire, not truncated
+    assert "- short one" in body
+    assert "- short two" in body  # later bullets that fit are still kept
+
+
+def test_dangling_subsection_header_dropped(workrepo, tmp_path):
+    # A "### " header whose bullets were all trimmed must not dangle at
+    # the end of the trimmed section.
+    giant = "- " + "y" * 2000
+    section = "### Added\n- keeper bullet\n### Fixed\n%s\n" % giant
+    write_section_changelog(workrepo, "0.2.0", section)
+    commit_changelog(workrepo)
+    body, _ = dry_run_notes(workrepo, tmp_path, "notes.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": "900"})
+    assert len(body) <= 900
+    region = highlights_region(body)
+    content_lines = [l for l in region.splitlines()[2:]
+                     if l.strip() and not l.startswith("_The Highlights")]
+    assert content_lines
+    assert not content_lines[-1].startswith("### ")
+    assert "### Fixed" not in region
+    assert "- keeper bullet" in body
+
+
+def test_body_untouched_when_under_cap(workrepo, tmp_path):
+    body, r = dry_run_notes(workrepo, tmp_path, "notes.md")
+    assert TRIM_MARKER not in body
+    assert "trimmed to fit" not in body
+    assert "- Demo release bullet for 0.2.0" in body
+    assert "no trim needed" in r.stderr
+
+
+def test_cap_boundary_exact(workrepo, tmp_path):
+    # Pin the boundary: a body of exactly `cap` characters passes through
+    # untouched; one character more engages the trim.
+    bullets = ["- bullet %04d %s" % (i, "z" * 60) for i in range(20)]
+    write_section_changelog(workrepo, "0.2.0",
+                            "### Added\n" + "\n".join(bullets) + "\n")
+    commit_changelog(workrepo)
+    full, _ = dry_run_notes(workrepo, tmp_path, "full.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": "1000000000"})
+    assert TRIM_MARKER not in full
+    size = len(full)
+    exact, _ = dry_run_notes(workrepo, tmp_path, "exact.md",
+                             env={"CUT_RELEASE_MAX_BODY_CHARS": str(size)})
+    assert exact == full  # exactly at the cap: untouched
+    over, _ = dry_run_notes(workrepo, tmp_path, "over.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": str(size - 1)})
+    assert len(over) <= size - 1
+    assert "trimmed to fit" in over
+
+
+def test_dies_when_pr_list_alone_exceeds_cap(workrepo, tmp_path):
+    # The merged-PR list is never trimmed; when it plus the footer exceed
+    # the cap even with Highlights fully trimmed, the script must fail
+    # loudly (operator diagnostic) instead of publishing a 422.
+    r = run_script(workrepo, "--dry-run",
+                   env={"CUT_RELEASE_MAX_BODY_CHARS": "200"})
+    assert r.returncode != 0
+    assert "still exceed" in r.stderr
+    assert "merged-PR list alone" in r.stderr
+    assert "notes-file" in r.stderr  # the diagnostic names the manual path
+
+
+def test_rejects_non_numeric_max_body_chars(workrepo):
+    r = run_script(workrepo, "--dry-run",
+                   env={"CUT_RELEASE_MAX_BODY_CHARS": "abc"})
+    assert r.returncode != 0
+    assert "CUT_RELEASE_MAX_BODY_CHARS" in r.stderr
+
+
+def test_rejects_zero_max_body_chars(workrepo):
+    # A zero cap would die on every release; reject it up front.
+    r = run_script(workrepo, "--dry-run",
+                   env={"CUT_RELEASE_MAX_BODY_CHARS": "0"})
+    assert r.returncode != 0
+    assert "CUT_RELEASE_MAX_BODY_CHARS" in r.stderr
