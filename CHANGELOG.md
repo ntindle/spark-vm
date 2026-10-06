@@ -52,7 +52,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
-- Provisioning + metering convergence analysis: the metered, capped, provisioned box vs the hosted vision, pinned to v0.6.0 — files three genuinely-new gaps (the golden image has a gate but no build pipeline; the meter envelope has a producer and a plane endpoint but no emission worker; the pairing attestation token needs a plane-readable provision record, pinning the record store to D1) and pins the lane build order (#TBD).
+- Provisioning + metering convergence analysis: the metered, capped, provisioned box vs the hosted vision, pinned to v0.6.0 — files three genuinely-new gaps (the golden image has a gate but no build pipeline; the meter envelope has a producer and a plane endpoint but no emission worker; the pairing attestation token needs a plane-readable provision record, pinning the record store to D1) and pins the lane build order (#1090).
 
 ## [0.6.0] - 2026-10-06
 
