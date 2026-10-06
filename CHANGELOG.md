@@ -592,6 +592,16 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The jail firewall watchdog now pins the firewall table by its
+  canonical structure instead of its rendered text (#444): an nftables
+  upgrade that re-words rule text — not just re-indents it — no longer
+  trips a false fail-closed storm that stops the jail every minute. The
+  build captures the applied table once and the watchdog compares
+  semantically, so a re-rendered-but-identical table stays healthy
+  while a deleted rule, an added rule, or a re-addressed DNAT still
+  fails closed. Re-running the jail build regenerates the pin; the
+  build-time self-test exercises the canonicalizer against the box's
+  live rendering. (#PR)
 - Fleet journal lock no longer blocks forever on a stopped or wedged
   lock holder (#1007): collectors, prunes, and alert acks wait up to
   five minutes for the store lock, then fail loudly — naming the lock
