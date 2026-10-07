@@ -48,8 +48,15 @@ def head(repo):
                           timeout=30).stdout.strip()
 
 
-def gate_record(repo, sha, status="complete", verdict="pass"):
-    """A gate record file in the repo, completed or skeleton as asked."""
+def gate_record(repo, sha, status="complete", verdict="pass",
+                build_digest=DIGEST):
+    """A gate record file in the repo, completed or skeleton as asked.
+
+    build_digest is the push-produced digest the publish step
+    (build-image.sh --record-pushed-digest) stamps into build.image_digest.
+    Pass None for a record the publish step never stamped (skeletons, older
+    records) — write_pin refuses those on the #1124 cross-check.
+    """
     rec = {
         "schema": "sparkvm/golden-image-gate-record@1",
         "image_version": sha,
@@ -63,6 +70,8 @@ def gate_record(repo, sha, status="complete", verdict="pass"):
             "verdict": verdict,
         },
     }
+    if build_digest is not None:
+        rec["build"] = {"image_digest": build_digest}
     path = os.path.join(repo, f"gate-record-{sha[:12]}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(rec, f)
@@ -243,7 +252,8 @@ def test_write_pin_refuses_skeleton_gate(tmp_path):
     sha = head(repo)
     with pytest.raises(PinnedImageError, match="not a completed pass"):
         write_pin(**pin_args(repo, sha, gate_record=gate_record(
-            repo, sha, status="pending", verdict="not-run")))
+            repo, sha, status="pending", verdict="not-run",
+            build_digest=None)))
 
 
 def test_write_pin_refuses_failed_gate(tmp_path):
@@ -251,7 +261,8 @@ def test_write_pin_refuses_failed_gate(tmp_path):
     sha = head(repo)
     with pytest.raises(PinnedImageError, match="not a completed pass"):
         write_pin(**pin_args(repo, sha, gate_record=gate_record(
-            repo, sha, status="complete", verdict="fail")))
+            repo, sha, status="complete", verdict="fail",
+            build_digest=None)))
 
 
 def test_write_pin_refuses_gate_for_other_sha(tmp_path):
@@ -297,10 +308,75 @@ def test_repin_same_sha_new_digest_needs_force(tmp_path):
     sha = head(repo)
     write_pin(**pin_args(repo, sha))
     new_ref = f"registry.fly.io/sparkvm-prod/sparkvm-golden@{DIGEST2}"
-    with pytest.raises(PinnedImageError, match="--force"):
+    # The re-push path re-stamps the gate record first (#1124/D-PIN4):
+    # --record-pushed-digest --force writes the new digest, then pin
+    # matches it. A pin-side --force never bypasses the cross-check, so
+    # without the re-stamp the mismatch still refuses.
+    with pytest.raises(PinnedImageError, match="does not match"):
         write_pin(**pin_args(repo, sha, image_ref=new_ref))
-    rec = write_pin(**pin_args(repo, sha, image_ref=new_ref, force=True))
+    restamped = gate_record(repo, sha, build_digest=DIGEST2)
+    with pytest.raises(PinnedImageError, match="--force"):
+        write_pin(**pin_args(repo, sha, image_ref=new_ref,
+                             gate_record=restamped))
+    rec = write_pin(**pin_args(repo, sha, image_ref=new_ref, force=True,
+                               gate_record=restamped))
     assert rec["image"] == new_ref
+
+
+# --- #1124 pin-side digest cross-check ------------------------------------
+
+def test_write_pin_matches_recorded_digest(tmp_path):
+    """Match pins: the --image-ref digest equals build.image_digest."""
+    repo = make_repo(tmp_path)
+    sha = head(repo)
+    rec = write_pin(**pin_args(repo, sha))
+    assert rec["image"] == IMAGE_REF
+
+
+def test_write_pin_refuses_digest_mismatch(tmp_path):
+    repo = make_repo(tmp_path)
+    sha = head(repo)
+    with pytest.raises(PinnedImageError) as ei:
+        write_pin(**pin_args(
+            repo, sha, gate_record=gate_record(repo, sha,
+                                               build_digest=DIGEST2)))
+    msg = str(ei.value)
+    # Both digests named so the operator sees which side drifted (D-PIN4).
+    assert DIGEST in msg and DIGEST2 in msg
+
+
+def test_write_pin_refuses_missing_recorded_digest(tmp_path):
+    repo = make_repo(tmp_path)
+    sha = head(repo)
+    with pytest.raises(PinnedImageError, match="record-pushed-digest") as ei:
+        write_pin(**pin_args(
+            repo, sha, gate_record=gate_record(repo, sha,
+                                               build_digest=None)))
+    assert "build.image_digest" in str(ei.value)
+
+
+def test_write_pin_force_does_not_bypass_digest_mismatch(tmp_path):
+    repo = make_repo(tmp_path)
+    sha = head(repo)
+    with pytest.raises(PinnedImageError, match="does not match"):
+        write_pin(**pin_args(
+            repo, sha, force=True,
+            gate_record=gate_record(repo, sha, build_digest=DIGEST2)))
+
+
+def test_write_pin_match_ignores_tag_handle(tmp_path):
+    """Same-digest pins succeed regardless of the human tag handle."""
+    repo = make_repo(tmp_path)
+    sha = head(repo)
+    rec = write_pin(**pin_args(repo, sha, tag_ref=None))
+    assert rec["image"] == IMAGE_REF and rec["tag"] is None
+
+    (tmp_path / "repo2").mkdir()
+    repo2 = make_repo(tmp_path / "repo2")
+    sha2 = head(repo2)
+    other_tag = "registry.fly.io/sparkvm-prod/sparkvm-golden:nightly"
+    rec2 = write_pin(**pin_args(repo2, sha2, tag_ref=other_tag))
+    assert rec2["tag"] == other_tag
 
 
 def test_pin_forward_to_new_sha(tmp_path):
