@@ -3274,6 +3274,18 @@ def _msp_call(slug, job, fn, pre_resume=True):
             sid = _msp_require_sid(job, slug)
             msp_session.resume_session(host, sid)
         return fn(host)
+    except Exception as e:
+        # Issue #1129: a live detached supervisor holds the session
+        # exclusively; serve answers our resume with -32021 "already in
+        # use". Translate only when a supervisor is actually alive -- a
+        # -32021 with no live supervisor is a foreign holder and stays an
+        # error. Callers route around the held session (snapshot / queue).
+        if _msp_session_held_error(e) and _supervisor_alive(slug):
+            raise _MSPSessionHeldElsewhere(
+                f"session {job.get('session_uuid')} is held by the live "
+                f"detached supervisor for {slug!r}; the supervisor owns "
+                f"this turn") from e
+        raise
     finally:
         try:
             host.close()
@@ -3340,6 +3352,487 @@ def _msp_poll(host, slug, job, replay_wait=2.0):
         host, sid, job_dir(slug), replay_wait=replay_wait, sink=sink)
     _msp_journal_append(slug, seen)
     return view
+
+
+# -- detached per-turn serve-host supervisor (issue #1129) -------------------
+# `_spawn_msp` used to close its serve host at the end of the spawn, and a
+# turn cannot outlive its accepting host (2026-10-04/06 diagnosis): every
+# MSP spawn killed its own first turn. The supervisor is a detached
+# `muse-job _msp_supervise <slug>` process that holds ONE serve host for
+# ONE turn until the turn reaches a terminal state. A command that starts
+# a turn closes its own transient host, launches the supervisor, and waits
+# for its first heartbeat -- by the time the command returns, the turn is
+# held by the supervisor and no host close can kill it. While a supervisor
+# holds the session, serve answers resume with -32021 "already in use";
+# `_msp_call` translates that (only when a supervisor is actually alive)
+# into `_MSPSessionHeldElsewhere`, and each live-job command routes around
+# it: status reads the supervisor's view snapshot, steer appends to the
+# flock-guarded queue, watch reads the snapshot (the recovery ladder
+# cannot attach while the supervisor holds the session), resume reports
+# supervisor-alive, kill/close SIGTERM the supervisor first.
+
+_SUPERVISOR_HEARTBEAT_TTL_S = 120
+_SUPERVISOR_POLL_INTERVAL_S = 10
+_SUPERVISOR_MAX_CONSECUTIVE_POLL_FAILURES = 5
+_SUPERVISOR_RESUME_RETRY_S = 30
+_SUPERVISOR_BOOT_WAIT_S = 60
+_SUPERVISOR_CLAIM_TTL_S = 90
+_SUPERVISOR_TERMINATE_WAIT_S = 10
+_SUPERVISOR_PID_FILE = "supervisor.pid"
+_SUPERVISOR_CLAIM_FILE = "supervisor.claim"
+_SUPERVISOR_HEARTBEAT_FILE = "supervisor.heartbeat"
+_SUPERVISOR_VIEW_FILE = "supervisor.view.json"
+_SUPERVISOR_STEER_QUEUE = "steer-queue.jsonl"
+_SUPERVISOR_LOG_FILE = "supervisor.log"
+
+
+class _MSPSessionHeldElsewhere(Exception):
+    """The job's session is held by a live detached supervisor (-32021)."""
+
+
+def _supervisor_paths(slug):
+    jd = job_dir(slug)
+    return {
+        "pid": os.path.join(jd, _SUPERVISOR_PID_FILE),
+        "claim": os.path.join(jd, _SUPERVISOR_CLAIM_FILE),
+        "heartbeat": os.path.join(jd, _SUPERVISOR_HEARTBEAT_FILE),
+        "view": os.path.join(jd, _SUPERVISOR_VIEW_FILE),
+        "queue": os.path.join(jd, _SUPERVISOR_STEER_QUEUE),
+        "log": os.path.join(jd, _SUPERVISOR_LOG_FILE),
+    }
+
+
+def _supervisor_cmdline_matches(paths, pid, slug):
+    """True when /proc says `pid` is our `_msp_supervise` for this slug.
+
+    The pid file lives in the agent-writable job dir (issue #11): a planted
+    pid must never redirect a SIGTERM at an arbitrary process. The cmdline
+    check is the guard; the heartbeat gate in `_supervisor_alive` is the
+    second one.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\0", b" ").decode("utf-8",
+                                                           "replace")
+    except OSError:
+        return False
+    return ("_msp_supervise" in cmdline and "muse-job" in cmdline
+            and slug in cmdline.split())
+
+
+def _supervisor_pid_alive(paths, slug):
+    """True when the pid file names a live process that looks like our supervisor."""
+    try:
+        with open(paths["pid"]) as f:
+            pid = int(f.read().strip().split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    if pid <= 0:
+        return False
+    if os.path.isdir(f"/proc/{pid}"):
+        return _supervisor_cmdline_matches(paths, pid, slug)
+    # No /proc entry: either the process is gone or /proc is unavailable
+    # (non-Linux). Distinguish via kill-0; the heartbeat gate below still
+    # bounds spoofing to a same-user forger (issue #3's trust model).
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _supervisor_heartbeat_fresh(paths):
+    try:
+        return (time.time() - os.path.getmtime(paths["heartbeat"])
+                <= _SUPERVISOR_HEARTBEAT_TTL_S)
+    except OSError:
+        return False
+
+
+def _supervisor_alive(slug):
+    """True when a supervisor for this slug is live and attached (or booting).
+
+    Liveness = the pid file names a live supervisor process AND (the
+    heartbeat is fresh OR the launch claim is younger than
+    `_SUPERVISOR_CLAIM_TTL_S` -- the claim covers the boot window before
+    the first heartbeat lands).
+    """
+    paths = _supervisor_paths(slug)
+    if not _supervisor_pid_alive(paths, slug):
+        return False
+    if _supervisor_heartbeat_fresh(paths):
+        return True
+    try:
+        return (time.time() - os.path.getmtime(paths["claim"])
+                <= _SUPERVISOR_CLAIM_TTL_S)
+    except OSError:
+        return False
+
+
+def _supervisor_log(paths, msg):
+    """Append a line to the supervisor log. Never raises."""
+    try:
+        with open(paths["log"], "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}\n")
+    except OSError:
+        pass
+
+
+def _supervisor_beat(paths):
+    try:
+        with open(paths["heartbeat"], "w") as f:
+            f.write(f"{time.time():.3f}\n")
+    except OSError:
+        pass
+
+
+def _supervisor_write_snapshot(paths, view):
+    snap = {
+        "state": view.state,
+        "active_turn_id": view.active_turn_id,
+        "pending_summary": view.pending_summary,
+        "last_event_at": view.last_event_at,
+        "last_terminal": getattr(view, "last_terminal", None),
+        "snapshot_at": time.time(),
+    }
+    tmp = paths["view"] + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(snap, f)
+        os.replace(tmp, paths["view"])
+    except OSError:
+        pass
+
+
+def _supervisor_read_snapshot(slug):
+    """Read the supervisor's view snapshot; None when absent/malformed."""
+    try:
+        with open(_supervisor_paths(slug)["view"]) as f:
+            snap = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(snap, dict) or "state" not in snap:
+        return None
+    return snap
+
+
+class _SnapshotView:
+    """JobView-shaped shim over a supervisor snapshot (watch/status path).
+
+    The snapshot is supervisor-written (manager trust); like HEAD.json it
+    is agent-influenced only through what the turn did, and status output
+    already treats such sources as untrusted for terminal rendering.
+    """
+
+    def __init__(self, snap):
+        self.state = snap.get("state")
+        self.active_turn_id = snap.get("active_turn_id")
+        self.pending_summary = snap.get("pending_summary")
+        self.last_terminal = snap.get("last_terminal")
+        self.last_event_at = snap.get("last_event_at")
+
+
+def _supervisor_enqueue_steer(slug, message, turn_id=None):
+    """Append a steer request to the supervisor's queue (flock-guarded).
+
+    The queue file is agent-writable (issue #11); entries are
+    shape-validated here and re-validated by the supervisor on drain.
+    """
+    paths = _supervisor_paths(slug)
+    if not isinstance(message, str) or not message:
+        raise RuntimeError("refusing to queue an empty/non-string steer message")
+    if turn_id is not None and not isinstance(turn_id, str):
+        raise RuntimeError("refusing to queue a steer with a non-string turn_id")
+    line = json.dumps({"turn_id": turn_id, "message": message,
+                       "queued_at": time.time()}) + "\n"
+    with open(paths["queue"], "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.write(line)
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _supervisor_drain_queue(paths, host, sid, msp_turn, view):
+    """Deliver queued steer entries against the live turn.
+
+    Returns the number delivered. Semantics:
+    - turn_id matching the live turn -> steer_turn on it.
+    - turn_id None -> steer the live turn if any, else start a fresh turn
+      (covers entries queued during the boot window, before any snapshot).
+    - turn_id set but not the live turn -> dropped loudly, never steered
+      (the turn-id match is the anti-cross-turn guard).
+    Malformed entries and delivery failures are dropped loudly, never
+    retried: a poison entry must not wedge the supervisor, and a failed
+    delivery is visible in supervisor.log for the operator to re-issue.
+    """
+    try:
+        with open(paths["queue"], "a+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                lines = f.readlines()
+                f.seek(0)
+                f.truncate(0)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except OSError:
+        return 0
+    delivered = 0
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            _supervisor_log(paths,
+                            f"dropping malformed steer-queue entry: {line[:120]!r}")
+            continue
+        if (not isinstance(entry, dict)
+                or not isinstance(entry.get("message"), str)
+                or not entry["message"]):
+            _supervisor_log(paths,
+                            f"dropping malformed steer-queue entry: {line[:120]!r}")
+            continue
+        turn_id = entry.get("turn_id")
+        if turn_id is not None and not isinstance(turn_id, str):
+            _supervisor_log(paths,
+                            f"dropping malformed steer-queue entry: {line[:120]!r}")
+            continue
+        live = view.active_turn_id
+        try:
+            if turn_id is not None and turn_id != live:
+                _supervisor_log(
+                    paths,
+                    f"dropping stale steer entry for turn {turn_id!r} "
+                    f"(live: {live!r})")
+                continue
+            if live:
+                msp_turn.steer_turn(host, sid, entry["message"],
+                                    expected_turn_id=live)
+                _supervisor_log(paths, f"steered live turn {live!r} from queue")
+            else:
+                turn, _result = msp_turn.start_turn(host, sid,
+                                                   entry["message"])
+                new_id = (turn or {}).get("turnId")
+                _supervisor_log(paths,
+                                f"started turn {new_id!r} from queued steer")
+                view.active_turn_id = new_id
+            delivered += 1
+        except Exception as e:
+            _supervisor_log(paths, f"steer-queue delivery failed: {e}")
+    return delivered
+
+
+def _supervisor_resume_with_retry(host, msp_session, sid, paths):
+    """Resume the session on the supervisor's fresh host.
+
+    The spawner closed its own host before launching, so attach is normally
+    free; a racing short-lived command can transiently hold it (-32021) --
+    retry through that, but never wait out a real holder.
+    """
+    deadline = time.time() + _SUPERVISOR_RESUME_RETRY_S
+    while True:
+        try:
+            return msp_session.resume_session(host, sid)
+        except Exception as e:
+            if not _msp_session_held_error(e) or time.time() >= deadline:
+                raise
+            _supervisor_log(paths, f"resume raced a transient holder; retrying: {e}")
+            time.sleep(1.0)
+
+
+def _msp_session_held_error(e):
+    """True when the error is serve's 'session already in use' (-32021)."""
+    if getattr(e, "code", None) == -32021:
+        return True
+    return "already in use" in str(e).lower()
+
+
+def _sleep_interruptible(secs, stop):
+    end = time.time() + secs
+    while not stop["flag"] and time.time() < end:
+        time.sleep(0.5)
+
+
+def cmd__msp_supervise(args):
+    """Hidden subcommand: the detached per-turn serve-host supervisor.
+
+    Holds ONE `muse serve` host for ONE turn until the turn reaches a
+    terminal state: polls the view (heartbeat + snapshot + journal), drains
+    the steer queue, exits on terminal turn / stop signal / five consecutive
+    poll failures. The finally ALWAYS closes the host, so no orphaned serve
+    process survives the supervisor.
+    """
+    slug = args.slug
+    job = load_job(slug)
+    sid = _msp_require_sid(job, slug)
+    _, msp_session, msp_turn, msp_events, _ = _msp_imports()
+    paths = _supervisor_paths(slug)
+    try:
+        with open(paths["pid"], "w") as f:
+            f.write(str(os.getpid()))
+    except OSError as e:
+        print(f"muse-job: supervisor cannot write pid file: {e}",
+              file=sys.stderr)
+        return 1
+    stop = {"flag": False}
+
+    def _on_stop(signum, frame):
+        stop["flag"] = True
+
+    signal.signal(signal.SIGTERM, _on_stop)
+    signal.signal(signal.SIGINT, _on_stop)
+    terminal_states = {msp_events.STATE_IDLE, msp_events.STATE_TURN_FAILED,
+                       msp_events.STATE_TURN_CANCELLED,
+                       msp_events.STATE_SESSION_CLOSED}
+    _supervisor_log(paths, f"supervisor starting for turn of session {sid[:8]}...")
+    host = _msp_host_for(slug)
+    exit_code = 0
+    try:
+        host.open()
+        try:
+            _supervisor_resume_with_retry(host, msp_session, sid, paths)
+        except Exception as e:
+            _supervisor_log(paths, f"resume failed; supervisor exiting: {e}")
+            return 3
+        failures = 0
+        while not stop["flag"]:
+            try:
+                view = _msp_poll(host, slug, job)
+            except Exception as e:
+                failures += 1
+                _supervisor_log(
+                    paths,
+                    f"poll failed ({failures}/"
+                    f"{_SUPERVISOR_MAX_CONSECUTIVE_POLL_FAILURES}): {e}")
+                if failures >= _SUPERVISOR_MAX_CONSECUTIVE_POLL_FAILURES:
+                    # Dead-host livelock guard: a serve host that never
+                    # answers again must not pin the session forever.
+                    _supervisor_log(paths, "poll-failure budget exhausted; "
+                                           "releasing the session")
+                    exit_code = 2
+                    break
+                _sleep_interruptible(_SUPERVISOR_POLL_INTERVAL_S, stop)
+                continue
+            failures = 0
+            _supervisor_beat(paths)
+            _supervisor_write_snapshot(paths, view)
+            if _supervisor_drain_queue(paths, host, sid, msp_turn, view):
+                # A drained entry may have started a fresh turn -- re-poll
+                # before testing terminality.
+                continue
+            if view.active_turn_id is None and view.state in terminal_states:
+                _supervisor_log(paths,
+                                f"turn terminal (state={view.state}); exiting")
+                break
+            _sleep_interruptible(_SUPERVISOR_POLL_INTERVAL_S, stop)
+    finally:
+        # The stop flag and every exit path land here: the serve child is
+        # always reaped, never orphaned.
+        try:
+            host.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(paths["pid"])
+        except OSError:
+            pass
+        _supervisor_log(paths, f"supervisor exiting (rc={exit_code})")
+    return exit_code
+
+
+def _supervisor_launch(slug):
+    """Launch the detached supervisor; wait for its first heartbeat.
+
+    Detached: new session, stdio severed (own log file), cwd /tmp.
+    `~/.local/bin` is prepended to the child's PATH (the 2026-10-06 deploy
+    lesson: the detached supervisor must not depend on the parent's
+    environment). MUSE_NO_AUTO_UPDATE=1 is inherited from this process
+    (set by `_msp_host_for`). Returns the supervisor pid.
+    """
+    paths = _supervisor_paths(slug)
+    try:
+        os.unlink(paths["pid"])
+    except OSError:
+        pass
+    os.environ["MUSE_NO_AUTO_UPDATE"] = "1"
+    env = dict(os.environ)
+    local_bin = os.path.expanduser("~/.local/bin")
+    env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
+    with open(paths["claim"], "w") as f:
+        f.write(f"{time.time():.3f}\n")
+    script = os.path.abspath(__file__)
+    logf = open(paths["log"], "a")
+    try:
+        p = subprocess.Popen(
+            [sys.executable, script, "_msp_supervise", slug],
+            stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
+            cwd="/tmp", start_new_session=True, close_fds=True, env=env)
+    finally:
+        logf.close()
+    deadline = time.time() + _SUPERVISOR_BOOT_WAIT_S
+    while time.time() < deadline:
+        if _supervisor_heartbeat_fresh(paths):
+            return p.pid
+        if p.poll() is not None:
+            raise RuntimeError(
+                f"supervisor for {slug!r} exited during boot "
+                f"(rc={p.returncode}); see {paths['log']}")
+        time.sleep(0.5)
+    raise RuntimeError(
+        f"supervisor for {slug!r} did not heartbeat within "
+        f"{_SUPERVISOR_BOOT_WAIT_S}s; see {paths['log']}")
+
+
+def _supervisor_ensure(slug, job):
+    """Launch the supervisor unless one is already live; return its pid.
+
+    Call after starting a turn on a transient host -- the supervisor takes
+    over the steady-state hold. Records `supervisor_pid` in job.json.
+    """
+    if _supervisor_alive(slug):
+        return job.get("supervisor_pid")
+    pid = _supervisor_launch(slug)
+    job["supervisor_pid"] = pid
+    save_job(job, slug)
+    return pid
+
+
+def _supervisor_terminate(slug):
+    """SIGTERM (then SIGKILL) the supervisor. Best-effort, never raises.
+
+    Only signals a pid whose /proc cmdline proves it is our
+    `_msp_supervise` for this slug -- a planted pid file can never redirect
+    the signal at an arbitrary process (issue #11).
+    """
+    paths = _supervisor_paths(slug)
+    pid = None
+    try:
+        with open(paths["pid"]) as f:
+            pid = int(f.read().strip().split()[0])
+    except (OSError, ValueError, IndexError):
+        pid = None
+    if pid and pid > 0 and _supervisor_cmdline_matches(paths, pid, slug):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.time() + _SUPERVISOR_TERMINATE_WAIT_S
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.2)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    for key in ("pid", "claim"):
+        try:
+            os.unlink(paths[key])
+        except OSError:
+            pass
 
 
 def _spawn_msp(slug, args):
@@ -3425,9 +3918,25 @@ def _spawn_msp(slug, args):
         except Exception:
             pass
         raise
+    # Issue #1129: the spawn's own host must be closed BEFORE the supervisor
+    # attaches -- sessions are single-attach, and a turn cannot outlive its
+    # accepting host. The supervisor then holds the turn; the spawn returns
+    # only once the first heartbeat proves the handoff.
     host.close()
+    try:
+        supervisor_pid = _supervisor_ensure(slug, job)
+    except Exception:
+        # The turn died with the spawn's host and no supervisor holds it:
+        # fail loud and mark blocked, never active.
+        job["state"] = "blocked"
+        job["supervisor_error"] = ("the detached supervisor failed to take "
+                                   "over the turn; the turn died with the "
+                                   "spawn host")
+        save_job(job, slug)
+        raise
     print(json.dumps({"slug": slug, "transport": "msp",
-                      "session_id": job["session_uuid"], "state": "active"}))
+                      "session_id": job["session_uuid"], "state": "active",
+                      "supervisor_pid": supervisor_pid}))
     return 0
 
 
@@ -3447,7 +3956,22 @@ def _msp_steer(job, args):
             return {"steered_turn": view.active_turn_id}
         turn, _result = msp_turn.start_turn(host, sid, args.message)
         return {"started_turn": (turn or {}).get("turnId")}
-    out = _msp_call(slug, job, go)
+    try:
+        out = _msp_call(slug, job, go)
+    except _MSPSessionHeldElsewhere:
+        # The supervisor holds the live turn: queue the steer; the
+        # supervisor drains the queue against the live turn (turn-id
+        # tagged, never cross-turn).
+        snap = _supervisor_read_snapshot(slug)
+        turn_id = snap.get("active_turn_id") if snap else None
+        _supervisor_enqueue_steer(slug, args.message, turn_id)
+        out = {"steered": "queued", "turn_id": turn_id}
+        print(json.dumps({"slug": slug, **out}))
+        return 0
+    if out.get("started_turn"):
+        # A fresh turn on a transient host dies with the host close --
+        # hand it to the supervisor (issue #1129).
+        _supervisor_ensure(slug, job)
     print(json.dumps({"slug": slug, **out}))
     return 0
 
@@ -3477,6 +4001,56 @@ def _msp_view_summary(view):
     }
 
 
+def _msp_status_from_supervisor(job, slug):
+    """Build the status dict from the supervisor's view snapshot.
+
+    Used when the supervisor holds the session and `_msp_call` cannot
+    attach. The snapshot is supervisor-written; fields are rendered
+    through the same `_clean_text` gates as live views.
+    """
+    snap = _supervisor_read_snapshot(slug)
+    if snap is None:
+        raise RuntimeError(
+            f"session is held by a live supervisor for {slug!r} but no view "
+            f"snapshot exists yet -- the supervisor may still be booting; "
+            f"retry in a few seconds")
+    job_state = _MSP_STATE_TO_JOB.get(snap.get("state"), "active")
+    if job.get("state") != job_state:
+        job["state"] = job_state
+        save_job(job, slug)
+    paths = _supervisor_paths(slug)
+    try:
+        hb_age = round(time.time() - os.path.getmtime(paths["heartbeat"]), 1)
+    except OSError:
+        hb_age = None
+    try:
+        pm = os.path.getmtime(os.path.join(job_dir(slug), "PROGRESS.md"))
+        progress_age_s = time.time() - pm
+    except OSError:
+        progress_age_s = None
+    return {
+        "slug": slug,
+        "transport": "msp",
+        "job_state": job_state,
+        "session_uuid": job.get("session_uuid"),
+        "elapsed_h": (time.time() - _num(job.get("started_at"),
+                                         time.time())) / 3600,
+        "budget_hours": _num(job.get("budget_hours"), 8),
+        "dir_bytes": _cached_dir_bytes(job, slug),
+        "msp_state": snap.get("state"),
+        "active_turn_id": snap.get("active_turn_id"),
+        "pending": snap.get("pending_summary"),
+        "last_activity_age_s": (
+            round(time.time() - snap["last_event_at"], 1)
+            if snap.get("last_event_at") else None),
+        "supervisor_held": True,
+        "supervisor_heartbeat_age_s": hb_age,
+        "snapshot_age_s": round(time.time() - snap.get("snapshot_at",
+                                                       time.time()), 1),
+        "progress_age_s": progress_age_s,
+    }
+
+
 def _msp_status(job, slug, args):
     """status for an MSP job: poll the event stream, fold to a JobView."""
     def go(host):
@@ -3502,13 +4076,19 @@ def _msp_status(job, slug, args):
         except OSError:
             st["progress_age_s"] = None
         return st
-    st = _msp_call(slug, job, go)
+    try:
+        st = _msp_call(slug, job, go)
+    except _MSPSessionHeldElsewhere:
+        # Issue #1129: the supervisor holds the session; report from its
+        # view snapshot instead of failing the status.
+        st = _msp_status_from_supervisor(job, slug)
     if args.json:
         print(json.dumps(st, indent=2, default=str))
     else:
+        held = " supervisor=holding" if st.get("supervisor_held") else ""
         print(f"job {st['slug']}: transport=msp state={_clean_text(st['job_state'])} "
               f"msp={_clean_text(st['msp_state'])} "
-              f"turn={_clean_text(st['active_turn_id'] or '-')}")
+              f"turn={_clean_text(st['active_turn_id'] or '-')}{held}")
         if st["pending"]:
             print(f"  pending: {_clean_text(st['pending'])[:200]}")
         if st["progress_age_s"] is not None:
@@ -3563,6 +4143,9 @@ def _msp_kill(args):
     tmux path (issue #5)."""
     slug = args.slug
     job = load_job(slug)
+    # Issue #1129: a live supervisor holds the session exclusively -- kill
+    # it first so session/delete below can attach.
+    _supervisor_terminate(slug)
     sid = job.get("session_uuid")
     if sid:
         def go(host):
@@ -3611,10 +4194,28 @@ def _msp_resume(args, _from_watch=False):
         session = result.get("session", result) if isinstance(result, dict) else {}
         return {"resumed": sid,
                 "status": (session or {}).get("status")}
-    out = _msp_call(slug, job, go, pre_resume=False)
+    try:
+        out = _msp_call(slug, job, go, pre_resume=False)
+    except _MSPSessionHeldElsewhere:
+        # Issue #1129: the supervisor holds the session, so the job is
+        # alive by definition -- report, don't resume.
+        paths = _supervisor_paths(slug)
+        try:
+            hb_age = round(time.time()
+                           - os.path.getmtime(paths["heartbeat"]), 1)
+        except OSError:
+            hb_age = None
+        out = {"resumed": "supervisor-alive",
+               "supervisor_pid": job.get("supervisor_pid"),
+               "supervisor_heartbeat_age_s": hb_age}
+        print(json.dumps({"slug": slug, "transport": "msp", **out}))
+        return 0
     if out.get("resumed") == "fallback-fresh":
         job["session_uuid"] = out["session_id"]
         job["session_started_at"] = time.time()
+        # The fresh turn is on a transient host -- hand it to the supervisor
+        # (issue #1129).
+        _supervisor_ensure(slug, job)
     if _from_watch:
         fresh = load_job(slug)
         if fresh.get("state") not in ("active", "blocked"):
@@ -3654,6 +4255,10 @@ def _reanchor_prompt(slug, job):
 def _msp_close_runtime(slug, job):
     """Best-effort session/delete for close. Called from _close before the
     shared archive/remove-worktree flow."""
+    # Issue #1129: kill the supervisor before session/delete so the close
+    # path can attach -- a supervisor left running would also keep its
+    # serve child alive past the worktree removal.
+    _supervisor_terminate(slug)
     sid = job.get("session_uuid")
     if not sid:
         return
@@ -3718,8 +4323,21 @@ def _watch_msp_job(slug, job, events, now):
 
     def go(host):
         return _msp_poll(host, slug, job)
+    held = False
     try:
         view = _msp_call(slug, job, go)
+    except _MSPSessionHeldElsewhere:
+        # Issue #1129: the supervisor holds the session, so the recovery
+        # ladder below cannot attach. Read the supervisor's snapshot and
+        # skip recovery -- a held session is being worked, not dead.
+        snap = _supervisor_read_snapshot(slug)
+        if snap is None:
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": "MSP poll failed: session held by a "
+                                     "live supervisor, no view snapshot yet"})
+            return
+        view = _SnapshotView(snap)
+        held = True
     except Exception as e:
         events.append({"job": slug, "signal": "needs-attention",
                        "detail": f"MSP poll failed: {e}"})
@@ -3747,6 +4365,15 @@ def _watch_msp_job(slug, job, events, now):
                                  "re-anchor or `muse-job kill` to end it"})
         return
     if state == "stalled":
+        if held:
+            # The supervisor owns this turn; the ladder cannot attach while
+            # it holds the session. Surface, don't recover.
+            events.append({"job": slug, "signal": "needs-attention",
+                           "detail": "MSP turn stalled; session held by the "
+                                     "live supervisor -- no recovery "
+                                     "attempted (the supervisor owns the "
+                                     "turn)"})
+            return
         def go2(host):
             # recover_dead_turn polls the view and detects the dead shape
             # internally; it takes (host, session_id, job_dir) and returns
@@ -3765,6 +4392,16 @@ def _watch_msp_job(slug, job, events, now):
             return
         if action in (msp_recovery.ACTION_CONTINUED,
                       msp_recovery.ACTION_RESUMED):
+            # The revived turn would die with the recovery host's close --
+            # hand it to the supervisor (issue #1129).
+            try:
+                _supervisor_ensure(slug, job)
+            except Exception as e:
+                events.append({"job": slug, "signal": "needs-attention",
+                               "detail": f"MSP stalled turn recovered via "
+                                         f"{action} but the supervisor "
+                                         f"handoff failed: {e}"})
+                return
             events.append({"job": slug, "signal": "recovered",
                            "detail": f"MSP stalled turn recovered via "
                                      f"{action}: {detail}"})
@@ -3847,6 +4484,14 @@ def main():
 
     s = sub.add_parser("watch", help="watchdog pass over active jobs")
     s.set_defaults(fn=cmd_watch)
+
+    # Internal: the detached per-turn serve-host supervisor (issue #1129).
+    # Launched by _supervisor_launch, never by hand.
+    s = sub.add_parser("_msp_supervise",
+                       help="internal: detached per-turn MSP supervisor "
+                            "(launched by spawn/steer; do not run by hand)")
+    s.add_argument("slug")
+    s.set_defaults(fn=cmd__msp_supervise)
 
     args = ap.parse_args()
     try:

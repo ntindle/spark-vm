@@ -242,6 +242,19 @@ def _read_job(cli, slug):
         return json.load(f)
 
 
+def _fake_supervisor_ensure(monkeypatch, cli):
+    """Issue #1129: spawn/steer/resume/watch hand a new turn to the detached
+    supervisor; fake the handoff (no real subprocess in unit tests)."""
+    ensured = {}
+
+    def fake(slug, job):
+        ensured["slug"] = slug
+        return 4242
+
+    monkeypatch.setattr(cli, "_supervisor_ensure", fake)
+    return ensured
+
+
 # -- spawn ---------------------------------------------------------------
 
 def test_spawn_msp_records_transport_and_session(cli, fakes, monkeypatch):
@@ -260,14 +273,24 @@ def test_spawn_msp_records_transport_and_session(cli, fakes, monkeypatch):
                 cli.job_dir(slug))
 
     monkeypatch.setattr(cli, "_spawn_prepare", fake_prepare)
+    # Issue #1129: spawn hands the live turn to the detached supervisor.
+    ensured = {}
+    def fake_ensure(slug, job):
+        ensured["slug"] = slug
+        job["supervisor_pid"] = 4242
+        cli.save_job(job, slug)
+        return 4242
+    monkeypatch.setattr(cli, "_supervisor_ensure", fake_ensure)
     rc = cli._spawn_msp(slug, argparse.Namespace(slug=slug))
     assert rc == 0
     assert captured["preamble"] is cli.PREAMBLE_MSP
     assert "tmux" not in captured["preamble"]
     assert captured["tmux_name"] is None
+    assert ensured["slug"] == slug
     job = _read_job(cli, slug)
     assert job["transport"] == "msp"
     assert job["session_uuid"] == "sess-1"
+    assert job["supervisor_pid"] == 4242
     # serve got the yolo approval mode and the workdir as workspace root
     assert fakes.modules["msp_session"].started["approval_mode"] == "allowAll"
     assert fakes.modules["msp_session"].started["workspace_root"].endswith(
@@ -375,15 +398,18 @@ def test_steer_active_turn(cli, fakes):
     assert fakes.modules["msp_turn"].started_turns == []
 
 
-def test_steer_no_active_turn_starts_turn(cli, fakes):
+def test_steer_no_active_turn_starts_turn(cli, fakes, monkeypatch):
     slug = "mspsteer2"
     _make_job(cli, slug)
+    ensured = _fake_supervisor_ensure(monkeypatch, cli)
     fakes.view = FakeView(state="idle", active_turn_id=None)
     job = _read_job(cli, slug)
     cli._msp_steer(job, argparse.Namespace(slug=slug, message="go",
                                            allow_secrets=False))
     assert fakes.modules["msp_turn"].steered == []
     assert fakes.modules["msp_turn"].started_turns == [("sess-1", "go")]
+    # Issue #1129: a fresh turn is handed to the detached supervisor.
+    assert ensured["slug"] == slug
 
 
 # -- status / log ----------------------------------------------------------
@@ -495,6 +521,7 @@ def test_resume_fallback_fresh_on_gone_session(cli, fakes, monkeypatch):
                         lambda s, j: (work, "/repos/x", f"job/{s}"))
     with open(os.path.join(cli.job_dir(slug), "PROGRESS.md"), "w") as f:
         f.write("did the thing\n")
+    ensured = _fake_supervisor_ensure(monkeypatch, cli)
     rc = cli.cmd_resume(argparse.Namespace(slug=slug))
     assert rc == 0
     # fresh session started, re-anchor turn carries the PROGRESS tail
@@ -503,13 +530,16 @@ def test_resume_fallback_fresh_on_gone_session(cli, fakes, monkeypatch):
     assert "Do NOT repeat" in prompt
     job = _read_job(cli, slug)
     assert job["session_uuid"] == "sess-1"
+    # Issue #1129: the fresh turn is handed to the detached supervisor.
+    assert ensured["slug"] == slug
 
 
 # -- watch -----------------------------------------------------------------
 
-def test_watch_stalled_runs_recovery_ladder(cli, fakes):
+def test_watch_stalled_runs_recovery_ladder(cli, fakes, monkeypatch):
     slug = "mspwatch"
     _make_job(cli, slug)
+    ensured = _fake_supervisor_ensure(monkeypatch, cli)
     fakes.view = FakeView(state="stalled", active_turn_id="turn-1")
     fakes.outcome = types.SimpleNamespace(action="continued",
                                           detail="interrupted zombie, re-anchored",
@@ -526,6 +556,8 @@ def test_watch_stalled_runs_recovery_ladder(cli, fakes):
     host_arg, sid_arg, jd_arg = fakes.recover_calls[0]
     assert jd_arg == cli.job_dir(slug)
     assert sid_arg == _read_job(cli, slug)["session_uuid"]
+    # Issue #1129: the revived turn is handed to the detached supervisor.
+    assert ensured["slug"] == slug
 
 
 def test_watch_stalled_recovery_none_is_silent(cli, fakes):

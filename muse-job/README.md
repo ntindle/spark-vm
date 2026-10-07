@@ -104,6 +104,43 @@ The legacy tmux transport is the safe retry: the first-turn cancellation
 is a suspected MSP/serve-host race (session/branchChanged, per issue #994)
 the `--tmux` path never hits (it has no first-turn watch).
 
+### Detached per-turn supervisor (issue #1129)
+
+A turn cannot outlive its accepting host: when the spawning command closed
+its `muse serve` connection, the serve process died and took the turn with
+it — every MSP spawn killed its own first turn. Every turn now runs under
+a detached supervisor (`muse-job _msp_supervise <slug>`, launched by
+spawn/steer/resume, never by hand) that holds one serve connection for one
+turn until the turn reaches a terminal state. Commands that start a turn
+close their own transient connection, launch the supervisor, and return
+only once its first heartbeat proves the handoff.
+
+While a supervisor holds a job's session, serve answers any other
+connection's resume with "session already in use", and the commands route
+around it instead of failing:
+
+- `status` reports from the supervisor's view snapshot (marked
+  `supervisor=holding`).
+- `steer` appends to a flock-guarded queue in the job dir; the supervisor
+  drains it against the live turn — entries carry the turn id they were
+  read against and are dropped loudly on mismatch, so a steer never lands
+  on the wrong turn.
+- `watch` reads the snapshot and skips the recovery ladder (it cannot
+  attach while the supervisor holds the session); a stalled turn under a
+  supervisor surfaces as needs-attention instead.
+- `resume` reports the supervisor alive (pid + heartbeat age) rather than
+  resuming.
+- `kill` and `close` SIGTERM the supervisor first (verified via its
+  `/proc` command line, so a planted pid file can never redirect the
+  signal), then tear down the session as before.
+
+The supervisor writes a heartbeat every poll (120 s TTL), a view snapshot,
+and a journaled log in the job dir; SIGTERM/SIGINT stops it and the serve
+connection is always closed in its `finally`, so no orphaned serve process
+survives it. Five consecutive poll failures release the session (dead-host
+livelock guard). If the supervisor fails to boot, the spawn fails loudly
+and the job is marked `blocked`, never `active`.
+
 ### TUI auto-update policy (issue #699)
 
 **Updates are deferred while a job is active.** The `muse` launcher
