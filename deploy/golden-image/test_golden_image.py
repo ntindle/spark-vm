@@ -426,6 +426,42 @@ def _path_without_docker():
     return os.pathsep.join(parts)
 
 
+def _shadow_bin_without_docker(tmp_path):
+    """A bindir shadowing every PATH executable *except* `docker`.
+
+    `_path_without_docker()` removes whole PATH components that hold a
+    real docker — but on hosts where docker shares a directory with the
+    tools the test itself needs (CI runners: docker and bash both live
+    in /usr/bin), the filtered PATH can no longer launch `bash`, let
+    alone the `git` the script's preflight needs. Instead of leaving the
+    bindir empty, symlink every executable found on the ambient PATH
+    except `docker` itself (first PATH hit wins, mirroring lookup
+    order). `docker` stays truly unresolvable while bash/git/python3
+    keep working, so the missing-docker fail-closed path is proven
+    hermetically on any host layout.
+    """
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d:
+            continue
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if name == "docker" or (bindir / name).exists():
+                continue
+            src = os.path.join(d, name)
+            try:
+                if os.path.isdir(src) or not os.access(src, os.X_OK):
+                    continue
+                os.symlink(src, bindir / name)
+            except OSError:
+                pass
+    return bindir
+
+
 def _run_record(tmp_path, repo, repodigest, record_path, image_ref, *extra,
                 no_docker=False):
     """Run build-image.sh --record-pushed-digest with a fake docker on PATH
@@ -433,8 +469,10 @@ def _run_record(tmp_path, repo, repodigest, record_path, image_ref, *extra,
     bindir = tmp_path / "fakebin"
     bindir.mkdir(exist_ok=True)
     if no_docker:
-        # No docker anywhere: the bindir stays empty and every PATH
-        # component holding a real docker is filtered out.
+        # No docker anywhere: the bindir shadows every PATH executable
+        # except docker itself, and every PATH component holding a real
+        # docker is filtered out.
+        _shadow_bin_without_docker(tmp_path)
         path = str(bindir) + os.pathsep + _path_without_docker()
     else:
         _fake_docker_bin(tmp_path)
