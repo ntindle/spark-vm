@@ -51,7 +51,11 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
-            files=$(git diff --name-only "$base"...HEAD)
+            # --no-renames: a rename is reported by destination name only,
+            # so a scripts/x.py -> docs/x.md rename would look docs-only
+            # and skip the suite while deleting real code. As delete+add
+            # the old path trips the case below and the suite runs.
+            files=$(git diff --no-renames --name-only "$base"...HEAD)
           else
             files="push"
           fi
