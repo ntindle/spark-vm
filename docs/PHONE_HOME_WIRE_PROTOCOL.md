@@ -143,13 +143,54 @@ never inject bytes into a live session.
   row has no valid kind to route on — which is why skip-and-log, not
   per-kind fail-closed, is the policy for unparseable rows. On the
   HTTPS path the row drops out of redelivery once the cursor advances
-  past its seq (the loud log is the only record). KNOWN DIVERGENCE: the
-  socket carrier (S5b) currently holds its per-session acked prefix on
-  malformed rows — stricter than this policy, and theater while the
-  HTTPS cron serves the same queue (the cron's skip wins on the shared
-  cursor). Socket alignment is queued work on #1118; malformed-row
-  handling on the re-drive path is open work in the S4b-2 slice
-  (#1001).
+  past its seq (the loud log is the only record). KNOWN DIVERGENCE —
+  **CLOSED by the S4b-2a pin below (2026-10-07, #1001):** the socket
+  carrier's re-drive now skips malformed rows per D-MAL1 (never
+  emitted, journaled LOUDLY as `phone_home.redrive_malformed`)
+  instead of holding its per-session acked prefix; socket and HTTPS
+  carriers are aligned on malformed rows.
+
+- **S4b-2 implementation pin (2026-10-07, #1001 slice 2a):** the plane
+  DO's re-drive (on every (re)bind, and on the D15 Worker→DO wakeup
+  RPC after each enqueue) reads the acked watermark (`MAX(seq)` over
+  `state='acked'` — no second cursor) and emits `command` frames in
+  seq order for current-epoch rows (`epoch` equal to the session's
+  accepted generation, §5) with `seq > watermark`, stamping
+  leases exactly as the HTTPS fetch path does (per-row conditional
+  UPDATE, `MAX_PENDING_FETCH` cap per pass; see
+  `docs/DURABLE_COMMANDS.md`'s lease-stamping contract). A (re)bind never expires
+  in-flight commands — only epoch claims do. Malformed rows are
+  skipped on the re-drive (never emitted) and journaled LOUDLY as
+  `phone_home.redrive_malformed` (code = seq); every re-drive pass —
+  including the no-bound-socket wakeup no-op — journals
+  `phone_home.redrive` (code = frames emitted). The D15 wakeup rides
+  an internal, never-publicly-routable RPC
+  (`/internal/commands-wakeup` on the box's stub): no bound socket →
+  no-op; enqueue-succeeds/wakeup-fails → the Worker retries once,
+  bounded and loud (the loud channel is the Worker's operational log —
+  a wakeup that never reaches the DO cannot appear in the DO's
+  `phone_home.redrive` journal), degrading to fetch-path latency, never
+  loss; a wakeup racing a (re)bind may double-emit, absorbed by
+  at-least-once + the box's `(box_id, seq)` dedup + the conditional
+  lease stamp. A re-drive pass that throws journals
+  `phone_home.redrive` with code `-1` and keeps the bind: transient
+  bind-path throws (e.g. socket write) are covered by the next wakeup
+  or fetch poll, but a throw in the shared queue-read re-throws
+  identically on wakeup — the wakeup is not a backstop for read-path
+  throws. After 3 consecutive `-1` journals the DO closes the bind,
+  engaging §8's fetch-path fallback (degrading to fetch-path latency,
+  never loss): a queue-read failure is never session-fatal, and the
+  `-1` streak in the journal is the operator-visible signal. The
+  socket `command_ack` consume-half is slice 2b (still open): slice 2b
+  MUST record each consumed socket `command_ack` into the same
+  watermark source the re-drive reads (`state='acked'` on the row, so
+  the derived `MAX(seq)` watermark advances) — §3.3's S5b text ("lands
+  directly in the queue-owning DO instead of traveling through the
+  durable table first") describes the fast path only; durability still
+  flows through the table. Until 2b lands, the watermark advances only
+  via HTTPS acks, so `phone_home.redrive`'s emitted-count overstates
+  *new* deliveries after lease expiry — at-least-once + box-side
+  dedup absorb the re-emissions.
 
 ## 4. Keepalive
 
@@ -309,6 +350,13 @@ frame contents):
 - `phone_home.revoked_kill` / `phone_home.expired_close` —
   credential-lifecycle closes
 - `phone_home.identity_mismatch` — handshake/frame identity conflict
+- `phone_home.redrive` — re-drive pass (`box_id`, `generation` —
+  NULL when unbound, e.g. the no-bound-socket wakeup no-op); `code` =
+  frames emitted as decimal, `-1` on re-drive-pass throw (bind kept;
+  3 consecutive `-1`s close the bind — §3.3)
+- `phone_home.redrive_malformed` — malformed row skipped on the
+  re-drive (`box_id`, `generation` — NULL when unbound); `code` = the
+  malformed row's `seq` as decimal
 
 Pre-handshake upgrade `401`s are not DO journal events — no DO exists
 yet and the prober is unattributable; upgrade auth failures are the
@@ -325,10 +373,10 @@ The journal is the D1 table `phone_home_events` (migration
 | column | meaning |
 |---|---|
 | `box_id` | owning box |
-| `event` | one of the six names above — the plane's journal helper is the only writer and raises (fail-closed) on anything else |
-| `generation` | bound generation for `connect` / `disconnect` / `hibernate_wake` / `revoked_kill` / `expired_close`; for `generation_fence` this is the **kept** generation; NULL when unbound (connect is unbound until S4b-1 binds the fence) |
+| `event` | one of the names above — the plane's journal helper is the only writer and raises (fail-closed) on anything else |
+| `generation` | bound generation for `connect` / `disconnect` / `hibernate_wake` / `revoked_kill` / `expired_close` / `redrive` / `redrive_malformed`; for `generation_fence` this is the **kept** generation; NULL when unbound (connect is unbound until S4b-1 binds the fence; `redrive` is unbound on the no-bound-socket wakeup no-op) |
 | `seen_generation` | only `generation_fence`: the dropped stale generation |
-| `code` | TEXT: close code as decimal (`disconnect`) or wake cause (`hibernate_wake`); NULL otherwise |
+| `code` | TEXT: close code as decimal (`disconnect`) or wake cause (`hibernate_wake`); frames emitted as decimal or `-1` on throw (`redrive`); malformed row's `seq` as decimal (`redrive_malformed`); NULL otherwise |
 | `server_time` | unix seconds, plane clock |
 
 Owner read path: `GET /v1/boxes/{id}/phone-home/events` (`limit`,
