@@ -282,8 +282,11 @@ def test_drain_drops_malformed_entries(cli):
 def test_msp_session_held_error(cli):
     mod, _ = cli
     assert mod._msp_session_held_error(FakeServerError(-32021, "x")) is True
+    # Message-only match is deliberately NOT enough: the text also matches
+    # unrelated errors (e.g. "address already in use"); only the -32021
+    # code routes into the held path.
     assert mod._msp_session_held_error(
-        RuntimeError("session already in use by another host")) is True
+        RuntimeError("session already in use by another host")) is False
     assert mod._msp_session_held_error(RuntimeError("boom")) is False
     assert mod._msp_session_held_error(FakeServerError(-32600, "x")) is False
 

@@ -3641,10 +3641,14 @@ def _supervisor_resume_with_retry(host, msp_session, sid, paths):
 
 
 def _msp_session_held_error(e):
-    """True when the error is serve's 'session already in use' (-32021)."""
-    if getattr(e, "code", None) == -32021:
-        return True
-    return "already in use" in str(e).lower()
+    """True when the error is serve's 'session already in use' (-32021).
+
+    Only the -32021 code counts: the message text also matches unrelated
+    errors (e.g. "address already in use"), which must not misroute into
+    the held path. A held session arriving without the code fails closed
+    as a loud error instead of misrouting.
+    """
+    return getattr(e, "code", None) == -32021
 
 
 def _sleep_interruptible(secs, stop):
@@ -3754,8 +3758,10 @@ def _supervisor_launch(slug):
         os.unlink(paths["pid"])
     except OSError:
         pass
-    os.environ["MUSE_NO_AUTO_UPDATE"] = "1"
     env = dict(os.environ)
+    # Set on the child's env only -- the launcher must not mutate the
+    # parent's environment as a side effect.
+    env["MUSE_NO_AUTO_UPDATE"] = "1"
     local_bin = os.path.expanduser("~/.local/bin")
     env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
     with open(paths["claim"], "w") as f:
@@ -3824,10 +3830,14 @@ def _supervisor_terminate(slug):
                 break
             time.sleep(0.2)
         else:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+            # Re-verify the cmdline before escalating: the pid may have been
+            # recycled during the wait; never SIGKILL a process we haven't
+            # just verified is still our supervisor.
+            if _supervisor_cmdline_matches(paths, pid, slug):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
     for key in ("pid", "claim"):
         try:
             os.unlink(paths[key])
