@@ -123,6 +123,21 @@ never inject bytes into a live session.
   queue's `acked_watermark` — it owns the queue, so it knows where to
   resume pushing; the box dedupes redeliveries by `(box_id, seq)` per
   #848. No cursor travels in `hello`.
+- **Malformed command-row policy (D-MAL1, 2026-10-07, #1118):** both
+  carriers skip-and-log. A row that fails the box-side shape check is
+  the plane's bug: it is never executed, and (having no valid seq) is
+  never acked. The box logs it LOUDLY and the queue flows past it — a
+  plane data bug must not wedge the durable queue, because revocations
+  and decisions must keep moving (the `docs/DURABLE_COMMANDS.md`
+  "Plane bugs" philosophy: acked-and-logged, no stamp; a single bad
+  row never wedges the queue behind a version skew). On the HTTPS path
+  the row drops out of redelivery once the cursor advances past its seq
+  (the loud log is the only record). KNOWN DIVERGENCE: the socket
+  carrier (S5b) currently holds its per-session acked prefix on
+  malformed rows — stricter than this policy, and theater while the
+  HTTPS cron serves the same queue (the cron's skip wins on the shared
+  cursor). Socket alignment is queued work on #1118; the S4b-2 re-drive
+  logic (#1001) implements this policy plane-side.
 
 ## 4. Keepalive
 
