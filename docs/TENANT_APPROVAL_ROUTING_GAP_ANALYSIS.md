@@ -81,11 +81,16 @@ tenant" for the hosted product.
 **F-T3 — the VAPID onboarding cost is answered by design.** #69: "Tenant #2
 cannot be onboarded without … VAPID keys." The push sender pins one plane
 VAPID identity with per-(owner,box,device) D1 subscriptions
-(`docs/PUSH_SENDER_SCHEMA_CONTRACT.md` D3, §3): a new tenant subscribes
-devices, nobody provisions keys. The one-identity trade-off (one key
-compromise exposes every tenant's `p256dh`/`auth` ciphertexts) is stated
-plainly in the same contract and mitigated by Worker-secret custody +
-rotation — it is a decided trade-off, not an open gap.
+(`docs/PUSH_SENDER_SCHEMA_CONTRACT.md` D3, §3/D48): a new tenant subscribes
+devices, nobody provisions keys. The one-identity trade-off is stated
+plainly in the same contract: a VAPID private-key compromise enables
+unauthorized sends as the plane identity to every subscription endpoint —
+mitigated by Worker-secret custody plus the D48c rotation rule and the D48d
+compromise response (rotate per D48c, audit sends under the old
+`vapid_key_id`). (Separately, the D45 data key carries its own one-key
+trade-off: one data key protects all tenants' subscription-secret
+ciphertexts; a D1-only reader gets ciphertexts it cannot use without the
+VAPID key.)
 
 ## 4. Genuinely open gaps
 
@@ -107,6 +112,25 @@ is single-tenant (one store, one VAPID identity) AND plane-unaware; it needs
 a hosted-mode routing decision: skip the local enqueue (and the worker) when
 the plane push lane owns paging for the box — e.g. when the box is
 plane-enrolled — and a bound on the queue journal either way.
+
+**Handoff failure contract (load-bearing — the enqueue path's documented
+guarantee is fail-open: "a push failure must never lose the filed approval",
+`proxy/swap_addon.py`).** "Plane-enrolled" is not "plane-deliverable": an
+enrolled box with zero `live` `(owner, box, *)` subscriptions gets no local
+page (skipped) and no plane page (nobody to page) — total silence; D10
+budget exhaustion, a plane send-path outage, or a stale box token produce
+the same silence; and no local source of truth for "plane-enrolled" exists
+in `swap_addon` today. So the skip predicate must be "the plane push lane
+can actually page" — enrolled AND at least one live subscription for
+`(owner, box)` (or a plane-side readiness signal) — with a defined fallback:
+retain the local enqueue whenever the plane cannot actually page, so the
+self-hosted deferred-delivery guarantee ("they deliver once the operator
+configures keys") survives the handoff. The slice must name the fallback
+explicitly; a gap analysis under honesty rules cannot propose removing the
+only page path without naming what replaces its guarantee. The journal bound
+is scoped to the hosted handoff — bounding the self-hosted journal would
+trade away the deferred-delivery guarantee and is a separate product
+decision.
 
 **G-T2 — no owner-level cross-box pending aggregation (new).** The approvals
 API is entirely box-scoped (`/v1/boxes/{box_id}/approvals*`,
@@ -139,7 +163,8 @@ a box shape the product no longer ships.
   plane ((owner, box)-scoped records, owner-key auth, (owner,box,device)
   push subscriptions, per-owner digest), not in confirmd. #69's routing
   vision is substantially realized there; confirmd keeps its single-tenant
-  shape per box.
+  shape (for hosted per-tenant boxes — H10's shared/self-hosted multi-user
+  driver is the G-T3 question, not a contradiction).
 - **D-T3** — VAPID stays one plane identity (the D3 decision stands); #69's
   per-tenant VAPID-keys onboarding cost is answered, not open.
 - **D-T4** — G-T1 and G-T2 are filed as build slices; G-T3 is folded into
