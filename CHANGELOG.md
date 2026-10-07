@@ -75,6 +75,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Security
 
+- Push-sender claim design: overlapping per-minute sender ticks can no longer double-send pages — the sender loop's exactly-one-instance guarantee is now pinned to a single Durable Object per worker whose drain runs to completion before the next tick starts, so queued ticks wait their turn instead of interleaving mid-send; the design also pins bounded work per drain, the accepted crash posture (a retried page may buzz twice, never go missing), no public route to the sender, and the singleton's exact scope. (#1094) (#1121)
 - Pristine repo clones are now namespaced by upstream: spawning jobs against same-named repos on different orgs — or different hosts — no longer shares one clone directory, so the second spawn can't silently fetch the wrong repository's code into the first clone and cut job worktrees from the wrong base — clones live under `~/repos/<host>/<path...>` (local paths under `~/repos/_local/`); pre-existing flat clones keep working for recorded jobs, new spawns re-clone into the namespaced dir (#10). (#1105)
 
 ## [0.6.0] - 2026-10-06
