@@ -652,15 +652,20 @@ Record, alongside the image's manifest, one gate record per image:
   is stamped via
   `deploy/golden-image/build-image.sh --record-pushed-digest <gate-record> <image-ref>`
   (the digest is resolved from the registry through the local docker
-  daemon's RepoDigests — never pasted from push output by hand, which is
-  the advisory-D hazard; a later pin_image.py slice cross-checks
-  `--image-ref` against this value). Null until published — an unpushed
+  daemon's RepoDigests — never pasted from push output by hand; the
+  record half of the advisory-D fix, a later pin_image.py slice
+  cross-checks `--image-ref` against this value). Stamping requires a
+  completed gate pass (`interactive_gate.status == "complete"` and
+  `verdict == "pass"` — the same predicate `harness/pin_image.py`
+  enforces before it pins). Null until published — an unpushed
   image has no RepoDigests, and the skeleton honestly says so.
 - the §6 item-6 interface-gap note (while unlanded: "round trip
   exercised through confirmd directly; pending-signal interface not yet
   shipped") and the activation-script gap note (while unlanded: "task
   run as an explicit command, not through the minute-5–8 script")
-- the final verdict: **gate / no-gate**
+- the final verdict: **pass** (set `interactive_gate.status` to
+  `complete`; anything but `pass` refuses the publish and the pin —
+  this is the machine vocabulary `harness/pin_image.py` enforces)
 
 A gate failure must name the defect tracker entry (request-pattern
 defect → proxy/confirmd track; image-path defect → harness tooling;

@@ -81,6 +81,16 @@ done
 
 die() { echo "build-image: ERROR: $*" >&2; exit 1; }
 
+# The record mode is standalone: combining it with the build/preflight
+# modes would silently drop the stamp request (their early exits fire
+# first), and --force is meaningless outside the record mode.
+if [ -n "$RECORD_PUSHED_DIGEST" ] && { [ "$PREFLIGHT_ONLY" = "1" ] || [ -n "$GATE_RECORD_OUT" ]; }; then
+    die "--record-pushed-digest cannot be combined with --preflight-only or --gate-record-out"
+fi
+if [ "$FORCE" = "1" ] && [ -z "$RECORD_PUSHED_DIGEST" ]; then
+    die "--force only applies to --record-pushed-digest"
+fi
+
 # --- 1. tree preflight -------------------------------------------------------
 [ -d "$REPO/.git" ] || die "not a git checkout: $REPO"
 if [ -n "$(git -C "$REPO" -c status.showUntrackedFiles=normal status --porcelain)" ]; then
@@ -189,9 +199,10 @@ fi
 # --- publish-step: record the push-produced digest --------------------------------
 # #1111: stamps build.image_digest into an already-emitted gate record.
 # The digest is resolved from the registry through the local docker daemon
-# (RepoDigests of the pushed ref) — never from an operator paste, which is
-# the advisory-D hazard this closes. A later pin_image.py slice cross-checks
-# --image-ref against the recorded digest.
+# (RepoDigests of the pushed ref) — never from an operator paste: the
+# record half of the advisory-D fix (the pin-side cross-check is a later
+# slice). A later pin_image.py slice cross-checks --image-ref against the
+# recorded digest.
 cmd_record_pushed_digest() {
     local record="$1" image_ref="$2"
     command -v docker >/dev/null 2>&1 \
@@ -228,9 +239,17 @@ if not isinstance(build, dict):
     fail(f"gate record {record_path} has no build section — refusing to stamp")
 # Publish presumes a completed gate: a digest on a skeleton (or a refused
 # gate) is meaningless to the cross-check and would look authoritative.
+# The completed-pass vocabulary is shared with harness/pin_image.py's
+# _check_gate_record (status == "complete", verdict == "pass") — the two
+# predicates must agree, or no record can travel the publish → pin
+# pipeline (a drift test in test_golden_image.py pins the agreement).
 interactive = record.get("interactive_gate")
-if not isinstance(interactive, dict) or interactive.get("verdict") != "gate":
-    fail(f"gate record {record_path} is not a completed gate pass (interactive_gate.verdict != 'gate') — the image does not publish before the gate")
+if not isinstance(interactive, dict) or interactive.get("status") != "complete" \
+        or interactive.get("verdict") != "pass":
+    fail(f"gate record {record_path} is not a completed gate pass "
+         f"(interactive_gate.status={interactive.get('status') if isinstance(interactive, dict) else interactive!r}, "
+         f"verdict={(interactive.get('verdict') if isinstance(interactive, dict) else None)!r}) — "
+         f"the image does not publish before the gate")
 current = build.get("image_digest")
 if current == digest:
     print(f"build-image: image_digest {digest} already recorded — idempotent, nothing changed")
@@ -239,10 +258,13 @@ if current is not None and force != "1":
     fail(f"gate record already names image_digest {current!r} — refusing to overwrite with {digest!r} (the re-push case needs --force)")
 build["image_digest"] = digest
 tmp = record_path + ".tmp"
-with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(record, f, indent=2)
-    f.write("\n")
-os.replace(tmp, record_path)  # atomic: no torn record on a mid-write crash
+try:
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, record_path)  # atomic: no torn record on a mid-write crash
+except OSError as e:
+    fail(f"cannot write gate record {record_path}: {e}")
 print(f"build-image: image_digest {digest} recorded in {record_path}")
 EOF
 }
