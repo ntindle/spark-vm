@@ -5,7 +5,9 @@ against `main`, and on manual `workflow_dispatch` runs.
 
 | Job | What it runs |
 |---|---|
+| `changes` | Changed-paths gate: one-step `git diff --no-renames --name-only` against the PR base. `code_changed` is true when any file outside `docs/` + `CHANGELOG.md` changed; on push / `workflow_dispatch` it defaults true. `python-tests` runs only when `code_changed` is true, so docs-only PRs skip the ~40-min suite (the other five jobs are the docs-only merge gate; a skipped required check is neutral and does not block merging). |
 | `python-tests` | pytest suites: `proxy/` (swap addon incl. `test_round6.py`, grant writer), `confirm/` (confirmd), `deploy/` (auto-deploy), `muse-job/tests` (event trust), `cred-ui/tests` (cred-ui HTTP), `cua/` (cua-bridge), `jail/` (build.sh smoke). Installs `shellcheck` via apt first — `test_auto_deploy.py::test_scripts_syntax` gates on shellcheck *warnings* and must not depend on whatever the runner image happens to carry. |
+| `docs-guard` | `scripts/test_docs_index_coverage.py`: every `docs/*.md` file must have an index row in `docs/README.md`. Always runs — including on docs-only PRs where `python-tests` is skipped, since the test lives in that suite. |
 | `shellcheck` | shellcheck at `--severity=error` over every `*.sh` (gates on real breakage, not style) |
 | `markdown-links` | lychee checks every link in every `*.md` (`--exclude-loopback`: docs reference localhost service addresses that can never resolve on a runner; `--exclude` for the bot-blocking hosts — boat.dev, businesswire.com, daytona.io, fourweekmba.com, globenewswire.com, medium.com, producthunt.com, tvgreport.com, plus the release-compare URL pattern — see the exclusion comments in `.github/workflows/ci.yml`; the local-run block below documents the manual re-sweep ritual for the medium.com / businesswire.com / globenewswire.com subset). Mail links are excluded by lychee's default in current versions — do not pass `--exclude-mail`; the flag was removed upstream and fails the step. |
 | `png-check` | Playwright screenshots example.com (`scripts/pw-test.py`) and `scripts/png-check.py` validates the PNG signature/dimensions |
@@ -58,4 +60,5 @@ python3 scripts/pw-test.py && python3 scripts/png-check.py
 Only pytest is required; everything else is stdlib. Adding a new test suite:
 drop a `test_*.py` next to its component and add one `pytest` step to the
 `python-tests` job — the suite must be green on the branch before the PR is
-opened.
+opened. (Docs-only PRs skip `python-tests` via the `changes` gate above;
+`docs-guard` still enforces the docs-index invariant on those.)
