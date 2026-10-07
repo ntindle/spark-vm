@@ -56,7 +56,8 @@ partly obsolete** — see §3.
 **F-T1 — the plane side of per-tenant routing is built.** The
 `#872`/`#876` record shape (`docs/APPROVALS_PLANE_PROTOCOL.md:31-52`) is
 `(box_id, aid)` primary key plus `owner_id` (the #843 owner key that created
-the record; NULL = box-filed). Every approvals endpoint is owner-key
+the record; NULL = box-filed provenance —
+`docs/FILING_UPLOAD_GAP_ANALYSIS.md:186-199`). Every approvals endpoint is owner-key
 authenticated except the write-only box-token `approvals/file`
 (`docs/CONTROL_PLANE_API_REFERENCE.md:155-180`); a box can never read or
 decide its own approvals. The push lane keys subscriptions
@@ -101,9 +102,9 @@ anywhere in `confirm/push.py` or `swap_addon.py`), and `push-worker.service`
 is enabled by the standard box deploy (`proxy/deploy.sh:298`; the unit file
 says it "runs wherever the deployment lives (self-hosted box or hosted
 service)"). But a hosted tenant owner never subscribes locally — the H14
-path is "operator-subscribed behind the confirmd page a hosted tenant owner
-never reaches" (`docs/HOSTED_PLANE_PUSH_GAP_ANALYSIS.md`), while the plane
-push lane does the actual paging. So on a hosted box: no box-local VAPID keys
+path's subscriptions live behind the confirmd page, which a hosted tenant
+owner never reaches (`docs/HOSTED_PLANE_PUSH_GAP_ANALYSIS.md:54-55`), while
+the plane push lane does the actual paging. So on a hosted box: no box-local VAPID keys
 → the worker's `run_once` skips loudly every pass ("push-queue: worker pass
 skipped — push disabled", rate-limited) and entries stay queued forever
 (`confirm/push.py:725-745`) — an ever-growing queue journal of approvals the
