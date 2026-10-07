@@ -8,6 +8,7 @@ dial/wake -> running -> destroy -> destroyed), including the rec-2
 failure paths (resume failure returns to SUSPENDED; destroy wins races).
 """
 
+import dataclasses
 import importlib.util
 import io
 import os
@@ -682,6 +683,68 @@ def test_attempt_n_must_be_positive():
     for bad in (0, -1):
         with pytest.raises(ValueError):
             make_spec(attempt_n=bad)
+
+
+def test_attempt_n_must_be_exact_int():
+    # The key rides provider-side metadata; a fresh driver rebuilds the
+    # dedupe map by listing. True == 1 and 1.0 == 1 in-process, but both
+    # serialize differently from the int 1 across that boundary — silently
+    # splitting the key space and defeating dedupe (double-provision,
+    # double spend on retry). Fail closed at construction.
+    for bad in (True, False, 1.0, 2.5, "2", None, (1,)):
+        with pytest.raises(ValueError):
+            make_spec(attempt_n=bad)
+
+
+def test_key_strings_must_be_nonblank_str():
+    # Whitespace-only (or non-str) tenant_id/claim_id would let " c-1 "
+    # shadow "c-1" as a distinct-looking key, and fail the metadata
+    # round-trip the same way attempt_n does.
+    for kw in ("tenant_id", "claim_id"):
+        for bad in ("", "   ", "\t\n", " c-1 ", "c-1 ", 123, None, b"c-1"):
+            with pytest.raises(ValueError):
+                make_spec(**{kw: bad})
+
+
+def test_box_identity_is_frozen():
+    # BoxIdentity is the provider-side record the reconciler matches on;
+    # mutating a listed record must be impossible, not merely untested.
+    box = pi.BoxIdentity(vm_id="vm-1",
+                         idempotency_key=("t-1", "c-1", 1),
+                         state="running")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        box.vm_id = "vm-2"  # type: ignore[misc]
+
+
+def test_box_identity_key_is_canonical():
+    # The reconstitution path: a driver that reads string metadata and
+    # forgets to int()-parse attempt_n would build ("t-1", "c-1", "1") —
+    # never equal to the spec's ("t-1", "c-1", 1), so dedupe misses on
+    # every retry and every retry double-provisions, silently. The record
+    # must fail loud at list time, with the same canonical shape the
+    # spec enforces at construction.
+    good = pi.BoxIdentity(vm_id="vm-1",
+                          idempotency_key=("t-1", "c-1", 1),
+                          state="running")
+    assert good.idempotency_key == ("t-1", "c-1", 1)
+    legacy = pi.BoxIdentity(vm_id="vm-0", idempotency_key=None,
+                            state="running")
+    assert legacy.idempotency_key is None  # pre-D-O1 records still list
+    for bad_key in (
+        ("t-1", "c-1", "1"),      # str attempt_n: the silent-split case
+        ("t-1", "c-1", 1.0),      # float attempt_n
+        ("t-1", "c-1", True),     # bool attempt_n
+        ("t-1", "c-1"),           # short tuple
+        ("t-1", "c-1", 1, "x"),   # long tuple
+        ("t-1", "", 1),           # blank claim
+        (" t-1", "c-1", 1),       # padded tenant
+        ("t-1", "c-1", None),     # None attempt
+        ["t-1", "c-1", 1],        # list, not tuple
+        "not-a-tuple",
+    ):
+        with pytest.raises(ValueError):
+            pi.BoxIdentity(vm_id="vm-1", idempotency_key=bad_key,
+                           state="running")
 
 
 def test_idempotency_key_shape():
