@@ -1273,12 +1273,13 @@ def _ingest_command_shape(cmd):
     queue flows past it — never executed, and never allowed to wedge
     the queue behind a plane data bug (revocations and decisions must
     keep moving; see D-MAL1 in docs/PHONE_HOME_WIRE_PROTOCOL.md §3.3).
-    There is no seq to ack (the row failed shaping), so the row drops
-    out of redelivery once the cursor advances past it — the loud log
-    line is the only record. This helper is shared by both carriers:
-    the HTTPS path's skip matches the pinned policy; the socket path's
-    stricter hold (see _PhoneHomeSession) is a known divergence queued
-    for alignment (#1118).
+    The row failed shaping, so no field can be trusted — nothing is
+    acked for it; the row drops out of redelivery once the cursor
+    advances past its seq — the loud log line is the only record. This
+    helper is shared by both carriers: the HTTPS path's skip matches
+    the pinned policy; the socket path's stricter hold (see
+    _PhoneHomeSession) is a known divergence queued for alignment
+    (#1118).
     """
     if not isinstance(cmd, dict):
         return None
@@ -1819,14 +1820,16 @@ def _ingest_commands(d, approvals, box_id, token, control):
     for cmd in commands:
         shaped = _ingest_command_shape(cmd)
         if shaped is None:
-            # No seq to ack and nothing safe to execute: skip loudly per
-            # D-MAL1 (docs/PHONE_HOME_WIRE_PROTOCOL.md §3.3). The row is
-            # NOT redelivered forever: once the cursor advances past its
-            # seq on a later ack, `since` moves on and the row drops out
-            # of the fetch window — the loud log is the only record, and
-            # the alternative (holding the whole queue on a plane data
-            # bug) would block revocations. Acking without a seq is
-            # impossible.
+            # Nothing safe to execute and nothing trustworthy to ack:
+            # skip loudly per D-MAL1
+            # (docs/PHONE_HOME_WIRE_PROTOCOL.md §3.3). The row is not
+            # redelivered forever once a later ack advances the cursor
+            # past its seq — `since` moves on and the row drops out of
+            # the fetch window. (If the malformed row is the queue tail
+            # with no later ackable rows, it still redelivers each fetch
+            # — noisy, but nothing behind it wedges.) The alternative
+            # (holding the whole queue on a plane data bug) would block
+            # revocations.
             _ingest_fail(d, "malformed command row from plane — skipped "
                             "(plane bug; nothing was written)",
                          redact=(token,))
@@ -2989,14 +2992,15 @@ class _PhoneHomeSession:
             "seq": frame.get("seq"), "epoch": frame.get("epoch"),
             "kind": inner.get("kind"), "payload": inner.get("payload")})
         if shaped is None:
-            # No seq to ack and nothing safe to execute. KNOWN DIVERGENCE
-            # from D-MAL1 (docs/PHONE_HOME_WIRE_PROTOCOL.md §3.3): the
-            # pinned policy is skip-and-log for both carriers; the socket
-            # currently holds the per-session prefix on the malformed row
-            # instead. Theater while the HTTPS cron serves the same queue
-            # (its skip advances the shared cursor past the row), so the
-            # queue never wedges on this in practice; alignment queued on
-            # #1118.
+            # Nothing safe to execute and nothing trustworthy to ack
+            # (shaping failed, so no field can be trusted). KNOWN
+            # DIVERGENCE from D-MAL1 (docs/PHONE_HOME_WIRE_PROTOCOL.md
+            # §3.3): the pinned policy is skip-and-log for both carriers;
+            # the socket currently holds the per-session prefix on the
+            # malformed row instead. Theater while the HTTPS cron serves
+            # the same queue (its skip advances the shared cursor past
+            # the row), so the queue never wedges on this in practice;
+            # alignment queued on #1118.
             _phone_home_say(self.d,
                             "ignoring malformed command frame (plane "
                             "bug) — not acked, will re-drive",
