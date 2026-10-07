@@ -37,6 +37,33 @@ teardown, re-scan), complete the emitted `gate-record-<sha12>.json`,
 then publish with the command the driver prints. An image without a
 completed gate record does not publish.
 
+## Publish + pin (operator)
+
+Pushing the image is not enough — the #905 Fly driver consumes a
+**digest-pinned ref** (docs/FLY_DRIVER_RESEARCH.md §F3b), and nothing in
+the push names it. After the gate passes and the push completes:
+
+```bash
+# From a clean checkout at the pinned commit:
+python3 harness/pin_image.py pin \
+  --image-ref registry.fly.io/<app>/sparkvm-golden@sha256:<digest-from-push> \
+  --tag-ref registry.fly.io/<app>/sparkvm-golden:<tag-you-pushed> \
+  --gate-record gate-record-<sha12>.json \
+  --pinned-by "<your principal>"
+git add deploy/golden-image/pinned-image.json
+git commit -m "distribution: pin golden image <version>+<sha12> (#1087)"
+```
+
+The tool refuses anything but a completed gate pass for the exact baked
+SHA, anything but `registry.fly.io` (the only registry the F3b driver
+contract names), and anything but a digest-pinned ref — a bare tag is
+never launchable. Re-pinning the same SHA to a different digest needs
+`--force` (the re-push case). `deploy/golden-image/pinned-image.json`
+is the driver's consumption contract: `harness/pin_image.py`'s
+`read_pin()` / `pin_image_ref()` are what #905 imports, and they raise
+on a missing or invalid record so the driver cannot provision from an
+unpinned image.
+
 ## CI
 
 `.github/workflows/golden-image.yml` builds the recipe on every `v*`
