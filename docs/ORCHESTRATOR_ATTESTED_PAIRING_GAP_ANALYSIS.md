@@ -149,7 +149,7 @@ F-P3/D-P2 left open:
   in both directions — the driver never double-provisions, and the
   orchestrator never orphans a provision it forgot it made.
 - **D-O2 — the attestation token is a bound, TTL'd, atomically-consumed
-  Bearer <redacted>**
+  bearer token**
   - Format: 256-bit random, base64url, opaque. Minted by the plane at
     provision-record creation — D-O4's owner-auth create endpoint
     returns the plaintext once, over the already-authenticated channel;
