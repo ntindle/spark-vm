@@ -147,9 +147,27 @@ never inject bytes into a live session.
   socket carrier (S5b) currently holds its per-session acked prefix on
   malformed rows — stricter than this policy, and theater while the
   HTTPS cron serves the same queue (the cron's skip wins on the shared
-  cursor). Socket alignment is queued work on #1118; malformed-row
-  handling on the re-drive path is open work in the S4b-2 slice
-  (#1001).
+  cursor). Socket alignment is queued work on #1118.
+
+- **S4b-2 implementation pin (2026-10-07, #1001 slice 2a):** the plane
+  DO's re-drive (on every (re)bind, and on the D15 Worker→DO wakeup
+  RPC after each enqueue) reads the acked watermark (`MAX(seq)` over
+  `state='acked'` — no second cursor) and emits `command` frames in
+  seq order for current-epoch rows with `seq > watermark`, stamping
+  leases exactly as the HTTPS fetch path does (per-row conditional
+  UPDATE, `MAX_PENDING_FETCH` cap per pass). A (re)bind never expires
+  in-flight commands — only epoch claims do. Malformed rows are
+  skipped on the re-drive (never emitted) and journaled LOUDLY as
+  `phone_home.redrive_malformed` (code = seq); every re-drive pass —
+  including the no-bound-socket wakeup no-op — journals
+  `phone_home.redrive` (code = frames emitted). The D15 wakeup rides
+  an internal, never-publicly-routable RPC
+  (`/internal/commands-wakeup` on the box's stub): no bound socket →
+  no-op; enqueue-succeeds/wakeup-fails → the Worker retries once,
+  bounded and loud, degrading to fetch-path latency, never loss; a
+  wakeup racing a (re)bind may double-emit, absorbed by at-least-once
+  + the box's `(box_id, seq)` dedup + the conditional lease stamp.
+  The socket `command_ack` consume-half is slice 2b (still open).
 
 ## 4. Keepalive
 
