@@ -167,7 +167,14 @@ never inject bytes into a live session.
   bounded and loud, degrading to fetch-path latency, never loss; a
   wakeup racing a (re)bind may double-emit, absorbed by at-least-once
   + the box's `(box_id, seq)` dedup + the conditional lease stamp.
-  The socket `command_ack` consume-half is slice 2b (still open).
+  A re-drive pass that throws on the bind path journals
+  `phone_home.redrive` with code `-1` and keeps the bind (the next
+  wakeup or fetch poll covers the backlog) — a queue-read failure is
+  never session-fatal. The socket `command_ack` consume-half is slice
+  2b (still open): until it lands, the watermark advances only via
+  HTTPS acks, so `phone_home.redrive`'s emitted-count overstates *new*
+  deliveries after lease expiry — at-least-once + box-side dedup
+  absorb the re-emissions.
 
 ## 4. Keepalive
 
