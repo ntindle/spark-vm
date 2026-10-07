@@ -45,12 +45,14 @@ the approval record names the provision record, not a human.
   auto-approval credential, which is why its consume must be atomic
   and single-use (finding O2).
 - **The golden-image producer is closing.** F-P1's gap (#1087) is closing:
-  the pinned-Dockerfile build driver, dirty-tree-refusing builds, and the
-  supervisord daemon set are merged; the digest-pin recorder
-  (`harness/pin_image.py` → `deploy/golden-image/pinned-image.json`,
-  PR #1106 — **not yet on main** at the pinned commit) will give #906's
-  driver call an image to pin and a record the #905 driver consumes as its
-  operator-set pin (`docs/FLY_DRIVER_RESEARCH.md` §F3b) once merged.
+  the pinned-Dockerfile build driver with dirty-tree-refusing builds
+  (`deploy/golden-image/build-image.sh`) and the supervisord daemon set
+  are merged; the digest-pin recorder
+  (`harness/pin_image.py` → `deploy/golden-image/pinned-image.json`)
+  ships in PR #1106 — **not yet on main** at the pinned commit — and
+  will give #906's driver call an image to pin and a record the #905
+  driver consumes as its operator-set pin
+  (`docs/FLY_DRIVER_RESEARCH.md` §F3b) once merged.
 - **The provision-record home is pinned (D-P2).** #1089's contract:
   the provision record (claim id, invite, box id, attestation-token
   hash, tenant binding) lives in plane D1 — one record, two consumers
@@ -123,26 +125,57 @@ F-P3/D-P2 left open:
 
 ## 4. Decisions pinned (D-O series)
 
-- **D-O1 — idempotency key = the claim id, required on `ProvisionSpec`.**
+- **D-O1 — idempotency key = `(tenant_id, claim_id, attempt_n)`, required
+  on `ProvisionSpec`.**
   Fail-closed at construction, like `tenant_id`: a spec without a
-  claim binding is rejected, not honored. The driver dedupes on
-  `(tenant_id, idempotency_key)` and returns the existing `vm_id` on
-  retry — never an error, never a second box. The driver's in-flight
+  claim binding is rejected, not honored. The driver dedupes on the
+  full key and returns the existing `vm_id` on retry of the same
+  attempt — never an error, never a second box. Scoping the attempt
+  into the key is load-bearing: D-O3's re-provision writes `attempt_n`
+  with a fresh token, and a claim-scoped key would return attempt_1's
+  `vm_id` (whose env holds the now-superseded token) for attempt_n's
+  provision — a box that can never auto-pair while the orchestrator
+  believes attempt_n is in flight. The driver's in-flight
   key→vm_id map must survive driver restarts (for the Fly driver: the
   key rides machine metadata at create so a fresh driver process can
   rebuild the map by listing). The orchestrator's startup path is
   **list → match → then provision**: reconcile driver-listed machines
   (matched by the metadata key) against unconsumed provision records
-  before issuing any new `provision()` call. This closes the crash
-  window in both directions — the driver never double-provisions, and
-  the orchestrator never orphans a provision it forgot it made.
+  before issuing any new `provision()` call. Supersede includes
+  old-machine teardown: the orchestrator destroys attempt_{n-1}'s
+  machine (when it still exists) as part of the supersede transition,
+  before attempt_n's provision is issued — a superseded machine is
+  never left running with a dead token. This closes the crash window
+  in both directions — the driver never double-provisions, and the
+  orchestrator never orphans a provision it forgot it made.
 - **D-O2 — the attestation token is a bound, TTL'd, atomically-consumed
   Bearer <redacted>**
-  - Format: 256-bit random, base64url, opaque. Bound to
-    `(box_id, claim_id)` at mint — a token minted for box X enrolls
-    only box X. Stored as hash in the provision record (D-P2);
-    plaintext exists only in the machine-config env and the box's
-    first-boot memory.
+  - Format: 256-bit random, base64url, opaque. Minted by the plane at
+    provision-record creation — D-O4's owner-auth create endpoint
+    returns the plaintext once, over the already-authenticated channel;
+    the plane stores only the hash (D-P2). The plaintext transits
+    exactly twice: plane→orchestrator in the create-record response,
+    orchestrator→box in the machine-config env. At rest it exists in
+    the machine-config env and the box's first-boot memory (plus
+    transiently in the orchestrator's memory between the two hops).
+  - Enrolled identity: the plane enrolls the **presenting pubkey**. It
+    cannot verify the presenter is the minted `box_id` on an
+    unauthenticated endpoint, so "a token minted for box X enrolls only
+    box X" is unenforceable as stated. What the token *does* bind is
+    the approval: auto-approval fires only against the provision record
+    whose token hash matches, and the approval is bound to that
+    record's `(tenant_id, claim_id, box_id)` — a token-holder can only
+    ever enroll under the same tenant and claim, never cross-tenant or
+    cross-claim. The same-tenant substitution residual (a config-reading
+    operator presenting the token from another machine) is accepted:
+    the only party that can read Fly machine config is the operator,
+    who already holds the owner key and the Fly token — against an
+    adversarial operator nothing in this leg holds.
+  - Threat model: the token defends against *leakage* (logs, API audit
+    trails, shoulder-surfed config), not against the operator. For
+    leakage, 24 h TTL + atomic single-use consume + 403-and-audit on
+    replay is defense-in-depth; the TTL bounds the window a leaked
+    token stays useful.
   - Wire: new optional field `attestation_token` on
     `POST /v1/pairing/request`. The box's first-boot hook presents it
     on the pairing `request` call (`pairing/spark_pair.py request`
@@ -160,10 +193,10 @@ F-P3/D-P2 left open:
   - TTL: 24 h from provision **(tunable — a first pin, not a researched
     constant; the rationale is the bounded-window argument below, and the
     value should move with first-boot latency data once the leg runs).**
-    The pre-consumption window is bounded,
-    not zero — the machine-config env is operator-visible by
-    construction (G51.4's only plane→box channel), so the forgery
-    window is the TTL. Lapsed tokens are never honored late.
+    The pre-consumption window is bounded, not zero — the machine-config
+    env is operator-visible by construction (G51.4's only plane→box
+    channel), so a leaked token stays useful for the TTL. Lapsed tokens
+    are never honored late.
   - Why this doesn't reopen G51.3's forgery hole: auto-approval fires
     **only on token presentation**, never on recognition; the human
     fingerprint ceremony was unverifiable for hosted boxes anyway
@@ -173,14 +206,24 @@ F-P3/D-P2 left open:
 - **D-O3 — provision-record lifecycle: `pending → paired | expired |
   destroyed`, plus `superseded`.**
   The pairing endpoint transitions `pending→paired` on token consume
-  (D-O2). A plane-side sweeper (own cadence) marks `expired` past the
-  24 h TTL for records never paired. The destroy worker (#1076)
+  (D-O2). The in-repo cron's reconcile pass (D-O4) sweeps `expired`
+  past the 24 h TTL for records never paired, via the owner-auth record
+  endpoint — the plane worker has no scheduled path today, so the
+  sweeper's driver is the same in-repo clock, not a plane-side cadence;
+  D9's option-(b) scheduled plane worker is the named future home for
+  the loop and the sweeper. The destroy worker (#1076)
   stamps `destroyed`. Re-provision for the same claim writes a new
   attempt row (D-C5 lineage: `attempt_n`, `supersedes attempt_{n-1}`);
   **supersede invalidates the old token immediately** — the old
   record flips to `superseded` at supersede time, not at TTL, so a
   stale first-boot hook racing a re-provision can never auto-approve
-  the dead box. #1074 ingests every terminal transition
+  the dead box. Re-provision fires only on terminal, operator-visible
+  failure — never on a timer and never because a first-boot is slow:
+  the trigger is the token TTL lapsing with no pairing, or the destroy
+  worker's (#1076) health verdict. An aggressive trigger (superseding a
+  live-but-slow box) would leave a running machine that can never pair,
+  so supersede requires the old attempt known-dead, not merely slow.
+  #1074 ingests every terminal transition
   (`paired`/`expired`/`destroyed`/`superseded`), commit→emit at the
   plane per the #898 lesson.
 - **D-O4 — the orchestrator never writes D1 directly.**
@@ -188,17 +231,23 @@ F-P3/D-P2 left open:
   endpoint** (the plane writes D1 itself); the orchestrator holds an
   owner key and calls the endpoint. This answers F-P3's trust-root
   question with machinery that already ships: the plane's owner-key
-  auth (#843) is the write credential — no new D1-write credential,
-  no separate custody story. Orchestrator placement follows: the
+  auth (#843) is the write credential — no new D1-write credential.
+  The cron's owner key lives in the existing in-repo secret custody
+  (the same store the loop's operators already use for plane owner
+  keys), so F-P3's custody question is closed by naming it, not by
+  inventing a new story. Orchestrator placement follows: the
   claim→provision loop runs as an **in-repo supervised cron one-shot**
   (flock-serialized, loud failure — the #864/#953 discipline), reading
   claims from the in-repo claim store today and from the plane's claim
   surface when the control-plane claim POST deploys. The plane worker
   has no scheduled path, so a plane-resident orchestrator has nowhere
   to tick — in-repo is not a compromise, it is the only place with a
-  clock. The driver itself stays behind `provider_iface`; the
-  orchestrator calls the driver directly (same process) and the plane
-  for record creation.
+  clock (D9, `PUSH_EVENT_TAXONOMY_GAP_ANALYSIS.md`, already chose a
+  future scheduled-plane-worker home for the sweep — the orchestrator's
+  loop and the D-O3 sweeper migrate there when it exists; in-repo is the
+  only clock today, not the forever home). The driver itself stays
+  behind `provider_iface`; the orchestrator calls the driver directly
+  (same process) and the plane for record creation.
 - **D-O5 — tenant_id sourcing: claim→tenant link, fail-closed.**
   G51.2's decision (2) is answered for the MVP: the orchestrator
   derives `tenant_id` from an explicit claim→tenant link record
