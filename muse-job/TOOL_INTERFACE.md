@@ -162,7 +162,14 @@ happened.
 
 `~/muse-jobs/<slug>/` holds `job.json`, `prompt.md`, `SUMMARY.md`,
 `QUESTIONS.md`, `PROGRESS.md`, `work/` (the git worktree), and `tmp/`.
-Pristine clones live directly under `~/repos/`; job branches are always
+Pristine clones live under `~/repos/<host>/<path...>` (namespaced by the
+repo URL's host + full path, so `github.com/org/foo` and
+`gitlab.com/org/foo` never share one clone -- issue #10; local paths and
+`file://` URLs namespace under `~/repos/_local/<path...>`; a bare name
+keeps the old flat `~/repos/<name>` shape). Pre-#10 flat
+`~/repos/<repo>` clones are orphaned by the rename but keep working for
+existing jobs (their `job.json` records the absolute pristine path); new
+spawns re-clone into the namespaced dir. Job branches are always
 `job/<slug>`.
 
 The manager **derives** the worktree (`<jobdir>/work`) and branch

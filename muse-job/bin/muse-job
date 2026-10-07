@@ -508,11 +508,122 @@ def with_lock(slug, fn):
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
-def repo_name_from_url(url):
-    name = url.rstrip("/").split("/")[-1]
-    if name.endswith(".git"):
-        name = name[:-4]
-    return name or "repo"
+def _host_of(authority):
+    """Lowercased host from a URL authority, minus userinfo.
+
+    An explicit port stays part of the key (`host:2222`): different ports
+    on one host can serve different repositories, so dropping it would let
+    distinct upstreams share one pristine clone (issue #10). Refuses
+    fail-fast when the host is not a single path segment (issue #793).
+    """
+    auth = authority.split("@")[-1]
+    if auth.startswith("["):
+        host, _, rest = auth[1:].partition("]")  # IPv6 literal
+        port = rest[1:] if rest.startswith(":") else ""
+    else:
+        host, _, port = auth.partition(":")
+    if "/" in host:
+        # The host must be a single path segment. A '/' here means the
+        # input was not really "<host>:<path>" (e.g. a local path
+        # containing ':'), and passing it through would break the
+        # REPOS_DIR containment invariant (issue #793).
+        raise RuntimeError(f"bad repo name from url: {authority!r}")
+    host = (host or "unknown-host").lower()
+    return f"{host}:{port}" if port else host
+
+
+def pristine_name_from_url(url):
+    """Pristine clone dir, relative to REPOS_DIR, for a repo URL (issue #10).
+
+    Keys on host + full path, not the bare repo name: `org1/foo` and
+    `org2/foo` previously shared one pristine clone, so the second
+    spawn's `git fetch` pulled the wrong repo's objects into it and
+    worktrees were cut from the wrong base. Returns e.g.
+    `github.com/ntindle/spark-vm`; equivalent URLs normalize to one dir
+    (`https://github.com/o/r`, `git@github.com:o/r.git`,
+    `ssh://git@github.com/o/r` all land together -- an explicit port
+    stays in the key, so `ssh://git@github.com:22/o/r` gets its own
+    dir). Local paths and
+    `file://` URLs namespace under `_local/<path...>`; a bare name keeps
+    the old flat `<name>` shape.
+
+    The host is part of the key: `github.com/org/foo` and
+    `gitlab.com/org/foo` are different upstreams and must never share a
+    clone. The full path is kept (no last-two-segment truncation), so
+    GitLab subgroups (`host/a/sub/repo` vs `host/b/sub/repo`) stay
+    distinct too. An explicit port stays in the key (`host:2222`) --
+    different ports can serve different repos. Host case is folded (DNS
+    is case-insensitive); path case is preserved for debuggability.
+    `_local` is reserved for the local-path namespace: network hosts
+    named `_local` are refused, and empty-path URLs (`https://host`,
+    `git@host:`, `file://`) are refused rather than collapsing onto a
+    bare-name dir.
+
+    Containment: every returned component is a single URL path segment
+    (or the derived host / `_local` marker), so no component can contain
+    `/`. A `..`/`.` segment in any position is refused fail-fast before
+    any filesystem work -- this extends issue #793's last-segment gate
+    to every segment, and the derived path can never escape REPOS_DIR.
+    """
+    u = url.rstrip("/")
+    if "://" in u:
+        scheme, _, rest = u.partition("://")
+        authority, _, path = rest.partition("/")
+        if scheme.lower() == "file" or not authority:
+            # file:// URLs and scheme-relative paths: no meaningful host.
+            path_segs = [s for s in path.split("/") if s]
+            if not path_segs:
+                raise RuntimeError(f"bad repo name from url: {url!r}")
+            segs = ["_local"] + path_segs
+        else:
+            host = _host_of(authority)
+            if host == "_local" or host.startswith("_local:"):
+                # `_local` is reserved for the local-path namespace below;
+                # a network host with that name would share clone dirs
+                # with local paths (issue #10).
+                raise RuntimeError(f"bad repo name from url: {host!r}")
+            path_segs = [s for s in path.split("/") if s]
+            if not path_segs:
+                # `https://host` (empty path) would derive the flat `<host>`
+                # dir and collide with a bare-name `<host>` spawn (issue #10).
+                raise RuntimeError(f"bad repo name from url: {url!r}")
+            segs = [host] + path_segs
+    elif ":" in u:
+        # scp-like SSH syntax: [user@]host:path
+        before, _, path = u.partition(":")
+        if "/" in before:
+            # Not scp-like at all (git reads `a/b:x` as a local path):
+            # the "host" would smuggle `/` into one dir component and
+            # collide with the https://a/b/x derivation (issue #10).
+            raise RuntimeError(f"bad repo name from url: {before!r}")
+        path_segs = [s for s in path.split("/") if s]
+        if not path_segs:
+            raise RuntimeError(f"bad repo name from url: {url!r}")
+        host = _host_of(before)
+        if host == "_local" or host.startswith("_local:"):
+            # `_local` is reserved for the local-path namespace (issue #10).
+            raise RuntimeError(f"bad repo name from url: {host!r}")
+        segs = [host] + path_segs
+    else:
+        # Local path or bare name.
+        rest = [s for s in u.split("/") if s]
+        if not rest:
+            return "repo"
+        if rest == ["_local"]:
+            # A real path literally named `_local` must not collapse onto
+            # the namespace root or the empty-input fallback (issue #10).
+            segs = ["_local", "_local"]
+        else:
+            segs = (["_local"] + rest) if len(rest) > 1 else rest
+    if segs[-1].endswith(".git"):
+        segs[-1] = segs[-1][:-4]
+    segs = [s for s in segs if s]
+    if not segs:
+        return "repo"
+    for seg in segs:
+        if seg in ("..", "."):
+            raise RuntimeError(f"bad repo name from url: {seg!r}")
+    return os.path.join(*segs)
 
 
 def cmd_spawn(args):
@@ -563,16 +674,16 @@ def _spawn_prepare(slug, args, preamble, tmux_name):
         raise RuntimeError(f"prompt file missing: {prompt_file}")
 
     os.makedirs(REPOS_DIR, exist_ok=True)
-    rname = repo_name_from_url(args.repo)
-    # Issue #793: the last URL segment is attacker-influenced (copied from
-    # issues/chat). `..` would escape ~/repos (pristine = $HOME itself) and
-    # `.` would collapse to ~/repos -- both are derived-path escapes, so
-    # fail fast before any filesystem work. Deliberately NOT slug_ok():
-    # legitimate repo names may be uppercase or longer than 80 chars;
-    # `..`/`.` are the only names that escape the containment root, and
-    # every other segment stays inside it.
-    if rname in ("..", "."):
-        raise RuntimeError(f"bad repo name from url: {rname!r}")
+    # Issue #10: the pristine clone is keyed on host+full-path, not the
+    # bare last URL segment, so distinct upstreams never share one clone.
+    # pristine_name_from_url fail-fasts on `..`/`.` in any segment
+    # (issue #793's gate, extended to every segment); every derived
+    # component is a single path segment and cannot escape REPOS_DIR.
+    # Deliberately NOT slug_ok(): legitimate host/org/repo names may be
+    # uppercase or longer than 80 chars; `..`/`.` are the only names that
+    # escape the containment root, and every other segment stays inside it.
+    pristine = os.path.join(REPOS_DIR, pristine_name_from_url(args.repo))
+    os.makedirs(os.path.dirname(pristine), exist_ok=True)
     base = args.base or "origin/HEAD"
     # Issue #793: --base reaches `rev-parse` in option position (hardening,
     # not a hole: rev-parse has no command-execution options). The `--`
@@ -584,7 +695,6 @@ def _spawn_prepare(slug, args, preamble, tmux_name):
         raise RuntimeError(
             f"bad base ref: {base!r} (leading dash rejected: "
             "git option injection)")
-    pristine = os.path.join(REPOS_DIR, rname)
     if not os.path.isdir(os.path.join(pristine, ".git")):
         print(f"cloning {args.repo} -> {pristine}", flush=True, file=sys.stderr)
         # Issue #7: `--` keeps the URL out of git's option position even if
