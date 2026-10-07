@@ -126,8 +126,8 @@ never inject bytes into a live session.
 - **Malformed command-row policy (D-MAL1, 2026-10-07, #1118):** the
   pinned policy is skip-and-log for both carriers. A row that fails the
   box-side shape check — not a dict, or a missing/mistyped `seq`,
-  `kind`, `payload`, or `epoch` (the check `_ingest_command_shape`
-  performs) — is the plane's bug: it is never executed, and never
+  `kind`, or `payload`, or a mistyped `epoch` (the check
+  `_ingest_command_shape` performs) — is the plane's bug: it is never executed, and never
   acked — the row failed shaping, so the box cannot trust any of its
   fields (including its `seq`). The box logs it LOUDLY on the box's
   ingest log (stderr + `ingest.log`) — the same loud channel that
