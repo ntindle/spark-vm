@@ -15,6 +15,30 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SCRIPT = os.path.join(REPO, "deploy", "auto-deploy.sh")
 
 
+def _cred_ui_runtime_spec():
+    """cred-ui's runtime set, from the single source of truth.
+
+    `cred-ui/tests/test_cred_ui_install.py` owns `RUNTIME_FILES` (the
+    installed file names) and `REPO_SOURCES` (name -> repo-relative
+    source path). This suite consumes the same pair instead of
+    hard-coding a third copy: the runtime set has already drifted
+    twice in the loop's history (#706 added credvalidate.py, #964
+    touched the install path), and every hard-coded copy is a future
+    false failure waiting to happen. Loading by file location keeps
+    the suite runnable from the repo root without turning the test
+    directory into an importable package.
+    """
+    import importlib.util
+
+    path = os.path.join(REPO, "cred-ui", "tests", "test_cred_ui_install.py")
+    spec = importlib.util.spec_from_file_location(
+        "_cred_ui_install_runtime_spec", path
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.RUNTIME_FILES, mod.REPO_SOURCES
+
+
 def run_bash(code, env_extra=None, cwd=REPO):
     """Run bash -c code with the updater env overrides applied."""
     env = dict(os.environ)
@@ -306,12 +330,17 @@ def test_cred_ui_install_end_to_end(tmp_path):
                    "CRED_UI_TOKEN_FILE": str(tmp_path / "token")},
     )
     assert r.returncode == 0, r.stderr + r.stdout
-    for name, src in (("cred-ui.py", "cred-ui/cred-ui.py"),
-                      ("index.html", "cred-ui/index.html"),
-                      ("credvalidate.py", "credlib/credvalidate.py"),
-                      ("bounded_http.py", "scripts/bounded_http.py"),
-                      ("sparkvm_version.py", "scripts/sparkvm_version.py"),
-                      ("VERSION", "VERSION")):
+    # The runtime set lives in one place (cred-ui/tests); this suite
+    # asserts against it instead of a hard-coded third copy.
+    runtime_files, repo_sources = _cred_ui_runtime_spec()
+    # Guard the dedup: an empty runtime set would make the loop below
+    # assert nothing and the test pass on returncode alone. Do NOT pin the
+    # count here — the set's size is the install suite's business.
+    assert runtime_files, (
+        "RUNTIME_FILES from cred-ui/tests/test_cred_ui_install.py is empty "
+        "— the loop below would assert nothing")
+    for name in runtime_files:
+        src = repo_sources[name]
         got = install_dir / name
         assert got.is_file(), "install step did not write %s" % name
         want = open(os.path.join(REPO, src), "rb").read()
