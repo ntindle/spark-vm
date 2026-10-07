@@ -44,9 +44,9 @@ Acceptance is #960's S6 checklist, harness-first per the S4 contract.
 | `hello` frame handling | **Shipped — #1000 (S4b-1), PR #1055, deployed live 2026-10-05.** `BoxDO.fetch` reads the first frame as `hello`; malformed → `close`/`protocol-error`. The box side (#959 S5a, closed) sends `hello` with `(box_id, generation)` — it is now answered, not left waiting. |
 | Identity binding | **Shipped — #1000 (S4b-1), PR #1055, deployed live 2026-10-05.** The DO re-derives the handshake identity from the upgrade request's `Authorization` Bearer <redacted> per D14; the `hello` frame's `box_id` self-assertion must equal it (mismatch → `close`/`identity-mismatch` + journal). |
 | Generation fence | **Shipped — #1000 (S4b-1), PR #1055, deployed live 2026-10-05.** `last_generation` lives in DO durable storage: `hello` with `generation > last_generation` binds the new socket and closes the old one `superseded-generation`; `<= last_generation` → `close`/`stale-generation` carrying `last_generation`; every subsequent frame is generation-checked (stale → dropped + `phone_home.generation_fence` journaled). The box side (#959) already bumps a crash-safe durable generation per connect and adopts `last_generation + 1` on a stale-generation close — the plane half of that contract is now built. |
-| Re-drive | **Nothing.** The DO never reads the `commands` table and never emits `command` frames. The acked-watermark query (`SELECT MAX(seq) ... WHERE state='acked'`) and the pending/leased fetch shape exist on the Worker's HTTPS path only. |
-| Socket `command_ack` consume half | **Nothing on the plane.** The box (#976 S5b) sends `command_ack` frames with `(generation, seq, epoch)`; the DO drops them on the floor (it reads no frames at all). The HTTPS `POST /commands/ack` endpoint is the only ack path that lands. |
-| Ping / pong | **Nothing.** Neither side's keepalive is answered; the 90 s pong-timeout rule has no plane half. |
+| Re-drive | **Partially landed — the emit half is in the deployed worker checkout (in-flight #1001 S4b-2a work; the sibling feature turn is live, review not yet converged).** `_phone_home_redrive` emits `command` frames on (re)bind and on the D15 Worker→DO wakeup RPC (`/internal/commands-wakeup`, fired after `_enqueue_command`); leases stamped exactly as the HTTPS path; `phone_home.redrive` journaled; malformed rows skipped-and-logged per D-MAL1. The socket `command_ack` consume-half is still open (S4b-2b, #1001). |
+| Socket `command_ack` consume half | **Nothing on the plane.** The box (#976 S5b) sends `command_ack` frames with `(generation, seq, epoch)`; the DO ignores them as unknown frame types (they are never fenced-bypassed — the generation fence already ran). The HTTPS `POST /commands/ack` endpoint is the only ack path that lands; the socket ack UPDATE hoist is S4b-2b, still open (#1001). |
+| Ping / pong | **Pong answered in the deployed worker checkout (wire spec §4 keepalive).** The DO answers the box's `ping` with `pong` (keeps the box's 90 s watchdog from flapping the session). The 90 s pong-timeout → hibernate rule and the alarm-wake + token re-verify are still open (#1002). |
 | Alarm wake + token re-verify | **Nothing.** No alarm is set; a hibernated socket is never re-verified. The revocation-latency ceiling for a silent socket is currently unbounded — the exact hole wire spec §6's bound exists to close. |
 | Hibernation | **Not used.** S4a's `server.accept()` pins the DO in memory. The `BoxDO` docstring already names the move to `self.ctx.acceptWebSocket(server)` as S4b scope. |
 | Journal events | **Shipped — #999 (S4b-4), PR #1014, 2026-10-04.** The sink is the D1 table `phone_home_events` (D16's decision implemented, migration `migrate_958_s4b.sql`, re-run safe); owner-only read path `GET /v1/boxes/{box_id}/phone-home/events`; 90-day retention with the daily Worker cron + manual trigger `POST /v1/ops/phone_home/gc` (#1013). Wire spec §9's sink reference was corrected to this table by the same slice. |
@@ -216,7 +216,12 @@ the unknown-`type` ignore (a stale-generation frame of an unknown type
 is still fenced, not ignored). Live: the #959 box client
 completes hello/welcome against the deployed plane.
 
-**S4b-2 — command re-drive + socket ack consume half.**
+**S4b-2 — command re-drive + socket ack consume half. PARTIALLY LANDED
+(2026-10-07): the emit half is in the deployed worker checkout via
+in-flight #1001 S4b-2a work (sibling feature turn live, review pending) —
+re-drive on (re)bind + the D15 wakeup RPC, leases stamped exactly as the
+HTTPS path, `phone_home.redrive` journaled (D-MAL1 malformed-row skip);
+the socket `command_ack` consume-half (S4b-2b) is still open.**
 On (re)bind and on the D15 wakeup RPC, the DO reads the acked watermark
 (the existing `MAX(seq) ... state='acked'` query — no second cursor) and
 emits `command` frames onto **S4b-1's bound socket** (the bound-socket
@@ -262,8 +267,9 @@ item 2's plane half).
 
 **S4b-4 — journal sink + events. SHIPPED 2026-10-04 (#999, PR #1014).**
 D16's decision implemented as shipped: `phone_home_events` D1 table
-(created by `migrate_958_s4b.sql`, re-run safe), the DO's `_journal_event`
-helper as the only writer (never payloads/tokens/frames), the owner-only
+(created by `migrate_958_s4b.sql`, re-run safe), the DO's
+`_journal_phone_home_event` helper as the only writer (never
+payloads/tokens/frames), the owner-only
 read path `GET /v1/boxes/{box_id}/phone-home/events`, 90-day retention
 with the daily Worker cron + manual `POST /v1/ops/phone_home/gc` (#1013),
 and the wire spec §9 sink correction to this table.
@@ -303,5 +309,6 @@ before any deploy. #960 (S6) consumes all four: its six-item checklist
 (two-box no-cross-talk, revoke-during-socket, reconnect-resume,
 stale-generation fence, fallback honored, epoch untouched) is the
 integration gate. S4b-4 (#999) and S4b-1 (#1000) have shipped; #958 stays
-OPEN until S4b-2 (#1001) and S4b-3 (#1002) land; #847 stays OPEN until
+OPEN until S4b-2 (#1001) and S4b-3 (#1002) land (S4b-2's emit half is
+partially landed in the deployed checkout — see §2); #847 stays OPEN until
 S4b + S6.
