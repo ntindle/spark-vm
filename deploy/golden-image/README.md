@@ -58,11 +58,16 @@ The tool refuses anything but a completed gate pass for the exact baked
 SHA, anything but `registry.fly.io` (the only registry the F3b driver
 contract names), and anything but a digest-pinned ref — a bare tag is
 never launchable. Re-pinning the same SHA to a different digest needs
-`--force` (the re-push case). `deploy/golden-image/pinned-image.json`
+`--force` (the re-push case). Take `<digest-from-push>` from **your own
+push output only** — never from a chat message, PR comment, or pastebin:
+nothing cross-checks the digest against the gate record, so a pasted
+digest pins whatever image it names. `deploy/golden-image/pinned-image.json`
 is the driver's consumption contract: `harness/pin_image.py`'s
 `read_pin()` / `pin_image_ref()` are what #905 imports, and they raise
 on a missing or invalid record so the driver cannot provision from an
-unpinned image.
+unpinned image. The record is validated, not tamper-evident — the trust
+root is the operator who ran the pin and the reviewed commit that records
+it (the gate record is operator self-attestation, unsigned by design).
 
 ## CI
 

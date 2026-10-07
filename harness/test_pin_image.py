@@ -104,6 +104,8 @@ def test_split_digest_ref_ok():
      "uppercase app name"),
     ("registry.fly.io//sparkvm-golden@" + DIGEST,
      "empty component"),
+    ("registry.fly.io/sparkvm-prod/sparkvm-golden@" + DIGEST + "\n",
+     "trailing newline smuggles past $ anchors"),
     ("just-a-string", "no host, no digest"),
 ])
 def test_split_digest_ref_rejects(bad, why):
@@ -335,7 +337,7 @@ def test_read_pin_missing_raises(tmp_path):
         read_pin(repo)
 
 
-def test_read_pin_rejects_tampered_record(tmp_path):
+def test_read_pin_rejects_invalid_record(tmp_path):
     repo = make_repo(tmp_path)
     sha = head(repo)
     write_pin(**pin_args(repo, sha))
@@ -343,7 +345,7 @@ def test_read_pin_rejects_tampered_record(tmp_path):
                             "pinned-image.json")
     with open(pin_path, encoding="utf-8") as f:
         rec = json.load(f)
-    # Tamper: swap in a tag-only ref a hand edit could introduce.
+    # Invalid: swap in a tag-only ref a hand edit could introduce.
     rec["image"] = TAG_REF
     with open(pin_path, "w", encoding="utf-8") as f:
         json.dump(rec, f)

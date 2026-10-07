@@ -21,7 +21,14 @@ is fail-closed:
 
 The reader (read_pin / pin_image_ref) is what the driver imports; it raises
 PinnedImageError on a missing or invalid record so the driver cannot provision
-from an unpinned or hand-tampered ref.
+from an unpinned or malformed ref. The reader detects *malformed* records,
+not *malicious-but-well-formed* ones: pinned-image.json carries no signature,
+so the trust root is the repo itself — the operator who ran the pin and the
+reviewed commit that records it. A substituted record with a different-but-valid
+digest passes validation; the gate record is likewise operator self-attestation
+(build-image.sh emits it unsigned, the operator hand-completes
+interactive_gate), so the pin inherits that ceiling and is not cryptographic
+proof a gate ran.
 
 stdlib only. No credentials are ever read, written, or printed here — the
 operator holds the registry push credential; this tool only sees the public
@@ -45,18 +52,21 @@ REGISTRY_HOST = "registry.fly.io"
 # test in test_pin_image.py asserts both patterns accept/reject identically
 # on a fixed corpus, so this copy cannot drift silently.
 _SEMVER_RE = re.compile(
-    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"\A(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
-    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\Z"
 )
 
-_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# \A...\Z (not ^...$): Python's $ also matches before a trailing newline, so
+# "sha256:<64hex>\n" would pass a ^...$ digest grammar and hand a bad ref to
+# the Fly Machines API. The validator's contract is exact-match or nothing.
+_SHA_RE = re.compile(r"\A[0-9a-f]{40}\Z")
+_DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 # Docker repository name component: lowercase alnum, separators [._-] singly.
-_NAME_COMPONENT_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
+_NAME_COMPONENT_RE = re.compile(r"\A[a-z0-9]+(?:[._-][a-z0-9]+)*\Z")
 # Docker's strict tag grammar ([\w][\w.-]{0,127}) plus "+", which the repo's
 # own D-P1 tag convention uses (<version>+<sha12>, build-image.sh / CI).
-_TAG_RE = re.compile(r"^[\w][\w.+-]{0,127}$")
+_TAG_RE = re.compile(r"\A[\w][\w.+-]{0,127}\Z")
 
 
 class PinnedImageError(Exception):
@@ -115,6 +125,9 @@ def _split_digest_ref(image_ref):
 
     Raises PinnedImageError on any shape violation.
     """
+    if not isinstance(image_ref, str):
+        raise PinnedImageError(
+            f"image ref must be a string, got {type(image_ref).__name__}")
     if "@" not in image_ref:
         raise PinnedImageError(
             f"image ref is not digest-pinned (no @digest): {image_ref!r}")

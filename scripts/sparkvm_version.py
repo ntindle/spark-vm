@@ -16,10 +16,13 @@ import os
 import re
 import sys
 
+# \A...\Z (not ^...$): $ also matches before a trailing newline; the pinned-image
+# drift test (harness/test_pin_image.py) requires this copy to stay identical to
+# harness/pin_image.py's grammar.
 _SEMVER_RE = re.compile(
-    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"\A(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
-    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\Z"
 )
 
 UNKNOWN = "0.0.0-unknown"
