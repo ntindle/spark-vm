@@ -33,7 +33,7 @@ PS = pi.ProviderState
 
 
 def make_spec(**kw):
-    args = {"tenant_id": "t-1", "image_version": "deadbeef"}
+    args = {"tenant_id": "t-1", "claim_id": "c-1", "image_version": "deadbeef"}
     args.update(kw)
     return pi.ProvisionSpec(**args)
 
@@ -186,10 +186,20 @@ def test_suspend_only_on_running():
 class FakeDriver:
     """In-memory driver implementing ProviderDriver. The fake honors the
     contract's transition table on every state change (a driver that
-    reports an illegal transition is a contract violation)."""
+    reports an illegal transition is a contract violation).
 
-    def __init__(self, capabilities=None):
-        self.boxes = {}
+    The fake also honors the D-O1 dedupe contract: provision() returns the
+    existing box for a repeated idempotency key, and the key->vm_id map
+    rides the shared `store` dict — the fake's stand-in for provider-side
+    machine metadata. Two FakeDriver instances sharing one store simulate
+    a driver process restart: the second instance rebuilds the map by
+    listing, exactly as the contract requires."""
+
+    def __init__(self, capabilities=None, store=None):
+        self.store = store if store is not None else {}
+        # Rebuild the live view from the provider-side store (fresh process
+        # sees everything the previous one persisted).
+        self.boxes = {vm_id: dict(rec) for vm_id, rec in self.store.items()}
         self.capabilities = capabilities or pi.ProviderCapabilities(
             supports_suspend=True,
             memory_resume=pi.MemoryResume.COLD_ONLY,  # Fly reference shape
@@ -200,10 +210,16 @@ class FakeDriver:
         self.stall_wake = False
         self.woke = set()  # vm_ids whose last RUNNING came from a wake
 
+    def _persist(self, vm_id):
+        # Write-through: the store is the provider-side truth a restarted
+        # driver rebuilds from, so every mutation lands there.
+        self.store[vm_id] = dict(self.boxes[vm_id])
+
     def _set(self, vm_id, new):
         old = self.boxes[vm_id]["state"]
         pi.check_transition(old, new)
         self.boxes[vm_id]["state"] = new
+        self._persist(vm_id)
 
     def _retention_for(self, vm_id):
         """The contract: retention set for every non-running state (C15)."""
@@ -224,15 +240,29 @@ class FakeDriver:
                                    "timeout_s must be positive")
 
     def provision(self, spec):
-        vm_id = f"vm-{spec.tenant_id}"
-        self.boxes[vm_id] = {"state": PS.PROVISIONING, "spec": spec}
+        # D-O1 dedupe: a retry of the same idempotency key returns the
+        # existing box — never a second box, never an error. Destroyed
+        # boxes are not returned: a same-key provision after destroy is a
+        # fresh provision (the orchestrator only reuses a key for a retry,
+        # never across a supersede — that increments attempt_n).
+        key = spec.idempotency_key
+        for vm_id, box in self.boxes.items():
+            old_spec = box.get("spec")
+            if (box["state"] is not PS.DESTROYED and old_spec is not None
+                    and old_spec.idempotency_key == key):
+                return box["result"]
+        vm_id = f"vm-{spec.tenant_id}-{spec.claim_id}-a{spec.attempt_n}"
+        result = pi.ProvisionResult(
+            vm_id=vm_id, mgmt_endpoint="mgmt.example.invalid",
+            capabilities=self.capabilities)
+        self.boxes[vm_id] = {"state": PS.PROVISIONING, "spec": spec,
+                             "result": result}
+        self._persist(vm_id)
         # A re-provisioned box has no wake history (Engineering round 2 B1:
         # vm_ids are deterministic, so stale wake_kind would otherwise leak
         # across the destroy/re-provision boundary).
         self.woke.discard(vm_id)
-        return pi.ProvisionResult(
-            vm_id=vm_id, mgmt_endpoint="mgmt.example.invalid",
-            capabilities=self.capabilities)
+        return result
 
     def status(self, vm_id):
         st = self.boxes[vm_id]["state"]
@@ -307,7 +337,25 @@ class FakeDriver:
         # history with the box (Engineering round 2 B1).
         if vm_id in self.boxes:
             self.boxes[vm_id]["state"] = PS.DESTROYED
+            self._persist(vm_id)
         self.woke.discard(vm_id)
+
+    def list_boxes(self):
+        # D-O1: the provider-side listing the orchestrator's startup
+        # reconcile matches against. Destroyed boxes no longer exist on the
+        # provider, so they are not listed. A record with spec None is a
+        # pre-D-O1 box (provider metadata without the claim-bound key) —
+        # it lists with idempotency_key None rather than raising or
+        # inventing a key, so the reconcile can ignore it honestly.
+        out = []
+        for vm_id, box in self.boxes.items():
+            if box["state"] is PS.DESTROYED:
+                continue
+            spec = box.get("spec")
+            key = spec.idempotency_key if spec is not None else None
+            out.append(pi.BoxIdentity(vm_id=vm_id, idempotency_key=key,
+                                      state=box["state"]))
+        return out
 
     def attest_network_isolation(self, vm_id):
         return pi.NetworkAttestation(public_ingress_observed=False)
@@ -614,3 +662,146 @@ def test_nonpositive_timeout_rejected():
         with pytest.raises(pi.ProviderError) as exc:
             d.dial(res.vm_id, timeout_s=bad)
         assert exc.value.kind == pi.ErrorKind.INVALID_ARGUMENT
+
+
+# ---------------------------------------------------------------------------
+# Claim binding: the idempotency key (D-O1, #1107)
+# ---------------------------------------------------------------------------
+
+def test_claim_id_required():
+    # Like tenant_id: absent -> rejected at construction (TypeError for the
+    # missing positional, ValueError for the present-but-empty string).
+    with pytest.raises(TypeError):
+        pi.ProvisionSpec(tenant_id="t-1")
+    with pytest.raises(ValueError):
+        make_spec(claim_id="")
+
+
+def test_attempt_n_must_be_positive():
+    assert make_spec().attempt_n == 1  # first attempt is the default
+    for bad in (0, -1):
+        with pytest.raises(ValueError):
+            make_spec(attempt_n=bad)
+
+
+def test_idempotency_key_shape():
+    # The key is the full (tenant_id, claim_id, attempt_n) triple — the
+    # attempt is load-bearing: D-O3's re-provision writes attempt_n with a
+    # fresh pairing token, so a claim-scoped key would hand back attempt
+    # 1's box (whose env holds the superseded token) for attempt n.
+    assert make_spec().idempotency_key == ("t-1", "c-1", 1)
+    assert make_spec(attempt_n=3).idempotency_key == ("t-1", "c-1", 3)
+    assert (make_spec(claim_id="c-2").idempotency_key
+            != make_spec(claim_id="c-1").idempotency_key)
+
+
+def test_provision_dedupe_same_attempt_returns_existing():
+    # D-O1: retry of the same attempt returns the existing box — never a
+    # second box, never an error (the crash window between provision() and
+    # the orchestrator recording the result).
+    d = FakeDriver()
+    spec = make_spec()
+    first = d.provision(spec)
+    second = d.provision(make_spec())  # rebuilt spec, same key
+    assert second.vm_id == first.vm_id
+    assert second.mgmt_endpoint == first.mgmt_endpoint
+    assert second is first  # dedupe returns the EXISTING result object —
+    # without the dedupe branch the fake would build a second result
+    # (same deterministic vm_id, same dict key), and this fails.
+    assert len(d.list_boxes()) == 1
+
+
+def test_provision_new_attempt_new_box():
+    # A new attempt_n is a different key -> a different box (D-O3's
+    # re-provision with a fresh attestation token).
+    d = FakeDriver()
+    first = d.provision(make_spec())
+    second = d.provision(make_spec(attempt_n=2))
+    assert second.vm_id != first.vm_id
+    assert len(d.list_boxes()) == 2
+
+
+def test_provision_dedupe_survives_driver_restart():
+    # The key->vm_id map must survive driver restarts: the key rides
+    # provider-side metadata, and a fresh driver process rebuilds the map
+    # by listing. Two FakeDriver instances over one store simulate the
+    # restart; the retry must still dedupe to the one existing box.
+    store = {}
+    d1 = FakeDriver(store=store)
+    spec = make_spec(claim_id="c-restart")
+    first = d1.provision(spec)
+    # A second, fresh driver process sees the provider-side store.
+    d2 = FakeDriver(store=store)
+    listed = d2.list_boxes()
+    assert [b.vm_id for b in listed] == [first.vm_id]
+    assert listed[0].idempotency_key == spec.idempotency_key
+    assert listed[0].state == PS.PROVISIONING
+    second = d2.provision(make_spec(claim_id="c-restart"))
+    assert second.vm_id == first.vm_id
+    assert second is first  # the retry deduped to the pre-restart result —
+    # without the dedupe branch the fresh driver would build a second
+    # result object for the same key, and this fails.
+    assert len(d2.list_boxes()) == 1  # still exactly one box for the claim
+
+
+def test_list_boxes_hides_destroyed():
+    d = FakeDriver()
+    ra = d.provision(make_spec(claim_id="c-a"))
+    rb = d.provision(make_spec(claim_id="c-b"))
+    assert {box.vm_id for box in d.list_boxes()} == {ra.vm_id, rb.vm_id}
+    d.destroy(ra.vm_id)
+    remaining = d.list_boxes()
+    assert [box.vm_id for box in remaining] == [rb.vm_id]
+    assert remaining[0].idempotency_key == ("t-1", "c-b", 1)
+
+
+def test_provision_after_destroy_same_key_creates_fresh():
+    # Destroyed boxes are not returned by dedupe: a same-key provision
+    # after destroy is a fresh provision (deterministic vm_id, no wake
+    # history, back in PROVISIONING).
+    d = FakeDriver()
+    spec = make_spec(claim_id="c-reprov")
+    first = d.provision(spec)
+    d._set(first.vm_id, PS.RUNNING)
+    d.destroy(first.vm_id)
+    second = d.provision(make_spec(claim_id="c-reprov"))
+    assert second.vm_id == first.vm_id
+    assert d.status(second.vm_id).state == PS.PROVISIONING
+    assert len(d.list_boxes()) == 1
+
+
+def test_list_boxes_surfaces_pre_d01_box_with_none_key():
+    # BoxIdentity's contract: a box that predates the D-O1 regime lists
+    # with idempotency_key None — never raising, never an invented key.
+    # A store record with spec None stands in for provider metadata that
+    # carries no claim-bound key (what a real driver reads from a machine
+    # created before the key existed).
+    d = FakeDriver(store={"vm-old": {"state": PS.RUNNING, "spec": None,
+                                     "result": None}})
+    listed = d.list_boxes()
+    assert len(listed) == 1
+    assert listed[0].vm_id == "vm-old"
+    assert listed[0].idempotency_key is None
+    assert listed[0].state == PS.RUNNING
+    # And a legacy box never dedupes against a claim-bound retry: a
+    # provision with any key creates a fresh box rather than returning it.
+    res = d.provision(make_spec(claim_id="c-new"))
+    assert res.vm_id != "vm-old"
+    assert len(d.list_boxes()) == 2
+
+
+def test_list_boxes_unsupported_default():
+    # Explicit subclasses inherit the loud default (evolution policy:
+    # never a silent empty list from a driver that cannot list).
+    class BareDriver(pi.ProviderDriver):
+        def provision(self, spec): ...
+        def status(self, vm_id): ...
+        def suspend(self, vm_id, timeout_s=120.0): ...
+        def dial(self, vm_id, timeout_s=300.0): ...
+        def ssh_info(self, vm_id): ...
+        def destroy(self, vm_id): ...
+        def attest_network_isolation(self, vm_id): ...
+
+    with pytest.raises(pi.ProviderError) as exc:
+        BareDriver().list_boxes()
+    assert exc.value.kind == pi.ErrorKind.UNSUPPORTED
