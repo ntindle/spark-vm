@@ -468,6 +468,14 @@ def tmux_alive(slug):
     return p.returncode == 0
 
 
+class _PhaseConcurrencyDeferred(Exception):
+    """Auto-resume deferred by the one-phase-job-at-a-time rule (issue #804).
+
+    Distinct from RuntimeError so the watchdog can emit `deferred` (retry
+    on a later pass) rather than `needs-attention` for this transient.
+    """
+
+
 def _phase_concurrency_bars_resume(slug):
     """True when auto-resuming `slug` would break the one-phase-job-at-a-time rule.
 
@@ -481,11 +489,11 @@ def _phase_concurrency_bars_resume(slug):
     phase-* job has a live tmux session, OSError on the job-dir scan fails
     open (pre-hot-patch behavior).
 
-    Check-then-act race (QA note): a sibling starting between this check
-    and cmd_resume can transiently over-admit; the sibling-dying direction
-    self-heals on the next pass. Narrow window, single-cron reality, and
-    the hot-patch this matches had the same shape -- re-checking inside
-    cmd_resume is follow-up material, not this fix.
+    Check-then-act race (issue #1131): a sibling starting between this
+    check and cmd_resume can transiently over-admit; the sibling-dying
+    direction self-heals on the next pass. cmd_resume re-checks the bar
+    itself on the `_from_watch` auto-recovery path, so the window is only
+    the re-check-to-new-session gap.
     """
     if not slug.startswith("phase-"):
         return False
@@ -2781,6 +2789,15 @@ def cmd_resume(args, _from_watch=False):
             f"recorded session uuid {uuid!r} is not bound to this job's "
             f"workdir {work!r} in the hook registry -- possible job.json "
             "tampering; refusing resume")
+    if _from_watch and _phase_concurrency_bars_resume(args.slug):
+        # Issue #1131: close the check-then-act race -- a sibling phase-*
+        # job may have gone live between the watch's bar check and this
+        # resume. Defer (the next watch pass retries) instead of
+        # over-admitting. Manual resume (_from_watch=False) stays a
+        # deliberate bypass by design.
+        raise _PhaseConcurrencyDeferred(
+            f"phase-* sibling went live between the watch check and resume; "
+            f"deferring auto-resume of {args.slug} (one-at-a-time rule)")
     run("tmux", "new-session", "-d", "-s", f"mjob-{args.slug}", "-x", "220", "-y", "60",
         "-c", work)
     run("tmux", "send-keys", "-t", f"mjob-{args.slug}",
@@ -2975,6 +2992,13 @@ def cmd_watch(args):
                 cmd_resume(argparse.Namespace(slug=slug), _from_watch=True)
                 events.append({"job": slug, "signal": "recovered",
                                "detail": "tmux was dead; resumed session"})
+            except _PhaseConcurrencyDeferred as e:
+                # Issue #1131: the re-check inside cmd_resume fired -- a
+                # sibling went live in the check-then-act window. Same
+                # `deferred` signal as the pre-check above; the next watch
+                # pass retries.
+                events.append({"job": slug, "signal": "deferred",
+                               "detail": f"tmux dead; auto-resume deferred — {e}"})
             except Exception as e:
                 events.append({"job": slug, "signal": "needs-attention",
                                "detail": f"tmux dead and resume failed: {e}"})

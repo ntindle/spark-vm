@@ -210,3 +210,72 @@ def test_watch_two_dead_phase_jobs_serialize(cli, monkeypatch, capsys):
     assert by_job["phase-a"]["signal"] == "recovered"
     assert by_job["phase-b"]["signal"] == "deferred"
     assert resumed == ["phase-a"]
+
+
+# --- issue #1131: re-check inside cmd_resume ---------------------------------
+
+def _resume_fakes(cli, monkeypatch, live_slugs):
+    # Drive cmd_resume's tmux path to the re-check without touching tmux.
+    monkeypatch.setattr(cli, "tmux_alive", lambda s: s in live_slugs)
+    monkeypatch.setattr(cli, "trusted_job_paths",
+                        lambda s, j: ("/tmp/w", "/repos/x", "job/s"))
+    monkeypatch.setattr(cli, "session_bound_to_workdir", lambda u, w: True)
+    ran = []
+    monkeypatch.setattr(cli, "run",
+                        lambda *a, **k: ran.append(a) or
+                        __import__("types").SimpleNamespace(stdout=b"pane"))
+    return ran
+
+
+def test_cmd_resume_rechecks_bar_on_watch_path(cli, monkeypatch):
+    # Issue #1131: the watch's bar check passed, then a sibling phase-*
+    # job went live before cmd_resume ran. The re-check defers instead of
+    # over-admitting, and no tmux session is created.
+    _make_job(cli, "phase-dead", session_uuid="uuid-1")
+    _bare_dir(cli, "phase-live")
+    ran = _resume_fakes(cli, monkeypatch, live_slugs=("phase-live",))
+    with pytest.raises(cli._PhaseConcurrencyDeferred):
+        cli.cmd_resume(argparse.Namespace(slug="phase-dead"), _from_watch=True)
+    assert ran == []
+
+
+def test_cmd_resume_manual_bypass_unaffected(cli, monkeypatch, capsys):
+    # The manual escape hatch is by design: _from_watch=False never hits
+    # the re-check, even with a live sibling.
+    _make_job(cli, "phase-dead", session_uuid="uuid-1")
+    _bare_dir(cli, "phase-live")
+    ran = _resume_fakes(cli, monkeypatch, live_slugs=("phase-live",))
+    monkeypatch.setattr(cli, "_answer_trust_prompt", lambda s: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    rc = cli.cmd_resume(argparse.Namespace(slug="phase-dead"), _from_watch=False)
+    assert rc == 0
+    assert ran and ran[0][:2] == ("tmux", "new-session")
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["resumed"] == "uuid-1"
+
+
+def test_cmd_resume_watch_path_recovers_when_unbarred(cli, monkeypatch, capsys):
+    # No live sibling at re-check time: the resume proceeds normally.
+    _make_job(cli, "phase-dead", session_uuid="uuid-1")
+    ran = _resume_fakes(cli, monkeypatch, live_slugs=())
+    monkeypatch.setattr(cli, "_answer_trust_prompt", lambda s: None)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    rc = cli.cmd_resume(argparse.Namespace(slug="phase-dead"), _from_watch=True)
+    assert rc == 0
+    assert ran and ran[0][:2] == ("tmux", "new-session")
+
+
+def test_watch_maps_recheck_deferral_to_deferred_signal(cli, monkeypatch, capsys):
+    # The watch's pre-check passed; cmd_resume's re-check fired. The watch
+    # emits `deferred` (retry on a later pass), not `needs-attention`.
+    _make_job(cli, "phase-dead")
+    _dead_tmux_watch(cli, monkeypatch, live_slugs=())
+
+    def boom(a, **k):
+        raise cli._PhaseConcurrencyDeferred("race fired")
+
+    monkeypatch.setattr(cli, "cmd_resume", boom)
+    events = _watch_events(cli, capsys)
+    by_job = {e["job"]: e for e in events}
+    assert by_job["phase-dead"]["signal"] == "deferred"
+    assert "race fired" in by_job["phase-dead"]["detail"]
