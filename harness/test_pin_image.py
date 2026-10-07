@@ -112,7 +112,7 @@ def test_split_digest_ref_rejects(bad, why):
 
 
 def test_validate_tag_ref_ok():
-    repo_path, tag = validate_tag_ref(TAG_REF, DIGEST)
+    repo_path, tag = validate_tag_ref(TAG_REF, IMAGE_REF)
     assert repo_path == "sparkvm-prod/sparkvm-golden"
     assert tag == "0.6.0+abcdef123456"
 
@@ -121,10 +121,18 @@ def test_validate_tag_ref_ok():
     "registry.fly.io/sparkvm-prod/sparkvm-golden@" + DIGEST,  # digest form
     "ghcr.io/sparkvm-prod/sparkvm-golden:0.6.0",  # wrong host
     "registry.fly.io/sparkvm-prod/sparkvm-golden:not a tag",  # spaces
+    "registry.fly.io/other-app/sparkvm-golden:0.6.0",  # mismatched app
+    "registry.fly.io/sparkvm-prod/other-image:0.6.0",  # mismatched image
+    "registry.fly.io/sparkvm-prod:0.6.0",  # single path component
 ])
 def test_validate_tag_ref_rejects(bad):
     with pytest.raises(PinnedImageError):
-        validate_tag_ref(bad, DIGEST)
+        validate_tag_ref(bad, IMAGE_REF)
+
+
+def test_validate_tag_ref_rejects_non_string():
+    with pytest.raises(PinnedImageError):
+        validate_tag_ref(123, IMAGE_REF)
 
 
 # --- record validation -----------------------------------------------------
@@ -162,6 +170,11 @@ def test_validate_record_tag_optional():
     lambda r: r.update(pinned_at="not-a-date"),
     lambda r: r.update(pinned_by="  "),
     lambda r: r.pop("pinned_by"),
+    lambda r: r.update(image=123),  # tampered: non-string image
+    lambda r: r.update(tag=123),  # tampered: non-string tag
+    lambda r: r.update(sparkvm_sha=123),  # tampered: non-string sha
+    lambda r: r.update(sparkvm_version=123),  # tampered: non-string version
+    lambda r: r.update(image=None),  # null image: not silently missing
 ])
 def test_validate_record_rejects(mutate):
     rec = valid_record()
@@ -245,6 +258,21 @@ def test_write_pin_refuses_gate_for_other_sha(tmp_path):
     with pytest.raises(PinnedImageError, match="exactly the image"):
         write_pin(**pin_args(repo, sha, gate_record=gate_record(
             repo, "b" * 40)))
+
+
+def test_write_pin_refuses_non_dict_interactive_gate(tmp_path):
+    repo = make_repo(tmp_path)
+    sha = head(repo)
+    path = gate_record(repo, sha)
+    with open(path, encoding="utf-8") as f:
+        rec = json.load(f)
+    # Tamper: interactive_gate as a bare string must raise PinnedImageError,
+    # not an AttributeError escaping the fail-closed contract.
+    rec["interactive_gate"] = "complete"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rec, f)
+    with pytest.raises(PinnedImageError, match="must be an object"):
+        write_pin(**pin_args(repo, sha, gate_record=path))
 
 
 def test_write_pin_refuses_wrong_registry(tmp_path):

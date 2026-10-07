@@ -139,27 +139,35 @@ def _split_digest_ref(image_ref):
     return host, repo, digest
 
 
-def validate_tag_ref(tag_ref, digest):
-    """Validate the human tag ref; the tag must name the same digest image.
+def validate_tag_ref(tag_ref, image_ref):
+    """Validate the human tag ref against the digest-pinned image ref.
 
     We cannot query the registry (no creds here), so the check is structural:
-    same host, same repo path as the digest-pinned ref, well-formed tag.
+    same host AND same repo path as the digest-pinned ref, well-formed tag.
+    A tag naming a different app or image would mislabel what actually boots —
+    the recorded handle must name the digest image, not just any image on the
+    same registry.
     """
+    if not isinstance(tag_ref, str):
+        raise PinnedImageError(
+            f"tag ref must be a string, got {type(tag_ref).__name__}")
+    host, repo, _digest = _split_digest_ref(image_ref)
     if ":" not in tag_ref or "@" in tag_ref:
         raise PinnedImageError(
             f"tag ref must be <host>/<repo>:<tag>: {tag_ref!r}")
     repo_part, _, tag = tag_ref.rpartition(":")
-    host, sep, repo = repo_part.partition("/")
-    if not sep or host != REGISTRY_HOST:
+    t_host, sep, t_repo = repo_part.partition("/")
+    if not sep or t_host != REGISTRY_HOST:
         raise PinnedImageError(
             f"tag ref must use the F3b contract host {REGISTRY_HOST!r}: "
             f"{tag_ref!r}")
+    if t_repo != repo:
+        raise PinnedImageError(
+            f"tag ref repo path {t_repo!r} does not match the digest-pinned "
+            f"ref's repo path {repo!r} — the human handle must name the "
+            f"image that actually boots, not another app's image")
     if not _TAG_RE.match(tag):
         raise PinnedImageError(f"malformed image tag: {tag!r}")
-    # The digest is bound to the digest-pinned ref; the tag ref rides along
-    # as the human handle the operator pushed under. digest is unused here
-    # beyond the signature — the binding is documented, not checkable offline.
-    _ = digest
     return repo, tag
 
 
@@ -174,6 +182,18 @@ def validate_record(rec):
                   "pinned_by"):
         if not rec.get(field):
             raise PinnedImageError(f"pinned-image record missing {field!r}")
+    # The record is the deploy-trust anchor: every field the driver codes
+    # against must be a string. Without these guards a tampered record
+    # (e.g. "image": 123) escapes as TypeError/AttributeError instead of the
+    # PinnedImageError the driver's `except PinnedImageError` contract
+    # expects — the clean fail-closed refusal becomes an unhandled
+    # exception in the provision path.
+    for field in ("image", "tag", "sparkvm_sha", "sparkvm_version"):
+        value = rec.get(field)
+        if value is not None and not isinstance(value, str):
+            raise PinnedImageError(
+                f"pinned-image record field {field!r} must be a string, "
+                f"got {type(value).__name__}")
     _split_digest_ref(rec["image"])
     if not _SHA_RE.match(rec["sparkvm_sha"]):
         raise PinnedImageError(
@@ -184,8 +204,7 @@ def validate_record(rec):
             f"sparkvm_version is not valid semver: "
             f"{rec['sparkvm_version']!r}")
     if rec.get("tag"):
-        digest = rec["image"].partition("@")[2]
-        validate_tag_ref(rec["tag"], digest)
+        validate_tag_ref(rec["tag"], rec["image"])
     if not isinstance(rec.get("pinned_by"), str) or \
             not rec["pinned_by"].strip():
         raise PinnedImageError("pinned_by must be a non-empty operator name")
@@ -216,7 +235,13 @@ def _check_gate_record(gate, sha, gate_label):
             f"gate record {gate_label} names image_version "
             f"{gate.get('image_version')!r}, not the pinned tree {sha!r} — "
             "the gate must cover exactly the image being pinned")
-    interactive = gate.get("interactive_gate") or {}
+    interactive = gate.get("interactive_gate")
+    if not isinstance(interactive, dict):
+        raise PinnedImageError(
+            f"gate record {gate_label} interactive_gate must be an object, "
+            f"got {type(interactive).__name__} — an image without a completed "
+            "gate record does not publish, and an unpublished image does not "
+            "pin")
     if interactive.get("status") != "complete" or \
             interactive.get("verdict") != "pass":
         raise PinnedImageError(
@@ -246,9 +271,8 @@ def write_pin(repo=None, image_ref=None, tag_ref=None, gate_record=None,
     version = _tree_version(repo)
 
     _split_digest_ref(image_ref)
-    digest = image_ref.partition("@")[2]
     if tag_ref:
-        validate_tag_ref(tag_ref, digest)
+        validate_tag_ref(tag_ref, image_ref)
 
     if gate_record is None:
         gate_record = os.path.join(repo, f"gate-record-{sha[:12]}.json")
