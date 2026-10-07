@@ -237,7 +237,17 @@ class ProvisionSpec:
     load-bearing in the key: D-O3's re-provision writes `attempt_n` with a
     fresh pairing token, and a claim-scoped key would return attempt 1's
     box (whose env holds the now-superseded token) for attempt n's
-    provision — a box that could never auto-pair."""
+    provision — a box that could never auto-pair.
+
+    The key material is canonical-typed: `tenant_id`/`claim_id` must be
+    non-blank, unpadded strings and `attempt_n` an exact `int` (no `bool`,
+    no `float`, no `str`). The key rides provider-side metadata that a
+    fresh driver process reconstitutes by listing; non-canonical types
+    serialize differently across that boundary (`True`/`1.0`/`"1"` vs `1`),
+    silently splitting the key space, defeating dedupe, and
+    double-provisioning (double spend) on retry. `BoxIdentity` enforces the
+    same canonical shape on the reconstituted record, so a driver read-path
+    bug fails loud at list time instead of defeating dedupe silently."""
 
     tenant_id: str
     claim_id: str
@@ -266,10 +276,28 @@ class ProvisionSpec:
                 "public_ingress=True violates the H3 §6 network invariant: "
                 "drivers MUST NOT expose any public inbound path to the VM"
             )
-        if not self.tenant_id:
-            raise ValueError("tenant_id is required")
-        if not self.claim_id:
-            raise ValueError("claim_id is required")
+        for name, value in (("tenant_id", self.tenant_id),
+                           ("claim_id", self.claim_id)):
+            # Same canonical-type argument as attempt_n below: both ride the
+            # idempotency key across the metadata boundary, so they must be
+            # real strings — non-blank and unpadded, so " c-1 " can't sit
+            # in the key space as a distinct-looking shadow of "c-1".
+            if type(value) is not str or not value or value != value.strip():
+                raise ValueError(
+                    f"{name} is required and must be a non-blank, "
+                    f"unpadded str, got {value!r}"
+                )
+        # Canonical-type gate: the idempotency key rides provider-side
+        # metadata, so a fresh driver process rebuilds the dedupe map by
+        # listing. attempt_n=True (== 1 in-process), 1.0, or "1" all
+        # serialize differently from the int 1 across that boundary —
+        # silently splitting the key space and breaking dedupe, which is
+        # how a retry provisions (and bills) a second box. Fail closed.
+        if type(self.attempt_n) is not int:
+            raise ValueError(
+                "attempt_n must be an int, "
+                f"got {type(self.attempt_n).__name__}"
+            )
         if self.attempt_n < 1:
             raise ValueError(
                 f"attempt_n must be >= 1, got {self.attempt_n}"
@@ -357,11 +385,33 @@ class BoxIdentity:
     (provisioned without a claim-bound key); the reconcile ignores those
     for claim matching — it must never invent a key for a box that lacks
     one. Destroyed boxes are not listed: they no longer exist on the
-    provider."""
+    provider.
+
+    The key is canonical-typed, same as `ProvisionSpec`'s: drivers
+    reconstitute this record from provider-side metadata (whose values
+    are strings), so a read path that forgets to `int()`-parse
+    `attempt_n` would otherwise build a key that never equals the spec's
+    — defeating dedupe silently on every retry. Fail loud here instead."""
 
     vm_id: str
     idempotency_key: tuple[str, str, int] | None
     state: ProviderState
+
+    def __post_init__(self) -> None:
+        key = self.idempotency_key
+        if key is None:
+            return  # pre-D-O1 box; the reconcile never claim-matches it
+        if (type(key) is not tuple or len(key) != 3
+                or type(key[0]) is not str or not key[0]
+                or key[0] != key[0].strip()
+                or type(key[1]) is not str or not key[1]
+                or key[1] != key[1].strip()
+                or type(key[2]) is not int):
+            raise ValueError(
+                "idempotency_key must be None or a "
+                "(non-blank unpadded str, non-blank unpadded str, int) "
+                f"triple, got {key!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
