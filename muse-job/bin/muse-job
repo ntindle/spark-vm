@@ -3748,10 +3748,10 @@ def _supervisor_launch(slug):
     """Launch the detached supervisor; wait for its first heartbeat.
 
     Detached: new session, stdio severed (own log file), cwd /tmp.
-    `~/.local/bin` is prepended to the child's PATH (the 2026-10-06 deploy
-    lesson: the detached supervisor must not depend on the parent's
-    environment). MUSE_NO_AUTO_UPDATE=1 is inherited from this process
-    (set by `_msp_host_for`). Returns the supervisor pid.
+    `~/.local/bin` is prepended to the child's PATH and
+    MUSE_NO_AUTO_UPDATE=1 is stamped on the child's env explicitly (the
+    2026-10-06 deploy lesson: the detached supervisor must not depend on
+    the parent's environment). Returns the supervisor pid.
     """
     paths = _supervisor_paths(slug)
     try:
