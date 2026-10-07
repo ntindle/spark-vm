@@ -648,6 +648,14 @@ Record, alongside the image's manifest, one gate record per image:
 - **baked-secrets scans**: the Step 0b and Step 5b exit codes, targets,
   and hit counts (a skipped scan is recorded as skipped — the record is
   what makes a skipped step visible at audit time)
+- **push-produced image digest**: after the push, `build.image_digest`
+  is stamped via
+  `deploy/golden-image/build-image.sh --record-pushed-digest <gate-record> <image-ref>`
+  (the digest is resolved from the registry through the local docker
+  daemon's RepoDigests — never pasted from push output by hand, which is
+  the advisory-D hazard; a later pin_image.py slice cross-checks
+  `--image-ref` against this value). Null until published — an unpushed
+  image has no RepoDigests, and the skeleton honestly says so.
 - the §6 item-6 interface-gap note (while unlanded: "round trip
   exercised through confirmd directly; pending-signal interface not yet
   shipped") and the activation-script gap note (while unlanded: "task

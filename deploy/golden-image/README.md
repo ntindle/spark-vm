@@ -41,7 +41,21 @@ completed gate record does not publish.
 
 Pushing the image is not enough — the #905 Fly driver consumes a
 **digest-pinned ref** (docs/FLY_DRIVER_RESEARCH.md §F3b), and nothing in
-the push names it. After the gate passes and the push completes:
+the push names it. After the gate passes and the push completes, first
+record the push-produced digest in the gate record (#1111):
+
+```bash
+# From a clean checkout at the pinned commit, after `docker push`:
+deploy/golden-image/build-image.sh --record-pushed-digest \
+  gate-record-<sha12>.json \
+  registry.fly.io/<app>/sparkvm-golden:<tag-you-pushed>
+```
+
+The digest is resolved from the registry through the local docker daemon
+(RepoDigests) — never pasted from push output by hand. The record is
+write-once (a different digest refuses unless `--force` names the re-push
+case), idempotent on re-runs, and refuses a skeleton, a refused gate, or
+a record naming another build's `image_version`. Then pin:
 
 ```bash
 # From a clean checkout at the pinned commit:
@@ -60,8 +74,9 @@ contract names), and anything but a digest-pinned ref — a bare tag is
 never launchable. Re-pinning the same SHA to a different digest needs
 `--force` (the re-push case). Take `<digest-from-push>` from **your own
 push output only** — never from a chat message, PR comment, or pastebin:
-nothing cross-checks the digest against the gate record, so a pasted
-digest pins whatever image it names. `deploy/golden-image/pinned-image.json`
+the pin does not yet cross-check the digest against the gate record's
+`build.image_digest` (that is a later slice), so a pasted digest still
+pins whatever image it names. `deploy/golden-image/pinned-image.json`
 is the driver's consumption contract: `harness/pin_image.py`'s
 `read_pin()` / `pin_image_ref()` are what #905 imports, and they raise
 on a missing or invalid record so the driver cannot provision from an

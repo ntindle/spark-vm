@@ -373,9 +373,168 @@ def test_gate_record_skeleton_schema(tmp_path):
     assert record["interactive_gate"]["verdict"] == "not-run"
     assert record["interactive_gate"]["status"] == "pending"
     assert record["interface_gaps"], "the record must name its open interfaces"
+    # #1111: the skeleton honestly marks the unpushed state — the digest is
+    # stamped at publish time, never at emit time.
+    assert record["build"]["image_digest"] is None
     # the sibling manifest generated alongside must preflight (the driver
     # already ran check-image-manifest.sh; this pins the sibling naming)
     assert os.path.isfile(str(out).replace(".json", ".manifest.json"))
+
+
+# --- publish-step digest recording (#1111) -----------------------------------------
+
+
+def _fake_docker_bin(tmp_path):
+    """A hermetic docker(1): `inspect` prints the RepoDigest canned in
+    FAKE_REPODIGEST (empty = the daemon never resolved the ref)."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "docker").write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "inspect" ]; then\n'
+        '  printf "%s\\n" "$FAKE_REPODIGEST"\n'
+        "  exit 0\n"
+        "fi\n"
+        'echo "fake docker: unexpected args: $*" >&2\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    os.chmod(bindir / "docker", 0o755)
+    return bindir
+
+
+def _run_record(tmp_path, repo, repodigest, record_path, image_ref, *extra):
+    """Run build-image.sh --record-pushed-digest with a fake docker on PATH."""
+    bindir = _fake_docker_bin(tmp_path)
+    env = dict(
+        os.environ,
+        REPO_OVERRIDE=str(repo),
+        PATH=str(bindir) + os.pathsep + os.environ["PATH"],
+        FAKE_REPODIGEST=repodigest,
+    )
+    return subprocess.run(
+        ["bash", BUILD_IMAGE, "--record-pushed-digest", str(record_path),
+         image_ref, *extra],
+        capture_output=True, text=True, env=env, timeout=120,
+    )
+
+
+def _emit_completed_gate(tmp_path):
+    """A scratch repo + a gate record skeleton marked verdict=gate (the
+    publish step presumes the interactive gate already ran)."""
+    repo, _ = _scratch_repo(tmp_path)
+    out = tmp_path / "gate-record.json"
+    r = _run_driver(repo, "--gate-record-out", str(out))
+    assert r.returncode == 0, r.stderr
+    with open(out, encoding="utf-8") as f:
+        record = json.load(f)
+    record["interactive_gate"]["verdict"] = "gate"
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2)
+        f.write("\n")
+    return repo, out
+
+
+_DIGEST_A = "sha256:" + "ab" * 32
+_DIGEST_B = "sha256:" + "cd" * 32
+_REF = "registry.fly.io/myapp/sparkvm-golden:0.6.0+deadbeefcafe"
+
+
+def _image_digest(record_path):
+    with open(record_path, encoding="utf-8") as f:
+        return json.load(f)["build"]["image_digest"]
+
+
+def test_record_pushed_digest_stamps_gate_record(tmp_path):
+    """The publish step records the digest the registry produced — resolved
+    through the daemon, never pasted by the operator."""
+    repo, record = _emit_completed_gate(tmp_path)
+    r = _run_record(tmp_path, repo, f"registry.fly.io/myapp/sparkvm-golden@{_DIGEST_A}",
+                     record, _REF)
+    assert r.returncode == 0, r.stderr
+    assert _DIGEST_A in r.stdout
+    assert _image_digest(record) == _DIGEST_A
+
+
+def test_record_pushed_digest_is_idempotent(tmp_path):
+    """Re-recording the same digest is a no-op, not an error."""
+    repo, record = _emit_completed_gate(tmp_path)
+    repodigest = f"registry.fly.io/myapp/sparkvm-golden@{_DIGEST_A}"
+    assert _run_record(tmp_path, repo, repodigest, record, _REF).returncode == 0
+    r = _run_record(tmp_path, repo, repodigest, record, _REF)
+    assert r.returncode == 0, r.stderr
+    assert "idempotent" in r.stdout
+    assert _image_digest(record) == _DIGEST_A
+
+
+def test_record_pushed_digest_refuses_overwrite_without_force(tmp_path):
+    """A recorded digest is write-once: a different digest refuses unless
+    --force names the re-push case explicitly."""
+    repo, record = _emit_completed_gate(tmp_path)
+    assert _run_record(tmp_path, repo, f"x@{_DIGEST_A}", record, _REF).returncode == 0
+    r = _run_record(tmp_path, repo, f"x@{_DIGEST_B}", record, _REF)
+    assert r.returncode != 0
+    assert "--force" in r.stderr
+    assert _image_digest(record) == _DIGEST_A  # refused, not clobbered
+    r = _run_record(tmp_path, repo, f"x@{_DIGEST_B}", record, _REF, "--force")
+    assert r.returncode == 0, r.stderr
+    assert _image_digest(record) == _DIGEST_B
+
+
+def test_record_pushed_digest_fails_when_ref_unpushed(tmp_path):
+    """An empty RepoDigests (the daemon never resolved the ref) fails
+    closed instead of recording nothing."""
+    repo, record = _emit_completed_gate(tmp_path)
+    r = _run_record(tmp_path, repo, "", record, _REF)
+    assert r.returncode != 0
+    assert "RepoDigests" in r.stderr
+    assert _image_digest(record) is None  # failed, not half-written
+
+
+def test_record_pushed_digest_rejects_malformed_digest(tmp_path):
+    """A non-strict digest from the daemon never lands in the trust record."""
+    repo, record = _emit_completed_gate(tmp_path)
+    r = _run_record(tmp_path, repo, "registry.fly.io/x@sha256:ZZZ", record, _REF)
+    assert r.returncode != 0
+    assert "not a strict sha256 digest" in r.stderr
+    assert _image_digest(record) is None
+
+
+def test_record_pushed_digest_refuses_skeleton(tmp_path):
+    """Publish presumes a completed gate: stamping a skeleton (or a refused
+    gate) is meaningless to the pin cross-check and looks authoritative."""
+    repo, _ = _scratch_repo(tmp_path)
+    out = tmp_path / "gate-record.json"
+    assert _run_driver(repo, "--gate-record-out", str(out)).returncode == 0
+    r = _run_record(tmp_path, repo, f"x@{_DIGEST_A}", out, _REF)
+    assert r.returncode != 0
+    assert "completed gate" in r.stderr
+    assert _image_digest(out) is None
+
+
+def test_record_pushed_digest_rejects_non_gate_record(tmp_path):
+    """A JSON file that is not a gate record is never stamped."""
+    repo, _ = _scratch_repo(tmp_path)
+    other = tmp_path / "other.json"
+    other.write_text('{"schema": "something-else"}', encoding="utf-8")
+    r = _run_record(tmp_path, repo, f"x@{_DIGEST_A}", other, _REF)
+    assert r.returncode != 0
+    assert "not a sparkvm/golden-image-gate-record@1 record" in r.stderr
+
+
+def test_record_pushed_digest_refuses_wrong_tree_record(tmp_path):
+    """The tree is the pin: a record naming another build's image_version
+    refuses, so a digest can never be stamped onto the wrong record."""
+    repo, record = _emit_completed_gate(tmp_path)
+    with open(record, encoding="utf-8") as f:
+        rec = json.load(f)
+    rec["image_version"] = "0" * 40
+    with open(record, "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=2)
+    r = _run_record(tmp_path, repo, f"x@{_DIGEST_A}", record, _REF)
+    assert r.returncode != 0
+    assert "image_version" in r.stderr
+    assert _image_digest(record) is None
 
 
 # --- baked-secrets scan -----------------------------------------------------------
