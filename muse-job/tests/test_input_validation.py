@@ -233,10 +233,11 @@ def test_spawn_rejects_remote_helper_transports(cli, monkeypatch, tmp_path, caps
     ("..", ".."),
 ])
 def test_spawn_rejects_dotdot_repo_name(cli, monkeypatch, tmp_path, capsys, repo, name):
-    # Issue #793: the derived pristine path is REPOS_DIR/<last URL segment>.
-    # `..` escapes to $HOME itself (where the clone would fail into ~) and
-    # `.` collapses to REPOS_DIR. Both fail fast with no clone and no job
-    # dir; nothing is written outside the containment root.
+    # Issue #793: the derived pristine path is REPOS_DIR/<host>/<path...>
+    # (issue #10 namespacing). `..` escapes to $HOME itself (where the
+    # clone would fail into ~) and `.` collapses to REPOS_DIR. Both fail
+    # fast with no clone and no job dir; nothing is written outside the
+    # containment root.
     prompt = tmp_path / "p.md"
     prompt.write_text("do the thing")
     monkeypatch.setattr(sys, "argv", [
@@ -282,7 +283,10 @@ def test_spawn_legit_repo_names_still_work(cli, monkeypatch, tmp_path, capsys):
     cli._spawn(args.slug, args)  # returns None on success; would raise first
     clones = [c for c in calls if list(c)[:2] == ["git", "clone"]]
     assert len(clones) == 1
-    assert clones[0][-1].endswith(os.path.join("repos", "SomeRepo"))
+    # Issue #10: the pristine dir is namespaced host/path, not the bare
+    # repo name.
+    assert clones[0][-1].endswith(
+        os.path.join("repos", "example.com", "SomeOrg", "SomeRepo"))
 
 
 @pytest.mark.parametrize("base", ["--verify", "--symbolic-full-name", "-x"])
@@ -302,7 +306,8 @@ def test_spawn_rejects_dash_base_ref(cli, monkeypatch, tmp_path, capsys, base):
     err = capsys.readouterr().err
     assert "bad base ref" in err
     assert not (tmp_path / "muse-jobs" / "basejob").exists()
-    assert not (tmp_path / "repos" / "r").exists()
+    # Issue #10: the namespaced dir is repos/<host>/<repo>.
+    assert not (tmp_path / "repos" / "example.com" / "r").exists()
 
 
 def test_rev_parse_gets_base_without_option_separator(cli, monkeypatch, tmp_path):
@@ -334,8 +339,9 @@ def test_rev_parse_gets_base_without_option_separator(cli, monkeypatch, tmp_path
         prompt_file=str(prompt), base="v1.2.3",
         budget_hours=8, allow_secrets=False)
     cli._spawn(args.slug, args)
+    # Issue #10: the namespaced dir is repos/<host>/<repo>.
     revs = [c for c in calls if list(c)[:3] == ["git", "-C", os.path.join(
-        str(tmp_path), "repos", "r")] and "rev-parse" in list(c)]
+        str(tmp_path), "repos", "example.com", "r")] and "rev-parse" in list(c)]
     assert len(revs) == 1
     assert list(revs[0][-2:]) == ["rev-parse", "v1.2.3"]
 
@@ -364,5 +370,6 @@ def test_clone_passes_option_separator(cli, monkeypatch, tmp_path):
     assert len(clones) == 1
     assert list(clones[0]) == [
         "git", "clone", "--", repo,
-        os.path.join(str(tmp_path), "repos", "repo"),
+        # Issue #10: pristine is namespaced host/path, not the bare name.
+        os.path.join(str(tmp_path), "repos", "example.com", "some", "repo"),
     ]

@@ -67,6 +67,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Control-plane API reference: the phone-home WebSocket lane is now covered — the box→plane upgrade handshake, the session and close-code taxonomy, and the owner-only journal read + retention endpoints — closing the gap since the plane DO deployed live in October (#1092).
 - GitHub releases: release notes are now capped at GitHub's 125,000-character body limit — an oversized curated section is trimmed at whole-bullet boundaries with a note pointing at the full changelog on the tag, instead of failing the publish step (and its recovery) with a body-too-long error, as the v0.6.0 cut did (#1091).
 
+### Security
+
+- Pristine repo clones are now namespaced by upstream: spawning jobs against same-named repos on different orgs — or different hosts — no longer shares one clone directory, so the second spawn can't silently fetch the wrong repository's code into the first clone and cut job worktrees from the wrong base — clones live under `~/repos/<host>/<path...>` (local paths under `~/repos/_local/`); pre-existing flat clones keep working for recorded jobs, new spawns re-clone into the namespaced dir (#10). (#1105)
+
 ## [0.6.0] - 2026-10-06
 
 ### Added
