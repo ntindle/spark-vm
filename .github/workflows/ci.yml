@@ -168,6 +168,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # The test imports only stdlib (os, re), but pytest itself is not on
+      # the runner image — install just it (not the whole requirements-test
+      # set, which this test never needs).
+      - name: install pytest
+        run: pip install pytest
       - name: docs-index coverage
         run: python3 -m pytest scripts/test_docs_index_coverage.py -q
 
