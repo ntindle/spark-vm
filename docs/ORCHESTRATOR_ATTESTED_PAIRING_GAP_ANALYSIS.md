@@ -67,6 +67,51 @@ the approval record names the provision record, not a human.
   is committed *before* `claimed` is emitted; the dangerous window the
   orchestrator must survive is its own mirror image (finding O1).
 
+### 2026-10-07 refresh — F-P1 / #1087 closed (post-#1106)
+
+The §2 "golden-image producer is closing" bullet and the §5
+"golden-image producer (#1087, closing)" line were written at the pinned
+commit `2a4669c`, when PR #1106 was open but unmerged. PR #1106 merged
+2026-10-07 (commit `506ff48`); the digest-pin recorder
+(`harness/pin_image.py` → `deploy/golden-image/pinned-image.json`) is now
+on main. The producer is **closed, not closing**:
+
+- Slice 1 (PR #1100) shipped the producer: pinned-Dockerfile recipe,
+  dirty-tree-refusing build driver baking the exact commit + release tag
+  into the manifest, the supervisord daemon set.
+- Slice 2 (PR #1106) shipped the publish pin: the fail-closed writer
+  records the digest-pinned ref only for a completed gate pass on the
+  exact baked SHA, only the `registry.fly.io` host the driver contract
+  names, only a digest-pinned ref (a bare tag is never launchable);
+  re-pinning the same SHA to a different digest needs `--force`.
+  `read_pin()` / `pin_image_ref()` raise `PinnedImageError` on a
+  missing or invalid record, so the future #905 driver cannot provision
+  from an unpinned image. The record is validated, not tamper-evident —
+  the trust root is the operator who ran the pin and the reviewed
+  pinning commit (`deploy/golden-image/README.md` §"Publish + pin
+  (operator)" documents the operator flow).
+
+Net for this lane: F-P1's "the golden image has a gate but no producer"
+is now fully closed — the lane has a producer (recipe + build driver)
+and the pin machinery (fail-closed writer + `read_pin()` /
+`pin_image_ref()`, the record the #905 driver's §F3b contract names as
+its operator-set pin); no image has been built or pinned yet —
+publishing remains an operator step per
+`deploy/golden-image/README.md` §"Publish + pin (operator)". Issue
+#1087 closed via #1106's `Closes`. What remains is unchanged by this
+refresh: #905 (driver), #906 (orchestrator), #908 (spend-cap mechanism),
+#1089 (provision-record store), the O-series findings (filed as
+#1107–#1110), and decisions D-O1–D-O5.
+
+§2's other bullets were re-verified against main `c9b9f84` (2026-10-07)
+and show no drift: the pairing-request wire shape still matches
+`docs/CONTROL_PLANE_API_REFERENCE.md`; the #1089 provision-record
+contract is open and unchanged; `docs/SPEND_CAP_ENFORCEMENT_GAP_ANALYSIS.md`
+D-C5 is unchanged; `site/waitlist_invites.py --reconcile-claimed` still
+commits the claim row before emitting `claimed` (#898 is closed, the
+code claim still holds); the `approved_by` pairing vocabulary is
+unchanged since #844.
+
 ## 3. Findings: genuinely-new gaps (O-series)
 
 Gaps already filed (#905, #906, #907, #908, #1074–#1077, #1047, #1048,
@@ -259,7 +304,7 @@ F-P3/D-P2 left open:
 
 - Fly driver build + exec-install path (#905), golden-image gate
   (exists), first-boot hook (rides #905/G51.4), golden-image producer
-  (#1087, closing), meter envelope emission (#1088), provision-record
+  (#1087 — closed 2026-10-07; see the refresh in §2), meter envelope emission (#1088), provision-record
   schema (#1089), spend-cap slices (#1074–#1077), meter_agent (#1047),
   plane metering endpoint (#1048), H4 live-API clearance (granted),
   the human pairing ceremony (ships — #844), token rotation (#846),
