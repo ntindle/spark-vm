@@ -1,4 +1,8 @@
-# spark-vm CI: python tests, shellcheck, markdown link check, PNG smoke test.
+# spark-vm CI: python tests (gated to code changes — P138), shellcheck, markdown
+# link check, changelog ritual lint, docs index coverage, PNG smoke test.
+# The changed-paths gate skips the ~40-min python suite on docs-only diffs;
+# shellcheck, link check, changelog lint, docs-guard, and PNG are the
+# docs-only merge gate.
 #
 # Run locally with (from the repo root — the one-liner in CONTRIBUTING.md):
 #   python3 -m pytest
@@ -25,8 +29,52 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Path gate for the expensive jobs (P138 / F453: the ~40-min full python
+  # suite used to gate even docs-only PRs). Computes `code_changed`: true
+  # when the PR touches any file outside docs/ + CHANGELOG.md. The cheap,
+  # always-run jobs below are the docs-only merge gate; python-tests is
+  # skipped for docs-only diffs. No new dependency: one-step
+  # `git diff --name-only` against the PR base (fetch-depth 0 so the base
+  # is available). On push/workflow_dispatch the diff is meaningless, so
+  # code_changed defaults true and everything runs.
+  changes:
+    name: changed-paths gate
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.diff.outputs.code_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: compute changed paths
+        id: diff
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            files=$(git diff --name-only "$base"...HEAD)
+          else
+            files="push"
+          fi
+          code_changed=true
+          if [ "$files" != "push" ]; then
+            code_changed=false
+            while IFS= read -r f; do
+              case "$f" in
+                docs/*|CHANGELOG.md) ;;
+                *) code_changed=true; break ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "code_changed=$code_changed" >> "$GITHUB_OUTPUT"
+
   python-tests:
     name: python tests
+    needs: changes
+    # P138: docs-only diffs skip the ~40-min suite; the docs-only gate is
+    # the four other jobs plus the docs-index coverage guard (docs-guard).
+    # A skipped required check shows as neutral, so this does not block
+    # branch-protected merges of docs-only PRs.
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -103,6 +151,21 @@ jobs:
       # ritual preamble that documents the rule is exempt (see the script).
       - name: lint changelog for workspace-internal path references
         run: python3 scripts/lint-changelog-ritual.py
+
+  docs-guard:
+    name: docs index coverage
+    # Always runs, even on docs-only diffs where python-tests is skipped
+    # (P138): scripts/test_docs_index_coverage.py lives in the python suite,
+    # so without this carve-out a new docs/*.md file without an index row
+    # would land with the coverage invariant unwatched.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: docs-index coverage
+        run: python3 -m pytest scripts/test_docs_index_coverage.py -q
 
   markdown-links:
     name: markdown link check
