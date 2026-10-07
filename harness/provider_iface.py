@@ -40,6 +40,11 @@ contract so the Fly driver (and any later driver) has a fixed target:
   this interface; the golden-image manifest preflight
   (`harness/generate-image-manifest.sh` / `check-image-manifest.sh`) pins
   `image_version` on the provision spec.
+- D-O1 (#1107, `docs/ORCHESTRATOR_ATTESTED_PAIRING_GAP_ANALYSIS.md`): the
+  spec carries the claim-binding idempotency key `(tenant_id, claim_id,
+  attempt_n)`; `provision()` dedupes on it and `list_boxes()` exposes each
+  box's key so the orchestrator's startup reconcile matches provider-listed
+  machines against unconsumed provision records.
 
 Adjudications this module makes (the research docs defer these to "the H4
 design loop" — this is that loop; each is cited so a later turn can amend):
@@ -222,12 +227,27 @@ class ProviderCapabilities:
 class ProvisionSpec:
     """What the control plane asks for. Validated at construction: the
     `public_ingress: false` invariant (H3 §6) is fail-closed — a spec that
-    asks for public ingress is rejected, not honored."""
+    asks for public ingress is rejected, not honored.
+
+    Claim binding (D-O1, #1107): the idempotency key
+    `(tenant_id, claim_id, attempt_n)` is required and fail-closed — a spec
+    with no claim is rejected at construction, exactly like a spec with no
+    tenant. `claim_id` is the signup claim this box provisions for;
+    `attempt_n` (default 1) counts re-provisions of the same claim and is
+    load-bearing in the key: D-O3's re-provision writes `attempt_n` with a
+    fresh pairing token, and a claim-scoped key would return attempt 1's
+    box (whose env holds the now-superseded token) for attempt n's
+    provision — a box that could never auto-pair."""
 
     tenant_id: str
+    claim_id: str
     cpus: int = 8
     ram_gb: int = 15
     disk_gb: int = 250
+    # Attempt counter for re-provisions of the same claim. Part of the
+    # idempotency key (see above); the orchestrator's supersede writes
+    # attempt_n with a fresh attestation token and tears down attempt_{n-1}.
+    attempt_n: int = 1
     # Open descriptor, NOT a closed enum (GPU_PATH_RESEARCH.md): any string
     # the driver understands ("none", "runpod-rtx4090", ...). None = CPU-only.
     gpu_class: str | None = None
@@ -248,10 +268,23 @@ class ProvisionSpec:
             )
         if not self.tenant_id:
             raise ValueError("tenant_id is required")
+        if not self.claim_id:
+            raise ValueError("claim_id is required")
+        if self.attempt_n < 1:
+            raise ValueError(
+                f"attempt_n must be >= 1, got {self.attempt_n}"
+            )
         for name, value in (("cpus", self.cpus), ("ram_gb", self.ram_gb),
                             ("disk_gb", self.disk_gb)):
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
+
+    @property
+    def idempotency_key(self) -> tuple[str, str, int]:
+        """The claim-binding idempotency key (D-O1). The driver dedupes
+        provision() on the full key and exposes it per box via
+        list_boxes(); the orchestrator's startup reconcile matches on it."""
+        return (self.tenant_id, self.claim_id, self.attempt_n)
 
 
 @dataclass(frozen=True)
@@ -312,6 +345,23 @@ class BoxStatus:
         if self.wake_kind is None:
             return None
         return self.wake_kind is WakeKind.WARM
+
+
+@dataclass(frozen=True)
+class BoxIdentity:
+    """One driver-listed box: the provider-side record the orchestrator's
+    startup reconcile (D-O1) matches against unconsumed provision records
+    before issuing any new provision() call.
+
+    `idempotency_key` is None only for boxes that predate the D-O1 regime
+    (provisioned without a claim-bound key); the reconcile ignores those
+    for claim matching — it must never invent a key for a box that lacks
+    one. Destroyed boxes are not listed: they no longer exist on the
+    provider."""
+
+    vm_id: str
+    idempotency_key: tuple[str, str, int] | None
+    state: ProviderState
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +494,17 @@ class ProviderDriver(typing.Protocol):
     def provision(self, spec: ProvisionSpec) -> ProvisionResult:
         """Create the box. Returns once the box exists and is entering
         PROVISIONING (not once it is running — the control plane drives
-        deploy over dial() and polls status())."""
+        deploy over dial() and polls status()).
+
+        Dedupe (D-O1, #1107): provision() is idempotent on the spec's
+        `idempotency_key`. A retry of the same (tenant_id, claim_id,
+        attempt_n) MUST return the existing box's ProvisionResult — never
+        a second box, never an error. The key->vm_id map must survive
+        driver restarts: the key rides provider-side metadata at create
+        (the Fly driver stores it in machine metadata), and a fresh driver
+        process rebuilds the map by listing (list_boxes()) before honoring
+        any provision(). A box destroyed after provisioning is not returned
+        by dedupe — a same-key provision then creates a fresh box."""
         ...
 
     def status(self, vm_id: str) -> BoxStatus:
@@ -453,6 +513,19 @@ class ProviderDriver(typing.Protocol):
         `retention` must be set for every non-running state except
         PROVISIONING (nothing retained yet — C15 billing surface)."""
         ...
+
+    def list_boxes(self) -> list[BoxIdentity]:
+        """Every box the provider currently has, with its claim-binding
+        idempotency key (D-O1). The orchestrator's startup reconcile calls
+        this before any provision() and matches the returned keys against
+        unconsumed provision records — so a driver restart followed by an
+        orchestrator restart still provisions exactly one box per claim.
+        The default raises UNSUPPORTED — a driver without a box-listing
+        story must say so loudly, never silently return []. Explicit
+        subclasses inherit this default; structural implementers must
+        define it (or the same)."""
+        raise ProviderError(ErrorKind.UNSUPPORTED,
+                            "driver has no box-listing story")
 
     def suspend(self, vm_id: str, timeout_s: float = 120.0) -> None:
         """Idle primitive (H13's). Maps to the provider's best suspend
