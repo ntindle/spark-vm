@@ -2858,6 +2858,71 @@ class _PhoneHomeSession:
             ack["epoch"] = epoch
         self.send(ack)
 
+    def _save_socket_ingest_state(self, seq, epoch):
+        """Persist post-ingest box state — under the ingest lock.
+
+        #1116: the socket path is a carrier for the same durable queue
+        the HTTPS cron ingest serves, so it honors the #947 epoch
+        contract the same way: last-writer-wins epoch adoption plus a
+        monotonic cursor advance, persisted via _save_ingest_cursor. The
+        next cron fetch then asserts a truthful ?epoch= (no spurious
+        forced re-syncs once #848/#958's stale-epoch detection lands)
+        and does not re-fetch socket-acked seqs. The ack envelope keeps
+        echoing the frame's own epoch verbatim (diagnostic contract
+        unchanged).
+
+        #1117: _save_ingested is a full-file rewrite, not an append —
+        it must land inside the same lock hold as the executor, or a
+        cron tick blocked on the lock can load the log before this save
+        and clobber this session's entries when it saves after. And
+        because self._ingested was snapshotted at session init, the
+        rewrite first reloads the on-disk log under the lock and merges
+        (session marks win on conflict), so a cron tick that completed
+        a pass since session init is not clobbered either.
+
+        The save lands before the ack send (the send stays outside the
+        lock, as before): if the ack then dies in transport, the DO
+        re-drives the seq and the consumed/ backstops dedupe it — the
+        cursor advance never skips an un-executed command because the
+        stamp is written by the executor before this method runs.
+
+        Returns True when every save landed; False on OSError (loud log
+        already written; the caller withholds the ack so the DO
+        re-drives). Anything else propagates to the outer fail-closed
+        handler — never an ack, never silent.
+        """
+        try:
+            saved_cursor, saved_epoch, _ = _load_ingest_cursor(self.d)
+            new_cursor = (seq if saved_cursor is None
+                          else max(saved_cursor, seq))
+            new_epoch = saved_epoch
+            if epoch is not None and epoch != saved_epoch:
+                _phone_home_say(self.d,
+                                f"epoch {saved_epoch} -> {epoch} "
+                                "(plane moved on)", self.token)
+                new_epoch = epoch
+            _save_ingest_cursor(self.d, new_cursor, new_epoch)
+            # #1117, second half: self._ingested was snapshotted at
+            # session init — a cron tick that completed a pass since
+            # then holds fresher on-disk marks this full-file rewrite
+            # must not clobber. Reload under the lock and merge: the
+            # session's fresh marks win on key conflict (keys are
+            # write-once idempotency keys, so the session's entry is
+            # the fresher stamp). Refreshing self._ingested also keeps
+            # the next save from regressing again.
+            on_disk = _load_ingested(self.d)
+            on_disk.update(self._ingested)
+            self._ingested = on_disk
+            _save_ingested(self.d, self._ingested)
+        except OSError as e:
+            _phone_home_say(self.d,
+                            f"seq={seq}: socket ingest state save failed "
+                            f"({e}) — not acked; redelivery is idempotent, "
+                            "will re-drive",
+                            self.token)
+            return False
+        return True
+
     def _handle_socket_command(self, frame):
         """Execute one `command` frame via the #874 ingest executor.
 
@@ -2979,6 +3044,11 @@ class _PhoneHomeSession:
                     consumed = _ingest_approval_decision(
                         self.d, self.approvals, self.box_id, self.token, seq,
                         payload, self._ingested, attention)
+                    if consumed and not self._save_socket_ingest_state(
+                            seq, epoch):
+                        # State saves failed loudly: withhold the ack so
+                        # the DO re-drives; redelivery is idempotent.
+                        consumed = False
                 finally:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
                     os.close(lock_fd)
@@ -2997,15 +3067,6 @@ class _PhoneHomeSession:
             _phone_home_say(self.d, "ATTENTION: " + note, self.token)
         if not consumed:
             return "ok"  # not acked; the DO re-drives
-        try:
-            _save_ingested(self.d, self._ingested)
-        except OSError as e:
-            _phone_home_say(self.d,
-                            f"seq={seq}: ingested-log save failed ({e}) "
-                            "— not acked; redelivery is idempotent, will "
-                            "re-drive",
-                            self.token)
-            return "ok"
         try:
             self._socket_ack(seq, epoch)
         except _WsTransportLost:
