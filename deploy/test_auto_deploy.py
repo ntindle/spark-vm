@@ -333,6 +333,12 @@ def test_cred_ui_install_end_to_end(tmp_path):
     # The runtime set lives in one place (cred-ui/tests); this suite
     # asserts against it instead of a hard-coded third copy.
     runtime_files, repo_sources = _cred_ui_runtime_spec()
+    # Guard the dedup: an empty runtime set would make the loop below
+    # assert nothing and the test pass on returncode alone. Do NOT pin the
+    # count here — the set's size is the install suite's business.
+    assert runtime_files, (
+        "RUNTIME_FILES from cred-ui/tests/test_cred_ui_install.py is empty "
+        "— the loop below would assert nothing")
     for name in runtime_files:
         src = repo_sources[name]
         got = install_dir / name
