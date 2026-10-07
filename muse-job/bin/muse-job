@@ -476,6 +476,13 @@ class _PhaseConcurrencyDeferred(Exception):
     """
 
 
+# The deferred signal's detail string is pinned: watchers grep for it
+# (issue #804 hot-patch contract). The re-check path reuses it verbatim
+# with a suffix naming the re-check, so both deferral paths stay greppable.
+_PHASE_DEFERRED_DETAIL = ("tmux dead; auto-resume deferred — another phase-* "
+                          "job is live (one-at-a-time rule)")
+
+
 def _phase_concurrency_bars_resume(slug):
     """True when auto-resuming `slug` would break the one-phase-job-at-a-time rule.
 
@@ -2986,19 +2993,22 @@ def cmd_watch(args):
             # once no sibling phase-* job is live.
             if _phase_concurrency_bars_resume(slug):
                 events.append({"job": slug, "signal": "deferred",
-                               "detail": "tmux dead; auto-resume deferred — another phase-* job is live (one-at-a-time rule)"})
+                               "detail": _PHASE_DEFERRED_DETAIL})
                 return
             try:
                 cmd_resume(argparse.Namespace(slug=slug), _from_watch=True)
                 events.append({"job": slug, "signal": "recovered",
                                "detail": "tmux was dead; resumed session"})
-            except _PhaseConcurrencyDeferred as e:
+            except _PhaseConcurrencyDeferred:
                 # Issue #1131: the re-check inside cmd_resume fired -- a
                 # sibling went live in the check-then-act window. Same
-                # `deferred` signal as the pre-check above; the next watch
+                # pinned detail as the pre-check above (watchers grep for
+                # it) with a suffix naming the re-check; the next watch
                 # pass retries.
                 events.append({"job": slug, "signal": "deferred",
-                               "detail": f"tmux dead; auto-resume deferred — {e}"})
+                               "detail": _PHASE_DEFERRED_DETAIL +
+                               " (re-check inside cmd_resume fired; next "
+                               "pass retries)"})
             except Exception as e:
                 events.append({"job": slug, "signal": "needs-attention",
                                "detail": f"tmux dead and resume failed: {e}"})

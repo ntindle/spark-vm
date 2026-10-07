@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import time
+import types
 
 import pytest
 
@@ -114,8 +115,16 @@ def test_listdir_oserror_fails_open(cli, monkeypatch, tmp_path):
 
 # --- cmd_watch guard ----------------------------------------------------------
 
-DEFERRED_DETAIL = ("tmux dead; auto-resume deferred — another phase-* job "
-                   "is live (one-at-a-time rule)")
+# The deferred detail string is pinned in the module (watchers grep for it,
+# issue #804 hot-patch contract); the tests below assert against
+# cli._PHASE_DEFERRED_DETAIL so code and contract cannot drift apart.
+
+
+def test_deferred_detail_string_pinned(cli):
+    # The exact hot-patch wording watchers grep for.
+    assert cli._PHASE_DEFERRED_DETAIL == (
+        "tmux dead; auto-resume deferred — another phase-* job is live "
+        "(one-at-a-time rule)")
 
 
 def _dead_tmux_watch(cli, monkeypatch, live_slugs=()):
@@ -135,7 +144,7 @@ def test_watch_defers_barred_phase_job(cli, monkeypatch, capsys):
     events = _watch_events(cli, capsys)
     by_job = {e["job"]: e for e in events}
     assert by_job["phase-dead"]["signal"] == "deferred"
-    assert by_job["phase-dead"]["detail"] == DEFERRED_DETAIL
+    assert by_job["phase-dead"]["detail"] == cli._PHASE_DEFERRED_DETAIL
     assert resumed == []  # no resurrection attempt
 
 
@@ -278,4 +287,44 @@ def test_watch_maps_recheck_deferral_to_deferred_signal(cli, monkeypatch, capsys
     events = _watch_events(cli, capsys)
     by_job = {e["job"]: e for e in events}
     assert by_job["phase-dead"]["signal"] == "deferred"
-    assert "race fired" in by_job["phase-dead"]["detail"]
+    # The pinned detail string is reused verbatim (watchers grep for it),
+    # with a suffix naming the re-check.
+    assert by_job["phase-dead"]["detail"] == (
+        cli._PHASE_DEFERRED_DETAIL +
+        " (re-check inside cmd_resume fired; next pass retries)")
+
+
+def test_watch_recheck_fires_on_midpass_sibling_start(cli, monkeypatch, capsys):
+    # Issue #1131, the actual race, end to end through the REAL cmd_watch
+    # + REAL cmd_resume (faking only tmux_alive as a flip-flop, plus run,
+    # trust-prompt, sleep, and the path/uuid helpers): the watch pre-check
+    # sees no live sibling, the sibling goes live in the check-then-act
+    # window, and the re-check defers instead of over-admitting -- no tmux
+    # session is created.
+    _make_job(cli, "phase-dead", session_uuid="uuid-1")
+    _bare_dir(cli, "phase-live")
+    calls = {"n": 0}
+
+    def flip_flop(slug):
+        # First scan (the watch pre-check): nobody live. Every scan after:
+        # the sibling went live in the window.
+        calls["n"] += 1
+        return slug == "phase-live" and calls["n"] > 1
+
+    monkeypatch.setattr(cli, "tmux_alive", flip_flop)
+    monkeypatch.setattr(cli, "job_status",
+                        lambda job, slug: {"tmux_alive": False})
+    ran = []
+    monkeypatch.setattr(cli, "run",
+                        lambda *a, **k: ran.append(a) or
+                        types.SimpleNamespace(stdout=b"pane"))
+    monkeypatch.setattr(cli, "_answer_trust_prompt", lambda s: None)
+    monkeypatch.setattr(cli, "trusted_job_paths",
+                        lambda s, j: ("/tmp/w", "/repos/x", "job/s"))
+    monkeypatch.setattr(cli, "session_bound_to_workdir", lambda u, w: True)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    events = _watch_events(cli, capsys)
+    by_job = {e["job"]: e for e in events}
+    assert by_job["phase-dead"]["signal"] == "deferred"
+    assert by_job["phase-dead"]["detail"].startswith(cli._PHASE_DEFERRED_DETAIL)
+    assert ran == []  # the re-check fired before any tmux session existed
