@@ -44,12 +44,13 @@ the approval record names the provision record, not a human.
   unauthenticated endpoint as a new field — the token *is* the
   auto-approval credential, which is why its consume must be atomic
   and single-use (finding O2).
-- **The golden-image producer exists.** F-P1's gap (#1087) is closing:
-  the pinned-Dockerfile build driver, dirty-tree-refusing builds, the
-  supervisord daemon set, and the digest-pin recorder
-  (`harness/pin_image.py` → `deploy/golden-image/pinned-image.json`)
-  give #906's driver call an image to pin and a record the #905 driver
-  consumes as its operator-set pin (`docs/FLY_DRIVER_RESEARCH.md` §F3b).
+- **The golden-image producer is closing.** F-P1's gap (#1087) is closing:
+  the pinned-Dockerfile build driver, dirty-tree-refusing builds, and the
+  supervisord daemon set are merged; the digest-pin recorder
+  (`harness/pin_image.py` → `deploy/golden-image/pinned-image.json`,
+  PR #1106 — **not yet on main** at the pinned commit) will give #906's
+  driver call an image to pin and a record the #905 driver consumes as its
+  operator-set pin (`docs/FLY_DRIVER_RESEARCH.md` §F3b) once merged.
 - **The provision-record home is pinned (D-P2).** #1089's contract:
   the provision record (claim id, invite, box id, attestation-token
   hash, tenant binding) lives in plane D1 — one record, two consumers
@@ -156,7 +157,10 @@ F-P3/D-P2 left open:
     auto-approved). Replay of a consumed token → 403 + plane-side
     audit row (the endpoint is unauthenticated; the audit row is the
     only signal).
-  - TTL: 24 h from provision. The pre-consumption window is bounded,
+  - TTL: 24 h from provision **(tunable — a first pin, not a researched
+    constant; the rationale is the bounded-window argument below, and the
+    value should move with first-boot latency data once the leg runs).**
+    The pre-consumption window is bounded,
     not zero — the machine-config env is operator-visible by
     construction (G51.4's only plane→box channel), so the forgery
     window is the TTL. Lapsed tokens are never honored late.
