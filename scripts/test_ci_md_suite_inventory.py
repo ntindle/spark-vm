@@ -33,10 +33,7 @@ CD_PYTEST_RE = re.compile(r"^\s*cd\s+[^\s&|;]+\s*&&\s*python3\s+-m\s+pytest\b", 
 # The blessed shape: the repo-root one-liner (flags only, no targets).
 ONE_LINER_RE = re.compile(r"^\s*python3\s+-m\s+pytest(?:\s+-[^\s]+)*\s*$", re.MULTILINE)
 # Per-component invocations from the repo root: `python3 -m pytest <dir>`.
-# NOTE: the arg group is [ \t]-local on purpose: \s would span newlines and
-# let the first match gobble the whole block, after which the one-liner skip
-# below would swallow every per-component invocation unexamined.
-BARE_PYTEST_RE = re.compile(r"^\s*python3\s+-m\s+pytest((?:[ \t]+[^\s]+)+)[ \t]*$", re.MULTILINE)
+BARE_PYTEST_RE = re.compile(r"^\s*python3\s+-m\s+pytest((?:\s+[^\s]+)+)", re.MULTILINE)
 
 
 def get_testpaths():
@@ -105,8 +102,6 @@ class TestCiMdSuiteInventory(unittest.TestCase):
         bad = []
         for m in BARE_PYTEST_RE.finditer(block):
             arg = first_positional_arg(m.group(1))
-            if arg is not None:
-                arg = arg.rstrip("/")  # `pytest proxy/` names the same dir
             if arg is None or arg.endswith(".py") or ONE_LINER_RE.match(m.group(0)):
                 continue  # the one-liner, or a file-level invocation
             if arg not in testpaths:
