@@ -141,6 +141,26 @@ survives it. Five consecutive poll failures release the session (dead-host
 livelock guard). If the supervisor fails to boot, the spawn fails loudly
 and the job is marked `blocked`, never `active`.
 
+Four structural guarantees pin the design:
+
+- **Verified handoff.** A heartbeat proves the supervisor is polling, not
+  that the turn survived the close→resume gap. The launcher therefore
+  waits for the view snapshot and requires it to show the expected turn
+  live (or a completed terminal turn, for fast finishers); otherwise the
+  launch fails loudly and the job is marked `blocked`.
+- **One supervisor per slug.** The launcher takes the claim file with
+  `O_CREAT|O_EXCL`; a racing launcher adopts the winner (waits on its
+  heartbeat + handoff) instead of launching a second supervisor. The
+  supervisor's `finally` removes the pid/claim files only when they name
+  its own pid, so a loser can never unlink the winner's files.
+- **Liveness-first routing.** Held-session commands check supervisor
+  liveness *before* touching serve — no doomed `muse serve` spawn per
+  status/watch/steer/resume in the steady state. The `-32021` translation
+  stays only as the race backstop.
+- **Versioned snapshot.** The view snapshot carries a schema version;
+  readers reject a mismatch as "no usable snapshot" (needs-attention),
+  so a mixed-version deploy degrades loudly, never silently.
+
 ### TUI auto-update policy (issue #699)
 
 **Updates are deferred while a job is active.** The `muse` launcher

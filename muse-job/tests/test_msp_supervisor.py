@@ -174,10 +174,29 @@ def test_snapshot_round_trip(cli):
                     pending_summary="waiting on tool")
     mod._supervisor_write_snapshot(paths, view)
     snap = mod._supervisor_read_snapshot(slug)
+    assert snap["schema"] == mod._SUPERVISOR_SNAPSHOT_SCHEMA
     assert snap["state"] == "working"
     assert snap["active_turn_id"] == "turn-9"
     assert snap["pending_summary"] == "waiting on tool"
     assert snap["snapshot_at"] <= time.time()
+
+
+def test_read_snapshot_rejects_wrong_schema(cli):
+    mod, slug = cli
+    paths = paths_of(mod, slug)
+    view = FakeView(state="working", active_turn_id="turn-9")
+    mod._supervisor_write_snapshot(paths, view)
+    with open(paths["view"]) as f:
+        snap = json.load(f)
+    snap["schema"] = 999
+    with open(paths["view"], "w") as f:
+        json.dump(snap, f)
+    assert mod._supervisor_read_snapshot(slug) is None
+    # Missing schema (pre-version writer) also reads as None.
+    del snap["schema"]
+    with open(paths["view"], "w") as f:
+        json.dump(snap, f)
+    assert mod._supervisor_read_snapshot(slug) is None
 
 
 def test_read_snapshot_malformed(cli):
@@ -445,3 +464,118 @@ def test_resume_reports_supervisor_alive_when_held(cli, monkeypatch, fakes, caps
     out = json.loads(capsys.readouterr().out)
     assert out["resumed"] == "supervisor-alive"
     assert out["supervisor_heartbeat_age_s"] is not None
+
+
+# -- handoff verification (Blocking 1) -----------------------------------
+
+def _write_raw_snapshot(mod, slug, **fields):
+    paths = paths_of(mod, slug)
+    snap = {"schema": mod._SUPERVISOR_SNAPSHOT_SCHEMA, "snapshot_at": time.time()}
+    snap.update(fields)
+    with open(paths["view"], "w") as f:
+        json.dump(snap, f)
+    return paths
+
+
+def test_await_handoff_accepts_live_turn(cli):
+    mod, slug = cli
+    paths = _write_raw_snapshot(mod, slug, state="working",
+                                active_turn_id="turn-1", last_terminal=None)
+    snap = mod._supervisor_await_handoff(paths, slug, "turn-1", timeout=5)
+    assert snap["active_turn_id"] == "turn-1"
+
+
+def test_await_handoff_accepts_completed_turn(cli):
+    mod, slug = cli
+    # Fast-finishing turn completed before the first poll: no live turn,
+    # terminal idle + completed is an honest handoff.
+    paths = _write_raw_snapshot(mod, slug, state="idle", active_turn_id=None,
+                                last_terminal="completed")
+    snap = mod._supervisor_await_handoff(paths, slug, "turn-1", timeout=5)
+    assert snap["last_terminal"] == "completed"
+
+
+def test_await_handoff_rejects_dead_turn(cli):
+    mod, slug = cli
+    paths = _write_raw_snapshot(mod, slug, state="turn_failed",
+                                active_turn_id=None, last_terminal="failed")
+    with pytest.raises(RuntimeError) as ei:
+        mod._supervisor_await_handoff(paths, slug, "turn-1", timeout=5)
+    assert "not live" in str(ei.value)
+
+
+def test_await_handoff_rejects_wrong_turn(cli):
+    mod, slug = cli
+    paths = _write_raw_snapshot(mod, slug, state="working",
+                                active_turn_id="turn-other",
+                                last_terminal=None)
+    with pytest.raises(RuntimeError):
+        mod._supervisor_await_handoff(paths, slug, "turn-1", timeout=5)
+
+
+def test_await_handoff_times_out_without_snapshot(cli):
+    mod, slug = cli
+    paths = paths_of(mod, slug)
+    with pytest.raises(RuntimeError) as ei:
+        mod._supervisor_await_handoff(paths, slug, "turn-1", timeout=0)
+    assert "never wrote a verifiable snapshot" in str(ei.value)
+
+
+# -- exclusive claim (Blocking 2) -----------------------------------------
+
+def test_try_claim_exclusive(cli):
+    mod, slug = cli
+    paths = paths_of(mod, slug)
+    assert mod._supervisor_try_claim(paths) is True
+    # Second launcher sees the claim: no double supervisor.
+    assert mod._supervisor_try_claim(paths) is False
+
+
+def test_remove_own_files_only_self(cli):
+    mod, slug = cli
+    paths = paths_of(mod, slug)
+    with open(paths["claim"], "w") as f:
+        f.write("x")
+    # Pid file names another process: a losing racer's finally must not
+    # unlink the winner's files.
+    with open(paths["pid"], "w") as f:
+        f.write("999999999")
+    mod._supervisor_remove_own_files(paths)
+    assert os.path.exists(paths["pid"])
+    assert os.path.exists(paths["claim"])
+    # Pid file names this process: own files are removed.
+    with open(paths["pid"], "w") as f:
+        f.write(str(os.getpid()))
+    mod._supervisor_remove_own_files(paths)
+    assert not os.path.exists(paths["pid"])
+    assert not os.path.exists(paths["claim"])
+
+
+# -- liveness-first routing (Blocking 3) ------------------------------------
+
+def test_msp_call_or_held_skips_serve_when_held(cli, monkeypatch):
+    mod, slug = cli
+    monkeypatch.setattr(mod, "_supervisor_alive", lambda s: True)
+
+    def boom(slug, job, fn, pre_resume=True):
+        raise AssertionError("must not spawn a serve host when held")
+
+    monkeypatch.setattr(mod, "_msp_call", boom)
+    job = {"session_uuid": "sid-1"}
+    with pytest.raises(mod._MSPSessionHeldElsewhere):
+        mod._msp_call_or_held(slug, job, lambda host: None)
+
+
+def test_msp_call_or_held_delegates_when_not_held(cli, monkeypatch):
+    mod, slug = cli
+    monkeypatch.setattr(mod, "_supervisor_alive", lambda s: False)
+    called = {}
+
+    def fake_call(slug, job, fn, pre_resume=True):
+        called["pre_resume"] = pre_resume
+        return "ok"
+
+    monkeypatch.setattr(mod, "_msp_call", fake_call)
+    assert mod._msp_call_or_held(slug, {}, lambda h: None,
+                                pre_resume=False) == "ok"
+    assert called["pre_resume"] is False

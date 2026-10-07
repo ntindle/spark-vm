@@ -3384,6 +3384,11 @@ _SUPERVISOR_HEARTBEAT_FILE = "supervisor.heartbeat"
 _SUPERVISOR_VIEW_FILE = "supervisor.view.json"
 _SUPERVISOR_STEER_QUEUE = "steer-queue.jsonl"
 _SUPERVISOR_LOG_FILE = "supervisor.log"
+# View-snapshot schema version (issue #1129 Blocking 4): writer,
+# _SnapshotView, and readers share this implicit schema; a version field
+# keeps mixed-version deploys from degrading to silent Nones.
+_SUPERVISOR_SNAPSHOT_SCHEMA = 1
+_SUPERVISOR_HANDOFF_VERIFY_S = 30
 
 
 class _MSPSessionHeldElsewhere(Exception):
@@ -3420,14 +3425,27 @@ def _supervisor_cmdline_matches(paths, pid, slug):
             and slug in cmdline.split())
 
 
-def _supervisor_pid_alive(paths, slug):
-    """True when the pid file names a live process that looks like our supervisor."""
+def _supervisor_terminal_states():
+    """JobView states in which the supervised turn is over."""
+    _, _, _, msp_events, _ = _msp_imports()
+    return {msp_events.STATE_IDLE, msp_events.STATE_TURN_FAILED,
+            msp_events.STATE_TURN_CANCELLED,
+            msp_events.STATE_SESSION_CLOSED}
+
+
+def _supervisor_read_pid(paths):
+    """The pid file's pid, or None when absent/malformed."""
     try:
         with open(paths["pid"]) as f:
-            pid = int(f.read().strip().split()[0])
+            return int(f.read().strip().split()[0])
     except (OSError, ValueError, IndexError):
-        return False
-    if pid <= 0:
+        return None
+
+
+def _supervisor_pid_alive(paths, slug):
+    """True when the pid file names a live process that looks like our supervisor."""
+    pid = _supervisor_read_pid(paths)
+    if not pid or pid <= 0:
         return False
     if os.path.isdir(f"/proc/{pid}"):
         return _supervisor_cmdline_matches(paths, pid, slug)
@@ -3488,6 +3506,7 @@ def _supervisor_beat(paths):
 
 def _supervisor_write_snapshot(paths, view):
     snap = {
+        "schema": _SUPERVISOR_SNAPSHOT_SCHEMA,
         "state": view.state,
         "active_turn_id": view.active_turn_id,
         "pending_summary": view.pending_summary,
@@ -3505,13 +3524,21 @@ def _supervisor_write_snapshot(paths, view):
 
 
 def _supervisor_read_snapshot(slug):
-    """Read the supervisor's view snapshot; None when absent/malformed."""
+    """Read the supervisor's view snapshot; None when absent/malformed.
+
+    A schema mismatch also reads as None: a mixed-version deploy (old
+    supervisor still running after an upgrade, or vice versa) degrades to
+    "no usable snapshot" -- every caller already treats None as
+    needs-attention, the safe direction.
+    """
     try:
         with open(_supervisor_paths(slug)["view"]) as f:
             snap = json.load(f)
     except (OSError, ValueError):
         return None
     if not isinstance(snap, dict) or "state" not in snap:
+        return None
+    if snap.get("schema") != _SUPERVISOR_SNAPSHOT_SCHEMA:
         return None
     return snap
 
@@ -3685,9 +3712,7 @@ def cmd__msp_supervise(args):
 
     signal.signal(signal.SIGTERM, _on_stop)
     signal.signal(signal.SIGINT, _on_stop)
-    terminal_states = {msp_events.STATE_IDLE, msp_events.STATE_TURN_FAILED,
-                       msp_events.STATE_TURN_CANCELLED,
-                       msp_events.STATE_SESSION_CLOSED}
+    terminal_states = _supervisor_terminal_states()
     _supervisor_log(paths, f"supervisor starting for turn of session {sid[:8]}...")
     host = _msp_host_for(slug)
     exit_code = 0
@@ -3731,41 +3756,147 @@ def cmd__msp_supervise(args):
             _sleep_interruptible(_SUPERVISOR_POLL_INTERVAL_S, stop)
     finally:
         # The stop flag and every exit path land here: the serve child is
-        # always reaped, never orphaned.
+        # always reaped, never orphaned. pid/claim files are removed only
+        # when they name this process -- a losing racer's finally must not
+        # unlink the winner's files (issue #1129 Blocking 2).
         try:
             host.close()
         except Exception:
             pass
-        try:
-            os.unlink(paths["pid"])
-        except OSError:
-            pass
+        _supervisor_remove_own_files(paths)
         _supervisor_log(paths, f"supervisor exiting (rc={exit_code})")
     return exit_code
 
 
-def _supervisor_launch(slug):
-    """Launch the detached supervisor; wait for its first heartbeat.
+def _supervisor_try_claim(paths):
+    """Create the exclusive supervisor claim file. True when this launcher
+    won the slot; False when another launcher holds a claim.
+
+    O_EXCL makes the check-and-act atomic: two concurrent launchers cannot
+    both believe they won (issue #1129 Blocking 2 -- a double supervisor
+    wedges the job and defeats kill/close when the loser's finally unlinks
+    the winner's pid file).
+    """
+    try:
+        fd = os.open(paths["claim"],
+                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as f:
+        f.write(f"{time.time():.3f}\n")
+    return True
+
+
+def _supervisor_await_handoff(paths, slug, expect_turn_id,
+                             timeout=_SUPERVISOR_HANDOFF_VERIFY_S):
+    """Wait for the snapshot to prove the turn survived the handoff.
+
+    A heartbeat proves the supervisor is polling, not that the turn
+    survived the close→resume gap (issue #1129 Blocking 1). The snapshot
+    must show the expected turn live -- or a completed terminal turn (a
+    fast-finishing turn may complete before the first poll). Anything else
+    fails loud: the turn died in the gap and the caller marks the job
+    blocked, never active.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        snap = _supervisor_read_snapshot(slug)
+        if snap is not None:
+            live = snap.get("active_turn_id")
+            if live == expect_turn_id:
+                return snap
+            if (live is None
+                    and snap.get("state") in _supervisor_terminal_states()
+                    and snap.get("last_terminal") == "completed"):
+                return snap
+            raise RuntimeError(
+                f"supervisor for {slug!r} is polling but turn "
+                f"{expect_turn_id!r} is not live (state={snap.get('state')!r}, "
+                f"live={live!r}, terminal={snap.get('last_terminal')!r}); "
+                f"the turn died in the handoff gap")
+        time.sleep(1.0)
+    raise RuntimeError(
+        f"supervisor for {slug!r} never wrote a verifiable snapshot within "
+        f"{timeout}s; see {paths['log']}")
+
+
+def _supervisor_adopt_winner(paths, slug, expect_turn_id):
+    """A racing launcher lost the exclusive claim; wait for the winner.
+
+    Never launches a second supervisor. Returns the winner's pid once its
+    heartbeat proves it is polling (and the handoff verifies when the
+    expected turn is known).
+    """
+    deadline = time.time() + _SUPERVISOR_BOOT_WAIT_S
+    while time.time() < deadline:
+        if _supervisor_heartbeat_fresh(paths):
+            break
+        time.sleep(0.5)
+    else:
+        raise RuntimeError(
+            f"lost the supervisor race for {slug!r} and the winner never "
+            f"heartbeated within {_SUPERVISOR_BOOT_WAIT_S}s")
+    if expect_turn_id is not None:
+        _supervisor_await_handoff(paths, slug, expect_turn_id)
+    return _supervisor_read_pid(paths)
+
+
+def _supervisor_remove_own_files(paths):
+    """Remove pid/claim files, but only when the pid file names this process.
+
+    A supervisor that loses a race (or exits after another took over) must
+    never unlink the winner's files from its finally (issue #1129
+    Blocking 2).
+    """
+    if _supervisor_read_pid(paths) == os.getpid():
+        for key in ("pid", "claim"):
+            try:
+                os.unlink(paths[key])
+            except OSError:
+                pass
+
+
+def _supervisor_launch(slug, expect_turn_id=None):
+    """Launch the detached supervisor; wait for heartbeat + handoff proof.
 
     Detached: new session, stdio severed (own log file), cwd /tmp.
     `~/.local/bin` is prepended to the child's PATH and
     MUSE_NO_AUTO_UPDATE=1 is stamped on the child's env explicitly (the
     2026-10-06 deploy lesson: the detached supervisor must not depend on
-    the parent's environment). Returns the supervisor pid.
+    the parent's environment).
+
+    The exclusive claim guarantees one supervisor per slug: a racing
+    launcher adopts the winner instead of launching a second. When
+    `expect_turn_id` is known, the launch additionally verifies the turn
+    survived the close→resume gap (heartbeat alone doesn't prove it).
+    Returns the supervisor pid.
     """
     paths = _supervisor_paths(slug)
     try:
         os.unlink(paths["pid"])
     except OSError:
         pass
+    for _ in range(4):
+        if _supervisor_try_claim(paths):
+            break
+        if _supervisor_alive(slug):
+            return _supervisor_adopt_winner(paths, slug, expect_turn_id)
+        # Stale claim from a dead supervisor: clear and retry the exclusive
+        # create. Bounded retries; a live supervisor always wins the alive
+        # check above, so this never steals a live slot.
+        try:
+            os.unlink(paths["claim"])
+        except OSError:
+            pass
+    else:
+        raise RuntimeError(
+            f"could not claim the supervisor slot for {slug!r}")
     env = dict(os.environ)
     # Set on the child's env only -- the launcher must not mutate the
     # parent's environment as a side effect.
     env["MUSE_NO_AUTO_UPDATE"] = "1"
     local_bin = os.path.expanduser("~/.local/bin")
     env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
-    with open(paths["claim"], "w") as f:
-        f.write(f"{time.time():.3f}\n")
     script = os.path.abspath(__file__)
     logf = open(paths["log"], "a")
     try:
@@ -3778,29 +3909,54 @@ def _supervisor_launch(slug):
     deadline = time.time() + _SUPERVISOR_BOOT_WAIT_S
     while time.time() < deadline:
         if _supervisor_heartbeat_fresh(paths):
-            return p.pid
+            break
         if p.poll() is not None:
             raise RuntimeError(
                 f"supervisor for {slug!r} exited during boot "
                 f"(rc={p.returncode}); see {paths['log']}")
         time.sleep(0.5)
-    raise RuntimeError(
-        f"supervisor for {slug!r} did not heartbeat within "
-        f"{_SUPERVISOR_BOOT_WAIT_S}s; see {paths['log']}")
+    else:
+        raise RuntimeError(
+            f"supervisor for {slug!r} did not heartbeat within "
+            f"{_SUPERVISOR_BOOT_WAIT_S}s; see {paths['log']}")
+    if expect_turn_id is not None:
+        _supervisor_await_handoff(paths, slug, expect_turn_id)
+    return p.pid
 
 
-def _supervisor_ensure(slug, job):
+def _supervisor_ensure(slug, job, expect_turn_id=None):
     """Launch the supervisor unless one is already live; return its pid.
 
     Call after starting a turn on a transient host -- the supervisor takes
-    over the steady-state hold. Records `supervisor_pid` in job.json.
+    over the steady-state hold. `expect_turn_id` verifies the turn survived
+    the handoff (issue #1129 Blocking 1); callers that don't know the turn
+    id (watch recovery) get heartbeat-only assurance. Records
+    `supervisor_pid` in job.json.
     """
     if _supervisor_alive(slug):
         return job.get("supervisor_pid")
-    pid = _supervisor_launch(slug)
+    pid = _supervisor_launch(slug, expect_turn_id=expect_turn_id)
     job["supervisor_pid"] = pid
     save_job(job, slug)
     return pid
+
+
+def _msp_call_or_held(slug, job, fn, pre_resume=True):
+    """`_msp_call`, but a held session short-circuits before any serve spawn.
+
+    Issue #1129 Blocking 3: in the steady state the supervisor owns the
+    turn, so spawning a full `muse serve` just to eat -32021 on every
+    status/watch/steer/resume is pure churn -- and it makes routing depend
+    on serve's error surface. Check liveness first and raise
+    `_MSPSessionHeldElsewhere` directly; the translation inside `_msp_call`
+    stays as the race backstop for a supervisor that launches between this
+    check and the resume.
+    """
+    if _supervisor_alive(slug):
+        raise _MSPSessionHeldElsewhere(
+            f"session {job.get('session_uuid')} is held by the live detached "
+            f"supervisor for {slug!r}; the supervisor owns this turn")
+    return _msp_call(slug, job, fn, pre_resume=pre_resume)
 
 
 def _supervisor_terminate(slug):
@@ -3811,12 +3967,7 @@ def _supervisor_terminate(slug):
     the signal at an arbitrary process (issue #11).
     """
     paths = _supervisor_paths(slug)
-    pid = None
-    try:
-        with open(paths["pid"]) as f:
-            pid = int(f.read().strip().split()[0])
-    except (OSError, ValueError, IndexError):
-        pid = None
+    pid = _supervisor_read_pid(paths)
     if pid and pid > 0 and _supervisor_cmdline_matches(paths, pid, slug):
         try:
             os.kill(pid, signal.SIGTERM)
@@ -3934,14 +4085,14 @@ def _spawn_msp(slug, args):
     # only once the first heartbeat proves the handoff.
     host.close()
     try:
-        supervisor_pid = _supervisor_ensure(slug, job)
-    except Exception:
-        # The turn died with the spawn's host and no supervisor holds it:
-        # fail loud and mark blocked, never active.
+        # Issue #1129 Blocking 1: the handoff is verified -- the snapshot
+        # must show this turn live (or completed), otherwise the turn died
+        # in the close→resume gap and the job is blocked, never active.
+        supervisor_pid = _supervisor_ensure(slug, job,
+                                            expect_turn_id=turn["turnId"])
+    except Exception as e:
         job["state"] = "blocked"
-        job["supervisor_error"] = ("the detached supervisor failed to take "
-                                   "over the turn; the turn died with the "
-                                   "spawn host")
+        job["supervisor_error"] = f"supervisor handoff failed: {e}"
         save_job(job, slug)
         raise
     print(json.dumps({"slug": slug, "transport": "msp",
@@ -3967,7 +4118,11 @@ def _msp_steer(job, args):
         turn, _result = msp_turn.start_turn(host, sid, args.message)
         return {"started_turn": (turn or {}).get("turnId")}
     try:
-        out = _msp_call(slug, job, go)
+        # Issue #1129 Blocking 3: when the supervisor holds the session,
+        # queue directly instead of spawning a doomed serve host for a
+        # -32021; the translation inside _msp_call stays as the race
+        # backstop.
+        out = _msp_call_or_held(slug, job, go)
     except _MSPSessionHeldElsewhere:
         # The supervisor holds the live turn: queue the steer; the
         # supervisor drains the queue against the live turn (turn-id
@@ -3980,8 +4135,9 @@ def _msp_steer(job, args):
         return 0
     if out.get("started_turn"):
         # A fresh turn on a transient host dies with the host close --
-        # hand it to the supervisor (issue #1129).
-        _supervisor_ensure(slug, job)
+        # hand it to the supervisor, verifying the handoff (Blocking 1).
+        _supervisor_ensure(slug, job,
+                           expect_turn_id=out.get("started_turn"))
     print(json.dumps({"slug": slug, **out}))
     return 0
 
@@ -4087,7 +4243,9 @@ def _msp_status(job, slug, args):
             st["progress_age_s"] = None
         return st
     try:
-        st = _msp_call(slug, job, go)
+        # Issue #1129 Blocking 3: liveness first -- no doomed serve spawn
+        # in the steady state; the translation stays as the race backstop.
+        st = _msp_call_or_held(slug, job, go)
     except _MSPSessionHeldElsewhere:
         # Issue #1129: the supervisor holds the session; report from its
         # view snapshot instead of failing the status.
@@ -4199,13 +4357,16 @@ def _msp_resume(args, _from_watch=False):
             if not new_sid:
                 raise RuntimeError("session/start returned no session id")
             prompt = _reanchor_prompt(slug, job)
-            msp_turn.start_turn(host, new_sid, prompt)
-            return {"resumed": "fallback-fresh", "session_id": new_sid}
+            turn, _result = msp_turn.start_turn(host, new_sid, prompt)
+            return {"resumed": "fallback-fresh", "session_id": new_sid,
+                    "turn_id": (turn or {}).get("turnId")}
         session = result.get("session", result) if isinstance(result, dict) else {}
         return {"resumed": sid,
                 "status": (session or {}).get("status")}
     try:
-        out = _msp_call(slug, job, go, pre_resume=False)
+        # Issue #1129 Blocking 3: liveness first -- no doomed serve spawn
+        # when the supervisor holds the session.
+        out = _msp_call_or_held(slug, job, go, pre_resume=False)
     except _MSPSessionHeldElsewhere:
         # Issue #1129: the supervisor holds the session, so the job is
         # alive by definition -- report, don't resume.
@@ -4223,9 +4384,9 @@ def _msp_resume(args, _from_watch=False):
     if out.get("resumed") == "fallback-fresh":
         job["session_uuid"] = out["session_id"]
         job["session_started_at"] = time.time()
-        # The fresh turn is on a transient host -- hand it to the supervisor
-        # (issue #1129).
-        _supervisor_ensure(slug, job)
+        # The fresh turn is on a transient host -- hand it to the supervisor,
+        # verifying the handoff (issue #1129 Blocking 1).
+        _supervisor_ensure(slug, job, expect_turn_id=out.get("turn_id"))
     if _from_watch:
         fresh = load_job(slug)
         if fresh.get("state") not in ("active", "blocked"):
@@ -4335,7 +4496,9 @@ def _watch_msp_job(slug, job, events, now):
         return _msp_poll(host, slug, job)
     held = False
     try:
-        view = _msp_call(slug, job, go)
+        # Issue #1129 Blocking 3: liveness first -- the watchdog runs this
+        # per job per pass; no doomed serve spawn in the steady state.
+        view = _msp_call_or_held(slug, job, go)
     except _MSPSessionHeldElsewhere:
         # Issue #1129: the supervisor holds the session, so the recovery
         # ladder below cannot attach. Read the supervisor's snapshot and

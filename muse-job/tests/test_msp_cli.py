@@ -247,8 +247,9 @@ def _fake_supervisor_ensure(monkeypatch, cli):
     supervisor; fake the handoff (no real subprocess in unit tests)."""
     ensured = {}
 
-    def fake(slug, job):
+    def fake(slug, job, expect_turn_id=None):
         ensured["slug"] = slug
+        ensured["expect_turn_id"] = expect_turn_id
         return 4242
 
     monkeypatch.setattr(cli, "_supervisor_ensure", fake)
@@ -275,8 +276,9 @@ def test_spawn_msp_records_transport_and_session(cli, fakes, monkeypatch):
     monkeypatch.setattr(cli, "_spawn_prepare", fake_prepare)
     # Issue #1129: spawn hands the live turn to the detached supervisor.
     ensured = {}
-    def fake_ensure(slug, job):
+    def fake_ensure(slug, job, expect_turn_id=None):
         ensured["slug"] = slug
+        ensured["expect_turn_id"] = expect_turn_id
         job["supervisor_pid"] = 4242
         cli.save_job(job, slug)
         return 4242
@@ -291,6 +293,8 @@ def test_spawn_msp_records_transport_and_session(cli, fakes, monkeypatch):
     assert job["transport"] == "msp"
     assert job["session_uuid"] == "sess-1"
     assert job["supervisor_pid"] == 4242
+    # Blocking 1: the handoff is verified against the engaged turn id.
+    assert ensured["expect_turn_id"] == "turn-1"
     # serve got the yolo approval mode and the workdir as workspace root
     assert fakes.modules["msp_session"].started["approval_mode"] == "allowAll"
     assert fakes.modules["msp_session"].started["workspace_root"].endswith(
@@ -408,8 +412,10 @@ def test_steer_no_active_turn_starts_turn(cli, fakes, monkeypatch):
                                            allow_secrets=False))
     assert fakes.modules["msp_turn"].steered == []
     assert fakes.modules["msp_turn"].started_turns == [("sess-1", "go")]
-    # Issue #1129: a fresh turn is handed to the detached supervisor.
+    # Issue #1129: a fresh turn is handed to the detached supervisor, with
+    # the handoff verified against the started turn id (Blocking 1).
     assert ensured["slug"] == slug
+    assert ensured["expect_turn_id"] == "turn-1"
 
 
 # -- status / log ----------------------------------------------------------
