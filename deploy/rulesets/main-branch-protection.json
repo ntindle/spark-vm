@@ -43,6 +43,12 @@
           },
           {
             "context": "changelog ritual lint"
+          },
+          {
+            "context": "changed-paths gate"
+          },
+          {
+            "context": "docs index coverage"
           }
         ],
         "strict_required_status_checks_policy": true
