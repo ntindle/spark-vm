@@ -1,13 +1,16 @@
 # S4b socket-lifecycle gap analysis: the plane DO's session logic (#958)
 
 **Vision vs current state.** Statuses pinned to this repo at main
-`4487c13` (2026-10-04) and to the deployed plane worker — the S4a slice
-that landed 2026-10-04 (upgrade route + `BoxDO` accept-and-hold, deployed
+`7b20178` (2026-10-07) and to the deployed plane worker — the S4a slice
+landed 2026-10-04 (upgrade route + `BoxDO` accept-and-hold, deployed
 live via `deploy_worker.py`; the deployed source is the
-`diff-958-s4a-worker.patch` state). The plane lives outside this repo, so
-plane-side facts below are pinned to that deployed checkout, not to a repo
-commit. Doc-first; honesty rules apply (`docs/POSITIONING.md`): everything
-below is **current state and work to do**, not promises.
+`diff-958-s4a-worker.patch` state), the S4b-4 journal sink shipped
+2026-10-04 (#999, PR #1014), and S4b-1 (hello/identity/generation fence)
+shipped and deployed live 2026-10-05 (#1000, PR #1055). The plane lives
+outside this repo, so plane-side facts below are pinned to that deployed
+checkout, not to a repo commit. Doc-first; honesty rules apply
+(`docs/POSITIONING.md`): everything below is **current state and work to
+do**, not promises.
 
 ## 1. The S4b vision
 
@@ -38,15 +41,15 @@ Acceptance is #960's S6 checklist, harness-first per the S4 contract.
 
 | S4b element | Current state |
 |---|---|
-| `hello` frame handling | **Nothing.** The socket is accepted and held; no frame is read, parsed, or answered. The box side (#959 S5a, closed) already sends `hello` with `(box_id, generation)` and waits for `welcome` — today it waits forever against the live plane. |
-| Identity binding | **Nothing.** The Worker validated the token at upgrade; the DO never re-derives the handshake identity and enforces nothing about the `hello` frame's `box_id` self-assertion. |
-| Generation fence | **Nothing.** No `last_generation` in DO durable storage; no stale-generation close; no superseded-generation close to the old socket; frames on a non-bound socket are not dropped. The box side (#959) already bumps a crash-safe durable generation per connect and adopts `last_generation + 1` on a stale-generation close — the plane half of that contract is unbuilt. |
-| Re-drive | **Nothing.** The DO never reads the `commands` table and never emits `command` frames. The acked-watermark query (`SELECT MAX(seq) ... WHERE state='acked'`) and the pending/leased fetch shape exist on the Worker's HTTPS path only. |
-| Socket `command_ack` consume half | **Nothing on the plane.** The box (#976 S5b) sends `command_ack` frames with `(generation, seq, epoch)`; the DO drops them on the floor (it reads no frames at all). The HTTPS `POST /commands/ack` endpoint is the only ack path that lands. |
-| Ping / pong | **Nothing.** Neither side's keepalive is answered; the 90 s pong-timeout rule has no plane half. |
+| `hello` frame handling | **Shipped — #1000 (S4b-1), PR #1055, deployed live 2026-10-05.** `BoxDO.fetch` reads the first frame as `hello`; malformed → `close`/`protocol-error`. The box side (#959 S5a, closed) sends `hello` with `(box_id, generation)` — it is now answered, not left waiting. |
+| Identity binding | **Shipped — #1000 (S4b-1), PR #1055, deployed live 2026-10-05.** The DO re-derives the handshake identity from the upgrade request's `Authorization` Bearer <redacted> per D14; the `hello` frame's `box_id` self-assertion must equal it (mismatch → `close`/`identity-mismatch` + journal). |
+| Generation fence | **Shipped — #1000 (S4b-1), PR #1055, deployed live 2026-10-05.** `last_generation` lives in DO durable storage: `hello` with `generation > last_generation` binds the new socket and closes the old one `superseded-generation`; `<= last_generation` → `close`/`stale-generation` carrying `last_generation`; every subsequent frame is generation-checked (stale → dropped + `phone_home.generation_fence` journaled). The box side (#959) already bumps a crash-safe durable generation per connect and adopts `last_generation + 1` on a stale-generation close — the plane half of that contract is now built. |
+| Re-drive | **Partially landed — the emit half is in the deployed worker checkout (in-flight #1001 S4b-2a work; the sibling feature turn is live, review not yet converged).** `_phone_home_redrive` emits `command` frames on (re)bind and on the D15 Worker→DO wakeup RPC (`/internal/commands-wakeup`, fired after `_enqueue_command`); leases stamped exactly as the HTTPS path; `phone_home.redrive` journaled; malformed rows skipped-and-logged per D-MAL1. The socket `command_ack` consume-half is still open (S4b-2b, #1001). |
+| Socket `command_ack` consume half | **Nothing on the plane.** The box (#976 S5b) sends `command_ack` frames with `(generation, seq, epoch)`; the DO ignores them as unknown frame types (they are never fenced-bypassed — the generation fence already ran). The HTTPS `POST /commands/ack` endpoint is the only ack path that lands; the socket ack UPDATE hoist is S4b-2b, still open (#1001). |
+| Ping / pong | **Pong answered in the deployed worker checkout (wire spec §4 keepalive).** The DO answers the box's `ping` with `pong` (keeps the box's 90 s watchdog from flapping the session). The 90 s pong-timeout → hibernate rule and the alarm-wake + token re-verify are still open (#1002). |
 | Alarm wake + token re-verify | **Nothing.** No alarm is set; a hibernated socket is never re-verified. The revocation-latency ceiling for a silent socket is currently unbounded — the exact hole wire spec §6's bound exists to close. |
 | Hibernation | **Not used.** S4a's `server.accept()` pins the DO in memory. The `BoxDO` docstring already names the move to `self.ctx.acceptWebSocket(server)` as S4b scope. |
-| Journal events | **Nothing.** No sink exists on the plane (see F-S4b-1). |
+| Journal events | **Shipped — #999 (S4b-4), PR #1014, 2026-10-04.** The sink is the D1 table `phone_home_events` (D16's decision implemented, migration `migrate_958_s4b.sql`, re-run safe); owner-only read path `GET /v1/boxes/{box_id}/phone-home/events`; 90-day retention with the daily Worker cron + manual trigger `POST /v1/ops/phone_home/gc` (#1013). Wire spec §9's sink reference was corrected to this table by the same slice. |
 | Liveness writes from the socket | **Correctly absent** — and must stay absent (§8). The #864 heartbeat remains the only liveness signal; nothing in S4b changes that. |
 
 ## 3. Findings
@@ -59,6 +62,11 @@ Acceptance is #960's S6 checklist, harness-first per the S4 contract.
   `commands`, `approvals`) has no events table. The S4b journal slice must
   pin the real sink; until it does, every other S4b slice's "journal the
   event" acceptance criterion has nowhere to land. Decision D16 pins it.
+  **Status 2026-10-07: RESOLVED.** #999 shipped 2026-10-04 (PR #1014):
+  the sink is the D1 table `phone_home_events` per D16, wire spec §9 was
+  corrected to it, and the owner-only read path plus 90-day retention
+  shipped with it (#1013). The finding above is historical — it was true
+  when written; the §2 "Journal events" row carries the shipped state.
 - **F-S4b-2 — the new-enqueue wakeup path is unspecified.** The DO owns
   the socket, but enqueues land on the Worker (`_enqueue_command`, owner
   API + #873 approval decisions). Nothing tells the DO a new command is
@@ -183,7 +191,10 @@ Acceptance is #960's S6 checklist, harness-first per the S4 contract.
 
 ## 5. Slices (each ≤ one slot, harness-first, independently deployable)
 
-**S4b-1 — hello, identity binding, generation fence.**
+**S4b-1 — hello, identity binding, generation fence. SHIPPED 2026-10-05
+(#1000, PR #1055, deployed live).** The §2 hello handshake and §5
+generation fence run in `BoxDO` against the deployed plane worker; wire
+spec §7 carries the shipped pin.
 `BoxDO.fetch`: re-derive identity per D14; read the first frame as
 `hello`; `box_id` mismatch → `close`/`identity-mismatch` + journal;
 malformed `hello` → `close`/`protocol-error`. Generation: `hello`
@@ -205,7 +216,12 @@ the unknown-`type` ignore (a stale-generation frame of an unknown type
 is still fenced, not ignored). Live: the #959 box client
 completes hello/welcome against the deployed plane.
 
-**S4b-2 — command re-drive + socket ack consume half.**
+**S4b-2 — command re-drive + socket ack consume half. PARTIALLY LANDED
+(2026-10-07): the emit half is in the deployed worker checkout via
+in-flight #1001 S4b-2a work (sibling feature turn live, review pending) —
+re-drive on (re)bind + the D15 wakeup RPC, leases stamped exactly as the
+HTTPS path, `phone_home.redrive` journaled (D-MAL1 malformed-row skip);
+the socket `command_ack` consume-half (S4b-2b) is still open.**
 On (re)bind and on the D15 wakeup RPC, the DO reads the acked watermark
 (the existing `MAX(seq) ... state='acked'` query — no second cursor) and
 emits `command` frames onto **S4b-1's bound socket** (the bound-socket
@@ -249,9 +265,16 @@ wake re-verifies before accepting further frames. Live:
 revoke-during-socket closes on next inbound/wake (S6
 item 2's plane half).
 
-**S4b-4 — journal sink + events.**
+**S4b-4 — journal sink + events. SHIPPED 2026-10-04 (#999, PR #1014).**
+D16's decision implemented as shipped: `phone_home_events` D1 table
+(created by `migrate_958_s4b.sql`, re-run safe), the DO's
+`_journal_phone_home_event` helper as the only writer (never
+payloads/tokens/frames), the owner-only
+read path `GET /v1/boxes/{box_id}/phone-home/events`, 90-day retention
+with the daily Worker cron + manual `POST /v1/ops/phone_home/gc` (#1013),
+and the wire spec §9 sink correction to this table.
 D16: `migrate_958_s4b.sql` creates `phone_home_events`; the DO's
-`_journal_event` helper writes it (box_id, event, generation, code,
+`_journal_phone_home_event` helper writes it (box_id, event, generation, code,
 server_time — never payloads/tokens/frames); owner-only read path;
 90-day retention + GC follow-up filed. Correct wire spec §9's sink
 reference to the D1 table. Worker-side: the unattributed pre-handshake
@@ -263,7 +286,7 @@ per-event→column mapping above and nothing else (in particular
 `seen_generation`); pre-handshake 401s never create DO journal rows;
 retention bound documented. *Build order note:* S4b-4's sink decision
 is a prerequisite for S4b-1–3's emission call sites — build S4b-4
-first, or land 1–3 against a `_journal_event` no-op stub that S4b-4
+first, or land 1–3 against a `_journal_phone_home_event` no-op stub that S4b-4
 replaces. Recommended: 4 → 1 → 2 → 3.
 
 ## 6. Explicit non-scope
@@ -285,5 +308,7 @@ live smoke per slice). Each slice extends the real-worker harness
 before any deploy. #960 (S6) consumes all four: its six-item checklist
 (two-box no-cross-talk, revoke-during-socket, reconnect-resume,
 stale-generation fence, fallback honored, epoch untouched) is the
-integration gate. #958 stays OPEN until S4b-1–4 land; #847 stays OPEN
-until S4b + S6.
+integration gate. S4b-4 (#999) and S4b-1 (#1000) have shipped; #958 stays
+OPEN until S4b-2 (#1001) and S4b-3 (#1002) land (S4b-2's emit half is
+partially landed in the deployed checkout — see §2); #847 stays OPEN until
+S4b + S6.

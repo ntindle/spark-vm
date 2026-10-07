@@ -17,6 +17,10 @@ is fail-closed:
   build-image.sh),
 - the referenced gate record must exist, name the same image_version, and be
   a COMPLETED pass (a skeleton is not a gate),
+- the digest the --image-ref names must equal the push-produced digest the
+  publish step recorded in the gate record's build.image_digest (a
+  pasted/fat-fingered ref cannot pin an image the gate did not publish;
+  --force never bypasses this — re-push re-stamps the record first),
 - repinning the same sparkvm_sha to a different digest needs --force.
 
 The reader (read_pin / pin_image_ref) is what the driver imports; it raises
@@ -265,6 +269,42 @@ def _check_gate_record(gate, sha, gate_label):
             "image does not pin")
 
 
+def _check_image_digest_crossref(image_ref, gate, gate_label):
+    """Pin-side digest cross-check (#1124, D-PIN1--D-PIN4).
+
+    The digest named by --image-ref must equal the push-produced digest the
+    publish step recorded in the gate record's build.image_digest. The
+    comparison is digest-component only: host and repo-path rules already
+    ran on both operands (_split_digest_ref above, the record step's own
+    validation at stamp time), so this check adds no ref-shape opinions.
+
+    Fail-closed both ways: a record with no build.image_digest (the publish
+    step never stamped it) refuses with the exact re-stamp command as the
+    remediation; a digest mismatch refuses naming both digests so the
+    operator sees which side drifted.
+
+    Honest ceiling (D-PIN6 / module docstring): the recorded digest is still
+    operator self-attestation — this closes paste/fat-finger divergence
+    between the publish and pin steps, not a malicious operator.
+    """
+    _, _, ref_digest = _split_digest_ref(image_ref)
+    build = gate.get("build")
+    if not isinstance(build, dict) or build.get("image_digest") is None:
+        raise PinnedImageError(
+            f"gate record {gate_label} records no push-produced digest "
+            "(build.image_digest is missing) — stamp it first with "
+            f"`build-image.sh --record-pushed-digest {gate_label} "
+            "<image-ref>; refusing to pin on an unattested digest")
+    recorded = build.get("image_digest")
+    if recorded != ref_digest:
+        raise PinnedImageError(
+            f"image ref digest {ref_digest} does not match the push-produced "
+            f"digest recorded in gate record {gate_label} ({recorded}) — "
+            "the pin would name a different image than the one the gate "
+            "published; re-push and re-stamp the record first, then pin "
+            "the digest the record names")
+
+
 def write_pin(repo=None, image_ref=None, tag_ref=None, gate_record=None,
               pinned_by=None, force=False):
     """Validate and write deploy/golden-image/pinned-image.json.
@@ -293,6 +333,7 @@ def write_pin(repo=None, image_ref=None, tag_ref=None, gate_record=None,
         if os.path.isabs(gate_record) else gate_record
     gate = _load_gate_record(gate_record)
     _check_gate_record(gate, sha, gate_label)
+    _check_image_digest_crossref(image_ref, gate, gate_label)
 
     record = {
         "schema": PIN_SCHEMA,
@@ -384,7 +425,8 @@ def main(argv=None):
                      help="operator principal recording the pin")
     pin.add_argument("--force", action="store_true",
                      help="allow repinning the same sparkvm_sha to a "
-                     "different digest (re-push case)")
+                     "different digest (re-push case); does NOT bypass the "
+                     "--image-ref vs gate-record digest cross-check (#1124)")
 
     sub.add_parser("show", help="print the current validated pin record")
 

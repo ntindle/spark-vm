@@ -123,6 +123,33 @@ never inject bytes into a live session.
   queue's `acked_watermark` — it owns the queue, so it knows where to
   resume pushing; the box dedupes redeliveries by `(box_id, seq)` per
   #848. No cursor travels in `hello`.
+- **Malformed command-row policy (D-MAL1, 2026-10-07, #1118):** the
+  pinned policy is skip-and-log for both carriers. A row that fails the
+  box-side shape check — not a dict, or a missing/mistyped `seq`,
+  `kind`, or `payload`, or a mistyped `epoch` (the check
+  `_ingest_command_shape` performs) — is the plane's bug: it is never executed, and never
+  acked — the row failed shaping, so the box cannot trust any of its
+  fields (including its `seq`). The box logs it LOUDLY on the box's
+  ingest log (stderr + `ingest.log`) — the same loud channel that
+  reports all ingest failures — and the queue flows past it: a plane
+  data bug must not wedge the durable queue, because revocations and
+  decisions must keep moving (the `docs/DURABLE_COMMANDS.md` "Plane
+  bugs" liveness principle — a single bad row never wedges the queue
+  behind a version skew — applied here as skip-without-ack: the cursor
+  advances past the row instead of acking it, unlike unknown kinds,
+  which the reference implementation acked-and-logged). The
+  DURABLE_COMMANDS.md fail-closed carve-out governs well-formed rows
+  of security-effect kinds; it cannot apply here because a malformed
+  row has no valid kind to route on — which is why skip-and-log, not
+  per-kind fail-closed, is the policy for unparseable rows. On the
+  HTTPS path the row drops out of redelivery once the cursor advances
+  past its seq (the loud log is the only record). KNOWN DIVERGENCE: the
+  socket carrier (S5b) currently holds its per-session acked prefix on
+  malformed rows — stricter than this policy, and theater while the
+  HTTPS cron serves the same queue (the cron's skip wins on the shared
+  cursor). Socket alignment is queued work on #1118; malformed-row
+  handling on the re-drive path is open work in the S4b-2 slice
+  (#1001).
 
 ## 4. Keepalive
 

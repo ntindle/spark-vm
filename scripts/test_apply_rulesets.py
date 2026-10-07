@@ -179,9 +179,11 @@ class TestMainBranchRuleset(unittest.TestCase):
 
     def test_ci_job_check_names_are_the_declared_five(self):
         # Known-good anchor: the protection is *supposed* to require exactly
-        # these five checks. A ci.yml job rename/add/remove must update this
+        # these checks. A ci.yml job rename/add/remove must update this
         # set deliberately, under review, together with the ruleset JSON —
         # the equality test above then forces the JSON to follow.
+        # (P138, 2026-10-07: the changed-paths gate and the docs-index
+        # coverage guard joined the merge gate.)
         self.assertEqual(
             ci_job_check_names(CI_YML),
             {
@@ -190,6 +192,8 @@ class TestMainBranchRuleset(unittest.TestCase):
                 "markdown link check",
                 "PNG screenshot smoke test",
                 "changelog ritual lint",
+                "changed-paths gate",
+                "docs index coverage",
             },
         )
 
