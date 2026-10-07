@@ -274,7 +274,7 @@ read path `GET /v1/boxes/{box_id}/phone-home/events`, 90-day retention
 with the daily Worker cron + manual `POST /v1/ops/phone_home/gc` (#1013),
 and the wire spec §9 sink correction to this table.
 D16: `migrate_958_s4b.sql` creates `phone_home_events`; the DO's
-`_journal_event` helper writes it (box_id, event, generation, code,
+`_journal_phone_home_event` helper writes it (box_id, event, generation, code,
 server_time — never payloads/tokens/frames); owner-only read path;
 90-day retention + GC follow-up filed. Correct wire spec §9's sink
 reference to the D1 table. Worker-side: the unattributed pre-handshake
@@ -286,7 +286,7 @@ per-event→column mapping above and nothing else (in particular
 `seen_generation`); pre-handshake 401s never create DO journal rows;
 retention bound documented. *Build order note:* S4b-4's sink decision
 is a prerequisite for S4b-1–3's emission call sites — build S4b-4
-first, or land 1–3 against a `_journal_event` no-op stub that S4b-4
+first, or land 1–3 against a `_journal_phone_home_event` no-op stub that S4b-4
 replaces. Recommended: 4 → 1 → 2 → 3.
 
 ## 6. Explicit non-scope
