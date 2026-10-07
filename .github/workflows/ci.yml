@@ -65,6 +65,10 @@ jobs:
             while IFS= read -r f; do
               case "$f" in
                 docs/*|CHANGELOG.md) ;;
+                # NB: an empty diff feeds the loop one empty line, which
+                # matches *) — so a zero-change diff fails closed to
+                # code_changed=true and the suite runs. That is the safe
+                # direction; keep it.
                 *) code_changed=true; break ;;
               esac
             done <<< "$files"
