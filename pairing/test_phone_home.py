@@ -1524,6 +1524,170 @@ def test_socket_command_ingest_lock_contention_defers(ctx, monkeypatch,
         assert len(json.load(f)) == 1
 
 
+def test_socket_command_adopts_epoch_and_advances_cursor(ctx, monkeypatch,
+                                                         tmp_path):
+    # #1116: the socket path honors the #947 epoch contract like the
+    # HTTPS path — the plane's epoch is adopted and persisted via the
+    # durable cursor file, so the next cron fetch asserts a truthful
+    # ?epoch= and does not re-fetch socket-acked seqs.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 5, _s5b_inner()),
+                    ("expect-acks", [1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    cursor_path = os.path.join(ctx.dir, spark_pair._INGEST_CURSOR_FILE)
+    assert os.path.exists(cursor_path), \
+        "socket path must persist the ingest cursor (#1116)"
+    with open(cursor_path) as f:
+        cur = json.load(f)
+    assert cur["cursor"] == 1
+    assert cur["epoch"] == 5
+    # The ack envelope keeps echoing the frame's epoch verbatim —
+    # diagnostic contract unchanged.
+    assert _s5b_acks(stub)[0]["epoch"] == 5
+
+
+def test_socket_command_epoch_last_writer_wins_cursor_monotonic(
+        ctx, monkeypatch, tmp_path):
+    # #1116: epoch adoption is last-writer-wins (mirrors the HTTPS
+    # path's per-row adoption); the durable cursor never regresses
+    # below a higher cron-side value.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    with open(os.path.join(ctx.dir, spark_pair._INGEST_CURSOR_FILE),
+              "w") as f:
+        json.dump({"cursor": 10, "epoch": 3}, f)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 7, _s5b_inner()),
+                    ("expect-acks", [1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    with open(os.path.join(ctx.dir, spark_pair._INGEST_CURSOR_FILE)) as f:
+        cur = json.load(f)
+    assert cur["cursor"] == 10, \
+        "cursor must not regress below the cron-side value"
+    assert cur["epoch"] == 7
+
+
+def test_socket_command_state_saves_hold_ingest_lock(ctx, monkeypatch,
+                                                     tmp_path):
+    # #1117: _save_ingested is a full-file rewrite (and the cursor save
+    # rides with it) — both must land inside the ingest-lock hold, or a
+    # cron tick blocked on the lock can clobber this save. Probed
+    # directly: a non-blocking LOCK_EX on a separately-opened fd must
+    # FAIL while each save runs (flock does not merge across open file
+    # descriptions, so this proves the hold is real, even in-process).
+    import fcntl
+    held = []
+    orig_save_cursor = spark_pair._save_ingest_cursor
+    orig_save_ingested = spark_pair._save_ingested
+
+    def _probe_under_lock(save):
+        def wrapper(d, *a):
+            probe_fd = os.open(
+                os.path.join(d, spark_pair._INGEST_LOCK_FILE), os.O_RDWR)
+            try:
+                try:
+                    fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    held.append(True)  # the socket path holds the lock
+                else:
+                    held.append(False)  # lock free — the race is open
+            finally:
+                os.close(probe_fd)
+            return save(d, *a)
+        return wrapper
+
+    monkeypatch.setattr(spark_pair, "_save_ingest_cursor",
+                        _probe_under_lock(orig_save_cursor))
+    monkeypatch.setattr(spark_pair, "_save_ingested",
+                        _probe_under_lock(orig_save_ingested))
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, _s5b_inner()),
+                    ("expect-acks", [1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert held == [True, True], \
+        f"cursor + ingested saves must run under the ingest lock: {held}"
+
+
+def test_socket_command_save_failure_withholds_ack(ctx, monkeypatch,
+                                                   tmp_path, capsys):
+    # _save_socket_ingest_state's fail-closed contract (#1116/#1117):
+    # a state-save OSError must withhold the ack (the DO re-drives;
+    # redelivery is idempotent), loudly. The executor's stamp is
+    # asserted too, so the no-ack is proven to be the save failure's
+    # doing, not an executor failure.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+
+    def _boom(d, data):
+        raise OSError("ENOSPC: no space left on device")
+    monkeypatch.setattr(spark_pair, "_save_ingested", _boom)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 5, _s5b_inner()),
+                    ("drain", 1.0),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert _s5b_consumed(approvals)["plane_seq"] == 1
+    # No ack left the box (drain-based proof, not the quota-blind
+    # rec["frames"]).
+    assert _s5b_drained_acks(stub) == []
+    out = capsys.readouterr().out
+    assert "socket ingest state save failed" in out
+    assert "not acked" in out
+
+
+def test_socket_command_ingested_merge_keeps_cron_marks(ctx, monkeypatch,
+                                                        tmp_path):
+    # #1117, second half: self._ingested is snapshotted at session
+    # init — a cron tick that completes a pass after init must not lose
+    # its marks when the socket path rewrites the log under the lock.
+    # Deterministic interleaving: the helper's _load_ingested (the
+    # second call, under the lock) finds a cron-written entry on disk;
+    # the save must keep both the cron entry and the session's fresh
+    # mark. Without the reload-and-merge, the save keeps only the
+    # session's mark (toggle-verified).
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    _s5b_file_pending(approvals)
+    real_load = spark_pair._load_ingested
+    calls = []
+
+    def _interleaved_load(d):
+        calls.append(1)
+        if len(calls) == 2:
+            # The cron tick's pass lands between session init and the
+            # socket path's under-lock save.
+            spark_pair._save_ingested(
+                d, {"approval_decision:%s:cronaid0000001:9" % BOX_ID: {
+                    "seq": 9, "decision": "approve",
+                    "ingested_at": "2026-10-07T00:00:00+00:00"}})
+        return real_load(d)
+
+    monkeypatch.setattr(spark_pair, "_load_ingested", _interleaved_load)
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, _s5b_inner()),
+                    ("expect-acks", [1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    assert len(calls) == 2, \
+        f"expected session-init + helper loads, got {len(calls)}"
+    with open(os.path.join(ctx.dir, "ingested_decisions.json")) as f:
+        saved = json.load(f)
+    assert len(saved) == 2, f"cron mark clobbered: {sorted(saved)}"
+    assert any("cronaid0000001" in k for k in saved)
+    assert any("s5bcmd0000000001" in k for k in saved)
+
+
 def test_dispatch_crash_exits_2_not_1(ctx, monkeypatch, capsys):
     """An uncaught exception in the daemon must exit 2 (restartable),
     not 1 (deliberate human-attention stop). CPython's default is 1,
