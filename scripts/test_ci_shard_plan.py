@@ -50,38 +50,53 @@ def _testpaths():
 class TestCiShardPlanCoversAll(unittest.TestCase):
     def test_every_testpaths_dir_is_in_exactly_one_shard(self):
         plan = _load_plan()
-        counts = {}
-        for shard, dirs in plan.SHARDS.items():
-            for d in dirs:
-                counts[d] = counts.get(d, 0) + 1
-        missing = [p for p in _testpaths() if counts.get(p, 0) == 0]
-        duplicated = sorted(d for d, c in counts.items() if c > 1)
         self.assertEqual(
-            missing,
+            plan.check_bijection(_testpaths()),
             [],
-            "testpaths dirs with no CI shard (they would never run in CI):\n"
-            + "\n".join(f"  {m}" for m in missing),
+            "shard inventory drifted — see scripts/ci_shard_plan.py "
+            "check_bijection for the per-case messages",
         )
-        self.assertEqual(
-            duplicated,
-            [],
-            "dirs claimed by more than one shard (they would run twice):\n"
-            + "\n".join(f"  {d}" for d in duplicated),
+
+    def test_check_bijection_names_each_drift_case(self):
+        # Non-vacuity: the shared check must actually catch each drift
+        # class with a message naming the offender (the CI plan job runs
+        # this same function via --check).
+        plan = _load_plan()
+        base = _testpaths()
+        missing = plan.check_bijection(base + ["brand-new-suite"])
+        self.assertTrue(
+            any("brand-new-suite" in m and "no shard" in m for m in missing),
+            f"missing-dir case not caught: {missing}",
+        )
+        dup_shards = dict(plan.SHARDS)
+        dup_shards["shard-unit"] = ["proxy"] + dup_shards["shard-unit"]
+        orig = plan.SHARDS
+        plan.SHARDS = dup_shards
+        try:
+            duped = plan.check_bijection(base)
+        finally:
+            plan.SHARDS = orig
+        self.assertTrue(
+            any("proxy" in m and "2 shards" in m for m in duped),
+            f"duplicated-dir case not caught: {duped}",
+        )
+        stray_shards = dict(plan.SHARDS)
+        stray_shards["shard-unit"] = stray_shards["shard-unit"] + ["nope"]
+        plan.SHARDS = stray_shards
+        try:
+            stray = plan.check_bijection(base)
+        finally:
+            plan.SHARDS = orig
+        self.assertTrue(
+            any("nope" in m and "not in pytest.ini" in m for m in stray),
+            f"stray-dir case not caught: {stray}",
         )
 
     def test_no_shard_names_dirs_outside_testpaths(self):
+        # Covered by check_bijection's stray-dir case above; kept as a
+        # named test so the invariant reads in the test list.
         plan = _load_plan()
-        paths = set(_testpaths())
-        stray = sorted(
-            {d for dirs in plan.SHARDS.values() for d in dirs} - paths
-        )
-        self.assertEqual(
-            stray,
-            [],
-            "shard dirs not in pytest.ini testpaths (pytest would fail\n"
-            "with 'file or directory not found' — remove or fix the shard):\n"
-            + "\n".join(f"  {s}" for s in stray),
-        )
+        self.assertEqual(plan.check_bijection(_testpaths()), [])
 
     def test_shard_inventory_shape(self):
         plan = _load_plan()

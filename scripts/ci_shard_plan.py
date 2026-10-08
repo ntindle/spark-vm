@@ -37,6 +37,7 @@ job with nothing installed beyond the runner's Python.
 """
 
 import json
+import sys
 
 # Shard name -> ordered list of pytest.ini testpaths directories.
 # Keep names short and URL/identifier-safe: they appear in check names
@@ -65,6 +66,49 @@ SHARDS = {
 }
 
 
+def get_testpaths():
+    """The pytest.ini testpaths inventory (same source the pin test uses)."""
+    import configparser
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    parser = configparser.ConfigParser()
+    parser.read(root / "pytest.ini")
+    raw = parser.get("pytest", "testpaths")
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def check_bijection(testpaths):
+    """The shard<->testpaths bijection as a list of problem strings.
+
+    Empty means sound. Single implementation shared by `--check` (CI) and
+    the pin test — the inventory must not be enforceable only by a test
+    that runs inside the inventory it guards (a PR dropping scripts/
+    from SHARDS would unwire the pin from its own CI run; the plan job's
+    --check cannot be unwired that way).
+    """
+    counts = {}
+    for shard, dirs in SHARDS.items():
+        for d in dirs:
+            counts[d] = counts.get(d, 0) + 1
+    problems = []
+    for p in testpaths:
+        n = counts.get(p, 0)
+        if n == 0:
+            problems.append(
+                f"testpaths dir {p!r} is in no shard (would never run in CI)"
+            )
+        elif n > 1:
+            problems.append(f"dir {p!r} is in {n} shards (would run twice)")
+    for d in counts:
+        if d not in testpaths:
+            problems.append(
+                f"shard dir {d!r} is not in pytest.ini testpaths "
+                "(pytest would fail 'file or directory not found')"
+            )
+    return problems
+
+
 def shard_matrix():
     """The Actions matrix payload: one entry per shard.
 
@@ -90,6 +134,17 @@ def shard_matrix():
 
 
 def main():
+    if "--check" in sys.argv[1:]:
+        # Bijection enforcement for the CI plan job: fails the job (and
+        # therefore the aggregate gate) if the inventory drifts. Must stay
+        # stdlib-only — the plan job runs it with nothing installed.
+        problems = check_bijection(get_testpaths())
+        for p in problems:
+            print(f"ci_shard_plan --check: {p}", file=sys.stderr)
+        if problems:
+            raise SystemExit(1)
+        print("ci_shard_plan --check: shard inventory OK")
+        return
     matrix = shard_matrix()
     if not matrix["include"]:
         raise SystemExit("ci_shard_plan: no shards defined")

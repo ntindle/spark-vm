@@ -96,6 +96,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: check shard inventory
+        # The bijection pin test (scripts/test_ci_shard_plan.py) runs
+        # INSIDE the shard-unit shard, so a PR that drops scripts/ from
+        # the inventory would unwire the pin from its own CI run and go
+        # green with suites silently never running. Enforce the bijection
+        # here too: the plan job always runs on code PRs, and a failure
+        # here fails the aggregate gate via plan=failure.
+        run: python3 scripts/ci_shard_plan.py --check
       - name: emit shard matrix
         id: shards
         run: |
@@ -184,34 +192,34 @@ jobs:
     # The aggregate gate. Branch-protection ruleset 23971329 requires the
     # `python tests` context by name, so this job keeps that exact name and
     # the shard children (`python tests (<shard>)`) stay unrequired: the
-    # ruleset needs no update and the gate is not weakened, because this
-    # job is green iff every shard was green — the only other green path
-    # is the docs-only skip, where the changes gate proved no tests
-    # needed to run.
-    needs: [changes, python-tests-shard]
+    # ruleset needs no update and the gate is not weakened.
+    needs: [changes, plan, python-tests-shard]
     # if: always(): without it, a failed/cancelled shard would SKIP this
     # job, and a skipped required check shows neutral — the PR could merge
-    # on red shards. With it, this job always runs and fails the gate
-    # unless the shard verdicts genuinely pass.
+    # on red shards. With it, this job always runs and the step below
+    # decides the verdict explicitly.
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: gate on shard results
         run: |
-          code_changed="${{ needs.changes.outputs.code_changed }}"
+          changes_result="${{ needs.changes.result }}"
+          plan_result="${{ needs.plan.result }}"
           shard_result="${{ needs.python-tests-shard.result }}"
-          if [ "$code_changed" = "false" ] && [ "$shard_result" = "skipped" ]; then
-            # Docs-only path (P138): the shards never ran — same as today's
-            # skipped required check: neutral, not a failure. Keying on the
-            # changes output (not just "shards skipped") matters: a FAILED
-            # `changes` job and a FAILED `plan` job both leave the shards
-            # skipped, and both must fail the gate, not read as green.
+          if [ "$changes_result" = "success" ] && [ "$plan_result" = "skipped" ] && [ "$shard_result" = "skipped" ]; then
+            # Docs-only path (P138): plan's `if` is exactly the code_changed
+            # gate, so given changes=success, plan-skipped ⟺ docs-only —
+            # the shards never ran, same as today's skipped check: neutral,
+            # not a failure.
             exit 0
           fi
-          if [ "$shard_result" = "success" ]; then
+          if [ "$plan_result" = "success" ] && [ "$shard_result" = "success" ]; then
             exit 0
           fi
-          echo "failing the gate: code_changed=$code_changed shards=$shard_result" >&2
+          # Every other combination fails the gate: a failed/cancelled plan
+          # (shards skipped via needs), a failed/cancelled shard, or a
+          # failed changes job can never read as green.
+          echo "failing the gate: changes=$changes_result plan=$plan_result shards=$shard_result" >&2
           exit 1
 
   shellcheck:
