@@ -687,7 +687,7 @@ def _find_login(obj):
     refused (an empty login is not an identity — the recursive form
     never returned one either, its truthiness check skipped it).
 
-    Architecture review (#1168, blocking): the fail-closed path must not
+    Architecture review (this PR's Architecture round, blocking): the fail-closed path must not
     be silent — a whois schema change would otherwise hard-lock the
     single approver out of the page with zero trail. The warnings below
     name only the failure mode and top-level field names (never values —
