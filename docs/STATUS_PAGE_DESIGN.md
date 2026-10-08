@@ -127,15 +127,20 @@ is `docs/ALERT_PUSH_FANOUT_SPEC.md`'s intake.
 
 - **What is the free incident channel?** Three layers, in ship order:
   1. **Interim: musebook #sparkvm** — decided 2026-09-24, stays until
-     the real design ships.
-  2. **$0 by construction: the page itself + an RSS/Atom feed.**
-     Both are renders of the *same* feed projection (the S2/S2a
-     semantics — journal-traceable rows, freshness stamp,
+     the real design ships. Interim posts follow the same public-row
+     discipline as the RSS (fleet-wide rows only, no tenant attribution,
+     no box ids) and the no-fiction contract (copy traceable to journaled
+     rows).
+  2. **$0 by construction: the RSS/Atom feed (public) + the S2a page
+     (operator).** Both are renders of the *same* feed projection
+     (journal-traceable rows, freshness stamp,
      silence-as-missing-evidence), published as a static render or a
-     Workers cron-triggered render on the Cloudflare free tier. RSS
-     needs no mail provider, no per-message cost, and no new infra —
-     it is the free tier's incident channel the way the static page
-     is the free tier's incident feed.
+     Workers cron-triggered render on the Cloudflare free tier. The RSS
+     is the public free-tier incident channel — fleet-wide rows only,
+     per the row-set rule below; the S2a page is the operator's incident
+     surface (owner-authed when hosted, per Q4). There is no public HTML
+     page in this design: a public page render of the fleet-wide
+     projection is a named follow-up, not an implied deliverable.
   3. **The tenant push variant** — G23's S3 (gated on G24 and C4):
      when the H14 push plane's tenant subscriptions exist, tenant-
      visible incidents get a tenant-scoped page — curated summaries,
@@ -232,8 +237,9 @@ is `docs/ALERT_PUSH_FANOUT_SPEC.md`'s intake.
     signed-feed preference. "No tenant-visible rows until G24" is
     the gate — the page says so and means it.
 - **S3 — incident comms (#368).** Interim musebook #sparkvm; the
-  page + RSS render path (same projection, free-tier posture);
-  tenant push variant via G23's S3 when gated; webhook opt-in
-  riding #968. Exit criteria: the $0 posture holds at small fleet;
-  every channel's copy is traceable to journaled rows; BYO-box
-  incidents never enter the plane.
+  RSS render path (same projection, free-tier posture; public rows
+  only) — the S2a page remains the operator surface; tenant push
+  variant via G23's S3 when gated; webhook opt-in riding #968. Exit
+  criteria: the $0 posture holds at small fleet; every channel's copy
+  is traceable to journaled rows; no journal/telemetry path from a
+  BYO box to the plane is created by this slice.
