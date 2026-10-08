@@ -150,6 +150,21 @@ never inject bytes into a live session.
   instead of holding its per-session acked prefix; socket and HTTPS
   carriers are aligned on malformed rows.
 
+  *Delivery-degradation caveat (2026-10-08, #1143/D-GH1):* the carriers
+  are aligned on skip-and-log, but they diverge on *delivery
+  degradation* when the plane skips a malformed *row* (as opposed to
+  the box skipping a malformed *frame*): a skipped frame never holds
+  the socket's per-session acked prefix, while a DO-skipped row
+  surfaces to the socket as a sequence gap — the gap guard holds later
+  frames until the cursor fast-forward (the every-minute cron ingest
+  advances the shared cursor past the skipped row, and the session
+  fast-forwards its prefix to the shared cursor on the same epoch —
+  bounded to about one cron tick, self-healing without reconnect) or
+  a reconnect re-fences the session, while HTTPS flows past the bad
+  row on its next tick. The durable queue is never wedged by this —
+  only the socket fast path degrades to fetch-path latency for the
+  bounded window.
+
 - **S4b-2 implementation pin (2026-10-07, #1001 slice 2a):** the plane
   DO's re-drive (on every (re)bind, and on the D15 Worker→DO wakeup
   RPC after each enqueue) reads the acked watermark (`MAX(seq)` over

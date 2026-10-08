@@ -2851,9 +2851,15 @@ class _PhoneHomeSession:
         # acked_watermark is the durable record; this is the per-session
         # ordering guard so a *missing* row holds the queue (later seqs
         # wait for the re-drive) instead of being skipped and reordered.
-        # A *malformed* row is not a missing row: per D-MAL1 it is
+        # A *malformed frame* is not a missing row: per D-MAL1 it is
         # skipped loudly (see _handle_socket_command) and never holds
-        # this prefix.
+        # this prefix. A *malformed row* is different: the DO journals
+        # it (phone_home.redrive_malformed) and never emits it, so this
+        # session sees it as a sequence gap and the gap guard holds
+        # later frames — until the D-GH1 cursor fast-forward (#1143):
+        # the every-minute cron ingest advances the shared cursor past
+        # the skipped row, bounding the hold to ~one cron tick, or a
+        # reconnect re-fences the session. (Wire-doc §3.3 caveat.)
         self._acked_prefix = None
         # Shared with the HTTPS ingest path: redelivery dedupe by
         # (box_id, seq) survives a session boundary through this log and
@@ -2946,6 +2952,159 @@ class _PhoneHomeSession:
             return False
         return True
 
+    def _fast_forward_to_shared_cursor(self, epoch):
+        """Cursor fast-forward for the #1143 gap-hold wedge (D-GH1).
+
+        Returns True when the gap guard may re-evaluate the frame
+        against the advanced prefix; False when the hold stands.
+
+        The scenario: the DO journals a malformed table row per D-MAL1
+        (docs/PHONE_HOME_WIRE_PROTOCOL.md §3.3) and never emits it, so
+        this session sees a gap (frame seq > prefix + 1) the re-drive
+        can never heal. But the every-minute HTTPS cron ingest serves
+        the same durable queue and advances the shared
+        commands_cursor.json past such rows — its own D-MAL1 skip when
+        it acks the later seqs — so a shared cursor ahead of the
+        session's prefix means every seq in (prefix, cursor] was already
+        executed-and-acked in order by the cron, acked-and-logged as an
+        unknown kind (which the socket treats identically — ack-and-log,
+        so no behavioral divergence), or skipped per D-MAL1 by the
+        cron. Advancing _acked_prefix to the shared cursor skips no
+        un-executed command, and the (box_id, seq) idempotency
+        backstops absorb any socket/cron race on the boundary.
+
+        Discipline (per D-GH1):
+        - The cursor read holds the non-blocking .ingest.lock (the
+          #976/#1117 precedent — _write_private is O_TRUNC in place, so
+          an unlocked concurrent read can see torn JSON). Lock open
+          failure, contention, an unreadable or wrong-shaped cursor all
+          keep the hold: degrade, never wedge.
+        - The epoch gate: fast-forward only when the cursor's epoch
+          equals the frame's epoch — the incarnation the session would
+          adopt for this frame per the #947 contract in
+          _save_socket_ingest_state. Both sides must carry epoch
+          evidence: with no epoch on either side the incarnation is
+          unknown, so the guard keeps the hold (the #947 contract ships
+          on both sides, so the no-evidence case only fires on
+          legacy/hand-made cursor files or a plane that omits epochs).
+          A moved epoch is the #848/#958 stale-epoch case, not a
+          fast-forward case.
+        - The hold is now bounded to ~one cron tick and self-heals
+          without a reconnect.
+        """
+        old_prefix = self._acked_prefix
+        lock_path = os.path.join(self.d, _INGEST_LOCK_FILE)
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as e:
+            _phone_home_say(self.d,
+                            f"gap after acked prefix {old_prefix}: cannot "
+                            f"open ingest lock ({e}) — keeping the hold "
+                            "(degrade, never wedge)", self.token)
+            return False
+        try:
+            # 0600 at creation is not enough: a pre-existing lock file
+            # keeps its wider mode through the open (same as the ingest
+            # wrapper).
+            os.fchmod(lock_fd, 0o600)
+        except OSError as e:
+            # The open succeeded but the secure failed: close the fd —
+            # returning with it open would leak one fd per held frame in
+            # a long-lived session.
+            os.close(lock_fd)
+            _phone_home_say(self.d,
+                            f"gap after acked prefix {old_prefix}: cannot "
+                            f"secure ingest lock ({e}) — keeping the hold "
+                            "(degrade, never wedge)", self.token)
+            return False
+        try:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                _phone_home_say(self.d,
+                                f"gap after acked prefix {old_prefix}: "
+                                "ingest lock contended (the cron is "
+                                "mid-pass) — keeping the hold (degrade, "
+                                "never wedge)", self.token)
+                return False
+            try:
+                with open(os.path.join(self.d, _INGEST_CURSOR_FILE)) as f:
+                    cur = json.load(f)
+            except (OSError, ValueError) as e:
+                _phone_home_say(self.d,
+                                f"gap after acked prefix {old_prefix}: "
+                                f"shared cursor unreadable ({e}) — keeping "
+                                "the hold (degrade, never wedge)",
+                                self.token)
+                return False
+            if not isinstance(cur, dict):
+                _phone_home_say(self.d,
+                                f"gap after acked prefix {old_prefix}: "
+                                "shared cursor is not an object — keeping "
+                                "the hold (degrade, never wedge)",
+                                self.token)
+                return False
+            shared_cursor, shared_epoch = (cur.get("cursor"),
+                                           cur.get("epoch"))
+            if not isinstance(shared_cursor, int) or \
+                    isinstance(shared_cursor, bool):
+                _phone_home_say(self.d,
+                                f"gap after acked prefix {old_prefix}: "
+                                "shared cursor has a non-integer cursor — "
+                                "keeping the hold (degrade, never wedge)",
+                                self.token)
+                return False
+            if shared_epoch is not None and \
+                    (not isinstance(shared_epoch, int)
+                     or isinstance(shared_epoch, bool)):
+                _phone_home_say(self.d,
+                                f"gap after acked prefix {old_prefix}: "
+                                "shared cursor has a non-integer epoch — "
+                                "keeping the hold (degrade, never wedge)",
+                                self.token)
+                return False
+            if epoch is None or shared_epoch is None:
+                # No epoch evidence on one or both sides: the incarnation
+                # is unknown, so the prefix must not advance (the #947
+                # contract ships on both sides, so this only fires on
+                # legacy/hand-made cursor files or a plane that omits
+                # epochs). Keep the hold — degrade, never wedge.
+                _phone_home_say(self.d,
+                                f"gap after acked prefix {old_prefix}: no "
+                                f"epoch evidence (shared cursor epoch "
+                                f"{shared_epoch}, frame epoch {epoch}) — "
+                                "keeping the hold (degrade, never wedge)",
+                                self.token)
+                return False
+            if shared_epoch != epoch:
+                # The cursor belongs to another incarnation (the cron
+                # adopted a moved epoch while this session still
+                # processes the old one) — the #848/#958 stale-epoch
+                # case, not a fast-forward case. Never advance a prefix
+                # across an incarnation boundary.
+                _phone_home_say(self.d,
+                                f"gap after acked prefix {old_prefix}: "
+                                f"shared cursor epoch {shared_epoch} != "
+                                f"frame epoch {epoch} (moved epoch) — "
+                                "keeping the hold (degrade, never wedge)",
+                                self.token)
+                return False
+            if shared_cursor <= old_prefix:
+                # Nothing to gain: the true-missing-row hold stands.
+                return False
+            self._acked_prefix = shared_cursor
+            _phone_home_say(self.d,
+                            f"cursor fast-forward: acked prefix "
+                            f"{old_prefix} -> {shared_cursor} from the "
+                            f"shared ingest cursor (epoch {shared_epoch}) "
+                            "— the range was executed/acked or skipped "
+                            "per D-MAL1 by the cron ingest; processing "
+                            "the frame", self.token)
+            return True
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
     def _handle_socket_command(self, frame):
         """Execute one `command` frame via the #874 ingest executor.
 
@@ -2959,12 +3118,16 @@ class _PhoneHomeSession:
         never holding the per-session `_acked_prefix`. (The DO's S4b-2a
         re-drive never emits malformed rows at all — it journals them
         as `phone_home.redrive_malformed` — so this branch only fires
-        on a DO/wire bug, never on a table row. Note the residual below:
-        a DO-skipped malformed *row* surfaces to this session as a
-        sequence gap, and the gap guard still holds later frames on it —
-        live delivery degrades to the cron path until reconnect or
-        plane repair. The cron path itself always flows past the bad
-        row.)
+        on a DO/wire bug, never on a table row. A DO-skipped malformed
+        *row* instead surfaces to this session as a sequence gap, and
+        the gap guard holds later frames on it — but the D-GH1 cursor
+        fast-forward (#1143) heals the wedge within ~one cron tick: the
+        cron ingest advances the shared cursor past the skipped row,
+        and the guard fast-forwards its prefix to the shared cursor on
+        the same epoch (re-acking, not re-executing, any frame the cron
+        already consumed). Live delivery degrades to the cron path only
+        for that bounded window; the cron path itself always flows past
+        the bad row.)
         """
         if frame.get("generation") != self.generation:
             # A stale session's frame (or a plane bug): it does not
@@ -3028,17 +3191,47 @@ class _PhoneHomeSession:
                 return "ok"
             if seq > self._acked_prefix + 1:
                 # Gap: the DO drives in order from its watermark, so a
-                # jump means a row is missing or was rejected. Hold the
-                # prefix — the re-drive resends the gap; acking past it
-                # would hide a plane bug the way skipping a bad row
-                # would.
-                _phone_home_say(
-                    self.d,
-                    f"ignoring command seq={seq}: gap after acked "
-                    f"prefix {self._acked_prefix} — not acked, waiting "
-                    "on the re-drive",
-                    self.token)
-                return "ok"
+                # jump means a row is missing or was rejected. First try
+                # the #1143 cursor fast-forward (D-GH1): a DO-skipped
+                # malformed row (D-MAL1) never emits a frame, so the gap
+                # is real-but-already-healed once the cron advances the
+                # shared cursor past it. The fast-forward re-evaluates
+                # the frame against the advanced prefix: a frame now at
+                # or below the prefix re-acks without re-executing (the
+                # cron already consumed it — same as the redelivery
+                # branch above); a frame still past prefix + 1 holds.
+                if self._fast_forward_to_shared_cursor(epoch):
+                    if seq <= self._acked_prefix:
+                        # Re-ack without re-executing: the cron already
+                        # consumed this seq (see the redelivery branch
+                        # above — acks are idempotent for the DO).
+                        try:
+                            self._socket_ack(seq, epoch)
+                        except _WsTransportLost:
+                            return "transport-lost"
+                        return "ok"
+                    if seq > self._acked_prefix + 1:
+                        _phone_home_say(
+                            self.d,
+                            f"ignoring command seq={seq}: gap after "
+                            f"fast-forwarded prefix {self._acked_prefix} "
+                            "— not acked, waiting on the re-drive",
+                            self.token)
+                        return "ok"
+                    # else: seq == prefix + 1 — fall through to execute.
+                else:
+                    # No fast-forward (true missing row, lock contention,
+                    # unreadable cursor, or moved epoch): hold the prefix
+                    # — the re-drive resends the gap; acking past it
+                    # would hide a plane bug the way skipping a bad row
+                    # would.
+                    _phone_home_say(
+                        self.d,
+                        f"ignoring command seq={seq}: gap after acked "
+                        f"prefix {self._acked_prefix} — not acked, "
+                        "waiting on the re-drive",
+                        self.token)
+                    return "ok"
         attention = []
         try:
             if kind not in _HONORED_COMMAND_KINDS:
