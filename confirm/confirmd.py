@@ -1663,11 +1663,18 @@ def _prune_quarantine(limit=None):
     (Architecture review): `_quarantine_corrupt_pending` moves the
     existing `<aid>.json` pending file into place via `os.replace` — no
     temp intermediates ever enter the dir — so the `.json` filter sees
-    every file the writer path can create.
+    every file the writer path can create. CI-found (PR #1169): the
+    prune never creates the dir — `_quarantine_dir()` makedirs, which a
+    prune must not do (PermissionError on a read-only approvals root
+    would crash housekeeping instead of no-op'ing). A missing dir just
+    means nothing to prune.
     """
     if limit is None:
         limit = _QUARANTINE_KEEP
-    d = _quarantine_dir()
+    # Deliberately NOT _quarantine_dir(): that helper makedirs, and a
+    # prune must never create the thing it prunes. Missing/unreadable
+    # dir => nothing to do.
+    d = os.path.join(APPROVALS, "pending-quarantine")
     try:
         names = [fn for fn in os.listdir(d) if fn.endswith(".json")]
     except OSError:

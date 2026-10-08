@@ -1104,32 +1104,38 @@ class ConfirmdTests(unittest.TestCase):
         self.assertEqual(remaining, names)
 
     def test_housekeeping_runs_when_due(self):
-        """First call after a reset runs the sweep+prune pair."""
+        """First call after a reset runs the sweep+prune trio."""
         with mock.patch.object(cd, "_sweep_answered") as sw, \
-             mock.patch.object(cd, "_prune_consumed") as pr:
+             mock.patch.object(cd, "_prune_consumed") as pr, \
+             mock.patch.object(cd, "_prune_quarantine") as pq:
             self.assertTrue(cd._housekeeping_if_due())
         sw.assert_called_once_with()
         pr.assert_called_once_with()
+        pq.assert_called_once_with()
 
     def test_housekeeping_skips_when_not_due(self):
-        """A second immediate call is gated — one pair per interval."""
+        """A second immediate call is gated — one trio per interval."""
         with mock.patch.object(cd, "_sweep_answered") as sw, \
-             mock.patch.object(cd, "_prune_consumed") as pr:
+             mock.patch.object(cd, "_prune_consumed") as pr, \
+             mock.patch.object(cd, "_prune_quarantine") as pq:
             self.assertTrue(cd._housekeeping_if_due())
             self.assertFalse(cd._housekeeping_if_due())
         sw.assert_called_once_with()
         pr.assert_called_once_with()
+        pq.assert_called_once_with()
 
     def test_housekeeping_zero_interval_always_runs(self):
         """Patching the interval to 0 restores the old every-answer
         behavior (the escape hatch tests rely on)."""
         with mock.patch.object(cd, "_HOUSEKEEPING_INTERVAL_S", 0), \
              mock.patch.object(cd, "_sweep_answered") as sw, \
-             mock.patch.object(cd, "_prune_consumed") as pr:
+             mock.patch.object(cd, "_prune_consumed") as pr, \
+             mock.patch.object(cd, "_prune_quarantine") as pq:
             self.assertTrue(cd._housekeeping_if_due())
             self.assertTrue(cd._housekeeping_if_due())
         self.assertEqual(sw.call_count, 2)
         self.assertEqual(pr.call_count, 2)
+        self.assertEqual(pq.call_count, 2)
 
     def test_housekeeping_concurrent_callers_run_once(self):
         """Racing handler threads can't both decide 'due': the timestamp
