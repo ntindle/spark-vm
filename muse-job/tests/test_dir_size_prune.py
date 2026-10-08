@@ -76,7 +76,8 @@ def test_sweep_dir_size_keeps_true_on_disk_size(sweep, tmp_path):
 
 def _sweep_job(home, slug, state, legacy_state=None, age_days=8):
     """Seed one job for the prune test: job dir with an old mtime, a
-    metadata record, and optionally a legacy in-tree record.
+    metadata record, a journals-dir journal, and optionally a legacy
+    in-tree record.
     NB: all writes inside the job dir happen BEFORE backdating its mtime
     (creating a file refreshes the dir's mtime)."""
     jd = home / "muse-jobs" / slug
@@ -90,6 +91,11 @@ def _sweep_job(home, slug, state, legacy_state=None, age_days=8):
     meta.mkdir(parents=True, exist_ok=True)
     (meta / f"{slug}.json").write_text(json.dumps({"slug": slug,
                                                    "state": state}))
+    journals = home / ".local" / "share" / "muse-job" / "journals"
+    journals.mkdir(parents=True, exist_ok=True)
+    (journals / f"{slug}.jsonl").write_text(
+        json.dumps({"t": 1700000000, "kind": "item",
+                    "method": "item/added", "detail": "seeded"}) + "\n")
     return jd
 
 
@@ -142,3 +148,35 @@ def test_sweep_prune_keeps_record_when_dir_survives(
     assert jd.exists()
     assert (meta / "stubborn.json").exists(), \
         "the record must survive when the dir was not actually removed"
+
+
+def test_sweep_prune_removes_journal_with_closed_dir(
+        sweep, tmp_path, monkeypatch):
+    # Issue #1130: the manager-side journal lives outside the job dir, so
+    # the prune must delete it alongside the dir -- otherwise `muse-job
+    # log` would render a ghost journal for a swept job.
+    home = tmp_path
+    jd_a = _sweep_job(home, "oldjob", "closed")
+    jd_b = _sweep_job(home, "livejob", "active")
+    monkeypatch.setattr(sweep, "disk_pct", lambda p: 90)
+    sweep.main()  # exits 0 always; never break the cron
+    journals = home / ".local" / "share" / "muse-job" / "journals"
+    assert not jd_a.exists() and not (journals / "oldjob.jsonl").exists(), \
+        "the closed job's journal must be pruned with its dir"
+    assert jd_b.exists() and (journals / "livejob.jsonl").exists(), \
+        "an active job's journal must survive the prune"
+
+
+def test_sweep_prune_keeps_journal_when_dir_survives(
+        sweep, tmp_path, monkeypatch):
+    # The journal remove shares the dir-gone gate: a failed rmtree must
+    # not orphan the journal while the dir survives.
+    home = tmp_path
+    jd = _sweep_job(home, "stubborn", "closed")
+    monkeypatch.setattr(sweep, "disk_pct", lambda p: 90)
+    monkeypatch.setattr(sweep.shutil, "rmtree", lambda *a, **k: None)
+    sweep.main()  # exits 0 always; never break the cron
+    journals = home / ".local" / "share" / "muse-job" / "journals"
+    assert jd.exists()
+    assert (journals / "stubborn.jsonl").exists(), \
+        "the journal must survive when the dir was not actually removed"

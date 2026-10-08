@@ -167,7 +167,12 @@ in the manager-side metadata dir `~/.local/share/muse-job/jobs/<slug>.json`
 (issue #11) -- the prompt preamble never names it, so the job agent no
 longer knows a writable management record exists at a predictable path.
 (Pre-#11 in-tree records are migrated to the metadata dir on first
-manager read.)
+manager read.) The redacted MSP turn-event journal likewise lives outside
+the job tree in the manager-side journals dir
+`~/.local/share/muse-job/journals/<slug>.jsonl` (issue #1130; pre-#1130
+in-tree journals migrate on first manager append, and `muse-job log`
+falls back to them read-only), so the job agent has no writable path to
+its own turn history either.
 Pristine clones live under `~/repos/<host>/<path...>` (namespaced by the
 repo URL's host + full path, so `github.com/org/foo` and
 `gitlab.com/org/foo` never share one clone -- issue #10; local paths and

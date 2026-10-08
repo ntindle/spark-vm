@@ -407,7 +407,9 @@ def test_status_maps_blocked_and_renders_pending(cli, fakes, capsys):
 def test_log_renders_redacted_journal(cli, fakes):
     slug = "msplog"
     _make_job(cli, slug)
-    with open(cli._msp_journal_path(slug), "w") as f:
+    jp = cli._msp_journal_path(slug)
+    os.makedirs(os.path.dirname(jp), exist_ok=True)
+    with open(jp, "w") as f:
         f.write(json.dumps({"t": 1700000000, "kind": "approval",
                             "method": "approval/requested",
                             "detail": "1 pending"}) + "\n")
