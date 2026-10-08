@@ -56,6 +56,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Added
 
+- Status-page design: the status page itself, staged — the operator page first (firing and acknowledged-but-unresolved alerts, rollout and freeze rows, a history window, a freshness stamp on every render; ack stays in the operator CLI), then the tenant-scoped history on the tenant read path (curated summaries instead of raw journal text, box-id surrogates, the signed feed preferred when it exists) — plus the incident-comms answer: a free-tier RSS/Atom feed carries incidents for everyone, the operator page carries them for operators, a tenant push variant follows the push lane's tenant gate, and user-configured webhooks cover the rest instead of email. Every channel inherits the no-fiction rule: incident copy never outruns the journal, and silence is rendered as missing evidence, never health. (#1165)
+
 - Plane-side tenant-identity gap analysis: the hosted vision speaks "tenant" (signup identity linking, tenant records, tenant-scoped signed API calls) while the shipped plane speaks "owner" (single-owner appliance, one-shot bootstrap, box-filed approval records with no owner attribution) — the analysis numbers the gaps (tenant record, tenant-Muse credential, the multi-tenant plane model decision, approval-record attribution, the tenant-status plane auth, tenant-record retention/erasure) and files them as build issues so no second tenant lands before the identity and attribution layer is decided. Also corrects the stale "design; not implemented" status on the tenant-status endpoint doc now that the engine slice has shipped. (#1163) (#1158) (#1159) (#1160) (#1161) (#1162)
 
 ## [0.7.0] - 2026-10-08
