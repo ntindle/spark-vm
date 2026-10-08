@@ -3460,6 +3460,18 @@ def _msp_call(slug, job, fn, pre_resume=True):
 # a privilege boundary against a determined shell user.
 _MSP_JOURNAL_CAP = 2000
 
+# Byte bound on the legacy-migration read (Security review, issue #1130):
+# the legacy file is agent-writable, so a single unbounded line (or a
+# symlink plant) must not OOM or stall the manager. ~2000 journal lines
+# of the redacted shape are far below this; anything past it is dropped.
+_MSP_JOURNAL_MAX_BYTES = 4 * 1024 * 1024
+
+# Byte bound on the legacy-fallback read in `log` (Security review,
+# issue #1130): the fallback file is agent-writable, so `log` reads only
+# a bounded tail of it -- a huge planted file, FIFO, or symlink plant can
+# never hang or OOM the operator's CLI.
+_MSP_JOURNAL_LOG_TAIL_BYTES = 1024 * 1024
+
 
 def _msp_journal_path(slug):
     """Manager-side journal path (issue #1130): outside the job dir."""
@@ -3479,20 +3491,32 @@ def _msp_journal_migrate_legacy(slug):
     publish via os.link only when the destination is absent -- a racing
     manager's journal wins, and the loser drops its copy of the legacy
     lines (already published by the winner). The migration read is bounded
-    by the journal cap so an agent-planted huge file cannot stall the
-    manager. The stale legacy file is unlinked once its lines are
+    by _MSP_JOURNAL_MAX_BYTES (line count is capped at _MSP_JOURNAL_CAP)
+    so an agent-planted huge file cannot stall or OOM the manager; only
+    regular files are read (a symlink/FIFO/device plant at the legacy path
+    is unlinked and migrates nothing -- unlinking a symlink removes just
+    the link). The stale legacy file is unlinked once its lines are
     published (harmless if a racer already unlinked it).
     """
     legacy = _legacy_msp_journal_path(slug)
     path = _msp_journal_path(slug)
     if not os.path.isfile(legacy) or os.path.isfile(path):
         return
-    with open(legacy) as f:
-        lines = []
-        for i, line in enumerate(f):
-            if i >= _MSP_JOURNAL_CAP:
-                break
-            lines.append(line)
+    try:
+        st = os.lstat(legacy)
+    except OSError:
+        return
+    if not stat.S_ISREG(st.st_mode):
+        # Symlink/FIFO/device plant: drop the link, migrate nothing.
+        try:
+            os.remove(legacy)
+        except OSError:
+            pass
+        return
+    with open(legacy, "rb") as f:
+        data = f.read(_MSP_JOURNAL_MAX_BYTES + 1)
+    lines = data.decode("utf-8", "replace").splitlines(keepends=True)
+    lines = lines[:_MSP_JOURNAL_CAP]
     tmp = "%s.tmp.%d" % (path, os.getpid())
     try:
         with open(tmp, "w") as f:
@@ -3510,7 +3534,11 @@ def _msp_journal_migrate_legacy(slug):
 
 
 def _msp_journal_append(slug, signals):
-    """Append JobSignals to the job's redacted journal. Never raises."""
+    """Append JobSignals to the job's redacted journal. Never raises.
+
+    Side effects on the way: creates the operator-owned journals dir and
+    migrates a legacy in-tree journal on first append (issue #1130).
+    """
     try:
         path = _msp_journal_path(slug)
         os.makedirs(JOURNAL_DIR, exist_ok=True)
@@ -3738,21 +3766,74 @@ def _msp_status(job, slug, args):
     return 0
 
 
+def _msp_legacy_journal_readable(slug):
+    """Return the legacy journal path when safe for a read-only `log`
+    render, else None (Security review, issue #1130).
+
+    The legacy file is agent-writable, so `log` never opens it blindly:
+    symlink/FIFO/device plants are refused (lstat, not stat) -- a refused
+    plant is not removed here (log is read-only; the appender's migration
+    drops plants on the write path).
+    """
+    legacy = _legacy_msp_journal_path(slug)
+    try:
+        st = os.lstat(legacy)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return legacy
+
+
+def _read_bounded_tail(path, limit):
+    """Read at most the last `limit` bytes of a file as text lines.
+
+    A mid-line or mid-character cut only drops the oldest partial line;
+    the rest renders normally.
+    """
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        start = max(0, f.tell() - limit)
+        f.seek(start)
+        chunk = f.read()
+    text = chunk.decode("utf-8", "replace")
+    if start > 0:
+        first_nl = text.find("\n")
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+    return text.splitlines(keepends=True)
+
+
 def _msp_log(args):
     """log for an MSP job: the redacted signal journal (never transcript
     text -- the event stream can carry real secrets)."""
     slug = args.slug
     n = max(1, args.n)
     path = _msp_journal_path(slug)
+    bounded = False
     if not os.path.isfile(path):
+        if os.path.lexists(path):
+            # A directory/symlink squat at the journal path: fail closed
+            # rather than downgrading to the agent-controlled legacy file.
+            raise RuntimeError(f"no MSP signal journal for job {slug}")
         # Issue #1130: read-only fallback for a legacy in-tree journal
         # that predates the journals-dir move and was never migrated by
         # an append. The agent-visible file is never the live journal --
         # history only; the appender no longer writes there.
-        path = _legacy_msp_journal_path(slug)
+        legacy = _msp_legacy_journal_readable(slug)
+        if legacy is None:
+            raise RuntimeError(f"no MSP signal journal for job {slug}")
+        path = legacy
+        bounded = True
     try:
-        with open(path) as f:
-            lines = f.readlines()
+        if bounded:
+            # The legacy file is agent-writable: read only a bounded tail
+            # so a huge planted file (or a plant the lstat check missed)
+            # can never hang or OOM the operator's CLI.
+            lines = _read_bounded_tail(path, _MSP_JOURNAL_LOG_TAIL_BYTES)
+        else:
+            with open(path) as f:
+                lines = f.readlines()
     except OSError:
         raise RuntimeError(f"no MSP signal journal for job {slug}")
     for line in lines[-n:]:

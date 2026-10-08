@@ -109,6 +109,49 @@ def test_append_migration_bounds_read_at_cap(cli):
     assert not os.path.exists(legacy_path(cli, "big"))
 
 
+def test_append_migration_ignores_symlink_plant(cli):
+    # A symlink at the legacy path is dropped, never followed: nothing
+    # from behind the link is migrated into the operator-owned journal.
+    target = os.path.join(str(cli.job_dir("plant")), "..", "secret.txt")
+    os.makedirs(cli.job_dir("plant"), exist_ok=True)
+    with open(target, "w") as f:
+        f.write("agent-planted\n")
+    os.symlink(target, legacy_path(cli, "plant"))
+    cli._msp_journal_append("plant", [FakeSignal(detail="real")])
+    assert not os.path.lexists(legacy_path(cli, "plant")), \
+        "the plant must be unlinked, not followed"
+    assert read_details(journal_path(cli, "plant")) == ["real"]
+    # The target file is untouched.
+    assert open(target).read() == "agent-planted\n"
+
+
+def test_append_migration_byte_bound(cli, monkeypatch):
+    # One enormous line must not stall/OOM the manager: the migration
+    # read is byte-bounded (Security review, issue #1130).
+    monkeypatch.setattr(cli, "_MSP_JOURNAL_MAX_BYTES", 100)
+    p = legacy_path(cli, "huge")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f:
+        f.write("x" * 1000 + "\n")
+    cli._msp_journal_append("huge", [FakeSignal(detail="after")])
+    with open(journal_path(cli, "huge")) as f:
+        migrated = f.read()
+    assert migrated.startswith("x" * 100)
+    assert "after" in migrated
+    assert len(migrated) < 500, \
+        "the 1000-byte planted line must be truncated at the byte bound"
+    assert not os.path.exists(legacy_path(cli, "huge"))
+
+
+def test_append_migration_empty_legacy(cli):
+    p = legacy_path(cli, "empty")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "w").close()
+    cli._msp_journal_append("empty", [FakeSignal(detail="only")])
+    assert not os.path.exists(legacy_path(cli, "empty"))
+    assert read_details(journal_path(cli, "empty")) == ["only"]
+
+
 def test_log_reads_new_location(cli, capsys):
     os.makedirs(cli.job_dir("demo"), exist_ok=True)
     cli._msp_journal_append("demo", [FakeSignal(detail="visible")])
@@ -140,6 +183,38 @@ def test_log_falls_back_to_legacy_readonly(cli, capsys):
 def test_log_errors_when_no_journal(cli):
     with pytest.raises(RuntimeError, match="no MSP signal journal"):
         cli._msp_log(log_args(cli, "ghost"))
+
+
+def test_log_fallback_ignores_symlink_plant(cli):
+    # A symlink plant at the legacy path is refused (lstat, not stat):
+    # `log` must not hang on or render through a link to /dev/zero or
+    # any other plant -- it reports no journal instead.
+    os.makedirs(cli.job_dir("linkplant"), exist_ok=True)
+    os.symlink("/dev/zero", legacy_path(cli, "linkplant"))
+    with pytest.raises(RuntimeError, match="no MSP signal journal"):
+        cli._msp_log(log_args(cli, "linkplant"))
+
+
+def test_log_fallback_reads_bounded_tail(cli, capsys, monkeypatch):
+    # The agent-writable legacy fallback is read bounded: a huge planted
+    # file can neither OOM nor hang the operator's CLI, and `log` still
+    # renders the tail it can see.
+    monkeypatch.setattr(cli, "_MSP_JOURNAL_LOG_TAIL_BYTES", 300)
+    write_legacy(cli, "tailed", 50)
+    assert cli._msp_log(log_args(cli, "tailed", n=50)) == 0
+    out = capsys.readouterr().out
+    assert "legacy-49" in out, "the tail must render"
+    assert "legacy-0" not in out, "the head must stay unread"
+
+
+def test_log_squat_at_journal_path_raises(cli):
+    # A directory squat at the operator-owned journal path must fail
+    # closed, never downgrade `log` to the agent-controlled legacy file.
+    jp = journal_path(cli, "squat")
+    os.makedirs(jp)
+    write_legacy(cli, "squat", 1, prefix="decoy")
+    with pytest.raises(RuntimeError, match="no MSP signal journal"):
+        cli._msp_log(log_args(cli, "squat"))
 
 
 def test_cap_rewrite_keeps_tail_in_new_location(cli):
