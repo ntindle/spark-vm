@@ -143,6 +143,20 @@ class TestCiShardPlanCoversAll(unittest.TestCase):
         )
         self.assertEqual(len(flagged), 1)
 
+    def test_workflow_consumes_the_root_tests_flag(self):
+        # The plan emits root_tests per shard; the workflow must actually
+        # gate the sudo root-tests step on it. If that wiring is deleted,
+        # every pin above still passes while the sudo install-safety tests
+        # silently never run — so the wiring itself is pinned here too.
+        ci_yml = ROOT / ".github" / "workflows" / "ci.yml"
+        self.assertIn(
+            "matrix.root_tests",
+            ci_yml.read_text(),
+            "ci.yml must gate the proxy install-safety root-tests step on "
+            "the plan's data-driven matrix.root_tests flag (never a "
+            "hardcoded shard name) — see scripts/ci_shard_plan.py",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

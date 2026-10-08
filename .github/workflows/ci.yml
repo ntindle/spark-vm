@@ -117,7 +117,16 @@ jobs:
       # needs every shard's own verdict, and a cancelled shard must not
       # read as anything but a gate failure.
       fail-fast: false
-      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+      # NB: the strategy expression is evaluated BEFORE the job-level `if:`
+      # below, so on docs-only diffs (where `plan` is skipped and its
+      # output is empty) a bare fromJson(needs.plan.outputs.matrix) would
+      # throw "empty input" and FAIL the job instead of skipping it —
+      # blocking the docs-only PRs P138 keeps mergeable. The `||` fallback
+      # yields a zero-leg matrix on empty input, so the job skips cleanly
+      # and the aggregate's docs-only carve-out works as designed. (Empty
+      # string is falsy in GHA expressions; a successful plan always emits
+      # non-empty JSON, so the fallback never fires on a code PR.)
+      matrix: ${{ fromJson(needs.plan.outputs.matrix || '{"include":[]}') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -176,7 +185,9 @@ jobs:
     # `python tests` context by name, so this job keeps that exact name and
     # the shard children (`python tests (<shard>)`) stay unrequired: the
     # ruleset needs no update and the gate is not weakened, because this
-    # job is green iff every shard was green.
+    # job is green iff every shard was green — the only other green path
+    # is the docs-only skip, where the changes gate proved no tests
+    # needed to run.
     needs: [changes, python-tests-shard]
     # if: always(): without it, a failed/cancelled shard would SKIP this
     # job, and a skipped required check shows neutral — the PR could merge
@@ -187,20 +198,20 @@ jobs:
     steps:
       - name: gate on shard results
         run: |
-          changes_result="${{ needs.changes.result }}"
+          code_changed="${{ needs.changes.outputs.code_changed }}"
           shard_result="${{ needs.python-tests-shard.result }}"
-          if [ "$changes_result" = "success" ] && [ "$shard_result" = "skipped" ]; then
+          if [ "$code_changed" = "false" ] && [ "$shard_result" = "skipped" ]; then
             # Docs-only path (P138): the shards never ran — same as today's
-            # skipped required check: neutral, not a failure. The
-            # changes_result guard matters: a FAILED changes job also
-            # leaves the shards skipped, and that must fail the gate, not
-            # read as green.
+            # skipped required check: neutral, not a failure. Keying on the
+            # changes output (not just "shards skipped") matters: a FAILED
+            # `changes` job and a FAILED `plan` job both leave the shards
+            # skipped, and both must fail the gate, not read as green.
             exit 0
           fi
           if [ "$shard_result" = "success" ]; then
             exit 0
           fi
-          echo "failing the gate: changes=$changes_result shards=$shard_result" >&2
+          echo "failing the gate: code_changed=$code_changed shards=$shard_result" >&2
           exit 1
 
   shellcheck:
