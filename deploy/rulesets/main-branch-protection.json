@@ -49,6 +49,9 @@
           },
           {
             "context": "docs index coverage"
+          },
+          {
+            "context": "shard plan"
           }
         ],
         "strict_required_status_checks_policy": true

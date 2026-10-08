@@ -81,6 +81,22 @@ def ci_job_check_names(ci_yml_path):
     return set(names)
 
 
+def matrix_check_templates(ci_yml_path):
+    """`name:` values that embed a matrix expression (e.g.
+    `python tests (${{ matrix.shard }})`).
+
+    These are matrix-child jobs: GitHub renders one check per matrix
+    value (`python tests (shard-integration)`, ...), so the template
+    string itself is never a real check name and can never be a required
+    status-check context. Their gate role must be carried by an
+    aggregate job with a stable name (here `python tests`, green iff
+    every shard is green) — the anchor test below pins exactly which
+    template is excluded and why, so a future matrix job without an
+    aggregate cannot slip in unrequired.
+    """
+    return {n for n in ci_job_check_names(ci_yml_path) if "${{ matrix." in n}
+
+
 def load(name):
     return json.loads((RULESETS / name).read_text())
 
@@ -174,7 +190,13 @@ class TestMainBranchRuleset(unittest.TestCase):
         # Exact set equality in BOTH directions: the declared ruleset must
         # require exactly the checks ci.yml defines — no lagging behind a
         # renamed/added job, and no requiring a check that no longer exists.
-        self.assertEqual(contexts, ci_job_check_names(CI_YML))
+        # Matrix-child templates are subtracted: they are never real check
+        # names (see matrix_check_templates) — their gate is the aggregate
+        # `python tests` job, which IS required.
+        self.assertEqual(
+            contexts,
+            ci_job_check_names(CI_YML) - matrix_check_templates(CI_YML),
+        )
         self.assertTrue(checks["parameters"]["strict_required_status_checks_policy"])
 
     def test_ci_job_check_names_are_the_declared_five(self):
@@ -184,8 +206,17 @@ class TestMainBranchRuleset(unittest.TestCase):
         # the equality test above then forces the JSON to follow.
         # (P138, 2026-10-07: the changed-paths gate and the docs-index
         # coverage guard joined the merge gate.)
+        # (#1138, 2026-10-07: the python suite sharded into a matrix job.
+        # The matrix children are deliberately NOT required — their names
+        # are per-shard and dynamic, so requiring them would couple the
+        # ruleset to the shard inventory and force an operator ruleset
+        # update on every rebalance. The aggregate `python tests` job is
+        # required instead and is green iff every shard is green
+        # (fail-fast: false + explicit result check), so the gate is not
+        # weakened. The `shard plan` job IS required: it is a real check
+        # CI defines, skipped-neutral on docs-only diffs like the rest.)
         self.assertEqual(
-            ci_job_check_names(CI_YML),
+            ci_job_check_names(CI_YML) - matrix_check_templates(CI_YML),
             {
                 "python tests",
                 "shellcheck",
@@ -194,7 +225,16 @@ class TestMainBranchRuleset(unittest.TestCase):
                 "changelog ritual lint",
                 "changed-paths gate",
                 "docs index coverage",
+                "shard plan",
             },
+        )
+        # Exactly one matrix template exists, and it is the known shard
+        # job: a future matrix job without an aggregate gate must fail
+        # this anchor and get its own deliberate review, not slip in
+        # unrequired behind the template subtraction.
+        self.assertEqual(
+            matrix_check_templates(CI_YML),
+            {"python tests (${{ matrix.shard }})"},
         )
 
     def _declared_contexts(self):
@@ -240,7 +280,13 @@ class TestMainBranchRuleset(unittest.TestCase):
         self.assertNotEqual(variant, CI_YML.read_text())  # the replace landed
         parsed = self._parse_variant(variant)
         self.assertIn("shellcheck", parsed)  # falls back to the job id
-        self.assertEqual(parsed, self._declared_contexts())
+        # Matrix-child templates are never required contexts (their gate
+        # is the aggregate job) — subtract them before comparing, same as
+        # the anchor test does. The variant leaves the matrix job alone,
+        # so the template set is CI_YML's.
+        self.assertEqual(
+            parsed - matrix_check_templates(CI_YML), self._declared_contexts()
+        )
 
     def test_parser_raises_on_unreadable_shape(self):
         with self.assertRaises(ValueError):
@@ -268,7 +314,11 @@ class TestMainBranchRuleset(unittest.TestCase):
         )
         parsed = self._parse_variant(variant)
         self.assertIn("shellcheck", parsed)
-        self.assertEqual(parsed, self._declared_contexts())
+        # Matrix-child templates are never required contexts — subtract
+        # them before comparing (see the test above).
+        self.assertEqual(
+            parsed - matrix_check_templates(CI_YML), self._declared_contexts()
+        )
 
 
 class TestNoSecretsInRulesets(unittest.TestCase):
