@@ -73,6 +73,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 - Plane-side tenant-identity gap analysis: the hosted vision speaks "tenant" (signup identity linking, tenant records, tenant-scoped signed API calls) while the shipped plane speaks "owner" (single-owner appliance, one-shot bootstrap, box-filed approval records with no owner attribution) — the analysis numbers the gaps (tenant record, tenant-Muse credential, the multi-tenant plane model decision, approval-record attribution, the tenant-status plane auth, tenant-record retention/erasure) and files them as build issues so no second tenant lands before the identity and attribution layer is decided. Also corrects the stale "design; not implemented" status on the tenant-status endpoint doc now that the engine slice has shipped. (#1163) (#1158) (#1159) (#1160) (#1161) (#1162)
 
+- S4b socket-lifecycle gap analysis re-pinned to 2026-10-08: records the box-side heal of the socket gap-hold wedge (shipped as #1154, already in 0.7.0) and confirms the remaining open builds — the socket-ack consume half (#1001), ping/alarm re-verify (#1002), and live acceptance (#960). (#1183)
+
 ## [0.7.0] - 2026-10-08
 
 ### Added
