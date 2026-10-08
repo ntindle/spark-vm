@@ -45,6 +45,7 @@ def cli(monkeypatch, tmp_path):
 def _make_job(cli, slug, **fields):
     jd = cli.job_dir(slug)
     os.makedirs(jd, exist_ok=True)
+    os.makedirs(cli.METADATA_DIR, exist_ok=True)
     job = {"slug": slug, "state": "active", "started_at": time.time()}
     job.update(fields)
     with open(cli.job_json_path(slug), "w") as f:

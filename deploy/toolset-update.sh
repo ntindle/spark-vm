@@ -19,9 +19,10 @@
 #     when agent jobs are active, unless --force. The gate is uid-aware:
 #     for every user in $TOOLSET_AGENT_USERS (default: ntindle) it checks
 #     that user's own tmux server for live `mjob-*` sessions AND scans
-#     their muse-job registry (~/muse-jobs/*/job.json) for non-terminal
-#     job records — the registry half survives the muse-job v2 cutover
-#     (#228), which moves jobs off tmux. Both probes are read-only. An
+#     their muse-job registry (~/.local/share/muse-job/jobs/<slug>.json,
+#     plus the legacy ~/muse-jobs/*/job.json location, issue #11) for
+#     non-terminal job records — the registry half survives the muse-job
+#     v2 cutover (#228), which moves jobs off tmux. Both probes are read-only. An
 #     identity-switch failure defers loudly (fail-closed); a tmux probe
 #     that fails for other reasons (missing binary, broken server) reads
 #     as no-sessions for that half, with the registry probe as the
@@ -342,10 +343,11 @@ _sudo() {
 #   1. tmux: live `mjob-*` sessions on each agent user's OWN tmux server.
 #      tmux sockets are per-uid — probing as root saw only root's server,
 #      so the v0 gate never saw any agent jobs at all.
-#   2. muse-job registry: ~/muse-jobs/<slug>/job.json records whose state
-#      is non-terminal (active/blocked). This is the v2-proof half: when
-#      the muse-job v2 cutover (#228) moves jobs off tmux, the registry
-#      keeps the same state contract and the gate keeps working.
+#   2. muse-job registry: ~/.local/share/muse-job/jobs/<slug>.json records
+#      (plus the legacy ~/muse-jobs/<slug>/job.json location, issue #11)
+#      whose state is non-terminal (active/blocked). This is the v2-proof
+#      half: when the muse-job v2 cutover (#228) moves jobs off tmux, the
+#      registry keeps the same state contract and the gate keeps working.
 # The probes never execute user code: tmux is asked only for session names
 # (`ls -F '#S'`, no pane content, fixed argv, absolute binary path), and
 # job.json records are parsed as JSON data (stdlib parser, never
@@ -415,9 +417,14 @@ _tmux_sessions_for_user() {
 
 _registry_busy() {
     # _registry_busy <jobsdir> — print one `slug:state` line per live job
-    # record in <jobsdir>/*/job.json. Returns 0 when at least one record
-    # is non-terminal, 1 when the estate is idle, 2 when the scan itself
-    # failed (fail-closed upstream). Non-terminal: active, blocked.
+    # record. Issue #11: records moved out of the job dir to
+    # ~/.local/share/muse-job/jobs/<slug>.json; the scan covers BOTH the
+    # metadata dir (derived from <jobsdir>'s parent) and the legacy
+    # <jobsdir>/*/job.json location (pre-#11 jobs the manager has not
+    # touched yet). The metadata record wins a slug present in both.
+    # Returns 0 when at least one record is non-terminal, 1 when the estate
+    # is idle, 2 when the scan itself failed (fail-closed upstream).
+    # Non-terminal: active, blocked.
     # Terminal: killed, closed, done. Anything else — missing state,
     # unparseable value, an unrecognized future state — is busy
     # (fail-closed). Read-only: records are parsed as data, never executed.
@@ -426,20 +433,39 @@ _registry_busy() {
     # output is the busy/idle bit plus slug:state lines in the (sanitized)
     # run log.
     local jobsdir="$1"
-    [ -d "$jobsdir" ] || return 1
+    local metadir
+    metadir="$(dirname "$jobsdir")/.local/share/muse-job/jobs"
+    [ -d "$jobsdir" ] || [ -d "$metadir" ] || return 1
     if command -v python3 >/dev/null 2>&1; then
         local out rc=0
         out="$(python3 -c '
 import json, os, sys
-jobsdir = sys.argv[1]
-try:
-    names = sorted(os.listdir(jobsdir))
-except OSError:
-    sys.exit(2)
-for name in names:
-    p = os.path.join(jobsdir, name, "job.json")
-    if not os.path.isfile(p):
-        continue
+jobsdir, metadir = sys.argv[1], sys.argv[2]
+seen = set()
+candidates = []
+def scan(dirpath, legacy):
+    try:
+        names = sorted(os.listdir(dirpath))
+    except OSError:
+        # A present-but-unlistable dir is a scan failure (fail-closed),
+        # mirroring the pre-#11 behavior; a missing dir is just absent.
+        if os.path.isdir(dirpath):
+            sys.exit(2)
+        return
+    for name in names:
+        if legacy:
+            slug, p = name, os.path.join(dirpath, name, "job.json")
+        else:
+            if not name.endswith(".json") or len(name) <= 5:
+                continue
+            slug, p = name[:-5], os.path.join(dirpath, name)
+        if slug in seen or not os.path.isfile(p):
+            continue
+        seen.add(slug)
+        candidates.append((slug, p))
+scan(metadir, False)   # issue #11 location first: wins a slug present in both
+scan(jobsdir, True)    # legacy in-tree location
+for slug, p in candidates:
     try:
         with open(p) as fh:
             d = json.load(fh)
@@ -448,14 +474,14 @@ for name in names:
         # means readers never see a torn file) — not evidence of a live job.
         continue
     except ValueError:
-        # Unparseable record: fail closed — a corrupt job.json for a live
+        # Unparseable record: fail closed — a corrupt record for a live
         # job must never read as idle.
-        print("%s:unparseable" % name)
+        print("%s:unparseable" % slug)
         continue
     state = d.get("state") if isinstance(d, dict) else None
     if state not in ("killed", "closed", "done"):
-        print("%s:%s" % (name, state))
-' "$jobsdir" 2>/dev/null)" || rc=$?
+        print("%s:%s" % (slug, state))
+' "$jobsdir" "$metadir" 2>/dev/null)" || rc=$?
         if [ "$rc" = "2" ]; then
             return 2
         fi
@@ -476,7 +502,8 @@ for name in names:
     # python path reads busy on state=None — the fallback cannot see JSON
     # structure. The primary python path is fail-closed; this fallback
     # only runs when python3 is absent.
-    local d slug states rest first busy=0
+    local d slug states rest first busy=0 f
+    # Legacy location (pre-#11): <jobsdir>/*/job.json
     for d in "$jobsdir"/*/; do
         [ -d "$d" ] || continue
         [ -f "${d}job.json" ] || continue
@@ -494,6 +521,24 @@ for name in names:
         # Strip the terminal states; whatever survives — a non-terminal
         # value — is busy. (A nested "done" can never mask a live
         # top-level state: ANY non-terminal value defers.)
+        rest="$(printf '%s\n' "$states" | grep -Ev '^(killed|closed|done)$' || true)"
+        if [ -n "$rest" ]; then
+            first="$(printf '%s' "$rest" | grep -v '^$' | head -n 1 || true)"
+            printf '%s:%s\n' "$slug" "${first:-unparseable}"
+            busy=1
+        fi
+    done
+    # Issue #11 location: ~/.local/share/muse-job/jobs/<slug>.json
+    for f in "$metadir"/*.json; do
+        [ -f "$f" ] || continue
+        slug="$(basename "$f" .json)"
+        states="$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            "$f" 2>/dev/null | cut -d'"' -f4 || true)"
+        if [ -z "$states" ]; then
+            printf '%s:unparseable\n' "$slug"
+            busy=1
+            continue
+        fi
         rest="$(printf '%s\n' "$states" | grep -Ev '^(killed|closed|done)$' || true)"
         if [ -n "$rest" ]; then
             first="$(printf '%s' "$rest" | grep -v '^$' | head -n 1 || true)"

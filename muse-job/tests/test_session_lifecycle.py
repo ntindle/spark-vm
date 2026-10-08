@@ -242,7 +242,7 @@ def test_watch_adopts_late_session_uuid(cli, monkeypatch, capsys):
              if l.strip()]
     adopted = [e for e in lines if e.get("signal") == "session-adopted"]
     assert adopted and adopted[0]["job"] == "demo"
-    with open(os.path.join(jd, "job.json")) as f:
+    with open(cli.job_json_path("demo")) as f:
         assert json.load(f)["session_uuid"] == "late-sid"
 
 
@@ -355,7 +355,8 @@ def test_watch_flags_malformed_uuid(cli, monkeypatch, capsys):
 def test_load_job_pins_slug(cli):
     """A forged "slug" in job.json is pinned to the manager-side slug on
     load, so save_job / job_status / verify_done_event can never write to
-    or report on another job's paths."""
+    or report on another job's paths. Issue #11: the record migrates to
+    the metadata dir on load."""
     jd, job = make_job_dir(cli)
     job["slug"] = "victim"
     with open(os.path.join(jd, "job.json"), "w") as f:
@@ -364,9 +365,13 @@ def test_load_job_pins_slug(cli):
     assert loaded["slug"] == "demo"
     loaded["state"] = "closed"
     cli.save_job(loaded, "demo")
-    assert os.path.exists(os.path.join(jd, "job.json"))
+    assert os.path.exists(cli.job_json_path("demo")), \
+        "the record lives in the metadata dir (issue #11)"
+    assert not os.path.exists(os.path.join(jd, "job.json")), \
+        "no record may remain in the agent-visible job dir"
     assert not os.path.exists(os.path.join(cli.JOBS_DIR, "victim"))
-    with open(os.path.join(jd, "job.json")) as f:
+    assert not os.path.exists(os.path.join(cli.METADATA_DIR, "victim.json"))
+    with open(cli.job_json_path("demo")) as f:
         assert json.load(f)["slug"] == "demo"
 
 
@@ -377,8 +382,9 @@ def test_save_job_write_path_uses_manager_slug(cli):
     jd, job = make_job_dir(cli)
     job["slug"] = "victim"
     cli.save_job(job, "demo")
-    assert os.path.exists(os.path.join(jd, "job.json"))
+    assert os.path.exists(cli.job_json_path("demo"))
     assert not os.path.exists(os.path.join(cli.JOBS_DIR, "victim", "job.json"))
+    assert not os.path.exists(os.path.join(cli.METADATA_DIR, "victim.json"))
     job["slug"] = "../../x"
     cli.save_job(job, "demo")
     assert not os.path.exists(os.path.join(cli.HOME, "x", "job.json"))
@@ -391,7 +397,7 @@ def test_load_job_pins_traversal_slug(cli):
         json.dump(job, f)
     loaded = cli.load_job("demo")
     cli.save_job(loaded, "demo")
-    assert os.path.exists(os.path.join(jd, "job.json"))
+    assert os.path.exists(cli.job_json_path("demo"))
     assert not os.path.exists(os.path.join(cli.HOME, "x", "job.json"))
 
 

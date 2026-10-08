@@ -305,6 +305,39 @@ def _write_job(home, slug, state):
     (d / "job.json").write_text(json.dumps({"slug": slug, "state": state}))
 
 
+def _write_job_metadata(home, slug, state):
+    # Issue #11 location: ~/.local/share/muse-job/jobs/<slug>.json
+    d = home / ".local" / "share" / "muse-job" / "jobs"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{slug}.json").write_text(json.dumps({"slug": slug,
+                                                "state": state}))
+
+
+def test_registry_busy_detects_metadata_dir_records(env):
+    # Issue #11: the gate must see records in the metadata dir even when
+    # no legacy in-tree record exists.
+    home = env["tmp"] / "reghome-meta"
+    _write_job_metadata(home, "malpha", "active")
+    _write_job_metadata(home, "mgamma", "closed")
+    r = source_and(f"set +e; _registry_busy {home}/muse-jobs; echo rc=$?",
+                   env_extra=env["env"])
+    assert r.stdout.strip().endswith("rc=0"), r.stdout + r.stderr
+    assert "malpha:active" in r.stdout, r.stdout
+    assert "mgamma" not in r.stdout, r.stdout
+
+
+def test_registry_busy_metadata_record_wins_slug_conflict(env):
+    # A slug present in both locations: the metadata record is
+    # authoritative (the legacy one is a pre-migration leftover).
+    home = env["tmp"] / "reghome-conflict"
+    _write_job(home, "dupe", "active")
+    _write_job_metadata(home, "dupe", "closed")
+    r = source_and(f"set +e; _registry_busy {home}/muse-jobs; echo rc=$?",
+                   env_extra=env["env"])
+    assert r.stdout.strip().endswith("rc=1"), r.stdout + r.stderr
+    assert "dupe" not in r.stdout, r.stdout
+
+
 def test_idle_gate_skips_agent_user_that_does_not_exist(env):
     # A configured agent user with no passwd entry has no jobs: skipped,
     # logged, never a deferral.

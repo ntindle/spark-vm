@@ -60,7 +60,8 @@ def test_cold_cache_walks_and_persists(cli, tmp_path, monkeypatch):
     job = json.loads((jd / "job.json").read_text())
     assert cli._cached_dir_bytes(job, "job1") == 1234
     assert len(calls) == 1
-    persisted = json.loads((jd / "job.json").read_text())
+    # Persistence goes through save_job, i.e. the metadata dir (issue #11).
+    persisted = json.loads(open(cli.job_json_path("job1")).read())
     assert persisted["last_dir_bytes"] == 1234
     assert persisted["last_dir_scan_at"] > 0
 
@@ -88,7 +89,8 @@ def test_expired_ttl_rewalks(cli, tmp_path, monkeypatch):
     job = json.loads((jd / "job.json").read_text())
     assert cli._cached_dir_bytes(job, "job1") == 7777
     assert len(calls) == 1
-    persisted = json.loads((jd / "job.json").read_text())
+    # Persistence goes through save_job, i.e. the metadata dir (issue #11).
+    persisted = json.loads(open(cli.job_json_path("job1")).read())
     assert persisted["last_dir_bytes"] == 7777
 
 

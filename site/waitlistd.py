@@ -2338,11 +2338,17 @@ class WaitlistService:
         address. Unparseable spool files are left alone: their ownership
         cannot be proven, and _write_spool never leaves torn files.
         Returns the number of spool files purged.
-        (Matching is exact `==`, not re-normalized: every spool writer
-        records the normalized form — `row["owner_email"]`, or `sender`
-        normalized at the patha intake boundary — so a case/plus-tag
-        variant can never be a spool "to".)
+        The address is normalized HERE (defensive, issue #1145): every
+        spool writer records the normalized form — `row["owner_email"]`,
+        or `sender` normalized at the patha intake boundary — so an
+        un-normalized argument (a future caller that forgets to normalize
+        first) would otherwise match nothing and silently leave the
+        address mailable. A non-plausible address can never be a spool
+        "to", so it purges zero.
         """
+        address = normalize_email(address)
+        if address is None:
+            return 0
         try:
             names = os.listdir(self.spool_dir)
         except OSError:

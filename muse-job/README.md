@@ -89,8 +89,9 @@ declares success:
   costs far more.
 
 To retry a stillborn spawn, pick one path — the job dir cannot be both
-removed and closed (`job.json` lives inside it, so removing the dir
-deletes the record `close` would archive):
+removed and closed (removing the dir deletes the work tree, logs, and
+diagnosis `close` would archive — the management record itself now lives
+in the metadata dir, issue #11):
 
 - New slug (keeps the diagnosis): `muse-job spawn <new-slug> --tmux`,
   then `muse-job close <slug>` the blocked job record — `close` archives
@@ -186,12 +187,14 @@ A rotation is reported as an `events-rotated` watch signal.
   cannot bury a claim), triages it against protocol checks (event names the
   job's recorded session uuid, cwd is at/under the job worktree, non-empty
   SUMMARY.md regular file present) and pages once per claim: `done-claimed`
-  (checks passed) or `done-unverified` (checks failed; possible forgery). The
-  dedup cursor lives in agent-writable job.json and is sanitized on read;
-  after 3 done pages in 24h, claims coalesce into a single `done-repeated`
-  page per window. `watch` also emits `events-missing` when the newest hook
+  (checks passed) or `done-unverified` (checks failed; possible forgery).
+  After 3 done pages in 24h, claims coalesce into a single `done-repeated`
+  page per window; the burst label is derived from the hook event file
+  (the old record-side dedup latch was removed as demonstrably plantable,
+  issue #3; the record itself moved to the manager-side metadata dir,
+  issue #11). `watch` also emits `events-missing` when the newest hook
   event is older than 30m (or none exists) while tmux is alive and a session
-  uuid is recorded (event file deleted or hooks blinded) -- pages on EVERY watch pass while blind (fail loud; no dedup latch, since a latch in agent-writable job.json would be plantable)
+  uuid is recorded (event file deleted or hooks blinded) -- pages on EVERY watch pass while blind (fail loud; no dedup latch, since a latch in the job record would be plantable)
   uuid -- and `events-tampered` when the event file is a symlink. A
   sophisticated agent can read this tooling and satisfy every check (including
   faking periodic heartbeat lines to defeat recency detection), so this verifies

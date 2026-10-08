@@ -20,6 +20,11 @@ import time
 
 HOME = os.path.expanduser("~")
 JOBS = os.path.join(HOME, "muse-jobs")
+# Issue #11: the manager-side record moved out of the job dir. The sweep is
+# read-only, so it needs no migration -- it reads the new location first
+# and falls back to the legacy in-tree record (pre-#11 jobs the manager
+# has not touched yet).
+METADATA = os.path.join(HOME, ".local", "share", "muse-job", "jobs")
 EVENTS = os.path.join(HOME, ".local", "share", "muse-job", "events")
 SESSIONS = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
 WARN_PCT = 85
@@ -63,6 +68,20 @@ def dir_size(p):
     return total
 
 
+def read_job_record(slug):
+    """Manager-side record for slug: metadata dir first, legacy in-tree fallback."""
+    for p in (os.path.join(METADATA, slug + ".json"),
+              os.path.join(JOBS, slug, "job.json")):
+        try:
+            with open(p) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def active_session_uuids():
     """Session uuids of non-closed jobs -- their hook event files and
     session registrations must never be pruned (issue #3 review: a job
@@ -72,10 +91,10 @@ def active_session_uuids():
     if not os.path.isdir(JOBS):
         return uuids
     for slug in os.listdir(JOBS):
-        jf = os.path.join(JOBS, slug, "job.json")
+        d = read_job_record(slug)
+        if d is None:
+            continue
         try:
-            with open(jf) as f:
-                d = json.load(f)
             sid = d.get("session_uuid")
             # Issue #23 H1: a planted non-string session_uuid (dict/list)
             # used to raise TypeError in the set comprehension below and
@@ -117,12 +136,10 @@ def main():
         if os.path.isdir(JOBS):
             for slug in os.listdir(JOBS):
                 jd = os.path.join(JOBS, slug)
-                jf = os.path.join(jd, "job.json")
-                try:
-                    with open(jf) as f:
-                        state = json.load(f).get("state")
-                except Exception:
+                d = read_job_record(slug)
+                if d is None:
                     continue
+                state = d.get("state")
                 if state == "closed" and (
                         time.time() - os.path.getmtime(jd)
                         > PRUNE_CLOSED_AFTER_DAYS * 86400):
@@ -148,11 +165,12 @@ def main():
         if os.path.isdir(JOBS):
             for slug in os.listdir(JOBS):
                 jd = os.path.join(JOBS, slug)
-                jf = os.path.join(jd, "job.json")
+                d = read_job_record(slug)
+                if d is None:
+                    continue
                 try:
-                    with open(jf) as f:
-                        if json.load(f).get("state") == "closed":
-                            continue
+                    if d.get("state") == "closed":
+                        continue
                 except Exception:
                     continue
                 s = dir_size(jd)

@@ -160,8 +160,14 @@ happened.
 
 ### Derived layout is the canonical contract
 
-`~/muse-jobs/<slug>/` holds `job.json`, `prompt.md`, `SUMMARY.md`,
-`QUESTIONS.md`, `PROGRESS.md`, `work/` (the git worktree), and `tmp/`.
+`~/muse-jobs/<slug>/` holds only agent-visible files: `prompt.md`,
+`SUMMARY.md`, `QUESTIONS.md`, `PROGRESS.md`, `work/` (the git worktree),
+and `tmp/`. The management record `job.json` lives OUTSIDE the job tree
+in the manager-side metadata dir `~/.local/share/muse-job/jobs/<slug>.json`
+(issue #11) -- the prompt preamble never names it, so the job agent no
+longer knows a writable management record exists at a predictable path.
+(Pre-#11 in-tree records are migrated to the metadata dir on first
+manager read.)
 Pristine clones live under `~/repos/<host>/<path...>` (namespaced by the
 repo URL's host + full path, so `github.com/org/foo` and
 `gitlab.com/org/foo` never share one clone -- issue #10; local paths and
@@ -175,8 +181,8 @@ spawns re-clone into the namespaced dir. Job branches are always
 The manager **derives** the worktree (`<jobdir>/work`) and branch
 (`job/<slug>`) from the slug for every destructive or security-relevant
 operation (`close`, `resume`, the done-claim cwd check, the watch thrash
-heuristic) instead of reading them from `job.json`, which the job agent
-can rewrite (issue #11). A recorded value that diverges from the derived
+heuristic) instead of trusting the recorded values (defense in depth for
+issue #11, from when the record lived in the agent-writable job dir). A recorded value that diverges from the derived
 layout fails closed with an explicit error -- divergence is treated as
 tampering or an unsupported migration, never silently overridden. The one
 value that cannot be derived (the pristine repo dir) is containment-checked

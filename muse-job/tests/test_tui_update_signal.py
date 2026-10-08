@@ -148,7 +148,7 @@ def test_watch_emission_contract(cli, tmp_path):
     assert events[0]["signal"] == "tui-updated"
     assert events[0]["job"] == slug
     assert OLD in events[0]["detail"] and NEW in events[0]["detail"]
-    with open(os.path.join(cli.JOBS_DIR, slug, "job.json")) as f:
+    with open(cli.job_json_path(slug)) as f:
         on_disk = json.load(f)
     assert on_disk["tui_cmd"] == NEW
     # Second identical pass: baseline already advanced, nothing appended.
@@ -166,5 +166,5 @@ def test_emission_helper_quiet_when_no_swap(cli, tmp_path):
     events = []
     cli._emit_tui_swap_event(job, slug, OLD, events)
     assert events == []
-    with open(os.path.join(cli.JOBS_DIR, slug, "job.json")) as f:
+    with open(cli.job_json_path(slug)) as f:
         assert json.load(f)["tui_cmd"] == OLD
