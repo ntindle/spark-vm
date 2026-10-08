@@ -1,7 +1,10 @@
 # Tenant status endpoint — `GET /tenant/status` design (G3)
 
-**Status:** design; not implemented. Closes the design half of backlog item
-G3 ("tenant onboarding status poll with the spec's machine vocabulary").
+**Status:** design + shipped reference slice. The design half closed
+G3's design item; the implementation slice S1 (`hosted/tenant_status.py`
+— transition engine + JSON-file `TenantStore` daemon + tests, #679/#680)
+is shipped. Still open: the plane-side store and plane-side auth for
+this endpoint (see `docs/PLANE_TENANT_IDENTITY_GAP_ANALYSIS.md`, T1/T2/T5).
 
 **The gap:** three spec documents agree on a control-plane poll —
 `FIRST_TEN_MINUTES_SPEC.md` §2 prescribes the tenant status poll carrying
