@@ -52,7 +52,7 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Changed
 
-- CI Python test gate rebalanced: the real-worker harness suite (the slowest slice of the run — about seventy percent of its shard's wall time) now runs in its own shard, so a code PR's test signal arrives in roughly four minutes instead of six; the required `python tests` check keeps its name and still gates the merge, and rebalancing never touches the required status checks. (#TBD)
+- CI Python test gate rebalanced: the real-worker harness suite (the slowest slice of the run — about seventy percent of its shard's wall time) now runs in its own shard, so a code PR's test signal arrives in roughly four minutes instead of six; the required `python tests` check keeps its name and still gates the merge, and rebalancing never touches the required status checks. (#1164)
 
 ### Added
 
