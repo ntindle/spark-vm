@@ -41,6 +41,7 @@ def cli(monkeypatch, tmp_path):
 def _make_job(cli, slug, **fields):
     jd = cli.job_dir(slug)
     os.makedirs(jd, exist_ok=True)
+    os.makedirs(cli.METADATA_DIR, exist_ok=True)
     job = {"slug": slug, "state": "active", "started_at": time.time()}
     job.update(fields)
     with open(cli.job_json_path(slug), "w") as f:
@@ -266,6 +267,7 @@ def test_kill_corrupt_job_json_stays_permissive(cli, monkeypatch, capsys):
     slug = "corruptjob"
     jd = cli.job_dir(slug)
     os.makedirs(jd, exist_ok=True)
+    os.makedirs(cli.METADATA_DIR, exist_ok=True)
     with open(cli.job_json_path(slug), "w") as f:
         f.write("{not valid json")
     monkeypatch.setattr(cli, "_kill_process_tree", lambda s: [])

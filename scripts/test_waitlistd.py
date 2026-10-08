@@ -1077,6 +1077,36 @@ def test_forget_matchers_fold_mixed_case_address():
                                       needle, variant_re)
 
 
+def test_purge_spool_for_normalizes_address_defensively():
+    # #1145: _purge_spool_for normalizes its argument itself — a future
+    # caller passing a non-normalized address must not silently purge
+    # nothing (the pre-hardening posture of _forget_matchers). Pre-fix
+    # this returned 0 for the mixed-case/plus-tagged argument; post-fix
+    # it purges the spool docs for the normalized form.
+    svc, tmp = make_service()
+    owner = "purge1145@example.com"
+    spool = os.path.join(tmp, "spool")
+    os.makedirs(spool, exist_ok=True)
+    for i in range(2):
+        with open(os.path.join(spool, f"a{i}.json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump({"to": owner, "kind": "pending"}, fh)
+    with open(os.path.join(spool, "other.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({"to": "bystander@example.com", "kind": "pending"}, fh)
+    purged = svc._purge_spool_for("Purge1145+Tag@Example.COM")
+    assert purged == 2, \
+        "an un-normalized argument must purge the normalized 'to' docs"
+    remaining = [json.load(open(os.path.join(spool, n), encoding="utf-8"))
+                 for n in os.listdir(spool)]
+    assert all(d.get("to") != owner for d in remaining), \
+        "no spool doc for the forgotten address may remain"
+    assert any(d.get("to") == "bystander@example.com" for d in remaining), \
+        "bystander spool docs must survive"
+    # A non-plausible address can never be a spool "to": purges nothing.
+    assert svc._purge_spool_for("not-an-email") == 0
+
+
 def test_forget_scrub_matches_plus_tag_variants():
     # #400: raw mail carries the un-normalized From — a plus-tagged or
     # differently-cased address must be caught by the targeted scrub,

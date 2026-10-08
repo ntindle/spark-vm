@@ -895,7 +895,7 @@ def test_b5_load_job_pins_slug_to_directory_name(cli):
     cli.save_job(job, "demo")
     with open(os.path.join(victim, "job.json")) as f:
         assert json.load(f)["slug"] == "victim", "victim record untouched"
-    with open(os.path.join(demo, "job.json")) as f:
+    with open(cli.job_json_path("demo")) as f:
         assert json.load(f)["slug"] == "demo"
 
 

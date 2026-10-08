@@ -711,6 +711,7 @@ def test_recover_trust_prompt_pages_when_still_blocked(cli, monkeypatch):
 def _make_watch_job(cli, slug):
     jd = cli.job_dir(slug)
     os.makedirs(jd, exist_ok=True)
+    os.makedirs(cli.METADATA_DIR, exist_ok=True)
     job = {"slug": slug, "state": "active", "started_at": _time.time(),
            "session_uuid": None}
     with open(cli.job_json_path(slug), "w") as f:

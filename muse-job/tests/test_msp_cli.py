@@ -227,6 +227,7 @@ def cli(monkeypatch, tmp_path):
 def _make_job(cli, slug, **fields):
     jd = cli.job_dir(slug)
     os.makedirs(os.path.join(jd, "tmp"), exist_ok=True)
+    os.makedirs(cli.METADATA_DIR, exist_ok=True)
     job = {"slug": slug, "state": "active", "started_at": time.time(),
            "transport": "msp", "session_uuid": "sess-1"}
     job.update(fields)
