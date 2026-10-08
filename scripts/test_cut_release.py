@@ -557,6 +557,28 @@ def test_poll_rejects_non_numeric_hooks(workrepo, fake_gh):
     assert "CUT_RELEASE_POLL_ATTEMPTS" in r.stderr
 
 
+def test_release_workflow_calls_golden_image_gate():
+    # #1176: the release workflow pushes the v* tag with GITHUB_TOKEN,
+    # which never triggers workflow runs, so golden-image.yml's own
+    # `push: tags` trigger could never fire the F-P1 gate on a real
+    # release. release.yml must call the gate as a reusable workflow in
+    # the same run. This pins the caller wiring structurally — a typo in
+    # `uses:`, a dropped `needs:`, or a widened permission would otherwise
+    # pass CI and detonate only on the next real release, the one path CI
+    # can never exercise.
+    wf = os.path.join(REPO, ".github", "workflows", "release.yml")
+    text = open(wf, encoding="utf-8").read()
+    assert "uses: ./.github/workflows/golden-image.yml" in text
+    assert "needs: release" in text
+    # The caller narrows to contents:read for the gate job (the workflow's
+    # own top-level permission is contents:write for the tag+release).
+    assert "contents: read" in text
+    # The gate builds the exact release tree, not main's tip: the tag is
+    # passed explicitly from the release job's own per-run checkout.
+    assert "needs.release.outputs.tag" in text
+    assert "steps.tag.outputs.tag" in text
+
+
 def test_release_workflow_has_publish_only_recovery_step():
     # GitHub #659: the workflow must recover a tag-pushed/publish-failed
     # state on its own instead of leaving a manual recovery to the operator.

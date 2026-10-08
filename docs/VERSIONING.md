@@ -105,7 +105,11 @@ than its own installed copy. `muse-job --version` reads the repo file.
    the same workflow run calls the golden-image build gate
    (`.github/workflows/golden-image.yml`) via `workflow_call` on the exact
    release tag — the tag push itself uses `GITHUB_TOKEN` and therefore
-   cannot trigger the gate's own `push: tags` trigger (#1176). Merging to main
+   cannot trigger the gate's own `push: tags` trigger (#1176). The gate runs
+   after the release publishes, so a red gate is a signal, not a blocker:
+   do not run the interactive publish gate for that image (its Step 0b
+   would refuse it anyway) — file a follow-up instead. The tag and the
+   GitHub release are never re-cut. Merging to main
    is the release authorization — treat VERSION bumps like releases in
    review, and consider a GitHub tag-protection ruleset for `v*` so only
    the workflow can create release tags (declared in `deploy/rulesets/` —
