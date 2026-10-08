@@ -193,6 +193,56 @@ created with the default umask and carry no data.
   these run from a root shell; the `sudo -u swapd` hop only drops
   privileges down to swapd.
 
+## Hosted-mode handoff (plane-enrolled boxes)
+
+On a box enrolled with the hosted control plane (GitHub #1135), the
+box-local push queue stands down: the local channel could never page
+there anyway (a hosted tenant owner never reaches the confirmd page, so
+no VAPID subscription can exist), and without the handoff every refused
+approval would pile up in an ever-growing journal while the worker
+warned loudly every pass. With the handoff, the enqueue is skipped and
+the worker passes quietly — the approval still reaches the plane via
+the filing-upload path, so the owner sees it on the dashboard.
+
+Honest status: the local channel standing down is not the same as
+paging arriving. Plane-side push paging itself ships with the plane
+push lane (#967 sender, #968 subscriptions); until then, a hosted
+owner learns about approvals by opening the dashboard — nothing pages
+them. The handoff removes a dead channel and its noise; it does not
+create a paging path.
+
+How the decision is made (`confirm/push.py::_plane_push_owner`):
+
+- `SPARKVM_PLANE_PUSH=1` forces the handoff; `=0` forces the box-local
+  queue. Any other value logs a warning and falls back to auto-detect.
+- Unset → auto-detect: the box counts as plane-enrolled when
+  `SVM_PAIR_DIR/enrollment.json` (default `~/.config/spark-pair`) parses
+  as JSON with a non-empty box `token`.
+- Any check error (missing/unreadable/corrupt record, no token) fails
+  **open** to the box-local queue — a handoff-check failure must never
+  lose the filed approval. The token itself is never logged.
+
+The deploy wires the knob: `proxy/deploy.sh` §5b runs as root, checks
+the operator pairing records (`/root/.config/spark-pair` and the
+`SUDO_USER` home) for a token, and — only when enrolled — installs
+`SPARKVM_PLANE_PUSH=1` systemd drop-ins on `swap-proxy.service` (the
+enqueue path) and `push-worker.service` (the delivery path). Not
+enrolled → any stale drop-ins are removed. Re-run the deploy after
+pairing (or manage the drop-ins by hand + `daemon-reload`) for the
+handoff to take effect. The services run as `swapd` and cannot read the
+0600 pairing record themselves, which is why the deploy — not the
+service — makes the call.
+
+Runbook:
+
+```sh
+systemctl cat push-worker.service | grep -A2 plane-push   # handoff active?
+sudo rm /etc/systemd/system/push-worker.service.d/10-plane-push.conf \
+        /etc/systemd/system/swap-proxy.service.d/10-plane-push.conf
+sudo systemctl daemon-reload && sudo systemctl restart swap-proxy push-worker
+# ^ force the box-local queue back on (e.g. testing the local channel)
+```
+
 ## Configuration reference
 
 | Env | Default | Purpose |
@@ -202,6 +252,8 @@ created with the default umask and carry no data.
 | `CONFIRM_VAPID_SUB` | `mailto:confirmd@localhost` | VAPID `sub` contact claim |
 | `CONFIRM_PUSH_QUEUE` | `$CONFIRM_DIR/push-queue.jsonl` | worker queue journal |
 | `CONFIRM_PUSH_DEAD` | `$CONFIRM_DIR/push-queue-dead.jsonl` | dead-letter file |
+| `SPARKVM_PLANE_PUSH` | unset (auto-detect) | `1` = plane push lane owns paging (box-local queue stands down); `0` = force box-local queue |
+| `SVM_PAIR_DIR` | `~/.config/spark-pair` | pairing state dir consulted by the handoff auto-detect |
 
 ## Follow-ups (not this slice)
 

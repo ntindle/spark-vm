@@ -406,12 +406,15 @@ def _push_notify(item):
     guarantee (and a poisoned queue file can't stall the agent's
     already-refused request). The worker (`push.py --worker`) does the
     sends with exponential-backoff retry; transient failures are retried,
-    not dropped.
+    not dropped. On a plane-enrolled box (#1135) enqueue returns
+    "plane-owned" — the box-local channel could never page there, so the
+    queue stands down and this is not logged as a problem.
     """
     def _run():
         try:
             res = _load_push_module().PushQueue.default().enqueue(item)
-            if res not in ("queued", "duplicate", "notified"):
+            if res not in ("queued", "duplicate", "notified",
+                           "plane-owned"):
                 log.warning("swap: push enqueue returned %s for approval %s",
                             res, item.get("id"))
         except Exception:
