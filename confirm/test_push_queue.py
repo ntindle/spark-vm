@@ -577,6 +577,13 @@ class TestPlaneHandoff(unittest.TestCase):
         combined = "\n".join(logs.output)
         self.assertNotIn("SECRET-BOX-TOKEN-XYZ", combined)
 
+    def test_plane_mode_preserves_invalid_id_contract(self):
+        # The handoff check runs after id validation: a malformed id
+        # reports "invalid" even on a plane-enrolled box.
+        os.environ["SPARKVM_PLANE_PUSH"] = "1"
+        self.assertEqual(self.q.enqueue({"id": "bad id!"}), "invalid")
+        self.assertFalse(os.path.exists(self.q.queue_path))
+
 
 if __name__ == "__main__":
     unittest.main()

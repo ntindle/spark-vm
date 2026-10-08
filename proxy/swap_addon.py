@@ -407,7 +407,7 @@ def _push_notify(item):
     already-refused request). The worker (`push.py --worker`) does the
     sends with exponential-backoff retry; transient failures are retried,
     not dropped. On a plane-enrolled box (#1135) enqueue returns
-    "plane-owned" — the plane push lane owns paging, so the box-local
+    "plane-owned" — the box-local channel could never page there, so the
     queue stands down and this is not logged as a problem.
     """
     def _run():

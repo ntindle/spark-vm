@@ -269,6 +269,47 @@ sudo install -o root -g root -m 0644 confirm/push-worker.service /etc/systemd/sy
 sudo install -o root -g root -m 0644 proxy/summons-sweep.service /etc/systemd/system/summons-sweep.service
 sudo install -o root -g root -m 0644 proxy/summons-sweep.timer /etc/systemd/system/summons-sweep.timer
 
+# --- 5b. plane push handoff (GitHub #1135) -----------------------------------
+# On a plane-enrolled box the plane push lane is the paging channel, so the
+# box-local push queue stands down via SPARKVM_PLANE_PUSH=1 drop-ins on the
+# two services that consult it (swap-proxy: the enqueue path in the swap
+# addon; push-worker: the delivery worker). Detection runs here as root:
+# the pairing record is 0600 in the operator's home, unreadable by swapd —
+# which is exactly why the services cannot auto-detect and the deploy must
+# decide. Not enrolled → any stale drop-ins are removed, so a re-deploy
+# after un-enrollment restores the box-local queue. Self-hosted boxes are
+# unaffected (no enrollment record → no drop-ins). To override manually,
+# write/remove the drop-in and re-run the deploy (or daemon-reload).
+echo "[5b/7] Checking plane enrollment for the push handoff..."
+plane_enrolled=0
+for _pair_home in /root ${SUDO_USER:+/home/$SUDO_USER}; do
+    _enroll="$_pair_home/.config/spark-pair/enrollment.json"
+    if [ -f "$_enroll" ] && python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and d.get("token") else 1)
+' "$_enroll" 2>/dev/null; then
+        plane_enrolled=1
+        break
+    fi
+done
+for _svc in swap-proxy push-worker; do
+    _dropdir="/etc/systemd/system/$_svc.service.d"
+    if [ "$plane_enrolled" = "1" ]; then
+        sudo install -o root -g root -m 0755 -d "$_dropdir"
+        printf '[Service]\nEnvironment=SPARKVM_PLANE_PUSH=1\n' | \
+            sudo tee "$_dropdir/10-plane-push.conf" > /dev/null
+        echo "    $_svc: plane-enrolled -> SPARKVM_PLANE_PUSH=1 drop-in installed"
+    else
+        sudo rm -f "$_dropdir/10-plane-push.conf"
+        echo "    $_svc: not plane-enrolled -> no push-handoff drop-in"
+    fi
+done
+unset _pair_home _enroll _svc _dropdir plane_enrolled
+
 # --- 6. sudoers -------------------------------------------------------------
 echo "[6/7] Installing sudoers..."
 # Validate BEFORE installing: a bad sudoers file must never go live.
