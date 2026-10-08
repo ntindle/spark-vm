@@ -1,7 +1,7 @@
 """Shard inventory for the `python tests` CI gate (#1138).
 
 CI's `python-tests` job fans out into one matrix job per shard (see
-`.github/workflows/ci.yml`), so the ~40-minute serial suite runs as 3
+`.github/workflows/ci.yml`), so the ~40-minute serial suite runs as 4
 parallel shards and the slowest shard becomes the new pole. This file is
 the single source of the shard inventory:
 
@@ -23,11 +23,27 @@ muse-job/tests is additionally the slow integration dir the issue names.
 The PR's own CI run measures the real per-shard wall times — rebalance
 by editing SHARDS below (the pin test keeps the bijection honest).
 
+Rebalance 2026-10-08 (follow-up turn): the first sharded CI run
+(PR #1149) measured the pole at shard-components 5m50s vs 3m14s
+(shard-integration) and 3m12s (shard-unit), and full per-dir local
+timings on the loop VM pinned the driver: harness/ alone is ~278s
+local — ~1.5x the next-heaviest dir (muse-job/tests ~188s local, deploy
+~123s) and ~70% of shard-components' whole wall time. The minimax move is to
+extract harness/ into its own shard: the pole becomes the harness
+shard itself at ~4m (estimated from the CI/local ratio of the old
+shard-components), vs the old 5m50s. If the suite grows past this
+again, the same playbook applies — split the new pole dir into its own
+shard; the aggregate `python tests` gate, the ruleset anchor, and the
+workflow all stay untouched (per-shard check names are deliberately
+never required status checks).
+
 - shard-integration: muse-job/tests — the named slow integration dir
-  (real manager/host round-trips; 653 tests, the largest suite).
-- shard-components: proxy, harness, hosted — the other
-  process-spawning integration suites. proxy/ also carries the sudo
-  root tests (see `root_tests` below).
+  (real manager/host round-trips; 685 tests, the largest suite).
+- shard-harness: harness — the measured pole driver (~278s local;
+  real-worker process-spawning harness, ~1.5x any other dir).
+- shard-components: proxy, hosted — the remaining process-spawning
+  integration suites. proxy/ also carries the sudo root tests (see
+  `root_tests` below).
 - shard-unit: confirm, deploy, scripts, cred-ui/tests, cua, jail,
   credlib, fleet, pairing, browser-driver — component suites and the
   fast unit/lint/schema/docs-guard suites.
@@ -46,9 +62,11 @@ SHARDS = {
     "shard-integration": [
         "muse-job/tests",
     ],
+    "shard-harness": [
+        "harness",
+    ],
     "shard-components": [
         "proxy",
-        "harness",
         "hosted",
     ],
     "shard-unit": [
