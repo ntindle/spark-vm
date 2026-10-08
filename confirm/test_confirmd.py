@@ -3626,6 +3626,81 @@ class GrantTtlChoiceTests(unittest.TestCase):
         self.assertEqual(cd._answered_api_item(base)["grant_ttl_hours"],
                          "")
 
+    # --- #1166: _find_login anchoring ------------------------------------
+    # The finding-47 owner check rests on this extraction: it must read
+    # UserProfile.LoginName only, never the first LoginName-shaped key
+    # anywhere in the whois tree.
+
+    def test_1166_find_login_anchored_to_user_profile(self):
+        """A LoginName nested inside Node (future schema / metadata) must
+        not take precedence over the owner's UserProfile.LoginName."""
+        doc = {
+            "Node": {"Name": "x",
+                     "Nested": {"LoginName": "intruder@evil"}},
+            "UserProfile": {"LoginName": "ntindle@github"},
+        }
+        self.assertEqual(cd._find_login(doc), "ntindle@github")
+
+    def test_1166_find_login_missing_profile_fails_closed(self):
+        """Absent UserProfile (or absent tree) means the peer is refused."""
+        self.assertIsNone(cd._find_login({"Node": {"Name": "x"}}))
+        self.assertIsNone(cd._find_login({}))
+        self.assertIsNone(cd._find_login(None))
+        self.assertIsNone(cd._find_login(["UserProfile"]))
+
+    def test_1166_find_login_non_string_fails_closed(self):
+        self.assertIsNone(cd._find_login({"UserProfile": {"LoginName": 7}}))
+        self.assertIsNone(
+            cd._find_login({"UserProfile": {"LoginName": None}}))
+
+    # --- #1168: quarantine pruning ---------------------------------------
+
+    def _write_quarantine(self, name, mtime_age):
+        qd = self.approvals / "pending-quarantine"
+        qd.mkdir(exist_ok=True)
+        p = qd / name
+        p.write_text('{"id": "%s"}' % name)
+        old = time.time() - mtime_age
+        os.utime(p, (old, old))
+        return p
+
+    def test_1168_quarantine_prune_keeps_newest(self):
+        """Over-cap quarantine prunes mtime-oldest first, keeping the
+        newest `limit` files."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            for i in range(5):
+                self._write_quarantine("q%d.json" % i,
+                                       mtime_age=(5 - i) * 10)
+            cd._prune_quarantine(limit=3)
+            remaining = sorted(
+                (self.approvals / "pending-quarantine").iterdir())
+            self.assertEqual([p.name for p in remaining],
+                             ["q2.json", "q3.json", "q4.json"])
+
+    def test_1168_quarantine_prune_under_cap_noop(self):
+        """Under-cap quarantine is untouched (no stat storm, no deletes)."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            self._write_quarantine("q0.json", mtime_age=10)
+            cd._prune_quarantine(limit=3)
+            self.assertTrue(
+                (self.approvals / "pending-quarantine" / "q0.json")
+                .exists())
+
+    def test_1168_housekeeping_prunes_quarantine(self):
+        """_housekeeping_if_due() runs the quarantine prune at the keep
+        bound."""
+        with mock.patch.object(cd, "APPROVALS",
+                               str(self.approvals)), \
+             mock.patch.object(cd, "_QUARANTINE_KEEP", 2):
+            for i in range(4):
+                self._write_quarantine("q%d.json" % i,
+                                       mtime_age=(4 - i) * 10)
+            self.assertTrue(cd._housekeeping_if_due())
+            remaining = sorted(
+                (self.approvals / "pending-quarantine").iterdir())
+            self.assertEqual([p.name for p in remaining],
+                             ["q2.json", "q3.json"])
+
 
 if __name__ == "__main__":
     unittest.main()
