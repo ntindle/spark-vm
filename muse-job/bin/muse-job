@@ -70,6 +70,15 @@ METADATA_DIR = os.path.join(HOME, ".local", "share", "muse-job", "jobs")
 
 SESSIONS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
 
+# Issue #1130: the manager's redacted turn-event journal (msp_signals.jsonl)
+# lived in the agent-visible job dir, where the job agent could rewrite or
+# truncate its own turn history -- anti-forensics against `muse-job log`
+# and the stillborn diagnosis. The journal now lives in the operator-owned
+# journals dir below, which the prompt preamble never names -- the agent
+# loses the known writable path. Same #11 caveat: this is not a privilege
+# boundary against a determined shell user.
+JOURNAL_DIR = os.path.join(HOME, ".local", "share", "muse-job", "journals")
+
 SESSION_INDEX = os.path.join(HOME, ".local", "share", "muse", "session-index.db")
 VIEW_DIR = os.path.join(HOME, ".local", "share", "muse", "sessions", ".msp-view-v1")
 MUSE = os.path.join(HOME, ".local", "bin", "muse")
@@ -3439,17 +3448,73 @@ def _msp_call(slug, job, fn, pre_resume=True):
 # The redacted signal journal: every poll journals its replayed JobSignals
 # (kind/method/detail -- no transcript text) as JSON lines. `muse-job log`
 # renders the tail. Cap: rewrite when over _MSP_JOURNAL_CAP lines.
+#
+# Issue #1130: the journal used to live at the legacy in-tree path below.
+# A job's agent could rewrite or truncate its own turn history there --
+# anti-forensics against exactly the tooling (`log`, the stillborn
+# record) the operator uses to diagnose misbehavior (the #3 precedent:
+# same-user job-agent events are forgeable, so they are never trusted;
+# the journal now gets the same treatment). The journal moved to the
+# operator-owned journals dir, which the prompt preamble never names --
+# the agent loses the known writable path. Same #11 caveat: this is not
+# a privilege boundary against a determined shell user.
 _MSP_JOURNAL_CAP = 2000
 
 
 def _msp_journal_path(slug):
+    """Manager-side journal path (issue #1130): outside the job dir."""
+    return os.path.join(JOURNAL_DIR, slug + ".jsonl")
+
+
+def _legacy_msp_journal_path(slug):
+    """Pre-#1130 journal path inside the agent-visible job dir (read-only
+    fallback in `log`; migrate-on-append in the appender)."""
     return os.path.join(job_dir(slug), "msp_signals.jsonl")
+
+
+def _msp_journal_migrate_legacy(slug):
+    """Move a pre-#1130 in-tree journal into the journals dir (issue #1130).
+
+    Non-clobbering and atomic like the #11 record migration: legacy lines
+    publish via os.link only when the destination is absent -- a racing
+    manager's journal wins, and the loser drops its copy of the legacy
+    lines (already published by the winner). The migration read is bounded
+    by the journal cap so an agent-planted huge file cannot stall the
+    manager. The stale legacy file is unlinked once its lines are
+    published (harmless if a racer already unlinked it).
+    """
+    legacy = _legacy_msp_journal_path(slug)
+    path = _msp_journal_path(slug)
+    if not os.path.isfile(legacy) or os.path.isfile(path):
+        return
+    with open(legacy) as f:
+        lines = []
+        for i, line in enumerate(f):
+            if i >= _MSP_JOURNAL_CAP:
+                break
+            lines.append(line)
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        with open(tmp, "w") as f:
+            f.writelines(lines)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            pass  # a racing manager published first; drop our copy
+    finally:
+        _discard_tmp(tmp)
+    try:
+        os.remove(legacy)
+    except OSError:
+        pass
 
 
 def _msp_journal_append(slug, signals):
     """Append JobSignals to the job's redacted journal. Never raises."""
     try:
         path = _msp_journal_path(slug)
+        os.makedirs(JOURNAL_DIR, exist_ok=True)
+        _msp_journal_migrate_legacy(slug)
         lines = []
         for sig in signals:
             try:
@@ -3679,6 +3744,12 @@ def _msp_log(args):
     slug = args.slug
     n = max(1, args.n)
     path = _msp_journal_path(slug)
+    if not os.path.isfile(path):
+        # Issue #1130: read-only fallback for a legacy in-tree journal
+        # that predates the journals-dir move and was never migrated by
+        # an append. The agent-visible file is never the live journal --
+        # history only; the appender no longer writes there.
+        path = _legacy_msp_journal_path(slug)
     try:
         with open(path) as f:
             lines = f.readlines()
