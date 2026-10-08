@@ -652,9 +652,13 @@ def _forget_matchers(address):
     the UN-normalized form — the triaged "forget me" reply #400 names
     is usually plus-tagged or cased differently from the canonical
     form, so the canonical needle alone would miss it. Both matchers
-    run against case-folded bytes; callers fold once.
+    run against case-folded bytes; callers fold once. The matcher halves
+    are folded HERE too, so a mixed-case address argument (any future
+    caller that forgets to normalize first) still yields a working
+    matcher set instead of a silently dead variant regex.
     """
-    needle = address.lower().encode("utf-8", errors="replace")
+    address = address.lower()
+    needle = address.encode("utf-8", errors="replace")
     local, _, domain = address.partition("@")
     variant_re = re.compile(
         re.escape(local.encode("utf-8")) + rb"\+[^@\s]+@"

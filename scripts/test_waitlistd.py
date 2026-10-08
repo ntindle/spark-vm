@@ -1055,6 +1055,28 @@ def test_forget_scrub_survives_malformed_stores():
     assert json.load(open(weird_spool)) == [1, 2, 3]
 
 
+def test_forget_matchers_fold_mixed_case_address():
+    # #840 Security delta re-confirm residual: _forget_matchers built the
+    # plus-tag variant regex from the RAW-cased address halves while the
+    # needle was lowercased and every caller folds blobs with .lower().
+    # Any future caller passing a mixed-case address would silently get a
+    # dead variant regex (PII erasure residual). The matcher folds the
+    # address itself now, so the matcher set works either way.
+    needle, variant_re = wd._forget_matchers("Forget19@Example.COM")
+    assert needle == b"forget19@example.com", \
+        "the needle is the lowercased canonical address"
+    folded_plus_tagged = b"forget19+newsletter@example.com"
+    assert variant_re.search(folded_plus_tagged) is not None, \
+        "a folded plus-tagged variant must match (was dead pre-fix)"
+    assert variant_re.search(b"other@example.com") is None
+    # _blob_holds_address over folded blobs — the exact shape callers use.
+    assert wd._blob_holds_address(folded_plus_tagged, needle, variant_re)
+    assert wd._blob_holds_address(b"FROM: Forget19@Example.COM".lower(),
+                                  needle, variant_re)
+    assert not wd._blob_holds_address(b"other@example.com",
+                                      needle, variant_re)
+
+
 def test_forget_scrub_matches_plus_tag_variants():
     # #400: raw mail carries the un-normalized From — a plus-tagged or
     # differently-cased address must be caught by the targeted scrub,
