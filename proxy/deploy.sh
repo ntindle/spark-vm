@@ -258,6 +258,44 @@ if ! sudo test -e /home/swapd/inference-ssrf.allow; then
     sudo install -o swapd -g swapd -m 0644 /dev/null /home/swapd/inference-ssrf.allow
 fi
 
+# --- 4e. confirmd pending/ setgid dir (issue #1167, Finding 50) ------------
+echo "[4e/7] Ensuring confirmd pending/ is a setgid filing dir..."
+# Finding 50's owner-identifies-requester invariant needs pending/ to be
+# a setgid dir owned by the filing principals' shared group. mkdir(2)
+# drops S_ISGID even for root, so no makedirs in confirm-request or
+# confirmd can establish it — the deploy step must (the operator
+# contract in confirm/README.md names this group explicitly now).
+# Dedicated group `approval-filers`, not group swapd: bdrive must
+# eventually file here too, and putting bdrive in group swapd would hand
+# it far more than filing rights. swapd files today (the proxy refusal
+# path); bdrive joins when its user lands (box hardening).
+# Idempotent: groupadd/usermod are no-ops on repeat runs, and the helper
+# repairs drift with a WARNING instead of failing.
+# Rollback note: pending/ is deliberately NOT in proxy_install_paths —
+# a rollback must never delete or restore live approval state.
+# Deploy-window note: between this chmod and the §7 restart, the still-
+# running proxy (started before the usermod) lacks the new group and
+# gets EACCES when filing — the addon's except OSError demotes that to
+# a loud log + no filing (the swap stays refused, fail-closed); the §7
+# restart (or the auto-deploy component restart) picks up the group.
+# Issue #108: CONFIRM_DIR is env-overridable so deploy tests can
+# redirect it at tmp instead of touching the host.
+pending_group="approval-filers"
+if ! getent group "$pending_group" >/dev/null; then
+    sudo groupadd -r "$pending_group"
+fi
+sudo usermod -aG "$pending_group" swapd
+if id -u bdrive >/dev/null 2>&1; then
+    sudo usermod -aG "$pending_group" bdrive
+fi
+approvals_dir="${CONFIRM_DIR:-/home/swapd/approvals}"
+# The parent stays swapd-owned (confirmd makedirs answered//consumed as
+# swapd); only the leaf is root-owned setgid.
+sudo -u swapd mkdir -p "$approvals_dir"
+sudo python3 proxy/enforce_pending_dir.py --create \
+    --owner root --group "$pending_group" --mode 2770 \
+    "$approvals_dir/pending"
+
 # --- 5. systemd units (finding 66) -----------------------------------------
 echo "[5/7] Installing systemd units..."
 sudo install -o root -g root -m 0644 proxy/swap-proxy.service /etc/systemd/system/swap-proxy.service
