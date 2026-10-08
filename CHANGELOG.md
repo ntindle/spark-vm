@@ -52,6 +52,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- Release-notes body cap: the oversized-notes failure diagnostic now gives a copy-paste recovery that marks prereleases as prerelease and recreates the release tag at the release commit (it previously assumed the tag already existed, which is only true for `--publish-only`); the trim report counts dangling subsection headers separately from dropped lines; the trim note renders as its own paragraph; and the no-curated-section path is pinned to die loudly rather than emit a trim note pointing at a changelog section that doesn't exist. (#TBD)
+
 - The golden-image build gate (the baked-secrets scan + manifest preflight that must run on every release) had never actually run on a release tag: the release workflow pushes the tag with `GITHUB_TOKEN`, which cannot trigger workflow runs, so the gate's tag trigger was dead. The release workflow now calls the gate as a reusable workflow in the same run, building the exact release tree. (#1177)
 
 - The approvals page's pending directory is now created setgid by the deploy itself: `proxy/deploy.sh` provisions the dedicated `approval-filers` group, enrolls the filing principals, and enforces the directory as group-setgid on every deploy — so the "file owner identifies the requester" guarantee no longer depends on a manual operator step that nothing in the repo performed. (#1167)
