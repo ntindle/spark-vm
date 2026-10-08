@@ -486,6 +486,23 @@ def test_registry_busy_fallback_busy_on_any_nonterminal(env):
     assert "mixed:active" in r.stdout, r.stdout
 
 
+def test_registry_busy_fallback_metadata_record_wins_slug_conflict(env):
+    # No python3 on PATH: the grep fallback must dedup slug conflicts
+    # exactly like the python path — the metadata record decides, and the
+    # slug is printed at most once.
+    home = env["tmp"] / "reghome-fbconflict"
+    _write_job(home, "dupe", "active")
+    _write_job_metadata(home, "dupe", "closed")
+    tbin = make_stub_bin(env["tmp"] / "nopybin3", {})
+    realtools = make_realtools(env["tmp"])
+    e = dict(env["env"])
+    e["PATH"] = tbin + os.pathsep + realtools
+    r = source_and(f"set +e; _registry_busy {home}/muse-jobs; echo rc=$?",
+                   env_extra=e)
+    assert r.stdout.strip().endswith("rc=1"), r.stdout + r.stderr
+    assert "dupe" not in r.stdout, r.stdout
+
+
 def test_registry_busy_missing_dir_is_idle(env):
     r = source_and(f"set +e; _registry_busy {env['tmp']}/nope; echo rc=$?",
                    env_extra=env["env"])

@@ -205,10 +205,12 @@ Overrides (environment): `PLAYWRIGHT_VENV`, `PLAYWRIGHT_USER`.
   `--force` bypasses. The gate is uid-aware: for every user in
   `TOOLSET_AGENT_USERS` (default: `ntindle`) it probes that user's own tmux
   server for live `mjob-*` sessions *and* scans their muse-job registry
-  (`~/muse-jobs/*/job.json`) for non-terminal job records
-  (`active`/`blocked`; unrecognized states fail closed as busy). Both probes
-  are read-only — tmux is asked only for session names, job records are
-  parsed as data and never executed. An identity-switch failure defers
+  (`~/.local/share/muse-job/jobs/<slug>.json`, plus the legacy
+  `~/muse-jobs/*/job.json` location — issue #11) for non-terminal job
+  records (`active`/`blocked`; unrecognized states fail closed as busy).
+  A slug present in both locations is decided by the metadata record.
+  Both probes are read-only — tmux is asked only for session names, job
+  records are parsed as data and never executed. An identity-switch failure defers
   loudly (fail-closed); a tmux probe that fails for other reasons (missing
   binary, broken server) reads as no-sessions for that half, with the
   registry probe as the independent backstop. The registry half is the

@@ -102,6 +102,31 @@ def test_load_job_unknown_slug_raises(cli):
         cli.load_job("nope")
 
 
+def test_load_job_falls_back_to_legacy_when_migration_fails(cli, monkeypatch):
+    # B1: a failed move (unwritable metadata dir) must not make a good
+    # legacy record unreadable — the record is served in place and the
+    # next read retries the move.
+    write_legacy(cli, "stuck", {"slug": "stuck", "state": "active"})
+    def boom(slug):
+        raise OSError("metadata dir unwritable")
+    monkeypatch.setattr(cli, "_migrate_legacy_record", boom)
+    job = cli.load_job("stuck")
+    assert job["state"] == "active"
+    assert job["slug"] == "stuck"
+    assert os.path.exists(legacy_path(cli, "stuck")), \
+        "the legacy record must survive a failed migration"
+    assert not os.path.exists(meta_path(cli, "stuck"))
+
+
+def test_load_job_rejects_non_dict_record(cli):
+    cli.save_job(["not", "a", "dict"], "weird")
+    with pytest.raises(ValueError):
+        cli.load_job("weird")
+    write_legacy(cli, "weirdleg", ["not", "a", "dict"])
+    with pytest.raises(ValueError):
+        cli.load_job("weirdleg")
+
+
 def test_job_record_exists_both_locations(cli):
     assert not cli.job_record_exists("ghost")
     write_legacy(cli, "leg", {"slug": "leg", "state": "active"})

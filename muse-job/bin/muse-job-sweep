@@ -144,6 +144,14 @@ def main():
                         time.time() - os.path.getmtime(jd)
                         > PRUNE_CLOSED_AFTER_DAYS * 86400):
                     shutil.rmtree(jd, ignore_errors=True)
+                    # Issue #11: the manager-side record lives outside the
+                    # job dir now -- pruning the dir alone would leave the
+                    # record behind and list/watch would enumerate the
+                    # pruned job forever.
+                    try:
+                        os.remove(os.path.join(METADATA, slug + ".json"))
+                    except OSError:
+                        pass
                     summary["pruned"].append(jd)
         for d in (EVENTS, SESSIONS):
             if os.path.isdir(d):

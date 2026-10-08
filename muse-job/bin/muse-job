@@ -474,14 +474,20 @@ def trusted_job_paths(slug, job):
 def _migrate_legacy_record(slug):
     """Move a pre-#11 in-tree record to the metadata dir (issue #11).
 
-    Best-effort: a failed migration leaves the legacy file in place and the
-    caller still gets the record -- the next read retries. A manager racing
+    Best-effort: only the final stale-unlink is swallowed here. A move
+    that fails earlier (unwritable metadata dir, corrupt legacy JSON)
+    raises, and load_job falls back to reading the legacy record in
+    place -- a good legacy record must never become unreadable because
+    the move failed; the next read retries the move. A manager racing
     the same migration either writes the same bytes or finds the moved
-    record; the stale-unlink race is harmless (FileNotFoundError swallowed).
+    record; the stale-unlink race is harmless (FileNotFoundError
+    swallowed).
     """
     legacy = legacy_job_json_path(slug)
     with open(legacy) as f:
         d = json.load(f)
+    if not isinstance(d, dict):
+        raise ValueError(f"legacy job record is not an object: {slug}")
     d["slug"] = slug
     p = job_json_path(slug)
     os.makedirs(METADATA_DIR, exist_ok=True)
@@ -496,13 +502,27 @@ def _migrate_legacy_record(slug):
 
 
 def load_job(slug):
-    if not os.path.exists(job_json_path(slug)):
-        if os.path.exists(legacy_job_json_path(slug)):
-            _migrate_legacy_record(slug)
-        else:
+    p = job_json_path(slug)
+    if not os.path.exists(p):
+        legacy = legacy_job_json_path(slug)
+        if not os.path.exists(legacy):
             raise RuntimeError(f"unknown job: {slug}")
+        try:
+            _migrate_legacy_record(slug)
+        except (OSError, ValueError):
+            # Move failed (unwritable metadata dir, corrupt legacy JSON):
+            # read the legacy record in place so the job stays visible;
+            # the next read retries the move.
+            with open(legacy) as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError(f"corrupt job record: {slug}")
+            d["slug"] = slug
+            return d
     with open(job_json_path(slug)) as f:
         d = json.load(f)
+    if not isinstance(d, dict):
+        raise ValueError(f"corrupt job record: {slug}")
     # Pin the slug to the manager-side value: job.json is agent-writable
     # (issue #11) and every read-modify-write path (save_job, job_status,
     # verify_done_event's SUMMARY.md check) builds filesystem paths from the

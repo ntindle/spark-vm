@@ -502,21 +502,20 @@ for slug, p in candidates:
     # python path reads busy on state=None — the fallback cannot see JSON
     # structure. The primary python path is fail-closed; this fallback
     # only runs when python3 is absent.
-    local d slug states rest first busy=0 f
-    # Legacy location (pre-#11): <jobsdir>/*/job.json
-    for d in "$jobsdir"/*/; do
-        [ -d "$d" ] || continue
-        [ -f "${d}job.json" ] || continue
-        slug="$(basename "$d")"
+    local d slug states rest first busy=0 f seen
+    seen=""
+    # Per-record scan shared by both locations below.
+    _scan_one() { # <slug> <file>
+        local s="$1" f2="$2" states rest first
         states="$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' \
-            "${d}job.json" 2>/dev/null | cut -d'"' -f4 || true)"
+            "$f2" 2>/dev/null | cut -d'"' -f4 || true)"
         # No parseable state at all: fail closed (a corrupt record must
         # never read as idle). NB: command substitution strips trailing
         # newlines, so an empty $states would otherwise vanish here.
         if [ -z "$states" ]; then
-            printf '%s:unparseable\n' "$slug"
+            printf '%s:unparseable\n' "$s"
             busy=1
-            continue
+            return
         fi
         # Strip the terminal states; whatever survives — a non-terminal
         # value — is busy. (A nested "done" can never mask a live
@@ -524,27 +523,30 @@ for slug, p in candidates:
         rest="$(printf '%s\n' "$states" | grep -Ev '^(killed|closed|done)$' || true)"
         if [ -n "$rest" ]; then
             first="$(printf '%s' "$rest" | grep -v '^$' | head -n 1 || true)"
-            printf '%s:%s\n' "$slug" "${first:-unparseable}"
+            printf '%s:%s\n' "$s" "${first:-unparseable}"
             busy=1
         fi
-    done
-    # Issue #11 location: ~/.local/share/muse-job/jobs/<slug>.json
+    }
+    # Issue #11 location first: a slug present in both locations is
+    # decided by the metadata record (mirrors the python path's dedup).
     for f in "$metadir"/*.json; do
         [ -f "$f" ] || continue
         slug="$(basename "$f" .json)"
-        states="$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' \
-            "$f" 2>/dev/null | cut -d'"' -f4 || true)"
-        if [ -z "$states" ]; then
-            printf '%s:unparseable\n' "$slug"
-            busy=1
+        seen="${seen}${slug}
+"
+        _scan_one "$slug" "$f"
+    done
+    # Legacy location (pre-#11): <jobsdir>/*/job.json
+    for d in "$jobsdir"/*/; do
+        [ -d "$d" ] || continue
+        [ -f "${d}job.json" ] || continue
+        slug="$(basename "$d")"
+        # Skip when the metadata dir already decided this slug (fixed-string
+        # whole-line match: a slug is one line of the seen list).
+        if printf '%s' "$seen" | grep -Fxq "$slug"; then
             continue
         fi
-        rest="$(printf '%s\n' "$states" | grep -Ev '^(killed|closed|done)$' || true)"
-        if [ -n "$rest" ]; then
-            first="$(printf '%s' "$rest" | grep -v '^$' | head -n 1 || true)"
-            printf '%s:%s\n' "$slug" "${first:-unparseable}"
-            busy=1
-        fi
+        _scan_one "$slug" "${d}job.json"
     done
     [ "$busy" = "1" ] && return 0
     return 1
