@@ -1753,8 +1753,12 @@ def _housekeeping_if_due():
     Returns True when the trio ran. Benign under handler concurrency: the
     timestamp commits under _housekeeping_lock before the work starts, so
     two threads can't both decide "due"; the sweep and both prunes are
-    individually race-tolerant (write-once files, oldest-only deletes, all
-    OSError paths tolerated)."""
+    individually race-tolerant (unique filenames — aids are never reused —
+    oldest-only deletes, all OSError paths tolerated). Note the quarantine
+    prune's mtime snapshot can go stale: a quarantine move replaces in
+    place via os.replace, refreshing mtime, so a stale snapshot can evict
+    a recently-refreshed file early — the eviction itself stays safe and
+    every quarantine move is journaled in the audit log."""
     with _housekeeping_lock:
         global _last_housekeeping_mono
         now = time.monotonic()

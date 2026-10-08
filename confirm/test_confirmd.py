@@ -3626,10 +3626,13 @@ class GrantTtlChoiceTests(unittest.TestCase):
         self.assertEqual(cd._answered_api_item(base)["grant_ttl_hours"],
                          "")
 
-    # --- #1166: _find_login anchoring ------------------------------------
-    # The finding-47 owner check rests on this extraction: it must read
-    # UserProfile.LoginName only, never the first LoginName-shaped key
-    # anywhere in the whois tree.
+
+class FindLoginTests(unittest.TestCase):
+    """Issue #1166: _find_login is anchored to UserProfile.LoginName.
+
+    The finding-47 owner check rests on this extraction: it must read
+    UserProfile.LoginName only, never the first LoginName-shaped key
+    anywhere in the whois tree."""
 
     def test_1166_find_login_anchored_to_user_profile(self):
         """A LoginName nested inside Node (future schema / metadata) must
@@ -3660,7 +3663,19 @@ class GrantTtlChoiceTests(unittest.TestCase):
             cd._find_login({"UserProfile": {"LoginName": {"a": 1}}}))
         self.assertIsNone(cd._find_login({"UserProfile": "x"}))
 
-    # --- #1168: quarantine pruning ---------------------------------------
+
+class QuarantinePruneTests(unittest.TestCase):
+    """Issue #1168: pending-quarantine/ is count-capped by the
+    housekeeping prune (mtime-ordered, oldest-only deletes)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.approvals = Path(self.tmp.name) / "approvals"
+        self.approvals.mkdir()
+        cd._reset_housekeeping_for_tests()
+
+    def tearDown(self):
+        self.tmp.cleanup()
 
     def _write_quarantine(self, name, mtime_age):
         qd = self.approvals / "pending-quarantine"
