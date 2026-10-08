@@ -70,7 +70,6 @@ METADATA_DIR = os.path.join(HOME, ".local", "share", "muse-job", "jobs")
 
 SESSIONS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
 
-SESSIONS_DIR = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
 SESSION_INDEX = os.path.join(HOME, ".local", "share", "muse", "session-index.db")
 VIEW_DIR = os.path.join(HOME, ".local", "share", "muse", "sessions", ".msp-view-v1")
 MUSE = os.path.join(HOME, ".local", "bin", "muse")
@@ -471,6 +470,26 @@ def trusted_job_paths(slug, job):
     return work, pristine, branch
 
 
+def _write_json_tmp(path, data):
+    """Write JSON to a pid-unique tmp file next to path; return the tmp path.
+
+    The tmp name is per-process: two managers writing the same record
+    concurrently never share a tmp file, so their writes cannot interleave
+    into a torn record (Security review, issue #11).
+    """
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    return tmp
+
+
+def _discard_tmp(tmp):
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+
+
 def _migrate_legacy_record(slug):
     """Move a pre-#11 in-tree record to the metadata dir (issue #11).
 
@@ -482,6 +501,13 @@ def _migrate_legacy_record(slug):
     the same migration either writes the same bytes or finds the moved
     record; the stale-unlink race is harmless (FileNotFoundError
     swallowed).
+
+    The publish is NON-CLOBBERING and atomic: the migration's bytes are
+    stale (read before any racing save), so they must never overwrite a
+    metadata record a racing manager already migrated or saved. os.link
+    publishes only when the destination is absent; on FileExistsError the
+    racing record wins and the legacy file is still unlinked (it has been
+    superseded).
     """
     legacy = legacy_job_json_path(slug)
     with open(legacy) as f:
@@ -491,10 +517,14 @@ def _migrate_legacy_record(slug):
     d["slug"] = slug
     p = job_json_path(slug)
     os.makedirs(METADATA_DIR, exist_ok=True)
-    tmp = p + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(d, f, indent=2)
-    os.replace(tmp, p)
+    tmp = _write_json_tmp(p, d)
+    try:
+        try:
+            os.link(tmp, p)
+        except FileExistsError:
+            pass
+    finally:
+        _discard_tmp(tmp)
     try:
         os.unlink(legacy)
     except FileNotFoundError:
@@ -523,10 +553,11 @@ def load_job(slug):
         d = json.load(f)
     if not isinstance(d, dict):
         raise ValueError(f"corrupt job record: {slug}")
-    # Pin the slug to the manager-side value: job.json is agent-writable
-    # (issue #11) and every read-modify-write path (save_job, job_status,
-    # verify_done_event's SUMMARY.md check) builds filesystem paths from the
-    # slug. A recorded "slug": "victim" would overwrite another job's record;
+    # Pin the slug to the manager-side value (defense in depth, issue #11:
+    # the record used to live in the agent-writable job dir). Every
+    # read-modify-write path (save_job, job_status, verify_done_event's
+    # SUMMARY.md check) builds filesystem paths from the slug. A recorded
+    # "slug": "victim" would overwrite another job's record;
     # "slug": "../../x" would write outside ~/muse-jobs. Every caller already
     # passes the trusted slug (argv / lock slug / listdir entry).
     d["slug"] = slug
@@ -535,16 +566,17 @@ def load_job(slug):
 
 def save_job(job, slug):
     # The write path comes from the MANAGER-side slug (argv / lock slug /
-    # listdir entry), never job["slug"]: job.json is agent-writable
-    # (issue #11), so a recorded "slug": "victim" / "../../x" must not
-    # redirect the write. Callers pass their trusted slug; load_job also
-    # pins the record's slug as defense in depth.
+    # listdir entry), never job["slug"] (defense in depth, issue #11: the
+    # record used to be agent-writable in the job dir). A recorded
+    # "slug": "victim" / "../../x" must not redirect the write. Callers
+    # pass their trusted slug; load_job also pins the record's slug.
     os.makedirs(METADATA_DIR, exist_ok=True)
     p = job_json_path(slug)
-    tmp = p + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(job, f, indent=2)
-    os.replace(tmp, p)
+    tmp = _write_json_tmp(p, job)
+    try:
+        os.replace(tmp, p)
+    finally:
+        _discard_tmp(tmp)
 
 
 def tmux_alive(slug):
@@ -855,12 +887,13 @@ def _spawn_prepare(slug, args, preamble, tmux_name):
         }
         save_job(job, slug)
     except BaseException:
-        # Don't leave a job dir without a job.json: the next spawn with the
-        # same slug would fail "job dir exists" until someone rm -rf's it by
-        # hand, and a half-added `job/<slug>` branch would break the retry's
-        # `worktree add -b` too. BaseException (not Exception) so SIGTERM /
-        # KeyboardInterrupt mid-spawn -- the clone can run minutes -- also
-        # cleans up. Best-effort git cleanup, then remove the dir.
+        # Don't leave a job dir without its manager-side record: the next
+        # spawn with the same slug would fail "job dir exists" until someone
+        # rm -rf's it by hand, and a half-added `job/<slug>` branch would
+        # break the retry's `worktree add -b` too. BaseException (not
+        # Exception) so SIGTERM / KeyboardInterrupt mid-spawn -- the clone
+        # can run minutes -- also cleans up. Best-effort git cleanup, then
+        # remove the dir.
         try:
             run("git", "-C", pristine, "worktree", "remove", "--force", work,
                 check=False)

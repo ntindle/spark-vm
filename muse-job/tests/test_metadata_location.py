@@ -127,6 +127,30 @@ def test_load_job_rejects_non_dict_record(cli):
         cli.load_job("weirdleg")
 
 
+def test_migration_never_clobbers_newer_metadata_record(cli):
+    # Security review: the migration's bytes are stale (read before any
+    # racing save), so they must never overwrite a metadata record a
+    # racing manager already migrated or saved. Exercise the racy
+    # interleaving directly: legacy present AND metadata already present.
+    write_legacy(cli, "race", {"slug": "race", "state": "stale-legacy"})
+    cli.save_job({"slug": "race", "state": "fresh-metadata"}, "race")
+    cli._migrate_legacy_record("race")
+    job = cli.load_job("race")
+    assert job["state"] == "fresh-metadata", \
+        "the racing record wins; stale legacy bytes must not clobber it"
+    assert not os.path.exists(legacy_path(cli, "race")), \
+        "the superseded legacy file is still unlinked"
+
+
+def test_save_job_leaves_no_tmp_files(cli):
+    # Security review: concurrent managers must never share a tmp file.
+    cli.save_job({"slug": "t1", "state": "active"}, "t1")
+    cli.save_job({"slug": "t1", "state": "blocked"}, "t1")
+    leftovers = [n for n in os.listdir(cli.METADATA_DIR) if ".tmp." in n]
+    assert leftovers == [], f"tmp files leaked: {leftovers}"
+    assert json.load(open(meta_path(cli, "t1")))["state"] == "blocked"
+
+
 def test_job_record_exists_both_locations(cli):
     assert not cli.job_record_exists("ghost")
     write_legacy(cli, "leg", {"slug": "leg", "state": "active"})
