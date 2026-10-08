@@ -50,6 +50,10 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Changed
+
+- CI Python test gate rebalanced: the real-worker harness suite (the slowest slice of the run — about seventy percent of its shard's wall time) now runs in its own shard, so a code PR's test signal arrives in roughly four minutes instead of six; the required `python tests` check keeps its name and still gates the merge, and rebalancing never touches the required status checks. (#TBD)
+
 ### Added
 
 - Plane-side tenant-identity gap analysis: the hosted vision speaks "tenant" (signup identity linking, tenant records, tenant-scoped signed API calls) while the shipped plane speaks "owner" (single-owner appliance, one-shot bootstrap, box-filed approval records with no owner attribution) — the analysis numbers the gaps (tenant record, tenant-Muse credential, the multi-tenant plane model decision, approval-record attribution, the tenant-status plane auth, tenant-record retention/erasure) and files them as build issues so no second tenant lands before the identity and attribution layer is decided. Also corrects the stale "design; not implemented" status on the tenant-status endpoint doc now that the engine slice has shipped. (#1163) (#1158) (#1159) (#1160) (#1161) (#1162)
