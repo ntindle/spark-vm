@@ -50,7 +50,7 @@ Acceptance is #960's S6 checklist, harness-first per the S4 contract.
 | Alarm wake + token re-verify | **Nothing.** No alarm is set; a hibernated socket is never re-verified. The revocation-latency ceiling for a silent socket is currently unbounded — the exact hole wire spec §6's bound exists to close. |
 | Hibernation | **Not used.** S4a's `server.accept()` pins the DO in memory. The `BoxDO` docstring already names the move to `self.ctx.acceptWebSocket(server)` as S4b scope. |
 | Journal events | **Shipped — #999 (S4b-4), PR #1014, 2026-10-04.** The sink is the D1 table `phone_home_events` (D16's decision implemented, migration `migrate_958_s4b.sql`, re-run safe); owner-only read path `GET /v1/boxes/{box_id}/phone-home/events`; 90-day retention with the daily Worker cron + manual trigger `POST /v1/ops/phone_home/gc` (#1013). Wire spec §9's sink reference was corrected to this table by the same slice. |
-| Liveness writes from the socket | **Correctly absent** — and must stay absent (§8). The #864 heartbeat remains the only liveness signal; nothing in S4b changes that. |
+| Liveness writes from the socket | **Correctly absent** — and must stay absent (wire spec §8). The #864 heartbeat remains the only liveness signal; nothing in S4b changes that. |
 
 ## 3. Findings
 
@@ -217,21 +217,23 @@ is still fenced, not ignored). Live: the #959 box client
 completes hello/welcome against the deployed plane.
 
 **S4b-2 — command re-drive + socket ack consume half. PARTIALLY LANDED
-(2026-10-07; refreshed 2026-10-08):** the emit half is in the deployed
-worker checkout via in-flight #1001 S4b-2a work (sibling feature turn
-live, review not yet converged) — re-drive on (re)bind + the D15 wakeup
-RPC, leases stamped exactly as the HTTPS path, `phone_home.redrive`
-journaled (D-MAL1 malformed-row skip); the socket `command_ack`
-consume-half (S4b-2b) is still open. The emit half's wire-spec pin
+(2026-10-07; carried forward unchanged 2026-10-08 — the deployed-checkout
+half is not re-verified by this refresh):** the emit half is in the
+deployed worker checkout via in-flight #1001 S4b-2a work (sibling
+feature turn live, review not yet converged) — re-drive on (re)bind +
+the D15 wakeup RPC, leases stamped exactly as the HTTPS path,
+`phone_home.redrive` journaled (D-MAL1 malformed-row skip); the socket
+`command_ack` consume-half (S4b-2b) is still open. The emit half's wire-spec pin
 landed 2026-10-07 (#1141, wire spec §3.3) and the companion
 `docs/S4B_SOCKET_REMAINING_BUILDS_GAP_ANALYSIS.md` pinned the emit-half
 → gap-guard interaction: a DO-skipped malformed row surfaced to the
 box's gap guard as a permanent sequence gap (#1143, F-S4b-8). That
-wedge is HEALED box-side (2026-10-07, #1154): the guard consults the
+wedge is HEALED box-side (2026-10-08, #1154): the guard consults the
 shared durable cursor and fast-forwards its prefix on the same epoch
 (D-GH1; the hold is bounded to ~one cron tick, self-healing without
-reconnect — the wire spec §3.3 carries the D-GH1 bounded-degradation
-caveat per D-GH4). The heal is box-side and independent of the plane's
+reconnect — the wire spec §3.3 carries the D-GH4-mandated
+bounded-degradation caveat, titled with #1143/D-GH1 in the spec and
+dated 2026-10-08). The heal is box-side and independent of the plane's
 consume half — S4b-2b stays open on #1001. The D-GH3 wire-tombstone
 alternative stays deferred.
 On (re)bind and on the D15 wakeup RPC, the DO reads the acked watermark
@@ -307,7 +309,7 @@ Stream/input frame classes (#853/#919 — the registry reserves them;
 the DO's generation fence in S4b-1 already covers every class, but no
 stream/input payload handling is built here). Approval decisions (#873 —
 durable channel, never a WSS frame class). Any write to
-`last_heartbeat.json` or heartbeat freshness (§8 — the socket never
+`last_heartbeat.json` or heartbeat freshness (wire spec §8 — the socket never
 touches liveness). Box-side changes (#959/#976 shipped; the S5 client
 already speaks every frame S4b-1–3 implement). Desktop/SFU (#854).
 
@@ -327,8 +329,10 @@ S4b + S6.
 
 ## 8. 2026-10-08 refresh note (#1143 gap-hold wedge healed, D-GH1 shipped)
 
-Since the 2026-10-07 pin the only movement in the S4b lane is the
-box-side resolution of the gap-hold wedge:
+Since the 2026-10-07 pin the movement in the S4b lane is the companion
+remaining-builds analysis (#1148, 2026-10-07), the #1141 S4b-2a
+wire-spec pin (merged 2026-10-07; recorded in §5), and the box-side wedge
+arc (#1143 filed 2026-10-07 → D-GH1 shipped as #1154, merged 2026-10-08):
 
 - **#1143 filed 2026-10-07, closed 2026-10-08.** A DO-skipped malformed
   row surfaced to the box's per-session gap guard as a sequence gap the
@@ -337,7 +341,7 @@ box-side resolution of the gap-hold wedge:
   remaining life — the socket fast path degraded to a dead session
   (companion doc `docs/S4B_SOCKET_REMAINING_BUILDS_GAP_ANALYSIS.md`,
   F-S4b-8–F-S4b-11). The companion's D-series decision **D-GH1 (cursor
-  fast-forward) is SHIPPED as #1154** (`77661b7`, merged 2026-10-07):
+  fast-forward) is SHIPPED as #1154** (`77661b7`, merged 2026-10-08):
   when the gap guard would hold, it consults the shared durable cursor
   (`commands_cursor.json`, advanced past malformed rows by the
   every-minute cron ingest per D-MAL1) and fast-forwards its
@@ -346,20 +350,22 @@ box-side resolution of the gap-hold wedge:
   keeps the hold (degrade, never wedge). The companion's "design pinned,
   build-ready" posture and D-GH2's interim document-and-accept are
   superseded.
-- **Wire spec §3.3 carries the D-GH1 bounded-degradation caveat** (D-GH4,
-  dated 2026-10-08 in the spec): the carriers are aligned on
-  skip-and-log but diverge on delivery degradation — the socket holds
-  later frames on a DO-skipped row until the cursor fast-forward or a
-  reconnect, while HTTPS flows past. D-GH3's wire tombstones stay
-  deferred; D-GH5's test contract shipped (six new tests in
-  `pairing/test_phone_home.py`: fast-forward heals, epoch-gate refusal,
-  no fast-forward without epoch evidence, re-ack without re-execution,
-  still-gapped holds, fchmod-failure fd hygiene).
+- **Wire spec §3.3 carries the D-GH4-mandated bounded-degradation caveat**
+  (titled with #1143/D-GH1 in the spec, dated 2026-10-08): the carriers
+  are aligned on skip-and-log but diverge on delivery degradation — the
+  socket holds later frames on a DO-skipped row until the cursor
+  fast-forward or a reconnect, while HTTPS flows past. D-GH3's wire
+  tombstones stay deferred; D-GH5's test contract shipped and exceeded
+  (six tests in `pairing/test_phone_home.py` vs the three enumerated:
+  fast-forward heals, epoch-gate refusal, no fast-forward without epoch
+  evidence, re-ack without re-execution, still-gapped holds,
+  fchmod-failure fd hygiene).
 - **Plane side unchanged by this refresh.** The §2 table's plane rows
-  are carried forward from the 2026-10-07 pin plus #1001's pointer
-  comment (2026-10-07): the S4b-2a wire-spec pin (#1141) is in the spec,
-  the emit-half code is in the deployed checkout (in-flight sibling
-  work), the consume half (S4b-2b) stays open on #1001, S4b-3 on #1002,
-  S6 on #960. The D-GH1 heal is box-side and independent of S4b-2b —
-  nothing here re-pins the deployed worker checkout, and nothing here
-  claims it.
+  are unchanged from the 2026-10-07 pin and are not re-verified by this
+  refresh. #1001's pointer comment (2026-10-07T23:21Z) confirms the
+  S4b-2a wire-spec pin (#1141) is in the spec and the consume half
+  (S4b-2b) stays open on #1001; S4b-3 on #1002, S6 on #960. The
+  "emit-half code in the deployed checkout" row is carried forward from
+  the 2026-10-07 pin — no 2026-10-08 evidence for the deployed checkout
+  exists in the cited sources. Nothing here re-pins the deployed
+  checkout.
