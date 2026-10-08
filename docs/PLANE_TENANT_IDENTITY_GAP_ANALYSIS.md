@@ -40,7 +40,9 @@ plane that has no tenant dimension.
   existing sessions.
 - **First ten minutes** (`docs/FIRST_TEN_MINUTES_SPEC.md`): the
   minute-by-minute script a tenant Muse follows from signup; the
-  tenant-status poll carries the 13 machine codes + `approvals_url`
+  tenant-status poll carries the 13 machine codes (12 in §2 +
+  `maintenance` per `docs/UPDATE_CHANNEL_POLICY.md` §2) +
+  `approvals_url`
   in the tenant record (§2, minute 4–5), and the 10-minute clock
   starts at box-live — the moment the poll says so.
 - **Tenant-status poll auth** (`docs/TENANT_STATUS_ENDPOINT.md` §1):
@@ -55,10 +57,12 @@ plane that has no tenant dimension.
   surface follows in `docs/HOSTED_SIGNUP_WEB_UI.md` §7). Identity is
   credential-derived; there is no tenant selector.
 - **Host-side tenancy** (`docs/MULTI_TENANCY_AUDIT.md`, H11): the
-  mutually-untrusted-tenant inventory for a shared host (A1–A12). The
-  relay posture is decided — each box lives on its own tailnet, never
-  a shared tenant-to-tenant network — with "tenant isolation on the
-  relay path is the H11 audit's call." A1–A3 (shared swap proxy, no
+  mutually-untrusted-tenant inventory for a shared host (A1–A12).
+  The relay posture is decided (`docs/HOSTED_SIGNUP_ONBOARDING.md`
+  §6 — the box lives on the tenant's own tailnet, never a shared
+  tenant-to-tenant network — with "tenant isolation on the relay
+  path is the H11 multi-tenancy audit's call"). A1–A3 (shared
+  swap proxy, no
   tenant dimension in the credential stack, cred-ui as localhost-only
   on a shared host) gate any second tenant on the same host; the
   operator-plane retirement is tracked separately (#464).
@@ -111,8 +115,8 @@ plane that has no tenant dimension.
   proof-of-possession covers *boxes* (fingerprint, first token);
   there is no binding of a *Muse's* key to a tenant, and no plane
   path for an off-box tenant Muse to authenticate at all. The
-  tenant-status poll's "Muse polls with its key" half (§1) is
-  unauthenticated-able on the plane. → #1158
+  tenant-status poll's "Muse polls with its key" half (§1) has no
+  plane-side credential type that can authenticate it. → #1158
 - **T3 — Single-owner bootstrap gates every tenant slice.**
   One-shot bootstrap + last-active-key guard = one-owner
   appliance. Serving a second tenant needs either (a) one plane
@@ -157,9 +161,9 @@ This analysis is the plane-side counterpart, not a re-do. The H11
 audit inventories mutually-untrusted tenants on one **host**
 (A1–A12, gate release, open verifications); this doc inventories
 mutually-untrusted tenants on one **plane** (T1–T7). The two share
-a rule: never add a second tenant without the identity and
-attribution layer resolved — on the host that's A1–A3 and #464;
-on the plane that's T1–T3.
+a rule: never add a second tenant without the identity layer
+(T1–T3) resolved — on the host that's A1–A3 and #464; on the
+plane that's T1–T3.
 
 ## Issues filed
 
