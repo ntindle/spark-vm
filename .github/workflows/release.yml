@@ -36,6 +36,12 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      # The exact tag the cut published (or the recovery step published).
+      # The gate job consumes this as its build target — never re-derived
+      # from main's tip, which may already be past the release commit when
+      # a second release bump is queued behind the concurrency group.
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
         with:
@@ -64,6 +70,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/cut-release.sh --publish-only --yes --ci
+      - name: Expose the cut release tag
+        # Runs after the cut and after the recovery step, so both the
+        # normal path and the tag-pushed/publish-failed path expose the
+        # tag. The checkout is the per-run commit (preflight-guarded by
+        # cut-release.sh), so v$(cat VERSION) is exactly the tag that was
+        # just published. Skipped on job failure (no output → gate skipped).
+        id: tag
+        run: echo "tag=v$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
   golden-image:
     # The #1087 F-P1 gate, run in the same workflow run as the release:
@@ -77,3 +91,5 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/golden-image.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}

@@ -21,6 +21,7 @@ DOCKERFILE = os.path.join(GOLDEN_DIR, "Dockerfile")
 SUPERVISORD_CONF = os.path.join(GOLDEN_DIR, "supervisord.conf")
 BUILD_IMAGE = os.path.join(GOLDEN_DIR, "build-image.sh")
 WORKFLOW = os.path.join(REPO_ROOT, ".github", "workflows", "golden-image.yml")
+RELEASE_WORKFLOW = os.path.join(REPO_ROOT, ".github", "workflows", "release.yml")
 SCAN_SCRIPT = os.path.join(REPO_ROOT, "harness", "scan-baked-secrets.sh")
 
 
@@ -786,6 +787,11 @@ def _workflow_text():
         return f.read()
 
 
+def _release_workflow_text():
+    with open(RELEASE_WORKFLOW, encoding="utf-8") as f:
+        return f.read()
+
+
 def test_workflow_exists_and_builds_on_release_tags():
     """The v* tag trigger must exist structurally — asserting the prose
     comment alone would pass with the trigger deleted."""
@@ -798,16 +804,26 @@ def test_workflow_callable_from_release_workflow():
     which never triggers workflow runs, so the tag trigger alone could
     never fire this gate on a real release (zero runs across v0.5.0–v0.7.0).
     release.yml calls this workflow via workflow_call in the same run, so
-    the workflow_call trigger must exist structurally. The called job pins
-    the exact release tree (v$(cat VERSION)) because main may advance
-    between the release job and the gate job; the step must be scoped to
-    the workflow_call event so the push/dispatch triggers keep their
-    existing HEAD-is-the-tree behavior."""
+    the workflow_call trigger must exist structurally. The release tag is
+    passed explicitly as the `tag` input from the release job's own
+    checkout — never re-derived from the caller's main tip, which may
+    already be past the release commit when a second release bump queues
+    behind the concurrency group. Both sides are pinned: deleting the
+    trigger, the input, the pin step, or the caller wiring fails this
+    test."""
     text = _workflow_text()
+    release = _release_workflow_text()
+    # Callee side (golden-image.yml).
     assert re.search(r"(?m)^\s*workflow_call:\s*$", text), "workflow_call trigger missing"
+    assert re.search(r"(?m)^\s*tag:\s*$", text), "workflow_call tag input missing"
     assert 'github.event_name == \'workflow_call\'' in text, "release-tree pin step missing"
-    assert 'git checkout "v$(cat VERSION)"' in text, "release-tag checkout missing"
+    assert "${{ inputs.tag }}" in text, "pin step must check out the workflow_call tag input"
     assert "fetch-tags: true" in text, "tag fetch missing (checkout cannot see the release tag)"
+    # Caller side (release.yml).
+    assert "uses: ./.github/workflows/golden-image.yml" in release, "release.yml no longer calls the gate"
+    assert "needs: release" in release, "gate job must run after the release job"
+    assert "needs.release.outputs.tag" in release, "gate job must consume the release job's tag output"
+    assert "steps.tag.outputs.tag" in release, "release job must expose the cut tag as an output"
 
 
 def test_workflow_actions_sha_pinned():

@@ -10,13 +10,12 @@
 # GITHUB_TOKEN, and GitHub never creates workflow runs from GITHUB_TOKEN
 # events, so `push: tags: ["v*"]` alone CANNOT fire this gate on a real
 # release. release.yml therefore calls this workflow as a reusable
-# workflow (workflow_call) in the same run after publishing; the called
-# job derives the tag as v$(cat VERSION) and checks it out explicitly,
-# because main may advance between the release job and this job (VERSION
-# bumps are releases per docs/VERSIONING.md, and the release concurrency
-# group serializes release runs, so v$(cat VERSION) names exactly the tag
-# the release job just cut). The `push: tags` trigger
-# covers operator-pushed tags; `workflow_dispatch` covers manual runs.
+# workflow (workflow_call) in the same run after publishing; the tag to
+# build arrives as the `tag` input, taken from the release job's own
+# per-run checkout (preflight-guarded) — it is NEVER re-derived from the
+# called workflow's checkout, whose ref is main's tip and may already be
+# past the release commit. The `push: tags` trigger covers operator-pushed
+# tags; `workflow_dispatch` covers manual runs.
 #
 # Build-only, never a push: publishing stays an operator step AFTER the
 # interactive gate (file → answer → grant → verify, teardown, re-scan) —
@@ -36,6 +35,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
   workflow_call:
+    inputs:
+      tag:
+        description: "Release tag whose tree the gate builds (from the release job's own checkout — never re-derived from the caller's ref)"
+        required: true
+        type: string
 
 # Least privilege: this workflow only reads the repo and reports status.
 permissions:
@@ -52,19 +56,21 @@ jobs:
           fetch-tags: true
       - name: Pin the release tree when called from the release workflow
         # The called checkout is at the caller's ref (main's tip), which may
-        # already be past the release commit. The gate must build the exact
-        # tree the tag names — the tree is the pin (D-P1). VERSION bumps are
-        # releases (docs/VERSIONING.md) and the release concurrency group
-        # serializes release runs, so v$(cat VERSION) names exactly the tag
-        # the release job just cut. For the push and dispatch triggers HEAD
-        # already names the right tree, so this step only fires for
+        # already be past the release commit — the tree is the pin (D-P1),
+        # so the gate must build exactly the tag the release job cut. The
+        # tag arrives as the workflow_call input, taken from the release
+        # job's own per-run checkout; main's tip VERSION is never trusted
+        # for this (a queued second release bump would name a tag that does
+        # not exist yet and fail loudly). For the push and dispatch triggers
+        # HEAD already names the right tree, so this step only fires for
         # workflow_call.
         if: github.event_name == 'workflow_call'
-        run: git checkout "v$(cat VERSION)"
+        run: git checkout "${{ inputs.tag }}"
       - name: Resolve the D-P1 pins from the tree
         # The tree is the pin: HEAD names the baked commit and VERSION names
         # the release tag (for the push trigger the tag push IS the release
-        # commit; for workflow_call the step above checked the tag out).
+        # commit; for workflow_call the step above checked the tag out, and
+        # the tag the release job cut always matches the tree's VERSION).
         run: |
           echo "SPARKVM_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "SPARKVM_VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
