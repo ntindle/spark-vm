@@ -79,9 +79,10 @@ a one-line stderr explanation (`flood cap:`, `rate limited:`, `invalid --ttl:`).
 Operator contract for the data dir:
 
 - `<CONFIRM_DIR>/pending` must be a **setgid** directory owned by the filing
-  principals' shared group (`install -d -o root -g <shared-group> -m 2770`
-  + `chmod g+s`), so the filed file's *owner* identifies the requester.
-  Without the setgid bit the CLI warns but still files (warn, never refuse).
+  principals' shared group (`approval-filers`), enforced as
+  `root:approval-filers 2770` by `proxy/deploy.sh` §4e (issue #1167) —
+  so the filed file's *owner* identifies the requester. Without the
+  setgid bit the CLI warns but still files (warn, never refuse).
 - Filed items are written owner-only (mode `0600`), atomically
   (tmp + fsync + `os.replace`).
 - `--ttl` must be 1–86400 seconds; out-of-range is refused loudly (exit 2).

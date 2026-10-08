@@ -31,19 +31,18 @@ two places, and the divergences are the point:
 
 Operator contract (issue #76):
 - ``<APPROVALS>/pending`` must be a setgid directory owned by the
-  filing principals' shared group, so the filed file's owner
-  identifies the requester (Finding 50). ``os.makedirs`` below only
-  *creates* the directory when it does not exist — and makedirs
-  cannot make a setgid directory on its own (mkdir(2) drops S_ISGID
-  even as root; only a later ``chmod g+s`` sets it). **No current
-  repo deploy step creates this directory** (known gap — the
-  browser-driver round-8 note); until one does, the operator runs,
-  e.g.: ``sudo install -d -o root -g <shared-group> -m 2770
-  /home/swapd/approvals/pending && sudo chmod g+s
-  /home/swapd/approvals/pending``. When the setgid bit is absent the
-  CLI warns on stderr (the Finding-50 invariant is not in effect) but
-  still files — warn, never refuse, so CONFIRM_DIR test/demo mode
-  keeps working.
+  filing principals' shared group (``approval-filers``), so the filed
+  file's owner identifies the requester (Finding 50). ``os.makedirs``
+  below only *creates* the directory when it does not exist — and
+  makedirs cannot make a setgid directory on its own (mkdir(2) drops
+  S_ISGID even as root; only a later ``chmod g+s`` sets it). The
+  deploy step owns this: ``proxy/deploy.sh`` §4e (issue #1167) creates
+  the ``approval-filers`` group, enrolls the filing principals
+  (``swapd`` today; ``bdrive`` when its user lands), and enforces
+  ``root:approval-filers 2770`` on ``<APPROVALS>/pending``
+  idempotently. When the setgid bit is absent the CLI warns on stderr
+  (the Finding-50 invariant is not in effect) but still files — warn,
+  never refuse, so CONFIRM_DIR test/demo mode keeps working.
 - Filed items are written owner-only (mode 0600, not umask-inherited),
   atomically (tmp + fsync + os.replace — issue #232).
 - Mutual exclusion for the flood check comes from an flock(2)
