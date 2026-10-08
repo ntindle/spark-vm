@@ -476,5 +476,107 @@ class TestWorkerCLI(unittest.TestCase):
                                            "--worker-interval", "1"])
 
 
+class TestPlaneHandoff(unittest.TestCase):
+    """#1135: hosted-mode handoff — on a plane-enrolled box the plane push
+    lane owns paging, so the box-local queue stands down; the journal is
+    capped either way."""
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.q, self.sender = make_queue(self._td.name)
+        # Hermetic env: never consult the real pairing dir or caller env.
+        self._pair_dir = os.path.join(self._td.name, "pair")
+        os.makedirs(self._pair_dir, exist_ok=True)
+        env = {"SPARKVM_PLANE_PUSH": "", "SVM_PAIR_DIR": self._pair_dir}
+        self._env = mock.patch.dict(os.environ, env, clear=False)
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        self._td.cleanup()
+
+    def _write_enrollment(self, token="tok", box_id="box1"):
+        with open(os.path.join(self._pair_dir, "enrollment.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"box_id": box_id, "token": token}, f)
+
+    def test_env_plane_skips_enqueue_without_journaling(self):
+        os.environ["SPARKVM_PLANE_PUSH"] = "1"
+        self.assertEqual(self.q.enqueue({"id": "a1", "summary": "hi"}),
+                         "plane-owned")
+        self.assertFalse(os.path.exists(self.q.queue_path))
+
+    def test_env_local_overrides_enrollment_record(self):
+        os.environ["SPARKVM_PLANE_PUSH"] = "0"
+        self._write_enrollment()
+        self.assertEqual(self.q.enqueue({"id": "a1"}), "queued")
+        self.assertEqual(len(read_entries(self.q.queue_path)), 1)
+
+    def test_autodetect_enrolled_box(self):
+        self._write_enrollment()
+        self.assertEqual(self.q.enqueue({"id": "a1"}), "plane-owned")
+        self.assertFalse(os.path.exists(self.q.queue_path))
+
+    def test_autodetect_missing_record_fails_open_to_local(self):
+        # No enrollment.json anywhere under the pairing dir.
+        self.assertEqual(self.q.enqueue({"id": "a1"}), "queued")
+        self.assertEqual(len(read_entries(self.q.queue_path)), 1)
+
+    def test_autodetect_corrupt_record_fails_open_to_local(self):
+        with open(os.path.join(self._pair_dir, "enrollment.json"),
+                  "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertEqual(self.q.enqueue({"id": "a1"}), "queued")
+
+    def test_autodetect_record_without_token_fails_open_to_local(self):
+        with open(os.path.join(self._pair_dir, "enrollment.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"box_id": "box1"}, f)
+        self.assertEqual(self.q.enqueue({"id": "a1"}), "queued")
+
+    def test_bad_env_value_falls_back_to_autodetect(self):
+        os.environ["SPARKVM_PLANE_PUSH"] = "bogus"
+        self.assertEqual(self.q.enqueue({"id": "a1"}), "queued")
+        self._write_enrollment()
+        self.assertEqual(self.q.enqueue({"id": "a2"}), "plane-owned")
+
+    def test_worker_skips_quietly_in_plane_mode(self):
+        # Seed the journal in local mode, then flip to plane mode: the
+        # pre-enrollment entries must stay journaled but never deliver —
+        # no double-page via the plane, no disabled-sender warning storm.
+        os.environ["SPARKVM_PLANE_PUSH"] = "0"
+        self.assertEqual(self.q.enqueue({"id": "a1"}), "queued")
+        self.assertEqual(self.q.enqueue({"id": "a2"}), "queued")
+        os.environ["SPARKVM_PLANE_PUSH"] = "1"
+        stats = self.q.run_once()
+        self.assertTrue(stats.get("plane_owned"))
+        self.assertEqual(stats["processed"], 0)
+        self.assertNotIn("disabled", stats)
+        self.assertEqual(len(read_entries(self.q.queue_path)), 2)
+
+    def test_journal_bound_trims_oldest_first(self):
+        os.environ["SPARKVM_PLANE_PUSH"] = "0"
+        with mock.patch.object(push, "QUEUE_MAX_ENTRIES", 3):
+            for aid in ("a1", "a2", "a3", "a4"):
+                self.assertEqual(self.q.enqueue({"id": aid}), "queued")
+        aids = [e["aid"] for e in read_entries(self.q.queue_path)]
+        self.assertEqual(aids, ["a2", "a3", "a4"])
+
+    def test_journal_bound_does_not_fire_below_cap(self):
+        os.environ["SPARKVM_PLANE_PUSH"] = "0"
+        with mock.patch.object(push, "QUEUE_MAX_ENTRIES", 3):
+            for aid in ("a1", "a2", "a3"):
+                self.assertEqual(self.q.enqueue({"id": aid}), "queued")
+        self.assertEqual(len(read_entries(self.q.queue_path)), 3)
+
+    def test_handoff_decision_never_logs_the_box_token(self):
+        self._write_enrollment(token="SECRET-BOX-TOKEN-XYZ")
+        with self.assertLogs("sparkvm.push", level="INFO") as logs:
+            self.assertEqual(self.q.enqueue({"id": "a1"}), "plane-owned")
+        combined = "\n".join(logs.output)
+        self.assertNotIn("SECRET-BOX-TOKEN-XYZ", combined)
+
+
 if __name__ == "__main__":
     unittest.main()

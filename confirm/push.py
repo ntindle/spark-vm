@@ -23,7 +23,13 @@ Flow:
      worker (``python3 push.py --worker``, shipped as
      ``push-worker.service``) delivers queued approvals with
      exponential-backoff retry (H14). Fail-open throughout: a queue or
-     worker failure never loses the filed approval.
+     worker failure never loses the filed approval. On a box enrolled
+     with the hosted control plane (#1135), enqueue and the worker
+     stand down instead: the plane push lane owns paging, so the
+     box-local queue is not the channel — the journal stays empty and
+     the worker skips quietly. The journal is capped at QUEUE_MAX_ENTRIES
+     either way, so a keyless box that never gets the handoff cannot
+     accumulate entries forever.
   4. The service worker (/sw.js) shows the notification; tapping it opens
      /approval/<id>.
 
@@ -41,6 +47,16 @@ Config (env):
                       /home/swapd/approvals/push-subscriptions.json)
   CONFIRM_VAPID_SUB   VAPID subject contact, e.g. mailto:owner@example.com
                       (default mailto:confirmd@localhost)
+  SPARKVM_PLANE_PUSH  hosted-mode handoff (GitHub #1135): "1" forces the
+                      plane push lane as this box's paging channel (the
+                      box-local queue stands down); "0" forces the box-local
+                      queue. Unset → auto-detect: the box is plane-enrolled
+                      when SVM_PAIR_DIR/enrollment.json (the pairing record)
+                      carries a box token. Any check error fails open to
+                      the box-local queue — a handoff-check failure must
+                      never lose a filed approval.
+  SVM_PAIR_DIR        pairing state dir for the auto-detect above (default
+                      ~/.config/spark-pair)
 """
 
 import base64
@@ -556,6 +572,12 @@ def _build_approval_payload(item: dict) -> tuple:
 # surface. The payload on the wire is byte-identical to the inline path
 # (shared _build_approval_payload); the queue journal and dead-letter
 # files carry only approval ids + summaries, never secrets.
+#
+# Hosted-mode handoff (GitHub #1135): _plane_push_owner() routes both the
+# enqueue (returns "plane-owned" without journaling) and the worker
+# (skips quietly). On a plane-enrolled box the plane push lane owns
+# paging, so the box-local queue stands down entirely; the journal cap
+# (QUEUE_MAX_ENTRIES) still bounds the journal either way.
 
 def _default_queue_path() -> str:
     if "CONFIRM_PUSH_QUEUE" in os.environ:
@@ -586,10 +608,58 @@ QUEUE_BACKOFF_CAP = 1800.0
 # needs a single entry with >120 subscriptions at 15s each — impossible
 # on a single-owner box.
 QUEUE_CLAIM_TTL = 1800.0
+# Journal bound (GitHub #1135): a keyless box that never gets the plane
+# handoff must not accumulate queue entries forever — on enqueue, the
+# journal is trimmed to this many entries, oldest first. Approvals are
+# human-paced, so the cap is generous; the dropped entries were never
+# deliverable (no keys, no plane lane), and the loud log line is the
+# operator signal.
+QUEUE_MAX_ENTRIES = 1000
 # Module-level throttle for the disabled-sender warning: one line per
 # hour per process, not one per pass.
 _DISABLED_LOG_INTERVAL = 3600.0
 _last_disabled_log = 0.0
+# Same throttle for the plane-owned skip note (one line per hour).
+_PLANE_LOG_INTERVAL = 3600.0
+_last_plane_log = 0.0
+
+
+def _plane_push_owner() -> bool:
+    """True when the plane push lane (not the box-local queue) owns paging.
+
+    Hosted-mode handoff (GitHub #1135): on a box enrolled with the hosted
+    control plane, the plane push lane pages the owner — the box-local
+    H14 queue is not the channel, so enqueue and the worker stand down
+    (no ever-growing journal, no permanent "push disabled" warnings).
+
+    Decision: the explicit SPARKVM_PLANE_PUSH env knob wins ("1"/"true"/
+    "yes" → plane; "0"/"false"/"no" → box-local); otherwise auto-detect:
+    the box is plane-enrolled when SVM_PAIR_DIR/enrollment.json (the
+    pairing record) exists with a non-empty box token.
+
+    Fail-open: ANY check error (missing/unreadable/corrupt record, no
+    token, unreadable pairing dir) → False. A handoff-check failure must
+    never lose the filed approval, so it falls back to the box-local
+    enqueue path. The token itself is never logged — only the boolean
+    decision is.
+    """
+    raw = os.environ.get("SPARKVM_PLANE_PUSH", "").strip().lower()
+    if raw in ("1", "true", "yes"):
+        return True
+    if raw in ("0", "false", "no"):
+        return False
+    if raw:
+        log.warning("push-queue: ignoring bad SPARKVM_PLANE_PUSH=%r "
+                    "(expected 1/0); auto-detecting", raw)
+    try:
+        d = os.environ.get("SVM_PAIR_DIR") or os.path.expanduser(
+            "~/.config/spark-pair")
+        with open(os.path.join(d, "enrollment.json"),
+                  encoding="utf-8") as f:
+            enroll = json.load(f)
+        return bool(isinstance(enroll, dict) and enroll.get("token"))
+    except Exception:
+        return False
 
 
 def _queue_next_at(attempts: int, now: float) -> float:
@@ -629,14 +699,22 @@ class PushQueue:
     def enqueue(self, item: dict) -> str:
         """File an approval for worker delivery.
 
-        Returns "queued" | "duplicate" | "notified" | "invalid" | "error".
-        "invalid" is a bad approval id; "error" is a queue I/O failure —
-        distinct so the operator can tell a poisoned journal from a
-        malformed id. Fail-open: never raises — a queue failure must
-        never lose the filed approval (the worker simply never learns
-        about it; the loud log line is the signal).
+        Returns "queued" | "duplicate" | "notified" | "invalid" | "error"
+        | "plane-owned". "invalid" is a bad approval id; "error" is a
+        queue I/O failure — distinct so the operator can tell a poisoned
+        journal from a malformed id. "plane-owned" is the #1135
+        hosted-mode handoff: the plane push lane owns this box's paging,
+        so the approval is NOT journaled in the box-local queue (it
+        reaches the plane via the filing path). Fail-open: never raises
+        — a queue failure must never lose the filed approval (the worker
+        simply never learns about it; the loud log line is the signal).
         """
         try:
+            if _plane_push_owner():
+                log.info("push-queue: plane push lane owns paging; skipping "
+                         "box-local enqueue for approval %s",
+                         item.get("id"))
+                return "plane-owned"
             aid, _payload = _build_approval_payload(item)
             if not AID_RE.match(aid):
                 log.warning("push-queue: refusing to enqueue bad id %r",
@@ -669,11 +747,29 @@ class PushQueue:
                     # fdopen took ownership of fd; on failure the file
                     # object closes it.
                     raise
+                self._enforce_cap()
             log.info("push-queue: enqueued approval %s", aid)
             return "queued"
         except Exception:
             log.exception("push-queue: enqueue failed")
             return "error"
+
+    def _enforce_cap(self) -> None:
+        """Trim the journal to QUEUE_MAX_ENTRIES, oldest first (#1135).
+
+        Must be called with the journal lock held. A keyless box that
+        never gets the plane handoff would otherwise accumulate entries
+        forever — the dropped entries were never deliverable, and the
+        loud log line is the operator signal.
+        """
+        entries = self._read_all()
+        if len(entries) <= QUEUE_MAX_ENTRIES:
+            return
+        dropped = len(entries) - QUEUE_MAX_ENTRIES
+        self._rewrite(entries[dropped:])
+        log.warning("push-queue: journal capped at %d entries; dropped %d "
+                    "oldest undeliverable entries",
+                    QUEUE_MAX_ENTRIES, dropped)
 
     def _read_all(self):
         """All journal entries in file order; corrupt lines are logged
@@ -730,11 +826,29 @@ class PushQueue:
         entry is left for a later pass (counted in stats["errors"]).
         With a disabled sender (no keys / no crypto) the pass is
         skipped loudly and entries stay queued — they deliver once the
-        operator configures keys.
+        operator configures keys. In plane mode (#1135) the pass is
+        skipped quietly instead (stats["plane_owned"] is True): the
+        plane pages this box's approvals, so the box-local queue is not
+        the channel.
         """
         stats = {"processed": 0, "sent": 0, "rescheduled": 0, "dead": 0,
                  "errors": 0}
         now = time.time() if now is None else now
+        if _plane_push_owner():
+            # #1135 hosted-mode handoff: the plane push lane pages this
+            # box's approvals, so the box-local queue is not the channel.
+            # Skip quietly — the disabled-sender warning is for
+            # self-hosted operators who can still fix it by configuring
+            # keys; here it would fire forever. Pre-enrollment journal
+            # entries stay journaled but are never delivered, so they
+            # cannot double-page.
+            global _last_plane_log
+            if now - _last_plane_log >= _PLANE_LOG_INTERVAL:
+                log.info("push-queue: worker pass skipped — plane push "
+                         "lane owns paging")
+                _last_plane_log = now
+            stats["plane_owned"] = True
+            return stats
         if sender is None:
             sender = PushSender.default()
         if not sender.enabled:
