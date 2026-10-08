@@ -1435,6 +1435,99 @@ def test_socket_command_gap_no_fast_forward_without_epoch_evidence(
     assert "no epoch evidence" in out
 
 
+def test_socket_command_gap_fast_forward_reacks_without_reexecuting(
+        ctx, monkeypatch, tmp_path, capsys):
+    # #1143 / D-GH1: the fast-forward can land past the arriving frame
+    # itself (the cron consumed it via HTTPS while the DO's re-drive
+    # was already in flight — the socket/cron race window). The frame
+    # then re-acks without re-executing, exactly like the redelivery
+    # branch: no double stamp, duplicate acks are DO-idempotent.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    aids = {1: "s5bgapra000000001", 3: "s5bgapra000000003"}
+    for aid in aids.values():
+        _s5b_file_pending(approvals, aid)
+    with open(os.path.join(ctx.dir, "commands_cursor.json"), "w") as f:
+        json.dump({"cursor": 10, "epoch": 0}, f)
+
+    def inner(seq, aid):
+        return _s5b_inner(_s5b_decision(aid=aid, dseq=seq))
+
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, inner(1, aids[1])),
+                    ("send-command", 3, 0, inner(3, aids[3])),
+                    ("expect-acks", [1, 3]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    acks = [f["seq"] for f in _s5b_acks(stub)]
+    assert acks == [1, 3], f"re-ack after fast-forward failed: {acks}"
+    # Seq 3 was re-acked, never executed: its pending is untouched.
+    assert _s5b_consumed(approvals, aids[3]) is None, \
+        "aid 3 was executed after the fast-forward covered it"
+    out = capsys.readouterr().out
+    assert "cursor fast-forward" in out
+
+
+def test_socket_command_gap_fast_forward_still_gapped_holds(
+        ctx, monkeypatch, tmp_path, capsys):
+    # #1143 / D-GH1: the fast-forward heals only what the cursor
+    # covers — when the arriving frame is still past prefix + 1 after
+    # the advance, the hold stands for the re-drive.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    aids = {1: "s5bgapsg000000001", 5: "s5bgapsg000000005"}
+    for aid in aids.values():
+        _s5b_file_pending(approvals, aid)
+    with open(os.path.join(ctx.dir, "commands_cursor.json"), "w") as f:
+        json.dump({"cursor": 2, "epoch": 0}, f)
+
+    def inner(seq, aid):
+        return _s5b_inner(_s5b_decision(aid=aid, dseq=seq))
+
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, inner(1, aids[1])),
+                    ("send-command", 5, 0, inner(5, aids[5])),
+                    ("expect-acks", [1]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    acks = [f["seq"] for f in _s5b_acks(stub)]
+    assert acks == [1], f"still-gapped frame was not held: {acks}"
+    assert _s5b_consumed(approvals, aids[5]) is None, \
+        "aid 5 was executed despite the standing gap"
+    out = capsys.readouterr().out
+    assert "cursor fast-forward" in out
+    assert "fast-forwarded prefix" in out
+    assert "waiting on the re-drive" in out
+
+
+def test_fast_forward_fchmod_failure_closes_fd(ctx, monkeypatch, capsys):
+    # Engineering round-1 blocker: if os.fchmod raises after a
+    # successful os.open (e.g. EPERM on an another-uid-owned lock
+    # file), the fd must be closed — a leak here would exhaust fds one
+    # per held frame in a long-lived session. The hold stands and the
+    # failure is loud.
+    with open(os.path.join(ctx.dir, "commands_cursor.json"), "w") as f:
+        json.dump({"cursor": 3, "epoch": 0}, f)
+
+    def _raising_fchmod(fd, mode):
+        raise OSError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", _raising_fchmod)
+    sess = spark_pair._PhoneHomeSession(ctx.dir, None, None, BOX_ID, 7,
+                                        TOKEN)
+    sess._acked_prefix = 1
+
+    def _fds():
+        return set(os.listdir("/proc/self/fd"))
+
+    before = _fds()
+    for _ in range(5):
+        assert sess._fast_forward_to_shared_cursor(0) is False
+    assert _fds() == before, "fd leaked on fchmod failure"
+    out = capsys.readouterr().out
+    assert "cannot secure ingest lock" in out
+
+
 def test_socket_command_malformed_frame_no_ack(ctx, monkeypatch, tmp_path,
                                               capsys):
     _s5b_setup(ctx, monkeypatch, tmp_path)

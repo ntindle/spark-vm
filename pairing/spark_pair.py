@@ -2952,7 +2952,7 @@ class _PhoneHomeSession:
             return False
         return True
 
-    def _fast_forward_to_shared_cursor(self, seq, epoch):
+    def _fast_forward_to_shared_cursor(self, epoch):
         """Cursor fast-forward for the #1143 gap-hold wedge (D-GH1).
 
         Returns True when the gap guard may re-evaluate the frame
@@ -2996,14 +2996,25 @@ class _PhoneHomeSession:
         lock_path = os.path.join(self.d, _INGEST_LOCK_FILE)
         try:
             lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as e:
+            _phone_home_say(self.d,
+                            f"gap after acked prefix {old_prefix}: cannot "
+                            f"open ingest lock ({e}) — keeping the hold "
+                            "(degrade, never wedge)", self.token)
+            return False
+        try:
             # 0600 at creation is not enough: a pre-existing lock file
             # keeps its wider mode through the open (same as the ingest
             # wrapper).
             os.fchmod(lock_fd, 0o600)
         except OSError as e:
+            # The open succeeded but the secure failed: close the fd —
+            # returning with it open would leak one fd per held frame in
+            # a long-lived session.
+            os.close(lock_fd)
             _phone_home_say(self.d,
                             f"gap after acked prefix {old_prefix}: cannot "
-                            f"open ingest lock ({e}) — keeping the hold "
+                            f"secure ingest lock ({e}) — keeping the hold "
                             "(degrade, never wedge)", self.token)
             return False
         try:
@@ -3189,7 +3200,7 @@ class _PhoneHomeSession:
                 # or below the prefix re-acks without re-executing (the
                 # cron already consumed it — same as the redelivery
                 # branch above); a frame still past prefix + 1 holds.
-                if self._fast_forward_to_shared_cursor(seq, epoch):
+                if self._fast_forward_to_shared_cursor(epoch):
                     if seq <= self._acked_prefix:
                         # Re-ack without re-executing: the cron already
                         # consumed this seq (see the redelivery branch
