@@ -7,7 +7,10 @@
 # bump was superseded while still queued fails the script's in-sync
 # preflight by design; a run already past its fetch when the newer push
 # lands completes and publishes, then the newer run publishes next — both
-# releases happen, in push order.
+# releases happen, in push order. The same run also calls the golden-image
+# build gate (workflow_call) after publishing: the tag push uses
+# GITHUB_TOKEN, which never triggers workflow runs, so the gate's own
+# `push: tags` trigger cannot fire on a real release (#1176).
 
 name: Cut release
 
@@ -33,6 +36,12 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      # The exact tag the cut published (or the recovery step published).
+      # The gate job consumes this as its build target — never re-derived
+      # from main's tip, which may already be past the release commit when
+      # a second release bump is queued behind the concurrency group.
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
         with:
@@ -61,3 +70,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/cut-release.sh --publish-only --yes --ci
+      - name: Expose the cut release tag
+        # Runs after the cut and after the recovery step, so both the
+        # normal path and the tag-pushed/publish-failed path expose the
+        # tag. The checkout is the per-run commit (preflight-guarded by
+        # cut-release.sh), so v$(cat VERSION) is exactly the tag that was
+        # just published. Skipped on job failure (no output → gate skipped).
+        id: tag
+        run: echo "tag=v$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+  golden-image:
+    # The #1087 F-P1 gate, run in the same workflow run as the release:
+    # the tag push above uses GITHUB_TOKEN, which never triggers workflow
+    # runs, so the gate's own `push: tags: ["v*"]` trigger cannot fire on
+    # a real release (#1176). The called workflow checks out the exact
+    # release tag itself (v$(cat VERSION)); it needs no secrets and never
+    # pushes (contents: read, build-only).
+    name: golden-image build gate
+    needs: release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/golden-image.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}

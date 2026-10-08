@@ -1,9 +1,21 @@
 # Golden-image build gate (#1087, F-P1).
 #
-# Builds the golden-image recipe (deploy/golden-image/Dockerfile) on every
-# v* release tag and runs the automatable half of the per-build gate
+# Builds the golden-image recipe (deploy/golden-image/Dockerfile) for every
+# release and runs the automatable half of the per-build gate
 # (docs/GOLDEN_IMAGE_GATE_PROCEDURE.md): the baked-secrets scan against the
 # built image (Step 0b) and the manifest preflight (Step 0).
+#
+# Trigger topology (#1176 — read this before touching `on:`): the release
+# workflow (.github/workflows/release.yml) pushes the v* tag with
+# GITHUB_TOKEN, and GitHub never creates workflow runs from GITHUB_TOKEN
+# events, so `push: tags: ["v*"]` alone CANNOT fire this gate on a real
+# release. release.yml therefore calls this workflow as a reusable
+# workflow (workflow_call) in the same run after publishing; the tag to
+# build arrives as the `tag` input, taken from the release job's own
+# per-run checkout (preflight-guarded) — it is NEVER re-derived from the
+# called workflow's checkout, whose ref is main's tip and may already be
+# past the release commit. The `push: tags` trigger covers operator-pushed
+# tags; `workflow_dispatch` covers manual runs.
 #
 # Build-only, never a push: publishing stays an operator step AFTER the
 # interactive gate (file → answer → grant → verify, teardown, re-scan) —
@@ -22,6 +34,12 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag whose tree the gate builds (from the release job's own checkout — never re-derived from the caller's ref)"
+        required: true
+        type: string
 
 # Least privilege: this workflow only reads the repo and reports status.
 permissions:
@@ -35,9 +53,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
         with:
           fetch-depth: 0
+          fetch-tags: true
+      - name: Pin the release tree when called from the release workflow
+        # The called checkout is at the caller's ref (main's tip), which may
+        # already be past the release commit — the tree is the pin (D-P1),
+        # so the gate must build exactly the tag the release job cut. The
+        # tag arrives as the workflow_call input, taken from the release
+        # job's own per-run checkout; main's tip VERSION is never trusted
+        # for this (a queued second release bump would name a tag that does
+        # not exist yet and fail loudly). For the push and dispatch triggers
+        # HEAD already names the right tree, so this step only fires for
+        # workflow_call.
+        if: github.event_name == 'workflow_call'
+        run: git checkout "${{ inputs.tag }}"
       - name: Resolve the D-P1 pins from the tree
-        # The tree is the pin: the tag push IS the release commit, so HEAD
-        # names the baked commit and VERSION names the release tag.
+        # The tree is the pin: HEAD names the baked commit and VERSION names
+        # the release tag (for the push trigger the tag push IS the release
+        # commit; for workflow_call the step above checked the tag out, and
+        # the tag the release job cut always matches the tree's VERSION).
         run: |
           echo "SPARKVM_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "SPARKVM_VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
