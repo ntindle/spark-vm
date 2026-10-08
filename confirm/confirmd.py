@@ -480,7 +480,7 @@ def _push_enqueue_reopen(new_aid, summary):
         try:
             res = mod.PushQueue.default().enqueue(
                 {"id": new_aid, "summary": summary})
-            if res not in ("queued", "duplicate", "notified"):
+            if res not in _PUSH_REOPEN_OK:
                 print("confirmd WARNING: push enqueue returned %s for "
                       "re-opened %s" % (res, new_aid), flush=True)
         except Exception:
@@ -488,6 +488,12 @@ def _push_enqueue_reopen(new_aid, summary):
                   % new_aid, flush=True)
     threading.Thread(target=_run, name="confirmd-reopen-push",
                      daemon=True).start()
+
+
+# H20 enqueue results that are NOT warnings. "plane-owned" (#1135) is the
+# hosted-mode stand-down — the box-local channel could never page on a
+# plane-enrolled box — not a failure.
+_PUSH_REOPEN_OK = ("queued", "duplicate", "notified", "plane-owned")
 
 
 # Issue #78: server-side CSRF nonce rings, keyed by approval id. The map

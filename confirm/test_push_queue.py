@@ -75,8 +75,16 @@ class TestEnqueue(unittest.TestCase):
         import tempfile
         self._td = tempfile.TemporaryDirectory()
         self.q, self.sender = make_queue(self._td.name)
+        # Hermetic w.r.t. the #1135 handoff: never consult the real
+        # pairing dir or caller env.
+        pair_dir = os.path.join(self._td.name, "pair")
+        os.makedirs(pair_dir, exist_ok=True)
+        self._env = mock.patch.dict(os.environ, {
+            "SPARKVM_PLANE_PUSH": "", "SVM_PAIR_DIR": pair_dir}, clear=False)
+        self._env.start()
 
     def tearDown(self):
+        self._env.stop()
         self._td.cleanup()
 
     def test_queued_and_entry_fields(self):
@@ -135,8 +143,16 @@ class TestRunOnce(unittest.TestCase):
         import tempfile
         self._td = tempfile.TemporaryDirectory()
         self.q, self.sender = make_queue(self._td.name)
+        # Hermetic w.r.t. the #1135 handoff: never consult the real
+        # pairing dir or caller env.
+        pair_dir = os.path.join(self._td.name, "pair")
+        os.makedirs(pair_dir, exist_ok=True)
+        self._env = mock.patch.dict(os.environ, {
+            "SPARKVM_PLANE_PUSH": "", "SVM_PAIR_DIR": pair_dir}, clear=False)
+        self._env.start()
 
     def tearDown(self):
+        self._env.stop()
         self._td.cleanup()
 
     def test_empty(self):
@@ -441,7 +457,10 @@ class TestWorkerCLI(unittest.TestCase):
             env = {"CONFIRM_PUSH_QUEUE": qp,
                    "CONFIRM_PUSH_DEAD": os.path.join(td, "dead.jsonl"),
                    "CONFIRM_PUSH_SUBS": os.path.join(td, "subs.json"),
-                   "CONFIRM_VAPID_KEYS": os.path.join(td, "no-keys.json")}
+                   "CONFIRM_VAPID_KEYS": os.path.join(td, "no-keys.json"),
+                   # Hermetic w.r.t. the #1135 handoff (see TestEnqueue).
+                   "SPARKVM_PLANE_PUSH": "",
+                   "SVM_PAIR_DIR": os.path.join(td, "pair")}
             with mock.patch.dict(os.environ, env, clear=False):
                 q = push.PushQueue.default()
                 self.assertEqual(q.enqueue({"id": "cli1"}), "queued")
@@ -461,7 +480,10 @@ class TestWorkerCLI(unittest.TestCase):
             env = {"CONFIRM_PUSH_QUEUE": os.path.join(td, "q.jsonl"),
                    "CONFIRM_PUSH_DEAD": os.path.join(td, "dead.jsonl"),
                    "CONFIRM_PUSH_SUBS": os.path.join(td, "subs.json"),
-                   "CONFIRM_VAPID_KEYS": os.path.join(td, "no-keys.json")}
+                   "CONFIRM_VAPID_KEYS": os.path.join(td, "no-keys.json"),
+                   # Hermetic w.r.t. the #1135 handoff (see TestEnqueue).
+                   "SPARKVM_PLANE_PUSH": "",
+                   "SVM_PAIR_DIR": os.path.join(td, "pair")}
             with mock.patch.dict(os.environ, env, clear=False):
                 q = push.PushQueue.default()
                 with mock.patch.object(q, "run_once",
@@ -497,9 +519,12 @@ class TestPlaneHandoff(unittest.TestCase):
         self._td.cleanup()
 
     def _write_enrollment(self, token="tok", box_id="box1"):
-        with open(os.path.join(self._pair_dir, "enrollment.json"),
-                  "w", encoding="utf-8") as f:
+        # Match production's _write_private invariant: owner-only 0600,
+        # which the hardened auto-detect requires.
+        path = os.path.join(self._pair_dir, "enrollment.json")
+        with open(path, "w", encoding="utf-8") as f:
             json.dump({"box_id": box_id, "token": token}, f)
+        os.chmod(path, 0o600)
 
     def test_env_plane_skips_enqueue_without_journaling(self):
         os.environ["SPARKVM_PLANE_PUSH"] = "1"
@@ -583,6 +608,56 @@ class TestPlaneHandoff(unittest.TestCase):
         os.environ["SPARKVM_PLANE_PUSH"] = "1"
         self.assertEqual(self.q.enqueue({"id": "bad id!"}), "invalid")
         self.assertFalse(os.path.exists(self.q.queue_path))
+
+    def test_world_readable_enrollment_record_fails_open(self):
+        # A 0644 record violates the pairing writer's 0600 invariant —
+        # the hardened auto-detect must reject it (loudly) and fail open
+        # to the box-local queue, never silently stand down paging.
+        self._write_enrollment()
+        os.chmod(os.path.join(self._pair_dir, "enrollment.json"), 0o644)
+        with self.assertLogs("sparkvm.push", level="WARNING") as logs:
+            self.assertEqual(self.q.enqueue({"id": "a1"}), "queued")
+        self.assertTrue(any("unexpected owner/mode" in l
+                            for l in logs.output))
+        self.assertEqual(len(read_entries(self.q.queue_path)), 1)
+
+    def test_stand_down_warns_once_per_process(self):
+        # Disabling the box's paging channel must be loud at least once
+        # per process — the hourly info note is not enough signal.
+        os.environ["SPARKVM_PLANE_PUSH"] = "1"
+        push._plane_startup_warned = False
+        try:
+            with self.assertLogs("sparkvm.push", level="WARNING") as logs:
+                self.q.enqueue({"id": "a1"})
+                self.q.enqueue({"id": "a2"})
+            warns = [l for l in logs.output if "standing down" in l]
+            self.assertEqual(len(warns), 1)
+        finally:
+            push._plane_startup_warned = False
+
+    def test_requeue_in_plane_mode_exits_zero(self):
+        # --requeue on a plane-enrolled box: the queue is stood down by
+        # design, so exit 0 with a plain-language line, not exit 1.
+        import contextlib
+        import io
+        env = {"CONFIRM_PUSH_QUEUE": os.path.join(self._td.name, "q.jsonl"),
+               "CONFIRM_PUSH_DEAD": os.path.join(self._td.name, "d.jsonl"),
+               "CONFIRM_PUSH_SUBS": os.path.join(self._td.name, "s.json"),
+               "SPARKVM_PLANE_PUSH": "1",
+               "SVM_PAIR_DIR": self._pair_dir}
+        with mock.patch.dict(os.environ, env, clear=False):
+            q = push.PushQueue.default()
+            q._dead_letter({"aid": "a1", "summary": "s"}, 8, "max-attempts")
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = push.main(["--requeue", "a1"])
+            self.assertEqual(rc, 0)
+            self.assertIn("plane-owned", out.getvalue())
+
+    def test_h20_reopen_tuple_accepts_plane_owned(self):
+        # confirmd's denied-approval re-open path must not print a
+        # spurious WARNING on a plane-enrolled box.
+        import confirmd
+        self.assertIn("plane-owned", confirmd._PUSH_REOPEN_OK)
 
 
 if __name__ == "__main__":

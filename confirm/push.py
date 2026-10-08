@@ -73,6 +73,7 @@ import json
 import logging
 import os
 import re
+import stat
 import struct
 import sys
 import time
@@ -617,12 +618,14 @@ QUEUE_BACKOFF_CAP = 1800.0
 # needs a single entry with >120 subscriptions at 15s each — impossible
 # on a single-owner box.
 QUEUE_CLAIM_TTL = 1800.0
-# Journal bound (GitHub #1135): a keyless box that never gets the plane
-# handoff must not accumulate queue entries forever — on enqueue, the
-# journal is trimmed to this many entries, oldest first. Approvals are
-# human-paced, so the cap is generous; the dropped entries were never
-# deliverable (no keys, no plane lane), and the loud log line is the
-# operator signal.
+# Journal bound (GitHub #1135): a keyless box that never enrolls must not
+# accumulate queue entries forever — on enqueue, the journal is trimmed
+# to this many entries, oldest first. Approvals are human-paced, so the
+# cap is generous; past the cap, entries are effectively undeliverable
+# without operator action (no keys configured and no plane lane), and
+# every trim is warning-logged. Note the trade-off: on a box where keys
+# get configured later, entries that would have delivered are dropped
+# past 1000 — the loud warning is the operator signal.
 QUEUE_MAX_ENTRIES = 1000
 # Module-level throttle for the disabled-sender warning: one line per
 # hour per process, not one per pass.
@@ -635,6 +638,23 @@ _last_plane_log = 0.0
 # SPARKVM_PLANE_PUSH is a deploy-time error — one line per process,
 # not one per enqueue.
 _warned_bad_plane_env = False
+
+
+# Once-per-process flag for the stand-down warning below: disabling the
+# box's paging channel must be loud at least once per process — the
+# hourly info note is not enough of a signal for a channel going quiet.
+_plane_startup_warned = False
+
+
+def _note_plane_stand_down() -> None:
+    """Warn once per process that the box-local queue is standing down."""
+    global _plane_startup_warned
+    if not _plane_startup_warned:
+        log.warning("push-queue: box-local push queue standing down on "
+                    "this plane-enrolled box (SPARKVM_PLANE_PUSH or "
+                    "enrollment record; SPARKVM_PLANE_PUSH=0 forces "
+                    "box-local)")
+        _plane_startup_warned = True
 
 
 def _plane_push_owner() -> bool:
@@ -679,9 +699,31 @@ def _plane_push_owner() -> bool:
     try:
         d = os.environ.get("SVM_PAIR_DIR") or os.path.expanduser(
             "~/.config/spark-pair")
-        with open(os.path.join(d, "enrollment.json"),
-                  encoding="utf-8") as f:
-            enroll = json.load(f)
+        path = os.path.join(d, "enrollment.json")
+        # Integrity: the record is a channel selector now, not just CLI
+        # state. Trust only the pairing writer's own invariant —
+        # owner-only 0600 regular file owned by this user — verified on
+        # the opened fd (no path TOCTOU), never following symlinks, never
+        # blocking on a FIFO. Anything else fails open with a warning: a
+        # mode/owner violation is itself the tamper signal, and a planted
+        # record must never silently kill the box-local paging channel.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            st = os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode)
+                    or st.st_uid != os.geteuid()
+                    or stat.S_IMODE(st.st_mode) & 0o077):
+                log.warning("push-queue: ignoring enrollment.json with "
+                            "unexpected owner/mode (expected owner-only "
+                            "0600 regular file) — treating box as not "
+                            "plane-enrolled")
+                return False
+            with os.fdopen(fd, "r", encoding="utf-8") as f:
+                fd = None  # fdopen owns it now
+                enroll = json.load(f)
+        finally:
+            if fd is not None:
+                os.close(fd)
         return bool(isinstance(enroll, dict) and enroll.get("token"))
     except Exception:
         return False
@@ -746,6 +788,7 @@ class PushQueue:
                 # never page on a plane-enrolled box — stand down without
                 # journaling. (Checked after id validation so the
                 # "invalid" contract is preserved.)
+                _note_plane_stand_down()
                 log.info("push-queue: plane-enrolled box, standing down "
                          "box-local enqueue for approval %s", aid)
                 return "plane-owned"
@@ -787,8 +830,9 @@ class PushQueue:
         """Trim the journal to QUEUE_MAX_ENTRIES, oldest first (#1135).
 
         Must be called with the journal lock held. A keyless box that
-        never gets the plane handoff would otherwise accumulate entries
-        forever — the dropped entries were never deliverable, and the
+        never enrolls would otherwise accumulate entries forever —
+        past the cap, entries are effectively undeliverable without
+        operator action (no keys configured and no plane lane), and the
         loud log line is the operator signal.
         """
         entries = self._read_all()
@@ -874,6 +918,7 @@ class PushQueue:
             # cannot double-page. (Plane-side push paging itself arrives
             # with the plane push lane, #967/#968 — this only removes
             # the dead local channel.)
+            _note_plane_stand_down()
             global _last_plane_log
             if now - _last_plane_log >= _PLANE_LOG_INTERVAL:
                 log.info("push-queue: worker pass skipped — plane-enrolled "
@@ -1104,6 +1149,14 @@ def main(argv):
     args = ap.parse_args(argv)
     if args.requeue:
         res = PushQueue.default()._requeue(args.requeue)
+        if res == "plane-owned":
+            # #1135: the box-local queue is stood down on this
+            # plane-enrolled box — nothing to requeue, and that is the
+            # designed behavior, not a failure.
+            print("requeue %s: plane-owned — box-local queue is stood "
+                  "down on this plane-enrolled box; nothing to "
+                  "requeue" % args.requeue)
+            return 0
         print("requeue %s: %s" % (args.requeue, res))
         return 0 if res in ("queued", "duplicate", "notified") else 1
     if args.worker_once:
