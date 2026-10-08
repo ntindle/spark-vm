@@ -53,7 +53,7 @@ COMPONENTS_CONF = ROOT / "deploy" / "components.conf"
 # Registering or removing a test file is a deliberate gate-policy change:
 # it must edit this pin, not slip through a range check.
 EXPECTED_REGISTERED_COUNTS = {
-    "proxy": 14,
+    "proxy": 15,  # issue #1167: +proxy/test_enforce_pending_dir.py
     "confirm": 4,
 }
 
