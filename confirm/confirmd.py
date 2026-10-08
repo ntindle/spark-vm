@@ -675,19 +675,42 @@ def tailnet_login(peer_ip):
 
 
 def _find_login(obj):
-    if isinstance(obj, dict):
-        if "LoginName" in obj and isinstance(obj["LoginName"], str):
-            return obj["LoginName"]
-        for v in obj.values():
-            found = _find_login(v)
-            if found:
-                return found
-    elif isinstance(obj, list):
-        for v in obj:
-            found = _find_login(v)
-            if found:
-                return found
-    return None
+    """Return the Tailscale LoginName of the whois subject, or None.
+
+    Issue #1166: anchored to ``UserProfile.LoginName``. The recursive
+    descent this replaced returned the first string-valued "LoginName"
+    key anywhere in the tree, descending Node before UserProfile — a
+    "LoginName" nested inside Node (a future tailscale schema addition
+    or nested metadata) would have silently taken precedence over the
+    owner's profile, flipping the finding-47 owner check. Anything
+    absent, non-string, or empty fails closed: None means the peer is
+    refused (an empty login is not an identity — the recursive form
+    never returned one either, its truthiness check skipped it).
+
+    Architecture review (this PR's Architecture round, blocking): the fail-closed path must not
+    be silent — a whois schema change would otherwise hard-lock the
+    single approver out of the page with zero trail. The warnings below
+    name only the failure mode and top-level field names (never values —
+    the doc carries node addresses); they fire only on the refusal path,
+    so a healthy daemon never logs them.
+    """
+    if not isinstance(obj, dict):
+        print("confirmd WARNING: _find_login: whois doc is not a dict "
+              "(type=%s); refusing peer" % type(obj).__name__, flush=True)
+        return None
+    profile = obj.get("UserProfile")
+    if not isinstance(profile, dict):
+        print("confirmd WARNING: _find_login: no UserProfile dict in "
+              "whois doc (top-level keys=%s); refusing peer"
+              % sorted(map(str, obj.keys())), flush=True)
+        return None
+    login = profile.get("LoginName")
+    if not isinstance(login, str) or not login:
+        print("confirmd WARNING: _find_login: UserProfile.LoginName "
+              "absent/empty/non-string (type=%s); refusing peer"
+              % type(login).__name__, flush=True)
+        return None
+    return login
 
 
 # Issue #535 (open-source) / #360 (hosted S1): the audit trail is
@@ -1616,6 +1639,62 @@ _ANSWERED_SWEEP_GRACE_S = _env_int("CONFIRM_ANSWERED_SWEEP_GRACE_S",
                                    86400, 3600)
 
 
+# Issue #1168: the #232 corruption quarantine had no bound — every other
+# confirmd store is capped (audit log rolls at _AUDIT_MAX_BYTES, consumed/
+# keeps _CONSUMED_KEEP, the in-memory rings are capped), but
+# pending-quarantine/ accumulated one file per corrupt filing for the
+# daemon's whole lifetime, and any pending/ writer can plant unparsable
+# files. Keep the newest N on disk; the audit log stays the durable
+# trail (each quarantine move is journaled via the pending-quarantined
+# event). mtime-ordered, oldest-only deletes, like _prune_consumed.
+_QUARANTINE_KEEP = _env_int("CONFIRM_QUARANTINE_KEEP", 200, 10)
+
+
+def _prune_quarantine(limit=None):
+    """Delete pending-quarantine/ history beyond the newest `limit` files.
+
+    Called by _housekeeping_if_due() (cadence-gated), after
+    _prune_consumed(). Mirrors _prune_consumed's race-benign shape: only
+    the oldest files are ever deletion candidates, all OSError paths
+    tolerated, and the count gate skips the mtime stat storm when the
+    dir is within the cap. Quarantine moves never collide with the prune
+    by name (aids are never reused), and a lost race surfaces as
+    FileNotFoundError, which is tolerated. Strays can't land here
+    (Architecture review): `_quarantine_corrupt_pending` moves the
+    existing `<aid>.json` pending file into place via `os.replace` — no
+    temp intermediates ever enter the dir — so the `.json` filter sees
+    every file the writer path can create. CI-found (PR #1169): the
+    prune never creates the dir — `_quarantine_dir()` makedirs, which a
+    prune must not do (PermissionError on a read-only approvals root
+    would crash housekeeping instead of no-op'ing). A missing dir just
+    means nothing to prune.
+    """
+    if limit is None:
+        limit = _QUARANTINE_KEEP
+    # Deliberately NOT _quarantine_dir(): that helper makedirs, and a
+    # prune must never create the thing it prunes. Missing/unreadable
+    # dir => nothing to do.
+    d = os.path.join(APPROVALS, "pending-quarantine")
+    try:
+        names = [fn for fn in os.listdir(d) if fn.endswith(".json")]
+    except OSError:
+        return
+    if len(names) <= limit:
+        return
+    entries = []
+    for fn in names:
+        try:
+            entries.append((os.path.getmtime(os.path.join(d, fn)), fn))
+        except OSError:
+            continue
+    entries.sort()
+    for _, fn in entries[:max(0, len(entries) - limit)]:
+        try:
+            os.remove(os.path.join(d, fn))
+        except OSError:
+            pass
+
+
 def _sweep_answered(grace=None):
     """Move answered/ strays older than `grace` seconds to consumed/."""
     if grace is None:
@@ -1696,13 +1775,18 @@ def _reset_housekeeping_for_tests():
 
 
 def _housekeeping_if_due():
-    """Run the answered-sweep + consumed-prune at most once per interval.
+    """Run the answered-sweep + consumed-prune + quarantine-prune at most
+    once per interval.
 
-    Returns True when the pair ran. Benign under handler concurrency: the
+    Returns True when the trio ran. Benign under handler concurrency: the
     timestamp commits under _housekeeping_lock before the work starts, so
-    two threads can't both decide "due"; the sweep and prune are
-    individually race-tolerant (write-once files, oldest-only deletes, all
-    OSError paths tolerated)."""
+    two threads can't both decide "due"; the sweep and both prunes are
+    individually race-tolerant (unique filenames — aids are never reused —
+    oldest-only deletes, all OSError paths tolerated). Note the quarantine
+    prune's mtime snapshot can go stale: a quarantine move replaces in
+    place via os.replace, refreshing mtime, so a stale snapshot can evict
+    a recently-refreshed file early — the eviction itself stays safe and
+    every quarantine move is journaled in the audit log."""
     with _housekeeping_lock:
         global _last_housekeeping_mono
         now = time.monotonic()
@@ -1712,6 +1796,7 @@ def _housekeeping_if_due():
         _last_housekeeping_mono = now
     _sweep_answered()
     _prune_consumed()
+    _prune_quarantine()
     return True
 
 

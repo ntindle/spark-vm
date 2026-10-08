@@ -50,6 +50,11 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+### Fixed
+
+- The approvals page now reads the tailnet owner's identity from the documented field of the `tailscale whois` response instead of the first login-name-shaped value anywhere in it — a schema change on the whois side could otherwise have flipped the owner check and locked out (or mis-identified) the approver. (#1166) (#1169)
+- The approvals daemon's corruption-quarantine directory is now bounded like every other approval store: the newest 200 quarantined filings are kept and the oldest are pruned on the housekeeping cadence, instead of growing without limit. (#1168) (#1169)
+
 ### Changed
 
 - CI Python test gate rebalanced: the real-worker harness suite (the slowest slice of the run — about seventy percent of its shard's wall time) now runs in its own shard, so a code PR's test signal arrives in roughly four minutes instead of six; the required `python tests` check keeps its name and still gates the merge, and rebalancing never touches the required status checks. (#1164)

@@ -1104,32 +1104,38 @@ class ConfirmdTests(unittest.TestCase):
         self.assertEqual(remaining, names)
 
     def test_housekeeping_runs_when_due(self):
-        """First call after a reset runs the sweep+prune pair."""
+        """First call after a reset runs the sweep+prune trio."""
         with mock.patch.object(cd, "_sweep_answered") as sw, \
-             mock.patch.object(cd, "_prune_consumed") as pr:
+             mock.patch.object(cd, "_prune_consumed") as pr, \
+             mock.patch.object(cd, "_prune_quarantine") as pq:
             self.assertTrue(cd._housekeeping_if_due())
         sw.assert_called_once_with()
         pr.assert_called_once_with()
+        pq.assert_called_once_with()
 
     def test_housekeeping_skips_when_not_due(self):
-        """A second immediate call is gated — one pair per interval."""
+        """A second immediate call is gated — one trio per interval."""
         with mock.patch.object(cd, "_sweep_answered") as sw, \
-             mock.patch.object(cd, "_prune_consumed") as pr:
+             mock.patch.object(cd, "_prune_consumed") as pr, \
+             mock.patch.object(cd, "_prune_quarantine") as pq:
             self.assertTrue(cd._housekeeping_if_due())
             self.assertFalse(cd._housekeeping_if_due())
         sw.assert_called_once_with()
         pr.assert_called_once_with()
+        pq.assert_called_once_with()
 
     def test_housekeeping_zero_interval_always_runs(self):
         """Patching the interval to 0 restores the old every-answer
         behavior (the escape hatch tests rely on)."""
         with mock.patch.object(cd, "_HOUSEKEEPING_INTERVAL_S", 0), \
              mock.patch.object(cd, "_sweep_answered") as sw, \
-             mock.patch.object(cd, "_prune_consumed") as pr:
+             mock.patch.object(cd, "_prune_consumed") as pr, \
+             mock.patch.object(cd, "_prune_quarantine") as pq:
             self.assertTrue(cd._housekeeping_if_due())
             self.assertTrue(cd._housekeeping_if_due())
         self.assertEqual(sw.call_count, 2)
         self.assertEqual(pr.call_count, 2)
+        self.assertEqual(pq.call_count, 2)
 
     def test_housekeeping_concurrent_callers_run_once(self):
         """Racing handler threads can't both decide 'due': the timestamp
@@ -3625,6 +3631,127 @@ class GrantTtlChoiceTests(unittest.TestCase):
             ["grant_ttl_hours"], "24")
         self.assertEqual(cd._answered_api_item(base)["grant_ttl_hours"],
                          "")
+
+
+class FindLoginTests(unittest.TestCase):
+    """Issue #1166: _find_login is anchored to UserProfile.LoginName.
+
+    The finding-47 owner check rests on this extraction: it must read
+    UserProfile.LoginName only, never the first LoginName-shaped key
+    anywhere in the whois tree."""
+
+    def test_1166_find_login_anchored_to_user_profile(self):
+        """A LoginName nested inside Node (future schema / metadata) must
+        not take precedence over the owner's UserProfile.LoginName."""
+        doc = {
+            "Node": {"Name": "x",
+                     "Nested": {"LoginName": "intruder@evil"}},
+            "UserProfile": {"LoginName": "ntindle@github"},
+        }
+        self.assertEqual(cd._find_login(doc), "ntindle@github")
+
+    def test_1166_find_login_missing_profile_fails_closed(self):
+        """Absent UserProfile (or absent tree) means the peer is refused."""
+        self.assertIsNone(cd._find_login({"Node": {"Name": "x"}}))
+        self.assertIsNone(cd._find_login({}))
+        self.assertIsNone(cd._find_login(None))
+        self.assertIsNone(cd._find_login(["UserProfile"]))
+
+    def test_1166_find_login_non_string_fails_closed(self):
+        self.assertIsNone(cd._find_login({"UserProfile": {"LoginName": 7}}))
+        self.assertIsNone(
+            cd._find_login({"UserProfile": {"LoginName": None}}))
+        # An empty login is not an identity — the recursive form never
+        # returned one (its truthiness check skipped it), and the owner
+        # check downstream must see None, not "".
+        self.assertIsNone(cd._find_login({"UserProfile": {"LoginName": ""}}))
+        self.assertIsNone(
+            cd._find_login({"UserProfile": {"LoginName": {"a": 1}}}))
+        self.assertIsNone(cd._find_login({"UserProfile": "x"}))
+
+
+class QuarantinePruneTests(unittest.TestCase):
+    """Issue #1168: pending-quarantine/ is count-capped by the
+    housekeeping prune (mtime-ordered, oldest-only deletes)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.approvals = Path(self.tmp.name) / "approvals"
+        self.approvals.mkdir()
+        cd._reset_housekeeping_for_tests()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_quarantine(self, name, mtime_age):
+        qd = self.approvals / "pending-quarantine"
+        qd.mkdir(exist_ok=True)
+        p = qd / name
+        p.write_text('{"id": "%s"}' % name)
+        old = time.time() - mtime_age
+        os.utime(p, (old, old))
+        return p
+
+    def test_1168_quarantine_prune_keeps_newest(self):
+        """Over-cap quarantine prunes mtime-oldest first, keeping the
+        newest `limit` files."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            for i in range(5):
+                self._write_quarantine("q%d.json" % i,
+                                       mtime_age=(5 - i) * 10)
+            cd._prune_quarantine(limit=3)
+            remaining = sorted(
+                (self.approvals / "pending-quarantine").iterdir())
+            self.assertEqual([p.name for p in remaining],
+                             ["q2.json", "q3.json", "q4.json"])
+
+    def test_1168_quarantine_prune_under_cap_noop(self):
+        """Under-cap quarantine is untouched (no stat storm, no deletes)."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            self._write_quarantine("q0.json", mtime_age=10)
+            cd._prune_quarantine(limit=3)
+            self.assertTrue(
+                (self.approvals / "pending-quarantine" / "q0.json")
+                .exists())
+
+    def test_1168_quarantine_prune_at_cap_noop(self):
+        """Exactly-at-cap quarantine is untouched (pins the <= count
+        gate)."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            for i in range(3):
+                self._write_quarantine("q%d.json" % i,
+                                       mtime_age=(3 - i) * 10)
+            cd._prune_quarantine(limit=3)
+            remaining = sorted(
+                (self.approvals / "pending-quarantine").iterdir())
+            self.assertEqual([p.name for p in remaining],
+                             ["q0.json", "q1.json", "q2.json"])
+
+    def test_1168_quarantine_prune_missing_dir_noop(self):
+        """A missing quarantine dir is a no-op — the prune must never
+        create the dir it prunes (CI incident, PR #1169)."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._prune_quarantine(limit=3)  # must not raise
+            self.assertFalse(
+                (self.approvals / "pending-quarantine").exists())
+
+    def test_1168_housekeeping_prunes_quarantine(self):
+        """_housekeeping_if_due() runs the quarantine prune at the keep
+        bound."""
+        # Self-sufficient: reset the cadence module-state so this test
+        # never depends on execution order (QA review).
+        cd._reset_housekeeping_for_tests()
+        with mock.patch.object(cd, "APPROVALS",
+                               str(self.approvals)), \
+             mock.patch.object(cd, "_QUARANTINE_KEEP", 2):
+            for i in range(4):
+                self._write_quarantine("q%d.json" % i,
+                                       mtime_age=(4 - i) * 10)
+            self.assertTrue(cd._housekeeping_if_due())
+            remaining = sorted(
+                (self.approvals / "pending-quarantine").iterdir())
+            self.assertEqual([p.name for p in remaining],
+                             ["q2.json", "q3.json"])
 
 
 if __name__ == "__main__":
