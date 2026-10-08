@@ -15,8 +15,9 @@ Issue #796 stays open across all slices.
   feed is a read-only, read-time-derived projection of the three fleet
   journals (events, alerts, inventory); no feed-local state; row keys are
   journal keys (`alert_id`, `(box_id, event_id)`); every row cites its
-  journal source; freshness renders as `data_current_as_of`
-  (per-journal, collector clocks); silence renders as "no journaled
+  journal source; freshness renders as `data_current_as_of` (the single
+  cross-journal stamp — newest `received_at` across the event and alert
+  journals, collector clocks); silence renders as "no journaled
   alerts in the window", never "all systems operational"; no synthesized
   availability. Ack is operator-declared and suppresses nothing but
   attention; resolved is journal-derived per rule and never auto-clears.
@@ -75,8 +76,9 @@ Sections, in render order (each a projection of the feed rows):
    G15 S2 lands (the page does not invent waves).
 3. **History window** — resolved rows for the retention window (Q1),
    newest first, each citing the journal records that resolved it
-   (the ack→resolve evidence pair).
-4. **Freshness** — `data_current_as_of` per journal on every render.
+   (later journaled evidence, independent of any ack).
+4. **Freshness** — the `data_current_as_of` cross-journal stamp on
+   every render.
 
 Deployment shape: the S2a page renders from the collector journals
 through the G21 read API's field-equivalence contract when it exists —
@@ -158,9 +160,13 @@ is `docs/ALERT_PUSH_FANOUT_SPEC.md`'s intake.
   plane never sees a BYO-box journal and must never be in the loop.
   Hosted incidents notify **only affected tenants** — tenant-scoped
   rows under the G24 privacy boundary. The public RSS carries
-  **fleet-wide rows only** (firing rule-1/2 rows carry no tenant
-  attribution in the journals, so they are publishable under the
-  no-fiction contract) — never per-tenant attribution, never box ids.
+  **fleet-wide rows only** — alert rows publish exclusively in the
+  fleet-notice variant (§4: surrogate box counts, no attribution, no
+  box ids), never as raw journal rows. Raw rule-1/2 rows carry box
+  ids (operator-only per feed spec §6); the journals carry no tenant
+  attribution on those rows today, so the fleet-notice transform names
+  no tenant — but the transform is what makes them publishable, not
+  the absence of tenant attribution.
 - **Does the P7 ops turn feed this, or is it a separate
   control-plane path?** The P7 turn feeds the journals; the page, the
   RSS, and (later) the tenant push are consumers of the same feed
@@ -171,7 +177,8 @@ is `docs/ALERT_PUSH_FANOUT_SPEC.md`'s intake.
 - **Cost ceiling.** Stays ~$0 at small fleet: the page and RSS ride the
   existing static/worker surface; the tenant push variant rides the
   H14 push sender already built (#1094 — claim/fanout/retry on the
-  plane) rather than a new sender. No new infra line item is licensed
+  plane; shipped per CHANGELOG, the issue stays open for follow-up
+  slices) rather than a new sender. No new infra line item is licensed
   by this design.
 - **The words discipline.** Every channel inherits the no-fiction
   contract: incident copy is a render of journaled rows, never ahead
@@ -203,18 +210,21 @@ is `docs/ALERT_PUSH_FANOUT_SPEC.md`'s intake.
 
 ## 7. Open questions
 
-- **Q1 — History window length.** The operator history window (§3.3)
-  and the tenant window (§4) default to the retention window, but is
-  one window enough for both? Incident post-mortems may want longer
-  than the 30-day-style retention G19 keeps; if so, the retention
-  design re-scopes, not this page. Argue with evidence on #796.
+- **Q1 — History window length.** The operator history window (the
+  §3 history window) and the tenant window (§4) default to the
+  retention window, but is one window enough for both? Incident
+  post-mortems may want longer than the 90-day hot window G19
+  keeps; if so, the retention design re-scopes, not this page.
+  Argue with evidence on #796.
 - **Q2 — The public RSS row set.** Fleet-wide rows only — but is a
   correlated-failure row on a single tenant's boxes publishable when
-  every correlated box is one tenant's? This design's position: yes,
-  in the fleet-notice variant (surrogate box counts, no attribution,
-  no box ids) — the journals carry no tenant attribution on those
-  rows today, so nothing leaks. Argue the other way on #796 with a
-  concrete leak scenario.
+  every correlated box is one tenant's? This design's position: yes —
+  alert rows publish exclusively in the fleet-notice variant (surrogate
+  box counts, no attribution, no box ids), so no tenant is named. The
+  residual inference risk (a tenant correlating their own S2b "N boxes
+  affected" with the public "correlated failure across N boxes") is
+  the open question — argue the other way on #796 with a concrete
+  leak scenario.
 - **Q3 — Webhook/push opt-in surface.** Rides #968's subscription
   surface per §6, or is incident comms distinct enough (fleet-level
   vs approval-level) to warrant its own opt-in? This design says
