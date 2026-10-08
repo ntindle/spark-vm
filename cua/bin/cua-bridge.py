@@ -24,6 +24,8 @@ Endpoints:
                                   alive; GET /api/status exposes the running
                                   set under "launched" (#491).
 """
+import ctypes
+import ctypes.util
 import errno
 import fcntl
 import json
@@ -447,6 +449,213 @@ def focus_window(w):
     call("bring_to_front", {"pid": w["pid"], "window_id": w["window_id"]})
 
 
+_XA_WINDOW = 33  # predefined X atom id for the WINDOW property type
+
+_x11 = None          # cached libX11 CDLL once loaded
+_x11_failed = False  # latched once a load attempt has failed
+_x11_lock = threading.Lock()  # serializes the lazy load: the bridge is
+# threaded, and without it a racing failed load could latch _x11_failed
+# while a sibling load would have succeeded, permanently disabling the
+# assertion for the process
+
+
+def _x11_lib():
+    """Load libX11 once via stdlib ctypes (no new dependency). Returns the
+    CDLL, or None when libX11 cannot be loaded on this machine. Never
+    raises — a missing X client library only means the focus assertion
+    cannot run (fail-open, loudly, in _assert_focused)."""
+    global _x11, _x11_failed
+    if _x11_failed:
+        return None
+    if _x11 is not None:
+        return _x11
+    with _x11_lock:
+        if _x11_failed:
+            return None
+        if _x11 is not None:
+            return _x11
+        try:
+            name = ctypes.util.find_library("X11") or "libX11.so.6"
+            lib = ctypes.CDLL(name)
+            lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            lib.XOpenDisplay.restype = ctypes.c_void_p
+            lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            lib.XCloseDisplay.restype = ctypes.c_int
+            lib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            lib.XDefaultRootWindow.restype = ctypes.c_ulong
+            lib.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                        ctypes.c_int]
+            lib.XInternAtom.restype = ctypes.c_ulong
+            lib.XFree.argtypes = [ctypes.c_void_p]
+            lib.XFree.restype = ctypes.c_int
+            lib.XGetWindowProperty.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+                ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+                ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte))]
+            lib.XGetWindowProperty.restype = ctypes.c_int
+            _x11 = lib
+        except Exception:
+            _x11_failed = True
+            return None
+    return _x11
+
+
+def _active_window_id():
+    """Best-effort read of the EWMH _NET_ACTIVE_WINDOW root property — the
+    same property bring_to_front sets through the driver.
+
+    Returns the active X11 window id (int), or None when it cannot be
+    determined: no libX11, no display name, the WM doesn't publish the
+    property (non-EWMH WMs), or any X error short of a fatal Xlib protocol
+    error (unreachable with the validated display/root/atom used here).
+    Never raises; no per-call subprocesses (one `ldconfig` probe may run
+    at first load inside `ctypes.util.find_library`). The display name
+    comes from BASE_ENV (the bridged desktop's env) — when BASE_ENV has
+    no DISPLAY the target desktop is unknown and the read fails open —
+    so the read always targets the desktop the bridge drives, never a
+    stray ambient display.
+    """
+    lib = None
+    prop = ctypes.POINTER(ctypes.c_ubyte)()
+    d = None
+    try:
+        lib = _x11_lib()
+        if lib is None:
+            return None
+        display = BASE_ENV.get("DISPLAY")
+        if not display:
+            return None
+        d = lib.XOpenDisplay(display.encode())
+        if not d:
+            return None
+        atom = lib.XInternAtom(d, b"_NET_ACTIVE_WINDOW", False)
+        root = lib.XDefaultRootWindow(d)
+        actual_type = ctypes.c_ulong()
+        actual_format = ctypes.c_int()
+        nitems = ctypes.c_ulong()
+        bytes_after = ctypes.c_ulong()
+        rc = lib.XGetWindowProperty(
+            d, root, atom, 0, 1, False, _XA_WINDOW,
+            ctypes.byref(actual_type), ctypes.byref(actual_format),
+            ctypes.byref(nitems), ctypes.byref(bytes_after),
+            ctypes.byref(prop))
+        if rc != 0 or nitems.value < 1 or not prop:
+            return None
+        return int(ctypes.cast(prop, ctypes.POINTER(ctypes.c_ulong))[0])
+    except Exception:
+        return None
+    finally:
+        try:
+            if prop:
+                lib.XFree(prop)
+        except Exception:
+            pass
+        try:
+            if d:
+                lib.XCloseDisplay(d)
+        except Exception:
+            pass
+
+
+_FOCUS_SETTLE_S = 0.5    # per-attempt budget waiting for the WM to publish
+# _NET_ACTIVE_WINDOW after bring_to_front (polled, not slept — a fast WM
+# grants focus on the first poll)
+_FOCUS_POLL_STEP_S = 0.05
+
+
+def _poll_focus(target_id, deadline):
+    """Poll _NET_ACTIVE_WINDOW until target_id appears or the deadline
+    passes. Returns (matched, readable): readable tells whether any poll
+    returned a value at all, so callers can distinguish "stolen focus"
+    from "the WM doesn't publish focus".
+
+    Two consecutive unreadable reads short-circuit the poll: a missing
+    libX11, an unreachable display, or a non-EWMH WM is deterministic —
+    the property will not become readable later in this poll — so there
+    is no reason to burn the whole settle budget (which would otherwise
+    eat the #492 probe's echo-observation budget on exotic stacks). A
+    merely slow WM still returns a *wrong* id, not None, so the
+    grant-latency case keeps its full settle."""
+    readable = False
+    none_streak = 0
+    while True:
+        active = _active_window_id()
+        if active is None:
+            none_streak += 1
+            if none_streak >= 2:
+                # Keep any earlier readability: a transient X hiccup after
+                # a readable (wrong) id must not downgrade a stolen-focus
+                # signal into fail-open.
+                return False, readable
+        else:
+            readable = True
+            none_streak = 0
+            if active == target_id:
+                return True, True
+        if time.monotonic() >= deadline:
+            return False, readable
+        time.sleep(_FOCUS_POLL_STEP_S)
+
+
+def _assert_focused(w):
+    """Confirm w still holds input focus before keystrokes are delivered
+    (#494).
+
+    bring_to_front is asynchronous — the WM grants _NET_ACTIVE_WINDOW on
+    its own schedule — and another client can steal focus at any moment,
+    in which case the driver's XTEST injection would land in the wrong
+    window (XTEST delivers to the focus window and ignores the target).
+    Poll the EWMH active-window property — the same property
+    bring_to_front sets — for the target id; on a persistent mismatch,
+    re-assert focus once and re-poll, then give up LOUDLY (False) instead
+    of typing into the wrong window.
+
+    When the property cannot be read at all (no libX11, no display, a
+    non-EWMH WM), fail OPEN — fast, after two consecutive unreadable reads,
+    with a loud log: typing availability on exotic stacks outranks an
+    unverifiable assertion, and the fast path keeps the #492 probe's echo
+    budget intact; the stolen-focus case — the shape #494 names — stays
+    fail-closed.
+
+    Residual, stated honestly: this narrows the bridge-side window to the
+    final-poll→driver-call race (stolen focus between bring_to_front and
+    the driver call). The driver's own
+    foreground sequence re-activates the target inside the call, but a
+    focus steal landing between the driver's activate and its inject is
+    driver-internal and cannot be closed from the bridge — closing that
+    needs an atomic focus+inject driver operation (upstream).
+    """
+    target_id = int(w["window_id"])
+    matched, readable = _poll_focus(target_id,
+                                    time.monotonic() + _FOCUS_SETTLE_S)
+    if matched:
+        return True
+    if not readable:
+        # Never saw a readable property — the WM doesn't publish it or X
+        # is unreachable; fail open, loudly (see docstring).
+        print("cua-bridge: WARNING: _NET_ACTIVE_WINDOW unreadable — focus "
+              "assertion skipped (fail-open); exotic/non-EWMH stack?",
+              file=sys.stderr)
+        return True
+    # Readable but wrong: one re-assert + re-poll (a slow WM, or a
+    # transient raise interleaved with the first bring_to_front), then
+    # fail closed.
+    try:
+        focus_window(w)
+    except Exception as e:
+        print(f"cua-bridge: focus re-assert failed: {e}", file=sys.stderr)
+        return False
+    matched, _ = _poll_focus(target_id, time.monotonic() + _FOCUS_SETTLE_S)
+    if matched:
+        return True
+    print(f"cua-bridge: FOCUS ASSERTION FAILED for window {target_id} "
+          f"(pid {w.get('pid')}) — keystrokes NOT delivered (#494)",
+          file=sys.stderr)
+    return False
+
+
 # Input-path liveness probe (#492): /api/status used to report
 # driver-process health only, so the stack's best-known failure mode — the
 # Xvfb XTEST keyboard device wedging while the driver keeps reporting
@@ -475,6 +684,14 @@ _ECHO_FLOOR_S = 0.5  # minimum echo-wait budget after the key is sent; less
 # ASSUMPTION (B4), pinned to cua-driver 0.28.2 (cua/README.md): untargeted
 # foreground press_key routes through XTestFakeKeyEvent — see the
 # focus_window contract note. Re-verify on driver upgrades.
+# #494: bring_to_front is async and focus can be stolen between it and
+# the keystroke injection, so the /api/type and /api/key handlers (and
+# the #492 probe) re-verify the target through _assert_focused() before
+# delivering input — a persistent mismatch fails closed (409 /
+# "unknown") instead of typing into the wrong window. ASSUMPTION, pinned
+# to cua-driver 0.28.2 like (B4) above: the read trusts that
+# bring_to_front keeps publishing _NET_ACTIVE_WINDOW — re-verify on
+# driver upgrades.
 PROBE_DRIVER_VERSION = "cua-driver 0.28.2"
 
 # Serializes probe bodies: XTestFakeKeyEvent delivers to the focus window,
@@ -580,6 +797,15 @@ def _input_probe(timeout=INPUT_PROBE_TIMEOUT, cancel=None):
             if cancel is not None and cancel.is_set():
                 return ("unknown",
                         "input probe cancelled before the key — inconclusive")
+            # #494: the untargeted key below lands wherever input focus is.
+            # If focus was stolen after the hop, the echo would never arrive
+            # and the probe would false-report a wedge — verify first, and
+            # report the theft as inconclusive (the fail-safe direction).
+            if not _assert_focused(win):
+                return ("unknown",
+                        "focus stolen between the probe's focus hop and the "
+                        "XTEST key — a missing echo would false-report a "
+                        "wedge; probe inconclusive")
             # No pid/window_id: the untargeted foreground key routes through
             # XTEST global input and lands in the focused window (xev). A
             # bare modifier tap is harmless wherever it lands.
@@ -769,6 +995,13 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _focus_409(self):
+        # #494: the focus assertion failed — refuse loudly instead of
+        # delivering keystrokes to whatever stole focus.
+        return self._json(
+            {"error": "focus assertion failed — another window holds "
+                      "input focus; keystrokes not delivered (#494)"}, 409)
+
     def do_GET(self):
         try:
             if not self._check_csrf():
@@ -884,6 +1117,8 @@ class Handler(BaseHTTPRequestHandler):
                 if w is None:
                     return self._json({"error": "no window open"}, 404)
                 focus_window(w)
+                if not _assert_focused(w):
+                    return self._focus_409()
                 res = call("type_text", {"pid": w["pid"],
                                          "window_id": w["window_id"],
                                          "text": text,
@@ -899,6 +1134,8 @@ class Handler(BaseHTTPRequestHandler):
                 if w is None:
                     return self._json({"error": "no window open"}, 404)
                 focus_window(w)
+                if not _assert_focused(w):
+                    return self._focus_409()
                 res = call("press_key", {"pid": w["pid"],
                                          "window_id": w["window_id"],
                                          "key": key, "modifiers": mods,
