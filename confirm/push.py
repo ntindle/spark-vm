@@ -694,7 +694,8 @@ def _plane_push_owner() -> bool:
         global _warned_bad_plane_env
         if not _warned_bad_plane_env:
             log.warning("push-queue: ignoring bad SPARKVM_PLANE_PUSH=%r "
-                        "(expected 1/0); auto-detecting", raw)
+                        "(expected 1/true/yes or 0/false/no); "
+                        "auto-detecting", raw)
             _warned_bad_plane_env = True
     try:
         d = os.environ.get("SVM_PAIR_DIR") or os.path.expanduser(
