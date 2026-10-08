@@ -50,6 +50,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-08
+
 ### Added
 
 - S4b remaining-builds gap analysis: what moved since the S4b socket-lifecycle analysis — the box-side sequence-gap guard now interacts with the re-drive's malformed-row skip, so a skipped malformed row reads as a permanent sequence gap and the socket holds every later command frame for the session's whole remaining life (the durable queue keeps flowing through the every-minute cron backstop, but the fast path degrades to a dead session). The analysis validates the finding against the shipped code, rejects the booked-frame fix (a skipped row never produces a frame, so there is nothing to book), defers wire tombstones, and pins the build design: the gap guard consults the cron ingest's shared cursor and fast-forwards the session prefix when the cursor has advanced past the gap on the same epoch — bounding the hold to about one cron tick, self-healing without reconnect. The build is scoped and test-pinned on the issue; the wire doc's "carriers aligned" claim gets its bounded-degradation caveat in the same change. (#1148)
@@ -2791,7 +2793,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 - Fixed critical and high findings from the security code review
   ([`dd382af`](https://github.com/ntindle/spark-vm/commit/dd382af))
 
-[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.6.0...HEAD
+[unreleased]: https://github.com/ntindle/spark-vm/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ntindle/spark-vm/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ntindle/spark-vm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ntindle/spark-vm/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ntindle/spark-vm/compare/v0.3.0...v0.4.0

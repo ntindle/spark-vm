@@ -283,7 +283,19 @@ def test_supervisord_commands_mirror_units():
 # real ARG default, the real version checker, the real manifest scripts).
 
 
-def _scratch_repo(tmp_path, version="0.6.0", dirty=False, dockerfile_transform=None):
+def _tree_version():
+    with open(os.path.join(REPO_ROOT, "VERSION"), encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def _scratch_repo(tmp_path, version=None, dirty=False, dockerfile_transform=None):
+    if version is None:
+        # The fixture carries the real driver inputs (the real Dockerfile
+        # with its real ARG default), so it must also carry the real tree
+        # version — a hardcoded old VERSION would drift from the recipe
+        # default on every release bump and trip the driver's D-P1
+        # refuse-on-drift check.
+        version = _tree_version()
     repo = tmp_path / "scratch"
     (repo / "deploy" / "golden-image").mkdir(parents=True)
     (repo / "harness").mkdir()
@@ -367,7 +379,7 @@ def test_gate_record_skeleton_schema(tmp_path):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert record["image_version"] == head
-    assert record["built_from_version"] == "0.6.0"
+    assert record["built_from_version"] == _tree_version()
     assert record["automated_gate_steps"]["step0_manifest_preflight"] == "pass"
     scan = record["automated_gate_steps"]["step0b_baked_secrets_scan"]
     assert scan["target"] == "not-run"  # static path: honestly not run
