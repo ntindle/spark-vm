@@ -210,3 +210,19 @@ operator-visible; (c) unhandled-exception paths in the DO must not
 leak VAPID key material into platform logs. This doc amends nothing
 in D56's contract text — D56a's "MUST run exactly one instance per
 D1 store" now names this doc as its mechanism.
+
+Status 2026-10-07: the drain body landed — `hosted/push_send_loop.py`
+(#1102) implements the D56b–f drain the loop runs under this claim:
+claims `'queued'` outbox rows in `id` ASC, gate-2 terminal-state re-read
+(D56d/D80/D85 — aid-keyed kinds re-read the live approval record before
+any send; decided or deleted approvals never page), per-device fanout
+against live subscriptions only, six retry attempts with backoff
+(429 Retry-After honored; 410/404 tombstones; then per-device
+dead-letter), and aid-keyed re-page by the reminder machinery. The
+Durable-Object singleton claim build itself is still open on #1094 —
+until it ships, the interim claiming mechanism is the non-overlap
+scheduler rule pinned in `docs/PRODUCTION_DEPLOY_CONTRACT.md`
+"Scheduled plane jobs" (the claim-design doc's §3 pins the
+DO-singleton's input-gate behavior for the built world, not the
+interim rule). Companion: `hosted/push_sender.py` (#989) owns the
+transport; `hosted/push_enqueue.py` (#990) owns the enqueue boundary.

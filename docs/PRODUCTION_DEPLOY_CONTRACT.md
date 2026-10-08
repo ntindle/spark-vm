@@ -102,6 +102,30 @@ remains the working backup; the SHA is the audit pin.
   is expected, not a failure signal — persisting beyond the propagation
   window is.
 
+## Scheduled plane jobs
+
+The push sender loop (`hosted/push_send_loop.py`, #1094) runs as a
+scheduled job against the plane's D1 store. The loop has no leader
+election and no claim lease (the frozen schema, #988, rules out a claim
+column) — so the scheduler owns singleton-ness, and this section is
+the interim claiming mechanism:
+
+- **Ticks MUST NOT overlap.** Exactly one sender tick per D1 store at a
+  time. Two overlapping ticks SELECT the same `'queued'` rows and both
+  POST: the owner's phone buzzes twice for one page (page-once is the
+  lane's core promise — a double-buzz cannot be un-rung by any
+  downstream dedup), and on the release path both ticks run the
+  terminal transaction, double-decrementing the D10 budget counter
+  (floored at zero) so one page can consume another page's budget unit.
+- **A tick overrunning the schedule interval is a double-buzz incident**,
+  not a performance note: shorten the tick's work (`max_claims`) or
+  lengthen the interval before ticks can overlap.
+- **Handoff:** this rule retires when the Durable-Object singleton
+  claim build ships — the claim design is pinned in
+  `docs/PUSH_SENDER_CLAIM_DESIGN.md` (D56a, #1121); its input gate is
+  what turns overlapping ticks into queued ones instead of concurrent
+  sends. Until then, this section is the entire claiming mechanism.
+
 ## Live verification checklist
 
 Run after the deploy, against production, before calling it done:
