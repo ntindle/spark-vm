@@ -27,6 +27,11 @@ JOBS = os.path.join(HOME, "muse-jobs")
 METADATA = os.path.join(HOME, ".local", "share", "muse-job", "jobs")
 EVENTS = os.path.join(HOME, ".local", "share", "muse-job", "events")
 SESSIONS = os.path.join(HOME, ".local", "share", "muse-job", "sessions")
+# Issue #1130: the manager-side turn-event journal lives outside the job
+# dir (see bin/muse-job). Same treatment as the #11 record above: the
+# sweep prunes it with the closed job, gated on the dir actually being
+# gone, so `muse-job log` never renders a ghost journal for a swept job.
+JOURNALS = os.path.join(HOME, ".local", "share", "muse-job", "journals")
 WARN_PCT = 85
 KILL_PCT = 93
 PRUNE_CLOSED_AFTER_DAYS = 7
@@ -154,6 +159,13 @@ def main():
                     if not os.path.exists(jd):
                         try:
                             os.remove(os.path.join(METADATA, slug + ".json"))
+                        except OSError:
+                            pass
+                        # Issue #1130: the manager-side journal lives
+                        # outside the job dir too -- prune it under the
+                        # same gate so no ghost journal survives the sweep.
+                        try:
+                            os.remove(os.path.join(JOURNALS, slug + ".jsonl"))
                         except OSError:
                             pass
                     summary["pruned"].append(jd)
