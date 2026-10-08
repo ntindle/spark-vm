@@ -686,14 +686,31 @@ def _find_login(obj):
     absent, non-string, or empty fails closed: None means the peer is
     refused (an empty login is not an identity — the recursive form
     never returned one either, its truthiness check skipped it).
+
+    Architecture review (#1168, blocking): the fail-closed path must not
+    be silent — a whois schema change would otherwise hard-lock the
+    single approver out of the page with zero trail. The warnings below
+    name only the failure mode and top-level field names (never values —
+    the doc carries node addresses); they fire only on the refusal path,
+    so a healthy daemon never logs them.
     """
     if not isinstance(obj, dict):
+        print("confirmd WARNING: _find_login: whois doc is not a dict "
+              "(type=%s); refusing peer" % type(obj).__name__, flush=True)
         return None
     profile = obj.get("UserProfile")
     if not isinstance(profile, dict):
+        print("confirmd WARNING: _find_login: no UserProfile dict in "
+              "whois doc (top-level keys=%s); refusing peer"
+              % sorted(map(str, obj.keys())), flush=True)
         return None
     login = profile.get("LoginName")
-    return login if isinstance(login, str) and login else None
+    if not isinstance(login, str) or not login:
+        print("confirmd WARNING: _find_login: UserProfile.LoginName "
+              "absent/empty/non-string (type=%s); refusing peer"
+              % type(login).__name__, flush=True)
+        return None
+    return login
 
 
 # Issue #535 (open-source) / #360 (hosted S1): the audit trail is
@@ -1642,7 +1659,11 @@ def _prune_quarantine(limit=None):
     tolerated, and the count gate skips the mtime stat storm when the
     dir is within the cap. Quarantine moves never collide with the prune
     by name (aids are never reused), and a lost race surfaces as
-    FileNotFoundError, which is tolerated.
+    FileNotFoundError, which is tolerated. Strays can't land here
+    (Architecture review): `_quarantine_corrupt_pending` moves the
+    existing `<aid>.json` pending file into place via `os.replace` — no
+    temp intermediates ever enter the dir — so the `.json` filter sees
+    every file the writer path can create.
     """
     if limit is None:
         limit = _QUARANTINE_KEEP
