@@ -75,15 +75,66 @@ jobs:
           fi
           echo "code_changed=$code_changed" >> "$GITHUB_OUTPUT"
 
-  python-tests:
-    name: python tests
+  # #1138: shard the ~40-min python suite into parallel jobs. The `plan`
+  # job emits the shard inventory from scripts/ci_shard_plan.py as the
+  # matrix for `python-tests-shard` (one matrix child per shard); the
+  # `python-tests` job below is the aggregate gate over all shards and
+  # keeps the exact `python tests` check name the branch-protection
+  # ruleset requires — no ruleset update needed, and the gate cannot go
+  # green while any shard is red.
+  plan:
+    name: shard plan
     needs: changes
-    # P138: docs-only diffs skip the ~40-min suite; the docs-only gate is
-    # the four other jobs plus the docs-index coverage guard (docs-guard).
-    # A skipped required check shows as neutral, so this does not block
-    # branch-protected merges of docs-only PRs.
+    # P138: docs-only diffs skip the suite entirely, so the plan has
+    # nothing to emit for them.
     if: needs.changes.outputs.code_changed == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: check shard inventory
+        # The bijection pin test (scripts/test_ci_shard_plan.py) runs
+        # INSIDE the shard-unit shard, so a PR that drops scripts/ from
+        # the inventory would unwire the pin from its own CI run and go
+        # green with suites silently never running. Enforce the bijection
+        # here too: the plan job always runs on code PRs, and a failure
+        # here fails the aggregate gate via plan=failure.
+        run: python3 scripts/ci_shard_plan.py --check
+      - name: emit shard matrix
+        id: shards
+        run: |
+          matrix="$(python3 scripts/ci_shard_plan.py)"
+          # Fail loud on a broken plan: an empty matrix would fan out to
+          # zero children and the gate below would see "all skipped".
+          echo "$matrix" | python3 -c "import json,sys; m=json.load(sys.stdin); assert m['include'], 'empty shard matrix'"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  python-tests-shard:
+    name: python tests (${{ matrix.shard }})
+    needs: [changes, plan]
+    # P138: docs-only diffs skip the ~40-min suite; the docs-only gate is
+    # the four other jobs plus the docs-index coverage guard (docs-guard).
+    if: needs.changes.outputs.code_changed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      # One shard's failure must not cancel the others: the aggregate gate
+      # needs every shard's own verdict, and a cancelled shard must not
+      # read as anything but a gate failure.
+      fail-fast: false
+      # NB: the strategy expression is evaluated BEFORE the job-level `if:`
+      # below, so on docs-only diffs (where `plan` is skipped and its
+      # output is empty) a bare fromJson(needs.plan.outputs.matrix) would
+      # throw "empty input" and FAIL the job instead of skipping it —
+      # blocking the docs-only PRs P138 keeps mergeable. The `||` fallback
+      # yields a zero-leg matrix on empty input, so the job skips cleanly
+      # and the aggregate's docs-only carve-out works as designed. (Empty
+      # string is falsy in GHA expressions; a successful plan always emits
+      # non-empty JSON, so the fallback never fires on a code PR.)
+      matrix: ${{ fromJson(needs.plan.outputs.matrix || '{"include":[]}') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -102,35 +153,74 @@ jobs:
       # PR author could not reproduce locally — the gate must be deterministic.)
       - name: install shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-      - name: full test suite (repo-root one-liner)
-        # pytest.ini testpaths enumerate every suite, so this step can never
-        # silently drop one the way the old per-directory file lists did
-        # (~two dozen suites landed unwired before 2026-09-27). pytest continues past
-        # a failing suite and reports every failure at the end, so one red
-        # suite cannot mask another. scripts/test_pytest_ini_covers_all.py
-        # pins the residual drift class: a test_*.py outside testpaths fails
-        # the run instead of never running.
+      - name: shard test suite
+        # pytest.ini testpaths enumerate every suite; the shard inventory in
+        # scripts/ci_shard_plan.py partitions them, and
+        # scripts/test_ci_shard_plan.py (running in the shard-unit child)
+        # pins the bijection — so this step can never silently drop a suite
+        # the way the old per-directory file lists did (~two dozen suites
+        # landed unwired before 2026-09-27). pytest continues past a failing
+        # suite and reports every failure at the end, so one red suite
+        # cannot mask another.
         # if: always(): never let an infra flake in an earlier setup step
         # (shellcheck's apt-get, pip) skip the whole suite and void the
         # merge gate's test signal.
         if: always()
-        run: python3 -m pytest -q
+        run: python3 -m pytest -q ${{ matrix.dirs }}
       - name: proxy install-safety root tests (substitution regression)
         # test_staged_temp_unreachable_by_parent_dir_attacker and
         # test_staging_dir_swap_fails_closed self-skip as non-root, so the
-        # one-liner above never executes the staged-temp substitution TOCTOU
+        # shard run above never executes the staged-temp substitution TOCTOU
         # guard (issue #336). Run them under sudo so the merge gate proves
         # the guard; SAFE_INSTALL_ROOT_TESTS=require turns a self-skip into
         # a failure, so a skipped test can never read as a green build.
         # (Pytest exits 5 if the -k selection ever matches nothing, e.g.
         # after a rename -- also a failure.)
-        if: always()
+        # matrix.root_tests is data-driven from scripts/ci_shard_plan.py
+        # (exactly the shard holding proxy/) — never a hardcoded shard name,
+        # so renaming a shard cannot silently drop these tests.
+        if: always() && matrix.root_tests
         # NB: sudo resets PATH to secure_path, so bare `python3` would resolve
         # to /usr/bin/python3 (no pytest) -- that failed the CI step with
         # "No module named pytest". Resolve the setup-python interpreter OUTSIDE
         # sudo (setup-python puts it first on PATH) and pass it as an absolute
         # path; sudo's VAR=value form still carries SAFE_INSTALL_ROOT_TESTS.
         run: sudo SAFE_INSTALL_ROOT_TESTS=require "$(command -v python3)" -m pytest proxy/test_safe_install.py -k 'unreachable_by_parent_dir_attacker or staging_dir_swap_fails_closed' -q
+
+  python-tests:
+    name: python tests
+    # The aggregate gate. Branch-protection ruleset 23971329 requires the
+    # `python tests` context by name, so this job keeps that exact name and
+    # the shard children (`python tests (<shard>)`) stay unrequired: the
+    # ruleset needs no update and the gate is not weakened.
+    needs: [changes, plan, python-tests-shard]
+    # if: always(): without it, a failed/cancelled shard would SKIP this
+    # job, and a skipped required check shows neutral — the PR could merge
+    # on red shards. With it, this job always runs and the step below
+    # decides the verdict explicitly.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: gate on shard results
+        run: |
+          changes_result="${{ needs.changes.result }}"
+          plan_result="${{ needs.plan.result }}"
+          shard_result="${{ needs.python-tests-shard.result }}"
+          if [ "$changes_result" = "success" ] && [ "$plan_result" = "skipped" ] && [ "$shard_result" = "skipped" ]; then
+            # Docs-only path (P138): plan's `if` is exactly the code_changed
+            # gate, so given changes=success, plan-skipped ⟺ docs-only —
+            # the shards never ran, same as today's skipped check: neutral,
+            # not a failure.
+            exit 0
+          fi
+          if [ "$plan_result" = "success" ] && [ "$shard_result" = "success" ]; then
+            exit 0
+          fi
+          # Every other combination fails the gate: a failed/cancelled plan
+          # (shards skipped via needs), a failed/cancelled shard, or a
+          # failed changes job can never read as green.
+          echo "failing the gate: changes=$changes_result plan=$plan_result shards=$shard_result" >&2
+          exit 1
 
   shellcheck:
     name: shellcheck

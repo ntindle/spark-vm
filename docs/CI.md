@@ -6,7 +6,9 @@ against `main`, and on manual `workflow_dispatch` runs.
 | Job | What it runs |
 |---|---|
 | `changes` | Changed-paths gate: one-step `git diff --no-renames --name-only` against the PR base. `code_changed` is true when any file outside `docs/` + `CHANGELOG.md` changed; on push / `workflow_dispatch` it defaults true. `python-tests` runs only when `code_changed` is true, so docs-only PRs skip the ~40-min suite (the other five jobs are the docs-only merge gate; a skipped required check is neutral and does not block merging). |
-| `python-tests` | The repo-root one-liner `python3 -m pytest -q` — `pytest.ini`'s `testpaths` is the authoritative suite inventory (one directory per component; the per-component breakdown with dependency notes lives in CONTRIBUTING.md's "Running the tests" table, which `scripts/test_contributing_suites.py` pins to `testpaths` so it can't drift). Installs `shellcheck` via apt first — `test_auto_deploy.py::test_scripts_syntax` gates on shellcheck *warnings* and must not depend on whatever the runner image happens to carry. |
+| `plan` | Shard-plan job: runs `python3 scripts/ci_shard_plan.py` and emits its matrix for `python-tests-shard`. The plan script is the single source of the shard inventory; `scripts/test_ci_shard_plan.py` (running inside the `shard-unit` shard) pins the bijection between `pytest.ini` `testpaths` and shards, so a new suite can never land unwired from CI. Gated to `code_changed` like the shards. |
+| `python-tests-shard` | Matrix job — one child per shard (`python tests (shard-integration)`, `python tests (shard-components)`, `python tests (shard-unit)`), each installing `requirements-test.txt` (+ shellcheck via apt — `cua/test_shell_scripts.py` gates on shellcheck *warnings* and must not depend on whatever the runner image happens to carry) and running its `pytest.ini` `testpaths` slice. `fail-fast: false` so one shard's failure never cancels the others. The sudo install-safety root tests (`proxy/test_safe_install.py`'s self-skipping substitution guards, issue #336) run on the shard holding `proxy/` — flagged data-driven by the plan script, never a hardcoded shard name. Each shard's suite step keeps the `if: always()` discipline: an infra flake in an earlier setup step never voids that shard's signal. |
+| `python-tests` | The aggregate gate over the shards, keeping the exact `python tests` check name the branch-protection ruleset requires. `if: always()` plus an explicit result check over the `changes` / `plan` / shard verdicts: green on the docs-only path (`changes` success, `plan` + shards skipped — `plan`'s `if` is exactly the `code_changed` gate, so that combination means docs-only) or when `plan` and every shard succeeded; every other combination (failed/cancelled plan, failed/cancelled shard, failed `changes` job) fails the gate. A failed shard can never read as a passing gate. |
 | `docs-guard` | `scripts/test_docs_index_coverage.py`: every `docs/*.md` file must have an index row in `docs/README.md`. Always runs — including on docs-only PRs where `python-tests` is skipped, since the test lives in that suite. |
 | `shellcheck` | shellcheck at `--severity=error` over every `*.sh` (gates on real breakage, not style) |
 | `markdown-links` | lychee checks every link in every `*.md` (`--exclude-loopback`: docs reference localhost service addresses that can never resolve on a runner; `--exclude` for the bot-blocking hosts — boat.dev, businesswire.com, daytona.io, fourweekmba.com, globenewswire.com, medium.com, producthunt.com, tvgreport.com, plus the release-compare URL pattern — see the exclusion comments in `.github/workflows/ci.yml`; the local-run block below documents the manual re-sweep ritual for the medium.com / businesswire.com / globenewswire.com subset). Mail links are excluded by lychee's default in current versions — do not pass `--exclude-mail`; the flag was removed upstream and fails the step. |
@@ -16,11 +18,19 @@ against `main`, and on manual `workflow_dispatch` runs.
 # replicate the CI jobs locally before opening a PR:
 
 ```sh
-# pytest suites — CI runs exactly this repo-root one-liner
-# (`pytest.ini` testpaths is the authoritative suite inventory; a test file
-# landing outside the listed directories fails
-# scripts/test_pytest_ini_covers_all.py instead of silently never running):
+# pytest suites — CI runs the repo-root one-liner's inventory *sharded*
+# (`pytest.ini` testpaths is the authoritative suite inventory, partitioned
+# by scripts/ci_shard_plan.py; a test file landing outside the listed
+# directories fails scripts/test_pytest_ini_covers_all.py instead of
+# silently never running, and a directory missing from every shard fails
+# scripts/test_ci_shard_plan.py):
 python3 -m pytest -q
+
+# one shard's slice only (what a single `python-tests-shard` matrix child runs;
+# shard -> dirs lives in scripts/ci_shard_plan.py):
+python3 -m pytest -q muse-job/tests          # shard-integration
+python3 -m pytest -q proxy harness hosted    # shard-components
+python3 -m pytest -q confirm deploy scripts cred-ui/tests cua jail credlib fleet pairing browser-driver  # shard-unit
 
 # one component's suite only, from the repo root:
 python3 -m pytest proxy -q
@@ -74,9 +84,12 @@ Adding a new test suite: drop a `test_*.py` next to its component and add
 its directory to `pytest.ini`'s `testpaths` — `scripts/test_pytest_ini_covers_all.py`
 fails the run if a `test_*.py` file lands outside the listed directories,
 and `scripts/test_contributing_suites.py` fails if CONTRIBUTING.md's
-component table disagrees with `testpaths` in either direction. (There is
-no per-suite CI step to add anymore — the `python-tests` job runs the
-repo-root one-liner over the whole `testpaths` inventory.) The suite must
+component table disagrees with `testpaths` in either direction. Then put
+the directory in exactly one shard in `scripts/ci_shard_plan.py` —
+`scripts/test_ci_shard_plan.py` fails if a `testpaths` directory is in
+zero shards (silently unwired from CI) or in two (runs twice). (There is
+no per-suite CI step to add — the `python-tests-shard` matrix covers the
+whole `testpaths` inventory via the shard plan.) The suite must
 be green on the branch before the PR is opened. (Docs-only PRs skip
 `python-tests` via the `changes` gate above; `docs-guard` still enforces
 the docs-index invariant on those.)
