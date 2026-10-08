@@ -3727,6 +3727,14 @@ class QuarantinePruneTests(unittest.TestCase):
             self.assertEqual([p.name for p in remaining],
                              ["q0.json", "q1.json", "q2.json"])
 
+    def test_1168_quarantine_prune_missing_dir_noop(self):
+        """A missing quarantine dir is a no-op — the prune must never
+        create the dir it prunes (CI incident, PR #1169)."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            cd._prune_quarantine(limit=3)  # must not raise
+            self.assertFalse(
+                (self.approvals / "pending-quarantine").exists())
+
     def test_1168_housekeeping_prunes_quarantine(self):
         """_housekeeping_if_due() runs the quarantine prune at the keep
         bound."""
