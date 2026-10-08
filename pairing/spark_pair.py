@@ -2824,11 +2824,14 @@ class _PhoneHomeSession:
     consumed/ O_EXCL records). D-MAL1 (wire doc §3.3, aligned on #1118):
     a malformed `command` frame is skipped loudly — never executed,
     never acked, and never holding the per-session `_acked_prefix` —
-    so the queue flows past plane data bugs exactly like the HTTPS
-    carrier. (The separate gap guard below still holds later seqs when
-    a frame jumps past an unacked seq: a missing row is not a malformed
-    row — the DO re-drives the gap, and skipping it would silently
-    reorder execution. See _handle_socket_command.)
+    the same skip-and-log the HTTPS carrier applies to malformed rows.
+    (The separate gap guard below still holds later seqs when a frame
+    jumps past an unacked seq: a missing row is not a malformed row —
+    the DO re-drives the gap, and skipping it would silently
+    reorder execution. Residual: a DO-skipped malformed *row* looks
+    exactly like a missing row to this guard, so the session holds
+    live frames on it until reconnect or plane repair; the cron path
+    is the liveness backstop. See _handle_socket_command.)
     """
 
     def __init__(self, d, sock, reader, box_id, generation, token,
@@ -2953,11 +2956,15 @@ class _PhoneHomeSession:
         box cannot trust is logged loudly and never acked — per the
         pinned D-MAL1 policy (docs/PHONE_HOME_WIRE_PROTOCOL.md §3.3) a
         malformed frame is skipped: never executed, never acked, and
-        never holding the per-session `_acked_prefix`, so the queue
-        flows past the plane's data bug exactly like the HTTPS carrier.
-        (The DO's S4b-2a re-drive never emits malformed rows at all —
-        it journals them as `phone_home.redrive_malformed` — so this
-        branch only fires on a DO/wire bug, never on a table row.)
+        never holding the per-session `_acked_prefix`. (The DO's S4b-2a
+        re-drive never emits malformed rows at all — it journals them
+        as `phone_home.redrive_malformed` — so this branch only fires
+        on a DO/wire bug, never on a table row. Note the residual below:
+        a DO-skipped malformed *row* surfaces to this session as a
+        sequence gap, and the gap guard still holds later frames on it —
+        live delivery degrades to the cron path until reconnect or
+        plane repair. The cron path itself always flows past the bad
+        row.)
         """
         if frame.get("generation") != self.generation:
             # A stale session's frame (or a plane bug): it does not
@@ -2997,10 +3004,11 @@ class _PhoneHomeSession:
             # (shaping failed, so no field can be trusted — including
             # the seq). D-MAL1 (docs/PHONE_HOME_WIRE_PROTOCOL.md §3.3):
             # skip-and-log for both carriers. The frame is skipped
-            # loudly and the per-session prefix is untouched, so later
-            # seqs keep flowing — the queue never wedges on a plane
-            # data bug. (The S4b-2a re-drive never emits malformed rows,
-            # so this frame will not re-drive; the DO journals it as
+            # loudly and the per-session prefix is untouched, so the
+            # malformed frame itself never holds the session (later
+            # seqs still pass through the gap guard below). (The S4b-2a
+            # re-drive never emits malformed rows, so this frame will
+            # not re-drive; the DO journals it as
             # `phone_home.redrive_malformed`.)
             _phone_home_say(self.d,
                             "ignoring malformed command frame (plane "

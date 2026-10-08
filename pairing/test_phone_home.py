@@ -1369,6 +1369,38 @@ def test_socket_command_malformed_frame_skips_prefix_flows(ctx, monkeypatch,
     assert "skipped per D-MAL1" in out
 
 
+def test_socket_command_non_object_payload_skipped_flows(ctx, monkeypatch,
+                                                        tmp_path, capsys):
+    # #1118 (QA round-1 blocker): the non-object-payload branch's
+    # D-MAL1 rewording needs its own pin — a frame whose payload is
+    # not a dict is skipped loudly without holding the prefix, and
+    # valid frames around it are executed and acked.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    aids = {1: "s5bpay0000000001", 2: "s5bpay0000000002"}
+    for aid in aids.values():
+        _s5b_file_pending(approvals, aid)
+
+    def inner(seq, aid):
+        return _s5b_inner(_s5b_decision(aid=aid, dseq=seq))
+
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, inner(1, aids[1])),
+                    ("send-command", "bogus", 0, ["not", "a", "dict"]),
+                    ("send-command", 2, 0, inner(2, aids[2])),
+                    ("expect-acks", [1, 2]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    acks = [f["seq"] for f in _s5b_acks(stub)]
+    assert acks == [1, 2], f"non-object payload held the prefix: {acks}"
+    for aid in aids.values():
+        assert _s5b_consumed(approvals, aid) is not None, \
+            f"aid {aid} was never stamped"
+    out = capsys.readouterr().out
+    assert "non-object" in out
+    assert "skipped per D-MAL1" in out
+
+
 _S5B_AID2 = "s5bcmd0000000002"
 
 
