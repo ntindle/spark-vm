@@ -101,7 +101,11 @@ than its own installed copy. `muse-job --version` reads the repo file.
    script fails loudly with an operator diagnostic instead of hitting
    the API's 422), creates the annotated tag (tags
    are never moved or re-cut), and publishes the GitHub release. Semver
-   prereleases (`-rc.1`) are marked prerelease on GitHub. Merging to main
+   prereleases (`-rc.1`) are marked prerelease on GitHub. After publishing,
+   the same workflow run calls the golden-image build gate
+   (`.github/workflows/golden-image.yml`) via `workflow_call` on the exact
+   release tag — the tag push itself uses `GITHUB_TOKEN` and therefore
+   cannot trigger the gate's own `push: tags` trigger (#1176). Merging to main
    is the release authorization — treat VERSION bumps like releases in
    review, and consider a GitHub tag-protection ruleset for `v*` so only
    the workflow can create release tags (declared in `deploy/rulesets/` —

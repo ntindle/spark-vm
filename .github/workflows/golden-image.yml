@@ -1,9 +1,22 @@
 # Golden-image build gate (#1087, F-P1).
 #
-# Builds the golden-image recipe (deploy/golden-image/Dockerfile) on every
-# v* release tag and runs the automatable half of the per-build gate
+# Builds the golden-image recipe (deploy/golden-image/Dockerfile) for every
+# release and runs the automatable half of the per-build gate
 # (docs/GOLDEN_IMAGE_GATE_PROCEDURE.md): the baked-secrets scan against the
 # built image (Step 0b) and the manifest preflight (Step 0).
+#
+# Trigger topology (#1176 — read this before touching `on:`): the release
+# workflow (.github/workflows/release.yml) pushes the v* tag with
+# GITHUB_TOKEN, and GitHub never creates workflow runs from GITHUB_TOKEN
+# events, so `push: tags: ["v*"]` alone CANNOT fire this gate on a real
+# release. release.yml therefore calls this workflow as a reusable
+# workflow (workflow_call) in the same run after publishing; the called
+# job derives the tag as v$(cat VERSION) and checks it out explicitly,
+# because main may advance between the release job and this job (VERSION
+# bumps are releases per docs/VERSIONING.md, and the release concurrency
+# group serializes release runs, so v$(cat VERSION) names exactly the tag
+# the release job just cut). The `push: tags` trigger
+# covers operator-pushed tags; `workflow_dispatch` covers manual runs.
 #
 # Build-only, never a push: publishing stays an operator step AFTER the
 # interactive gate (file → answer → grant → verify, teardown, re-scan) —
@@ -22,6 +35,7 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  workflow_call:
 
 # Least privilege: this workflow only reads the repo and reports status.
 permissions:
@@ -35,9 +49,22 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, SHA-pinned
         with:
           fetch-depth: 0
+          fetch-tags: true
+      - name: Pin the release tree when called from the release workflow
+        # The called checkout is at the caller's ref (main's tip), which may
+        # already be past the release commit. The gate must build the exact
+        # tree the tag names — the tree is the pin (D-P1). VERSION bumps are
+        # releases (docs/VERSIONING.md) and the release concurrency group
+        # serializes release runs, so v$(cat VERSION) names exactly the tag
+        # the release job just cut. For the push and dispatch triggers HEAD
+        # already names the right tree, so this step only fires for
+        # workflow_call.
+        if: github.event_name == 'workflow_call'
+        run: git checkout "v$(cat VERSION)"
       - name: Resolve the D-P1 pins from the tree
-        # The tree is the pin: the tag push IS the release commit, so HEAD
-        # names the baked commit and VERSION names the release tag.
+        # The tree is the pin: HEAD names the baked commit and VERSION names
+        # the release tag (for the push trigger the tag push IS the release
+        # commit; for workflow_call the step above checked the tag out).
         run: |
           echo "SPARKVM_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "SPARKVM_VERSION=$(cat VERSION)" >> "$GITHUB_ENV"

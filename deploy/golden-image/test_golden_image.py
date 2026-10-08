@@ -793,6 +793,23 @@ def test_workflow_exists_and_builds_on_release_tags():
     assert re.search(r"tags:\s*\[\s*\"v\*\"\s*\]", text), "v* tag trigger missing"
 
 
+def test_workflow_callable_from_release_workflow():
+    """#1176: the release workflow pushes the v* tag with GITHUB_TOKEN,
+    which never triggers workflow runs, so the tag trigger alone could
+    never fire this gate on a real release (zero runs across v0.5.0–v0.7.0).
+    release.yml calls this workflow via workflow_call in the same run, so
+    the workflow_call trigger must exist structurally. The called job pins
+    the exact release tree (v$(cat VERSION)) because main may advance
+    between the release job and the gate job; the step must be scoped to
+    the workflow_call event so the push/dispatch triggers keep their
+    existing HEAD-is-the-tree behavior."""
+    text = _workflow_text()
+    assert re.search(r"(?m)^\s*workflow_call:\s*$", text), "workflow_call trigger missing"
+    assert 'github.event_name == \'workflow_call\'' in text, "release-tree pin step missing"
+    assert 'git checkout "v$(cat VERSION)"' in text, "release-tag checkout missing"
+    assert "fetch-tags: true" in text, "tag fetch missing (checkout cannot see the release tag)"
+
+
 def test_workflow_actions_sha_pinned():
     """Every third-party action must be SHA-pinned (repo convention —
     release.yml pins checkout to a full SHA)."""

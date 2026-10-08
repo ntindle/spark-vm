@@ -52,6 +52,8 @@ codified as rule 6 so future watch bullets arrive compliant.)
 
 ### Fixed
 
+- The golden-image build gate (the baked-secrets scan + manifest preflight that must run on every release) had never actually run on a release tag: the release workflow pushes the tag with `GITHUB_TOKEN`, which cannot trigger workflow runs, so the gate's tag trigger was dead. The release workflow now calls the gate as a reusable workflow in the same run, building the exact release tree. (#TBD)
+
 - The approvals page's pending directory is now created setgid by the deploy itself: `proxy/deploy.sh` provisions the dedicated `approval-filers` group, enrolls the filing principals, and enforces the directory as group-setgid on every deploy — so the "file owner identifies the requester" guarantee no longer depends on a manual operator step that nothing in the repo performed. (#1167)
 - The approvals page now reads the tailnet owner's identity from the documented field of the `tailscale whois` response instead of the first login-name-shaped value anywhere in it — a schema change on the whois side could otherwise have flipped the owner check and locked out (or mis-identified) the approver. (#1166) (#1169)
 - The approvals daemon's corruption-quarantine directory is now bounded like every other approval store: the newest 200 quarantined filings are kept and the oldest are pruned on the housekeeping cadence, instead of growing without limit. (#1168) (#1169)
