@@ -683,7 +683,9 @@ def _find_login(obj):
     "LoginName" nested inside Node (a future tailscale schema addition
     or nested metadata) would have silently taken precedence over the
     owner's profile, flipping the finding-47 owner check. Anything
-    absent or non-string fails closed: None means the peer is refused.
+    absent, non-string, or empty fails closed: None means the peer is
+    refused (an empty login is not an identity — the recursive form
+    never returned one either, its truthiness check skipped it).
     """
     if not isinstance(obj, dict):
         return None
@@ -691,7 +693,7 @@ def _find_login(obj):
     if not isinstance(profile, dict):
         return None
     login = profile.get("LoginName")
-    return login if isinstance(login, str) else None
+    return login if isinstance(login, str) and login else None
 
 
 # Issue #535 (open-source) / #360 (hosted S1): the audit trail is

@@ -3652,6 +3652,13 @@ class GrantTtlChoiceTests(unittest.TestCase):
         self.assertIsNone(cd._find_login({"UserProfile": {"LoginName": 7}}))
         self.assertIsNone(
             cd._find_login({"UserProfile": {"LoginName": None}}))
+        # An empty login is not an identity — the recursive form never
+        # returned one (its truthiness check skipped it), and the owner
+        # check downstream must see None, not "".
+        self.assertIsNone(cd._find_login({"UserProfile": {"LoginName": ""}}))
+        self.assertIsNone(
+            cd._find_login({"UserProfile": {"LoginName": {"a": 1}}}))
+        self.assertIsNone(cd._find_login({"UserProfile": "x"}))
 
     # --- #1168: quarantine pruning ---------------------------------------
 
@@ -3686,9 +3693,25 @@ class GrantTtlChoiceTests(unittest.TestCase):
                 (self.approvals / "pending-quarantine" / "q0.json")
                 .exists())
 
+    def test_1168_quarantine_prune_at_cap_noop(self):
+        """Exactly-at-cap quarantine is untouched (pins the <= count
+        gate)."""
+        with mock.patch.object(cd, "APPROVALS", str(self.approvals)):
+            for i in range(3):
+                self._write_quarantine("q%d.json" % i,
+                                       mtime_age=(3 - i) * 10)
+            cd._prune_quarantine(limit=3)
+            remaining = sorted(
+                (self.approvals / "pending-quarantine").iterdir())
+            self.assertEqual([p.name for p in remaining],
+                             ["q0.json", "q1.json", "q2.json"])
+
     def test_1168_housekeeping_prunes_quarantine(self):
         """_housekeeping_if_due() runs the quarantine prune at the keep
         bound."""
+        # Self-sufficient: reset the cadence module-state so this test
+        # never depends on execution order (QA review).
+        cd._reset_housekeeping_for_tests()
         with mock.patch.object(cd, "APPROVALS",
                                str(self.approvals)), \
              mock.patch.object(cd, "_QUARANTINE_KEEP", 2):
