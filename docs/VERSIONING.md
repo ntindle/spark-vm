@@ -80,7 +80,12 @@ than its own installed copy. `muse-job --version` reads the repo file.
    YYYY-MM-DD`), add/update the compare links in the footer scaffold at the
    bottom of the changelog,
    and leave a fresh empty `## [Unreleased]` section behind for the next PR
-   (the ritual is documented at the top of `CHANGELOG.md`). The release
+   (the ritual is documented at the top of `CHANGELOG.md`). In the same commit,
+   also bump the recipe default `ARG SPARKVM_VERSION=` in
+   `deploy/golden-image/Dockerfile` to the new version:
+   `test_dockerfile_recipe_default_matches_tree_version` pins that invariant
+   (the recipe must never default to a different version than the tree being
+   baked). The release
    script uses the changelog section, falling back to the
    merged-PR list.
 2. Push to `main`. The release workflow (`.github/workflows/release.yml`)
