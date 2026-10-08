@@ -1062,6 +1062,166 @@ def test_dies_when_pr_list_alone_exceeds_cap(workrepo, tmp_path):
     assert "still exceed" in r.stderr
     assert "merged-PR list alone" in r.stderr
     assert "notes-file" in r.stderr  # the diagnostic names the manual path
+    assert "--prerelease" not in r.stderr  # E1: not a prerelease, no flag
+    assert "<tag>" not in r.stderr  # the real tag, never a placeholder
+
+
+def test_trim_die_recovery_names_prerelease_flag(workrepo):
+    # E1: the trim-die's manual recovery command must carry --prerelease
+    # for prerelease versions — an operator following the diagnostic
+    # verbatim on an rc would otherwise publish a full release.
+    (workrepo / "VERSION").write_text("0.3.0-rc.1\n")
+    git("add", "-A", cwd=workrepo)
+    git("commit", "-m", "release: bump VERSION to 0.3.0-rc.1", cwd=workrepo)
+    git("push", "origin", "main", cwd=workrepo)
+    r = run_script(workrepo, "--dry-run",
+                   env={"CUT_RELEASE_MAX_BODY_CHARS": "200"})
+    assert r.returncode != 0
+    assert "still exceed" in r.stderr
+    assert "--prerelease" in r.stderr
+    assert "v0.3.0-rc.1" in r.stderr  # the real tag, not a <tag> placeholder
+    assert "<tag>" not in r.stderr
+
+
+def test_trim_die_recovery_recreates_tag_in_dry_run(workrepo):
+    # Q4: in --dry-run (and --execute) no tag exists yet — the die fires on
+    # the shared assembly path before tagging — so the recovery must
+    # recreate the tag at the release commit. gh release create alone would
+    # tag whatever main happens to point at by then.
+    r = run_script(workrepo, "--dry-run",
+                   env={"CUT_RELEASE_MAX_BODY_CHARS": "200"})
+    assert r.returncode != 0
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(workrepo),
+                         capture_output=True, text=True, check=True,
+                         timeout=60).stdout.strip()
+    assert ("git tag -a v0.2.0 -m 'spark-vm v0.2.0' %s" % sha) in r.stderr
+    assert "git push origin v0.2.0" in r.stderr
+    assert "already on the remote" not in r.stderr
+
+
+def test_trim_die_recovery_targets_existing_tag_in_publish_only(workrepo):
+    # Q4: in --publish-only the tag is already on the remote, so the
+    # recovery publishes onto it directly — no tag recreation.
+    git("tag", "v0.2.0", cwd=workrepo)
+    git("push", "origin", "v0.2.0", cwd=workrepo)
+    r = run_script(workrepo, "--publish-only", "--yes",
+                   env={"CUT_RELEASE_MAX_BODY_CHARS": "200"})
+    assert r.returncode != 0
+    assert "still exceed" in r.stderr
+    assert "already on the remote" in r.stderr
+    assert "gh release create v0.2.0 --title v0.2.0" in r.stderr
+    assert "git tag -a" not in r.stderr
+
+
+def test_trim_report_counts_dangling_headers_separately(workrepo, tmp_path):
+    # E2: popped "### " headers must not inflate the dropped-lines count.
+    giant = "- " + "y" * 2000
+    section = "### Added\n- keeper bullet\n### Fixed\n%s\n" % giant
+    write_section_changelog(workrepo, "0.2.0", section)
+    commit_changelog(workrepo)
+    body, r = dry_run_notes(workrepo, tmp_path, "notes.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": "900"})
+    assert len(body) <= 900
+    assert "1 Highlights line(s) dropped" in r.stderr
+    assert "(1 dangling '### ' header(s) pruned)" in r.stderr
+
+
+def test_trim_note_framed_by_blank_lines(workrepo, tmp_path):
+    # E3: the trim note must render as its own paragraph — a blank line
+    # before and after it.
+    bullets = ["- bullet %04d %s" % (i, "x" * 80) for i in range(1400)]
+    section = "### Added\n" + "\n".join(bullets) + "\n"
+    write_section_changelog(workrepo, "0.2.0", section)
+    commit_changelog(workrepo)
+    body, _ = dry_run_notes(workrepo, tmp_path, "notes.md")
+    assert len(body) <= 125000
+    assert "\n\n_The Highlights section was trimmed" in body
+    assert "on this tag._\n\n## Merged" in body
+
+
+def test_default_cap_boundary_exact_at_125000(workrepo, tmp_path):
+    # Q1: pin the production default — a body of exactly 125,000 characters
+    # passes the real default cap untouched; one more engages the trim.
+    bullets = ["- bullet %04d %s" % (i, "z" * 60) for i in range(20)]
+    write_section_changelog(workrepo, "0.2.0",
+                            "### Added\n" + "\n".join(bullets) + "\n")
+    commit_changelog(workrepo)
+    full, _ = dry_run_notes(workrepo, tmp_path, "full.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": "1000000000"})
+    assert TRIM_MARKER not in full
+    pad = 125000 - len(full)
+    assert pad > 4  # non-vacuous: the filler actually engages the boundary
+    filler = "- " + "q" * (pad - 3)  # +1 newline == exactly `pad` new chars
+    write_section_changelog(workrepo, "0.2.0",
+                            "### Added\n" + "\n".join(bullets)
+                            + "\n" + filler + "\n")
+    commit_changelog(workrepo)
+    # The commit above grew the merged-PR list by one line; measure the
+    # padded body, then correct the filler with --amend (no new PR line)
+    # so the final body lands exactly on the boundary.
+    padded, _ = dry_run_notes(workrepo, tmp_path, "padded.md",
+                              env={"CUT_RELEASE_MAX_BODY_CHARS": "1000000000"})
+    delta = 125000 - len(padded)
+    assert abs(delta) < 1000  # only the one PR-line growth to correct
+    filler2 = "- " + "q" * (pad - 3 + delta)
+    assert len(filler2) > 4
+    write_section_changelog(workrepo, "0.2.0",
+                            "### Added\n" + "\n".join(bullets)
+                            + "\n" + filler2 + "\n")
+    git("add", "-A", cwd=workrepo)
+    git("commit", "--amend", "--no-edit", cwd=workrepo)
+    git("push", "--force", "origin", "main", cwd=workrepo)
+    body, r = dry_run_notes(workrepo, tmp_path, "exact.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": "125000"})
+    assert len(body) == 125000
+    assert TRIM_MARKER not in body
+    assert "no trim needed" in r.stderr
+    over, _ = dry_run_notes(workrepo, tmp_path, "over.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": "124999"})
+    assert "trimmed to fit" in over
+
+
+def test_unicode_counted_in_code_points_not_bytes(workrepo, tmp_path):
+    # Q2: lengths are Unicode code points, not UTF-8 bytes. A body whose
+    # character count fits the cap but whose byte count exceeds it must
+    # pass untouched — a byte-counting implementation would trim.
+    fire = "🔥" * 200  # 200 code points, 800 UTF-8 bytes
+    section = "### Added\n- %s\n" % fire
+    write_section_changelog(workrepo, "0.2.0", section)
+    commit_changelog(workrepo)
+    full, _ = dry_run_notes(workrepo, tmp_path, "full.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": "1000000000"})
+    assert TRIM_MARKER not in full
+    size = len(full)
+    assert len(full.encode("utf-8")) > size  # the divergence is real
+    body, r = dry_run_notes(workrepo, tmp_path, "uni.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": str(size)})
+    assert body == full  # exactly at the cap in code points: untouched
+    assert TRIM_MARKER not in body
+    assert "no trim needed" in r.stderr
+    assert len(body.encode("utf-8")) > size  # ...despite exceeding it in bytes
+
+
+def test_placeholder_path_never_trims(workrepo, tmp_path):
+    # Q3: the trim note claims "the full section is in CHANGELOG.md" —
+    # misleading when there is no curated section. Structurally the note
+    # (~150 chars) is longer than the placeholder (~78) it would replace,
+    # so the placeholder path can never trim: an over-cap body always dies
+    # loudly instead. Pin that no trim note is ever emitted on this path —
+    # if a future edit shortens the note below the placeholder length,
+    # this fails and forces the question.
+    write_changelog(workrepo, "0.2.0", section=False)
+    commit_changelog(workrepo)
+    full, _ = dry_run_notes(workrepo, tmp_path, "full.md",
+                            env={"CUT_RELEASE_MAX_BODY_CHARS": "1000000000"})
+    assert TRIM_MARKER not in full
+    assert "_No curated CHANGELOG.md section" in full
+    for cap in (len(full) - 1, len(full) // 2, 200):
+        r = run_script(workrepo, "--dry-run",
+                       env={"CUT_RELEASE_MAX_BODY_CHARS": str(cap)})
+        assert r.returncode != 0, cap  # always dies, never trims
+        assert "still exceed" in r.stderr
+        assert "the full section is in CHANGELOG.md" not in r.stderr
 
 
 def test_rejects_non_numeric_max_body_chars(workrepo):

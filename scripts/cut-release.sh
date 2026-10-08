@@ -335,7 +335,17 @@ trap 'rm -rf "$NOTES_DIR"' EXIT
 # exercise the trim; production always uses GitHub's real limit. Lengths
 # are counted in Unicode code points, matching how the API measures the
 # JSON body.
-TRIM_MSG="$(MAX_BODY_CHARS="$MAX_BODY_CHARS" python3 - "$NOTES" <<'PYEOF' 2>&1
+#
+# The trim-die diagnostic's manual recovery command must be copy-paste
+# runnable: prerelease versions need --prerelease (E1), and in
+# --execute/--dry-run no tag exists yet, so the recovery recreates the tag
+# at the release commit instead of letting gh tag whatever main points at
+# by then (Q4).
+PRE_FLAG=""
+[[ "$VERSION" == *-* ]] && PRE_FLAG=" --prerelease"
+TRIM_MSG="$(MAX_BODY_CHARS="$MAX_BODY_CHARS" TRIM_MODE="$MODE" TRIM_TAG="$TAG" \
+    TRIM_SHA="$RELEASE_SHA" TRIM_REMOTE="$REMOTE" PRE_FLAG="$PRE_FLAG" \
+    python3 - "$NOTES" <<'PYEOF' 2>&1
 import os
 import sys
 
@@ -386,18 +396,41 @@ trim_note = ("_The Highlights section was trimmed to fit the %s-character "
              "release-body limit; the full section is in CHANGELOG.md on "
              "this tag._\n" % cap_fmt)
 
-# Even a fully trimmed Highlights section keeps its header, the trim note,
-# the whole merged-PR list, and the footer.
-floor_len = len(HEADER_PREFIX + trim_note + pr_block + footer)
+# Q3 structural note: on the placeholder path (no curated CHANGELOG.md
+# section) the trim note can never appear. The note (~150 chars) is longer
+# than the placeholder line (~78) it would replace, so floor_len always
+# exceeds len(text) here — an over-cap placeholder body always takes the
+# die branch below, never the trim. No alternate note is needed; if a
+# future edit shortens the note below the placeholder length, the
+# test_placeholder_path_never_trims pin will fail and force the question.
+floor_len = len(HEADER_PREFIX + "\n" + trim_note + "\n" + pr_block + footer)
 if floor_len > cap:
+    mode = os.environ.get("TRIM_MODE", "dry-run")
+    tag = os.environ.get("TRIM_TAG", "<tag>")
+    sha = os.environ.get("TRIM_SHA", "")
+    remote = os.environ.get("TRIM_REMOTE", "origin")
+    pre = os.environ.get("PRE_FLAG", "")
+    publish_cmd = ("gh release create %s --title %s%s --notes-file notes.md "
+                   "--target main" % (tag, tag, pre))
+    if mode == "publish-only":
+        recovery = ("then publish with: %s\n"
+                    "(the tag %s is already on the remote; this creates the "
+                    "release on it)" % (publish_cmd, tag))
+    else:
+        # --execute and --dry-run: this die fired before any tag was
+        # created (Q4), so the manual path recreates the tag at the release
+        # commit first — gh release create alone would tag whatever main
+        # happens to point at by then.
+        recovery = ("recreate the tag at the release commit, then publish:\n"
+                    "  git tag -a %s -m 'spark-vm %s' %s && git push %s %s\n"
+                    "  %s" % (tag, tag, sha, remote, tag, publish_cmd))
     sys.stderr.write(
         "release notes are %s characters and still exceed the %s-character "
         "release-body limit with the Highlights section fully trimmed - "
         "the merged-PR list alone is too long to publish. Trim the PR list "
         "by hand: cut-release.sh --dry-run --notes-file notes.md, edit the "
-        "file, then publish with: gh release create <tag> --title <tag> "
-        "--notes-file notes.md --target main\n"
-        % (f"{len(text):,}", cap_fmt))
+        "file, %s\n"
+        % (f"{len(text):,}", cap_fmt, recovery))
     sys.exit(1)
 
 kept = []
@@ -412,21 +445,25 @@ for ln in content:
     else:
         dropped += 1
 # A subsection header ("### Added") with no surviving bullets underneath
-# would dangle at the end of the trimmed section; drop it.
+# would dangle at the end of the trimmed section; drop it. Popped headers
+# are counted separately from dropped content lines (E2).
+dropped_headers = 0
 while kept and kept[-1].startswith("### "):
     kept_len -= len(kept.pop()) + 1
-    dropped += 1
+    dropped_headers += 1
 
 new_text = HEADER_PREFIX
 if kept:
     new_text += "\n".join(kept) + "\n"
-new_text += trim_note + pr_block + footer
-# Invariant by construction: kept_len tracked every addition, and the
-# header-pop only shrinks it; floor_len <= cap was checked above.
+new_text += ("\n" if kept else "") + trim_note + "\n" + pr_block + footer
+# Invariant by construction: kept_len tracked every addition (the floor
+# folded in the note-framing blanks), and the header-pop only shrinks it;
+# floor_len <= cap was checked above.
 with open(notes_path, "w", encoding="utf-8") as f:
     f.write(new_text)
 print("cut-release.sh: release notes trimmed to %s characters (cap %s); "
-      "%d Highlights line(s) dropped" % (f"{len(new_text):,}", cap_fmt, dropped))
+      "%d Highlights line(s) dropped (%d dangling '### ' header(s) pruned)"
+      % (f"{len(new_text):,}", cap_fmt, dropped, dropped_headers))
 PYEOF
 )" || die "$TRIM_MSG"
 echo "$TRIM_MSG" >&2
