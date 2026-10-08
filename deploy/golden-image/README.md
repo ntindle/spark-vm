@@ -70,13 +70,20 @@ git commit -m "distribution: pin golden image <version>+<sha12> (#1087)"
 
 The tool refuses anything but a completed gate pass for the exact baked
 SHA, anything but `registry.fly.io` (the only registry the F3b driver
-contract names), and anything but a digest-pinned ref — a bare tag is
-never launchable. Re-pinning the same SHA to a different digest needs
-`--force` (the re-push case). Take `<digest-from-push>` from **your own
-push output only** — never from a chat message, PR comment, or pastebin:
-the pin does not yet cross-check the digest against the gate record's
-`build.image_digest` (that is a later slice), so a pasted digest still
-pins whatever image it names. `deploy/golden-image/pinned-image.json`
+contract names), anything but a digest-pinned ref — a bare tag is
+never launchable — and anything but the exact digest the publish step
+recorded in the gate record's `build.image_digest`: the `--image-ref`
+digest must equal the recorded push-produced digest, fail-closed both
+ways (a record the publish step never stamped refuses with the re-stamp
+command; a mismatch refuses naming both digests so the operator sees
+which side drifted). `--force` never bypasses the cross-check — the
+re-push case re-stamps the record first, then pins the digest the record
+names. Re-pinning the same SHA to a different digest still needs
+`--force`. Take `<digest-from-push>` from your own push output anyway:
+the check closes paste/fat-finger divergence between the publish and pin
+steps, not a malicious operator — the recorded digest is operator
+self-attestation (resolved from the registry through the local docker
+daemon, never hand-pasted), and the pin inherits that ceiling. `deploy/golden-image/pinned-image.json`
 is the driver's consumption contract: `harness/pin_image.py`'s
 `read_pin()` / `pin_image_ref()` are what #905 imports, and they raise
 on a missing or invalid record so the driver cannot provision from an
