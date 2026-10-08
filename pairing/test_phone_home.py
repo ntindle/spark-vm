@@ -1337,6 +1337,38 @@ def test_socket_command_malformed_frame_no_ack(ctx, monkeypatch, tmp_path,
     assert "malformed command frame" in capsys.readouterr().out
 
 
+def test_socket_command_malformed_frame_skips_prefix_flows(ctx, monkeypatch,
+                                                          tmp_path, capsys):
+    # D-MAL1 (#1118): a malformed command frame is skipped loudly — it
+    # must not hold the per-session acked prefix. Valid frames before
+    # AND after the malformed one are executed and acked; the malformed
+    # frame itself is never executed and never acked.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    aids = {1: "s5bmal0000000001", 2: "s5bmal0000000002"}
+    for aid in aids.values():
+        _s5b_file_pending(approvals, aid)
+
+    def inner(seq, aid):
+        return _s5b_inner(_s5b_decision(aid=aid, dseq=seq))
+
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, inner(1, aids[1])),
+                    ("send-command", "bogus", 0, _s5b_inner()),
+                    ("send-command", 2, 0, inner(2, aids[2])),
+                    ("expect-acks", [1, 2]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    acks = [f["seq"] for f in _s5b_acks(stub)]
+    assert acks == [1, 2], f"malformed frame held the prefix: {acks}"
+    for aid in aids.values():
+        assert _s5b_consumed(approvals, aid) is not None, \
+            f"aid {aid} was never stamped"
+    out = capsys.readouterr().out
+    assert "malformed command frame" in out
+    assert "skipped per D-MAL1" in out
+
+
 _S5B_AID2 = "s5bcmd0000000002"
 
 

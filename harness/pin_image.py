@@ -358,6 +358,14 @@ def write_pin(repo=None, image_ref=None, tag_ref=None, gate_record=None,
             raise PinnedImageError(
                 f"existing pin record is unreadable ({e}) — fix or remove it "
                 "by hand before pinning")
+        if not isinstance(existing, dict):
+            # #1112: a valid-but-non-object pin file (e.g. a list) must
+            # refuse cleanly, not AttributeError on .get — the operator
+            # gets a fail-closed PinnedImageError either way.
+            raise PinnedImageError(
+                f"existing pin record is not an object "
+                f"({type(existing).__name__}) — fix or remove it by hand "
+                "before pinning")
         if existing.get("image") == image_ref and \
                 existing.get("sparkvm_sha") == sha:
             print("pin-image: already pinned — no change")

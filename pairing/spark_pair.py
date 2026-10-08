@@ -1276,10 +1276,9 @@ def _ingest_command_shape(cmd):
     The row failed shaping, so no field can be trusted — nothing is
     acked for it; the row drops out of redelivery once the cursor
     advances past its seq — the loud log line is the only record. This
-    helper is shared by both carriers: the HTTPS path's skip matches
-    the pinned policy; the socket path's stricter hold (see
-    _PhoneHomeSession) is a known divergence queued for alignment
-    (#1118).
+    helper is shared by both carriers: the HTTPS path's skip and the
+    socket path's skip (see _PhoneHomeSession._handle_socket_command)
+    both implement the pinned policy (#1118 closed).
     """
     if not isinstance(cmd, dict):
         return None
@@ -2822,12 +2821,14 @@ class _PhoneHomeSession:
     recorded in docs/PHONE_HOME_WIRE_PROTOCOL.md). The socket is a faster
     carrier for the same queue, not a second queue: redeliveries dedupe
     through the shared backstops (the ingested idempotency log and the
-    consumed/ O_EXCL records). KNOWN DIVERGENCE from the pinned D-MAL1
-    policy (wire doc §3.3): the per-session `_acked_prefix` currently
-    holds on malformed rows instead of skipping them — stricter than the
-    policy, and theater while the HTTPS cron serves the same queue (the
-    cron's skip wins on the shared cursor). Queued for alignment on
-    #1118; see _handle_socket_command.
+    consumed/ O_EXCL records). D-MAL1 (wire doc §3.3, aligned on #1118):
+    a malformed `command` frame is skipped loudly — never executed,
+    never acked, and never holding the per-session `_acked_prefix` —
+    so the queue flows past plane data bugs exactly like the HTTPS
+    carrier. (The separate gap guard below still holds later seqs when
+    a frame jumps past an unacked seq: a missing row is not a malformed
+    row — the DO re-drives the gap, and skipping it would silently
+    reorder execution. See _handle_socket_command.)
     """
 
     def __init__(self, d, sock, reader, box_id, generation, token,
@@ -2845,10 +2846,11 @@ class _PhoneHomeSession:
         self.welcomed = False
         # Highest contiguously socket-acked seq on THIS session. The DO's
         # acked_watermark is the durable record; this is the per-session
-        # ordering guard so a malformed or failed row holds the queue
-        # (later seqs wait for the re-drive) instead of being skipped.
-        # (Diverges from the pinned D-MAL1 policy — see the class
-        # docstring; queued for alignment on #1118.)
+        # ordering guard so a *missing* row holds the queue (later seqs
+        # wait for the re-drive) instead of being skipped and reordered.
+        # A *malformed* row is not a missing row: per D-MAL1 it is
+        # skipped loudly (see _handle_socket_command) and never holds
+        # this prefix.
         self._acked_prefix = None
         # Shared with the HTTPS ingest path: redelivery dedupe by
         # (box_id, seq) survives a session boundary through this log and
@@ -2948,15 +2950,14 @@ class _PhoneHomeSession:
         not acked) and "transport-lost" when the ack could not be sent —
         the caller reconnects and the command redelivers; the
         idempotency backstops make the re-execution safe. A frame the
-        box cannot trust is logged loudly and never acked: the DO
-        re-drives from its acked_watermark. KNOWN DIVERGENCE from the
-        pinned D-MAL1 policy (docs/PHONE_HOME_WIRE_PROTOCOL.md §3.3): a
-        malformed frame currently holds the per-session `_acked_prefix`
-        instead of skipping it — the pinned policy is skip-and-log for
-        both carriers. The hold is theater while the HTTPS cron serves
-        the same queue (the cron skips the row and advances the shared
-        cursor), so no queue wedges in practice; alignment is queued on
-        #1118.
+        box cannot trust is logged loudly and never acked — per the
+        pinned D-MAL1 policy (docs/PHONE_HOME_WIRE_PROTOCOL.md §3.3) a
+        malformed frame is skipped: never executed, never acked, and
+        never holding the per-session `_acked_prefix`, so the queue
+        flows past the plane's data bug exactly like the HTTPS carrier.
+        (The DO's S4b-2a re-drive never emits malformed rows at all —
+        it journals them as `phone_home.redrive_malformed` — so this
+        branch only fires on a DO/wire bug, never on a table row.)
         """
         if frame.get("generation") != self.generation:
             # A stale session's frame (or a plane bug): it does not
@@ -2972,8 +2973,8 @@ class _PhoneHomeSession:
         if not isinstance(inner, dict):
             _phone_home_say(self.d,
                             "ignoring command frame with non-object "
-                            "payload (plane bug) — not acked, will "
-                            "re-drive",
+                            "payload (plane bug) — skipped per D-MAL1, "
+                            "not executed, not acked",
                             self.token)
             return "ok"
         try:
@@ -2993,17 +2994,18 @@ class _PhoneHomeSession:
             "kind": inner.get("kind"), "payload": inner.get("payload")})
         if shaped is None:
             # Nothing safe to execute and nothing trustworthy to ack
-            # (shaping failed, so no field can be trusted). KNOWN
-            # DIVERGENCE from D-MAL1 (docs/PHONE_HOME_WIRE_PROTOCOL.md
-            # §3.3): the pinned policy is skip-and-log for both carriers;
-            # the socket currently holds the per-session prefix on the
-            # malformed row instead. Theater while the HTTPS cron serves
-            # the same queue (its skip advances the shared cursor past
-            # the row), so the queue never wedges on this in practice;
-            # alignment queued on #1118.
+            # (shaping failed, so no field can be trusted — including
+            # the seq). D-MAL1 (docs/PHONE_HOME_WIRE_PROTOCOL.md §3.3):
+            # skip-and-log for both carriers. The frame is skipped
+            # loudly and the per-session prefix is untouched, so later
+            # seqs keep flowing — the queue never wedges on a plane
+            # data bug. (The S4b-2a re-drive never emits malformed rows,
+            # so this frame will not re-drive; the DO journals it as
+            # `phone_home.redrive_malformed`.)
             _phone_home_say(self.d,
                             "ignoring malformed command frame (plane "
-                            "bug) — not acked, will re-drive",
+                            "bug) — skipped per D-MAL1, not executed, "
+                            "not acked",
                             self.token)
             return "ok"
         seq, kind, payload, epoch = shaped

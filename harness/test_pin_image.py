@@ -437,3 +437,20 @@ def test_read_pin_rejects_corrupt_json(tmp_path):
         f.write("{not json")
     with pytest.raises(PinnedImageError):
         read_pin(repo)
+
+
+def test_write_pin_rejects_non_object_existing_pin(tmp_path):
+    # #1112: a valid-but-non-object pin file (a list) must raise
+    # PinnedImageError — a clean operator-facing refusal, not an
+    # AttributeError traceback from .get on the loaded value.
+    repo = make_repo(tmp_path)
+    sha = head(repo)
+    pin_path = os.path.join(repo, "deploy", "golden-image",
+                            "pinned-image.json")
+    with open(pin_path, "w", encoding="utf-8") as f:
+        json.dump(["not", "an", "object"], f)
+    with pytest.raises(PinnedImageError, match="not an object"):
+        write_pin(**pin_args(repo, sha))
+    # Nothing was written over the bad file (fail-closed).
+    with open(pin_path, encoding="utf-8") as f:
+        assert json.load(f) == ["not", "an", "object"]
