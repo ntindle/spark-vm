@@ -1322,6 +1322,81 @@ def test_socket_command_gap_holds_prefix(ctx, monkeypatch, tmp_path):
     assert t1 <= t2 <= t3, (t1, t2, t3)
 
 
+def test_socket_command_gap_fast_forwards_over_cron_cursor(
+        ctx, monkeypatch, tmp_path, capsys):
+    # #1143 / D-GH1: the every-minute cron ingest advanced the shared
+    # cursor past the gap (it skipped the malformed row per D-MAL1 and
+    # consumed the later seqs) — the session's gap guard fast-forwards
+    # its prefix to the shared cursor (same epoch) instead of holding,
+    # and the next frame processes normally. Seqs 2 and 3 were consumed
+    # by the cron (their pendings are gone); the socket must skip them
+    # without executing and without wedging.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    aids = {1: "s5bgapff00000001", 4: "s5bgapff00000004"}
+    for aid in aids.values():
+        _s5b_file_pending(approvals, aid)
+    # The cron's pass: cursor past the gap, same epoch.
+    with open(os.path.join(ctx.dir, "commands_cursor.json"), "w") as f:
+        json.dump({"cursor": 3, "epoch": 0}, f)
+
+    def inner(seq, aid):
+        return _s5b_inner(_s5b_decision(aid=aid, dseq=seq))
+
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 0, inner(1, aids[1])),
+                    ("send-command", 4, 0, inner(4, aids[4])),
+                    ("expect-acks", [1, 4]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    acks = [f["seq"] for f in _s5b_acks(stub)]
+    assert acks == [1, 4], f"fast-forward did not heal the gap: {acks}"
+    assert _s5b_consumed(approvals, aids[4]) is not None, \
+        "aid 4 was never stamped"
+    out = capsys.readouterr().out
+    assert "cursor fast-forward" in out
+
+
+def test_socket_command_gap_no_fast_forward_on_moved_epoch(
+        ctx, monkeypatch, tmp_path, capsys):
+    # #1143 / D-GH1 epoch gate: the cron adopted a moved epoch (the
+    # plane moved on) while this session still processes the old
+    # incarnation's frames — the gap guard must NOT fast-forward its
+    # prefix across the incarnation boundary. The hold stands until the
+    # re-drive delivers the true missing row, and only then does seq 3
+    # flow.
+    approvals = _s5b_setup(ctx, monkeypatch, tmp_path)
+    aids = {1: "s5bgate0000000001", 2: "s5bgate0000000002",
+            3: "s5bgate0000000003"}
+    for aid in aids.values():
+        _s5b_file_pending(approvals, aid)
+    # The cron adopted the new incarnation's epoch; the session's
+    # frames still carry the old one.
+    with open(os.path.join(ctx.dir, "commands_cursor.json"), "w") as f:
+        json.dump({"cursor": 3, "epoch": 1}, f)
+
+    def inner(seq, aid):
+        return _s5b_inner(_s5b_decision(aid=aid, dseq=seq))
+
+    stub = StubDO([[("welcome",),
+                    ("send-command", 1, 1, inner(1, aids[1])),
+                    ("send-command", 3, 0, inner(3, aids[3])),  # gap
+                    ("send-command", 2, 0, inner(2, aids[2])),
+                    ("send-command", 3, 0, inner(3, aids[3])),  # re-drive
+                    ("expect-acks", [1, 2, 3]),
+                    ("close", "revoked", {})]])
+    rc = _run_client(ctx, stub)
+    assert rc == 1
+    acks = [f["seq"] for f in _s5b_acks(stub)]
+    assert acks == [1, 2, 3], f"epoch gate broke the re-drive order: {acks}"
+    for aid in aids.values():
+        assert _s5b_consumed(approvals, aid) is not None, \
+            f"aid {aid} was never stamped"
+    out = capsys.readouterr().out
+    assert "cursor fast-forward" not in out
+    assert "moved epoch" in out
+
+
 def test_socket_command_malformed_frame_no_ack(ctx, monkeypatch, tmp_path,
                                               capsys):
     _s5b_setup(ctx, monkeypatch, tmp_path)
