@@ -147,11 +147,15 @@ def main():
                     # Issue #11: the manager-side record lives outside the
                     # job dir now -- pruning the dir alone would leave the
                     # record behind and list/watch would enumerate the
-                    # pruned job forever.
-                    try:
-                        os.remove(os.path.join(METADATA, slug + ".json"))
-                    except OSError:
-                        pass
+                    # pruned job forever. Remove it only when the dir is
+                    # actually gone: a failed rmtree must not orphan the
+                    # record while the dir (and any legacy record in it)
+                    # survives.
+                    if not os.path.exists(jd):
+                        try:
+                            os.remove(os.path.join(METADATA, slug + ".json"))
+                        except OSError:
+                            pass
                     summary["pruned"].append(jd)
         for d in (EVENTS, SESSIONS):
             if os.path.isdir(d):

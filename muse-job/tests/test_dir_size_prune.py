@@ -9,8 +9,10 @@ free real disk, so it must measure true on-disk size.
 """
 import importlib.machinery
 import importlib.util
+import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -70,3 +72,73 @@ def test_sweep_dir_size_keeps_true_on_disk_size(sweep, tmp_path):
     _write(root / "target" / "debug" / "blob", 4096)
     _write(root / "prompt.md", 100)
     assert sweep.dir_size(str(root)) == 4196
+
+
+def _sweep_job(home, slug, state, legacy_state=None, age_days=8):
+    """Seed one job for the prune test: job dir with an old mtime, a
+    metadata record, and optionally a legacy in-tree record.
+    NB: all writes inside the job dir happen BEFORE backdating its mtime
+    (creating a file refreshes the dir's mtime)."""
+    jd = home / "muse-jobs" / slug
+    jd.mkdir(parents=True, exist_ok=True)
+    if legacy_state is not None:
+        (jd / "job.json").write_text(json.dumps({"slug": slug,
+                                                 "state": legacy_state}))
+    old = time.time() - age_days * 86400
+    os.utime(jd, (old, old))
+    meta = home / ".local" / "share" / "muse-job" / "jobs"
+    meta.mkdir(parents=True, exist_ok=True)
+    (meta / f"{slug}.json").write_text(json.dumps({"slug": slug,
+                                                   "state": state}))
+    return jd
+
+
+def test_sweep_prune_removes_metadata_record_with_closed_dir(
+        sweep, tmp_path, monkeypatch):
+    # Issue #11: the manager-side record lives outside the job dir, so the
+    # prune must delete it alongside the dir -- otherwise list/watch would
+    # enumerate the pruned job forever.
+    # A: closed + old -> dir and metadata record both pruned.
+    home = tmp_path
+    jd_a = _sweep_job(home, "oldjob", "closed")
+    # B: active + old -> both survive.
+    jd_b = _sweep_job(home, "livejob", "active")
+    # C: legacy-only closed (no metadata file) -> dir pruned, no error.
+    # NB: write the record BEFORE backdating the dir mtime -- creating a
+    # file inside the dir refreshes the dir's mtime.
+    jd_c = home / "muse-jobs" / "legjob"
+    jd_c.mkdir(parents=True, exist_ok=True)
+    (jd_c / "job.json").write_text(json.dumps({"slug": "legjob",
+                                               "state": "closed"}))
+    old = time.time() - 8 * 86400
+    os.utime(jd_c, (old, old))
+    # D: conflict (metadata active + legacy closed) -> metadata wins, kept.
+    jd_d = _sweep_job(home, "dupe", "active", legacy_state="closed")
+    # WARN_PCT <= 90 < KILL_PCT: the prune branch runs, the emergency
+    # breaker loop exits immediately (no subprocesses).
+    monkeypatch.setattr(sweep, "disk_pct", lambda p: 90)
+    sweep.main()  # exits 0 always; never break the cron
+    meta = home / ".local" / "share" / "muse-job" / "jobs"
+    assert not jd_a.exists() and not (meta / "oldjob.json").exists()
+    assert str(jd_a) in sweep.summary["pruned"]
+    assert jd_b.exists() and (meta / "livejob.json").exists()
+    assert not jd_c.exists()
+    assert jd_d.exists() and (meta / "dupe.json").exists(), \
+        "metadata-wins: an active metadata record is not pruned"
+
+
+def test_sweep_prune_keeps_record_when_dir_survives(
+        sweep, tmp_path, monkeypatch):
+    # A failed rmtree must not orphan the metadata record while the dir
+    # (and any legacy record in it) survives -- the remove is gated on the
+    # dir actually being gone.
+    home = tmp_path
+    jd = _sweep_job(home, "stubborn", "closed")
+    monkeypatch.setattr(sweep, "disk_pct", lambda p: 90)
+    # Simulate rmtree silently failing (ignore_errors=True swallows).
+    monkeypatch.setattr(sweep.shutil, "rmtree", lambda *a, **k: None)
+    sweep.main()  # exits 0 always; never break the cron
+    meta = home / ".local" / "share" / "muse-job" / "jobs"
+    assert jd.exists()
+    assert (meta / "stubborn.json").exists(), \
+        "the record must survive when the dir was not actually removed"
