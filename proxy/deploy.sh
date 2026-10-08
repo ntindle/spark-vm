@@ -1,6 +1,6 @@
 #!/bin/bash
-# proxy/deploy.sh — deploy the swap proxy, inference proxy, and confirmd
-# from the repo. Nick runs this as himself (not from the jail).
+# proxy/deploy.sh — deploy the swap proxy, inference proxy, confirmd, and
+# push-worker from the repo. Nick runs this as himself (not from the jail).
 #
 # Finding 66: runs `systemctl daemon-reload` before restarting, so unit
 # file changes take effect. Finding 19: this script is the rebuild
@@ -12,6 +12,16 @@
 #   --no-restart  install everything but do not restart services (used by
 #                 deploy/auto-deploy.sh, which restarts only the services
 #                 belonging to changed components).
+#                 A manual --no-restart caller owns the §7 step instead:
+#                 `systemctl daemon-reload` + restart swap-proxy.service,
+#                 swap-inference.service, confirmd.service, and
+#                 push-worker.service, plus `systemctl enable --now
+#                 summons-sweep.timer`. Restart is not optional hygiene —
+#                 §4e's approval-filers group change leaves the still-running
+#                 proxy without the group (filings demote to a loud log +
+#                 no filing, fail-closed, until restart) and §5b's
+#                 SPARKVM_PLANE_PUSH drop-ins take effect only after
+#                 daemon-reload + restart.
 
 set -euo pipefail
 
@@ -367,7 +377,13 @@ sudo mv -f "$tmp_sudoers" /etc/sudoers.d/swapd
 
 # --- 7. daemon-reload and restart (finding 66) -------------------------------
 if [ "$NO_RESTART" = "1" ]; then
-    echo "[7/7] Skipping service restarts (--no-restart; caller restarts affected services)"
+    echo "[7/7] Skipping service restarts (--no-restart)"
+    echo "      Caller owns the restart: systemctl daemon-reload, then restart"
+    echo "      swap-proxy.service swap-inference.service confirmd.service push-worker.service"
+    echo "      plus: systemctl enable --now summons-sweep.timer"
+    echo "      (confirmd included). Until then: the still-running proxy lacks §4e's"
+    echo "      approval-filers group (filings demote to a loud log + no filing,"
+    echo "      fail-closed), and §5b's SPARKVM_PLANE_PUSH drop-ins have no effect."
     echo ""
     echo "Deploy complete (no restart). The repo is the only source (finding 19)."
     exit 0
