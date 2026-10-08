@@ -79,6 +79,21 @@ The component is in good shape where it counts:
   the writer and the gate agree on mode 0600.
 - #494 focus-then-type/key has a TOCTOU window: `bring_to_front` then
   `type_text`/`press_key` — focus can be stolen between the two calls.
+  **Fixed 2026-10-08 (#1151):** the bridge now re-verifies the target
+  window still holds `_NET_ACTIVE_WINDOW` (read directly from the X
+  server via stdlib ctypes — the same EWMH property `bring_to_front`
+  sets) between the focus hop and the keystroke injection, with one
+  re-focus retry: a persistent mismatch fails closed (the type/key
+  endpoints answer 409 and never send the keystrokes) instead of typing
+  into the wrong window, while an unreadable focus property fails open
+  loudly (typing availability on non-EWMH stacks outranks an
+  unverifiable assertion). The #492 liveness probe applies the same
+  check before its untargeted XTEST key, reporting stolen focus as
+  "unknown" rather than a false wedge. Residual, stated honestly: the
+  driver's own foreground sequence re-activates the target inside the
+  call, so a steal landing between the driver's activate and its inject
+  stays driver-internal — closing that needs an atomic focus+inject
+  driver operation (upstream).
 - #495 keepalive can double-spawn the bridge: two overlapping keepalive runs
   can both fail the curl and both spawn; the bridge has no pidfile or
   singleton guard. **Fixed 2026-09-27 (#596):** the bridge takes an

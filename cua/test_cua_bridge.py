@@ -23,6 +23,11 @@ Covers:
   outcome, GET /api/status?probe=1 runs a fresh probe single-flight;
   windows matched by child PID (never title), probe failures / budget
   overruns / late windows are "unknown", never "wedged"
+- #494: focus assertion before keystroke delivery — /api/type and /api/key
+  re-verify the target window still holds _NET_ACTIVE_WINDOW after
+  bring_to_front (one re-focus retry); a persistent mismatch fails closed
+  (409, no keystrokes sent) while an unreadable focus property fails open
+  loudly; the #492 probe reports stolen focus as "unknown", never a wedge
 """
 import importlib.util
 import io
@@ -51,7 +56,7 @@ def load_bridge():
 
 
 @pytest.fixture()
-def bridge(tmp_path):
+def bridge(tmp_path, monkeypatch):
     mod = load_bridge()
     # hermetic registry: the bridge module persists its launch registry to
     # ~/.cache on every spawn (#491) — redirect it to a per-test tmp file
@@ -59,6 +64,10 @@ def bridge(tmp_path):
     # real bridge state on machines where the bridge has run.
     mod._LAUNCHED.clear()
     mod._LAUNCH_REGISTRY_FILE = str(tmp_path / "cua-launched.json")
+    # hermetic focus assertion (#494): _active_window_id reads the real X
+    # server through libX11 — stub it to "unverifiable" (the fail-open
+    # path) so no test ever touches a display; individual tests override.
+    monkeypatch.setattr(mod, "_active_window_id", lambda: None)
     return mod
 
 
@@ -466,6 +475,123 @@ class TestEndpoints:
         resp = conn.getresponse()
         assert resp.status == 413
         conn.close()
+
+
+# ---------------------------------------------------------------- #494 focus assertion
+
+
+class TestFocusAssertion:
+    """#494: the focus-then-type/key TOCTOU — bring_to_front is async and
+    focus can be stolen before injection, so the bridge re-verifies
+    _NET_ACTIVE_WINDOW before delivering keystrokes."""
+
+    def _window(self):
+        return {"pid": 33, "window_id": 303, "title": "web"}
+
+    def test_match_on_first_poll_no_retry(self, bridge, monkeypatch):
+        monkeypatch.setattr(bridge, "_active_window_id", lambda: 303)
+        monkeypatch.setattr(bridge, "_FOCUS_SETTLE_S", 0.05)
+        focuses = []
+        monkeypatch.setattr(bridge, "focus_window", focuses.append)
+        assert bridge._assert_focused(self._window()) is True
+        assert focuses == []  # no retry needed when focus already holds
+
+    def test_retry_then_match(self, bridge, monkeypatch):
+        # slow WM / transient raise: wrong id until the re-assert lands,
+        # then the target — succeeds with exactly one re-focus
+        state = {"refocused": False}
+
+        def fake_active():
+            return 303 if state["refocused"] else 101
+
+        def fake_focus(w):
+            state["refocused"] = True
+
+        monkeypatch.setattr(bridge, "_active_window_id", fake_active)
+        monkeypatch.setattr(bridge, "focus_window", fake_focus)
+        monkeypatch.setattr(bridge, "_FOCUS_SETTLE_S", 0.05)
+        monkeypatch.setattr(bridge, "_FOCUS_POLL_STEP_S", 0.01)
+        assert bridge._assert_focused(self._window()) is True
+
+    def test_persistent_mismatch_fails_closed(self, bridge, monkeypatch):
+        monkeypatch.setattr(bridge, "_active_window_id", lambda: 999)
+        monkeypatch.setattr(bridge, "_FOCUS_SETTLE_S", 0.05)
+        monkeypatch.setattr(bridge, "_FOCUS_POLL_STEP_S", 0.01)
+        focuses = []
+        monkeypatch.setattr(bridge, "focus_window", focuses.append)
+        assert bridge._assert_focused(self._window()) is False
+        assert len(focuses) == 1  # exactly one re-assert, then give up
+
+    def test_readable_then_unreadable_stays_fail_closed(
+            self, bridge, monkeypatch):
+        # Architecture-review regression: a readable wrong id (the
+        # stolen-focus signal) followed by transient unreadable reads
+        # must NOT downgrade to fail-open — the signal survives the X
+        # hiccup through the re-assert path and fails closed
+        reads = iter([999, None, None, None, None, None, None, None])
+        monkeypatch.setattr(bridge, "_active_window_id",
+                            lambda: next(reads, None))
+        monkeypatch.setattr(bridge, "_FOCUS_SETTLE_S", 0.5)
+        monkeypatch.setattr(bridge, "_FOCUS_POLL_STEP_S", 0.01)
+        focuses = []
+        monkeypatch.setattr(bridge, "focus_window", focuses.append)
+        assert bridge._assert_focused(self._window()) is False
+        assert len(focuses) == 1  # one re-assert, then fail closed
+
+    def test_unreadable_property_fails_open(self, bridge, monkeypatch):
+        # non-EWMH WM / no X server: the assertion cannot run — typing must
+        # not brick, and no re-focus is attempted
+        monkeypatch.setattr(bridge, "_active_window_id", lambda: None)
+        monkeypatch.setattr(bridge, "_FOCUS_SETTLE_S", 0.5)
+        monkeypatch.setattr(bridge, "_FOCUS_POLL_STEP_S", 0.01)
+        focuses = []
+        monkeypatch.setattr(bridge, "focus_window", focuses.append)
+        start = time.monotonic()
+        assert bridge._assert_focused(self._window()) is True
+        elapsed = time.monotonic() - start
+        assert focuses == []
+        # fast fail-open: two consecutive unreadable reads short-circuit —
+        # the full settle budget is never burned (the #492 probe's echo
+        # budget depends on this)
+        assert elapsed < 0.5
+
+    def test_active_window_id_never_raises(self, monkeypatch):
+        # the bridge fixture stubs _active_window_id, so it cannot pin the
+        # real function's exception safety — load a fresh module and break
+        # the loader underneath the REAL function instead (still hermetic:
+        # the raise happens before any display access)
+        mod = load_bridge()
+
+        def boom():
+            raise RuntimeError("no X here")
+        monkeypatch.setattr(mod, "_x11_lib", boom)
+        assert mod._active_window_id() is None
+
+    def test_type_stolen_focus_409_no_keystrokes(self, live, monkeypatch):
+        bridge, driver, port = live
+        monkeypatch.setattr(bridge, "_assert_focused", lambda w: False)
+        status, body = req(port, "POST", "/api/type", {"text": "hi"})
+        assert status == 409
+        assert "focus" in body["error"]
+        assert [c for c in driver.calls if c[0] == "type_text"] == []
+        # the focus hop itself still happened — loud refusal, not silent
+        assert ("bring_to_front", {"pid": 33, "window_id": 303}) in \
+            driver.calls
+
+    def test_type_focus_ok_200(self, live, monkeypatch):
+        bridge, driver, port = live
+        monkeypatch.setattr(bridge, "_assert_focused", lambda w: True)
+        status, _ = req(port, "POST", "/api/type", {"text": "hi"})
+        assert status == 200
+        assert driver.calls[-1][0] == "type_text"
+
+    def test_key_stolen_focus_409_no_keystrokes(self, live, monkeypatch):
+        bridge, driver, port = live
+        monkeypatch.setattr(bridge, "_assert_focused", lambda w: False)
+        status, body = req(port, "POST", "/api/key", {"key": "Enter"})
+        assert status == 409
+        assert "focus" in body["error"]
+        assert [c for c in driver.calls if c[0] == "press_key"] == []
 
 
 # ---------------------------------------------------------------- cua/bin shell scripts
@@ -1514,6 +1640,26 @@ class TestInputLiveness:
         assert state == "unknown"
         assert not spawned  # not even spawned
         assert driver.calls == []  # no focus hop, no key
+
+    def test_probe_stolen_focus_is_unknown_not_wedged(
+            self, bridge, monkeypatch):
+        # #494: focus stolen between the probe's focus hop and the XTEST
+        # key — the missing echo must not false-report a wedge, and the
+        # key must not be sent into the wrong window
+        self._patch_binaries(bridge, monkeypatch)
+        spawned = []
+        self._patch_popen(bridge, monkeypatch, spawned,
+                          out_chunks=(b"KeyPress event, serial 34\n",))
+        driver = AppearingDriver(WINDOWS)
+        monkeypatch.setattr(bridge, "call", driver)
+        monkeypatch.setattr(bridge, "_active_window_id", lambda: 999)
+        monkeypatch.setattr(bridge, "_FOCUS_SETTLE_S", 0.05)
+        monkeypatch.setattr(bridge, "_FOCUS_POLL_STEP_S", 0.01)
+        state, detail = bridge._input_probe(timeout=2.0)
+        assert state == "unknown"
+        assert "focus" in detail
+        assert [c for c in driver.calls if c[0] == "press_key"] == []
+        assert spawned[0].killed  # xev still reaped
 
     def test_bounded_probe_passes_through(self, bridge, monkeypatch):
         monkeypatch.setattr(bridge, "_input_probe",
